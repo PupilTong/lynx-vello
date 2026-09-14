@@ -56,6 +56,7 @@ type LepusMethodCall = {
 type FromBackground = LepusMethodCall | NodeQueryRequest
   | { bobcat: "runtime"; method: "reportError" | "console"; level: string; message: string }
   | { bobcat: "runtime"; method: "backgroundReady" }
+  | { bobcat: "runtime"; method: "disposed" }
   | { bobcat: "runtime"; method: "backgroundFailed"; message: string }
   | { bobcat: "runtime"; method: "reloadFromJS"; data?: unknown; id?: number }
   | (ContextEvent & { bobcat?: never });
@@ -118,8 +119,11 @@ function styleSheetURL(key: string, bundleName: string): string {
   return `${path.replace(/\/$/, "")}/${section}index.css${suffix}`;
 }
 let backgroundWorker: Worker | undefined;
+let backgroundDisposal: Promise<void> | undefined;
+let acknowledgeDisposal: (() => void) | undefined;
 let pendingBackgroundMessages: ToBackground[] = [];
 function sendToBackground(message: ToBackground) {
+  if (backgroundDisposal) return;
   if (backgroundWorker === undefined) pendingBackgroundMessages.push(message);
   else backgroundWorker.postMessage(message);
 }
@@ -154,6 +158,14 @@ async function callLepusMethod(message: LepusMethodCall) {
  * flushed in order through the same Worker transport as later events.
  */
 export function __BobcatConnectBackground(worker: Worker, data: unknown) {
+  if (backgroundDisposal) {
+    worker.terminate();
+    return;
+  }
+  worker.addEventListener("__bobcat:close", () => {
+    if (backgroundWorker === worker) backgroundWorker = undefined;
+    acknowledgeDisposal?.();
+  });
   worker.addEventListener("message", (event: { data: FromBackground }) => {
     const message = event.data;
     if (message?.bobcat === "runtime") {
@@ -172,6 +184,8 @@ export function __BobcatConnectBackground(worker: Worker, data: unknown) {
         void callLepusMethod(message);
       } else if (message.method === "backgroundReady") {
         notifyReady();
+      } else if (message.method === "disposed") {
+        acknowledgeDisposal?.();
       } else if (message.method === "backgroundFailed") {
         reportStartupFailure(message.message);
       } else if (message.method === "reloadFromJS") {
@@ -216,9 +230,29 @@ export function __BobcatPublishEvent(
   });
 }
 
-engineContext.addEventListener("__DestroyLifetime", () => {
-  sendToBackground({ bobcat: "runtime", method: "callDestroyLifetimeFun" });
-});
+function disposeBackground(): Promise<void> {
+  if (backgroundDisposal) return backgroundDisposal;
+  const worker = backgroundWorker;
+  pendingBackgroundMessages = [];
+  backgroundDisposal = new Promise<void>(resolve => {
+    if (worker === undefined) resolve();
+    else acknowledgeDisposal = resolve;
+  }).finally(() => {
+    worker?.terminate();
+    backgroundWorker = undefined;
+    acknowledgeDisposal = undefined;
+  });
+  worker?.postMessage({ bobcat: "runtime", method: "dispose" });
+  return backgroundDisposal;
+}
+
+engineContext.addEventListener("__DestroyLifetime", () => { void disposeBackground(); });
+
+/** MTS keeps its Worker alive until BTS has acknowledged app cleanup. */
+export function __BobcatDispose(): Promise<void> {
+  engineContext.dispatchEvent({ type: "__DestroyLifetime" });
+  return disposeBackground();
+}
 
 const globalEventEmitter = {
   addListener: noop,

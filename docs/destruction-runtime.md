@@ -1,54 +1,66 @@
-# BTS application and object destruction
+# BTS disposal and Worker ownership
 
-The built-in `bobcat:bts` Worker owns an application lifetime. The creator records
-that role explicitly; an ordinary Worker cannot acquire it by using the BTS name
-or importing the runtime. When its view is released, the BTS owner stops and reaps
-ordinary tasks, invokes the already-loaded `__BobcatDestroyBTS` export, then drops
-the realm. An unstarted realm is not created just to destroy it.
+MTS owns BTS cleanup as a JavaScript message exchange. Its disposal Promise
+posts `dispose` to the existing Worker, waits for `disposed`, then calls
+`Worker.terminate()`. Explicit engine `__DestroyLifetime` notifications share
+that Promise. Reload does not dispose the application.
 
-The JS export consumes the lifetime before calling the current
-`app.callDestroyLifetimeFun` with the app as receiver and zero arguments. A throw,
-reentrant call or earlier explicit `__DestroyLifetime` cannot repeat cleanup.
-The final call drains ordinary Promise jobs even when the hook throws, but runs
-no timer/resource epilogue. Cleanup cannot restart an ended worker. Hooks already
-installed during an unfinished entry still run; other workers remain usable.
-React reload retains this app lifetime and owns its own component cleanup.
+The BTS message handler calls the current `app.callDestroyLifetimeFun` with the
+app receiver and no arguments. A throw is reported through `lynx.reportError`;
+the handler still replies after an ordinary `await` boundary, like web-worker-rpc.
+It does not await asynchronous work returned by the framework's synchronous
+hook. Ordinary BTS messages, timers and imports continue until MTS terminates
+it. There is no native app hook, BTS role flag, or special promise-job drain.
 
-## Object finalization in JavaScript
+Disposal remains deliverable during an unfinished BTS entry import, cleaning up
+any hook already installed. Unlike web-core's readiness wait, this cannot wait
+for the entire entry: a released view no longer services its resource fetcher.
+An already closed or failed Worker also completes the MTS disposal wait.
 
-`getNativeApp().createJSObjectDestructionObserver(callback)` requires exactly one
-function and returns an opaque object. Its JS `FinalizationRegistry` retains the
-callback as the held value, without retaining the target. Property reads return
-undefined and writes report the existing HostObject setter error without storing
-the value. The cleanup job calls the function once, with no arguments and an
-undefined receiver. Its return value is ignored; a throw goes through
-`lynx.reportError` and does not stop other finalizers.
+## The MTS realm boundary
 
-This follows the user's choice to implement the observer with the existing JS
-finalization primitive. Native Lynx posts a low-priority task and can wait for a
-50 ms timer window; Bobcat deliberately uses JS cleanup-job timing instead.
-There is no Rust callback queue, worker index, idle scheduler, timer-window check
-or observer-specific host function. Object collection is not a prompt disposal
-API and no ordering between independent finalizers is promised.
+Releasing `LynxView` cancels ordinary view work. The page owner then starts the
+ordinary `bobcat:dispose` ESM, whose top-level await waits for the MTS JS disposal
+Promise. It continues routing Worker events through the existing inbox until
+that evaluation finishes. Only then is the MTS realm and document released.
+Rust neither parses the disposal messages nor calls the BTS app hook.
 
-Once the app lifetime has been consumed, the registry ignores late cleanup jobs,
-including jobs drained by a sibling realm's checkpoint. Dropping the realm
-releases its registry. The callback body remains framework code; this layer adds
-no cross-thread node operation or native platform module.
+Each Worker has its own cancellation token, including its entry/import source
+completions. It is not a child of the view token. MTS event routing holds
+`WeakRef<Worker>` values, and a JS `FinalizationRegistry` releases the native
+sending handle when its Worker object becomes unreachable. Explicit termination
+uses the same release path and unregisters the finalizer. Thus an unreachable
+ordinary Worker can end while the view stays alive, and a reachable Worker does
+not end just because the host cancelled the view.
 
-## Validation boundaries
+At realm release, remaining senders close naturally. Host functions hold weak
+references to the channel owner so finalizers queued during realm destruction
+cannot prolong its lifetime. Rust has no `WorkerOwner::drop` termination loop.
+This GC ownership policy is the user-selected Bobcat behavior; collection is
+not prompt or a replacement for explicit termination when timing matters.
 
-Real QuickJS tests verify target liveness, one-shot callback delivery, receiver and
-arity, rejected arguments/property writes, nonfatal errors, suppression after app
-destruction and sibling isolation. Real worker and dual-realm tests verify view
-release, explicit destruction, current-hook lookup, reentrancy, thrown hooks and
-Promise jobs, cancellation during entry imports, cancellation before source
-arrival and ordinary Worker termination. The JS lifecycle test also exercises
-repeated destruction notifications.
+## Object destruction observers
 
-Compiled React unmount tests remain in the MVP integration layer because they
-require the separate compiled-module bootstrap. Neither compiled bundles nor
-new fixture copies are part of this layer.
+`lynx.getNativeApp().createJSObjectDestructionObserver(callback)` follows
+web-core's implementation: return an ordinary `{}` and register it with a
+`FinalizationRegistry` whose cleanup directly invokes `callback()`. The registry
+holds the callback without directly retaining the observed object. The object
+is extensible, and this wrapper adds no argument checks, HostObject proxy,
+error reporter or app-destroyed filter. GC and the JS runtime own cleanup timing
+and exception reporting.
 
-Native observer reference: `lynx/core/runtime/js/bindings/js_app.cc:1475–1507`,
-`bindings/js_object_destruction_observer.h`, and `base/src/fml/task_source.cc`.
+ReactLynx uses this object on `MainThreadRef`; its callback sends the existing
+`releaseWorkletRef` Context event. This layer adds no cross-thread node API.
+
+## Validation
+
+Real QuickJS tests cover retained and cyclic unreachable Workers, GC during a
+pending source request, independent view/Worker cancellation, channel closure,
+BTS disposal acknowledgement and repeated notifications, throwing hooks,
+disposal during entry imports, and already closed Workers. Page-owner tests
+verify that the MTS realm survives until the reply. Observer tests cover plain
+object behavior, target liveness, one-shot cleanup and shared checkpoints.
+
+References in `lynx-stack`: `web-core/ts/client/mainthread/Background.ts`,
+`background/background-apis/crossThreadHandlers/registerDisposeHandler.ts`,
+`createJSObjectDestructionObserver.ts`, and React's `core/main-thread-ref.ts`.

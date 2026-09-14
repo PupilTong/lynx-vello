@@ -18,22 +18,16 @@
 //!
 //! A worker's tasks, the token that ends them and the latch this thread reads
 //! are one [`Lifetime`], the same helper a view on `bobcat-main` is built
-//! from. The token is a child of the creating view's, so a released view ends
-//! every worker it made without this thread being told; the explicit
-//! `Terminate` stays the protocol, and is what discards whatever was queued
-//! behind it.
-//!
-//! The built-in BTS owner then makes one final synchronous call to the React
-//! destruction hook before releasing its realm. This is outside ordinary
-//! cancelled entries and has no timer/resource epilogue; ordinary Workers
-//! invoke no app hook.
+//! from. Its token belongs to this worker; the MTS object's termination or
+//! collection sends `Terminate`, while releasing the MTS realm closes its
+//! channel. There is no app-specific destruction path on this thread.
 //!
 //! The `select!`s on this thread are of four kinds, and none of them
 //! dispatches anything. [`serve_workers`] is thread lifetime: attach versus
 //! join. Each [`serve_worker`] waits on its worker's [`Lifetime`]: the end,
 //! versus the next task of that worker to finish. Each [`boot_worker`] has a
-//! pre-boot wait of its own, on the script versus a `Terminate` that must win
-//! or a parent view that was released, which is one task's three-source wait
+//! pre-boot wait of its own, on the script versus termination or channel
+//! closure and its own cancellation, which is one task's three-source wait
 //! rather than a scheduler. Each live worker realm has one [`serve_clock`],
 //! waiting on its deadline, the re-arm that moves it, and a sibling's
 //! checkpoint.
@@ -187,16 +181,13 @@ enum WorkerState {
 /// things afterwards.
 struct Worker {
     js: WorkerRuntime,
-    background: bool,
     key: WorkerKey,
     /// Where this worker reports, which is the creating view's own channel.
     events: mpsc::UnboundedSender<WorkerEvent>,
     state: RefCell<WorkerState>,
     /// Every task of this worker, the token that ends them, the latch this
     /// thread reads, and the two numbers this realm's clock task waits on — the
-    /// deadline it armed and the generation its own last entry recorded. The
-    /// token is a child of the creating view's, so a released view is what ends
-    /// this worker when nothing said so.
+    /// deadline it armed and the generation its own last entry recorded.
     lifetime: Lifetime,
     /// Whether this worker has already been told why it is over. The first
     /// report wins, so a `Failed` and a `Closed` cannot both arrive. A panic
@@ -219,11 +210,9 @@ impl Worker {
         events: mpsc::UnboundedSender<WorkerEvent>,
         token: CancellationToken,
         sources: SourceRequester,
-        background: bool,
     ) -> Rc<Self> {
         Rc::new(Self {
             js,
-            background,
             key,
             events,
             state: RefCell::new(WorkerState::Loading),
@@ -252,10 +241,9 @@ impl Worker {
 
     /// Ends this worker, once. `true` for the call that did it.
     ///
-    /// The owner calls it after its wait too, which is how a cancellation from
-    /// the creating view's thread reaches this thread's latch. A worker owes an
-    /// end nothing a view does not, so this is the lifetime's own end — the
-    /// deadline it had armed is withdrawn there.
+    /// The owner calls it after its wait too, mirroring cancellation into the
+    /// local latch. This is the lifetime's own end, which also withdraws the
+    /// deadline the worker had armed.
     fn end(&self) -> bool {
         self.lifetime.end()
     }
@@ -429,7 +417,7 @@ impl Worker {
     ///
     /// The wait is the lifetime's — the end, or the next task of this worker
     /// to finish — and [`Self::end`] after it is what mirrors a cancellation
-    /// that came from the creating view's thread. A task that panicked hands
+    /// onto this worker's local latch. A task that panicked hands
     /// its payload to [`Self::trapped`], so the creating view hears one
     /// `Failed`, which is what a worker nothing will be heard from again is.
     async fn run_owner(self: &Rc<Self>) {
@@ -440,33 +428,7 @@ impl Worker {
         self.lifetime
             .reap(&mut |payload| self.trapped(payload.as_ref()))
             .await;
-        self.destroy_background();
         *self.state.borrow_mut() = WorkerState::Gone;
-    }
-
-    /// The app's final synchronous entry, after ordinary work has stopped.
-    /// It deliberately bypasses `enter`'s ended gate and has no timer/resource
-    /// epilogue: cleanup may run promise jobs, but cannot restart the worker.
-    fn destroy_background(&self) {
-        if !self.background {
-            return;
-        }
-        let mut state = self.state.borrow_mut();
-        let WorkerState::Live(realm) = &mut *state else {
-            return;
-        };
-        let mut runtime = self.js.borrow_mut();
-        let Ok(js) = runtime.as_mut() else {
-            return;
-        };
-        if let Err(error) = realm.engine.call_module_export(
-            js,
-            crate::esm::BTS_RUNTIME_MODULE_SPECIFIER,
-            "__BobcatDestroyBTS",
-            &[],
-        ) {
-            report(&self.events, self.key, "destroying the BTS app", error);
-        }
     }
 
     /// Whether this worker's realm is up, for a test that has to wait for it.
@@ -502,7 +464,6 @@ impl Settles for Worker {
 async fn serve_worker(js: WorkerRuntime, start: WorkerStart) {
     let WorkerStart {
         key,
-        background,
         name,
         script,
         messages,
@@ -510,7 +471,7 @@ async fn serve_worker(js: WorkerRuntime, start: WorkerStart) {
         token,
         sources,
     } = start;
-    let worker = Worker::new(js, key, events, token, sources, background);
+    let worker = Worker::new(js, key, events, token, sources);
     worker.spawn(boot_worker(Rc::clone(&worker), name, script, messages));
     worker.run_owner().await;
 }
@@ -522,8 +483,8 @@ async fn serve_worker(js: WorkerRuntime, start: WorkerStart) {
 /// dispatcher, and it is `biased` for the reason HTML's "terminate a worker"
 /// aborts the fetch: a `Terminate` that lands in the same instant as the
 /// script must win, so a worker told to stop before it booted never boots.
-/// The message arm stays first for that reason; the token arm behind it is
-/// the same fact reaching a worker whose creating view is simply gone.
+/// The message arm stays first for that reason; the token arm observes this
+/// worker's own cancellation scope.
 /// Returning here drops the script's receiving end, which is what cancels
 /// that fetch.
 ///
@@ -542,24 +503,15 @@ async fn boot_worker(
         tokio::select! {
             biased;
             message = messages.recv() => match message {
-                // Either way this worker is over. `Terminate` is what the
-                // realm that created it says — on `terminate()`, and again as
-                // it is released — and a closed channel is the backstop, for
-                // a realm that was gone before it could say anything.
+                // The MTS handle ended, or its realm released the sender.
                 None | Some(WorkerMessage::Terminate) => {
                     worker.end();
                     return;
                 }
                 Some(WorkerMessage::Post(data)) => queued.push(data),
             },
-            // The creating view was released while this script was in flight.
-            // This arm is a backstop: the owner registers on the same token
-            // first (`serve_worker` → `Lifetime::serve`) and normally ends
-            // this worker and aborts this task before the arm is polled. What
-            // it covers is the poll in which the token is already cancelled
-            // when this select is first reached — the worker ends before it
-            // boots, and returning here drops the script's receiving end,
-            // which cancels the fetch.
+            // A worker that ended before its boot task was polled must not
+            // evaluate the arriving source.
             () = worker.lifetime.token().cancelled() => {
                 worker.end();
                 return;
@@ -621,8 +573,7 @@ async fn consume_messages(
     }
     while let Some(message) = messages.recv().await {
         match message {
-            // As before the boot: the realm's `Terminate`, or — below — the
-            // channel it would have sent one on having gone with it.
+            // Explicit termination or collection of the MTS handle.
             WorkerMessage::Terminate => break,
             WorkerMessage::Post(data) => {
                 worker.enter(|realm, js| deliver(&worker.events, worker.key, realm, js, &data));
@@ -809,7 +760,6 @@ mod tests {
                 std::sync::Arc::new(crate::NoWakeup),
                 CancellationToken::new(),
             ),
-            false,
         );
         worker.spawn(boot_worker(
             Rc::clone(&worker),
@@ -938,20 +888,20 @@ mod tests {
     #[test]
     fn object_destruction_observers_finalize_in_js_once_without_retaining_the_target() {
         with_observers(|first, _| {
-            first.execute(r"
+            first.execute(
+                r"
                 import {lynx} from 'bobcat:bts-runtime';
                 const create = lynx.getNativeApp().createJSObjectDestructionObserver;
-                for (const args of [[], [null], [() => {}, 1]]) {
-                    let rejected = false;
-                    try { create(...args); } catch (error) { rejected = error instanceof TypeError; }
-                    if (!rejected) throw Error('invalid observer arguments accepted');
-                }
                 globalThis.observer = create(function(...args) {
                     postMessage(['finalized', this === undefined, args.length]);
                 });
                 if (Object.keys(observer).length || observer.anything !== undefined)
-                    throw Error('observer exposes fields');
-            ");
+                    throw Error('observer is not initially empty');
+                observer.field = 1;
+                if (observer.field !== 1 || Object.getPrototypeOf(observer) !== Object.prototype)
+                    throw Error('observer must be an ordinary object');
+            ",
+            );
             first.collect();
             assert!(
                 first.messages().is_empty(),
@@ -969,62 +919,16 @@ mod tests {
     }
 
     #[test]
-    fn object_destruction_errors_report_without_stopping_other_js_finalizers() {
-        with_observers(|first, _| {
-            first.execute(
-                r"
-                import {lynx} from 'bobcat:bts-runtime';
-                const create = lynx.getNativeApp().createJSObjectDestructionObserver;
-                globalThis.targets = [
-                    create(() => { throw Error('observer failed'); }),
-                    create(() => postMessage('survivor')),
-                ];
-                targets[0].field = 1;
-                if (targets[0].field !== undefined) throw Error('observer stored a property');
-            ",
-            );
-            let writes = first.messages();
-            assert_eq!(writes.len(), 1);
-            assert!(writes[0].contains("HostObject with default setter"));
-            first.execute("delete globalThis.targets;");
-            first.collect();
-            let messages = first.messages();
-            assert_eq!(messages.len(), 2);
-            assert!(messages.iter().any(|message| message == r#"["survivor"]"#));
-            assert!(
-                messages
-                    .iter()
-                    .any(|message| message.contains("reportError")
-                        && message.contains("observer failed"))
-            );
-            first.execute("postMessage('still-usable');");
-            assert_eq!(first.messages(), [r#"["still-usable"]"#]);
-        });
-    }
-
-    #[test]
-    fn object_destruction_after_app_destroy_is_suppressed_without_affecting_siblings() {
+    fn object_observer_cleanup_uses_the_shared_js_checkpoint() {
         with_observers(|first, second| {
-            for worker in [&*first, &*second] {
-                worker.execute(r"
-                    import {lynx} from 'bobcat:bts-runtime';
-                    globalThis.observer = lynx.getNativeApp().createJSObjectDestructionObserver(() => postMessage('finalized'));
-                ");
-            }
-            first.execute(
-                r"
-                import {__BobcatDestroyBTS} from 'bobcat:bts-runtime';
-                __BobcatDestroyBTS();
-                delete globalThis.observer;
-            ",
-            );
-            second.execute("delete globalThis.observer;");
+            first.execute(r"
+                import {lynx} from 'bobcat:bts-runtime';
+                globalThis.observer = lynx.getNativeApp().createJSObjectDestructionObserver(() => postMessage('finalized'));
+            ");
+            first.execute("delete globalThis.observer;");
             second.collect();
-            assert!(
-                first.messages().is_empty(),
-                "a destroyed app cannot receive cleanup jobs"
-            );
-            assert_eq!(second.messages(), [r#"["finalized"]"#]);
+            assert_eq!(first.messages(), [r#"["finalized"]"#]);
+            assert!(second.messages().is_empty());
         });
     }
 }

@@ -37,22 +37,7 @@ const app: {
   registerModule(name, value) { jsModules.set(name, value); },
   getJSModule(name) { return jsModules.get(name); },
 };
-let destroyed = false;
-// The BTS owner calls this after stopping ordinary worker tasks, while the
-// realm and current React hook still exist. An earlier explicit destroy
-// notification consumes the same lifetime, including when its hook throws.
-export function __BobcatDestroyBTS() {
-  if (destroyed) return;
-  destroyed = true;
-  app.callDestroyLifetimeFun?.call(app);
-}
-// Finalization belongs to JavaScript's cleanup jobs. The held callback does
-// not retain its observer; app destruction suppresses any late cleanup job.
-const destructionRegistry = new FinalizationRegistry<Function>(callback => {
-  if (destroyed) return;
-  try { Reflect.apply(callback, undefined, []); }
-  catch (error) { lynx.reportError(error); }
-});
+const destructionRegistry = new FinalizationRegistry<() => unknown>(callback => callback());
 
 // Looked up by the id a `callLepusMethodResult` carries, which a result for
 // a call made without a callback lacks.
@@ -71,7 +56,7 @@ type FromMainThread =
       method: "publishEvent" | "publicComponentEvent" | "updateGlobalProps" | "updateCardData" | "onAppReload" | "processCardConfig";
       args: unknown[];
     }
-  | { bobcat: "runtime"; method: "callDestroyLifetimeFun" }
+  | { bobcat: "runtime"; method: "dispose" }
   | {
       bobcat: "runtime";
       method: "callLepusMethodResult";
@@ -134,18 +119,8 @@ const sendQuery: SendQuery = (operation, token, params, callback) => {
 };
 
 const nativeApp = {
-  createJSObjectDestructionObserver(callback: Function): object {
-    if (arguments.length !== 1) throw new TypeError("createJSObjectDestructionObserver arg count must == 1");
-    if (typeof callback !== "function") throw new TypeError("the first argument of createJSObjectDestructionObserver must be a function");
-    // A native HostObject exposes no fields. Property writes report through
-    // the native error funnel and do not attach values to the object.
-    const observer = new Proxy(Object.create(null) as object, {
-      get() { return undefined; },
-      set(_target, key) {
-        lynx.reportError(new TypeError(`Cannot assign to property '${String(key)}' on HostObject with default setter`));
-        return true;
-      },
-    });
+  createJSObjectDestructionObserver(callback: () => unknown): object {
+    const observer = {};
     destructionRegistry.register(observer, callback);
     return observer;
   },
@@ -212,6 +187,12 @@ export function __BobcatStartBTS(loadEntry: () => Promise<unknown>) {
 
 scope.addEventListener("message", (event: { data: FromMainThread }): void | Promise<void> => {
   const message = event.data;
+  // Disposal must remain deliverable while entry imports are outstanding:
+  // the released view can no longer provide their resources. Clean up any
+  // hook already installed, then acknowledge through the ordinary Worker.
+  if (message?.bobcat === "runtime" && message.method === "dispose") {
+    return dispose();
+  }
   if (message?.bobcat === "runtime" && message.method === "initialize") {
     const start = startBackground;
     if (start) {
@@ -243,9 +224,6 @@ function receiveMessage(message: FromMainThread): void | Promise<void> {
     case "publicComponentEvent":
       publicComponentEvent(message.args);
       break;
-    case "callDestroyLifetimeFun":
-      __BobcatDestroyBTS();
-      break;
     case "reloadResult":
     case "nodeQueryResult": {
       const callback = callbacks.get(message.id);
@@ -265,6 +243,15 @@ function receiveMessage(message: FromMainThread): void | Promise<void> {
     case "callLepusMethodResult":
       return receiveLepusResult(message);
   }
+}
+
+async function dispose() {
+  try { app.callDestroyLifetimeFun?.call(app); }
+  catch (error) { lynx.reportError(error); }
+  // Match web-worker-rpc's await boundary before replying. This does not
+  // wait for asynchronous work launched by the framework's synchronous hook.
+  await undefined;
+  scope.postMessage({ bobcat: "runtime", method: "disposed" });
 }
 
 // The selected runtime target, independent of the compiler's minimum SDK.

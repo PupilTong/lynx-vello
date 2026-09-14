@@ -23,10 +23,10 @@
 //! owner's wait, and `cancel()` is what a release, a fatal event, an exit
 //! guard or the engine's own end does.
 //!
-//! Its parent/child relation is the ownership: the embedder holds a view's
-//! token and cancels it when the view is dropped, and every worker that view's
-//! realm creates carries a child of it, so releasing a view ends the workers it
-//! created without a message having to reach each of them first.
+//! A view and each Worker have independent tokens. Host release ends the
+//! view's ordinary tasks; MTS then finishes its JS disposal RPC before its
+//! realm is released. A Worker ends on explicit termination, collection of
+//! its MTS handle, its own `close()`, or its message channel closing.
 //!
 //! # Why the latch stays
 //!

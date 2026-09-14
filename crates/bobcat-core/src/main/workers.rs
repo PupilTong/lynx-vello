@@ -1,30 +1,24 @@
-//! The main realm's Worker handle: start a worker realm, ask the host for its
-//! script, and route what the realm posts to it.
+//! The MTS realm's Worker handles and their message channels.
 //!
-//! Nothing about a worker's *state* is here. This side owns exactly one thing
-//! per worker — the sending end of its message channel — and a released realm
-//! sends a `Terminate` on every one of them, which is how a view stops the
-//! workers it created. The channel closing behind that message ends a worker
-//! too, but it is the backstop rather than the protocol.
-//!
-//! What travels with a worker besides that channel is a cancellation token,
-//! minted here as a child of the view's own. It is the *signal* a worker's
-//! tasks wake on, where the `Terminate` is the message: a view released
-//! before its realm could say anything cancels its token on the embedder's
-//! thread, and every worker it created ends without this side taking a turn.
+//! JavaScript keeps weak references to Worker objects and releases a handle
+//! through `terminateWorker` when the object is collected or explicitly
+//! terminated. Each worker has its own cancellation scope. Releasing a view
+//! does not cancel those scopes: MTS first completes its JS disposal protocol.
+//! When the realm is released, its remaining senders close naturally.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use quickjs_rust_bridge::HostValue;
 use rustc_hash::FxHashMap;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use super::quickjs::{ScriptEngine, ScriptRuntime};
 use crate::background::{WorkerCommand, WorkerEvent, WorkerKey, WorkerMessage, WorkerStart};
 use crate::esm::{BTS_ENTRY_PREAMBLE, BTS_MODULE_SPECIFIER, HOST_MODULE_SPECIFIER};
 use crate::link::{ViewNotice, ViewOutbox};
-use crate::resource::{LoadedSource, SourceRequest};
+use crate::resource::{LoadedSource, SourceCompletion, SourceRequest};
 use crate::script::ScriptError;
 
 pub(super) const MODULE: &str = "bobcat-internal";
@@ -57,16 +51,16 @@ impl WorkerFactory {
         background_entry: Option<String>,
     ) -> Result<(Rc<WorkerOwner>, mpsc::UnboundedReceiver<WorkerEvent>), ScriptError> {
         let (events, incoming) = mpsc::unbounded_channel();
-        // The native functions hold clones of the owner until the realm is
-        // dropped, including when entry boot fails after it constructed
-        // workers. The caller keeps one too, which is what outlives them.
+        // The MTS runtime owns the channels. Host functions borrow that owner
+        // weakly: cleanup jobs queued while a realm is released must not keep
+        // the owner, its channels, or the group thread alive.
         let owner = Rc::new(WorkerOwner {
             factory: self.clone(),
             outbox,
             events,
             live: RefCell::default(),
         });
-        let creator = Rc::clone(&owner);
+        let creator = Rc::downgrade(&owner);
         let base_url = base_url.to_owned();
         engine.register_host_module_function(
             runtime,
@@ -74,6 +68,7 @@ impl WorkerFactory {
             "createWorker",
             2,
             Box::new(move |arguments| {
+                let creator = creator.upgrade().ok_or("the creating realm has been released")?;
                 let specifier = string(arguments, 0)?.to_owned();
                 let name = string(arguments, 1)?.to_owned();
                 let id = creator.factory.next.get();
@@ -82,9 +77,8 @@ impl WorkerFactory {
                     .next
                     .set(id.checked_add(1).ok_or("worker ids exhausted")?);
                 let key = WorkerKey::new(id);
-                let background = specifier == BTS_MODULE_SPECIFIER;
-                let script = creator.start(key, name, background)?;
-                if background {
+                let script = creator.start(key, name)?;
+                if specifier == BTS_MODULE_SPECIFIER {
                     let mut source = BTS_ENTRY_PREAMBLE.to_owned();
                     source.push_str("import { __BobcatStartBTS } from \"bobcat:bts-runtime\";\n__BobcatStartBTS(async () => {\n");
                     if let Some(entry) = &background_entry {
@@ -98,7 +92,7 @@ impl WorkerFactory {
                     // The built-in background script is this thread's own, so
                     // it answers its own request rather than asking a host
                     // that has no bytes for it.
-                    let _ = script.send(Ok(LoadedSource::Entry {
+                    script.complete(Ok(LoadedSource::Entry {
                         source,
                         url: BTS_MODULE_SPECIFIER.to_owned(),
                     }));
@@ -113,12 +107,12 @@ impl WorkerFactory {
                         specifier,
                         base_url: base_url.clone(),
                     },
-                    completion: creator.outbox.completion_for(script),
+                    completion: script,
                 });
                 Ok(HostValue::String(id.to_string()))
             }),
         )?;
-        let sender = Rc::clone(&owner);
+        let sender = Rc::downgrade(&owner);
         engine.register_host_module_function(
             runtime,
             HOST_MODULE_SPECIFIER,
@@ -127,18 +121,23 @@ impl WorkerFactory {
             Box::new(move |arguments| {
                 let key = key(arguments)?;
                 let data = string(arguments, 1)?.to_owned();
-                sender.post(key, WorkerMessage::Post(data));
+                if let Some(sender) = sender.upgrade() {
+                    sender.post(key, WorkerMessage::Post(data));
+                }
                 Ok(HostValue::Undefined)
             }),
         )?;
-        let terminator = Rc::clone(&owner);
+        let terminator = Rc::downgrade(&owner);
         engine.register_host_module_function(
             runtime,
             HOST_MODULE_SPECIFIER,
             "terminateWorker",
             1,
             Box::new(move |arguments| {
-                terminator.terminate(key(arguments)?);
+                let key = key(arguments)?;
+                if let Some(terminator) = terminator.upgrade() {
+                    terminator.terminate(key);
+                }
                 Ok(HostValue::Undefined)
             }),
         )?;
@@ -153,60 +152,27 @@ pub(super) struct WorkerOwner {
     /// Cloned into every `Start`, so the channel stays open while the realm
     /// does even when it has no worker at all.
     events: mpsc::UnboundedSender<WorkerEvent>,
-    /// The one thing this side keeps per worker: the right to tell it to
-    /// stop. What ends a worker is a message from the realm that created it —
-    /// `terminate()`, or the `Drop` below as that realm is released. The
-    /// channel closing when this map goes is the backstop, not the protocol.
-    ///
-    /// It holds exactly the workers still running: [`Self::start`] enters one,
-    /// and it leaves again the moment this side learns the worker is over —
-    /// [`Self::terminate`] for the realm's own `terminate()`, and
-    /// [`Self::forget`] for a worker that ended on its own.
+    /// One sender per live JS handle. Explicit termination or its finalizer
+    /// removes it; a worker which closed itself is forgotten on delivery.
+    /// Dropping this map closes the remaining channels without a stop sweep.
     live: RefCell<FxHashMap<WorkerKey, mpsc::UnboundedSender<WorkerMessage>>>,
-}
-
-impl Drop for WorkerOwner {
-    /// A released realm stops its own workers rather than leaving each to
-    /// notice that nobody is talking to it any more.
-    ///
-    /// JavaScript first, then the message: the realm's host functions hold
-    /// clones of this owner and the runtime holds the last one, so this runs
-    /// once that realm's context has been freed and every worker it names is
-    /// one this view will never hear from again.
-    ///
-    /// The message is the protocol. Two things behind it are the backstop,
-    /// for a worker whose realm was gone before it could speak: the senders
-    /// drained here going out of scope with this statement, and the view's
-    /// token, whose children every one of these workers holds.
-    fn drop(&mut self) {
-        for (_, messages) in self.live.borrow_mut().drain() {
-            let _ = messages.send(WorkerMessage::Terminate);
-        }
-    }
 }
 
 impl WorkerOwner {
     /// Names one worker on `bobcat-workers` and hands back the right to
     /// answer its script.
     ///
-    /// The token that rides with it is a child of this view's, so cancelling
-    /// the view's cancels every worker's — including the ones whose `Start`
-    /// has not been served yet.
-    fn start(
-        &self,
-        key: WorkerKey,
-        name: String,
-        background: bool,
-    ) -> Result<oneshot::Sender<Result<LoadedSource, crate::LynxViewError>>, String> {
-        let (script, awaiting) = oneshot::channel();
+    /// Source requests share this worker's own token. Neither a source
+    /// completion nor a Worker inherits the view's cancellation token.
+    fn start(&self, key: WorkerKey, name: String) -> Result<SourceCompletion, String> {
         let (messages, incoming) = mpsc::unbounded_channel();
-        let token = self.outbox.token().child_token();
+        let token = CancellationToken::new();
+        let (script, awaiting) = SourceCompletion::new(token.clone());
         let sources = self.outbox.source_requester(token.clone());
         self.factory
             .commands
             .send(WorkerCommand::Start(WorkerStart {
                 key,
-                background,
                 name,
                 script: awaiting,
                 messages: incoming,
@@ -248,8 +214,7 @@ impl WorkerOwner {
 
     /// Drops what this side kept of a worker that ended on its own — it
     /// called `close()`, or its script or realm failed — so `live` goes on
-    /// naming only the workers still running and the `Drop` above sends no
-    /// `Terminate` to a task that has already returned.
+    /// naming only the workers still running.
     ///
     /// The sender goes with the entry, which closes that channel. Harmless
     /// either way: there is nothing left listening on it.

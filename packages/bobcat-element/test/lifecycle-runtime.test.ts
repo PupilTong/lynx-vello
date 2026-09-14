@@ -74,6 +74,7 @@ let receiveInBackground: (event: { data: unknown }) => void | Promise<void>;
 const toBackground: Recorded[] = [];
 const toMain: unknown[] = [];
 const worker = Object.assign(new eventTarget.EventTarget(), {
+  terminate: rstest.fn(),
   postMessage(message: unknown) {
     toBackground.push(JSON.parse(JSON.stringify([message]))[0]);
   },
@@ -413,39 +414,7 @@ describe("MTS/BTS lifecycle runtime", () => {
   });
 
 
-  it("consumes a destroy notification once even if the current app hook throws", async () => {
-    const callback = rstest.fn();
-    bts.getNativeApp().callLepusMethod("emptyLepusMethod", {}, callback);
-    await deliverToMain();
-    const lateReply = toBackground.shift();
-    const engine = mts.lynx.getEngine();
-    const app = bts.getApp();
-    app.callDestroyLifetimeFun = function (...args) {
-      expect(this).toBe(app);
-      expect(args).toEqual([]);
-      throw new Error("BTS destroy");
-    };
-    engine.dispatchEvent({ type: "__DestroyLifetime", data: "ignored" });
-    expect(toBackground).toEqual([{ bobcat: "runtime", method: "callDestroyLifetimeFun" }]);
-    expect(() => deliverToBackground()).toThrow("BTS destroy");
-    await receiveInBackground({ data: lateReply });
-    expect(callback).toHaveBeenCalledTimes(1);
-    expect(callback).toHaveBeenCalledWith(undefined);
 
-    const replacement = rstest.fn(function (this: typeof app, ...args: unknown[]) {
-      expect(this).toBe(app);
-      expect(args).toEqual([]);
-    });
-    app.callDestroyLifetimeFun = replacement;
-    engine.dispatchEvent({ type: "__DestroyLifetime" });
-    deliverToBackground();
-    expect(replacement).not.toHaveBeenCalled();
-
-    bts.getNativeApp().callLepusMethod("emptyLepusMethod", {}, callback);
-    await deliverToMain();
-    await deliverToBackground();
-    expect(callback).toHaveBeenCalledTimes(2);
-  });
 });
 
 describe("runtime events and diagnostics", () => {
@@ -824,4 +793,29 @@ it("declares readiness through the native binding when BTS acknowledges completi
 it("forwards BTS startup failures through the native binding without throwing in the listener", () => {
   expect(() => worker.dispatchEvent({type: "error", message: "BTS entry failed"})).not.toThrow();
   expect(reportStartupFailure).toHaveBeenCalledExactlyOnceWith("BTS entry failed");
+});
+
+it("waits for the JS disposal acknowledgement before terminating the Worker", async () => {
+  const app = bts.getApp();
+  const calls: string[] = [];
+  app.callDestroyLifetimeFun = function (...args) {
+    expect(this).toBe(app);
+    expect(args).toEqual([]);
+    calls.push("hook");
+    Promise.resolve().then(() => calls.push("job"));
+    throw Error("BTS destroy");
+  };
+  const disposing = mts.__BobcatDispose();
+  mts.lynx.getEngine().dispatchEvent({type: "__DestroyLifetime"});
+  expect(toBackground).toEqual([{bobcat: "runtime", method: "dispose"}]);
+  expect(worker.terminate).not.toHaveBeenCalled();
+  await deliverToBackground();
+  expect(calls).toEqual(["hook", "job"]);
+  expect(worker.terminate).not.toHaveBeenCalled();
+  await deliverToMain(); // reportError from the hook
+  await deliverToMain(); // disposal acknowledgement
+  await disposing;
+  expect(worker.terminate).toHaveBeenCalledTimes(1);
+  expect(toBackground).toHaveLength(0);
+  expect(reportedErrors).toHaveBeenLastCalledWith("error", expect.stringContaining("BTS destroy"));
 });

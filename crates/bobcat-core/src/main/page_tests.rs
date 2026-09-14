@@ -109,6 +109,15 @@ impl Harness {
     /// Lets every ready task of the view run, collecting whatever it said.
     async fn turn(&mut self) {
         task::yield_now().await;
+        if self.view.token.is_cancelled()
+            && let Some(background) = self.background.as_mut()
+        {
+            while let Ok(message) = background.messages.try_recv() {
+                if is_dispose(&message) {
+                    acknowledge_disposal(background);
+                }
+            }
+        }
         while let Ok(notice) = self.view.notices.try_recv() {
             match notice {
                 ViewNotice::Engine(event) => self.events.push(event),
@@ -207,6 +216,40 @@ fn acknowledge_background(background: &WorkerStart) {
             ),
         })
         .unwrap();
+}
+
+fn is_dispose(message: &WorkerMessage) -> bool {
+    matches!(message, WorkerMessage::Post(data) if data == r#"[{"bobcat":"runtime","method":"dispose"}]"#)
+}
+
+fn acknowledge_disposal(background: &WorkerStart) {
+    background
+        .events
+        .send(crate::background::WorkerEvent {
+            key: background.key,
+            payload: crate::background::WorkerPayload::Message(
+                r#"[{"bobcat":"runtime","method":"disposed"}]"#.into(),
+            ),
+        })
+        .unwrap();
+}
+
+async fn answer_disposal(background: &mut WorkerStart) {
+    while let Some(message) = background.messages.recv().await {
+        if is_dispose(&message) {
+            assert!(
+                !background.token.is_cancelled(),
+                "BTS remains live until its acknowledgement"
+            );
+            acknowledge_disposal(background);
+            return;
+        }
+        assert!(
+            !matches!(message, WorkerMessage::Terminate),
+            "Worker terminated before dispose"
+        );
+    }
+    panic!("Worker channel closed before dispose");
 }
 
 /// One page over the token that ends it, with the test holding the owner's
@@ -484,9 +527,10 @@ fn a_fatal_module_failure_ends_every_task_of_the_view() {
         let _ = harness
             .commands
             .send(ToMain::BeginFrame { now: 0.0, seq: 9 });
+        answer_disposal(&mut background).await;
         harness
             .until("the view's owner never returned", |harness| {
-                harness.commands.is_closed()
+                harness.owner.is_finished()
             })
             .await;
 
@@ -671,7 +715,7 @@ fn a_task_that_traps_ends_the_view_before_a_sibling_runs() {
             .expect("the view is still serving");
         harness
             .until("the view's owner never returned", |harness| {
-                harness.commands.is_closed()
+                harness.owner.is_finished()
             })
             .await;
         harness.turn().await;
@@ -709,7 +753,7 @@ fn a_task_that_traps_ends_the_view_before_a_sibling_runs() {
 #[test]
 fn the_end_acknowledges_the_begin_frame_a_painter_is_blocked_on() {
     on_a_local_set(async {
-        let (context, _workers) = group();
+        let (context, mut workers) = group();
         let mut owned = OwnedPage::new(context);
         owned.boot(ONE_BOX_WITH_TIMER).await;
         assert!(
@@ -720,8 +764,11 @@ fn the_end_acknowledges_the_begin_frame_a_painter_is_blocked_on() {
 
         // The embedder's release, with nothing else touched: the command
         // channel stays open, so the owner's wait is the token alone.
+        let Some(WorkerCommand::Start(mut background)) = workers.recv().await else {
+            panic!("BTS starts")
+        };
         owned.token.cancel();
-        owned.page.run_owner().await;
+        tokio::join!(owned.page.run_owner(), answer_disposal(&mut background));
 
         assert_eq!(
             owned.view.published.begin_frame_serviced(),
@@ -876,6 +923,8 @@ fn readiness_is_reported_once_when_bts_acknowledges_after_mts_render() {
             1
         );
         harness.view.token.cancel();
+        let mut background = background;
+        answer_disposal(&mut background).await;
         harness.owner.await.unwrap();
     });
 }
@@ -958,5 +1007,83 @@ fn card_url_uses_the_entry_response_url_before_requesting_styles() {
         let request = harness.preloads.pop().unwrap();
         assert!(matches!(request, SourceRequest::StyleSheet(ref url)
             if url == "https://cdn.test/redirected/main.js/index.css?version=2#entry"));
+    });
+}
+
+#[test]
+fn view_release_waits_for_js_dispose_before_terminating_its_bts() {
+    on_a_local_set(async {
+        let (context, workers) = group();
+        let mut harness = Harness::new(context, workers);
+        harness.boot(ONE_BOX).await;
+        let mut background = harness.background_worker();
+        harness.view.token.cancel();
+        for _ in 0..8 {
+            harness.turn().await;
+        }
+        assert!(
+            !harness.owner.is_finished(),
+            "MTS remains alive for the disposal reply"
+        );
+        assert!(
+            !background.token.is_cancelled(),
+            "host release does not cancel BTS"
+        );
+        answer_disposal(&mut background).await;
+        harness
+            .until("JS disposal never finished", |h| h.owner.is_finished())
+            .await;
+        assert!(
+            matches!(background.messages.try_recv(), Ok(WorkerMessage::Terminate)),
+            "MTS JavaScript terminates only after the reply"
+        );
+        harness.owner.await.unwrap();
+    });
+}
+
+#[test]
+fn a_disposal_reply_queued_with_view_release_is_not_discarded() {
+    on_a_local_set(async {
+        let (context, workers) = group();
+        let mut harness = Harness::new(context, workers);
+        harness.boot(&format!(
+            "{ONE_BOX}\nglobalThis.updatePage = () => lynx.getEngine().dispatchEvent({{type:'__DestroyLifetime'}});"
+        )).await;
+        let mut background = harness.background_worker();
+        harness
+            .commands
+            .send(ToMain::PageUpdate(crate::link::PageUpdate::Data {
+                data: "{}".into(),
+                processor_name: String::new(),
+                reset: false,
+            }))
+            .unwrap();
+        let mut requested = false;
+        for _ in 0..TURNS {
+            while let Ok(message) = background.messages.try_recv() {
+                if is_dispose(&message) {
+                    requested = true;
+                }
+            }
+            if requested {
+                break;
+            }
+            harness.turn().await;
+        }
+        assert!(requested, "the explicit engine event starts JS disposal");
+        // Both wakes are ready before the normal event consumer runs again.
+        // Its cancellation must leave the reply in the inbox for the owner.
+        harness.view.token.cancel();
+        acknowledge_disposal(&background);
+        harness
+            .until("the disposal reply was discarded at release", |h| {
+                h.owner.is_finished()
+            })
+            .await;
+        assert!(matches!(
+            background.messages.try_recv(),
+            Ok(WorkerMessage::Terminate)
+        ));
+        harness.owner.await.unwrap();
     });
 }

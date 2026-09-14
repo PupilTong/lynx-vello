@@ -8,7 +8,10 @@ import {
 // Main-thread-only `bobcat-internal` exports. Each object owns a context on
 // the group's existing worker thread. Transport currently uses the worker
 // scope's JSON encoding; structured clone and transfer lists are pending.
-const workers: Map<string, Worker> = new Map();
+const workers: Map<string, WeakRef<Worker>> = new Map();
+const registry = new FinalizationRegistry<string>(key => {
+  if (workers.delete(key)) terminateWorker(key);
+});
 
 /** A message the worker's script posted, as its `Worker` dispatches it. */
 interface WorkerMessageEvent {
@@ -61,7 +64,8 @@ export class Worker extends EventTarget {
     this.onerror = null;
     installEventHandler(this, "message");
     installEventHandler(this, "error");
-    workers.set(this.#key, this);
+    workers.set(this.#key, new WeakRef(this));
+    registry.register(this, this.#key, this);
   }
 
   postMessage(message: unknown, transfer?: unknown) {
@@ -75,8 +79,10 @@ export class Worker extends EventTarget {
   }
 
   terminate() {
+    registry.unregister(this);
     if (workers.delete(this.#key)) {
       terminateWorker(this.#key);
+      this.dispatchEvent({ type: "__bobcat:close" });
     }
   }
 
@@ -97,14 +103,25 @@ export function __BobcatDispatchWorkerEvent(
   lineno: number,
   colno: number,
 ) {
-  const worker = workers.get(key);
+  const worker = workers.get(key)?.deref();
   if (worker === undefined) return;
-  if (kind === "closed" || kind === "failed") workers.delete(key);
+  if (kind === "closed" || kind === "failed") {
+    workers.delete(key);
+    registry.unregister(worker);
+  }
   if (kind === "message") {
     worker.dispatchEvent({
       type: "message", data: JSON.parse(data)[0], target: worker,
     });
   } else if (kind === "error" || kind === "failed") {
-    worker.dispatchEvent({ type: "error", message: data, filename, lineno, colno, target: worker });
+    try {
+      worker.dispatchEvent({ type: "error", message: data, filename, lineno, colno, target: worker });
+    } finally {
+      if (kind === "failed") worker.dispatchEvent({ type: "__bobcat:close" });
+    }
+  } else if (kind === "closed") {
+    // Internal notification: MTS disposal must not await a reply from a
+    // worker which has already closed or failed to open its realm.
+    worker.dispatchEvent({ type: "__bobcat:close" });
   }
 }

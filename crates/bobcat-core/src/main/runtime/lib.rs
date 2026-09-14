@@ -518,10 +518,9 @@ impl EventState {
 /// its own clone of that `Rc` — before the `LynxDocument` those functions could
 /// name. JavaScript first, then the Rust object it named.
 ///
-/// `workers` is declared after all of those handles for a different reason: the
-/// last clone of it going is what sends each live worker its `Terminate`, and
-/// those messages go out after the JavaScript that could still have named a
-/// worker is gone.
+/// `workers` follows the realm handles: its channels belong to this MTS
+/// runtime and close when it is released. JS host functions reference it
+/// weakly, so queued finalizers cannot extend the channels' lifetime.
 pub(crate) struct MainThreadRuntime {
     engine: ScriptEngine,
     /// MTS declares application readiness through native bindings. Module
@@ -977,6 +976,27 @@ await Promise.resolve().then(() => __FlushElementTree());
         self.engine
             .module_finished()
             .map_err(|error| MainThreadError::from_engine("booting the MTS entry", error))
+    }
+
+    /// Run the MTS module's asynchronous disposal through the ordinary ESM
+    /// evaluator. JavaScript owns the BTS request, acknowledgement and stop.
+    pub(crate) fn begin_dispose(
+        &mut self,
+        js_runtime: &mut ScriptRuntime,
+    ) -> Result<(), MainThreadError> {
+        self.engine
+            .start_module(
+                js_runtime,
+                "import { __BobcatDispose } from 'bobcat:runtime'; await __BobcatDispose();",
+                "bobcat:dispose",
+            )
+            .map_err(|error| MainThreadError::from_engine("disposing the MTS realm", error))
+    }
+
+    pub(crate) fn disposal_finished(&mut self) -> Result<bool, MainThreadError> {
+        self.engine
+            .module_finished()
+            .map_err(|error| MainThreadError::from_engine("disposing the MTS realm", error))
     }
 
     pub(crate) fn complete_module(
