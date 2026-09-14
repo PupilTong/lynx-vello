@@ -744,88 +744,88 @@ impl<F> Drop for LynxView<F> {
 }
 
 impl<F: ResourceFetcher + 'static> LynxView<F> {
-    /// Reload the existing page with merged data, recreating the framework's
-    /// component state and lifetimes without fetching or evaluating the entry
-    /// again. Global properties remain unchanged.
+    /// Reload the page without fetching or evaluating its entry again. The
+    /// framework recreates component state; global properties remain unchanged.
+    /// Pass [`DataUpdate`] for a named processor, or a JSON map for the default.
     ///
-    /// Before the initial MTS render finishes this reports a nonfatal
-    /// [`EngineEvent::ScriptReported`] instead of queueing a later reload.
-    /// The BTS entry may still be loading; its reload notification retains
-    /// FIFO order ahead of the new first-screen lifecycle event.
-    /// Pass [`DataUpdate`] to select a named processor, or a JSON map for default.
-    pub fn reload(&self, data: impl Into<DataUpdate>) {
-        let _ = self
-            .seat
-            .commands
-            .send(ToMain::PageUpdate(crate::link::PageUpdate::Reload(
-                data.into(),
-            )));
+    /// # Errors
+    ///
+    /// Returns [`EngineError::NotReady`] until [`Self::pump`] reports
+    /// [`EngineEvent::ScriptFinished`] or after the view ends. No update is queued.
+    pub fn reload(&self, data: impl Into<DataUpdate>) -> Result<(), EngineError> {
+        self.send_page_update(crate::link::PageUpdate::Reload(data.into()))
     }
 
-    /// Merge page data through the MTS update entry and the BTS framework's
-    /// `updateCardData` hook. The default native host policy ignores updates
-    /// before the initial MTS render. After that render, MTS applies them and
-    /// BTS receives them in order when its entry has finished.
-    /// Pass [`DataUpdate`] to select a named processor, or a JSON map for default.
-    pub fn update_data(&self, data: impl Into<DataUpdate>) {
-        let _ = self
-            .seat
-            .commands
-            .send(ToMain::PageUpdate(crate::link::PageUpdate::Data {
-                data: data.into(),
-                reset: false,
-            }));
+    /// Merge data through the MTS update entry and BTS `updateCardData` hook.
+    /// Pass [`DataUpdate`] for a named processor, or a JSON map for the default.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::NotReady`] until [`Self::is_ready`] is true.
+    /// Rejected updates are not queued.
+    pub fn update_data(&self, data: impl Into<DataUpdate>) -> Result<(), EngineError> {
+        self.send_page_update(crate::link::PageUpdate::Data {
+            data: data.into(),
+            reset: false,
+        })
     }
 
-    /// Replace page data using native RESET semantics. The framework owns
-    /// data merging, notification and React rerendering.
-    /// Resets before the initial MTS render are ignored, like updates.
-    /// Pass [`DataUpdate`] to select a named processor, or a JSON map for default.
-    pub fn reset_data(&self, data: impl Into<DataUpdate>) {
-        let _ = self
-            .seat
-            .commands
-            .send(ToMain::PageUpdate(crate::link::PageUpdate::Data {
-                data: data.into(),
-                reset: true,
-            }));
+    /// Replace page data using RESET semantics. The framework owns merging,
+    /// notification and React rerendering. Pass [`DataUpdate`] for a named
+    /// processor, or a JSON map for the default.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::NotReady`] until [`Self::is_ready`] is true.
+    /// Rejected resets are not queued.
+    pub fn reset_data(&self, data: impl Into<DataUpdate>) -> Result<(), EngineError> {
+        self.send_page_update(crate::link::PageUpdate::Data {
+            data: data.into(),
+            reset: true,
+        })
     }
 
-    /// Merge literal top-level global-property keys into the host values.
-    /// Before the initial MTS render, changes become the initial environment
-    /// without update hooks. Later, the full props notify BTS before the MTS
-    /// environment and hook update; script mutations do not alter host values.
-    /// BTS notification and rerendering belong to the framework's current hook.
-    pub fn update_global_props(&self, data: serde_json::Map<String, serde_json::Value>) {
-        let _ = self
-            .seat
-            .commands
-            .send(ToMain::PageUpdate(crate::link::PageUpdate::GlobalProps(
-                data,
-            )));
+    /// Merge literal top-level global-property keys into host values, then
+    /// notify BTS before updating MTS bindings and invoking its current hook.
+    /// Script mutations do not alter the host values.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::NotReady`] until [`Self::is_ready`] is true.
+    /// Supply initial properties through [`ViewSources::global_props`]; rejected
+    /// updates are not retained as initial properties or queued for replay.
+    pub fn update_global_props(
+        &self,
+        data: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), EngineError> {
+        self.send_page_update(crate::link::PageUpdate::GlobalProps(data))
     }
 
-    /// Deliver a native global event. `arguments` is the listener argument list.
+    /// Deliver a global event. `arguments` is the listener argument list.
     /// Call after pump returns `ScriptFinished`, or when `is_ready()` is true.
     ///
     /// # Errors
     ///
-    /// Returns `EngineError::NotReady` before readiness is observed or after
+    /// Returns [`EngineError::NotReady`] before readiness is observed or after
     /// the view ends. Rejected events are not queued for later delivery.
     pub fn send_global_event(
         &self,
         name: impl Into<String>,
         arguments: Vec<serde_json::Value>,
     ) -> Result<(), EngineError> {
+        self.send_page_update(crate::link::PageUpdate::GlobalEvent {
+            name: name.into(),
+            arguments,
+        })
+    }
+
+    fn send_page_update(&self, update: crate::link::PageUpdate) -> Result<(), EngineError> {
         if !self.is_ready() {
             return Err(EngineError::NotReady);
         }
         self.seat
             .commands
-            .send(ToMain::PageUpdate(crate::link::PageUpdate::GlobalEvent {
-                name: name.into(),
-                arguments,
-            }))
+            .send(ToMain::PageUpdate(update))
             .map_err(|_| EngineError::NotReady)
     }
 

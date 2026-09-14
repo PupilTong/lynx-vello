@@ -9,7 +9,8 @@ import { GlobalEventEmitter } from "bobcat:global-event-emitter";
 
 // The bobcat:bts bootstrap and the BTS application's entry preamble import
 // this runtime. Like MTS, lynx is a module binding, never a global property.
-// Application module loading through ResourceFetcher remains pending.
+// The bootstrap installs a message receiver, then returns so Worker messages
+// can initialize the runtime before the application entry is imported.
 const scope = globalThis as unknown as WorkerGlobalScope;
 
 const coreContext = createCrossThreadContext();
@@ -47,6 +48,7 @@ let nextCallbackId = 1;
  * `bobcat: "runtime"`, or a Context event's public fields, which carry no tag.
  */
 type FromMainThread =
+  | ({ bobcat: "runtime"; method: "initialize" } & BackgroundData & {systemInfo?: Record<string, unknown>})
   | {
       bobcat: "runtime";
       method: "publishEvent" | "publicComponentEvent" | "updateGlobalProps" | "updateCardData" | "onAppReload" | "processCardConfig";
@@ -163,8 +165,40 @@ coreContext.addEventListener(
 );
 
 coreContext.connect((event) => scope.postMessage({ type: event.type, data: event.data, origin: event.origin }));
+// Only the built-in BTS bootstrap arms initialization. Its first Worker
+// message supplies inputs; ordinary messages wait for the entry's imports.
+let startBackground: ((options: BackgroundData & {systemInfo?: Record<string, unknown>}) => Promise<void>) | undefined;
+let entryReady: Promise<boolean> | undefined;
+
+export function __BobcatStartBTS(loadEntry: () => Promise<unknown>) {
+  startBackground = async options => {
+    __BobcatInitializeBTS(options);
+    await loadEntry();
+  };
+}
+
 scope.addEventListener("message", (event: { data: FromMainThread }): void | Promise<void> => {
   const message = event.data;
+  if (message?.bobcat === "runtime" && message.method === "initialize") {
+    const start = startBackground;
+    if (start) {
+      startBackground = undefined;
+      entryReady = start(message).then(() => {
+        entryReady = undefined;
+        scope.postMessage({bobcat: "runtime", method: "backgroundReady"});
+        return true;
+      }, error => {
+        scope.postMessage({bobcat: "runtime", method: "backgroundFailed", message: printable(error)});
+        return false;
+      });
+    }
+    return;
+  }
+  if (entryReady) return entryReady.then(ready => { if (ready) return receiveMessage(message); });
+  return receiveMessage(message);
+});
+
+function receiveMessage(message: FromMainThread): void | Promise<void> {
   if (message?.bobcat !== "runtime") {
     coreContext.receive(message);
     return;
@@ -198,7 +232,7 @@ scope.addEventListener("message", (event: { data: FromMainThread }): void | Prom
     case "callLepusMethodResult":
       return receiveLepusResult(message);
   }
-});
+}
 
 // The selected runtime target, independent of the compiler's minimum SDK.
 export let SystemInfo: Readonly<Record<string, unknown>> = Object.freeze({
@@ -276,10 +310,9 @@ interface BackgroundData {
 }
 
 export function __BobcatInitializeBTS(options: BackgroundData & {
-  backgroundData?: BackgroundData;
   systemInfo?: Record<string, unknown>;
 }) {
-  const params = options.backgroundData ?? options;
+  const params = options;
   app._params = { initData:params.initData ?? null, updateData:params.updateData, processorName:params.processorName ?? "", cacheData:params.cacheData ?? [] };
   lynx.__initData = Object.hasOwn(params, "updateData") ? params.updateData : params.initData;
   lynx.__globalProps = params.globalProps || {};

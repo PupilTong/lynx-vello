@@ -1,11 +1,11 @@
-//! Public host updates retain their order while the BTS entry is loading.
+//! Public host updates require readiness and retain their order afterwards.
 
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bobcat_core::{EngineEvent, LynxGroup, LynxView, NoWakeup, StyleThreads};
+use bobcat_core::{EngineError, EngineEvent, LynxGroup, LynxView, NoWakeup, StyleThreads};
 use bobcat_resources::{Resources, ResourcesConfig};
 use bobcat_source::PageSource;
 use serde_json::json;
@@ -46,14 +46,35 @@ async fn until(
     }
 }
 
+fn reject_updates(view: &LynxView<DelayedBackground>) {
+    assert!(matches!(
+        view.update_data(json!({"raw":999}).as_object().unwrap().clone()),
+        Err(EngineError::NotReady)
+    ));
+    assert!(matches!(
+        view.reset_data(json!({"raw":999}).as_object().unwrap().clone()),
+        Err(EngineError::NotReady)
+    ));
+    assert!(matches!(
+        view.update_global_props(json!({"theme":"early"}).as_object().unwrap().clone()),
+        Err(EngineError::NotReady)
+    ));
+    assert!(matches!(
+        view.reload(json!({"raw":999}).as_object().unwrap().clone()),
+        Err(EngineError::NotReady)
+    ));
+}
+
 #[tokio::test]
 #[expect(
     clippy::too_many_lines,
     reason = "one public-API sequence pins ordering across the delayed BTS boot and both reload origins"
 )]
-async fn public_updates_and_reload_preserve_order_through_a_delayed_background_entry() {
+async fn public_updates_require_readiness_then_preserve_order() {
     let page = PageSource::from_bytes(&Url::parse("app:///lifecycle.xml").unwrap(), br#"
       <lynx engine-version="4.1"><script thread="main">
+        if (SystemInfo.pixelRatio !== 1 || SystemInfo.pixelWidth !== 100 || SystemInfo.pixelHeight !== 100)
+          throw Error('MTS system info');
         globalThis.executions = (globalThis.executions || 0) + 1;
         globalThis.processData = (data, name) => {
           if (name !== '') throw Error('default processor name');
@@ -78,6 +99,8 @@ async fn public_updates_and_reload_preserve_order_through_a_delayed_background_e
         };
       </script><script thread="background">
         import {lynx as backgroundLynx, console as backgroundConsole} from 'bobcat:bts-runtime';
+        if (backgroundLynx.SystemInfo.pixelRatio !== 1 || backgroundLynx.SystemInfo.pixelWidth !== 100 || backgroundLynx.SystemInfo.pixelHeight !== 100)
+          throw Error('BTS system info');
         const app = backgroundLynx.getApp();
         if (app._params.initData !== null || app._params.processorName !== '' || app._params.cacheData.length)
           throw Error('initial data slots');
@@ -118,18 +141,24 @@ async fn public_updates_and_reload_preserve_order_through_a_delayed_background_e
             sources,
         )
         .unwrap();
+    reject_updates(&view);
     let mut seen = Observed::default();
     until(&mut view, &mut seen, "mts render 2", false).await;
     assert!(!view.is_ready());
-    view.update_data(json!({"raw":2}).as_object().unwrap().clone());
-    view.reset_data(json!({"raw":3}).as_object().unwrap().clone());
-    view.update_global_props(json!({"theme":"dark"}).as_object().unwrap().clone());
-    view.reload(json!({"raw":4}).as_object().unwrap().clone());
-    until(&mut view, &mut seen, "mts update 5 false false", false).await;
+    reject_updates(&view);
     assert!(!seen.booted);
     released.set(true);
-    until(&mut view, &mut seen, "bts first-screen 5", true).await;
+    until(&mut view, &mut seen, "bts first-screen 2", true).await;
     assert!(seen.booted);
+    view.update_data(json!({"raw":2}).as_object().unwrap().clone())
+        .unwrap();
+    view.reset_data(json!({"raw":3}).as_object().unwrap().clone())
+        .unwrap();
+    view.update_global_props(json!({"theme":"dark"}).as_object().unwrap().clone())
+        .unwrap();
+    view.reload(json!({"raw":4}).as_object().unwrap().clone())
+        .unwrap();
+    until(&mut view, &mut seen, "bts first-screen 5", true).await;
     assert_eq!(
         seen.messages
             .iter()

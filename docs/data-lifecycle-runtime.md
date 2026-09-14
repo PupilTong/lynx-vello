@@ -18,15 +18,23 @@ its flush with `Promise.resolve().then` after rendering.
 Only a non-null, non-array object replaces the input. A non-table result or a
 reported processor failure preserves the original data.
 
-Before rendering, boot snapshots the processed result and current host props
-with ordinary JSON serialization and supplies the data to the BTS
-Worker. Undefined object members are omitted, nonfinite numbers become null,
+Before rendering, boot posts the processed result, host props and SystemInfo as
+its first `worker.postMessage`. Worker transport supplies the ordinary JSON copy;
+there is no native bootstrap-data binding, JSON map or generated data-bearing
+BTS module. The BTS bootstrap installs its receiver and returns, allowing the
+initialization message to arrive. JS initializes its inputs, imports the entry,
+and posts `backgroundReady` on success or `backgroundFailed` on failure.
+Context/lifecycle messages received during that import wait on its Promise. Undefined object members are omitted, nonfinite numbers become null,
 and negative zero becomes zero; own `__proto__` keys remain ordinary data. Rust
 carries JSON protocol data, not realm values or DOM handles. BTS receives the
 parsed data before its entry runs:
 `_params.initData` is null, `_params.updateData` and `lynx.__initData` share the
 processed data, and `_params.cacheData` is empty under the default host policy.
-The same initial environment supplies SystemInfo and global props to both realms.
+Rust retains processor selection as `DataProcessing` and viewport metrics as
+`Viewport`. Boot passes the string, boolean and numeric inputs directly to JS;
+only string quoting is needed for the generated source. JS constructs SystemInfo
+from its runtime constants and viewport metrics, then sends its snapshot to BTS.
+Initial global props come solely from `ViewSources.global_props`.
 
 `DataProcessing.initial_processor` selects the initial name; a plain JSON map
 passed to a host update selects the default name. `DataUpdate` carries an explicit
@@ -39,22 +47,22 @@ is false. No pre-update cache, processor coalescing or path-based merge is added
 
 ## Readiness and delivery order
 
-The initial MTS render and BTS readiness are different moments. Boot marks the
-former after render and flush. MTS evaluation then completes without awaiting
-BTS. A BTS ready message makes MTS call the native `notifyReady()` binding;
-public `is_ready()` becomes true when the host observes `ScriptFinished`.
+MTS render/flush completes without waiting for BTS. Public readiness requires
+both MTS completion and the BTS acknowledgement. `LynxView::pump` records it
+before returning `ScriptFinished`; `is_ready()` exposes the same state.
 
-| Host operation | Before initial MTS render | After initial MTS render |
-| --- | --- | --- |
-| update/reset | Ignore, without later replay | Process, invoke MTS update, then enqueue BTS update |
-| global props | Retain merged host props; update the initial environment without hooks | Enqueue full props to BTS, then update MTS bindings and invoke its hook |
-| reload | Report nonfatally and discard | Process, remove components, enqueue BTS reload, then invoke MTS update |
-| global event | Existing observed-readiness requirement | Still requires observed `ScriptFinished` |
+Every host lifecycle operation (`update_data`, `reset_data`, `update_global_props`,
+`reload`, and `send_global_event`) returns `EngineError::NotReady` until readiness
+has been observed or after the view ends. Rejected commands never enter the
+channel. Embedders supply initial data/props in `ViewSources`, then wait for
+readiness before sending updates. There is no pre-realm props cache, early-update
+policy, initial-render flag or replay queue for host updates.
 
-The ordered Worker consumer retains these messages while its entry loads.
-The public update methods do not add a second readiness queue. React owns data
-merging, RESET semantics, rerendering and component state; Rust sends a command
-and JavaScript invokes the framework's current hook.
+Accepted updates use the existing ordered command and Worker channels. Internal
+MTS messages produced by entry evaluation or rendering still retain their order
+before Worker connection and while the BTS entry imports. React owns data merging,
+RESET semantics, rerendering and component state; Rust sends a command and
+JavaScript invokes the framework's current hook.
 
 Global props merge literal top-level keys; nested objects are replaced and dots
 in a key stay literal. The host retains JSON text independently of mutable script objects.
@@ -100,9 +108,10 @@ Native evidence at `66b002855a25a5a8812fe878af69e20a346d0408`:
   assembler. The intentionally ordinary JS call/microtask boundary is described in
   [MTS execution](mts-execution-runtime.md).
 
-Core tests cover pre-realm and pending-import readiness, initial argument
-retention, processor names/fallbacks, cross-realm snapshots, live ESM props
-and Promise-job order. JS tests cover engine/global-hook precedence, merged props,
-update/reset options, both reload paths, coercion and callback release. The source
-integration drives public `LynxView` methods while holding the BTS entry, then
-verifies FIFO delivery, unchanged entry execution count and a BTS-origin reload.
+Core tests cover readiness, initial argument retention, processor names/fallbacks,
+cross-realm snapshots, live ESM props, failed BTS entry loading and Promise-job
+order. JS tests cover engine/global-hook precedence, merged props, update/reset
+options, both reload paths, coercion and callback release. The source integration
+rejects public updates before readiness, including while BTS loads; after readiness
+it verifies FIFO delivery, unchanged entry execution count and a BTS-origin reload.
+It also checks SystemInfo and initial data in both entries.

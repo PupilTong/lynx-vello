@@ -22,8 +22,11 @@ top-level await; posted messages wait for entry settlement. Worker termination
 or view release cancels outstanding completions and discards late results.
 
 Raw XML background entries use this path and import their runtime bindings from
-`bobcat:bts-runtime`. After its application entry completes, BTS sends ready;
-MTS then calls its readiness binding. MTS evaluation does not await BTS.
+`bobcat:bts-runtime`. The built-in bootstrap installs a JS initializer and
+returns; the first Worker message supplies inputs before the application entry
+imports. Later messages wait on that import Promise. Success sends ready;
+failure sends `backgroundFailed`. MTS calls the corresponding readiness binding
+without awaiting BTS.
 
 ## ReactLynx compiled-module contract
 

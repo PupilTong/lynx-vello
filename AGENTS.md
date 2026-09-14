@@ -560,12 +560,13 @@ useful signal for currently-compatible versions of those libraries.
   `docs/runtime-architecture.md` for the transport and lifetime boundaries.
   **After the MTS entry import succeeds, boot creates a BTS Worker** named
   `lynx-bg` through that same class, using the engine entry `bobcat:bts`.
-  `bobcat:bts` imports `lynx` from `bobcat:bts-runtime` and, when
-  `ViewSources.background_entry` is supplied, executes `await import(entry)`.
+  `bobcat:bts` installs its JS initializer from `bobcat:bts-runtime`, then
+  returns. Its first Worker message supplies initial data and starts the
+  optional `ViewSources.background_entry` import.
   Raw BTS application entries explicitly import their bindings from
   `bobcat:bts-runtime`; neither runtime installs `globalThis.lynx`.
   Keeping the runtime separate lets the app import its bindings without a
-  dependency back to the bootstrap awaiting it.
+  dependency back to the bootstrap that starts it.
   XML uses this identical startup path. The bootstrap contains no application
   source and does not fetch it in advance. A worker carries a `SourceRequester`
   that sends module requests directly to the view's resource host. ESM
@@ -587,8 +588,9 @@ useful signal for currently-compatible versions of those libraries.
   Worker postMessage takes the JSON snapshot. JSON's loss of undefined members
   and special-number values is an accepted compatibility limit; do not add a
   custom codec or deep clone to compensate for it. A worker's own task
-  queues what is posted to it until its script has been evaluated, so BTS
-  listeners are registered before the first delivery. Raw XML
+  queues what is posted until its bootstrap has evaluated. BTS JS then waits
+  on the application import before delivering later messages, so application
+  listeners exist before first delivery. Raw XML
   adapters supply the optional entry; compiled bundle manifests still need
   the Lynx Core module/init shell and remain pending. Each view costs one
   additional realm on the group's existing worker runtime. MTS boot does not
@@ -744,20 +746,25 @@ useful signal for currently-compatible versions of those libraries.
   missing values become `{}` and malformed inputs fail boot. Boot creates its
   document, initializes `__Card__` and MTS inputs, retains the host render
   argument, then awaits the entry. It processes the retained argument and
-  snapshots the result plus current host props before starting BTS. The BTS
-  initializer runs before its entry, so its inputs already hold that result.
+  posts the result plus host props and SystemInfo as the first BTS Worker
+  message, before rendering. The BTS bootstrap returns after installing a JS
+  receiver; that message initializes its inputs before importing the entry.
+  Later internal messages wait on the import Promise. Success acknowledges
+  readiness; failure reports back through the same Worker channel.
   Lifecycle hooks and engine listeners run synchronously, with no intervening
   Promise-job checkpoint. Boot awaits a `Promise.resolve().then` flush after
-  rendering and then marks the initial MTS render complete. MTS evaluation
-  completes independently; public readiness still requires BTS acknowledgement.
-  The selected SystemInfo snapshot, including initial viewport metrics, reaches
-  both realms. Entries receive runtime bindings through prepended ESM imports.
+  rendering. MTS evaluation completes independently; public readiness still
+  requires BTS acknowledgement.
+  Processor selection remains typed `DataProcessing` and initial metrics remain
+  `Viewport`; Rust stores no JSON bootstrap map. JS constructs SystemInfo from
+  runtime constants and those metrics, and sends its snapshot to BTS. Entries receive runtime bindings through prepended ESM imports.
   Global props updates replace the live module binding; there is no native
   evaluator or separate Script lexical environment.
   `LynxView::{update_data, reset_data, update_global_props, reload}` use the
-  existing ordered command/Worker links. Early data updates are ignored, early
-  global props update the initial environment, and early host reload reports
-  without replay. Later hooks process data and notify BTS in call order.
+  existing ordered command/Worker links. All require observed readiness and
+  otherwise return `EngineError::NotReady`, just like global events. Initial
+  data and props come from `ViewSources`; there is no early props cache or
+  initial-render update gate. Hooks process accepted data and notify BTS in order.
   A reload retains the realms and entry; the framework recreates component state.
   See `docs/data-lifecycle-runtime.md` for processor selection, snapshots,
   readiness, engine-event precedence and the BTS reload callback boundary.

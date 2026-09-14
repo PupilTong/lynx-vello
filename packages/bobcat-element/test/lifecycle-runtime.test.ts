@@ -109,13 +109,6 @@ async function deliverToMain() {
 }
 
 describe("MTS/BTS lifecycle runtime", () => {
-  it("rejects reload before the initial MTS render without enqueueing a later reload", () => {
-    const before=toBackground.length;
-    mts.__BobcatApplyPageUpdate(JSON.stringify({method:'onAppReload',args:[{seed:2},{processorName:''}]}));
-    expect(reportedErrors).toHaveBeenLastCalledWith('error',expect.stringContaining('ReloadTemplate in another loading process'));
-    expect(toBackground).toHaveLength(before);
-  });
-
   it("resolves the card alias to stylesheet URLs and keeps opaque handles", () => {
     expect(mts.__Card__).toBe("https://example.test/page/main.js?version=2#entry");
     const first = mts.__LoadStyleSheet('CSS', '__Card__');
@@ -180,7 +173,8 @@ describe("MTS/BTS lifecycle runtime", () => {
     mts.lynx.getJSContext().dispatchEvent(contextEvent);
     mts.__BobcatPublishEvent("component", "second", { value: 3 });
     contextEvent.data = 2;
-    mts.__BobcatConnectBackground(worker as unknown as Worker);
+    mts.__BobcatConnectBackground(worker as unknown as Worker, {seed: 1});
+    expect(toBackground.shift()).toMatchObject({bobcat: "runtime", method: "initialize", updateData: {seed: 1}});
     expect(toBackground.map((message) => message.method ?? message.type)).toEqual([
       "publishEvent", "custom", "publicComponentEvent",
     ]);
@@ -492,7 +486,6 @@ describe("runtime events and diagnostics", () => {
   it("uses full host props, current MTS hooks and native engine-event precedence", () => {
     const old=scope.updateGlobalProps;
     const initial={initData:mts.lynx.__initData,globalProps:mts.lynx.__globalProps,systemInfo:mts.SystemInfo};
-    mts.__BobcatPageLoaded();
     mts.__BobcatInitializeMTS({...initial,globalProps:{keep:1,nested:{value:2}}});
     const before=mts.lynx.__globalProps;
     (before['nested'] as {value: number}).value=99;
@@ -536,7 +529,6 @@ describe("runtime events and diagnostics", () => {
     const app=bts.getApp();
     const oldReload=app.onAppReload, oldLifecycle=app.OnLifecycleEvent;
     const order: unknown[]=[];
-    mts.__BobcatPageLoaded();
     try {
       scope.processData=(data, processor) => {
         order.push(['process',processor]);

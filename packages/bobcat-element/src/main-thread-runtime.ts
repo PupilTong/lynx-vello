@@ -56,6 +56,7 @@ type LepusMethodCall = {
 type FromBackground = LepusMethodCall | NodeQueryRequest
   | { bobcat: "runtime"; method: "reportError" | "console"; level: string; message: string }
   | { bobcat: "runtime"; method: "backgroundReady" }
+  | { bobcat: "runtime"; method: "backgroundFailed"; message: string }
   | { bobcat: "runtime"; method: "reloadFromJS"; data?: unknown; id?: number }
   | (ContextEvent & { bobcat?: never });
 
@@ -152,7 +153,7 @@ async function callLepusMethod(message: LepusMethodCall) {
  * listeners already exist; events it sent before Worker construction are
  * flushed in order through the same Worker transport as later events.
  */
-export function __BobcatConnectBackground(worker: Worker) {
+export function __BobcatConnectBackground(worker: Worker, data: unknown) {
   worker.addEventListener("message", (event: { data: FromBackground }) => {
     const message = event.data;
     if (message?.bobcat === "runtime") {
@@ -171,6 +172,8 @@ export function __BobcatConnectBackground(worker: Worker) {
         void callLepusMethod(message);
       } else if (message.method === "backgroundReady") {
         notifyReady();
+      } else if (message.method === "backgroundFailed") {
+        reportStartupFailure(message.message);
       } else if (message.method === "reloadFromJS") {
         reloadPage(message.data, true);
         // Acknowledge after jobs already queued by the lifecycle hooks.
@@ -191,6 +194,8 @@ export function __BobcatConnectBackground(worker: Worker) {
   worker.addEventListener("error", (event: {message: string}) => {
     reportStartupFailure(event.message);
   });
+  // Snapshot initial data before queued events or render can mutate it.
+  worker.postMessage({bobcat: "runtime", method: "initialize", ...__BobcatBackgroundData(data), systemInfo: SystemInfo});
   backgroundWorker = worker;
   const queued = pendingBackgroundMessages;
   pendingBackgroundMessages = [];
@@ -265,30 +270,21 @@ export const __BobcatInitData = parsePageData("initData", initData());
 export let __globalProps = parsePageData("globalProps", globalProps()) as Record<string, unknown>;
 // Host state is separate from the copies the two script realms may mutate.
 let hostGlobalPropsJson = "{}";
-let pageLoaded = false;
 let initialProcessor = "";
 let jsDataProcessor = false;
-
-// Boot marks the initial MTS render, independently of the later BTS-ready
-// promise. Native accepts reload once its template is loaded, even if BTS
-// has not finished evaluating its app yet.
-export function __BobcatPageLoaded() {
-  pageLoaded = true;
-}
 
 export function __BobcatInitializeMTS(options: {
   initData?: unknown;
   globalProps?: Record<string, unknown>;
-  globalPropsUpdates?: Record<string, unknown>;
   systemInfo?: Record<string, unknown>;
   processorName?: string;
   enableJSDataProcessor?: boolean;
 }) {
   lynx.__initData = "initData" in options ? options.initData : __BobcatInitData;
-  hostGlobalPropsJson = JSON.stringify({...("globalProps" in options ? options.globalProps : __globalProps), ...options.globalPropsUpdates});
+  hostGlobalPropsJson = JSON.stringify("globalProps" in options ? options.globalProps : __globalProps);
   __globalProps = JSON.parse(hostGlobalPropsJson);
   lynx.__globalProps = __globalProps;
-  SystemInfo = Object.freeze(options.systemInfo ?? {});
+  SystemInfo = Object.freeze({platform: "headless", runtimeType: "quickjs", lynxSdkVersion: "4.1.0", ...options.systemInfo});
   lynx.SystemInfo = SystemInfo;
   initialProcessor = options.processorName ?? "";
   jsDataProcessor = options.enableJSDataProcessor === true;
@@ -299,7 +295,7 @@ export function __BobcatProcessInitData(data: unknown) { return __BobcatProcessD
 /** App::LoadApp separates encoded data from host TemplateData. React's
  * Fiber output does not set LepusInitData, so the encoded slot is native nil.
  */
-export function __BobcatBackgroundData(data: unknown) {
+function __BobcatBackgroundData(data: unknown) {
   return {initData:null, updateData:data, processorName:jsDataProcessor ? initialProcessor : "", cacheData:[], globalProps:JSON.parse(hostGlobalPropsJson)};
 }
 
@@ -340,10 +336,6 @@ function updatePage(data: unknown, options: Record<string, unknown>) {
 }
 
 function reloadPage(data: unknown, fromJS: boolean, processorName = "") {
-  if (!pageLoaded && !fromJS) {
-    _ReportError(new Error("ReloadTemplate in another loading process!!!"));
-    return;
-  }
   const processed = fromJS ? data : __BobcatProcessData(data, processorName);
   try {
     if (hasEventListener(engineContext, "__RemoveComponents")) engineContext.dispatchEvent({type: '__RemoveComponents', data: []});
@@ -366,9 +358,6 @@ export function __BobcatApplyPageUpdate(json: string) {
     updateGlobalProps(message.args[0]);
     return;
   }
-  // Global events have already passed LynxView's readiness gate. Native's
-  // data-update policy still ignores update/reset before the initial render.
-  if (!pageLoaded && message.method === "updateCardData") return;
   const data = message.args[0];
   if (message.method === "onAppReload") {
     reloadPage(data, false, message.args[1].processorName);
@@ -391,10 +380,9 @@ function updateGlobalProps(data: Record<string, unknown>) {
   // Native's host merges literal top-level keys; TemplateAssembler receives
   // the complete props, not the diff. Notify BTS before entering MTS hooks.
   hostGlobalPropsJson = JSON.stringify({...JSON.parse(hostGlobalPropsJson), ...data});
-  if (pageLoaded) sendToBackground({bobcat:"runtime", method:"updateGlobalProps", args:[JSON.parse(hostGlobalPropsJson)]});
+  sendToBackground({bobcat:"runtime", method:"updateGlobalProps", args:[JSON.parse(hostGlobalPropsJson)]});
   __globalProps = JSON.parse(hostGlobalPropsJson);
   lynx.__globalProps = __globalProps;
-  if (!pageLoaded) return;
   try {
     if (hasEventListener(engineContext, "__UpdateGlobalProps")) engineContext.dispatchEvent({type: '__UpdateGlobalProps', data: [__globalProps]});
     else {

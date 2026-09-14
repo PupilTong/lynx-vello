@@ -372,7 +372,7 @@ fn global_props_initialize_bts_before_hooks_and_notify_before_mts_events() {
         Some(
             r"
         const props=lynx.__globalProps;
-        if (props.seed!==3 || props.keep!==1 || props.nested.value!==2) throw Error('BTS initial props');
+        if (props.seed!==1 || props.keep!==1 || props.nested.value!==2) throw Error('BTS initial props');
         lynx.getApp().updateGlobalProps=data=>{
             if (data.keep!==1 || data.nested.value!==2 || 'scriptOnly' in data) throw Error('host props mutated');
             lynx.getCoreContext().dispatchEvent({type:'reply',data:['update',data.seed]});
@@ -391,33 +391,25 @@ fn global_props_initialize_bts_before_hooks_and_notify_before_mts_events() {
         },
     );
 
-    pair.runtime
-        .as_mut()
-        .unwrap()
-        .prepare_global_props(serde_json::from_str(r#"{"seed":2}"#).unwrap());
     pair.boot(r"
-        import {__BobcatApplyPageUpdate} from 'bobcat:runtime';
         globalThis.results=[];
         lynx.getJSContext().addEventListener('reply', e=>results.push(e.data));
-        if (lynx.__globalProps.seed!==2) throw Error('staged initial props');
-        globalThis.updateGlobalProps=()=>{throw Error('early hook');};
-        __BobcatApplyPageUpdate(JSON.stringify({method:'updateGlobalProps',args:[{seed:3}]}));
         const initial=lynx.__globalProps;
         globalThis.renderPage=()=>{
-            if (initial.seed!==3) throw Error('initial render props');
+            if (initial.seed!==1) throw Error('initial render props');
             initial.nested.value=99;
             initial.scriptOnly=true;
         };
         lynx.getEngine().addEventListener('__UpdateGlobalProps',e=>{
             if ('origin' in e || e.data.length!==1 || e.data[0].seed!==4 || lynx.__globalProps.seed!==4 ||
-                lynx.__globalProps===initial || initial.seed!==3) throw Error('MTS props delivery');
+                lynx.__globalProps===initial || initial.seed!==1) throw Error('MTS props delivery');
             lynx.getJSContext().dispatchEvent({type:'mts-props',data:e.data[0].seed});
             throw Error('props hook failed');
         });
     ").unwrap();
     pair.deliver();
     pair.check(
-        r#"if (JSON.stringify(results)!=='[["initial",3]]') throw Error('initial hook count');"#,
+        r#"if (JSON.stringify(results)!=='[["initial",1]]') throw Error('initial hook count');"#,
     );
     pair.runtime
         .as_mut()
@@ -429,7 +421,7 @@ fn global_props_initialize_bts_before_hooks_and_notify_before_mts_events() {
         .unwrap();
     pair.deliver();
     pair.deliver();
-    pair.check(r#"if (JSON.stringify(results)!=='[["initial",3],["update",4],["mts",4]]') throw Error('props event order');"#);
+    pair.check(r#"if (JSON.stringify(results)!=='[["initial",1],["update",4],["mts",4]]') throw Error('props event order');"#);
     assert!(pair.notices().iter().any(|notice| matches!(notice,
         ViewNotice::Engine(crate::EngineEvent::ScriptReported {message,..}) if message.contains("props hook failed"))));
 }

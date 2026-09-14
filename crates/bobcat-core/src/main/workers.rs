@@ -14,7 +14,6 @@
 //! thread, and every worker it created ends without this side taking a turn.
 
 use std::cell::{Cell, RefCell};
-use std::fmt::Write as _;
 use std::rc::Rc;
 
 use quickjs_rust_bridge::HostValue;
@@ -56,7 +55,6 @@ impl WorkerFactory {
         outbox: ViewOutbox,
         base_url: &str,
         background_entry: Option<String>,
-        initial_options: Rc<RefCell<serde_json::Map<String, serde_json::Value>>>,
     ) -> Result<(Rc<WorkerOwner>, mpsc::UnboundedReceiver<WorkerEvent>), ScriptError> {
         let (events, incoming) = mpsc::unbounded_channel();
         // The native functions hold clones of the owner until the realm is
@@ -87,16 +85,7 @@ impl WorkerFactory {
                 let script = creator.start(key, name)?;
                 if specifier == BTS_MODULE_SPECIFIER {
                     let mut source = BTS_ENTRY_PREAMBLE.to_owned();
-                    let options = serde_json::to_string(&*initial_options.borrow())
-                        .expect("bootstrap options are JSON values");
-                    let options =
-                        serde_json::to_string(&options).expect("JSON text is a JavaScript string");
-                    write!(
-                        source,
-                        "import {{ __BobcatInitializeBTS }} from \"bobcat:bts-runtime\";\n\
-                         __BobcatInitializeBTS(JSON.parse({options}));\n"
-                    )
-                    .expect("writing to a String cannot fail");
+                    source.push_str("import { __BobcatStartBTS } from \"bobcat:bts-runtime\";\n__BobcatStartBTS(async () => {\n");
                     if let Some(entry) = &background_entry {
                         let entry =
                             serde_json::to_string(entry).expect("a string is JSON serializable");
@@ -104,7 +93,7 @@ impl WorkerFactory {
                         source.push_str(&entry);
                         source.push_str(");\n");
                     }
-                    source.push_str("postMessage({bobcat:'runtime',method:'backgroundReady'});\n");
+                    source.push_str("});\n");
                     // The built-in background script is this thread's own, so
                     // it answers its own request rather than asking a host
                     // that has no bytes for it.

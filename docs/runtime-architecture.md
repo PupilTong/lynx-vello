@@ -519,19 +519,21 @@ is an ESM export from `bobcat:bts-runtime`; neither MTS nor BTS sets
 `globalThis.lynx`. The bootstrap uses
 `import { lynx } from "bobcat:bts-runtime"`; raw BTS applications explicitly
 import the bindings they need. The application imports its bindings without
-creating a dependency back to the bootstrap awaiting it.
+creating a dependency back to the bootstrap that starts it.
 Main answers the built-in `bobcat:bts` source itself, on the one-shot that
 rode to `bobcat-workers` inside the `Start`, rather than asking a host that has
 no bytes for it. When `ViewSources.background_entry` is
-configured, the bootstrap appends `await import(entry)`, matching MTS boot's
-import structure. XML takes exactly this path; no application source is
-prefetched or concatenated into the bootstrap. Without an entry, the bootstrap
-initializes the Context and the app/native-app hook surfaces.
+configured, the bootstrap passes an `async () => { await import(entry); }`
+loader to its JS initializer and returns. The first `postMessage` initializes
+BTS inputs before that loader runs; later messages wait on its Promise. XML
+takes exactly this path. Without an entry, the same initialization message
+supplies the Context and app/native-app environment, then BTS acknowledges it.
 
 Workers use the same asynchronous ESM loader as main. Each discovered module
 gets a source completion on the view's existing host channel; its final response
 URL becomes the base for dependencies. A per-worker boot watch gates posted
-messages until entry settlement, while module completions and timers continue.
+messages until the Worker bootstrap settles. The BTS runtime separately holds
+its messages on the application import Promise; completions and timers continue.
 Cancellation follows the worker's child token; source completions never travel
 through the MTS realm. Handled import failures leave the worker usable; a BTS
 startup failure reaches the MTS failure binding. ReactLynx compiled-module and
@@ -694,25 +696,25 @@ entry execution. The generated boot body has this order:
 ```js
 export const document = new Document();
 __BobcatInitEntry(entryMtsUrl);
-__BobcatInitializeMTS(initialOptions);
+__BobcatInitializeMTS({ processorName, enableJSDataProcessor, systemInfo: viewportMetrics });
 let data = lynx.__initData;
 await import(entryMtsUrl);
 const { Worker } = await import("bobcat-internal");
 data = __BobcatProcessInitData(data);
-prepareBackgroundData(JSON.stringify(__BobcatBackgroundData(data)));
-__BobcatConnectBackground(new Worker("bobcat:bts", { name: "lynx-bg" }));
+__BobcatConnectBackground(new Worker("bobcat:bts", { name: "lynx-bg" }), data);
 __BobcatRenderPage(data);
 await Promise.resolve().then(() => __FlushElementTree());
-__BobcatPageLoaded();
 ```
 
 The retained argument survives entry initialization replacing `lynx.__initData`.
 Processing, the BTS snapshot and MTS render run synchronously. Boot then awaits
 a flush queued with `Promise.resolve().then`, preserving the ordinary microtask
 boundary; it does not drain Promise jobs between lifecycle hooks.
-The Worker initializes its data before importing the BTS entry. Initial MTS render
-is a separate boundary from the later public readiness report; see
-[data lifecycle](data-lifecycle-runtime.md) for early-operation policies.
+The first Worker message initializes BTS data before its entry imports. JS holds
+later messages on that import's Promise, then acknowledges readiness; import
+failure reports through the same Worker channel. Host updates require observed
+public readiness, with no caching or replay before it. See
+[data lifecycle](data-lifecycle-runtime.md) for the inputs and readiness contract.
 
 The global `renderPage` function remains a compatibility path, not a boot
 requirement. An entry may instead register its renderer on the stable,
@@ -1251,7 +1253,8 @@ ownership and synchronous failures are described in
 ## Data lifecycle
 
 Initial preprocessing, update/reset, global-property snapshots and reload use
-the existing MTS command and Worker links. Initial MTS render is distinct from
-BTS readiness; early operations follow their own native policies. See
+the existing MTS command and Worker links. Rust keeps processor/viewport inputs
+typed; JS owns BTS initialization and sends its snapshot through postMessage.
+Host updates require observed readiness and otherwise return `NotReady`. See
 [data and global-property lifecycle](data-lifecycle-runtime.md) for the call
 order, input ownership, live ESM bindings and framework boundary.
