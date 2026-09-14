@@ -28,7 +28,7 @@ import {
 } from "bobcat:cross-thread-context";
 import { __BobcatQueryNodes } from "bobcat:element";
 import type { NodeQueryRequest } from "bobcat:selector-query";
-import { entryUrl, globalProps, initData, reportScriptError, logScriptMessage, notifyReady, reportStartupFailure, loadStyleSheet, adoptStyleSheet, releaseStyleSheet } from "bobcat-internal:host";
+import { globalProps, initData, reportScriptError, logScriptMessage, notifyReady, reportStartupFailure, preloadStyleSheet, adoptStyleSheet, releaseStyleSheet } from "bobcat-internal:host";
 import type { Worker } from "bobcat-internal";
 
 /**
@@ -94,7 +94,12 @@ const engineContext = new EngineContext();
 const scope = globalThis as Record<string, unknown>;
 
 /** The entry response URL supplied by the view's resource loader. */
-export const __Card__ = entryUrl();
+export let __Card__: string;
+
+/** Boot supplies the entry URL before importing the application's module. */
+export function __BobcatInitEntry(url: string): void {
+  __Card__ = url;
+}
 
 function cardURL(bundleName: string): string {
   return bundleName === "__Card__" ? __Card__ : bundleName;
@@ -323,7 +328,7 @@ export function __LoadStyleSheet(key: string, bundleName: string): object {
   if (arguments.length < 2 || typeof key !== "string" || typeof bundleName !== "string") {
     throw new TypeError("__LoadStyleSheet requires a section key and bundle name");
   }
-  const id = loadStyleSheet(styleSheetURL(key, bundleName));
+  const id = preloadStyleSheet(styleSheetURL(key, bundleName));
   const handle: object = Object.freeze(Object.create(null));
   styleHandles.set(handle, id);
   styleCleanup.register(handle, id);

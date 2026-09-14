@@ -70,7 +70,6 @@ const ELEMENT_PAPI_SOURCE: &str = crate::esm::runtime_source!("element-papi");
 const RUNTIME_MODULE_SOURCE: &str = crate::esm::runtime_source!("main-thread-runtime");
 
 mod style_sheets;
-pub(crate) use style_sheets::Sheet as PendingStyleSheet;
 
 const ENTRY_PREAMBLE: &str = r#"import {
   __Card__,
@@ -534,7 +533,6 @@ pub(crate) struct MainThreadRuntime {
     slot: Rc<RefCell<DocumentSlot>>,
     events: Rc<EventState>,
     timers: Rc<TimerState>,
-    styles: Rc<style_sheets::Styles>,
     /// Names one dispatch, so the realm can keep one event object alive across
     /// the whole walk instead of minting one per node. Not shared with the
     /// host functions: only [`Self::dispatch_event`] reads or advances it, and
@@ -590,11 +588,7 @@ impl MainThreadRuntime {
             &events,
             &timers,
         )?;
-        let styles = style_sheets::install_styles(&mut engine, js_runtime, &slot)?;
-        let entry_url = base_url.to_owned();
-        install(&mut engine, js_runtime, "entryUrl", 0, move |_| {
-            Ok(HostValue::String(entry_url.clone()))
-        })?;
+        style_sheets::install_styles(&mut engine, js_runtime, &slot, &outbox)?;
         install_page_data(&mut engine, js_runtime, page_data)?;
         let readiness = Rc::new(RefCell::new(Ok(false)));
         install_readiness(&mut engine, js_runtime, &readiness)?;
@@ -609,25 +603,10 @@ impl MainThreadRuntime {
                 slot,
                 events,
                 timers,
-                styles,
                 next_event_id: 0,
             },
             incoming,
         ))
-    }
-
-    pub(crate) fn take_stylesheet_request(&self) -> Option<(String, Rc<PendingStyleSheet>)> {
-        self.styles.take_request()
-    }
-
-    pub(crate) fn complete_stylesheet(
-        &self,
-        sheet: &PendingStyleSheet,
-        source: Result<crate::resource::LoadedSource, crate::LynxViewError>,
-    ) -> Result<(), String> {
-        let result = sheet.complete(source);
-        self.styles.apply(&mut self.slot.borrow_mut());
-        result
     }
 
     /// How many of this realm's workers are still running, which is how many
@@ -898,7 +877,7 @@ impl MainThreadRuntime {
         let entry_specifier = serde_json::to_string(source_name)
             .expect("serializing a Rust string as a JavaScript string cannot fail");
         let boot = format!(
-            r#"import {{ lynx, _ReportError, __BobcatConnectBackground, __BobcatInitData }} from "{RUNTIME_MODULE_SPECIFIER}";
+            r#"import {{ lynx, _ReportError, __BobcatConnectBackground, __BobcatInitData, __BobcatInitEntry }} from "{RUNTIME_MODULE_SPECIFIER}";
 import {{ Document, __FlushElementTree }} from "{ELEMENT_MODULE_SPECIFIER}";
 // Imported for its effect: it installs the timer globals, and a static
 // import runs before the entry this module then loads.
@@ -909,6 +888,7 @@ import "{TIMER_MODULE_SPECIFIER}";
 // it: it goes when the realm does.
 export const document = new Document();
 
+__BobcatInitEntry({entry_specifier});
 await import({entry_specifier});
 const {{ Worker }} = await import("bobcat-internal");
 __BobcatConnectBackground(new Worker("{BTS_MODULE_SPECIFIER}", {{ name: "lynx-bg" }}));

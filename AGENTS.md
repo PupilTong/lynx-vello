@@ -177,9 +177,10 @@ useful signal for currently-compatible versions of those libraries.
   is handed one sender on it — and awaits the QuickJS runtime and Stylo pool every view in
   that group will share.
   **Both engine threads run a tokio `current_thread` runtime under a
-  `LocalSet`**, and on both of them each thing that can be waited for is a
-  task of its own, so tokio owns the polling, parking and waking and the
-  engine only decides which page operation a ready task calls. A view's tasks
+  `LocalSet`**, and on both of them each asynchronous wait is a task of
+  its own, so tokio owns its polling, parking and waking and the engine only
+  decides which page operation a ready task calls. Synchronous stylesheet
+  adoption can instead park MTS on a source response, as described below. A view's tasks
   are its owner (`serve_view`, whose one wait is the view's end), its boot
   future, one ordered consumer of the command channel, one ordered consumer of
   its workers' events, one future per resource load an import produced, and one
@@ -287,15 +288,19 @@ useful signal for currently-compatible versions of those libraries.
   embedder that builds one. The protocol carries no response-size limit
   either; each fetcher owns the memory bound for the response it
   materializes. `PageSource` registers named CSS under ordinary entry-relative
-  resource URLs. The MTS `__Card__` import exposes the entry response URL;
-  JS replaces the `"__Card__"` alias and maps the compiler's `CSS` section to
-  `<entry-url>/index.css`. `__LoadStyleSheet` returns a fresh opaque handle and
-  requests that URL through the existing `SourceRequest::StyleSheet` protocol.
-  The embedder returns CSS text or a `PreparsedStyleSheet`; JS sees neither.
-  `__AdoptStyleSheet` applies in call order as resources arrive, including
-  repeated adoption. A pending adoption retains its sheet after JS collection;
-  adopted rules belong to the document. Failed loads report without blocking
-  later adoptions, and view release cancels completions. See
+  resource URLs. Boot supplies the entry response URL to the JS runtime before
+  importing the entry, whose `__Card__` import reads that value. JS replaces
+  the `"__Card__"` alias and maps the compiler's `CSS` section to
+  `<entry-url>/index.css`. `__LoadStyleSheet` returns a fresh opaque preload
+  handle and requests that URL through `SourceRequest::StyleSheet`.
+  `__AdoptStyleSheet` synchronously obtains the response and mounts it before
+  returning, including repeated adoption. The embedder returns CSS text or
+  a `PreparsedStyleSheet`; JS sees neither. An incomplete preload parks MTS
+  until the response arrives or the view is cancelled, without executing JS
+  jobs or sibling views. Errors throw at adoption; an unused preload changes
+  no styles. Collection releases the preload handle, cancelling an unused
+  response, while adopted rules belong to the document. No stylesheet task
+  or adoption queue lives in `MainThreadRuntime`. See
   `docs/named-styles-runtime.md` for URL mapping and load timing.
   Per-component css-id scoping is
   **not** implemented — every fragment mounts globally, which is what

@@ -13,8 +13,7 @@
 //! - [`consume_commands`], the one ordered consumer of the command stream;
 //! - [`boot_page`], the page's boot future: the sheets in cascade order, the entry, and then the
 //!   realm;
-//! - one [`load_module`] future per imported module and one [`load_stylesheet`] future per dynamic
-//!   sheet;
+//! - one [`load_module`] future per resource load an import produced;
 //! - [`consume_worker_events`], the one ordered consumer of this view's workers;
 //! - [`serve_clock`], which owns this realm's one pinned sleep and watches the runtime-wide
 //!   checkpoint generation for a sibling's entry into JavaScript.
@@ -28,7 +27,7 @@
 //! Every one of those tasks reaches the realm through [`Page::enter`], which
 //! runs one synchronous operation and then settles what that operation left
 //! owing: due timers, the commit, the boot report, the `BeginFrame`
-//! acknowledgement, the source requests the entry produced, the next timer
+//! acknowledgement, the module requests the entry produced, the next timer
 //! deadline. [`Page::settle`] is the epilogue alone, for a wake that carries
 //! no operation of its own. [`Page::open_realm`] is the one documented
 //! exception, because the realm it would enter does not exist until it
@@ -85,7 +84,9 @@
 //! first kind per engine thread, one of the second per live view and per live
 //! worker, one of the third per live realm, one of the fourth per worker that
 //! has not booted yet. `link.rs`'s `block_on_deadline` is a hand-rolled poll
-//! loop rather than a select.
+//! loop rather than a select. Synchronous stylesheet adoption uses `link::block_on`
+//! to wait only for its preload response or cancellation; it does not drive this
+//! thread's tasks or JavaScript jobs while waiting.
 
 use std::cell::{Cell, RefCell};
 use std::future::Future;
@@ -307,8 +308,7 @@ impl Page {
     /// 3. **The boot report**, once, so the frame exists before the event that implies it.
     /// 4. **The `BeginFrame` acknowledgement**, for the same reason: a host blocked on the sequence
     ///    number is blocked on that frame.
-    /// 5. **The source requests** this entry produced, each module or stylesheet spawned as a load
-    ///    of its own.
+    /// 5. **The module requests** this entry produced, each spawned as a load of its own.
     /// 6. **The next timer deadline**, republished only when it moved.
     /// 7. **The checkpoint generation**, so the clock task can tell this page's own bumps from a
     ///    sibling's.
@@ -343,12 +343,6 @@ impl Page {
                 .outbox
                 .request_source(SourceRequest::Module(url.clone()));
             self.spawn(load_module(Rc::clone(self), url, answer));
-        }
-        while let Some((url, sheet)) = runtime.take_stylesheet_request() {
-            let answer = self
-                .outbox
-                .request_source(SourceRequest::StyleSheet(url.clone()));
-            self.spawn(load_stylesheet(Rc::clone(self), url, sheet, answer));
         }
         self.lifetime.arm_deadline(runtime.next_timer_deadline());
         self.lifetime.record_checkpoint(js.checkpoint_generation());
@@ -880,26 +874,6 @@ async fn load_module(page: Rc<Page>, url: String, answer: SourceAnswer) {
                 EngineEvent::ScriptRunError(error)
             } else {
                 EngineEvent::StartupFailed(error.into())
-            });
-        }
-    });
-}
-
-/// Dynamic styles use the same source protocol and lifetime as imported modules.
-async fn load_stylesheet(
-    page: Rc<Page>,
-    url: String,
-    sheet: Rc<super::runtime::PendingStyleSheet>,
-    answer: SourceAnswer,
-) {
-    let source = answer
-        .await
-        .unwrap_or_else(|_| Err(unanswered_source().into()));
-    page.enter(|runtime, _| {
-        if let Err(error) = runtime.complete_stylesheet(&sheet, source) {
-            page.outbox.engine_event(EngineEvent::ScriptReported {
-                level: "error".to_owned(),
-                message: format!("loading stylesheet {url}: {error}"),
             });
         }
     });

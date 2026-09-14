@@ -2794,9 +2794,24 @@ fn a_chain_of_zero_delay_timers_starts_waiting_once_it_nests_deeply() {
     assert!(deadline > before, "the sixth link waits");
 }
 
+fn stylesheet_request(far: &mut PublishedNames) -> (String, crate::resource::SourceCompletion) {
+    loop {
+        if let ViewNotice::RequestSource {
+            request,
+            completion,
+        } = far.0.notices.try_recv().unwrap()
+        {
+            let crate::resource::SourceRequest::StyleSheet(url) = request else {
+                panic!("expected a stylesheet request");
+            };
+            return (url, completion);
+        }
+    }
+}
+
 #[test]
 #[expect(clippy::float_cmp, reason = "rounded test widths are exact CSS pixels")]
-fn url_stylesheets_preserve_adoption_order_and_survive_handle_collection() {
+fn preload_is_inert_and_adopt_synchronously_mounts_text_or_preparsed_styles() {
     use crate::resource::{LoadedSource, StyleSheetSource};
 
     for text in [true, false] {
@@ -2805,7 +2820,7 @@ fn url_stylesheets_preserve_adoption_order_and_survive_handle_collection() {
             ".box{width:20px;height:10px} #strong{width:90px} .important{width:95px!important}"
                 .into(),
         ));
-        let (mut js, mut runtime, elements) = runtime_over(ingredients);
+        let (mut js, mut runtime, elements, mut far) = runtime_over_watching_names(ingredients);
         runtime
             .run_main_thread_script(
                 &mut js,
@@ -2828,16 +2843,10 @@ fn url_stylesheets_preserve_adoption_order_and_survive_handle_collection() {
             let tree = elements.tree();
             [3, 4, 5].map(|id| tree.rounded_layout(node_id(id)).unwrap().size.width)
         };
-        assert_eq!(
-            widths(),
-            [20.0, 90.0, 95.0],
-            "pending resources do not block rendering"
-        );
-        let (url_a, a) = runtime.take_stylesheet_request().unwrap();
-        let (url_b, b) = runtime.take_stylesheet_request().unwrap();
+        let (url_a, a) = stylesheet_request(&mut far);
+        let (url_b, b) = stylesheet_request(&mut far);
         assert_eq!(url_a, "app:///main.js/index.css");
         assert_eq!(url_b, "https://cdn.test/bundle/index.css");
-        assert!(runtime.take_stylesheet_request().is_none());
         let source = |width: &str| {
             let sheet = if text {
                 StyleSheetSource::Text(format!("\u{feff}.box{{width:{width}}}"))
@@ -2855,44 +2864,168 @@ fn url_stylesheets_preserve_adoption_order_and_survive_handle_collection() {
             };
             Ok(LoadedSource::StyleSheet(sheet))
         };
-        runtime.complete_stylesheet(&b, source("80px")).unwrap();
+        b.complete(source("80px"));
         runtime.commit_if_dirty();
-        assert_eq!(
-            widths(),
-            [20.0, 90.0, 95.0],
-            "loading a sheet without adopting it leaves the cascade unchanged"
-        );
-        runtime.evaluate_module(&mut js,
-            "import {__AdoptStyleSheet} from 'bobcat:runtime'; __AdoptStyleSheet(a); __AdoptStyleSheet(b); __AdoptStyleSheet(a);",
-            "app:///adopt.js", "adopting loaded and pending stylesheets").unwrap();
-        runtime.commit_if_dirty();
-        assert_eq!(
-            widths(),
-            [20.0, 90.0, 95.0],
-            "a loaded later sheet waits for the earlier adoption"
-        );
+        assert_eq!(widths(), [20.0, 90.0, 95.0], "preloading does not adopt");
         runtime
             .evaluate_module(
                 &mut js,
-                "delete globalThis.a; delete globalThis.b;",
-                "app:///release-handles.js",
-                "releasing stylesheet handles",
+                r"
+            import {__AdoptStyleSheet} from 'bobcat:runtime';
+            import {__FlushElementTree} from 'bobcat:element';
+            __AdoptStyleSheet(b);
+            __FlushElementTree();
+        ",
+                "app:///adopt-b.js",
+                "adopting B before pending A",
             )
             .unwrap();
-        runtime.collect_garbage(&mut js).unwrap();
-        runtime.complete_stylesheet(&a, source("40px")).unwrap();
-        runtime.commit_if_dirty();
+        assert_eq!(
+            widths(),
+            [80.0, 90.0, 95.0],
+            "an unused preload does not hold up adoption"
+        );
+        a.complete(source("40px"));
+        runtime
+            .evaluate_module(
+                &mut js,
+                r"
+            import {__AdoptStyleSheet} from 'bobcat:runtime';
+            import {__FlushElementTree} from 'bobcat:element';
+            __AdoptStyleSheet(a); __AdoptStyleSheet(b); __AdoptStyleSheet(a);
+            __FlushElementTree();
+            delete globalThis.a; delete globalThis.b;
+        ",
+                "app:///adopt-aba.js",
+                "adopting A, B, A",
+            )
+            .unwrap();
         assert_eq!(
             widths(),
             [40.0, 90.0, 95.0],
-            "A, B, A adoption order survives collection and retains CSS precedence"
+            "each adoption mounts before returning"
         );
         runtime.collect_garbage(&mut js).unwrap();
         runtime.commit_if_dirty();
         assert_eq!(
             widths(),
             [40.0, 90.0, 95.0],
-            "adopted rules outlive their handles"
+            "mounted styles outlive handles"
         );
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[expect(clippy::float_cmp, reason = "rounded test widths are exact CSS pixels")]
+async fn adopt_waits_for_the_loader_and_reports_failure_or_cancellation_synchronously() {
+    use crate::resource::{LoadedSource, StyleSheetSource};
+
+    for outcome in ["success", "failure", "dropped", "cancelled"] {
+        let (mut js, mut runtime, elements, mut far) = runtime_over_watching_names(ingredients());
+        let (entering, entered) = std::sync::mpsc::channel();
+        install(&mut runtime.engine, &mut js, "adopting", 0, move |_| {
+            entering.send(()).unwrap();
+            Ok(HostValue::Undefined)
+        })
+        .unwrap();
+        runtime
+            .run_main_thread_script(
+                &mut js,
+                r"
+            const page = __CreatePage();
+            const box = __CreateView(0);
+            __SetClasses(box, 'box');
+            __AppendElement(page, box);
+            globalThis.sheet = __LoadStyleSheet('CSS', '__Card__');
+        ",
+                "app:///main.js",
+            )
+            .unwrap();
+        let (_, completion) = stylesheet_request(&mut far);
+        let token = far.0.token.clone();
+        let host = std::thread::spawn(move || {
+            entered
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+            match outcome {
+                "success" => completion.complete(Ok(LoadedSource::StyleSheet(
+                    StyleSheetSource::Text(".box{width:40px;height:10px}".into()),
+                ))),
+                "failure" => completion.complete(Err(crate::resource::unanswered_source().into())),
+                "dropped" => drop(completion),
+                "cancelled" => {
+                    token.cancel();
+                    // Retain the completion: cancellation itself must wake adopt.
+                    return Some(completion);
+                }
+                _ => unreachable!(),
+            }
+            None
+        });
+        let expected_failure = outcome != "success";
+        runtime
+            .evaluate_module(
+                &mut js,
+                &format!(
+                    r"
+            import {{__AdoptStyleSheet}} from 'bobcat:runtime';
+            import {{__FlushElementTree}} from 'bobcat:element';
+            import {{adopting}} from 'bobcat-internal:host';
+            let jobRan = false;
+            Promise.resolve().then(() => {{ jobRan = true; }});
+            adopting();
+            let failed = false;
+            try {{ __AdoptStyleSheet(sheet); }}
+            catch (error) {{
+                failed = true;
+                if (!String(error).includes('app:///main.js/index.css')) throw error;
+            }}
+            if (failed !== {expected_failure}) throw Error('adopt failure was not synchronous');
+            if (jobRan) throw Error('adopt ran JavaScript jobs while waiting');
+            __FlushElementTree();
+        "
+                ),
+                "app:///adopt.js",
+                "synchronous adoption",
+            )
+            .unwrap();
+        if let Some(completion) = host.join().unwrap() {
+            assert!(completion.is_cancelled());
+        }
+        if !expected_failure {
+            assert_eq!(
+                elements
+                    .tree()
+                    .rounded_layout(node_id(3))
+                    .unwrap()
+                    .size
+                    .width,
+                40.0
+            );
+        }
+    }
+}
+
+#[test]
+fn collecting_an_unused_preload_cancels_its_source_completion() {
+    let (mut js, mut runtime, _elements, mut far) = runtime_over_watching_names(ingredients());
+    runtime
+        .run_main_thread_script(
+            &mut js,
+            "globalThis.sheet = __LoadStyleSheet('CSS', '__Card__');",
+            "app:///main.js",
+        )
+        .unwrap();
+    let (_, completion) = stylesheet_request(&mut far);
+    assert!(!completion.is_cancelled());
+    runtime
+        .evaluate_module(
+            &mut js,
+            "delete globalThis.sheet;",
+            "app:///release.js",
+            "release preload",
+        )
+        .unwrap();
+    runtime.collect_garbage(&mut js).unwrap();
+    assert!(completion.is_cancelled());
 }

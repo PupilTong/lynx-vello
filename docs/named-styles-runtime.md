@@ -1,4 +1,4 @@
-# Named stylesheet loading through resource URLs
+# Named stylesheet preloading and synchronous adoption
 
 Named CSS uses the same resource loader as startup stylesheets. The embedder
 resolves a URL and returns `StyleSheetSource::Text` or
@@ -7,48 +7,54 @@ case. Core carries no decoded bundle metadata in its view configuration.
 
 ## Entry identity and URL mapping
 
-The `__Card__` import in MTS contains the entry response URL already supplied
-by the resource loader. It is also exported by `bobcat:runtime`. The string
-`"__Card__"` remains an accepted alias; JavaScript replaces it with that URL.
-Local Lepus chunk lookup accepts either the alias or the same entry URL.
+Boot passes its entry response URL to `__BobcatInitEntry` before importing the
+application entry. The `__Card__` import in MTS reads that JS binding from
+`bobcat:runtime`; there is no native URL getter. The string `"__Card__"` remains
+an accepted alias, replaced by JavaScript. Local Lepus chunk lookup accepts
+either the alias or the same entry URL.
 
 `__LoadStyleSheet('CSS', bundleName)` appends `/index.css` to the entry or
 bundle URL's path. Other section names use `/<encoded-name>/index.css`.
 Query and fragment suffixes are preserved after the appended path. For example:
 
-- `__LoadStyleSheet('CSS', '__Card__')`, with entry `https://app.test/main.js`,
+- With entry `https://app.test/main.js`, loading `('CSS', '__Card__')`
   requests `https://app.test/main.js/index.css`.
-- `__LoadStyleSheet('CSS', 'https://cdn.test/component.bundle?rev=2')`
+- Loading `('CSS', 'https://cdn.test/component.bundle?rev=2')`
   requests `https://cdn.test/component.bundle/index.css?rev=2`.
 
-The wrapper constructs the specifier; URL resolution and transport policy
-remain with the embedder. It can answer registered URLs, load CSS from a
-server, or decode a container and supply preparsed styles through the same
-completion. The stylesheet API adds no resource protocol or Rust bundle-name
-lookup. A complete lazy-component script loader remains separate work.
+JS constructs the specifier; URL resolution and transport policy remain with
+the embedder. It can answer registered URLs, load CSS from a server, or decode a
+container and return preparsed styles through the same completion. There is no
+additional resource protocol or Rust bundle-name lookup. A complete lazy-component
+script loader remains separate work.
 
-## Load and adoption timing
+## Preload and adopt
 
-Loading immediately returns a fresh opaque handle and queues a normal
-stylesheet request. It does not mount styles or wait for IO. Resource absence
-therefore cannot be reported by a synchronous null return: failed loads produce
-one host `ScriptReported` error, including the requested URL. Boot readiness
-continues to follow entry completion and the existing BTS readiness declaration.
+`__LoadStyleSheet` starts a preload and immediately returns a fresh opaque
+handle. The host binding sends a normal stylesheet request directly through
+`SourceRequester`; its handle retains the response receiver. Preloading does
+not parse text into document rules, mount styles, or wait for IO. A response can
+finish without any MTS task running. Unused preloads produce no script errors.
 
-`__AdoptStyleSheet(handle)` returns null and records an adoption. Ready
-adoptions are applied in call order. If A is adopted before B, a faster B
-response waits for A; a failed A is skipped so B can proceed. Repeated adoption
-appends again and preserves the author cascade, specificity and importance.
-Loading a sheet that is never adopted changes no styles.
+`__AdoptStyleSheet(handle)` synchronously obtains the preload response, mounts
+the sheet and returns null. If the response has not arrived, it parks MTS until
+the embedder completes it or the view's cancellation token fires. This wait
+runs no JS jobs, timers or sibling-view tasks on the group's shared MTS thread.
+The resource-owning host continues to service requests through `LynxView::pump`.
+There is no nested runtime, stylesheet completion task or deferred adoption queue.
 
-Every load is a task of its view, using its existing cancellation token and
-`SourceCompletion`. Completion re-enters through `Page::enter`, applies ready
-adoptions and uses the normal commit/publication epilogue. Releasing a view
-cancels unfinished loads and discards late results.
+A loader failure throws from `__AdoptStyleSheet` in that same JS call and can be
+caught there. An uncaught error follows the existing entry/event error path.
+Adopting B never waits for an unused preload A. Sequential adoption calls mount
+in their call order, including repeat calls, preserving CSS specificity and
+importance. Successful responses are retained by the handle for repeated adoption.
+The ordinary element-tree flush/commit publishes the resulting styles.
 
-The JS WeakMap and finalizer retain only handle identity. A queued adoption
-retains its resource even if its JS handle is collected before loading finishes.
-Once mounted, styles belong to the document and survive handle collection.
+Collection releases a handle and its response receiver. The existing
+`SourceCompletion::is_cancelled` then tells the fetcher that an unused preload
+has no consumer. Once mounted, styles belong to the document and survive handle
+collection. View release wakes a blocked adoption even if the host retains its
+completion; late source results are discarded by the existing resource protocol.
 
 ## Source ownership and validation
 
@@ -60,8 +66,8 @@ reconstructing a whole stylesheet. Malformed or unsupported descriptors are
 not registered. Ordinary page styles keep their existing startup resource path;
 native/web wire formats and the rkyv 0.7 model are unchanged.
 
-Tests cover card aliases and explicit/escaped URLs, text/preparsed equivalence,
-inert loads, out-of-order completion with ordered repeated adoption, CSS
-precedence, collection before and after completion, load failure and view
-cancellation. Native/web source integration verifies the final painted result
-using only URLs and the embedder's resource loader.
+Tests cover boot URL initialization, redirects, escaped section URLs,
+text/preparsed equivalence, inert preloading, immediate and repeated adoption,
+CSS precedence, collection, synchronous errors and cancellation while waiting.
+Native/web integration verifies the final painted result through ordinary
+resource URLs and the embedder's loader.

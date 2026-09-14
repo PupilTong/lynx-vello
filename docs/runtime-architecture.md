@@ -660,7 +660,7 @@ The bridge keeps built-in sources on the shared runtime and entry/imported
 sources on each realm. A missing module creates one `SourceRequest::Module` per
 normalized URL in that realm. The boundary's epilogue spawns one task per
 queued request, and `LynxView::pump` forwards each through
-`ResourceFetcher::request_source`. IO never blocks the script thread. The
+`ResourceFetcher::request_source`. Module IO never blocks the script thread. The
 answer resolves that task, whose completion registers the source or the cached
 load error, resumes import continuations, and drains promise jobs. Repeated
 imports share the same module namespace and evaluation within a realm; sibling
@@ -1234,10 +1234,12 @@ build that includes dev targets.
 
 ## Named stylesheets
 
-MTS exposes its entry response URL as the `__Card__` import. JS resolves the
-card alias into a CSS resource URL before invoking the host. Named styles use
-`SourceRequest::StyleSheet` and the same `SourceCompletion` as startup styles;
-one task awaits each load and re-enters the page to apply ready adoptions.
-The embedder supplies CSS text or preparsed styles without exposing that choice
-to JS. Adoption order, failure reporting and cancellation are described in
-[named stylesheet loading and adoption](named-styles-runtime.md).
+Boot initializes the JS runtime's `__Card__` with the entry response URL before
+importing the entry. JS resolves the card alias into a CSS resource URL.
+`__LoadStyleSheet` preloads through `SourceRequest::StyleSheet` and the same
+`SourceCompletion` as startup styles, returning an opaque handle immediately.
+`__AdoptStyleSheet` synchronously obtains that response and mounts it before
+returning. An unfinished preload parks MTS until completion or view cancellation;
+it runs no JS jobs or sibling view tasks. The embedder supplies text or preparsed
+styles without exposing that choice to JS. Handle lifetime and synchronous
+failures are described in [named stylesheet loading and adoption](named-styles-runtime.md).
