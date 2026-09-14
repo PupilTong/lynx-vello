@@ -533,6 +533,7 @@ pub(crate) struct MainThreadRuntime {
     slot: Rc<RefCell<DocumentSlot>>,
     events: Rc<EventState>,
     timers: Rc<TimerState>,
+    script_frames: Rc<crate::script_frames::FrameRequests>,
     /// Names one dispatch, so the realm can keep one event object alive across
     /// the whole walk instead of minting one per node. Not shared with the
     /// host functions: only [`Self::dispatch_event`] reads or advances it, and
@@ -579,6 +580,9 @@ impl MainThreadRuntime {
             .map_err(|error| MainThreadError::from_engine("creating the script realm", error))?;
         let events = Rc::new(EventState::new(outbox.clone()));
         let timers = Rc::new(TimerState::new());
+        let script_frames = outbox.script_frames.requests();
+        crate::script_frames::install(&mut engine, js_runtime, &script_frames)
+            .map_err(|error| MainThreadError::from_engine("installing animation frames", error))?;
         engine.enable_module_loading();
         let slot = install_bobcat(
             &mut engine,
@@ -603,6 +607,7 @@ impl MainThreadRuntime {
                 slot,
                 events,
                 timers,
+                script_frames,
                 next_event_id: 0,
             },
             incoming,
@@ -717,12 +722,28 @@ impl MainThreadRuntime {
 
     /// Advances the animation timeline to the painting side's clock
     /// reading. Whether anything changed is the next commit's business.
-    pub(crate) fn begin_frame(&mut self, now: f64) {
+    pub(crate) fn begin_frame(
+        &mut self,
+        js: &mut ScriptRuntime,
+        now: f64,
+    ) -> Result<(), MainThreadError> {
         let _ = self
             .slot
             .borrow_mut()
             .document_mut()
             .advance_animations(now);
+        let Some(milliseconds) = self.script_frames.take() else {
+            return Ok(());
+        };
+        self.engine
+            .call_module_export(
+                js,
+                RUNTIME_MODULE_SPECIFIER,
+                "__BobcatBeginFrame",
+                &[HostArgument::Number(milliseconds)],
+            )
+            .map(|_| ())
+            .map_err(|error| MainThreadError::from_engine("delivering animation callbacks", error))
     }
 
     /// Writes the painting side's scroll offsets into the document and

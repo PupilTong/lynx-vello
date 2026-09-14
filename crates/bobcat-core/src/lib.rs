@@ -48,6 +48,7 @@ mod main;
 mod paint;
 pub mod resource;
 pub mod script;
+mod script_frames;
 pub mod style;
 #[cfg(test)]
 mod test_support;

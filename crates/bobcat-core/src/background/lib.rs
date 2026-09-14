@@ -104,6 +104,7 @@ impl WorkerKey {
 /// else a worker has — what is posted to it, what it says back — is a channel
 /// that arrives with it.
 pub(crate) struct WorkerStart {
+    pub(crate) script_frames: crate::script_frames::ScriptFrames,
     pub(crate) key: WorkerKey,
     /// The worker's `self.name`, empty when the constructor named none.
     pub(crate) name: String,

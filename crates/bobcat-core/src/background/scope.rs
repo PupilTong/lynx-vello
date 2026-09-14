@@ -57,6 +57,10 @@ pub(super) fn install_worker_modules(js_runtime: &mut ScriptRuntime) -> Result<(
         crate::esm::SELECTOR_QUERY_SPECIFIER,
         crate::esm::SELECTOR_QUERY_SOURCE,
     )?;
+    js_runtime.register_module_source(
+        "bobcat:lynx-modules",
+        crate::esm::runtime_source!("lynx-modules"),
+    )?;
     js_runtime.register_module_source(GLOBAL_EVENT_MODULE_SPECIFIER, GLOBAL_EVENT_MODULE_SOURCE)?;
     js_runtime.register_module_source(EVENT_TARGET_MODULE_SPECIFIER, EVENT_TARGET_SOURCE)?;
     js_runtime.register_module_source(WORKER_MODULE_SPECIFIER, WORKER_MODULE_SOURCE)?;

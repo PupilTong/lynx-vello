@@ -228,6 +228,7 @@ impl RouterHost for Published {
 /// command channel, which is what ends its task — precedes giving up the
 /// view's share of the host's resource system.
 pub(crate) struct ViewSeat {
+    pub(crate) script_frames: crate::script_frames::ScriptFrames,
     /// The view's own strong sender. Closing it is the goodbye that ends the
     /// view's task, which is why the seat dies with the view rather than with
     /// whatever a painter is holding.
@@ -247,6 +248,7 @@ pub(crate) struct ViewSeat {
 /// that costs.
 #[derive(Clone)]
 pub(crate) struct ViewOutbox {
+    pub(crate) script_frames: crate::script_frames::ScriptFrames,
     notices: mpsc::UnboundedSender<ViewNotice>,
     /// `Rc` because the sender is the task's and every host closure that
     /// publishes holds a clone of this whole outbox.
@@ -266,8 +268,10 @@ impl ViewOutbox {
         frames: watch::Sender<Published>,
         requester: Arc<dyn EventRequester>,
         token: CancellationToken,
+        script_frames: crate::script_frames::ScriptFrames,
     ) -> Self {
         Self {
+            script_frames,
             notices,
             frames: Rc::new(frames),
             requester,
@@ -454,8 +458,9 @@ pub(crate) fn detached_outbox(requester: Arc<dyn EventRequester>) -> (ViewOutbox
     let token = CancellationToken::new();
     let (notices, notice_receiver) = mpsc::unbounded_channel();
     let (frames, frame_receiver) = watch::channel(Published::default());
+    let script_frames = crate::script_frames::ScriptFrames::new(Arc::clone(&requester));
     (
-        ViewOutbox::new(notices, frames, requester, token.clone()),
+        ViewOutbox::new(notices, frames, requester, token.clone(), script_frames),
         DetachedView {
             notices: notice_receiver,
             published: ViewObserver {

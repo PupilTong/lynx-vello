@@ -617,7 +617,9 @@ impl Painter {
         let (commands, command_receiver) = mpsc::unbounded_channel();
         let (notices, notice_receiver) = mpsc::unbounded_channel();
         let (frames, frame_receiver) = watch::channel(Published::default());
+        let script_frames = crate::script_frames::ScriptFrames::new(Arc::clone(&requester));
         let seat = Rc::new(ViewSeat {
+            script_frames: script_frames.clone(),
             commands,
             images: Rc::new(dom::NoImages),
         });
@@ -636,6 +638,7 @@ impl Painter {
                     // A token of its own: this far end plays the view, and
                     // nothing here is ever released.
                     tokio_util::sync::CancellationToken::new(),
+                    script_frames,
                 ),
                 notices: notice_receiver,
             },
@@ -859,6 +862,10 @@ impl Painter {
     pub fn is_animating(&self) -> bool {
         self.is_attached()
             && (self.frame().is_some_and(|frame| frame.animations_active())
+                || self
+                    .seat
+                    .upgrade()
+                    .is_some_and(|seat| seat.script_frames.is_pending())
                 || self.gesture.needs_frame())
     }
 
@@ -1058,10 +1065,12 @@ impl Painter {
         let main_ticks_due = self
             .frame()
             .is_some_and(|frame| frame.needs_main_ticks() || frame.animation_boundary_passed(now));
-        if !main_ticks_due && !always {
+        let seat = self.seat.upgrade()?;
+        let script_ticks_due = seat.script_frames.is_pending();
+        if !main_ticks_due && !script_ticks_due && !always {
             return None;
         }
-        let seat = self.seat.upgrade()?;
+        seat.script_frames.tick(now * 1000.0);
         self.begin_frames_sent += 1;
         let seq = self.begin_frames_sent;
         seat.commands

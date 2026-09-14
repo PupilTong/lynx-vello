@@ -442,7 +442,9 @@ impl Page {
                 device_pixel_ratio,
             } => runtime.apply_resize(width, height, device_pixel_ratio),
             ToMain::BeginFrame { now, seq } => {
-                runtime.begin_frame(now);
+                if let Err(error) = runtime.begin_frame(js, now) {
+                    self.fail(EngineEvent::ScriptRunError(error.into_script_error()));
+                }
                 let pending = self.pending_begin_frame.get().unwrap_or(0);
                 self.pending_begin_frame.set(Some(seq.max(pending)));
             }

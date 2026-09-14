@@ -172,6 +172,7 @@ impl WorkerOwner {
         self.factory
             .commands
             .send(WorkerCommand::Start(WorkerStart {
+                script_frames: self.outbox.script_frames.clone(),
                 key,
                 name,
                 script: awaiting,

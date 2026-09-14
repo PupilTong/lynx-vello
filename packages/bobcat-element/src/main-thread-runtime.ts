@@ -28,8 +28,13 @@ import {
 } from "bobcat:cross-thread-context";
 import { __BobcatQueryNodes } from "bobcat:element";
 import type { NodeQueryRequest } from "bobcat:selector-query";
+import "bobcat:timers";
+import { requestScriptFrame } from "bobcat-internal:host";
 import { initialProcessor as getInitialProcessor, globalProps, initData, reportScriptError, logScriptMessage, notifyReady, reportStartupFailure, preloadStyleSheet, adoptStyleSheet } from "bobcat-internal:host";
 import type { Worker } from "bobcat-internal";
+import type { TimerGlobals } from "bobcat:timers";
+
+const timers = globalThis as unknown as TimerGlobals;
 
 /**
  * What this realm sends its BTS Worker: a Context event, or a runtime call,
@@ -119,6 +124,23 @@ function styleSheetURL(key: string, bundleName: string): string {
   return `${path.replace(/\/$/, "")}/${section}index.css${suffix}`;
 }
 let backgroundWorker: Worker | undefined;
+const animationCallbacks = new Map<number, (milliseconds: number) => void>();
+let nextAnimationId = 1;
+function updateFrameRequest() {
+  requestScriptFrame(animationCallbacks.size > 0);
+}
+export function __BobcatBeginFrame(milliseconds: number) {
+  const mainIds = Array.from(animationCallbacks.keys());
+  for (const id of mainIds) {
+    const callback = animationCallbacks.get(id);
+    animationCallbacks.delete(id);
+    if (callback) {
+      try { callback(milliseconds); }
+      catch (error) { _ReportError(error); }
+    }
+  }
+  updateFrameRequest();
+}
 let backgroundDisposal: Promise<void> | undefined;
 let acknowledgeDisposal: (() => void) | undefined;
 let pendingBackgroundMessages: ToBackground[] = [];
@@ -234,6 +256,8 @@ function disposeBackground(): Promise<void> {
   if (backgroundDisposal) return backgroundDisposal;
   const worker = backgroundWorker;
   pendingBackgroundMessages = [];
+  animationCallbacks.clear();
+  updateFrameRequest();
   backgroundDisposal = new Promise<void>(resolve => {
     if (worker === undefined) resolve();
     else acknowledgeDisposal = resolve;
@@ -502,6 +526,21 @@ export function __AdoptStyleSheet(handle: object) {
 }
 
 export const lynx = {
+  setTimeout: timers.setTimeout,
+  setInterval: timers.setInterval,
+  clearTimeout: timers.clearTimeout,
+  clearInterval: timers.clearInterval,
+  requestAnimationFrame(callback: (milliseconds: number) => void) {
+    if (typeof callback !== "function") throw new TypeError("requestAnimationFrame requires a function");
+    const id = nextAnimationId++;
+    animationCallbacks.set(id, callback);
+    updateFrameRequest();
+    return id;
+  },
+  cancelAnimationFrame(id: number) {
+    animationCallbacks.delete(id);
+    updateFrameRequest();
+  },
   SystemInfo,
   __initData: {} as unknown,
   __globalProps,

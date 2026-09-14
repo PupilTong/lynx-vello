@@ -1,11 +1,16 @@
 import "bobcat:worker";
+import { requestScriptFrame } from "bobcat-internal:host";
 import type { WorkerGlobalScope } from "bobcat:worker";
 import {
   type ContextEvent,
   createCrossThreadContext,
 } from "bobcat:cross-thread-context";
 import { SelectorQuery, type SendQuery } from "bobcat:selector-query";
+import { createLynxModules } from "bobcat:lynx-modules";
 import { GlobalEventEmitter } from "bobcat:global-event-emitter";
+import type { TimerGlobals } from "bobcat:timers";
+
+const timers = globalThis as unknown as TimerGlobals;
 
 // The bobcat:bts bootstrap and the BTS application's entry preamble import
 // this runtime. Like MTS, lynx is a module binding, never a global property.
@@ -18,7 +23,15 @@ const coreContext = createCrossThreadContext();
 type AppHook = (...args: unknown[]) => unknown;
 const emitter = new GlobalEventEmitter();
 const jsModules = new Map<string, unknown>([["GlobalEventEmitter", emitter]]);
+// Platform modules are absent; the compiler still receives the proxy slot.
+const nativeModuleProxy = new Proxy({}, {get() { return null; }});
 const app: {
+  NativeModules: object;
+  _apiList: object;
+  define?: Function;
+  require?: Function;
+  _nativeApp?: object;
+  lynx?: object;
   OnLifecycleEvent?: AppHook;
   publishEvent?: AppHook;
   publicComponentEvent?: AppHook;
@@ -32,6 +45,8 @@ const app: {
   registerModule(name: string, value: unknown): void;
   getJSModule(name: string): unknown;
 } = {
+  NativeModules: nativeModuleProxy,
+  _apiList: {},
   _params: {initData: null, updateData: undefined, processorName: "", cacheData: []},
   GlobalEventEmitter: emitter,
   registerModule(name, value) { jsModules.set(name, value); },
@@ -44,6 +59,8 @@ const destructionRegistry = new FinalizationRegistry<() => unknown>(callback => 
 const callbacks: Map<number | undefined, (result: unknown) => void> =
   new Map();
 let nextCallbackId = 1;
+const animationCallbacks = new Map<number, (milliseconds: number) => void>();
+let nextAnimationId = 1;
 
 /**
  * What the main thread sends this realm: a runtime call, tagged
@@ -119,6 +136,7 @@ const sendQuery: SendQuery = (operation, token, params, callback) => {
 };
 
 const nativeApp = {
+  nativeModuleProxy,
   createJSObjectDestructionObserver(callback: () => unknown): object {
     const observer = {};
     destructionRegistry.register(observer, callback);
@@ -246,6 +264,8 @@ function receiveMessage(message: FromMainThread): void | Promise<void> {
 }
 
 async function dispose() {
+  animationCallbacks.clear();
+  requestScriptFrame(false);
   try { app.callDestroyLifetimeFun?.call(app); }
   catch (error) { lynx.reportError(error); }
   // Match web-worker-rpc's await boundary before replying. This does not
@@ -270,6 +290,21 @@ function printable(value: unknown): string {
   catch { return String(value); }
 }
 
+// Called only by this worker's own display-opportunity task. Callback IDs
+// and errors stay on BTS; no MTS message or acknowledgement participates.
+export function __BobcatBeginFrame(milliseconds: number) {
+  const ids = Array.from(animationCallbacks.keys());
+  for (const id of ids) {
+    const callback = animationCallbacks.get(id);
+    animationCallbacks.delete(id);
+    if (callback) {
+      try { callback(milliseconds); }
+      catch (error) { lynx.reportError(error); }
+    }
+  }
+  requestScriptFrame(animationCallbacks.size > 0);
+}
+
 export const console = Object.fromEntries(
   ["log", "info", "debug", "warn", "error"].map(level => [level,
     (...args: unknown[]) => scope.postMessage({ bobcat: "runtime", method: "console", level,
@@ -277,9 +312,30 @@ export const console = Object.fromEntries(
   ]),
 );
 
-// This raw BTS environment supplies lifecycle inputs and hooks. Compiled
-// factory/module bootstrap is a separate integration layer.
+// Compiler modules are registered before the app-service entry executes.
 export const lynx = {
+  setTimeout: timers.setTimeout,
+  setInterval: timers.setInterval,
+  clearTimeout: timers.clearTimeout,
+  clearInterval: timers.clearInterval,
+  Promise: globalThis.Promise,
+  queueMicrotask(callback: () => void) {
+    if (typeof callback !== "function") throw new TypeError("queueMicrotask requires a function");
+    void Promise.resolve().then(() => {
+      try { callback(); } catch (error) { lynx.reportError(error); }
+    });
+  },
+  requestAnimationFrame(callback: (milliseconds: number) => void) {
+    if (typeof callback !== "function") throw new TypeError("requestAnimationFrame requires a function");
+    const id = nextAnimationId++;
+    animationCallbacks.set(id, callback);
+    requestScriptFrame(true);
+    return id;
+  },
+  cancelAnimationFrame(id: number) {
+    animationCallbacks.delete(id);
+    requestScriptFrame(animationCallbacks.size > 0);
+  },
   reload(value?: unknown, callback?: unknown) {
     // Native only parses object arguments. Primitives (including null) mean
     // an empty data table; arrays/functions do not produce a reload table.
@@ -316,10 +372,27 @@ export const lynx = {
   getNativeApp() {
     return nativeApp;
   },
+  requireModule(path: string, entry?: string) { return modules.requireModule(path, entry); },
+  loadScript(key: string, options: {bundleName?: string}) { return modules.loadScript(key, options); },
   getCoreContext() {
     return coreContext;
   },
 };
+
+const modules = createLynxModules(app, lynx, console);
+app.define = modules.define;
+app.require = modules.require;
+app._nativeApp = nativeApp;
+app.lynx = lynx;
+export const lynxCoreInject = {tt: app};
+export const globDynamicComponentEntry = "__Card__";
+Object.assign(scope, {globDynamicComponentEntry});
+
+export function __BobcatRegisterBundle(manifest: Record<string, string>, wrapped: boolean,
+  sections: Record<string, string> = {}, entry?: string) {
+  modules.register(manifest, wrapped, entry);
+  modules.registerSections(sections, entry);
+}
 
 interface BackgroundData {
   initData?: unknown;

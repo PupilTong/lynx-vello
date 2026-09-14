@@ -152,6 +152,7 @@ impl Group {
             token.clone(),
         );
         self.tell(WorkerCommand::Start(WorkerStart {
+            script_frames: crate::script_frames::ScriptFrames::new(Arc::new(crate::NoWakeup)),
             key,
             name: name.to_owned(),
             script: awaiting,

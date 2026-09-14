@@ -231,12 +231,17 @@ impl PageSource {
                     entry: bounded_diagnostic(entry.to_owned()),
                 })?;
         template.lepus_code.insert("root".to_owned(), source);
-        Self::from_template(input, template)
+        Self::from_template_with_background(input, template, true)
     }
 
-    fn from_template(
+    fn from_template(input: &Url, template: crate::web::WebTemplate) -> Result<Self, SourceError> {
+        Self::from_template_with_background(input, template, false)
+    }
+
+    fn from_template_with_background(
         input: &Url,
         mut template: crate::web::WebTemplate,
+        wrapped: bool,
     ) -> Result<Self, SourceError> {
         let mut source = template
             .lepus_code
@@ -295,11 +300,38 @@ impl PageSource {
                 css_ids: scoped_css_ids,
             }]
         };
+        let background_script = if template.manifest.is_empty() {
+            None
+        } else {
+            // Source adaptation is embedder work. The realm receives source
+            // text and parses its module tables; core owns no bundle model.
+            let tables = serde_json::json!({
+                "manifest": template.manifest,
+                "sections": template.custom_sections,
+            })
+            .to_string();
+            let tables = serde_json::to_string(&tables).expect("JSON text is a JavaScript string");
+            let mut source = format!(
+                "import {{lynx, __BobcatRegisterBundle}} from 'bobcat:bts-runtime';\n\
+                 const page = JSON.parse({tables});\n\
+                 const sections = Object.fromEntries(Object.entries(page.sections ?? {{}})\n\
+                   .filter(([, section]) => typeof section?.content === 'string')\n\
+                   .map(([name, section]) => [name, section.content]));\n\
+                 __BobcatRegisterBundle(page.manifest, {wrapped}, sections);\n"
+            );
+            if template.manifest.contains_key("/app-service.js") {
+                source.push_str("lynx.requireModule('/app-service.js');\n");
+            }
+            Some((
+                Url::parse("bobcat-memory://bundle/background.js").expect("valid built-in URL"),
+                Arc::from(source),
+            ))
+        };
         Ok(Self {
             input_url: input.clone(),
             script_url,
             script: Arc::from(source),
-            background_script: None,
+            background_script,
             named_style_sheets,
             style_sheet,
             config,
@@ -668,6 +700,67 @@ mod tests {
         let resources = resources();
         page.register_with(&resources);
         assert!(resources.unregister(&sources.entry));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn registered_compiler_sources_boot_bts_for_web_and_native_wrappers() {
+        use std::time::{Duration, Instant};
+
+        use bobcat_core::{EngineEvent, LynxGroup, NoWakeup, StyleThreads};
+
+        for wrapped in [false, true] {
+            let mut template = crate::web::decode(&web_bundle(Some("export {};"))).unwrap();
+            let body = r#"
+                const app = lynxCoreInject.tt;
+                app.define('entry.js', function(require,module,exports,Card,setTimeout,setInterval,clearInterval,clearTimeout,NativeModules,api) {
+                    module.exports = {value:42, api};
+                });
+                const result = app.require('entry.js');
+                if (result.api !== app._apiList || result.value !== lynx.loadScript('answer', {})) throw Error('factory ABI');
+                if (lynx.requireModule('/data.json').message !== `quotes ' and " `) throw Error('JSON source');
+                console.log('compiler bootstrap ready');
+            "#;
+            template.manifest.insert(
+                "/app-service.js".into(),
+                if wrapped {
+                    format!("({{init({{tt}}){{{body}}}}})")
+                } else {
+                    body.into()
+                },
+            );
+            template.manifest.insert(
+                "/data.json".into(),
+                serde_json::json!({"message": "quotes ' and \" "}).to_string(),
+            );
+            template.custom_sections = Some(serde_json::json!({"answer": {"content":"21 * 2"}}));
+            let page =
+                PageSource::from_template_with_background(&input_url(), template, wrapped).unwrap();
+            let resources = resources();
+            page.register_with(&resources);
+            let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Sequential)
+                .await
+                .unwrap();
+            let mut view = group
+                .create_lynx_view(32.0, 24.0, 1.0, resources.builder(), page.view_sources())
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(20);
+            let mut reported = false;
+            while !view.is_ready() || !reported {
+                for event in view.pump() {
+                    match event {
+                        EngineEvent::ScriptFinished => {}
+                        EngineEvent::ConsoleMessage { message, .. } => {
+                            assert_eq!(message, "compiler bootstrap ready");
+                            reported = true;
+                        }
+                        event => panic!("compiler bootstrap failed: {event:?}"),
+                    }
+                }
+                assert!(Instant::now() < deadline, "BTS did not become ready");
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }
     }
 
     #[test]

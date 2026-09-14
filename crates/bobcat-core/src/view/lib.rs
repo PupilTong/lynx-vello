@@ -435,6 +435,7 @@ pub struct LynxGroup {
 /// because its view tasks and its `WorkerFactory` hold senders on the worker
 /// thread's channel and it takes them with it.
 struct GroupInner {
+    requester: Arc<dyn EventRequester>,
     attach: mpsc::UnboundedSender<GroupCommand>,
     #[expect(dead_code, reason = "held to wait for bobcat-main on drop")]
     home: ThreadJoin,
@@ -483,7 +484,7 @@ impl LynxGroup {
             style_threads,
             GroupLink {
                 attach: attachments,
-                requester: event_requester,
+                requester: event_requester.clone(),
                 ready,
                 workers: workers.commands(),
             },
@@ -492,6 +493,7 @@ impl LynxGroup {
         // here on closes both threads and joins them — including this one.
         let group = Self {
             inner: Rc::new(GroupInner {
+                requester: event_requester,
                 attach,
                 home,
                 workers,
@@ -560,12 +562,15 @@ impl LynxGroup {
         let (commands, command_receiver) = mpsc::unbounded_channel();
         let (notices, notice_receiver) = mpsc::unbounded_channel();
         let (frames, frame_receiver) = watch::channel(Published::default());
+        let script_frames =
+            crate::script_frames::ScriptFrames::new(Arc::clone(&self.inner.requester));
         self.inner
             .attach
             .send(GroupCommand::Attach(Box::new(ViewAttachment {
                 viewport,
                 // Main owns source ordering; the view owns the fetcher.
                 sources,
+                script_frames: script_frames.clone(),
                 commands: command_receiver,
                 notices,
                 frames,
@@ -591,6 +596,7 @@ impl LynxGroup {
             // are this view's, and the view is the only holder of a strong
             // reference to it.
             seat: Rc::new(ViewSeat {
+                script_frames,
                 commands,
                 images: Rc::clone(&fetcher) as Rc<dyn FrameImages>,
             }),
@@ -979,6 +985,7 @@ pub(crate) enum GroupCommand {
 /// the group's — every view in a group paints on the thread that created the
 /// group, and so wakes one event loop.
 pub(crate) struct ViewAttachment {
+    pub(crate) script_frames: crate::script_frames::ScriptFrames,
     pub(crate) viewport: Viewport,
     pub(crate) sources: ViewSources,
     pub(crate) commands: mpsc::UnboundedReceiver<ToMain>,
