@@ -184,9 +184,9 @@ fn mts_imported_inputs_follow_global_props_updates() {
         )
         .unwrap();
     runtime.evaluate_module(&mut js, &entry_module_source(r#"
-        import {__BobcatApplyPageUpdate} from 'bobcat:runtime';
+        import {__BobcatUpdateGlobalProps} from 'bobcat:runtime';
         const oldProps = scriptInputs.readProps();
-        __BobcatApplyPageUpdate('{"method":"updateGlobalProps","args":[{"next":2}]}');
+        __BobcatUpdateGlobalProps('{"next":2}');
         if (scriptInputs.readProps() !== __globalProps || __globalProps === oldProps || __globalProps.next !== 2)
             throw Error('Script props binding did not follow its module export');
         if (scriptInputs.updated !== __globalProps)

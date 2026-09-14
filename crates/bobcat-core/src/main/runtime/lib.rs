@@ -675,17 +675,44 @@ impl MainThreadRuntime {
     pub(crate) fn apply_page_update(
         &mut self,
         js: &mut ScriptRuntime,
-        update: crate::link::PageUpdate,
+        update: &crate::link::PageUpdate,
     ) -> Result<(), MainThreadError> {
-        let message = update.into_message().to_string();
+        use crate::link::PageUpdate;
+
+        let (export, arguments): (&str, &[HostArgument<'_>]) = match update {
+            PageUpdate::Reload {
+                data,
+                processor_name,
+            } => (
+                "__BobcatReload",
+                &[
+                    HostArgument::String(data),
+                    HostArgument::String(processor_name),
+                ],
+            ),
+            PageUpdate::Data {
+                data,
+                processor_name,
+                reset,
+            } => (
+                "__BobcatUpdateData",
+                &[
+                    HostArgument::String(data),
+                    HostArgument::String(processor_name),
+                    HostArgument::Boolean(*reset),
+                ],
+            ),
+            PageUpdate::GlobalProps(data) => {
+                ("__BobcatUpdateGlobalProps", &[HostArgument::String(data)])
+            }
+            PageUpdate::GlobalEvent { name, arguments } => (
+                "__BobcatSendGlobalEvent",
+                &[HostArgument::String(name), HostArgument::String(arguments)],
+            ),
+        };
         let called = self
             .engine
-            .call_module_export(
-                js,
-                RUNTIME_MODULE_SPECIFIER,
-                "__BobcatApplyPageUpdate",
-                &[HostArgument::String(&message)],
-            )
+            .call_module_export(js, RUNTIME_MODULE_SPECIFIER, export, arguments)
             .map_err(|error| MainThreadError::from_engine("updating page data", error));
         let finished = self.finish_batch(js, called.is_ok());
         called.map(|_| ()).and(finished)

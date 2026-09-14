@@ -353,31 +353,26 @@ function reloadPage(data: unknown, fromJS: boolean, processorName = "") {
   updatePage(processed, options);
 }
 
-export function __BobcatApplyPageUpdate(json: string) {
-  const message = JSON.parse(json);
-  if (message.method === "updateGlobalProps") {
-    updateGlobalProps(message.args[0]);
-    return;
-  }
-  const data = message.args[0];
-  if (message.method === "onAppReload") {
-    reloadPage(data, false, message.args[1].processorName);
-    return;
-  } else if (message.method === "updateCardData") {
-    // The compiled MTS entry owns processData/updatePage and its data model.
-    const name = message.args[1].processorName ?? "";
-    const processed = __BobcatProcessData(data, name);
-    updatePage(processed, {resetPageData:message.args[1].type === 1, reloadFromJS:false, reloadTemplate:false, nativeUpdateDataOrder:0, ...processorOptions(name)});
-    // React's BTS registerDataProcessors is a no-op: its hook must receive
-    // the same processed data as MTS, even if the MTS update reported an error.
-    message.args[0] = processed;
-    // Native's MTS path constructs fresh TemplateData with an empty name.
-    message.args[1].processorName = jsDataProcessor ? name : "";
-  }
-  sendToBackground({ bobcat: "runtime", ...message });
+export function __BobcatReload(json: string, processorName: string) {
+  reloadPage(JSON.parse(json), false, processorName);
 }
 
-function updateGlobalProps(data: Record<string, unknown>) {
+export function __BobcatUpdateData(json: string, processorName: string, reset: boolean) {
+  // The compiled MTS entry owns processData/updatePage and its data model.
+  const processed = __BobcatProcessData(JSON.parse(json), processorName);
+  updatePage(processed, {resetPageData:reset, reloadFromJS:false, reloadTemplate:false, nativeUpdateDataOrder:0, ...processorOptions(processorName)});
+  // React's BTS registerDataProcessors is a no-op: its hook must receive
+  // the same processed data as MTS, even if the MTS update reported an error.
+  const options = {type:reset ? 1 : 0, processorName:jsDataProcessor ? processorName : ""};
+  sendToBackground({bobcat:"runtime", method:"updateCardData", args:[processed, options]});
+}
+
+export function __BobcatSendGlobalEvent(name: string, json: string) {
+  sendToBackground({bobcat:"runtime", method:"sendGlobalEvent", name, args:JSON.parse(json)});
+}
+
+export function __BobcatUpdateGlobalProps(json: string) {
+  const data = JSON.parse(json);
   // Native's host merges literal top-level keys; TemplateAssembler receives
   // the complete props, not the diff. Notify BTS before entering MTS hooks.
   hostGlobalPropsJson = JSON.stringify({...JSON.parse(hostGlobalPropsJson), ...data});

@@ -413,7 +413,7 @@ impl Page {
         match command {
             ToMain::PageUpdate(update) => {
                 // All host lifecycle commands passed LynxView's readiness gate.
-                if let Err(error) = runtime.apply_page_update(js, update) {
+                if let Err(error) = runtime.apply_page_update(js, &update) {
                     self.fail(EngineEvent::ScriptRunError(error.into_script_error()));
                 }
             }

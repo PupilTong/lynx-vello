@@ -763,7 +763,11 @@ useful signal for currently-compatible versions of those libraries.
   Global props updates replace the live module binding; there is no native
   evaluator or separate Script lexical environment.
   `LynxView::{update_data, reset_data, update_global_props, reload}` use the
-  existing ordered command/Worker links. All require observed readiness and
+  existing ordered command/Worker links. Embedders serialize data and global
+  event argument lists into `String`; core passes them unchanged to JS, which
+  parses them and constructs Worker messages. Update/reset/reload take a separate
+  processor-name `String`, with an empty name selecting the default processor.
+  All require observed readiness and
   otherwise return `EngineError::NotReady`, just like global events. Initial
   data and props come from `ViewSources`; there is no early props cache or
   initial-render update gate. Hooks process accepted data and notify BTS in order.

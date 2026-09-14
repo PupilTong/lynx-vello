@@ -64,7 +64,9 @@ wait on its Promise while imports and timers continue.
 The remaining [compiled-module loading contract](worker-resources-runtime.md)
 is defined by ReactLynx callers, without lynx-core's source-text read APIs.
 
-`LynxView::send_global_event(name, arguments)` returns `EngineError::NotReady`
+`LynxView::send_global_event(name, arguments)` takes an embedder-serialized JSON
+array `String` for `arguments`. Core passes it unchanged to MTS JS, which parses
+it and constructs the Worker message. The method returns `EngineError::NotReady`
 before observed readiness or after the view ends. Rejected events are not
 retained or replayed. Accepted events use the ordered `ToMain` channel and
 Worker FIFO to deliver `sendGlobalEvent` to the BTS emitter. There is no page

@@ -48,19 +48,19 @@ async fn until(
 
 fn reject_updates(view: &LynxView<DelayedBackground>) {
     assert!(matches!(
-        view.update_data(json!({"raw":999}).as_object().unwrap().clone()),
+        view.update_data(json!({"raw":999}).to_string(), String::new()),
         Err(EngineError::NotReady)
     ));
     assert!(matches!(
-        view.reset_data(json!({"raw":999}).as_object().unwrap().clone()),
+        view.reset_data(json!({"raw":999}).to_string(), String::new()),
         Err(EngineError::NotReady)
     ));
     assert!(matches!(
-        view.update_global_props(json!({"theme":"early"}).as_object().unwrap().clone()),
+        view.update_global_props(json!({"theme":"early"}).to_string()),
         Err(EngineError::NotReady)
     ));
     assert!(matches!(
-        view.reload(json!({"raw":999}).as_object().unwrap().clone()),
+        view.reload(json!({"raw":999}).to_string(), String::new()),
         Err(EngineError::NotReady)
     ));
 }
@@ -150,13 +150,13 @@ async fn public_updates_require_readiness_then_preserve_order() {
     released.set(true);
     until(&mut view, &mut seen, "bts first-screen 2", true).await;
     assert!(seen.booted);
-    view.update_data(json!({"raw":2}).as_object().unwrap().clone())
+    view.update_data(json!({"raw":2}).to_string(), String::new())
         .unwrap();
-    view.reset_data(json!({"raw":3}).as_object().unwrap().clone())
+    view.reset_data(json!({"raw":3}).to_string(), String::new())
         .unwrap();
-    view.update_global_props(json!({"theme":"dark"}).as_object().unwrap().clone())
+    view.update_global_props(json!({"theme":"dark"}).to_string())
         .unwrap();
-    view.reload(json!({"raw":4}).as_object().unwrap().clone())
+    view.reload(json!({"raw":4}).to_string(), String::new())
         .unwrap();
     until(&mut view, &mut seen, "bts first-screen 5", true).await;
     assert_eq!(
@@ -175,7 +175,7 @@ async fn public_updates_require_readiness_then_preserve_order() {
             "bts first-screen 5",
         ]
     );
-    view.send_global_event("reload-from-bts", Vec::new())
+    view.send_global_event("reload-from-bts", "[]".into())
         .unwrap();
     until(&mut view, &mut seen, "bts callback", true).await;
     assert!(

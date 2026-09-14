@@ -490,7 +490,7 @@ describe("runtime events and diagnostics", () => {
     mts.__BobcatInitializeMTS({...initial,globalProps:{keep:1,nested:{value:2}}});
     const before=mts.lynx.__globalProps;
     (before['nested'] as {value: number}).value=99;
-    const apply=(data: unknown)=>mts.__BobcatApplyPageUpdate(JSON.stringify({method:'updateGlobalProps',args:[data]}));
+    const apply=(data: unknown)=>mts.__BobcatUpdateGlobalProps(JSON.stringify(data));
     const listener=rstest.fn(event=>{
       expect(event).toEqual({type:'__UpdateGlobalProps',data:[mts.lynx.__globalProps]});
       expect(toBackground.at(-1)).toEqual({bobcat:'runtime',method:'updateGlobalProps',args:[mts.lynx.__globalProps]});
@@ -543,7 +543,7 @@ describe("runtime events and diagnostics", () => {
       };
       app.onAppReload=function(...args) { expect(this).toBe(app); order.push(['background',...args]); };
       app.OnLifecycleEvent=function(...args) { order.push(['lifecycle',...args]); };
-      mts.__BobcatApplyPageUpdate(JSON.stringify({method:'onAppReload',args:[{seed:2},{processorName:''}]}));
+      mts.__BobcatReload(JSON.stringify({seed:2}),'');
       deliverToBackground();
       deliverToBackground();
       expect(order).toEqual([
@@ -555,14 +555,14 @@ describe("runtime events and diagnostics", () => {
       scope.updatePage=() => {};
       for (const ignored of [null, [], 7, undefined]) {
         scope.processData=() => ignored;
-        mts.__BobcatApplyPageUpdate(JSON.stringify({method:'onAppReload',args:[{seed:4},{processorName:''}]}));
+        mts.__BobcatReload(JSON.stringify({seed:4}),'');
         expect(toBackground.shift()).toEqual({bobcat:'runtime',method:'onAppReload',args:[{seed:4},{processorName:''}]});
       }
       const failures=reportedErrors.mock.calls.length;
       scope.processData=() => {throw Error('processor failed');};
       scope.removeComponents=() => {throw Error('removal failed');};
       scope.updatePage=() => {throw Error('render failed');};
-      mts.__BobcatApplyPageUpdate(JSON.stringify({method:'onAppReload',args:[{seed:5},{processorName:''}]}));
+      mts.__BobcatReload(JSON.stringify({seed:5}),'');
       expect(toBackground.shift()).toEqual({bobcat:'runtime',method:'onAppReload',args:[{seed:5},{processorName:''}]});
       expect(reportedErrors.mock.calls.slice(failures).map(call=>call[1])).toEqual([
         expect.stringContaining('processor failed'),expect.stringContaining('removal failed'),expect.stringContaining('render failed'),
@@ -573,7 +573,7 @@ describe("runtime events and diagnostics", () => {
       try {
         scope.processData=() => ({seed:6});
         const reports=reportedErrors.mock.calls.length;
-        mts.__BobcatApplyPageUpdate(JSON.stringify({method:'onAppReload',args:[{seed:5},{processorName:''}]}));
+        mts.__BobcatReload(JSON.stringify({seed:5}),'');
         expect(reportedErrors.mock.calls).toHaveLength(reports);
         expect(remove).toHaveBeenCalledWith({type:'__RemoveComponents',data:[]});
         expect(update).toHaveBeenCalledWith({type:'__UpdatePage',data:[{seed:6},expect.objectContaining({reloadTemplate:true})]});
@@ -606,7 +606,7 @@ describe("runtime events and diagnostics", () => {
       const process=rstest.fn(() => processed);
       scope.processData=process;
       for (const type of [0,1]) {
-        mts.__BobcatApplyPageUpdate(JSON.stringify({method:'updateCardData',args:[{raw:7},{type,processorName:''}]}));
+        mts.__BobcatUpdateData(JSON.stringify({raw:7}),'',type === 1);
         expect(process).toHaveBeenLastCalledWith({raw:7},'');
         expect(update).toHaveBeenLastCalledWith({type:'__UpdatePage',data:[processed,{resetPageData:type===1,reloadFromJS:false,reloadTemplate:false,nativeUpdateDataOrder:0}]});
         expect(hook).toHaveBeenCalledTimes(type);
@@ -621,7 +621,7 @@ describe("runtime events and diagnostics", () => {
       scope.updatePage=rstest.fn();
       for (const value of [undefined,null,[],false,7,'wrong',()=>({})]) {
         scope.processData=()=>value;
-        mts.__BobcatApplyPageUpdate(JSON.stringify({method:'updateCardData',args:[{raw:8},{type:0,processorName:''}]}));
+        mts.__BobcatUpdateData(JSON.stringify({raw:8}),'',false);
         expect(scope.updatePage).toHaveBeenLastCalledWith({raw:8},expect.objectContaining({resetPageData:false}));
         deliverToBackground();
         expect(hook).toHaveBeenLastCalledWith({raw:8},{type:0,processorName:''});
@@ -629,7 +629,7 @@ describe("runtime events and diagnostics", () => {
       scope.processData=()=>{throw Error('update processor failed');};
       scope.updatePage=()=>{throw Error('update renderer failed');};
       const errors=reportedErrors.mock.calls.length;
-      mts.__BobcatApplyPageUpdate(JSON.stringify({method:'updateCardData',args:[{raw:9},{type:1,processorName:''}]}));
+      mts.__BobcatUpdateData(JSON.stringify({raw:9}),'',true);
       deliverToBackground();
       expect(hook).toHaveBeenLastCalledWith({raw:9},{type:1,processorName:''});
       expect(reportedErrors.mock.calls.slice(errors).map(call=>call[1])).toEqual([
@@ -639,6 +639,25 @@ describe("runtime events and diagnostics", () => {
       engine.removeEventListener('__UpdatePage',update);
       scope.processData=oldProcess; scope.updatePage=oldUpdate;
       if (oldHook) app.updateCardData=oldHook; else delete app.updateCardData;
+    }
+  });
+
+  it("rejects malformed host JSON before invoking hooks or posting Worker messages", () => {
+    const oldProcess=scope.processData, oldUpdate=scope.updatePage, oldRemove=scope.removeComponents;
+    const hook=rstest.fn(), props=mts.lynx.__globalProps;
+    const queued=toBackground.length;
+    scope.processData=hook; scope.updatePage=hook; scope.removeComponents=hook;
+    try {
+      expect(() => mts.__BobcatUpdateData('{', '', false)).toThrow(SyntaxError);
+      expect(() => mts.__BobcatUpdateData('{', '', true)).toThrow(SyntaxError);
+      expect(() => mts.__BobcatReload('{', '')).toThrow(SyntaxError);
+      expect(() => mts.__BobcatUpdateGlobalProps('{')).toThrow(SyntaxError);
+      expect(() => mts.__BobcatSendGlobalEvent('event', '[')).toThrow(SyntaxError);
+      expect(hook).not.toHaveBeenCalled();
+      expect(mts.lynx.__globalProps).toBe(props);
+      expect(toBackground).toHaveLength(queued);
+    } finally {
+      scope.processData=oldProcess; scope.updatePage=oldUpdate; scope.removeComponents=oldRemove;
     }
   });
 
@@ -660,12 +679,12 @@ describe("runtime events and diagnostics", () => {
         expect(data).toEqual(onJS?{raw:3}:{value:4,name:'initial'});
         expect(render).toHaveBeenLastCalledWith({type:'__RenderPage',data:[data,{preLoadTemplate:false,...(onJS?{processorName:'initial'}:{})}]});
         for (const type of [0,1]) {
-          mts.__BobcatApplyPageUpdate(JSON.stringify({method:'updateCardData',args:[{raw:5},{type,processorName:'next'}]}));
+          mts.__BobcatUpdateData(JSON.stringify({raw:5}),'next',type === 1);
           const data=onJS?{raw:5}:{value:6,name:'next'};
           expect(scope.updatePage).toHaveBeenLastCalledWith(data,{resetPageData:type===1,reloadFromJS:false,reloadTemplate:false,nativeUpdateDataOrder:0,...(onJS?{processorName:'next'}:{})});
           expect(toBackground.shift()).toEqual({bobcat:'runtime',method:'updateCardData',args:[data,{type,processorName:onJS?'next':''}]});
         }
-        mts.__BobcatApplyPageUpdate(JSON.stringify({method:'onAppReload',args:[{raw:7},{processorName:'reload'}]}));
+        mts.__BobcatReload(JSON.stringify({raw:7}),'reload');
         expect(toBackground.shift()).toEqual({bobcat:'runtime',method:'onAppReload',args:[onJS?{raw:7}:{value:8,name:'reload'},{processorName:onJS?'reload':''}]});
         expect(process.mock.calls.map(call=>call[1])).toEqual(onJS?[]:['initial','next','next','reload']);
       }
@@ -757,11 +776,11 @@ describe("runtime events and diagnostics", () => {
     expect(bts.getApp().getJSModule("custom-module")).toBe(registered);
     const listener = rstest.fn();
     emitter.addListener("host-event", listener);
-    mts.__BobcatApplyPageUpdate(JSON.stringify({method: "sendGlobalEvent", name: "host-event", args: [1, {value: 2}]}));
+    mts.__BobcatSendGlobalEvent("host-event", JSON.stringify([1, {value: 2}]));
     expect(toBackground).toHaveLength(1);
     deliverToBackground();
     expect(listener).toHaveBeenCalledWith(1, {value: 2});
-    mts.__BobcatApplyPageUpdate(JSON.stringify({method: "sendGlobalEvent", name: "host-event", args: []}));
+    mts.__BobcatSendGlobalEvent("host-event", "[]");
     deliverToBackground();
     expect(listener.mock.calls).toEqual([[1, {value: 2}], []]);
     emitter.removeAllListeners("host-event");

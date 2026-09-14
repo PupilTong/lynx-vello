@@ -283,6 +283,57 @@ fn bts_entry_receives_processed_initial_data_before_it_installs_app_hooks() {
 }
 
 #[test]
+fn host_updates_preserve_json_text_and_processor_strings_until_js() {
+    let mut pair = Pair::new("__CreatePage();");
+    pair.check(r#"
+        globalThis.updates = [];
+        globalThis.processData = (data, name) => {
+            if (!Object.is(data.zero, -0) || data.large !== Infinity ||
+                data.text !== '\"\\\n\u0000中文' ||
+                !Object.hasOwn(data, '__proto__') || data.__proto__.own !== true ||
+                data.own !== undefined) throw Error('JSON was not parsed by JS');
+            if (name !== 'selected\'\"\\\n\u0000中文') throw Error('processor string changed');
+            return data;
+        };
+        globalThis.updatePage = (_data, options) => updates.push([options.resetPageData, options.reloadTemplate]);
+    "#);
+    let data = r#"{"zero":-0,"large":1e400,"text":"\"\\\n\u0000中文","__proto__":{"own":true}}"#;
+    let processor = "selected'\"\\\n\0中文";
+    for update in [
+        crate::link::PageUpdate::Data {
+            data: data.into(),
+            processor_name: processor.into(),
+            reset: false,
+        },
+        crate::link::PageUpdate::Data {
+            data: data.into(),
+            processor_name: processor.into(),
+            reset: true,
+        },
+        crate::link::PageUpdate::Reload {
+            data: data.into(),
+            processor_name: processor.into(),
+        },
+    ] {
+        pair.runtime
+            .as_mut()
+            .unwrap()
+            .apply_page_update(&mut pair.js, &update)
+            .unwrap();
+    }
+    pair.check(
+        r"
+        if (JSON.stringify(updates) !== '[[false,false],[true,false],[false,true]]')
+            throw Error('update/reset/reload options');
+    ",
+    );
+    assert!(!pair.notices().iter().any(|notice| matches!(
+        notice,
+        ViewNotice::Engine(crate::EngineEvent::ScriptReported { .. })
+    )));
+}
+
+#[test]
 fn lifecycle_hooks_and_bts_snapshots_precede_queued_mts_jobs() {
     for engine_hooks in [false, true] {
         let mut pair = Pair::unbooted_with_data(
@@ -337,20 +388,23 @@ fn lifecycle_hooks_and_bts_snapshots_precede_queued_mts_jobs() {
         ")).unwrap();
         pair.deliver();
         for (count, reload) in [(4, false), (7, true)] {
-            let data = serde_json::json!({"count":count})
-                .as_object()
-                .unwrap()
-                .clone()
-                .into();
+            let data = serde_json::json!({"count":count}).to_string();
             let update = if reload {
-                crate::link::PageUpdate::Reload(data)
+                crate::link::PageUpdate::Reload {
+                    data,
+                    processor_name: String::new(),
+                }
             } else {
-                crate::link::PageUpdate::Data { data, reset: false }
+                crate::link::PageUpdate::Data {
+                    data,
+                    processor_name: String::new(),
+                    reset: false,
+                }
             };
             pair.runtime
                 .as_mut()
                 .unwrap()
-                .apply_page_update(&mut pair.js, update)
+                .apply_page_update(&mut pair.js, &update)
                 .unwrap();
             pair.deliver();
         }
@@ -419,7 +473,7 @@ fn global_props_initialize_bts_before_hooks_and_notify_before_mts_events() {
         .unwrap()
         .apply_page_update(
             &mut pair.js,
-            crate::link::PageUpdate::GlobalProps(serde_json::from_str(r#"{"seed":4}"#).unwrap()),
+            &crate::link::PageUpdate::GlobalProps(r#"{"seed":4}"#.into()),
         )
         .unwrap();
     pair.deliver();
@@ -1515,9 +1569,9 @@ fn host_global_events_reach_the_bts_emitter_in_order_after_a_listener_throws() {
             .unwrap()
             .apply_page_update(
                 &mut pair.js,
-                crate::link::PageUpdate::GlobalEvent {
+                &crate::link::PageUpdate::GlobalEvent {
                     name: "host-event".into(),
-                    arguments: vec![value.into(), serde_json::json!({"nested":value})],
+                    arguments: serde_json::json!([value, {"nested":value}]).to_string(),
                 },
             )
             .unwrap();

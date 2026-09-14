@@ -386,11 +386,8 @@ fn data_updates_are_visible_to_the_next_command_and_commit_without_an_explicit_f
         owned.page.apply(
             [
                 ToMain::PageUpdate(crate::link::PageUpdate::Data {
-                    data: serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(
-                        r#"{"value":7}"#,
-                    )
-                    .unwrap()
-                    .into(),
+                    data: r#"{"value":7}"#.into(),
+                    processor_name: String::new(),
                     reset: false,
                 }),
                 ToMain::Probe(Box::new(|document| {

@@ -73,6 +73,6 @@ pub use style::{PreparsedDeclaration, PreparsedKeyframe, PreparsedRule, Preparse
 #[cfg(target_arch = "wasm32")]
 pub use view::configure_wasm_workers;
 pub use view::{
-    DataUpdate, DrawTarget, EngineError, EngineEvent, EventRequester, FrameSize, LynxGroup,
-    LynxView, LynxViewError, NoWakeup, Screenshot, StyleThreads, ViewSources, WindowTarget,
+    DrawTarget, EngineError, EngineEvent, EventRequester, FrameSize, LynxGroup, LynxView,
+    LynxViewError, NoWakeup, Screenshot, StyleThreads, ViewSources, WindowTarget,
 };

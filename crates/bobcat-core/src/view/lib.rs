@@ -344,23 +344,6 @@ impl StyleThreads {
     }
 }
 
-/// One host update or reload and the processor selected for its data.
-/// A plain JSON map converts to an update using the default processor.
-#[derive(Debug, Default)]
-pub struct DataUpdate {
-    pub data: serde_json::Map<String, serde_json::Value>,
-    pub processor_name: String,
-}
-
-impl From<serde_json::Map<String, serde_json::Value>> for DataUpdate {
-    fn from(data: serde_json::Map<String, serde_json::Value>) -> Self {
-        Self {
-            data,
-            processor_name: String::new(),
-        }
-    }
-}
-
 /// Everything one view is built from.
 ///
 /// Everything *shared* is the group's instead: the script runtime, the style
@@ -736,41 +719,49 @@ impl<F> Drop for LynxView<F> {
 impl<F: ResourceFetcher + 'static> LynxView<F> {
     /// Reload the page without fetching or evaluating its entry again. The
     /// framework recreates component state; global properties remain unchanged.
-    /// Pass [`DataUpdate`] for a named processor, or a JSON map for the default.
+    /// The embedder serializes `data` as JSON; JavaScript parses it on delivery.
+    /// An empty `processor_name` selects the default processor.
     ///
     /// # Errors
     ///
     /// Returns [`EngineError::NotReady`] until [`Self::pump`] reports
     /// [`EngineEvent::ScriptFinished`] or after the view ends. No update is queued.
-    pub fn reload(&self, data: impl Into<DataUpdate>) -> Result<(), EngineError> {
-        self.send_page_update(crate::link::PageUpdate::Reload(data.into()))
+    pub fn reload(&self, data: String, processor_name: String) -> Result<(), EngineError> {
+        self.send_page_update(crate::link::PageUpdate::Reload {
+            data,
+            processor_name,
+        })
     }
 
     /// Merge data through the MTS update entry and BTS `updateCardData` hook.
-    /// Pass [`DataUpdate`] for a named processor, or a JSON map for the default.
+    /// The embedder serializes `data` as JSON; JavaScript parses it on delivery.
+    /// An empty `processor_name` selects the default processor.
     ///
     /// # Errors
     ///
     /// Returns [`EngineError::NotReady`] until [`Self::is_ready`] is true.
     /// Rejected updates are not queued.
-    pub fn update_data(&self, data: impl Into<DataUpdate>) -> Result<(), EngineError> {
+    pub fn update_data(&self, data: String, processor_name: String) -> Result<(), EngineError> {
         self.send_page_update(crate::link::PageUpdate::Data {
-            data: data.into(),
+            data,
+            processor_name,
             reset: false,
         })
     }
 
     /// Replace page data using RESET semantics. The framework owns merging,
-    /// notification and React rerendering. Pass [`DataUpdate`] for a named
-    /// processor, or a JSON map for the default.
+    /// notification and React rerendering. The embedder serializes `data` as
+    /// JSON; JavaScript parses it on delivery. An empty `processor_name`
+    /// selects the default processor.
     ///
     /// # Errors
     ///
     /// Returns [`EngineError::NotReady`] until [`Self::is_ready`] is true.
     /// Rejected resets are not queued.
-    pub fn reset_data(&self, data: impl Into<DataUpdate>) -> Result<(), EngineError> {
+    pub fn reset_data(&self, data: String, processor_name: String) -> Result<(), EngineError> {
         self.send_page_update(crate::link::PageUpdate::Data {
-            data: data.into(),
+            data,
+            processor_name,
             reset: true,
         })
     }
@@ -778,20 +769,19 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
     /// Merge literal top-level global-property keys into host values, then
     /// notify BTS before updating MTS bindings and invoking its current hook.
     /// Script mutations do not alter the host values.
+    /// The embedder serializes `data` as a JSON object; JavaScript parses it.
     ///
     /// # Errors
     ///
     /// Returns [`EngineError::NotReady`] until [`Self::is_ready`] is true.
     /// Supply initial properties through [`ViewSources::global_props`]; rejected
     /// updates are not retained as initial properties or queued for replay.
-    pub fn update_global_props(
-        &self,
-        data: serde_json::Map<String, serde_json::Value>,
-    ) -> Result<(), EngineError> {
+    pub fn update_global_props(&self, data: String) -> Result<(), EngineError> {
         self.send_page_update(crate::link::PageUpdate::GlobalProps(data))
     }
 
-    /// Deliver a global event. `arguments` is the listener argument list.
+    /// Deliver a global event. The embedder serializes the listener argument
+    /// list as a JSON array in `arguments`; JavaScript parses it on delivery.
     /// Call after pump returns `ScriptFinished`, or when `is_ready()` is true.
     ///
     /// # Errors
@@ -801,7 +791,7 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
     pub fn send_global_event(
         &self,
         name: impl Into<String>,
-        arguments: Vec<serde_json::Value>,
+        arguments: String,
     ) -> Result<(), EngineError> {
         self.send_page_update(crate::link::PageUpdate::GlobalEvent {
             name: name.into(),

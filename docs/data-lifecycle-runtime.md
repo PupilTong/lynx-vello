@@ -37,9 +37,14 @@ without serializing it or embedding it in generated source. JS constructs
 SystemInfo from its runtime constants and viewport metrics, then sends it to BTS.
 Initial global props come solely from `ViewSources.global_props`.
 
-`ViewSources.initial_processor` selects the initial name; a plain JSON map
-passed to a host update selects the default name. `DataUpdate` carries an explicit
-name for update/reset/reload. The framework's `processData` owns named lookup and
+`ViewSources.initial_processor` selects the initial name. Host update/reset/reload
+accept the JSON data as a `String` and the processor name as a separate `String`;
+an empty name selects the default processor. Global-property updates likewise
+accept a JSON object string; global events accept their argument list as a JSON
+array string. The embedder owns serialization. Core carries these strings
+unchanged through the command channel and passes them as JS call arguments;
+it neither parses the data nor serializes a message envelope. MTS uses
+`JSON.parse` before invoking hooks and constructs the Worker message in JS. The framework's `processData` owns named lookup and
 fallback. After MTS processing, BTS receives an empty processor name, preventing
 a second preprocessing pass. The `PageConfig.enable_js_data_processor` switch comes
 from the normalized `enableJSDataProcessor` source flag: if enabled, the runtime
@@ -65,8 +70,13 @@ before Worker connection and while the BTS entry imports. React owns data mergin
 RESET semantics, rerendering and component state; Rust sends a command and
 JavaScript invokes the framework's current hook.
 
+Accepting a command does not validate its JSON. Malformed data fails when MTS
+parses it, before any lifecycle hook or Worker message, and follows the existing
+script-failure path: `pump` reports `ScriptRunError` and the view ends.
+
 Global props merge literal top-level keys; nested objects are replaced and dots
-in a key stay literal. The host retains JSON text independently of mutable script objects.
+in a key stay literal. MTS keeps the host-provided values as JSON text independently
+of the mutable objects exposed to application code.
 Each later MTS update replaces the exported `__globalProps`, `lynx.__globalProps`
 so existing ESM imports observe the new value. BTS receives its own snapshot.
 
