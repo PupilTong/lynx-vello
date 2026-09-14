@@ -16,26 +16,26 @@ Last re-assessed against `main` at 22d9ac1c (2026-09-14).
 must "render and behave the same as [it does] under `web-core` today", and
 explicitly *not* by "reimplementing Android/iOS native platform code paths".
 Where native Lynx and `web-core` disagree, the replicas assert `web-core`.
-[Native ↔ web conflicts](#native--web-conflicts) lists every disagreement found,
-because one of them is a place where this engine currently matches *native* and
-is therefore scored as a gap.
+[Native ↔ web conflicts](#native--web-conflicts) lists every disagreement found.
+One of them — the truncation marker gate — was put to the user and decided
+*against* the default: see [A0](#a0-truncation-marker-gating--ruled-not-a-gap).
 
 ## The suite
 
 | File | Cases | Passing | Gap-ignored |
 | --- | --- | --- | --- |
-| [`crates/hughie/tests/web_text_replication.rs`](../../crates/hughie/tests/web_text_replication.rs) | paragraph algorithm: clamping, cut points, tail fitting, word-break | 9 | 10 |
-| [`crates/bobcat-core/src/main/tree/web_text_replication.rs`](../../crates/bobcat-core/src/main/tree/web_text_replication.rs) | the `<text>` element, its UA sheet and its attributes | 26 | 10 |
-| [`crates/bobcat-core/src/main/runtime/web_text_replication.rs`](../../crates/bobcat-core/src/main/runtime/web_text_replication.rs) | the Element PAPI: content, restyle, truncation, `setNativeProps`, layout events | 13 | 7 |
+| [`crates/hughie/tests/web_text_replication.rs`](../../crates/hughie/tests/web_text_replication.rs) | paragraph algorithm: clamping, cut points, tail fitting, word-break | 15 | 4 |
+| [`crates/bobcat-core/src/main/tree/web_text_replication.rs`](../../crates/bobcat-core/src/main/tree/web_text_replication.rs) | the `<text>` element, its UA sheet and its attributes | 28 | 9 |
+| [`crates/bobcat-core/src/main/runtime/web_text_replication.rs`](../../crates/bobcat-core/src/main/runtime/web_text_replication.rs) | the Element PAPI: content, restyle, truncation, `setNativeProps`, layout events | 15 | 6 |
 | [`crates/dom/tests/web_text_replication.rs`](../../crates/dom/tests/web_text_replication.rs) | relayout, percentage sizing, scroll targets, glyph and atom paint | 10 | 5 |
 | [`crates/dom/tests/web_text_screenshots.rs`](../../crates/dom/tests/web_text_screenshots.rs) | golden screenshots — the originals' own oracle, for the cases whose claim is visual | 10 | 0 |
 | [`crates/bobcat-source/tests/web_text_css_replication.rs`](../../crates/bobcat-source/tests/web_text_css_replication.rs) | text CSS across the `.web.bundle` wire | 9 | 0 |
-| **Total** | | **77** | **32** |
+| **Total** | | **87** | **24** |
 
 A gap-ignored test asserts the `web-core` behavior and is marked
 `#[ignore = "GAP: …"]` naming the cause with a `file:line`. It is a real
 assertion, never weakened — run any file with `-- --ignored` and every one of
-the 32 fails on the assertion its own string names, so no ignore is masking a
+the 24 fails on the assertion its own string names, so no ignore is masking a
 test that would now pass.
 
 ### Screenshots
@@ -94,18 +94,46 @@ content and migrate raw-text to CSS" (#227)*, in two clauses:
 to invalidate half of one gap's cited cause (see B3 below). None of #211–#226 or
 #228–#235 changed a single result.
 
-## Gaps
+## Gaps and ruled deviations
 
-### A. Truncation — the largest remaining cluster
+### A0. Truncation marker gating — ruled, not a gap
+
+**Ruled (user, 2026-09-14): the engine's gating is the intended behavior.**
+`crates/hughie/src/text/block/truncate.rs:95` (the maxline retreat) and `:135`
+(the `Tail` decision) both guard on `style.overflow == TextOverflow::Ellipsis`.
+`text-overflow`'s initial value is `clip` and the Lynx UA sheet never declares
+it, so a bare `text-maxline` or `text-maxlength` clamps with **no marker**; with
+`text-overflow: ellipsis` the marker appears. Do not "fix" this.
+
+The nine tests that were gap-ignored on it now assert it, each in two passes —
+one under the fixture's own declarations and one with `text-overflow: ellipsis`
+— so both sides of the gate stay covered and neither pass can hold vacuously.
+
+What the references do, kept on record in every one of those tests:
+
+| Attribute | native Lynx | `web-core` | this engine |
+| --- | --- | --- | --- |
+| `text-maxline` | gates on `text-overflow` | **unconditional** (`x-text.css:216-230,:239-241`; `XTextTruncation.ts:349-366`, which never reads it) | gates — **matches native, diverges from `web-core`** |
+| `text-maxlength` | **unconditional** (Android `TextRenderer.java:126-135`: "Ellipsis will be appended disregarding the overflowing mode.") | **unconditional** (`x-text.css:191-194`) | gates — **matches neither reference** |
+
+`AGENTS.md` names `web-core` as the compatibility target, so the maxline row is a
+knowing divergence from it and the maxlength row is a Lynx-vello-specific
+behavior. Both are deliberate outcomes of the ruling, not oversights, and both
+reverse by deleting one condition.
+
+CSS `text-overflow: ellipsis` as the real W3C single-line overflow marker is a
+**different** feature and is still unimplemented — see A2 below. The engine
+currently reaches the marker only through the two Lynx attributes; un-conflating
+the two stays correct under this ruling.
+
+### A. Truncation — what remains open
 
 | # | Gap | Cause |
 | --- | --- | --- |
-| A1 | A bare `text-maxline` clamp emits no marker | `crates/hughie/src/text/block/truncate.rs:95` guards the retreat on `TextOverflow::Ellipsis`, whose initial value is `clip` and which the Lynx UA sheet never declares. `web-core` is unconditional. **This engine matches native here — see [conflict 1](#1-truncation-marker-gating).** |
-| A2 | A `text-maxlength` cut emits no three-dot tail | `truncate.rs:135` (decision spans `:127-146`) — same gate. `web-core` appends `::after { content: "..." }` unconditionally, and so does native, so this half is a plain gap. |
-| A3 | `tail-color-convert` is unparsed | `truncate.rs:226` picks the run holding the last visible byte, which is the `="false"` behavior applied unconditionally; the default path should take the block's own style. |
-| A4 | No overflow-driven ellipsis path | `crates/hughie/src/text/block/mod.rs:625` — a cut needs a maxline clamp or a maxlength cut, so CSS `text-overflow: ellipsis` on an overflowing `nowrap` line marks nothing. This is the genuinely-W3C half, distinct from the Lynx attributes. |
-| A5 | No `text-maxline="1"` nowrap / fill-available treatment | `crates/bobcat-core/src/main/tree/text.rs:91-101` has no counterpart to `web-core`'s `x-text.css:216-241`, so a one-line clamp breaks at a word boundary instead of running to the parent's edge. Measured 288 where the reference gives 384. |
-| A6 | `ellipsize-mode` is inert | `text.rs:26-31` — `apply_attribute_style` matches only `text-maxline` and `text-maxlength`. Compounds A1/A2; carried by no test of its own. |
+| A1 | `tail-color-convert` is unparsed | `truncate.rs:226` picks the run holding the last visible byte, which is the `="false"` behavior applied unconditionally; the default path should take the block's own style. |
+| A2 | No overflow-driven ellipsis path | `crates/hughie/src/text/block/mod.rs:625` — a cut needs a maxline clamp or a maxlength cut, so CSS `text-overflow: ellipsis` on an overflowing `nowrap` line marks nothing. This is the genuinely-W3C half, distinct from the Lynx attributes. |
+| A3 | No `text-maxline="1"` nowrap / fill-available treatment | `crates/bobcat-core/src/main/tree/text.rs:91-101` has no counterpart to `web-core`'s `x-text.css:216-241`, so a one-line clamp breaks at a word boundary instead of running to the parent's edge. Measured 288 where the reference gives 384. |
+| A4 | `ellipsize-mode` is inert | `text.rs:26-31` — `apply_attribute_style` matches only `text-maxline` and `text-maxlength`. Carried by no test of its own. |
 
 ### B. Atomic inline boxes — what #227 did not fix
 
@@ -159,9 +187,15 @@ Each blocks replicas that could not be written at all.
 
 - `text { display: -lynx-text !important }` (`tree/text.rs:94`) is user-agent
   origin, so it outranks an author's `display: none` and no `text` element can be
-  hidden. This is §D.15's recorded exception (`deviations.md`) — Lynx's
-  inline-ness is structural, not cascaded — but `web-core` does let
-  `display: none` win, so the exception is currently wider than it needs to be.
+  hidden. This is §D.15's recorded exception (`deviations.md:492-498`) — Lynx's
+  inline-ness is structural, not cascaded. `web-core` does let `display: none`
+  win, so the exception is wider than the structural argument alone requires:
+  `display: none` generates no box at all and so cannot break an inline-ness
+  invariant. **Ruled (user, 2026-09-14): `display: none` on a `text` stays
+  unsupported for now**, and the exception keeps its current width. The replica
+  `display_none_removes_a_text_block_and_an_inline_run_alike` stays `#[ignore]`d
+  and marked DEVIATION rather than GAP, so the divergence stays visible and the
+  ruling is reversible by narrowing one UA declaration.
 - `var()` inside an `@font-face` descriptor is not substituted. Correct per
   css-variables-1 §3; the browser `web-core` runs on behaves identically.
 - `x-text`, `inline-image` and `inline-text` are `web-core`'s *HTML* mappings of
@@ -204,8 +238,8 @@ failure mode is easy to reintroduce.
 
 ## Native ↔ web conflicts
 
-`AGENTS.md` resolves all of these to `web-core`; they are listed because the
-first is a case where this engine currently implements the *native* behavior.
+`AGENTS.md` resolves these to `web-core` by default. Conflict 1 was put to the
+user and decided the other way; the rest stand as `web-core`.
 
 ### 1. Truncation marker gating
 
@@ -215,9 +249,10 @@ first is a case where this engine currently implements the *native* behavior.
 | web-core | **Unconditional.** `text-overflow` is never read in JS; maxline ≥ 2 uses `-webkit-line-clamp`, maxline = 1 has the stylesheet declare `text-overflow: ellipsis` itself | `x-text.css:207-210,:216-230,:239-241`; `XTextTruncation.ts:349-366` |
 | lynx-vello | Gated — **matches native** | `truncate.rs:95,:135` |
 
-`text-maxlength` is unconditional on both sides; only this engine gates it.
-Reversing the ruling in favour of native would reclassify gap A1 as
-correct-as-is, but would leave A2 a gap either way.
+**Decided (user, 2026-09-14): the gating stays.** So on `text-maxline` this
+engine follows native rather than the stated compatibility target, and on
+`text-maxlength` — which both references leave ungated — it follows neither. See
+[A0](#a0-truncation-marker-gating--ruled-not-a-gap).
 
 ### 2. The ellipsis glyph
 
@@ -251,7 +286,8 @@ reflects unconditionally. Since #227 this engine follows `web-core`.
 ## Not replicated
 
 - **`x-textarea` / `x-input` (75 cases).** Blocked on an editable-text
-  subsystem that does not exist. The catalogue stands as their specification;
+  subsystem that does not exist. **Ruled out of scope (user, 2026-09-14): not
+  to be built.** The catalogue stands as their specification if that reverses;
   the rows worth transcribing first are `x-textarea/min-height-max-height`
   (content-driven height under min/max), `placeholder-font-size` (the
   precedence matrix), `x-input/type-value-do-not-show-input`, and

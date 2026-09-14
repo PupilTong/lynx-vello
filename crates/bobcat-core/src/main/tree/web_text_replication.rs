@@ -11,6 +11,15 @@
 //! (solid em squares, so an advance is exactly glyph count times font size),
 //! and paint, which belongs to `crates/dom`'s pixel tests.
 //!
+//! One deliberate exception to that rule is on record. The truncation marker
+//! `text-maxline` and `text-maxlength` append is gated on
+//! `text-overflow: ellipsis` here (`crates/hughie/src/text/block/truncate.rs`),
+//! which neither the initial value `clip` nor the Lynx UA sheet ever sets. Both
+//! references append it unconditionally for `text-maxlength`, and web-core does
+//! so for `text-maxline` too. The 2026-09-14 ruling adopts this engine's gating
+//! as the intended behavior, so the maxlength replicas below assert the bare cut
+//! and state in their own doc comments what the references render instead.
+//!
 //! The fixtures are written in web-core's custom-element vocabulary; this
 //! engine spells the same tags without the prefix. `x-text` is `text`,
 //! `x-view` is `view`, `x-image` is `image`, and `lynx-wrapper` is `wrapper`.
@@ -1298,20 +1307,29 @@ fn a_single_line_clamp_caps_the_block_to_its_parent_s_available_width() {
 /// (`web-elements/tests/fixtures/x-text/text-maxlength-with-raw-text.html`,
 /// `web-elements/tests/web-elements.spec.ts:406`): a `raw-text` is transparent
 /// to the character-index run — its payload joins the parent block's run
-/// directly, so `text-maxlength="5"` cuts inside the payload and the block's
-/// three-dot tail follows the five kept characters.
+/// directly, so `text-maxlength="5"` cuts inside the payload rather than at the
+/// carrier's boundary. The transparency is the fixture's claim, and it holds.
 ///
-/// The tail is unconditional in web-core: `text-overflow` is consulted for
-/// neither truncation attribute — it appears nowhere in `XTextTruncation.ts`,
-/// which observes only `text-maxlength`, `text-maxline` and
-/// `tail-color-convert` — and `x-text[text-maxlength]::part(inner-box)::after`
-/// carries `content: "..."` outright (`x-text.css:191-194`).
+/// Where the cut's marker is concerned this engine deliberately diverges from
+/// *both* references. web-core renders `12345...`: the marker is unconditional
+/// there — `x-text[text-maxlength]::part(inner-box)::after` carries
+/// `content: "..."` outright (`x-text.css:191-194`), and `text-overflow` is
+/// consulted for neither truncation attribute (it appears nowhere in
+/// `XTextTruncation.ts`, which observes only `text-maxlength`, `text-maxline`
+/// and `tail-color-convert`). Native Lynx appends it unconditionally too, and
+/// says so verbatim — "Ellipsis will be appended disregarding the overflowing
+/// mode." (Android `TextRenderer.java:126-135`). This engine instead gates the
+/// marker on `text-overflow: ellipsis`
+/// (`crates/hughie/src/text/block/truncate.rs:135`), which the initial value
+/// `clip` and the Lynx UA sheet's silence leave unset here, so the fixture
+/// renders `12345` bare. That gating is the intended behavior under the
+/// 2026-09-14 ruling — a Lynx-vello-specific behavior matching neither
+/// reference, recorded rather than normalised away.
+///
+/// `a_maxlength_cut_shows_the_tail_once_text_overflow_is_ellipsis` is the same
+/// fixture with the gate opened, and is what reproduces web-core's `12345...`.
 #[test]
-#[ignore = "GAP: the maxlength tail is gated on `TextOverflow::Ellipsis` \
-            (crates/hughie/src/text/block/truncate.rs:135-146), whose initial \
-            value is `clip` and which the Lynx UA sheet never declares \
-            (crates/bobcat-core/src/main/tree/text.rs:91-101)"]
-fn a_maxlength_cut_inside_a_raw_text_payload_still_gets_the_block_s_tail() {
+fn a_maxlength_cut_inside_a_raw_text_payload_lands_bare_at_the_kept_five() {
     let mut document = ahem_document();
     let column = child(
         &mut document,
@@ -1331,8 +1349,47 @@ fn a_maxlength_cut_inside_a_raw_text_payload_still_gets_the_block_s_tail() {
     );
     assert_eq!(
         ink(&document, text),
+        (5.0 * 20.0, 20.0),
+        "the five kept em squares at 20px and nothing after them: no marker is \
+         emitted, and with no marker to make room for nothing is backed off \
+         either, so all five characters the limit allows survive"
+    );
+}
+
+/// The gated-open counterpart of
+/// `a_maxlength_cut_inside_a_raw_text_payload_lands_bare_at_the_kept_five`: the
+/// same fixture with `text-overflow: ellipsis` declared, which is the one state
+/// in which this engine emits the marker
+/// (`crates/hughie/src/text/block/truncate.rs:135`).
+///
+/// This is what web-core renders for the fixture *unconditionally*, and pinning
+/// it here keeps the marker machinery covered: without this test a regression
+/// that stopped emitting markers at all would read as the ruled behavior
+/// everywhere and go unnoticed.
+#[test]
+fn a_maxlength_cut_shows_the_tail_once_text_overflow_is_ellipsis() {
+    let mut document = ahem_document();
+    let column = child(
+        &mut document,
+        "view",
+        "display: flex; flex-direction: column",
+    );
+    let text = element_under(
+        &mut document,
+        column,
+        "text",
+        "font-size: 20px; text-overflow: ellipsis",
+    );
+    raw_text(&mut document, text, "12345678");
+    set_limit(&mut document, text, "text-maxlength", "5");
+    document.layout();
+
+    assert_eq!(
+        ink(&document, text),
         (8.0 * 20.0, 20.0),
-        "five kept characters and the three-dot tail"
+        "the five kept em squares plus the three dots the ellipsis appends, at \
+         20px each — the maxlength candidate is never backed off, so the dots \
+         are added to the five rather than taken out of them"
     );
 }
 

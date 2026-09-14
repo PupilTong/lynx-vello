@@ -8,6 +8,15 @@
 //! replica is `#[ignore]`d with the cause, never weakened: an ignored test
 //! still compiles and still asserts the reference.
 //!
+//! One deliberate exception to that rule is on record. The truncation marker
+//! `text-maxlength` appends is gated on `text-overflow: ellipsis` here
+//! (`crates/hughie/src/text/block/truncate.rs`), which neither the initial
+//! value `clip` nor the Lynx UA sheet ever sets, where both web-core and the
+//! native platforms append it unconditionally. The 2026-09-14 ruling adopts
+//! this engine's gating as the intended behavior, so the maxlength replicas
+//! below assert the bare cut and state in their own doc comments what the
+//! references render instead.
+//!
 //! Geometry is measured with the vendored Ahem face, whose glyphs are solid
 //! em squares, so a run's advance is exactly its glyph count times its font
 //! size and every metric below is an exact number rather than a tolerance.
@@ -71,6 +80,11 @@ use crate::view::NoWakeup;
 const AHEM: &[u8] = include_bytes!("../../../../hughie/tests/fixtures/Ahem.ttf");
 
 /// How long a test waits for a thread that should already be working.
+/// The background realm's own readiness message, as a structural predicate
+/// rather than a substring: a `Message` payload is a `HostValue`, so the
+/// check is the same one `worker_tests.rs:21` makes.
+const IS_READY: &str = r#"(m) => m?.bobcat === "runtime" && m.method === "backgroundReady""#;
+
 const PATIENCE: Duration = Duration::from_secs(30);
 
 /// A same-thread window onto the realm-owned document, so a replica can read
@@ -174,8 +188,8 @@ impl BackgroundPair {
             let event = block_on_deadline(self.events.recv(), deadline)
                 .flatten()
                 .expect("a worker event arrives");
-            let ready = matches!(&event.payload, WorkerPayload::Message(json)
-                if json.contains("backgroundReady"));
+            let ready = matches!(&event.payload, WorkerPayload::Message(value)
+                if crate::background::wire_matches(value, IS_READY));
             self.runtime
                 .dispatch_worker_event(&mut self.js, event.key, event.payload)
                 .expect("the realm accepts its background thread's event");
@@ -990,67 +1004,118 @@ fn swapping_a_text_s_class_and_inline_style_replaces_its_declarations_with_carri
 /// The `text/maxline-with-setData` card: a `text` carrying
 /// `text-maxlength="5"` is flushed while its dynamic child slot is still
 /// empty, and the content arrives afterwards, the way a `setData` a second
-/// later delivers it.
-fn maxlength_with_set_data_card() -> (ScriptRuntime, MainThreadRuntime, DocumentProbe) {
+/// later delivers it. `overflow`, when not empty, is the `text-overflow` the
+/// card declares — the fixture itself declares none, and this engine's
+/// truncation marker is gated on it.
+fn maxlength_with_set_data_card(
+    overflow: &str,
+) -> (ScriptRuntime, MainThreadRuntime, DocumentProbe) {
+    let overflow = if overflow.is_empty() {
+        String::new()
+    } else {
+        format!(";text-overflow:{overflow}")
+    };
     let (mut js_runtime, mut runtime, elements) = text_runtime();
     runtime
         .run_main_thread_script(
             &mut js_runtime,
-            r"
-                globalThis.renderPage = function () {
+            &format!(
+                r"
+                globalThis.renderPage = function () {{
                   const page = __CreatePage('card', 0);
                   const text = __CreateText(0);
-                  __SetInlineStyles(text, 'font-family:Ahem;font-size:20px;line-height:21px');
+                  __SetInlineStyles(text, 'font-family:Ahem;font-size:20px;line-height:21px{overflow}');
                   __SetAttribute(text, 'text-maxlength', '5');
                   __AppendElement(page, text);
                   // The first flush sees the dynamic slot still empty.
                   __FlushElementTree();
                   // The data update a second later fills it.
                   __AppendElement(text, __CreateRawText('123456'));
-                };
-                ",
+                }};
+                "
+            ),
             "app:///maxline-with-set-data.js",
         )
         .expect("main-thread script");
     (js_runtime, runtime, elements)
 }
 
-/// Replicates `text/maxline-with-setData`
-/// (`web-platform/web-tests/dist/basic-element-text-maxline-with-setData`,
-/// `web-core-e2e/tests/reactlynx.spec.ts:2783`), the truncation-marker half:
-/// `123456` under `text-maxlength="5"` becomes five kept units plus the
-/// marker.
-///
-/// The marker is unconditional in web-core: `text-maxlength` is served by
-/// `::after { content: "..." }` in `x-text.css:191-194`, and `text-overflow`
-/// is never consulted for either truncation attribute. So the reference
-/// width is eight em squares — the five kept characters and three dots — on
-/// a card that declares no `text-overflow` at all.
-///
-/// The re-clamp itself is the other half of this case and is *not* behind
-/// this ignore: `a_maxlength_clamp_re_applies_when_the_content_arrives_after_a_flush`
-/// runs the identical card and asserts the five-unit cut on one line. The
-/// tail is deliberately left out of that width rather than folded into it.
-#[test]
-#[ignore = "GAP: the truncation marker is gated on `TextOverflow::Ellipsis`, whose \
-            initial value is `clip` and which the Lynx UA sheet never declares — \
-            crates/hughie/src/text/block/truncate.rs:127-146"]
-fn a_late_maxlength_clamp_ends_in_the_three_dot_tail() {
-    let (_js_runtime, _runtime, elements) = maxlength_with_set_data_card();
+/// The width of the paragraph the card's single `text` establishes.
+/// The card's paragraph as `(width, height)`, so a caller can pin both.
+fn card_paragraph_size(elements: &DocumentProbe) -> (f32, f32) {
     let tree = elements.tree();
     let text = tree
         .document_element()
         .first_child()
         .expect("the text")
         .id();
-    let measured = tree.text_block_size(text).expect("a committed paragraph");
+    let size = tree.text_block_size(text).expect("a committed paragraph");
+    (size.width, size.height)
+}
+
+fn card_paragraph_width(elements: &DocumentProbe) -> f32 {
+    card_paragraph_size(elements).0
+}
+
+/// Replicates `text/maxline-with-setData`
+/// (`web-platform/web-tests/dist/basic-element-text-maxline-with-setData`,
+/// `web-core-e2e/tests/reactlynx.spec.ts:2783`), the truncation-marker half:
+/// what `123456` under `text-maxlength="5"` ends with once the late content
+/// has been clamped.
+///
+/// web-core renders `12345...`: its marker is unconditional, served by
+/// `::after { content: "..." }` (`x-text.css:191-194`), with `text-overflow`
+/// never consulted for either truncation attribute — so the reference width is
+/// eight em squares on a card that declares no `text-overflow` at all. Native
+/// Lynx appends it unconditionally too ("Ellipsis will be appended
+/// disregarding the overflowing mode.", Android `TextRenderer.java:126-135`).
+/// This engine deliberately renders `12345` instead: the marker is gated on
+/// `text-overflow: ellipsis` (`crates/hughie/src/text/block/truncate.rs:135`),
+/// which this card leaves at its initial `clip`. On `text-maxlength` that
+/// gating matches *neither* reference; it is the intended behavior under the
+/// 2026-09-14 ruling and is recorded here rather than normalised away.
+///
+/// The gate's other side is
+/// `a_late_maxlength_clamp_ends_in_the_three_dot_tail_under_text_overflow_ellipsis`,
+/// which runs the same card with the declaration web-core does not need and
+/// does reach eight em squares. The re-clamp itself is a third half of this
+/// case: `a_maxlength_clamp_re_applies_when_the_content_arrives_after_a_flush`.
+#[test]
+fn a_late_maxlength_clamp_ends_bare_where_web_core_ends_in_a_tail() {
+    let (_js_runtime, _runtime, elements) = maxlength_with_set_data_card("");
+    let width = card_paragraph_width(&elements);
     assert!(
-        (measured.width - 160.0).abs() < f32::EPSILON,
-        "five kept units plus the three-dot tail, at 20px each, got {measured:?}"
+        (width - 100.0).abs() < f32::EPSILON,
+        "the five kept units at 20px and no marker after them — web-core's \
+         `12345...` would be 160 — got {width}"
     );
+}
+
+/// The gated-open counterpart of
+/// `a_late_maxlength_clamp_ends_bare_where_web_core_ends_in_a_tail`: the same
+/// card with `text-overflow: ellipsis` declared, which is the one state in
+/// which this engine emits the marker
+/// (`crates/hughie/src/text/block/truncate.rs:135`).
+///
+/// This reproduces what web-core renders for the fixture unconditionally, and
+/// keeps the marker machinery covered from the PAPI side: without it a
+/// regression that stopped emitting markers at all would read as the ruled
+/// behavior everywhere and go unnoticed.
+#[test]
+fn a_late_maxlength_clamp_ends_in_the_three_dot_tail_under_text_overflow_ellipsis() {
+    let (_js_runtime, _runtime, elements) = maxlength_with_set_data_card("ellipsis");
+    let (width, height) = card_paragraph_size(&elements);
     assert!(
-        (measured.height - 21.0).abs() < f32::EPSILON,
-        "and the clamp keeps it on one line, got {measured:?}"
+        (width - 160.0).abs() < f32::EPSILON,
+        "the five kept units plus the three dots the ellipsis appends, at 20px \
+         each — the maxlength candidate is never backed off, so the dots are \
+         added to the five rather than taken out of them — got {width}"
+    );
+    // The height the pre-ruling test asserted, kept here: the tail rides the
+    // cut line rather than opening a second one.
+    assert!(
+        (height - 21.0).abs() < f32::EPSILON,
+        "one line of the card's 21px line-height — got {height}"
     );
 }
 
@@ -1064,7 +1129,7 @@ fn a_late_maxlength_clamp_ends_in_the_three_dot_tail() {
 /// still holds the whole string.
 #[test]
 fn a_maxlength_clamp_re_applies_when_the_content_arrives_after_a_flush() {
-    let (_js_runtime, _runtime, elements) = maxlength_with_set_data_card();
+    let (_js_runtime, _runtime, elements) = maxlength_with_set_data_card("");
     let tree = elements.tree();
     let text = tree
         .document_element()
@@ -1365,24 +1430,38 @@ fn a_native_props_text_push_replaces_the_leading_raw_text_run() {
 /// that arrived through the query rather than through a render.
 ///
 /// The pushed string becomes the paragraph's leading run, so the five
-/// characters the clamp keeps are `the c` and the marker follows them. That
-/// marker is unconditional in web-core:
-/// `x-text[text-maxlength]::part(inner-box)::after` carries `content: "..."`
-/// outright (`x-text.css:191-194`) and `text-overflow` is consulted for
-/// neither truncation attribute. Eight em squares in all.
+/// characters the clamp keeps are `the c`.
+///
+/// web-core follows them with a marker — `12345...`-style, from
+/// `x-text[text-maxlength]::part(inner-box)::after`'s outright
+/// `content: "..."` (`x-text.css:191-194`), with `text-overflow` consulted for
+/// neither truncation attribute — and so does native Lynx ("Ellipsis will be
+/// appended disregarding the overflowing mode.", Android
+/// `TextRenderer.java:126-135`). This engine deliberately does not: the marker
+/// is gated on `text-overflow: ellipsis`
+/// (`crates/hughie/src/text/block/truncate.rs:135`), which this card leaves at
+/// its initial `clip`. On `text-maxlength` that gating matches *neither*
+/// reference — it is a Lynx-vello-specific behavior, intended under the
+/// 2026-09-14 ruling — so the width asserted here is web-core's eight em
+/// squares minus its three dots: `the c` alone, five at 10px. Nothing is
+/// backed off to make room for a marker that is not emitted, so all five
+/// characters the limit allows survive.
+///
+/// The marker is therefore no longer among this case's gaps. The two that
+/// remain are its sibling
+/// `a_native_props_text_push_replaces_the_leading_raw_text_run`'s, and they
+/// are why this stays ignored: the push never reaches the leading carrier, so
+/// the first assertion below is the one that fails.
 #[test]
-#[ignore = "GAP (three of them). The push is not retargeted onto a leading \
+#[ignore = "GAP (two of them). The push is not retargeted onto a leading \
             `raw-text` child (packages/bobcat-element/src/element-papi.ts:1226-1235 \
             against web-core's \
             web-core/ts/client/mainthread/crossThreadHandlers/registerSetNativePropsHandler.ts:13-20), \
-            the `text` attribute it writes instead replaces the element's \
+            and the `text` attribute it writes instead replaces the element's \
             children rather than appending to them \
             (`text[text] { content: attr(text) }`, \
             crates/bobcat-core/src/main/tree/text.rs:95, through \
-            crates/dom/src/layout/text_block.rs:172-174), and the clamp's tail \
-            is gated on `TextOverflow::Ellipsis`, whose initial value is `clip` \
-            and which the Lynx UA sheet never declares \
-            (crates/hughie/src/text/block/truncate.rs:127-146)"]
+            crates/dom/src/layout/text_block.rs:172-174)"]
 fn a_maxlength_clamps_the_text_a_native_props_push_delivers() {
     let mut pair = background_pair(&countdown_card(true, "5"), COUNTDOWN_PUSH);
     pair.deliver();
@@ -1397,9 +1476,9 @@ fn a_maxlength_clamps_the_text_a_native_props_push_delivers() {
     );
     let measured = tree.text_block_size(target).expect("a committed paragraph");
     assert!(
-        (measured.width - 80.0).abs() < f32::EPSILON,
-        "five kept characters — `the c` — and the three-dot tail, at 10px \
-         each, got {measured:?}"
+        (measured.width - 50.0).abs() < f32::EPSILON,
+        "the five kept characters — `the c` — at 10px each, with no marker \
+         after them, got {measured:?}"
     );
 }
 

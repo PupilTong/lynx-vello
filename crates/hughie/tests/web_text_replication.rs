@@ -5,6 +5,26 @@
 //! what this engine does today. A replica whose reference behavior does not
 //! hold yet is `#[ignore]`d with the cause, never weakened.
 //!
+//! The one standing exception is the truncation marker, by the user's ruling of
+//! 2026-09-14: this engine gates the `text-maxline` retreat and the
+//! `text-maxlength` tail on `text-overflow: ellipsis`
+//! (`crates/hughie/src/text/block/truncate.rs:95`, `:135`), and that gating is
+//! now the intended behavior rather than a gap. `text-overflow`'s initial value
+//! is `clip` and the Lynx UA sheet never declares it, so a bare `text-maxline`
+//! or `text-maxlength` clamps or cuts with no marker at all. The tests below
+//! that cover a marker therefore assert the gated behavior for the fixture's own
+//! declarations and keep the reference's on record in prose: on `text-maxline`
+//! this matches native Lynx (Harmony `text_shadow_node.cc:63-66`, `:162-164`;
+//! Android `TextRenderer.java:185-200`; iOS `LynxTextRenderer.m:1013-1021`) and
+//! diverges from `web-core`, which marks unconditionally (`x-text.css:216-230`,
+//! `:239-241`; `XTextTruncation.ts:349-366`, which never reads `text-overflow`);
+//! on `text-maxlength` it matches neither reference, since both append the tail
+//! unconditionally (Android `TextRenderer.java:126-135`, "Ellipsis will be
+//! appended disregarding the overflowing mode."; `x-text.css:191-194`). Each
+//! such test also lays the same fixture out a second time with
+//! `text-overflow: ellipsis` set, so the gated-open path — the marker the
+//! references show — stays covered.
+//!
 //! The fixtures are re-authored against the vendored Ahem face: every glyph
 //! (CJK and punctuation included) advances one em, so a run of `n` characters
 //! at `font_size` is exactly `n * font_size` wide and every break point is
@@ -296,19 +316,23 @@ fn an_avatar_atom_and_a_short_run_fit_one_line_under_a_two_line_clamp() {
 /// raw text follows the parsed element child, as it does in the fixture's run
 /// order.
 ///
-/// How many units the marker takes with it is not asserted, and must not be:
-/// with `text-maxline="1"`, default attributes and no *valid* inline
-/// truncation, `#doExpensiveLineLayoutCalculation` is false
-/// (`XTextTruncation.ts:100-105`) so no JS truncation runs at all — the marker
-/// is the browser's own `text-overflow: ellipsis` on a `white-space: nowrap`
-/// inner box (`x-text.css:223-230`), which fits one `…` and drops however many
-/// glyphs that takes. This engine backs off a fixed three source units
-/// instead, a recorded deviation, so what is asserted is that the line gives
-/// up units to a marker at all.
+/// **2026-09-14 ruling.** On the web this paragraph ends in a marker: with
+/// `text-maxline="1"`, default attributes and no *valid* inline truncation,
+/// `#doExpensiveLineLayoutCalculation` is false (`XTextTruncation.ts:100-105`)
+/// so no JS truncation runs at all, and the marker is the browser's own
+/// `text-overflow: ellipsis` on a `white-space: nowrap` inner box
+/// (`x-text.css:223-230`), which fits one `…` and drops however many glyphs
+/// that takes. This engine deliberately shows none: the fixture declares no
+/// `text-overflow`, its initial value is `clip`, and the maxline retreat is
+/// gated on `ellipsis` (`crates/hughie/src/text/block/truncate.rs:95`) — the
+/// ruled behavior, and native Lynx's (Harmony `text_shadow_node.cc:63-66`;
+/// Android `TextRenderer.java:185-200`; iOS `LynxTextRenderer.m:1013-1021`).
+/// So the one kept line keeps every unit that fits it: the empty view is unit 0
+/// and adds no advance, and thirty 10px glyphs fill the 300px width exactly,
+/// which is the whole line's advance with nothing backed off. The marked form
+/// of the same clamp is covered by
+/// `a_bare_maxline_clamp_marks_its_last_visible_line`.
 #[test]
-#[ignore = "GAP: the clamp marker is gated on `text-overflow: ellipsis`, whose \
-            initial value is `clip` and which the Lynx UA sheet never declares \
-            (crates/hughie/src/text/block/truncate.rs:95)"]
 fn a_truncation_node_inside_an_inline_view_never_registers() {
     let base = ahem_at(10.0);
     let items = [
@@ -337,10 +361,55 @@ fn a_truncation_node_inside_an_inline_view_never_registers() {
     assert!(block.truncated());
     assert!(!block.truncation_visible());
     assert_eq!(block.lines().len(), 1);
-    // The tail the web target shows unconditionally gives up units from the
-    // line's end; how many is the marker's own business.
-    assert!(block.lines()[0].ellipsis_count > 0);
-    assert!(sources(&block).contains(&SourceItem::Ellipsis));
+    // No retreat, so the clamped line keeps the zero-width view and all thirty
+    // 10px glyphs that fit beside it: units 0..31, advancing the full 300px.
+    assert_eq!(
+        (block.lines()[0].source_start, block.lines()[0].source_end),
+        (0, 31),
+        "the unmarked cut keeps every unit the line fits",
+    );
+    assert_eq!(block.lines()[0].ellipsis_count, 0);
+    assert_close(block.lines()[0].advance, 300.0);
+    assert!(!sources(&block).contains(&SourceItem::Ellipsis));
+
+    // Gated open on this fixture's own items, not a sibling's: the interaction
+    // under test is a registered-but-unshown inline view at the head of a
+    // clamped line, and only this shape has one. Three 10px dots displace three
+    // of the glyphs, so the line keeps units 0..28 and still fills its 300px.
+    let marked = laid_out(
+        &mut context,
+        BlockStyle {
+            word_break: WordBreak::BreakAll,
+            max_lines: core::num::NonZeroU32::new(1),
+            overflow: TextOverflow::Ellipsis,
+            ..BlockStyle::default()
+        },
+        &items,
+        None,
+        Some(300.0),
+    );
+    assert_eq!(marked.lines().len(), 1);
+    assert_eq!(marked.lines().len(), 1);
+    // A reported range is the NATURAL layout's span and `ellipsis_count` is
+    // `source_end - cut` (`crates/hughie/src/text/block/mod.rs:66-79`), so the
+    // pair says the cut fell at unit 28: the same 0..31 the clip pass reports,
+    // with the last three units given up to the dots.
+    assert_eq!(
+        (marked.lines()[0].source_start, marked.lines()[0].source_end),
+        (0, 31),
+        "the range is the pre-truncation span either way",
+    );
+    assert_eq!(
+        marked.lines()[0].ellipsis_count,
+        3,
+        "and the cut is three units back from its end",
+    );
+    assert!(sources(&marked).contains(&SourceItem::Ellipsis));
+    // Three 10px glyphs out, three 10px dots in: the line still fills 300px,
+    // which is why the advance alone cannot tell the two passes apart and
+    // `ellipsis_count` is what carries the claim.
+    assert_close(marked.lines()[0].advance, 300.0);
+    assert!(!marked.truncation_visible());
 }
 
 // ---------------------------------------------------------------------------
@@ -349,17 +418,24 @@ fn a_truncation_node_inside_an_inline_view_never_registers() {
 
 /// The nine `a`..`i` rows the two `text-maxlength` fixtures share, as (row,
 /// `text-maxlength`, the flattened runs of the row's nested text children, the
-/// width `web-core` renders once the three-dot tail is in).
-const MAXLENGTH_ROWS: [(char, u32, &[&str], f32); 9] = [
-    ('a', 1, &["1"], 10.0),
-    ('b', 1, &["12"], 40.0),
-    ('c', 1, &["123"], 40.0),
-    ('d', 1, &["1", "2", "3"], 40.0),
-    ('e', 2, &["1", "2", "3", "4", "5"], 50.0),
-    ('f', 3, &["简", "体", "中文"], 60.0),
-    ('g', 3, &["1", "2", "3", "4", "5"], 60.0),
-    ('h', 4, &["1", "2", "3", "4", "5"], 70.0),
-    ('i', 0, &["1", "2", "3", "4", "5"], 30.0),
+/// width `web-core` renders once the three-dot tail is in, the width this
+/// engine renders for the fixture's own declarations — the cut alone, with no
+/// tail, by the 2026-09-14 ruling).
+///
+/// Every glyph is one 10px em, so the tailed width is
+/// `min(maxlength, units) * 10 + 30` on a row that cuts and the untailed one is
+/// `min(maxlength, units) * 10`. Row `a` cuts nothing and is 10 either way; row
+/// `i` cuts everything, so it is three dots wide tailed and empty untailed.
+const MAXLENGTH_ROWS: [(char, u32, &[&str], f32, f32); 9] = [
+    ('a', 1, &["1"], 10.0, 10.0),
+    ('b', 1, &["12"], 40.0, 10.0),
+    ('c', 1, &["123"], 40.0, 10.0),
+    ('d', 1, &["1", "2", "3"], 40.0, 10.0),
+    ('e', 2, &["1", "2", "3", "4", "5"], 50.0, 20.0),
+    ('f', 3, &["简", "体", "中文"], 60.0, 30.0),
+    ('g', 3, &["1", "2", "3", "4", "5"], 60.0, 30.0),
+    ('h', 4, &["1", "2", "3", "4", "5"], 70.0, 40.0),
+    ('i', 0, &["1", "2", "3", "4", "5"], 30.0, 0.0),
 ];
 
 /// Replicates `x-text/text-maxlength`
@@ -380,37 +456,65 @@ const MAXLENGTH_ROWS: [(char, u32, &[&str], f32); 9] = [
 /// giving one mixed metrics would be inventing geometry the fixture does not
 /// have. `the_truncation_tail_takes_the_block_style_not_the_cut_runs` carries
 /// a fixture that does discriminate, and is where ownership is pinned.
+///
+/// **2026-09-14 ruling.** `web-core` appends the three dots to every one of
+/// these rows unconditionally — they are the inner box's `::after`
+/// (`x-text.css:191-194`), which reads no `text-overflow` — and so does native
+/// Lynx, verbatim: "Ellipsis will be appended disregarding the overflowing
+/// mode." (Android `TextRenderer.java:126-135`). This engine deliberately does
+/// not: the tail is gated on `text-overflow: ellipsis`
+/// (`crates/hughie/src/text/block/truncate.rs:135`), the fixture declares none,
+/// and the initial value is `clip`, so each row renders its cut alone. On
+/// `text-maxlength` that matches *neither* reference — it is a Lynx-vello
+/// behavior, deliberate under the ruling, not an oversight — which is why the
+/// untailed width is spelled out per row rather than derived from the tailed
+/// one. The second pass sets `text-overflow: ellipsis` and asserts the
+/// reference widths, so the tail's own machinery stays covered.
 #[test]
-#[ignore = "GAP: the three-dot tail is gated on `text-overflow: ellipsis`, \
-            whose initial value is `clip`, where the web target appends it \
-            unconditionally (crates/hughie/src/text/block/truncate.rs:135)"]
 fn maxlength_cuts_the_flattened_run_and_tails_it_with_three_dots() {
     let base = ahem_at(10.0);
     let mut context = text_context();
 
-    for (row, max_chars, parts, width) in MAXLENGTH_ROWS {
+    for (row, max_chars, parts, tailed, untailed) in MAXLENGTH_ROWS {
         let items = parts
             .iter()
             .map(|part| run(&base, part))
             .collect::<Vec<_>>();
-        let block = laid_out(
-            &mut context,
-            BlockStyle {
-                max_chars: Some(max_chars),
-                ..BlockStyle::default()
-            },
-            &items,
-            None,
-            None,
-        );
-
+        let style = |overflow| BlockStyle {
+            max_chars: Some(max_chars),
+            overflow,
+            ..BlockStyle::default()
+        };
         let source_len: u32 = parts
             .iter()
             .map(|part| u32::try_from(part.chars().count()).expect("fits"))
             .sum();
+
+        // The fixture's own declarations: the cut, with no tail after it.
+        let block = laid_out(&mut context, style(TextOverflow::Clip), &items, None, None);
         assert_eq!(block.truncated(), max_chars < source_len, "row {row}");
         assert_eq!(block.lines().len(), 1, "row {row}");
-        assert_close(block.size().width, width);
+        assert!(
+            !sources(&block).contains(&SourceItem::Ellipsis),
+            "row {row} appends no dots without `text-overflow: ellipsis`",
+        );
+        assert_close(block.size().width, untailed);
+
+        // Gated open: the width both references render for this row.
+        let tailed_block = laid_out(
+            &mut context,
+            style(TextOverflow::Ellipsis),
+            &items,
+            None,
+            None,
+        );
+        assert_eq!(
+            sources(&tailed_block).contains(&SourceItem::Ellipsis),
+            tailed_block.truncated(),
+            "row {row} tails exactly the cuts it makes",
+        );
+        assert_eq!(tailed_block.lines().len(), 1, "row {row}");
+        assert_close(tailed_block.size().width, tailed);
     }
 }
 
@@ -434,35 +538,74 @@ fn maxlength_cuts_the_flattened_run_and_tails_it_with_three_dots() {
 /// they wear that run's 20px: 10 + 20 + 3x20 = 90. The default path, where the
 /// tail is the inner box's `::after` in the block's own styling
 /// (`x-text.css:191-194`), would put the same row at 10 + 20 + 3x10 = 60.
+///
+/// **2026-09-14 ruling.** Whether the dots exist at all is a separate question
+/// from whose style they wear, and this test now reports on both. `web-core`
+/// splices them in unconditionally, as does native Lynx on `text-maxlength`
+/// ("Ellipsis will be appended disregarding the overflowing mode.", Android
+/// `TextRenderer.java:126-135`); this engine deliberately does not, because the
+/// tail is gated on `text-overflow: ellipsis`
+/// (`crates/hughie/src/text/block/truncate.rs:135`) and the fixture declares
+/// none — a behavior matching neither reference, and Lynx-vello-specific under
+/// the ruling. So the first pass asserts each row's bare cut, and the second
+/// sets `text-overflow: ellipsis` and keeps the ownership claim the fixture
+/// exists for: the dots are real inline content wearing the cut run's metrics,
+/// which the adapted row measures at 90px against the 60px a block-owned tail
+/// would give. The converse ownership case — the *default*
+/// `tail-color-convert`, where the tail should take the block's style and does
+/// not — is the `tail-color-convert` gap (A1 in
+/// `docs/tracking/web-text-test-replication.md`), still open, and stays pinned by
+/// `the_truncation_tail_takes_the_block_style_not_the_cut_runs`.
 #[test]
-#[ignore = "GAP: the spliced dots are gated on `text-overflow: ellipsis`, \
-            whose initial value is `clip`, where the web target splices them \
-            in unconditionally (crates/hughie/src/text/block/truncate.rs:135)"]
 fn tail_color_convert_false_splices_the_dots_into_the_cut_run() {
     let base = ahem_at(10.0);
     let mut context = text_context();
 
-    for (row, max_chars, parts, width) in MAXLENGTH_ROWS {
+    for (row, max_chars, parts, tailed, untailed) in MAXLENGTH_ROWS {
         let items = parts
             .iter()
             .map(|part| run(&base, part))
             .collect::<Vec<_>>();
-        let block = laid_out(
+        let style = |overflow| BlockStyle {
+            max_chars: Some(max_chars),
+            overflow,
+            ..BlockStyle::default()
+        };
+
+        // The fixture's own declarations: the cut keeps every unit it spares
+        // and nothing is spliced in after it.
+        let block = laid_out(&mut context, style(TextOverflow::Clip), &items, None, None);
+        assert_close(block.size().width, untailed);
+        // Row `i` cuts all five units, and there the block reports two widths
+        // that disagree: `size()` is the display layout's 0, while `lines()[0]`
+        // falls back to the natural layout's five 10px units. `assemble` takes
+        // the width from `final_layout` but can take the lines from the
+        // fallback (`crates/hughie/src/text/block/mod.rs:1074-1079`), so the two
+        // are not held to each other. That is an UNRULED deviation, recorded
+        // here rather than endorsed: the 2026-09-14 ruling settled only whether
+        // a marker is emitted, not which of the two widths an empty cut should
+        // report. Pinned so a change to either one is noticed.
+        assert_close(
+            block.lines()[0].advance,
+            if row == 'i' { 50.0 } else { untailed },
+        );
+        assert!(
+            !sources(&block).contains(&SourceItem::Ellipsis),
+            "row {row} splices in no dots without `text-overflow: ellipsis`",
+        );
+
+        // Gated open: the dots ride in the line's own advance, not past it.
+        let spliced = laid_out(
             &mut context,
-            BlockStyle {
-                max_chars: Some(max_chars),
-                ..BlockStyle::default()
-            },
+            style(TextOverflow::Ellipsis),
             &items,
             None,
             None,
         );
-
-        // The dots ride in the line's own advance, not past it.
-        assert_close(block.lines()[0].advance, width);
+        assert_close(spliced.lines()[0].advance, tailed);
         assert_eq!(
-            sources(&block).contains(&SourceItem::Ellipsis),
-            block.truncated(),
+            sources(&spliced).contains(&SourceItem::Ellipsis),
+            spliced.truncated(),
             "row {row} carries the dots as inline content",
         );
     }
@@ -477,12 +620,26 @@ fn tail_color_convert_false_splices_the_dots_into_the_cut_run() {
         run(&base, "4"),
         run(&base, "5"),
     ];
+    let adapted_style = |overflow| BlockStyle {
+        max_chars: Some(2),
+        overflow,
+        ..BlockStyle::default()
+    };
+    // Ungated, the same cut is the kept glyphs alone: '1' at 10px and '2' at
+    // 20px.
     let block = laid_out(
         &mut context,
-        BlockStyle {
-            max_chars: Some(2),
-            ..BlockStyle::default()
-        },
+        adapted_style(TextOverflow::Clip),
+        &adapted,
+        None,
+        None,
+    );
+    assert!(block.truncated());
+    assert_close(block.size().width, 30.0);
+
+    let block = laid_out(
+        &mut context,
+        adapted_style(TextOverflow::Ellipsis),
         &adapted,
         None,
         None,
@@ -498,10 +655,30 @@ fn tail_color_convert_false_splices_the_dots_into_the_cut_run() {
 /// anywhere — the browser's own line-clamp ellipsis for N >= 2, and the UA
 /// sheet's single-line tail ellipsis for N == 1.
 ///
-/// How many units the marker takes with it is the marker's own business — the
-/// web target fits `…` where this engine backs off three characters, a
-/// recorded deviation — so what is asserted is that the last visible line
-/// gives up units to a marker at all.
+/// **2026-09-14 ruling.** `web-core` renders this fixture with a marker on the
+/// last visible line — the browser's line-clamp ellipsis for N >= 2 and the UA
+/// sheet's tail ellipsis for N == 1, neither of which reads `text-overflow`
+/// (`x-text.css:216-230`, `:239-241`; `XTextTruncation.ts:349-366`). This
+/// engine deliberately does not: the maxline retreat is gated on
+/// `text-overflow: ellipsis` (`crates/hughie/src/text/block/truncate.rs:95`),
+/// the fixture declares none, and the initial value is `clip` — so the clamp
+/// keeps N line boxes with no marker and no units given up. That gating is the
+/// ruled behavior, and it is what native Lynx does (Harmony
+/// `text_shadow_node.cc:63-66`, `:162-164`; Android `TextRenderer.java:185-200`;
+/// iOS `LynxTextRenderer.m:1013-1021`), so on maxline the divergence is from
+/// `web-core` alone. The second pass sets `text-overflow: ellipsis` and is the
+/// marker's own cover: there the last line does give up units, three of them
+/// (`ELLIPSIS_UNITS`), where the web target instead fits a single `…` — a
+/// recorded deviation in the marker's width, not in whether it appears.
+///
+/// The advances are pure Ahem geometry at a 300px width, one em per glyph. The
+/// clamp 1 and 2 lines are thirty 10px units (`0..30`, `30..60`), so an unmarked
+/// line advances 300 and a marked one keeps 27 of them plus three 10px dots,
+/// also 300. The clamp 4 line is `90..117`: twenty-six 10px units of the pink
+/// run and the 3em run's first 30px glyph, 290 unmarked; marked, it retreats
+/// three units to 114, which leaves 24 10px units and puts the dots in the 10px
+/// run, 270. The clamp 6 line is ten 30px units (`127..137`), 300 unmarked and
+/// seven kept units plus three 30px dots marked, also 300.
 ///
 /// Recorded model deviation for the `clamp == 1` block, shared with
 /// `a_lynx_wrapper_adds_no_box_and_no_break_to_a_clamped_paragraph`: the web
@@ -510,9 +687,6 @@ fn tail_color_convert_false_splices_the_dots_into_the_cut_run() {
 /// its single line consumes the whole paragraph. The line count coincides and
 /// no source range is asserted for that clamp.
 #[test]
-#[ignore = "GAP: no marker on a bare maxline clamp — the tail is gated on \
-            `text-overflow: ellipsis`, whose initial value is `clip` \
-            (crates/hughie/src/text/block/truncate.rs:95)"]
 fn a_bare_maxline_clamp_marks_its_last_visible_line() {
     let base = ahem_at(10.0);
     let three_em = ahem_at(30.0);
@@ -522,29 +696,59 @@ fn a_bare_maxline_clamp_marks_its_last_visible_line() {
     };
     let mut context = text_context();
 
-    for clamp in [1u32, 2, 4, 6] {
+    // (clamp, the last visible line's advance unmarked, and marked).
+    for (clamp, clipped, marked) in [
+        (1u32, 300.0f32, 300.0f32),
+        (2, 300.0, 300.0),
+        (4, 290.0, 270.0),
+        (6, 300.0, 300.0),
+    ] {
         let lead = maxline_lead(clamp);
         let items = maxline_basic_items(&lead, &base, &base, &three_em, &tracked);
+        let style = |overflow| BlockStyle {
+            word_break: WordBreak::BreakAll,
+            max_lines: core::num::NonZeroU32::new(clamp),
+            overflow,
+            ..BlockStyle::default()
+        };
+
+        // The fixture's own declarations: `text-overflow` at its initial `clip`.
         let block = laid_out(
             &mut context,
-            BlockStyle {
-                word_break: WordBreak::BreakAll,
-                max_lines: core::num::NonZeroU32::new(clamp),
-                ..BlockStyle::default()
-            },
+            style(TextOverflow::Clip),
             &items,
             None,
             Some(300.0),
         );
-
         assert!(block.truncated(), "clamp {clamp}");
         assert_eq!(block.lines().len(), clamp as usize);
         let last = *block.lines().last().expect("a clamped line");
-        assert!(
-            last.ellipsis_count > 0,
-            "clamp {clamp} marks its last visible line",
+        assert_eq!(
+            last.ellipsis_count, 0,
+            "clamp {clamp} gives up no unit to a marker it does not draw",
         );
-        assert!(sources(&block).contains(&SourceItem::Ellipsis));
+        assert_close(last.advance, clipped);
+        assert!(
+            !sources(&block).contains(&SourceItem::Ellipsis),
+            "clamp {clamp} draws no dots without `text-overflow: ellipsis`",
+        );
+
+        // Gated open: the marker the references draw unconditionally.
+        let marked_block = laid_out(
+            &mut context,
+            style(TextOverflow::Ellipsis),
+            &items,
+            None,
+            Some(300.0),
+        );
+        assert_eq!(marked_block.lines().len(), clamp as usize);
+        let last = *marked_block.lines().last().expect("a clamped line");
+        assert_eq!(
+            last.ellipsis_count, 3,
+            "clamp {clamp} backs the cut off by the three units the dots take",
+        );
+        assert_close(last.advance, marked);
+        assert!(sources(&marked_block).contains(&SourceItem::Ellipsis));
     }
 }
 
@@ -560,10 +764,23 @@ fn a_bare_maxline_clamp_marks_its_last_visible_line() {
 /// and clamp 6 are where ownership is measurable: the first cut falls in the
 /// 10px lead run and the second in the 3em run, and in both the dots refill
 /// the 300px line exactly, which dots wearing one shared size could not do.
+///
+/// **2026-09-14 ruling.** The fixture declares no `text-overflow`, and this
+/// engine gates the maxline retreat on `text-overflow: ellipsis`
+/// (`crates/hughie/src/text/block/truncate.rs:95`), so for the fixture's own
+/// declarations it renders the clamp with no retreat and no dots — where
+/// `web-core` lays the three `.` characters in unconditionally
+/// (`XTextTruncation.ts:289-303`, which never reads `text-overflow`). On
+/// `text-maxline` the gate is what native Lynx does (Harmony
+/// `text_shadow_node.cc:63-66`; Android `TextRenderer.java:185-200`; iOS
+/// `LynxTextRenderer.m:1013-1021`), so the divergence is from `web-core` alone
+/// and is deliberate. The first pass therefore asserts the unretreated clamp —
+/// the last visible line keeps every unit that fits it, 300px of 10px glyphs at
+/// clamps 1 and 2, 290px at clamp 4 (twenty-six 10px units plus the 3em run's
+/// first 30px glyph) and 300px of ten 30px glyphs at clamp 6 — and the second
+/// sets `text-overflow: ellipsis`, which is where the fixture's own claim, the
+/// three-unit back-off with the dots wearing the cut run's metrics, is kept.
 #[test]
-#[ignore = "GAP: the dots are gated on `text-overflow: ellipsis`, whose \
-            initial value is `clip`, and `tail-color-convert` is unparsed \
-            (crates/hughie/src/text/block/truncate.rs:95)"]
 fn tail_color_convert_false_backs_the_maxline_cut_off_by_three_units() {
     let base = ahem_at(10.0);
     let three_em = ahem_at(30.0);
@@ -577,27 +794,57 @@ fn tail_color_convert_false_backs_the_maxline_cut_off_by_three_units() {
     for clamp in [1u32, 2, 4, 6] {
         let lead = maxline_lead(clamp);
         let items = maxline_basic_items(&lead, &base, &base, &three_em, &tracked);
+        let style = |overflow| BlockStyle {
+            word_break: WordBreak::BreakAll,
+            max_lines: core::num::NonZeroU32::new(clamp),
+            overflow,
+            ..BlockStyle::default()
+        };
+
+        // The fixture's own declarations: no retreat, so no dots to own.
         let block = laid_out(
             &mut context,
-            BlockStyle {
-                word_break: WordBreak::BreakAll,
-                max_lines: core::num::NonZeroU32::new(clamp),
-                ..BlockStyle::default()
-            },
+            style(TextOverflow::Clip),
             &items,
             None,
             Some(300.0),
         );
-
         let last = *block.lines().last().expect("a clamped line");
-        assert_eq!(last.ellipsis_count, 3, "clamp {clamp} reserves three units");
-        advances.push(last.advance);
+        assert_eq!(
+            last.ellipsis_count, 0,
+            "clamp {clamp} reserves nothing for dots it does not lay in",
+        );
+        assert!(
+            !sources(&block).contains(&SourceItem::Ellipsis),
+            "clamp {clamp} lays in no dots without `text-overflow: ellipsis`",
+        );
+
+        // Gated open: the three-unit back-off, and whose metrics the dots wear.
+        let block = laid_out(
+            &mut context,
+            style(TextOverflow::Ellipsis),
+            &items,
+            None,
+            Some(300.0),
+        );
+        let marked = *block.lines().last().expect("a clamped line");
+        assert_eq!(
+            marked.ellipsis_count, 3,
+            "clamp {clamp} reserves three units"
+        );
+        assert!(sources(&block).contains(&SourceItem::Ellipsis));
+        advances.push((last.advance, marked.advance));
     }
 
-    // Clamp 1: 27 kept 10px glyphs and three 10px dots. Clamp 6: seven kept
-    // 30px glyphs and three 30px dots.
-    assert_close(advances[0], 300.0);
-    assert_close(advances[3], 300.0);
+    // Unretreated, the last visible line keeps every unit that fits: thirty
+    // 10px glyphs at clamp 1, and ten 30px ones at clamp 6.
+    assert_close(advances[0].0, 300.0);
+    assert_close(advances[3].0, 300.0);
+    // Retreated, clamp 1 is 27 kept 10px glyphs and three 10px dots, and clamp
+    // 6 seven kept 30px glyphs and three 30px dots. Dots wearing one shared
+    // size could not refill both lines exactly.
+    assert_close(advances[0].1, 300.0);
+    assert_close(advances[3].1, 300.0);
 }
 
 /// Replicates `x-text/text-maxline-with-custom-truncation`
@@ -1086,6 +1333,14 @@ fn an_atom_clipped_past_the_clamp_leaves_the_paint_list() {
 // ReactLynx `<text>`: the same attributes, reached through the element PAPI.
 // ---------------------------------------------------------------------------
 
+/// One row of the `ReactLynx` `text-maxlength` fixture: its letter, its
+/// `text-maxlength` attribute, the flattened runs of its nested text children,
+/// the width the references render with their tail in, and the width of the cut
+/// alone — which is what this engine renders for the fixture's own
+/// declarations: N 10px units, or the whole 244-unit paragraph where nothing
+/// cuts.
+type MaxlengthRow<'src> = (char, Option<u32>, Vec<&'src str>, f32, f32);
+
 /// The 244-character English paragraph the `ReactLynx` text fixtures share.
 /// Only its length and the absence of a cut point before unit 200 matter to
 /// the clamps below, so it is spelled here rather than copied.
@@ -1108,46 +1363,71 @@ fn paragraph() -> String {
 /// everything.
 ///
 /// The rows are laid out unconstrained, as the fixture's flex column leaves
-/// them.
+/// them, and each is spelled as a [`MaxlengthRow`].
+///
+/// **2026-09-14 ruling.** Both references append the tail to every cut row
+/// regardless of `text-overflow` — `web-core` through the inner box's `::after`
+/// (`x-text.css:191-194`) and native Lynx explicitly ("Ellipsis will be
+/// appended disregarding the overflowing mode.", Android
+/// `TextRenderer.java:126-135`). This engine deliberately gates it on
+/// `text-overflow: ellipsis` (`crates/hughie/src/text/block/truncate.rs:135`),
+/// which the fixture never declares and whose initial value is `clip`, so each
+/// row renders exactly its first N units and nothing else. On `text-maxlength`
+/// that matches neither reference; it is a Lynx-vello behavior, ruled correct,
+/// so both widths are carried per row: the cut alone, and — in the second pass,
+/// which sets `text-overflow: ellipsis` and keeps the tail covered — the cut
+/// plus the 30px of dots the references show.
 #[test]
-#[ignore = "GAP: the three-dot tail is gated on `text-overflow: ellipsis`, \
-            whose initial value is `clip`, where the web target appends it \
-            unconditionally (crates/hughie/src/text/block/truncate.rs:135)"]
 fn maxlength_counts_units_across_nested_runs_and_scripts() {
     let base = ahem_at(10.0);
     let para = paragraph();
     let mut context = text_context();
 
-    // (row, text-maxlength, the row's flattened runs, the rendered width).
-    let rows: [(char, Option<u32>, Vec<&str>, f32); 9] = [
-        ('a', Some(1), vec![para.as_str()], 40.0),
-        ('b', Some(1), vec!["简体中文"], 40.0),
-        ('c', Some(2), vec![para.as_str()], 50.0),
-        ('d', Some(2), vec!["简体中文"], 50.0),
-        ('e', Some(3), vec!["简", "体", "中文"], 60.0),
-        ('f', Some(3), vec!["简", "体中", "文"], 60.0),
-        ('g', Some(3), vec!["简", "体中文"], 60.0),
-        ('h', Some(200), vec![para.as_str()], 2030.0),
-        ('i', None, vec![para.as_str()], 2440.0),
+    let rows: [MaxlengthRow<'_>; 9] = [
+        ('a', Some(1), vec![para.as_str()], 40.0, 10.0),
+        ('b', Some(1), vec!["简体中文"], 40.0, 10.0),
+        ('c', Some(2), vec![para.as_str()], 50.0, 20.0),
+        ('d', Some(2), vec!["简体中文"], 50.0, 20.0),
+        ('e', Some(3), vec!["简", "体", "中文"], 60.0, 30.0),
+        ('f', Some(3), vec!["简", "体中", "文"], 60.0, 30.0),
+        ('g', Some(3), vec!["简", "体中文"], 60.0, 30.0),
+        ('h', Some(200), vec![para.as_str()], 2030.0, 2000.0),
+        ('i', None, vec![para.as_str()], 2440.0, 2440.0),
     ];
-    for (row, max_chars, parts, width) in rows {
+    for (row, max_chars, parts, tailed, untailed) in rows {
         let items = parts
             .iter()
             .map(|part| run(&base, part))
             .collect::<Vec<_>>();
-        let block = laid_out(
+        let style = |overflow| BlockStyle {
+            max_chars,
+            overflow,
+            ..BlockStyle::default()
+        };
+
+        // The fixture's own declarations: the cut, untailed.
+        let block = laid_out(&mut context, style(TextOverflow::Clip), &items, None, None);
+        assert_eq!(block.truncated(), max_chars.is_some(), "row {row}");
+        assert!(
+            !sources(&block).contains(&SourceItem::Ellipsis),
+            "row {row} appends no tail without `text-overflow: ellipsis`",
+        );
+        assert_close(block.size().width, untailed);
+
+        // Gated open: the width both references render.
+        let tailed_block = laid_out(
             &mut context,
-            BlockStyle {
-                max_chars,
-                ..BlockStyle::default()
-            },
+            style(TextOverflow::Ellipsis),
             &items,
             None,
             None,
         );
-
-        assert_eq!(block.truncated(), max_chars.is_some(), "row {row}");
-        assert_close(block.size().width, width);
+        assert_eq!(
+            sources(&tailed_block).contains(&SourceItem::Ellipsis),
+            max_chars.is_some(),
+            "row {row} tails exactly the cuts it makes",
+        );
+        assert_close(tailed_block.size().width, tailed);
     }
 }
 
