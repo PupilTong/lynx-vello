@@ -1837,4 +1837,7 @@ fn string_argument<'a>(
 mod tests;
 
 #[cfg(test)]
+mod web_text_replication;
+
+#[cfg(test)]
 mod worker_tests;

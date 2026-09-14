@@ -25,6 +25,8 @@ mod scroll_container;
 mod test_support;
 mod text;
 mod ua_sheet;
+#[cfg(test)]
+mod web_text_replication;
 
 use dom::{Document, StylesheetOrigin};
 
