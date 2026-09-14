@@ -48,7 +48,7 @@ fn wire(data: &str) -> String {
 }
 
 /// One realm's whole side of its workers, which is one channel each, the one
-/// they all report on, and the token every one of them holds a child of.
+/// they all report on. The view token does not own any worker's lifetime.
 struct View {
     messages: FxHashMap<WorkerKey, mpsc::UnboundedSender<WorkerMessage>>,
     events: mpsc::UnboundedSender<WorkerEvent>,
@@ -145,7 +145,7 @@ impl Group {
         self.next_key.set(key.get() + 1);
         let (script, awaiting) = oneshot::channel();
         let (messages, incoming) = mpsc::unbounded_channel();
-        let token = self.views[view].token.child_token();
+        let token = CancellationToken::new();
         let sources = SourceRequester::new(
             self.views[view].notices.clone(),
             Arc::new(crate::NoWakeup),
@@ -406,33 +406,16 @@ fn releasing_a_view_ends_the_workers_it_created() {
     assert_eq!(event.key, survivor);
 }
 
-/// A released view ends the workers it created without a message reaching any
-/// of them: each holds a child of that view's token, so cancelling the one on
-/// the embedder's thread is what wakes a worker still waiting for its script.
-///
-/// The message sender stays open and unused throughout, so what ends this
-/// worker cannot be a `Terminate` or a closed channel — and it ends silently,
-/// which is the other half of the same claim: every other way out reports
-/// something on the view's event channel first.
+/// The MTS handle, not the view token, owns a worker still loading its script.
 #[test]
-fn cancelling_a_view_ends_a_worker_whose_script_never_arrived() {
+fn cancelling_a_view_does_not_end_a_worker_whose_mts_handle_is_alive() {
     let mut group = Group::new();
-    let _parked = group.construct(0, "");
-
+    let worker = group.construct(0, "");
     group.cancel(0);
-
-    // A second or two rather than PATIENCE: nothing here waits for IO, and a
-    // worker that has to be told is a worker this never wakes at all.
-    group.wait_for_workers_to_end(
-        0,
-        Duration::from_secs(2),
-        "a cancelled view's parked worker never ended",
-    );
-    assert!(
-        group.views[0].incoming.try_recv().is_err(),
-        "and it ended without saying anything: a worker that took the failure path or found \
-         its channel closed would have reported one of those first"
-    );
+    group.answer(worker, "app:///worker.js", "postMessage('still-owned');");
+    assert_eq!(group.message(0), wire("still-owned"));
+    group.release(0);
+    group.wait_for_workers_to_end(0, PATIENCE, "dropping the last sender ends the worker");
 }
 
 #[test]
@@ -540,17 +523,15 @@ fn a_handled_import_failure_keeps_the_worker_usable() {
 }
 
 #[test]
-fn releasing_a_view_cancels_its_workers_import_requests_immediately() {
+fn worker_import_cancellation_follows_its_handle_instead_of_the_view_token() {
     let mut group = Group::new();
-    group.start("await import('./pending.js'); postMessage('must not run');");
+    let worker = group.start("await import('./pending.js'); postMessage('must not run');");
     let (_, completion) = group.views[0].source();
+    group.cancel(0);
     assert!(!completion.is_cancelled());
-    group.views[0].token.cancel();
+    group.terminate(worker);
+    group.wait_for_workers_to_end(0, PATIENCE, "the terminated worker ends its import");
     assert!(completion.is_cancelled());
-    completion.complete(Ok(LoadedSource::Entry {
-        source: String::new(),
-        url: "app:///pending.js".to_owned(),
-    }));
 }
 
 #[test]

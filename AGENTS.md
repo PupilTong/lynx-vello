@@ -256,9 +256,9 @@ Rust parses structured input only when Rust behavior actually needs its fields
   the embedder's thread and cancelled there by the view's drop and by a fatal
   lifecycle event, and by a guard on every exit from the view's owner, so a host
   still holding a `SourceCompletion` reads cancellation without waiting for a
-  turn. It is the view's whole end signal: the owner waits on it, every task of
-  the view is reclaimed behind it, and every worker that view's realm creates
-  carries a child of it, so releasing a view ends those workers too. A burst of
+  turn. It is the view's end signal: the owner reclaims its ordinary tasks,
+  then waits for MTS JavaScript disposal before releasing the realm. Workers
+  have independent tokens and remain live for that disposal exchange. A burst of
   commands queued behind that release is discarded rather than applied: the
   view's one command consumer reads the token at each wake, before it applies
   anything, so a command sent before the release ends the view instead of
@@ -534,12 +534,12 @@ Rust parses structured input only when Rust behavior actually needs its fields
   per live worker, and a worker's whole state is that task**: a `WorkerStart`
   carries its key, its name, the one-shot its script will arrive on, the
   receiving end of its message channel, the sender its events go back on —
-  which is the creating view's own `WorkerEvent` channel, so a released view
-  drops its workers' news by dropping the receiver, and stops each worker it
-  created with a `Terminate` on that worker's own channel — and a child of the
-  creating view's cancellation token; the senders dropping behind those
-  messages, and that token being cancelled with the view, are the backstop, for
-  a worker whose realm was gone before it could speak. The script wait is a
+  which is the creating MTS realm's `WorkerEvent` channel — and the Worker's
+  own cancellation token. MTS routes events through weak references to JS
+  Worker objects. Their finalizers and explicit `terminate()` release sending
+  handles; releasing the MTS realm closes its remaining senders naturally.
+  Host functions reference the channel owner weakly, so queued finalizers
+  cannot keep a released realm's workers or group thread alive. The script wait is a
   `biased` select over the message channel first and that token behind it, so a
   `terminate` that lands in the same instant as the script wins and a worker
   told to stop never boots. The timer
@@ -561,10 +561,10 @@ Rust parses structured input only when Rust behavior actually needs its fields
   already rode to `bobcat-workers` inside that `Start`, so the script reaches
   the worker without a main-thread turn and nothing the painter holds ever
   names a worker. Every concurrent worker request is preserved.
-  Dropping the main realm cancels
-  its source work and stops its workers — one `Terminate` sent to each as the
-  realm goes, rather than each noticing that its channel closed — including
-  after failed boot.
+  Worker entry/import requests use the Worker's cancellation scope. Host
+  release does not cancel it ahead of JS disposal. Once the MTS realm is
+  released, closing its senders ends remaining Workers, including after failed
+  boot; Rust has no Worker termination sweep.
   A `WorkerEvent` delivers messages and errors to the owning realm; worker
   errors also produce nonfatal `EngineEvent::WorkerFailed`. See
   `docs/runtime-architecture.md` for the transport and lifetime boundaries.
@@ -573,6 +573,14 @@ Rust parses structured input only when Rust behavior actually needs its fields
   `bobcat:bts` installs its JS initializer from `bobcat:bts-runtime`, then
   returns. Its first Worker message supplies initial data and starts the
   optional `ViewSources.background_entry` import.
+  MTS JavaScript owns BTS disposal: send `dispose`, await `disposed`, then
+  terminate its Worker. BTS calls the current app hook, reports any throw and
+  replies after an ordinary Promise boundary. The MTS disposal Promise also
+  handles repeated destroy notifications. Disposal bypasses an unfinished BTS
+  entry import, since a released view cannot supply its remaining resources.
+  Object observers follow web-core: a plain object registered with a JS
+  `FinalizationRegistry` that directly invokes its callback. See
+  `docs/destruction-runtime.md`.
   Raw BTS application entries explicitly import their bindings from
   `bobcat:bts-runtime`; neither runtime installs `globalThis.lynx`.
   Keeping the runtime separate lets the app import its bindings without a
@@ -619,9 +627,10 @@ Rust parses structured input only when Rust behavior actually needs its fields
   containing target/currentTarget `dataset`, `id` and `uid`, never handles.
   Current PAPI elements have no component metadata and use `publishEvent`;
   explicit component calls preserve the supplied ID. An explicit JS engine
-  `__DestroyLifetime` event forwards to BTS `callDestroyLifetimeFun` as a
-  framework hook only. It does not terminate a Worker, clear pending native-app
-  callbacks or release Rust objects; Rust lifetime management stays unchanged.
+  `__DestroyLifetime` event starts the same JS disposal Promise used by MTS
+  teardown, terminating BTS only after its acknowledgement. Rust starts and
+  awaits MTS disposal through the existing ESM evaluator and routes ordinary
+  Worker events while it waits; it neither identifies BTS nor calls its hook.
   `bobcat-main` builds the group's one `dom::StylePool` — sized by the
   `StyleThreads` passed to `LynxGroup::new`, `Auto` being the usual choice —
   before any view attaches, and every document it goes on to carry holds an

@@ -190,12 +190,12 @@ impl SourceCompletion {
         }
     }
 
-    /// Whether the view has ended, or nobody is waiting for this source any
-    /// more.
+    /// Whether the requesting realm has ended, or nobody is waiting for this
+    /// source any more.
     ///
-    /// The view's end signal is a cancellation token every completion it hands
-    /// out carries a clone of, cancelled by the embedder's release or a fatal
-    /// event, or by the view's own end. Reading it takes a mutex, so it is
+    /// Completions carry their requesting realm's cancellation token: the
+    /// view's for MTS, or the Worker's independent token for its entry/imports.
+    /// Reading it takes a mutex, so it is
     /// asked once per decision rather than per byte. Cancellation is
     /// cooperative: an IO operation already running may finish, but its result
     /// is discarded.

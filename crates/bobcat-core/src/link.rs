@@ -275,8 +275,7 @@ impl ViewOutbox {
         }
     }
 
-    /// This view's end signal, for the realm that mints a child of it per
-    /// worker it creates.
+    /// This view's end signal. Workers have separate cancellation scopes.
     pub(crate) const fn token(&self) -> &CancellationToken {
         &self.token
     }
@@ -311,16 +310,6 @@ impl ViewOutbox {
             completion,
         });
         answer
-    }
-
-    /// The right to answer one source request that already has a receiver —
-    /// a worker script, whose answer travels to `bobcat-workers` rather than
-    /// staying here.
-    pub(crate) fn completion_for(
-        &self,
-        answer: oneshot::Sender<Result<LoadedSource, LynxViewError>>,
-    ) -> SourceCompletion {
-        SourceCompletion::over(answer, self.token.clone())
     }
 
     /// Publishes the newest committed frame.

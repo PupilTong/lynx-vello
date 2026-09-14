@@ -37,18 +37,12 @@
 //!               ──── Post / Terminate ──▶ the worker's own task
 //!               ◀─────── WorkerEvent ────
 //!
-//!   the view's token ─── cancel ────────▶ the worker's own token (its child)
-//!
 //!   host        ──── the script ────────▶ the worker's own task
 //! ```
 //!
-//! The token is the one thing on that picture that needs no turn anywhere: a
-//! worker's is a child of the token its creating view was built with, so a
-//! released view ends every worker it created by cancelling one thing on the
-//! embedder's own thread. The `Terminate` above stays the protocol — it is
-//! what `terminate()` and a released realm say, and it is what discards what
-//! was queued behind it — and the token is the signal a worker's tasks wake
-//! on, and the backstop for a realm that was gone before it could speak.
+//! Each worker owns its cancellation token. The MTS Worker object's explicit
+//! termination or JS finalizer sends `Terminate`; releasing its realm closes
+//! the sender. A view's cancellation does not race ahead of JS app cleanup.
 //!
 //! A worker's *answer* deliberately skips `bobcat-main`: the thread that owns
 //! a view's [`ResourceFetcher`](crate::resource::ResourceFetcher) is its
@@ -117,18 +111,12 @@ pub(crate) struct WorkerStart {
     /// fetcher. A `Start` for the built-in background context arrives with
     /// this already answered.
     pub(crate) script: oneshot::Receiver<Result<LoadedSource, LynxViewError>>,
-    /// What the creating realm posts, and what tells this worker to stop: a
-    /// released realm sends a [`WorkerMessage::Terminate`] on it before it
-    /// drops the sending end. The closing itself ends the worker too, for the
-    /// realm that was gone before it could say anything.
+    /// What the MTS Worker object posts. Its finalizer or explicit terminate
+    /// sends `Terminate`; releasing the MTS realm closes the channel.
     pub(crate) messages: mpsc::UnboundedReceiver<WorkerMessage>,
     /// Where this worker reports, which is the creating view's own channel.
     pub(crate) events: mpsc::UnboundedSender<WorkerEvent>,
-    /// This worker's end signal: a child of the token its creating view was
-    /// built with, minted by the realm that constructed it. So a released view
-    /// ends every worker it created without a message reaching each of them
-    /// first, and a worker whose realm was gone before it could speak still
-    /// wakes.
+    /// This worker's end signal, independent of its creating view's token.
     pub(crate) token: CancellationToken,
     /// Imported text reaches the view resource host under this worker's cancellation scope.
     pub(crate) sources: crate::link::SourceRequester,
@@ -144,9 +132,8 @@ pub(crate) enum WorkerCommand {
 pub(crate) enum WorkerMessage {
     /// One JSON-encoded message for the worker's realm.
     Post(String),
-    /// `Worker.terminate()`, and a released realm stopping what it created:
-    /// end it between tasks and drop its realm, discarding whatever was
-    /// queued behind this.
+    /// Explicit termination or GC of the MTS Worker object: end it between
+    /// tasks and discard what was queued behind this.
     Terminate,
 }
 

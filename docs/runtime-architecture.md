@@ -487,30 +487,26 @@ does. The completion answers the worker's task directly: it needs no
 main-thread turn and cannot be held behind a long main-thread script. A worker
 told to terminate before its script arrives never boots, because that wait is
 a `biased` select with the message channel first; behind that arm the same
-wait watches the worker's own cancellation token, so a view released while a
-script is in flight ends its workers without a message reaching any of them.
+wait watches the worker's own cancellation token. That scope is independent
+of the view, so its cancellation cannot race ahead of JS disposal.
 
 Worker keys are allocated once per group on main and never reused. A worker's
 whole state is its own task; `bobcat-main` keeps nothing per worker but the
 sending end of its message channel, and only while that worker runs — a worker
 that closed itself or failed is forgotten where the realm learns of it, when
-that event is dispatched. A released realm sends a terminate on
-every sender it still holds, which is how a view stops the workers it created.
-A closed channel, and the view's own cancellation token — every worker it
-created holds a child of it, so cancelling the view's cancels theirs — end a
-worker too, but those are the backstop, for a realm that was gone before it
-could say anything, rather than the protocol. The main
-realm retains Worker objects until termination, close, or load failure.
-`terminate()` immediately removes the sending handle and asks that worker to
-end its context between tasks, discarding whatever was queued behind it; it
-does not interrupt synchronous JavaScript.
-Late source results and messages cannot restart or reach a terminated context.
-Releasing the view, including after failed entry boot, cancels its source work
-and stops its workers — one terminate each, sent as the realm goes. The senders
-they were reachable through drop behind those messages; that is the backstop,
-not the protocol. Worker errors reach the
-parent's `error` handler and the embedder as nonfatal `WorkerFailed`; a parent
-handler that throws reports `ListenerFailed` and leaves the view serving.
+that event is dispatched. MTS keeps `WeakRef<Worker>` values for event routing;
+a JS `FinalizationRegistry` releases an unreachable Worker's sending handle.
+A reachable Worker survives collection. Explicit `terminate()` uses the same
+release path and unregisters its finalizer. Both stop the context between tasks
+and discard queued messages without interrupting synchronous JavaScript.
+Releasing the MTS realm closes its remaining senders naturally. Host callbacks
+reference their channel owner weakly, so finalizers queued during realm release
+cannot retain it. Worker entry/import completions use the Worker's independent
+token and become cancelled when that Worker ends.
+
+Worker errors still produce a nonfatal `WorkerFailed` host event. A private JS
+close notification lets MTS disposal finish when BTS already closed or failed.
+An application listener that throws reports `ListenerFailed`.
 
 Each successful MTS entry import now starts one BTS Worker named `lynx-bg`.
 Boot constructs it through the same `bobcat-internal` class, using the reserved
@@ -534,7 +530,7 @@ gets a source completion on the view's existing host channel; its final response
 URL becomes the base for dependencies. A per-worker boot watch gates posted
 messages until the Worker bootstrap settles. The BTS runtime separately holds
 its messages on the application import Promise; completions and timers continue.
-Cancellation follows the worker's child token; source completions never travel
+Cancellation follows the worker's own token; source completions never travel
 through the MTS realm. Handled import failures leave the worker usable; a BTS
 startup failure reaches the MTS failure binding. ReactLynx compiled-module and
 lazy-bundle execution remain a later layer over this resource transport; see
@@ -616,10 +612,13 @@ clone compensates for these effects; structured clone and transfers remain
 outside this endpoint's scope.
 
 An explicit JS `lynx.getEngine().dispatchEvent({type: "__DestroyLifetime"})`
-forwards a Worker message to the current BTS `app.callDestroyLifetimeFun()`
-hook. This is framework event delivery only: it does not terminate the Worker,
-clear pending Lepus callbacks, or release Rust objects. Automatic Rust teardown
-has no added JS entry point, and no dispose API is introduced.
+starts MTS's disposal Promise: post `dispose`, await the BTS `disposed` reply,
+then terminate the Worker. BTS calls its current `app.callDestroyLifetimeFun`,
+reports a throw and replies after the ordinary Promise boundary. MTS teardown
+uses this same Promise, so repeated notifications do not repeat app cleanup.
+The page owner evaluates the ordinary `bobcat:dispose` ESM and continues routing
+Worker events until its TLA completes before releasing MTS. See
+`destruction-runtime.md` for the Worker and object finalization boundaries.
 
 Its script surface covers:
 
@@ -766,15 +765,16 @@ take: cards genuinely unroot handles, and a collection every 32 removals frees
 what they named.
 
 Release is the view's task ending. Dropping the `LynxView` closes its command
-channel; the task returns and drops the `MainThreadRuntime`, whose fields drop
+channel; the task reaps ordinary view work, awaits MTS JS disposal, then drops
+the `MainThreadRuntime`, whose fields drop
 in declaration order — the `engine` field first, which holds the context's
 `Rc`, so the realm is freed with it; freeing it takes the host functions the
 realm held and their clones of the
 `Rc<RefCell<DocumentSlot>>` with it, and the runtime's own `slot` handle drops
 after that, which is when the `LynxDocument` drops. JavaScript goes first, then the Rust
 object it named; the field order and its comment are the whole mechanism, and
-no `Drop` impl stands behind them. The task drops the workers it started and
-the frames watch with the same return; a painter attached to the view keeps
+no `Drop` impl stands behind them. Remaining Worker channels close with MTS,
+and the frames watch closes with the same return; an attached painter keeps
 showing the last frame it drew.
 
 There is one window where a view has no document, and the task serves through
@@ -929,9 +929,9 @@ over as index zero of the first pool built on it and refuses a second one
 there forever, so one thread can only ever build one pool.
 
 Dropping a view cancels its source work, detaches its image inbox, and closes
-its command channel, which is the goodbye its task ends on; that task releases
-the view's realm — and with it the document and every worker the realm created
-— and the thread goes on serving its siblings. The group's two threads
+its command channel, which ends ordinary view tasks. The owner awaits MTS JS
+disposal over the existing Worker inbox, then releases the realm and document;
+remaining Worker senders close with it. The thread keeps serving its siblings. The group's two threads
 are joined when the group handle and the last view built from it are both
 gone — a view holds its group alive as its last field, so the embedder may
 drop them in either order.

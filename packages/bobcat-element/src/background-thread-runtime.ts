@@ -37,6 +37,8 @@ const app: {
   registerModule(name, value) { jsModules.set(name, value); },
   getJSModule(name) { return jsModules.get(name); },
 };
+const destructionRegistry = new FinalizationRegistry<() => unknown>(callback => callback());
+
 // Looked up by the id a `callLepusMethodResult` carries, which a result for
 // a call made without a callback lacks.
 const callbacks: Map<number | undefined, (result: unknown) => void> =
@@ -54,7 +56,7 @@ type FromMainThread =
       method: "publishEvent" | "publicComponentEvent" | "updateGlobalProps" | "updateCardData" | "onAppReload" | "processCardConfig";
       args: unknown[];
     }
-  | { bobcat: "runtime"; method: "callDestroyLifetimeFun" }
+  | { bobcat: "runtime"; method: "dispose" }
   | {
       bobcat: "runtime";
       method: "callLepusMethodResult";
@@ -117,6 +119,12 @@ const sendQuery: SendQuery = (operation, token, params, callback) => {
 };
 
 const nativeApp = {
+  createJSObjectDestructionObserver(callback: () => unknown): object {
+    const observer = {};
+    destructionRegistry.register(observer, callback);
+    return observer;
+  },
+
   callLepusMethod(
     name: string,
     data: unknown,
@@ -179,6 +187,12 @@ export function __BobcatStartBTS(loadEntry: () => Promise<unknown>) {
 
 scope.addEventListener("message", (event: { data: FromMainThread }): void | Promise<void> => {
   const message = event.data;
+  // Disposal must remain deliverable while entry imports are outstanding:
+  // the released view can no longer provide their resources. Clean up any
+  // hook already installed, then acknowledge through the ordinary Worker.
+  if (message?.bobcat === "runtime" && message.method === "dispose") {
+    return dispose();
+  }
   if (message?.bobcat === "runtime" && message.method === "initialize") {
     const start = startBackground;
     if (start) {
@@ -210,9 +224,6 @@ function receiveMessage(message: FromMainThread): void | Promise<void> {
     case "publicComponentEvent":
       publicComponentEvent(message.args);
       break;
-    case "callDestroyLifetimeFun":
-      app.callDestroyLifetimeFun?.call(app);
-      break;
     case "reloadResult":
     case "nodeQueryResult": {
       const callback = callbacks.get(message.id);
@@ -232,6 +243,15 @@ function receiveMessage(message: FromMainThread): void | Promise<void> {
     case "callLepusMethodResult":
       return receiveLepusResult(message);
   }
+}
+
+async function dispose() {
+  try { app.callDestroyLifetimeFun?.call(app); }
+  catch (error) { lynx.reportError(error); }
+  // Match web-worker-rpc's await boundary before replying. This does not
+  // wait for asynchronous work launched by the framework's synchronous hook.
+  await undefined;
+  scope.postMessage({ bobcat: "runtime", method: "disposed" });
 }
 
 // The selected runtime target, independent of the compiler's minimum SDK.

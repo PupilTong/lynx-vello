@@ -47,8 +47,9 @@
 //! One [`Lifetime`] per view carries the tasks, the token that ends them and
 //! the latch this thread reads. The token is the embedder's: `LynxView::drop`
 //! and a fatal `pump` event cancel it, [`serve_view`]'s drop guard cancels it
-//! on every exit, and each worker this view's realm creates holds a child of
-//! it. What ended a view is not recorded anywhere, because nothing reads it:
+//! on every exit. Worker tokens are independent: after ordinary view tasks
+//! stop, MTS completes JS disposal over the same Worker inbox before releasing
+//! its realm. What ended a view is not recorded anywhere, because nothing reads it:
 //! what the embedder was told is whatever was reported before the end, and a
 //! release is the token having been cancelled from outside.
 //!
@@ -77,8 +78,8 @@
 //!   versus the next task of that object to finish;
 //! - **a realm's clock** — one [`serve_clock`] per live realm, a view's and a worker's alike,
 //!   waiting on its deadline, the re-arm that moves it, and a sibling's checkpoint;
-//! - **the worker's pre-boot wait** — its script versus a `Terminate` that must win, or its parent
-//!   view being released.
+//! - **the worker's pre-boot wait** — its script versus termination, channel closure, or its own
+//!   cancellation.
 //!
 //! How many there are is the group's shape rather than a constant: one of the
 //! first kind per engine thread, one of the second per live view and per live
@@ -89,7 +90,7 @@
 //! thread's tasks or JavaScript jobs while waiting.
 
 use std::cell::{Cell, RefCell};
-use std::future::Future;
+use std::future::{Future, poll_fn};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 
@@ -138,6 +139,9 @@ pub(super) struct Page {
     context: Rc<GroupContext>,
     outbox: ViewOutbox,
     realm: RefCell<Realm>,
+    /// The same inbox serves ordinary events and the final JS disposal RPC.
+    /// The owner takes it only after the ordinary consumer has been reaped.
+    worker_events: RefCell<Option<mpsc::UnboundedReceiver<WorkerEvent>>>,
     /// The newest `BeginFrame` sequence applied and not yet acknowledged.
     ///
     /// Acknowledged in the epilogue rather than where it is applied: a host
@@ -147,9 +151,7 @@ pub(super) struct Page {
     boot_reported: Cell<bool>,
     /// Every task of this view, the token that ends them, the latch this thread
     /// reads, and the two numbers this realm's clock task waits on — the
-    /// deadline it armed and the generation its own last entry recorded. A
-    /// worker this view's realm creates carries a child of that token, so
-    /// releasing the view ends the workers it made.
+    /// deadline it armed and the generation its own last entry recorded.
     lifetime: Lifetime,
     /// Whether this view has already been told why it failed. The first report
     /// wins, so one failure is one `StartupFailed` or one `ScriptRunError`. A
@@ -187,6 +189,7 @@ impl Page {
             context,
             outbox,
             realm: RefCell::new(Realm::Loading(Box::new(ingredients))),
+            worker_events: RefCell::new(None),
             pending_begin_frame: Cell::new(None),
             boot_reported: Cell::new(false),
             lifetime: Lifetime::new(token),
@@ -589,7 +592,8 @@ impl Page {
             }
             Some(Err(error)) => self.fail(EngineEvent::StartupFailed(error)),
             Some(Ok((worker_events, checkpoints))) => {
-                self.spawn(consume_worker_events(Rc::clone(self), worker_events));
+                *self.worker_events.borrow_mut() = Some(worker_events);
+                self.spawn(consume_worker_events(Rc::clone(self)));
                 self.spawn(serve_clock(
                     Rc::clone(self),
                     self.lifetime.deadlines(),
@@ -618,11 +622,39 @@ impl Page {
         self.lifetime
             .reap(&mut |payload| self.trapped(payload.as_ref()))
             .await;
-        // JavaScript first, then the Rust object it named: `MainThreadRuntime`
-        // drops its fields in declaration order, and this is where that
-        // happens — after every task that could still have entered the realm
-        // is gone.
-        *self.realm.borrow_mut() = Realm::Gone;
+        let realm = self.realm.replace(Realm::Gone);
+        let events = self.worker_events.borrow_mut().take();
+        if let Realm::Live(mut runtime) = realm
+            && let Some(mut events) = events
+        {
+            // The view has ended, but its MTS realm remains alive to exchange
+            // disposal messages. No view token cancels its Workers first.
+            let started = runtime.begin_dispose(&mut self.context.js.borrow_mut());
+            let disposed = async {
+                started?;
+                while !runtime.disposal_finished()? {
+                    let Some(WorkerEvent { key, payload }) = events.recv().await else {
+                        break;
+                    };
+                    if let Err(error) = runtime.dispatch_worker_event(
+                        &mut self.context.js.borrow_mut(),
+                        key,
+                        payload,
+                    ) {
+                        self.outbox
+                            .engine_event(EngineEvent::ListenerFailed(error.into_script_error()));
+                    }
+                }
+                Ok::<_, super::runtime::MainThreadError>(())
+            }
+            .await;
+            if let Err(error) = disposed {
+                self.outbox
+                    .engine_event(EngineEvent::ListenerFailed(error.into_script_error()));
+            }
+            // The realm owns the remaining Worker handles. Its release drops
+            // their channels naturally; there is no Rust termination sweep.
+        }
     }
 
     /// Takes the one command that is not the realm's out of a burst.
@@ -708,8 +740,7 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
     } = view;
     // On every exit path, ordinary or trapped: a host still holding one of
     // this view's source completions must see it cancelled without waiting
-    // for a turn of its own, and every worker this view created — each
-    // holding a child of this token — must wake and end.
+    // for a turn of its own. Workers retain their independent lifetimes.
     let _cancel = cancel.clone().drop_guard();
     let ViewSources {
         config,
@@ -898,8 +929,22 @@ async fn load_module(page: Rc<Page>, url: String, answer: SourceAnswer) {
 /// The channel's senders are the realm's `WorkerOwner` and this view's worker
 /// tasks, so it closes only once the realm is gone — which is to say, with
 /// the view.
-async fn consume_worker_events(page: Rc<Page>, mut events: mpsc::UnboundedReceiver<WorkerEvent>) {
-    while let Some(WorkerEvent { key, payload }) = events.recv().await {
+async fn consume_worker_events(page: Rc<Page>) {
+    loop {
+        let event = tokio::select! {
+            biased;
+            () = page.lifetime.token().cancelled() => return,
+            event = poll_fn(|cx| {
+                page.worker_events
+                    .borrow_mut()
+                    .as_mut()
+                    .expect("the live realm installed its Worker inbox")
+                    .poll_recv(cx)
+            }) => event,
+        };
+        let Some(WorkerEvent { key, payload }) = event else {
+            return;
+        };
         let delivered = page.enter(|runtime, js| runtime.dispatch_worker_event(js, key, payload));
         // A configured BTS entry can reject the boot promise in this checkpoint.
         // The epilogue reports that as StartupFailed and ends the view; only an

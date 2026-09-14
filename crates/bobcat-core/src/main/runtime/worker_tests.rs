@@ -23,10 +23,8 @@ struct Pair {
     /// The host's end of the view's link: the test plays the embedder, so it
     /// is what answers every source request.
     view: DetachedView,
-    /// This view's end signal, the one every completion it hands out was
-    /// built with and the parent of every worker token its realm mints. The
-    /// test plays the embedder, so releasing a view is something it has to
-    /// spell.
+    /// The host's view cancellation signal. Worker handles and their sources
+    /// have independent lifetimes, which these tests exercise explicitly.
     cancel: tokio_util::sync::CancellationToken,
     /// The group's worker thread. `Option` only so a test can drop it in the
     /// middle of its body: that is what waits for the thread, and two pins here
@@ -194,6 +192,39 @@ impl Pair {
                 "asserting Worker behavior",
             )
             .unwrap();
+    }
+    /// Drive the same MTS module and Worker event stream as the page owner.
+    fn dispose(&mut self) -> Vec<String> {
+        self.runtime
+            .as_mut()
+            .unwrap()
+            .begin_dispose(&mut self.js)
+            .unwrap();
+        let mut messages = Vec::new();
+        while !self.runtime.as_mut().unwrap().disposal_finished().unwrap() {
+            let event = self.next_event().expect("BTS acknowledges disposal");
+            if let WorkerPayload::Message(ref data) = event.payload {
+                messages.push(data.clone());
+            }
+            self.runtime
+                .as_mut()
+                .unwrap()
+                .dispatch_worker_event(&mut self.js, event.key, event.payload)
+                .unwrap();
+        }
+        messages
+    }
+
+    /// Release the creating realm and wait for every worker owner to return.
+    /// Keep the receiver to detect anything posted after JS disposal.
+    fn finish(&mut self) -> Vec<WorkerEvent> {
+        drop(self.runtime.take());
+        drop(self.home.take());
+        let mut events = Vec::new();
+        while let Ok(event) = self.events.try_recv() {
+            events.push(event);
+        }
+        events
     }
 }
 
@@ -846,49 +877,16 @@ fn lepus_failures_report_without_success_callbacks_and_leave_bts_usable() {
 }
 
 #[test]
-fn a_js_lifetime_event_calls_the_background_hook_without_releasing_the_worker() {
-    let mut pair = Pair::with_background(
-        r"
-        globalThis.results = [];
-        lynx.getJSContext().addEventListener('reply', e => results.push(e.data));
-        lynx.getEngine().dispatchEvent({ type: '__DestroyLifetime' });
-        ",
-        Some(
-            r"
-        const app = lynx.getApp();
-        const core = lynx.getCoreContext();
-        app.callDestroyLifetimeFun = function(...args) {
-            if (this !== app || args.length !== 0) throw Error('wrong lifetime call');
-            core.dispatchEvent({ type: 'reply', data: 'hook' });
-            throw Error('lifetime hook failure');
-        };
-        core.addEventListener('ping', () => core.dispatchEvent({ type: 'reply', data: 'alive' }));
-        ",
-        ),
-    );
-    pair.deliver();
-    pair.deliver();
-    assert!(worker_failed(&pair.notices(), "lifetime hook failure"));
-    pair.check(
-        r#"
-        import { lynx } from 'bobcat:runtime';
-        if (JSON.stringify(results) !== '["hook"]') throw Error(JSON.stringify(results));
-        lynx.getJSContext().dispatchEvent({ type: 'ping', data: undefined });
-        "#,
-    );
-    pair.deliver();
-    pair.check(r#"if (JSON.stringify(results) !== '["hook","alive"]') throw Error(JSON.stringify(results));"#);
-}
-
-#[test]
 fn constructor_creates_distinct_contexts_and_queues_messages_in_order() {
     let mut pair = Pair::new(
         r"
         import { Worker } from 'bobcat-internal';
         if (typeof globalThis.Worker !== 'undefined') throw Error('unexpected global');
         globalThis.results = [];
+        globalThis.keptWorkers = [];
         for (const name of ['one', 'two']) {
             const worker = new Worker('./worker.js', { name, type: 'module' });
+            keptWorkers.push(worker);
             worker.onmessage = e => results.push(e.data);
             worker.postMessage(1);
             worker.postMessage(2);
@@ -1000,20 +998,13 @@ fn dropping_the_view_cancels_io_without_keeping_the_worker_thread_alive() {
     let mut pair =
         Pair::new("import { Worker } from 'bobcat-internal'; new Worker('./worker.js');");
     let completion = pair.source();
-    // Where `Painter::shutdown` sets it: first, before anything this view
-    // owns is released, so a host still holding a completion learns that its
-    // load no longer matters without waiting for a turn of the engine's.
     pair.cancel.cancel();
     assert!(
-        completion.is_cancelled(),
-        "cancellation precedes releasing the fetcher"
+        !completion.is_cancelled(),
+        "the live MTS handle still owns this load"
     );
-    // The cancel above already ended that worker's task: it is parked on its
-    // script, and the token it holds is a child of the one just cancelled.
-    // Releasing the realm drops the one sender it was listening on, which is
-    // the backstop for a worker whose realm was gone before it could speak —
-    // and this must finish even though the host is still holding the
-    // completion.
+    // Dropping the realm releases its senders even while the host retains the
+    // source completion. No view-token propagation is needed to end the worker.
     drop(pair.runtime.take());
     drop(pair.home.take());
     assert!(
@@ -1027,19 +1018,8 @@ fn dropping_the_view_cancels_io_without_keeping_the_worker_thread_alive() {
     assert!(pair.events.try_recv().is_err());
 }
 
-/// A released realm stops the workers it created, rather than leaving each of
-/// them to discover that nobody is talking to it any more.
-///
-/// Pinned with a worker that would never end on its own: it arms an interval,
-/// so its task always has work and a thread that waited for it to finish would
-/// wait forever. What ends it is the `Terminate` its realm sends as it drops.
-///
-/// The message is the protocol and the channel closing behind it is the
-/// backstop, but the two are not separately observable from here: the same
-/// statement sends the one and drops the other. So what this pins is that the
-/// worker's task ends, not which of the two ended it — read through the events
-/// channel, whose senders are the realm's own and one clone per live worker
-/// task.
+/// Dropping the MTS realm closes its last Worker sender. Even an interval
+/// cannot keep that Worker or its thread alive after the channel is gone.
 #[test]
 fn releasing_a_realm_ends_a_worker_that_would_never_end_on_its_own() {
     let mut pair = Pair::new(
@@ -1075,7 +1055,7 @@ fn releasing_a_realm_ends_a_worker_that_would_never_end_on_its_own() {
 /// `close()` ends the worker's task, and the `Closed` event is where this side
 /// learns of it — so that is where the right to tell that worker to stop stops
 /// being worth keeping. What the realm holds afterwards is the workers still
-/// running, which is what a release sends its `Terminate`s to.
+/// running; releasing the realm closes only those remaining senders.
 #[test]
 fn a_worker_that_closes_itself_is_forgotten_by_the_realm() {
     let mut pair = Pair::new(
@@ -1706,4 +1686,190 @@ fn a_throwing_render_hook_reports_without_failing_bts_startup() {
     assert!(pair.notices().iter().any(|notice| matches!(notice,
         ViewNotice::Engine(crate::EngineEvent::ScriptReported { message, .. })
         if message.contains("render hook failed"))));
+}
+
+#[test]
+fn mts_disposal_calls_the_current_bts_hook_once_before_js_terminates_the_worker() {
+    for throws in [false, true] {
+        let mut pair = Pair::with_background(
+            "lynx.getJSContext().addEventListener('repeat-dispose', () => lynx.getEngine().dispatchEvent({type:'__DestroyLifetime'}));",
+            Some(&format!(
+                r"
+                const app = lynx.getApp();
+                app.callDestroyLifetimeFun = () => postMessage('stale-hook');
+                app.callDestroyLifetimeFun = function(...args) {{
+                    postMessage(['cleanup', this === app, args.length]);
+                    lynx.getCoreContext().dispatchEvent({{type:'repeat-dispose', data:undefined}});
+                    Promise.resolve().then(() => postMessage('cleanup-job'));
+                    if ({throws}) throw Error('cleanup failed');
+                }};
+            "
+            )),
+        );
+        pair.acknowledge_background();
+        // Host cancellation leaves the live MTS Worker alone until JS disposal.
+        pair.cancel.cancel();
+        assert_eq!(pair.live_workers(), 1);
+        let messages = pair.dispose();
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|m| m.as_str() == r#"[["cleanup",true,0]]"#)
+                .count(),
+            1
+        );
+        assert!(
+            messages.iter().any(|m| m == r#"["cleanup-job"]"#),
+            "{messages:?}"
+        );
+        assert!(messages.last().unwrap().contains("disposed"));
+        assert_eq!(
+            pair.live_workers(),
+            0,
+            "the acknowledgement lets JS terminate"
+        );
+        let reports = pair.notices();
+        assert_eq!(
+            reports
+                .iter()
+                .filter(|notice| matches!(notice,
+            ViewNotice::Engine(crate::EngineEvent::ScriptReported {message, ..})
+            if message.contains("cleanup failed")))
+                .count(),
+            usize::from(throws)
+        );
+        assert!(
+            pair.dispose().is_empty(),
+            "a second disposal does not repeat cleanup"
+        );
+        assert!(pair.finish().is_empty());
+    }
+}
+
+#[test]
+fn disposal_remains_deliverable_while_the_bts_entry_is_loading() {
+    let mut pair = Pair::with_background(
+        "",
+        Some(
+            r"
+        lynx.getApp().callDestroyLifetimeFun = () => postMessage('cleanup');
+        await import('app:///pending.js');
+        postMessage('late-entry');
+    ",
+        ),
+    );
+    let completion = loop {
+        let notice = block_on_deadline(pair.view.notices.recv(), ClockInstant::now() + PATIENCE)
+            .flatten()
+            .expect("the BTS import asks for its source");
+        if let ViewNotice::RequestSource {
+            request: SourceRequest::Module(url),
+            completion,
+        } = notice
+        {
+            assert_eq!(url, "app:///pending.js");
+            break completion;
+        }
+    };
+    pair.cancel.cancel();
+    assert!(!completion.is_cancelled());
+    let messages = pair.dispose();
+    assert_eq!(messages.first().unwrap(), r#"["cleanup"]"#);
+    assert!(messages.last().unwrap().contains("disposed"));
+    assert!(pair.finish().is_empty());
+    assert!(completion.is_cancelled());
+    completion.complete(Ok(LoadedSource::Entry {
+        source: "postMessage('late-module');".into(),
+        url: "app:///pending.js".into(),
+    }));
+    assert!(pair.events.try_recv().is_err());
+}
+
+#[test]
+fn disposal_does_not_wait_for_a_worker_that_already_closed() {
+    let mut pair = Pair::with_background("", Some("close();"));
+    pair.deliver();
+    assert_eq!(pair.live_workers(), 0);
+    assert!(pair.dispose().is_empty());
+}
+
+#[test]
+fn unreachable_mts_worker_is_collected_without_releasing_the_view() {
+    let mut pair = Pair::new(
+        r"
+        import {Worker} from 'bobcat-internal';
+        globalThis.worker = new Worker('./worker.js');
+        globalThis.received = [];
+        worker.onmessage = e => received.push(e.data);
+        worker.cycle = worker;
+    ",
+    );
+    pair.answer(
+        "onmessage = e => postMessage(e.data); setInterval(() => {}, 1000); postMessage('ready');",
+    );
+    pair.deliver();
+    pair.runtime
+        .as_mut()
+        .unwrap()
+        .collect_garbage(&mut pair.js)
+        .unwrap();
+    assert_eq!(pair.live_workers(), 2, "a reachable Worker survives GC");
+    pair.check("worker.postMessage('alive');");
+    pair.deliver();
+    pair.check("if (received[1] !== 'alive') throw Error('retained worker stopped'); delete globalThis.worker;");
+    pair.runtime
+        .as_mut()
+        .unwrap()
+        .collect_garbage(&mut pair.js)
+        .unwrap();
+    // QuickJS discovers cycles in one collection and processes their weak
+    // registrations in the next. Neither pass may retain the Worker.
+    pair.runtime
+        .as_mut()
+        .unwrap()
+        .collect_garbage(&mut pair.js)
+        .unwrap();
+    assert_eq!(pair.live_workers(), 1, "only the built-in BTS remains");
+    assert!(!pair.cancel.is_cancelled(), "GC does not release the view");
+    pair.dispose();
+    assert!(pair.finish().is_empty());
+}
+
+#[test]
+fn collecting_a_worker_cancels_its_pending_source() {
+    let mut pair = Pair::new(
+        "import {Worker} from 'bobcat-internal'; globalThis.worker = new Worker('./worker.js');",
+    );
+    let completion = pair.source();
+    pair.check("delete globalThis.worker;");
+    pair.runtime
+        .as_mut()
+        .unwrap()
+        .collect_garbage(&mut pair.js)
+        .unwrap();
+    assert_eq!(pair.live_workers(), 1);
+    pair.dispose();
+    pair.finish();
+    assert!(completion.is_cancelled());
+}
+
+#[test]
+fn ordinary_worker_does_not_acquire_app_teardown_by_importing_bts_or_using_its_name() {
+    let mut pair = Pair::new(
+        r"
+        import {Worker} from 'bobcat-internal';
+        globalThis.worker = new Worker('./worker.js', {name:'lynx-bg'});
+    ",
+    );
+    pair.answer(
+        r"
+        import {lynx} from 'bobcat:bts-runtime';
+        lynx.getApp().callDestroyLifetimeFun = () => postMessage('cleanup');
+        postMessage('ready');
+    ",
+    );
+    assert!(matches!(pair.next_event().unwrap().payload,
+        WorkerPayload::Message(ref value) if value == r#"["ready"]"#));
+    pair.check("worker.terminate();");
+    assert!(pair.finish().is_empty());
 }
