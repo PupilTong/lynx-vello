@@ -69,6 +69,7 @@ struct Harness {
     view: DetachedView,
     events: Vec<EngineEvent>,
     sources: Vec<(SourceRequest, SourceCompletion)>,
+    preloads: Vec<SourceRequest>,
     /// The owner's handle, so a step that never happened because the owner
     /// trapped is reported as that panic rather than as a deadline.
     owner: task::JoinHandle<()>,
@@ -100,6 +101,7 @@ impl Harness {
             view,
             events: Vec::new(),
             sources: Vec::new(),
+            preloads: Vec::new(),
             owner,
         }
     }
@@ -115,6 +117,7 @@ impl Harness {
                     completion,
                 } => self.sources.push((request, completion)),
                 ViewNotice::RequestImages(_) => {}
+                ViewNotice::PreloadSource(request) => self.preloads.push(request),
             }
         }
     }
@@ -890,5 +893,32 @@ fn a_configured_background_entry_failure_reports_startup_failed_once() {
         assert_eq!(failures.len(), 1);
         assert!(failures[0].contains("BTS startup failed"));
         harness.owner.await.unwrap();
+    });
+}
+
+#[test]
+fn card_url_uses_the_entry_response_url_before_requesting_styles() {
+    on_a_local_set(async {
+        let (context, workers) = group();
+        let mut harness = Harness::new(context, workers);
+        harness
+            .until("the entry was not requested", |h| h.sources.len() == 1)
+            .await;
+        harness.answer(
+            "https://cdn.test/redirected/main.js?version=2#entry",
+            r"
+            if (__Card__ !== 'https://cdn.test/redirected/main.js?version=2#entry')
+                throw Error('entry URL was not supplied by the resource loader');
+            __LoadStyleSheet('CSS', '__Card__');
+        ",
+        );
+        harness
+            .until("the stylesheet was not requested", |h| {
+                h.preloads.len() == 1
+            })
+            .await;
+        let request = harness.preloads.pop().unwrap();
+        assert!(matches!(request, SourceRequest::StyleSheet(ref url)
+            if url == "https://cdn.test/redirected/main.js/index.css?version=2#entry"));
     });
 }

@@ -69,7 +69,10 @@ const INLINE_DELIVERIES: usize = 8;
 const ELEMENT_PAPI_SOURCE: &str = crate::esm::runtime_source!("element-papi");
 const RUNTIME_MODULE_SOURCE: &str = crate::esm::runtime_source!("main-thread-runtime");
 
+mod style_sheets;
+
 const ENTRY_PREAMBLE: &str = r#"import {
+  __Card__,
   lynx,
   console,
   SystemInfo,
@@ -80,6 +83,8 @@ const ENTRY_PREAMBLE: &str = r#"import {
   _SetSourceMapRelease,
   __OnLifecycleEvent,
   __LoadLepusChunk,
+  __LoadStyleSheet,
+  __AdoptStyleSheet,
 } from "bobcat:runtime";
 import {
   __CreatePage,
@@ -583,6 +588,7 @@ impl MainThreadRuntime {
             &events,
             &timers,
         )?;
+        style_sheets::install_styles(&mut engine, js_runtime, &slot, &outbox)?;
         install_page_data(&mut engine, js_runtime, page_data)?;
         let readiness = Rc::new(RefCell::new(Ok(false)));
         install_readiness(&mut engine, js_runtime, &readiness)?;
@@ -871,7 +877,7 @@ impl MainThreadRuntime {
         let entry_specifier = serde_json::to_string(source_name)
             .expect("serializing a Rust string as a JavaScript string cannot fail");
         let boot = format!(
-            r#"import {{ lynx, _ReportError, __BobcatConnectBackground, __BobcatInitData }} from "{RUNTIME_MODULE_SPECIFIER}";
+            r#"import {{ lynx, _ReportError, __BobcatConnectBackground, __BobcatInitData, __BobcatInitEntry }} from "{RUNTIME_MODULE_SPECIFIER}";
 import {{ Document, __FlushElementTree }} from "{ELEMENT_MODULE_SPECIFIER}";
 // Imported for its effect: it installs the timer globals, and a static
 // import runs before the entry this module then loads.
@@ -882,6 +888,7 @@ import "{TIMER_MODULE_SPECIFIER}";
 // it: it goes when the realm does.
 export const document = new Document();
 
+__BobcatInitEntry({entry_specifier});
 await import({entry_specifier});
 const {{ Worker }} = await import("bobcat-internal");
 __BobcatConnectBackground(new Worker("{BTS_MODULE_SPECIFIER}", {{ name: "lynx-bg" }}));

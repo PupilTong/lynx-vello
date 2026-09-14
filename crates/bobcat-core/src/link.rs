@@ -66,6 +66,16 @@ impl SourceRequester {
         answer
     }
 
+    pub(crate) fn preload(&self, request: SourceRequest) {
+        if self
+            .notices
+            .send(ViewNotice::PreloadSource(request))
+            .is_ok()
+        {
+            self.requester.request_event();
+        }
+    }
+
     fn send(&self, request: SourceRequest, completion: SourceCompletion) {
         if self
             .notices
@@ -143,6 +153,8 @@ impl PageUpdate {
 /// reads is [`Published`] instead.
 pub(crate) enum ViewNotice {
     Engine(EngineEvent),
+    /// A hint to the same resource fetcher, with no result retained by core.
+    PreloadSource(SourceRequest),
     /// Sources the last paint walk met that the store has not been asked for.
     RequestImages(Vec<Arc<str>>),
     /// One source — a stylesheet, the entry, an imported module or a worker
@@ -486,6 +498,20 @@ pub(crate) fn block_on_deadline<F: Future>(future: F, deadline: ClockInstant) ->
         }
         let remaining = deadline.checked_duration_since(ClockInstant::now())?;
         thread::park_timeout(remaining);
+    }
+}
+
+/// Waits for work completed by another thread, without entering a runtime or
+/// running JavaScript jobs. The future must also wake on owner cancellation.
+pub(crate) fn block_on<F: Future>(future: F) -> F::Output {
+    let waker = Waker::from(Arc::new(Unpark(thread::current())));
+    let mut context = Context::from_waker(&waker);
+    let mut future = pin!(tokio::task::coop::unconstrained(future));
+    loop {
+        if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
+            return output;
+        }
+        thread::park();
     }
 }
 

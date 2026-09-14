@@ -23,6 +23,7 @@ pub struct PageSource {
     script_url: Url,
     script: Arc<str>,
     background_script: Option<(Url, Arc<str>)>,
+    named_style_sheets: Vec<(Url, Arc<PreparsedStyleSheet>)>,
     style_sheet: Option<(Url, PageStyleSheet)>,
     config: PageConfig,
     compatibility_warnings: Vec<CompatibilityWarning>,
@@ -254,6 +255,10 @@ impl PageSource {
         }
         let script_url = Url::parse("bobcat-memory://bundle/lepus-root.js")
             .expect("the built-in root-script URL must be valid");
+        let named_style_sheets = crate::custom_style::named_style_sheets(&template)
+            .into_iter()
+            .map(|(key, sheet)| (named_style_url(&script_url, &key), sheet))
+            .collect();
         let style_sheet = template
             .style_info
             .as_ref()
@@ -294,6 +299,7 @@ impl PageSource {
             script_url,
             script: Arc::from(source),
             background_script: None,
+            named_style_sheets,
             style_sheet,
             config,
             compatibility_warnings,
@@ -314,6 +320,7 @@ impl PageSource {
             script_url: mapped.main_thread.0,
             script: Arc::from(mapped.main_thread.1),
             background_script,
+            named_style_sheets: Vec::new(),
             style_sheet,
             config: raw_lynx_xml_config(),
             compatibility_warnings: Vec::new(),
@@ -346,6 +353,11 @@ impl PageSource {
         );
         if let Some((url, source)) = self.background_script.as_ref() {
             register_text(resources, url, source, "text/javascript; charset=utf-8");
+        }
+        for (url, sheet) in &self.named_style_sheets {
+            resources
+                .register_style_sheet(url.as_str(), sheet.as_ref().clone())
+                .expect("named stylesheet URLs are derived from the entry URL");
         }
         match self.style_sheet.as_ref() {
             Some((url, PageStyleSheet::Text(source))) => {
@@ -387,6 +399,23 @@ impl PageSource {
     pub fn compatibility_warnings(&self) -> &[CompatibilityWarning] {
         &self.compatibility_warnings
     }
+}
+
+/// The resource URL used by the JS stylesheet wrapper: the compiler's `CSS`
+/// section is `index.css`; other named sections each have their own directory.
+fn named_style_url(entry: &Url, key: &str) -> Url {
+    let mut url = entry.clone();
+    let section = if key == "CSS" {
+        String::new()
+    } else {
+        let name: String = url::form_urlencoded::byte_serialize(key.as_bytes()).collect();
+        format!("{}/", name.replace('+', "%20"))
+    };
+    url.set_path(&format!(
+        "{}/{section}index.css",
+        entry.path().trim_end_matches('/')
+    ));
+    url
 }
 
 /// Parses and registers one already-decoded browser Lynx XML response.

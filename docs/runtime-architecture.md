@@ -332,9 +332,10 @@ exits before answering. Other views and their group remain alive; the last
 group/view handle joins the group's threads.
 
 Source requests select an entry or stylesheet payload and carry a specifier;
-the fetcher owns base URL and transport policy. That call, `request_image`,
-`service_images` and the `FrameImages` supertrait are the whole protocol, and
-every one of them is synchronous — core holds no resource future, and core
+the fetcher owns base URL and transport policy. That call, the optional
+`preload_source` hint, `request_image`, `service_images` and the `FrameImages`
+supertrait are the whole protocol. Every method is synchronous — no transport
+future crosses this interface, and core
 names none of a fetcher's own transport API. The protocol carries no
 response-size limit; each fetcher owns the bound for the response it
 materializes.
@@ -660,7 +661,7 @@ The bridge keeps built-in sources on the shared runtime and entry/imported
 sources on each realm. A missing module creates one `SourceRequest::Module` per
 normalized URL in that realm. The boundary's epilogue spawns one task per
 queued request, and `LynxView::pump` forwards each through
-`ResourceFetcher::request_source`. IO never blocks the script thread. The
+`ResourceFetcher::request_source`. Module IO never blocks the script thread. The
 answer resolves that task, whose completion registers the source or the cached
 load error, resumes import continuations, and drains promise jobs. Repeated
 imports share the same module namespace and evaluation within a realm; sibling
@@ -1231,3 +1232,17 @@ there — its tokio features are target-gated, with `time` enabled only off
 wasm32 — while its *dev* dependency asks for `rt-multi-thread`, which does not
 compile for wasm32 at all and which feature unification would drag into any
 build that includes dev targets.
+
+## Named stylesheets
+
+Boot initializes the JS runtime's `__Card__` with the entry response URL before
+importing the entry. JS resolves the card alias into a CSS resource URL.
+`__LoadStyleSheet` sends an optional `ResourceFetcher::preload_source` hint and
+returns a JS handle associated only with the URL. Each `__AdoptStyleSheet` sends
+an ordinary stylesheet request and synchronously mounts its response before
+returning. The fetcher owns pending loads, caching and failures; core holds only
+that call's response receiver. An unfinished request parks MTS until completion
+or view cancellation; it runs no JS jobs or sibling view tasks. The embedder
+supplies text or preparsed styles without exposing that choice to JS. Cache
+ownership and synchronous failures are described in
+[named stylesheet loading and adoption](named-styles-runtime.md).

@@ -179,7 +179,7 @@ const MAX_RENDER_DIMENSION: u32 = 16_384;
 /// dirties the document, and every rebuild takes a new commit id.
 pub(crate) type ComposeKey = (u64, u64);
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum EngineError {
     #[error("the view is not ready")]
@@ -208,7 +208,7 @@ pub enum EngineError {
 /// A view construction or startup failure. Construction reports target and
 /// attachment errors directly; loading and boot report through
 /// [`EngineEvent::StartupFailed`] on the returned view.
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum LynxViewError {
     #[error(transparent)]
@@ -768,6 +768,11 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
                         self.state = ViewState::Ready;
                     }
                     events.push(event);
+                }
+                ViewNotice::PreloadSource(request) => {
+                    if self.state != ViewState::Failed && !self.cancel.is_cancelled() {
+                        self.fetcher.preload_source(request);
+                    }
                 }
                 ViewNotice::RequestImages(sources) => image_requests.extend(sources),
                 // A view that failed or was released asks its host for

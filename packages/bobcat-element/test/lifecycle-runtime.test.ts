@@ -16,6 +16,8 @@ rstest.mockRequire("bobcat:cross-thread-context", () => crossThreadContext);
 rstest.mockRequire("bobcat:worker", () => ({}));
 const notifyReady = rstest.fn();
 const reportStartupFailure = rstest.fn();
+const preloadStyleSheet = rstest.fn();
+const adoptStyleSheet = rstest.fn();
 const reportedErrors = rstest.fn();
 const consoleMessages = rstest.fn();
 // The runtime reads the view's page data as it evaluates; this view has none.
@@ -23,6 +25,7 @@ rstest.mockRequire("bobcat-internal:host", () => ({
   notifyReady, reportStartupFailure,
   reportScriptError: reportedErrors,
   logScriptMessage: consoleMessages,
+  preloadStyleSheet, adoptStyleSheet,
   initData: () => undefined,
   globalProps: () => undefined,
 }));
@@ -72,6 +75,7 @@ const worker = Object.assign(new eventTarget.EventTarget(), {
 
 beforeAll(async () => {
   mts = await import("../src/main-thread-runtime.ts");
+  mts.__BobcatInitEntry("https://example.test/page/main.js?version=2#entry");
   scope.emptyLepusMethod = () => undefined;
   scope.postMessage = (message: unknown) => {
     toMain.push(JSON.parse(JSON.stringify([message]))[0]);
@@ -100,6 +104,41 @@ async function deliverToMain() {
 }
 
 describe("MTS/BTS lifecycle runtime", () => {
+  it("resolves the card alias to stylesheet URLs and keeps opaque handles", () => {
+    expect(mts.__Card__).toBe("https://example.test/page/main.js?version=2#entry");
+    const first = mts.__LoadStyleSheet('CSS', '__Card__');
+    const second = mts.__LoadStyleSheet('CSS', mts.__Card__);
+    expect(preloadStyleSheet.mock.calls).toEqual([
+      ['https://example.test/page/main.js/index.css?version=2#entry'],
+      ['https://example.test/page/main.js/index.css?version=2#entry'],
+    ]);
+    expect(first).not.toBe(second);
+    expect(mts.__AdoptStyleSheet(first)).toBeNull();
+    expect(mts.__AdoptStyleSheet(first)).toBeNull();
+    expect(adoptStyleSheet.mock.calls).toEqual([
+      ['https://example.test/page/main.js/index.css?version=2#entry'],
+      ['https://example.test/page/main.js/index.css?version=2#entry'],
+    ]);
+    expect(() => mts.__AdoptStyleSheet({})).toThrow();
+    expect(() => Reflect.apply(mts.__LoadStyleSheet, undefined, ['CSS'])).toThrow();
+  });
+
+  it("passes external and escaped stylesheet URLs to the same loader", () => {
+    preloadStyleSheet.mockClear();
+    mts.__LoadStyleSheet('CSS', 'https://cdn.test/component.bundle?rev=3');
+    mts.__LoadStyleSheet('A &/中', './component.bundle#entry');
+    expect(preloadStyleSheet.mock.calls).toEqual([
+      ['https://cdn.test/component.bundle/index.css?rev=3'],
+      ['./component.bundle/A%20%26%2F%E4%B8%AD/index.css#entry'],
+    ]);
+  });
+
+  it("throws a load failure from adopt in the same call", () => {
+    const handle = mts.__LoadStyleSheet('CSS', '__Card__');
+    adoptStyleSheet.mockImplementationOnce(() => { throw Error('CSS unavailable'); });
+    expect(() => mts.__AdoptStyleSheet(handle)).toThrow('CSS unavailable');
+  });
+
   it("loads only a named local MTS chunk and re-evaluates it on every request", () => {
     const evaluate = rstest.fn(source => {
       if (source === "throw") throw Error("chunk failure");
@@ -110,7 +149,8 @@ describe("MTS/BTS lifecycle runtime", () => {
     expect(evaluate).not.toHaveBeenCalled();
     expect(mts.__LoadLepusChunk("worklet", {})).toBe(true);
     expect(mts.__LoadLepusChunk("worklet", {dynamicComponentEntry: "__Card__"})).toBe(true);
-    expect(evaluate.mock.calls).toEqual([["worklet bytes"], ["worklet bytes"]]);
+    expect(mts.__LoadLepusChunk("worklet", {dynamicComponentEntry: mts.__Card__})).toBe(true);
+    expect(evaluate.mock.calls).toEqual([["worklet bytes"], ["worklet bytes"], ["worklet bytes"]]);
     expect(mts.__LoadLepusChunk("bad", {})).toBe(true);
     expect(reportedErrors).toHaveBeenLastCalledWith("error", expect.stringContaining("chunk failure"));
   });

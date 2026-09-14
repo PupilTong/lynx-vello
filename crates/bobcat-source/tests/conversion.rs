@@ -20,6 +20,43 @@ const EMPTY_ROOT_LEPUS: &[u8] = &[
     128, 128, 128, 144, 128, 128, 128, 128, 128, 1,
 ];
 
+#[cfg(not(target_arch = "wasm32"))]
+fn web_page(native: &[u8], entry: &str) -> Vec<u8> {
+    let mut bytes = convert(native).unwrap();
+    let mut scripts = bobcat_source::web::decode(&bytes).unwrap().lepus_code;
+    let root = scripts.remove(entry).unwrap();
+    scripts.insert("root".to_owned(), root);
+    let mut payload = Vec::new();
+    u32_value(&mut payload, scripts.len());
+    for (name, source) in scripts {
+        string(&mut payload, &name);
+        string(&mut payload, &source);
+    }
+    let mut offset = 12;
+    loop {
+        let tag = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+        let len = u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap()) as usize;
+        if tag == bobcat_source::web::SectionLabel::LepusCode as u32 {
+            bytes[offset + 4..offset + 8]
+                .copy_from_slice(&u32::try_from(payload.len()).unwrap().to_le_bytes());
+            bytes.splice(offset + 8..offset + 8 + len, payload);
+            return bytes;
+        }
+        offset += 8 + len;
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn default_page(native: &[u8], web: bool) -> bobcat_source::PageSource {
+    let input = url::Url::parse("app:///page.bundle").unwrap();
+    if web {
+        bobcat_source::PageSource::from_bytes(&input, &web_page(native, "entry__main-thread"))
+    } else {
+        bobcat_source::PageSource::from_native_bundle(&input, native, "entry__main-thread")
+    }
+    .unwrap()
+}
+
 #[test]
 fn native_boolean_flags_keep_their_types_through_web_conversion() {
     for key in ["enableQueryComponentSync", "enableJSDataProcessor"] {
@@ -636,6 +673,80 @@ async fn named_lepus_chunks_load_on_demand_in_the_selected_entry_scope() {
                 bobcat_core::EngineEvent::StartupFailed(error) => panic!("{error}"),
                 bobcat_core::EngineEvent::ScriptReported { message, .. } => panic!("{message}"),
                 _ => {}
+            }
+        }
+    }
+}
+
+// Pixel readback through Painter::capture is a native-only integration.
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn named_css_is_loaded_by_url_after_native_web_conversion() {
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use bobcat_core::{DrawTarget, EngineEvent, LynxGroup, NoWakeup, Painter, StyleThreads};
+    use bobcat_resources::{Resources, ResourcesConfig};
+
+    let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Sequential)
+        .await
+        .unwrap();
+    for name in ["CSS", "A &/中"] {
+        let main = format!(
+            r"
+            const page = __CreatePage();
+            const box = __CreateView(0);
+            __SetClasses(box, 'box');
+            __SetInlineStyles(box, 'width:20px;height:20px');
+            __AppendElement(page, box);
+            const first = __LoadStyleSheet('{name}', '__Card__');
+            const second = __LoadStyleSheet('{name}', __Card__);
+            if (first === second) throw Error('stylesheet handles were reused');
+            __AdoptStyleSheet(first);
+            __AdoptStyleSheet(first);
+        "
+        );
+        let native = native_bundle(vec![custom_section(vec![
+            CustomSection::source("entry__main-thread", &main),
+            CustomSection::css(name, &css_fragment()),
+        ])]);
+        for web in [false, true] {
+            let page = default_page(&native, web);
+            let mut sources = page.view_sources();
+            // Isolate explicit named-sheet loading from ordinary boot styles.
+            sources.style_sheets.clear();
+            let resources = Resources::new(ResourcesConfig::default(), || {});
+            page.register_with(&resources);
+            let mut view = group
+                .create_lynx_view(32.0, 24.0, 1.0, resources.builder(), sources)
+                .unwrap();
+            let mut painter = Painter::new(DrawTarget::Offscreen, 32.0, 24.0, 1.0)
+                .await
+                .unwrap();
+            painter.attach(&view).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(20);
+            let mut booted = false;
+            loop {
+                for event in view.pump() {
+                    match event {
+                        EngineEvent::ScriptFinished => booted = true,
+                        EngineEvent::StartupFailed(error) => panic!("{error}"),
+                        EngineEvent::ScriptReported { message, .. } => panic!("{message}"),
+                        _ => {}
+                    }
+                }
+                if booted {
+                    let screenshot = painter.capture().unwrap();
+                    let offset = (5 * screenshot.size.width as usize + 5) * 4;
+                    if screenshot.pixels[offset..offset + 4] == [0x12, 0x34, 0x56, 255] {
+                        break;
+                    }
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "named CSS never reached the painted view: {name}, web={web}"
+                );
+                tokio::time::sleep(Duration::from_millis(1)).await;
             }
         }
     }

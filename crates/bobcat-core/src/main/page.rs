@@ -84,7 +84,9 @@
 //! first kind per engine thread, one of the second per live view and per live
 //! worker, one of the third per live realm, one of the fourth per worker that
 //! has not booted yet. `link.rs`'s `block_on_deadline` is a hand-rolled poll
-//! loop rather than a select.
+//! loop rather than a select. Synchronous stylesheet adoption uses `link::block_on`
+//! to wait only for its preload response or cancellation; it does not drive this
+//! thread's tasks or JavaScript jobs while waiting.
 
 use std::cell::{Cell, RefCell};
 use std::future::Future;
