@@ -118,8 +118,8 @@ pub(crate) struct WorkerStart {
     pub(crate) events: mpsc::UnboundedSender<WorkerEvent>,
     /// This worker's end signal, independent of its creating view's token.
     pub(crate) token: CancellationToken,
-    /// Imported text reaches the view resource host under this worker's cancellation scope.
-    pub(crate) sources: crate::link::SourceRequester,
+    /// Sources and frame demand reach the host directly, under this worker's lifetime.
+    pub(crate) sources: crate::link::HostOutbox,
 }
 
 /// Everything the worker thread is ever told.
@@ -130,6 +130,8 @@ pub(crate) enum WorkerCommand {
 
 /// Everything one worker in particular is ever told.
 pub(crate) enum WorkerMessage {
+    /// A display opportunity from the painter, handled even while entry awaits.
+    Vsync(f64),
     /// One JSON-encoded message for the worker's realm.
     Post(String),
     /// Explicit termination or GC of the MTS Worker object: end it between

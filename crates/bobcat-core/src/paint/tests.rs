@@ -23,6 +23,69 @@ fn detached_waking<R: EventRequester>(requester: Arc<R>) -> (Painter, FarEnd) {
 }
 
 #[test]
+fn script_frame_demand_waits_for_host_vsync_even_before_the_first_commit() {
+    let (mut painter, mut main) = detached();
+    main.seat.frame_demand.borrow_mut().set(None, true);
+    assert!(painter.is_animating());
+    painter.pump().unwrap();
+    painter.begin_frame(1.0, true);
+    assert!(matches!(
+        main.commands.try_recv().unwrap(),
+        ToMain::BeginFrame { .. }
+    ));
+    assert!(main.commands.try_recv().is_err());
+
+    painter.vsync();
+    assert!(matches!(
+        main.commands.try_recv().unwrap(),
+        ToMain::Vsync(_)
+    ));
+    assert!(!painter.is_animating());
+
+    main.seat.frame_demand.borrow_mut().set(None, true);
+    main.seat.frame_demand.borrow_mut().set(None, false);
+    assert!(
+        !painter.is_animating(),
+        "cancellation withdraws the vsync request"
+    );
+    painter.vsync();
+    assert!(main.commands.try_recv().is_err());
+}
+
+#[test]
+fn worker_frame_demand_notifies_only_that_worker_and_does_not_keep_it_alive() {
+    let (mut painter, mut main) = detached();
+    let (messages, mut worker) = tokio::sync::mpsc::unbounded_channel();
+    let key = crate::background::WorkerKey::new(1);
+    main.seat
+        .frame_demand
+        .borrow_mut()
+        .register_worker(key, messages.downgrade());
+    main.seat.frame_demand.borrow_mut().set(Some(key), true);
+    assert!(painter.is_animating());
+    painter.vsync();
+    assert!(matches!(
+        worker.try_recv().unwrap(),
+        crate::background::WorkerMessage::Vsync(_)
+    ));
+    assert!(
+        main.commands.try_recv().is_err(),
+        "BTS rAF needs no MTS message"
+    );
+    assert!(!painter.is_animating());
+    main.seat.frame_demand.borrow_mut().set(Some(key), true);
+    drop(messages);
+    assert!(
+        !painter.is_animating(),
+        "frame demand does not keep a Worker handle alive"
+    );
+    assert!(matches!(
+        worker.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
+    ));
+}
+
+#[test]
 fn frame_size_applies_the_device_scale_once() {
     let size = FrameSize::for_viewport(393.0, 727.0, 2.0).unwrap();
     assert_eq!((size.width, size.height), (786, 1_454));

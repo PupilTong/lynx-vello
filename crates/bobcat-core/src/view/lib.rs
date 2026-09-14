@@ -13,6 +13,7 @@
 //! painter can outlive its view. The sibling `paint` and `main` modules hold
 //! those two, and this one holds the handles that join them.
 
+use std::cell::RefCell;
 use std::fmt;
 use std::num::NonZeroUsize;
 use std::rc::Rc;
@@ -591,6 +592,7 @@ impl LynxGroup {
             // are this view's, and the view is the only holder of a strong
             // reference to it.
             seat: Rc::new(ViewSeat {
+                frame_demand: RefCell::default(),
                 commands,
                 images: Rc::clone(&fetcher) as Rc<dyn FrameImages>,
             }),
@@ -823,6 +825,17 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
         let mut image_requests = Vec::new();
         while let Ok(notice) = self.notices.try_recv() {
             match notice {
+                ViewNotice::WorkerCreated { key, messages } => {
+                    self.seat
+                        .frame_demand
+                        .borrow_mut()
+                        .register_worker(key, messages);
+                }
+                ViewNotice::ScriptFrameDemand { worker, pending } => {
+                    if self.state != ViewState::Failed && !self.cancel.is_cancelled() {
+                        self.seat.frame_demand.borrow_mut().set(worker, pending);
+                    }
+                }
                 ViewNotice::Engine(event) => {
                     // A fatal event ends the view the same way its release
                     // does, and by the same signal: the token this view was
@@ -833,6 +846,7 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
                         EngineEvent::StartupFailed(_) | EngineEvent::ScriptRunError(_)
                     ) {
                         self.state = ViewState::Failed;
+                        *self.seat.frame_demand.borrow_mut() = crate::link::FrameDemand::default();
                         self.cancel.cancel();
                     }
                     if matches!(event, EngineEvent::ScriptFinished) {

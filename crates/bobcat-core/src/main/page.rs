@@ -441,6 +441,11 @@ impl Page {
                 height,
                 device_pixel_ratio,
             } => runtime.apply_resize(width, height, device_pixel_ratio),
+            ToMain::Vsync(milliseconds) => {
+                if let Err(error) = runtime.vsync(js, milliseconds) {
+                    self.fail(EngineEvent::ScriptRunError(error.into_script_error()));
+                }
+            }
             ToMain::BeginFrame { now, seq } => {
                 runtime.begin_frame(now);
                 let pending = self.pending_begin_frame.get().unwrap_or(0);
@@ -489,7 +494,7 @@ impl Page {
                     ToMain::BeginFrame { seq, .. } => {
                         acknowledged = Some(seq.max(acknowledged.unwrap_or(0)));
                     }
-                    ToMain::DispatchEvent { .. } | ToMain::Refill { .. } => {}
+                    ToMain::Vsync(_) | ToMain::DispatchEvent { .. } | ToMain::Refill { .. } => {}
                     #[cfg(test)]
                     ToMain::Probe(_) => {}
                     #[cfg(test)]

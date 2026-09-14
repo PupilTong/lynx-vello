@@ -1,5 +1,6 @@
 //! Real `QuickJS` on both sides, with the test acting as the resource-owning
 //! embedder. No GPU is needed to verify contexts, transport and teardown.
+use std::collections::VecDeque;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -23,6 +24,8 @@ struct Pair {
     /// The host's end of the view's link: the test plays the embedder, so it
     /// is what answers every source request.
     view: DetachedView,
+    frame_demand: crate::link::FrameDemand,
+    deferred_notices: VecDeque<ViewNotice>,
     /// The host's view cancellation signal. Worker handles and their sources
     /// have independent lifetimes, which these tests exercise explicitly.
     cancel: tokio_util::sync::CancellationToken,
@@ -99,6 +102,8 @@ impl Pair {
             js,
             events,
             view,
+            frame_demand: crate::link::FrameDemand::default(),
+            deferred_notices: VecDeque::new(),
             cancel,
             home: Some(home),
         }
@@ -115,8 +120,9 @@ impl Pair {
     /// The next source request the realm made, which for these tests is
     /// always a worker script.
     fn source(&mut self) -> SourceCompletion {
+        self.pump_host();
         loop {
-            let notice = self.view.notices.try_recv().expect("source requested");
+            let notice = self.deferred_notices.pop_front().expect("source requested");
             if let ViewNotice::RequestSource {
                 request,
                 completion,
@@ -173,12 +179,17 @@ impl Pair {
     }
 
     /// Everything the realm has said to its host so far.
+    fn pump_host(&mut self) {
+        collect_host_notices(
+            &mut self.frame_demand,
+            &mut self.view.notices,
+            &mut self.deferred_notices,
+        );
+    }
+
     fn notices(&mut self) -> Vec<ViewNotice> {
-        let mut notices = Vec::new();
-        while let Ok(notice) = self.view.notices.try_recv() {
-            notices.push(notice);
-        }
-        notices
+        self.pump_host();
+        self.deferred_notices.drain(..).collect()
     }
 
     fn check(&mut self, source: &str) {
@@ -225,6 +236,20 @@ impl Pair {
             events.push(event);
         }
         events
+    }
+}
+
+fn collect_host_notices(
+    demand: &mut crate::link::FrameDemand,
+    incoming: &mut mpsc::UnboundedReceiver<ViewNotice>,
+    other: &mut VecDeque<ViewNotice>,
+) {
+    while let Ok(notice) = incoming.try_recv() {
+        match notice {
+            ViewNotice::WorkerCreated { key, messages } => demand.register_worker(key, messages),
+            ViewNotice::ScriptFrameDemand { worker, pending } => demand.set(worker, pending),
+            notice => other.push_back(notice),
+        }
     }
 }
 
@@ -1872,4 +1897,202 @@ fn ordinary_worker_does_not_acquire_app_teardown_by_importing_bts_or_using_its_n
         WorkerPayload::Message(ref value) if value == r#"["ready"]"#));
     pair.check("worker.terminate();");
     assert!(pair.finish().is_empty());
+}
+
+impl Pair {
+    fn frame(&mut self, milliseconds: f64) {
+        self.pump_host();
+        let (commands, mut incoming) = mpsc::unbounded_channel();
+        self.frame_demand.dispatch(milliseconds, &commands);
+        while let Ok(crate::link::ToMain::Vsync(milliseconds)) = incoming.try_recv() {
+            self.runtime
+                .as_mut()
+                .unwrap()
+                .vsync(&mut self.js, milliseconds)
+                .unwrap();
+        }
+    }
+}
+
+#[test]
+fn vsync_can_resume_mts_and_bts_entries_awaiting_their_first_frame() {
+    let mut pair = Pair::with_background(
+        "globalThis.firstFrame = await new Promise(resolve => lynx.requestAnimationFrame(resolve));",
+        Some(
+            r"
+            const time = await new Promise(resolve => {
+                lynx.requestAnimationFrame(resolve);
+                globalThis.postMessage('waiting for vsync');
+            });
+            if (time !== 500) throw Error('BTS frame timestamp');
+        ",
+        ),
+    );
+    // The boot module starts BTS only after the MTS entry finishes.
+    pair.frame(250.0);
+    pair.check("if (globalThis.firstFrame !== 250) throw Error('MTS frame timestamp');");
+    let event = pair.next_event().unwrap();
+    assert!(
+        matches!(event.payload, WorkerPayload::Message(ref value) if value == "[\"waiting for vsync\"]")
+    );
+    pair.frame(500.0);
+    pair.acknowledge_background();
+    assert!(worker_failures(pair.notices()).is_empty());
+}
+
+#[test]
+fn animation_callbacks_use_display_timestamps_and_defer_nested_requests() {
+    let mut pair = Pair::with_background(
+        "globalThis.frames = []; lynx.getJSContext().addEventListener('frame', e => frames.push(e.data));",
+        Some(
+            r"
+            const send = (label, time) => lynx.getCoreContext().dispatchEvent({type:'frame', data:[label,time]});
+            lynx.requestAnimationFrame(time => {
+                send('first', time);
+                lynx.cancelAnimationFrame(cancelled);
+                lynx.requestAnimationFrame(time => send('nested', time));
+            });
+            const cancelled = lynx.requestAnimationFrame(() => {throw Error('cancelled callback ran');});
+            lynx.requestAnimationFrame(time => send('third', time));
+        ",
+        ),
+    );
+    pair.acknowledge_background();
+    pair.frame(1250.0);
+    pair.deliver();
+    pair.deliver();
+    // Wait until the callback's nested request is armed, independently of
+    // delivery of the console/Context messages it posted earlier.
+    let deadline = ClockInstant::now() + PATIENCE;
+    loop {
+        pair.pump_host();
+        if pair.frame_demand.is_pending() {
+            break;
+        }
+        assert!(
+            ClockInstant::now() < deadline,
+            "nested frame request was not armed"
+        );
+        std::thread::yield_now();
+    }
+    pair.check(r#"if (JSON.stringify(frames) !== '[["first",1250],["third",1250]]') throw Error(JSON.stringify(frames));"#);
+    pair.frame(1500.0);
+    pair.deliver();
+    pair.check(r#"if (JSON.stringify(frames) !== '[["first",1250],["third",1250],["nested",1500]]') throw Error(JSON.stringify(frames));"#);
+    assert!(worker_failures(pair.notices()).is_empty());
+}
+
+#[test]
+fn bts_animation_frames_continue_while_an_mts_callback_is_blocked() {
+    let mut pair = Pair::unbooted(Some(
+        r"
+        function frame(time) {
+            lynx.requestAnimationFrame(frame);
+            globalThis.postMessage({frame:time});
+        }
+        lynx.requestAnimationFrame(frame);
+    ",
+    ));
+    let (blocked, waiting) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    pair.runtime
+        .as_mut()
+        .unwrap()
+        .engine
+        .register_host_module_function(
+            &mut pair.js,
+            "test:gate",
+            "block",
+            0,
+            Box::new(move |_| {
+                blocked.send(()).unwrap();
+                released
+                    .recv_timeout(PATIENCE)
+                    .map_err(|error| error.to_string())?;
+                Ok(HostValue::Undefined)
+            }),
+        )
+        .unwrap();
+    pair.boot("import {block} from 'test:gate'; lynx.requestAnimationFrame(() => block());")
+        .unwrap();
+    pair.acknowledge_background();
+    let mut events = std::mem::replace(&mut pair.events, mpsc::unbounded_channel().1);
+    pair.pump_host();
+    let (main_commands, mut incoming) = mpsc::unbounded_channel();
+    pair.frame_demand.dispatch(1000.0, &main_commands);
+    let mut frames = std::mem::take(&mut pair.frame_demand);
+    let mut notices = std::mem::replace(&mut pair.view.notices, mpsc::unbounded_channel().1);
+    let mut other = VecDeque::new();
+    let observer = std::thread::spawn(move || {
+        waiting.recv_timeout(PATIENCE).unwrap();
+        for milliseconds in [1000, 2000, 3000] {
+            if milliseconds != 1000 {
+                collect_host_notices(&mut frames, &mut notices, &mut other);
+                frames.dispatch(f64::from(milliseconds), &main_commands);
+            }
+            let event = block_on_deadline(events.recv(), ClockInstant::now() + PATIENCE)
+                .flatten()
+                .expect("BTS advances while MTS is blocked");
+            let WorkerPayload::Message(message) = event.payload else {
+                panic!("unexpected worker event");
+            };
+            let value: serde_json::Value = serde_json::from_str(&message).unwrap();
+            assert_eq!(value[0]["frame"], milliseconds);
+        }
+        release.send(()).unwrap();
+        (events, frames, notices, other)
+    });
+    let crate::link::ToMain::Vsync(milliseconds) = incoming.try_recv().unwrap() else {
+        panic!("MTS vsync");
+    };
+    pair.runtime
+        .as_mut()
+        .unwrap()
+        .vsync(&mut pair.js, milliseconds)
+        .unwrap();
+    let (events, frames, notices, other) = observer.join().unwrap();
+    pair.events = events;
+    pair.frame_demand = frames;
+    pair.view.notices = notices;
+    pair.deferred_notices.extend(other);
+    assert!(worker_failures(pair.notices()).is_empty());
+}
+
+#[test]
+fn mts_animation_frames_continue_while_a_bts_callback_is_busy() {
+    let mut pair = Pair::with_background(
+        r"globalThis.frames = []; function frame(time) {
+            frames.push(time); lynx.requestAnimationFrame(frame);
+        } lynx.requestAnimationFrame(frame);",
+        Some(
+            r"
+            lynx.requestAnimationFrame(() => {
+                globalThis.postMessage('busy');
+                const until = Date.now() + 4000;
+                while (Date.now() < until) {}
+                globalThis.postMessage('finished');
+            });
+        ",
+        ),
+    );
+    pair.acknowledge_background();
+    pair.frame(1000.0);
+    let event = pair.next_event().unwrap();
+    assert!(matches!(event.payload, WorkerPayload::Message(ref value) if value == "[\"busy\"]"));
+    pair.frame(2000.0);
+    pair.frame(3000.0);
+    pair.check(
+        r"if (JSON.stringify(frames) !== '[1000,2000,3000]') throw Error(JSON.stringify(frames));",
+    );
+    assert!(
+        matches!(
+            pair.events.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ),
+        "MTS frames finish before the long BTS callback returns"
+    );
+    let event = pair.next_event().unwrap();
+    assert!(
+        matches!(event.payload, WorkerPayload::Message(ref value) if value == "[\"finished\"]")
+    );
 }

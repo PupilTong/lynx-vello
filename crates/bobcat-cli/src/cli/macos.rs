@@ -51,6 +51,7 @@ use crate::cli::vsync::DisplayLink;
 enum UserEvent {
     Command(Command),
     Pump,
+    Vsync,
 }
 
 const MOUSE_POINTER_ID: u32 = u32::MAX;
@@ -236,7 +237,9 @@ impl MacApplication {
         // every commit, it just cannot pace an animation itself.
         self.vsync = window.current_monitor().and_then(|monitor| {
             let requester = Arc::clone(&self.event_requester);
-            DisplayLink::new(monitor.native_id(), move || requester.request_event())
+            DisplayLink::new(monitor.native_id(), move || {
+                let _ = requester.0.send_event(UserEvent::Vsync);
+            })
         });
         if self.vsync.is_none() {
             eprintln!("bobcat: no display link for this window; animations will not be paced");
@@ -513,6 +516,11 @@ impl ApplicationHandler<UserEvent> for MacApplication {
             // The wakeup itself. Answering it is `about_to_wait`'s job; this
             // arm exists only because a wakeup had to be shaped as an event.
             UserEvent::Pump => {}
+            UserEvent::Vsync => {
+                if let Some(painter) = self.painter.as_mut() {
+                    painter.vsync();
+                }
+            }
         }
     }
 

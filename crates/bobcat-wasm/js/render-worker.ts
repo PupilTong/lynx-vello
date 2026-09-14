@@ -91,12 +91,13 @@ function nextDisplayFrame(): Promise<void> {
 // display's rate, and the engine names no interval for it. A realm timer is
 // not this loop's to wait out either: the engine waits its own out and arms
 // this signal when the round it ran commits.
-async function nextEngineWakeup(): Promise<void> {
+async function nextEngineWakeup(): Promise<boolean> {
   if (renderer!.owesFrame()) {
     await nextDisplayFrame()
-  } else {
-    await renderer!.waitForEngineEvent()
+    return true
   }
+  await renderer!.waitForEngineEvent()
+  return false
 }
 
 async function initialize(message: InitMessage): Promise<void> {
@@ -216,7 +217,8 @@ async function readBoundedBytes(
 
 async function waitForScriptCompletion(): Promise<void> {
   while (running && renderer !== undefined && !renderer.pump()) {
-    await nextEngineWakeup()
+    const vsync = await nextEngineWakeup()
+    if (vsync && running) renderer?.vsync()
   }
   if (!running || renderer === undefined) {
     throw new Error('Bobcat was disposed before the script completed')
@@ -229,8 +231,9 @@ async function servePage(generation: number): Promise<void> {
   const isCurrent = () =>
     running && renderer !== undefined && generation === engineEventGeneration
   while (isCurrent()) {
-    await nextEngineWakeup()
+    const vsync = await nextEngineWakeup()
     if (isCurrent()) {
+      if (vsync) renderer!.vsync()
       renderer!.pump()
     }
   }

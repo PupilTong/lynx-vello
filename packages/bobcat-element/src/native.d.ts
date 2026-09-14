@@ -114,6 +114,7 @@ interface BobcatWorkerNative {
 declare module "bobcat-internal:host" {
   /** Initial processor name, handed over once as a plain string. */
   export function initialProcessor(): string | undefined;
+  export function requestScriptFrame(pending: boolean): void;
   export function notifyReady(): void;
   export function reportStartupFailure(message: string): void;
   export function preloadStyleSheet(url: string): void;

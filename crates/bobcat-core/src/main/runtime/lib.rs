@@ -579,6 +579,14 @@ impl MainThreadRuntime {
             .map_err(|error| MainThreadError::from_engine("creating the script realm", error))?;
         let events = Rc::new(EventState::new(outbox.clone()));
         let timers = Rc::new(TimerState::new());
+        let frame_outbox = outbox.clone();
+        crate::script_frames::install(&mut engine, js_runtime, move |pending| {
+            frame_outbox.notify(crate::link::ViewNotice::ScriptFrameDemand {
+                worker: None,
+                pending,
+            });
+        })
+        .map_err(|error| MainThreadError::from_engine("installing animation frames", error))?;
         engine.enable_module_loading();
         let slot = install_bobcat(
             &mut engine,
@@ -723,6 +731,22 @@ impl MainThreadRuntime {
             .borrow_mut()
             .document_mut()
             .advance_animations(now);
+    }
+
+    pub(crate) fn vsync(
+        &mut self,
+        js: &mut ScriptRuntime,
+        milliseconds: f64,
+    ) -> Result<(), MainThreadError> {
+        self.engine
+            .call_module_export(
+                js,
+                RUNTIME_MODULE_SPECIFIER,
+                "__BobcatBeginFrame",
+                &[HostArgument::Number(milliseconds)],
+            )
+            .map(|_| ())
+            .map_err(|error| MainThreadError::from_engine("delivering animation callbacks", error))
     }
 
     /// Writes the painting side's scroll offsets into the document and

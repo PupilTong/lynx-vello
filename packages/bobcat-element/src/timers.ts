@@ -29,6 +29,13 @@ import { clearTimer, setTimer } from "bobcat-internal:host";
 // embedder and leaves the realm usable, which is what the standard's
 // "report the exception" step amounts to here.
 
+export interface TimerGlobals {
+  setTimeout(handler: unknown, delay?: unknown, ...args: unknown[]): number;
+  setInterval(handler: unknown, delay?: unknown, ...args: unknown[]): number;
+  clearTimeout(id: unknown): undefined;
+  clearInterval(id: unknown): undefined;
+}
+
 interface ScheduledTimer {
   /** The realm value to call when the timer fires. */
   handler: unknown;

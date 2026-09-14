@@ -5,6 +5,8 @@ import type * as btsRuntime from "../src/background-thread-runtime.ts";
 import type * as mtsRuntime from "../src/main-thread-runtime.ts";
 import type { Worker } from "../src/worker.ts";
 import * as selectorQuery from "../src/selector-query.ts";
+import * as lynxModules from "../src/lynx-modules.ts";
+rstest.mockRequire("bobcat:lynx-modules", () => lynxModules);
 import * as globalEventEmitter from "../src/global-event-emitter.ts";
 rstest.mockRequire("bobcat:global-event-emitter", () => globalEventEmitter);
 rstest.mockRequire("bobcat:selector-query", () => selectorQuery);
@@ -14,6 +16,8 @@ rstest.mockRequire("bobcat:element", () => ({ __BobcatQueryNodes: queryNodes }))
 rstest.mockRequire("bobcat:event-target", () => eventTarget);
 rstest.mockRequire("bobcat:cross-thread-context", () => crossThreadContext);
 rstest.mockRequire("bobcat:worker", () => ({}));
+rstest.mockRequire("bobcat:timers", () => ({}));
+const requestScriptFrame = rstest.fn();
 const notifyReady = rstest.fn();
 const reportStartupFailure = rstest.fn();
 const preloadStyleSheet = rstest.fn();
@@ -22,7 +26,7 @@ const reportedErrors = rstest.fn();
 const consoleMessages = rstest.fn();
 // The runtime reads the view's page data as it evaluates; this view has none.
 rstest.mockRequire("bobcat-internal:host", () => ({
-  notifyReady, reportStartupFailure,
+  notifyReady, reportStartupFailure, requestScriptFrame,
   reportScriptError: reportedErrors,
   logScriptMessage: consoleMessages,
   preloadStyleSheet, adoptStyleSheet,
@@ -162,6 +166,59 @@ describe("MTS/BTS lifecycle runtime", () => {
     expect(reportedErrors).toHaveBeenLastCalledWith("error", expect.stringContaining("chunk failure"));
   });
 
+
+  it("reports a microtask throw before the next job and ignores callback return values", async () => {
+    const then = rstest.fn();
+    const before = toMain.length;
+    bts.queueMicrotask(() => ({then}));
+    bts.queueMicrotask(() => { throw Error("microtask failure"); });
+    bts.queueMicrotask(() => bts.reportError("after microtask"));
+    await Promise.resolve();
+    expect(then).not.toHaveBeenCalled();
+    const reports = toMain.splice(before) as {method:string; message:string}[];
+    expect(reports.map(message => message.method)).toEqual(["reportError", "reportError"]);
+    expect(reports[0]!.message).toContain("microtask failure");
+    expect(reports[1]!.message).toBe("after microtask");
+  });
+
+  it("runs MTS frames with cancellation, nested requests and errors kept on their own frame", () => {
+    requestScriptFrame.mockClear();
+    const calls: [string, number][] = [];
+    let cancelled = 0;
+    mts.lynx.requestAnimationFrame(time => {
+      calls.push(["first", time]);
+      mts.lynx.cancelAnimationFrame(cancelled);
+      mts.lynx.requestAnimationFrame(time => calls.push(["nested", time]));
+      throw undefined;
+    });
+    cancelled = mts.lynx.requestAnimationFrame(() => { throw Error("cancelled callback ran"); });
+    mts.lynx.requestAnimationFrame(time => calls.push(["third", time]));
+    expect(requestScriptFrame.mock.calls).toEqual([[true]]);
+    mts.__BobcatBeginFrame(1250);
+    expect(calls).toEqual([["first", 1250], ["third", 1250]]);
+    expect(reportedErrors).toHaveBeenLastCalledWith("error", "undefined");
+    expect(requestScriptFrame).toHaveBeenLastCalledWith(true);
+    mts.__BobcatBeginFrame(1500);
+    expect(calls).toEqual([["first", 1250], ["third", 1250], ["nested", 1500]]);
+    expect(requestScriptFrame.mock.calls).toEqual([[true], [true]]);
+  });
+
+  it("coalesces each realm's frame demand and withdraws it when the last callback is cancelled", async () => {
+    for (const runtime of [mts, await import("../src/background-thread-runtime.ts")]) {
+      requestScriptFrame.mockClear();
+      const callback = rstest.fn();
+      const first = runtime.lynx.requestAnimationFrame(callback);
+      const last = runtime.lynx.requestAnimationFrame(callback);
+      expect(requestScriptFrame.mock.calls).toEqual([[true]]);
+      runtime.lynx.cancelAnimationFrame(first);
+      expect(requestScriptFrame.mock.calls).toEqual([[true]]);
+      runtime.lynx.cancelAnimationFrame(last);
+      expect(requestScriptFrame.mock.calls).toEqual([[true], [false]]);
+      runtime.__BobcatBeginFrame(1750);
+      expect(callback).not.toHaveBeenCalled();
+      expect(requestScriptFrame.mock.calls).toEqual([[true], [false]]);
+    }
+  });
 
   it("queues Context and publish calls together, then replays each late publish hook", () => {
     const seen: unknown[] = [];

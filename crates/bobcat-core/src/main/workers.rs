@@ -168,7 +168,11 @@ impl WorkerOwner {
         let (messages, incoming) = mpsc::unbounded_channel();
         let token = CancellationToken::new();
         let (script, awaiting) = SourceCompletion::new(token.clone());
-        let sources = self.outbox.source_requester(token.clone());
+        let sources = self.outbox.host_outbox(token.clone());
+        self.outbox.notify(ViewNotice::WorkerCreated {
+            key,
+            messages: messages.downgrade(),
+        });
         self.factory
             .commands
             .send(WorkerCommand::Start(WorkerStart {
