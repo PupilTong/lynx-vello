@@ -16,14 +16,19 @@ the compiler factory ABI; `requireModule` and `loadScript` consume registered
 source only. External bundle loading remains separate work.
 
 `lynx.requestAnimationFrame` and `cancelAnimationFrame` use each realm's own JS
-callback map. The painter publishes display timestamps directly to MTS and the
-BTS worker's event loop; neither loop waits for the other's callbacks. Pending
-demand is counted per realm, missed opportunities coalesce, and a request made
-after an opportunity waits for a later one. Timers and BTS microtask aliases use
-the existing realm timer/job machinery. This follows the independent worker
-rendering steps in [HTML's event-loop processing model](https://html.spec.whatwg.org/multipage/webappapis.html#event-loop-processing-model).
-The existing synchronous offscreen `Painter::tick` still waits for MTS's frame
-acknowledgement; it does not wait for BTS callbacks.
+callback map. A pending callback requests vsync from the painter, whose
+`owes_frame()` tells the host to enable its display callback. Only that callback
+calls `Painter::vsync()`, which answers the outstanding requests with a timestamp.
+MTS handles a `Vsync` command; BTS waits on its own reply. Each calls its runtime
+module to run the JS callbacks, independently of the other event loop. Cancelling
+the last callback drops that realm's reply receiver; the painter removes closed
+requests. A callback requesting another frame waits for another host vsync.
+Ordinary pumping and native animation ticks do not deliver script frames. Timers
+and BTS microtask aliases use the existing realm timer/job machinery. This follows
+the independent worker rendering steps in
+[HTML's event-loop processing model](https://html.spec.whatwg.org/multipage/webappapis.html#event-loop-processing-model).
+Offscreen `Painter::tick` supplies one synthetic vsync before its existing wait
+for MTS's frame acknowledgement; it does not wait for BTS callbacks.
 
 ### Global JS API surface, native module bridge, and lifecycle
 

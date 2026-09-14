@@ -172,7 +172,7 @@ impl WorkerOwner {
         self.factory
             .commands
             .send(WorkerCommand::Start(WorkerStart {
-                script_frames: self.outbox.script_frames.clone(),
+                vsync: self.outbox.vsync.clone(),
                 key,
                 name,
                 script: awaiting,

@@ -23,6 +23,40 @@ fn detached_waking<R: EventRequester>(requester: Arc<R>) -> (Painter, FarEnd) {
 }
 
 #[test]
+fn script_frame_demand_waits_for_host_vsync_even_before_the_first_commit() {
+    let (mut painter, mut main) = detached();
+    let frames = crate::script_frames::AnimationFrames::new(main.outbox.vsync.clone());
+    frames.set(true);
+    assert!(painter.is_animating());
+    painter.pump().unwrap();
+    painter.begin_frame(1.0, true);
+    assert_eq!(
+        frames.take(),
+        None,
+        "ordinary pumping and native animation ticks are not vsync"
+    );
+    assert!(matches!(
+        main.commands.try_recv().unwrap(),
+        ToMain::BeginFrame { .. }
+    ));
+    assert!(main.commands.try_recv().is_err());
+
+    painter.vsync();
+    assert!(frames.take().is_some());
+    assert!(matches!(main.commands.try_recv().unwrap(), ToMain::Vsync));
+    assert!(!painter.is_animating());
+
+    frames.set(true);
+    frames.set(false);
+    assert!(
+        !painter.is_animating(),
+        "cancellation withdraws the vsync request"
+    );
+    painter.vsync();
+    assert!(main.commands.try_recv().is_err());
+}
+
+#[test]
 fn frame_size_applies_the_device_scale_once() {
     let size = FrameSize::for_viewport(393.0, 727.0, 2.0).unwrap();
     assert_eq!((size.width, size.height), (786, 1_454));

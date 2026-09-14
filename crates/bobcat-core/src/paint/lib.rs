@@ -25,6 +25,8 @@ mod event_loop_tests;
 mod tests;
 
 use std::cell::Cell;
+#[cfg(test)]
+use std::cell::RefCell;
 use std::marker::PhantomData;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
@@ -617,9 +619,9 @@ impl Painter {
         let (commands, command_receiver) = mpsc::unbounded_channel();
         let (notices, notice_receiver) = mpsc::unbounded_channel();
         let (frames, frame_receiver) = watch::channel(Published::default());
-        let script_frames = crate::script_frames::ScriptFrames::new(Arc::clone(&requester));
+        let (vsync, requests) = crate::script_frames::VsyncRequests::new(Arc::clone(&requester));
         let seat = Rc::new(ViewSeat {
-            script_frames: script_frames.clone(),
+            vsync: RefCell::new(requests),
             commands,
             images: Rc::new(dom::NoImages),
         });
@@ -638,7 +640,7 @@ impl Painter {
                     // A token of its own: this far end plays the view, and
                     // nothing here is ever released.
                     tokio_util::sync::CancellationToken::new(),
-                    script_frames,
+                    vsync,
                 ),
                 notices: notice_receiver,
             },
@@ -865,7 +867,7 @@ impl Painter {
                 || self
                     .seat
                     .upgrade()
-                    .is_some_and(|seat| seat.script_frames.is_pending())
+                    .is_some_and(|seat| seat.vsync.borrow_mut().is_pending())
                 || self.gesture.needs_frame())
     }
 
@@ -1061,16 +1063,31 @@ impl Painter {
         }
     }
 
+    /// Deliver an actual display vsync reported by the host. Pending requests
+    /// participate in `owes_frame`; ordinary pumps and repaints deliver no rAF.
+    pub fn vsync(&mut self) {
+        self.poll_link();
+        if !self.render_failed && !self.occluded {
+            self.deliver_vsync(self.clock.now_seconds());
+        }
+    }
+
+    fn deliver_vsync(&self, now: f64) {
+        if let Some(seat) = self.seat.upgrade()
+            && seat.vsync.borrow_mut().dispatch(now * 1000.0)
+        {
+            let _ = seat.commands.send(ToMain::Vsync);
+        }
+    }
+
     pub(super) fn begin_frame(&mut self, now: f64, always: bool) -> Option<u64> {
         let main_ticks_due = self
             .frame()
             .is_some_and(|frame| frame.needs_main_ticks() || frame.animation_boundary_passed(now));
         let seat = self.seat.upgrade()?;
-        let script_ticks_due = seat.script_frames.is_pending();
-        if !main_ticks_due && !script_ticks_due && !always {
+        if !main_ticks_due && !always {
             return None;
         }
-        seat.script_frames.tick(now * 1000.0);
         self.begin_frames_sent += 1;
         let seq = self.begin_frames_sent;
         seat.commands
@@ -1265,6 +1282,7 @@ impl Painter {
     }
 
     /// Advances an offscreen painter by one frame, answering whether it drew.
+    /// Supplies one synthetic vsync to outstanding script-frame requests first.
     ///
     /// The one call that blocks this thread on `bobcat-main`, which is why
     /// only an offscreen painter has it — and why a browser painter, which
@@ -1284,6 +1302,7 @@ impl Painter {
         }
         let now = self.clock.now_seconds();
         self.service_gesture_clock(now);
+        self.deliver_vsync(now);
         if let Some(seq) = self.begin_frame(now, true) {
             let _ = self.wait_begin_frame(seq, BEGIN_FRAME_TIMEOUT);
         }

@@ -1875,24 +1875,36 @@ fn ordinary_worker_does_not_acquire_app_teardown_by_importing_bts_or_using_its_n
 }
 
 impl Pair {
-    fn frame_clock(&self) -> crate::script_frames::ScriptFrames {
-        self.runtime
-            .as_ref()
-            .unwrap()
-            .events
-            .outbox
-            .script_frames
-            .clone()
-    }
-
     fn frame(&mut self, milliseconds: f64) {
-        self.frame_clock().tick(milliseconds);
-        self.runtime
-            .as_mut()
-            .unwrap()
-            .begin_frame(&mut self.js, milliseconds / 1000.0)
-            .unwrap();
+        self.view.vsync.dispatch(milliseconds);
+        self.runtime.as_mut().unwrap().vsync(&mut self.js).unwrap();
     }
+}
+
+#[test]
+fn vsync_can_resume_mts_and_bts_entries_awaiting_their_first_frame() {
+    let mut pair = Pair::with_background(
+        "globalThis.firstFrame = await new Promise(resolve => lynx.requestAnimationFrame(resolve));",
+        Some(
+            r"
+            const time = await new Promise(resolve => {
+                lynx.requestAnimationFrame(resolve);
+                globalThis.postMessage('waiting for vsync');
+            });
+            if (time !== 500) throw Error('BTS frame timestamp');
+        ",
+        ),
+    );
+    // The boot module starts BTS only after the MTS entry finishes.
+    pair.frame(250.0);
+    pair.check("if (globalThis.firstFrame !== 250) throw Error('MTS frame timestamp');");
+    let event = pair.next_event().unwrap();
+    assert!(
+        matches!(event.payload, WorkerPayload::Message(ref value) if value == "[\"waiting for vsync\"]")
+    );
+    pair.frame(500.0);
+    pair.acknowledge_background();
+    assert!(worker_failures(pair.notices()).is_empty());
 }
 
 #[test]
@@ -1919,7 +1931,7 @@ fn animation_callbacks_use_display_timestamps_and_defer_nested_requests() {
     // Wait until the callback's nested request is armed, independently of
     // delivery of the console/Context messages it posted earlier.
     let deadline = ClockInstant::now() + PATIENCE;
-    while !pair.frame_clock().is_pending() {
+    while !pair.view.vsync.is_pending() {
         assert!(
             ClockInstant::now() < deadline,
             "nested frame request was not armed"
@@ -1968,12 +1980,16 @@ fn bts_animation_frames_continue_while_an_mts_callback_is_blocked() {
         .unwrap();
     pair.acknowledge_background();
     let mut events = std::mem::replace(&mut pair.events, mpsc::unbounded_channel().1);
-    let frames = pair.frame_clock();
+    pair.view.vsync.dispatch(1000.0);
+    let mut frames = std::mem::replace(
+        &mut pair.view.vsync,
+        crate::script_frames::VsyncRequests::new(Arc::new(NoWakeup)).1,
+    );
     let observer = std::thread::spawn(move || {
         waiting.recv_timeout(PATIENCE).unwrap();
         for milliseconds in [1000, 2000, 3000] {
             if milliseconds != 1000 {
-                frames.tick(f64::from(milliseconds));
+                frames.dispatch(f64::from(milliseconds));
             }
             let event = block_on_deadline(events.recv(), ClockInstant::now() + PATIENCE)
                 .flatten()
@@ -1985,10 +2001,10 @@ fn bts_animation_frames_continue_while_an_mts_callback_is_blocked() {
             assert_eq!(value[0]["frame"], milliseconds);
         }
         release.send(()).unwrap();
-        events
+        (events, frames)
     });
-    pair.frame(1000.0);
-    pair.events = observer.join().unwrap();
+    pair.runtime.as_mut().unwrap().vsync(&mut pair.js).unwrap();
+    (pair.events, pair.view.vsync) = observer.join().unwrap();
     assert!(worker_failures(pair.notices()).is_empty());
 }
 

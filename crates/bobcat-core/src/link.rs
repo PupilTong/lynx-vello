@@ -14,6 +14,7 @@
 //! `BeginFrame` are *observed state* — a painter wants the latest and never
 //! the ones it slept through, which is what [`Published`] on a watch is.
 
+use std::cell::RefCell;
 use std::future::Future;
 use std::pin::pin;
 use std::rc::Rc;
@@ -108,6 +109,7 @@ pub(crate) enum ToMain {
         height: f32,
         device_pixel_ratio: f32,
     },
+    Vsync,
     BeginFrame {
         now: f64,
         seq: u64,
@@ -228,7 +230,7 @@ impl RouterHost for Published {
 /// command channel, which is what ends its task — precedes giving up the
 /// view's share of the host's resource system.
 pub(crate) struct ViewSeat {
-    pub(crate) script_frames: crate::script_frames::ScriptFrames,
+    pub(crate) vsync: RefCell<crate::script_frames::VsyncRequests>,
     /// The view's own strong sender. Closing it is the goodbye that ends the
     /// view's task, which is why the seat dies with the view rather than with
     /// whatever a painter is holding.
@@ -248,7 +250,7 @@ pub(crate) struct ViewSeat {
 /// that costs.
 #[derive(Clone)]
 pub(crate) struct ViewOutbox {
-    pub(crate) script_frames: crate::script_frames::ScriptFrames,
+    pub(crate) vsync: crate::script_frames::VsyncRequester,
     notices: mpsc::UnboundedSender<ViewNotice>,
     /// `Rc` because the sender is the task's and every host closure that
     /// publishes holds a clone of this whole outbox.
@@ -268,10 +270,10 @@ impl ViewOutbox {
         frames: watch::Sender<Published>,
         requester: Arc<dyn EventRequester>,
         token: CancellationToken,
-        script_frames: crate::script_frames::ScriptFrames,
+        vsync: crate::script_frames::VsyncRequester,
     ) -> Self {
         Self {
-            script_frames,
+            vsync,
             notices,
             frames: Rc::new(frames),
             requester,
@@ -427,6 +429,8 @@ impl ViewObserver {
 /// crate's benchmarks, and the tests that drive a document in place rather
 /// than over a group's thread.
 pub(crate) struct DetachedView {
+    #[cfg(test)]
+    pub(crate) vsync: crate::script_frames::VsyncRequests,
     /// Held even where nothing reads it: a closed notice channel would make
     /// the outbox's sends fail, which is not the shape a caller playing the
     /// host is standing in for.
@@ -458,10 +462,14 @@ pub(crate) fn detached_outbox(requester: Arc<dyn EventRequester>) -> (ViewOutbox
     let token = CancellationToken::new();
     let (notices, notice_receiver) = mpsc::unbounded_channel();
     let (frames, frame_receiver) = watch::channel(Published::default());
-    let script_frames = crate::script_frames::ScriptFrames::new(Arc::clone(&requester));
+    let (vsync, requests) = crate::script_frames::VsyncRequests::new(Arc::clone(&requester));
+    #[cfg(not(test))]
+    drop(requests);
     (
-        ViewOutbox::new(notices, frames, requester, token.clone(), script_frames),
+        ViewOutbox::new(notices, frames, requester, token.clone(), vsync),
         DetachedView {
+            #[cfg(test)]
+            vsync: requests,
             notices: notice_receiver,
             published: ViewObserver {
                 frames: frame_receiver,

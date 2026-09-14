@@ -158,7 +158,7 @@ struct WorkerRealm {
     /// teardown because it is written from inside the realm it would tear
     /// down: the task reads it once the call that set it has returned.
     closing: Rc<Cell<bool>>,
-    frames: Rc<crate::script_frames::FrameRequests>,
+    frames: Rc<crate::script_frames::AnimationFrames>,
 }
 
 /// What a worker is, which is what decides whether a message has anywhere to
@@ -198,7 +198,7 @@ struct Worker {
     /// Messages wait for entry evaluation, including imports and top-level
     /// await. Timers and module completions continue to enter the realm.
     boot_finished: watch::Sender<bool>,
-    script_frames: crate::script_frames::ScriptFrames,
+    vsync: crate::script_frames::VsyncRequester,
     /// How many times the epilogue has run, for the test that counts the wakes
     /// a worker answers.
     #[cfg(test)]
@@ -212,7 +212,7 @@ impl Worker {
         events: mpsc::UnboundedSender<WorkerEvent>,
         token: CancellationToken,
         sources: SourceRequester,
-        script_frames: crate::script_frames::ScriptFrames,
+        vsync: crate::script_frames::VsyncRequester,
     ) -> Rc<Self> {
         Rc::new(Self {
             js,
@@ -223,7 +223,7 @@ impl Worker {
             reported: Cell::new(false),
             sources,
             boot_finished: watch::channel(false).0,
-            script_frames,
+            vsync,
             #[cfg(test)]
             epilogues: Cell::new(0),
         })
@@ -383,32 +383,25 @@ impl Worker {
                 // asked for. Each hears the same reason.
                 Err(error) => Err(error.clone()),
                 Ok(js) => {
-                    open_realm(js, self.events.clone(), self.key, &self.script_frames).map(
-                        |mut realm| {
-                            let (source, url) = script;
-                            let source = worker_boot_source(name, &source);
-                            if let Err(error) = realm.engine.start_module(js, &source, &url) {
-                                // Nothing to clean up after: a throw at this module's
-                                // top level rejects through the runtime's shared job
-                                // queue, and what it leaves there is this realm's — it
-                                // waits for this worker rather than reaching the next
-                                // realm to be entered on this runtime.
-                                report(
-                                    &self.events,
-                                    self.key,
-                                    "running the worker's script",
-                                    error,
-                                );
-                            }
-                            // Both under the borrow the script ran under, so a
-                            // sibling's bump between this boot and the clock task's
-                            // first poll is neither lost nor mistaken for this
-                            // worker's own.
-                            let checkpoints = js.checkpoints();
-                            self.lifetime.record_checkpoint(js.checkpoint_generation());
-                            (realm, checkpoints)
-                        },
-                    )
+                    open_realm(js, self.events.clone(), self.key, &self.vsync).map(|mut realm| {
+                        let (source, url) = script;
+                        let source = worker_boot_source(name, &source);
+                        if let Err(error) = realm.engine.start_module(js, &source, &url) {
+                            // Nothing to clean up after: a throw at this module's
+                            // top level rejects through the runtime's shared job
+                            // queue, and what it leaves there is this realm's — it
+                            // waits for this worker rather than reaching the next
+                            // realm to be entered on this runtime.
+                            report(&self.events, self.key, "running the worker's script", error);
+                        }
+                        // Both under the borrow the script ran under, so a
+                        // sibling's bump between this boot and the clock task's
+                        // first poll is neither lost nor mistaken for this
+                        // worker's own.
+                        let checkpoints = js.checkpoints();
+                        self.lifetime.record_checkpoint(js.checkpoint_generation());
+                        (realm, checkpoints)
+                    })
                 }
             }
         };
@@ -481,9 +474,9 @@ async fn serve_worker(js: WorkerRuntime, start: WorkerStart) {
         events,
         token,
         sources,
-        script_frames,
+        vsync,
     } = start;
-    let worker = Worker::new(js, key, events, token, sources, script_frames);
+    let worker = Worker::new(js, key, events, token, sources, vsync);
     worker.spawn(boot_worker(Rc::clone(&worker), name, script, messages));
     worker.run_owner().await;
 }
@@ -553,10 +546,7 @@ async fn boot_worker(
         return;
     }
     worker.spawn(consume_messages(Rc::clone(&worker), messages, queued));
-    worker.spawn(serve_frames(
-        Rc::clone(&worker),
-        worker.script_frames.subscribe(),
-    ));
+    worker.spawn(serve_frames(Rc::clone(&worker)));
     worker.spawn(serve_clock(
         Rc::clone(&worker),
         worker.lifetime.deadlines(),
@@ -566,21 +556,16 @@ async fn boot_worker(
 
 /// Display opportunities reach this event loop directly from the painter.
 /// No MTS task or callback acknowledgement is needed to make progress here.
-async fn serve_frames(
-    worker: Rc<Worker>,
-    mut ticks: watch::Receiver<crate::script_frames::FrameTick>,
-) {
-    while ticks.changed().await.is_ok() {
-        let milliseconds = {
-            let state = worker.state.borrow();
-            let WorkerState::Live(realm) = &*state else {
-                continue;
-            };
-            realm.frames.take()
+async fn serve_frames(worker: Rc<Worker>) {
+    let frames = {
+        let state = worker.state.borrow();
+        let WorkerState::Live(realm) = &*state else {
+            return;
         };
-        let Some(milliseconds) = milliseconds else {
-            continue;
-        };
+        Rc::clone(&realm.frames)
+    };
+    loop {
+        let milliseconds = frames.next().await;
         worker.enter(|realm, js| {
             if let Err(error) = realm.engine.call_module_export(
                 js,
@@ -675,13 +660,13 @@ fn open_realm(
     js_runtime: &mut ScriptRuntime,
     events: mpsc::UnboundedSender<WorkerEvent>,
     key: WorkerKey,
-    clock: &crate::script_frames::ScriptFrames,
+    vsync: &crate::script_frames::VsyncRequester,
 ) -> Result<WorkerRealm, ScriptError> {
     let mut engine = js_runtime
         .create_realm()
         .map_err(|error| context_of("creating the worker realm", error))?;
     engine.enable_module_loading();
-    let frames = clock.requests();
+    let frames = crate::script_frames::AnimationFrames::new(vsync.clone());
     crate::script_frames::install(&mut engine, js_runtime, &frames)?;
     let timers = Rc::new(TimerState::new());
     let closing = Rc::new(Cell::new(false));
@@ -815,7 +800,7 @@ mod tests {
                 std::sync::Arc::new(crate::NoWakeup),
                 CancellationToken::new(),
             ),
-            crate::script_frames::ScriptFrames::new(std::sync::Arc::new(crate::NoWakeup)),
+            crate::script_frames::VsyncRequests::new(std::sync::Arc::new(crate::NoWakeup)).0,
         );
         worker.spawn(boot_worker(
             Rc::clone(&worker),

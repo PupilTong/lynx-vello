@@ -533,7 +533,7 @@ pub(crate) struct MainThreadRuntime {
     slot: Rc<RefCell<DocumentSlot>>,
     events: Rc<EventState>,
     timers: Rc<TimerState>,
-    script_frames: Rc<crate::script_frames::FrameRequests>,
+    script_frames: Rc<crate::script_frames::AnimationFrames>,
     /// Names one dispatch, so the realm can keep one event object alive across
     /// the whole walk instead of minting one per node. Not shared with the
     /// host functions: only [`Self::dispatch_event`] reads or advances it, and
@@ -580,7 +580,7 @@ impl MainThreadRuntime {
             .map_err(|error| MainThreadError::from_engine("creating the script realm", error))?;
         let events = Rc::new(EventState::new(outbox.clone()));
         let timers = Rc::new(TimerState::new());
-        let script_frames = outbox.script_frames.requests();
+        let script_frames = crate::script_frames::AnimationFrames::new(outbox.vsync.clone());
         crate::script_frames::install(&mut engine, js_runtime, &script_frames)
             .map_err(|error| MainThreadError::from_engine("installing animation frames", error))?;
         engine.enable_module_loading();
@@ -722,16 +722,15 @@ impl MainThreadRuntime {
 
     /// Advances the animation timeline to the painting side's clock
     /// reading. Whether anything changed is the next commit's business.
-    pub(crate) fn begin_frame(
-        &mut self,
-        js: &mut ScriptRuntime,
-        now: f64,
-    ) -> Result<(), MainThreadError> {
+    pub(crate) fn begin_frame(&mut self, now: f64) {
         let _ = self
             .slot
             .borrow_mut()
             .document_mut()
             .advance_animations(now);
+    }
+
+    pub(crate) fn vsync(&mut self, js: &mut ScriptRuntime) -> Result<(), MainThreadError> {
         let Some(milliseconds) = self.script_frames.take() else {
             return Ok(());
         };

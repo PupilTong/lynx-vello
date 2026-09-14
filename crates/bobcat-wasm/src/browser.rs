@@ -547,6 +547,13 @@ impl BobcatRenderer {
         self.painter.as_ref().is_some_and(Painter::owes_frame)
     }
 
+    /// Report the browser's display callback separately from engine wakeups.
+    pub fn vsync(&mut self) {
+        if let Some(painter) = self.painter.as_mut() {
+            painter.vsync();
+        }
+    }
+
     /// Route one browser `PointerEvent` into the opaque native view.
     ///
     /// The JavaScript facade owns pointer capture and converts client
