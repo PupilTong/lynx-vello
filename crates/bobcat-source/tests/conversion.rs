@@ -20,6 +20,7 @@ const EMPTY_ROOT_LEPUS: &[u8] = &[
     128, 128, 128, 144, 128, 128, 128, 128, 128, 1,
 ];
 
+#[cfg(not(target_arch = "wasm32"))]
 fn web_page(native: &[u8], entry: &str) -> Vec<u8> {
     let mut bytes = convert(native).unwrap();
     let mut scripts = bobcat_source::web::decode(&bytes).unwrap().lepus_code;
@@ -45,6 +46,7 @@ fn web_page(native: &[u8], entry: &str) -> Vec<u8> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn default_page(native: &[u8], web: bool) -> bobcat_source::PageSource {
     let input = url::Url::parse("app:///page.bundle").unwrap();
     if web {
@@ -676,6 +678,8 @@ async fn named_lepus_chunks_load_on_demand_in_the_selected_entry_scope() {
     }
 }
 
+// Pixel readback through Painter::capture is a native-only integration.
+#[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
 async fn named_css_is_loaded_by_url_after_native_web_conversion() {
     use std::sync::Arc;
