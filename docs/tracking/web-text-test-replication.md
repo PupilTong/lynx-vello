@@ -25,32 +25,56 @@ is therefore scored as a gap.
 | File | Cases | Passing | Gap-ignored |
 | --- | --- | --- | --- |
 | [`crates/hughie/tests/web_text_replication.rs`](../../crates/hughie/tests/web_text_replication.rs) | paragraph algorithm: clamping, cut points, tail fitting, word-break | 9 | 10 |
-| [`crates/bobcat-core/src/main/tree/web_text_replication.rs`](../../crates/bobcat-core/src/main/tree/web_text_replication.rs) | the `<text>` element, its UA sheet and its attributes | 26 | 7 |
-| [`crates/bobcat-core/src/main/runtime/web_text_replication.rs`](../../crates/bobcat-core/src/main/runtime/web_text_replication.rs) | the Element PAPI: content, restyle, truncation, layout events | 13 | 3 |
-| [`crates/dom/tests/web_text_replication.rs`](../../crates/dom/tests/web_text_replication.rs) | relayout, percentage sizing, scroll targets, glyph and atom paint | 10 | 3 |
+| [`crates/bobcat-core/src/main/tree/web_text_replication.rs`](../../crates/bobcat-core/src/main/tree/web_text_replication.rs) | the `<text>` element, its UA sheet and its attributes | 26 | 10 |
+| [`crates/bobcat-core/src/main/runtime/web_text_replication.rs`](../../crates/bobcat-core/src/main/runtime/web_text_replication.rs) | the Element PAPI: content, restyle, truncation, `setNativeProps`, layout events | 13 | 7 |
+| [`crates/dom/tests/web_text_replication.rs`](../../crates/dom/tests/web_text_replication.rs) | relayout, percentage sizing, scroll targets, glyph and atom paint | 10 | 5 |
+| [`crates/dom/tests/web_text_screenshots.rs`](../../crates/dom/tests/web_text_screenshots.rs) | golden screenshots — the originals' own oracle, for the cases whose claim is visual | 10 | 0 |
 | [`crates/bobcat-source/tests/web_text_css_replication.rs`](../../crates/bobcat-source/tests/web_text_css_replication.rs) | text CSS across the `.web.bundle` wire | 9 | 0 |
-| **Total** | | **67** | **23** |
+| **Total** | | **77** | **32** |
 
 A gap-ignored test asserts the `web-core` behavior and is marked
 `#[ignore = "GAP: …"]` naming the cause with a `file:line`. It is a real
 assertion, never weakened — run any file with `-- --ignored` and every one of
-the 23 fails on the assertion its own string names, so no ignore is masking a
+the 32 fails on the assertion its own string names, so no ignore is masking a
 test that would now pass.
+
+### Screenshots
+
+The lynx-stack originals are overwhelmingly Playwright full-page screenshot
+diffs at `maxDiffPixelRatio: 0`. Metric assertions are the right oracle for
+layout but show nothing about what the text *looks* like, so
+`web_text_screenshots.rs` restores the originals' oracle for the ten cases whose
+claim is visual — per-run colour on one line, mixed sizes on one baseline, an
+atomic box drawn inline, a gradient running down real letterforms, a literal
+newline breaking where it is written. Refresh with
+`FLASHBULB_UPDATE_SNAPSHOTS=1 cargo test -p dom --test web_text_screenshots`.
+
+**A golden is committed only where the frame is right.** Where a case renders
+wrongly today it appears here only if the fixture can be built so the defective
+element is absent; a case whose whole frame is wrong gets no test in that file
+at all, because an `#[ignore]`d screenshot test is self-healing —
+`assert_golden` writes a missing PNG and fails only on that first run
+(`crates/flashbulb/src/golden.rs:100-103`), so the next run would pass against a
+golden of the defect. Those visual claims are carried by `#[ignore]`d metric
+siblings instead.
 
 ### Where the originals came from
 
 230 cases were catalogued across `web-elements/tests/web-elements.spec.ts`
 (`x-text`, `x-textarea`, and the text-adjacent `layout`/`scroll-view` cases),
 `web-core-e2e/tests/reactlynx.spec.ts`, `web-core/tests/*`, and the compiled
-cards under `web-tests/dist/`. 85 became the 90 tests above, a few cases
-splitting where they carried independent claims. The remaining 145 are out of
-scope, for the reasons in [Not replicated](#not-replicated).
+cards under `web-tests/dist/`. 85 became the 109 tests above — a case splits
+where it carries independent claims, and a visual case is replicated twice,
+once as a metric and once as a golden. The remaining 145 are out of scope, for
+the reasons in [Not replicated](#not-replicated).
 
 ## What closed since the first assessment
 
 The suite was first written against the branch point 6cac1d42 and scored 55
-passing / 35 gap-ignored. Re-run against 22d9ac1c, 24 commits later, it scores
-**67 / 23**: twelve gaps closed, no regressions.
+passing / 35 gap-ignored. Re-run unchanged against 22d9ac1c, 24 commits later,
+it scored **67 / 23**: twelve gaps closed, no regressions. (The table above
+reads 77 / 32 because a later round added the screenshots and closed the
+coverage holes below; the twelve closures are the engine delta.)
 
 **All twelve trace to one commit**, d19cbea2 *"feat(dom): render element text
 content and migrate raw-text to CSS" (#227)*, in two clauses:
@@ -143,27 +167,40 @@ Each blocks replicas that could not be written at all.
 - `x-text`, `inline-image` and `inline-text` are `web-core`'s *HTML* mappings of
   Lynx tags, not Lynx tags. The PAPI mints `text`, `image` and `raw-text`.
 
-## Coverage holes
+## Coverage holes — closed
 
-Places where the suite reports green on something it does not actually cover.
-These are defects in the tests, not in the engine.
+A re-assessment found four places where the suite reported green on something it
+did not actually cover. All four are now closed; they are recorded because the
+failure mode is easy to reintroduce.
 
-- **Custom `<inline-truncation>` is carried by zero ignored tests.** Worse,
-  `truncation_content_is_skipped_entirely_when_no_maxline_is_declared` passes for
+- **Custom `<inline-truncation>` was carried by zero ignored tests**, and
+  `truncation_content_is_skipped_entirely_when_no_maxline_is_declared` passed for
   a reason `web-core` does not share: `web-core` skips the subtree because the
   block is not in the overflowing-maxline state, whereas here
-  `inline-truncation { display: none }` is unconditional — the test would still
-  pass with the whole feature deleted.
-- **`@font-face` → shaping and `scrollIntoView`** are both open and both carried
-  by zero ignored tests, so `bobcat-source` reports 9/9 green on a category whose
-  downstream half does not exist.
-- **Four-to-five cases are now writable that the suite still declines.** #230
-  implemented `__SetDataset`/`__GetDataset`/`__AddDataset` and a BTS
-  `SelectorQuery` whose `setNativeProps` is serviced by `__BobcatQueryNodes`, so
-  the `text/set-native-props-*` cases can be written against the BTS harness.
-  Still genuinely absent: a direct MTS selector PAPI, `__AddClass`, and any rect
-  field in `nodeFields`, so the geometry half of the SelectorQuery case stays
-  blocked.
+  `inline-truncation { display: none }` is unconditional, so the test would still
+  have passed with the whole feature deleted. That negative case is kept and now
+  says so; its **positive twin** — the same paragraph with a `text-maxline` it
+  overflows, where the content must be laid in at the clamp — is what pins the
+  feature, and fails today. Three more replicas carry the same wiring gap at the
+  tree layer and one at the dom layer.
+- **`@font-face` → shaping** is now carried by an ignored test in the dom file,
+  and the `bobcat-source` module doc states that its nine green tests cover the
+  wire and lowering only.
+- **`scrollIntoView` genuinely cannot be carried by a test.** There is no entry
+  point in `crates/dom/src/scroll/`, so a test could only re-implement CSSOM-View
+  inside itself and assert nothing about the engine. It stays report-only until
+  an entry point exists; the two `a_text_block_is_a_*_axis_scroll_target_like_a_view`
+  tests pin scroll-target geometry and say explicitly that they do not pin
+  alignment.
+- **Four cases were writable but declined.** #230 implemented
+  `__SetDataset`/`__GetDataset`/`__AddDataset` and a BTS `SelectorQuery` whose
+  `setNativeProps` is serviced by `__BobcatQueryNodes`, so the four
+  `text/set-native-props-*` cases are now written against the BTS harness. They
+  are ignored on two real gaps: the push is not retargeted onto a leading
+  `raw-text` child the way `web-core` retargets it, and the attribute written
+  instead replaces the element's children where `web-core` appends. Still
+  genuinely absent: a direct MTS selector PAPI, `__AddClass`, and any rect field
+  in `nodeFields`, so the geometry half of the SelectorQuery case stays blocked.
 
 ## Native ↔ web conflicts
 

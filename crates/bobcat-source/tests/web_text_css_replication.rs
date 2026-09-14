@@ -87,6 +87,28 @@
 //!   `crates/dom/tests/at_rules.rs` — which today has no `var()` case at all.
 //!
 //! Both are stated in the relevant case's doc comment rather than asserted.
+//!
+//! # `@font-face`: nine green cases that stop at the wire
+//!
+//! All nine cases in this file pass, six of them touching `@font-face` — the
+//! rule kind, the `src: url()` round trip, descriptor order and form, the
+//! `var()` fallback, the encoder corpus, and the group-at-rule survival case.
+//! Every one of them is correct about what it observes: the decoder accepts
+//! the section web-core's
+//! encoder emits, and the lowering hands each descriptor to the engine's
+//! stylesheet contract unrewritten. None of them observes anything downstream
+//! of that hand-off, and downstream the path ends. The rule parses into a real
+//! stylo `FontFaceRule` (`crates/dom/src/style/engine.rs:417-426`) and enters
+//! the cascade, but no reader of that variant exists, no `src:` URL is ever
+//! fetched, and a face reaches shaping only as embedder-supplied bytes through
+//! `Document::register_fonts` (`crates/dom/src/layout/mod.rs:192`). A card
+//! that ships its own face and names it therefore renders in the default
+//! family. That gap is carried by
+//! `a_font_face_declared_family_shapes_the_text_that_names_it` in
+//! `crates/dom/tests/web_text_replication.rs`, which asserts the shaped
+//! advance a browser gives web-core and is `#[ignore]`d on the gap. Read the
+//! green count below as "the wire and the lowering", never as "`@font-face`
+//! works".
 
 use bobcat_resources::{Resources, ResourcesConfig};
 use bobcat_source::PageSource;

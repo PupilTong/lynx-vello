@@ -375,7 +375,7 @@ const MAXLENGTH_ROWS: [(char, u32, &[&str], f32); 9] = [
 /// width. The fixture declares no `font-size` anywhere, so every row gives its
 /// nested children identical metrics and which element owns the dots — here
 /// the outer `<text>`, since the tail is the inner box's `::after`
-/// (`x-text.css:179-182`) — moves nothing measurable. That is a property of
+/// (`x-text.css:191-194`) — moves nothing measurable. That is a property of
 /// the fixture, not a weakening: no row of it can discriminate ownership, and
 /// giving one mixed metrics would be inventing geometry the fixture does not
 /// have. `the_truncation_tail_takes_the_block_style_not_the_cut_runs` carries
@@ -433,7 +433,7 @@ fn maxlength_cuts_the_flattened_run_and_tails_it_with_three_dots() {
 /// (`XTextTruncation.ts:289-303`, `new Array(ellipsisLength).fill('.')`), so
 /// they wear that run's 20px: 10 + 20 + 3x20 = 90. The default path, where the
 /// tail is the inner box's `::after` in the block's own styling
-/// (`x-text.css:179-182`), would put the same row at 10 + 20 + 3x10 = 60.
+/// (`x-text.css:191-194`), would put the same row at 10 + 20 + 3x10 = 60.
 #[test]
 #[ignore = "GAP: the spliced dots are gated on `text-overflow: ellipsis`, \
             whose initial value is `clip`, where the web target splices them \
@@ -1086,7 +1086,7 @@ fn an_atom_clipped_past_the_clamp_leaves_the_paint_list() {
 // ReactLynx `<text>`: the same attributes, reached through the element PAPI.
 // ---------------------------------------------------------------------------
 
-/// The 244-character English paragraph the ReactLynx text fixtures share.
+/// The 244-character English paragraph the `ReactLynx` text fixtures share.
 /// Only its length and the absence of a cut point before unit 200 matter to
 /// the clamps below, so it is spelled here rather than copied.
 fn paragraph() -> String {

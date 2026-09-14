@@ -34,6 +34,10 @@
 //! width. Those drop the fixture's surrounding whitespace instead, and each
 //! such test's own doc comment says so.
 
+// Ahem and explicit line heights have exact metrics, so the geometry these
+// replicas assert is compared exactly; glyph counts convert to advances.
+#![allow(clippy::float_cmp, clippy::cast_precision_loss, clippy::similar_names)]
+
 use dom::NodeId;
 use dom::stylo::color::AbsoluteColor;
 use dom::stylo::values::computed::{ColorPropertyValue, Display};
@@ -45,7 +49,7 @@ use super::test_support::{child, display, document, element_under, style_of};
 const AHEM: &[u8] = include_bytes!("../../../../hughie/tests/fixtures/Ahem.ttf");
 
 /// The attribute a `raw-text` carries its run in, and the one a compiled
-/// ReactLynx card writes a static string child into.
+/// `ReactLynx` card writes a static string child into.
 const TEXT_ATTRIBUTE: &str = "text";
 
 /// The picture every `x-text` fixture draws, at its fixture-relative path.
@@ -114,13 +118,22 @@ fn horizontal_frame(document: &LynxDocument, id: NodeId) -> (f32, f32, f32) {
     (x, width, height)
 }
 
+/// The same shape as [`horizontal_frame`], for a box a case does not yet know
+/// exists: `None` where nothing was laid out. A test whose claim is that a box
+/// appears at all states it as an equality against `Some(..)`, so it fails on
+/// its own assertion instead of unwinding inside a helper.
+fn placement(document: &LynxDocument, id: NodeId) -> Option<(f32, f32, f32)> {
+    let layout = document.rounded_layout(id)?;
+    Some((layout.location.x, layout.size.width, layout.size.height))
+}
+
 /// Replicates `x-text/text-attribute-text`
 /// (`web-elements/tests/fixtures/x-text/text-attribute-text.html`,
 /// `web-elements/tests/web-elements.spec.ts:135`): a `text` attribute written
 /// on a `text` element is that paragraph's inline content, and the element's
 /// whitespace-only child contributes nothing after collapsing.
 ///
-/// This is the dominant ReactLynx path, not a corner: the compiler collapses a
+/// This is the dominant `ReactLynx` path, not a corner: the compiler collapses a
 /// static string child into `__SetAttribute(textEl, "text", …)`, so most text
 /// cards reach the engine this way and render blank until it is implemented.
 /// Held only from `d19cbea2` (#227) on: before it only `raw-text` reflected a
@@ -907,6 +920,20 @@ fn the_image_beside_a_wrapped_carrier_is_a_real_box_on_the_line() {
 /// is skipped rather than clipped — no width, no line box, no trailing
 /// whitespace — which the replica pins against the same paragraph written
 /// without the child.
+///
+/// On its own this test cannot tell the two reasons for that emptiness apart,
+/// and it would keep passing if the whole custom-truncation feature were
+/// deleted. web-core skips the subtree because the block is not in the
+/// overflowing-maxline state: `inline-truncation` starts at `display: none`
+/// (`XText/x-text.css:45-49`) and `XTextTruncation` lifts it with
+/// `x-show-inline-truncation` once a clamp is found to overflow
+/// (`XText/XTextTruncation.ts:194-204`, `x-text.css:96-100`). This engine's UA
+/// sheet declares the same `display: none` *unconditionally*
+/// (`crates/bobcat-core/src/main/tree/text.rs:97`), with nothing to lift it, so
+/// the negative case holds here for a reason that has nothing to do with the
+/// state it is about. What pins the feature is its positive twin,
+/// `truncation_content_is_laid_in_at_the_clamp_a_maxline_overflows`, which
+/// declares a `text-maxline` the same paragraph overflows and fails today.
 #[test]
 fn truncation_content_is_skipped_entirely_when_no_maxline_is_declared() {
     const PARAGRAPH: &str = "width: 200px; font-size: 16px";
@@ -935,6 +962,249 @@ fn truncation_content_is_skipped_entirely_when_no_maxline_is_declared() {
         ink(&document, text).1,
         16.0,
         "one line: the seven exclamation marks did not open a second"
+    );
+}
+
+/// The style every custom-truncation replica below is written in: a 200px
+/// measure at 16px, breaking between characters, so a line holds exactly twelve
+/// em squares and a cut point is an exact number of them.
+const CLAMPED: &str = "width: 200px; font-size: 16px; word-break: break-all";
+
+/// The positive twin of
+/// `truncation_content_is_skipped_entirely_when_no_maxline_is_declared`
+/// (`web-elements/tests/fixtures/x-text/text-no-maxline-do-not-show-inline-truncation.html`,
+/// `web-elements/tests/web-elements.spec.ts:244`), and the tree-layer carrier
+/// of the custom-truncation gap: the same paragraph with a `text-maxline` it
+/// overflows, where web-core lays the `inline-truncation` content in at the
+/// clamp.
+///
+/// web-core reaches that through a state rather than a fixed rule.
+/// `inline-truncation` is `display: none` to begin with
+/// (`XText/x-text.css:45-49`); `XTextTruncation` sets `x-show-inline-truncation`
+/// on the host once the clamp is found to overflow
+/// (`XText/XTextTruncation.ts:194-204`), which switches the subtree to
+/// `display: inline-flex` (`x-text.css:96-100`). The same pass moves the cut:
+/// the last visible line's kept end walks back from `end - 1` until the
+/// discarded tail is at least as wide as the truncation content
+/// (`XTextTruncation.ts:205-232`), and the content is laid in there with no
+/// dots beside it — `::part(inner-box)::after` is emptied out for a block that
+/// has an `inline-truncation` child (`x-text.css:196-201`).
+///
+/// The numbers follow from that. Twelve em squares fill the 200px measure at
+/// 16px; the truncation content is one 32x22 image, two squares wide. One
+/// square is not enough to cover it and two are exactly enough, so the cut
+/// retreats by two and the image takes the 160..192 they vacated.
+///
+/// The fixture's indentation is dropped, as in the atomic-inline replicas:
+/// this case's claim is an absolute placement, and the module-level
+/// leading-space divergence would move it.
+#[test]
+#[ignore = "GAP (the wiring, in two places). The tree hands hughie no \
+            truncation content at all: crates/dom/src/layout/text_block.rs:360 \
+            passes `None` for `TextBlock::new`'s truncation slice. And the \
+            subtree is dropped before it could be collected — \
+            `inline-truncation { display: none }` \
+            (crates/bobcat-core/src/main/tree/text.rs:97) is unconditional \
+            here, where web-core's identical default is lifted by \
+            `x-show-inline-truncation` once the block overflows its clamp. The \
+            algorithm itself is complete one layer down: \
+            crates/hughie/tests/web_text_replication.rs' \
+            `custom_truncation_content_replaces_the_marker_at_the_clamp` passes"]
+fn truncation_content_is_laid_in_at_the_clamp_a_maxline_overflows() {
+    let mut document = ahem_document();
+    let text = child(&mut document, "text", CLAMPED);
+    literal(&mut document, text, &"a".repeat(24));
+    let truncation = element_under(&mut document, text, "inline-truncation", "");
+    let icon = image(&mut document, truncation, "width: 32px; height: 22px");
+    set_limit(&mut document, text, "text-maxline", "1");
+    document.layout();
+
+    assert_ne!(
+        display(&document, truncation),
+        Display::None,
+        "the paragraph overflows the one line it is allowed, so its truncation \
+         subtree is content: the default the unclamped case keeps is lifted \
+         exactly in this state"
+    );
+    assert_eq!(
+        placement(&document, icon),
+        Some((10.0 * 16.0, 32.0, 22.0)),
+        "the cut retreats the two squares the 32px content needs, and the \
+         content takes the width they vacated"
+    );
+    assert_eq!(
+        ink(&document, text),
+        (12.0 * 16.0, 16.0),
+        "one clamped line, still filling the measure: ten kept squares and the \
+         content that replaced the other two"
+    );
+}
+
+/// Replicates `x-text/text-maxline-with-custom-truncation`
+/// (`web-elements/tests/fixtures/x-text/text-maxline-with-custom-truncation.html`,
+/// `web-elements/tests/web-elements.spec.ts:226`) at the tree layer: five
+/// paragraphs holding the same run and the same `inline-truncation` child, the
+/// first with no `text-maxline` and the rest clamped to 1, 2, 4 and 6 lines.
+/// The unclamped one never shows the content; each clamped one shows it at the
+/// end of its last visible line, inside the block's width, with no dots.
+///
+/// The fixture reaches its line structure with `word-break: break-all` over a
+/// run of mixed sizes and letter-spacings; the replica keeps the break-all and
+/// makes every unit one Ahem em square, so a line is twelve squares and the
+/// retreat is countable. The freed-unit arithmetic over the fixture's *own*
+/// mixed runs is not re-derived here — `crates/hughie`'s replica of this same
+/// fixture owns it. What this layer adds is the wiring: whether an
+/// `inline-truncation` written in the tree reaches the paragraph at all.
+///
+/// Each clamped block measures the full 192 that an unclamped line measures:
+/// the two squares the retreat freed are exactly the two the 32px content
+/// occupies. Three dots beside it would have to come out of a further retreat,
+/// and the golden shows none.
+#[test]
+#[ignore = "GAP (the wiring, in two places). The tree hands hughie no \
+            truncation content at all: crates/dom/src/layout/text_block.rs:360 \
+            passes `None` for `TextBlock::new`'s truncation slice. And the \
+            subtree is dropped before it could be collected — \
+            `inline-truncation { display: none }` \
+            (crates/bobcat-core/src/main/tree/text.rs:97) is unconditional \
+            here, where web-core's identical default is lifted by \
+            `x-show-inline-truncation` once the block overflows its clamp. The \
+            algorithm itself is complete one layer down: \
+            crates/hughie/tests/web_text_replication.rs' \
+            `custom_truncation_content_replaces_the_marker_at_the_clamp` passes"]
+fn a_custom_truncation_s_content_replaces_the_clamp_marker_at_every_maxline() {
+    let mut document = ahem_document();
+
+    let unclamped = child(&mut document, "text", CLAMPED);
+    literal(&mut document, unclamped, &"a".repeat(100));
+    let unclamped_truncation = element_under(&mut document, unclamped, "inline-truncation", "");
+    literal(&mut document, unclamped_truncation, "!!");
+
+    let control = child(&mut document, "text", CLAMPED);
+    literal(&mut document, control, &"a".repeat(100));
+
+    let mut clamped = Vec::new();
+    for limit in [1u32, 2, 4, 6] {
+        let block = child(&mut document, "text", CLAMPED);
+        literal(&mut document, block, &"a".repeat(100));
+        let truncation = element_under(&mut document, block, "inline-truncation", "");
+        literal(&mut document, truncation, "!!");
+        set_limit(&mut document, block, "text-maxline", &limit.to_string());
+        clamped.push((limit, block, truncation));
+    }
+    document.layout();
+
+    for (limit, block, truncation) in clamped {
+        assert_ne!(
+            display(&document, truncation),
+            Display::None,
+            "clamp {limit}: the block overflows, so its truncation content is \
+             content"
+        );
+        assert_eq!(
+            ink(&document, block),
+            (12.0 * 16.0, limit as f32 * 16.0),
+            "clamp {limit}: exactly that many lines, the last of them ten kept \
+             squares and the two-square content that replaced the two the \
+             retreat freed"
+        );
+    }
+
+    assert_eq!(
+        display(&document, unclamped_truncation),
+        Display::None,
+        "and the block that declared no clamp never enters the state that \
+         would show its content"
+    );
+    assert_eq!(
+        ink(&document, unclamped),
+        ink(&document, control),
+        "so it measures what the same run measures with no truncation child \
+         written at all"
+    );
+    assert_eq!(
+        ink(&document, unclamped).1,
+        9.0 * 16.0,
+        "nine lines: a hundred squares at twelve to a line, none of them \
+         dropped"
+    );
+}
+
+/// Replicates `x-text/truncation-first-element-is-image`
+/// (`web-elements/tests/fixtures/x-text/truncation-first-element-is-image.html`,
+/// `web-elements/tests/web-elements.spec.ts:385`) at the tree layer: the first
+/// unit of the run is a replaced box rather than text, and the truncation
+/// content is itself a run plus a replaced box. The leading image survives at
+/// the head of line 1 while the retreat consumes only the tail of the last
+/// visible line, and both halves of the truncation content land inside the
+/// block's width.
+///
+/// The fixture's CJK run becomes Ahem em squares under `word-break: break-all`,
+/// which breaks between units the way the CJK run does, and its 更多 label
+/// becomes a two-square run at the same 14px. Two things the fixture carries
+/// are left out: the leading image's 4px `margin-right`, because an atom's
+/// margin never reaching the line is a separate filed gap
+/// (`a_compiled_card_s_inline_image_takes_its_used_size_and_its_margin`), and
+/// the boxes' vertical placement, which for an atomic inline follows the
+/// recorded line-box deviation (`docs/tracking/deviations.md:213-220`).
+///
+/// Numbers: a 300px measure at 24px, so line 1 holds the 32px image and eleven
+/// squares and the lines under it hold twelve. The truncation content is 40
+/// wide — two 14px squares and a 12x12 icon — so the retreat gives up two 24px
+/// units of line 3, and the content occupies 240..280 of it.
+#[test]
+#[ignore = "GAP (the wiring, in two places). The tree hands hughie no \
+            truncation content at all: crates/dom/src/layout/text_block.rs:360 \
+            passes `None` for `TextBlock::new`'s truncation slice. And the \
+            subtree is dropped before it could be collected — \
+            `inline-truncation { display: none }` \
+            (crates/bobcat-core/src/main/tree/text.rs:97) is unconditional \
+            here, where web-core's identical default is lifted by \
+            `x-show-inline-truncation` once the block overflows its clamp. The \
+            algorithm itself is complete one layer down: \
+            crates/hughie/tests/web_text_replication.rs' \
+            `custom_truncation_content_replaces_the_marker_at_the_clamp` passes"]
+fn a_leading_image_survives_the_retreat_that_lays_the_truncation_content_in() {
+    let mut document = ahem_document();
+    let column = child(&mut document, "view", "width: 300px");
+    let text = element_under(
+        &mut document,
+        column,
+        "text",
+        "width: 300px; font-size: 24px; line-height: 32px; word-break: break-all",
+    );
+    let lead = image(&mut document, text, "width: 32px; height: 18px");
+    literal(&mut document, text, &"a".repeat(60));
+    let truncation = element_under(&mut document, text, "inline-truncation", "");
+    let label = element_under(&mut document, truncation, "text", "font-size: 14px");
+    literal(&mut document, label, "ab");
+    let icon = image(&mut document, truncation, "width: 12px; height: 12px");
+    set_limit(&mut document, text, "text-maxline", "3");
+    document.layout();
+
+    assert_ne!(
+        display(&document, truncation),
+        Display::None,
+        "three lines out of five: the block overflows, so its truncation \
+         content is content"
+    );
+    assert_eq!(
+        placement(&document, icon),
+        Some((10.0 * 24.0 + 2.0 * 14.0, 12.0, 12.0)),
+        "the icon follows the label at the end of the last visible line, and \
+         both sit inside the 300px measure"
+    );
+    assert_eq!(
+        placement(&document, lead),
+        Some((0.0, 32.0, 18.0)),
+        "the leading box is unit zero of the run, not a seed the cut search \
+         mistakes for the absence of one: the retreat consumed the tail of \
+         line 3 and left it where it was"
+    );
+    assert_eq!(
+        ink(&document, text).1,
+        3.0 * 32.0,
+        "three clamped lines at the declared line height"
     );
 }
 
@@ -1035,7 +1305,7 @@ fn a_single_line_clamp_caps_the_block_to_its_parent_s_available_width() {
 /// neither truncation attribute — it appears nowhere in `XTextTruncation.ts`,
 /// which observes only `text-maxlength`, `text-maxline` and
 /// `tail-color-convert` — and `x-text[text-maxlength]::part(inner-box)::after`
-/// carries `content: "..."` outright (`x-text.css:179-182`).
+/// carries `content: "..."` outright (`x-text.css:191-194`).
 #[test]
 #[ignore = "GAP: the maxlength tail is gated on `TextOverflow::Ellipsis` \
             (crates/hughie/src/text/block/truncate.rs:135-146), whose initial \
@@ -1271,7 +1541,7 @@ fn a_one_line_clamp_fills_the_available_width_instead_of_breaking_at_a_word() {
 
 /// Replicates `text/baseline`
 /// (`web-tests/dist/basic-element-text-baseline/index.web.json`,
-/// `web-core-e2e/tests/reactlynx.spec.ts:2590`): the compiled ReactLynx form of
+/// `web-core-e2e/tests/reactlynx.spec.ts:2590`): the compiled `ReactLynx` form of
 /// the baseline case — two sibling block `text` elements whose runs arrive as
 /// `text` attributes, then one `text` holding two inline runs whose strings
 /// arrive as `raw-text` children.

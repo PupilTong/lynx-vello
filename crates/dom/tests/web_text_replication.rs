@@ -201,7 +201,7 @@ fn rewriting_a_clamped_text_node_reclamps_against_the_new_string() {
     assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
     let root = doc.root;
     let target = doc.el(root, "view.target");
-    let run = doc.dom.create_text_node(&"b".repeat(30), ());
+    let run = doc.dom.create_text_node("b".repeat(30), ());
     doc.dom.append_child(target, run);
     doc.flush();
 
@@ -217,12 +217,115 @@ fn rewriting_a_clamped_text_node_reclamps_against_the_new_string() {
          survives into it",
     );
 
-    doc.dom.set_text_node_data(run, &"a".repeat(100));
+    doc.dom.set_text_node_data(run, "a".repeat(100));
     doc.flush();
     assert_eq!(
         ink(&doc, target),
         (100.0, 40.0),
         "the second long string clamps afresh rather than restoring the first",
+    );
+}
+
+/// Replicates `x-text/text-maxline-with-custom-truncation`
+/// (`packages/web-platform/web-elements/tests/fixtures/x-text/text-maxline-with-custom-truncation.
+/// html`, `packages/web-platform/web-elements/tests/web-elements.spec.ts:226`)
+/// at the dom layer: a clamped block that overflows paints its
+/// `inline-truncation` subtree's content at the end of the last visible line,
+/// in place of the units a retreat frees for it, and paints no dots beside it.
+///
+/// This is the *wiring* half, and it is deliberately narrower than the tree
+/// layer's replica of the same fixture
+/// (`a_custom_truncation_s_content_replaces_the_clamp_marker_at_every_maxline`
+/// in `crates/bobcat-core/src/main/tree/web_text_replication.rs`), which also
+/// carries the `inline-truncation { display: none }` default that
+/// `crates/bobcat-core/src/main/tree/text.rs:97` never lifts. Here the marker
+/// subtree is already shown — it is written as an ordinary nested text scope,
+/// the state web-core's `x-show-inline-truncation` puts it in once the clamp
+/// is found to overflow — so the only thing left between this document and the
+/// reference frame is whether `crates/dom` hands that subtree to the paragraph
+/// as truncation content at all. It does not: `TextBlock::new`'s truncation
+/// slice is `None` at `crates/dom/src/layout/text_block.rs:360`, so the
+/// marker's run is collected as ordinary inline content of the main flow
+/// instead, lands past the clamp, and is never painted.
+///
+/// The algorithm the wiring is missing is complete one layer down:
+/// `custom_truncation_content_replaces_the_marker_at_the_clamp` in
+/// `crates/hughie/tests/web_text_replication.rs` passes, and it fixes the
+/// geometry asserted below — the cut retreats until the discarded tail is at
+/// least as wide as the truncation content, but never by fewer than two units
+/// (`removed >= 1 && freed >= needed`, `crates/hughie/src/text/block/truncate.rs:216`,
+/// matching web-core's own `maxLineEndAt = end - 1` plus its fitting loop in
+/// `XTextTruncation.ts`). Five Ahem em squares fill each 100px line and the
+/// content is one square wide, so the minimum governs: two squares are given
+/// up, the last line is three kept squares, the marker takes the fourth, and
+/// the fifth stays empty.
+///
+/// Colour, not ink, is what separates the reference from what happens today: a
+/// clamped line is 100px wide either way, so only the fifth square of the
+/// second line being *red* distinguishes truncation content laid in at the cut
+/// from black content that merely reaches the same place.
+#[test]
+#[ignore = "GAP: the dom layer passes no truncation content to the paragraph — \
+            `TextBlock::new(context, style, &items, None)` at \
+            crates/dom/src/layout/text_block.rs:360 — so an \
+            `inline-truncation` subtree is collected as ordinary inline \
+            content by crates/dom/src/layout/text_block.rs:151-167 and clamped \
+            away with the rest of the tail"]
+fn a_shown_truncation_subtree_is_painted_at_the_clamp() {
+    let mut doc = Doc::with_device(device(200.0, 100.0));
+    doc.add_ua_css(LIMIT_PROPERTIES);
+    doc.add_css(
+        "page { display: flex; position: relative; width: 200px; height: 100px; }
+         .text { display: -lynx-text; position: absolute; left: 0px; top: 0px;
+                 width: 100px; word-break: break-all; color: #000000;
+                 font-family: Ahem; font-size: 20px; line-height: 20px;
+                 --lynx-text-maxline: 2; }
+         .marker { display: -lynx-text; color: #ff0000; }",
+    );
+    assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
+    let root = doc.root;
+    let text = doc.el(root, "view.text");
+    let run = doc.dom.create_text_node("H".repeat(30), ());
+    doc.dom.append_child(text, run);
+    let marker = doc.el(text, "inline-truncation.marker");
+    let marker_run = doc.dom.create_text_node("H", ());
+    doc.dom.append_child(marker, marker_run);
+
+    let pixels = readback(
+        "a_shown_truncation_subtree_is_painted_at_the_clamp",
+        &mut doc,
+        200,
+        100,
+    );
+
+    // Thirty squares break-all onto six 100px lines, clamped to two.
+    assert_eq!(ink(&doc, text), (100.0, 40.0));
+
+    let marker_square = pixel(&pixels, 200, 70, 30);
+    assert!(
+        is_red(marker_square),
+        "the truncation content takes the fourth square, the first the \
+         two-unit minimum retreat freed ({marker_square:?})",
+    );
+    let freed_square = pixel(&pixels, 200, 90, 30);
+    assert!(
+        is_white(freed_square),
+        "the second freed square stays empty: the retreat is bounded below by \
+         two units, not by the content's one-square width ({freed_square:?})",
+    );
+    let kept_square = pixel(&pixels, 200, 50, 30);
+    assert!(
+        kept_square[0] < 60 && kept_square[1] < 60 && kept_square[2] < 60,
+        "and the third square is still kept text ({kept_square:?})",
+    );
+    let first_line_end = pixel(&pixels, 200, 90, 10);
+    assert!(
+        first_line_end[0] < 60 && first_line_end[1] < 60 && first_line_end[2] < 60,
+        "and the line above the cut is untouched ({first_line_end:?})",
+    );
+    assert!(
+        is_white(pixel(&pixels, 200, 90, 50)),
+        "nothing paints past the clamp",
     );
 }
 
@@ -278,14 +381,21 @@ fn a_percentage_width_against_an_indefinite_basis_behaves_as_auto() {
 /// text block is a scroll target with the same border-box geometry as a view.
 ///
 /// The original calls `scrollIntoView({ block: 'start' | 'center' | 'end' })`
-/// on the sixth of eight equal children. There is no `scrollIntoView` in this
-/// engine — the scroll module exposes only `scroll_to(id, offset)`
-/// (`crates/dom/src/scroll/mod.rs:200`) — so what is replicated is the half
-/// the case really pins about text: the block reports the same scrollable
-/// geometry a view in its place would, and each of the three CSSOM-View
-/// alignments computed from that geometry lands the scrollport somewhere
-/// different. The alignment computation itself is unimplemented and is
-/// reported as such.
+/// on the sixth of eight equal children. This engine has no `scrollIntoView`
+/// at any layer — `crates/dom/src/scroll/mod.rs` exposes `scroll_box`,
+/// `scroll_offset`, `scroll_to(id, offset)` (`:200`), `scroll_by`,
+/// `nearest_user_scrollable` and `scroll_chain`, and nothing else in the
+/// workspace names the operation — so no test can call it.
+///
+/// What this test pins is therefore stated plainly, and it is **not**
+/// alignment: it is the scroll-target *geometry* a text block exposes — its
+/// border box, its container's `scroll_size` and `max_offset` — plus
+/// `scroll_to`'s clamping of an offset against that maximum. The three
+/// CSSOM-View block alignments below are computed *by this test*, from that
+/// geometry, and then asserted to land where the arithmetic says; no engine
+/// code participates in the alignment step, so a wrong or missing alignment
+/// implementation could not fail this test. The alignment computation is an
+/// open gap that no test in this replication carries.
 ///
 /// The fixture's sizing is kept verbatim (`x-view`/`x-text { width: 100%;
 /// height: 50% }` against a 100x400 port), so the 200px slot is measured out
@@ -366,12 +476,15 @@ fn a_text_block_is_a_block_axis_scroll_target_like_a_view() {
 /// inline-axis half of the case above — a text block is a horizontal scroll
 /// target with a view's geometry.
 ///
-/// Same substitution: `scrollIntoView({ inline: ... })` does not exist here,
-/// so the three inline alignments are computed from the text block's border
-/// box and each one's landing offset is asserted. The fixture's own
-/// percentage sizing (`x-view`/`x-text { width: 50%; height: 100% }` against
-/// a 400x100 port) is kept, so the 200px slot is measured rather than
-/// declared.
+/// Same substitution, and the same limit on what it proves:
+/// `scrollIntoView({ inline: ... })` does not exist here, so what is pinned is
+/// the text block's inline-axis scroll-target geometry and `scroll_to`'s
+/// clamping on that axis — not alignment. The three inline alignments are
+/// arithmetic this test performs on the block's own border box before calling
+/// `scroll_to`, so no engine code computes them and none of these assertions
+/// can fail on them. The fixture's own percentage sizing (`x-view`/`x-text
+/// { width: 50%; height: 100% }` against a 400x100 port) is kept, so the 200px
+/// slot is measured rather than declared.
 #[test]
 fn a_text_block_is_an_inline_axis_scroll_target_like_a_view() {
     let mut doc = Doc::with_device(device(600.0, 400.0));
@@ -661,14 +774,15 @@ fn a_gradient_color_on_a_nested_run_fills_only_that_run() {
 /// The original supplies that family through a card-authored
 /// `@font-face { src: url(...) }`. Nothing in this engine consumes an
 /// `@font-face` rule: the rule parses and enters the cascade
-/// (`crates/dom/src/style/engine.rs:413-423`) but there is no `src: url()`
+/// (`crates/dom/src/style/engine.rs:417-426`) but there is no `src: url()`
 /// fetch anywhere, and faces reach shaping only as embedder-supplied blobs
-/// (`crates/dom/src/layout/mod.rs:177`). Ruling R4 of this replication forbids
-/// writing the shaping assertion against `@font-face` itself — the descriptor
-/// grammar is already pinned by `crates/dom/tests/at_rules.rs` — so this is
-/// the adapted replica: the extra face arrives through `register_fonts`
-/// instead of a URL, and what is asserted is the half the fixture is really
-/// about, that selecting it by family name overrides the default family.
+/// (`crates/dom/src/layout/mod.rs:192`). So the fixture is carried by two
+/// tests: this one, the adapted replica, where the extra face arrives through
+/// `register_fonts` instead of a URL and what is asserted is that selecting it
+/// by family name overrides the default family; and
+/// `a_font_face_declared_family_shapes_the_text_that_names_it` below, which
+/// asserts the unadapted reference — the card's own `@font-face` reaching
+/// shaping — and is ignored on the gap.
 #[test]
 fn an_extra_registered_family_is_selected_over_the_default_one() {
     let mut doc = Doc::with_device(device(800.0, 600.0));
@@ -709,6 +823,80 @@ fn an_extra_registered_family_is_selected_over_the_default_one() {
         (default_line - 21.101_563).abs() < 0.01,
         "and with Roboto's own line metrics, not Ahem's 16px em box \
          ({default_line})",
+    );
+}
+
+/// Replicates `text/extra-font-family`
+/// (`packages/web-platform/web-core-e2e/tests/reactlynx/basic-element-text-extra-font-family/index.
+/// jsx`, `packages/web-platform/web-core-e2e/tests/reactlynx.spec.ts:2596`)
+/// without the adaptation the test above makes: the family the card declares
+/// with `@font-face { font-family: ...; src: url(...) }` must be the family
+/// that shapes the text naming it.
+///
+/// This is what a browser gives web-core, and it is the whole point of the
+/// fixture — a card ships a face with its bundle and uses it. The `src` here
+/// is an absolute `file:` URL to a face that really exists in this repo, so
+/// the assertion is answerable by any implementation that fetches it: five
+/// Ahem em squares at 16px are 80px of advance on a 16px line box, a number no
+/// other face in this test produces.
+///
+/// Nothing consumes the rule. It parses into a real stylo `FontFaceRule`
+/// (`crates/dom/src/style/engine.rs:417-426`, per ruling R4 of this
+/// replication) and enters the cascade, but no reader of that variant exists
+/// anywhere in `crates/dom`, nothing fetches a `src:` URL, and the only way a
+/// face reaches shaping is `Document::register_fonts`
+/// (`crates/dom/src/layout/mod.rs:192`) forwarding embedder-owned bytes to
+/// `TextContext::register_fonts` (`crates/hughie/src/text/context.rs:54`) —
+/// whose blob type is constructible only from bytes the caller already holds
+/// (`crates/hughie/src/text/font.rs:17`, `:26`, `:35`), never from a URL. The
+/// declared family is therefore an unknown family and the run is shaped by
+/// whatever parley's fallback answers with — which is neither the declared
+/// face nor, as it happens, the registered default family either.
+///
+/// The bundle-side half of this path is green and covers only the wire:
+/// `font_face_with_a_src_url_survives_the_bundle` and
+/// `font_face_descriptors_decode_in_authored_order_and_form` in
+/// `crates/bobcat-source/tests/web_text_css_replication.rs` carry the
+/// descriptors from a `.web.bundle` into the engine's stylesheet contract, and
+/// hand them to exactly the rule this test shows nobody reads.
+#[test]
+#[ignore = "GAP: an `@font-face` rule is parsed and cascaded but never read — \
+            crates/dom/src/style/engine.rs:417-426 builds the rule and no \
+            consumer of `CssRule::FontFace` exists in crates/dom, no `src:` \
+            URL is ever fetched, and the only path into shaping is \
+            Document::register_fonts (crates/dom/src/layout/mod.rs:192) \
+            handing crates/hughie/src/text/context.rs:54 bytes the embedder \
+            already owns"]
+fn a_font_face_declared_family_shapes_the_text_that_names_it() {
+    const AHEM_URL: &str = concat!(
+        "file://",
+        env!("CARGO_MANIFEST_DIR"),
+        "/../hughie/tests/fixtures/Ahem.ttf"
+    );
+
+    let mut doc = Doc::with_device(device(800.0, 600.0));
+    doc.add_css(&format!(
+        "@font-face {{ font-family: DeclaredAhem;
+                       src: url(\"{AHEM_URL}\") format(\"truetype\"); }}
+         page {{ display: flex; flex-direction: column; align-items: flex-start; }}
+         .label {{ display: -lynx-text; font-size: 16px;
+                   font-family: DeclaredAhem; }}"
+    ));
+    // Only the default face is handed over the embedder seam; the extra one is
+    // the card's own, and reaches the document only through the rule above.
+    assert_eq!(doc.dom.register_fonts(FontBlob::from_static(ROBOTO)), 1);
+    assert!(doc.dom.set_default_font_family("Roboto"));
+    let root = doc.root;
+    let label = doc.el(root, "view.label");
+    let run = doc.dom.create_text_node("EXTRA", ());
+    doc.dom.append_child(label, run);
+    doc.flush();
+
+    assert_eq!(
+        ink(&doc, label),
+        (80.0, 16.0),
+        "the declared face shapes the run that names its family, rather than \
+         the run falling back to another face",
     );
 }
 

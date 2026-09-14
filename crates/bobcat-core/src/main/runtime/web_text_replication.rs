@@ -14,37 +14,64 @@
 //!
 //! # The cases that are not replicated here
 //!
-//! Six of the assigned cases have no replica, and all six for one reason:
-//! the member the case drives is not a global at all. `text/set-native-props-*`
-//! (four cases) call `__SetNativeProps`, `reactlynx/api-SelectorQuery` calls
-//! `createSelectorQuery`, and `web-core-e2e/web-core/add-class-css-og-style-font-size`
-//! calls `__AddClass`; the dataset members, selector querying and `__AddClass`
-//! are on this runtime's not-implemented list by name
-//! (`packages/bobcat-element/src/element-papi.mjs:72-78`), and nothing else
-//! defines them. A replica would die on a `ReferenceError` at its first line
-//! and would therefore pin the absence of a *name*, not any text behaviour —
-//! it could not state what web-core renders, so it could not be strengthened
-//! into a reference assertion later.
+//! Two of the assigned cases have no replica, each for its own reason.
 //!
-//! That is what separates them from `x-text/event-layoutchange` and
-//! `text/bindlayout`, which the assignment files under the same
-//! `blocked-by-engine-gap` verdict but which *are* written as `#[ignore]`d
-//! replicas below: every member those two call (`__AddEventListener`,
-//! `__SetInlineStyles`, `__CreateRawText`) exists, so the replica runs the
-//! whole card, states the reference payload, and fails on the missing
-//! behaviour rather than on a missing identifier.
+//! `reactlynx/api-SelectorQuery` (`web-core-e2e/tests/reactlynx.spec.ts:1389`)
+//! runs 30 selector forms and reports each subject's `boundingClientRect`.
+//! Its querying half is reachable: a background-thread card builds a
+//! `SelectorQuery` (`packages/bobcat-element/src/selector-query.ts`) whose
+//! requests `__BobcatQueryNodes` answers against the document's own selector
+//! engine (`packages/bobcat-element/src/element-papi.ts:1176`). Its geometry
+//! half is not, in two ways that both have to close before the card could run.
+//! `nodeFields` answers `id`, `tag`, `unique_id`, `name`, `class`, `dataset`,
+//! `index` and `attribute` and nothing else (`element-papi.ts:1144-1173`), so
+//! no rect of any kind reaches script, and every UI method — the one the card
+//! calls included — is refused by name (`element-papi.ts:1224`). There is also
+//! no direct MTS selector PAPI at all: the query path is the background
+//! thread's. The card's own rows are produced *by* `SelectorQuery`, so its
+//! screenshot cannot be reconstructed from the outside; what can be replicated
+//! of it is the selector matching (in `crates/dom`) and the 8px-on-10px row
+//! geometry (in the tree replicas), neither of which belongs here.
+//!
+//! `web-core-e2e/web-core/add-class-css-og-style-font-size` calls `__AddClass`,
+//! which is not implemented and is not a global (`element-papi.ts:81-88`
+//! names it among the members a bundle fails at). A replica would die on a
+//! `ReferenceError` at its first line and would pin the absence of a *name*,
+//! not any text behaviour — it could not state what web-core renders, so it
+//! could not be strengthened into a reference assertion later.
+//!
+//! That is what separates it from `x-text/event-layoutchange`,
+//! `text/bindlayout` and the four `text/set-native-props-*` cases, which the
+//! assignment files under the same `blocked-by-engine-gap` verdict but which
+//! *are* written as `#[ignore]`d replicas below: every member those call
+//! exists, so the replica runs the whole card, states the reference, and fails
+//! on the missing behaviour rather than on a missing identifier. The
+//! `set-native-props` four became writable with `__SetDataset`/`__GetDataset`/
+//! `__AddDataset` (`element-papi.ts:973-988`) and the background-thread
+//! `SelectorQuery`, whose `setNativeProps` operation
+//! (`element-papi.ts:1226-1235`) routes each prop to `__AddInlineStyle` or
+//! `__SetAttribute` and flushes.
+
+use std::time::Duration;
 
 use dom::stylo::color::AbsoluteColor;
 use dom::stylo::values::computed::FontStyle;
 use tokio::sync::mpsc;
 
 use super::*;
-use crate::background::{WorkerCommand, WorkerEvent};
-use crate::link::detached_outbox;
+use crate::background::{WorkerCommand, WorkerEvent, WorkerHome, WorkerPayload};
+use crate::link::{DetachedView, block_on_deadline, detached_outbox};
 use crate::main::tree::{PageConfig, Viewport};
 use crate::main::workers::WorkerFactory;
 use crate::resource::StyleSheetSource;
 use crate::view::NoWakeup;
+
+/// Solid em squares, so a run's advance is its glyph count times its font
+/// size and every metric below is an exact number rather than a tolerance.
+const AHEM: &[u8] = include_bytes!("../../../../hughie/tests/fixtures/Ahem.ttf");
+
+/// How long a test waits for a thread that should already be working.
+const PATIENCE: Duration = Duration::from_secs(30);
 
 /// A same-thread window onto the realm-owned document, so a replica can read
 /// back what script built without going through the runtime's own methods —
@@ -76,8 +103,6 @@ fn text_runtime() -> (ScriptRuntime, MainThreadRuntime, DocumentProbe) {
 /// view's fetched sheets are, because the document does not exist until the
 /// boot module creates it.
 fn text_runtime_with_author_css(css: &str) -> (ScriptRuntime, MainThreadRuntime, DocumentProbe) {
-    const AHEM: &[u8] = include_bytes!("../../../../hughie/tests/fixtures/Ahem.ttf");
-
     let mut text = dom::TextContext::new();
     assert_eq!(text.register_fonts(dom::FontBlob::from_static(AHEM)), 1);
     let mut ingredients =
@@ -112,6 +137,90 @@ fn runtime_over(
         _worker_events: worker_events,
     };
     (js_runtime, runtime, probe)
+}
+
+/// A realm with a real background thread behind it — the shape
+/// `worker_tests.rs` builds, narrowed to what a text card needs. The card's
+/// main-thread script and its background entry both run for real, and the
+/// test plays the view: it takes each worker event off the channel and hands
+/// it to the realm, which is what a card's `SelectorQuery` requests travel on.
+struct BackgroundPair {
+    runtime: MainThreadRuntime,
+    js: ScriptRuntime,
+    events: mpsc::UnboundedReceiver<WorkerEvent>,
+    slot: Rc<RefCell<DocumentSlot>>,
+    /// The host end of the view's link, held open for as long as the realm is.
+    _view: DetachedView,
+    /// **Last field, and it must stay last.** Fields drop in declaration
+    /// order, and the realm holds a sender on the thread this owns.
+    _home: WorkerHome,
+}
+
+impl BackgroundPair {
+    /// The document the realm's boot module created.
+    fn tree(&self) -> RefMut<'_, LynxDocument> {
+        RefMut::filter_map(self.slot.borrow_mut(), |slot| slot.document.as_mut())
+            .ok()
+            .expect("the realm has created its document")
+    }
+
+    /// Waits for one worker event and hands it to the realm, as the view's
+    /// own task does. The background realm's own readiness is not one of
+    /// them: it is delivered and then waited past, so a card's first request
+    /// is what this returns on.
+    fn deliver(&mut self) {
+        let deadline = ClockInstant::now() + PATIENCE;
+        loop {
+            let event = block_on_deadline(self.events.recv(), deadline)
+                .flatten()
+                .expect("a worker event arrives");
+            let ready = matches!(&event.payload, WorkerPayload::Message(json)
+                if json.contains("backgroundReady"));
+            self.runtime
+                .dispatch_worker_event(&mut self.js, event.key, event.payload)
+                .expect("the realm accepts its background thread's event");
+            if !ready {
+                return;
+            }
+        }
+    }
+}
+
+/// A runtime over an Ahem-shaping document, with `background` running as the
+/// card's background-thread entry and `main` as its main-thread script.
+fn background_pair(main: &str, background: &str) -> BackgroundPair {
+    let home =
+        WorkerHome::with_entry_for_test((background.to_owned(), "test:bts-entry".to_owned()));
+    let (outbox, view) = detached_outbox(Arc::new(NoWakeup));
+    let mut js = ScriptRuntime::new().expect("the test runtime starts");
+    install_shared_modules(&mut js).expect("the shared modules register");
+    let mut text = dom::TextContext::new();
+    assert_eq!(text.register_fonts(dom::FontBlob::from_static(AHEM)), 1);
+    let mut ingredients =
+        DocumentIngredients::for_test(Viewport::new(393.0, 727.0), PageConfig::default());
+    ingredients.text_context = Some(text);
+    let (mut runtime, events) = MainThreadRuntime::new(
+        &mut js,
+        ingredients,
+        outbox,
+        &WorkerFactory::new(home.commands()),
+        "app:///main.js",
+        Some("test:bts-entry".to_owned()),
+        PageData::default(),
+    )
+    .expect("main-thread runtime");
+    let slot = Rc::clone(&runtime.slot);
+    runtime
+        .run_main_thread_script(&mut js, main, "app:///main.js")
+        .expect("main-thread script");
+    BackgroundPair {
+        runtime,
+        js,
+        events,
+        slot,
+        _view: view,
+        _home: home,
+    }
 }
 
 /// Every descendant of `root` in document order — the sequence
@@ -512,22 +621,21 @@ fn raw_text_content_round_trips_with_its_case_intact() {
 /// `text` attribute — the source test's `textContent` assertion is commented
 /// out precisely because content lives on the attribute.
 ///
-/// The source tags the element with `__AddDataset(text0, 'testid', ...)`.
-/// The dataset members are deliberately not implemented here
-/// (`packages/bobcat-element/src/element-papi.mjs:72-78`), so the replica
-/// tags it with `__SetID` instead; what is under test is the content read,
-/// not the tagging member.
+/// The source tags the element with `__AddDataset(text0, 'testid', ...)` and
+/// then finds it with a `[data-testid=…]` selector. `__AddDataset` exists here
+/// (`packages/bobcat-element/src/element-papi.ts:985-988`), but it files a
+/// typed value in this realm's own per-element store, not a `data-*`
+/// attribute on the node — so nothing in the document carries what that
+/// selector matches, and the lookup half of the source case stays
+/// unreplicable. The replica therefore tags with `__SetID`; what is under test
+/// is the content read, not the tagging member.
 ///
-/// Be honest about what that substitution costs. The source case's
-/// distinguishing half is the *dataset* lookup — `[data-testid=…]` — and once
-/// the tag becomes an id this replica is structurally the multiple-levels case
-/// below (`a_carrier_is_reachable_as_a_descendant_of_the_id_d_text`) with a
-/// different content string; the two pin the same property. The dataset lookup
-/// itself is therefore unreplicated, and it is a gap rather than an omission:
-/// no member writes a dataset entry, so nothing can carry the attribute a
-/// `[data-*]` selector would match. It is not written as an `#[ignore]`d
-/// replica for the reason the module header gives — the script would die on a
-/// `ReferenceError` at `__AddDataset` and would state nothing about text.
+/// Be honest about what that substitution costs. Once the tag becomes an id
+/// this replica is structurally the multiple-levels case below
+/// (`a_carrier_is_reachable_as_a_descendant_of_the_id_d_text`) with a different
+/// content string; the two pin the same property. The dataset lookup itself is
+/// unreplicated, and a `[data-*]` selector over a dataset entry would be a new
+/// case rather than this one — it would state nothing about text.
 #[test]
 fn a_tagged_text_is_found_and_reads_its_content_back() {
     let (mut js_runtime, mut runtime, elements) = text_runtime();
@@ -914,7 +1022,7 @@ fn maxlength_with_set_data_card() -> (ScriptRuntime, MainThreadRuntime, Document
 /// marker.
 ///
 /// The marker is unconditional in web-core: `text-maxlength` is served by
-/// `::after { content: "..." }` in `x-text.css:179-182`, and `text-overflow`
+/// `::after { content: "..." }` in `x-text.css:191-194`, and `text-overflow`
 /// is never consulted for either truncation attribute. So the reference
 /// width is eight em squares — the five kept characters and three dots — on
 /// a card that declares no `text-overflow` at all.
@@ -1135,5 +1243,325 @@ fn a_wrapping_text_reports_its_line_count_and_line_ranges() {
     assert!(
         (measured.height - 42.0).abs() < f32::EPSILON,
         "two lines of 21px, got {measured:?}"
+    );
+}
+
+/// The compiled `countdown` card the `text/set-native-props-*` fixtures share,
+/// with the parts only a screenshot needs left out: one `.countdown__num--h`
+/// `text` holding mixed children — a `raw-text` run and two nested inline
+/// `text` elements carrying their strings as `text` attributes, exactly as the
+/// snapshots build them. Every string is Ahem em squares at 10px, so the
+/// paragraph's advance counts characters. `leading` writes the `raw-text` the
+/// fixtures put in front of the nested texts, and `limit` the `text-maxlength`
+/// one of them declares. The `__SetID` is the test's own handle on the node;
+/// the selector the card is about is the class one the query uses.
+fn countdown_card(leading: bool, limit: &str) -> String {
+    let maxlength = if limit.is_empty() {
+        String::new()
+    } else {
+        format!("__SetAttribute(num, 'text-maxlength', '{limit}');")
+    };
+    let leading = if leading {
+        "__AppendElement(num, __CreateRawText('--'));"
+    } else {
+        ""
+    };
+    format!(
+        r"
+        globalThis.renderPage = function () {{
+          const page = __CreatePage('card', 0);
+          const block = __CreateView(0);
+          __SetClasses(block, 'countdown__block');
+          __AppendElement(page, block);
+
+          const num = __CreateText(0);
+          __SetID(num, 'target');
+          __SetClasses(num, 'countdown__num countdown__num--h');
+          __SetInlineStyles(num, 'font-family:Ahem;font-size:10px');
+          {maxlength}
+          __AppendElement(block, num);
+          {leading}
+          const hello = __CreateText(0);
+          __SetAttribute(hello, 'text', 'hello');
+          __AppendElement(num, hello);
+          __AppendElement(num, __CreateRawText('--'));
+          const world = __CreateText(0);
+          __SetAttribute(world, 'text', 'world');
+          __AppendElement(num, world);
+          __FlushElementTree();
+        }};
+        "
+    )
+}
+
+/// What the card's `useEffect` does a tick after mount, minus the timer: one
+/// `setNativeProps({text})` through a background-thread `SelectorQuery`.
+const COUNTDOWN_PUSH: &str = r"
+    lynx.createSelectorQuery()
+      .select('.countdown__num--h')
+      .setNativeProps({text: 'the count is:1'})
+      .exec();
+    ";
+
+/// Replicates `text/set-native-props-text`
+/// (`web-tests/dist/basic-element-text-set-native-props-text/index.web.json`,
+/// `web-core-e2e/tests/reactlynx.spec.ts:2792`): a `setNativeProps({text})`
+/// pushed from the background thread onto a `text` whose first element child is
+/// a `raw-text` replaces *that run* and leaves the rest of the paragraph
+/// standing.
+///
+/// The original asserts DOM text counts — exactly one node reading
+/// `the count is:1` — which is a claim about where the pushed string went, not
+/// only that it arrived. web-core's own handler is where the answer is: for a
+/// `text` prop on an `X-TEXT` it retargets to the host's first `RAW-TEXT`
+/// element child before writing
+/// (`web-core/ts/client/mainthread/crossThreadHandlers/registerSetNativePropsHandler.ts:13-20`),
+/// and `RawTextAttributes` then swaps that carrier's text node for the new
+/// string (`web-elements/src/elements/XText/RawText.ts:19-26`). So the
+/// paragraph reads `the count is:1` + `hello` + `--` + `world`: twenty-six em
+/// squares, with the pushed string standing exactly once and in first place.
+///
+/// Its sibling `a_native_props_text_push_appends_where_there_is_no_leading_run`
+/// is the same push onto the same card without that leading carrier, which is
+/// the other branch of the same handler.
+#[test]
+#[ignore = "GAP (two of them). The push is not retargeted onto a leading \
+            `raw-text` child: packages/bobcat-element/src/element-papi.ts:1226-1235 \
+            routes every prop to `__SetAttribute` on the selected element \
+            itself, where web-core hands a `text` prop to the host's first \
+            `raw-text` element child instead \
+            (web-core/ts/client/mainthread/crossThreadHandlers/registerSetNativePropsHandler.ts:13-20). \
+            And the attribute it writes instead REPLACES the element's \
+            children: `text[text] { content: attr(text) }` \
+            (crates/bobcat-core/src/main/tree/text.rs:95) is a CSS content \
+            list, and a content list replaces rendered children \
+            (crates/dom/src/layout/text_block.rs:172-174), where web-core's \
+            `RawTextAttributes` appends the attribute's text node after them \
+            (web-elements/src/elements/XText/RawText.ts:19-26)"]
+fn a_native_props_text_push_replaces_the_leading_raw_text_run() {
+    let mut pair = background_pair(&countdown_card(true, ""), COUNTDOWN_PUSH);
+    pair.deliver();
+
+    let tree = pair.tree();
+    let target = element_with_id(&tree, "target");
+    assert_eq!(
+        carrier_contents(&tree, target),
+        vec!["the count is:1".to_owned(), "--".to_owned()],
+        "the push landed on the leading carrier — the card still holds two of \
+         them, and the second is untouched"
+    );
+    let measured = tree.text_block_size(target).expect("a committed paragraph");
+    assert!(
+        (measured.width - 260.0).abs() < f32::EPSILON,
+        "twenty-six em squares at 10px: the pushed string, then the `hello`, \
+         `--` and `world` it did not disturb, got {measured:?}"
+    );
+}
+
+/// Replicates `text/set-native-props-with-maxlength`
+/// (`web-tests/dist/basic-element-text-set-native-props-with-maxlength/index.web.json`,
+/// `web-core-e2e/tests/reactlynx.spec.ts:2802`): the same push onto a target
+/// that already carries `text-maxlength="5"`, so the clamp applies to content
+/// that arrived through the query rather than through a render.
+///
+/// The pushed string becomes the paragraph's leading run, so the five
+/// characters the clamp keeps are `the c` and the marker follows them. That
+/// marker is unconditional in web-core:
+/// `x-text[text-maxlength]::part(inner-box)::after` carries `content: "..."`
+/// outright (`x-text.css:191-194`) and `text-overflow` is consulted for
+/// neither truncation attribute. Eight em squares in all.
+#[test]
+#[ignore = "GAP (three of them). The push is not retargeted onto a leading \
+            `raw-text` child (packages/bobcat-element/src/element-papi.ts:1226-1235 \
+            against web-core's \
+            web-core/ts/client/mainthread/crossThreadHandlers/registerSetNativePropsHandler.ts:13-20), \
+            the `text` attribute it writes instead replaces the element's \
+            children rather than appending to them \
+            (`text[text] { content: attr(text) }`, \
+            crates/bobcat-core/src/main/tree/text.rs:95, through \
+            crates/dom/src/layout/text_block.rs:172-174), and the clamp's tail \
+            is gated on `TextOverflow::Ellipsis`, whose initial value is `clip` \
+            and which the Lynx UA sheet never declares \
+            (crates/hughie/src/text/block/truncate.rs:127-146)"]
+fn a_maxlength_clamps_the_text_a_native_props_push_delivers() {
+    let mut pair = background_pair(&countdown_card(true, "5"), COUNTDOWN_PUSH);
+    pair.deliver();
+
+    let tree = pair.tree();
+    let target = element_with_id(&tree, "target");
+    assert_eq!(
+        carrier_contents(&tree, target),
+        vec!["the count is:1".to_owned(), "--".to_owned()],
+        "the clamp cuts the paragraph, so the carrier still holds the whole \
+         pushed string"
+    );
+    let measured = tree.text_block_size(target).expect("a committed paragraph");
+    assert!(
+        (measured.width - 80.0).abs() < f32::EPSILON,
+        "five kept characters — `the c` — and the three-dot tail, at 10px \
+         each, got {measured:?}"
+    );
+}
+
+/// Replicates `text/set-native-props-text-do-not-change-inline-text`
+/// (`web-tests/dist/basic-element-text-set-native-props-text-do-not-change-inline-text/index.web.
+/// json`, `web-core-e2e/tests/reactlynx.spec.ts:2815`): the same push onto a target
+/// whose first element child is a nested inline `text` rather than a
+/// `raw-text`. The original asserts that `hello`, `--` and `world` each still
+/// appear exactly once afterwards — the push must not clobber the children it
+/// found.
+///
+/// This is the other branch of web-core's handler: with no leading `raw-text`
+/// to retarget to, the `text` prop is written on the host itself
+/// (`registerSetNativePropsHandler.ts:13-20`), and `RawTextAttributes` appends
+/// a text node for it after the existing children
+/// (`web-elements/src/elements/XText/RawText.ts:19-26`). The paragraph reads
+/// `hello` + `--` + `world` + `the count is:1`: twenty-six em squares, the
+/// pushed string last.
+///
+/// So this case isolates the second of the two defects its sibling
+/// `a_native_props_text_push_replaces_the_leading_raw_text_run` carries. No
+/// retargeting is involved here — both engines write the attribute on the
+/// element itself — and what is left is what the attribute then does to the
+/// children.
+#[test]
+#[ignore = "GAP: a `text` attribute REPLACES the element's children here. \
+            `text[text] { content: attr(text) }` \
+            (crates/bobcat-core/src/main/tree/text.rs:95) is a CSS content \
+            list, and a content list replaces rendered children \
+            (crates/dom/src/layout/text_block.rs:172-174), so the push leaves \
+            the paragraph holding nothing but the pushed string — where \
+            web-core's `RawTextAttributes` appends the attribute's text node \
+            after the children it found \
+            (web-elements/src/elements/XText/RawText.ts:19-26)"]
+fn a_native_props_text_push_appends_where_there_is_no_leading_run() {
+    let mut pair = background_pair(&countdown_card(false, ""), COUNTDOWN_PUSH);
+    pair.deliver();
+
+    let tree = pair.tree();
+    let target = element_with_id(&tree, "target");
+    assert_eq!(
+        tree.get(target).and_then(|node| node.attribute("text")),
+        Some("the count is:1"),
+        "with no leading carrier to retarget to, the push is written on the \
+         element itself"
+    );
+    assert_eq!(
+        carrier_contents(&tree, target),
+        vec!["--".to_owned()],
+        "and it becomes no carrier of its own: the one the card wrote is still \
+         the only one"
+    );
+    let measured = tree.text_block_size(target).expect("a committed paragraph");
+    assert!(
+        (measured.width - 260.0).abs() < f32::EPSILON,
+        "twenty-six em squares at 10px: `hello`, `--` and `world` survive the \
+         push, and the pushed string follows them, got {measured:?}"
+    );
+}
+
+/// Replicates `text/set-native-props-with-setData`
+/// (`web-tests/dist/basic-element-text-set-native-props-with-setData/index.web.json`,
+/// `web-core-e2e/tests/reactlynx.spec.ts:2831`): `setNativeProps({text})` and
+/// ordinary data updates, interleaved on one `text`. The card's paragraph is a
+/// leading `raw-text`, two dynamic slots built as wrapper elements, and a
+/// static nested `text` between them; four taps drive push, update, push,
+/// update, and the original counts DOM text after each one — after the first
+/// push the leading `--` is gone, and each pushed string stands exactly once
+/// while the re-rendered slots keep changing under it.
+///
+/// The taps are dropped and their four actions kept in order: the background
+/// thread pushes, then asks the main thread for the update a `setState`
+/// performs (both directions travel the one FIFO, so the order is the card's),
+/// then pushes again, then asks for the second update. A compiled update slot
+/// rewrites a dynamic string child by writing the carrier's `text` attribute,
+/// which is what the main-thread listener does here.
+///
+/// Because each push retargets onto the leading carrier, the final paragraph
+/// reads `2ndNative` + `world` + `text` + `world` — twenty-three em squares at
+/// 10px — and the `--` the card started with is gone after the first push,
+/// which is the fixture's own count assertion.
+#[test]
+#[ignore = "GAP (two of them). The push is not retargeted onto the leading \
+            `raw-text` child: packages/bobcat-element/src/element-papi.ts:1226-1235 \
+            routes every prop to `__SetAttribute` on the selected element \
+            itself, where web-core hands a `text` prop to the host's first \
+            `raw-text` element child \
+            (web-core/ts/client/mainthread/crossThreadHandlers/registerSetNativePropsHandler.ts:13-20). \
+            And the attribute it writes instead replaces the element's \
+            children — `text[text] { content: attr(text) }` \
+            (crates/bobcat-core/src/main/tree/text.rs:95) through \
+            crates/dom/src/layout/text_block.rs:172-174 — so the re-rendered \
+            slots stop rendering at all, where web-core appends the pushed \
+            string after them \
+            (web-elements/src/elements/XText/RawText.ts:19-26)"]
+fn a_native_props_push_survives_the_data_updates_interleaved_with_it() {
+    let mut pair = background_pair(
+        r"
+        globalThis.renderPage = function () {
+          const page = __CreatePage('card', 0);
+          const container = __CreateText(0);
+          __SetID(container, 'container');
+          __SetClasses(container, 'container');
+          __SetInlineStyles(container, 'font-family:Ahem;font-size:10px');
+          __AppendElement(page, container);
+
+          __AppendElement(container, __CreateRawText('--'));
+          const first = __CreateRawText('initial');
+          const slot0 = __CreateWrapperElement(0);
+          __AppendElement(slot0, first);
+          __AppendElement(container, slot0);
+          const label = __CreateText(0);
+          __SetAttribute(label, 'text', 'text');
+          __AppendElement(container, label);
+          const second = __CreateRawText('initial');
+          const slot1 = __CreateWrapperElement(0);
+          __AppendElement(slot1, second);
+          __AppendElement(container, slot1);
+          __FlushElementTree();
+
+          // What a `setState` does to this card: both dynamic slots are
+          // rewritten through the call a compiled update slot emits, and
+          // nothing else in the tree is touched.
+          lynx.getJSContext().addEventListener('setData', (event) => {
+            __SetAttribute(first, 'text', event.data);
+            __SetAttribute(second, 'text', event.data);
+            __FlushElementTree();
+          });
+        };
+        ",
+        r"
+        const query = lynx.createSelectorQuery();
+        const core = lynx.getCoreContext();
+        query.select('.container').setNativeProps({text: 'nativeText'}).exec();
+        core.dispatchEvent({type: 'setData', data: 'hello'});
+        query.select('.container').setNativeProps({text: '2ndNative'}).exec();
+        core.dispatchEvent({type: 'setData', data: 'world'});
+        ",
+    );
+    for _ in 0..4 {
+        pair.deliver();
+    }
+
+    let tree = pair.tree();
+    let container = element_with_id(&tree, "container");
+    assert_eq!(
+        carrier_contents(&tree, container),
+        vec![
+            "2ndNative".to_owned(),
+            "world".to_owned(),
+            "world".to_owned()
+        ],
+        "the second push replaced the leading carrier the first push had \
+         already written, and the two data updates reached the slots without \
+         disturbing it"
+    );
+    let measured = tree
+        .text_block_size(container)
+        .expect("a committed paragraph");
+    assert!(
+        (measured.width - 230.0).abs() < f32::EPSILON,
+        "twenty-three em squares at 10px: the pushed string, both re-rendered \
+         slots and the static run between them, got {measured:?}"
     );
 }
