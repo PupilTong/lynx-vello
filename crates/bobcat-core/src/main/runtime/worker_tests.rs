@@ -948,15 +948,36 @@ fn worker_errors_reach_parent_and_leave_both_realms_usable() {
         globalThis.errors = [];
         globalThis.messages = [];
         const worker = new Worker('./worker.js');
-        worker.onerror = e => errors.push(e.message);
+        worker.onerror = e => {
+            if (e.target !== worker) throw Error('wrong error target');
+            errors.push([e.message, e.filename, e.lineno, e.colno]);
+        };
         worker.addEventListener('message', e => messages.push(e.data));
         worker.postMessage('ping');
     ",
     );
     pair.answer("onmessage = e => postMessage(e.data); throw Error('worker boom');");
+    let mut event = pair.next_event().expect("worker error");
+    let WorkerPayload::Errored(error) = &mut event.payload else {
+        panic!("expected a recoverable worker error");
+    };
+    error.message = "worker boom'\"\\\n\0中文".into();
+    error.location = Some(crate::script::ScriptSourceLocation {
+        source: Some("worker'\"\\\n\0中文.js".into()),
+        line: Some(u32::MAX),
+        column: Some(17),
+    });
+    pair.runtime
+        .as_mut()
+        .unwrap()
+        .dispatch_worker_event(&mut pair.js, event.key, event.payload)
+        .unwrap();
     pair.deliver();
-    pair.deliver();
-    pair.check("if (errors.length !== 1 || !errors[0].includes('worker boom') || messages[0] !== 'ping') throw Error('worker error recovery');");
+    pair.check(r#"
+        const expected = [['worker boom\'\"\\\n\u0000中文', 'worker\'\"\\\n\u0000中文.js', 4294967295, 17]];
+        if (JSON.stringify(errors) !== JSON.stringify(expected) || messages[0] !== 'ping')
+            throw Error('worker error recovery or diagnostic arguments');
+    "#);
 }
 
 #[test]

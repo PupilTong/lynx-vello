@@ -631,23 +631,18 @@ impl MainThreadRuntime {
         if matches!(payload, WorkerPayload::Closed | WorkerPayload::Failed(_)) {
             self.workers.forget(key);
         }
-        let (kind, data) = match payload {
-            WorkerPayload::Message(data) => ("message", data),
-            WorkerPayload::Closed => ("closed", String::new()),
+        let (kind, data, location) = match payload {
+            WorkerPayload::Message(data) => ("message", data, None),
+            WorkerPayload::Closed => ("closed", String::new(), None),
             WorkerPayload::Errored(error) | WorkerPayload::Failed(error) => {
                 let kind = if failed { "failed" } else { "error" };
-                let location = error.location.as_ref();
-                let data = serde_json::json!({
-                    "message": error.message.as_ref(),
-                    "filename": location.and_then(|l| l.source.as_deref()).unwrap_or(""),
-                    "lineno": location.and_then(|l| l.line).unwrap_or(0),
-                    "colno": location.and_then(|l| l.column).unwrap_or(0),
-                })
-                .to_string();
+                let data = error.message.to_string();
+                let location = error.location.clone();
                 self.workers.report_failure(error);
-                (kind, data)
+                (kind, data, location)
             }
         };
+        let location = location.as_ref();
         let key = key.get().to_string();
         let called = self
             .engine
@@ -659,6 +654,9 @@ impl MainThreadRuntime {
                     HostArgument::String(&key),
                     HostArgument::String(kind),
                     HostArgument::String(&data),
+                    HostArgument::String(location.and_then(|l| l.source.as_deref()).unwrap_or("")),
+                    HostArgument::Number(f64::from(location.and_then(|l| l.line).unwrap_or(0))),
+                    HostArgument::Number(f64::from(location.and_then(|l| l.column).unwrap_or(0))),
                 ],
             )
             .map_err(|error| MainThreadError::from_engine("delivering a worker event", error));

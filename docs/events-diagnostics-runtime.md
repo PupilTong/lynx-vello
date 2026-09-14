@@ -76,6 +76,10 @@ entry itself, which necessarily runs before boot constructs its Worker.
 
 ## Diagnostics
 
+Worker failures remain typed Rust diagnostics for the host. MTS receives the
+message, filename, line and column as primitive binding arguments and creates
+the Worker error event in JS; Rust does not serialize the diagnostic to JSON.
+
 Both runtimes export `console.log/info/debug/warn/error`. MTS entries receive
 `console` through their injected ESM import; raw BTS entries can import it from
 `bobcat:bts-runtime`. Installing the compiled BTS wrapper environment is a later

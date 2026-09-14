@@ -134,6 +134,16 @@ decode those without a forward-compat break. `/Users/akiwah/repos/paws-libs/Paws
 `Cargo.toml` (an actively maintained sibling project on `stylo`/`parley`) is a
 useful signal for currently-compatible versions of those libraries.
 
+## JavaScript data ownership
+
+Values consumed only by JavaScript stay opaque in Rust. Embedders serialize
+host payloads to `String`; the runtime passes that text unchanged and JavaScript
+parses it. Do not add Rust JSON models for these payloads or walk Rust
+structs/maps to build JSON for a JS call. When exposing facts Rust itself owns,
+pass primitive binding arguments and construct the JS object in JavaScript.
+Rust parses structured input only when Rust behavior actually needs its fields
+(for example, page configuration or styles), not merely to forward it to JS.
+
 ## Crates
 
 - `crates/bobcat-source` — the single owner of Lynx source parsing and
