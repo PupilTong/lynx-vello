@@ -638,12 +638,15 @@ impl MainThreadRuntime {
         if matches!(payload, WorkerPayload::Closed | WorkerPayload::Failed(_)) {
             self.workers.forget(key);
         }
+        // `(key, kind, data, filename, lineno, colno)`: `data` is the value
+        // the worker posted — primitive or structured clone — for a message,
+        // and the error's own message for a failure.
         let (kind, data, location) = match payload {
             WorkerPayload::Message(data) => ("message", data, None),
-            WorkerPayload::Closed => ("closed", String::new(), None),
+            WorkerPayload::Closed => ("closed", HostValue::Undefined, None),
             WorkerPayload::Errored(error) | WorkerPayload::Failed(error) => {
                 let kind = if failed { "failed" } else { "error" };
-                let data = error.message.to_string();
+                let data = HostValue::String(error.message.to_string());
                 let location = error.location.clone();
                 self.workers.report_failure(error);
                 (kind, data, location)
@@ -660,7 +663,7 @@ impl MainThreadRuntime {
                 &[
                     HostArgument::String(&key),
                     HostArgument::String(kind),
-                    HostArgument::String(&data),
+                    data.as_argument(),
                     HostArgument::String(location.and_then(|l| l.source.as_deref()).unwrap_or("")),
                     HostArgument::Number(f64::from(location.and_then(|l| l.line).unwrap_or(0))),
                     HostArgument::Number(f64::from(location.and_then(|l| l.column).unwrap_or(0))),
@@ -994,6 +997,16 @@ await Promise.resolve().then(() => __FlushElementTree());
             .clone()
             .map(|ready| ready && module_finished)
             .map_err(|error| MainThreadError::from_engine("starting the BTS application", error))
+    }
+
+    /// Whether BTS has declared readiness, module completion aside.
+    ///
+    /// The narrow half of [`Self::is_ready`], for a test that has to
+    /// recognize the `backgroundReady` message by what delivering it did:
+    /// the message itself is a structured clone, opaque to Rust.
+    #[cfg(test)]
+    pub(crate) fn readiness_declared(&self) -> bool {
+        matches!(*self.readiness.borrow(), Ok(true))
     }
 
     pub(crate) fn main_module_finished(&mut self) -> Result<bool, MainThreadError> {

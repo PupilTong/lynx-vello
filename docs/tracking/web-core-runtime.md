@@ -94,8 +94,8 @@ over it, and parent message/error listeners and termination are supported. This 
 under the BTS integration above; it does not yet install the ReactLynx BTS
 bootstrap or RPC ports. The Context MVP below builds on it. Its event/lifetime model follows
 the [HTML Worker interface](https://html.spec.whatwg.org/multipage/workers.html#dedicated-workers-and-the-worker-interface),
-with the current module-only, JSON-only scope and cooperative termination
-recorded in `../runtime-architecture.md`.
+with the current module-only, structured-clone scope and cooperative
+termination recorded in `../runtime-architecture.md`.
 
 ## Bobcat BTS Context MVP (2026-09-09)
 
@@ -123,7 +123,7 @@ This is a Lynx-only protocol, despite the `dispatchEvent` name:
   listener methods. It does not echo or retain an event for a future listener.
 - Context `postMessage` does not send: web-core leaves it unimplemented.
 - Before MTS connects its Worker, queued events retain references; after
-  connection, the existing JSON Worker transport snapshots each send.
+  connection, the structured-clone Worker transport snapshots each send.
 - A worker's own task queues incoming events until its BTS entry evaluation
   finishes, preserving the opportunity to install listeners first.
 
@@ -170,5 +170,6 @@ The existing raw render payload is retained by explicit user decision. The
 reference engine's positional-argument array is not introduced here; existing
 consumers and render tests continue to receive the processed value directly.
 
-These calls reuse ordinary Worker JSON messages; module loading, Lynx Core
+These calls reuse ordinary Worker messages and their structured-clone
+transport; module loading, Lynx Core
 bootstrap, component creation and global event fan-out remain separate work.

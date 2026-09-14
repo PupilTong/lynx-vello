@@ -25,10 +25,12 @@ walk, with Lynx-specific argument and receiver semantics:
 
 Context and runtime messages share one FIFO, including sends before Worker
 connection. Queued payloads remain references until Worker `postMessage` copies
-them using JSON. Undefined object members are omitted, undefined array entries
-and nonfinite numbers become null, negative zero becomes zero, and `toJSON`
-runs normally. BigInt and cycles fail serialization. These are accepted
-transport limits; no custom codec or compensating deep clone is added.
+them as a structured clone. Undefined object members, undefined array entries,
+the nonfinite numbers, negative zero, `BigInt`, `Date`, typed arrays, cycles and
+shared references all survive; `toJSON` is never consulted, because structured
+clone has no such hook. A value the serializer refuses — a function, a `Symbol`,
+a `Map`, `Set`, `RegExp`, `Error` or `DataView` — throws at the call. No custom
+codec or compensating deep clone sits on top of the transport.
 Named `callLepusMethod`
 RPC retains the stack's selected web-worker-rpc async boundary.
 MTS `getCoreContext()` and `getNative()` remain inactive direction sinks.
@@ -78,7 +80,7 @@ entry itself, which necessarily runs before boot constructs its Worker.
 
 Worker failures remain typed Rust diagnostics for the host. MTS receives the
 message, filename, line and column as primitive binding arguments and creates
-the Worker error event in JS; Rust does not serialize the diagnostic to JSON.
+the Worker error event in JS; Rust builds no diagnostic envelope of its own.
 
 Both runtimes export `console.log/info/debug/warn/error`. MTS entries receive
 `console` through their injected ESM import; raw BTS entries can import it from

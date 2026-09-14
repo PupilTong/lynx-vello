@@ -7,6 +7,8 @@
 //! rather than as a silently growing process, which is what makes these
 //! assertions meaningful.
 
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -28,6 +30,14 @@ fn tight_realm() -> Context {
     .unwrap()
     .create_context()
     .unwrap()
+}
+
+/// The realm's own answer to an expression, as a Rust `String`.
+fn text(realm: &mut Context, source: &str) -> String {
+    let value = realm
+        .evaluate(EvalSource::new(source), EvalOptions::default())
+        .unwrap();
+    String::from_utf16(&value.to_utf16().unwrap()).unwrap()
 }
 
 #[test]
@@ -160,18 +170,203 @@ fn rejected_argument_path_does_not_leak() {
     realm
         .define_global_function("take", 1, |_| Ok(HostValue::Undefined))
         .unwrap();
+    // The serializer refuses a function, and does so partway through an object
+    // it has already written most of — so this drives the trampoline's own
+    // cleanup of a half-built argument list as well as the refusal itself.
     let value = realm
         .evaluate(
             EvalSource::new(
                 "let n = 0; \
                  for (let i = 0; i < 50000; i++) { \
-                   try { take({ a: 'y'.repeat(100) }); } catch (e) { n++; } \
+                   try { take({ a: 'y'.repeat(100), f() {} }); } catch (e) { n++; } \
                  } n",
             ),
             EvalOptions::default(),
         )
         .unwrap();
     assert_eq!(value.as_number(), Some(50000.0));
+}
+
+#[test]
+fn an_object_comes_back_from_the_host_as_a_deep_copy() {
+    let mut realm = realm();
+    // Hands whatever it was given straight back, which for a non-primitive
+    // means the realm reads its own structured clone back as a deep copy.
+    realm
+        .define_global_function("echo", 1, |arguments| {
+            Ok(arguments.first().cloned().unwrap_or(HostValue::Undefined))
+        })
+        .unwrap();
+    assert_eq!(
+        text(
+            &mut realm,
+            "(() => {
+                const o = { a: [1, { b: 2 }], u: undefined, n: NaN,
+                            d: new Date(1700000000123),
+                            bytes: new Uint8Array([1, 2, 255]),
+                            big: 9007199254740993n };
+                o.self = o;
+                const c = echo(o);
+                return [
+                    c !== o, c.a !== o.a, c.a[0] === 1, c.a[1].b === 2,
+                    'u' in c, c.u === undefined, Number.isNaN(c.n),
+                    c.d instanceof Date, c.d.getTime() === 1700000000123,
+                    c.bytes instanceof Uint8Array, c.bytes.length === 3,
+                    c.bytes[2] === 255, c.self === c,
+                    typeof c.big === 'bigint', c.big === 9007199254740993n,
+                ].join(':');
+            })()",
+        ),
+        [
+            "true", "true", "true", "true", "true", "true", "true", "true", "true", "true", "true",
+            "true", "true", "true", "true"
+        ]
+        .join(":")
+    );
+}
+
+#[test]
+fn a_structured_clone_passes_back_into_the_realm_as_a_call_argument() {
+    let mut realm = realm();
+    let captured: Rc<RefCell<Option<HostValue>>> = Rc::new(RefCell::new(None));
+    let sink = Rc::clone(&captured);
+    realm
+        .define_global_function("keep", 1, move |arguments| {
+            *sink.borrow_mut() = arguments.first().cloned();
+            Ok(HostValue::Undefined)
+        })
+        .unwrap();
+    let host = realm
+        .evaluate(
+            EvalSource::new(
+                "globalThis.host = { seen: null, take(value) { host.seen = value; } }; \
+                 const o = { tag: 'kept', list: [1, 2, 3] }; o.self = o; keep(o); \
+                 globalThis.host",
+            ),
+            EvalOptions::default(),
+        )
+        .unwrap();
+    let kept = captured.borrow_mut().take().expect("the host kept it");
+    assert!(matches!(kept, HostValue::Structured(_)));
+
+    let take = realm.member("take").unwrap();
+    let outcome = realm
+        .call_member(&host, &take, &[kept.as_argument()])
+        .unwrap();
+    assert!(matches!(outcome, CallOutcome::Called(_)));
+    assert_eq!(
+        text(
+            &mut realm,
+            "[host.seen.tag, host.seen.list.join(','), host.seen.self === host.seen].join(':')",
+        ),
+        "kept:1,2,3:true"
+    );
+}
+
+#[test]
+fn a_structured_clone_written_in_one_runtime_reads_in_another() {
+    let captured: Rc<RefCell<Option<HostValue>>> = Rc::new(RefCell::new(None));
+    let mut writer = realm();
+    let sink = Rc::clone(&captured);
+    writer
+        .define_global_function("keep", 1, move |arguments| {
+            *sink.borrow_mut() = arguments.first().cloned();
+            Ok(HostValue::Undefined)
+        })
+        .unwrap();
+    writer
+        .evaluate(
+            EvalSource::new(
+                "const o = { tag: 'from A', bytes: new Uint8Array([7, 8]) }; o.self = o; keep(o);",
+            ),
+            EvalOptions::default(),
+        )
+        .unwrap();
+    let kept = captured.borrow_mut().take().expect("the host kept it");
+
+    // A second runtime, so a second heap and a second atom table. The stream
+    // carries every atom as a string, which is what lets it be read here.
+    let mut reader = realm();
+    let host = reader
+        .evaluate(
+            EvalSource::new(
+                "globalThis.host = { seen: null, take(value) { host.seen = value; } }; \
+                 globalThis.host",
+            ),
+            EvalOptions::default(),
+        )
+        .unwrap();
+    let take = reader.member("take").unwrap();
+    reader
+        .call_member(&host, &take, &[kept.as_argument()])
+        .unwrap();
+    assert_eq!(
+        text(
+            &mut reader,
+            "[host.seen.tag, host.seen.bytes instanceof Uint8Array, \
+             host.seen.bytes.join(','), host.seen.self === host.seen].join(':')",
+        ),
+        "from A:true:7,8:true"
+    );
+}
+
+#[test]
+fn a_function_argument_throws_a_type_error_and_never_reaches_the_host() {
+    let mut realm = realm();
+    let calls = Rc::new(Cell::new(0u32));
+    let counter = Rc::clone(&calls);
+    realm
+        .define_global_function("take", 1, move |_| {
+            counter.set(counter.get() + 1);
+            Ok(HostValue::Undefined)
+        })
+        .unwrap();
+    assert_eq!(
+        text(
+            &mut realm,
+            "(() => {
+                const thrown = [];
+                for (const value of [function f() {}, { nested: () => 1 }]) {
+                    try { take(value); thrown.push('no throw'); }
+                    catch (e) { thrown.push(e instanceof TypeError ? 'TypeError' : String(e)); }
+                }
+                return thrown.join(':');
+            })()",
+        ),
+        "TypeError:TypeError"
+    );
+    assert_eq!(
+        calls.get(),
+        0,
+        "the serializer refuses before the host is dispatched to"
+    );
+    // And the realm is unharmed: the pending exception was the only thing left.
+    assert_eq!(text(&mut realm, "String(take({ ok: 1 }))"), "undefined");
+    assert_eq!(calls.get(), 1);
+}
+
+#[test]
+fn structured_round_trip_does_not_leak() {
+    let mut realm = tight_realm();
+    // Hands whatever it was given straight back, which for a non-primitive
+    // means the realm reads its own structured clone back as a deep copy.
+    realm
+        .define_global_function("echo", 1, |arguments| {
+            Ok(arguments.first().cloned().unwrap_or(HostValue::Undefined))
+        })
+        .unwrap();
+    let value = realm
+        .evaluate(
+            EvalSource::new(
+                "const o = { text: 'x'.repeat(200), list: [1, 2, 3, 4, 5, 6, 7, 8], \
+                   d: new Date(0), bytes: new Uint8Array(64) }; \
+                 o.self = o; \
+                 let n = 0; for (let i = 0; i < 20000; i++) { n += echo(o).list.length; } n",
+            ),
+            EvalOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(value.as_number(), Some(20000.0 * 8.0));
 }
 
 #[test]

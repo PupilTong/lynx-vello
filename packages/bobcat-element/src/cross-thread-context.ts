@@ -34,8 +34,9 @@ class CrossThreadContext extends EventTarget {
     if (event === null || typeof event !== "object" || typeof event.type !== "string" || !("data" in event)) {
       throw new TypeError("Context event requires a string type and a data property");
     }
-    // Capture the public envelope now; payloads are copied by Worker JSON
-    // when posted, including messages queued before connection.
+    // Capture the public envelope now; payloads are copied by Worker's
+    // structured-clone transport when posted, including messages queued
+    // before connection.
     const message = { type: event.type, data: event.data, origin: this.#origin };
     if (this.#sender === undefined) this.#pending.push(message);
     else this.#sender(message);

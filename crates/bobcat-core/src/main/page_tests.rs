@@ -213,15 +213,19 @@ fn acknowledge_background(background: &WorkerStart) {
         .events
         .send(crate::background::WorkerEvent {
             key: background.key,
-            payload: crate::background::WorkerPayload::Message(
-                r#"[{"bobcat":"runtime","method":"backgroundReady"}]"#.into(),
-            ),
+            payload: crate::background::WorkerPayload::Message(crate::background::wire_value(
+                r#"{bobcat:"runtime",method:"backgroundReady"}"#,
+            )),
         })
         .unwrap();
 }
 
 fn is_dispose(message: &WorkerMessage) -> bool {
-    matches!(message, WorkerMessage::Post(data) if data == r#"[{"bobcat":"runtime","method":"dispose"}]"#)
+    matches!(message, WorkerMessage::Post(data)
+    if crate::background::wire_matches(
+        data,
+        r#"(m) => m?.bobcat === "runtime" && m.method === "dispose""#,
+    ))
 }
 
 fn acknowledge_disposal(background: &WorkerStart) {
@@ -229,9 +233,9 @@ fn acknowledge_disposal(background: &WorkerStart) {
         .events
         .send(crate::background::WorkerEvent {
             key: background.key,
-            payload: crate::background::WorkerPayload::Message(
-                r#"[{"bobcat":"runtime","method":"disposed"}]"#.into(),
-            ),
+            payload: crate::background::WorkerPayload::Message(crate::background::wire_value(
+                r#"{bobcat:"runtime",method:"disposed"}"#,
+            )),
         })
         .unwrap();
 }

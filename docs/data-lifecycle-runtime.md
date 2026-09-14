@@ -19,14 +19,15 @@ Only a non-null, non-array object replaces the input. A non-table result or a
 reported processor failure preserves the original data.
 
 Before rendering, boot posts the processed result, host props and SystemInfo as
-its first `worker.postMessage`. Worker transport supplies the ordinary JSON copy;
-there is no native bootstrap-data binding, JSON map or generated data-bearing
+its first `worker.postMessage`. Worker transport supplies the structured-clone
+copy, so the processed result must be one the serializer accepts; there is no
+native bootstrap-data binding, JSON map or generated data-bearing
 BTS module. The BTS bootstrap installs its receiver and returns, allowing the
 initialization message to arrive. JS initializes its inputs, imports the entry,
 and posts `backgroundReady` on success or `backgroundFailed` on failure.
-Context/lifecycle messages received during that import wait on its Promise. Undefined object members are omitted, nonfinite numbers become null,
-and negative zero becomes zero; own `__proto__` keys remain ordinary data. Rust
-carries JSON protocol data, not realm values or DOM handles. BTS receives the
+Context/lifecycle messages received during that import wait on its Promise. Undefined object members, nonfinite numbers and negative zero all
+survive; own `__proto__` keys remain ordinary data. Rust
+carries opaque structured clones, not realm values or DOM handles. BTS receives the
 parsed data before its entry runs:
 `_params.initData` is null, `_params.updateData` and `lynx.__initData` share the
 processed data, and `_params.cacheData` is empty under the default host policy.
@@ -96,8 +97,9 @@ event in BTS. The framework owns cleanup, state recreation and rehydration.
 
 `lynx.reload(value?, callback?)` sends a Worker message. Omitted/null/primitive
 values become an empty object; top-level functions or arrays do not reload.
-Objects are serialized by Worker.postMessage at the call; ordinary JSON value
-limits apply. Non-function callbacks are ignored.
+Objects are serialized by Worker.postMessage at the call, as structured
+clones: `undefined` members, the special numbers, `BigInt`, `Date`, typed
+arrays and cycles survive, and a value the serializer refuses throws there. Non-function callbacks are ignored.
 This path skips the MTS processor and sets `reloadFromJS:true`. Its dedicated
 acknowledgement is queued with `Promise.resolve().then` after MTS lifecycle calls.
 Already queued jobs precede it; nested jobs may follow.

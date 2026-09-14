@@ -53,7 +53,14 @@ rstest.mockRequire("bobcat:runtime", () => ({
   ) {
     const native =
       globalThis.__bobcatTestHost as ReturnType<typeof createMockBobcat>;
-    native.calls.push(["publishEvent", componentId, handlerName, event]);
+    // `structuredClone` stands in for the Worker transport, which is what
+    // takes the copy now that element-papi hands over the values themselves.
+    native.calls.push([
+      "publishEvent",
+      componentId,
+      handlerName,
+      structuredClone(event),
+    ]);
   },
 }));
 

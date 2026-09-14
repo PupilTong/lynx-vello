@@ -342,7 +342,9 @@ Rust parses structured input only when Rust behavior actually needs its fields
   realm published back, and provides the GC seam. It is created on the
   engine-owned Lynx main thread and never leaves it, which is why nothing
   about it is `Send`. Values crossing it are `quickjs-rust-bridge`'s
-  primitives-only `HostValue`/`HostArgument`, so realm values and DOM handles
+  `HostValue`/`HostArgument` — primitives plus opaque structured clones, which
+  is what lets an object or a typed array cross a thread without the host
+  naming any of it — so realm values and DOM handles
   never cross as themselves. The private
   `MainThreadRuntime` owns the realm integration and, through it, the document.
   **The realm creates its own document, and says so.** The boot module's first
@@ -551,8 +553,13 @@ Rust parses structured input only when Rust behavior actually needs its fields
   It is an explicit ESM import, creates a distinct context on the group's
   existing `bobcat-workers` thread, and supports `postMessage`, `terminate`,
   `onmessage`, `onerror` and the shared EventTarget listener methods. It uses
-  module scripts (also with omitted options) and the existing worker scope's
-  JSON transport; structured clone and transfer lists remain pending. External
+  module scripts (also with omitted options) and the worker scope's
+  structured-clone transport — the value is serialized by the engine's own
+  serializer at the host boundary and rebuilt in the receiving realm, so
+  `undefined`, `NaN`, `Date`, `BigInt`, typed arrays, cycles and shared
+  references survive, while a function, `Symbol`, `Map`, `Set`, `RegExp`,
+  `Error`, `DataView` or accessor property throws synchronously at the
+  `postMessage` call; transfer lists remain pending. External
   ESM imports now load through the view's resource fetcher and support TLA. `main/workers.rs` installs its three native
   operations — `createWorker`, `sendWorkerMessage`, `terminateWorker` — before
   entry boot. The `Start` goes out before the host is asked for anything;
@@ -603,9 +610,12 @@ Rust parses structured input only when Rust behavior actually needs its fields
   receive the original null/undefined data and an undefined receiver, and
   ignore DOM listener options. Origins identify the sending CoreContext or
   JSContext. MTS queues payload references until the Worker is connected;
-  Worker postMessage takes the JSON snapshot. JSON's loss of undefined members
-  and special-number values is an accepted compatibility limit; do not add a
-  custom codec or deep clone to compensate for it. A worker's own task
+  Worker postMessage takes the structured-clone snapshot, for early and
+  connected sends alike — so `undefined` members, the special numbers,
+  `BigInt`, `Date`, typed arrays and cycles all survive, and `toJSON` is never
+  consulted, because structured clone has no such hook. Do not add a custom
+  codec or a deep clone on top of that transport; a value it refuses throws at
+  the call. A worker's own task
   queues what is posted until its bootstrap has evaluated. BTS JS then waits
   on the application import before delivering later messages, so application
   listeners exist before first delivery. Raw XML

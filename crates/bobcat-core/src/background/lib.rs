@@ -69,6 +69,7 @@ mod thread;
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread::Builder as ThreadBuilder;
 
+use quickjs_rust_bridge::HostValue;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 #[cfg(target_arch = "wasm32")]
@@ -132,8 +133,8 @@ pub(crate) enum WorkerCommand {
 pub(crate) enum WorkerMessage {
     /// A display opportunity from the painter, handled even while entry awaits.
     Vsync(f64),
-    /// One JSON-encoded message for the worker's realm.
-    Post(String),
+    /// One value, primitive or structured clone, for the worker's realm.
+    Post(HostValue),
     /// Explicit termination or GC of the MTS Worker object: end it between
     /// tasks and discard what was queued behind this.
     Terminate,
@@ -146,8 +147,9 @@ pub(crate) struct WorkerEvent {
 }
 
 pub(crate) enum WorkerPayload {
-    /// A JSON-encoded `postMessage` from the worker.
-    Message(String),
+    /// One value, primitive or structured clone, from the worker's
+    /// `postMessage`.
+    Message(HostValue),
     /// Something in the worker threw and it is still running — a timer
     /// callback, which HTML reports at the worker and then at its parent
     /// without ending either.
@@ -158,6 +160,92 @@ pub(crate) enum WorkerPayload {
     Failed(ScriptError),
     /// The worker ended itself with `close()`.
     Closed,
+}
+
+/// One wire value, built from the JavaScript expression that produces it.
+///
+/// A test that plays one side of the transport by hand used to write the
+/// message as JSON text. It cannot any more: a structured clone is opaque to
+/// the host, produced only by a realm, so the expression is evaluated in a
+/// throwaway realm and what crosses the boundary is kept. The stream is
+/// self-contained, so a clone written here reads in whichever realm the test
+/// hands it to.
+#[cfg(test)]
+pub(crate) fn wire_value(expression: &str) -> HostValue {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use quickjs_rust_bridge::{EvalOptions, EvalSource, Runtime};
+
+    let captured: Rc<RefCell<Option<HostValue>>> = Rc::new(RefCell::new(None));
+    let sink = Rc::clone(&captured);
+    let runtime = Runtime::new().expect("a throwaway runtime");
+    let mut realm = runtime.create_context().expect("a throwaway realm");
+    realm
+        .define_global_function("__capture", 1, move |arguments| {
+            *sink.borrow_mut() = arguments.first().cloned();
+            Ok(HostValue::Undefined)
+        })
+        .expect("installing the capture function");
+    realm
+        .evaluate(
+            EvalSource::new(&format!("__capture({expression})")),
+            EvalOptions::default(),
+        )
+        .expect("the wire value evaluates");
+    captured
+        .borrow_mut()
+        .take()
+        .expect("the wire value crossed the boundary")
+}
+
+/// One wire value as JSON text, for an assertion to compare against.
+///
+/// A description, not the transport: the clone is read back into a throwaway
+/// realm and stringified there, because a structured clone carries more than
+/// JSON can spell and nothing in Rust can look inside it. A test that cares
+/// about what JSON cannot spell uses [`wire_matches`] instead.
+#[cfg(test)]
+pub(crate) fn wire_json(value: &HostValue) -> String {
+    use quickjs_rust_bridge::{EvalOptions, EvalSource, Runtime};
+
+    let runtime = Runtime::new().expect("a throwaway runtime");
+    let mut realm = runtime.create_context().expect("a throwaway realm");
+    let value = value.clone();
+    realm
+        .define_global_function("__value", 0, move |_| Ok(value.clone()))
+        .expect("installing the value function");
+    let answer = realm
+        .evaluate(
+            EvalSource::new("String(JSON.stringify(__value()))"),
+            EvalOptions::default(),
+        )
+        .expect("the wire value stringifies");
+    String::from_utf16(&answer.to_utf16().expect("a JavaScript string"))
+        .expect("well-formed UTF-16")
+}
+
+/// Whether a wire value is the object this JavaScript predicate accepts.
+///
+/// The mirror of [`wire_value`], for a test that has to recognize a message
+/// rather than build one: the clone is read back into a throwaway realm and
+/// the predicate is applied there, because nothing in Rust can look inside it.
+#[cfg(test)]
+pub(crate) fn wire_matches(value: &HostValue, predicate: &str) -> bool {
+    use quickjs_rust_bridge::{EvalOptions, EvalSource, Runtime};
+
+    let runtime = Runtime::new().expect("a throwaway runtime");
+    let mut realm = runtime.create_context().expect("a throwaway realm");
+    let value = value.clone();
+    realm
+        .define_global_function("__value", 0, move |_| Ok(value.clone()))
+        .expect("installing the value function");
+    realm
+        .evaluate(
+            EvalSource::new(&format!("Boolean(({predicate})(__value()))")),
+            EvalOptions::default(),
+        )
+        .is_ok_and(|answer| answer.as_boolean() == Some(true))
 }
 
 /// The group's right to talk to `bobcat-workers`, and to end it.
