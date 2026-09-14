@@ -499,8 +499,11 @@ fn check_events(view: &mut LynxView<ViewResources>, url: &Url) -> Result<bool, C
 }
 
 #[cfg(test)]
+#[path = "../../../../packages/reactlynx-test-fixtures/fixtures.rs"]
+mod fixtures;
+
+#[cfg(test)]
 mod tests {
-    use std::path::Path;
     use std::sync::mpsc::Sender;
 
     use super::*;
@@ -599,18 +602,15 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn a_real_web_bundle_renders_to_the_fixed_bmp_contract() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../bobcat-source/tests/fixtures/basic-class-selector.web.bundle");
-        let url = Url::from_file_path(&path).expect("absolute fixture URL");
         let executor = CaptureExecutor::new().expect("start capture owner thread");
         let result = executor
             .capture(CaptureRequest {
-                input: CaptureInput::Bytes(std::fs::read(&path).expect("read fixture")),
+                input: CaptureInput::Bytes(fixtures::fixture("basic-class-selector").page.to_vec()),
                 width: 800,
                 height: 600,
                 screenshot_settle: Duration::ZERO,
                 timeout: Duration::from_secs(30),
-                url,
+                url: Url::parse("file:///basic-class-selector.web.bundle").expect("fixture URL"),
             })
             .await
             .expect("capture queue remains available");
