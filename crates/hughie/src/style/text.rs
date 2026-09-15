@@ -16,6 +16,7 @@ use crate::style::{CoreStyle, initial_values};
 
 static TEXT_MAXLINE: LazyLock<Name> = LazyLock::new(|| Name::from("lynx-text-maxline"));
 static TEXT_MAXLENGTH: LazyLock<Name> = LazyLock::new(|| Name::from("lynx-text-maxlength"));
+static TAIL_COLOR_CONVERT: LazyLock<Name> = LazyLock::new(|| Name::from("lynx-tail-color-convert"));
 
 /// Read the UA-registered, non-inherited integer after CSS computation.
 /// Stylo has no public scalar accessor for registered values. `ToCss` exposes
@@ -48,6 +49,12 @@ style_protocol! {
                 paragraph_limit(style.computed_values(), &TEXT_MAXLINE).and_then(NonZeroU32::new),
             text_maxlength -> Option<u32> =
                 paragraph_limit(style.computed_values(), &TEXT_MAXLENGTH),
+            // Lynx `tail-color-convert`: whether the truncation marker wears
+            // the establishing element's colour instead of the colour of the
+            // run the cut landed in. Off by default, as it is natively.
+            tail_color_convert -> bool =
+                paragraph_limit(style.computed_values(), &TAIL_COLOR_CONVERT)
+                    .is_some_and(|value| value != 0),
         }
     }
 }
@@ -148,6 +155,7 @@ mod tests {
         assert!(style.text_indent().length.is_zero());
         assert_eq!(style.text_maxline(), None);
         assert_eq!(style.text_maxlength(), None);
+        assert!(!style.tail_color_convert());
         // A paragraph needs no LinearStyle implementation.
         let block = crate::text::block::BlockStyle::from_container_style(&style);
         assert_eq!(block.max_lines, None);

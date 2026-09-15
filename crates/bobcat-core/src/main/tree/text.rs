@@ -9,29 +9,48 @@ use dom::NodeId;
 
 use super::LynxDocument;
 
-/// Reflects paragraph-limit attributes into CSS presentational hints. Author
+/// Reflects paragraph attributes into CSS presentational hints. Author
 /// declarations can override them without replacing the attribute's value.
-#[expect(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "parse_count bounds values to u32; character offsets truncate like DOM Range"
-)]
 pub(crate) fn apply_attribute_style(
     document: &mut LynxDocument,
     element: NodeId,
     name: &str,
     value: Option<&str>,
 ) {
-    let (property, count) = match name {
+    let (property, css) = match name {
         "text-maxline" => (
             "--lynx-text-maxline",
-            parse_count(value).filter(|count| *count > 0.0 && count.fract() == 0.0),
+            count_css(parse_count(value).filter(|count| *count > 0.0 && count.fract() == 0.0)),
         ),
-        "text-maxlength" => ("--lynx-text-maxlength", parse_count(value)),
+        "text-maxlength" => ("--lynx-text-maxlength", count_css(parse_count(value))),
+        // Native reads this one as a BOOL rather than a number
+        // (`LynxTextRenderer.m overrideTruncatedAttrIfNeed`, Android
+        // `TextRenderer.convertTailColor`), and its default is off, so only
+        // the literal `true` turns it on — which is what ReactLynx's
+        // `tail-color-convert={true}` reaches the DOM as. Any other value,
+        // including a removal, writes the empty string and resets the hint.
+        "tail-color-convert" => (
+            "--lynx-tail-color-convert",
+            if value == Some("true") {
+                "1".to_owned()
+            } else {
+                String::new()
+            },
+        ),
         _ => return,
     };
-    let css = count.map_or_else(String::new, |count| (count as u32).to_string());
     document.set_presentational_hint(element, property, &css);
+}
+
+/// The canonical integer a parsed count reflects as; an absent count resets
+/// the hint.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "parse_count bounds values to u32; character offsets truncate like DOM Range"
+)]
+fn count_css(count: Option<f64>) -> String {
+    count.map_or_else(String::new, |count| (count as u32).to_string())
 }
 
 /// `XTextTruncation` reads both attributes with JavaScript `parseFloat`:
@@ -88,9 +107,13 @@ fn parse_count(value: Option<&str>) -> Option<f64> {
 /// lives.
 /// Attribute parsing supplies canonical counts; the registered integer syntax
 /// validates CSS overrides, and each paragraph receives its own limits.
+/// `--lynx-tail-color-convert` carries the `tail-color-convert` boolean the
+/// same way: zero, its initial value, leaves the truncation marker in the
+/// colour of the run the cut landed in, which is native Lynx's default.
 pub(super) const UA_RULES: &str = r#"
 @property --lynx-text-maxline { syntax: "<integer>"; inherits: false; initial-value: 0; }
 @property --lynx-text-maxlength { syntax: "<integer>"; inherits: false; initial-value: -1; }
+@property --lynx-tail-color-convert { syntax: "<integer>"; inherits: false; initial-value: 0; }
 text { box-sizing: border-box; display: -lynx-text !important; color: initial; }
 text[text] { content: attr(text); }
 inline-text { display: -lynx-text !important; }
@@ -113,6 +136,7 @@ mod tests {
 
     const MAX_LINES: &str = "text-maxline";
     const MAX_CHARS: &str = "text-maxlength";
+    const TAIL_COLOR_CONVERT: &str = "tail-color-convert";
 
     fn set_limit(
         document: &mut LynxDocument,
@@ -328,6 +352,50 @@ mod tests {
             assert_eq!(
                 document.get(text).unwrap().attribute(attribute),
                 Some(equivalent)
+            );
+        }
+    }
+
+    /// The computed value of the registered property `name`, as CSS text. An
+    /// unset property reports its registered initial value, which is what an
+    /// empty hint value leaves the paragraph reading.
+    fn hint(document: &LynxDocument, element: dom::NodeId, name: &str, initial: &str) -> String {
+        use dom::stylo::custom_properties::Name;
+
+        style_of(document, element)
+            .custom_properties()
+            .non_inherited
+            .get(&Name::from(name))
+            .map_or_else(|| initial.to_owned(), |value| value.to_variable_value().css)
+    }
+
+    /// `tail-color-convert` is a native BOOL whose default is off, so only the
+    /// literal `true` — what `ReactLynx`'s `tail-color-convert={true}` reaches
+    /// the DOM as — turns the hint on. Anything else, a removal included,
+    /// writes the empty value that resets it to the registered initial 0.
+    #[test]
+    fn tail_color_convert_reflects_only_the_literal_true() {
+        let (mut document, text) = paragraph("abc def");
+        for (value, expected) in [
+            (Some("true"), "1"),
+            (Some("false"), "0"),
+            (Some("TRUE"), "0"),
+            (Some("1"), "0"),
+            (Some(""), "0"),
+            (Some("true"), "1"),
+            (None, "0"),
+        ] {
+            set_limit(&mut document, text, TAIL_COLOR_CONVERT, value);
+            document.layout();
+            assert_eq!(
+                hint(&document, text, "lynx-tail-color-convert", "0"),
+                expected,
+                "tail-color-convert={value:?}",
+            );
+            assert_eq!(
+                document.get(text).unwrap().attribute(TAIL_COLOR_CONVERT),
+                value,
+                "and the attribute itself is never rewritten",
             );
         }
     }

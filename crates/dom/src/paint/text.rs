@@ -97,8 +97,8 @@ fn text_fill(style: &ComputedValues, gradient_box: Option<Rect>) -> TextFill {
 /// indexed by that index and the lookup is O(1).
 ///
 /// The establishing element answers for anything with no element of its own —
-/// the synthesized ellipsis, the truncation flow, an index the block cannot
-/// resolve — which is also what the whole paragraph used to paint with.
+/// the truncation flow, an index the block cannot resolve — which is also what
+/// the whole paragraph used to paint with.
 pub(crate) struct RunPaints<'doc> {
     by_style: Vec<RunPaint<'doc>>,
     fallback: RunPaint<'doc>,
@@ -106,6 +106,14 @@ pub(crate) struct RunPaints<'doc> {
 
 pub(crate) struct RunPaint<'doc> {
     style: &'doc ComputedValues,
+    /// The style the ink fill comes from, separately from everything else.
+    ///
+    /// The two differ for exactly one run: the truncation marker under Lynx
+    /// `tail-color-convert`, which swaps the dots' foreground colour for the
+    /// establishing element's and changes nothing else — not the font, so the
+    /// marker's geometry never moves, and not its shadow, stroke or
+    /// decorations, which stay the cut run's.
+    fill_style: &'doc ComputedValues,
     decorations: SmallVec<[Decorations; 2]>,
     /// The tile this run's gradient-valued `color` fills from.
     ///
@@ -126,13 +134,21 @@ impl<'doc> RunPaints<'doc> {
     ) -> Self {
         use hughie::text::block::SourceItem;
 
+        let block_style = document
+            .paint_style(element)
+            .unwrap_or_else(|| unreachable!("the caller resolved this style already"));
         let fallback = RunPaint {
-            style: document
-                .paint_style(element)
-                .unwrap_or_else(|| unreachable!("the caller resolved this style already")),
+            style: block_style,
+            fill_style: block_style,
             decorations: propagated_decorations(document, element),
             gradient_box,
         };
+        // Native Lynx defaults this off: the dots wear the cut run's colour
+        // (`lynx/js_libraries/types/skills/text.md`, Android
+        // `TextRenderer.convertTailColor`, iOS
+        // `LynxTextRenderer.m overrideTruncatedAttrIfNeed`). web-core inverts
+        // the default; the 2026-09-15 ruling follows native.
+        let convert_tail = crate::layout::converts_tail_color(block_style);
         let sources = document.text_block_sources(element).unwrap_or_default();
         let mut by_style = Vec::new();
         // The style indices a nested element's own ramp paints, with that
@@ -141,29 +157,35 @@ impl<'doc> RunPaints<'doc> {
         // never runs for them.
         let mut nested: SmallVec<[(usize, crate::NodeId); 2]> = SmallVec::new();
         for index in 0..block.style_count() {
-            let resolved = match block.source_of(u16::try_from(index).unwrap_or(u16::MAX)) {
-                SourceItem::Content(item) => sources
+            // The dots are shaped in the run holding the last visible byte, so
+            // that run's element answers for them exactly as it answers for its
+            // own glyphs — unless `tail-color-convert` reclaims the fill below.
+            let source = block.source_of(u16::try_from(index).unwrap_or(u16::MAX));
+            let converted = convert_tail && matches!(source, SourceItem::Ellipsis { .. });
+            let resolved = match source {
+                SourceItem::Content(item) | SourceItem::Ellipsis { item } => sources
                     .get(item as usize)
                     .copied()
                     .and_then(|node| document.paint_style(node).map(|style| (node, style))),
-                // Neither the truncation flow nor the dots has an element of
-                // its own; both wear the block's own style, which is what
-                // `tail-color-convert` would later override.
-                SourceItem::Truncation(_) | SourceItem::Ellipsis => None,
+                // The truncation flow paints from its own subtree, which the
+                // `Truncation` arm of `text_block_truncation_sources` answers.
+                SourceItem::Truncation(_) => None,
             };
             by_style.push(match resolved {
                 Some((node, style)) => {
-                    if node != element && needs_gradient_box(style) {
+                    if !converted && node != element && needs_gradient_box(style) {
                         nested.push((index, node));
                     }
                     RunPaint {
                         style,
+                        fill_style: if converted { block_style } else { style },
                         decorations: propagated_decorations(document, node),
                         gradient_box,
                     }
                 }
                 None => RunPaint {
                     style: fallback.style,
+                    fill_style: fallback.style,
                     decorations: fallback.decorations.clone(),
                     gradient_box,
                 },
@@ -425,7 +447,7 @@ fn paint_pass(
                 }
                 Layer::Ink => (
                     transform,
-                    text_fill(run.style, run.gradient_box),
+                    text_fill(run.fill_style, run.gradient_box),
                     text_stroke(run.style),
                     run.decorations.clone(),
                 ),
