@@ -24,7 +24,10 @@ copy, so the processed result must be one the serializer accepts; there is no
 native bootstrap-data binding, JSON map or generated data-bearing
 BTS module. The BTS bootstrap installs its receiver and returns, allowing the
 initialization message to arrive. JS initializes its inputs, imports the entry,
-and posts `backgroundReady` on success or `backgroundFailed` on failure.
+and posts `backgroundReady` once that import settles, whether it finished or
+threw. An entry that throws is reported through the worker realm's
+`reportError`, which reaches the `Worker`'s `error` event and a nonfatal
+`WorkerFailed`, and leaves BTS running.
 Context/lifecycle messages received during that import wait on its Promise. Undefined object members, nonfinite numbers and negative zero all
 survive; own `__proto__` keys remain ordinary data. Rust
 carries opaque structured clones, not realm values or DOM handles. BTS receives the

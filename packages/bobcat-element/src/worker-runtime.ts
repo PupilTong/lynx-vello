@@ -16,15 +16,15 @@ import { closeWorker, postWorkerMessage } from "bobcat-internal:worker";
 //
 // # What is here and what is not
 //
-// `postMessage`, `close`, `name`, `self`, the `message` event and the
-// EventTarget surface under it. Not here: `importScripts` (this realm loads
-// ESM, so a worker script uses `import`), `location`, `navigator`, `fetch`,
-// `XMLHttpRequest`, `MessagePort`, `messageerror` (the reader cannot fail on
-// what the same build's writer produced), `onerror` (an uncaught exception in
-// here is reported at the parent `Worker` and to the embedder, but this side
-// has no hook to intercept it first), and the DOM — a worker realm holds no
-// document and cannot reach one, which is the whole reason it is on another
-// runtime and another thread.
+// `postMessage`, `close`, `name`, `self`, `reportError`, the `message` event
+// and the EventTarget surface under it. Not here: `importScripts` (this realm
+// loads ESM, so a worker script uses `import`), `location`, `navigator`,
+// `fetch`, `XMLHttpRequest`, `MessagePort`, `messageerror` (the reader cannot
+// fail on what the same build's writer produced), `onerror` (an uncaught
+// exception in here is reported at the parent `Worker` and to the embedder,
+// but this side has no hook to intercept it first), and the DOM — a worker
+// realm holds no document and cannot reach one, which is the whole reason it
+// is on another runtime and another thread.
 
 /**
  * The worker realm's global scope once this module has run: an `EventTarget`
@@ -34,6 +34,7 @@ export interface WorkerGlobalScope extends EventTarget {
   self: WorkerGlobalScope;
   postMessage(message: unknown, transfer?: unknown): undefined;
   close(): undefined;
+  reportError(error: unknown): undefined;
 }
 
 /**
@@ -97,6 +98,17 @@ Object.assign(scope, {
    */
   close(): undefined {
     closeWorker();
+    return undefined;
+  },
+  /**
+   * Reports an error the way an uncaught exception in this realm is reported.
+   */
+  reportError(error: unknown): undefined {
+    // This realm has no synchronous host hook. A rejection nothing handles is
+    // reported by the checkpoint that ends the current entry, on the path an
+    // uncaught exception takes: at the parent Worker's `error` event and to the
+    // embedder as `WorkerFailed`, with this realm still running.
+    void Promise.reject(error);
     return undefined;
   },
 });

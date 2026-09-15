@@ -19,14 +19,13 @@ rstest.mockRequire("bobcat:worker", () => ({}));
 rstest.mockRequire("bobcat:timers", () => ({}));
 const requestScriptFrame = rstest.fn();
 const notifyReady = rstest.fn();
-const reportStartupFailure = rstest.fn();
 const preloadStyleSheet = rstest.fn();
 const adoptStyleSheet = rstest.fn();
 const reportedErrors = rstest.fn();
 const consoleMessages = rstest.fn();
 // The runtime reads the view's page data as it evaluates; this view has none.
 rstest.mockRequire("bobcat-internal:host", () => ({
-  notifyReady, reportStartupFailure, requestScriptFrame,
+  notifyReady, requestScriptFrame,
   reportScriptError: reportedErrors,
   logScriptMessage: consoleMessages,
   preloadStyleSheet, adoptStyleSheet,
@@ -46,6 +45,8 @@ interface TestScope {
   updatePage: ((data: unknown, options: unknown) => unknown) | undefined;
   removeComponents: (() => unknown) | undefined;
   updateGlobalProps: unknown;
+  /** Absent in Node; the worker realm installs it, and the BTS test stands in. */
+  reportError?: (error: unknown) => void;
   postMessage(message: unknown): void;
   addEventListener(
     name: string,
@@ -880,9 +881,10 @@ it("declares readiness through the native binding when BTS acknowledges completi
   expect(notifyReady).toHaveBeenCalledExactlyOnceWith();
 });
 
-it("forwards BTS startup failures through the native binding without throwing in the listener", () => {
+it("leaves a BTS worker error to the host, which already reports every one", () => {
+  const before = notifyReady.mock.calls.length;
   expect(() => worker.dispatchEvent({type: "error", message: "BTS entry failed"})).not.toThrow();
-  expect(reportStartupFailure).toHaveBeenCalledExactlyOnceWith("BTS entry failed");
+  expect(notifyReady.mock.calls).toHaveLength(before);
 });
 
 it("waits for the JS disposal acknowledgement before terminating the Worker", async () => {
@@ -908,4 +910,35 @@ it("waits for the JS disposal acknowledgement before terminating the Worker", as
   expect(worker.terminate).toHaveBeenCalledTimes(1);
   expect(toBackground).toHaveLength(0);
   expect(reportedErrors).toHaveBeenLastCalledWith("error", expect.stringContaining("BTS destroy"));
+});
+
+it("settles readiness when the BTS Worker ends before it declared any", () => {
+  const before = notifyReady.mock.calls.length;
+  worker.dispatchEvent({type: "__bobcat:close"});
+  expect(notifyReady.mock.calls).toHaveLength(before + 1);
+});
+
+it("reports a BTS entry that throws and keeps taking messages after it", async () => {
+  const runtime = await import("../src/background-thread-runtime.ts");
+  const reportError = rstest.fn();
+  scope.reportError = reportError;
+  const failure = Error("BTS entry failed");
+  runtime.__BobcatStartBTS(() => Promise.reject(failure));
+  const received: unknown[] = [];
+  const emitter = bts.getJSModule("GlobalEventEmitter") as globalEventEmitter.GlobalEventEmitter;
+  emitter.addListener("after-failure", (value: unknown) => { received.push(value); });
+  // The entry's rejection must not stop the message behind it: both are
+  // delivered before either settles, as the Worker queue delivers them.
+  const initializing = receiveInBackground({data: {
+    bobcat: "runtime", method: "initialize", updateData: {}, systemInfo: {},
+  }});
+  const delivering = receiveInBackground({data: {
+    bobcat: "runtime", method: "sendGlobalEvent", name: "after-failure", args: [1],
+  }});
+  await initializing;
+  await delivering;
+  expect(reportError).toHaveBeenCalledExactlyOnceWith(failure);
+  expect(toMain).toContainEqual({bobcat: "runtime", method: "backgroundReady"});
+  expect(received).toEqual([1]);
+  delete scope.reportError;
 });

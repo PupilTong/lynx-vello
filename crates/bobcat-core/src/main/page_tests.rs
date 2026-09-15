@@ -936,7 +936,7 @@ fn readiness_is_reported_once_when_bts_acknowledges_after_mts_render() {
 }
 
 #[test]
-fn a_configured_background_entry_failure_reports_startup_failed_once() {
+fn a_bts_worker_that_fails_reports_worker_failed_and_settles_boot() {
     on_a_local_set(async {
         let (context, workers) = group();
         let mut sources = ViewSources::new("app:///main.js");
@@ -965,17 +965,22 @@ fn a_configured_background_entry_failure_reports_startup_failed_once() {
             })
             .unwrap();
         harness
-            .until("BTS failure did not end boot", |h| {
-                h.view.token.is_cancelled()
+            .until("BTS failure did not settle boot", |h| {
+                h.events
+                    .iter()
+                    .any(|e| matches!(e, EngineEvent::ScriptFinished))
             })
             .await;
-        harness.turn().await;
+        assert!(
+            !harness.view.token.is_cancelled(),
+            "no BTS failure ends the view"
+        );
         let failures: Vec<_> = harness
             .events
             .iter()
             .filter_map(|event| match event {
-                EngineEvent::StartupFailed(error) => Some(error.to_string()),
-                EngineEvent::ScriptFinished
+                EngineEvent::WorkerFailed(error) => Some(error.to_string()),
+                EngineEvent::StartupFailed(_)
                 | EngineEvent::ListenerFailed(_)
                 | EngineEvent::ScriptRunError(_) => {
                     panic!("BTS startup failure was misreported: {event:?}")
@@ -985,6 +990,24 @@ fn a_configured_background_entry_failure_reports_startup_failed_once() {
             .collect();
         assert_eq!(failures.len(), 1);
         assert!(failures[0].contains("BTS startup failed"));
+        assert_eq!(
+            harness
+                .events
+                .iter()
+                .filter(|e| matches!(e, EngineEvent::ScriptFinished))
+                .count(),
+            1
+        );
+        // The failed Worker was forgotten when MTS heard `__bobcat:close`, so
+        // disposal has no acknowledgement to wait for.
+        drop(background);
+        harness.view.token.cancel();
+        for _ in 0..TURNS {
+            if harness.owner.is_finished() {
+                break;
+            }
+            harness.turn().await;
+        }
         harness.owner.await.unwrap();
     });
 }

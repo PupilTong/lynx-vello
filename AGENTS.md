@@ -625,10 +625,13 @@ Rust parses structured input only when Rust behavior actually needs its fields
   await BTS: the built-in BTS posts `backgroundReady` after its optional entry
   completes, including when no entry is configured. MTS then calls the native
   `notifyReady()` binding. The page publishes `ScriptFinished` once both MTS
-  completion and that declaration hold, after commit. MTS forwards BTS errors
-  through `reportStartupFailure(message)`; an error before readiness produces
-  `StartupFailed` without rejecting MTS evaluation. Ordinary Worker errors and
-  BTS errors after readiness remain nonfatal `WorkerFailed` events.
+  completion and that declaration hold, after commit. A BTS entry that throws
+  is reported like any worker script: `reportError` in the worker realm
+  surfaces it at the `Worker`'s `error` event and as a nonfatal
+  `WorkerFailed`; the BTS keeps running and still takes messages, and
+  `backgroundReady` follows so `ScriptFinished` is still published. A BTS
+  Worker that ends before readiness (`Failed`) also settles readiness through
+  the MTS close listener. No BTS failure ends the view.
   BTS also exposes stable `getApp()` and `getNativeApp()` objects. The current
   app hooks receive `OnLifecycleEvent`, `publishEvent`, `publicComponentEvent`
   and `callDestroyLifetimeFun`; the native app's `callLepusMethod` invokes a
@@ -778,8 +781,8 @@ Rust parses structured input only when Rust behavior actually needs its fields
   posts the result plus host props and SystemInfo as the first BTS Worker
   message, before rendering. The BTS bootstrap returns after installing a JS
   receiver; that message initializes its inputs before importing the entry.
-  Later internal messages wait on the import Promise. Success acknowledges
-  readiness; failure reports back through the same Worker channel.
+  Later internal messages wait on the import Promise. Readiness is
+  acknowledged once the entry has settled, success or failure.
   Lifecycle hooks and engine listeners run synchronously, with no intervening
   Promise-job checkpoint. Boot awaits a `Promise.resolve().then` flush after
   rendering. MTS evaluation completes independently; public readiness still

@@ -227,8 +227,10 @@ pub enum LynxViewError {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum EngineEvent {
-    /// MTS boot completed and MTS declared application readiness after BTS acknowledged it.
-    /// `LynxView::pump` records readiness before returning this notification.
+    /// MTS boot completed and the BTS Worker's startup settled: its entry
+    /// finished, or threw and was reported as [`EngineEvent::WorkerFailed`],
+    /// or the Worker ended. `LynxView::pump` records readiness before
+    /// returning this notification.
     ScriptFinished,
     /// Source loading, document configuration, or entry boot failed.
     StartupFailed(LynxViewError),
@@ -241,7 +243,8 @@ pub enum EngineEvent {
     /// Not fatal either: only the timer that threw is affected, a repeating
     /// one stays armed, and the realm goes on.
     TimerFailed(ScriptError),
-    /// A worker failed to load or threw. The owning view remains usable.
+    /// A worker failed to load or threw, the BTS Worker included. The owning
+    /// view remains usable.
     WorkerFailed(ScriptError),
     /// An application reported an error through `lynx.reportError`, or the
     /// runtime reported a recoverable operation failure.
@@ -369,6 +372,8 @@ pub struct ViewSources {
     /// built-in environment. Its imports load through the view's resource fetcher.
     /// After entry evaluation, including top-level await, BTS sends ready and MTS
     /// declares readiness through its binding. MTS evaluation does not await BTS.
+    /// An entry that throws is reported as [`EngineEvent::WorkerFailed`], like
+    /// any worker script, and leaves the view and the BTS Worker running.
     pub background_entry: Option<String>,
     /// Initial page data, as JSON text. The engine hands it to the view's
     /// realm unread, as a plain string; `bobcat:runtime` parses it there and

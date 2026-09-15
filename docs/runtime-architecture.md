@@ -576,9 +576,11 @@ and `WorkerFailed` reporting apply to BTS too. The built-in BTS always posts a
 readiness acknowledgement after its optional entry completes. MTS receives it
 and calls `notifyReady()` through the native binding; MTS boot itself never
 awaits BTS. `ScriptFinished` requires both MTS completion and this declaration.
-A BTS startup error uses `reportStartupFailure(message)` and reports
-`StartupFailed`, independently of MTS evaluation. Ordinary Worker failures and
-BTS failures after readiness remain nonfatal.
+A BTS entry that throws is reported like any worker script: the worker
+realm's `reportError` surfaces it at the `Worker`'s `error` event and as a
+nonfatal `WorkerFailed`, BTS stays up and still takes messages, and
+`backgroundReady` follows. A BTS Worker that ends first settles readiness
+through the MTS close listener. No BTS failure ends the view.
 `LynxView::pump` records readiness before returning `ScriptFinished`, and
 `is_ready()` exposes that state. Host global events require readiness and return
 `EngineError::NotReady` otherwise, without buffering them.
