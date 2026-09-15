@@ -12,6 +12,9 @@
   "references": [
     { "path": "packages/bobcat-element" },
     { "path": "packages/reactlynx-test-fixtures" },
+    { "path": "packages/explorer-lib" },
+    { "path": "packages/explorer-homepage" },
+    { "path": "packages/explorer-showcase" },
     { "path": "crates/bobcat-wasm" },
     { "path": "packages/github-pages" },
     { "path": "examples/gesture" },

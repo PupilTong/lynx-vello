@@ -260,6 +260,9 @@ jobs:
       - name: Build latest-engine ReactLynx fixtures
         run: pnpm --filter reactlynx-test-fixtures build
 
+      - name: Build the Lynx Explorer pages
+        run: pnpm build:explorer
+
   walltime-benchmarks:
     name: bench (CodSpeed walltime, macOS)
     if: >-

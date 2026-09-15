@@ -33,9 +33,11 @@ export function pluginSourceBundles(mode: string, engineVersion: string): Rsbuil
           const name = file.replace('.provenance.json', '');
           const metadata: { bundles: Record<string, string>; publicPath?: string | null } =
             JSON.parse(await readFile(join(output, file), 'utf8'));
-          const page = Object.keys(metadata.bundles).find(path => !path.startsWith('async/'));
+          // The page is the one bundle at the top of the output directory; lazy
+          // bundles live in a subdirectory whose name Rspeedy owns.
+          const page = Object.keys(metadata.bundles).find(path => !path.includes('/'));
           if (!page) throw new Error(`No page bundle for ${name}`);
-          const chunks = Object.keys(metadata.bundles).filter(path => path.startsWith('async/')).sort();
+          const chunks = Object.keys(metadata.bundles).filter(path => path.includes('/')).sort();
           entries.push(`        ${JSON.stringify(name)} => Fixture {
             page: include_bytes!(${JSON.stringify(`${name}/${page}`)}),
             chunks: &[${chunks.map(path => `(${JSON.stringify(path)}, include_bytes!(${JSON.stringify(`${name}/${path}`)}))`).join(',')}],
@@ -65,7 +67,7 @@ ${entries.join('\n')}
         if (native) {
           // DEBUG=rspeedy retains both this page's compiler input and the
           // original MTS source inside lazy bundles. Lazy bytes stay unchanged.
-          const options: CompilerSources = JSON.parse(await readFile(join(output, `.rspeedy/${fixture}/tasm.json`), 'utf8'));
+          const options: CompilerSources = JSON.parse(await readFile(join(output, `.lynx/${fixture}/tasm.json`), 'utf8'));
           const publicPathMatch = options.lepusCode.root.match(/__webpack_require__\.p\s*=\s*("(?:[^"\\]|\\.)*")/);
           if (mode === 'development' && !publicPathMatch) throw new Error('Compiled page public path was not found');
           publicPath = publicPathMatch?.[1] ? JSON.parse(publicPathMatch[1]) : null;
@@ -87,7 +89,7 @@ ${entries.join('\n')}
         }
         const bundles: Record<string, string> = {};
         for (const file of (await readdir(output, { recursive: true })).sort()) {
-          if (file.endsWith('.bundle') && !file.startsWith('.rspeedy/')) {
+          if (file.endsWith('.bundle') && !file.startsWith('.')) {
             bundles[file] = sha256(await readFile(join(output, file)));
           }
         }

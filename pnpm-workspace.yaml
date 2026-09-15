@@ -17,27 +17,29 @@ minimumReleaseAgeExclude:
   - "@lynx-js/*"
   - "@rspack/*"
   - "@rsbuild/*"
+  - "@rslib/*"
   - "@rstest/*"
+  - rsbuild-plugin-dts@1.0.1
 minimumReleaseAgeStrict: false
 
 catalog:
-  "@lynx-js/config-rsbuild-plugin": "0.1.1"
-  "@lynx-js/external-bundle-rsbuild-plugin": "0.4.0"
+  "@lynx-js/config-rsbuild-plugin": "0.2.3"
+  "@lynx-js/external-bundle-rsbuild-plugin": "0.4.2"
   "@lynx-js/gesture-runtime": "2.1.3"
-  "@lynx-js/lynx-bundle-rslib-config": "0.6.0"
+  "@lynx-js/lynx-bundle-rslib-config": "0.8.1"
   "@lynx-js/lynx-core": "0.1.4"
-  "@lynx-js/motion": "0.0.3"
-  "@lynx-js/preact-devtools": "5.0.1-20260716151326-abdb87c"
-  "@lynx-js/qrcode-rsbuild-plugin": "0.6.0"
-  "@lynx-js/react": "0.123.0"
-  "@lynx-js/react-rsbuild-plugin": "0.18.0"
-  "@lynx-js/react-umd": "0.123.0"
-  "@lynx-js/rspeedy": "0.16.0"
-  "@lynx-js/tailwind-preset": "0.5.0"
-  "@lynx-js/template-webpack-plugin": "0.13.0"
-  "@lynx-js/types": "4.0.0"
-  "@lynx-js/web-core": "0.22.2"
-  "@lynx-js/web-elements": "0.12.6"
+  "@lynx-js/motion": "0.0.6"
+  "@lynx-js/preact-devtools": "5.0.1-20260827072047-5f77e12"
+  "@lynx-js/qrcode-rsbuild-plugin": "0.7.2"
+  "@lynx-js/react": "0.126.1"
+  "@lynx-js/react-rsbuild-plugin": "0.20.2"
+  "@lynx-js/react-umd": "0.126.1"
+  "@lynx-js/rspeedy": "0.17.2"
+  "@lynx-js/tailwind-preset": "0.5.1"
+  "@lynx-js/template-webpack-plugin": "0.16.1"
+  "@lynx-js/types": "4.2.1"
+  "@lynx-js/web-core": "0.26.1"
+  "@lynx-js/web-elements": "0.12.11"
   "@types/node": "24.13.2"
   # The workspace compiler: every program is type-checked, and the bobcat-wasm
   # facade emitted, by TypeScript 7.
@@ -45,14 +47,30 @@ catalog:
 
 catalogs:
   rspack:
-    "@rspack/core": "2.1.4"
+    "@rspack/core": "2.2.4"
   # `@lynx-js/rspeedy` loads `lynx.config.ts` through a Node module hook that
   # imports the classic `typescript` compiler API as it loads, and its peer
-  # range stops at 5.9. TypeScript 7 has no such API, so every rspeedy project
+  # range stops at 6.0. TypeScript 7 has no such API, so every rspeedy project
   # installs this compiler for that hook alone; TypeScript 7 at the root is what
   # checks those projects. Drop this once rspeedy's loader stops importing it.
   rspeedy:
     typescript: "5.9.3"
+  # The examples the Explorer showcase opens, taken from the pkg.pr.new preview
+  # of https://github.com/lynx-family/lynx-examples/pull/440 (web platform
+  # bundles in the binary template), pinned to its head commit 74e8136 so the
+  # tarballs cannot change under the lockfile. Return to registry versions once
+  # that PR is released.
+  lynx-examples:
+    "@lynx-example/animation": "https://pkg.pr.new/@lynx-example/animation@74e8136"
+    "@lynx-example/css": "https://pkg.pr.new/@lynx-example/css@74e8136"
+    "@lynx-example/fetch": "https://pkg.pr.new/@lynx-example/fetch@74e8136"
+    "@lynx-example/image": "https://pkg.pr.new/@lynx-example/image@74e8136"
+    "@lynx-example/layout": "https://pkg.pr.new/@lynx-example/layout@74e8136"
+    "@lynx-example/lazy-bundle": "https://pkg.pr.new/@lynx-example/lazy-bundle@74e8136"
+    "@lynx-example/list": "https://pkg.pr.new/@lynx-example/list@74e8136"
+    "@lynx-example/scroll-view": "https://pkg.pr.new/@lynx-example/scroll-view@74e8136"
+    "@lynx-example/text": "https://pkg.pr.new/@lynx-example/text@74e8136"
+    "@lynx-example/view": "https://pkg.pr.new/@lynx-example/view@74e8136"
 
 strictDepBuilds: true
 
