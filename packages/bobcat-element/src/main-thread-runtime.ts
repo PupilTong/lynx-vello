@@ -2,7 +2,10 @@
 //
 // The JS Context and lifecycle/event calls reach this view's BTS Worker.
 // Native modules remain sinks. Diagnostics reach the view's host; global
-// events reach BTS through the same Worker FIFO as Context messages.
+// events reach BTS through the same Worker FIFO as Context messages. This
+// realm never waits on the BTS: a BTS that closed itself, failed, or trapped
+// leaves the view running, and later messages go to its Worker all the same,
+// where the host drops them as a browser drops a post to a terminated worker.
 // The one local delivery path is `lynx.getEngine()`:
 // its stable EventTarget retains realm-local listeners so `bobcat:boot` can
 // dispatch `__RenderPage` when an entry has no legacy `globalThis.renderPage`.
@@ -21,7 +24,7 @@
 // the same class, on a runtime this module is not registered on, so the source
 // is shared as a module and each runtime compiles its own copy.
 
-import { EventTarget, hasEventListener, dispatchEventListeners } from "bobcat:event-target";
+import { EventTarget, hasEventListener, installExceptionReporter } from "bobcat:event-target";
 import {
   type ContextEvent,
   createCrossThreadContext,
@@ -30,11 +33,16 @@ import { __BobcatQueryNodes } from "bobcat:element";
 import type { NodeQueryRequest } from "bobcat:selector-query";
 import "bobcat:timers";
 import { requestScriptFrame } from "bobcat-internal:host";
-import { initialProcessor as getInitialProcessor, globalProps, initData, reportScriptError, logScriptMessage, notifyReady, preloadStyleSheet, adoptStyleSheet } from "bobcat-internal:host";
+import { initialProcessor as getInitialProcessor, globalProps, initData, reportScriptError, logScriptMessage, preloadStyleSheet, adoptStyleSheet } from "bobcat-internal:host";
 import type { Worker } from "bobcat-internal";
 import type { TimerGlobals } from "bobcat:timers";
 
 const timers = globalThis as unknown as TimerGlobals;
+
+// This realm reports a listener exception the way it reports any other script
+// error: through the host's `reportScriptError`. Installed as this module
+// evaluates, before anything here can dispatch.
+installExceptionReporter(_ReportError);
 
 /**
  * What this realm sends its BTS Worker: a Context event, or a runtime call,
@@ -60,7 +68,6 @@ type LepusMethodCall = {
  */
 type FromBackground = LepusMethodCall | NodeQueryRequest
   | { bobcat: "runtime"; method: "reportError" | "console"; level: string; message: string }
-  | { bobcat: "runtime"; method: "backgroundReady" }
   | { bobcat: "runtime"; method: "disposed" }
   | { bobcat: "runtime"; method: "reloadFromJS"; data?: unknown; id?: number }
   | (ContextEvent & { bobcat?: never });
@@ -81,21 +88,13 @@ function createContextSink() {
   };
 }
 
-// Engine dispatch owns its listener error policy. All callers use the same
-// EventTarget API, with Promise jobs left to the existing outer checkpoint.
-class EngineContext extends EventTarget {
-  override dispatchEvent(event: unknown): boolean {
-    return dispatchEventListeners(this, event, (callback, receiver, value) => {
-      try { Reflect.apply(callback, receiver, [value]); }
-      catch (error) { _ReportError(error); }
-    });
-  }
-}
-
 const coreContext = createContextSink();
 const jsContext = createCrossThreadContext("CoreContext");
 const nativeContext = createContextSink();
-const engineContext = new EngineContext();
+// A plain EventTarget: per-listener isolation is EventTarget's own, and the
+// reporter installed above is this realm's. Promise jobs a listener schedules
+// are left to the existing outer checkpoint.
+const engineContext = new EventTarget();
 // The realm's global object, where a card installs the methods
 // `callLepusMethod` looks up by name.
 const scope = globalThis as Record<string, unknown>;
@@ -122,7 +121,12 @@ function styleSheetURL(key: string, bundleName: string): string {
   const section = key === "CSS" ? "" : `${name}/`;
   return `${path.replace(/\/$/, "")}/${section}index.css${suffix}`;
 }
+// Set once, at connection, and never cleared: a Worker that has ended is still
+// the Worker this view posts to, and the host is what drops those posts.
 let backgroundWorker: Worker | undefined;
+// The BTS Worker ended — it closed itself, its script failed, or its thread
+// trapped. Only disposal reads it: nothing can reply from an ended Worker.
+let backgroundEnded = false;
 const animationCallbacks = new Map<number, (milliseconds: number) => void>();
 let nextAnimationId = 1;
 let frameRequested = false;
@@ -148,6 +152,13 @@ export function __BobcatBeginFrame(milliseconds: number) {
 let backgroundDisposal: Promise<void> | undefined;
 let acknowledgeDisposal: (() => void) | undefined;
 let pendingBackgroundMessages: ToBackground[] = [];
+/**
+ * The FIFO exists only for the messages a booting entry sends before its
+ * Worker is constructed. Once connected, every message goes to the Worker,
+ * whether or not the BTS still runs: the host drops a post to a worker it no
+ * longer names, exactly as a browser drops a post to a terminated worker.
+ * Queueing them instead would grow a list nothing can ever drain.
+ */
 function sendToBackground(message: ToBackground) {
   if (backgroundDisposal) return;
   if (backgroundWorker === undefined) pendingBackgroundMessages.push(message);
@@ -191,14 +202,10 @@ export function __BobcatConnectBackground(worker: Worker, data: unknown) {
     return;
   }
   worker.addEventListener("__bobcat:close", () => {
-    if (backgroundWorker === worker) backgroundWorker = undefined;
+    // The Worker stays this realm's BTS Worker. What changes is that no reply
+    // can come from it any more, so a disposal waiting for one settles now.
+    if (backgroundWorker === worker) backgroundEnded = true;
     acknowledgeDisposal?.();
-    // A BTS that ended before declaring readiness (its realm could not be
-    // built, or its thread trapped: `Failed`, already reported as
-    // `WorkerFailed`) has settled its startup. Declaring it keeps the view
-    // from staying in the loading state with nothing left to wait for.
-    // `notifyReady` is idempotent on the host side.
-    notifyReady();
   });
   worker.addEventListener("message", (event: { data: FromBackground }) => {
     const message = event.data;
@@ -216,8 +223,6 @@ export function __BobcatConnectBackground(worker: Worker, data: unknown) {
         }
       } else if (message.method === "callLepusMethod") {
         void callLepusMethod(message);
-      } else if (message.method === "backgroundReady") {
-        notifyReady();
       } else if (message.method === "disposed") {
         acknowledgeDisposal?.();
       } else if (message.method === "reloadFromJS") {
@@ -265,15 +270,17 @@ function disposeBackground(): Promise<void> {
   pendingBackgroundMessages = [];
   animationCallbacks.clear();
   updateFrameRequest();
+  // An ended Worker gets no `dispose`: nothing over there could run it, and
+  // no acknowledgement could come back. Terminating it again is a no-op.
+  const ended = worker === undefined || backgroundEnded;
   backgroundDisposal = new Promise<void>(resolve => {
-    if (worker === undefined) resolve();
+    if (ended) resolve();
     else acknowledgeDisposal = resolve;
   }).finally(() => {
     worker?.terminate();
-    backgroundWorker = undefined;
     acknowledgeDisposal = undefined;
   });
-  worker?.postMessage({ bobcat: "runtime", method: "dispose" });
+  if (!ended) worker?.postMessage({ bobcat: "runtime", method: "dispose" });
   return backgroundDisposal;
 }
 

@@ -8,6 +8,32 @@ beforeAll(async () => {
   ({createCrossThreadContext} = await import("../src/cross-thread-context.ts"));
 });
 
+describe("EventTarget listener isolation", () => {
+  it("keeps listener order, once removal and the dispatch result when one throws", () => {
+    // The reporter is one binding per realm; this suite's realm installs the
+    // recorder below and nothing else here dispatches through it.
+    const reports: unknown[] = [];
+    eventTarget.installExceptionReporter(error => { reports.push(error); });
+    const target = new eventTarget.EventTarget();
+    const order: string[] = [];
+    const failure = Error("plain listener failed");
+    const first = () => { order.push("first"); throw failure; };
+    const once = () => { order.push("once"); };
+    const last = () => { order.push("last"); };
+    target.addEventListener("x", first);
+    target.addEventListener("x", once, { once: true });
+    target.addEventListener("x", last);
+    expect(target.dispatchEvent({ type: "x" })).toBe(true);
+    expect(order).toEqual(["first", "once", "last"]);
+    expect(reports).toEqual([failure]);
+    // The `once` listener is gone, the throwing one is not, and the result
+    // still says only whether the event was cancelled.
+    expect(target.dispatchEvent({ type: "x", defaultPrevented: true })).toBe(false);
+    expect(order).toEqual(["first", "once", "last", "first", "last"]);
+    expect(reports).toEqual([failure, failure]);
+  });
+});
+
 describe("native Lynx Context contract", () => {
   it("preserves FIFO and queued payload references until the structured clone copies the send", () => {
     const context = createCrossThreadContext("CoreContext");

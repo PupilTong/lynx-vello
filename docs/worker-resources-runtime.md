@@ -24,10 +24,13 @@ or view release cancels outstanding completions and discards late results.
 Raw XML background entries use this path and import their runtime bindings from
 `bobcat:bts-runtime`. The built-in bootstrap installs a JS initializer and
 returns; the first Worker message supplies inputs before the application entry
-imports. Later messages wait on that import Promise and are delivered once it settles,
-success or failure. Ready is sent either way; an entry that throws is reported
-through `reportError` as a nonfatal `WorkerFailed` and leaves BTS running. MTS
-calls the readiness binding without awaiting BTS.
+imports. Later messages wait on that import Promise and are delivered in order
+once it settles,
+success or failure. An entry that throws is reported
+through `reportError` as a nonfatal `WorkerFailed` and leaves BTS running. The
+view's readiness is MTS boot finishing and does not involve BTS at all, so an
+entry whose top-level await never settles delays messages to BTS but not
+readiness.
 
 ## ReactLynx compiled-module contract
 

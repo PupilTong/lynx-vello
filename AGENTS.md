@@ -243,7 +243,11 @@ Rust parses structured input only when Rust behavior actually needs its fields
   the group's realms share, and what it leaves there neither reaches the next
   view to boot, dispatch an event, or run a timer on that runtime, nor comes
   back at the failing realm's own next entry. Queued *jobs* still run — they
-  are the runtime's work, and the next checkpoint finishes them. That the queue
+  are the runtime's work, and the next checkpoint finishes them. A checkpoint
+  drains that queue until it is empty, as a browser's microtask checkpoint
+  does: there is no per-checkpoint job budget and no incomplete checkpoint for
+  a later entry into the realm to resume instead of running its own operation.
+  That the queue
   is the runtime's is also why a view has to notice a sibling's entry into
   JavaScript: `ScriptEngine::checkpoint` bumps a runtime-wide generation on a
   `watch<u64>`, every view has a task following it, and a page whose import
@@ -332,7 +336,7 @@ Rust parses structured input only when Rust behavior actually needs its fields
   defers incomplete import graphs, and resumes the original promises on main
   when sources arrive. Cycles never become partially linked while fetching.
   Top-level await can span resource and timer turns; `ScriptFinished` waits
-  for the boot promise and the application's readiness declaration. Handled import failures leave the realm usable, and
+  for the boot promise alone. Handled import failures leave the realm usable, and
   dropping the view cancels outstanding completions and releases continuations.
   This is JavaScript ESM loading; import maps, import attributes, JSON modules
   and Lynx component-bundle imports remain unsupported.
@@ -608,7 +612,14 @@ Rust parses structured input only when Rust behavior actually needs its fields
   string type and data property, captures the public envelope, sends to the peer and
   returns `0`. Context `postMessage(value)` sends a message event. Listeners
   receive the original null/undefined data and an undefined receiver, and
-  ignore DOM listener options. Origins identify the sending CoreContext or
+  ignore DOM listener options. The shared `bobcat:event-target` EventTarget
+  every Context, `Worker` and engine target extends follows the DOM's
+  inner-invoke rule: a listener that throws is reported and the walk continues
+  with the next listener — in the MTS realm through `lynx.reportError` and the
+  host's `reportScriptError`, as a nonfatal `ScriptReported`; in a worker realm
+  through the worker global's `reportError`, so it reaches the parent
+  `Worker`'s `error` event and a nonfatal `WorkerFailed`.
+  Origins identify the sending CoreContext or
   JSContext. MTS queues payload references until the Worker is connected;
   Worker postMessage takes the structured-clone snapshot, for early and
   connected sends alike — so `undefined` members, the special numbers,
@@ -622,16 +633,17 @@ Rust parses structured input only when Rust behavior actually needs its fields
   adapters supply the optional entry; compiled bundle manifests still need
   the Lynx Core module/init shell and remain pending. Each view costs one
   additional realm on the group's existing worker runtime. MTS boot does not
-  await BTS: the built-in BTS posts `backgroundReady` after its optional entry
-  completes, including when no entry is configured. MTS then calls the native
-  `notifyReady()` binding. The page publishes `ScriptFinished` once both MTS
-  completion and that declaration hold, after commit. A BTS entry that throws
+  await BTS: `ScriptFinished` means MTS boot finished — the entry module
+  evaluated, its top-level await settled, and its first flush committed. The
+  BTS Worker's state is no part of it, so a BTS entry whose top-level await
+  never settles does not keep the view from becoming ready. A BTS entry that throws
   is reported like any worker script: `reportError` in the worker realm
   surfaces it at the `Worker`'s `error` event and as a nonfatal
-  `WorkerFailed`; the BTS keeps running and still takes messages, and
-  `backgroundReady` follows so `ScriptFinished` is still published. A BTS
-  Worker that ends before readiness (`Failed`) also settles readiness through
-  the MTS close listener. No BTS failure ends the view.
+  `WorkerFailed`; the BTS keeps running and still takes messages. No BTS
+  failure ends the view. MTS keeps its Worker reference after that Worker ends;
+  a post to an ended Worker is dropped by the host, as a browser drops
+  `postMessage` to a terminated worker, and the pre-connection FIFO holds only
+  what the MTS entry sends before boot constructs the Worker.
   BTS also exposes stable `getApp()` and `getNativeApp()` objects. The current
   app hooks receive `OnLifecycleEvent`, `publishEvent`, `publicComponentEvent`
   and `callDestroyLifetimeFun`; the native app's `callLepusMethod` invokes a
@@ -781,12 +793,12 @@ Rust parses structured input only when Rust behavior actually needs its fields
   posts the result plus host props and SystemInfo as the first BTS Worker
   message, before rendering. The BTS bootstrap returns after installing a JS
   receiver; that message initializes its inputs before importing the entry.
-  Later internal messages wait on the import Promise. Readiness is
-  acknowledged once the entry has settled, success or failure.
+  Later internal messages wait on the import Promise and are delivered in order
+  once it settles, success or failure.
   Lifecycle hooks and engine listeners run synchronously, with no intervening
   Promise-job checkpoint. Boot awaits a `Promise.resolve().then` flush after
-  rendering. MTS evaluation completes independently; public readiness still
-  requires BTS acknowledgement.
+  rendering. That flush's commit completes MTS boot, which is the whole of
+  public readiness; BTS acknowledges nothing.
   Boot reads `PageConfig.enable_js_data_processor` and `Viewport` directly
   from the staged document ingredients. `ViewSources.initial_processor` is a
   plain `String`, handed to JS by the one-shot startup-data binding without
@@ -799,18 +811,22 @@ Rust parses structured input only when Rust behavior actually needs its fields
   event argument lists into `String`; core passes them unchanged to JS, which
   parses them and constructs Worker messages. Update/reset/reload take a separate
   processor-name `String`, with an empty name selecting the default processor.
-  All require observed readiness and
-  otherwise return `EngineError::NotReady`, just like global events. Initial
+  All are accepted once MTS boot has finished and
+  otherwise return `EngineError::NotReady`, just like global events; the BTS
+  Worker still loading is no reason to refuse one. Initial
   data and props come from `ViewSources`; there is no early props cache or
-  initial-render update gate. Hooks process accepted data and notify BTS in order.
+  initial-render update gate. MTS runs its own hook at once and forwards the
+  update to BTS with `Worker.postMessage`; the BTS runtime queues that message
+  behind its entry import and delivers it in order once the import settles.
+  Rust never sends page data to BTS — MTS `postMessage` is the only path.
   A reload retains the realms and entry; the framework recreates component state.
   See `docs/data-lifecycle-runtime.md` for processor selection, snapshots,
   readiness, engine-event precedence and the BTS reload callback boundary.
   Native Context behavior, the BTS GlobalEventEmitter and
   `LynxView::send_global_event` are described in `docs/events-diagnostics-runtime.md`.
   `LynxView::pump` records readiness before returning `ScriptFinished`, exposed
-  by `is_ready()`. Global events require observed readiness and otherwise return
-  `EngineError::NotReady`; rejected events are never queued or replayed. Accepted
+  by `is_ready()`. Global events require that observed MTS boot and otherwise
+  return `EngineError::NotReady`; rejected events are never queued or replayed. Accepted
   events retain host FIFO order. Internal pre-connection MTS messages still wait
   for Worker construction.
   `ScriptReported` and `ConsoleMessage` are nonfatal host notices; their BTS
@@ -1047,7 +1063,7 @@ Rust parses structured input only when Rust behavior actually needs its fields
   Worker message handlers; Rust transports opaque messages and performs no
   Lepus-specific dispatch or reply flush.
   Boot's deferred flush uses ordinary Promise scheduling and the existing
-  outer checkpoint, with its job budget, rejection attribution and generation
+  outer checkpoint, with its rejection attribution and generation
   notification. See `docs/mts-execution-runtime.md` for the boot and chunk
   execution boundaries.
   A closure's lifetime follows its JS function object rather than the realm: the closure

@@ -116,11 +116,10 @@ export function __BobcatDispatchWorkerEvent(
   if (kind === "message") {
     worker.dispatchEvent({ type: "message", data, target: worker });
   } else if (kind === "error" || kind === "failed") {
-    try {
-      worker.dispatchEvent({ type: "error", message: String(data), filename, lineno, colno, target: worker });
-    } finally {
-      if (kind === "failed") worker.dispatchEvent({ type: "__bobcat:close" });
-    }
+    // A listener that throws is reported by the EventTarget walk and never
+    // reaches here, so the close notification needs no guarding.
+    worker.dispatchEvent({ type: "error", message: String(data), filename, lineno, colno, target: worker });
+    if (kind === "failed") worker.dispatchEvent({ type: "__bobcat:close" });
   } else if (kind === "closed") {
     // Internal notification: MTS disposal must not await a reply from a
     // worker which has already closed or failed to open its realm.

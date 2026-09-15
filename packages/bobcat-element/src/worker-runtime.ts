@@ -2,6 +2,7 @@ import {
   type EventTarget,
   installEventHandler,
   installEventTarget,
+  installExceptionReporter,
 } from "bobcat:event-target";
 import { closeWorker, postWorkerMessage } from "bobcat-internal:worker";
 
@@ -17,7 +18,9 @@ import { closeWorker, postWorkerMessage } from "bobcat-internal:worker";
 // # What is here and what is not
 //
 // `postMessage`, `close`, `name`, `self`, `reportError`, the `message` event
-// and the EventTarget surface under it. Not here: `importScripts` (this realm
+// and the EventTarget surface under it — including its rule that a listener
+// which throws is reported here (through `reportError`) and the listeners
+// behind it still run. Not here: `importScripts` (this realm
 // loads ESM, so a worker script uses `import`), `location`, `navigator`,
 // `fetch`, `XMLHttpRequest`, `MessagePort`, `messageerror` (the reader cannot
 // fail on what the same build's writer produced), `onerror` (an uncaught
@@ -112,3 +115,7 @@ Object.assign(scope, {
     return undefined;
   },
 });
+
+// Installed after `Object.assign` defines it: a listener exception in this
+// realm is reported the way an uncaught one is, and the dispatch continues.
+installExceptionReporter(scope.reportError);

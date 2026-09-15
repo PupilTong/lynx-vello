@@ -3,14 +3,13 @@
 //!
 //! Runtime and realms live in `quickjs-rust-bridge`. What this module adds is
 //! everything the runtime needs and the bridge deliberately leaves open: when
-//! the promise-job queue is drained, how many jobs one checkpoint may run,
-//! which realm a drained failure is reported to, how a bridge failure becomes
+//! the promise-job queue is drained, which realm a drained failure is
+//! reported to, how a bridge failure becomes
 //! a sanitized [`ScriptError`], and how a module namespace caches the atoms an
 //! export is looked up by.
 
 use std::collections::HashMap;
 use std::fmt;
-use std::num::NonZeroUsize;
 use std::rc::Rc;
 use std::sync::Arc;
 #[cfg(test)]
@@ -28,13 +27,9 @@ use crate::script::{ScriptError, ScriptErrorKind, ScriptErrorPhase, ScriptSource
 pub(crate) type HostCallback =
     Box<dyn FnMut(&[quickjs::HostValue]) -> Result<quickjs::HostValue, String> + 'static>;
 
-const DEFAULT_MAX_JOBS_PER_CHECKPOINT: NonZeroUsize =
-    NonZeroUsize::new(1_024).expect("the default job limit is non-zero");
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct QuickJsConfig {
     runtime_options: quickjs::RuntimeOptions,
-    max_jobs_per_checkpoint: NonZeroUsize,
 }
 
 #[cfg(test)]
@@ -54,7 +49,6 @@ impl Default for QuickJsConfig {
                 max_stack_size: None,
                 execution_timeout: None,
             },
-            max_jobs_per_checkpoint: DEFAULT_MAX_JOBS_PER_CHECKPOINT,
         }
     }
 }
@@ -98,16 +92,15 @@ pub(crate) struct ScriptEngine {
 /// The `QuickJS` runtime a group's realms share.
 ///
 /// Everything here is a runtime-wide fact rather than a realm's: one heap,
-/// one atom table, one promise-job queue, one set of execution limits.
-///
-/// *Unfinished work* is one of those facts and lives here: the queue that
-/// stopped short is the queue every realm drains, so whichever realm enters
-/// next finishes it. A *failure* is not, and does not: it belongs to the
-/// realm that raised it, which is where it waits — on [`ScriptEngine`].
+/// one atom table, one promise-job queue, one set of execution limits. The
+/// queue is one of those facts, and no checkpoint ever leaves work in it:
+/// every checkpoint runs it dry, whichever realm queued the jobs. A
+/// *failure* is not a runtime-wide fact and does not live here: it belongs
+/// to the realm that raised it, which is where it waits — on
+/// [`ScriptEngine`].
 pub(crate) struct ScriptRuntime {
     runtime: quickjs::Runtime,
     config: QuickJsConfig,
-    checkpoint_incomplete: bool,
     /// Bumped by every checkpoint any realm on this runtime runs.
     ///
     /// The job queue is the runtime's: one view's checkpoint runs another's
@@ -128,7 +121,6 @@ impl ScriptRuntime {
         Ok(Self {
             runtime: quickjs::Runtime::with_options(config.runtime_options)?,
             config,
-            checkpoint_incomplete: false,
             checkpoint: tokio::sync::watch::channel(0).0,
         })
     }
@@ -207,8 +199,8 @@ impl ScriptEngine {
     /// handing those out one entry at a time would turn one broken script
     /// into a realm that fails forever. A worker whose script throws at load
     /// still answers the next message, which is what HTML says it does.
-    /// Pending *jobs* are not dropped — they are still due, and the next
-    /// checkpoint finishes them.
+    /// Pending *jobs* are not dropped — they are still due, and this entry's
+    /// own checkpoint runs them before the caller hears the failure.
     fn finish_operation<T>(
         &mut self,
         runtime: &mut ScriptRuntime,
@@ -251,47 +243,24 @@ impl ScriptEngine {
         runtime: &mut ScriptRuntime,
         phase: ScriptErrorPhase,
     ) -> Result<usize, ScriptError> {
-        let budget = runtime.config.max_jobs_per_checkpoint.get();
-        let drained = runtime
-            .runtime
-            .drain_pending_jobs_up_to(&self.realm, budget);
+        let drained = runtime.runtime.drain_pending_jobs(&self.realm);
         // Structurally, on both outcomes: this realm entered the shared job
         // queue, and every sibling has to settle what its own realm owes
         // whether or not the drain got through it.
         runtime.mark_checkpoint();
-        let drain = match drained {
-            Ok(drain) => drain,
-            Err(error) => {
-                runtime.checkpoint_incomplete = true;
-                return Err(map_quickjs_error(error, phase));
-            }
-        };
-        runtime.checkpoint_incomplete = drain.jobs_remaining;
-        if drain.jobs_remaining {
-            return Err(script_error(
-                ScriptErrorKind::Other,
-                phase,
-                "QuickJS promise jobs exceeded the per-checkpoint limit",
-            ));
-        }
-        Ok(drain.executed)
+        let executed = drained.map_err(|error| map_quickjs_error(error, phase))?;
+        Ok(executed)
     }
 
     /// Reports what the previous entry left owing before this one starts:
-    /// this realm's parked checkpoint error, then the queue the runtime
-    /// stopped draining.
-    fn resume_incomplete_checkpoint(
-        &mut self,
-        runtime: &mut ScriptRuntime,
-        phase: ScriptErrorPhase,
-    ) -> Result<(), ScriptError> {
-        if let Some(error) = self.deferred_checkpoint_error.take() {
-            return Err(error);
+    /// this realm's parked checkpoint error. There is nothing else to hand
+    /// back — the job queue is the runtime's and every checkpoint runs it
+    /// dry, so no entry inherits an unfinished one.
+    fn take_deferred_checkpoint_error(&mut self) -> Result<(), ScriptError> {
+        match self.deferred_checkpoint_error.take() {
+            Some(error) => Err(error),
+            None => Ok(()),
         }
-        if runtime.checkpoint_incomplete {
-            self.checkpoint(runtime, phase)?;
-        }
-        Ok(())
     }
 
     /// Runs a collection now, so a dead handle's finalizer reaches the
@@ -304,7 +273,7 @@ impl ScriptEngine {
         &mut self,
         runtime: &mut ScriptRuntime,
     ) -> Result<(), ScriptError> {
-        self.resume_incomplete_checkpoint(runtime, ScriptErrorPhase::CollectGarbage)?;
+        self.take_deferred_checkpoint_error()?;
         runtime.runtime.run_gc();
         self.checkpoint(runtime, ScriptErrorPhase::CollectGarbage)
             .map(|_| ())
@@ -336,7 +305,7 @@ impl ScriptEngine {
         result: Result<(&str, &str), &str>,
     ) -> Result<(), ScriptError> {
         const PHASE: ScriptErrorPhase = ScriptErrorPhase::ExecuteModule;
-        self.resume_incomplete_checkpoint(runtime, PHASE)?;
+        self.take_deferred_checkpoint_error()?;
         self.realm
             .complete_module(name, result)
             .map_err(|error| map_quickjs_error(error, PHASE))?;
@@ -418,15 +387,19 @@ impl ScriptEngine {
     /// Every export must be registered before that module first loads, and a
     /// name cannot be replaced. Registration retains the callback without
     /// invoking it.
+    ///
+    /// The runtime is taken but not read: `QuickJS` is not reentrant, and the
+    /// exclusive borrow is how a caller proves no other realm on this runtime
+    /// is mid-entry while this one is furnished.
     pub(crate) fn register_host_module_function(
         &mut self,
-        runtime: &mut ScriptRuntime,
+        _runtime: &mut ScriptRuntime,
         module_specifier: &str,
         export_name: &str,
         arity: u8,
         mut callback: HostCallback,
     ) -> Result<(), ScriptError> {
-        self.resume_incomplete_checkpoint(runtime, ScriptErrorPhase::RegisterHostModuleFunction)?;
+        self.take_deferred_checkpoint_error()?;
         self.realm
             .register_host_module_function(
                 module_specifier,
@@ -448,7 +421,7 @@ impl ScriptEngine {
         source_name: &str,
     ) -> Result<(), ScriptError> {
         const PHASE: ScriptErrorPhase = ScriptErrorPhase::Execute;
-        self.resume_incomplete_checkpoint(runtime, PHASE)?;
+        self.take_deferred_checkpoint_error()?;
         let result = self
             .realm
             .evaluate(
@@ -494,7 +467,7 @@ impl ScriptEngine {
         source_name: &str,
     ) -> Result<(), ScriptError> {
         const PHASE: ScriptErrorPhase = ScriptErrorPhase::ExecuteModule;
-        self.resume_incomplete_checkpoint(runtime, PHASE)?;
+        self.take_deferred_checkpoint_error()?;
         let evaluation = self
             .realm
             .evaluate(
@@ -532,7 +505,7 @@ impl ScriptEngine {
         arguments: &[quickjs::HostArgument<'_>],
     ) -> Result<bool, ScriptError> {
         const PHASE: ScriptErrorPhase = ScriptErrorPhase::CallModuleExport;
-        self.resume_incomplete_checkpoint(runtime, PHASE)?;
+        self.take_deferred_checkpoint_error()?;
         let (object, member) = self.module_export(module_specifier, export_name)?;
         // One crossing carries the lookup and every argument, and nothing
         // here allocates: the primitives are described in place and a string
@@ -598,7 +571,6 @@ impl fmt::Debug for ScriptRuntime {
         formatter
             .debug_struct("ScriptRuntime")
             .field("config", &self.config)
-            .field("checkpoint_incomplete", &self.checkpoint_incomplete)
             .finish_non_exhaustive()
     }
 }
@@ -637,6 +609,7 @@ fn map_quickjs_error(error: quickjs::Error, phase: ScriptErrorPhase) -> ScriptEr
     }
 }
 
+#[cfg(test)]
 fn script_error(
     kind: ScriptErrorKind,
     phase: ScriptErrorPhase,
@@ -1084,12 +1057,9 @@ mod tests {
     #[test]
     fn discarding_a_failures_leftovers_does_not_discard_its_jobs() {
         // Only rejections are dropped. A job the failing entry queued is
-        // still due, and the checkpoint that follows still runs it — which is
-        // the case the deferred-checkpoint design already got right.
-        let (mut runtime, mut engine) = engine_with(QuickJsConfig {
-            max_jobs_per_checkpoint: NonZeroUsize::MIN,
-            ..QuickJsConfig::default()
-        });
+        // still due, and that entry's own checkpoint runs it — before the
+        // next entry's own code.
+        let (mut runtime, mut engine) = engine();
         engine
             .execute_script(
                 &mut runtime,
@@ -1097,14 +1067,9 @@ mod tests {
                  Promise.resolve().then(() => order.push('queued-1'));
                  Promise.resolve().then(() => order.push('queued-2'));
                  throw new Error('primary')",
-                "over-budget.js",
+                "thrower.js",
             )
-            .expect_err("the script throws, and its jobs outrun a one-job checkpoint");
-
-        let budget = engine
-            .execute_script(&mut runtime, "globalThis.blocked = true", "blocked.js")
-            .expect_err("the checkpoint's own budget error is still owed to this realm");
-        assert_eq!(budget.kind, ScriptErrorKind::Other);
+            .expect_err("the script throws");
 
         engine
             .execute_script(
@@ -1146,55 +1111,41 @@ mod tests {
     }
 
     #[test]
-    fn a_checkpoint_at_exactly_the_job_limit_is_not_an_error() {
-        let (mut runtime, mut engine) = engine_with(QuickJsConfig {
-            max_jobs_per_checkpoint: NonZeroUsize::MIN,
-            ..QuickJsConfig::default()
-        });
+    fn a_checkpoint_drains_every_queued_job_in_one_entry() {
+        // A checkpoint is a browser's microtask checkpoint: it runs the
+        // queue dry, however long it is, and jobs a job queues are part of
+        // the same checkpoint. Nothing is left for the next entry to
+        // inherit, so no entry can be spent finishing the last one's work.
+        let (mut runtime, mut engine) = engine();
         engine
             .execute_script(
                 &mut runtime,
-                "globalThis.jobs = 0; Promise.resolve().then(() => jobs = 1)",
-                "one-job.js",
+                "globalThis.count = 0;
+                 for (let i = 0; i < 5000; i++) {
+                     Promise.resolve().then(() => { count++; });
+                 }
+                 globalThis.cascade = 0;
+                 const chain = (left) => {
+                     cascade++;
+                     if (left > 0) Promise.resolve().then(() => chain(left - 1));
+                 };
+                 Promise.resolve().then(() => chain(2000));",
+                "flood.js",
             )
-            .expect("one job fits a one-job checkpoint");
+            .expect("a job queue far past the old 1024-job budget is not an error");
+        assert!(
+            !runtime.runtime.has_pending_jobs(),
+            "the checkpoint must leave the runtime's job queue empty"
+        );
+
         engine
             .execute_script(
                 &mut runtime,
-                "if (jobs !== 1) throw new Error('the job did not run')",
+                "if (count !== 5000) throw new Error('jobs left over: ' + count);
+                 if (cascade !== 2001) throw new Error('cascade left over: ' + cascade);",
                 "verify.js",
             )
-            .expect("the single job ran");
-    }
-
-    #[test]
-    fn exceeding_the_job_limit_is_an_error_and_the_rest_runs_before_reentry() {
-        let (mut runtime, mut engine) = engine_with(QuickJsConfig {
-            max_jobs_per_checkpoint: NonZeroUsize::MIN,
-            ..QuickJsConfig::default()
-        });
-        let error = engine
-            .execute_script(
-                &mut runtime,
-                "globalThis.order = [];
-                 Promise.resolve().then(() => order.push('old-1'));
-                 Promise.resolve().then(() => order.push('old-2'))",
-                "two-jobs.js",
-            )
-            .expect_err("two jobs exceed a one-job checkpoint");
-        assert_eq!(error.kind, ScriptErrorKind::Other);
-        assert_eq!(error.phase, ScriptErrorPhase::Execute);
-
-        engine
-            .execute_script(
-                &mut runtime,
-                "order.push('new');
-                 if (order.join(',') !== 'old-1,old-2,new') {
-                     throw new Error('left-over jobs ran late: ' + order.join(','));
-                 }",
-                "reentry.js",
-            )
-            .expect("the queued job finishes before the next script's own code");
+            .expect("the very next entry sees every job already done");
     }
 
     #[test]

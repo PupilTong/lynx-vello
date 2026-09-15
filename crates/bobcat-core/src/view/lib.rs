@@ -227,10 +227,12 @@ pub enum LynxViewError {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum EngineEvent {
-    /// MTS boot completed and the BTS Worker's startup settled: its entry
-    /// finished, or threw and was reported as [`EngineEvent::WorkerFailed`],
-    /// or the Worker ended. `LynxView::pump` records readiness before
-    /// returning this notification.
+    /// MTS boot completed: the entry module evaluated — its top-level await
+    /// settled — and its first flush committed. The BTS Worker plays no part
+    /// in it: it may still be importing its entry, may have thrown (reported
+    /// separately as [`EngineEvent::WorkerFailed`]), or may have ended.
+    /// `LynxView::pump` records the view as ready before returning this
+    /// notification.
     ScriptFinished,
     /// Source loading, document configuration, or entry boot failed.
     StartupFailed(LynxViewError),
@@ -370,10 +372,11 @@ pub struct ViewSources {
     /// Optional BTS application module specifier imported by `bobcat:bts`.
     /// The view always starts a BTS context; without this it runs only the
     /// built-in environment. Its imports load through the view's resource fetcher.
-    /// After entry evaluation, including top-level await, BTS sends ready and MTS
-    /// declares readiness through its binding. MTS evaluation does not await BTS.
-    /// An entry that throws is reported as [`EngineEvent::WorkerFailed`], like
-    /// any worker script, and leaves the view and the BTS Worker running.
+    /// Neither MTS evaluation nor [`EngineEvent::ScriptFinished`] waits for it:
+    /// a host update accepted while the BTS entry is still importing is
+    /// forwarded to the Worker, which queues it behind that import. An entry
+    /// that throws is reported as [`EngineEvent::WorkerFailed`], like any
+    /// worker script, and leaves the view and the BTS Worker running.
     pub background_entry: Option<String>,
     /// Initial page data, as JSON text. The engine hands it to the view's
     /// realm unread, as a plain string; `bobcat:runtime` parses it there and
@@ -681,8 +684,10 @@ enum ViewState {
 }
 
 impl<F> LynxView<F> {
-    /// Whether pump has observed successful MTS boot and configured BTS entry
-    /// completion, and this view has not ended. Keep calling pump while loading.
+    /// Whether pump has observed successful MTS boot — the entry module
+    /// evaluated and its first flush committed — and this view has not ended.
+    /// The BTS Worker's own state is not part of it. Keep calling pump while
+    /// loading.
     #[must_use]
     pub fn is_ready(&self) -> bool {
         self.state == ViewState::Ready && !self.cancel.is_cancelled()
@@ -732,7 +737,8 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
     /// # Errors
     ///
     /// Returns [`EngineError::NotReady`] until [`Self::pump`] reports
-    /// [`EngineEvent::ScriptFinished`] or after the view ends. No update is queued.
+    /// [`EngineEvent::ScriptFinished`] — MTS boot, not the BTS Worker's — or
+    /// after the view ends. No update is queued.
     pub fn reload(&self, data: String, processor_name: String) -> Result<(), EngineError> {
         self.send_page_update(crate::link::PageUpdate::Reload {
             data,
@@ -746,7 +752,8 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
     ///
     /// # Errors
     ///
-    /// Returns [`EngineError::NotReady`] until [`Self::is_ready`] is true.
+    /// Returns [`EngineError::NotReady`] until [`Self::is_ready`] is true —
+    /// MTS boot, not the BTS Worker's startup.
     /// Rejected updates are not queued.
     pub fn update_data(&self, data: String, processor_name: String) -> Result<(), EngineError> {
         self.send_page_update(crate::link::PageUpdate::Data {
@@ -763,7 +770,8 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
     ///
     /// # Errors
     ///
-    /// Returns [`EngineError::NotReady`] until [`Self::is_ready`] is true.
+    /// Returns [`EngineError::NotReady`] until [`Self::is_ready`] is true —
+    /// MTS boot, not the BTS Worker's startup.
     /// Rejected resets are not queued.
     pub fn reset_data(&self, data: String, processor_name: String) -> Result<(), EngineError> {
         self.send_page_update(crate::link::PageUpdate::Data {
@@ -780,7 +788,8 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
     ///
     /// # Errors
     ///
-    /// Returns [`EngineError::NotReady`] until [`Self::is_ready`] is true.
+    /// Returns [`EngineError::NotReady`] until [`Self::is_ready`] is true —
+    /// MTS boot, not the BTS Worker's startup.
     /// Supply initial properties through [`ViewSources::global_props`]; rejected
     /// updates are not retained as initial properties or queued for replay.
     pub fn update_global_props(&self, data: String) -> Result<(), EngineError> {
@@ -793,7 +802,7 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
     ///
     /// # Errors
     ///
-    /// Returns [`EngineError::NotReady`] before readiness is observed or after
+    /// Returns [`EngineError::NotReady`] before MTS boot is observed or after
     /// the view ends. Rejected events are not queued for later delivery.
     pub fn send_global_event(
         &self,

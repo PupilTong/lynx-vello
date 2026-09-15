@@ -31,8 +31,11 @@ The flush follows jobs already queued by the hooks. A job may enqueue another
 job behind the flush: `render -> job 1 -> flush -> job 2` is expected. The await
 keeps the flush in the boot completion/failure path; it does not await hook
 results or drain jobs recursively inside a host callback. The existing outer
-checkpoint continues to run jobs, report unhandled rejections and enforce its
-budget/deadline. Entry-module and flush failures still fail boot. Later dirty
+checkpoint continues to report unhandled rejections and enforce its deadline,
+and runs the runtime's queued jobs until the queue is empty, as a browser's
+microtask checkpoint does: no job budget bounds it, and there is no incomplete
+checkpoint for the next entry into the realm to resume instead of running its
+own operation. Entry-module and flush failures still fail boot. Later dirty
 mutations retain the existing page epilogue's commit behavior.
 
 Named cross-thread calls continue to await through Worker `postMessage` RPC.

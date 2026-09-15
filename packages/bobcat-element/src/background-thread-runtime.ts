@@ -193,7 +193,8 @@ coreContext.addEventListener(
 coreContext.connect((event) => scope.postMessage({ type: event.type, data: event.data, origin: event.origin }));
 // Only the built-in BTS bootstrap arms initialization. Its first Worker
 // message supplies inputs; ordinary messages wait for the entry's imports to
-// settle, whether they finished or threw.
+// settle, whether they finished or threw. Nothing outside this realm waits on
+// that: the view is ready once MTS has booted, whatever becomes of the BTS.
 let startBackground: ((options: BackgroundData & {systemInfo?: Record<string, unknown>}) => Promise<void>) | undefined;
 let entryReady: Promise<void> | undefined;
 
@@ -223,12 +224,11 @@ scope.addEventListener("message", (event: { data: FromMainThread }): void | Prom
       const started = start(message);
       // An entry that throws is a worker script that throws: reported at the
       // parent Worker's `error` event, with this realm still up and taking
-      // messages, as HTML's "run a worker" leaves it. Startup has settled
-      // either way, which is what MTS declares readiness on.
+      // messages, as HTML's "run a worker" leaves it. Nothing waits on the
+      // outcome — the messages behind this one wait only for it to settle.
       started.catch(error => scope.reportError(error));
       entryReady = started.then(noop, noop).then(() => {
         entryReady = undefined;
-        scope.postMessage({bobcat: "runtime", method: "backgroundReady"});
       });
     }
     return;

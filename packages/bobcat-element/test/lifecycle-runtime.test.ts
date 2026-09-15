@@ -18,14 +18,13 @@ rstest.mockRequire("bobcat:cross-thread-context", () => crossThreadContext);
 rstest.mockRequire("bobcat:worker", () => ({}));
 rstest.mockRequire("bobcat:timers", () => ({}));
 const requestScriptFrame = rstest.fn();
-const notifyReady = rstest.fn();
 const preloadStyleSheet = rstest.fn();
 const adoptStyleSheet = rstest.fn();
 const reportedErrors = rstest.fn();
 const consoleMessages = rstest.fn();
 // The runtime reads the view's page data as it evaluates; this view has none.
 rstest.mockRequire("bobcat-internal:host", () => ({
-  notifyReady, requestScriptFrame,
+  requestScriptFrame,
   reportScriptError: reportedErrors,
   logScriptMessage: consoleMessages,
   preloadStyleSheet, adoptStyleSheet,
@@ -529,6 +528,56 @@ describe("runtime events and diagnostics", () => {
     }
   });
 
+  it("isolates the listeners of a Context event arriving from the BTS Worker", () => {
+    const jsContext = mts.lynx.getJSContext();
+    const order: string[] = [];
+    const first = () => { order.push("first"); throw Error("context listener failed"); };
+    const second = () => { order.push("second"); };
+    reportedErrors.mockClear();
+    jsContext.addEventListener("isolated", first);
+    jsContext.addEventListener("isolated", second);
+    try {
+      // The host entry that delivers the Worker message must see nothing of
+      // the throw, and the listener behind it must still run.
+      expect(() => worker.dispatchEvent({
+        type: "message", data: {type: "isolated", data: 1, origin: "CoreContext"},
+      })).not.toThrow();
+      expect(order).toEqual(["first", "second"]);
+      expect(reportedErrors).toHaveBeenCalledExactlyOnceWith(
+        "error", expect.stringContaining("context listener failed"));
+    } finally {
+      jsContext.removeEventListener("isolated", first);
+      jsContext.removeEventListener("isolated", second);
+      reportedErrors.mockClear();
+    }
+  });
+
+  it("reports a throwing BTS Context listener in the worker realm and runs the rest", () => {
+    // worker-runtime.ts installs the worker realm's reporter, and this suite
+    // does not load it (`bobcat:worker` is mocked as `{}`), so stand in for it
+    // with the same function it would install: the realm's `reportError`.
+    const reportError = rstest.fn();
+    scope.reportError = reportError;
+    eventTarget.installExceptionReporter(reportError);
+    const coreContext = bts.getCoreContext();
+    const order: string[] = [];
+    const failure = Error("BTS context listener failed");
+    const first = () => { order.push("first"); throw failure; };
+    const second = () => { order.push("second"); };
+    coreContext.addEventListener("bts-isolated", first);
+    coreContext.addEventListener("bts-isolated", second);
+    try {
+      receiveInBackground({data: {type: "bts-isolated", data: 1, origin: "JSContext"}});
+      expect(order).toEqual(["first", "second"]);
+      expect(reportError).toHaveBeenCalledExactlyOnceWith(failure);
+    } finally {
+      coreContext.removeEventListener("bts-isolated", first);
+      coreContext.removeEventListener("bts-isolated", second);
+      eventTarget.installExceptionReporter(mts._ReportError);
+      delete scope.reportError;
+    }
+  });
+
   it("uses full host props, current MTS hooks and native engine-event precedence", () => {
     const old=scope.updateGlobalProps;
     const initial={initData:mts.lynx.__initData,globalProps:mts.lynx.__globalProps,systemInfo:mts.SystemInfo};
@@ -875,16 +924,10 @@ describe("runtime events and diagnostics", () => {
   });
 });
 
-it("declares readiness through the native binding when BTS acknowledges completion", () => {
-  expect(notifyReady).not.toHaveBeenCalled();
-  worker.dispatchEvent({type: "message", data: {bobcat: "runtime", method: "backgroundReady"}});
-  expect(notifyReady).toHaveBeenCalledExactlyOnceWith();
-});
-
 it("leaves a BTS worker error to the host, which already reports every one", () => {
-  const before = notifyReady.mock.calls.length;
+  const before = reportedErrors.mock.calls.length;
   expect(() => worker.dispatchEvent({type: "error", message: "BTS entry failed"})).not.toThrow();
-  expect(notifyReady.mock.calls).toHaveLength(before);
+  expect(reportedErrors.mock.calls).toHaveLength(before);
 });
 
 it("waits for the JS disposal acknowledgement before terminating the Worker", async () => {
@@ -912,12 +955,6 @@ it("waits for the JS disposal acknowledgement before terminating the Worker", as
   expect(reportedErrors).toHaveBeenLastCalledWith("error", expect.stringContaining("BTS destroy"));
 });
 
-it("settles readiness when the BTS Worker ends before it declared any", () => {
-  const before = notifyReady.mock.calls.length;
-  worker.dispatchEvent({type: "__bobcat:close"});
-  expect(notifyReady.mock.calls).toHaveLength(before + 1);
-});
-
 it("reports a BTS entry that throws and keeps taking messages after it", async () => {
   const runtime = await import("../src/background-thread-runtime.ts");
   const reportError = rstest.fn();
@@ -938,7 +975,45 @@ it("reports a BTS entry that throws and keeps taking messages after it", async (
   await initializing;
   await delivering;
   expect(reportError).toHaveBeenCalledExactlyOnceWith(failure);
-  expect(toMain).toContainEqual({bobcat: "runtime", method: "backgroundReady"});
   expect(received).toEqual([1]);
   delete scope.reportError;
+});
+
+// Last, and on their own MTS instance: the runtime is a module singleton, and
+// the disposal test above has already taken this file's instance past
+// disposal, after which it sends nothing at all.
+describe("a BTS Worker that ended", () => {
+  let runtime: typeof mtsRuntime;
+  const endedWorker = Object.assign(new eventTarget.EventTarget(), {
+    terminate: rstest.fn(),
+    postMessage: rstest.fn(),
+  });
+
+  beforeAll(async () => {
+    // A second boot of the same source. The `bobcat:*` modules it imports are
+    // this file's own objects, so its EventTarget, its Context class and its
+    // host bindings are the ones every other test here uses.
+    rstest.resetModules();
+    runtime = await import("../src/main-thread-runtime.ts");
+    runtime.__BobcatConnectBackground(endedWorker as unknown as Worker, {});
+    endedWorker.postMessage.mockClear();
+    endedWorker.dispatchEvent({type: "__bobcat:close"});
+  });
+
+  it("keeps posting to the ended Worker, where the host drops the message", () => {
+    runtime.__OnLifecycleEvent(["lifecycle", 1]);
+    runtime.__BobcatSendGlobalEvent("x", "[]");
+    // Nothing was swallowed by an internal queue: both crossed to the Worker,
+    // as a browser lets a post to a terminated worker cross and be dropped.
+    expect(endedWorker.postMessage.mock.calls).toEqual([
+      [{type: "__OnLifecycleEvent", data: ["lifecycle", 1], origin: "CoreContext"}],
+      [{bobcat: "runtime", method: "sendGlobalEvent", name: "x", args: []}],
+    ]);
+  });
+
+  it("disposes without a `dispose` no one could answer", async () => {
+    await runtime.__BobcatDispose();
+    expect(endedWorker.postMessage).toHaveBeenCalledTimes(2);
+    expect(endedWorker.terminate).toHaveBeenCalledTimes(1);
+  });
 });

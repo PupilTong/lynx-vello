@@ -271,7 +271,8 @@ its Render Worker after fetching one XML URL. Native and browser XML adapters
 register the optional background script and pass its URL as
 `ViewSources.background_entry`; `bobcat:bts` imports that entry after
 initializing `lynx.getCoreContext()`. Worker ESM imports use the view's
-ResourceFetcher, with top-level await included in startup readiness. Compiled
+ResourceFetcher; MTS top-level await is part of startup readiness, and the BTS
+entry's is not. Compiled
 bundle factories still need the module/init shell from a later stack layer.
 
 `LynxGroup::new` awaits the shared script runtime and style pool.
@@ -523,7 +524,17 @@ token and become cancelled when that Worker ends.
 
 Worker errors still produce a nonfatal `WorkerFailed` host event. A private JS
 close notification lets MTS disposal finish when BTS already closed or failed.
-An application listener that throws reports `ListenerFailed`.
+MTS keeps its Worker reference after that Worker ends; a post to an ended
+Worker is dropped by the host, as a browser drops `postMessage` to a terminated
+worker, and nothing accumulates in a queue for it.
+An application listener that throws during a DOM event dispatched from Rust
+reports `ListenerFailed`. A JS `EventTarget` listener — a Context event, a
+`Worker` `message` or `error` event, an engine event — follows the DOM's
+inner-invoke rule instead: the throw is reported and the walk continues with
+the next listener, through `lynx.reportError` and the host's
+`reportScriptError` (a nonfatal `ScriptReported`) in the MTS realm, and through
+the worker global's `reportError`, hence the parent `Worker`'s `error` event
+and a nonfatal `WorkerFailed`, in a worker realm.
 
 Each successful MTS entry import now starts one BTS Worker named `lynx-bg`.
 Boot constructs it through the same `bobcat-internal` class, using the reserved
@@ -570,19 +581,22 @@ Context fields before queuing; payload objects remain references until Worker
 connection posts the messages in FIFO order. Worker `postMessage` performs the
 structured-clone copy, for early and connected sends alike — so what a Context
 event carries is whatever that transport preserves, and a value it refuses
-throws at the `dispatchEvent` call. The worker's task queues what
+throws at the `dispatchEvent` call. That pre-connection queue is only for
+messages the MTS entry itself produces, before boot constructs the Worker; it
+is not a holding area for anything else. The worker's task queues what
 is posted until its entry has evaluated. Worker release, source cancellation
-and `WorkerFailed` reporting apply to BTS too. The built-in BTS always posts a
-readiness acknowledgement after its optional entry completes. MTS receives it
-and calls `notifyReady()` through the native binding; MTS boot itself never
-awaits BTS. `ScriptFinished` requires both MTS completion and this declaration.
+and `WorkerFailed` reporting apply to BTS too. `ScriptFinished` means MTS boot
+finished: the entry module evaluated, its top-level await settled, and its
+first flush committed. The BTS Worker's state — still importing its entry, its
+entry threw, or it ended — is no part of that, so a BTS entry whose top-level
+await never settles does not keep the view from becoming ready.
 A BTS entry that throws is reported like any worker script: the worker
 realm's `reportError` surfaces it at the `Worker`'s `error` event and as a
-nonfatal `WorkerFailed`, BTS stays up and still takes messages, and
-`backgroundReady` follows. A BTS Worker that ends first settles readiness
-through the MTS close listener. No BTS failure ends the view.
+nonfatal `WorkerFailed`, and BTS stays up and still takes messages.
+No BTS failure ends the view.
 `LynxView::pump` records readiness before returning `ScriptFinished`, and
-`is_ready()` exposes that state. Host global events require readiness and return
+`is_ready()` exposes that state. Host global events require that observed MTS
+boot and return
 `EngineError::NotReady` otherwise, without buffering them.
 
 The BTS runtime exposes stable `lynx.getApp()` and `lynx.getNativeApp()`
@@ -705,8 +719,7 @@ Boot stays pending while top-level await needs resources or timers. A host
 `LynxView::pump` keeps the resources moving; the timers need nothing from a
 host, because the view's task waits its own realm's deadlines out.
 The boot promise tracks only MTS evaluation. Its rejection sends `StartupFailed`;
-`ScriptFinished` is published after it fulfills and the MTS runtime has declared
-application readiness through `notifyReady()`.
+`ScriptFinished` is published after it fulfills and boot's first flush commits.
 Imports started after boot use the same loading path. Dropping a view cancels
 its completion handles and releases its suspended continuations.
 
@@ -733,9 +746,11 @@ Processing, the BTS snapshot and MTS render run synchronously. Boot then awaits
 a flush queued with `Promise.resolve().then`, preserving the ordinary microtask
 boundary; it does not drain Promise jobs between lifecycle hooks.
 The first Worker message initializes BTS data before its entry imports. JS holds
-later messages on that import's Promise, then acknowledges readiness; import
+later messages on that import's Promise and delivers them in order once it
+settles, success or failure; import
 failure reports through the same Worker channel. Host updates require observed
-public readiness, with no caching or replay before it. See
+MTS boot, with no caching or replay before it, and are accepted while the BTS
+entry still loads. See
 [data lifecycle](data-lifecycle-runtime.md) for the inputs and readiness contract.
 
 The global `renderPage` function remains a compatibility path, not a boot
@@ -1280,6 +1295,7 @@ the existing MTS command and Worker links. Boot reads the processor switch from
 PageConfig and the metrics from Viewport. The initial processor name crosses the
 startup-data binding as a string, without serialization or source interpolation.
 JS owns BTS initialization and sends its snapshot through postMessage.
-Host updates require observed readiness and otherwise return `NotReady`. See
+Host updates are accepted once MTS boot finished and otherwise return
+`NotReady`; the BTS still loading never refuses one. See
 [data and global-property lifecycle](data-lifecycle-runtime.md) for the call
 order, input ownership, live ESM bindings and framework boundary.

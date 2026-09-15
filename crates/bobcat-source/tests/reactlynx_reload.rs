@@ -220,11 +220,10 @@ async fn verify_reload(before_background: bool, development: bool) {
     )
     .await;
     if before_background {
-        assert!(!view.is_ready());
-        assert!(matches!(
-            view.reload("{}".into(), String::new()),
-            Err(EngineError::NotReady)
-        ));
+        // MTS boot alone makes the view ready, so the reload is accepted and
+        // waits in the BTS Worker's queue behind its still-loading entry.
+        assert!(view.is_ready());
+        view.reload("{}".into(), String::new()).unwrap();
         released.set(true);
         wait_pixel(
             &mut view,
@@ -344,11 +343,9 @@ async fn wait_pixel(
             Err(error) => panic!("capture failed: {error}"),
         };
         if pixel == Some(expected)
-            && marker.is_none_or(|marker| {
-                view.is_ready()
-                    && observed.booted
-                    && observed.messages.iter().any(|message| message == marker)
-            })
+            && view.is_ready()
+            && observed.booted
+            && marker.is_none_or(|marker| observed.messages.iter().any(|message| message == marker))
         {
             return;
         }
