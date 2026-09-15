@@ -1312,19 +1312,19 @@ fn the_listener_indexes_and_the_published_edges_stay_in_step() {
     };
     let edge = |observer: &mut ViewObserver| observer.take_published_edge();
 
-    state.enable(a, "tap", false);
+    state.enable(a, "tap", ListenerPass::Bubble);
     assert!(
         edge(&mut far_end.published),
         "a name's first registration crosses"
     );
-    state.enable(a, "tap", true);
+    state.enable(a, "tap", ListenerPass::Capture);
     assert!(
         !edge(&mut far_end.published),
         "its second anywhere does not"
     );
-    state.enable(a, "scroll", false);
+    state.enable(a, "scroll", ListenerPass::Bubble);
     assert!(edge(&mut far_end.published));
-    state.enable(b, "tap", false);
+    state.enable(b, "tap", ListenerPass::Bubble);
     assert!(!edge(&mut far_end.published));
     assert_eq!(published(&mut far_end.published), ["scroll", "tap"]);
     assert_eq!(state.by_node.borrow()[&a].len(), 3);
@@ -1332,14 +1332,38 @@ fn the_listener_indexes_and_the_published_edges_stay_in_step() {
 
     // A repeat registration is not a second one — neither index moves,
     // so no edge is published either.
-    state.enable(a, "tap", false);
+    state.enable(a, "tap", ListenerPass::Bubble);
     assert_eq!(state.by_node.borrow()[&a].len(), 3);
     assert!(
         !edge(&mut far_end.published),
         "a repeat registration publishes nothing"
     );
 
-    state.disable(a, "scroll", false);
+    // A global registration is a registration like any other to both
+    // indexes and to the published edge — it is only its *delivery* that
+    // leaves the path.
+    state.enable(a, "swipe", ListenerPass::Global);
+    assert!(
+        edge(&mut far_end.published),
+        "a global-only name is published too, so the painter routes it"
+    );
+    assert_eq!(
+        published(&mut far_end.published),
+        ["scroll", "swipe", "tap"]
+    );
+    state.enable(a, "swipe", ListenerPass::Global);
+    assert_eq!(
+        state.listeners.borrow()["swipe"].global,
+        vec![a],
+        "a repeat global registration is not a second delivery"
+    );
+    state.disable(a, "swipe", ListenerPass::Global);
+    assert!(
+        edge(&mut far_end.published),
+        "removing the only global registration closes its name"
+    );
+
+    state.disable(a, "scroll", ListenerPass::Bubble);
     assert!(
         edge(&mut far_end.published),
         "the last removal closes the name"
@@ -1356,6 +1380,7 @@ fn the_listener_indexes_and_the_published_edges_stay_in_step() {
     );
     assert_eq!(
         state.listeners.borrow()["tap"]
+            .path
             .iter()
             .copied()
             .collect::<Vec<_>>(),
@@ -1522,6 +1547,224 @@ fn add_event_registers_against_the_real_index_and_a_catch_form_ends_the_walk() {
             r"
                 if (seen.join('|') !== 'page-capture:2|inner-catch:4') {
                   throw new Error('unexpected deliveries: ' + seen.join('|'));
+                }
+                ",
+            "app:///verify.js",
+            "verifying",
+        )
+        .expect("verification");
+}
+
+/// `global-bindEvent` is not on the path, so its delivery is neither
+/// filtered by one nor ended by a `catch` on one. Both handler kinds run,
+/// the string before the worklet, at the registered element.
+#[test]
+fn global_bind_handlers_run_after_the_path_even_when_a_catch_ended_it() {
+    let (mut js_runtime, mut runtime, _elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.seen = [];
+                globalThis.runWorklet = (value, params) => value.body(params[0]);
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const outer = __CreateView(0);
+                  const inner = __CreateView(0);
+                  // Off the path from `inner` entirely: a sibling, so only a
+                  // delivery that ignores the path can reach it.
+                  const aside = __CreateView(0);
+                  __AppendElement(page, outer);
+                  __AppendElement(outer, inner);
+                  __AppendElement(page, aside);
+                  globalThis.held = [page, outer, inner, aside];
+                  const note = (label) => ({
+                    type: 'worklet',
+                    value: {
+                      body: (event) =>
+                        seen.push(
+                          label + ':' + event.currentTarget.uid + ':' +
+                          event.target.uid + ':' + event.eventPhase,
+                        ),
+                    },
+                  });
+                  // A catch on the target ends the walk over the path.
+                  __AddEvent(inner, 'catchEvent', 'tap', note('inner-catch'));
+                  __AddEvent(outer, 'bindEvent', 'tap', note('outer-bind'));
+                  // Both kinds on the one global registration. The string is
+                  // published to the background thread, which this realm has
+                  // none of, so only the worklet records here — the point of
+                  // the pair is that filing one did not clear the other.
+                  __AddEvent(aside, 'global-bindEvent', 'tap', 'aside:global');
+                  __AddEvent(aside, 'global-bindEvent', 'tap', note('aside-global'));
+                };
+                ",
+            "app:///global-bind.js",
+        )
+        .expect("main-thread script");
+
+    assert!(
+        runtime
+            .dispatch_event(&mut js_runtime, node_id(4), &tap(), &no_detail())
+            .expect("dispatch")
+    );
+
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                import { __GetEvents } from 'bobcat:element';
+                // `outer-bind` never ran: the catch ended the path. The
+                // global one did, after it, with the event's own target and
+                // no phase at all.
+                if (seen.join('|') !== 'inner-catch:4:4:2|aside-global:5:4:0') {
+                  throw new Error('unexpected deliveries: ' + seen.join('|'));
+                }
+                const filed = __GetEvents(held[3]);
+                if (filed.length !== 2 || filed[0].function !== 'aside:global' ||
+                    filed[1].function.type !== 'worklet') {
+                  throw new Error('a kind displaced the other: ' + JSON.stringify(filed));
+                }
+                ",
+            "app:///verify.js",
+            "verifying",
+        )
+        .expect("verification");
+}
+
+/// A name no path registration holds open is still a name the painting side
+/// has to route, or the event that would reach a global handler is dropped
+/// before a path is ever built.
+#[test]
+fn a_global_only_registration_publishes_its_name_and_is_delivered() {
+    let (mut js_runtime, mut runtime, _elements, mut names) =
+        runtime_over_watching_names(ingredients());
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.seen = [];
+                globalThis.runWorklet = (value, params) => value.body(params[0]);
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const view = __CreateView(0);
+                  __AppendElement(page, view);
+                  globalThis.held = [page, view];
+                  __AddEvent(view, 'global-bindEvent', 'swipe', {
+                    type: 'worklet',
+                    value: { body: (event) => seen.push(event.currentTarget.uid) },
+                  });
+                };
+                ",
+            "app:///global-only.js",
+        )
+        .expect("main-thread script");
+    assert!(names.contains("swipe"));
+
+    assert!(
+        runtime
+            .dispatch_event(
+                &mut js_runtime,
+                node_id(2),
+                &Arc::from("swipe"),
+                &no_detail()
+            )
+            .expect("dispatch"),
+        "a global registration alone is enough to deliver"
+    );
+
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                import { __AddEvent } from 'bobcat:element';
+                if (seen.join('|') !== '3') {
+                  throw new Error('unexpected deliveries: ' + seen.join('|'));
+                }
+                __AddEvent(held[1], 'global-bindEvent', 'swipe', null);
+                ",
+            "app:///verify.js",
+            "verifying",
+        )
+        .expect("verification");
+    assert!(
+        !names.contains("swipe"),
+        "the last global registration closes its name like any other"
+    );
+    assert!(
+        !runtime
+            .dispatch_event(
+                &mut js_runtime,
+                node_id(2),
+                &Arc::from("swipe"),
+                &no_detail()
+            )
+            .expect("dispatch")
+    );
+}
+
+/// `__QuerySelector`/`__QuerySelectorAll` are `Element.querySelector`'s
+/// scope, which never answers the element they were asked on — unlike
+/// `SelectorQuery`, which shares the same host primitive.
+#[test]
+fn the_query_selector_papi_never_answers_the_element_it_was_asked_on() {
+    let (mut js_runtime, mut runtime, _elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const outer = __CreateView(0);
+                  const inner = __CreateView(0);
+                  __SetClasses(outer, 'row');
+                  __SetClasses(inner, 'row');
+                  __AppendElement(page, outer);
+                  __AppendElement(outer, inner);
+                  globalThis.held = [page, outer, inner];
+                };
+                ",
+            "app:///query.js",
+        )
+        .expect("main-thread script");
+
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                import {
+                  __GetElementUniqueID,
+                  __GetPageElement,
+                  __QuerySelector,
+                  __QuerySelectorAll,
+                } from 'bobcat:element';
+                const [page, outer, inner] = held;
+                if (__GetPageElement() !== page) {
+                  throw new Error('the page element is not the page handle');
+                }
+                // `outer` matches `.row` itself and is the root of this
+                // query: the answer is its descendant, not itself.
+                if (__QuerySelector(outer, '.row', {}) !== inner) {
+                  throw new Error('the root answered its own selector');
+                }
+                const all = __QuerySelectorAll(outer, '.row', {});
+                if (all.length !== 1 || all[0] !== inner) {
+                  throw new Error(
+                    'all: ' + all.map(__GetElementUniqueID).join('|'),
+                  );
+                }
+                // From the page, both rows: the exclusion is of the root
+                // alone, not of matching descendants.
+                const fromPage = __QuerySelectorAll(page, '.row', {});
+                if (fromPage.length !== 2 || fromPage[0] !== outer ||
+                    fromPage[1] !== inner) {
+                  throw new Error(
+                    'fromPage: ' + fromPage.map(__GetElementUniqueID).join('|'),
+                  );
+                }
+                if (__QuerySelector(inner, '.row', {}) !== undefined ||
+                    __QuerySelectorAll(inner, '.row', {}).length !== 0) {
+                  throw new Error('a leaf answered itself');
                 }
                 ",
             "app:///verify.js",

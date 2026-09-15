@@ -71,10 +71,25 @@ rstest.mockRequire("bobcat:runtime", () => ({
  */
 const DOCUMENT_REFUSAL = new Error("the realm already created its document");
 
-/** Every native member, plus the recorded calls and a filter over them. */
+/**
+ * Every native member, plus the recorded calls, a filter over them, and the
+ * selector answer a test installs.
+ *
+ * The runtime captures the module's bindings at import, so a test cannot
+ * replace `queryElementIds` itself; `answerQuery` is the hook the recorded
+ * member delegates to, read at call time. Its default refuses, because the
+ * selector engine is the real DOM's and lives in
+ * crates/bobcat-core/src/main/runtime/tests.rs.
+ */
 type MockBobcat = BobcatNative & {
   calls: unknown[][];
   named: (name: string) => unknown[][];
+  answerQuery: (
+    root: number,
+    selector: string,
+    firstOnly: 0 | 1,
+    includeRoot: 0 | 1,
+  ) => string;
 };
 
 /**
@@ -182,7 +197,29 @@ function createMockBobcat(issuedIds?: number[]): MockBobcat {
       calls.push(["setInlineStyleProperty", nodeId("setInlineStyleProperty", node), name, value]);
     },
     supportsStyleProperty: (name: string) => name === "background-color" || name === "width",
-    queryElementIds: () => { throw new Error("selectors are tested against the real DOM"); },
+    answerQuery: () => {
+      throw new Error("selectors are tested against the real DOM");
+    },
+    queryElementIds: (
+      root: unknown,
+      selector: unknown,
+      firstOnly: unknown,
+      includeRoot: unknown,
+    ) => {
+      calls.push([
+        "queryElementIds",
+        nodeId("queryElementIds", root),
+        selector,
+        firstOnly,
+        includeRoot,
+      ]);
+      return host.answerQuery(
+        root as number,
+        selector as string,
+        firstOnly as 0 | 1,
+        includeRoot as 0 | 1,
+      );
+    },
     /**
      * Decodes the record payload the way the native side does, so the
      * expectations below read as declarations rather than as wire text — and
@@ -423,6 +460,9 @@ describe("installation", () => {
       ["__RemoveEventListener", 4],
       ["__StopPropagation", 1],
       ["__StopImmediatePropagation", 1],
+      ["__GetPageElement", 0],
+      ["__QuerySelector", 3],
+      ["__QuerySelectorAll", 3],
       ["__FlushElementTree", 0],
     ];
     for (const [name, arity] of arities) {
@@ -1193,9 +1233,12 @@ function walk(
 
 const BUBBLE = 0;
 const CAPTURE = 1;
+/** The third `type_id`: the `global-bindEvent` registrations. */
+const GLOBAL_PASS = 2;
 
-/** The identity half of an event's `target` and `currentTarget`. */
+/** An event's `target` and `currentTarget` descriptor. */
 interface TargetInfo {
+  dataset: Record<string, unknown>;
   id: string | null;
   uid: number;
   elementRefptr: object;
@@ -1942,8 +1985,118 @@ describe("__AddEvent", () => {
     expect(runs).toBe(1);
   });
 
-  it("files global-bindEvent apart, and never indexes it", () => {
+  it("files a string and a worklet for one name side by side, and runs both", () => {
     const { inner } = tree();
+    const order: string[] = [];
+    globalThis.runWorklet = (value) => {
+      order.push("worklet");
+      void value;
+    };
+
+    __AddEvent(inner, "bindEvent", "tap", "3:0:bindtap");
+    __AddEvent(inner, "bindEvent", "tap", { type: "worklet", value: {} });
+
+    // Two maps, one per kind: neither filing displaced the other.
+    expect(__GetEvent(inner, "tap", "bindEvent")).toBe("3:0:bindtap");
+    expect(__GetEvents(inner)).toEqual([
+      { type: "bindevent", name: "tap", function: "3:0:bindtap" },
+      {
+        type: "bindevent",
+        name: "tap",
+        function: { type: "worklet", value: {} },
+      },
+    ]);
+    // One index entry covers both kinds.
+    expect(mock.named("enableEventListener")).toEqual([
+      ["enableEventListener", __GetElementUniqueID(inner), BUBBLE, "tap"],
+    ]);
+
+    __AddEventListener(inner, "tap", () => order.push("closure"), {});
+    deliver(inner, inner, BUBBLE, "tap");
+
+    // web-core's per-node order: the cross-thread handler, then the worklet,
+    // then the `__AddEventListener` closures.
+    expect(
+      mock.calls
+        .filter(([name]) => name === "publishEvent")
+        .map(() => "publish"),
+    ).toEqual(["publish"]);
+    expect(order).toEqual(["worklet", "closure"]);
+  });
+
+  it("files the two kinds under different forms without either clearing the other", () => {
+    const { inner } = tree();
+    const handler = { type: "worklet", value: {} };
+
+    __AddEvent(inner, "capture-bind", "tap", handler);
+    __AddEvent(inner, "bindEvent", "tap", "3:0:bindtap");
+
+    // Each kind keeps its own form, so this node wants both passes.
+    expect(__GetEvent(inner, "tap", "bindEvent")).toBe("3:0:bindtap");
+    expect(__GetEvents(inner)).toEqual([
+      { type: "bindevent", name: "tap", function: "3:0:bindtap" },
+      { type: "capture-bind", name: "tap", function: handler },
+    ]);
+    const uid = __GetElementUniqueID(inner);
+    expect(mock.named("enableEventListener")).toEqual([
+      ["enableEventListener", uid, CAPTURE, "tap"],
+      ["enableEventListener", uid, BUBBLE, "tap"],
+    ]);
+  });
+
+  it("__GetEvent answers the string kind only", () => {
+    const { inner } = tree();
+    const handler = { type: "worklet", value: {} };
+
+    __AddEvent(inner, "bindEvent", "tap", handler);
+
+    // web-core's `get_event` reads its cross-thread map and never its
+    // worklet one, so a name carrying only a worklet answers nothing.
+    expect(__GetEvent(inner, "tap", "bindEvent")).toBeUndefined();
+    expect(__GetEvents(inner)).toEqual([
+      { type: "bindevent", name: "tap", function: handler },
+    ]);
+  });
+
+  it("clears both kinds on a nullish handler, and unindexes the name", () => {
+    const { inner } = tree();
+    const uid = __GetElementUniqueID(inner);
+    __AddEvent(inner, "bindEvent", "tap", "3:0:bindtap");
+    __AddEvent(inner, "bindEvent", "tap", { type: "worklet", value: {} });
+
+    __AddEvent(inner, "bindEvent", "tap", null);
+
+    expect(__GetEvents(inner)).toEqual([]);
+    expect(mock.named("disableEventListener")).toEqual([
+      ["disableEventListener", uid, BUBBLE, "tap"],
+    ]);
+  });
+
+  it("ends the walk when either kind carries the catch form", () => {
+    const { inner } = tree();
+    const order: string[] = [];
+
+    // The catch is the worklet's form; the string beside it is a plain bind.
+    __AddEvent(inner, "bindEvent", "tap", "3:0:bindtap");
+    __AddEvent(inner, "catchEvent", "tap", worklet(() => order.push("worklet")));
+
+    deliver(inner, inner, BUBBLE, "tap");
+
+    // Stopped before either ran, because the form decides it, not the
+    // handler.
+    expect(
+      mock.calls
+        .filter(([name]) =>
+          ["stopPropagation", "publishEvent"].includes(String(name))
+        )
+        .map(([name]) => name),
+    ).toEqual(["stopPropagation", "publishEvent"]);
+    expect(order).toEqual(["worklet"]);
+  });
+
+  it("files global-bindEvent apart, and indexes it in the host's third pass", () => {
+    const { inner } = tree();
+    const uid = __GetElementUniqueID(inner);
     let runs = 0;
     const handler = worklet(() => {
       runs += 1;
@@ -1951,15 +2104,102 @@ describe("__AddEvent", () => {
 
     __AddEvent(inner, "global-bindEvent", "tap", handler);
 
-    expect(__GetEvent(inner, "tap", "global-bindEvent")).toBe(handler);
-    // Its own map: a global registration does not displace a path one.
+    expect(__GetEvent(inner, "tap", "global-bindEvent")).toBeUndefined();
+    // Its own slot: a global registration does not displace a path one.
     expect(__GetEvent(inner, "tap", "bindEvent")).toBeUndefined();
-    // The host walks the event path and nothing else, so indexing it would
-    // deliver a subset no reference implementation produces.
-    expect(mock.named("enableEventListener")).toEqual([]);
+    expect(__GetEvents(inner)).toEqual([
+      { type: "global-bindevent", name: "tap", function: handler },
+    ]);
+    expect(mock.named("enableEventListener")).toEqual([
+      ["enableEventListener", uid, GLOBAL_PASS, "tap"],
+    ]);
 
+    // Not on the path: a bubble step over the same node runs nothing.
     deliver(inner, inner, BUBBLE, "tap");
     expect(runs).toBe(0);
+
+    deliver(inner, inner, GLOBAL_PASS, "tap");
+    expect(runs).toBe(1);
+  });
+
+  it("sends the disable for the global pass when the global handler goes", () => {
+    const { inner } = tree();
+    const uid = __GetElementUniqueID(inner);
+    __AddEvent(inner, "global-bindEvent", "tap", "3:0:globaltap");
+    __AddEvent(inner, "global-bindEvent", "tap", { type: "worklet", value: {} });
+    expect(mock.named("enableEventListener")).toEqual([
+      ["enableEventListener", uid, GLOBAL_PASS, "tap"],
+    ]);
+
+    __AddEvent(inner, "global-bindEvent", "tap", undefined);
+
+    expect(__GetEvents(inner)).toEqual([]);
+    expect(mock.named("disableEventListener")).toEqual([
+      ["disableEventListener", uid, GLOBAL_PASS, "tap"],
+    ]);
+  });
+
+  it("runs both global handler kinds with no phase and its own currentTarget", () => {
+    const { outer, inner } = tree();
+    const seen: { uid: number; phase: number }[] = [];
+    globalThis.runWorklet = (_value, params) => {
+      const event = params[0] as ListenerEvent;
+      seen.push({ uid: event.currentTarget.uid, phase: event.eventPhase });
+    };
+    __AddEvent(outer, "global-bindEvent", "tap", "outer:global");
+    __AddEvent(outer, "global-bindEvent", "tap", {
+      type: "worklet",
+      value: {},
+    });
+
+    // The registered node, not the target: a global delivery is not a step
+    // of the path the event took.
+    walk(
+      [{ node: outer, target: inner, phase: GLOBAL_PASS }],
+      "tap",
+      JSON.stringify({ x: 1 }),
+    );
+
+    const published = mock.named("publishEvent");
+    expect(published).toHaveLength(1);
+    expect(published[0]?.[2]).toBe("outer:global");
+    const event = published[0]?.[3] as {
+      eventPhase: number;
+      target: { uid: number };
+      currentTarget: { uid: number };
+    };
+    expect(event.eventPhase).toBe(0);
+    expect(event.target.uid).toBe(__GetElementUniqueID(inner));
+    expect(event.currentTarget.uid).toBe(__GetElementUniqueID(outer));
+    // The string first, then the worklet, as on the path.
+    expect(seen).toEqual([
+      { uid: __GetElementUniqueID(outer), phase: 0 },
+    ]);
+  });
+
+  it("carries the dataset on both descriptors a worklet and a closure see", () => {
+    const { inner } = tree();
+    __SetAttribute(inner, "data-item-name", "row");
+    __SetDataset(inner, { typed: 7 });
+    const seen: unknown[] = [];
+    __AddEvent(
+      inner,
+      "bindEvent",
+      "tap",
+      worklet((event: ListenerEvent) => {
+        seen.push(event.target.dataset, event.currentTarget.dataset);
+      }),
+    );
+    __AddEventListener(inner, "tap", (event: ListenerEvent) => {
+      seen.push(event.target.dataset, event.currentTarget.dataset);
+    }, {});
+
+    deliver(inner, inner, BUBBLE, "tap");
+
+    // web-core's `generateTargetObject` gives every descriptor a `dataset`,
+    // the `data-*` attributes camelCased with the typed values merged over.
+    const dataset = { itemName: "row", typed: 7 };
+    expect(seen).toEqual([dataset, dataset, dataset, dataset]);
   });
 });
 
@@ -2003,6 +2243,9 @@ describe("__GetEvents and __SetEvents", () => {
     const { inner, outer } = tree();
     __AddEvent(inner, "capture-bind", "tap", "a");
     __AddEvent(inner, "global-bindEvent", "scroll", "b");
+    // Both kinds of one name, which is the case the round trip could only
+    // carry once the two stopped sharing a slot.
+    __AddEvent(inner, "capture-bind", "tap", { type: "worklet", value: {} });
 
     __SetEvents(outer, __GetEvents(inner));
 
@@ -2030,6 +2273,71 @@ describe("__GetEvents and __SetEvents", () => {
     __SetEvents(inner, undefined);
 
     expect(__GetEvents(inner)).toEqual([]);
+  });
+});
+
+describe("__GetPageElement", () => {
+  it("is undefined before __CreatePage and the page handle after it", () => {
+    expect(__GetPageElement()).toBeUndefined();
+    const page = __CreatePage("card", 0);
+    // web-core's is `() => page`, the binding its own `__CreatePage` assigns.
+    expect(__GetPageElement()).toBe(page);
+  });
+});
+
+describe("__QuerySelector and __QuerySelectorAll", () => {
+  it("ask the host for a root-exclusive match and map the ids to handles", () => {
+    const { page, outer, inner } = tree();
+    mock.answerQuery = (_root, _selector, firstOnly) =>
+      firstOnly
+        ? String(__GetElementUniqueID(outer))
+        : `${__GetElementUniqueID(outer)},${__GetElementUniqueID(inner)}`;
+
+    expect(__QuerySelector(page, ".row", {})).toBe(outer);
+    expect(__QuerySelectorAll(page, ".row", {})).toEqual([outer, inner]);
+
+    // `includeRoot` 0: these two are `Element.querySelector`'s scope, which
+    // never answers the element it was asked on — unlike SelectorQuery's.
+    expect(mock.named("queryElementIds")).toEqual([
+      ["queryElementIds", __GetElementUniqueID(page), ".row", 1, 0],
+      ["queryElementIds", __GetElementUniqueID(page), ".row", 0, 0],
+    ]);
+  });
+
+  it("stringifies the selector and ignores the params object", () => {
+    const { page } = tree();
+    mock.answerQuery = () => "";
+
+    expect(__QuerySelector(page, 7, { onlyCurrentComponent: true }))
+      .toBeUndefined();
+    expect(__QuerySelectorAll(page, 7)).toEqual([]);
+
+    expect(mock.named("queryElementIds").map((call) => call[2])).toEqual([
+      "7",
+      "7",
+    ]);
+  });
+
+  it("lets a selector the host refuses throw", () => {
+    const { page } = tree();
+    const refusal = new Error("'!' is not a valid selector");
+    mock.answerQuery = () => {
+      throw refusal;
+    };
+
+    // The DOM throws a SyntaxError for an unparsable selector and so does
+    // web-core's; nothing here catches the host's refusal.
+    expect(() => __QuerySelector(page, "!", {})).toThrow(refusal);
+    expect(() => __QuerySelectorAll(page, "!", {})).toThrow(refusal);
+  });
+
+  it("refuses a match no live handle names", () => {
+    const { page } = tree();
+    mock.answerQuery = () => "4242";
+
+    expect(() => __QuerySelectorAll(page, ".row", {})).toThrow(
+      "a queried live node has no handle",
+    );
   });
 });
 

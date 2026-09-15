@@ -126,6 +126,9 @@ import {
   __RemoveEventListener,
   __StopPropagation,
   __StopImmediatePropagation,
+  __GetPageElement,
+  __QuerySelector,
+  __QuerySelectorAll,
   __FlushElementTree,
 } from "bobcat:element";
 //# allFunctionsCalledOnLoad
@@ -373,11 +376,82 @@ fn construction_phase<T>(phase: &str, work: impl FnOnce() -> T) -> Result<T, Str
     })
 }
 
-/// The nodes a walk should visit for one event name: `(node, is capture pass)`.
-type ListenerNodes = FxHashSet<(dom::NodeId, bool)>;
+/// Which delivery a registration asks for, and the number the realm spells it
+/// with: `0` bubble, `1` capture, `2` global.
+///
+/// The first two are passes over the event path. The third is not a pass over
+/// anything — a `global-bindEvent` registration is delivered for every event
+/// of its name whatever path that event took, which is why it is kept apart
+/// from the path index rather than filtered against a step.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ListenerPass {
+    Bubble,
+    Capture,
+    Global,
+}
 
-/// The `(name, is capture pass)` pairs one node carries listeners for.
-type NodeListeners = SmallVec<[(Arc<str>, bool); INLINE_NODE_LISTENERS]>;
+impl ListenerPass {
+    /// The number the realm is told, which is the one it registered with.
+    fn as_number(self) -> f64 {
+        match self {
+            Self::Bubble => 0.0,
+            Self::Capture => 1.0,
+            Self::Global => 2.0,
+        }
+    }
+}
+
+/// The nodes a dispatch should visit for one event name.
+#[derive(Default)]
+struct ListenerNodes {
+    /// The path registrations, `(node, is capture pass)`: a set, because the
+    /// walk tests every step against it and order is the path's.
+    path: FxHashSet<(dom::NodeId, bool)>,
+    /// The `global-bindEvent` registrations, in registration order — which is
+    /// delivery order, since no path orders them. A `Vec` rather than a set
+    /// for exactly that reason; the same node registering twice is filtered
+    /// on the way in.
+    global: Vec<dom::NodeId>,
+}
+
+impl ListenerNodes {
+    fn is_empty(&self) -> bool {
+        self.path.is_empty() && self.global.is_empty()
+    }
+
+    /// Records one registration, answering whether it was not already there.
+    fn insert(&mut self, node: dom::NodeId, pass: ListenerPass) -> bool {
+        match pass {
+            ListenerPass::Global => {
+                if self.global.contains(&node) {
+                    return false;
+                }
+                self.global.push(node);
+                true
+            }
+            ListenerPass::Bubble => self.path.insert((node, false)),
+            ListenerPass::Capture => self.path.insert((node, true)),
+        }
+    }
+
+    /// The reverse, answering whether it was there to remove.
+    fn remove(&mut self, node: dom::NodeId, pass: ListenerPass) -> bool {
+        match pass {
+            ListenerPass::Global => {
+                let Some(at) = self.global.iter().position(|held| *held == node) else {
+                    return false;
+                };
+                self.global.remove(at);
+                true
+            }
+            ListenerPass::Bubble => self.path.remove(&(node, false)),
+            ListenerPass::Capture => self.path.remove(&(node, true)),
+        }
+    }
+}
+
+/// The `(name, pass)` pairs one node carries listeners for.
+type NodeListeners = SmallVec<[(Arc<str>, ListenerPass); INLINE_NODE_LISTENERS]>;
 
 /// What the realm has told the host about listeners, and what it tells it
 /// during a walk.
@@ -386,10 +460,11 @@ type NodeListeners = SmallVec<[(Arc<str>, bool); INLINE_NODE_LISTENERS]>;
 /// owned: the native `enableEventListener` export and the dispatch driver are
 /// different stack frames on the same thread.
 struct EventState {
-    /// The nodes the realm has a listener on, per event name and pass. Keyed
-    /// by name first so a walk resolves it once and then tests each step
-    /// without touching the name again — and so an event no listener wants
-    /// costs one lookup for the whole walk.
+    /// The nodes the realm has a listener on, per event name — its path
+    /// registrations and its global ones. Keyed by name first so a walk
+    /// resolves it once and then tests each step without touching the name
+    /// again — and so an event no listener wants costs one lookup for the
+    /// whole walk.
     listeners: RefCell<FxHashMap<Arc<str>, ListenerNodes>>,
     /// The same registrations keyed the other way, so dropping an element
     /// costs its own listeners rather than a scan of every name.
@@ -422,8 +497,13 @@ impl EventState {
         }
     }
 
-    /// Records that `node` now has a listener for `(name, capture)`.
-    fn enable(&self, node: dom::NodeId, name: &str, capture: bool) {
+    /// Records that `node` now has a listener for `(name, pass)`.
+    ///
+    /// The published name edge is a global one over all three passes: a name
+    /// a global registration alone holds open is still a name the painting
+    /// side has to route, because the event it gates is delivered whatever
+    /// path it took.
+    fn enable(&self, node: dom::NodeId, name: &str, pass: ListenerPass) {
         let shared: Arc<str> = self
             .listeners
             .borrow()
@@ -431,18 +511,18 @@ impl EventState {
             .map_or_else(|| Arc::from(name), |(existing, _)| Arc::clone(existing));
         let mut listeners = self.listeners.borrow_mut();
         let nodes = listeners.entry(Arc::clone(&shared)).or_default();
-        // No name is ever left keyed to an empty set, so an empty one here is
-        // the entry `or_default` just made: this is the name's first listener
-        // anywhere in the document.
+        // No name is ever left keyed to an empty entry, so an empty one here
+        // is the entry `or_default` just made: this is the name's first
+        // listener anywhere in the document.
         let first_for_name = nodes.is_empty();
-        let fresh_registration = nodes.insert((node, capture));
+        let fresh_registration = nodes.insert(node, pass);
         drop(listeners);
         if fresh_registration {
             self.by_node
                 .borrow_mut()
                 .entry(node)
                 .or_default()
-                .push((Arc::clone(&shared), capture));
+                .push((Arc::clone(&shared), pass));
             if first_for_name {
                 self.outbox.listener_edge(shared, true);
             }
@@ -450,12 +530,12 @@ impl EventState {
     }
 
     /// The reverse: that registration went away.
-    fn disable(&self, node: dom::NodeId, name: &str, capture: bool) {
+    fn disable(&self, node: dom::NodeId, name: &str, pass: ListenerPass) {
         let mut listeners = self.listeners.borrow_mut();
         let Some(nodes) = listeners.get_mut(name) else {
             return;
         };
-        if !nodes.remove(&(node, capture)) {
+        if !nodes.remove(node, pass) {
             return;
         }
         // The key comes back out with the removal: it is the `Arc` every
@@ -466,7 +546,7 @@ impl EventState {
             None
         };
         drop(listeners);
-        self.forget_node_listener(node, name, capture);
+        self.forget_node_listener(node, name, pass);
         if let Some(name) = closed {
             self.outbox.listener_edge(name, false);
         }
@@ -479,9 +559,9 @@ impl EventState {
         };
         let mut closed = SmallVec::<[Arc<str>; INLINE_NODE_LISTENERS]>::new();
         let mut listeners = self.listeners.borrow_mut();
-        for (name, capture) in registrations {
+        for (name, pass) in registrations {
             if let Some(nodes) = listeners.get_mut(&name)
-                && nodes.remove(&(node, capture))
+                && nodes.remove(node, pass)
                 && nodes.is_empty()
             {
                 // A drop is a removal like any other: an element that took
@@ -496,12 +576,14 @@ impl EventState {
         }
     }
 
-    fn forget_node_listener(&self, node: dom::NodeId, name: &str, capture: bool) {
+    fn forget_node_listener(&self, node: dom::NodeId, name: &str, pass: ListenerPass) {
         let mut by_node = self.by_node.borrow_mut();
         let Some(registrations) = by_node.get_mut(&node) else {
             return;
         };
-        registrations.retain(|(registered, pass)| registered.as_ref() != name || *pass != capture);
+        registrations.retain(|(registered, registered_pass)| {
+            registered.as_ref() != name || *registered_pass != pass
+        });
         if registrations.is_empty() {
             by_node.remove(&node);
         }
@@ -807,6 +889,12 @@ impl MainThreadRuntime {
     /// the next one, as a real `Event` does — without the host retaining
     /// anything of the realm's.
     ///
+    /// The `global-bindEvent` registrations run after the path, in
+    /// registration order, and a `catch` on the path does not suppress them:
+    /// they are not on it. That is web-core's `common_event_handler`, which
+    /// calls `dispatch_global_bind_event` unconditionally once the two passes
+    /// have run.
+    ///
     /// Returns whether anything was delivered.
     pub(crate) fn dispatch_event(
         &mut self,
@@ -828,17 +916,19 @@ impl MainThreadRuntime {
             }
             document.event_steps(target, true, true)
         };
-        let mut deliverable: SmallVec<[(dom::NodeId, dom::NodeId, bool); INLINE_DELIVERIES]> =
+        let mut path: SmallVec<[(dom::NodeId, dom::NodeId, bool); INLINE_DELIVERIES]> =
             SmallVec::new();
-        deliverable.extend(
+        path.extend(
             steps
                 .steps()
                 .iter()
-                .filter(|step| nodes.contains(&(step.node, step.capture)))
+                .filter(|step| nodes.path.contains(&(step.node, step.capture)))
                 .map(|step| (step.node, step.target, step.capture)),
         );
+        let mut globals: SmallVec<[dom::NodeId; INLINE_DELIVERIES]> =
+            SmallVec::from_slice(&nodes.global);
         drop(listeners);
-        if deliverable.is_empty() {
+        if path.is_empty() && globals.is_empty() {
             return Ok(false);
         }
 
@@ -851,31 +941,57 @@ impl MainThreadRuntime {
         let event_id = self.next_event_id;
         self.next_event_id = self.next_event_id.wrapping_add(1);
 
-        let last = deliverable.len() - 1;
+        // The last call actually made carries the flag that ends the
+        // dispatch. A global delivery always runs, so when there is one it is
+        // the last; a path step is only the last when nothing follows the
+        // path, and a stop truncating the path leaves none flagged — which the
+        // realm covers, because it sees the stop as it happens.
+        let last_path_step = if globals.is_empty() {
+            path.len().checked_sub(1)
+        } else {
+            None
+        };
         let mut delivered = false;
-        for (index, (node, target, capture)) in deliverable.into_iter().enumerate() {
+        for (index, (node, step_target, capture)) in path.into_iter().enumerate() {
             if self.events.stopped.get() {
                 break;
             }
-            let arguments = [
-                HostArgument::Number(packed_node_id(node)),
-                HostArgument::Number(packed_node_id(target)),
-                HostArgument::Number(f64::from(u8::from(capture))),
-                HostArgument::String(name),
-                HostArgument::String(detail_json),
-                HostArgument::Number(f64::from(event_id)),
-                HostArgument::Boolean(index == last),
-            ];
-            let called = self.engine.call_module_export(
+            let pass = if capture {
+                ListenerPass::Capture
+            } else {
+                ListenerPass::Bubble
+            };
+            if !self.deliver_one(
                 js_runtime,
-                ELEMENT_MODULE_SPECIFIER,
-                EVENT_DISPATCH_EXPORT,
-                &arguments,
-            );
-            if !called
-                .map_err(|error| MainThreadError::from_engine("delivering an event", error))?
-            {
-                // The realm published no callback; nothing on this path will.
+                node,
+                step_target,
+                pass,
+                name,
+                detail_json,
+                event_id,
+                Some(index) == last_path_step,
+            )? {
+                // The realm published no callback; nothing else will reach it
+                // either, the global registrations included.
+                globals.clear();
+                break;
+            }
+            delivered = true;
+        }
+        // Deliberately outside the `stopped` test above: a `catch` form ends
+        // the walk over the path, and a global registration is not on it.
+        let last_global = globals.len().checked_sub(1);
+        for (index, node) in globals.into_iter().enumerate() {
+            if !self.deliver_one(
+                js_runtime,
+                node,
+                target,
+                ListenerPass::Global,
+                name,
+                detail_json,
+                event_id,
+                Some(index) == last_global,
+            )? {
                 break;
             }
             delivered = true;
@@ -884,6 +1000,42 @@ impl MainThreadRuntime {
         // here, at the end of the walk, rather than per node.
         self.finish_batch(js_runtime, true)?;
         Ok(delivered)
+    }
+
+    /// One call into the realm's dispatch export, answering whether the realm
+    /// published one at all.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the arguments are the realm's dispatch signature, one for one"
+    )]
+    fn deliver_one(
+        &mut self,
+        js_runtime: &mut ScriptRuntime,
+        node: dom::NodeId,
+        target: dom::NodeId,
+        pass: ListenerPass,
+        name: &str,
+        detail_json: &str,
+        event_id: u32,
+        is_last_call: bool,
+    ) -> Result<bool, MainThreadError> {
+        let arguments = [
+            HostArgument::Number(packed_node_id(node)),
+            HostArgument::Number(packed_node_id(target)),
+            HostArgument::Number(pass.as_number()),
+            HostArgument::String(name),
+            HostArgument::String(detail_json),
+            HostArgument::Number(f64::from(event_id)),
+            HostArgument::Boolean(is_last_call),
+        ];
+        self.engine
+            .call_module_export(
+                js_runtime,
+                ELEMENT_MODULE_SPECIFIER,
+                EVENT_DISPATCH_EXPORT,
+                &arguments,
+            )
+            .map_err(|error| MainThreadError::from_engine("delivering an event", error))
     }
 
     /// When the earliest armed timer comes due, if one is armed.
@@ -1364,8 +1516,8 @@ fn install_page_data(
 /// Installs the three members the realm's `EventTarget` speaks to.
 ///
 /// None of them touches the document. The first two only maintain an index —
-/// which nodes are worth visiting — and the third only sets a flag; see
-/// [`EventState::stopped`].
+/// which nodes are worth visiting, in which of the three passes — and the
+/// third only sets a flag; see [`EventState::stopped`].
 fn install_event_members(
     engine: &mut ScriptEngine,
     js_runtime: &mut ScriptRuntime,
@@ -1379,10 +1531,9 @@ fn install_event_members(
         3,
         move |arguments| {
             let node = node_id_argument("bobcat-internal:host.enableEventListener", arguments, 0)?;
-            let capture =
-                capture_argument("bobcat-internal:host.enableEventListener", arguments, 1)?;
+            let pass = pass_argument("bobcat-internal:host.enableEventListener", arguments, 1)?;
             let name = string_argument("bobcat-internal:host.enableEventListener", arguments, 2)?;
-            state.enable(node, name, capture);
+            state.enable(node, name, pass);
             Ok(HostValue::Undefined)
         },
     )?;
@@ -1395,10 +1546,9 @@ fn install_event_members(
         3,
         move |arguments| {
             let node = node_id_argument("bobcat-internal:host.disableEventListener", arguments, 0)?;
-            let capture =
-                capture_argument("bobcat-internal:host.disableEventListener", arguments, 1)?;
+            let pass = pass_argument("bobcat-internal:host.disableEventListener", arguments, 1)?;
             let name = string_argument("bobcat-internal:host.disableEventListener", arguments, 2)?;
-            state.disable(node, name, capture);
+            state.disable(node, name, pass);
             Ok(HostValue::Undefined)
         },
     )?;
@@ -1469,12 +1619,17 @@ fn install_attribute_members(
         fn queryElementIds(
             root: node_id_argument,
             selector: string_argument,
-            first_only: capture_argument
+            first_only: flag_argument,
+            include_root: flag_argument
         ) |document| {
             validate_live_element(document, NAME, root)?;
-            // SelectorQuery is Lynx's inclusive query scope. Matching itself
-            // still uses the same standard selector engine as the cascade.
-            let matches_root = document.matches(root, selector).map_err(|e| e.to_string())?;
+            // SelectorQuery is Lynx's inclusive query scope, so it asks for
+            // the root to be considered; the Element PAPI's `__QuerySelector`
+            // is `Element.querySelector`'s, which is root-exclusive, and asks
+            // for it to be skipped. Matching the root itself still uses the
+            // same standard selector engine as the cascade.
+            let matches_root =
+                include_root && document.matches(root, selector).map_err(|e| e.to_string())?;
             let mut ids = if matches_root { vec![root] } else { Vec::new() };
             if !first_only || ids.is_empty() {
                 if first_only {
@@ -1748,12 +1903,28 @@ fn optional_node_id_argument(
     }
 }
 
-/// The `type_id` the realm registers with: `0` bubble, `1` capture.
-fn capture_argument(function: &str, arguments: &[HostValue], index: usize) -> Result<bool, String> {
+/// A flag the realm spells as `0` or `1`, which is every boolean the host
+/// module takes.
+fn flag_argument(function: &str, arguments: &[HostValue], index: usize) -> Result<bool, String> {
     match *argument(arguments, index) {
         HostValue::Number(0.0) => Ok(false),
         HostValue::Number(1.0) => Ok(true),
         _ => Err(format!("{function} expects 0 or 1 for argument {index}")),
+    }
+}
+
+/// The `type_id` the realm registers with: `0` bubble, `1` capture, `2`
+/// global.
+fn pass_argument(
+    function: &str,
+    arguments: &[HostValue],
+    index: usize,
+) -> Result<ListenerPass, String> {
+    match *argument(arguments, index) {
+        HostValue::Number(0.0) => Ok(ListenerPass::Bubble),
+        HostValue::Number(1.0) => Ok(ListenerPass::Capture),
+        HostValue::Number(2.0) => Ok(ListenerPass::Global),
+        _ => Err(format!("{function} expects 0, 1 or 2 for argument {index}")),
     }
 }
 

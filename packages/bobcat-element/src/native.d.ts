@@ -24,7 +24,18 @@ interface BobcatNative {
   setInlineStyles(nodeId: number, record: string): void;
   setInlineStyleProperty(nodeId: number, name: string, value: string): void;
   supportsStyleProperty(name: string): boolean;
-  queryElementIds(root: number, selector: string, firstOnly: 0 | 1): string;
+  /**
+   * The `NodeId`s matching `selector` under `root`, joined by commas, or the
+   * empty string for no match. `includeRoot` picks the scope: `1` is Lynx's
+   * SelectorQuery, which considers `root` itself first, `0` is
+   * `Element.querySelector`'s, which does not.
+   */
+  queryElementIds(
+    root: number,
+    selector: string,
+    firstOnly: 0 | 1,
+    includeRoot: 0 | 1,
+  ): string;
   removeAttribute(nodeId: number, name: string): void;
   /** The attribute's value, or null when the element does not carry it. */
   getAttribute(nodeId: number, name: string): string | null;
@@ -70,7 +81,9 @@ interface BobcatNative {
   flushElementTree(): void;
   /**
    * Records that `nodeId` has at least one listener for `eventName` in the
-   * given pass (`0` bubble, `1` capture), so the walk stops skipping it.
+   * given pass (`0` bubble, `1` capture), so the walk stops skipping it —
+   * or, for pass `2`, that it holds a `global-bindEvent` handler, which the
+   * host delivers after the walk whatever path the event took.
    */
   enableEventListener(nodeId: number, phase: number, eventName: string): void;
   /** The reverse: the last listener for that pair went away. */

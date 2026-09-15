@@ -76,15 +76,18 @@ import { __BobcatPublishEvent } from "bobcat:runtime";
 // | `__RemoveEventListener(element, name, callback, options?)` | this runtime's own store |
 // | `__StopPropagation(event)` | native `stopPropagation` export |
 // | `__StopImmediatePropagation(event)` | native `stopPropagation` export + this runtime's own store |
+// | `__GetPageElement()` | the page handle `__CreatePage` minted |
+// | `__QuerySelector(element, selector, params)` | native `queryElementIds` export + this runtime's handle index |
+// | `__QuerySelectorAll(element, selector, params)` | native `queryElementIds` export + this runtime's handle index |
 // | `__FlushElementTree()` | native `flushElementTree` export |
 //
 // Everything else — `__CreateFrame`, `__DropElement` (absent from every
 // web-core generation), `__AddClass`,
 // component-info, config, template-part and animation members, the rest of
 // tree querying (`__GetParent`, `__FirstElement`, `__LastElement`,
-// `__NextElement`, `__ElementIsEqual`, `__GetPageElement`, `__GetAttributes`),
-// direct MTS selector PAPI, and list cell recycling — is not implemented. A bundle
-// that reaches for another member fails at the missing global, not silently.
+// `__NextElement`, `__ElementIsEqual`, `__GetAttributes`), and list cell
+// recycling — is not implemented. A bundle that reaches for another member
+// fails at the missing global, not silently.
 // BTS SelectorQuery uses the internal `__BobcatQueryNodes` export below;
 // it resolves through the document's existing selector engine.
 //
@@ -125,9 +128,11 @@ import { __BobcatPublishEvent } from "bobcat:runtime";
 // then calls this module's `__BobcatDispatchEvent(node, target, phase, name,
 // detail, eventId, isLastCall)` export once per node per pass. Releasing first is
 // what lets a callback mutate the tree. `phase` is the *pass* (`0` bubble, `1`
-// capture), not the standard's `eventPhase`. They are different numbers, and
-// at the target they do not even correspond, since both passes visit it; the
-// event object's `eventPhase` is derived here, where the event object is.
+// capture, `2` global), not the standard's `eventPhase`. They are different
+// numbers, and at the target they do not even correspond, since both passes
+// visit it; the event object's `eventPhase` is derived here, where the event
+// object is. The third pass is not over the path at all — see
+// `global-bindEvent` below.
 //
 // `eventId` names the dispatch and `isLastCall` says whether another call
 // carries that id, which is what lets one event object live for the whole
@@ -150,32 +155,45 @@ import { __BobcatPublishEvent } from "bobcat:runtime";
 // # `__AddEvent`, the other registration form
 //
 // `__AddEventListener` files a callable under the standard's identity.
-// `__AddEvent` files *one* handler per event name under a Lynx dispatch form
-// — `bindEvent`, `catchEvent`, `capture-bind`, `capture-catch`,
-// `global-bindEvent` — replacing whatever that name held. It is the form
-// ReactLynx's compiled output uses for every `bind*`/`catch*` prop, so it is
-// the one a real card exercises.
+// `__AddEvent` files handlers under a Lynx dispatch form — `bindEvent`,
+// `catchEvent`, `capture-bind`, `capture-catch`, `global-bindEvent`. It is
+// the form ReactLynx's compiled output uses for every `bind*`/`catch*` prop,
+// so it is the one a real card exercises.
 //
-// The two share the host's index and the same per-node delivery. The form
-// supplies what the standard's identity does not carry: which pass to file
-// in, and whether the walk ends after this node. Everything else about it
-// lives in this file, which is why no host member had to change for it.
+// **Two handler kinds, filed apart.** A *string* is an opaque
+// background-thread handler name; an *object* is a worklet. Each element
+// holds one of each per event name, and a call of one kind never disturbs
+// the other — a `main-thread:bindtap` and a `bindtap` on the same element
+// both run. That is both references' shape: native Lynx keeps `static_events_`
+// beside `lepus_events_` (`attribute_holder.h`), and web-core keeps a
+// cross-thread-handler map beside a run-worklet map, which its `__AddEvent`
+// writes to by the handler's type (`createElementAPI.ts`). Only a nullish
+// handler clears, and it clears both kinds, as web-core's does.
+//
+// Within a kind the key is the event *name* alone, with the dispatch form
+// carried inside the entry, which is native Lynx's `insert_or_assign`: filing
+// `catchtap` over `bindtap` of the same kind replaces it, form included.
+//
+// The two registration forms share the host's index and the same per-node
+// delivery. The form supplies what the standard's identity does not carry:
+// which pass to file in, and whether the walk ends after this node.
 //
 // What a handler *is* decides where it runs. A worklet runs through the
-// card's own `runWorklet`. A string is an opaque background-thread handler
-// name, published with a snapshot of the event through the MTS runtime.
-// A `catch` form ends the local walk before either kind is delivered,
-// because ending it is the form's doing, not the handler's.
-// Anything else non-nullish is ignored, neither filed nor clearing what the
-// name held, which is web-core's behavior for it. Native Lynx would take a
-// callable and file it as a Lepus handler; web-core has nowhere to run one,
-// and matching web-core is the compatibility target.
+// card's own `runWorklet`. A string is published with a snapshot of the event
+// through the MTS runtime. A `catch` form ends the local walk before either
+// kind is delivered, because ending it is the form's doing, not the
+// handler's. Anything else non-nullish is ignored, neither filed nor clearing
+// what the name held, which is web-core's behavior for it. Native Lynx would
+// take a callable and file it as a Lepus handler; web-core has nowhere to run
+// one, and matching web-core is the compatibility target.
 //
-// `global-bindEvent` is filed and never indexed. The host walks the event
-// path and nothing else, so indexing a global handler would deliver it only
-// when its element happened to be on that path — a subset neither native Lynx
-// nor web-core produces. The separate pass that gives the form meaning is the
-// host's to add.
+// `global-bindEvent` is filed in its own slot and indexed in a pass of its
+// own, `2`. It is not a pass over the path: the host delivers every global
+// registration for the name after the path walk has finished, in registration
+// order, whether or not a `catch` ended that walk — web-core's
+// `common_event_handler` calls `dispatch_global_bind_event` unconditionally.
+// A global delivery therefore has no `eventPhase`: `NONE`, since no step of
+// any path produced it.
 //
 // # What is deliberately absent
 //
@@ -286,9 +304,15 @@ const nodeIdSymbol = Symbol("nodeId");
  * Which listener list a registration belongs to; also the `type_id` the
  * native index is keyed by, so a node with only bubble listeners is skipped
  * entirely during the capture pass.
+ *
+ * `GLOBAL_PASS` is the third `type_id`, and the odd one out: it indexes no
+ * list of closures and is not a pass over the event path. The host delivers
+ * it after the path walk, for every node registered under `global-bindEvent`
+ * for that name.
  */
 const BUBBLE = 0;
 const CAPTURE = 1;
+const GLOBAL_PASS = 2;
 
 /**
  * The standard's `Event.eventPhase` values. The host sends the *pass*, not
@@ -330,19 +354,47 @@ const CAPTURE_CATCH = "capture-catch";
 const GLOBAL_BIND = "global-bindevent";
 
 /**
- * Which of an element's two handler maps a `type` selects. Both are keyed
- * by event *name* alone, with the type carried inside the entry, which is
- * native Lynx's `static_events` / `global_bind_events` split
- * (`AttributeHolder::SetStaticEvent`) rather than web-core's (name, type)
- * pair. The consequence is native's: filing `catchtap` over `bindtap`
- * replaces it, and `__GetEvent` answers for the requested type only.
+ * Which of an element's two handler slots a `type` selects: the path forms
+ * (`bindEvent`, `catchEvent`, `capture-bind`, `capture-catch`) file in
+ * `STATIC`, `global-bindEvent` in `GLOBAL`. Native Lynx splits the same way
+ * — every setter in `AttributeHolder` tests `kGlobalBind` first and writes
+ * `global_bind_events_` rather than the maps its path walk reads — and so
+ * does web-core, whose `update_global_bind_events` keeps its own index of
+ * the elements a global delivery has to visit.
+ *
+ * Native folds both handler kinds into its one global map, where web-core
+ * keeps them apart and its `dispatch_global_bind_event` reads both. web-core
+ * is the compatibility target, so the kind split below applies to this slot
+ * as much as to the other.
  */
 const STATIC = 0;
 const GLOBAL = 1;
 
 /**
+ * Which of a slot's two maps a *handler* selects, decided by what the handler
+ * is rather than by its type: a string names a background-thread handler, an
+ * object is a worklet. Filing one never disturbs the other, so an element can
+ * carry both for one event name and both run.
+ *
+ * This is the pair native Lynx keeps as `static_events_` beside
+ * `lepus_events_` (`AttributeHolder::SetStaticEvent` against
+ * `SetWorkletEvent`), and web-core as its cross-thread map beside its
+ * run-worklet map — two maps its `__AddEvent` chooses between by `typeof`,
+ * clearing both only for a nullish handler.
+ *
+ * Each map is keyed by event *name* alone, with the dispatch form carried
+ * inside the entry, which is native's `insert_or_assign` rather than
+ * web-core's (name, type) pair: filing `catchtap` over `bindtap` of the same
+ * kind replaces it, form included, and `__GetEvent` answers for the requested
+ * form only.
+ */
+const STRING_HANDLER = 0;
+const WORKLET_HANDLER = 1;
+
+/**
  * Where a handle files its `__AddEvent` handlers: at most one per name in
- * each map. On the handle, for the reason the listener lists are.
+ * each of the two kinds of each of the two slots. On the handle, for the
+ * reason the listener lists are.
  */
 const handlersSymbol = Symbol("handlers");
 interface FiledHandler {
@@ -350,20 +402,25 @@ interface FiledHandler {
   name: string;
   handler: unknown;
 }
-type HandlerMaps = [Map<string, FiledHandler>, Map<string, FiledHandler>];
+/** One slot's two kinds, indexed by [`STRING_HANDLER`, `WORKLET_HANDLER`]. */
+type HandlerKinds = [Map<string, FiledHandler>, Map<string, FiledHandler>];
+/** Both slots, indexed by [`STATIC`, `GLOBAL`]. */
+type HandlerMaps = [HandlerKinds, HandlerKinds];
 
 /**
- * What this file has last told the host about a (handle, name, pass).
+ * What this file has last told the host about a (handle, name, pass), for
+ * each of the three passes.
  *
- * The host indexes a plain set of `(node, capture)` per name, so
- * `disableEventListener` is unconditional — it cannot know that the other
- * registration kind still wants the node visited. Two kinds file into that
- * one index, `__AddEventListener` closures and one `__AddEvent` handler, so
- * the decision belongs here, taken from both, with only the transitions
- * crossing the boundary. Filed on the handle, like the rest.
+ * The host indexes a plain registration per `(node, pass)` per name, so
+ * `disableEventListener` is unconditional — it cannot know that another
+ * registration kind still wants the node visited. Several kinds file into
+ * that one index: `__AddEventListener` closures, and a string and a worklet
+ * `__AddEvent` handler in each slot. So the decision belongs here, taken from
+ * all of them, with only the transitions crossing the boundary. Filed on the
+ * handle, like the rest.
  */
 const indexedSymbol = Symbol("indexed");
-type IndexedPasses = Map<string, [boolean, boolean]>;
+type IndexedPasses = Map<string, [boolean, boolean, boolean]>;
 
 /**
  * The list callbacks `__CreateList` and `__UpdateListCallbacks` file.
@@ -1201,7 +1258,8 @@ export function __BobcatQueryNodes(request: NodeQueryRequest) {
       }
     } else {
       try {
-        const ids = queryElementIds(nodeIdOf(root), token.identifier, token.first_only ? 1 : 0);
+        // Inclusive: SelectorQuery's scope includes the root it is given.
+        const ids = queryElementIds(nodeIdOf(root), token.identifier, token.first_only ? 1 : 0, 1);
         elements = ids ? ids.split(",").map(id => {
           const element = handleOf(Number(id));
           if (!element) throw new Error("a queried live node has no handle");
@@ -1254,7 +1312,8 @@ export function __BobcatQueryNodes(request: NodeQueryRequest) {
  * The pass a `__AddEvent` type is delivered in. Lynx's four path-walking
  * forms collapse onto the two passes the host walks: the `capture-` pair is
  * the capture pass, `bindEvent`/`catchEvent` the bubble pass.
- * `global-bindEvent` is not one of them and never reaches this.
+ * `global-bindEvent` is not one of them and never reaches this — it is filed
+ * in the `GLOBAL` slot, whose whole content is the third pass.
  */
 function phaseOfType(type: string): 0 | 1 {
   return type === CAPTURE_BIND || type === CAPTURE_CATCH ? CAPTURE : BUBBLE;
@@ -1271,15 +1330,28 @@ function isCatchType(type: string): boolean {
 }
 
 /**
- * One element's two handler maps, created on demand.
+ * One element's four handler maps — two kinds in each of two slots — created
+ * on demand.
  */
 function handlersFor(handle: Handle): HandlerMaps {
   let maps = handlersOf(handle);
   if (maps === undefined) {
-    maps = [new Map(), new Map()];
+    maps = [[new Map(), new Map()], [new Map(), new Map()]];
     handle[handlersSymbol] = maps;
   }
   return maps;
+}
+
+/**
+ * The handler of one kind filed for one name in one slot, if any.
+ */
+function filedHandler(
+  handle: Handle,
+  slot: 0 | 1,
+  kind: 0 | 1,
+  name: string,
+): FiledHandler | undefined {
+  return handlersOf(handle)?.[slot][kind].get(name);
 }
 
 /**
@@ -1289,7 +1361,7 @@ function handlersFor(handle: Handle): HandlerMaps {
 function syncPass(
   handle: Handle,
   name: string,
-  phase: 0 | 1,
+  phase: 0 | 1 | 2,
   wanted: boolean,
 ): undefined {
   let byName = indexedOf(handle);
@@ -1304,7 +1376,7 @@ function syncPass(
   }
   if (state !== undefined) {
     state[phase] = wanted;
-    if (!state[BUBBLE] && !state[CAPTURE]) {
+    if (!state[BUBBLE] && !state[CAPTURE] && !state[GLOBAL_PASS]) {
       byName?.delete(name);
     }
     return undefined;
@@ -1313,34 +1385,40 @@ function syncPass(
     byName = new Map();
     handle[indexedSymbol] = byName;
   }
-  const created: [boolean, boolean] = [false, false];
+  const created: [boolean, boolean, boolean] = [false, false, false];
   created[phase] = wanted;
   byName.set(name, created);
   return undefined;
 }
 
 /**
- * Reconciles both passes of the host's index for one (element, name)
+ * Reconciles all three passes of the host's index for one (element, name)
  * against everything registered here now.
+ *
+ * A pass is wanted when *any* registration asks for it: a closure list, or
+ * either handler kind whose form selects that pass. The global pass is asked
+ * for by either kind of the `GLOBAL` slot, and by nothing else — closures
+ * never file globally, because `__AddEventListener` carries no Lynx form.
  */
 function syncIndex(handle: Handle, name: string): undefined {
   const lists = listenersOf(handle)?.get(name);
-  const filed = handlersOf(handle)?.[STATIC].get(name);
-  const filedPhase = filed === undefined ? undefined : phaseOfType(filed.type);
-  syncPass(
-    handle,
-    name,
-    BUBBLE,
-    (lists !== undefined && lists[BUBBLE].length > 0) ||
-      filedPhase === BUBBLE,
-  );
-  syncPass(
-    handle,
-    name,
-    CAPTURE,
-    (lists !== undefined && lists[CAPTURE].length > 0) ||
-      filedPhase === CAPTURE,
-  );
+  const wanted: [boolean, boolean, boolean] = [
+    lists !== undefined && lists[BUBBLE].length > 0,
+    lists !== undefined && lists[CAPTURE].length > 0,
+    false,
+  ];
+  for (const kind of [STRING_HANDLER, WORKLET_HANDLER] as const) {
+    const filed = filedHandler(handle, STATIC, kind, name);
+    if (filed !== undefined) {
+      wanted[phaseOfType(filed.type)] = true;
+    }
+    if (filedHandler(handle, GLOBAL, kind, name) !== undefined) {
+      wanted[GLOBAL_PASS] = true;
+    }
+  }
+  syncPass(handle, name, BUBBLE, wanted[BUBBLE]);
+  syncPass(handle, name, CAPTURE, wanted[CAPTURE]);
+  syncPass(handle, name, GLOBAL_PASS, wanted[GLOBAL_PASS]);
   return undefined;
 }
 
@@ -1444,14 +1522,18 @@ function removeListener(
 /**
  * `__AddEvent`'s registration, shared with `__SetEvents`.
  *
- * The identity is (element, map, name) — the map being the one `type`
- * selects — so a second call for the same name replaces the first outright,
- * type included. That is `insert_or_assign` on native Lynx's event map, and
- * it is what ReactLynx's per-slot updater relies on: it rewrites the same
- * binding on every render rather than removing and re-adding it.
+ * The identity is (element, slot, kind, name) — the slot being the one `type`
+ * selects and the kind being what the handler *is* — so a second call with a
+ * handler of the same kind replaces the first outright, type included. That
+ * is `insert_or_assign` on native Lynx's event map, and it is what ReactLynx's
+ * per-slot updater relies on: it rewrites the same binding on every render
+ * rather than removing and re-adding it. A handler of the *other* kind is
+ * left alone, which is what lets a `main-thread:bindtap` worklet and a
+ * `bindtap` background handler coexist on one element and both run.
  *
  * A nullish handler is the removal, matching `FiberAddEvent`'s
- * empty-callback branch.
+ * empty-callback branch, and it removes both kinds — web-core's `__AddEvent`
+ * clears its cross-thread map and its worklet map on that one branch.
  */
 function addEvent(
   handle: Handle,
@@ -1463,9 +1545,13 @@ function addEvent(
   const name = String(eventName).toLowerCase();
   const slot = type === GLOBAL_BIND ? GLOBAL : STATIC;
   if (handler === null || handler === undefined) {
-    handlersOf(handle)?.[slot].delete(name);
-  } else if (typeof handler === "string" || typeof handler === "object") {
-    handlersFor(handle)[slot].set(name, { type, name, handler });
+    const maps = handlersOf(handle);
+    maps?.[slot][STRING_HANDLER].delete(name);
+    maps?.[slot][WORKLET_HANDLER].delete(name);
+  } else if (typeof handler === "string") {
+    handlersFor(handle)[slot][STRING_HANDLER].set(name, { type, name, handler });
+  } else if (typeof handler === "object") {
+    handlersFor(handle)[slot][WORKLET_HANDLER].set(name, { type, name, handler });
   } else {
     // Neither a handler name nor a worklet. web-core's `__AddEvent` matches
     // none of its three branches on such a call and so does nothing at all
@@ -1474,16 +1560,15 @@ function addEvent(
     // no main-thread place to run one and this runtime does not invent one.
     return undefined;
   }
-  if (slot === STATIC) {
-    syncIndex(handle, name);
-  }
+  syncIndex(handle, name);
   return undefined;
 }
 
 /**
  * Files one handler for one element, event name and Lynx dispatch form.
  *
- * Two handler kinds are filed:
+ * Two handler kinds are filed, in separate maps, so a call of one kind never
+ * clears the other:
  *
  * - a **worklet** (`{ type: "worklet", value }`, what `main-thread:bind*`
  *   compiles to) runs here, through the `runWorklet` the card's own worklet
@@ -1492,14 +1577,14 @@ function addEvent(
  *   event snapshot through the MTS runtime. A `catch` form ends the walk
  *   here before the background handler receives it.
  *
- * Anything else that is not nullish — a callable above all — is ignored
- * outright, which is what web-core does with it.
+ * A nullish handler clears both kinds. Anything else that is not nullish — a
+ * callable above all — is ignored outright, which is what web-core does
+ * with it.
  *
- * `global-bindEvent` is filed in its own map and never indexed: the host
- * walks the event path and nothing else, so a global handler would only
- * ever be reached when its element happened to be on that path. Delivering
- * that subset would be a behavior neither native Lynx nor web-core has.
- * The pass that gives it meaning is the host's to add.
+ * `global-bindEvent` is filed in its own slot, and indexed in the host's
+ * third pass. That pass is not over the event path: the host delivers every
+ * global registration for the name once the path walk has finished, in
+ * registration order, whether or not a `catch` ended the walk.
  */
 export function __AddEvent(
   element: unknown,
@@ -1511,9 +1596,13 @@ export function __AddEvent(
 }
 
 /**
- * The handler filed for one name, or undefined when the filed one belongs
- * to a different dispatch form — the type check `FiberGetEvent` performs,
- * which is only meaningful because the map is keyed by name alone.
+ * The *string* handler filed for one name, or undefined when the filed one
+ * belongs to a different dispatch form — the type check `FiberGetEvent`
+ * performs, which is only meaningful because the map is keyed by name alone.
+ *
+ * The string kind only: web-core's `get_event` reads its cross-thread map
+ * and never its worklet one, so an element carrying only a worklet for a
+ * name answers undefined here. `__GetEvents` is what reports both.
  *
  * The arguments are (name, type), the reverse of `__AddEvent`'s
  * (type, name). Both native Lynx and web-core order them this way.
@@ -1526,7 +1615,7 @@ export function __GetEvent(
   const type = String(eventType).toLowerCase();
   const name = String(eventName).toLowerCase();
   const slot = type === GLOBAL_BIND ? GLOBAL : STATIC;
-  const filed = handlersOf(element as Handle)?.[slot].get(name);
+  const filed = handlersOf(element as Handle)?.[slot][STRING_HANDLER].get(name);
   if (filed === undefined || filed.type !== type) {
     return undefined;
   }
@@ -1534,7 +1623,9 @@ export function __GetEvent(
 }
 
 /**
- * Every handler filed on one element, static map first.
+ * Every handler filed on one element: the path slot before the global one,
+ * and within a name the string kind before the worklet kind, which is the
+ * order web-core's `get_events` pushes its two maps in.
  *
  * The three references disagree on the shape: native Lynx returns a record
  * of name to array, web-core's WASM returns records spelled
@@ -1551,13 +1642,24 @@ export function __GetEvents(
     return [];
   }
   const events: { type: string; name: string; function: unknown }[] = [];
-  for (const map of maps) {
-    for (const filed of map.values()) {
-      events.push({
-        type: filed.type,
-        name: filed.name,
-        function: filed.handler,
-      });
+  for (const slot of maps) {
+    // A name is reported once, at the position its first filing gave it,
+    // with both kinds together — the string one first.
+    const names = new Set([
+      ...slot[STRING_HANDLER].keys(),
+      ...slot[WORKLET_HANDLER].keys(),
+    ]);
+    for (const name of names) {
+      for (const kind of slot) {
+        const filed = kind.get(name);
+        if (filed !== undefined) {
+          events.push({
+            type: filed.type,
+            name: filed.name,
+            function: filed.handler,
+          });
+        }
+      }
     }
   }
   return events;
@@ -1579,9 +1681,13 @@ export function __SetEvents(element: unknown, events: unknown): undefined {
   const handle = element as Handle;
   const maps = handlersOf(handle);
   if (maps !== undefined) {
-    const names = [...maps[STATIC].keys(), ...maps[GLOBAL].keys()];
-    maps[STATIC].clear();
-    maps[GLOBAL].clear();
+    const names: string[] = [];
+    for (const slot of maps) {
+      for (const kind of slot) {
+        names.push(...kind.keys());
+        kind.clear();
+      }
+    }
     for (const name of names) {
       syncIndex(handle, name);
     }
@@ -1624,11 +1730,17 @@ export function __UpdateListCallbacks(
 }
 
 /**
- * The identity half of an event's `target`/`currentTarget`.
+ * An event's `target`/`currentTarget`: web-core's descriptor shape,
+ * `{ dataset, id, uid }` plus the live handle.
+ *
+ * `dataset` is [`datasetOf`]'s answer. Every worklet and every
+ * `__AddEventListener` closure sees it, which is what web-core's
+ * `generateTargetObject` gives them; publishing to the background thread
+ * reads the same object.
  *
  * `elementRefptr` is the handle itself, which a main-thread callback is
  * entitled to — it is in the same realm and already holds one. Background
- * delivery builds its own attribute snapshot without this live handle.
+ * delivery drops it, since no handle crosses a thread.
  *
  * A node the host routed an event to is connected, and a connected element's
  * handle is held by its parent's up to the permanent page handle, so one
@@ -1644,7 +1756,12 @@ export function __UpdateListCallbacks(
  */
 function targetInfo(
   nodeId: number,
-): { id: string | null; uid: number; elementRefptr: object } {
+): {
+  dataset: Record<string, unknown>;
+  id: string | null;
+  uid: number;
+  elementRefptr: object;
+} {
   const handle = handleOf(nodeId);
   if (handle === undefined) {
     throw new Error(
@@ -1652,9 +1769,39 @@ function targetInfo(
     );
   }
   return {
+    dataset: datasetOf(nodeId),
     id: getAttribute(nodeId, "id"),
     uid: nodeId,
     elementRefptr: handle,
+  };
+}
+
+/**
+ * One element's dataset as an event descriptor reports it: every `data-*`
+ * attribute under DOMStringMap's camelCased name, with the typed values
+ * `__SetDataset`/`__AddDataset` filed merged over them — native keeps those
+ * apart from the DOM strings, and the typed value wins where both name the
+ * same key.
+ *
+ * Read fresh at each use rather than kept, because web-core rebuilds the
+ * whole descriptor per listener invocation and a listener that writes a
+ * `data-*` attribute is expected to be seen by the steps after it. A node
+ * whose handle is gone has no typed values left to merge; its attributes
+ * still answer.
+ */
+function datasetOf(nodeId: number): Record<string, unknown> {
+  const attributeDataset = Object.fromEntries(
+    splitRecord(attributeNames(nodeId))
+      .filter((name) => name.startsWith("data-") && !/[A-Z]/.test(name))
+      .map((name): [string, string | null] => [
+        name.slice(5).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase()),
+        getAttribute(nodeId, name),
+      ]),
+  );
+  const handle = handleOf(nodeId);
+  return {
+    ...attributeDataset,
+    ...(handle === undefined ? {} : __GetDataset(handle)),
   };
 }
 
@@ -1686,8 +1833,13 @@ interface Dispatch {
 }
 
 /**
- * The background event target has values, never a realm-local element handle.
- * Dataset names follow DOMStringMap's data-* to camelCase conversion.
+ * The background event target: the descriptor minus the realm-local element
+ * handle, which no thread but this one could name.
+ *
+ * Derived from the descriptor rather than recomputed from the element, so a
+ * background handler is told exactly what the local listeners of the same
+ * step were. An empty `id` attribute is reported as none, which is the value
+ * a background handler reads for an element carrying no id at all.
  */
 function backgroundTargetInfo(
   target: ReturnType<typeof targetInfo> | null,
@@ -1699,16 +1851,8 @@ function backgroundTargetInfo(
   if (target === null) {
     return null;
   }
-  const dataset = Object.fromEntries(
-    splitRecord(attributeNames(target.uid))
-      .filter((name) => name.startsWith("data-") && !/[A-Z]/.test(name))
-      .map((name): [string, string | null] => [
-        name.slice(5).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase()),
-        getAttribute(target.uid, name),
-      ]),
-  );
-  const handle = handleOf(target.uid);
-  return { dataset: {...dataset, ...(handle ? __GetDataset(handle) : {})}, id: target.id || null, uid: target.uid };
+  const { elementRefptr: _handle, ...values } = target;
+  return { ...values, id: values.id || null };
 }
 
 /**
@@ -1807,7 +1951,7 @@ function eventPhaseOf(node: number, target: unknown, phase: number): number {
  * skipping of this node's remaining listeners — because one delivery covers
  * the whole node and the host has no finer step to withhold.
  *
- * @param phaseId `CAPTURE` or `BUBBLE`, the pass being run
+ * @param phaseId `BUBBLE`, `CAPTURE` or `GLOBAL_PASS`, the pass being run
  * @param detailJson the event's device facts, or an empty string
  * @param eventId names this dispatch, the same for all its calls
  * @param isLastCall whether the host will call again for this id
@@ -1828,7 +1972,7 @@ function eventListenerCallback(
       id,
       nodeId as number,
       targetNodeId as number,
-      phaseId === CAPTURE ? CAPTURE : BUBBLE,
+      phaseId === CAPTURE ? CAPTURE : phaseId === GLOBAL_PASS ? GLOBAL_PASS : BUBBLE,
       String(eventName).toLowerCase(),
       detailJson,
     );
@@ -1838,6 +1982,14 @@ function eventListenerCallback(
     endDispatch(id);
     throw error;
   }
+  // A stop ends the dispatch here, because the host only signals the walk's
+  // *last* call. The host goes on making the global-bind calls after a stop —
+  // a `catch` on the path does not suppress them — and each of those finds no
+  // entry and mints a fresh one, so a global handler after a caught walk sees
+  // a new event object rather than the caught one. That is the cost of
+  // ending eagerly, and it costs nothing a handler can observe except object
+  // identity across the boundary between the path and the global deliveries.
+  // The last global call still carries the flag, so the last entry is ended.
   if (isLastCall || entry === undefined || entry.stopped) {
     endDispatch(id);
   }
@@ -1896,7 +2048,14 @@ function runEventHandler(handler: unknown, event: DispatchedEvent): undefined {
 }
 
 /**
- * One node's listeners for one dispatch.
+ * One node's turn at one dispatch, for one pass.
+ *
+ * Passes `BUBBLE` and `CAPTURE` are steps of the event path: the `STATIC`
+ * slot's handlers whose form selects this pass, then the closures of the
+ * pass's own listener list. Pass `GLOBAL_PASS` is not a step of anything —
+ * it is a `global-bindEvent` registration the host delivers after the path,
+ * so it runs the `GLOBAL` slot's handlers regardless of form, runs no
+ * closures, and leaves `eventPhase` at `NONE` because no phase produced it.
  *
  * Returns the dispatch's entry, or `undefined` when this node contributed
  * nothing and none was needed.
@@ -1917,21 +2076,24 @@ function deliverEvent(
   if (handle === undefined) {
     return dispatches.get(id);
   }
-  const list = listenersOf(handle)?.get(name)?.[phase];
-  const closures = list !== undefined && list.length > 0 ? list : undefined;
-  const filed = handlersOf(handle)?.[STATIC].get(name);
-  const handled =
-    filed !== undefined && phaseOfType(filed.type) === phase
+  const global = phase === GLOBAL_PASS;
+  const slot = global ? GLOBAL : STATIC;
+  const inThisPass = (filed: FiledHandler | undefined) =>
+    filed !== undefined && (global || phaseOfType(filed.type) === phase)
       ? filed
       : undefined;
-  if (closures === undefined && handled === undefined) {
+  const published = inThisPass(filedHandler(handle, slot, STRING_HANDLER, name));
+  const worklet = inThisPass(filedHandler(handle, slot, WORKLET_HANDLER, name));
+  const list = global ? undefined : listenersOf(handle)?.get(name)?.[phase];
+  const closures = list !== undefined && list.length > 0 ? list : undefined;
+  if (closures === undefined && published === undefined && worklet === undefined) {
     return dispatches.get(id);
   }
 
   const entry = dispatchEntry(id, name, targetNodeId, detailJson);
   const event = entry.event;
   entry.immediate = false;
-  event.eventPhase = eventPhaseOf(node, targetNodeId, phase);
+  event.eventPhase = global ? NONE : eventPhaseOf(node, targetNodeId, phase);
   event.currentTarget = targetInfo(node);
   // Only across a shadow boundary, where retargeting hands this node a
   // different target than the last one saw. Rebuilding unconditionally would
@@ -1940,21 +2102,37 @@ function deliverEvent(
   if (targetNodeId !== entry.targetNodeId) {
     entry.targetNodeId = targetNodeId;
     event.target = targetInfo(targetNodeId);
+  } else {
+    // The object stays, but its dataset is read again: web-core rebuilds the
+    // whole descriptor per invocation, so a `data-*` attribute an earlier
+    // listener wrote has to be visible to the steps after it, and to every
+    // background publish. `id` is deliberately not refreshed — see the
+    // cached-target note in docs/tracking/dom-events.md.
+    event.target.dataset = datasetOf(entry.targetNodeId);
   }
 
-  // The `__AddEvent` handler first, then the `__AddEventListener` closures,
-  // which is web-core's per-node order.
-  if (handled !== undefined) {
-    // Before the handler rather than after it: a `catch` form ends the walk
-    // because of what it is, so it has to end it even when its handler is a
-    // background-thread name delivered asynchronously.
-    if (isCatchType(handled.type)) {
-      event.stopPropagation();
-    }
-    runEventHandler(handled.handler, event);
+  // The string handler, then the worklet, then the `__AddEventListener`
+  // closures, which is web-core's per-node order in both its path walk and
+  // its global-bind delivery.
+  //
+  // Before either handler rather than after: a `catch` form ends the walk
+  // because of what it is, so it has to end it even when its handler is a
+  // background-thread name delivered asynchronously. Either kind's form can
+  // be the catch. No `global-bindEvent` registration is ever one.
+  if (
+    (published !== undefined && isCatchType(published.type)) ||
+    (worklet !== undefined && isCatchType(worklet.type))
+  ) {
+    event.stopPropagation();
+  }
+  if (published !== undefined) {
+    runEventHandler(published.handler, event);
+  }
+  if (worklet !== undefined && !entry.immediate) {
+    runEventHandler(worklet.handler, event);
   }
 
-  // Skipped whole when the handler above stopped immediate propagation:
+  // Skipped whole when a handler above stopped immediate propagation:
   // the rest of this node's registrations is exactly what that suppresses.
   if (closures !== undefined && !entry.immediate) {
     // A copy, so a callback that adds or removes listeners for this same
@@ -2010,6 +2188,85 @@ export function __StopImmediatePropagation(event: unknown): undefined {
   (event as { stopImmediatePropagation?: () => void })
     ?.stopImmediatePropagation?.();
   return undefined;
+}
+
+/**
+ * The page handle, or undefined before `__CreatePage` minted one.
+ *
+ * web-core's is `() => page`, the same binding its `__CreatePage` assigns, so
+ * a card that asks before it has rendered gets nothing rather than an error.
+ * ReactLynx's worklet runtime caches the answer and tests it for truth, which
+ * is the contract that shape serves.
+ */
+export function __GetPageElement(): object | undefined {
+  return pageHandle;
+}
+
+/**
+ * The handles of `selector`'s matches under `element`, **excluding**
+ * `element` itself.
+ *
+ * Root-exclusive because this is `Element.querySelector`'s scope, which is
+ * what web-core implements these two members with. The `queryElementIds`
+ * host member is also SelectorQuery's primitive, whose scope is Lynx's
+ * inclusive one, so the exclusion is asked for explicitly — see
+ * `__BobcatQueryNodes`, which asks for the other.
+ *
+ * A selector the host refuses throws its error, as `querySelector` throws a
+ * `SyntaxError` for one. A match with no live handle throws for the reason
+ * `__GetChildren` does: no second handle is ever minted for a node whose
+ * first has died.
+ */
+function queryHandles(
+  element: unknown,
+  selector: unknown,
+  firstOnly: 0 | 1,
+): Handle[] {
+  const ids = queryElementIds(
+    nodeIdOf(element),
+    String(selector),
+    firstOnly,
+    0,
+  );
+  if (ids === "") {
+    return [];
+  }
+  return ids.split(",").map((field) => {
+    const nodeId = Number(field);
+    const handle = handleOf(nodeId);
+    if (handle === undefined) {
+      throw new Error(
+        `a queried live node has no handle: element ${nodeId}`,
+      );
+    }
+    return handle;
+  });
+}
+
+/**
+ * The first match of `selector` under `element`, or undefined.
+ *
+ * `params` — web-core's `{ onlyCurrentComponent? }` — is accepted and
+ * ignored, as web-core ignores it: it scopes the query to the element's own
+ * component, and no component PAPI creates a non-page component yet.
+ */
+export function __QuerySelector(
+  element: unknown,
+  selector: unknown,
+  params?: unknown,
+): object | undefined {
+  void params;
+  return queryHandles(element, selector, 1)[0];
+}
+
+/** Every match of `selector` under `element`, in tree order. */
+export function __QuerySelectorAll(
+  element: unknown,
+  selector: unknown,
+  params?: unknown,
+): object[] {
+  void params;
+  return queryHandles(element, selector, 0);
 }
 
 export function __FlushElementTree(): undefined {
