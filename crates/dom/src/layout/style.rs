@@ -252,24 +252,34 @@ pub(crate) fn shaping_inputs_changed(old: &ComputedValues, new: &ComputedValues)
                 || old_text.white_space_collapse != new_text.white_space_collapse))
 }
 
+/// Paragraph-level reads off bare computed values, for the callers that hold
+/// no node: the two registered limits and `tail-color-convert`.
+struct ParagraphStyle<'a>(&'a ComputedValues);
+
+impl CoreStyle for ParagraphStyle<'_> {
+    fn computed_values(&self) -> &ComputedValues {
+        self.0
+    }
+}
+
+impl TextContainerStyle for ParagraphStyle<'_> {}
+
 /// Stylo gives custom-property changes repaint damage. Compare the effective
 /// values the paragraph actually consumes to account for their layout dependency.
 pub(crate) fn paragraph_limits_changed(old: &ComputedValues, new: &ComputedValues) -> bool {
-    struct ParagraphStyle<'a>(&'a ComputedValues);
-
-    impl CoreStyle for ParagraphStyle<'_> {
-        fn computed_values(&self) -> &ComputedValues {
-            self.0
-        }
-    }
-    impl TextContainerStyle for ParagraphStyle<'_> {}
-
     if old.custom_properties().non_inherited == new.custom_properties().non_inherited {
         return false;
     }
 
     let (old, new) = (ParagraphStyle(old), ParagraphStyle(new));
     old.text_maxline() != new.text_maxline() || old.text_maxlength() != new.text_maxlength()
+}
+
+/// Whether this paragraph's `tail-color-convert` is on, so its truncation
+/// marker takes the establishing element's colour rather than the colour of
+/// the run the cut landed in.
+pub(crate) fn converts_tail_color(style: &ComputedValues) -> bool {
+    ParagraphStyle(style).tail_color_convert()
 }
 
 /// The style one shaped run carries: everything Parley resolves per *run* —

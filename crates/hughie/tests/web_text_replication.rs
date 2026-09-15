@@ -154,6 +154,15 @@ fn sources(block: &TextBlock) -> Vec<SourceItem> {
         .collect()
 }
 
+/// Whether the display layout carries the synthesized dots run. The variant
+/// names the content run the dots were shaped in, so a marker is matched
+/// rather than compared.
+fn has_ellipsis(sources: &[SourceItem]) -> bool {
+    sources
+        .iter()
+        .any(|item| matches!(item, SourceItem::Ellipsis { .. }))
+}
+
 /// The four `.text` paragraphs of the `text-maxline-basic` family, as the one
 /// flattened run sequence they reach a paragraph engine as: the leading raw
 /// text, a pink inline text, a `3em` one and a `letter-spacing: 7px` one,
@@ -370,7 +379,7 @@ fn a_truncation_node_inside_an_inline_view_never_registers() {
     );
     assert_eq!(block.lines()[0].ellipsis_count, 0);
     assert_close(block.lines()[0].advance, 300.0);
-    assert!(!sources(&block).contains(&SourceItem::Ellipsis));
+    assert!(!has_ellipsis(&sources(&block)));
 
     // Gated open on this fixture's own items, not a sibling's: the interaction
     // under test is a registered-but-unshown inline view at the head of a
@@ -404,7 +413,7 @@ fn a_truncation_node_inside_an_inline_view_never_registers() {
         3,
         "and the cut is three units back from its end",
     );
-    assert!(sources(&marked).contains(&SourceItem::Ellipsis));
+    assert!(has_ellipsis(&sources(&marked)));
     // Three 10px glyphs out, three 10px dots in: the line still fills 300px,
     // which is why the advance alone cannot tell the two passes apart and
     // `ellipsis_count` is what carries the claim.
@@ -495,7 +504,7 @@ fn maxlength_cuts_the_flattened_run_and_tails_it_with_three_dots() {
         assert_eq!(block.truncated(), max_chars < source_len, "row {row}");
         assert_eq!(block.lines().len(), 1, "row {row}");
         assert!(
-            !sources(&block).contains(&SourceItem::Ellipsis),
+            !has_ellipsis(&sources(&block)),
             "row {row} appends no dots without `text-overflow: ellipsis`",
         );
         assert_close(block.size().width, untailed);
@@ -509,7 +518,7 @@ fn maxlength_cuts_the_flattened_run_and_tails_it_with_three_dots() {
             None,
         );
         assert_eq!(
-            sources(&tailed_block).contains(&SourceItem::Ellipsis),
+            has_ellipsis(&sources(&tailed_block)),
             tailed_block.truncated(),
             "row {row} tails exactly the cuts it makes",
         );
@@ -590,7 +599,7 @@ fn tail_color_convert_false_splices_the_dots_into_the_cut_run() {
             if row == 'i' { 50.0 } else { untailed },
         );
         assert!(
-            !sources(&block).contains(&SourceItem::Ellipsis),
+            !has_ellipsis(&sources(&block)),
             "row {row} splices in no dots without `text-overflow: ellipsis`",
         );
 
@@ -604,7 +613,7 @@ fn tail_color_convert_false_splices_the_dots_into_the_cut_run() {
         );
         assert_close(spliced.lines()[0].advance, tailed);
         assert_eq!(
-            sources(&spliced).contains(&SourceItem::Ellipsis),
+            has_ellipsis(&sources(&spliced)),
             spliced.truncated(),
             "row {row} carries the dots as inline content",
         );
@@ -729,7 +738,7 @@ fn a_bare_maxline_clamp_marks_its_last_visible_line() {
         );
         assert_close(last.advance, clipped);
         assert!(
-            !sources(&block).contains(&SourceItem::Ellipsis),
+            !has_ellipsis(&sources(&block)),
             "clamp {clamp} draws no dots without `text-overflow: ellipsis`",
         );
 
@@ -748,7 +757,7 @@ fn a_bare_maxline_clamp_marks_its_last_visible_line() {
             "clamp {clamp} backs the cut off by the three units the dots take",
         );
         assert_close(last.advance, marked);
-        assert!(sources(&marked_block).contains(&SourceItem::Ellipsis));
+        assert!(has_ellipsis(&sources(&marked_block)));
     }
 }
 
@@ -815,7 +824,7 @@ fn tail_color_convert_false_backs_the_maxline_cut_off_by_three_units() {
             "clamp {clamp} reserves nothing for dots it does not lay in",
         );
         assert!(
-            !sources(&block).contains(&SourceItem::Ellipsis),
+            !has_ellipsis(&sources(&block)),
             "clamp {clamp} lays in no dots without `text-overflow: ellipsis`",
         );
 
@@ -832,7 +841,7 @@ fn tail_color_convert_false_backs_the_maxline_cut_off_by_three_units() {
             marked.ellipsis_count, 3,
             "clamp {clamp} reserves three units"
         );
-        assert!(sources(&block).contains(&SourceItem::Ellipsis));
+        assert!(has_ellipsis(&sources(&block)));
         advances.push((last.advance, marked.advance));
     }
 
@@ -914,7 +923,7 @@ fn custom_truncation_content_replaces_the_marker_at_the_clamp() {
         let source = sources(&block);
         assert!(source.contains(&SourceItem::Truncation(0)), "clamp {clamp}");
         assert!(
-            !source.contains(&SourceItem::Ellipsis),
+            !has_ellipsis(&source),
             "clamp {clamp} shows no dots beside the custom content",
         );
         // The retreat frees exactly the units the 170px truncation run needs,
@@ -960,7 +969,7 @@ fn content_that_just_fits_the_clamp_leaves_the_truncation_content_unused() {
     assert!(!block.truncation_visible());
     assert_eq!(block.lines().len(), 2);
     assert_eq!(block.lines()[1].ellipsis_count, 0);
-    assert!(!sources(&block).contains(&SourceItem::Ellipsis));
+    assert!(!has_ellipsis(&sources(&block)));
     assert_hidden(&block, 1);
 }
 
@@ -1000,7 +1009,7 @@ fn a_truncation_image_is_fitted_by_its_box_width() {
     // still gives up two: the web's loop decrements before its first width
     // check.
     assert_eq!(block.lines()[0].ellipsis_count, 2);
-    assert!(!sources(&block).contains(&SourceItem::Ellipsis));
+    assert!(!has_ellipsis(&sources(&block)));
     let (line, origin, size) = visible_box(&block, 1);
     assert_eq!(line, 0);
     assert!(
@@ -1159,7 +1168,7 @@ fn a_leading_image_survives_a_cut_that_retreats_only_trailing_content() {
     assert_eq!(block.lines()[2].ellipsis_count, 2);
     let source = sources(&block);
     assert!(source.contains(&SourceItem::Truncation(0)));
-    assert!(!source.contains(&SourceItem::Ellipsis));
+    assert!(!has_ellipsis(&source));
     let (line, origin, size) = visible_box(&block, 2);
     assert_eq!(line, 2);
     assert!(origin.x + size.width <= 300.0 + EPSILON);
@@ -1322,7 +1331,7 @@ fn an_atom_clipped_past_the_clamp_leaves_the_paint_list() {
     assert_hidden(&block, 1);
     let source = sources(&block);
     assert!(source.contains(&SourceItem::Truncation(0)));
-    assert!(!source.contains(&SourceItem::Ellipsis));
+    assert!(!has_ellipsis(&source));
     assert!(block.size().width <= 100.0 + EPSILON);
 }
 
@@ -1406,7 +1415,7 @@ fn maxlength_counts_units_across_nested_runs_and_scripts() {
         let block = laid_out(&mut context, style(TextOverflow::Clip), &items, None, None);
         assert_eq!(block.truncated(), max_chars.is_some(), "row {row}");
         assert!(
-            !sources(&block).contains(&SourceItem::Ellipsis),
+            !has_ellipsis(&sources(&block)),
             "row {row} appends no tail without `text-overflow: ellipsis`",
         );
         assert_close(block.size().width, untailed);
@@ -1420,7 +1429,7 @@ fn maxlength_counts_units_across_nested_runs_and_scripts() {
             None,
         );
         assert_eq!(
-            sources(&tailed_block).contains(&SourceItem::Ellipsis),
+            has_ellipsis(&sources(&tailed_block)),
             max_chars.is_some(),
             "row {row} tails exactly the cuts it makes",
         );
@@ -1450,9 +1459,15 @@ fn maxlength_counts_units_across_nested_runs_and_scripts() {
 /// separately by `maxlength_counts_units_across_nested_runs_and_scripts`.
 /// This test reports on the second gate only.
 #[test]
-#[ignore = "GAP: `tail-color-convert` is unparsed, and the dots always inherit \
-            the run holding the cut rather than the block \
-            (crates/hughie/src/text/block/truncate.rs:226)"]
+#[ignore = "DEVIATION: this engine follows native Lynx, by the user's ruling \
+            of 2026-09-15. `tail-color-convert` is a boolean that defaults to \
+            false (Android `TextRenderer.convertTailColor`, iOS \
+            `LynxTextRenderer.m overrideTruncatedAttrIfNeed`), and even when \
+            it is true only the marker's foreground colour is swapped — the \
+            dots keep the font of the run the cut landed in, so the advance \
+            here is 110 rather than web-core's 80. \
+            `the_truncation_tail_keeps_the_cut_run_s_font_under_the_native_default` \
+            asserts that geometry and passes."]
 fn the_truncation_tail_takes_the_block_style_not_the_cut_runs() {
     let outer = ahem_at(10.0);
     let nested = ahem_at(20.0);
@@ -1488,6 +1503,47 @@ fn the_truncation_tail_takes_the_block_style_not_the_cut_runs() {
     );
     assert!(!intact.truncated());
     assert_close(intact.size().width, 70.0);
+}
+
+/// The native half of `text/tail-color-convert`, and what this engine renders:
+/// the truncation marker is shaped in the run the cut landed in, whatever
+/// `tail-color-convert` says.
+///
+/// Native Lynx treats the attribute as a colour swap and nothing else —
+/// Android's `TextRenderer.convertTailColor` and iOS'
+/// `LynxTextRenderer.m overrideTruncatedAttrIfNeed` both rewrite the
+/// foreground of the already-built ellipsis span, leaving its font untouched —
+/// so the marker's advance is the cut run's em, not the block's. web-core
+/// instead builds the marker as a pseudo-element of the outer box, which is
+/// the 80 the sibling `#[ignore]`d test above records.
+///
+/// Same fixture geometry as that test: '简' at 10px, '体中' at 20px, then
+/// three dots at the nested run's 20px — 10 + 40 + 60.
+#[test]
+fn the_truncation_tail_keeps_the_cut_run_s_font_under_the_native_default() {
+    let outer = ahem_at(10.0);
+    let nested = ahem_at(20.0);
+    let items = [run(&outer, "简"), run(&nested, "体中文")];
+    let mut context = text_context();
+
+    let cut = laid_out(
+        &mut context,
+        BlockStyle {
+            max_chars: Some(3),
+            overflow: TextOverflow::Ellipsis,
+            ..BlockStyle::default()
+        },
+        &items,
+        None,
+        None,
+    );
+    assert!(cut.truncated());
+    assert_close(cut.size().width, 110.0);
+    assert!(
+        sources(&cut).contains(&SourceItem::Ellipsis { item: 1 }),
+        "the marker names the nested run it was shaped in, which is what the \
+         painter resolves its colour through",
+    );
 }
 
 /// Replicates `text/word-break`

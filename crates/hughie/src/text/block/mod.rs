@@ -59,8 +59,10 @@ pub enum SourceItem {
     Content(u32),
     /// Index into the `truncation` slice.
     Truncation(u32),
-    /// The synthesized dots run.
-    Ellipsis,
+    /// The synthesized dots run, carrying the content run item it was shaped
+    /// in — the run holding the last visible byte, which is also whose colour
+    /// the marker takes unless `tail-color-convert` overrides it.
+    Ellipsis { item: u32 },
 }
 
 /// One reported line, in source UTF-16 units (an atomic box counts one).
@@ -884,7 +886,7 @@ impl TextBlock {
             let spans = [ShapeSpan {
                 bytes: 0..DOTS.len(),
                 style: self.content.run_style(item),
-                source: SourceItem::Ellipsis,
+                source: SourceItem::Ellipsis { item },
             }];
             let mut sources = Vec::new();
             let mut probe =
@@ -972,7 +974,7 @@ impl TextBlock {
                 spans.push(ShapeSpan {
                     bytes: start..text.len(),
                     style: self.content.run_style(item),
-                    source: SourceItem::Ellipsis,
+                    source: SourceItem::Ellipsis { item },
                 });
             }
             Tail::Truncation => {

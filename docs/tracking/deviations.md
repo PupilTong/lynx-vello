@@ -209,6 +209,29 @@ consequential choice about whether to follow the spec or the quirk.
   as overflow: whether content remains is decided in source units over the
   committed lines, and cuts address boxes in unit space (a box shares its
   byte with the character after it).
+- **`tail-color-convert` follows native Lynx, not the web target** — the
+  attribute is implemented as the boolean the Android and iOS shadow nodes read
+  (`lynx/js_libraries/types/skills/text.md:71-76`, Android
+  `TextRenderer.convertTailColor`, iOS
+  `LynxTextRenderer.m overrideTruncatedAttrIfNeed`): its default is *false*, in
+  which case the truncation marker wears the colour of the inline run the cut
+  landed in, and `true` replaces the marker's fill colour with the establishing
+  element's and nothing else — the dots keep the cut run's font, shadow, stroke
+  and decorations, so the marker's advance never changes between the two
+  states. `web-core` inverts the default: the marker is a pseudo-element of the
+  outer box carrying the block's whole style, and `="false"` selects a separate
+  measured path that splices literal dots into the cut run
+  (`XTextTruncation.ts:88-104`, `x-text.css:200-241`). `AGENTS.md` names
+  `web-core` as the compatibility target, so this is a knowing divergence from
+  it, **ruled by the user on 2026-09-15**. The visible consequence is geometric
+  as well as chromatic: a cut landing in a run with a larger font gives a wider
+  marker here than under `web-core`. The wiring is one registered custom
+  property, `--lynx-tail-color-convert`
+  (`crates/bobcat-core/src/main/tree/text.rs:26-39`, `:116`), read back by
+  `TextContainerStyle::tail_color_convert`
+  (`crates/hughie/src/style/text.rs:55`) and applied by `RunPaint::fill_style`
+  (`crates/dom/src/paint/text.rs:116`), so reversing the ruling is a change to
+  the painter and the default, not to shaping.
 - **`hughie::text::block` vertical alignment of atomic inlines** — parley 0.11
   has no vertical-align: an in-flow box sits bottom-on-baseline and its height
   counts as pure ascent. The module writes each box's line-height
@@ -253,7 +276,7 @@ consequential choice about whether to follow the spec or the quirk.
   ruling is two UA declarations. Unaffected by it: an overflowing
   `white-space: nowrap` line *is* cut at the clip edge under
   `text-overflow: ellipsis` (`TextBlock::overflow_cut`,
-  `crates/hughie/src/text/block/mod.rs:776-874`), which is css-ui
+  `crates/hughie/src/text/block/mod.rs:778-876`), which is css-ui
   `text-overflow` in its own right and what both references do for a line that
   overflows its measure.
 

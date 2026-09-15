@@ -288,7 +288,7 @@ fn maxline_ellipsis_backs_off_three_units_and_appends_dots() {
     assert!(
         styles
             .clone()
-            .any(|i| block.source_of(i) == SourceItem::Ellipsis)
+            .any(|i| matches!(block.source_of(i), SourceItem::Ellipsis { .. }))
     );
     assert!(
         styles
@@ -426,7 +426,7 @@ fn truncation_content_reserves_its_width_on_the_cut_line() {
     assert!(
         styles
             .clone()
-            .all(|i| block.source_of(i) != SourceItem::Ellipsis)
+            .all(|i| !matches!(block.source_of(i), SourceItem::Ellipsis { .. }))
     );
 }
 
@@ -1177,7 +1177,7 @@ fn a_maxlength_cut_on_a_wrapped_box_keeps_the_dots() {
     assert!(
         styles
             .clone()
-            .any(|i| block.source_of(i) == SourceItem::Ellipsis)
+            .any(|i| matches!(block.source_of(i), SourceItem::Ellipsis { .. }))
     );
 }
 

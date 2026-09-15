@@ -215,7 +215,11 @@ counts mean unlimited, while a zero character count cuts all content. The
 web's numeric-prefix parsing is retained; fractional line counts are invalid
 for its CSS clamp, and fractional character offsets truncate as DOM Range does.
 Computed `text-overflow` selects clip or the existing literal-dots algorithm.
-Custom inline-truncation content, `tail-color-convert`, and delivery of the
-layout event remain unwired; the standalone block already supports custom
+`tail-color-convert` is wired, with native Lynx's semantics rather than the web
+target's: a boolean defaulting to false, reflected into the registered
+`--lynx-tail-color-convert`, that swaps only the truncation marker's fill colour
+for the establishing element's and leaves its font, shadow, stroke and
+decorations at the cut run's. Custom inline-truncation content and delivery of
+the layout event remain unwired; the standalone block already supports custom
 tails and exposes line data. Its recorded deviations live in
 [deviations.md](deviations.md) under "Text layout".

@@ -17,26 +17,29 @@ must "render and behave the same as [it does] under `web-core` today", and
 explicitly *not* by "reimplementing Android/iOS native platform code paths".
 Where native Lynx and `web-core` disagree, the replicas assert `web-core`.
 [Native ↔ web conflicts](#native--web-conflicts) lists every disagreement found.
-One of them — the truncation marker gate — was put to the user and decided
-*against* the default: see [A0](#a0-truncation-marker-gating--ruled-not-a-gap).
+Three of them were put to the user and decided *against* the default: the
+truncation marker gate, see
+[A0](#a0-truncation-marker-gating--ruled-not-a-gap); `tail-color-convert`, see
+[A1](#a1-tail-color-convert--ruled-not-a-gap); and `text-maxline="1"` geometry,
+see [F](#f-recorded-deviations-not-gaps).
 
 ## The suite
 
 | File | Cases | Passing | Gap-ignored |
 | --- | --- | --- | --- |
-| [`crates/hughie/tests/web_text_replication.rs`](../../crates/hughie/tests/web_text_replication.rs) | paragraph algorithm: clamping, cut points, tail fitting, word-break | 16 | 3 |
+| [`crates/hughie/tests/web_text_replication.rs`](../../crates/hughie/tests/web_text_replication.rs) | paragraph algorithm: clamping, cut points, tail fitting, word-break | 17 | 3 |
 | [`crates/bobcat-core/src/main/tree/web_text_replication.rs`](../../crates/bobcat-core/src/main/tree/web_text_replication.rs) | the `<text>` element, its UA sheet and its attributes | 28 | 9 |
 | [`crates/bobcat-core/src/main/runtime/web_text_replication.rs`](../../crates/bobcat-core/src/main/runtime/web_text_replication.rs) | the Element PAPI: content, restyle, truncation, `setNativeProps`, layout events | 15 | 6 |
-| [`crates/dom/tests/web_text_replication.rs`](../../crates/dom/tests/web_text_replication.rs) | relayout, percentage sizing, scroll targets, glyph and atom paint | 12 | 3 |
+| [`crates/dom/tests/web_text_replication.rs`](../../crates/dom/tests/web_text_replication.rs) | relayout, percentage sizing, scroll targets, glyph and atom paint | 14 | 2 |
 | [`crates/dom/tests/web_text_screenshots.rs`](../../crates/dom/tests/web_text_screenshots.rs) | golden screenshots — the originals' own oracle, for the cases whose claim is visual | 10 | 0 |
 | [`crates/bobcat-source/tests/web_text_css_replication.rs`](../../crates/bobcat-source/tests/web_text_css_replication.rs) | text CSS across the `.web.bundle` wire | 9 | 0 |
-| **Total** | | **90** | **21** |
+| **Total** | | **93** | **20** |
 
 A gap-ignored test asserts the `web-core` behavior and is marked
 `#[ignore = "GAP: …"]` naming the cause with a `file:line`. It is a real
 assertion, never weakened — run any file with `-- --ignored` and every one of
-the 21 fails on the assertion its own string names, so no ignore is masking a
-test that would now pass. Three of the 21 are marked `DEVIATION` instead: they
+the 20 fails on the assertion its own string names, so no ignore is masking a
+test that would now pass. Four of the 20 are marked `DEVIATION` instead: they
 assert `web-core` against a ruling that this engine follows native Lynx, and
 are listed in [F](#f-recorded-deviations-not-gaps).
 
@@ -82,7 +85,7 @@ coverage holes below; the twelve closures are the engine delta.)
 content and migrate raw-text to CSS" (#227)*, in two clauses:
 
 - `text[text] { content: attr(text); }` added to the UA sheet
-  (`crates/bobcat-core/src/main/tree/text.rs:95`) closed the **largest gap in the
+  (`crates/bobcat-core/src/main/tree/text.rs:118`) closed the **largest gap in the
   original assessment**: a `text` attribute written on a `<text>` element used to
   be inert, and since the ReactLynx compiler collapses a static text child into
   exactly that call, a typical card's whole body measured `0×0`. Four closures.
@@ -122,7 +125,7 @@ of its own to close into, so it is written up here:
   `TextContext::register_font_face` (`crates/hughie/src/text/context.rs:76`)
   files the blob under the **declared** family rather than the name inside the
   font file. `a_font_face_declared_family_shapes_the_text_that_names_it`
-  (`crates/dom/tests/web_text_replication.rs:860`) is no longer `#[ignore]`d and
+  (`crates/dom/tests/web_text_replication.rs:948`) is no longer `#[ignore]`d and
   drives the whole seam, standing in for the embedder by reading the `file:` URL
   it was handed off the disk.
 
@@ -171,12 +174,53 @@ CSS `text-overflow: ellipsis` as the real W3C single-line overflow marker is a
 taking part. The engine therefore reaches the marker by two independent routes,
 and un-conflating them stays correct under this ruling.
 
+### A1. `tail-color-convert` — ruled, not a gap
+
+**Ruled (user, 2026-09-15): this engine implements native Lynx's semantics,
+not `web-core`'s.** The attribute is a boolean whose default is *false*, and
+false means the truncation marker wears the colour of the inline run the cut
+landed in; `true` swaps the marker's fill for the establishing element's colour
+and nothing else — the dots keep the cut run's font, shadow, stroke and
+decorations, so no geometry moves. Native references:
+`lynx/js_libraries/types/skills/text.md:71-76`, Android
+`TextRenderer.convertTailColor`, iOS
+`LynxTextRenderer.m overrideTruncatedAttrIfNeed`, both of which rewrite the
+foreground of an ellipsis span that is already built out of the cut run.
+
+`web-core` inverts the default — it treats the marker as a pseudo-element of the
+outer box, so the dots take the block's style unless `="false"` selects a
+separate measured path (`XTextTruncation.ts:88-104`, `x-text.css:200-241`). That
+is deliberately not replicated; see [conflict 3](#3-tail-color-convert-default).
+
+The wiring: `apply_attribute_style` reflects the attribute into the registered
+`--lynx-tail-color-convert` integer, set only by the literal `true` that
+ReactLynx's `tail-color-convert={true}` reaches the DOM as
+(`crates/bobcat-core/src/main/tree/text.rs:26-41`, `:116`);
+`TextContainerStyle::tail_color_convert` reads it back
+(`crates/hughie/src/style/text.rs:55`); `SourceItem::Ellipsis` names the content
+run the dots were shaped in (`crates/hughie/src/text/block/mod.rs:65`), so the
+painter resolves them through that run's element and redirects only
+`RunPaint::fill_style` when the block converts
+(`crates/dom/src/paint/text.rs:116`, `:151-181`,
+`crates/dom/src/layout/style.rs:282`).
+
+Tests: `tail_color_convert_reflects_only_the_literal_true`
+(`crates/bobcat-core/src/main/tree/text.rs:377`) pins the reflection,
+`the_truncation_marker_wears_the_cut_run_s_colour_until_the_block_converts`
+(`crates/dom/tests/web_text_replication.rs:256`) pins both painted colours, and
+`the_truncation_tail_keeps_the_cut_run_s_font_under_the_native_default`
+(`crates/hughie/tests/web_text_replication.rs:1523`) pins the geometry the
+colour-only rule implies. Its `web-core` twin
+`the_truncation_tail_takes_the_block_style_not_the_cut_runs`
+(`crates/hughie/tests/web_text_replication.rs:1471`) stays `#[ignore]`d and is
+now labelled `DEVIATION:` rather than `GAP:`, so the divergence stays visible
+and reversible.
+
 ### A. Truncation — what remains open
 
 | # | Gap | Cause |
 | --- | --- | --- |
-| A1 | `tail-color-convert` is unparsed | `truncate.rs:226` picks the run holding the last visible byte, which is the `="false"` behavior applied unconditionally; the default path should take the block's own style. |
-| A4 | `ellipsize-mode` is inert | `text.rs:26-31` — `apply_attribute_style` matches only `text-maxline` and `text-maxlength`. Carried by no test of its own. |
+| A4 | `ellipsize-mode` is inert | `crates/bobcat-core/src/main/tree/text.rs:14-43` — `apply_attribute_style` matches `text-maxline`, `text-maxlength` and `tail-color-convert`, and nothing else. Carried by no test of its own. |
 
 **A2 — the overflow-driven ellipsis path — is closed.** A `white-space: nowrap`
 line wider than its measure is cut at the clip edge under
@@ -184,11 +228,11 @@ line wider than its measure is cut at the clip edge under
 neither `text-maxline` nor `text-maxlength` takes part, and the clamp path
 never saw the case because the one line had consumed all of its source.
 `TextBlock::overflow_cut`
-([`crates/hughie/src/text/block/mod.rs:776-874`](../../crates/hughie/src/text/block/mod.rs))
+([`crates/hughie/src/text/block/mod.rs:778-876`](../../crates/hughie/src/text/block/mod.rs))
 compares the line's visible advance against the constraint, keeps the widest
 prefix that still leaves room for the dots — shaped once in the run at that
-boundary by `measure_dots` (`:876-897`) — and hands the result to
-`truncate::plan` (`mod.rs:645`) as a third cut candidate beside the two clamps
+boundary by `measure_dots` (`:878-899`) — and hands the result to
+`truncate::plan` (`mod.rs:649`) as a third cut candidate beside the two clamps
 (`crates/hughie/src/text/block/truncate.rs:28-40,132-140`), so `ellipsis_count`,
 `truncated()` and the existing `CutPlan` path all hold unchanged. With
 truncation content present the cut retreats until the freed width covers it;
@@ -200,7 +244,7 @@ line**. A cut drops every line past the one it falls in, which is right for the
 single unbroken line `nowrap` normally produces and wrong for the several a
 preserved newline can still leave, so that shape is left uncut rather than half
 served. `an_overflowing_nowrap_line_is_marked_by_text_overflow_ellipsis`
-(`crates/hughie/tests/web_text_replication.rs:1247-1284`) is un-ignored and
+(`crates/hughie/tests/web_text_replication.rs:1256-1290`) is un-ignored and
 passes.
 
 ### B. Atomic inline boxes — what #227 did not fix
@@ -223,7 +267,7 @@ text nodes and the layout slots `place_and_hide`
 (`crates/dom/src/layout/text_block.rs:503`) hid, so an absorbed nested scope
 reaches no second record.
 `a_boxed_child_paints_from_a_text_block_that_is_its_own_context`
-(`crates/dom/tests/web_text_replication.rs:986`) now runs in CI.
+(`crates/dom/tests/web_text_replication.rs:1112`) now runs in CI.
 
 ### C. Shaping
 
@@ -240,7 +284,7 @@ element's own style, so a solid-coloured block resolved no tile at all and every
 nested run's gradient fell back to a solid fill.
 
 The tile is now per run, because `color` is a per-run property
-(`crates/dom/src/paint/text.rs:107-118`, `:187-241`): the establishing element
+(`crates/dom/src/paint/text.rs:107-126`, `:209-263`): the establishing element
 keeps its padding box, and a nested element gets the union of its own line
 fragments — each fragment's advance horizontally, its line box vertically. That
 is the area `web-core`'s `color: transparent; background-clip: text` rewrite
@@ -251,7 +295,7 @@ than the ancestor's tile, which is also what `web-core` does:
 applies on every nested `x-text` (`x-text.css:7-31`).
 
 Asserted by `a_gradient_color_on_a_nested_run_fills_only_that_run`
-(`crates/dom/tests/web_text_replication.rs:714`), which was the gap-ignored test
+(`crates/dom/tests/web_text_replication.rs:803`), which was the gap-ignored test
 for this row and now runs.
 
 ### E. Absent surfaces
@@ -262,7 +306,7 @@ Each blocks replicas that could not be written at all.
   fires; the only engine-synthesized names are the pointer set plus `tap` and
   `longpress` (`crates/bobcat-core/src/paint/gesture.rs:81,84`). The payload
   already exists as `hughie`'s `LineInfo`
-  (`crates/hughie/src/text/block/mod.rs:66-83`); what is missing is delivery and
+  (`crates/hughie/src/text/block/mod.rs:68-85`); what is missing is delivery and
   a host-visible query, since `Document::text_block` is `pub(crate)`
   (`crates/dom/src/layout/mod.rs:252`).
 - **Custom `<inline-truncation>` content.** `crates/dom/src/layout/text_block.rs:360`
@@ -278,7 +322,7 @@ Each blocks replicas that could not be written at all.
 
 ### F. Recorded deviations, not gaps
 
-- `text { display: -lynx-text !important }` (`tree/text.rs:94`) is user-agent
+- `text { display: -lynx-text !important }` (`tree/text.rs:117`) is user-agent
   origin, so it outranks an author's `display: none` and no `text` element can be
   hidden. This is §D.15's recorded exception (`deviations.md:492-498`) — Lynx's
   inline-ness is structural, not cascaded. `web-core` does let `display: none`
@@ -312,6 +356,15 @@ Each blocks replicas that could not be written at all.
   `crates/bobcat-core/src/main/tree/web_text_replication.rs`. Their passing
   sibling `a_one_line_clamp_keeps_the_nested_run_s_colour_and_the_parent_s_weight`
   keeps the card's style claim in CI.
+- **A1. The truncation marker wears the cut run's colour.**
+  **Ruled (user, 2026-09-15): this engine follows native Lynx here**, whose
+  `tail-color-convert` defaults to false; `web-core` inverts that default. The
+  full record is [A1](#a1-tail-color-convert--ruled-not-a-gap) above. The
+  `web-core` replica `the_truncation_tail_takes_the_block_style_not_the_cut_runs`
+  (`crates/hughie/tests/web_text_replication.rs:1471`) stays `#[ignore]`d and
+  marked DEVIATION rather than GAP; its passing sibling
+  `the_truncation_tail_keeps_the_cut_run_s_font_under_the_native_default` keeps
+  the native geometry in CI.
 - `var()` inside an `@font-face` descriptor is not substituted. Correct per
   css-variables-1 §3; the browser `web-core` runs on behaves identically.
 - `x-text`, `inline-image` and `inline-text` are `web-core`'s *HTML* mappings of
@@ -355,8 +408,8 @@ failure mode is easy to reintroduce.
 
 ## Native ↔ web conflicts
 
-`AGENTS.md` resolves these to `web-core` by default. Conflicts 1 and 7 were put
-to the user and decided the other way; the rest stand as `web-core`.
+`AGENTS.md` resolves these to `web-core` by default. Conflicts 1, 3 and 7 were
+put to the user and decided the other way; the rest stand as `web-core`.
 
 ### 1. Truncation marker gating
 
@@ -378,9 +431,16 @@ follows the web form, with the web slow path's 3-unit retreat.
 
 ### 3. `tail-color-convert` default
 
-Absent from the native C++ core entirely; it exists only in the Android/iOS
-shadow nodes, where Android defaults it to `false`. `web-core` defaults it to
-`true`. This engine reads it on neither side.
+| | Behavior | Evidence |
+| --- | --- | --- |
+| native | A BOOL defaulting to **false**: the truncation marker keeps the attributes of the run the cut landed in, and `true` rewrites only its foreground colour | `lynx/js_libraries/types/skills/text.md:71-76`; Android `TextRenderer.convertTailColor`; iOS `LynxTextRenderer.m overrideTruncatedAttrIfNeed` |
+| web-core | Defaults to **true**: the marker is a pseudo-element of the outer box and takes the block's whole style, and `="false"` selects a separate measured path that splices the dots into the cut run | `XTextTruncation.ts:88-104`; `x-text.css:200-241` |
+| lynx-vello | A boolean defaulting to false, converting the fill colour only — **matches native** | `crates/bobcat-core/src/main/tree/text.rs:26-41`; `crates/dom/src/paint/text.rs:151-181` |
+
+**Decided (user, 2026-09-15): native wins.** Absent from the native C++ core, the
+attribute exists only in the Android/iOS shadow nodes; the ruling takes their
+reading rather than the compatibility target's. See
+[A1](#a1-tail-color-convert--ruled-not-a-gap).
 
 ### 4. Inline image sizing
 

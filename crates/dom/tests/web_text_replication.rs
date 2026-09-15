@@ -37,6 +37,7 @@ const ROBOTO: &[u8] = include_bytes!("../../hughie/tests/fixtures/Roboto-Regular
 const LIMIT_PROPERTIES: &str = r#"
 @property --lynx-text-maxline { syntax: "<integer>"; inherits: false; initial-value: 0; }
 @property --lynx-text-maxlength { syntax: "<integer>"; inherits: false; initial-value: -1; }
+@property --lynx-tail-color-convert { syntax: "<integer>"; inherits: false; initial-value: 0; }
 "#;
 
 /// The paragraph ink `holder` establishes, as `(width, height)`.
@@ -81,6 +82,10 @@ fn is_red(color: [u8; 4]) -> bool {
 
 fn is_white(color: [u8; 4]) -> bool {
     color[0] > 240 && color[1] > 240 && color[2] > 240
+}
+
+fn is_black(color: [u8; 4]) -> bool {
+    color[0] < 60 && color[1] < 60 && color[2] < 60
 }
 
 /// Replicates `x-text/text-not-resize-detect-new-line`
@@ -223,6 +228,90 @@ fn rewriting_a_clamped_text_node_reclamps_against_the_new_string() {
         ink(&doc, target),
         (100.0, 40.0),
         "the second long string clamps afresh rather than restoring the first",
+    );
+}
+
+/// Replicates `text/tail-color-convert`
+/// (`web-tests/dist/basic-element-text-tail-color-convert/index.web.json`,
+/// `web-core-e2e/tests/reactlynx.spec.ts:2734`) as the colour claim it is.
+///
+/// **Native semantics, not web-core's** — the user's ruling of 2026-09-15.
+/// `tail-color-convert` is a boolean whose default is *false*, and false means
+/// the truncation marker wears the colour of the inline run the cut landed in
+/// (Android `TextRenderer.convertTailColor`, iOS
+/// `LynxTextRenderer.m overrideTruncatedAttrIfNeed`, both of which rewrite the
+/// foreground of an ellipsis span that is already built out of that run).
+/// True hands the marker the establishing element's own colour instead, and
+/// nothing else about it: the dots keep the cut run's font, so no geometry
+/// moves between the two passes below. web-core inverts the default and its
+/// `="false"` selects a different code path entirely; that is deliberately not
+/// replicated.
+///
+/// The paragraph is one black glyph, then a red nested scope. A one-line
+/// clamp at 100px leaves five 20px squares; `text-overflow: ellipsis` backs the
+/// cut off by three units, so the kept prefix is the black square plus one red
+/// one and the last three squares are the marker — painted red by default and
+/// black once the block converts.
+#[test]
+fn the_truncation_marker_wears_the_cut_run_s_colour_until_the_block_converts() {
+    fn marker_and_prefix(convert: bool) -> ([u8; 4], [u8; 4], [u8; 4]) {
+        let mut doc = Doc::with_device(device(200.0, 100.0));
+        doc.add_ua_css(LIMIT_PROPERTIES);
+        doc.add_css(
+            "page { display: flex; }
+             .text { display: -lynx-text; width: 100px; color: #000000;
+                     word-break: break-all; text-overflow: ellipsis;
+                     font-family: Ahem; font-size: 20px; line-height: 20px;
+                     --lynx-text-maxline: 1; }
+             .convert { --lynx-tail-color-convert: 1; }
+             .run { display: -lynx-text; color: #ff0000; }",
+        );
+        assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
+        let root = doc.root;
+        let text = doc.el(
+            root,
+            if convert {
+                "view.text.convert"
+            } else {
+                "view.text"
+            },
+        );
+        let lead = doc.dom.create_text_node("A", ());
+        doc.dom.append_child(text, lead);
+        let nested = doc.el(text, "view.run");
+        let run = doc.dom.create_text_node("BBBBBBBBB", ());
+        doc.dom.append_child(nested, run);
+
+        let pixels = readback(
+            "the_truncation_marker_wears_the_cut_run_s_colour_until_the_block_converts",
+            &mut doc,
+            200,
+            100,
+        );
+        // One clamped line of five 20px squares: the black lead, one kept red
+        // square, then the three-square marker.
+        assert_eq!(ink(&doc, text), (100.0, 20.0));
+        (
+            pixel(&pixels, 200, 10, 10),
+            pixel(&pixels, 200, 30, 10),
+            pixel(&pixels, 200, 70, 10),
+        )
+    }
+
+    let (lead, kept, marker) = marker_and_prefix(false);
+    assert!(is_black(lead), "the block's own run stays black ({lead:?})");
+    assert!(is_red(kept), "the kept nested square stays red ({kept:?})");
+    assert!(
+        is_red(marker),
+        "and by default the marker takes that run's colour too ({marker:?})",
+    );
+
+    let (lead, kept, marker) = marker_and_prefix(true);
+    assert!(is_black(lead), "conversion moves no other run ({lead:?})");
+    assert!(is_red(kept), "including the run at the cut ({kept:?})");
+    assert!(
+        is_black(marker),
+        "only the marker's fill becomes the block's own colour ({marker:?})",
     );
 }
 
@@ -705,7 +794,7 @@ fn a_gradient_color_fills_a_block_and_the_run_that_inherits_it() {
 /// happily if every glyph wears the establishing element's style.
 ///
 /// The tile a gradient `color` fills from is decided per run
-/// (`crates/dom/src/paint/text.rs:187-241`): the establishing element keeps its
+/// (`crates/dom/src/paint/text.rs:209-263`): the establishing element keeps its
 /// padding box, a nested element gets the union of its own line fragments. It
 /// used to be one paragraph-level decision taken from the establishing
 /// element's own color, so a solid-colored block resolved no tile at all and
@@ -1011,7 +1100,7 @@ fn a_boxed_child_paints_from_a_text_block_inside_its_parents_context() {
 /// `build_stacking_context` — the path a text block takes both as the paint
 /// root and as a real stacking context — pushed the paragraph and returned
 /// without descending, and the text painter draws only
-/// `PositionedLayoutItem::GlyphRun` (`crates/dom/src/paint/text.rs:303-320`),
+/// `PositionedLayoutItem::GlyphRun` (`crates/dom/src/paint/text.rs:397-414`),
 /// so nobody emitted the child: `[255, 255, 255, 255]` where it should be.
 /// It now pushes the paragraph and falls through to the collection walk
 /// (`crates/dom/src/visual/build.rs:563-569`), the same order as the in-context
