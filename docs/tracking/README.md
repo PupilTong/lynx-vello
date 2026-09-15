@@ -60,6 +60,7 @@ Most files use a table with these columns:
 | [css-layout.md](css-layout.md) | Box model, positioning, flex/grid, Lynx's `linear`/`relative` layout, z-index/stacking |
 | [css-visual.md](css-visual.md) | Color, background, border, shadow, filter, transform, opacity |
 | [css-text.md](css-text.md) | Font/text properties relevant to `parley` shaping/layout |
+| [web-text-test-replication.md](web-text-test-replication.md) | **Status tracker**, not research: the native port of `lynx-stack`'s web-platform text tests, the gaps it exposes, and the native ↔ `web-core` conflicts behind them |
 | [css-animation.md](css-animation.md) | Transitions, `@keyframes`, timing functions, JS `animate()` API |
 | [css-selectors-cascade.md](css-selectors-cascade.md) | Selector matching, pseudo-classes/elements, specificity/cascade, custom properties (`var()`) |
 | [css-at-rules.md](css-at-rules.md) | `@media`, `@font-face`, `@supports` |
