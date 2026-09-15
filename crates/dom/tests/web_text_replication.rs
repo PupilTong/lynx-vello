@@ -916,11 +916,12 @@ fn a_font_face_declared_family_shapes_the_text_that_names_it() {
 /// green when either was fixed, and would never cover the path that already
 /// works:
 ///
-/// 1. This test: the in-context descent (`crates/dom/src/visual/build.rs:915-960`), which does
-///    reach a text block's non-text child. It passes and stays in CI.
+/// 1. This test: the in-context descent (`crates/dom/src/visual/build.rs:902-965`), which does
+///    reach a text block's non-text child. It has always passed.
 /// 2. `a_boxed_child_paints_from_a_text_block_that_is_its_own_context`: the same child, reached
-///    through the paint root and the stacking-context paths, where
-///    `crates/dom/src/visual/build.rs:563-570` pushes the paragraph and returns without descending.
+///    through the paint root and the stacking-context paths, where `build_stacking_context` used to
+///    push the paragraph and return without descending. It now falls through to the same collection
+///    walk (`crates/dom/src/visual/build.rs:563-569`).
 /// 3. `an_atomic_inline_box_keeps_the_size_it_measured`: an in-flow atom's own committed box, which
 ///    `d19cbea2` (#227) closed by giving the paragraph a real inline-box commit entry point.
 ///
@@ -963,20 +964,25 @@ fn a_boxed_child_paints_from_a_text_block_inside_its_parents_context() {
 }
 
 /// The paint-root and stacking-context halves of the case above, split out
-/// because they do not hold. The child is the same `position: absolute` one
-/// that `a_boxed_child_paints_from_a_text_block_inside_its_parents_context`
-/// paints, and it has a real box from the paragraph's out-of-flow pass
+/// because they failed for their own reason. The child is the same
+/// `position: absolute` one that
+/// `a_boxed_child_paints_from_a_text_block_inside_its_parents_context` paints,
+/// and it has a real box from the paragraph's out-of-flow pass
 /// (`crates/dom/src/layout/text_block.rs:465-480`), so nothing but the
 /// frame-builder path differs between that test and this one.
 ///
-/// `crates/dom/src/visual/build.rs:563-570` pushes the paragraph and returns
-/// without descending — the path a text block takes both as the paint root and
-/// as a real stacking context — and the text painter draws only
-/// `PositionedLayoutItem::GlyphRun`
-/// (`crates/dom/src/paint/text.rs:303-320`), so nobody emits the child.
-/// Measured: `[255, 255, 255, 255]` where the child should be.
+/// `build_stacking_context` — the path a text block takes both as the paint
+/// root and as a real stacking context — pushed the paragraph and returned
+/// without descending, and the text painter draws only
+/// `PositionedLayoutItem::GlyphRun` (`crates/dom/src/paint/text.rs:303-320`),
+/// so nobody emitted the child: `[255, 255, 255, 255]` where it should be.
+/// It now pushes the paragraph and falls through to the collection walk
+/// (`crates/dom/src/visual/build.rs:563-569`), the same order as the in-context
+/// path. The glyphs stay unique because `collect_child`
+/// (`crates/dom/src/visual/build.rs:829-871`) drops text nodes and the layout
+/// slots `place_and_hide` (`crates/dom/src/layout/text_block.rs:503`) hid, so
+/// an absorbed nested scope reaches no second record.
 #[test]
-#[ignore = "GAP: a text block that is the paint root or a stacking context never descends past its paragraph (crates/dom/src/visual/build.rs:563-570)"]
 fn a_boxed_child_paints_from_a_text_block_that_is_its_own_context() {
     // The text block is the paint root itself.
     let mut as_root = Doc::with_device(device(200.0, 100.0));
