@@ -366,18 +366,21 @@ The `loadLynxXml` API continues to accept XML responses only.
 The one-shot response adapter preserves final-URL fragments and reports
 background presence without registering its body. Host PageConfig stays authoritative.
 
-`loadTemplate(url)` fetches a binary web or source-based native bundle with a
+`loadTemplate(url)` fetches XML, a binary web or source-based native bundle with a
 16 MiB response bound and delegates decoding, configuration and StyleInfo
 registration to `PageSource`. Native bytecode and missing root entries retain
 the shared parser's errors. The renderer uses the input URL as the resource
 base and the bundle configuration for that view; subsequent raw XML loads
 still use the host configuration.
 
-Both Pages tabs use the same two-column workspace. Canvas provides a local
-ZIP picker and an entry field: a ZIP-root-relative path, or an HTTP(S) URL whose
-decoded pathname exactly matches an archive member. Clicking **Load template**
-passes the ZIP bytes and absolute entry URL to `loadZip`. Relative paths receive
-a `bobcat-memory://archive/` base. The Render Worker delegates decoding,
+Both Pages tabs use the same two-column workspace. Canvas provides an optional
+local ZIP picker and an entry template URL field. Without a ZIP, clicking
+**Load template** calls `loadTemplate` to fetch the URL directly; relative URLs
+resolve against the document base URL. A `zip:///` URL requires a selected ZIP.
+With a ZIP selected, the entry can be a `zip:///` URL, a ZIP-root-relative path,
+or a full URL whose decoded pathname exactly matches an archive member. Pages
+passes the ZIP bytes and absolute entry URL to `loadZip`; relative paths receive
+a `zip:///` base. The Render Worker delegates decoding,
 entry selection and resource registration to the platform-independent
 `bobcat-source::ZipSource`; Pages contains no ZIP parser or storage layer.
 The COOP/COEP service worker remains responsible only for browser isolation.
