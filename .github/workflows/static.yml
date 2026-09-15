@@ -65,6 +65,9 @@ jobs:
       - name: Type-check GitHub Pages
         run: pnpm --filter github-pages test:type
 
+      - name: Build the Explorer homepage for the Canvas tab
+        run: pnpm --filter @explorer/homepage build
+
       - name: Build GitHub Pages
         run: pnpm --filter github-pages build
         env:

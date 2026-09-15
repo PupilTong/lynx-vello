@@ -1,0 +1,20 @@
+{
+  "name": "@explorer/lib",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Navigation, launch-command, history and theme helpers shared by the Lynx Explorer homepage and showcase.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "index.ts",
+  "scripts": {
+    "test:type": "tsc -b"
+  },
+  "dependencies": {
+    "@lynx-js/react": "catalog:"
+  },
+  "devDependencies": {
+    "@lynx-js/types": "catalog:",
+    "@types/react": "18.3.28",
+    "typescript": "catalog:"
+  }
+}

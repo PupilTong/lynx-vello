@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "target": "es2022",
+    "lib": ["es2024", "esnext.array", "esnext.collection", "esnext.iterator"],
+    "types": ["@lynx-js/types"],
+    "jsx": "react-jsx",
+    "jsxImportSource": "@lynx-js/react",
+  },
+  "include": ["*.ts", "*.tsx"],
+}

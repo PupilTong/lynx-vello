@@ -1,0 +1,180 @@
+// Copyright 2024 The Lynx Authors. All rights reserved.
+// Licensed under the Apache License Version 2.0 that can be found in the
+// LICENSE file in the root directory of this source tree.
+
+@import '../shared';
+
+.ownership-header {
+  display: flex;
+  flex-direction: row;
+  align-items: baseline;
+  width: 90%;
+  margin: 18px 5% 8px;
+}
+
+@mixin ownership-title {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 18px;
+}
+
+.ownership-title__light {
+  @include ownership-title;
+  color: var(--text-light);
+}
+
+.ownership-title__dark {
+  @include ownership-title;
+  color: var(--text-dark);
+}
+
+@mixin ownership-description {
+  margin-left: auto;
+  font-size: 10px;
+  line-height: 14px;
+}
+
+.ownership-description__light {
+  @include ownership-description;
+  color: #7a8089;
+}
+
+.ownership-description__dark {
+  @include ownership-description;
+  color: #989faa;
+}
+
+@mixin settings-group {
+  @include box;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.settings-group__light {
+  @include settings-group;
+  background: var(--box-light);
+}
+
+.settings-group__dark {
+  @include settings-group;
+  background: var(--box-dark);
+}
+
+.settings-group-label {
+  display: flex;
+  align-items: flex-end;
+  height: 28px;
+  margin: 0 16px;
+  padding-bottom: 4px;
+}
+
+.settings-group-label--divided,
+.settings-row-divider {
+  border-width: 1px 0 0;
+  border-color: #8a90991f;
+}
+
+@mixin settings-group-label-text {
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 14px;
+}
+
+.settings-group-label-text__light {
+  @include settings-group-label-text;
+  color: #7a8089;
+}
+
+.settings-group-label-text__dark {
+  @include settings-group-label-text;
+  color: #989faa;
+}
+
+.option-item {
+  margin: 0;
+}
+
+.option-icon {
+  width: 16px;
+  height: 16px;
+}
+
+.runtime-icon {
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+}
+
+.runtime-icon--lynx {
+  width: 17px;
+  border-radius: 0;
+}
+
+.radio-button-container-active__light,
+.radio-button-container-active__dark,
+.radio-button-container-inactive__light,
+.radio-button-container-inactive__dark {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 2px;
+  border-radius: 50%;
+  border: 1px solid #d9d9d9;
+}
+
+.radio-button-container-active__light {
+  border-color: #ff351a;
+}
+
+.radio-button-container-active__dark {
+  border-color: #ff6448;
+}
+
+.radio-button-container-inactive__dark {
+  border-color: #ffffff29;
+}
+
+.radio-button-active__light,
+.radio-button-active__dark {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+}
+
+.radio-button-active__light {
+  background: #ff351a;
+}
+
+.radio-button-active__dark {
+  background: #ff6448;
+}
+
+.settings-columns {
+  display: flex;
+  flex-direction: row;
+  width: 100%;
+}
+
+.settings-column {
+  display: flex;
+  flex-direction: column;
+  width: 50%;
+}
+
+@mixin info-value {
+  align-self: center;
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.info-value__light {
+  @include info-value;
+  color: var(--sub-title-light);
+}
+
+.info-value__dark {
+  @include info-value;
+  color: var(--sub-title-dark);
+}

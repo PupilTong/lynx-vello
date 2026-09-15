@@ -56,6 +56,15 @@ export default defineConfig({
             to: 'Roboto-Regular.ttf',
             info: { minimized: true },
           },
+          {
+            // The template the Canvas tab loads first.
+            from: path.resolve(
+              path.dirname(fileURLToPath(import.meta.url)),
+              '../explorer-homepage/dist/main.web.bundle',
+            ),
+            to: 'explorer-homepage/main.web.bundle',
+            info: { minimized: true },
+          },
           ...browserFiles.map((file) => ({
             from: path.join(packageDirectory, file),
             to: path.posix.join('bobcat-wasm', file),

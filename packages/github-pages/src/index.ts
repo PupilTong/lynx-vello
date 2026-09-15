@@ -6,6 +6,9 @@ const MAX_LYNX_XML_BYTES = 16 * 1024 * 1024;
 const RELOAD_MARKER = `bobcat-coi-reload:${new URL('.', document.baseURI).pathname}`;
 const RELOAD_PARAMETER = 'bobcat-coi-reload';
 const TAB_PARAMETER = 'tab';
+// The Lynx Explorer homepage, built by `@explorer/homepage` and copied beside
+// the page; the Canvas tab loads it first.
+const HOMEPAGE_TEMPLATE = 'explorer-homepage/main.web.bundle';
 
 type IndicatorState = 'pending' | 'ok' | 'error';
 type SourceState = 'idle' | 'pending' | 'ok' | 'error';
@@ -135,7 +138,7 @@ function mountShell(): Shell {
               </div>
               <div class="source-field">
                 <label for="entry-template-url">Entry template URL</label>
-                <input id="entry-template-url" type="text" required placeholder="https://example.com/main.web.bundle" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="template-loading-note">
+                <input id="entry-template-url" type="text" required value="${HOMEPAGE_TEMPLATE}" placeholder="https://example.com/main.web.bundle" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="template-loading-note">
               </div>
               <p id="template-loading-note" class="field-help">Enter a template URL to load directly. With a ZIP selected, use zip:///dist/main.web.bundle, a path from the ZIP root, or a full URL whose pathname matches an archive entry. Supports .lynx.xml, binary .web.bundle, and source-based .lynx.bundle templates.</p>
             </div>
@@ -709,7 +712,7 @@ function setSourceStatus(
 function installSources(
   shell: Shell,
   renderer: PreviewRenderer,
-): (label: string) => Promise<void> {
+): (label: string, template?: boolean) => Promise<void> {
   let rendering = false;
 
   const renderSource = async (label: string, template = false): Promise<void> => {
@@ -851,7 +854,14 @@ async function start(shell: Shell, router: TabRouter): Promise<void> {
   );
   router.subscribe(() => renderer.scheduleResize());
   const renderSource = installSources(shell, renderer);
-  await renderSource('demo.lynx.xml');
+  const initialTab = workspaceTab(
+    new URL(window.location.href).searchParams.get(TAB_PARAMETER),
+  );
+  if (initialTab === 'lynx-xml') {
+    await renderSource('demo.lynx.xml');
+  } else {
+    await renderSource(HOMEPAGE_TEMPLATE, true);
+  }
 }
 
 function errorMessage(error: unknown): string {
