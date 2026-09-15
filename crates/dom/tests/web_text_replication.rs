@@ -704,14 +704,13 @@ fn a_gradient_color_fills_a_block_and_the_run_that_inherits_it() {
 /// whole page would not catch its absence — such a golden passes just as
 /// happily if every glyph wears the establishing element's style.
 ///
-/// The tile a gradient `color` fills from is decided once per paragraph, from
-/// the *establishing element's* own color
-/// (`crates/dom/src/paint/walker.rs:816-817`), so a paragraph whose block is
-/// solid-colored resolves no tile at all and every nested run's gradient falls
-/// back to a solid fill (`crates/dom/src/paint/text.rs:71-76`). Measured: the
-/// nested run paints `[0, 0, 0, 255]` at both ends of the ramp.
+/// The tile a gradient `color` fills from is decided per run
+/// (`crates/dom/src/paint/text.rs:187-241`): the establishing element keeps its
+/// padding box, a nested element gets the union of its own line fragments. It
+/// used to be one paragraph-level decision taken from the establishing
+/// element's own color, so a solid-colored block resolved no tile at all and
+/// every nested run's gradient fell back to a solid fill.
 #[test]
-#[ignore = "GAP: a gradient `color` on a nested run is ignored unless the establishing element's own color is also a gradient (crates/dom/src/paint/walker.rs:816-817)"]
 fn a_gradient_color_on_a_nested_run_fills_only_that_run() {
     let mut doc = Doc::with_device(device(240.0, 180.0));
     doc.add_css(
