@@ -213,6 +213,62 @@ fn a_growing_subtree_escalates_and_still_matches_the_fresh_result() {
     assert_same_geometry(&mutated, &fresh);
 }
 
+/// A column of fixed-height boxes, all empty; the Explorer page-switch shape.
+fn fixed_box_page() -> (Document<()>, dom::NodeId) {
+    let mut doc = doc();
+    let root = doc.document_element().id();
+    let column = doc.create_element("view", ());
+    doc.set_inline_style(
+        column,
+        "display: flex; flex-direction: column; height: 100%",
+    );
+    doc.append_child(root, column);
+    let target = doc.create_element("view", ());
+    doc.set_inline_style(target, "height: 150px");
+    doc.append_child(column, target);
+    let sibling = doc.create_element("view", ());
+    doc.set_inline_style(sibling, "height: 150px");
+    doc.append_child(column, sibling);
+    (doc, target)
+}
+
+fn mount_into(doc: &mut Document<()>, target: dom::NodeId) -> dom::NodeId {
+    let child = doc.create_element("view", ());
+    doc.set_inline_style(child, "height: 100px");
+    let label = doc.create_element("text", ());
+    let run = doc.create_text_node("mounted".to_owned(), ());
+    doc.append_child(label, run);
+    doc.append_child(child, label);
+    doc.append_child(target, child);
+    child
+}
+
+#[test]
+fn a_subtree_mounted_into_a_fixed_size_box_is_laid_out_and_rounded() {
+    let (mut mutated, target) = fixed_box_page();
+    mutated.layout();
+    // The box keeps its size, so the relayout it schedules stays in place;
+    // the subtree mounted under it must still be laid out and rounded.
+    let child = mount_into(&mut mutated, target);
+    mutated.layout();
+
+    let (mut fresh, target) = fixed_box_page();
+    let fresh_child = mount_into(&mut fresh, target);
+    fresh.layout();
+    assert_eq!(
+        mutated
+            .rounded_layout(child)
+            .map(|layout| layout.size.height),
+        Some(100.0),
+        "the mounted subtree was never laid out or rounded",
+    );
+    assert_eq!(
+        format!("{:?}", mutated.rounded_layout(child)),
+        format!("{:?}", fresh.rounded_layout(fresh_child)),
+    );
+    assert_eq!(geometry(&mutated), geometry(&fresh));
+}
+
 #[test]
 fn a_row_height_change_reaches_the_root_and_matches_the_fresh_result() {
     let mut mutated = build("row", "alpha", 24);
