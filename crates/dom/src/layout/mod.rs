@@ -326,8 +326,10 @@ impl<T> Document<T> {
 
             let mut pending = None;
             let mut reached_root = true;
+            let mut top = id;
             let mut current = start.flat_parent_id();
             while let Some(node_id) = current {
+                top = node_id;
                 let node_slot = tree.live_slot(node_id);
                 let node = tree.at(node_slot);
                 let style_view = node.is_element().then(|| StyleView::of(node));
@@ -387,6 +389,13 @@ impl<T> Document<T> {
                 }
                 current = node.flat_parent_id();
             }
+            // Running off the top of a detached subtree is not reaching the
+            // root: nothing above it was ever laid out, and the caches of the
+            // document it will join are untouched. Counting it would make the
+            // next pass a whole-tree pass that ignores the relayout roots the
+            // eventual insertion records, and that pass stops at the root's
+            // still-valid cache, leaving the inserted subtree unlaid.
+            reached_root &= top == crate::tree::document::DOCUMENT_NODE_ID;
             (pending, reached_root)
         };
         self.mark_layout_dirty(reached_root);
