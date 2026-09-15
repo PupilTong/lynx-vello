@@ -275,6 +275,26 @@ impl<T> Document<T> {
         Some(&self.layout_state().get(slot)?.text.as_deref()?.source_ids)
     }
 
+    /// The nodes behind `id`'s custom truncation content, indexed the way
+    /// [`SourceItem::Truncation`](hughie::text::block::SourceItem) indexes
+    /// them — so the marker paints in its own subtree's colours rather than
+    /// the establishing element's.
+    #[must_use]
+    pub(crate) fn text_block_truncation_sources(
+        &self,
+        id: crate::NodeId,
+    ) -> Option<&[crate::NodeId]> {
+        let slot = self.slot(id)?;
+        Some(
+            &self
+                .layout_state()
+                .get(slot)?
+                .text
+                .as_deref()?
+                .truncation_source_ids,
+        )
+    }
+
     /// The paragraph `id` established, if a commit has produced one.
     ///
     /// `None` keeps every reader fail-closed: a block no commit laid out is

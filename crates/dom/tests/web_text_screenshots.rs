@@ -28,10 +28,13 @@
 //! * `crates/dom` has no UA sheet at all, so a container that stacks its children says `display:
 //!   flex; flex-direction: column` rather than relying on a block-level default. Where a case's
 //!   claim is about block-level stacking, it is the metric sibling that carries it.
-//! * These fixtures shape **vendored Roboto**, never Ahem and never a host font: a golden exists to
-//!   be looked at, and a host face could not have a committed golden at all
-//!   (`support/screenshot.rs`). Advances therefore differ from the Ahem-based metric replicas —
-//!   every width here is chosen so the line the fixture wants still fits.
+//! * These fixtures shape **vendored Roboto**, never a host font: a golden exists to be looked at,
+//!   and a host face could not have a committed golden at all (`support/screenshot.rs`). Advances
+//!   therefore differ from the Ahem-based metric replicas — every width here is chosen so the line
+//!   the fixture wants still fits. The one exception is
+//!   `a_custom_truncation_marker_is_laid_in_at_the_clamp_in_its_own_colour`, whose whole subject is
+//!   *where* a cut falls: it shapes the vendored Ahem face, so the picture is em squares a reviewer
+//!   can count instead of letterforms they would have to measure.
 //!
 //! * The fixture importer drops whitespace-only text nodes outright (`support/html.rs:110-112`), so
 //!   the newline-and-indent a browser would collapse to one space between two adjacent runs never
@@ -80,19 +83,58 @@ fn assert_web_text_golden(case: &str, actual: &Image) {
     screenshot::assert_golden(&["web-text", case], actual);
 }
 
+/// [`screenshot::capture`] plus one stylesheet and a chosen vendored face.
+fn capture_with_sheet(
+    test: &str,
+    css: &str,
+    origin: dom::StylesheetOrigin,
+    font: &'static [u8],
+    fragment: &str,
+    width: f32,
+    height: f32,
+) -> Image {
+    let mut doc = html::parse(fragment, width, height);
+    doc.dom.add_stylesheet(css, origin);
+    assert_eq!(
+        doc.dom.register_fonts(dom::FontBlob::from_static(font)),
+        1,
+        "the vendored fixture face must register exactly one face"
+    );
+    screenshot::capture_prebuilt_document(test, &mut doc.dom, &dom::NoImages)
+}
+
 /// [`screenshot::capture`] plus a user-agent sheet, for the fixtures that need
 /// one — a `@property` registration or a rule that no inline style can express.
 fn capture_with_ua_css(test: &str, ua_css: &str, fragment: &str, width: f32, height: f32) -> Image {
-    let mut doc = html::parse(fragment, width, height);
-    doc.dom
-        .add_stylesheet(ua_css, dom::StylesheetOrigin::UserAgent);
-    assert_eq!(
-        doc.dom
-            .register_fonts(dom::FontBlob::from_static(screenshot::ROBOTO)),
-        1,
-        "the vendored Roboto fixture must register exactly one face"
-    );
-    screenshot::capture_prebuilt_document(test, &mut doc.dom, &dom::NoImages)
+    capture_with_sheet(
+        test,
+        ua_css,
+        dom::StylesheetOrigin::UserAgent,
+        screenshot::ROBOTO,
+        fragment,
+        width,
+        height,
+    )
+}
+
+/// [`capture_with_ua_css`] over Ahem, for the one fixture whose subject is
+/// where a cut falls rather than what a face looks like.
+fn capture_ahem_with_ua_css(
+    test: &str,
+    ua_css: &str,
+    fragment: &str,
+    width: f32,
+    height: f32,
+) -> Image {
+    capture_with_sheet(
+        test,
+        ua_css,
+        dom::StylesheetOrigin::UserAgent,
+        screenshot::AHEM,
+        fragment,
+        width,
+        height,
+    )
 }
 
 /// [`capture_with_ua_css`] with an author sheet instead, for the one fixture
@@ -104,16 +146,15 @@ fn capture_with_author_css(
     width: f32,
     height: f32,
 ) -> Image {
-    let mut doc = html::parse(fragment, width, height);
-    doc.dom
-        .add_stylesheet(author_css, dom::StylesheetOrigin::Author);
-    assert_eq!(
-        doc.dom
-            .register_fonts(dom::FontBlob::from_static(screenshot::ROBOTO)),
-        1,
-        "the vendored Roboto fixture must register exactly one face"
-    );
-    screenshot::capture_prebuilt_document(test, &mut doc.dom, &dom::NoImages)
+    capture_with_sheet(
+        test,
+        author_css,
+        dom::StylesheetOrigin::Author,
+        screenshot::ROBOTO,
+        fragment,
+        width,
+        height,
+    )
 }
 
 /// Replicates `x-text/inline-text`
@@ -300,7 +341,7 @@ fn a_view_child_of_a_text_is_drawn_as_an_atomic_box() {
 /// `line baseline - the atom's own first baseline`
 /// (`crates/hughie/src/text/block/position.rs:93-95`), the atom's baseline
 /// being the one its own layout reported
-/// (`crates/dom/src/layout/text_block.rs:460`) — which for this flex container
+/// (`crates/dom/src/layout/text_block.rs:564`) — which for this flex container
 /// is its first item's synthesized baseline, 2px of margin plus a 22px border
 /// box above the atom's top. That is the CSS rule. The recorded deviation
 /// beside it (`docs/tracking/deviations.md:213-220`) is that the *line* is not
@@ -347,7 +388,7 @@ fn a_flex_view_atom_is_drawn_after_the_run_on_the_same_line() {
 /// hughie's placement table as `line baseline - the atom's own first baseline`
 /// (`crates/hughie/src/text/block/position.rs:93-95`) and that baseline is the
 /// inner paragraph's, carried up through
-/// `crates/dom/src/layout/text_block.rs:460`. The deviation
+/// `crates/dom/src/layout/text_block.rs:564`. The deviation
 /// (`docs/tracking/deviations.md:213-220`) is that the line is not grown by the
 /// atom's below-baseline part — its bottom padding and border — and this
 /// fixture keeps it out of the picture the same way the flex-atom golden does:
@@ -501,4 +542,70 @@ fn a_block_s_gradient_reaches_the_run_that_inherits_it() {
         140.0,
     );
     assert_web_text_golden("linear-gradient-color", &actual);
+}
+
+/// The Lynx UA sheet's truncation clauses, as much of them as a fixture here
+/// can wear (`crates/bobcat-core/src/main/tree/text.rs:121-132`): the two
+/// registered integer properties a paragraph reads its limit and its marker
+/// flag from, `inline-truncation`'s `display: none` default, and the rule that
+/// lifts it for a `text`'s **own** child — web-core's `:scope >
+/// inline-truncation` scope. `crates/dom` names no Lynx tag, so the `text` half
+/// of that child combinator is spelled as `support/html.rs`'s `text-block`
+/// class; the marker keeps its real tag name, which nothing in the engine reads.
+const TRUNCATION_SHEET: &str = r#"
+@property --lynx-text-maxline { syntax: "<integer>"; inherits: false; initial-value: 0; }
+@property --lynx-inline-truncation { syntax: "<integer>"; inherits: false; initial-value: 0; }
+inline-truncation { display: none; }
+.text-block > inline-truncation { display: -lynx-text !important; --lynx-inline-truncation: 1; }
+"#;
+
+/// Replicates `x-text/text-maxline-with-custom-truncation`
+/// (`packages/web-platform/web-elements/tests/fixtures/x-text/text-maxline-with-custom-truncation.
+/// html`, `packages/web-platform/web-elements/tests/web-elements.spec.ts:226`)
+/// together with its control,
+/// `x-text/text-no-maxline-do-not-show-inline-truncation`
+/// (`.../fixtures/x-text/text-no-maxline-do-not-show-inline-truncation.html`,
+/// `web-elements.spec.ts:244`): a clamped paragraph that overflows lays its
+/// `inline-truncation` child's content in at the end of the last visible line,
+/// in that child's own colour and in place of the units a retreat frees for it;
+/// a paragraph that does not overflow paints none of it.
+///
+/// Sibling metric tests: `a_shown_truncation_subtree_is_painted_at_the_clamp`
+/// in `crates/dom/tests/web_text_replication.rs`, whose fixture this is — the
+/// same 100px break-all paragraph of thirty Ahem squares clamped to two lines,
+/// with a one-square marker — and
+/// `a_shown_truncation_marker_paints_its_runs_and_never_its_own_box` beside it
+/// for the empty-with-nothing-to-clamp half. Both sample single pixels; what
+/// they cannot show, and this golden can, is the *whole* clamp line at once:
+/// that exactly three black squares are kept, that the red square is the
+/// fourth and not somewhere else on the line, that the fifth stays empty
+/// because the retreat's floor of two units is wider than the content asked
+/// for, and that the four clamped-away lines below leave no ink at all.
+///
+/// Ahem, not this file's usual Roboto: every claim here is a position on a
+/// line, and the reference's own picture — aqua marker text at the end of a
+/// clamped paragraph — is one a proportional face would only blur. The sizes
+/// are integers and the `line-height` explicit, so the frame is exact
+/// arithmetic: a 20px em square, five to a 100px line.
+///
+/// The fixture's aqua is written red here, as the metric siblings write it: on
+/// white, aqua's luminance is close enough to the paragraph's own that a
+/// reviewer could not tell the marker from kept text at a glance, which is the
+/// one thing this golden exists to show.
+#[test]
+fn a_custom_truncation_marker_is_laid_in_at_the_clamp_in_its_own_colour() {
+    const FRAGMENT: &str = r#"
+<div style="display: flex; flex-direction: column; width: 200px; height: 100px; padding: 10px; gap: 10px; box-sizing: border-box; background-color: white; font-family: Ahem; font-size: 20px; line-height: 20px; color: black">
+  <div class="text-block" style="width: 100px; word-break: break-all; --lynx-text-maxline: 2">HHHHHHHHHHHHHHHHHHHHHHHHHHHHHH<inline-truncation style="color: red">H</inline-truncation></div>
+  <div class="text-block" style="width: 100px; word-break: break-all">HHHHH<inline-truncation style="color: red">H</inline-truncation></div>
+</div>
+"#;
+    let actual = capture_ahem_with_ua_css(
+        "a_custom_truncation_marker_is_laid_in_at_the_clamp_in_its_own_colour",
+        TRUNCATION_SHEET,
+        FRAGMENT,
+        200.0,
+        100.0,
+    );
+    assert_web_text_golden("text-maxline-with-custom-truncation", &actual);
 }

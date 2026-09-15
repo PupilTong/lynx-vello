@@ -30,14 +30,16 @@ use flashbulb::headless;
 const AHEM: &[u8] = include_bytes!("../../hughie/tests/fixtures/Ahem.ttf");
 const ROBOTO: &[u8] = include_bytes!("../../hughie/tests/fixtures/Roboto-Regular.ttf");
 
-/// The two registered integer properties the Lynx UA sheet declares for the
-/// truncation attributes (`crates/bobcat-core/src/main/tree/text.rs:91-92`).
+/// The four registered integer properties the Lynx UA sheet declares — two for
+/// the truncation attributes, one for `tail-color-convert`, one flagging a
+/// truncation marker (`crates/bobcat-core/src/main/tree/text.rs:121-124`).
 /// Without the `@property` registration a custom property is an untyped token
 /// stream and the layout never sees a limit at all.
 const LIMIT_PROPERTIES: &str = r#"
 @property --lynx-text-maxline { syntax: "<integer>"; inherits: false; initial-value: 0; }
 @property --lynx-text-maxlength { syntax: "<integer>"; inherits: false; initial-value: -1; }
 @property --lynx-tail-color-convert { syntax: "<integer>"; inherits: false; initial-value: 0; }
+@property --lynx-inline-truncation { syntax: "<integer>"; inherits: false; initial-value: 0; }
 "#;
 
 /// The paragraph ink `holder` establishes, as `(width, height)`.
@@ -115,7 +117,7 @@ fn is_black(color: [u8; 4]) -> bool {
 /// `crates/dom/src/layout/mod.rs`'s `mod tests` asserts `text_block_rebuilds`
 /// and `break_count` are unchanged across the same move.
 /// `Document::text_block`, `text_block_rebuilds` and `text_block_is_probe_dirty`
-/// are all crate-private (`crates/dom/src/layout/mod.rs:237`, `:245`, `:253`),
+/// are all crate-private (`crates/dom/src/layout/mod.rs:303`, `:311`, `:319`),
 /// so no integration test can see them.
 ///
 /// The line count is therefore read here as ink height over an explicit
@@ -189,9 +191,11 @@ fn moving_a_clamped_paragraph_does_not_rebreak_its_lines() {
 /// the second long string must clamp afresh.
 ///
 /// Adaptation: the fixture's `<inline-truncation>` marker content is dropped.
-/// A custom truncation element is not reachable from this crate's tree at all
-/// (`crates/dom/src/layout/text_block.rs:276` flattens a paragraph's children
-/// without one), so the replica pins the re-clamp and not the marker.
+/// A marker is content only where the UA sheet flagged it, which this replica's
+/// CSS does not do (`collect_block`,
+/// `crates/dom/src/layout/text_block.rs:142`), and the marker's own claim is
+/// carried by `a_shown_truncation_subtree_is_painted_at_the_clamp`, so this
+/// replica pins the re-clamp and not the marker.
 #[test]
 fn rewriting_a_clamped_text_node_reclamps_against_the_new_string() {
     let mut doc = Doc::with_device(device(800.0, 600.0));
@@ -326,18 +330,13 @@ fn the_truncation_marker_wears_the_cut_run_s_colour_until_the_block_converts() {
 /// layer's replica of the same fixture
 /// (`a_custom_truncation_s_content_replaces_the_clamp_marker_at_every_maxline`
 /// in `crates/bobcat-core/src/main/tree/web_text_replication.rs`), which also
-/// carries the `inline-truncation { display: none }` default that
-/// `crates/bobcat-core/src/main/tree/text.rs:97` never lifts. Here the marker
-/// subtree is already shown — it is written as an ordinary nested text scope,
-/// the state web-core's `x-show-inline-truncation` puts it in once the clamp
-/// is found to overflow — so the only thing left between this document and the
-/// reference frame is whether `crates/dom` hands that subtree to the paragraph
-/// as truncation content at all. It does not: `TextBlock::new`'s truncation
-/// slice is `None` at `crates/dom/src/layout/text_block.rs:360`, so the
-/// marker's run is collected as ordinary inline content of the main flow
-/// instead, lands past the clamp, and is never painted.
+/// carries the `inline-truncation { display: none }` default the Lynx UA sheet
+/// lifts only for a `text`'s own child. `crates/dom` names no Lynx tag, so the
+/// marker here is a nested text scope carrying the registered
+/// `--lynx-inline-truncation` that same sheet flags it with — the one fact the
+/// paragraph walker keys on.
 ///
-/// The algorithm the wiring is missing is complete one layer down:
+/// The algorithm underneath it is complete one layer down:
 /// `custom_truncation_content_replaces_the_marker_at_the_clamp` in
 /// `crates/hughie/tests/web_text_replication.rs` passes, and it fixes the
 /// geometry asserted below — the cut retreats until the discarded tail is at
@@ -354,12 +353,6 @@ fn the_truncation_marker_wears_the_cut_run_s_colour_until_the_block_converts() {
 /// second line being *red* distinguishes truncation content laid in at the cut
 /// from black content that merely reaches the same place.
 #[test]
-#[ignore = "GAP: the dom layer passes no truncation content to the paragraph — \
-            `TextBlock::new(context, style, &items, None)` at \
-            crates/dom/src/layout/text_block.rs:360 — so an \
-            `inline-truncation` subtree is collected as ordinary inline \
-            content by crates/dom/src/layout/text_block.rs:151-167 and clamped \
-            away with the rest of the tail"]
 fn a_shown_truncation_subtree_is_painted_at_the_clamp() {
     let mut doc = Doc::with_device(device(200.0, 100.0));
     doc.add_ua_css(LIMIT_PROPERTIES);
@@ -369,7 +362,8 @@ fn a_shown_truncation_subtree_is_painted_at_the_clamp() {
                  width: 100px; word-break: break-all; color: #000000;
                  font-family: Ahem; font-size: 20px; line-height: 20px;
                  --lynx-text-maxline: 2; }
-         .marker { display: -lynx-text; color: #ff0000; }",
+         .marker { display: -lynx-text; color: #ff0000;
+                   --lynx-inline-truncation: 1; }",
     );
     assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
     let root = doc.root;
@@ -415,6 +409,132 @@ fn a_shown_truncation_subtree_is_painted_at_the_clamp() {
     assert!(
         is_white(pixel(&pixels, 200, 90, 50)),
         "nothing paints past the clamp",
+    );
+}
+
+/// The box half of the same wiring: an atomic inline box written *inside* the
+/// truncation content is laid out and placed like any other atom when the
+/// marker is shown, and reports the Lynx `HideView` outcome when it is not.
+///
+/// Both blocks carry a second `inline-truncation` child as well. web-core
+/// honours only the first (`XTextTruncation.ts` queries
+/// `:scope > inline-truncation`), and a second one that leaked into the
+/// content flow would widen the paragraph, so its absence from every measure
+/// below is the assertion.
+#[test]
+fn a_truncation_atom_is_placed_at_the_clamp_and_hidden_without_one() {
+    let mut doc = Doc::with_device(device(400.0, 200.0));
+    doc.add_ua_css(LIMIT_PROPERTIES);
+    doc.add_css(
+        "page { display: flex; align-items: flex-start; }
+         .text { display: -lynx-text; width: 100px; word-break: break-all;
+                 font-family: Ahem; font-size: 20px; line-height: 20px;
+                 --lynx-text-maxline: 2; }
+         .marker { display: -lynx-text; --lynx-inline-truncation: 1; }
+         .icon { display: flex; width: 40px; height: 20px; }",
+    );
+    assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
+    let root = doc.root;
+
+    let mut block = |content: &str| {
+        let text = doc.el(root, "view.text");
+        let run = doc.dom.create_text_node(content, ());
+        doc.dom.append_child(text, run);
+        let marker = doc.el(text, "view.marker");
+        let icon = doc.el(marker, "view.icon");
+        let spare = doc.el(text, "view.marker");
+        let spare_run = doc.dom.create_text_node("HHHHH", ());
+        doc.dom.append_child(spare, spare_run);
+        (text, icon)
+    };
+    let (overflowing, placed) = block(&"H".repeat(30));
+    let (fitting, unused) = block("HHHHH");
+    doc.flush();
+
+    // Six break-all lines clamped to two. The 40px icon needs two of the five
+    // squares on the clamp line, which is also the two-unit minimum, so three
+    // squares are kept and the icon takes the fourth and fifth.
+    assert_eq!(ink(&doc, overflowing), (100.0, 40.0));
+    assert_eq!(
+        rect(&doc, placed).0,
+        60.0,
+        "the icon starts where the retreat left off",
+    );
+    assert_eq!(
+        (rect(&doc, placed).2, rect(&doc, placed).3),
+        (40.0, 20.0),
+        "and keeps the box its own layout produced",
+    );
+
+    assert_eq!(
+        ink(&doc, fitting),
+        (100.0, 20.0),
+        "one line, and neither truncation child is in it",
+    );
+    assert_eq!(
+        rect(&doc, unused),
+        (0.0, 0.0, 0.0, 0.0),
+        "an atom the paragraph never showed generates no box",
+    );
+}
+
+/// The `inline-truncation` element itself never paints: it is a text scope,
+/// so it has no paragraph of its own, and the slot the paragraph leaves it is
+/// empty whether or not its content is shown.
+///
+/// What paints is its *runs*, through the flattened paragraph and in the
+/// marker's own colour. A background colour on the marker is the probe: it
+/// would cover the clamp line if the element had a box.
+#[test]
+fn a_shown_truncation_marker_paints_its_runs_and_never_its_own_box() {
+    fn readback_marker(content: &str) -> Vec<u8> {
+        let mut doc = Doc::with_device(device(200.0, 100.0));
+        doc.add_ua_css(LIMIT_PROPERTIES);
+        doc.add_css(
+            "page { display: flex; align-items: flex-start; }
+             .text { display: -lynx-text; width: 100px; word-break: break-all;
+                     color: #000000; font-family: Ahem; font-size: 20px;
+                     line-height: 20px; --lynx-text-maxline: 2; }
+             .marker { display: -lynx-text; --lynx-inline-truncation: 1;
+                       color: #ff0000; background-color: #0000ff; }",
+        );
+        assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
+        let root = doc.root;
+        let text = doc.el(root, "view.text");
+        let run = doc.dom.create_text_node(content, ());
+        doc.dom.append_child(text, run);
+        let marker = doc.el(text, "view.marker");
+        let marker_run = doc.dom.create_text_node("H", ());
+        doc.dom.append_child(marker, marker_run);
+        readback(
+            "a_shown_truncation_marker_paints_its_runs_and_never_its_own_box",
+            &mut doc,
+            200,
+            100,
+        )
+    }
+
+    let is_blue = |color: [u8; 4]| color[2] > 200 && color[0] < 60 && color[1] < 60;
+
+    let shown = readback_marker(&"H".repeat(30));
+    assert!(
+        is_red(pixel(&shown, 200, 70, 30)),
+        "the marker's own run paints, in the marker's colour",
+    );
+    assert!(
+        (0..100).all(|y| (0..200).all(|x| !is_blue(pixel(&shown, 200, x, y)))),
+        "and the marker element itself paints nothing: the paragraph leaves \
+         its slot empty rather than giving it a box",
+    );
+
+    let hidden = readback_marker("HHHHH");
+    assert!(
+        (0..100).all(|y| (0..200).all(|x| {
+            let color = pixel(&hidden, 200, x, y);
+            !is_blue(color) && !is_red(color)
+        })),
+        "and with nothing to clamp neither its runs nor a box of its own reach \
+         the frame",
     );
 }
 
@@ -794,7 +914,7 @@ fn a_gradient_color_fills_a_block_and_the_run_that_inherits_it() {
 /// happily if every glyph wears the establishing element's style.
 ///
 /// The tile a gradient `color` fills from is decided per run
-/// (`crates/dom/src/paint/text.rs:209-263`): the establishing element keeps its
+/// (`crates/dom/src/paint/text.rs:215-269`): the establishing element keeps its
 /// padding box, a nested element gets the union of its own line fragments. It
 /// used to be one paragraph-level decision taken from the establishing
 /// element's own color, so a solid-colored block resolved no tile at all and
@@ -1053,7 +1173,7 @@ fn a_font_face_declared_family_shapes_the_text_that_names_it() {
 ///
 /// The child here is `position: absolute`, which is what separates (1) and (2)
 /// from (3): the paragraph's own out-of-flow pass
-/// (`crates/dom/src/layout/text_block.rs:465-480`) lays such a child out and
+/// (`crates/dom/src/layout/text_block.rs:569-584`) lays such a child out and
 /// gives it a real box, so the only thing left to vary is which frame-builder
 /// path the enclosing block takes.
 #[test]
@@ -1094,19 +1214,19 @@ fn a_boxed_child_paints_from_a_text_block_inside_its_parents_context() {
 /// `position: absolute` one that
 /// `a_boxed_child_paints_from_a_text_block_inside_its_parents_context` paints,
 /// and it has a real box from the paragraph's out-of-flow pass
-/// (`crates/dom/src/layout/text_block.rs:465-480`), so nothing but the
+/// (`crates/dom/src/layout/text_block.rs:569-584`), so nothing but the
 /// frame-builder path differs between that test and this one.
 ///
 /// `build_stacking_context` — the path a text block takes both as the paint
 /// root and as a real stacking context — pushed the paragraph and returned
 /// without descending, and the text painter draws only
-/// `PositionedLayoutItem::GlyphRun` (`crates/dom/src/paint/text.rs:397-414`),
+/// `PositionedLayoutItem::GlyphRun` (`crates/dom/src/paint/text.rs:403-420`),
 /// so nobody emitted the child: `[255, 255, 255, 255]` where it should be.
 /// It now pushes the paragraph and falls through to the collection walk
 /// (`crates/dom/src/visual/build.rs:563-569`), the same order as the in-context
 /// path. The glyphs stay unique because `collect_child`
 /// (`crates/dom/src/visual/build.rs:829-871`) drops text nodes and the layout
-/// slots `place_and_hide` (`crates/dom/src/layout/text_block.rs:503`) hid, so
+/// slots `place_and_hide` (`crates/dom/src/layout/text_block.rs:607`) hid, so
 /// an absorbed nested scope reaches no second record.
 #[test]
 fn a_boxed_child_paints_from_a_text_block_that_is_its_own_context() {
@@ -1180,7 +1300,7 @@ fn a_boxed_child_paints_from_a_text_block_that_is_its_own_context() {
 /// layout, so the atom ended the pass 0x0. #227 needed committed geometry for
 /// atomic children restored after a content replacement and gave the
 /// paragraph a commit-goal path through `compute_inline_box_layout`
-/// (`crates/dom/src/layout/text_block.rs:436-444`), which fixed this case with
+/// (`crates/dom/src/layout/text_block.rs:540-548`), which fixed this case with
 /// it.
 #[test]
 fn an_atomic_inline_box_keeps_the_size_it_measured() {
@@ -1218,13 +1338,13 @@ fn an_atomic_inline_box_keeps_the_size_it_measured() {
 /// In web-core the paragraph and everything in it lay out inside the content
 /// box, so padding moves the two together. Here the paragraph writes an atom's
 /// paragraph-space origin straight into `location`
-/// (`crates/dom/src/layout/text_block.rs:446`) while every reader of
+/// (`crates/dom/src/layout/text_block.rs:667`) while every reader of
 /// `location` takes it as border-box relative: the frame builder adds it to
 /// the element's own border-box offset
 /// (`crates/dom/src/visual/build.rs:750-756`) and adds the content-box inset
 /// only to the glyphs (`crates/dom/src/visual/build.rs:920-925`), and the
 /// same function's own out-of-flow pass puts its children in that space by
-/// adding the border back (`crates/dom/src/layout/text_block.rs:474-475`).
+/// adding the border back (`crates/dom/src/layout/text_block.rs:698-699`).
 /// Glyphs and inline boxes therefore end up in two different coordinate
 /// systems, the atom short by the border plus padding.
 ///
@@ -1235,7 +1355,7 @@ fn an_atomic_inline_box_keeps_the_size_it_measured() {
 /// `a_boxed_child_paints_from_a_text_block_that_is_its_own_context`. Measured:
 /// with the 10px padding below, the atom reports `location` `(0, 0)`.
 #[test]
-#[ignore = "GAP: an atom's paragraph-space origin is written into `location`, which every reader takes as border-box relative (crates/dom/src/layout/text_block.rs:446)"]
+#[ignore = "GAP: an atom's paragraph-space origin is written into `location`, which every reader takes as border-box relative (crates/dom/src/layout/text_block.rs:667)"]
 fn an_atomic_inline_box_sits_inside_the_blocks_border_and_padding() {
     let mut doc = Doc::with_device(device(200.0, 100.0));
     doc.add_css(

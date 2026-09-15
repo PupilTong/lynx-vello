@@ -219,7 +219,14 @@ Computed `text-overflow` selects clip or the existing literal-dots algorithm.
 target's: a boolean defaulting to false, reflected into the registered
 `--lynx-tail-color-convert`, that swaps only the truncation marker's fill colour
 for the establishing element's and leaves its font, shadow, stroke and
-decorations at the cut run's. Custom inline-truncation content and delivery of
-the layout event remain unwired; the standalone block already supports custom
-tails and exposes line data. Its recorded deviations live in
+decorations at the cut run's. Custom inline-truncation content is wired too: the
+UA sheet makes a `text`'s own `inline-truncation` child a text scope and flags
+it with the registered `--lynx-inline-truncation`, `crates/dom` keys on that
+flag rather than on the tag name and hands the first such child's subtree to the
+paragraph as its truncation flow. There is no `x-show-inline-truncation`
+counterpart — the child is a text scope whether or not the clamp overflows, and
+`TextBlock::truncation_visible` decides whether its content is laid in — and
+only the first such child is content, as on the web. Delivery of the layout
+event remains unwired; the standalone block already supports custom tails and
+exposes line data. Its recorded deviations live in
 [deviations.md](deviations.md) under "Text layout".

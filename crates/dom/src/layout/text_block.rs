@@ -46,6 +46,12 @@ pub(crate) struct TextBlockStore {
     /// `SourceItem::Content(u32)`'s index space and *is* `InlineBoxSpec::id`,
     /// so one table serves painting, box placement and hiding.
     pub(crate) source_ids: Vec<NodeId>,
+    /// The same table for the custom truncation content, in
+    /// `SourceItem::Truncation(u32)`'s index space. Empty where the paragraph
+    /// has no `inline-truncation` child. A truncation atom's
+    /// `InlineBoxSpec::id` is offset past the content items, so the two share
+    /// one box-id space and one placement pass.
+    pub(crate) truncation_source_ids: Vec<NodeId>,
     /// What the block was built from. A paragraph is rebuilt, never patched —
     /// parley's own mutability contract — so this is the whole invalidation
     /// question for the shaped half.
@@ -95,11 +101,76 @@ enum OwnedItem {
     },
 }
 
-/// Walks `element`'s flat subtree into runs and atomic boxes.
+/// The establishing element's subtree, split into the two flows a paragraph
+/// takes: its own content, and the custom truncation content.
+struct Flattened {
+    content: Vec<Collected>,
+    truncation: Vec<Collected>,
+    /// The direct flat children the truncation flow consumed — the first
+    /// `inline-truncation` child, whose subtree became `truncation`, and any
+    /// later one, which contributes nothing at all.
+    markers: Vec<NodeSlot>,
+}
+
+/// Whether this child is the paragraph's custom truncation content.
+///
+/// A computed-style fact, never a tag: the Lynx UA sheet flags an
+/// `inline-truncation` written directly inside a `text` with
+/// `--lynx-inline-truncation`, and flags nothing else, so this reproduces
+/// web-core's `:scope > inline-truncation` scope without `crates/dom` naming
+/// the element.
+fn is_truncation_marker<T>(node: &Node<T>) -> bool {
+    if !node.is_element() {
+        return false;
+    }
+    let view = StyleView::of(node);
+    view.position() == PositionProperty::Static
+        && display_mode(view.display()) == DisplayMode::Text
+        && {
+            use hughie::style::TextContainerStyle;
+            view.is_inline_truncation()
+        }
+}
+
+/// Splits `element`'s flat subtree into the paragraph's content and the
+/// marker's.
+///
+/// Only the **first** `inline-truncation` child supplies truncation content,
+/// as on the web; later ones are excluded from the content walk and
+/// contribute nothing. Generated content on the establishing element replaces
+/// every child, marker included.
+fn collect_block<T>(tree: &TreeArenas<T>, element: NodeSlot) -> Flattened {
+    let mut markers = Vec::new();
+    if generated_content(tree.at(element)).is_none() {
+        markers.extend(
+            tree.at(element)
+                .flat_children()
+                .iter()
+                .copied()
+                .filter(|&child| is_truncation_marker(tree.at(child))),
+        );
+    }
+    let truncation = markers
+        .first()
+        .map(|&marker| collect_content(tree, marker, &[]))
+        .unwrap_or_default();
+    Flattened {
+        content: collect_content(tree, element, &markers),
+        truncation,
+        markers,
+    }
+}
+
+/// Walks `element`'s flat subtree into runs and atomic boxes, skipping the
+/// children `skip` names.
 ///
 /// Iterative rather than recursive: nesting depth is author-controlled, and a
 /// Lynx text scope may nest without limit.
-fn collect<T>(tree: &TreeArenas<T>, element: NodeSlot) -> Vec<Collected> {
+fn collect_content<T>(
+    tree: &TreeArenas<T>,
+    element: NodeSlot,
+    skip: &[NodeSlot],
+) -> Vec<Collected> {
     let mut collected = Vec::new();
     if collect_generated(tree, element, &mut collected) {
         return collected;
@@ -114,6 +185,9 @@ fn collect<T>(tree: &TreeArenas<T>, element: NodeSlot) -> Vec<Collected> {
         .collect();
 
     while let Some(slot) = stack.pop() {
+        if skip.contains(&slot) {
+            continue;
+        }
         let node = tree.at(slot);
         if node.is_text_node() {
             let Some(text) = node.text() else { continue };
@@ -258,30 +332,39 @@ fn style_preserves_newlines(style: &ComputedValues) -> bool {
 ///
 /// Not a correctness mechanism — the eviction paths are — but a backstop that
 /// turns a missed invalidation into a rebuild rather than into stale glyphs.
-fn fingerprint(collected: &[Collected]) -> u64 {
+fn fingerprint(flat: &Flattened) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = rustc_hash::FxHasher::default();
-    collected.len().hash(&mut hasher);
-    for entry in collected {
-        entry.source.hash(&mut hasher);
-        match &entry.item {
-            OwnedItem::Run {
-                text,
-                preserve_newlines,
-                ..
-            } => {
-                0_u8.hash(&mut hasher);
-                text.hash(&mut hasher);
-                preserve_newlines.hash(&mut hasher);
+    // Both flows, and the marker list: gaining or losing an `inline-truncation`
+    // child rebuilds the block even where neither flow's items moved, because
+    // the marker's mere presence suppresses the dots.
+    flat.markers.hash(&mut hasher);
+    for collected in [&flat.content, &flat.truncation] {
+        collected.len().hash(&mut hasher);
+        for entry in collected {
+            entry.source.hash(&mut hasher);
+            match &entry.item {
+                OwnedItem::Run {
+                    text,
+                    preserve_newlines,
+                    ..
+                } => {
+                    0_u8.hash(&mut hasher);
+                    text.hash(&mut hasher);
+                    preserve_newlines.hash(&mut hasher);
+                }
+                OwnedItem::Atom { .. } => 1_u8.hash(&mut hasher),
             }
-            OwnedItem::Atom { .. } => 1_u8.hash(&mut hasher),
         }
     }
     hasher.finish()
 }
 
 /// Borrows the collected items as the block's input vocabulary.
-fn as_items(collected: &[Collected]) -> Vec<InlineItem<'_>> {
+///
+/// `id_offset` puts the truncation flow's box ids past the content flow's, so
+/// one id space and one placement pass serve both.
+fn as_items(collected: &[Collected], id_offset: usize) -> Vec<InlineItem<'_>> {
     collected
         .iter()
         .enumerate()
@@ -298,7 +381,7 @@ fn as_items(collected: &[Collected]) -> Vec<InlineItem<'_>> {
             OwnedItem::Atom { vertical_align } => InlineItem::Box(InlineBoxSpec {
                 // The item index is the box id, so one table answers for
                 // painting, placement and hiding alike.
-                id: index as u64,
+                id: (id_offset + index) as u64,
                 size: Size::ZERO,
                 baseline: None,
                 vertical_align: *vertical_align,
@@ -319,19 +402,18 @@ pub(crate) fn refresh<T>(
     state: &mut DocumentLayoutState,
     element: NodeSlot,
 ) -> Vec<(NodeSlot, u64)> {
-    let collected = collect(tree, element);
-    let stamp = fingerprint(&collected);
+    let flat = collect_block(tree, element);
+    let stamp = fingerprint(&flat);
     let style = block_style(tree, element);
+    let offset = flat.content.len();
 
-    let atoms: Vec<(NodeSlot, u64)> = collected
-        .iter()
-        .enumerate()
-        .filter(|(_, entry)| matches!(entry.item, OwnedItem::Atom { .. }))
-        .map(|(index, entry)| (entry.source, index as u64))
-        .collect();
+    let mut atoms = atoms_of(&flat.content, 0);
+    atoms.extend(atoms_of(&flat.truncation, offset));
 
-    let run_styles: Vec<RunStyle> = collected
+    let run_styles: Vec<RunStyle> = flat
+        .content
         .iter()
+        .chain(flat.truncation.iter())
         .filter_map(|entry| match &entry.item {
             OwnedItem::Run { style, .. } => Some(style.clone()),
             OwnedItem::Atom { .. } => None,
@@ -350,17 +432,29 @@ pub(crate) fn refresh<T>(
     });
 
     if needs_build {
-        let items = as_items(&collected);
-        let source_ids = collected
+        let items = as_items(&flat.content, 0);
+        let truncation_items = as_items(&flat.truncation, offset);
+        let source_ids = flat
+            .content
+            .iter()
+            .map(|entry| tree.at(entry.source).id())
+            .collect();
+        let truncation_source_ids = flat
+            .truncation
             .iter()
             .map(|entry| tree.at(entry.source).id())
             .collect();
         let (context, slot) = state.text_block_parts(element);
         let rebuilds = slot.as_deref().map_or(0, |store| store.rebuilds + 1);
-        let block = TextBlock::new(context, style.clone(), &items, None);
+        // The marker's *presence* is the input, not its content: an empty
+        // `inline-truncation` still suppresses the dots, which is what the web
+        // reference does with the same subtree.
+        let truncation = (!flat.markers.is_empty()).then_some(&truncation_items[..]);
+        let block = TextBlock::new(context, style.clone(), &items, truncation);
         *slot = Some(Box::new(TextBlockStore {
             block,
             source_ids,
+            truncation_source_ids,
             fingerprint: stamp,
             style,
             run_styles,
@@ -372,6 +466,16 @@ pub(crate) fn refresh<T>(
         store.style = style;
     }
     atoms
+}
+
+/// The `(node, box id)` pairs of one flow's atomic boxes.
+fn atoms_of(collected: &[Collected], id_offset: usize) -> Vec<(NodeSlot, u64)> {
+    collected
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| matches!(entry.item, OwnedItem::Atom { .. }))
+        .map(|(index, entry)| (entry.source, (id_offset + index) as u64))
+        .collect()
 }
 
 /// Resolves `text-indent` against the definite inline size, which is the
@@ -523,6 +627,21 @@ fn place_and_hide<T>(
         .map(|block| block.boxes().to_vec())
         .unwrap_or_default();
 
+    // Every slot the paragraph gave a real box, and — separately — the
+    // consumed elements on the path down to one. A consumed element generates
+    // no box of its own, but hiding its subtree would zero the atom under it,
+    // so it keeps an empty layout instead.
+    let mut placed_slots: Vec<NodeSlot> = Vec::new();
+    for placed in &placements {
+        let PlacedBox::Visible { id, .. } = *placed else {
+            continue;
+        };
+        if let Some(&(slot, _)) = atoms.iter().find(|(_, atom_id)| *atom_id == id) {
+            placed_slots.push(slot);
+        }
+    }
+    let carriers = atom_carriers(tree, element, &placed_slots);
+
     for placed in placements {
         let (id, origin) = match placed {
             PlacedBox::Visible { id, origin, .. } => (id, Some(origin)),
@@ -582,12 +701,20 @@ fn place_and_hide<T>(
     }
 
     // Everything the paragraph swallowed generates no box. Hiding the whole
-    // child rather than each consumed node keeps this O(children): a nested
-    // scope's own subtree is consumed with it.
+    // child rather than each consumed node keeps this O(children) wherever the
+    // child holds no atom: a nested scope's own subtree is consumed with it.
     //
-    // Atoms are exempt — they were just placed — and hiding one would zero the
-    // geometry this pass gave it.
-    for child in tree.children(element) {
+    // A consumed element that *does* hold a placed atom is written with an
+    // empty layout instead of being marked hidden, and its children are
+    // visited under the same rule. Two things need that: the marker subtree,
+    // whose atoms are placed at the clamp, and a `display: contents` wrapper
+    // over an atom. An empty layout is not a hidden one — it keeps the slot's
+    // paint order and, because it is a write, keeps the rounding walk
+    // descending to the atom underneath.
+    let mut stack: Vec<NodeSlot> = tree.children(element).collect();
+    while let Some(child) = stack.pop() {
+        // Atoms are exempt — they were just placed — and hiding one would zero
+        // the geometry this pass gave it.
         if atoms.iter().any(|(slot, _)| *slot == child) {
             continue;
         }
@@ -598,8 +725,41 @@ fn place_and_hide<T>(
         if node.is_element() && StyleView::of(node).position() != PositionProperty::Static {
             continue;
         }
-        hughie::compute::hide_subtree(tree, state, child);
+        if !carriers.contains(&child) {
+            hughie::compute::hide_subtree(tree, state, child);
+            continue;
+        }
+        let order = tree.layout_mut(state, child).unrounded.order;
+        tree.set_unrounded_layout(state, child, hughie::tree::Layout::with_order(order));
+        stack.extend(tree.children(child));
     }
+}
+
+/// The consumed elements between `element` and each of `placed`, exclusive of
+/// both ends.
+///
+/// Walks up from the atoms rather than down from the element: a paragraph has
+/// far fewer placed atoms than nodes, and a shared prefix stops the walk.
+fn atom_carriers<T>(tree: &TreeArenas<T>, element: NodeSlot, placed: &[NodeSlot]) -> Vec<NodeSlot> {
+    let mut carriers = Vec::new();
+    for &atom in placed {
+        let mut current = atom;
+        while current != element {
+            let Some(parent) = tree
+                .at(current)
+                .flat_parent()
+                .and_then(|parent| tree.slot(parent.id()))
+            else {
+                break;
+            };
+            if parent == element || carriers.contains(&parent) {
+                break;
+            }
+            carriers.push(parent);
+            current = parent;
+        }
+    }
+    carriers
 }
 
 #[cfg(test)]
@@ -620,7 +780,7 @@ mod generated_content_tests {
     }
 
     fn contents(doc: &Document<()>, text: NodeId) -> String {
-        collect(doc.arenas(), doc.slot(text).unwrap())
+        collect_content(doc.arenas(), doc.slot(text).unwrap(), &[])
             .into_iter()
             .filter_map(|entry| match entry.item {
                 OwnedItem::Run { text, .. } => Some(text),

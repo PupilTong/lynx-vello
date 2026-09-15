@@ -238,11 +238,19 @@ mod tests {
     /// unconditional. This pins the exception rather than dropping the
     /// invariant: a new important declaration fails here until someone
     /// decides it deserves the same argument.
+    ///
+    /// `text > inline-truncation` is the same argument a third time. The tag
+    /// is `display: none` everywhere else, and a `text`'s own child is the
+    /// only place Lynx treats it as the paragraph's custom truncation content
+    /// — a structural role, established by where it is written rather than by
+    /// what any sheet declares.
     #[test]
     fn the_ua_sheet_is_important_free_apart_from_the_text_block() {
-        const ALLOWED: [&str; 2] = [
+        const ALLOWED: [&str; 3] = [
             "text { box-sizing: border-box; display: -lynx-text !important; color: initial; }",
             "inline-text { display: -lynx-text !important; }",
+            "text > inline-truncation { display: -lynx-text !important; \
+             --lynx-inline-truncation: 1; }",
         ];
 
         for config in [
