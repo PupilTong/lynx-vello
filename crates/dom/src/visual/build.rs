@@ -560,13 +560,12 @@ impl<'doc, T: Sync> Builder<'doc, T> {
             return;
         }
         let ctx = self.enter_element(root, values, &world, seed, own_slot, own_animation);
-        if mode == DisplayMode::Text {
-            // A text block paints its whole subtree as one paragraph.
-            if visible {
-                self.push_paragraph(root, &world, size, hit_testable, ctx);
-            }
-            self.close_layer(layer);
-            return;
+        if mode == DisplayMode::Text && visible {
+            // A text block paints its whole subtree as one paragraph, over its
+            // own box and under whatever the collection walk below still finds
+            // — an atomic inline box, an out-of-flow child. Same order as the
+            // in-context path in `collect_in_context`.
+            self.push_paragraph(root, &world, size, hit_testable, ctx);
         }
 
         // This context's members and in-flow records occupy the tail of the
@@ -792,12 +791,14 @@ impl<'doc, T: Sync> Builder<'doc, T> {
     /// Emits the one item a `display: -lynx-text` element paints its whole
     /// paragraph through.
     ///
-    /// The walk stops at a text block — descending would emit a second item
-    /// for each absorbed scope and paint the glyphs twice — so this is the
-    /// only record its runs ever get. Two details it must get right: the
-    /// glyphs sit in the element's *content* box, so the transform carries
-    /// that origin; and they take the element's *inner* clip, so an
-    /// `overflow: hidden` block clips its own paragraph.
+    /// The walk still descends past a text block, to reach an atomic inline
+    /// box or an out-of-flow child; what keeps the glyphs from being painted
+    /// twice is `collect_child`, which drops text nodes and the layout slots
+    /// `place_and_hide` hid, so an absorbed nested scope never reaches a
+    /// second record. Two details this must get right: the glyphs sit in the
+    /// element's *content* box, so the transform carries that origin; and they
+    /// take the element's *inner* clip, so an `overflow: hidden` block clips
+    /// its own paragraph.
     fn push_paragraph(
         &mut self,
         root: NodeId,

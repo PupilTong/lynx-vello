@@ -27,16 +27,16 @@ One of them — the truncation marker gate — was put to the user and decided
 | [`crates/hughie/tests/web_text_replication.rs`](../../crates/hughie/tests/web_text_replication.rs) | paragraph algorithm: clamping, cut points, tail fitting, word-break | 16 | 3 |
 | [`crates/bobcat-core/src/main/tree/web_text_replication.rs`](../../crates/bobcat-core/src/main/tree/web_text_replication.rs) | the `<text>` element, its UA sheet and its attributes | 28 | 9 |
 | [`crates/bobcat-core/src/main/runtime/web_text_replication.rs`](../../crates/bobcat-core/src/main/runtime/web_text_replication.rs) | the Element PAPI: content, restyle, truncation, `setNativeProps`, layout events | 15 | 6 |
-| [`crates/dom/tests/web_text_replication.rs`](../../crates/dom/tests/web_text_replication.rs) | relayout, percentage sizing, scroll targets, glyph and atom paint | 11 | 4 |
+| [`crates/dom/tests/web_text_replication.rs`](../../crates/dom/tests/web_text_replication.rs) | relayout, percentage sizing, scroll targets, glyph and atom paint | 12 | 3 |
 | [`crates/dom/tests/web_text_screenshots.rs`](../../crates/dom/tests/web_text_screenshots.rs) | golden screenshots — the originals' own oracle, for the cases whose claim is visual | 10 | 0 |
 | [`crates/bobcat-source/tests/web_text_css_replication.rs`](../../crates/bobcat-source/tests/web_text_css_replication.rs) | text CSS across the `.web.bundle` wire | 9 | 0 |
-| **Total** | | **89** | **22** |
+| **Total** | | **90** | **21** |
 
 A gap-ignored test asserts the `web-core` behavior and is marked
 `#[ignore = "GAP: …"]` naming the cause with a `file:line`. It is a real
 assertion, never weakened — run any file with `-- --ignored` and every one of
-the 22 fails on the assertion its own string names, so no ignore is masking a
-test that would now pass. Three of the 22 are marked `DEVIATION` instead: they
+the 21 fails on the assertion its own string names, so no ignore is masking a
+test that would now pass. Three of the 21 are marked `DEVIATION` instead: they
 assert `web-core` against a ruling that this engine follows native Lynx, and
 are listed in [F](#f-recorded-deviations-not-gaps).
 
@@ -169,7 +169,20 @@ passes.
 | B1 | An atom's origin **omits** border+padding | `crates/dom/src/layout/text_block.rs:548` writes the paragraph-space origin into `location`, which every reader takes as border-box relative. The atom lands **short** by the content-box inset: `location == (0,0)` where the origin is `(10,10)` under 10px padding. |
 | B2 | An atom's `margin` never reaches the line | `text_block.rs` hands the block the atom's **border** box, so `margin-left: 50px` on an inline image adds nothing to the advance (142 where the reference gives 192). Padding works, because `box-sizing: border-box` folds it in. |
 | B3 | A `display: contents` wrapper leaves the atom below it with a zero box | The post-placement hide loop at `text_block.rs:590-601` exempts only slots that are themselves in `atoms`; a wrapper holding an atom is not exempt, so `hide_subtree` zeroes the atom the paragraph placed. |
-| B4 | The frame builder never descends past a text block's paragraph when that block is the paint root or its own stacking context | `crates/dom/src/visual/build.rs:563-570` pushes the paragraph then returns. The in-context path does descend, so this bites only those two cases. |
+
+**B4 is closed.** The frame builder used not to descend past a text block's
+paragraph when that block was the paint root or its own stacking context:
+`build_stacking_context` pushed the paragraph and returned, so an atomic inline
+box or an out-of-flow child inside it was never emitted, while the in-context
+path did descend. It now pushes the paragraph and falls through to the same
+collection walk (`crates/dom/src/visual/build.rs:563-569`), which is also the
+in-context order — element box, paragraph, then the descent. The glyphs stay
+unique because `collect_child` (`crates/dom/src/visual/build.rs:829-871`) drops
+text nodes and the layout slots `place_and_hide`
+(`crates/dom/src/layout/text_block.rs:503`) hid, so an absorbed nested scope
+reaches no second record.
+`a_boxed_child_paints_from_a_text_block_that_is_its_own_context`
+(`crates/dom/tests/web_text_replication.rs:986`) now runs in CI.
 
 ### C. Shaping
 
