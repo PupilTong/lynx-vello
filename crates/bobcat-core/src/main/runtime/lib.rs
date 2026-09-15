@@ -523,10 +523,6 @@ impl EventState {
 /// weakly, so queued finalizers cannot extend the channels' lifetime.
 pub(crate) struct MainThreadRuntime {
     engine: ScriptEngine,
-    /// MTS declares that BTS startup has settled, through a native binding.
-    /// Module evaluation can finish independently while the BTS entry is
-    /// still loading.
-    readiness: Rc<Cell<bool>>,
     /// This realm's side of the workers it created, shared with the three
     /// host functions that drive them, and where a worker failure is reported
     /// from.
@@ -599,15 +595,12 @@ impl MainThreadRuntime {
         )?;
         style_sheets::install_styles(&mut engine, js_runtime, &slot, &outbox)?;
         install_page_data(&mut engine, js_runtime, page_data)?;
-        let readiness = Rc::new(Cell::new(false));
-        install_readiness(&mut engine, js_runtime, &readiness)?;
         let (workers, incoming) = workers
             .install(&mut engine, js_runtime, outbox, base_url, background_entry)
             .map_err(|error| MainThreadError::from_engine("installing Worker", error))?;
         Ok((
             Self {
                 engine,
-                readiness,
                 workers,
                 slot,
                 events,
@@ -989,22 +982,6 @@ await Promise.resolve().then(() => __FlushElementTree());
         self.engine.take_module_request()
     }
 
-    /// Module completion and the application's readiness declaration are
-    /// separate facts. The page reports success only after both, after commit.
-    pub(crate) fn is_ready(&mut self) -> Result<bool, MainThreadError> {
-        Ok(self.readiness.get() && self.main_module_finished()?)
-    }
-
-    /// Whether BTS has declared readiness, module completion aside.
-    ///
-    /// The narrow half of [`Self::is_ready`], for a test that has to
-    /// recognize the `backgroundReady` message by what delivering it did:
-    /// the message itself is a structured clone, opaque to Rust.
-    #[cfg(test)]
-    pub(crate) fn readiness_declared(&self) -> bool {
-        self.readiness.get()
-    }
-
     pub(crate) fn main_module_finished(&mut self) -> Result<bool, MainThreadError> {
         self.engine
             .module_finished()
@@ -1354,20 +1331,6 @@ fn install_document_members(
     })?;
 
     Ok(())
-}
-
-/// Installs the MTS declaration that BTS startup has settled: BTS posted
-/// `backgroundReady`, or its Worker ended first.
-fn install_readiness(
-    engine: &mut ScriptEngine,
-    js_runtime: &mut ScriptRuntime,
-    readiness: &Rc<Cell<bool>>,
-) -> Result<(), MainThreadError> {
-    let readiness = Rc::clone(readiness);
-    install(engine, js_runtime, "notifyReady", 0, move |_arguments| {
-        readiness.set(true);
-        Ok(HostValue::Undefined)
-    })
 }
 
 /// Installs `initData`, `globalProps` and `initialProcessor`, handing the realm

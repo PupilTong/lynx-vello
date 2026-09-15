@@ -119,9 +119,6 @@ declare module "bobcat-internal:host" {
   /** Initial processor name, handed over once as a plain string. */
   export function initialProcessor(): string | undefined;
   export function requestScriptFrame(pending: boolean): void;
-  /** BTS startup has settled: it posted `backgroundReady`, or its Worker
-   * ended first. Idempotent. */
-  export function notifyReady(): void;
   export function preloadStyleSheet(url: string): void;
   export function adoptStyleSheet(url: string): void;
   export function reportScriptError(level: string, message: string): void;

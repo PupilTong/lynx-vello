@@ -1,4 +1,4 @@
-//! Public host updates require readiness and retain their order afterwards.
+//! Public host updates require MTS boot and reach a loading BTS in order.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -20,16 +20,9 @@ struct Observed {
     booted: bool,
 }
 
-async fn until(
-    view: &mut LynxView<DelayedBackground>,
-    seen: &mut Observed,
-    expected: &str,
-    require_ready: bool,
-) {
+async fn until(view: &mut LynxView<DelayedBackground>, seen: &mut Observed, expected: &str) {
     let deadline = Instant::now() + Duration::from_secs(20);
-    while !seen.messages.iter().any(|message| message == expected)
-        || (require_ready && !view.is_ready())
-    {
+    while !seen.messages.iter().any(|message| message == expected) || !view.is_ready() {
         for event in view.pump() {
             match event {
                 EngineEvent::ScriptFinished => seen.booted = true,
@@ -70,7 +63,7 @@ fn reject_updates(view: &LynxView<DelayedBackground>) {
     clippy::too_many_lines,
     reason = "one public-API sequence pins ordering across the delayed BTS boot and both reload origins"
 )]
-async fn public_updates_require_readiness_then_preserve_order() {
+async fn public_updates_require_mts_boot_then_preserve_order() {
     let page = PageSource::from_bytes(&Url::parse("app:///lifecycle.xml").unwrap(), br#"
       <lynx engine-version="4.1"><script thread="main">
         if (SystemInfo.pixelRatio !== 1 || SystemInfo.pixelWidth !== 100 || SystemInfo.pixelHeight !== 100)
@@ -143,22 +136,30 @@ async fn public_updates_require_readiness_then_preserve_order() {
         .unwrap();
     reject_updates(&view);
     let mut seen = Observed::default();
-    until(&mut view, &mut seen, "mts render 2", false).await;
-    assert!(!view.is_ready());
-    reject_updates(&view);
-    assert!(!seen.booted);
-    released.set(true);
-    until(&mut view, &mut seen, "bts first-screen 2", true).await;
+    until(&mut view, &mut seen, "mts render 2").await;
     assert!(seen.booted);
+    assert!(view.is_ready());
+    assert!(!released.get());
     view.update_data(json!({"raw":2}).to_string(), String::new())
         .unwrap();
+    until(&mut view, &mut seen, "mts update 3 false false").await;
+    assert!(
+        !seen
+            .messages
+            .iter()
+            .any(|message| message.starts_with("bts ")),
+        "the held BTS entry must not have run yet: {:?}",
+        seen.messages
+    );
+    released.set(true);
+    until(&mut view, &mut seen, "bts update 3 0").await;
     view.reset_data(json!({"raw":3}).to_string(), String::new())
         .unwrap();
     view.update_global_props(json!({"theme":"dark"}).to_string())
         .unwrap();
     view.reload(json!({"raw":4}).to_string(), String::new())
         .unwrap();
-    until(&mut view, &mut seen, "bts first-screen 5", true).await;
+    until(&mut view, &mut seen, "bts first-screen 5").await;
     assert_eq!(
         seen.messages
             .iter()
@@ -177,7 +178,7 @@ async fn public_updates_require_readiness_then_preserve_order() {
     );
     view.send_global_event("reload-from-bts", "[]".into())
         .unwrap();
-    until(&mut view, &mut seen, "bts callback", true).await;
+    until(&mut view, &mut seen, "bts callback").await;
     assert!(
         seen.messages
             .iter()

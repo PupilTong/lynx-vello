@@ -68,7 +68,7 @@ use dom::stylo::values::computed::FontStyle;
 use tokio::sync::mpsc;
 
 use super::*;
-use crate::background::{WorkerCommand, WorkerEvent, WorkerHome, WorkerPayload};
+use crate::background::{WorkerCommand, WorkerEvent, WorkerHome};
 use crate::link::{DetachedView, block_on_deadline, detached_outbox};
 use crate::main::tree::{PageConfig, Viewport};
 use crate::main::workers::WorkerFactory;
@@ -80,11 +80,6 @@ use crate::view::NoWakeup;
 const AHEM: &[u8] = include_bytes!("../../../../hughie/tests/fixtures/Ahem.ttf");
 
 /// How long a test waits for a thread that should already be working.
-/// The background realm's own readiness message, as a structural predicate
-/// rather than a substring: a `Message` payload is a `HostValue`, so the
-/// check is the same one `worker_tests.rs:21` makes.
-const IS_READY: &str = r#"(m) => m?.bobcat === "runtime" && m.method === "backgroundReady""#;
-
 const PATIENCE: Duration = Duration::from_secs(30);
 
 /// A same-thread window onto the realm-owned document, so a replica can read
@@ -179,24 +174,15 @@ impl BackgroundPair {
     }
 
     /// Waits for one worker event and hands it to the realm, as the view's
-    /// own task does. The background realm's own readiness is not one of
-    /// them: it is delivered and then waited past, so a card's first request
-    /// is what this returns on.
+    /// own task does.
     fn deliver(&mut self) {
         let deadline = ClockInstant::now() + PATIENCE;
-        loop {
-            let event = block_on_deadline(self.events.recv(), deadline)
-                .flatten()
-                .expect("a worker event arrives");
-            let ready = matches!(&event.payload, WorkerPayload::Message(value)
-                if crate::background::wire_matches(value, IS_READY));
-            self.runtime
-                .dispatch_worker_event(&mut self.js, event.key, event.payload)
-                .expect("the realm accepts its background thread's event");
-            if !ready {
-                return;
-            }
-        }
+        let event = block_on_deadline(self.events.recv(), deadline)
+            .flatten()
+            .expect("a worker event arrives");
+        self.runtime
+            .dispatch_worker_event(&mut self.js, event.key, event.payload)
+            .expect("the realm accepts its background thread's event");
     }
 }
 

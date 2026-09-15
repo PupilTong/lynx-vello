@@ -179,9 +179,7 @@ impl Harness {
             h.view.published.commit().is_some()
         })
         .await;
-        let background = self.background_worker();
-        acknowledge_background(&background);
-        self.background = Some(background);
+        self.background = Some(self.background_worker());
         self.until("the entry never finished", |harness| {
             harness
                 .events
@@ -206,18 +204,6 @@ impl Harness {
         };
         start
     }
-}
-
-fn acknowledge_background(background: &WorkerStart) {
-    background
-        .events
-        .send(crate::background::WorkerEvent {
-            key: background.key,
-            payload: crate::background::WorkerPayload::Message(crate::background::wire_value(
-                r#"{bobcat:"runtime",method:"backgroundReady"}"#,
-            )),
-        })
-        .unwrap();
 }
 
 fn is_dispose(message: &WorkerMessage) -> bool {
@@ -886,7 +872,10 @@ fn a_view_that_already_failed_still_reports_a_task_that_traps() {
 }
 
 #[test]
-fn readiness_is_reported_once_when_bts_acknowledges_after_mts_render() {
+fn script_finished_is_published_once_without_any_bts_acknowledgement() {
+    // Boot is the MTS entry's: the module evaluated and its first flush
+    // committed. The BTS Worker here is taken and never booted, so it says
+    // nothing at all — and the view is ready anyway, exactly once.
     on_a_local_set(async {
         let (context, workers) = group();
         let mut sources = ViewSources::new("app:///main.js");
@@ -901,25 +890,18 @@ fn readiness_is_reported_once_when_bts_acknowledges_after_mts_render() {
                 h.view.published.commit().is_some()
             })
             .await;
-        let background = harness.background_worker();
-        for _ in 0..4 {
-            harness.turn().await;
-        }
-        assert!(
-            !harness
-                .events
-                .iter()
-                .any(|e| matches!(e, EngineEvent::ScriptFinished))
-        );
-        acknowledge_background(&background);
-        acknowledge_background(&background);
+        let mut background = harness.background_worker();
         harness
-            .until("BTS acknowledgement did not finish boot", |h| {
+            .until("MTS boot did not finish on its own", |h| {
                 h.events
                     .iter()
                     .any(|e| matches!(e, EngineEvent::ScriptFinished))
             })
             .await;
+        // And nothing later adds a second one.
+        for _ in 0..4 {
+            harness.turn().await;
+        }
         assert_eq!(
             harness
                 .events
@@ -929,14 +911,82 @@ fn readiness_is_reported_once_when_bts_acknowledges_after_mts_render() {
             1
         );
         harness.view.token.cancel();
-        let mut background = background;
         answer_disposal(&mut background).await;
         harness.owner.await.unwrap();
     });
 }
 
 #[test]
-fn a_bts_worker_that_fails_reports_worker_failed_and_settles_boot() {
+fn disposal_finishes_behind_a_job_heavy_worker_event() {
+    // A checkpoint runs the job queue dry however long it is. When it did
+    // not, the jobs one worker event queued were finished out of the *next*
+    // event's entry — and the reply disposal was waiting for was spent
+    // there instead of reaching JavaScript, so the view never ended.
+    on_a_local_set(async {
+        let (context, workers) = group();
+        let mut harness = Harness::new(context, workers);
+        harness
+            .until("entry request", |h| !h.sources.is_empty())
+            .await;
+        harness.answer(
+            "app:///main.js",
+            r"__CreatePage();
+lynx.getJSContext().addEventListener('flood', () => {
+    for (let i = 0; i < 4096; i++) Promise.resolve().then(() => {});
+});",
+        );
+        harness
+            .until("MTS did not render", |h| {
+                h.view.published.commit().is_some()
+            })
+            .await;
+        // Held here rather than in `harness.background`, so the harness's own
+        // turns do not acknowledge disposal before the flood is queued behind
+        // the `dispose` post.
+        let mut background = harness.background_worker();
+        harness
+            .until("MTS boot did not finish", |h| {
+                h.events
+                    .iter()
+                    .any(|e| matches!(e, EngineEvent::ScriptFinished))
+            })
+            .await;
+
+        harness.view.token.cancel();
+        {
+            let background = &mut background.messages;
+            let mut posted = false;
+            harness
+                .until("the BTS was never asked to dispose", |_| {
+                    while let Ok(message) = background.try_recv() {
+                        posted |= is_dispose(&message);
+                    }
+                    posted
+                })
+                .await;
+        }
+        // One event whose listener floods the job queue, then the reply the
+        // owner is waiting for. Both are due in this order on the one worker
+        // event stream.
+        background
+            .events
+            .send(crate::background::WorkerEvent {
+                key: background.key,
+                payload: crate::background::WorkerPayload::Message(crate::background::wire_value(
+                    r#"{type:"flood",data:null,origin:"JSContext"}"#,
+                )),
+            })
+            .unwrap();
+        acknowledge_disposal(&background);
+        harness
+            .until("the owner never ended", |h| h.owner.is_finished())
+            .await;
+        harness.owner.await.unwrap();
+    });
+}
+
+#[test]
+fn a_bts_worker_that_fails_reports_worker_failed_and_leaves_boot_alone() {
     on_a_local_set(async {
         let (context, workers) = group();
         let mut sources = ViewSources::new("app:///main.js");
@@ -952,6 +1002,15 @@ fn a_bts_worker_that_fails_reports_worker_failed_and_settles_boot() {
             })
             .await;
         let background = harness.background_worker();
+        // Boot is already settled when the failure arrives: it is the MTS
+        // entry's own, and the BTS Worker is no part of it.
+        harness
+            .until("MTS boot did not finish", |h| {
+                h.events
+                    .iter()
+                    .any(|e| matches!(e, EngineEvent::ScriptFinished))
+            })
+            .await;
         background
             .events
             .send(crate::background::WorkerEvent {
@@ -965,10 +1024,10 @@ fn a_bts_worker_that_fails_reports_worker_failed_and_settles_boot() {
             })
             .unwrap();
         harness
-            .until("BTS failure did not settle boot", |h| {
+            .until("the BTS failure was never reported", |h| {
                 h.events
                     .iter()
-                    .any(|e| matches!(e, EngineEvent::ScriptFinished))
+                    .any(|e| matches!(e, EngineEvent::WorkerFailed(_)))
             })
             .await;
         assert!(

@@ -15,7 +15,10 @@ it. There is no native app hook, BTS role flag, or special promise-job drain.
 Disposal remains deliverable during an unfinished BTS entry import, cleaning up
 any hook already installed. Unlike web-core's readiness wait, this cannot wait
 for the entire entry: a released view no longer services its resource fetcher.
-An already closed or failed Worker also completes the MTS disposal wait.
+An already closed or failed Worker also completes the MTS disposal wait: MTS
+keeps its Worker reference, but disposing a view whose BTS already ended
+completes without posting `dispose`, and a post to an ended Worker would in any
+case be dropped by the host.
 
 ## The MTS realm boundary
 

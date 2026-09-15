@@ -10,8 +10,32 @@
 // during dispatch follow EventTarget's `(type, callback, capture)` rules; the
 // capture bit participates in identity even on a standalone target with no
 // ancestor path for it to reorder.
+//
+// One listener that throws never ends the dispatch: DOM's "inner invoke"
+// reports the exception and moves on to the next listener, which is what this
+// module does. *Where* it is reported is realm-specific, and this module can
+// import nothing realm-specific, so each runtime installs its own reporter as
+// it evaluates (`installExceptionReporter`).
 
 const eventTargetListeners = Symbol("eventTargetListeners");
+
+/**
+ * Reports a listener exception the way the realm reports an uncaught one.
+ *
+ * Until a realm installs its own, rethrowing is all this can do: reporting is
+ * the realm's, and a swallowed exception with nowhere to go is worse than the
+ * pre-isolation behavior. Both runtimes install one as they evaluate.
+ */
+let reportException: (error: unknown) => void = (error) => {
+  throw error;
+};
+
+export function installExceptionReporter(
+  report: (error: unknown) => void,
+): undefined {
+  reportException = report;
+  return undefined;
+}
 
 interface RuntimeEventListener {
   callback: Function | object;
@@ -39,12 +63,11 @@ export function hasEventListener(target: EventTarget, name: string): boolean {
   return target[eventTargetListeners].has(name);
 }
 
-// Engine dispatch supplies per-listener error reporting. The public
-// EventTarget walk keeps its ordinary JavaScript call semantics.
-export function dispatchEventListeners(
-  target: EventTarget,
-  event: unknown,
-  call: (callback: Function, receiver: object, event: unknown) => unknown = (callback, receiver, value) => Reflect.apply(callback, receiver, [value])) {
+/**
+ * Runs one target's listeners for an event, isolated from one another, and
+ * answers what `dispatchEvent` answers: whether nothing cancelled the event.
+ */
+export function dispatchEventListeners(target: EventTarget, event: unknown) {
   if (
     event === null ||
     (typeof event !== "object" && typeof event !== "function")
@@ -70,13 +93,20 @@ export function dispatchEventListeners(
       target.removeEventListener(name, listener.callback, listener.capture);
     }
 
-    if (typeof listener.callback === "function") {
-      call(listener.callback, target, event);
-    } else {
-      const handleEvent = Reflect.get(listener.callback, "handleEvent");
-      if (typeof handleEvent === "function") {
-        call(handleEvent, listener.callback, event);
+    // The exception one listener throws is reported, not propagated: the
+    // listeners behind it still run, and the caller of dispatchEvent — a host
+    // entry, or a script that knows nothing of who listens — sees none of it.
+    try {
+      if (typeof listener.callback === "function") {
+        Reflect.apply(listener.callback, target, [event]);
+      } else {
+        const handleEvent = Reflect.get(listener.callback, "handleEvent");
+        if (typeof handleEvent === "function") {
+          Reflect.apply(handleEvent, listener.callback, [event]);
+        }
       }
+    } catch (error) {
+      reportException(error);
     }
   }
   return Reflect.get(event, "defaultPrevented") !== true;

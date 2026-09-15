@@ -23,12 +23,12 @@ its first `worker.postMessage`. Worker transport supplies the structured-clone
 copy, so the processed result must be one the serializer accepts; there is no
 native bootstrap-data binding, JSON map or generated data-bearing
 BTS module. The BTS bootstrap installs its receiver and returns, allowing the
-initialization message to arrive. JS initializes its inputs, imports the entry,
-and posts `backgroundReady` once that import settles, whether it finished or
-threw. An entry that throws is reported through the worker realm's
+initialization message to arrive. JS initializes its inputs and imports the
+entry. An entry that throws is reported through the worker realm's
 `reportError`, which reaches the `Worker`'s `error` event and a nonfatal
 `WorkerFailed`, and leaves BTS running.
-Context/lifecycle messages received during that import wait on its Promise. Undefined object members, nonfinite numbers and negative zero all
+Context/lifecycle messages received during that import wait on its Promise and
+are delivered in order once it settles, success or failure. Undefined object members, nonfinite numbers and negative zero all
 survive; own `__proto__` keys remain ordinary data. Rust
 carries opaque structured clones, not realm values or DOM handles. BTS receives the
 parsed data before its entry runs:
@@ -57,18 +57,25 @@ is false. No pre-update cache, processor coalescing or path-based merge is added
 
 ## Readiness and delivery order
 
-MTS render/flush completes without waiting for BTS. Public readiness requires
-both MTS completion and the BTS acknowledgement. `LynxView::pump` records it
-before returning `ScriptFinished`; `is_ready()` exposes the same state.
+MTS render/flush completes without waiting for BTS. Public readiness is MTS boot
+finishing: the entry module evaluated, its top-level await settled, and its first
+flush committed. `LynxView::pump` records it
+before returning `ScriptFinished`; `is_ready()` exposes the same state. The BTS
+Worker's state plays no part, so a BTS entry whose top-level await never settles
+does not keep the view from becoming ready.
 
 Every host lifecycle operation (`update_data`, `reset_data`, `update_global_props`,
-`reload`, and `send_global_event`) returns `EngineError::NotReady` until readiness
-has been observed or after the view ends. Rejected commands never enter the
+`reload`, and `send_global_event`) returns `EngineError::NotReady` until that MTS
+boot has been observed or after the view ends. Rejected commands never enter the
 channel. Embedders supply initial data/props in `ViewSources`, then wait for
 readiness before sending updates. There is no pre-realm props cache, early-update
 policy, initial-render flag or replay queue for host updates.
 
-Accepted updates use the existing ordered command and Worker channels. Internal
+Accepted updates use the existing ordered command and Worker channels. MTS runs
+its own hook at once and forwards the update to BTS with `Worker.postMessage`.
+An update accepted while the BTS entry still imports is held by the BTS runtime
+behind that import and delivered in order once it settles, success or failure;
+Rust never sends page data to BTS, so MTS `postMessage` is the only path. Internal
 MTS messages produced by entry evaluation or rendering still retain their order
 before Worker connection and while the BTS entry imports. React owns data merging,
 RESET semantics, rerendering and component state; Rust sends a command and
@@ -128,6 +135,7 @@ Core tests cover readiness, initial argument retention, processor names/fallback
 cross-realm snapshots, live ESM props, failed BTS entry loading and Promise-job
 order. JS tests cover engine/global-hook precedence, merged props, update/reset
 options, both reload paths, coercion and callback release. The source integration
-rejects public updates before readiness, including while BTS loads; after readiness
-it verifies FIFO delivery, unchanged entry execution count and a BTS-origin reload.
+rejects public updates before MTS boot finished; after it, updates are accepted
+while BTS still loads and reach BTS in order once its entry settles, and the test
+verifies FIFO delivery, unchanged entry execution count and a BTS-origin reload.
 It also checks SystemInfo and initial data in both entries.

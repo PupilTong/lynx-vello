@@ -327,7 +327,9 @@ impl Page {
         }
         runtime.commit_if_dirty();
         if !self.boot_reported.get() {
-            match runtime.is_ready() {
+            // MTS boot alone: the entry module evaluated and its first flush
+            // committed. The BTS Worker's own state is not part of it.
+            match runtime.main_module_finished() {
                 Ok(false) => {}
                 Ok(true) => {
                     self.boot_reported.set(true);
@@ -415,7 +417,7 @@ impl Page {
     ) {
         match command {
             ToMain::PageUpdate(update) => {
-                // All host lifecycle commands passed LynxView's readiness gate.
+                // All host lifecycle commands passed LynxView's MTS-boot gate.
                 if let Err(error) = runtime.apply_page_update(js, &update) {
                     self.fail(EngineEvent::ScriptRunError(error.into_script_error()));
                 }
@@ -477,7 +479,7 @@ impl Page {
             };
             for command in commands {
                 match command {
-                    // LynxView rejects lifecycle commands until readiness.
+                    // LynxView rejects lifecycle commands until MTS boot ends.
                     ToMain::PageUpdate(_) => {}
                     ToMain::Resize {
                         width,

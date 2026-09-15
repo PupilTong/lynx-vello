@@ -226,13 +226,6 @@ mod implementation {
         }
     }
 
-    /// Result of a bounded pending-job drain.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub struct JobDrain {
-        pub executed: usize,
-        pub jobs_remaining: bool,
-    }
-
     const INTERRUPT_REQUESTED: u64 = 1;
     const MAX_INTERRUPT_GENERATION: u64 = u64::MAX >> 1;
 
@@ -921,7 +914,7 @@ mod implementation {
         /// context is [`ErrorKind::WrongRealm`] — and neither do failures: a
         /// rejection this realm leaves unhandled is reported to this realm,
         /// by the drain that names it (see
-        /// [`Runtime::drain_pending_jobs_up_to`]).
+        /// [`Runtime::drain_pending_jobs`]).
         pub fn create_context(&self) -> Result<Context, Error> {
             self.inner.reclaim();
             let raw = NonNull::new(unsafe { ffi::qjs_context_new(self.inner.raw.as_ptr()) })
@@ -1015,7 +1008,7 @@ mod implementation {
 
         /// Runs one pending job, reporting for `realm`.
         ///
-        /// See [`Self::drain_pending_jobs_up_to`] for what `realm` decides.
+        /// See [`Self::drain_pending_jobs`] for what `realm` decides.
         pub fn try_execute_pending_job(&mut self, realm: &Context) -> Result<bool, Error> {
             self.inner.reclaim();
             let guard = self.inner.interrupt.begin();
@@ -1031,7 +1024,19 @@ mod implementation {
 
         /// Runs every pending job, reporting for `realm`.
         ///
-        /// See [`Self::drain_pending_jobs_up_to`] for what `realm` decides.
+        /// The queue is the runtime's, so this runs whatever is queued
+        /// whichever realm queued it — a job of another realm's is still this
+        /// runtime's work, and leaving it unrun would stall that realm. It
+        /// runs to exhaustion: a job that queues another job is part of the
+        /// same drain, exactly as a browser's microtask checkpoint is.
+        ///
+        /// An *unhandled rejection* is not the runtime's. Only one `realm`
+        /// left behind is reported here; one another realm left behind stays
+        /// queued for that realm's own next drain, so a failure never arrives
+        /// at a caller that could not have caused it. A rejection handled
+        /// later in the same drain is not one: the tracker un-queues it when
+        /// a handler is attached, which is why the question is only asked
+        /// once the queue has run dry.
         pub fn drain_pending_jobs(&mut self, realm: &Context) -> Result<usize, Error> {
             self.inner.reclaim();
             let guard = self.inner.interrupt.begin();
@@ -1044,43 +1049,6 @@ mod implementation {
                     return Err(error);
                 }
                 Ok(executed)
-            })();
-            guard.finish(result, ErrorPhase::PendingJob)
-        }
-
-        /// Runs at most `budget` pending jobs and reports whether work remains.
-        ///
-        /// The queue is the runtime's, so this runs whatever is queued
-        /// whichever realm queued it — a job of another realm's is still this
-        /// runtime's work, and leaving it unrun would stall that realm.
-        ///
-        /// An *unhandled rejection* is not the runtime's. Only one `realm`
-        /// left behind is reported here; one another realm left behind stays
-        /// queued for that realm's own next drain, so a failure never arrives
-        /// at a caller that could not have caused it.
-        pub fn drain_pending_jobs_up_to(
-            &mut self,
-            realm: &Context,
-            budget: usize,
-        ) -> Result<JobDrain, Error> {
-            self.inner.reclaim();
-            let guard = self.inner.interrupt.begin();
-            let result = (|| {
-                let mut executed = 0usize;
-                while executed < budget && self.try_execute_pending_job_inner()? {
-                    executed += 1;
-                }
-                let jobs_remaining = self.has_pending_jobs();
-                // A rejection handled later in the same drain is not one:
-                // the tracker un-queues it when a handler is attached, so
-                // the question is only asked once the queue has run dry.
-                if !jobs_remaining && let Some(error) = self.take_unhandled_rejection(realm) {
-                    return Err(error);
-                }
-                Ok(JobDrain {
-                    executed,
-                    jobs_remaining,
-                })
             })();
             guard.finish(result, ErrorPhase::PendingJob)
         }
@@ -3053,7 +3021,7 @@ mod implementation {
                     )
                     .expect("self-replenishing job chain should start");
                 let error = runtime
-                    .drain_pending_jobs_up_to(&realm, usize::MAX)
+                    .drain_pending_jobs(&realm)
                     .expect_err("the whole drain must share one deadline");
                 let reused = realm
                     .evaluate(EvalSource::new("84 / 2"), EvalOptions::default())
@@ -3574,7 +3542,7 @@ mod implementation {
                 )
                 .unwrap();
 
-            let error = runtime.drain_pending_jobs_up_to(&realm, 8).unwrap_err();
+            let error = runtime.drain_pending_jobs(&realm).unwrap_err();
             assert_eq!(error.phase, ErrorPhase::PendingJob);
             assert_eq!(error.name.as_deref(), Some("Error"));
             assert_eq!(error.message, "unhandled");
@@ -3615,19 +3583,16 @@ mod implementation {
                 )
                 .unwrap();
 
-            let drain = runtime
-                .drain_pending_jobs_up_to(&second, 8)
+            runtime
+                .drain_pending_jobs(&second)
                 .expect("a sibling's checkpoint does not inherit the failure");
-            assert!(!drain.jobs_remaining);
+            assert!(!runtime.has_pending_jobs());
 
             let error = runtime
-                .drain_pending_jobs_up_to(&first, 8)
+                .drain_pending_jobs(&first)
                 .expect_err("the realm that left it still hears about it");
             assert_eq!(error.message, "the first realm");
-            assert!(
-                runtime.drain_pending_jobs_up_to(&first, 8).is_ok(),
-                "and only once"
-            );
+            assert!(runtime.drain_pending_jobs(&first).is_ok(), "and only once");
         }
 
         #[test]
@@ -3650,9 +3615,9 @@ mod implementation {
                 )
                 .unwrap();
 
-            let error = runtime.drain_pending_jobs_up_to(&second, 8).unwrap_err();
+            let error = runtime.drain_pending_jobs(&second).unwrap_err();
             assert_eq!(error.message, "second");
-            let error = runtime.drain_pending_jobs_up_to(&first, 8).unwrap_err();
+            let error = runtime.drain_pending_jobs(&first).unwrap_err();
             assert_eq!(error.message, "first");
         }
 
@@ -3669,29 +3634,12 @@ mod implementation {
                 )
                 .unwrap();
 
-            let first = runtime.drain_pending_jobs_up_to(&realm, 0).unwrap_err();
-            let second = runtime.drain_pending_jobs_up_to(&realm, 0).unwrap_err();
+            // With nothing queued a drain runs no job and hands back the
+            // realm's next unhandled rejection, one per call.
+            let first = runtime.drain_pending_jobs(&realm).unwrap_err();
+            let second = runtime.drain_pending_jobs(&realm).unwrap_err();
             assert_eq!(first.message, "first");
             assert_eq!(second.message, "second");
-        }
-
-        #[test]
-        fn bounded_drain_reports_remaining_jobs_precisely() {
-            let (mut runtime, mut realm) = runtime_and_realm();
-            realm
-                .evaluate(
-                    EvalSource::new(
-                        "Promise.resolve().then(() => {}).then(() => {}).then(() => {})",
-                    ),
-                    EvalOptions::default(),
-                )
-                .unwrap();
-
-            let first = runtime.drain_pending_jobs_up_to(&realm, 1).unwrap();
-            assert_eq!(first.executed, 1);
-            assert!(first.jobs_remaining);
-            assert!(runtime.drain_pending_jobs(&realm).unwrap() > 0);
-            assert!(!runtime.has_pending_jobs());
         }
 
         fn number(realm: &mut Context, source: &str) -> Option<f64> {
@@ -4057,6 +4005,6 @@ mod implementation {
 
 pub use implementation::{
     CallOutcome, Context, Error, ErrorKind, ErrorPhase, EvalOptions, EvalSource, HostArgument,
-    HostFunctionError, HostValue, InterruptHandle, JobDrain, Member, ModuleNormalizer, Runtime,
+    HostFunctionError, HostValue, InterruptHandle, Member, ModuleNormalizer, Runtime,
     RuntimeOptions, SourceLocation, SourceType, StructuredClone, Value, ValueKind,
 };

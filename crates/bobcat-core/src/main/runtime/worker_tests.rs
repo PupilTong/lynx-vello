@@ -15,10 +15,13 @@ use crate::view::NoWakeup;
 /// How long a test waits for a thread that should already be working.
 const PATIENCE: Duration = Duration::from_secs(30);
 
-/// Recognizes the BTS readiness declaration inside a structured clone, which
-/// Rust cannot read into: the clone goes back into a realm and this predicate
-/// is applied there.
-const IS_READY: &str = r#"(m) => m?.bobcat === "runtime" && m.method === "backgroundReady""#;
+/// What a test's BTS entry posts as its own last statement, for a test that
+/// must not proceed until that entry has evaluated.
+///
+/// Nothing announces the BTS entry any more — the view is ready on MTS boot
+/// alone — so a test that needs the entry's hook installed or its animation
+/// frame requested says so in the entry itself.
+const BTS_ENTRY_RAN: &str = "bts-entry-ran";
 
 /// Whether the worker posted exactly this string.
 ///
@@ -55,24 +58,7 @@ struct Pair {
 
 impl Pair {
     fn new(script: &str) -> Self {
-        let mut pair = Self::with_background(script, None);
-        // Ordinary Worker tests start with the built-in empty BTS ready, so
-        // its acknowledgement is not mistaken for the worker under test.
-        pair.acknowledge_background();
-        pair
-    }
-
-    fn acknowledge_background(&mut self) {
-        let event = block_on_deadline(self.events.recv(), ClockInstant::now() + PATIENCE)
-            .flatten()
-            .expect("BTS acknowledgement, including an empty BTS entry");
-        assert!(matches!(&event.payload, WorkerPayload::Message(value)
-            if crate::background::wire_matches(value, IS_READY)));
-        self.runtime
-            .as_mut()
-            .unwrap()
-            .dispatch_worker_event(&mut self.js, event.key, event.payload)
-            .unwrap();
+        Self::with_background(script, None)
     }
 
     fn with_background(script: &str, background_source: Option<&str>) -> Self {
@@ -170,16 +156,18 @@ impl Pair {
 
     fn next_event(&mut self) -> Option<WorkerEvent> {
         let deadline = ClockInstant::now() + PATIENCE;
+        block_on_deadline(self.events.recv(), deadline).flatten()
+    }
+
+    /// Waits for the marker a test's BTS entry posts last, dispatching
+    /// whatever it said before it and consuming the marker itself.
+    fn await_background_entry(&mut self) {
         loop {
-            let event = block_on_deadline(self.events.recv(), deadline).flatten()?;
-            // Readiness is declared once, so the reader below runs only
-            // until it has been: reading a structured clone back costs a
-            // realm of its own, and after readiness no message is this one.
-            let ready = !self.runtime.as_ref().unwrap().readiness_declared()
-                && matches!(&event.payload, WorkerPayload::Message(value)
-                    if crate::background::wire_matches(value, IS_READY));
-            if !ready {
-                return Some(event);
+            let event = self.next_event().expect("the BTS entry's own marker");
+            if matches!(&event.payload, WorkerPayload::Message(value)
+                if posted(value, BTS_ENTRY_RAN))
+            {
+                return;
             }
             self.runtime
                 .as_mut()
@@ -1765,19 +1753,20 @@ fn host_global_events_reach_the_bts_emitter_in_order_after_a_listener_throws() {
 }
 
 #[test]
-fn mts_module_finishes_before_bts_declares_application_ready() {
-    for background in [None, Some("await Promise.resolve();")] {
+fn mts_boot_finishes_without_waiting_for_bts() {
+    // Boot is the MTS entry's own fact. A BTS entry whose top-level await
+    // never settles does not hold it back, and there is nothing further to
+    // wait for once the entry module has evaluated.
+    for background in [None, Some("await new Promise(() => {});")] {
         let mut pair = Pair::with_background("__CreatePage();", background);
-        let runtime = pair.runtime.as_mut().unwrap();
         assert!(
-            runtime.main_module_finished().unwrap(),
+            pair.runtime
+                .as_mut()
+                .unwrap()
+                .main_module_finished()
+                .unwrap(),
             "MTS never awaits BTS"
         );
-        assert!(!runtime.is_ready().unwrap());
-        pair.acknowledge_background();
-        let runtime = pair.runtime.as_mut().unwrap();
-        assert!(runtime.main_module_finished().unwrap());
-        assert!(runtime.is_ready().unwrap());
     }
 }
 
@@ -1799,9 +1788,6 @@ throw Error('BTS entry failed');",
             .main_module_finished()
             .unwrap()
     );
-    assert!(!pair.runtime.as_mut().unwrap().is_ready().unwrap());
-    // `next_event` dispatches the readiness message itself, so whichever of
-    // the two arrives first, what it returns is the failure.
     let event = pair.next_event().expect("the BTS entry reports its throw");
     let message = match &event.payload {
         WorkerPayload::Errored(error) => error.message.to_string(),
@@ -1813,12 +1799,6 @@ throw Error('BTS entry failed');",
         .unwrap()
         .dispatch_worker_event(&mut pair.js, event.key, event.payload)
         .unwrap();
-    // Readiness follows the entry either way. Which of the two the realm
-    // hears first is not this pin's business.
-    if !pair.runtime.as_ref().unwrap().readiness_declared() {
-        pair.acknowledge_background();
-    }
-    assert!(pair.runtime.as_mut().unwrap().is_ready().unwrap());
     let notices = pair.notices();
     assert!(
         !notices.iter().any(|notice| matches!(
@@ -1923,10 +1903,14 @@ fn mts_disposal_calls_the_current_bts_hook_once_before_js_terminates_the_worker(
                     Promise.resolve().then(() => postMessage('cleanup-job'));
                     if ({throws}) throw Error('cleanup failed');
                 }};
+                postMessage('{BTS_ENTRY_RAN}');
             "
             )),
         );
-        pair.acknowledge_background();
+        // The hook must be installed before disposal asks for it, and the
+        // marker is consumed here so it is not one of the messages disposal
+        // is compared against.
+        pair.await_background_entry();
         // Host cancellation leaves the live MTS Worker alone until JS disposal.
         pair.cancel.cancel();
         assert_eq!(pair.live_workers(), 1);
@@ -2120,6 +2104,7 @@ fn vsync_can_resume_mts_and_bts_entries_awaiting_their_first_frame() {
                 globalThis.postMessage('waiting for vsync');
             });
             if (time !== 500) throw Error('BTS frame timestamp');
+            postMessage('bts-entry-ran');
         ",
         ),
     );
@@ -2131,7 +2116,7 @@ fn vsync_can_resume_mts_and_bts_entries_awaiting_their_first_frame() {
         matches!(event.payload, WorkerPayload::Message(ref value) if posted(value, "waiting for vsync"))
     );
     pair.frame(500.0);
-    pair.acknowledge_background();
+    pair.await_background_entry();
     assert!(worker_failures(pair.notices()).is_empty());
 }
 
@@ -2149,10 +2134,12 @@ fn animation_callbacks_use_display_timestamps_and_defer_nested_requests() {
             });
             const cancelled = lynx.requestAnimationFrame(() => {throw Error('cancelled callback ran');});
             lynx.requestAnimationFrame(time => send('third', time));
+            postMessage('bts-entry-ran');
         ",
         ),
     );
-    pair.acknowledge_background();
+    // Every BTS frame request must be armed before the frame is dispatched.
+    pair.await_background_entry();
     pair.frame(1250.0);
     pair.deliver();
     pair.deliver();
@@ -2186,6 +2173,7 @@ fn bts_animation_frames_continue_while_an_mts_callback_is_blocked() {
             globalThis.postMessage({frame:time});
         }
         lynx.requestAnimationFrame(frame);
+        globalThis.postMessage('bts-entry-ran');
     ",
     ));
     let (blocked, waiting) = std::sync::mpsc::channel();
@@ -2210,7 +2198,8 @@ fn bts_animation_frames_continue_while_an_mts_callback_is_blocked() {
         .unwrap();
     pair.boot("import {block} from 'test:gate'; lynx.requestAnimationFrame(() => block());")
         .unwrap();
-    pair.acknowledge_background();
+    // The BTS frame request must be armed before the first dispatch below.
+    pair.await_background_entry();
     let mut events = std::mem::replace(&mut pair.events, mpsc::unbounded_channel().1);
     pair.pump_host();
     let (main_commands, mut incoming) = mpsc::unbounded_channel();
@@ -2269,10 +2258,11 @@ fn mts_animation_frames_continue_while_a_bts_callback_is_busy() {
                 while (Date.now() < until) {}
                 globalThis.postMessage('finished');
             });
+            globalThis.postMessage('bts-entry-ran');
         ",
         ),
     );
-    pair.acknowledge_background();
+    pair.await_background_entry();
     pair.frame(1000.0);
     let event = pair.next_event().unwrap();
     assert!(matches!(event.payload, WorkerPayload::Message(ref value) if posted(value, "busy")));
