@@ -24,19 +24,21 @@ One of them — the truncation marker gate — was put to the user and decided
 
 | File | Cases | Passing | Gap-ignored |
 | --- | --- | --- | --- |
-| [`crates/hughie/tests/web_text_replication.rs`](../../crates/hughie/tests/web_text_replication.rs) | paragraph algorithm: clamping, cut points, tail fitting, word-break | 15 | 4 |
+| [`crates/hughie/tests/web_text_replication.rs`](../../crates/hughie/tests/web_text_replication.rs) | paragraph algorithm: clamping, cut points, tail fitting, word-break | 16 | 3 |
 | [`crates/bobcat-core/src/main/tree/web_text_replication.rs`](../../crates/bobcat-core/src/main/tree/web_text_replication.rs) | the `<text>` element, its UA sheet and its attributes | 28 | 9 |
 | [`crates/bobcat-core/src/main/runtime/web_text_replication.rs`](../../crates/bobcat-core/src/main/runtime/web_text_replication.rs) | the Element PAPI: content, restyle, truncation, `setNativeProps`, layout events | 15 | 6 |
 | [`crates/dom/tests/web_text_replication.rs`](../../crates/dom/tests/web_text_replication.rs) | relayout, percentage sizing, scroll targets, glyph and atom paint | 11 | 4 |
 | [`crates/dom/tests/web_text_screenshots.rs`](../../crates/dom/tests/web_text_screenshots.rs) | golden screenshots — the originals' own oracle, for the cases whose claim is visual | 10 | 0 |
 | [`crates/bobcat-source/tests/web_text_css_replication.rs`](../../crates/bobcat-source/tests/web_text_css_replication.rs) | text CSS across the `.web.bundle` wire | 9 | 0 |
-| **Total** | | **88** | **23** |
+| **Total** | | **89** | **22** |
 
 A gap-ignored test asserts the `web-core` behavior and is marked
 `#[ignore = "GAP: …"]` naming the cause with a `file:line`. It is a real
 assertion, never weakened — run any file with `-- --ignored` and every one of
-the 23 fails on the assertion its own string names, so no ignore is masking a
-test that would now pass.
+the 22 fails on the assertion its own string names, so no ignore is masking a
+test that would now pass. Three of the 22 are marked `DEVIATION` instead: they
+assert `web-core` against a ruling that this engine follows native Lynx, and
+are listed in [F](#f-recorded-deviations-not-gaps).
 
 ### Screenshots
 
@@ -122,18 +124,43 @@ behavior. Both are deliberate outcomes of the ruling, not oversights, and both
 reverse by deleting one condition.
 
 CSS `text-overflow: ellipsis` as the real W3C single-line overflow marker is a
-**different** feature and is still unimplemented — see A2 below. The engine
-currently reaches the marker only through the two Lynx attributes; un-conflating
-the two stays correct under this ruling.
+**different** feature, and it is implemented in its own right — see
+[A2](#a-truncation--what-remains-open) below, now closed: an overflowing
+`white-space: nowrap` line is cut at the clip edge with neither Lynx attribute
+taking part. The engine therefore reaches the marker by two independent routes,
+and un-conflating them stays correct under this ruling.
 
 ### A. Truncation — what remains open
 
 | # | Gap | Cause |
 | --- | --- | --- |
 | A1 | `tail-color-convert` is unparsed | `truncate.rs:226` picks the run holding the last visible byte, which is the `="false"` behavior applied unconditionally; the default path should take the block's own style. |
-| A2 | No overflow-driven ellipsis path | `crates/hughie/src/text/block/mod.rs:625` — a cut needs a maxline clamp or a maxlength cut, so CSS `text-overflow: ellipsis` on an overflowing `nowrap` line marks nothing. This is the genuinely-W3C half, distinct from the Lynx attributes. |
-| A3 | No `text-maxline="1"` nowrap / fill-available treatment | `crates/bobcat-core/src/main/tree/text.rs:91-101` has no counterpart to `web-core`'s `x-text.css:216-241`, so a one-line clamp breaks at a word boundary instead of running to the parent's edge. Measured 288 where the reference gives 384. |
 | A4 | `ellipsize-mode` is inert | `text.rs:26-31` — `apply_attribute_style` matches only `text-maxline` and `text-maxlength`. Carried by no test of its own. |
+
+**A2 — the overflow-driven ellipsis path — is closed.** A `white-space: nowrap`
+line wider than its measure is cut at the clip edge under
+`text-overflow: ellipsis`, which is css-ui `text-overflow` in its own right:
+neither `text-maxline` nor `text-maxlength` takes part, and the clamp path
+never saw the case because the one line had consumed all of its source.
+`TextBlock::overflow_cut`
+([`crates/hughie/src/text/block/mod.rs:776-874`](../../crates/hughie/src/text/block/mod.rs))
+compares the line's visible advance against the constraint, keeps the widest
+prefix that still leaves room for the dots — shaped once in the run at that
+boundary by `measure_dots` (`:876-897`) — and hands the result to
+`truncate::plan` (`mod.rs:645`) as a third cut candidate beside the two clamps
+(`crates/hughie/src/text/block/truncate.rs:28-40,132-140`), so `ellipsis_count`,
+`truncated()` and the existing `CutPlan` path all hold unchanged. With
+truncation content present the cut retreats until the freed width covers it;
+under `text-overflow: clip` nothing is cut and the line simply overflows, which
+is what the property asks for.
+
+The path is restricted to a nowrap paragraph whose breaking left **exactly one
+line**. A cut drops every line past the one it falls in, which is right for the
+single unbroken line `nowrap` normally produces and wrong for the several a
+preserved newline can still leave, so that shape is left uncut rather than half
+served. `an_overflowing_nowrap_line_is_marked_by_text_overflow_ellipsis`
+(`crates/hughie/tests/web_text_replication.rs:1247-1284`) is un-ignored and
+passes.
 
 ### B. Atomic inline boxes — what #227 did not fix
 
@@ -213,6 +240,29 @@ Each blocks replicas that could not be written at all.
   `display_none_removes_a_text_block_and_an_inline_run_alike` stays `#[ignore]`d
   and marked DEVIATION rather than GAP, so the divergence stays visible and the
   ruling is reversible by narrowing one UA declaration.
+- **A3. `text-maxline="1"` is a one-line clamp, not a one-line shape.**
+  **Ruled (user, 2026-09-15): this engine follows native Lynx here.** Android
+  builds the `StaticLayout` at the available width and calls `setMaxLines(1)`
+  (`TextRenderer.shouldBeSingleLine()`,
+  `lynx/platform/android/lynx_android/src/main/java/com/lynx/tasm/behavior/shadow/text/TextRenderer.java:181-184,231-245`),
+  and iOS gives a container of the same size a `maximumNumberOfLines`
+  (`lynx/platform/darwin/ios/lynx/shadow_node/text/LynxTextRenderer.m:1009-1031`),
+  with the tail ellipsize reached only under `text-overflow: ellipsis`. So
+  `text-maxline="1"` clamps the paragraph as it normally wraps, and neither
+  `white-space: nowrap` nor a fill-available cap is forced. `web-core`'s
+  `x-text[text-maxline="1"]` pair (`x-text.css:216-241`) — `nowrap` plus
+  `max-width: -webkit-fill-available` — is therefore **not** replicated, and a
+  one-line clamp stops at the last word boundary that fit rather than running
+  to the parent's edge. The 09-14 marker ruling ([A0](#a0-truncation-marker-gating--ruled-not-a-gap))
+  is unaffected: the marker stays gated on `text-overflow`. Two replicas assert
+  `web-core` and stay `#[ignore]`d, marked DEVIATION rather than GAP —
+  `a_single_line_clamp_caps_the_block_to_its_parent_s_available_width` (the
+  88px cap) and
+  `a_one_line_clamp_fills_the_available_width_instead_of_breaking_at_a_word`
+  (the 384 ink), both in
+  `crates/bobcat-core/src/main/tree/web_text_replication.rs`. Their passing
+  sibling `a_one_line_clamp_keeps_the_nested_run_s_colour_and_the_parent_s_weight`
+  keeps the card's style claim in CI.
 - `var()` inside an `@font-face` descriptor is not substituted. Correct per
   css-variables-1 §3; the browser `web-core` runs on behaves identically.
 - `x-text`, `inline-image` and `inline-text` are `web-core`'s *HTML* mappings of
@@ -255,8 +305,8 @@ failure mode is easy to reintroduce.
 
 ## Native ↔ web conflicts
 
-`AGENTS.md` resolves these to `web-core` by default. Conflict 1 was put to the
-user and decided the other way; the rest stand as `web-core`.
+`AGENTS.md` resolves these to `web-core` by default. Conflicts 1 and 7 were put
+to the user and decided the other way; the rest stand as `web-core`.
 
 ### 1. Truncation marker gating
 
@@ -299,6 +349,17 @@ per-run. This engine follows the web
 Native uses an element's own `text` only when `childCount == 0`, and redirects
 the write into the first child when that child is a `raw-text`. `web-core`
 reflects unconditionally. Since #227 this engine follows `web-core`.
+
+### 7. `text-maxline="1"` geometry
+
+| | Behavior | Evidence |
+| --- | --- | --- |
+| native | A one-line clamp of the paragraph as it normally wraps: the layout is built at the available width and told to keep one line | Android `TextRenderer.java:181-184,231-245`; iOS `LynxTextRenderer.m:1009-1031` |
+| web-core | A one-line *shape*: `white-space: nowrap` on the inner box and `max-width: -webkit-fill-available` on the host, so the line never breaks and runs to the parent's edge | `x-text.css:216-241` |
+| lynx-vello | Clamped — **matches native** | `crates/hughie/src/text/block/mod.rs` truncation path; the UA sheet declares neither |
+
+**Decided (user, 2026-09-15): the clamp stays.** See
+[F](#f-recorded-deviations-not-gaps).
 
 ## Not replicated
 

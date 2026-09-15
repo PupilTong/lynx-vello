@@ -228,6 +228,34 @@ consequential choice about whether to follow the spec or the quirk.
   where every run carries the same value, which inheritance produces on its
   own. This is the D4 question `docs/text-measurement-and-ifc.md` reserves;
   the block module ships the web-shaped answer and records it here.
+- **`text-maxline="1"` is a one-line clamp, not a one-line shape** — **ruled by
+  the user on 2026-09-15**: on this one the engine follows native Lynx rather
+  than the `web-core` default. Native builds the paragraph's layout at the
+  available width and keeps one line of it — Android's `StaticLayout` is
+  constructed at the measure and told `setMaxLines(1)`
+  (`shouldBeSingleLine()`,
+  `lynx/platform/android/lynx_android/src/main/java/com/lynx/tasm/behavior/shadow/text/TextRenderer.java:181-184,231-245`),
+  and iOS gives an `NSTextContainer` of the same size a
+  `maximumNumberOfLines`
+  (`lynx/platform/darwin/ios/lynx/shadow_node/text/LynxTextRenderer.m:1009-1031`)
+  — with the tail ellipsize (`TruncateAt.END`,
+  `NSLineBreakByTruncatingTail`) reached only under
+  `text-overflow: ellipsis`. `web-core` instead makes the attribute a *shape*:
+  `white-space: nowrap` on the inner box plus
+  `max-width: -webkit-fill-available` on the host
+  (`x-text.css:216-241`), so its line never breaks and runs to the parent's
+  edge. This engine declares neither, so a one-line clamp stops at the last
+  word boundary that fit and the block is as wide as that line. Two replicas
+  assert the `web-core` geometry and stay `#[ignore]`d, marked DEVIATION —
+  `a_single_line_clamp_caps_the_block_to_its_parent_s_available_width` and
+  `a_one_line_clamp_fills_the_available_width_instead_of_breaking_at_a_word`
+  in `crates/bobcat-core/src/main/tree/web_text_replication.rs`. Reversing the
+  ruling is two UA declarations. Unaffected by it: an overflowing
+  `white-space: nowrap` line *is* cut at the clip edge under
+  `text-overflow: ellipsis` (`TextBlock::overflow_cut`,
+  `crates/hughie/src/text/block/mod.rs:776-874`), which is css-ui
+  `text-overflow` in its own right and what both references do for a line that
+  overflows its measure.
 
 ## Event model & gestures (see [dom-events.md](dom-events.md))
 

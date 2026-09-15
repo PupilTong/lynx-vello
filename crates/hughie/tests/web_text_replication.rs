@@ -1253,9 +1253,6 @@ fn a_runs_line_height_is_not_taken_from_the_span_after_it() {
 /// `text-maxlength` take part — overflowing a line box is the trigger, which
 /// is CSS-UI's own `text-overflow` and a W3C feature in its own right.
 #[test]
-#[ignore = "GAP: there is no overflow-driven ellipsis path — a cut needs a \
-            maxline clamp or a maxlength cut, and a single nowrap line \
-            consumes all its source (crates/hughie/src/text/block/mod.rs:625)"]
 fn an_overflowing_nowrap_line_is_marked_by_text_overflow_ellipsis() {
     let body = ahem_at_line_height(15.0, 36.0);
     let items = [run(&body, "曼联积分榜最新排行榜")];
