@@ -6,7 +6,7 @@
   "license": "GPL-3.0-only",
   "type": "module",
   "scripts": {
-    "build:github-pages": "pnpm --filter bobcat-wasm build && pnpm --filter github-pages build",
+    "build:github-pages": "pnpm --filter bobcat-wasm build && pnpm --filter @explorer/homepage build && pnpm --filter github-pages build",
     "build:examples": "pnpm --recursive --filter './examples/*' --if-present run build",
     "build:explorer": "pnpm --recursive --filter './packages/explorer-*' --if-present run build",
     "test:examples": "pnpm --recursive --filter './examples/*' --if-present run test",

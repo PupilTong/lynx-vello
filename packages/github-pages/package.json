@@ -13,6 +13,7 @@
     "bobcat-wasm": "workspace:*"
   },
   "devDependencies": {
+    "@explorer/homepage": "workspace:*",
     "@rsbuild/core": "2.2.4",
     "@types/node": "catalog:",
     "typescript": "catalog:"

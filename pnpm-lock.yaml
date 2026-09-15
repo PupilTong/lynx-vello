@@ -746,6 +746,9 @@ importers:
         specifier: workspace:*
         version: link:../../crates/bobcat-wasm
     devDependencies:
+      '@explorer/homepage':
+        specifier: workspace:*
+        version: link:../explorer-homepage
       '@rsbuild/core':
         specifier: 2.2.4
         version: 2.2.4
