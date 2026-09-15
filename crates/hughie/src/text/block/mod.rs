@@ -46,7 +46,7 @@ pub use style::{
     BlockStyle, Direction, LineHeight, RunStyle, TextAlign, TextIndent, TextOverflow, TextWrap,
     VerticalAlign, WordBreak,
 };
-use truncate::{CutPlan, Tail};
+use truncate::{CutPlan, OverflowCut, Tail};
 
 use crate::geometry::{Point, Size};
 use crate::style::TextBrush;
@@ -199,6 +199,9 @@ pub struct BlockMetrics {
     pub first_baseline: Option<f32>,
 }
 
+/// The dots-form ellipsis marker, as text.
+const DOTS: &str = "...";
+
 /// How many already-answered constraints one block remembers.
 ///
 /// Three, for the reason `MEASURED_BREAKS` is three on the measurement path:
@@ -260,6 +263,12 @@ pub struct TextBlock {
     /// How many times parley has actually broken these lines. The memo is
     /// only worth its state if a caller can see it working.
     breaks: u32,
+    /// The dots' advance in one content run's style, for the clip-edge cut.
+    ///
+    /// Constraint-independent, like the truncation content's own width: the
+    /// run styles a block was built from never change without a rebuild, so
+    /// one entry serves every `layout_at` that asks about the same run.
+    dots_width: Option<(u32, f32)>,
 }
 
 #[derive(Debug)]
@@ -346,6 +355,7 @@ impl TextBlock {
             committed: None,
             min_content: None,
             breaks: 0,
+            dots_width: None,
         }
     }
 
@@ -632,6 +642,8 @@ impl TextBlock {
             None
         };
 
+        let overflow_cut = self.overflow_cut(context, &natural_lines, &slot_units, width);
+
         let plan = truncate::plan(
             &self.natural,
             &natural_lines,
@@ -643,6 +655,7 @@ impl TextBlock {
             more_content,
             self.truncation.is_some(),
             truncation_width,
+            overflow_cut,
             width,
         );
 
@@ -760,6 +773,129 @@ impl TextBlock {
         }
     }
 
+    /// The clip-edge cut a `white-space: nowrap` line wider than its measure
+    /// takes — css-ui `text-overflow` in its own right, with neither
+    /// `text-maxline` nor `text-maxlength` taking part.
+    ///
+    /// The clamp path cannot see this case: the one line consumed all of its
+    /// source, so nothing "remains past the committed lines". What overflows
+    /// is the line box, and the decision is therefore an advance against the
+    /// constraint.
+    ///
+    /// Restricted to a paragraph whose nowrap breaking left exactly one line.
+    /// A cut drops every line past the one it falls in, which is right for the
+    /// single unbroken line `nowrap` normally produces and wrong for the
+    /// several a preserved newline can still leave, so that shape is left
+    /// uncut rather than half-served.
+    fn overflow_cut(
+        &mut self,
+        context: &mut TextContext,
+        natural_lines: &[NaturalLine],
+        slot_units: &[u32],
+        width: Option<f32>,
+    ) -> Option<OverflowCut> {
+        if self.style.text_wrap != TextWrap::NoWrap {
+            return None;
+        }
+        let width = width?;
+        let [line] = natural_lines else { return None };
+        let line = *line;
+        let visible_advance = {
+            let rendered = self.natural.get(0)?;
+            let metrics = rendered.metrics();
+            metrics.advance - metrics.trailing_whitespace
+        };
+        if visible_advance <= width {
+            return None;
+        }
+
+        let text = &self.content.block.text;
+        let map = &self.content.block.map;
+        // The widest prefix that fits the measure with nothing appended. Both
+        // branches below start from it.
+        let fit = truncate::clip_boundary(&self.natural, 0, line, text, map, slot_units, width);
+
+        if self.truncation.is_some() {
+            let marker = self.measure_truncation(context);
+            if marker >= width {
+                // Too wide for the container, exactly as on the clamp path:
+                // the content is hidden and the line keeps nothing.
+                return Some(OverflowCut {
+                    unit: line.start_unit,
+                    truncation_visible: false,
+                });
+            }
+            let unit = truncate::retreat_for_width(
+                &self.natural,
+                0,
+                NaturalLine {
+                    end_unit: fit,
+                    ..line
+                },
+                &self.content.block.text,
+                &self.content.block.map,
+                slot_units,
+                marker,
+            );
+            return Some(OverflowCut {
+                unit,
+                truncation_visible: true,
+            });
+        }
+
+        if self.style.overflow != TextOverflow::Ellipsis {
+            // `text-overflow: clip` appends nothing and cuts nothing: the line
+            // overflows and the element's own `overflow` clips the ink.
+            return None;
+        }
+        let cut_byte = map
+            .unit_to_byte(text, fit)
+            .unwrap_or_else(|| u32::try_from(text.len()).expect("text fits u32"));
+        let item = truncate::dots_item(&self.content.block.ranges, cut_byte)?;
+        // The dots are shaped in the run at the fit boundary and measured
+        // once. Backing off could in principle land the cut in an earlier run
+        // with a different advance; re-measuring per candidate would cost a
+        // shaping each, and the boundary run is the one the marker is drawn in
+        // for every case a single-run or uniformly-sized paragraph produces.
+        let dots = self.measure_dots(context, item);
+        let unit = truncate::clip_boundary(
+            &self.natural,
+            0,
+            line,
+            &self.content.block.text,
+            &self.content.block.map,
+            slot_units,
+            (width - dots).max(0.0),
+        );
+        Some(OverflowCut {
+            unit,
+            truncation_visible: false,
+        })
+    }
+
+    /// Shapes the three-dot marker in one run's style and caches its advance.
+    fn measure_dots(&mut self, context: &mut TextContext, item: u32) -> f32 {
+        if let Some((cached, width)) = self.dots_width
+            && cached == item
+        {
+            return width;
+        }
+        let width = {
+            let spans = [ShapeSpan {
+                bytes: 0..DOTS.len(),
+                style: self.content.run_style(item),
+                source: SourceItem::Ellipsis,
+            }];
+            let mut sources = Vec::new();
+            let mut probe =
+                shape::shape(context, &self.style, DOTS, &spans, Vec::new(), &mut sources);
+            probe.break_all_lines(None);
+            probe.width()
+        };
+        self.dots_width = Some((item, width));
+        width
+    }
+
     /// Shapes the truncation content unconstrained and caches its width.
     fn measure_truncation(&mut self, context: &mut TextContext) -> f32 {
         let style = &self.style;
@@ -832,7 +968,7 @@ impl TextBlock {
             Tail::None => {}
             Tail::Dots { count, item } => {
                 let start = text.len();
-                text.push_str(&"..."[..count as usize]);
+                text.push_str(&DOTS[..count as usize]);
                 spans.push(ShapeSpan {
                     bytes: start..text.len(),
                     style: self.content.run_style(item),

@@ -1267,17 +1267,31 @@ fn padding_narrows_the_measure_a_maxline_clamp_counts_lines_in() {
 /// its 88px parent.
 ///
 /// The fixture's ten CJK glyphs become ten Ahem em squares, which carry the
-/// same per-glyph advance. Today the block wraps first and then keeps the one
-/// line the clamp allows, so it ends up as wide as that wrapped line rather
-/// than as wide as the parent — 80 instead of 88 — which is the same missing
-/// cap seen from the other side.
+/// same per-glyph advance.
+///
+/// This does not hold here, and the cause is a ruling rather than an unbuilt
+/// feature. The user ruled on 2026-09-15 that `text-maxline="1"` follows
+/// native Lynx, where it is a one-line clamp of the paragraph as it normally
+/// wraps: Android builds the `StaticLayout` at the available width and calls
+/// `setMaxLines(1)` (`shouldBeSingleLine()`, lynx's
+/// `.../behavior/shadow/text/TextRenderer.java:181-184,231-245`), and iOS
+/// gives a container of the same size a `maximumNumberOfLines`
+/// (`.../ios/lynx/shadow_node/text/LynxTextRenderer.m:1009-1031`).
+/// Neither forces `white-space: nowrap` and neither caps the box at what the
+/// parent offers, so web-core's `x-text[text-maxline="1"]`
+/// nowrap/`-webkit-fill-available` pair (`x-text.css:216-241`) is not
+/// replicated: the block wraps first and keeps the one line the clamp allows,
+/// ending up as wide as that line — 80 rather than 88.
 #[test]
-#[ignore = "GAP: no fill-available cap for a single-line clamp — the UA sheet \
-            has no counterpart to web-core's \
+#[ignore = "DEVIATION, not a missing feature: this engine follows native \
+            Lynx, by the user's ruling of 2026-09-15. `text-maxline=\"1\"` is \
+            a one-line clamp of the paragraph as it normally wraps (Android \
+            `TextRenderer.shouldBeSingleLine()` plus a `StaticLayout` at the \
+            available width, iOS `maximumNumberOfLines`), so neither \
+            `white-space: nowrap` nor web-core's \
             `x-text[text-maxline=\"1\"] { max-width: -webkit-fill-available }` \
-            (crates/bobcat-core/src/main/tree/text.rs:91-101), and \
-            content_widths() reports the pre-alignment layout's own widths \
-            (crates/hughie/src/text/block/mod.rs:227-231,966-972)"]
+            (`x-text.css:216-241`) is replicated, and the block is as wide as \
+            the line it wrapped into"]
 fn a_single_line_clamp_caps_the_block_to_its_parent_s_available_width() {
     let mut document = ahem_document();
     let column = child(
@@ -1550,23 +1564,33 @@ fn a_one_line_clamp_keeps_the_nested_run_s_colour_and_the_parent_s_weight() {
 /// `::part(inner-box)` for `text-maxline="1"` (`x-text.css:216-230`) and
 /// `max-width: -webkit-fill-available` on the host (`x-text.css:232-237`), so
 /// the paragraph never breaks: the one line runs to the width the parent
-/// offers — the page's 393 here — and is ellipsized at that edge. This engine
-/// breaks the paragraph first and then keeps the first line, so its measure
-/// stops at the last word boundary that fit.
+/// offers — the page's 393 here — and is ellipsized at that edge.
+///
+/// This engine's is, and that is a ruling rather than an unbuilt feature. The
+/// user ruled on 2026-09-15 that `text-maxline="1"` follows native Lynx,
+/// which clamps the paragraph as it normally wraps to one line — Android's
+/// `StaticLayout` is built at the available width and told `setMaxLines(1)`
+/// (`shouldBeSingleLine()`, lynx's
+/// `.../behavior/shadow/text/TextRenderer.java:181-184,231-245`), iOS gives a
+/// container of the same size a `maximumNumberOfLines`
+/// (`.../ios/lynx/shadow_node/text/LynxTextRenderer.m:1009-1031`) — so the
+/// measure stops at the last word boundary that fit and web-core's
+/// nowrap/fill-available pair is not replicated.
 ///
 /// Split out of `a_one_line_clamp_keeps_the_nested_run_s_colour_and_the_parent_s_weight`
-/// so that the card's style claim, which holds today, stays in CI while the
-/// divergence this half carries is filed as the gap it is. It is the same
-/// missing `fill-available` cap that
+/// so that the card's style claim, which holds, stays in CI while this
+/// geometric half carries the divergence. The box cap is the same one
 /// `a_single_line_clamp_caps_the_block_to_its_parent_s_available_width` names
 /// from the other side.
 #[test]
-#[ignore = "GAP: no nowrap and no fill-available cap for a single-line clamp — \
-            the UA sheet has no counterpart to web-core's \
-            `x-text[text-maxline=\"1\"]` pair \
-            (crates/bobcat-core/src/main/tree/text.rs:91-101), so the block \
-            wraps at the measure and keeps the first line rather than running \
-            one unbroken line to the parent's edge"]
+#[ignore = "DEVIATION, not a missing feature: this engine follows native \
+            Lynx, by the user's ruling of 2026-09-15. `text-maxline=\"1\"` is \
+            a one-line clamp of the paragraph as it normally wraps (Android \
+            `TextRenderer.shouldBeSingleLine()` plus a `StaticLayout` at the \
+            available width, iOS `maximumNumberOfLines`), so web-core's \
+            `x-text[text-maxline=\"1\"]` nowrap/`-webkit-fill-available` pair \
+            (`x-text.css:216-241`) is not replicated and the kept line stops \
+            at the last word boundary that fit"]
 fn a_one_line_clamp_fills_the_available_width_instead_of_breaking_at_a_word() {
     let mut document = ahem_document();
     let text = child(&mut document, "text", "font-size: 24px; font-weight: bold");

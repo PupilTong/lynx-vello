@@ -25,6 +25,20 @@ use crate::style::TextBrush;
 /// many dots it appends.
 const ELLIPSIS_UNITS: u32 = 3;
 
+/// A cut decided from the line's own overflow rather than from a clamp.
+///
+/// css-ui `text-overflow` in its own right: a `white-space: nowrap` line
+/// wider than its measure is cut at the clip edge. Its width arithmetic needs
+/// a shaper — the marker's advance is not known until it is shaped — so the
+/// decision is taken in [`super::TextBlock`] and handed here as a third
+/// candidate beside the two clamps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::text::block) struct OverflowCut {
+    pub(in crate::text::block) unit: u32,
+    /// Whether the inline-truncation content is laid in at this cut.
+    pub(in crate::text::block) truncation_visible: bool,
+}
+
 /// One decided truncation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::text::block) struct CutPlan {
@@ -52,7 +66,8 @@ pub(in crate::text::block) enum Tail {
 /// Decides whether and where to cut. `truncation_width` is present exactly
 /// when maxline overflowed and truncation content exists; `has_truncation`
 /// says whether truncation content exists at all (it suppresses the dots
-/// marker even on a pure maxlength cut).
+/// marker even on a pure maxlength cut). `overflow_cut` is the clip-edge
+/// candidate a nowrap line already decided.
 #[allow(clippy::too_many_arguments, reason = "one decision reads both spaces")]
 pub(in crate::text::block) fn plan(
     natural: &Layout<TextBrush>,
@@ -65,6 +80,7 @@ pub(in crate::text::block) fn plan(
     maxline_overflow: bool,
     has_truncation: bool,
     truncation_width: Option<f32>,
+    overflow_cut: Option<OverflowCut>,
     width: Option<f32>,
 ) -> Option<CutPlan> {
     let last = *natural_lines.last()?;
@@ -113,12 +129,15 @@ pub(in crate::text::block) fn plan(
         .max_chars
         .filter(|&max_chars| max_chars < consumed_end);
 
-    let cut_unit = match (maxline_cut, maxchars_cut) {
-        (Some(a), Some(b)) => a.min(b),
-        (Some(a), None) => a,
-        (None, Some(b)) => b,
-        (None, None) => return None,
-    };
+    let overflow_cut = overflow_cut.map(|cut| {
+        truncation_visible |= cut.truncation_visible;
+        cut.unit
+    });
+
+    let cut_unit = [maxline_cut, maxchars_cut, overflow_cut]
+        .into_iter()
+        .flatten()
+        .min()?;
 
     let cut_byte = map
         .unit_to_byte(text, cut_unit)
@@ -177,7 +196,7 @@ pub(in crate::text::block) fn plan(
 /// unit before the end is never considered; at least two atoms are removed
 /// before the width can stop the walk. Lands on the line start when even the
 /// whole line does not free enough.
-fn retreat_for_width(
+pub(in crate::text::block) fn retreat_for_width(
     natural: &Layout<TextBrush>,
     line_index: usize,
     line: NaturalLine,
@@ -186,6 +205,30 @@ fn retreat_for_width(
     slot_units: &[u32],
     needed: f32,
 ) -> u32 {
+    let atoms = line_atoms(natural, line_index, line, text, map, slot_units);
+
+    let mut freed = 0.0;
+    let mut cut = line.start_unit;
+    for (removed, &(unit, advance)) in atoms.iter().rev().enumerate() {
+        freed += advance;
+        cut = unit;
+        if removed >= 1 && freed >= needed {
+            break;
+        }
+    }
+    cut
+}
+
+/// One line's units and their advances, in source order — text clusters and
+/// inline boxes alike, bounded above by the line's visible end.
+fn line_atoms(
+    natural: &Layout<TextBrush>,
+    line_index: usize,
+    line: NaturalLine,
+    text: &str,
+    map: &SourceMap,
+    slot_units: &[u32],
+) -> Vec<(u32, f32)> {
     let parley_line = natural.get(line_index).expect("the cut line is committed");
     let mut atoms = Vec::new();
     for run in parley_line.runs() {
@@ -207,23 +250,38 @@ fn retreat_for_width(
         }
     }
     atoms.sort_unstable_by_key(|atom| atom.0);
+    atoms
+}
 
-    let mut freed = 0.0;
-    let mut cut = line.start_unit;
-    for (removed, &(unit, advance)) in atoms.iter().rev().enumerate() {
-        freed += advance;
-        cut = unit;
-        if removed >= 1 && freed >= needed {
-            break;
+/// The first unit of the line that does not fit within `limit`, measured from
+/// the line's start — the exclusive end of the widest prefix that does fit.
+///
+/// The line's visible end when everything fits, which is the caller's signal
+/// that there is nothing to cut.
+pub(in crate::text::block) fn clip_boundary(
+    natural: &Layout<TextBrush>,
+    line_index: usize,
+    line: NaturalLine,
+    text: &str,
+    map: &SourceMap,
+    slot_units: &[u32],
+    limit: f32,
+) -> u32 {
+    let atoms = line_atoms(natural, line_index, line, text, map, slot_units);
+    let mut advance = 0.0;
+    for &(unit, atom) in &atoms {
+        advance += atom;
+        if advance > limit {
+            return unit;
         }
     }
-    cut
+    line.end_unit
 }
 
 /// The run whose style the dots inherit: the one containing the last visible
 /// byte, with the first run as the fallback for a cut at the very start.
 /// `None` — a paragraph with no text runs at all — suppresses the dots.
-fn dots_item(ranges: &[StyledRange], cut_byte: u32) -> Option<u32> {
+pub(in crate::text::block) fn dots_item(ranges: &[StyledRange], cut_byte: u32) -> Option<u32> {
     if cut_byte > 0
         && let Some(range) = ranges
             .iter()
