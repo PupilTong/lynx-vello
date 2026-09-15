@@ -27,15 +27,15 @@ One of them — the truncation marker gate — was put to the user and decided
 | [`crates/hughie/tests/web_text_replication.rs`](../../crates/hughie/tests/web_text_replication.rs) | paragraph algorithm: clamping, cut points, tail fitting, word-break | 15 | 4 |
 | [`crates/bobcat-core/src/main/tree/web_text_replication.rs`](../../crates/bobcat-core/src/main/tree/web_text_replication.rs) | the `<text>` element, its UA sheet and its attributes | 28 | 9 |
 | [`crates/bobcat-core/src/main/runtime/web_text_replication.rs`](../../crates/bobcat-core/src/main/runtime/web_text_replication.rs) | the Element PAPI: content, restyle, truncation, `setNativeProps`, layout events | 15 | 6 |
-| [`crates/dom/tests/web_text_replication.rs`](../../crates/dom/tests/web_text_replication.rs) | relayout, percentage sizing, scroll targets, glyph and atom paint | 10 | 5 |
+| [`crates/dom/tests/web_text_replication.rs`](../../crates/dom/tests/web_text_replication.rs) | relayout, percentage sizing, scroll targets, glyph and atom paint | 11 | 4 |
 | [`crates/dom/tests/web_text_screenshots.rs`](../../crates/dom/tests/web_text_screenshots.rs) | golden screenshots — the originals' own oracle, for the cases whose claim is visual | 10 | 0 |
 | [`crates/bobcat-source/tests/web_text_css_replication.rs`](../../crates/bobcat-source/tests/web_text_css_replication.rs) | text CSS across the `.web.bundle` wire | 9 | 0 |
-| **Total** | | **87** | **24** |
+| **Total** | | **88** | **23** |
 
 A gap-ignored test asserts the `web-core` behavior and is marked
 `#[ignore = "GAP: …"]` naming the cause with a `file:line`. It is a real
 assertion, never weakened — run any file with `-- --ignored` and every one of
-the 24 fails on the assertion its own string names, so no ignore is masking a
+the 23 fails on the assertion its own string names, so no ignore is masking a
 test that would now pass.
 
 ### Screenshots
@@ -151,10 +151,27 @@ the two stays correct under this ruling.
 | C1 | A run's `line-height` is taken from the style of the **next** span | Upstream parley: `shape/mod.rs:127-128` advances `item.style_index` before flushing the pending item, so the last span's `line-height` governs every line. Observed as a truncation flow's `line-height` rewriting lines *before* the cut. |
 | C2 | Leading collapsible whitespace is emitted, not removed | `crates/hughie/src/text/block/content.rs:359` — `PendingKind::Space => true` emits unconditionally with no start-of-line suppression. |
 
-### D. Paint
+### D. Paint — closed
 
-A gradient-valued `color` on a **nested** run is ignored: `crates/dom/src/paint/walker.rs:816-817`
-computes the gradient box only from the establishing element's own style.
+A gradient-valued `color` on a **nested** run used to be ignored: the tile the
+ramp filled from was one paragraph-level decision taken from the establishing
+element's own style, so a solid-coloured block resolved no tile at all and every
+nested run's gradient fell back to a solid fill.
+
+The tile is now per run, because `color` is a per-run property
+(`crates/dom/src/paint/text.rs:107-118`, `:187-241`): the establishing element
+keeps its padding box, and a nested element gets the union of its own line
+fragments — each fragment's advance horizontally, its line box vertically. That
+is the area `web-core`'s `color: transparent; background-clip: text` rewrite
+paints over (`packages/web-platform/web-core/src/style_transformer/rules.rs:259-291`).
+A nested scope that only *inherits* the gradient gets a union of its own rather
+than the ancestor's tile, which is also what `web-core` does:
+`--lynx-text-bg-color: inherit` plus `background-image: var(--lynx-text-bg-color)`
+applies on every nested `x-text` (`x-text.css:7-31`).
+
+Asserted by `a_gradient_color_on_a_nested_run_fills_only_that_run`
+(`crates/dom/tests/web_text_replication.rs:714`), which was the gap-ignored test
+for this row and now runs.
 
 ### E. Absent surfaces
 

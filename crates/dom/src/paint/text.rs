@@ -102,15 +102,19 @@ fn text_fill(style: &ComputedValues, gradient_box: Option<Rect>) -> TextFill {
 pub(crate) struct RunPaints<'doc> {
     by_style: Vec<RunPaint<'doc>>,
     fallback: RunPaint<'doc>,
-    /// The tile a gradient-valued `color` fills from. A paragraph-level
-    /// decision: the ramp spans the block's padding box however many runs
-    /// sample it.
-    gradient_box: Option<Rect>,
 }
 
 pub(crate) struct RunPaint<'doc> {
     style: &'doc ComputedValues,
     decorations: SmallVec<[Decorations; 2]>,
+    /// The tile this run's gradient-valued `color` fills from.
+    ///
+    /// A per-run decision, because `color` is a per-run property: the
+    /// establishing element's ramp spans its padding box, while a nested
+    /// element's spans that element's own line fragments, which is the box a
+    /// background on it would cover. `None` where no tile could be resolved,
+    /// which falls the run back to a solid fill.
+    gradient_box: Option<Rect>,
 }
 
 impl<'doc> RunPaints<'doc> {
@@ -127,9 +131,15 @@ impl<'doc> RunPaints<'doc> {
                 .paint_style(element)
                 .unwrap_or_else(|| unreachable!("the caller resolved this style already")),
             decorations: propagated_decorations(document, element),
+            gradient_box,
         };
         let sources = document.text_block_sources(element).unwrap_or_default();
         let mut by_style = Vec::new();
+        // The style indices a nested element's own ramp paints, with that
+        // element. Empty for every paragraph whose runs are solid-coloured or
+        // whose only gradient is the block's own, so the layout pass below
+        // never runs for them.
+        let mut nested: SmallVec<[(usize, crate::NodeId); 2]> = SmallVec::new();
         for index in 0..block.style_count() {
             let resolved = match block.source_of(u16::try_from(index).unwrap_or(u16::MAX)) {
                 SourceItem::Content(item) => sources
@@ -142,21 +152,27 @@ impl<'doc> RunPaints<'doc> {
                 SourceItem::Truncation(_) | SourceItem::Ellipsis => None,
             };
             by_style.push(match resolved {
-                Some((node, style)) => RunPaint {
-                    style,
-                    decorations: propagated_decorations(document, node),
-                },
+                Some((node, style)) => {
+                    if node != element && needs_gradient_box(style) {
+                        nested.push((index, node));
+                    }
+                    RunPaint {
+                        style,
+                        decorations: propagated_decorations(document, node),
+                        gradient_box,
+                    }
+                }
                 None => RunPaint {
                     style: fallback.style,
                     decorations: fallback.decorations.clone(),
+                    gradient_box,
                 },
             });
         }
-        Self {
-            by_style,
-            fallback,
-            gradient_box,
+        if !nested.is_empty() {
+            assign_nested_tiles(block.display(), &mut by_style, &nested);
         }
+        Self { by_style, fallback }
     }
 
     fn at(&self, style_index: usize) -> &RunPaint<'doc> {
@@ -165,6 +181,62 @@ impl<'doc> RunPaints<'doc> {
 
     fn block_style_run(&self) -> &RunPaint<'doc> {
         &self.fallback
+    }
+}
+
+/// Gives each nested run with a gradient-valued `color` the tile its ramp fills
+/// from: the union of that element's line fragments, in paragraph-local space.
+///
+/// Matches web-core, which rewrites `color: <gradient>` into
+/// `color: transparent; background-clip: text` plus a gradient background *on
+/// that element* (`packages/web-platform/web-core/src/style_transformer/
+/// rules.rs:259-291`), so the ramp spans the inline box's own background area:
+/// horizontally each fragment's advance, vertically its whole line box.
+///
+/// A fragment that only *inherits* the gradient from an enclosing scope gets a
+/// union of its own rather than the ancestor's tile. The two agree wherever the
+/// inner scope spans the outer one, which is the shape the reference's fixtures
+/// take.
+fn assign_nested_tiles(
+    layout: &Layout<crate::layout::TextBrush>,
+    by_style: &mut [RunPaint<'_>],
+    nested: &[(usize, crate::NodeId)],
+) {
+    // One entry per gradient-coloured element, not per style index: parley
+    // splits a run at every style change and at every line break, so one
+    // element's ink can arrive as several indices and must still sample one
+    // ramp. Linear scans over a list that is as long as the paragraph has
+    // gradient elements.
+    let mut tiles: SmallVec<[(crate::NodeId, Rect); 2]> = SmallVec::new();
+    for line in layout.lines() {
+        let metrics = line.metrics();
+        let top = f64::from(metrics.block_min_coord);
+        let bottom = f64::from(metrics.block_max_coord);
+        for item in line.items() {
+            let PositionedLayoutItem::GlyphRun(glyph_run) = item else {
+                continue;
+            };
+            let Some(glyph) = glyph_run.glyphs().next() else {
+                continue;
+            };
+            let index = glyph.style_index();
+            let Some(&(_, node)) = nested.iter().find(|(wanted, _)| *wanted == index) else {
+                continue;
+            };
+            let x = f64::from(glyph_run.offset());
+            let fragment = Rect::new(x, top, x + f64::from(glyph_run.advance()), bottom);
+            match tiles.iter_mut().find(|(seen, _)| *seen == node) {
+                Some((_, tile)) => *tile = tile.union(fragment),
+                None => tiles.push((node, fragment)),
+            }
+        }
+    }
+    for &(index, node) in nested {
+        // A style index with no glyph run of its own — an empty run, or one
+        // truncation removed — keeps the block's tile it was built with.
+        if let Some((_, tile)) = tiles.iter().find(|(seen, _)| *seen == node) {
+            by_style[index].gradient_box = Some(*tile);
+        }
     }
 }
 
@@ -353,7 +425,7 @@ fn paint_pass(
                 }
                 Layer::Ink => (
                     transform,
-                    text_fill(run.style, runs.gradient_box),
+                    text_fill(run.style, run.gradient_box),
                     text_stroke(run.style),
                     run.decorations.clone(),
                 ),
