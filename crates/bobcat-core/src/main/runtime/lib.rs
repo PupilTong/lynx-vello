@@ -523,9 +523,10 @@ impl EventState {
 /// weakly, so queued finalizers cannot extend the channels' lifetime.
 pub(crate) struct MainThreadRuntime {
     engine: ScriptEngine,
-    /// MTS declares application readiness through native bindings. Module
-    /// evaluation can finish independently while the BTS entry is still loading.
-    readiness: Rc<RefCell<Result<bool, ScriptError>>>,
+    /// MTS declares that BTS startup has settled, through a native binding.
+    /// Module evaluation can finish independently while the BTS entry is
+    /// still loading.
+    readiness: Rc<Cell<bool>>,
     /// This realm's side of the workers it created, shared with the three
     /// host functions that drive them, and where a worker failure is reported
     /// from.
@@ -598,7 +599,7 @@ impl MainThreadRuntime {
         )?;
         style_sheets::install_styles(&mut engine, js_runtime, &slot, &outbox)?;
         install_page_data(&mut engine, js_runtime, page_data)?;
-        let readiness = Rc::new(RefCell::new(Ok(false)));
+        let readiness = Rc::new(Cell::new(false));
         install_readiness(&mut engine, js_runtime, &readiness)?;
         let (workers, incoming) = workers
             .install(&mut engine, js_runtime, outbox, base_url, background_entry)
@@ -991,12 +992,7 @@ await Promise.resolve().then(() => __FlushElementTree());
     /// Module completion and the application's readiness declaration are
     /// separate facts. The page reports success only after both, after commit.
     pub(crate) fn is_ready(&mut self) -> Result<bool, MainThreadError> {
-        let module_finished = self.main_module_finished()?;
-        self.readiness
-            .borrow()
-            .clone()
-            .map(|ready| ready && module_finished)
-            .map_err(|error| MainThreadError::from_engine("starting the BTS application", error))
+        Ok(self.readiness.get() && self.main_module_finished()?)
     }
 
     /// Whether BTS has declared readiness, module completion aside.
@@ -1006,7 +1002,7 @@ await Promise.resolve().then(() => __FlushElementTree());
     /// the message itself is a structured clone, opaque to Rust.
     #[cfg(test)]
     pub(crate) fn readiness_declared(&self) -> bool {
-        matches!(*self.readiness.borrow(), Ok(true))
+        self.readiness.get()
     }
 
     pub(crate) fn main_module_finished(&mut self) -> Result<bool, MainThreadError> {
@@ -1360,39 +1356,18 @@ fn install_document_members(
     Ok(())
 }
 
-/// Installs MTS declarations of application readiness and startup failure.
+/// Installs the MTS declaration that BTS startup has settled: BTS posted
+/// `backgroundReady`, or its Worker ended first.
 fn install_readiness(
     engine: &mut ScriptEngine,
     js_runtime: &mut ScriptRuntime,
-    readiness: &Rc<RefCell<Result<bool, ScriptError>>>,
+    readiness: &Rc<Cell<bool>>,
 ) -> Result<(), MainThreadError> {
-    for (name, ready) in [("notifyReady", true), ("reportStartupFailure", false)] {
-        let readiness = Rc::clone(readiness);
-        install(
-            engine,
-            js_runtime,
-            name,
-            u8::from(!ready),
-            move |arguments| {
-                let outcome = if ready {
-                    Ok(true)
-                } else {
-                    Err(ScriptError {
-                        kind: crate::script::ScriptErrorKind::Exception,
-                        phase: crate::script::ScriptErrorPhase::ExecuteModule,
-                        message: string_argument(name, arguments, 0)?.into(),
-                        location: None,
-                    })
-                };
-                let mut state = readiness.borrow_mut();
-                if matches!(*state, Ok(false)) {
-                    *state = outcome;
-                }
-                Ok(HostValue::Undefined)
-            },
-        )?;
-    }
-    Ok(())
+    let readiness = Rc::clone(readiness);
+    install(engine, js_runtime, "notifyReady", 0, move |_arguments| {
+        readiness.set(true);
+        Ok(HostValue::Undefined)
+    })
 }
 
 /// Installs `initData`, `globalProps` and `initialProcessor`, handing the realm

@@ -1782,10 +1782,15 @@ fn mts_module_finishes_before_bts_declares_application_ready() {
 }
 
 #[test]
-fn a_failed_bts_entry_reports_startup_failure_without_rejecting_mts_evaluation() {
+fn a_throwing_bts_entry_reports_at_the_worker_and_leaves_bts_running() {
     let mut pair = Pair::with_background(
-        "__CreatePage();",
-        Some("throw Error('BTS startup failed');"),
+        r"__CreatePage();
+globalThis.results = [];
+lynx.getJSContext().addEventListener('reply', e => results.push(e.data));",
+        Some(
+            r"lynx.getJSModule('GlobalEventEmitter').addListener('host-event', value => lynx.getCoreContext().dispatchEvent({type:'reply', data:value}));
+throw Error('BTS entry failed');",
+        ),
     );
     assert!(
         pair.runtime
@@ -1795,14 +1800,51 @@ fn a_failed_bts_entry_reports_startup_failure_without_rejecting_mts_evaluation()
             .unwrap()
     );
     assert!(!pair.runtime.as_mut().unwrap().is_ready().unwrap());
-    let event = pair.next_event().expect("BTS startup failure");
-    let runtime = pair.runtime.as_mut().unwrap();
-    runtime
+    // `next_event` dispatches the readiness message itself, so whichever of
+    // the two arrives first, what it returns is the failure.
+    let event = pair.next_event().expect("the BTS entry reports its throw");
+    let message = match &event.payload {
+        WorkerPayload::Errored(error) => error.message.to_string(),
+        _ => panic!("a throwing entry is an ordinary worker error"),
+    };
+    assert!(message.contains("BTS entry failed"), "{message}");
+    pair.runtime
+        .as_mut()
+        .unwrap()
         .dispatch_worker_event(&mut pair.js, event.key, event.payload)
         .unwrap();
-    assert!(runtime.main_module_finished().unwrap());
-    let error = runtime.is_ready().unwrap_err();
-    assert!(error.to_string().contains("BTS startup failed"), "{error}");
+    // Readiness follows the entry either way. Which of the two the realm
+    // hears first is not this pin's business.
+    if !pair.runtime.as_ref().unwrap().readiness_declared() {
+        pair.acknowledge_background();
+    }
+    assert!(pair.runtime.as_mut().unwrap().is_ready().unwrap());
+    let notices = pair.notices();
+    assert!(
+        !notices.iter().any(|notice| matches!(
+            notice,
+            ViewNotice::Engine(crate::EngineEvent::StartupFailed(_))
+        )),
+        "a BTS entry that throws never ends the view"
+    );
+    let failures = worker_failures(notices);
+    assert_eq!(failures.len(), 1);
+    assert!(failures[0].message.contains("BTS entry failed"));
+    assert_eq!(pair.live_workers(), 1);
+    // The realm that threw still has its listeners and still takes messages.
+    pair.runtime
+        .as_mut()
+        .unwrap()
+        .apply_page_update(
+            &mut pair.js,
+            &crate::link::PageUpdate::GlobalEvent {
+                name: "host-event".into(),
+                arguments: "[7]".into(),
+            },
+        )
+        .unwrap();
+    pair.deliver();
+    pair.check("if (JSON.stringify(results) !== '[7]') throw Error(JSON.stringify(results));");
 }
 
 #[test]
@@ -2343,9 +2385,9 @@ fn verify_react_teardown(reload: bool, development: bool) {
         .iter()
         .filter_map(|event| {
             let message: serde_json::Value = serde_json::from_str(event).unwrap();
-            assert_ne!(message[0]["method"], "reportError", "{event}");
-            (message[0]["method"] == "console")
-                .then(|| message[0]["message"].as_str().unwrap().to_owned())
+            assert_ne!(message["method"], "reportError", "{event}");
+            (message["method"] == "console")
+                .then(|| message["message"].as_str().unwrap().to_owned())
                 .filter(|message| message.starts_with("reload-cleanup "))
         })
         .collect::<Vec<_>>();

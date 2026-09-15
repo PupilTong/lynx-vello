@@ -55,10 +55,12 @@ The built-in BTS sends `backgroundReady` over Worker `postMessage` after its
 optional entry completes, including when that entry is absent. The MTS message
 handler calls the native `notifyReady()` binding. The page publishes readiness
 once, after both that declaration and MTS completion, following the commit.
-BTS import failure sends `backgroundFailed`; MTS calls `reportStartupFailure(message)`.
-Worker errors reach the same binding through the MTS error handler;
-before readiness this reports `StartupFailed`, without rejecting the already
-completed MTS evaluation. Later errors keep the existing nonfatal Worker path.
+A BTS entry that throws calls the worker realm's `reportError`, so it reaches
+the `Worker`'s `error` event and a nonfatal `WorkerFailed` like any other
+worker script, and BTS sends `backgroundReady` after it. A BTS Worker that
+ends before declaring readiness settles it through the MTS `__bobcat:close`
+listener, which calls the same idempotent `notifyReady()`. No BTS failure ends
+the view.
 Worker ESM loading is part of this layer: the bootstrap's application import
 requests its source from the view fetcher, including XML background entries.
 The first Worker message initializes BTS before that import; later messages
@@ -120,5 +122,6 @@ formatting/forwarding. Real QuickJS tests exercise both realms and the actual
 Worker channel, including recovery after errors. Public view tests cover
 readiness observed through `pump()`, startup failure, early-event refusal without
 replay, and refusal after cancellation. Page-owner and runtime tests verify that MTS completes independently and
-BTS must acknowledge completion and that its failure reports one
-`StartupFailed`, without also reporting a listener failure or successful boot.
+BTS must acknowledge completion, and that a BTS failure reports one
+`WorkerFailed` and still publishes `ScriptFinished`, without a `StartupFailed`
+or a listener failure.

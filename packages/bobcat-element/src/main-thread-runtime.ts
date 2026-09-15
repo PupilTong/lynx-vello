@@ -30,7 +30,7 @@ import { __BobcatQueryNodes } from "bobcat:element";
 import type { NodeQueryRequest } from "bobcat:selector-query";
 import "bobcat:timers";
 import { requestScriptFrame } from "bobcat-internal:host";
-import { initialProcessor as getInitialProcessor, globalProps, initData, reportScriptError, logScriptMessage, notifyReady, reportStartupFailure, preloadStyleSheet, adoptStyleSheet } from "bobcat-internal:host";
+import { initialProcessor as getInitialProcessor, globalProps, initData, reportScriptError, logScriptMessage, notifyReady, preloadStyleSheet, adoptStyleSheet } from "bobcat-internal:host";
 import type { Worker } from "bobcat-internal";
 import type { TimerGlobals } from "bobcat:timers";
 
@@ -62,7 +62,6 @@ type FromBackground = LepusMethodCall | NodeQueryRequest
   | { bobcat: "runtime"; method: "reportError" | "console"; level: string; message: string }
   | { bobcat: "runtime"; method: "backgroundReady" }
   | { bobcat: "runtime"; method: "disposed" }
-  | { bobcat: "runtime"; method: "backgroundFailed"; message: string }
   | { bobcat: "runtime"; method: "reloadFromJS"; data?: unknown; id?: number }
   | (ContextEvent & { bobcat?: never });
 
@@ -194,6 +193,12 @@ export function __BobcatConnectBackground(worker: Worker, data: unknown) {
   worker.addEventListener("__bobcat:close", () => {
     if (backgroundWorker === worker) backgroundWorker = undefined;
     acknowledgeDisposal?.();
+    // A BTS that ended before declaring readiness (its realm could not be
+    // built, or its thread trapped: `Failed`, already reported as
+    // `WorkerFailed`) has settled its startup. Declaring it keeps the view
+    // from staying in the loading state with nothing left to wait for.
+    // `notifyReady` is idempotent on the host side.
+    notifyReady();
   });
   worker.addEventListener("message", (event: { data: FromBackground }) => {
     const message = event.data;
@@ -215,8 +220,6 @@ export function __BobcatConnectBackground(worker: Worker, data: unknown) {
         notifyReady();
       } else if (message.method === "disposed") {
         acknowledgeDisposal?.();
-      } else if (message.method === "backgroundFailed") {
-        reportStartupFailure(message.message);
       } else if (message.method === "reloadFromJS") {
         reloadPage(message.data, true);
         // Acknowledge after jobs already queued by the lifecycle hooks.
@@ -233,9 +236,6 @@ export function __BobcatConnectBackground(worker: Worker, data: unknown) {
     } else {
       jsContext.receive(message);
     }
-  });
-  worker.addEventListener("error", (event: {message: string}) => {
-    reportStartupFailure(event.message);
   });
   // Snapshot initial data before queued events or render can mutate it.
   worker.postMessage({bobcat: "runtime", method: "initialize", ...__BobcatBackgroundData(data), systemInfo: SystemInfo});

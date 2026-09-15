@@ -192,9 +192,14 @@ coreContext.addEventListener(
 
 coreContext.connect((event) => scope.postMessage({ type: event.type, data: event.data, origin: event.origin }));
 // Only the built-in BTS bootstrap arms initialization. Its first Worker
-// message supplies inputs; ordinary messages wait for the entry's imports.
+// message supplies inputs; ordinary messages wait for the entry's imports to
+// settle, whether they finished or threw.
 let startBackground: ((options: BackgroundData & {systemInfo?: Record<string, unknown>}) => Promise<void>) | undefined;
-let entryReady: Promise<boolean> | undefined;
+let entryReady: Promise<void> | undefined;
+
+function noop() {
+  return undefined;
+}
 
 export function __BobcatStartBTS(loadEntry: () => Promise<unknown>) {
   startBackground = async options => {
@@ -215,18 +220,20 @@ scope.addEventListener("message", (event: { data: FromMainThread }): void | Prom
     const start = startBackground;
     if (start) {
       startBackground = undefined;
-      entryReady = start(message).then(() => {
+      const started = start(message);
+      // An entry that throws is a worker script that throws: reported at the
+      // parent Worker's `error` event, with this realm still up and taking
+      // messages, as HTML's "run a worker" leaves it. Startup has settled
+      // either way, which is what MTS declares readiness on.
+      started.catch(error => scope.reportError(error));
+      entryReady = started.then(noop, noop).then(() => {
         entryReady = undefined;
         scope.postMessage({bobcat: "runtime", method: "backgroundReady"});
-        return true;
-      }, error => {
-        scope.postMessage({bobcat: "runtime", method: "backgroundFailed", message: printable(error)});
-        return false;
       });
     }
     return;
   }
-  if (entryReady) return entryReady.then(ready => { if (ready) return receiveMessage(message); });
+  if (entryReady) return entryReady.then(() => receiveMessage(message));
   return receiveMessage(message);
 });
 
