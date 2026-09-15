@@ -2343,9 +2343,9 @@ fn verify_react_teardown(reload: bool, development: bool) {
         .iter()
         .filter_map(|event| {
             let message: serde_json::Value = serde_json::from_str(event).unwrap();
-            assert_ne!(message[0]["method"], "reportError", "{event}");
-            (message[0]["method"] == "console")
-                .then(|| message[0]["message"].as_str().unwrap().to_owned())
+            assert_ne!(message["method"], "reportError", "{event}");
+            (message["method"] == "console")
+                .then(|| message["message"].as_str().unwrap().to_owned())
                 .filter(|message| message.starts_with("reload-cleanup "))
         })
         .collect::<Vec<_>>();
