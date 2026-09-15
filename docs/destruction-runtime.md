@@ -42,6 +42,19 @@ cannot prolong its lifetime. Rust has no `WorkerOwner::drop` termination loop.
 This GC ownership policy is the user-selected Bobcat behavior; collection is
 not prompt or a replacement for explicit termination when timing matters.
 
+What a page has to know about it: a `Worker` reachable only through its own
+`onmessage`/`onerror` handler is a cycle rather than a root, so it is
+collectable, and a message the worker already posted is then dropped where the
+routing weak reference is read — silently, because there is no object left to
+dispatch at. Every view of a group shares one `QuickJS` runtime, so the
+collection that takes a page's workers away can be the one a sibling view's
+boot runs; nothing about it is the page's to schedule. A page that waits for an
+answer keeps its worker named until it has one. Browsers diverge here: a
+running worker keeps its `Worker` object alive (Blink's `HasPendingActivity`),
+so the construct-handler-post shape delivers there regardless of references.
+`main::runtime::worker_tests::a_message_for_a_collected_worker_handle_is_dropped`
+and `a_named_worker_survives_a_collection_and_still_delivers` pin both sides.
+
 ## Object destruction observers
 
 `lynx.getNativeApp().createJSObjectDestructionObserver(callback)` follows

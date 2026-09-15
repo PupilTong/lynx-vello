@@ -2039,6 +2039,96 @@ fn unreachable_mts_worker_is_collected_without_releasing_the_view() {
     assert!(pair.finish().is_empty());
 }
 
+/// The shape a page writes by habit — construct, install a handler, post —
+/// keeps its `Worker` alive only through that handler's own closure, which is
+/// a cycle rather than a root. A collection between the worker's answer and
+/// its delivery clears the routing weak reference, and the answer is then
+/// dropped with no diagnostic anywhere: the page simply never hears back.
+///
+/// Pinned here because the collection is not the page's to schedule. Every
+/// view of a group shares one `QuickJS` runtime, so a sibling view's boot can
+/// run the collection that takes this page's workers away. A page that waits
+/// for an answer therefore has to name its worker for as long as it wants
+/// one, which is what `docs/destruction-runtime.md` means by this engine's
+/// handle collection policy. Browsers keep a running worker's object alive
+/// instead and deliver the message; that divergence is the policy rather than
+/// an oversight here.
+#[test]
+fn a_message_for_a_collected_worker_handle_is_dropped() {
+    let mut pair = Pair::new(
+        r"
+        import {Worker} from 'bobcat-internal';
+        globalThis.received = [];
+        {
+            const worker = new Worker('./worker.js');
+            worker.onmessage = event => received.push(event.data);
+            worker.postMessage('ready');
+        }
+    ",
+    );
+    pair.answer("onmessage = () => postMessage('answer');");
+    let event = pair.next_event().expect("the worker answers");
+    // QuickJS discovers the cycle in one collection and processes its weak
+    // registrations in the next, so the handle is released by the second.
+    for _ in 0..2 {
+        pair.runtime
+            .as_mut()
+            .unwrap()
+            .collect_garbage(&mut pair.js)
+            .unwrap();
+    }
+    assert_eq!(pair.live_workers(), 1, "only the built-in BTS remains");
+    pair.runtime
+        .as_mut()
+        .unwrap()
+        .dispatch_worker_event(&mut pair.js, event.key, event.payload)
+        .unwrap();
+    pair.check(
+        "if (received.length !== 0) throw Error('a collected Worker dispatched: ' + received.join());",
+    );
+    pair.dispose();
+    assert!(pair.finish().is_empty());
+}
+
+/// The same page with the one reference that makes the worker the page's: its
+/// answer arrives however many collections run in between.
+#[test]
+fn a_named_worker_survives_a_collection_and_still_delivers() {
+    let mut pair = Pair::new(
+        r"
+        import {Worker} from 'bobcat-internal';
+        globalThis.received = [];
+        globalThis.running = [];
+        {
+            const worker = new Worker('./worker.js');
+            running.push(worker);
+            worker.onmessage = event => received.push(event.data);
+            worker.postMessage('ready');
+        }
+    ",
+    );
+    pair.answer("onmessage = () => postMessage('answer');");
+    let event = pair.next_event().expect("the worker answers");
+    for _ in 0..2 {
+        pair.runtime
+            .as_mut()
+            .unwrap()
+            .collect_garbage(&mut pair.js)
+            .unwrap();
+    }
+    assert_eq!(pair.live_workers(), 2, "a named Worker survives GC");
+    pair.runtime
+        .as_mut()
+        .unwrap()
+        .dispatch_worker_event(&mut pair.js, event.key, event.payload)
+        .unwrap();
+    pair.check(
+        "if (received[0] !== 'answer') throw Error('the named worker was not heard: ' + received.join());",
+    );
+    pair.dispose();
+    assert!(pair.finish().is_empty());
+}
+
 #[test]
 fn collecting_a_worker_cancels_its_pending_source() {
     let mut pair = Pair::new(
