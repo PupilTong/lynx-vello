@@ -128,19 +128,19 @@ function mountShell(): Shell {
             </div>
             <div class="upload-fields">
               <div class="source-field">
-                <label for="canvas-zip">Local ZIP file</label>
-                <p id="zip-help" class="field-help">Choose a ZIP archive containing your template and resources.</p>
-                <input id="canvas-zip" type="file" required accept=".zip,application/zip,application/x-zip-compressed" aria-describedby="zip-help zip-status">
+                <label for="canvas-zip">Local ZIP file (optional)</label>
+                <p id="zip-help" class="field-help">Optionally choose a ZIP archive to provide local templates and resources.</p>
+                <input id="canvas-zip" type="file" accept=".zip,application/zip,application/x-zip-compressed" aria-describedby="zip-help zip-status">
                 <output id="zip-status" class="field-help" aria-live="polite">No ZIP selected</output>
               </div>
               <div class="source-field">
                 <label for="entry-template-url">Entry template URL</label>
-                <input id="entry-template-url" type="text" required placeholder="dist/main.web.bundle" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="template-loading-note">
+                <input id="entry-template-url" type="text" required placeholder="https://example.com/main.web.bundle" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="template-loading-note">
               </div>
-              <p id="template-loading-note" class="field-help">Enter a path from the ZIP root, or a full URL whose pathname matches it. Supports .lynx.xml, binary .web.bundle, and source-based .lynx.bundle templates.</p>
+              <p id="template-loading-note" class="field-help">Enter a template URL to load directly. With a ZIP selected, use zip:///dist/main.web.bundle, a path from the ZIP root, or a full URL whose pathname matches an archive entry. Supports .lynx.xml, binary .web.bundle, and source-based .lynx.bundle templates.</p>
             </div>
             <div class="editor-footer">
-              <output id="upload-status" class="field-help" aria-live="polite">Choose a ZIP and enter its template path.</output>
+              <output id="upload-status" class="field-help" aria-live="polite">Enter a template URL. A local ZIP is optional.</output>
             </div>
           </form>
 
@@ -535,16 +535,23 @@ class PreviewRenderer {
     }
   }
 
-  async renderArchive(file: File, entry: string): Promise<void> {
+  async renderTemplate(entry: string, file?: File): Promise<void> {
+    if (entry.trim() === '') {
+      throw new Error('Enter a template URL');
+    }
+    const entryUrl = new URL(
+      entry.trim(),
+      file === undefined ? document.baseURI : 'zip:///',
+    );
+    if (file === undefined) {
+      if (entryUrl.protocol === 'zip:') {
+        throw new Error('Choose a ZIP file to load a zip:/// template URL');
+      }
+      await this.#load((view) => view.loadTemplate(entryUrl));
+      return;
+    }
     if (file.size > 64 * 1024 * 1024) {
       throw new Error('ZIP exceeds the 64 MiB upload limit');
-    }
-    if (entry.trim() === '') {
-      throw new Error('Enter the template path inside the ZIP');
-    }
-    const entryUrl = new URL(entry.trim(), 'bobcat-memory://archive/');
-    if (!['bobcat-memory:', 'http:', 'https:'].includes(entryUrl.protocol)) {
-      throw new Error('Use a ZIP-relative path or an HTTP(S) entry template URL');
     }
     const bytes = await file.arrayBuffer();
     await this.#load((view) => view.loadZip(bytes, entryUrl));
@@ -705,13 +712,13 @@ function installSources(
 ): (label: string) => Promise<void> {
   let rendering = false;
 
-  const renderSource = async (label: string, archive = false): Promise<void> => {
+  const renderSource = async (label: string, template = false): Promise<void> => {
     if (rendering) {
       return;
     }
     rendering = true;
     const source = shell.editor.value;
-    const status = archive ? shell.uploadStatus : shell.sourceStatus;
+    const status = template ? shell.uploadStatus : shell.sourceStatus;
     const setStatus = (value: string, state: SourceState): void => {
       status.textContent = value;
       status.dataset['state'] = state;
@@ -720,7 +727,7 @@ function installSources(
     shell.editorForm.setAttribute('aria-busy', 'true');
     shell.renderButton.disabled = true;
     shell.loadButton.disabled = true;
-    shell.loadButton.textContent = archive ? 'Loading…' : 'Load template';
+    shell.loadButton.textContent = template ? 'Loading…' : 'Load template';
     shell.zipInput.disabled = true;
     shell.entryInput.disabled = true;
     shell.uploadPanel.setAttribute('aria-busy', 'true');
@@ -730,10 +737,8 @@ function installSources(
     shell.message.textContent = `Preparing the native Lynx view for ${label}…`;
 
     try {
-      if (archive) {
-        const file = shell.zipInput.files?.[0];
-        if (file === undefined) throw new Error('Choose a ZIP file first');
-        await renderer.renderArchive(file, shell.entryInput.value);
+      if (template) {
+        await renderer.renderTemplate(shell.entryInput.value, shell.zipInput.files?.[0]);
       } else {
         await renderer.render(source);
       }
