@@ -55,6 +55,9 @@ pub(super) fn install_styles(
             LoadedSource::Entry { .. } => {
                 return Err(format!("stylesheet {url} returned a script"));
             }
+            LoadedSource::Font(_) => {
+                return Err(format!("stylesheet {url} returned a font"));
+            }
         }
         Ok(HostValue::Undefined)
     })

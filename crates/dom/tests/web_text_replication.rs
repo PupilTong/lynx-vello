@@ -24,7 +24,7 @@ mod common;
 
 use common::{Doc, device};
 use dom::vello::peniko::Color;
-use dom::{FontBlob, NodeId, Vector2D};
+use dom::{FontBlob, FontFaceRequest, FontFaceSource, NodeId, Vector2D};
 use flashbulb::headless;
 
 const AHEM: &[u8] = include_bytes!("../../hughie/tests/fixtures/Ahem.ttf");
@@ -771,17 +771,13 @@ fn a_gradient_color_on_a_nested_run_fills_only_that_run() {
 /// text that asks for it.
 ///
 /// The original supplies that family through a card-authored
-/// `@font-face { src: url(...) }`. Nothing in this engine consumes an
-/// `@font-face` rule: the rule parses and enters the cascade
-/// (`crates/dom/src/style/engine.rs:417-426`) but there is no `src: url()`
-/// fetch anywhere, and faces reach shaping only as embedder-supplied blobs
-/// (`crates/dom/src/layout/mod.rs:192`). So the fixture is carried by two
-/// tests: this one, the adapted replica, where the extra face arrives through
-/// `register_fonts` instead of a URL and what is asserted is that selecting it
-/// by family name overrides the default family; and
+/// `@font-face { src: url(...) }`. `dom` fetches nothing itself, so the
+/// fixture is carried by two tests: this one, the adapted replica, where the
+/// extra face arrives through `register_fonts` and what is asserted is that
+/// selecting it by family name overrides the default family; and
 /// `a_font_face_declared_family_shapes_the_text_that_names_it` below, which
-/// asserts the unadapted reference — the card's own `@font-face` reaching
-/// shaping — and is ignored on the gap.
+/// asserts the unadapted reference — the card's own `@font-face`, reported
+/// over the loader seam and reaching shaping under its declared family.
 #[test]
 fn an_extra_registered_family_is_selected_over_the_default_one() {
     let mut doc = Doc::with_device(device(800.0, 600.0));
@@ -839,33 +835,27 @@ fn an_extra_registered_family_is_selected_over_the_default_one() {
 /// Ahem em squares at 16px are 80px of advance on a 16px line box, a number no
 /// other face in this test produces.
 ///
-/// Nothing consumes the rule. It parses into a real stylo `FontFaceRule`
-/// (`crates/dom/src/style/engine.rs:417-426`, per ruling R4 of this
-/// replication) and enters the cascade, but no reader of that variant exists
-/// anywhere in `crates/dom`, nothing fetches a `src:` URL, and the only way a
-/// face reaches shaping is `Document::register_fonts`
-/// (`crates/dom/src/layout/mod.rs:192`) forwarding embedder-owned bytes to
-/// `TextContext::register_fonts` (`crates/hughie/src/text/context.rs:54`) —
-/// whose blob type is constructible only from bytes the caller already holds
-/// (`crates/hughie/src/text/font.rs:17`, `:26`, `:35`), never from a URL. The
-/// declared family is therefore an unknown family and the run is shaped by
-/// whatever parley's fallback answers with — which is neither the declared
-/// face nor, as it happens, the registered default family either.
+/// `dom` performs no IO (`AGENTS.md`), so the rule is not fetched here: it is
+/// *reported*. `Document::take_font_face_requests`
+/// (`crates/dom/src/layout/mod.rs`) reduces every `@font-face` rule the
+/// cascade collected to a family plus its `src` components in author order,
+/// once per rule; the embedder loads one of them and hands the bytes back
+/// through `Document::register_font_face`, which files the face under the
+/// declared family rather than under the name inside the font file
+/// (`crates/hughie/src/text/context.rs`). This test stands in for the
+/// embedder — it reads the `file:` URL it was handed off the disk — so what it
+/// pins is the whole seam: the rule reaches the loader, and the loaded face
+/// reaches shaping under the declared name. The engine's own embedder half
+/// lives in `crates/bobcat-core` (the page's epilogue spawns one load per
+/// request over `SourceRequest::Font`).
 ///
-/// The bundle-side half of this path is green and covers only the wire:
+/// The bundle-side half of this path covers only the wire:
 /// `font_face_with_a_src_url_survives_the_bundle` and
 /// `font_face_descriptors_decode_in_authored_order_and_form` in
 /// `crates/bobcat-source/tests/web_text_css_replication.rs` carry the
 /// descriptors from a `.web.bundle` into the engine's stylesheet contract, and
-/// hand them to exactly the rule this test shows nobody reads.
+/// hand them to exactly the rule this test reads back.
 #[test]
-#[ignore = "GAP: an `@font-face` rule is parsed and cascaded but never read — \
-            crates/dom/src/style/engine.rs:417-426 builds the rule and no \
-            consumer of `CssRule::FontFace` exists in crates/dom, no `src:` \
-            URL is ever fetched, and the only path into shaping is \
-            Document::register_fonts (crates/dom/src/layout/mod.rs:192) \
-            handing crates/hughie/src/text/context.rs:54 bytes the embedder \
-            already owns"]
 fn a_font_face_declared_family_shapes_the_text_that_names_it() {
     const AHEM_URL: &str = concat!(
         "file://",
@@ -885,6 +875,33 @@ fn a_font_face_declared_family_shapes_the_text_that_names_it() {
     // the card's own, and reaches the document only through the rule above.
     assert_eq!(doc.dom.register_fonts(FontBlob::from_static(ROBOTO)), 1);
     assert!(doc.dom.set_default_font_family("Roboto"));
+
+    // What is reported is the URL resolved against the document's base, so
+    // the `..` this fixture path spells has already been normalized away.
+    let resolved = AHEM_URL.replace("/dom/../hughie/", "/hughie/");
+    let requests = doc.dom.take_font_face_requests();
+    assert_eq!(
+        requests,
+        vec![FontFaceRequest {
+            family: "DeclaredAhem".to_owned(),
+            sources: vec![FontFaceSource::Url(resolved.clone())],
+        }],
+        "the declared family and its one source, with the format hint dropped",
+    );
+    assert!(
+        doc.dom.take_font_face_requests().is_empty(),
+        "a rule is reported once, not again on the next drain",
+    );
+
+    // The embedder's half: fetch the source and hand the bytes back.
+    let bytes = std::fs::read(
+        resolved
+            .strip_prefix("file://")
+            .expect("the fixture URL is a file URL"),
+    )
+    .expect("the vendored Ahem fixture is on disk");
+    assert_eq!(doc.dom.register_font_face("DeclaredAhem", bytes.into()), 1);
+
     let root = doc.root;
     let label = doc.el(root, "view.label");
     let run = doc.dom.create_text_node("EXTRA", ());
@@ -896,6 +913,26 @@ fn a_font_face_declared_family_shapes_the_text_that_names_it() {
         (80.0, 16.0),
         "the declared face shapes the run that names its family, rather than \
          the run falling back to another face",
+    );
+
+    // A sheet mounted later is reported when it arrives, and only it.
+    doc.add_css(
+        "@font-face { font-family: LateFace; src: local(\"Helvetica\"); }
+         @font-face { font-family: Nameless; src: url(\"about:blank\"); }",
+    );
+    assert_eq!(
+        doc.dom.take_font_face_requests(),
+        vec![
+            FontFaceRequest {
+                family: "LateFace".to_owned(),
+                sources: vec![FontFaceSource::Local("Helvetica".to_owned())],
+            },
+            FontFaceRequest {
+                family: "Nameless".to_owned(),
+                sources: vec![FontFaceSource::Url("about:blank".to_owned())],
+            },
+        ],
+        "only the rules the new sheet added",
     );
 }
 

@@ -217,6 +217,18 @@ impl FetcherDouble {
         let (specifier, style_sheet, base_url) = match request {
             SourceRequest::StyleSheet(url) => (url, true, None),
             SourceRequest::Entry(url) | SourceRequest::Module(url) => (url, false, None),
+            // This double serves one payload, which is not a font. Refusing
+            // the request is what a host with no fonts does.
+            SourceRequest::Font { url } => {
+                return Err(ResourceError {
+                    kind: ResourceErrorKind::NotFound,
+                    phase: ResourceErrorPhase::Resolve,
+                    locator: Some(Arc::from(url.as_str())),
+                    message: "this double serves no fonts".into(),
+                    retry: RetryAdvice::Never,
+                }
+                .into());
+            }
             SourceRequest::Worker {
                 specifier,
                 base_url,

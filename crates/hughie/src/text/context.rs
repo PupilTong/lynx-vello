@@ -3,7 +3,9 @@
 use core::fmt;
 use std::sync::OnceLock;
 
-use parley::fontique::{Collection, CollectionOptions, GenericFamily, SourceCache};
+use parley::fontique::{
+    Collection, CollectionOptions, FontInfoOverride, GenericFamily, SourceCache,
+};
 use parley::{FontContext, LayoutContext};
 
 use super::FontBlob;
@@ -55,6 +57,32 @@ impl TextContext {
         self.font
             .collection
             .register_fonts(data.into_inner(), None)
+            .into_iter()
+            .map(|(_, fonts)| fonts.len())
+            .sum()
+    }
+
+    /// Registers an owned font resource under a CSS-declared family name.
+    ///
+    /// What an `@font-face` rule's `src` resolves to: the face is filed under
+    /// the rule's `font-family` rather than under the name inside the font
+    /// file, so a run naming the declared family shapes with it. The other
+    /// overridable metadata — width, style, weight, variation axes — stays the
+    /// font's own, because this engine reads none of the matching descriptors
+    /// beside `font-family` and `src` yet.
+    ///
+    /// Returns how many faces the blob contributed, like
+    /// [`Self::register_fonts`].
+    pub fn register_font_face(&mut self, family: &str, data: FontBlob) -> usize {
+        self.font
+            .collection
+            .register_fonts(
+                data.into_inner(),
+                Some(FontInfoOverride {
+                    family_name: Some(family),
+                    ..FontInfoOverride::default()
+                }),
+            )
             .into_iter()
             .map(|(_, fonts)| fonts.len())
             .sum()
@@ -133,6 +161,22 @@ mod tests {
         );
         assert_eq!(context.register_fonts(FontBlob::from_static(AHEM)), 1);
         assert!(context.font.collection.family_id("Ahem").is_some());
+    }
+
+    #[test]
+    fn a_declared_family_files_the_face_under_the_declared_name() {
+        let mut context = TextContext::without_system_fonts();
+
+        assert_eq!(
+            context.register_font_face("DeclaredAhem", FontBlob::from_static(AHEM)),
+            1
+        );
+
+        assert!(context.font.collection.family_id("DeclaredAhem").is_some());
+        assert!(
+            context.font.collection.family_id("Ahem").is_none(),
+            "the declared family replaces the name inside the font file"
+        );
     }
 
     #[test]

@@ -96,6 +96,47 @@ content and migrate raw-text to CSS" (#227)*, in two clauses:
 to invalidate half of one gap's cited cause (see B3 below). None of #211–#226 or
 #228–#235 changed a single result.
 
+### Closed after the 22d9ac1c assessment
+
+Three rows closed after that re-assessment. Two are written up where the gap
+they closed is listed — the nested-run gradient fill in [D. Paint —
+closed](#d-paint--closed) (#249, one dom row) and the overflow-driven ellipsis
+in [A2](#a-truncation--what-remains-open) (#250, one hughie row, which also
+re-labelled two `text-maxline="1"` tests GAP → DEVIATION). The third had no row
+of its own to close into, so it is written up here:
+
+- **`@font-face` → shaping** — was the last bullet of [E. Absent
+  surfaces](#e-absent-surfaces). A card-declared family now reaches shaping over
+  the seam the rest of the resource system already uses:
+  `StyleEngine::take_font_face_requests`
+  (`crates/dom/src/style/engine.rs:209`) reports each `@font-face` rule the
+  stylist collected once, as a family plus its `src` components in author order;
+  `Document::take_font_face_requests` / `Document::register_font_face`
+  (`crates/dom/src/layout/mod.rs:213`, `:223`) are the embedder's two calls, and
+  no IO happens in `dom`; the page's epilogue spawns one `load_font_face`
+  (`crates/bobcat-core/src/main/page.rs:968`) per request over
+  `SourceRequest::Font` (`crates/bobcat-core/src/resource.rs:131`);
+  `bobcat-resources` serves that request through the existing transports with no
+  charset decode and no UTF-8 check
+  (`crates/bobcat-resources/src/sources.rs:267-268`); and
+  `TextContext::register_font_face` (`crates/hughie/src/text/context.rs:76`)
+  files the blob under the **declared** family rather than the name inside the
+  font file. `a_font_face_declared_family_shapes_the_text_that_names_it`
+  (`crates/dom/tests/web_text_replication.rs:860`) is no longer `#[ignore]`d and
+  drives the whole seam, standing in for the embedder by reading the `file:` URL
+  it was handed off the disk.
+
+  What the seam deliberately does **not** do, each stated in a comment at the
+  code:
+
+  | Limit | Where it is stated |
+  | --- | --- |
+  | `local()` sources are skipped — naming a platform-installed face needs a font enumerator this engine does not have, and the native Harmony loader refuses it too. They are still *reported*, so an enumerator would only have to change the loader. | `crates/bobcat-core/src/main/page.rs:965-967` |
+  | A rule whose every `src` fails is dropped **silently**: nothing is waiting for a declared face, so the runs naming its family keep the fallback they already had. No log — the workspace has no logging facade — and no `EngineEvent`, whose every variant is either fatal or something a realm said. | `crates/bobcat-core/src/main/page.rs:957-963` |
+  | A relative `url()` does not resolve, because a document's base URL is `about:blank` (`crates/dom/src/tree/document.rs:26`) — pre-existing, not introduced here. An unresolved URL serializes empty and is dropped rather than handed to a fetcher that could only fail. | `crates/dom/src/style/engine.rs:135-137` |
+  | Shadow-scoped sheets are not walked: their rules live in a scoped `AuthorStyles` rather than in the stylist's origins, and no scoped sheet in this engine carries an `@font-face` yet. | `crates/dom/src/style/engine.rs:206-208` |
+  | `format()` / `tech()` hints and the matching descriptors (`font-style`, `font-weight`, `font-stretch`, `unicode-range`) are ignored. The first source that loads wins and registers under the declared family, so multiple faces for one family cannot be selected between — the CSS Fonts Level 4 §7 matching that [`css-at-rules.md`](css-at-rules.md) asks for is still absent. | `crates/dom/src/style/engine.rs:94-103`, `crates/hughie/src/text/context.rs:65-72` |
+
 ## Gaps and ruled deviations
 
 ### A0. Truncation marker gating — ruled, not a gap
@@ -234,11 +275,6 @@ Each blocks replicas that could not be written at all.
 - **Editable text controls.** No `<input>` or `<textarea>`; 54 catalogued cases
   are specified but unwritable.
 - **`scrollIntoView`** and its CSSOM-View alignment computation.
-- **`@font-face` → shaping.** The rule parses, lowers and enters the cascade, but
-  nothing reads it: `src:` is never fetched and no face is registered with
-  parley. Native Lynx also hands the map to the platform, so this is an engine
-  boundary rather than a defect — but no `@font-face` can currently change a
-  glyph.
 
 ### F. Recorded deviations, not gaps
 
@@ -297,9 +333,10 @@ failure mode is easy to reintroduce.
   overflows, where the content must be laid in at the clamp — is what pins the
   feature, and fails today. Three more replicas carry the same wiring gap at the
   tree layer and one at the dom layer.
-- **`@font-face` → shaping** is now carried by an ignored test in the dom file,
-  and the `bobcat-source` module doc states that its nine green tests cover the
-  wire and lowering only.
+- **`@font-face` → shaping** is now carried by a test in the dom file — written
+  ignored against the gap, un-ignored when the loader seam closed it above — and
+  the `bobcat-source` module doc states that its nine green tests cover the wire
+  and lowering only.
 - **`scrollIntoView` genuinely cannot be carried by a test.** There is no entry
   point in `crates/dom/src/scroll/`, so a test could only re-implement CSSOM-View
   inside itself and assert nothing about the engine. It stays report-only until

@@ -637,6 +637,7 @@ fn worker_script(
         Ok(Ok(LoadedSource::StyleSheet(_))) => {
             Err("the fetcher returned a stylesheet for a worker".to_owned())
         }
+        Ok(Ok(LoadedSource::Font(_))) => Err("the fetcher returned a font for a worker".to_owned()),
         Ok(Err(error)) => Err(error.to_string()),
         Err(_) => Err("the fetcher dropped the request".to_owned()),
     }

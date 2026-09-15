@@ -33,6 +33,58 @@ async fn text(response: CachedStyle) -> String {
     }
 }
 
+/// One load of any kind, over the same watch channel the style cache uses —
+/// `SourceCompletion`'s two ends are minted inside `bobcat-core`, and a
+/// destination is all this needs.
+fn load(resources: &Resources, url: &str, kind: SourceKind) -> CachedStyle {
+    let (sender, response) = watch::channel(None);
+    start(
+        resources,
+        Url::parse(url).expect("a URL"),
+        kind,
+        Destination::Cache(sender),
+    );
+    response
+}
+
+async fn font(resources: &Resources, url: &str) -> Vec<u8> {
+    match result(load(resources, url, SourceKind::Font))
+        .await
+        .unwrap()
+    {
+        LoadedSource::Font(blob) => blob.as_ref().to_vec(),
+        source => panic!("expected font bytes, got {source:?}"),
+    }
+}
+
+/// The vendored Ahem face, the one font fixture this workspace ships.
+const AHEM: &[u8] = include_bytes!("../../hughie/tests/fixtures/Ahem.ttf");
+
+#[tokio::test]
+async fn a_font_source_is_served_from_disk_without_utf8_validation() {
+    let resources = resources();
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../hughie/tests/fixtures/Ahem.ttf"
+    );
+
+    let bytes = font(&resources, &format!("file://{path}")).await;
+
+    assert_eq!(bytes, AHEM, "the face arrives byte for byte");
+    // The point of the assertion: a `.ttf` is not UTF-8, so a stylesheet or a
+    // script load of the same URL would have been refused for its encoding.
+    assert!(std::str::from_utf8(&bytes).is_err());
+}
+
+#[tokio::test]
+async fn a_font_source_is_served_from_a_data_url() {
+    let resources = resources();
+
+    let bytes = font(&resources, "data:font/ttf;base64,AAEAAAA=").await;
+
+    assert_eq!(bytes, [0x00, 0x01, 0x00, 0x00, 0x00]);
+}
+
 #[tokio::test]
 async fn normalized_preloads_and_reads_share_pending_and_completed_work() {
     let resources = resources();

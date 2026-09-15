@@ -343,6 +343,17 @@ impl DocumentSlot {
         }
     }
 
+    /// The `@font-face` rules the mounted sheets declared, once each.
+    ///
+    /// Empty before `createDocument`: the staged sheets are not in a cascade
+    /// yet, and the first entry after they are mounted asks again.
+    fn take_font_face_requests(&mut self) -> Vec<dom::FontFaceRequest> {
+        self.document
+            .as_mut()
+            .map(LynxDocument::take_font_face_requests)
+            .unwrap_or_default()
+    }
+
     /// Notes that a subtree left the tree.
     fn note_removal(&mut self) {
         self.removals = self.removals.saturating_add(1);
@@ -982,6 +993,20 @@ await Promise.resolve().then(() => __FlushElementTree());
         self.engine.take_module_request()
     }
 
+    /// The `@font-face` rules the sheets mounted so far declared and this
+    /// realm has not reported before. Empty until a sheet arrives.
+    pub(crate) fn take_font_face_requests(&mut self) -> Vec<dom::FontFaceRequest> {
+        self.slot.borrow_mut().take_font_face_requests()
+    }
+
+    /// Files one loaded `@font-face` source under its declared family.
+    pub(crate) fn register_font_face(&mut self, family: &str, data: dom::FontBlob) {
+        self.slot
+            .borrow_mut()
+            .document_mut()
+            .register_font_face(family, data);
+    }
+
     pub(crate) fn main_module_finished(&mut self) -> Result<bool, MainThreadError> {
         self.engine
             .module_finished()
@@ -1021,6 +1046,7 @@ await Promise.resolve().then(() => __FlushElementTree());
             Ok(LoadedSource::StyleSheet(_)) => {
                 Err("a module request returned a stylesheet".to_owned())
             }
+            Ok(LoadedSource::Font(_)) => Err("a module request returned a font".to_owned()),
             Err(error) => Err(format!("module '{name}': {error}").replace('\0', "\u{fffd}")),
         };
         self.engine
