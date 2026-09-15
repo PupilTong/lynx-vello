@@ -110,10 +110,18 @@ fn parse_count(value: Option<&str>) -> Option<f64> {
 /// `--lynx-tail-color-convert` carries the `tail-color-convert` boolean the
 /// same way: zero, its initial value, leaves the truncation marker in the
 /// colour of the run the cut landed in, which is native Lynx's default.
+///
+/// An `inline-truncation` is content wherever it is written *directly* inside
+/// a `text`, and generates no box anywhere else — the same scope web-core's
+/// `:scope > inline-truncation` query honours. It carries
+/// `--lynx-inline-truncation` because `crates/dom` names no Lynx tag: which
+/// subtree a paragraph takes its custom truncation content from is a
+/// computed-style fact there, exactly as the paragraph limits are.
 pub(super) const UA_RULES: &str = r#"
 @property --lynx-text-maxline { syntax: "<integer>"; inherits: false; initial-value: 0; }
 @property --lynx-text-maxlength { syntax: "<integer>"; inherits: false; initial-value: -1; }
 @property --lynx-tail-color-convert { syntax: "<integer>"; inherits: false; initial-value: 0; }
+@property --lynx-inline-truncation { syntax: "<integer>"; inherits: false; initial-value: 0; }
 text { box-sizing: border-box; display: -lynx-text !important; color: initial; }
 text[text] { content: attr(text); }
 inline-text { display: -lynx-text !important; }
@@ -121,6 +129,7 @@ inline-image, inline-truncation { display: none; }
 text > * { display: none; }
 text > wrapper { display: contents; }
 text > view, text > image { display: flex; }
+text > inline-truncation { display: -lynx-text !important; --lynx-inline-truncation: 1; }
 text > text, text > wrapper > text { color: inherit; }
 "#;
 
@@ -480,6 +489,44 @@ mod tests {
             ),
             "`color: initial` stops an ancestor's gradient at the text root"
         );
+    }
+
+    /// Custom truncation content is content only where web-core looks for it:
+    /// `XTextTruncation.ts` queries `:scope > inline-truncation`, so a marker
+    /// written directly inside a `text` becomes a text scope and one written
+    /// anywhere else — through a wrapper, or outside a paragraph entirely —
+    /// keeps the `display: none` the tag carries by default.
+    #[test]
+    fn an_inline_truncation_is_content_only_as_a_text_s_own_child() {
+        let mut document = document();
+        let text = child(&mut document, "text", "");
+        let marker = element_under(&mut document, text, "inline-truncation", "");
+        let second = element_under(&mut document, text, "inline-truncation", "");
+        let wrapper = element_under(&mut document, text, "wrapper", "");
+        let through_wrapper = element_under(&mut document, wrapper, "inline-truncation", "");
+        let outside = child(&mut document, "inline-truncation", "");
+        document.layout();
+
+        for (label, scope) in [("first", marker), ("second", second)] {
+            assert_eq!(
+                display(&document, scope),
+                Display::LynxText,
+                "a text's own inline-truncation child is a text scope: {label}",
+            );
+            assert_eq!(
+                hint(&document, scope, "lynx-inline-truncation", "0"),
+                "1",
+                "and says so in computed style, which is how the layout host \
+                 finds it without naming the tag: {label}",
+            );
+        }
+        for (label, elsewhere) in [("under a wrapper", through_wrapper), ("outside", outside)] {
+            assert_eq!(
+                display(&document, elsewhere),
+                Display::None,
+                "and nowhere else: {label}",
+            );
+        }
     }
 
     #[test]

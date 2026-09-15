@@ -17,6 +17,7 @@ use crate::style::{CoreStyle, initial_values};
 static TEXT_MAXLINE: LazyLock<Name> = LazyLock::new(|| Name::from("lynx-text-maxline"));
 static TEXT_MAXLENGTH: LazyLock<Name> = LazyLock::new(|| Name::from("lynx-text-maxlength"));
 static TAIL_COLOR_CONVERT: LazyLock<Name> = LazyLock::new(|| Name::from("lynx-tail-color-convert"));
+static INLINE_TRUNCATION: LazyLock<Name> = LazyLock::new(|| Name::from("lynx-inline-truncation"));
 
 /// Read the UA-registered, non-inherited integer after CSS computation.
 /// Stylo has no public scalar accessor for registered values. `ToCss` exposes
@@ -54,6 +55,13 @@ style_protocol! {
             // run the cut landed in. Off by default, as it is natively.
             tail_color_convert -> bool =
                 paragraph_limit(style.computed_values(), &TAIL_COLOR_CONVERT)
+                    .is_some_and(|value| value != 0),
+            // Whether this text scope is the paragraph's custom truncation
+            // content — a Lynx `inline-truncation` the UA sheet flagged. The
+            // host reads a computed value rather than a tag name, which is
+            // what keeps element vocabulary out of the layout host.
+            is_inline_truncation -> bool =
+                paragraph_limit(style.computed_values(), &INLINE_TRUNCATION)
                     .is_some_and(|value| value != 0),
         }
     }
@@ -156,6 +164,7 @@ mod tests {
         assert_eq!(style.text_maxline(), None);
         assert_eq!(style.text_maxlength(), None);
         assert!(!style.tail_color_convert());
+        assert!(!style.is_inline_truncation());
         // A paragraph needs no LinearStyle implementation.
         let block = crate::text::block::BlockStyle::from_container_style(&style);
         assert_eq!(block.max_lines, None);

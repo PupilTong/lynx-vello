@@ -953,7 +953,7 @@ fn assert_each_node_measures_ten_em_squares(tree: &LynxDocument) {
 /// with no carrier. web-core implements that as a real custom-element
 /// behaviour (the `RawTextAttributes` mixin), and this engine reaches the same
 /// rendering through `text[text] { content: attr(text); }`
-/// (`crates/bobcat-core/src/main/tree/text.rs:95`), so all four nodes render
+/// (`crates/bobcat-core/src/main/tree/text.rs:126`), so all four nodes render
 /// their string and the paragraphs measure.
 ///
 /// Its twin
@@ -975,7 +975,7 @@ fn swapping_a_text_s_class_and_inline_style_replaces_its_declarations() {
 /// carrier instead of through the element's own `text` attribute.
 ///
 /// The two constructions are separate UA rules — `text[text]` at
-/// `crates/bobcat-core/src/main/tree/text.rs:95` and `raw-text` at
+/// `crates/bobcat-core/src/main/tree/text.rs:126` and `raw-text` at
 /// `crates/bobcat-core/src/main/tree/raw_text.rs:10` — so the pair states
 /// that the cascade swap is observed through either one.
 #[test]
@@ -1234,7 +1234,7 @@ fn widening_a_text_dispatches_a_layoutchange_carrying_its_geometry() {
 #[test]
 #[ignore = "GAP: no layout event delivery, and the payload has no host-visible \
             query — LineInfo is computed at crates/hughie/src/text/block/mod.rs:66-83 \
-            but Document::text_block is pub(crate), crates/dom/src/layout/mod.rs:252"]
+            but Document::text_block is pub(crate), crates/dom/src/layout/mod.rs:303"]
 fn a_wrapping_text_reports_its_line_count_and_line_ranges() {
     let (mut js_runtime, mut runtime, elements) = text_runtime();
     runtime
@@ -1384,9 +1384,9 @@ const COUNTDOWN_PUSH: &str = r"
             (web-core/ts/client/mainthread/crossThreadHandlers/registerSetNativePropsHandler.ts:13-20). \
             And the attribute it writes instead REPLACES the element's \
             children: `text[text] { content: attr(text) }` \
-            (crates/bobcat-core/src/main/tree/text.rs:95) is a CSS content \
+            (crates/bobcat-core/src/main/tree/text.rs:126) is a CSS content \
             list, and a content list replaces rendered children \
-            (crates/dom/src/layout/text_block.rs:172-174), where web-core's \
+            (crates/dom/src/layout/text_block.rs:246-248), where web-core's \
             `RawTextAttributes` appends the attribute's text node after them \
             (web-elements/src/elements/XText/RawText.ts:19-26)"]
 fn a_native_props_text_push_replaces_the_leading_raw_text_run() {
@@ -1446,8 +1446,8 @@ fn a_native_props_text_push_replaces_the_leading_raw_text_run() {
             and the `text` attribute it writes instead replaces the element's \
             children rather than appending to them \
             (`text[text] { content: attr(text) }`, \
-            crates/bobcat-core/src/main/tree/text.rs:95, through \
-            crates/dom/src/layout/text_block.rs:172-174)"]
+            crates/bobcat-core/src/main/tree/text.rs:126, through \
+            crates/dom/src/layout/text_block.rs:246-248)"]
 fn a_maxlength_clamps_the_text_a_native_props_push_delivers() {
     let mut pair = background_pair(&countdown_card(true, "5"), COUNTDOWN_PUSH);
     pair.deliver();
@@ -1492,9 +1492,9 @@ fn a_maxlength_clamps_the_text_a_native_props_push_delivers() {
 #[test]
 #[ignore = "GAP: a `text` attribute REPLACES the element's children here. \
             `text[text] { content: attr(text) }` \
-            (crates/bobcat-core/src/main/tree/text.rs:95) is a CSS content \
+            (crates/bobcat-core/src/main/tree/text.rs:126) is a CSS content \
             list, and a content list replaces rendered children \
-            (crates/dom/src/layout/text_block.rs:172-174), so the push leaves \
+            (crates/dom/src/layout/text_block.rs:246-248), so the push leaves \
             the paragraph holding nothing but the pushed string — where \
             web-core's `RawTextAttributes` appends the attribute's text node \
             after the children it found \
@@ -1555,8 +1555,8 @@ fn a_native_props_text_push_appends_where_there_is_no_leading_run() {
             (web-core/ts/client/mainthread/crossThreadHandlers/registerSetNativePropsHandler.ts:13-20). \
             And the attribute it writes instead replaces the element's \
             children — `text[text] { content: attr(text) }` \
-            (crates/bobcat-core/src/main/tree/text.rs:95) through \
-            crates/dom/src/layout/text_block.rs:172-174 — so the re-rendered \
+            (crates/bobcat-core/src/main/tree/text.rs:126) through \
+            crates/dom/src/layout/text_block.rs:246-248 — so the re-rendered \
             slots stop rendering at all, where web-core appends the pushed \
             string after them \
             (web-elements/src/elements/XText/RawText.ts:19-26)"]

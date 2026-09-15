@@ -67,8 +67,10 @@ into `BlockStyle`; computed `text-overflow` selects clip or ellipsis. Core refle
 attributes into inline CSS, registered by the UA with `<integer>` syntax and
 `inherits: false`. Normal and animated style refreshes compare effective limits
 and merge their layout damage into existing box invalidation while preserving
-natural shaping. Custom inline-truncation content and layout-event delivery remain
-unwired; the standalone block already supports both custom tails and line data.
+natural shaping. A `text`'s own `inline-truncation` child is a text scope carrying the
+registered `--lynx-inline-truncation`, and the first one becomes the
+paragraph's truncation flow; layout-event delivery remains unwired, though the
+standalone block already exposes line data.
 [`docs/text-measurement-and-ifc.md`](text-measurement-and-ifc.md) carries the
 retained-layout and eviction contracts the wired path builds on, and the open
 design decisions ahead of an inline formatting context. Crate

@@ -97,8 +97,8 @@ fn text_fill(style: &ComputedValues, gradient_box: Option<Rect>) -> TextFill {
 /// indexed by that index and the lookup is O(1).
 ///
 /// The establishing element answers for anything with no element of its own —
-/// the truncation flow, an index the block cannot resolve — which is also what
-/// the whole paragraph used to paint with.
+/// an index the block cannot resolve — which is also what the whole paragraph
+/// used to paint with.
 pub(crate) struct RunPaints<'doc> {
     by_style: Vec<RunPaint<'doc>>,
     fallback: RunPaint<'doc>,
@@ -150,6 +150,9 @@ impl<'doc> RunPaints<'doc> {
         // the default; the 2026-09-15 ruling follows native.
         let convert_tail = crate::layout::converts_tail_color(block_style);
         let sources = document.text_block_sources(element).unwrap_or_default();
+        let truncation_sources = document
+            .text_block_truncation_sources(element)
+            .unwrap_or_default();
         let mut by_style = Vec::new();
         // The style indices a nested element's own ramp paints, with that
         // element. Empty for every paragraph whose runs are solid-coloured or
@@ -167,9 +170,12 @@ impl<'doc> RunPaints<'doc> {
                     .get(item as usize)
                     .copied()
                     .and_then(|node| document.paint_style(node).map(|style| (node, style))),
-                // The truncation flow paints from its own subtree, which the
-                // `Truncation` arm of `text_block_truncation_sources` answers.
-                SourceItem::Truncation(_) => None,
+                // The truncation flow has its own element subtree, indexed in
+                // its own space.
+                SourceItem::Truncation(item) => truncation_sources
+                    .get(item as usize)
+                    .copied()
+                    .and_then(|node| document.paint_style(node).map(|style| (node, style))),
             };
             by_style.push(match resolved {
                 Some((node, style)) => {

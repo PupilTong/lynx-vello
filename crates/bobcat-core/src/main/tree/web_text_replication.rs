@@ -189,7 +189,7 @@ fn a_text_attribute_on_a_text_element_carries_the_paragraph_s_run() {
 /// unwritten zero size into the placed layout. #227 needed committed geometry
 /// for atomic children restored after a content replacement and gave the
 /// paragraph a commit-goal path through `compute_inline_box_layout`
-/// (`crates/dom/src/layout/text_block.rs:436-444`).
+/// (`crates/dom/src/layout/text_block.rs:540-548`).
 #[test]
 fn a_view_child_of_a_text_is_one_atomic_inline_box_laid_out_on_its_own() {
     let mut document = ahem_document();
@@ -251,7 +251,7 @@ fn a_view_child_of_a_text_is_one_atomic_inline_box_laid_out_on_its_own() {
 /// unwritten zero size into the placed layout. #227 needed committed geometry
 /// for atomic children restored after a content replacement and gave the
 /// paragraph a commit-goal path through `compute_inline_box_layout`
-/// (`crates/dom/src/layout/text_block.rs:436-444`).
+/// (`crates/dom/src/layout/text_block.rs:540-548`).
 #[test]
 fn a_container_nested_inside_an_inline_atom_sizes_itself_without_re_entering_the_line() {
     const BOX: &str = "width: 50px; height: 20px; border: 1px solid red";
@@ -535,7 +535,7 @@ fn runs_of_different_size_share_a_baseline_while_sibling_text_blocks_do_not() {
 /// unwritten zero size into the placed layout. #227 needed committed geometry
 /// for atomic children restored after a content replacement and gave the
 /// paragraph a commit-goal path through `compute_inline_box_layout`
-/// (`crates/dom/src/layout/text_block.rs:436-444`).
+/// (`crates/dom/src/layout/text_block.rs:540-548`).
 #[test]
 fn an_image_child_of_a_text_advances_the_line_by_its_used_size() {
     let mut document = ahem_document();
@@ -571,12 +571,13 @@ fn an_image_child_of_a_text_advances_the_line_by_its_used_size() {
 /// web-core: there is no `text > wrapper > image` UA rule, and the wrapped image
 /// simply escapes `text > * { display: none }` because the combinator stops
 /// matching.
+/// Held from the `inline-truncation` wiring on: `place_and_hide` used to hide
+/// every consumed child's whole subtree, which zeroed the atom under a
+/// `display: contents` wrapper and left the wrapper's own slot unwritten, so
+/// the rounding walk pruned there (`crates/hughie/src/compute/mod.rs`'s
+/// `round_layout_inner`). A consumed element holding a placed atom now keeps
+/// an empty layout of its own instead.
 #[test]
-#[ignore = "GAP: a wrapper leaves the atom below it unrounded — a \
-            `display: contents` element's slot is never written, so \
-            crates/hughie/src/compute/mod.rs:780-784 stops the rounding walk \
-            there and the wrapped atom keeps a zero rounded box while its \
-            unwrapped control gets its placement (120, 22, 22)"]
 fn a_wrapper_between_a_text_and_an_inline_image_changes_nothing() {
     let mut document = ahem_document();
     let plain = child(&mut document, "text", "font-size: 24px; color: blue");
@@ -629,7 +630,7 @@ fn a_wrapper_between_a_text_and_an_inline_image_changes_nothing() {
 /// Geometry only: the bitmap and where it sits inside its box are paint.
 #[test]
 #[ignore = "GAP (two of them). An atom's margin never reaches the line: \
-            crates/dom/src/layout/text_block.rs:350-366 hands the block \
+            crates/dom/src/layout/text_block.rs:432-460 hands the block \
             `output.size`, which is the atom's border box, so the margin box \
             the line should advance by is lost. And an atom's padding inflates \
             it: this engine gives the authored `image` a real box, so \
@@ -761,7 +762,7 @@ fn adjacent_text_siblings_are_separate_blocks_and_collapse_their_own_newlines() 
 /// unwritten zero size into the placed layout. #227 needed committed geometry
 /// for atomic children restored after a content replacement and gave the
 /// paragraph a commit-goal path through `compute_inline_box_layout`
-/// (`crates/dom/src/layout/text_block.rs:436-444`).
+/// (`crates/dom/src/layout/text_block.rs:540-548`).
 #[test]
 fn a_flex_view_inside_a_text_shrinks_to_fit_and_stays_on_the_line() {
     let mut document = ahem_document();
@@ -810,7 +811,7 @@ fn a_flex_view_inside_a_text_shrinks_to_fit_and_stays_on_the_line() {
 /// unwritten zero size into the placed layout. #227 needed committed geometry
 /// for atomic children restored after a content replacement and gave the
 /// paragraph a commit-goal path through `compute_inline_box_layout`
-/// (`crates/dom/src/layout/text_block.rs:436-444`).
+/// (`crates/dom/src/layout/text_block.rs:540-548`).
 #[test]
 fn a_raw_text_carrier_contributes_a_run_and_no_box_of_its_own() {
     let mut document = ahem_document();
@@ -898,7 +899,7 @@ fn a_wrapper_between_a_text_and_a_raw_text_carrier_changes_nothing() {
 /// unwritten zero size into the placed layout. #227 needed committed geometry
 /// for atomic children restored after a content replacement and gave the
 /// paragraph a commit-goal path through `compute_inline_box_layout`
-/// (`crates/dom/src/layout/text_block.rs:436-444`).
+/// (`crates/dom/src/layout/text_block.rs:540-548`).
 #[test]
 fn the_image_beside_a_wrapped_carrier_is_a_real_box_on_the_line() {
     let mut document = ahem_document();
@@ -936,13 +937,14 @@ fn the_image_beside_a_wrapped_carrier_is_a_real_box_on_the_line() {
 /// overflowing-maxline state: `inline-truncation` starts at `display: none`
 /// (`XText/x-text.css:45-49`) and `XTextTruncation` lifts it with
 /// `x-show-inline-truncation` once a clamp is found to overflow
-/// (`XText/XTextTruncation.ts:194-204`, `x-text.css:96-100`). This engine's UA
-/// sheet declares the same `display: none` *unconditionally*
-/// (`crates/bobcat-core/src/main/tree/text.rs:97`), with nothing to lift it, so
-/// the negative case holds here for a reason that has nothing to do with the
-/// state it is about. What pins the feature is its positive twin,
-/// `truncation_content_is_laid_in_at_the_clamp_a_maxline_overflows`, which
-/// declares a `text-maxline` the same paragraph overflows and fails today.
+/// (`XText/XTextTruncation.ts:194-204`, `x-text.css:96-100`). This engine
+/// reaches the same rendering without a state on the element: a `text`'s own
+/// `inline-truncation` child is always a text scope, and the paragraph engine
+/// decides whether to lay its content in
+/// (`TextBlock::truncation_visible`). So the assertion below is about the
+/// paragraph's measure rather than about a `display` toggle. Its positive
+/// twin, `truncation_content_is_laid_in_at_the_clamp_a_maxline_overflows`,
+/// declares a `text-maxline` the same paragraph overflows.
 #[test]
 fn truncation_content_is_skipped_entirely_when_no_maxline_is_declared() {
     const PARAGRAPH: &str = "width: 200px; font-size: 16px";
@@ -959,13 +961,16 @@ fn truncation_content_is_skipped_entirely_when_no_maxline_is_declared() {
 
     assert_eq!(
         display(&document, truncation),
-        Display::None,
-        "the truncation subtree generates no box"
+        Display::LynxText,
+        "a text's own inline-truncation child is always a text scope here; \
+         whether its content is shown is the paragraph's decision, not the \
+         cascade's"
     );
     assert_eq!(
         ink(&document, text),
         ink(&document, without),
-        "and contributes nothing at all to the paragraph that holds it"
+        "and with no clamp to overflow it contributes nothing at all to the \
+         paragraph that holds it"
     );
     assert_eq!(
         ink(&document, text).1,
@@ -1006,19 +1011,11 @@ const CLAMPED: &str = "width: 200px; font-size: 16px; word-break: break-all";
 ///
 /// The fixture's indentation is dropped, as in the atomic-inline replicas:
 /// this case's claim is an absolute placement, and the module-level
-/// leading-space divergence would move it.
+/// leading-space divergence would move it. The clamped line's own *height* is
+/// left out for the same reason the inline-image replicas leave it out: a
+/// 22px-tall baseline-aligned box reserving no descent is a recorded deviation
+/// (`docs/tracking/deviations.md:213-220`), not this case.
 #[test]
-#[ignore = "GAP (the wiring, in two places). The tree hands hughie no \
-            truncation content at all: crates/dom/src/layout/text_block.rs:360 \
-            passes `None` for `TextBlock::new`'s truncation slice. And the \
-            subtree is dropped before it could be collected — \
-            `inline-truncation { display: none }` \
-            (crates/bobcat-core/src/main/tree/text.rs:97) is unconditional \
-            here, where web-core's identical default is lifted by \
-            `x-show-inline-truncation` once the block overflows its clamp. The \
-            algorithm itself is complete one layer down: \
-            crates/hughie/tests/web_text_replication.rs' \
-            `custom_truncation_content_replaces_the_marker_at_the_clamp` passes"]
 fn truncation_content_is_laid_in_at_the_clamp_a_maxline_overflows() {
     let mut document = ahem_document();
     let text = child(&mut document, "text", CLAMPED);
@@ -1028,12 +1025,11 @@ fn truncation_content_is_laid_in_at_the_clamp_a_maxline_overflows() {
     set_limit(&mut document, text, "text-maxline", "1");
     document.layout();
 
-    assert_ne!(
+    assert_eq!(
         display(&document, truncation),
-        Display::None,
-        "the paragraph overflows the one line it is allowed, so its truncation \
-         subtree is content: the default the unclamped case keeps is lifted \
-         exactly in this state"
+        Display::LynxText,
+        "the truncation subtree is a text scope, and the paragraph overflows \
+         the one line it is allowed, so its content is laid in"
     );
     assert_eq!(
         placement(&document, icon),
@@ -1042,8 +1038,8 @@ fn truncation_content_is_laid_in_at_the_clamp_a_maxline_overflows() {
          content takes the width they vacated"
     );
     assert_eq!(
-        ink(&document, text),
-        (12.0 * 16.0, 16.0),
+        ink(&document, text).0,
+        12.0 * 16.0,
         "one clamped line, still filling the measure: ten kept squares and the \
          content that replaced the other two"
     );
@@ -1070,17 +1066,6 @@ fn truncation_content_is_laid_in_at_the_clamp_a_maxline_overflows() {
 /// occupies. Three dots beside it would have to come out of a further retreat,
 /// and the golden shows none.
 #[test]
-#[ignore = "GAP (the wiring, in two places). The tree hands hughie no \
-            truncation content at all: crates/dom/src/layout/text_block.rs:360 \
-            passes `None` for `TextBlock::new`'s truncation slice. And the \
-            subtree is dropped before it could be collected — \
-            `inline-truncation { display: none }` \
-            (crates/bobcat-core/src/main/tree/text.rs:97) is unconditional \
-            here, where web-core's identical default is lifted by \
-            `x-show-inline-truncation` once the block overflows its clamp. The \
-            algorithm itself is complete one layer down: \
-            crates/hughie/tests/web_text_replication.rs' \
-            `custom_truncation_content_replaces_the_marker_at_the_clamp` passes"]
 fn a_custom_truncation_s_content_replaces_the_clamp_marker_at_every_maxline() {
     let mut document = ahem_document();
 
@@ -1104,11 +1089,11 @@ fn a_custom_truncation_s_content_replaces_the_clamp_marker_at_every_maxline() {
     document.layout();
 
     for (limit, block, truncation) in clamped {
-        assert_ne!(
+        assert_eq!(
             display(&document, truncation),
-            Display::None,
-            "clamp {limit}: the block overflows, so its truncation content is \
-             content"
+            Display::LynxText,
+            "clamp {limit}: the block's own inline-truncation child is a text \
+             scope"
         );
         assert_eq!(
             ink(&document, block),
@@ -1121,9 +1106,10 @@ fn a_custom_truncation_s_content_replaces_the_clamp_marker_at_every_maxline() {
 
     assert_eq!(
         display(&document, unclamped_truncation),
-        Display::None,
-        "and the block that declared no clamp never enters the state that \
-         would show its content"
+        Display::LynxText,
+        "the block that declared no clamp holds the same text scope as the \
+         clamped ones — what differs is whether the paragraph lays its content \
+         in, which the two measures below report"
     );
     assert_eq!(
         ink(&document, unclamped),
@@ -1136,6 +1122,69 @@ fn a_custom_truncation_s_content_replaces_the_clamp_marker_at_every_maxline() {
         9.0 * 16.0,
         "nine lines: a hundred squares at twelve to a line, none of them \
          dropped"
+    );
+}
+
+/// The whole `inline-truncation` path through the real UA sheet and the real
+/// attribute reflection, on a paragraph whose *clamp line* is its widest — so
+/// the marker's own advance is what the block's ink reports.
+///
+/// The three paragraphs share a 100px measure at 20px and the run
+/// `aa bbbbb ccccc ddddd eeeee`, which breaks to a 40px first line and a 100px
+/// second. Under `text-maxline="2"`:
+///
+/// - with a marker, the cut retreats the two-unit minimum off the second line and lays the marker's
+///   one square in, so the line is three kept squares plus it — 80;
+/// - with no marker the second line keeps all five squares — 100, which is also what the paragraph
+///   measures with nothing to clamp;
+/// - and a paragraph that fits inside the clamp is identical to the same paragraph with no marker
+///   written in it at all.
+///
+/// A second `inline-truncation` child is written into the first block on
+/// purpose: web-core honours only the first (`XTextTruncation.ts` queries
+/// `:scope > inline-truncation` and takes `[0]`), and a second one that leaked
+/// into the content flow would add a square to the measure.
+#[test]
+fn a_maxline_clamp_lays_its_first_inline_truncation_child_in_at_the_cut() {
+    const MEASURE: &str = "width: 100px; font-size: 20px";
+    const RUN: &str = "aa bbbbb ccccc ddddd eeeee";
+
+    let mut document = ahem_document();
+
+    let marked = child(&mut document, "text", MEASURE);
+    literal(&mut document, marked, RUN);
+    let marker = element_under(&mut document, marked, "inline-truncation", "");
+    literal(&mut document, marker, "M");
+    let ignored = element_under(&mut document, marked, "inline-truncation", "");
+    literal(&mut document, ignored, "XXX");
+    set_limit(&mut document, marked, "text-maxline", "2");
+
+    let bare = child(&mut document, "text", MEASURE);
+    literal(&mut document, bare, RUN);
+    set_limit(&mut document, bare, "text-maxline", "2");
+
+    let fitting = child(&mut document, "text", MEASURE);
+    literal(&mut document, fitting, "aa bbbbb");
+    let unused = element_under(&mut document, fitting, "inline-truncation", "");
+    literal(&mut document, unused, "M");
+    set_limit(&mut document, fitting, "text-maxline", "2");
+    document.layout();
+
+    assert_eq!(
+        ink(&document, marked),
+        (4.0 * 20.0, 2.0 * 20.0),
+        "the clamp line gives up two squares and the marker takes one of them, \
+         so the widest line is three kept squares plus the marker",
+    );
+    assert_eq!(
+        ink(&document, bare),
+        (5.0 * 20.0, 2.0 * 20.0),
+        "the same clamp with no marker keeps the whole line",
+    );
+    assert_eq!(
+        ink(&document, fitting),
+        (5.0 * 20.0, 2.0 * 20.0),
+        "and a paragraph that fits inside its clamp never lays its marker in",
     );
 }
 
@@ -1162,17 +1211,6 @@ fn a_custom_truncation_s_content_replaces_the_clamp_marker_at_every_maxline() {
 /// wide — two 14px squares and a 12x12 icon — so the retreat gives up two 24px
 /// units of line 3, and the content occupies 240..280 of it.
 #[test]
-#[ignore = "GAP (the wiring, in two places). The tree hands hughie no \
-            truncation content at all: crates/dom/src/layout/text_block.rs:360 \
-            passes `None` for `TextBlock::new`'s truncation slice. And the \
-            subtree is dropped before it could be collected — \
-            `inline-truncation { display: none }` \
-            (crates/bobcat-core/src/main/tree/text.rs:97) is unconditional \
-            here, where web-core's identical default is lifted by \
-            `x-show-inline-truncation` once the block overflows its clamp. The \
-            algorithm itself is complete one layer down: \
-            crates/hughie/tests/web_text_replication.rs' \
-            `custom_truncation_content_replaces_the_marker_at_the_clamp` passes"]
 fn a_leading_image_survives_the_retreat_that_lays_the_truncation_content_in() {
     let mut document = ahem_document();
     let column = child(&mut document, "view", "width: 300px");
@@ -1712,7 +1750,7 @@ fn the_compiled_baseline_card_rows_its_blocks_and_shares_one_run_baseline() {
 /// by, and the atom's own box, which the `x-text/inline-image` replica names.
 #[test]
 #[ignore = "GAP: an atom's margin never reaches the line — \
-            crates/dom/src/layout/text_block.rs:350-366 hands the block \
+            crates/dom/src/layout/text_block.rs:432-460 hands the block \
             `output.size`, which is the atom's border box, so the 10px \
             margin-left is dropped from the advance"]
 fn a_compiled_card_s_inline_image_takes_its_used_size_and_its_margin() {
@@ -1915,7 +1953,7 @@ fn a_compiled_maxline_card_clamps_one_two_and_unlimited_lines() {
 #[test]
 #[ignore = "DEVIATION, not a missing feature: \
             `text { display: -lynx-text !important }` \
-            (crates/bobcat-core/src/main/tree/text.rs:94) is user-agent origin, \
+            (crates/bobcat-core/src/main/tree/text.rs:125) is user-agent origin, \
             so it outranks the author's inline `display: none` and no `text` \
             element can be hidden by the declaration the card writes. The \
             important-UA exception is §D.15's, recorded at \
@@ -2036,7 +2074,7 @@ fn the_later_of_two_equal_specificity_class_rules_wins_on_a_text() {
 /// mechanism differs from web-core's: that target reaches the result through
 /// the card's `enableCSSInheritance: false` page config, while this engine
 /// always cascades and buys the same value with the UA `text { color: initial }`
-/// reset (`crates/bobcat-core/src/main/tree/text.rs:94`).
+/// reset (`crates/bobcat-core/src/main/tree/text.rs:125`).
 ///
 /// The card writes the string as a `text` attribute on the `text`; the replica
 /// writes it as the `raw-text` the dynamic path
