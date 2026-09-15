@@ -201,6 +201,37 @@ impl<T> Document<T> {
         registered
     }
 
+    /// Every `@font-face` rule this document has not reported before.
+    ///
+    /// The document names the declared faces; the embedder fetches their
+    /// sources — no IO happens in `dom` — and hands each blob back through
+    /// [`Self::register_font_face`]. Each rule is reported exactly once,
+    /// whatever later sheets do to the cascade.
+    ///
+    /// See [`FontFaceRequest`](crate::FontFaceRequest) for what is and is not
+    /// carried out of a rule.
+    pub fn take_font_face_requests(&mut self) -> Vec<crate::FontFaceRequest> {
+        self.style_engine_mut().take_font_face_requests()
+    }
+
+    /// Registers a loaded `@font-face` source under its declared family.
+    ///
+    /// The answer to [`Self::take_font_face_requests`]: `data` is filed under
+    /// `family` rather than under the name inside the font file, so runs
+    /// naming the declared family shape with it. Returns how many faces the
+    /// blob contributed, like [`Self::register_fonts`].
+    pub fn register_font_face(&mut self, family: &str, data: FontBlob) -> usize {
+        let context = self
+            .layout_state_mut()
+            .text_context
+            .get_or_insert_with(|| Box::new(TextContext::new()));
+        let registered = context.register_font_face(family, data);
+        if registered != 0 {
+            self.invalidate_layout_all();
+        }
+        registered
+    }
+
     /// Selects a registered family as the embedder-provided platform default.
     ///
     /// This maps CSS `system-ui`, `sans-serif`, and `serif` to `family` ahead

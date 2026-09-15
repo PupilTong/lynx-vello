@@ -350,6 +350,13 @@ impl Page {
                 .request_source(SourceRequest::Module(url.clone()));
             self.spawn(load_module(Rc::clone(self), url, answer));
         }
+        // Every path that mounts author CSS — the staged sheets
+        // `createDocument` mounts, `adoptStyleSheet`, and any rules a card
+        // appends — runs inside an entry, so draining here is what covers
+        // them all with one call site rather than one per mount.
+        for request in runtime.take_font_face_requests() {
+            self.spawn(load_font_face(Rc::clone(self), request));
+        }
         self.lifetime.arm_deadline(runtime.next_timer_deadline());
         self.lifetime.record_checkpoint(js.checkpoint_generation());
     }
@@ -872,6 +879,13 @@ async fn boot_page(page: Rc<Page>, sources: BootSources) {
                 )));
                 return;
             }
+            Ok(LoadedSource::Font(_)) => {
+                page.fail(EngineEvent::StartupFailed(mismatched_source(
+                    "a stylesheet request",
+                    "a font",
+                )));
+                return;
+            }
             Err(error) => {
                 page.fail(EngineEvent::StartupFailed(error));
                 return;
@@ -884,6 +898,13 @@ async fn boot_page(page: Rc<Page>, sources: BootSources) {
     }
     let (source, url) = match request_source(&page.outbox, SourceRequest::Entry(entry)).await {
         Ok(LoadedSource::Entry { source, url }) => (source, url),
+        Ok(LoadedSource::Font(_)) => {
+            page.fail(EngineEvent::StartupFailed(mismatched_source(
+                "an entry request",
+                "a font",
+            )));
+            return;
+        }
         Ok(LoadedSource::StyleSheet(_)) => {
             page.fail(EngineEvent::StartupFailed(mismatched_source(
                 "an entry request",
@@ -929,6 +950,41 @@ async fn load_module(page: Rc<Page>, url: String, answer: SourceAnswer) {
             });
         }
     });
+}
+
+/// One `@font-face` rule's sources, tried in author order until one loads.
+///
+/// Unlike a module, nothing is waiting for a declared face, so no failure
+/// here ends the view: a rule whose every source fails leaves the runs that
+/// name its family on the fallback they already had, which is what a browser
+/// does for a face it could not fetch. It is dropped without a word — this
+/// workspace has no logging facade and this would be its only use, and an
+/// [`EngineEvent`] is the wrong seam because every variant of it is either
+/// fatal or something a realm said.
+///
+/// `local()` is skipped: naming a face already installed on the platform needs
+/// a platform font enumerator this engine does not have, and the native
+/// Harmony loader refuses it too.
+async fn load_font_face(page: Rc<Page>, request: dom::FontFaceRequest) {
+    let dom::FontFaceRequest { family, sources } = request;
+    for source in sources {
+        let dom::FontFaceSource::Url(url) = source else {
+            continue;
+        };
+        if page.ended() {
+            return;
+        }
+        // A face the fetcher answered with a script or a stylesheet is a
+        // failed source like any other: try the next one.
+        if let Ok(LoadedSource::Font(blob)) =
+            request_source(&page.outbox, SourceRequest::Font { url }).await
+        {
+            // The entry's own epilogue commits: registering a face
+            // invalidates the layout of every run that names it.
+            page.enter(|runtime, _| runtime.register_font_face(&family, blob));
+            return;
+        }
+    }
 }
 
 /// The one ordered consumer of everything this view's workers say.
@@ -986,3 +1042,7 @@ fn mismatched_source(request: &str, answer: &str) -> LynxViewError {
 #[cfg(test)]
 #[path = "page_tests.rs"]
 mod page_tests;
+
+#[cfg(test)]
+#[path = "font_face_tests.rs"]
+mod font_face_tests;

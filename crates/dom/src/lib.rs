@@ -44,7 +44,9 @@ pub use crate::style::animation::AnimationTick;
 pub use crate::style::device::Device;
 #[doc(hidden)]
 pub use crate::style::device::standards_device;
-pub use crate::style::engine::{CssDeclaration, CssKeyframe, CssRule, StylesheetOrigin};
+pub use crate::style::engine::{
+    CssDeclaration, CssKeyframe, CssRule, FontFaceRequest, FontFaceSource, StylesheetOrigin,
+};
 pub use crate::style::pool::{MAX_STYLE_THREADS, StylePool, StylePoolError, StyleWorker};
 pub use crate::style::query::InvalidSelector;
 pub use crate::tree::custom::CustomElement;

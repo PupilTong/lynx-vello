@@ -43,6 +43,10 @@ pub(crate) enum TestSheet {
 pub(crate) struct InlineFetcher {
     entry: String,
     sheets: FxHashMap<String, TestSheet>,
+    /// The faces this host serves an `@font-face` `src` from, by URL. A URL
+    /// that is not in here fails, which is how a test drives the fall-through
+    /// to a rule's next source.
+    fonts: FxHashMap<String, dom::FontBlob>,
 }
 
 impl dom::FrameImages for InlineFetcher {
@@ -74,6 +78,10 @@ impl ResourceFetcher for InlineFetcher {
                 )),
                 None => Err(missing(&url)),
             },
+            SourceRequest::Font { url } => self.fonts.get(&url).map_or_else(
+                || Err(missing(&url)),
+                |blob| Ok(LoadedSource::Font(blob.clone())),
+            ),
             SourceRequest::Module(url) => Err(missing(&url)),
             SourceRequest::Worker { specifier, .. } => Err(missing(&specifier)),
         };
@@ -160,6 +168,7 @@ enum TestTarget {
 pub(crate) struct TestViewSpec {
     entry: String,
     sheets: Vec<(String, TestSheet)>,
+    fonts: Vec<(String, dom::FontBlob)>,
     target: TestTarget,
     width: f32,
     height: f32,
@@ -172,10 +181,18 @@ impl TestViewSpec {
         Self {
             entry: entry.to_owned(),
             sheets: Vec::new(),
+            fonts: Vec::new(),
             target: TestTarget::None,
             width: 393.0,
             height: 727.0,
         }
+    }
+
+    /// One face this host serves, at the URL an `@font-face` `src` names.
+    pub(crate) fn with_font(mut self, url: &str, bytes: &'static [u8]) -> Self {
+        self.fonts
+            .push((url.to_owned(), dom::FontBlob::from_static(bytes)));
+        self
     }
 
     /// One author sheet as CSS text, mounted before the entry runs.
@@ -226,6 +243,7 @@ impl TestViewSpec {
         let Self {
             entry,
             sheets,
+            fonts,
             target,
             width,
             height,
@@ -237,6 +255,7 @@ impl TestViewSpec {
         let fetcher = Rc::new(InlineFetcher {
             entry,
             sheets: sheets.into_iter().collect(),
+            fonts: fonts.into_iter().collect(),
         });
         block_on(async move {
             let group = LynxGroup::new(requester, StyleThreads::Sequential)

@@ -9,7 +9,7 @@ use stylo::author_styles::AuthorStyles;
 use stylo::context::QuirksMode;
 use stylo::custom_properties::AttrTaint;
 use stylo::device::Device;
-use stylo::font_face::parse_font_face_block;
+use stylo::font_face::{FontFaceRule, Source as StyloFontFaceSource, parse_font_face_block};
 use stylo::media_queries::MediaList;
 use stylo::parser::{Parse, ParserContext};
 use stylo::properties::declaration_block::parse_one_declaration_into;
@@ -91,11 +91,78 @@ pub(crate) enum StyleInvalidation {
     Rematch,
 }
 
+/// One `@font-face` rule reduced to what a resource loader needs.
+///
+/// The `format()` and `tech()` hints on a `src` component are dropped: they
+/// exist so a browser can skip a face it could not decode, and this engine
+/// hands every candidate to the loader in author order and takes the first
+/// that loads. The matching descriptors — `font-style`, `font-weight`,
+/// `font-stretch`, `unicode-range` — are dropped because nothing reads them:
+/// a loaded face is registered under the declared family carrying its own
+/// metadata, see
+/// [`TextContext::register_font_face`](crate::TextContext::register_font_face).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FontFaceRequest {
+    /// The `font-family` descriptor: the family the face is registered under.
+    pub family: String,
+    /// The `src` components in author order. The first one that loads wins.
+    pub sources: Vec<FontFaceSource>,
+}
+
+/// One component of an `@font-face` rule's `src` descriptor.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FontFaceSource {
+    /// `url(...)`, resolved against the document's base URL. An embedder
+    /// fetches it; nothing in `dom` performs IO.
+    Url(String),
+    /// `local(...)`: a face already installed on the platform, by name.
+    Local(String),
+}
+
+/// Reduces one parsed `@font-face` rule to a loadable request.
+///
+/// `None` for a rule that names no family or offers no usable source — a
+/// rule a browser would also never load anything for.
+fn font_face_request(rule: &FontFaceRule) -> Option<FontFaceRequest> {
+    let family = rule.descriptors.font_family.as_ref()?;
+    let sources = rule
+        .descriptors
+        .src
+        .as_ref()?
+        .0
+        .iter()
+        .filter_map(|source| match source {
+            // `as_str` is the URL resolved against the document's base; an
+            // unresolvable one serializes as the empty string and is dropped
+            // here rather than handed to a fetcher that could only fail.
+            StyloFontFaceSource::Url(url) => {
+                let url = url.url.as_str();
+                (!url.is_empty()).then(|| FontFaceSource::Url(url.to_owned()))
+            }
+            StyloFontFaceSource::Local(name) => Some(FontFaceSource::Local(name.name.to_string())),
+        })
+        .collect::<Vec<_>>();
+    (!sources.is_empty()).then(|| FontFaceRequest {
+        family: family.name.to_string(),
+        sources,
+    })
+}
+
 /// The private stylo state owned by exactly one [`Document`].
 pub(crate) struct StyleEngine {
     stylist: Stylist,
     lock: StdArc<SharedRwLock>,
     url_data: UrlExtraData,
+    /// Whether an author sheet has been mounted since the last time the
+    /// `@font-face` rules were reported. Reading the rules takes the shared
+    /// lock and walks every origin, and the answer can only change when a
+    /// sheet arrives, so this keeps the ordinary "nothing new" call free.
+    font_faces_dirty: bool,
+    /// Every `@font-face` rule already reported, kept alive so that pointer
+    /// identity stays unique: a rule survives the cascade rebuilds that
+    /// re-collect it, and a strong reference is what stops a freed rule's
+    /// address from being reused by a later one.
+    reported_font_faces: Vec<Arc<Locked<FontFaceRule>>>,
 }
 
 impl std::fmt::Debug for StyleEngine {
@@ -117,7 +184,54 @@ impl StyleEngine {
             stylist: Stylist::new(device, QuirksMode::NoQuirks),
             lock: StdArc::new(SharedRwLock::new()),
             url_data,
+            font_faces_dirty: false,
+            reported_font_faces: Vec::new(),
         }
+    }
+
+    /// Every `@font-face` rule this engine has not reported before.
+    ///
+    /// The seam an embedder loads declared faces over: `dom` never performs
+    /// IO, so it names the rules and the caller fetches their sources and
+    /// hands the bytes back through
+    /// [`Document::register_font_face`](crate::Document::register_font_face).
+    ///
+    /// A rule is reported once per document, whatever later sheets do to the
+    /// cascade: the collected list is rebuilt from scratch on every stylist
+    /// flush, and a face already handed to the font backend does not need
+    /// loading again. Rules without a `font-family` or without a usable `src`
+    /// are skipped, as is a `url()` that did not resolve against the
+    /// document's base URL.
+    ///
+    /// Shadow-scoped sheets are not walked: their `@font-face` rules live in
+    /// a scoped `AuthorStyles` rather than in the stylist's own origins, and
+    /// no scoped sheet in this engine carries one yet.
+    pub(crate) fn take_font_face_requests(&mut self) -> Vec<FontFaceRequest> {
+        if !std::mem::take(&mut self.font_faces_dirty) {
+            return Vec::new();
+        }
+        let guard = self.lock.read();
+        self.stylist.flush(&StylesheetGuards::same(&guard));
+        let mut requests = Vec::new();
+        let mut reported = Vec::new();
+        for (data, _) in self.stylist.iter_extra_data_origins() {
+            for (rule, _) in data.font_faces.iter() {
+                if self
+                    .reported_font_faces
+                    .iter()
+                    .any(|seen| Arc::ptr_eq(seen, rule))
+                {
+                    continue;
+                }
+                reported.push(rule.clone());
+                if let Some(request) = font_face_request(rule.read_with(&guard)) {
+                    requests.push(request);
+                }
+            }
+        }
+        drop(guard);
+        self.reported_font_faces.extend(reported);
+        requests
     }
 
     pub(crate) fn lock(&self) -> StdArc<SharedRwLock> {
@@ -303,6 +417,7 @@ impl StyleEngine {
         let guard = self.lock.read();
         self.stylist.append_stylesheet(sheet, &guard);
         self.stylist.flush(&StylesheetGuards::same(&guard));
+        self.font_faces_dirty = true;
     }
 
     pub(crate) fn add_scoped_stylesheet(
@@ -344,6 +459,7 @@ impl StyleEngine {
         self.stylist
             .append_stylesheet(DocumentStyleSheet(Arc::new(sheet)), &guard);
         self.stylist.flush(&StylesheetGuards::same(&guard));
+        self.font_faces_dirty = true;
     }
 
     #[must_use]

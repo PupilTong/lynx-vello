@@ -2,11 +2,11 @@
 
 use std::sync::Arc;
 
-use bobcat_core::LynxViewError;
 use bobcat_core::resource::{
     LoadedSource, ResourceErrorKind, ResourceErrorPhase, SourceCompletion, SourceRequest,
     StyleSheetSource,
 };
+use bobcat_core::{FontBlob, LynxViewError};
 use http::HeaderMap;
 use rustc_hash::FxHashMap;
 use tokio::sync::watch;
@@ -20,6 +20,17 @@ type CachedStyle = watch::Receiver<Option<SourceResult>>;
 /// Owned by one Resources scope on the resource host's thread. A watch holds
 /// the pending or completed response, shared by preloads and ordinary reads.
 pub(crate) type StyleCache = FxHashMap<Url, CachedStyle>;
+
+/// What a loaded source is turned into, which is the only way the three kinds
+/// differ once the bytes are in: text is validated as UTF-8 and a font is not.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SourceKind {
+    StyleSheet,
+    Script,
+    /// An `@font-face` source. Font files are binary, so the bytes are handed
+    /// over as they arrived — no charset decode, no UTF-8 check.
+    Font,
+}
 
 enum Destination {
     Request(SourceCompletion),
@@ -68,7 +79,12 @@ fn cached_style(resources: &Resources, url: Url) -> CachedStyle {
     }
     let (sender, response) = watch::channel(None);
     cache.insert(url.clone(), response.clone());
-    start(resources, url, true, Destination::Cache(sender));
+    start(
+        resources,
+        url,
+        SourceKind::StyleSheet,
+        Destination::Cache(sender),
+    );
     response
 }
 
@@ -90,11 +106,12 @@ pub(crate) fn request(resources: &Resources, request: SourceRequest, completion:
     if completion.is_cancelled() {
         return;
     }
-    let (specifier, style_sheet, base_url) = match request {
-        SourceRequest::StyleSheet(url) => (url, true, resources.base_url()),
+    let (specifier, kind, base_url) = match request {
+        SourceRequest::StyleSheet(url) => (url, SourceKind::StyleSheet, resources.base_url()),
         SourceRequest::Entry(url) | SourceRequest::Module(url) => {
-            (url, false, resources.base_url())
+            (url, SourceKind::Script, resources.base_url())
         }
+        SourceRequest::Font { url } => (url, SourceKind::Font, resources.base_url()),
         SourceRequest::Worker {
             specifier,
             base_url,
@@ -112,7 +129,7 @@ pub(crate) fn request(resources: &Resources, request: SourceRequest, completion:
                     return;
                 }
             };
-            (specifier, false, Some(base))
+            (specifier, SourceKind::Script, Some(base))
         }
     };
     let url = match resources
@@ -126,7 +143,7 @@ pub(crate) fn request(resources: &Resources, request: SourceRequest, completion:
             return;
         }
     };
-    if style_sheet
+    if kind == SourceKind::StyleSheet
         && let Some(Registered::StyleSheet(sheet)) = resources.shared.transports.registry.get(&url)
     {
         completion.complete(Ok(LoadedSource::StyleSheet(StyleSheetSource::Preparsed(
@@ -134,7 +151,7 @@ pub(crate) fn request(resources: &Resources, request: SourceRequest, completion:
         ))));
         return;
     }
-    if style_sheet {
+    if kind == SourceKind::StyleSheet {
         let response = cached_style(resources, url);
         let answer = answer_cached_style(response, completion);
         #[cfg(not(target_arch = "wasm32"))]
@@ -142,18 +159,18 @@ pub(crate) fn request(resources: &Resources, request: SourceRequest, completion:
         #[cfg(target_arch = "wasm32")]
         wasm_bindgen_futures::spawn_local(answer);
     } else {
-        start(resources, url, false, Destination::Request(completion));
+        start(resources, url, kind, Destination::Request(completion));
     }
 }
 
-fn start(resources: &Resources, url: Url, style_sheet: bool, completion: Destination) {
+fn start(resources: &Resources, url: Url, kind: SourceKind, completion: Destination) {
     #[cfg(not(target_arch = "wasm32"))]
-    spawn(resources, url, style_sheet, completion);
+    spawn(resources, url, kind, completion);
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_futures::spawn_local(run(
         SharedHandle::clone(&resources.shared),
         url,
-        style_sheet,
+        kind,
         completion,
     ));
 }
@@ -167,7 +184,7 @@ fn start(resources: &Resources, url: Url, style_sheet: bool, completion: Destina
 /// A cache load stops when no scope or reader holds its response; an ordinary
 /// request stops when its completion reports cancellation.
 #[cfg(not(target_arch = "wasm32"))]
-fn spawn(resources: &Resources, url: Url, style_sheet: bool, completion: Destination) {
+fn spawn(resources: &Resources, url: Url, kind: SourceKind, completion: Destination) {
     let shared = SharedHandle::clone(&resources.shared);
     let handle = resources.executor.handle();
     resources.executor.spawn(async move {
@@ -194,7 +211,7 @@ fn spawn(resources: &Resources, url: Url, style_sheet: bool, completion: Destina
         }
         let prepared = crate::executor::blocking(&handle, "source load", {
             let url = url.clone();
-            move || prepare(fetched, &url, style_sheet)
+            move || prepare(fetched, &url, kind)
         })
         .await;
         completion.complete(match prepared {
@@ -217,7 +234,7 @@ fn panicked(message: &str, url: &Url) -> LynxViewError {
 }
 
 #[cfg(target_arch = "wasm32")]
-async fn run(shared: SharedHandle, url: Url, style_sheet: bool, completion: Destination) {
+async fn run(shared: SharedHandle, url: Url, kind: SourceKind, completion: Destination) {
     if completion.is_cancelled() {
         return;
     }
@@ -228,21 +245,29 @@ async fn run(shared: SharedHandle, url: Url, style_sheet: bool, completion: Dest
     if completion.is_cancelled() {
         return;
     }
-    completion.complete(prepare(fetched, &url, style_sheet));
+    completion.complete(prepare(fetched, &url, kind));
 }
 
 /// The CPU half of a source load: preprocessing and the UTF-8 check the
 /// engine's strict validation depends on.
+///
+/// A font takes neither: its bytes go to the font backend as they arrived,
+/// without a copy — `Bytes` is already a shared, thread-safe buffer, which is
+/// what a [`FontBlob`] retains.
 fn prepare(
     fetched: Result<crate::Fetched, error::Failure>,
     url: &Url,
-    style_sheet: bool,
+    kind: SourceKind,
 ) -> Result<LoadedSource, LynxViewError> {
     fetched
         .and_then(|fetched| preprocess_fetched(fetched, url))
         .map_err(|failure| LynxViewError::from(failure.into_error(Some(Arc::from(url.as_str())))))
         .and_then(|(fetched, processed)| {
             let url = fetched.url.to_string();
+            if kind == SourceKind::Font {
+                return Ok(LoadedSource::Font(FontBlob::new(processed.bytes)));
+            }
+            let style_sheet = kind == SourceKind::StyleSheet;
             let source = std::str::from_utf8(&processed.bytes)
                 .map_err(|error| {
                     if style_sheet {

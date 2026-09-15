@@ -123,6 +123,14 @@ pub enum SourceRequest {
     },
     /// A normalized module URL, loaded after an import discovers it.
     Module(String),
+    /// One `src: url(...)` of an `@font-face` rule, already resolved against
+    /// the document's base URL. Complete with [`LoadedSource::Font`]; the
+    /// bytes are registered under the rule's declared family. A fetcher that
+    /// serves no fonts drops the completion, which fails this source and lets
+    /// the document try the rule's next one.
+    Font {
+        url: String,
+    },
 }
 
 /// A stylesheet ready to mount. The fetcher has already validated text as UTF-8.
@@ -138,7 +146,14 @@ pub enum StyleSheetSource {
 #[derive(Clone, Debug)]
 pub enum LoadedSource {
     StyleSheet(StyleSheetSource),
-    Entry { source: String, url: String },
+    Entry {
+        source: String,
+        url: String,
+    },
+    /// One `@font-face` source's bytes, unvalidated: a font file is binary,
+    /// so nothing here decodes or transcodes it. The font backend is what
+    /// rejects bytes that are not a face.
+    Font(dom::FontBlob),
 }
 
 /// The concrete, transferable right to answer one source request.
