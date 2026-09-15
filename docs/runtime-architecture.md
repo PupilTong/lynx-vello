@@ -671,7 +671,7 @@ The callback boundary carries only `quickjs-rust-bridge`'s primitive
 functions, raw VM values, and DOM handles cannot cross it. Bobcat registers its
 private callbacks as named exports of the native `bobcat-internal:host` ESM —
 the document member `createDocument`, the tree and attribute
-members, the three event members, the two timer members, and the three worker
+members, the two event-name members, the two timer members, and the three worker
 members — then preloads three kinds of ESM source: the core-owned
 `bobcat:runtime` named compatibility exports, the embedded `bobcat:element`
 named Element-PAPI exports, and the fetched entry under its resolved URL.
@@ -679,7 +679,8 @@ named Element-PAPI exports, and the fetched entry under its resolved URL.
 imports its native operations directly; nothing is installed as
 `globalThis.bobcat`. Before registering the entry, core prepends its runtime
 and Element-PAPI import declarations. Event delivery travels back through the
-loaded `bobcat:element` namespace's `__BobcatDispatchEvent` export.
+loaded `bobcat:element` namespace's `__BobcatDispatchEvent` export, once per
+dispatch, carrying the whole event path as two comma-joined id strings.
 
 Because `bobcat-internal:host` resolves from any module in the realm, a card
 can reach `createDocument` too. Constructing a second `Document` is refused,

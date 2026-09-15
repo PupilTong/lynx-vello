@@ -211,7 +211,8 @@ fn dispatch_to_listeners(bencher: divan::Bencher) {
 /// The painting side answers this from its own listener-name replica — a
 /// pass resync and a set lookup, no lock — so the realistic cost is what
 /// `has_listeners` measures here. The dispatch below covers a stale replica:
-/// the main thread rejects the name before looking up the target or its path.
+/// the path is built and crosses, and the realm finds nothing registered for
+/// the name on any of its steps.
 #[divan::bench]
 fn dispatch_with_no_listener(bencher: divan::Bencher) {
     let name: Arc<str> = Arc::from("scroll");
@@ -220,7 +221,7 @@ fn dispatch_with_no_listener(bencher: divan::Bencher) {
         .with_inputs(listening_harness)
         .bench_local_refs(|(harness, label)| {
             assert!(!harness.has_listeners(&name));
-            assert!(!harness.dispatch(*label, &name, &detail));
+            assert!(harness.dispatch(*label, &name, &detail));
         });
 }
 
@@ -228,9 +229,9 @@ fn dispatch_with_no_listener(bencher: divan::Bencher) {
 ///
 /// A list update that discards its cells does exactly this, in this order:
 /// `__RemoveElement` detaches the cell, and the collector then calls
-/// `dropElement` for the handle it takes — which has to forget the node's
-/// registrations, the path the reverse index exists for and the one that used
-/// to scan every registered event name. The removal is not decoration: a
+/// `dropElement` for the handle it takes — after the realm's own cleanup has
+/// given up every event name that handle was counted under. The removal is
+/// not decoration: a
 /// connected element cannot be dropped, because its handle cannot be
 /// collected while its parent's holds it. Each iteration gets its own booted
 /// realm, because a drop is final — the ids the previous one used name
@@ -247,17 +248,14 @@ fn register_then_drop_row_listeners(bencher: divan::Bencher) {
         .bench_local_values(|mut harness| {
             harness.evaluate(
                 r"
-                import {
-                  enableEventListener,
-                  dropElement,
-                } from 'bobcat-internal:host';
+                import { dropElement } from 'bobcat-internal:host';
+                const listener = () => {};
                 for (let i = 0; i < rows.length; i += 1) {
-                  const id = __GetElementUniqueID(rows[i]);
-                  enableEventListener(id, 0, 'tap');
-                  enableEventListener(id, 1, 'longpress');
+                  __AddEventListener(rows[i], 'tap', listener, {});
+                  __AddEventListener(rows[i], 'longpress', listener, { capture: true });
                 }
-                // `dropElement`, not `disableEventListener`: this is the call
-                // the collector makes for every handle a list update drops.
+                // `dropElement` straight: this is the call the collector
+                // makes for every handle a list update drops.
                 // The label under each row is an element child, so the drop
                 // unlinks it rather than freeing it, and its own handle
                 // carries it on.

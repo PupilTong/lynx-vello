@@ -4,12 +4,12 @@ import {
   createDocument,
   createElement,
   createPage,
-  disableEventListener,
   dropElement,
-  enableEventListener,
   flushElementTree,
   getAttribute,
   insertBefore,
+  listenerNameClosed,
+  listenerNameOpened,
   parentNode,
   removeAttribute,
   removeElement,
@@ -19,7 +19,6 @@ import {
   setInlineStyleProperty,
   supportsStyleProperty,
   queryElementIds,
-  stopPropagation,
   swapElement,
   tagName,
 } from "bobcat-internal:host";
@@ -74,8 +73,8 @@ import { __BobcatPublishEvent } from "bobcat:runtime";
 // | `__SetEvents(element, events)` | this runtime's own store |
 // | `__AddEventListener(element, name, callback, options?)` | this runtime's own store |
 // | `__RemoveEventListener(element, name, callback, options?)` | this runtime's own store |
-// | `__StopPropagation(event)` | native `stopPropagation` export |
-// | `__StopImmediatePropagation(event)` | native `stopPropagation` export + this runtime's own store |
+// | `__StopPropagation(event)` | the event object's own method |
+// | `__StopImmediatePropagation(event)` | the event object's own method |
 // | `__GetPageElement()` | the page handle `__CreatePage` minted |
 // | `__QuerySelector(element, selector, params)` | native `queryElementIds` export + this runtime's handle index |
 // | `__QuerySelectorAll(element, selector, params)` | native `queryElementIds` export + this runtime's handle index |
@@ -116,41 +115,45 @@ import { __BobcatPublishEvent } from "bobcat:runtime";
 //
 // Registration is the standard's: identity is (element, name, callback,
 // capture), a second add of those four is ignored outright, and `once` and
-// capture behave as `addEventListener`'s do. What is not the standard's is
-// that the host has to be told a node is worth visiting. A list going from
-// empty to occupied calls the native `enableEventListener` export and back to
-// empty calls `disableEventListener`, so the host
-// keeps an index and skips every node that has nothing registered — the walk
-// crosses the boundary only where a listener actually is.
+// capture behave as `addEventListener`'s do.
 //
-// Dispatch is the host's walk and this file's per-node work. The host
-// computes the whole event path while it holds the document, releases it, and
-// then calls this module's `__BobcatDispatchEvent(node, target, phase, name,
-// detail, eventId, isLastCall)` export once per node per pass. Releasing first is
-// what lets a callback mutate the tree. `phase` is the *pass* (`0` bubble, `1`
-// capture, `2` global), not the standard's `eventPhase`. They are different
-// numbers, and at the target they do not even correspond, since both passes
-// visit it; the event object's `eventPhase` is derived here, where the event
-// object is. The third pass is not over the path at all — see
-// `global-bindEvent` below.
+// **The whole walk is this file's.** The host computes the event path while
+// it holds the document, releases it, and makes one call:
+// `__BobcatDispatchEvent(nodes, targets, name, detail)`, where `nodes` is the
+// path in target-first order as comma-joined decimal node ids and `targets`
+// carries, position for position, the shadow-retargeted target of that step.
+// Two strings because the boundary takes primitives and structured clones
+// only, a clone can be minted by the realm alone, and a decimal id cannot
+// contain the separator — the same encoding `childElementIds` uses.
+// Releasing the document before the call is what lets a listener mutate the
+// tree.
 //
-// `eventId` names the dispatch and `isLastCall` says whether another call
-// carries that id, which is what lets one event object live for the whole
-// walk instead of one per node. A listener that writes a property onto the
-// event is seen by the next listener, as a real `Event` gives. The host
-// retains nothing of it: the object is held here, keyed by the id, and dropped
-// on whichever of the walk's three endings comes first — the last call, a
-// listener stopping propagation, or a listener throwing. The latter two are
-// visible here as they happen, which is why the host only has to signal the
-// first. Dropping runs the standard's last dispatch step first — `eventPhase`
-// back to `NONE`, `currentTarget` to null — so an event a listener kept past
-// the walk does not go on naming the node the walk stopped on.
+// From there this file runs the standard's dispatch over that path: the
+// capture pass from the last entry to the first, the bubble pass from the
+// first to the last, one event object for both, `eventPhase` derived per
+// step from whether the step is its own target, and `currentTarget` rebuilt
+// per step. One object for the whole dispatch is both the standard's model
+// and web-core's, and it is what makes a property one listener writes
+// visible to the next. When the dispatch ends — normally, or because a
+// listener threw — the standard's last dispatch step runs: `eventPhase` back
+// to `NONE` and `currentTarget` to null, so an event a listener kept does not
+// go on naming the node the walk stopped on.
 //
-// Propagation splits along the same line. Both stop methods call
-// the native `stopPropagation` export, since the standard's `stopImmediatePropagation`
-// implies `stopPropagation` and ending the walk is the host's. What stays
-// here is the immediate half — skipping the rest of *this* node's listeners —
-// because one delivery covers a whole node and the host has no finer step.
+// Both stop methods are pure local state now. `stopPropagation` ends the
+// remaining steps and `stopImmediatePropagation` also skips the rest of the
+// current node's registrations; neither crosses the boundary, because there
+// is no longer a walk on the other side to end.
+//
+// What the host does learn is the *name* set, and only its global edges: the
+// first handle anywhere to carry a registration for a name calls the native
+// `listenerNameOpened`, and the last to give one up calls
+// `listenerNameClosed`. The painting side routes against that set, so a name
+// nothing listens for never becomes a dispatch. The count behind those edges
+// is kept here, per name, because every registration kind lives here — two
+// closure lists and four `__AddEvent` maps — and only this file can know when
+// a name's first registration appears or its last disappears. A handle's own
+// counted names travel with it into the `FinalizationRegistry`'s held record,
+// so a collected element closes what it held open.
 //
 // # `__AddEvent`, the other registration form
 //
@@ -174,26 +177,28 @@ import { __BobcatPublishEvent } from "bobcat:runtime";
 // carried inside the entry, which is native Lynx's `insert_or_assign`: filing
 // `catchtap` over `bindtap` of the same kind replaces it, form included.
 //
-// The two registration forms share the host's index and the same per-node
-// delivery. The form supplies what the standard's identity does not carry:
-// which pass to file in, and whether the walk ends after this node.
+// The two registration forms share one delivery per step and one name count.
+// The form supplies what the standard's identity does not carry: which pass
+// to file in, and whether the walk ends after this node.
 //
 // What a handler *is* decides where it runs. A worklet runs through the
 // card's own `runWorklet`. A string is published with a snapshot of the event
-// through the MTS runtime. A `catch` form ends the local walk before either
+// through the MTS runtime. A `catch` form ends the walk before either
 // kind is delivered, because ending it is the form's doing, not the
 // handler's. Anything else non-nullish is ignored, neither filed nor clearing
 // what the name held, which is web-core's behavior for it. Native Lynx would
 // take a callable and file it as a Lepus handler; web-core has nowhere to run
 // one, and matching web-core is the compatibility target.
 //
-// `global-bindEvent` is filed in its own slot and indexed in a pass of its
-// own, `2`. It is not a pass over the path: the host delivers every global
-// registration for the name after the path walk has finished, in registration
-// order, whether or not a `catch` ended that walk — web-core's
-// `common_event_handler` calls `dispatch_global_bind_event` unconditionally.
-// A global delivery therefore has no `eventPhase`: `NONE`, since no step of
-// any path produced it.
+// `global-bindEvent` is filed in its own slot and delivered in a pass of its
+// own, after the two path passes. It is not a pass over the path: every
+// element holding a global registration for the name is delivered to, in
+// registration order, whatever path the event took and whether or not a
+// `catch` ended the walk over it — web-core's `common_event_handler` calls
+// `dispatch_global_bind_event` unconditionally. The ids to visit are kept in
+// this file's own registry of (name, node ids), which is what web-core's
+// `update_global_bind_events` keeps too. A global delivery therefore has no
+// `eventPhase`: `NONE`, since no step of any path produced it.
 //
 // # What is deliberately absent
 //
@@ -301,24 +306,16 @@ declare global {
 const nodeIdSymbol = Symbol("nodeId");
 
 /**
- * Which listener list a registration belongs to; also the `type_id` the
- * native index is keyed by, so a node with only bubble listeners is skipped
- * entirely during the capture pass.
- *
- * `GLOBAL_PASS` is the third `type_id`, and the odd one out: it indexes no
- * list of closures and is not a pass over the event path. The host delivers
- * it after the path walk, for every node registered under `global-bindEvent`
- * for that name.
+ * Which listener list a registration belongs to, and which pass runs it: the
+ * bubble pass walks the path's steps in order, the capture pass in reverse.
  */
 const BUBBLE = 0;
 const CAPTURE = 1;
-const GLOBAL_PASS = 2;
 
 /**
- * The standard's `Event.eventPhase` values. The host sends the *pass*, not
- * these: the two are not the same number, and at the target they do not even
- * correspond, since both passes visit it. Deriving one from the other is
- * this file's job because the event object is this file's.
+ * The standard's `Event.eventPhase` values, which are not the pass numbers
+ * above: at the target the two do not even correspond, since both passes
+ * visit it. A step derives its phase from whether it is its own target.
  */
 const NONE = 0;
 const CAPTURING_PHASE = 1;
@@ -359,8 +356,8 @@ const GLOBAL_BIND = "global-bindevent";
  * `STATIC`, `global-bindEvent` in `GLOBAL`. Native Lynx splits the same way
  * — every setter in `AttributeHolder` tests `kGlobalBind` first and writes
  * `global_bind_events_` rather than the maps its path walk reads — and so
- * does web-core, whose `update_global_bind_events` keeps its own index of
- * the elements a global delivery has to visit.
+ * does web-core, whose `update_global_bind_events` keeps the same index of
+ * the elements a global delivery has to visit that [`globalNodes`] is.
  *
  * Native folds both handler kinds into its one global map, where web-core
  * keeps them apart and its `dispatch_global_bind_event` reads both. web-core
@@ -408,19 +405,33 @@ type HandlerKinds = [Map<string, FiledHandler>, Map<string, FiledHandler>];
 type HandlerMaps = [HandlerKinds, HandlerKinds];
 
 /**
- * What this file has last told the host about a (handle, name, pass), for
- * each of the three passes.
+ * How many handles currently carry *any* registration for an event name —
+ * a closure in either pass, or a handler in any of the four `__AddEvent`
+ * maps.
  *
- * The host indexes a plain registration per `(node, pass)` per name, so
- * `disableEventListener` is unconditional — it cannot know that another
- * registration kind still wants the node visited. Several kinds file into
- * that one index: `__AddEventListener` closures, and a string and a worklet
- * `__AddEvent` handler in each slot. So the decision belongs here, taken from
- * all of them, with only the transitions crossing the boundary. Filed on the
- * handle, like the rest.
+ * The host keeps no listener index at all now, only the set of names the
+ * painting side routes against, and it learns that set through the two
+ * global edges of this count: 0 to 1 opens a name, 1 to 0 closes it. The
+ * count has to live here because every registration does. A handle is
+ * counted once per name however many registrations it holds for it, which
+ * is what makes the reconciliation below a per-(handle, name) decision
+ * rather than a sum.
  */
-const indexedSymbol = Symbol("indexed");
-type IndexedPasses = Map<string, [boolean, boolean, boolean]>;
+const listenerNameCounts: Map<string, number> = new Map();
+
+/**
+ * The node ids holding a `global-bindEvent` handler of either kind, per
+ * event name, in registration order — which is delivery order, since no
+ * path orders a global registration.
+ *
+ * A `Set` keeps the position of its first insertion when a member is added
+ * again while still present, which is exactly the rule wanted: re-filing a
+ * handler on an element already registered must not move it behind the ones
+ * that followed it. Ids rather than handles, so this registry cannot be what
+ * keeps an element alive; a dead one is skipped at delivery and pruned by
+ * the collection that took its handle.
+ */
+const globalNodes: Map<string, Set<number>> = new Map();
 
 /**
  * The list callbacks `__CreateList` and `__UpdateListCallbacks` file.
@@ -489,6 +500,27 @@ type OwnedChildren = Set<Handle>;
 const ownerSymbol = Symbol("owner");
 
 /**
+ * What a handle leaves behind for the collection that frees its element:
+ * its node id, and the event names it is counted under in
+ * [`listenerNameCounts`].
+ *
+ * A record rather than the bare id, because a name a dead handle held open
+ * has to be closed and its entry in [`globalNodes`] pruned, and the cleanup
+ * runs when the handle — and every set on it — is already unreachable. The
+ * handle points at this record and the record never points back: a held
+ * value that reached its target would keep it alive forever, and a
+ * `FinalizationRegistry` is specified to reject exactly that.
+ *
+ * The `names` set is created on first registration. Most elements never get
+ * one, so most handles pay this record and nothing more.
+ */
+const collectedSymbol = Symbol("collected");
+interface Collected {
+  readonly nodeId: number;
+  names: Set<string> | undefined;
+}
+
+/**
  * A handle as this file sees it: the node id, plus whatever it has filed
  * on the handle under its own symbols.
  */
@@ -496,7 +528,7 @@ interface Handle {
   readonly [nodeIdSymbol]: number;
   [listenersSymbol]?: ListenerLists;
   [handlersSymbol]?: HandlerMaps;
-  [indexedSymbol]?: IndexedPasses;
+  [collectedSymbol]?: Collected;
   [listCallbacksSymbol]?: ListCallbacks;
   [datasetSymbol]?: Map<string, unknown>;
   [attributeValuesSymbol]?: Map<string, unknown>;
@@ -512,8 +544,16 @@ function handlersOf(handle: Handle): HandlerMaps | undefined {
   return handle[handlersSymbol];
 }
 
-function indexedOf(handle: Handle): IndexedPasses | undefined {
-  return handle[indexedSymbol];
+/**
+ * The record this handle's collection will hand the cleanup, created on
+ * first use. The page handle never reaches a registry, and gets one all the
+ * same: it is where its counted names live.
+ */
+function collectedOf(handle: Handle): Collected {
+  return handle[collectedSymbol] ??= {
+    nodeId: nodeIdOf(handle),
+    names: undefined,
+  };
 }
 
 /**
@@ -529,18 +569,28 @@ function indexedOf(handle: Handle): IndexedPasses | undefined {
 const handlesByNodeId: Map<number, WeakRef<Handle>> = new Map();
 
 /**
- * Frees the element of a handle that is gone.
+ * Frees the element of a handle that is gone, and gives up what that handle
+ * had registered.
  *
  * The host frees that element alone: its element children are unlinked into
  * detached roots for their own handles, and only what no handle could name —
  * the text node a `raw-text` reflects — goes with it. The element cannot
  * still be connected, because a connected element's handle is held by its
  * parent's, up to the permanent page handle.
+ *
+ * Its registrations died with the handle, so the counts they held have to
+ * come down here: an element that took the last registration for a name with
+ * it closes that name, exactly as an explicit removal would have.
  */
 const registry = new FinalizationRegistry(
-  (nodeId: number) => {
-    handlesByNodeId.delete(nodeId);
-    dropElement(nodeId);
+  (collected: Collected) => {
+    handlesByNodeId.delete(collected.nodeId);
+    for (const name of collected.names ?? []) {
+      closeName(name);
+      forgetGlobalNode(name, collected.nodeId);
+    }
+    collected.names = undefined;
+    dropElement(collected.nodeId);
   },
 );
 
@@ -566,9 +616,9 @@ export class Document {
 let pageHandle: Handle | undefined;
 
 function createHandle(nodeId: number): Handle {
-  const handle = { [nodeIdSymbol]: nodeId };
+  const handle: Handle = { [nodeIdSymbol]: nodeId };
   handlesByNodeId.set(nodeId, new WeakRef(handle));
-  registry.register(handle, nodeId, handle);
+  registry.register(handle, collectedOf(handle), handle);
   return handle;
 }
 
@@ -1310,10 +1360,10 @@ export function __BobcatQueryNodes(request: NodeQueryRequest) {
 
 /**
  * The pass a `__AddEvent` type is delivered in. Lynx's four path-walking
- * forms collapse onto the two passes the host walks: the `capture-` pair is
+ * forms collapse onto the two passes over the path: the `capture-` pair is
  * the capture pass, `bindEvent`/`catchEvent` the bubble pass.
  * `global-bindEvent` is not one of them and never reaches this — it is filed
- * in the `GLOBAL` slot, whose whole content is the third pass.
+ * in the `GLOBAL` slot, whose whole content is the pass after both.
  */
 function phaseOfType(type: string): 0 | 1 {
   return type === CAPTURE_BIND || type === CAPTURE_CATCH ? CAPTURE : BUBBLE;
@@ -1355,70 +1405,102 @@ function filedHandler(
 }
 
 /**
- * Tells the host about one (element, name, pass), but only when the answer
- * changed. Records what was said, so the next reconciliation knows.
+ * Opens a name with the host when this is the first handle to want it.
  */
-function syncPass(
-  handle: Handle,
-  name: string,
-  phase: 0 | 1 | 2,
-  wanted: boolean,
-): undefined {
-  let byName = indexedOf(handle);
-  const state = byName?.get(name);
-  if (wanted === (state?.[phase] ?? false)) {
-    return undefined;
+function openName(name: string): undefined {
+  const count = listenerNameCounts.get(name) ?? 0;
+  listenerNameCounts.set(name, count + 1);
+  if (count === 0) {
+    listenerNameOpened(name);
   }
-  if (wanted) {
-    enableEventListener(nodeIdOf(handle), phase, name);
-  } else {
-    disableEventListener(nodeIdOf(handle), phase, name);
-  }
-  if (state !== undefined) {
-    state[phase] = wanted;
-    if (!state[BUBBLE] && !state[CAPTURE] && !state[GLOBAL_PASS]) {
-      byName?.delete(name);
-    }
-    return undefined;
-  }
-  if (byName === undefined) {
-    byName = new Map();
-    handle[indexedSymbol] = byName;
-  }
-  const created: [boolean, boolean, boolean] = [false, false, false];
-  created[phase] = wanted;
-  byName.set(name, created);
   return undefined;
 }
 
 /**
- * Reconciles all three passes of the host's index for one (element, name)
- * against everything registered here now.
- *
- * A pass is wanted when *any* registration asks for it: a closure list, or
- * either handler kind whose form selects that pass. The global pass is asked
- * for by either kind of the `GLOBAL` slot, and by nothing else — closures
- * never file globally, because `__AddEventListener` carries no Lynx form.
+ * The reverse, called once per handle that was counted under `name`.
  */
-function syncIndex(handle: Handle, name: string): undefined {
+function closeName(name: string): undefined {
+  const count = listenerNameCounts.get(name) ?? 0;
+  if (count > 1) {
+    listenerNameCounts.set(name, count - 1);
+    return undefined;
+  }
+  listenerNameCounts.delete(name);
+  listenerNameClosed(name);
+  return undefined;
+}
+
+/**
+ * Takes one node out of a name's global-bind registry, dropping the name's
+ * entry with its last member so the registry holds only names something is
+ * registered for.
+ */
+function forgetGlobalNode(name: string, nodeId: number): undefined {
+  const nodes = globalNodes.get(name);
+  if (nodes === undefined) {
+    return undefined;
+  }
+  nodes.delete(nodeId);
+  if (nodes.size === 0) {
+    globalNodes.delete(name);
+  }
+  return undefined;
+}
+
+/**
+ * Whether anything at all on this handle is registered for `name`: a closure
+ * in either pass, or a handler in any of the four `__AddEvent` maps.
+ */
+function hasRegistration(handle: Handle, name: string): boolean {
   const lists = listenersOf(handle)?.get(name);
-  const wanted: [boolean, boolean, boolean] = [
-    lists !== undefined && lists[BUBBLE].length > 0,
-    lists !== undefined && lists[CAPTURE].length > 0,
-    false,
-  ];
-  for (const kind of [STRING_HANDLER, WORKLET_HANDLER] as const) {
-    const filed = filedHandler(handle, STATIC, kind, name);
-    if (filed !== undefined) {
-      wanted[phaseOfType(filed.type)] = true;
-    }
-    if (filedHandler(handle, GLOBAL, kind, name) !== undefined) {
-      wanted[GLOBAL_PASS] = true;
+  if (lists !== undefined && (lists[BUBBLE].length > 0 || lists[CAPTURE].length > 0)) {
+    return true;
+  }
+  const maps = handlersOf(handle);
+  if (maps === undefined) {
+    return false;
+  }
+  return maps.some((slot) => slot.some((kind) => kind.has(name)));
+}
+
+/**
+ * Reconciles the two realm-wide registries for one (handle, name) against
+ * everything registered on that handle now. Every registration change calls
+ * it, and it is where a name edge reaches the host.
+ *
+ * A handle is counted once per name however many registrations it holds, so
+ * the decision is a membership test rather than a sum, and the transitions
+ * are the only thing that crosses: the first handle to want a name opens it,
+ * the last to give it up closes it.
+ */
+function reconcile(handle: Handle, name: string): undefined {
+  const collected = collectedOf(handle);
+  const wanted = hasRegistration(handle, name);
+  if (wanted !== (collected.names?.has(name) ?? false)) {
+    if (wanted) {
+      (collected.names ??= new Set()).add(name);
+      openName(name);
+    } else {
+      collected.names?.delete(name);
+      closeName(name);
     }
   }
-  syncPass(handle, name, BUBBLE, wanted[BUBBLE]);
-  syncPass(handle, name, CAPTURE, wanted[CAPTURE]);
-  syncPass(handle, name, GLOBAL_PASS, wanted[GLOBAL_PASS]);
+  const maps = handlersOf(handle);
+  const global = maps !== undefined &&
+    (maps[GLOBAL][STRING_HANDLER].has(name) ||
+      maps[GLOBAL][WORKLET_HANDLER].has(name));
+  if (global) {
+    let nodes = globalNodes.get(name);
+    if (nodes === undefined) {
+      nodes = new Set();
+      globalNodes.set(name, nodes);
+    }
+    // Re-adding a member a `Set` already holds leaves it where it was, which
+    // is what keeps a re-filed handler in its original delivery position.
+    nodes.add(nodeIdOf(handle));
+  } else {
+    forgetGlobalNode(name, nodeIdOf(handle));
+  }
   return undefined;
 }
 
@@ -1448,11 +1530,11 @@ function listsFor(
  * ignored outright — including its options, so re-adding with `once` neither
  * files a second listener nor changes the first.
  *
- * A list going from empty to occupied is what tells the host this node is
- * worth visiting for this name in this pass; until then the host skips it
- * and no cross-boundary call happens at all. The telling goes through
- * `syncIndex`, because an `__AddEvent` handler files into the same host
- * index and neither kind may switch the other off.
+ * A list going from empty to occupied can be what opens this event name
+ * with the host, which is what makes the painting side route the event at
+ * all. The telling goes through [`reconcile`], because an `__AddEvent`
+ * handler counts under the same name and neither kind may close it while the
+ * other still wants it.
  */
 function addListener(
   handle: Handle,
@@ -1478,7 +1560,7 @@ function addListener(
     once: Boolean(settings?.["once"]),
     removed: false,
   });
-  syncIndex(handle, name);
+  reconcile(handle, name);
   return undefined;
 }
 
@@ -1515,7 +1597,7 @@ function removeListener(
   if (removed !== undefined) {
     removed.removed = true;
   }
-  syncIndex(handle, name);
+  reconcile(handle, name);
   return undefined;
 }
 
@@ -1560,7 +1642,7 @@ function addEvent(
     // no main-thread place to run one and this runtime does not invent one.
     return undefined;
   }
-  syncIndex(handle, name);
+  reconcile(handle, name);
   return undefined;
 }
 
@@ -1581,10 +1663,10 @@ function addEvent(
  * callable above all — is ignored outright, which is what web-core does
  * with it.
  *
- * `global-bindEvent` is filed in its own slot, and indexed in the host's
- * third pass. That pass is not over the event path: the host delivers every
- * global registration for the name once the path walk has finished, in
- * registration order, whether or not a `catch` ended the walk.
+ * `global-bindEvent` is filed in its own slot and listed in [`globalNodes`].
+ * Its pass is not over the event path: every global registration for the
+ * name is delivered once both path passes have finished, in registration
+ * order, whether or not a `catch` ended the walk over the path.
  */
 export function __AddEvent(
   element: unknown,
@@ -1689,7 +1771,7 @@ export function __SetEvents(element: unknown, events: unknown): undefined {
       }
     }
     for (const name of names) {
-      syncIndex(handle, name);
+      reconcile(handle, name);
     }
   }
   if (!Array.isArray(events)) {
@@ -1806,16 +1888,14 @@ function datasetOf(nodeId: number): Record<string, unknown> {
 }
 
 /**
- * The event objects of the dispatches currently walking, by host event id.
+ * The event object one dispatch hands every listener it reaches.
  *
- * One entry, minted at a dispatch's first delivery and dropped at its last,
- * so every listener on a path sees the same object — a property one writes
- * is there for the next, which is what an `Event` instance is for. The host
- * cannot nest dispatches, so this holds at most one entry at a time; it is a
- * `Map` rather than a single slot only because the id is what identifies an
- * entry, and dropping the wrong one would be silent.
+ * One object for the whole dispatch, mutated as the passes advance, which is
+ * both the standard's model and web-core's (`WASMJSBinding.ts` passes one
+ * `LynxCrossThreadEvent` down its per-element loop): a property one listener
+ * writes is there for the next. It is minted per dispatch and reachable from
+ * nothing afterwards, so a listener that keeps one keeps only it.
  */
-const dispatches: Map<number, Dispatch> = new Map();
 interface DispatchedEvent {
   type: string;
   eventPhase: number;
@@ -1824,12 +1904,6 @@ interface DispatchedEvent {
   detail: unknown;
   stopPropagation: () => void;
   stopImmediatePropagation: () => void;
-}
-interface Dispatch {
-  event: DispatchedEvent;
-  targetNodeId: number;
-  immediate: boolean;
-  stopped: boolean;
 }
 
 /**
@@ -1880,48 +1954,6 @@ function backgroundEvent(event: DispatchedEvent): Record<string, unknown> {
 }
 
 /**
- * The entry for one dispatch, created on its first delivery.
- *
- * `detail` is parsed once here rather than once per node, and the two stop
- * methods close over the entry, so they keep working from a later delivery
- * of the same event.
- */
-function dispatchEntry(
-  eventId: number,
-  name: string,
-  targetNodeId: number,
-  detailJson: unknown,
-): Dispatch {
-  const existing = dispatches.get(eventId);
-  if (existing !== undefined) {
-    return existing;
-  }
-  const entry = {
-    targetNodeId,
-    immediate: false,
-    stopped: false,
-  } as Dispatch;
-  entry.event = {
-    type: name,
-    eventPhase: NONE,
-    target: targetInfo(targetNodeId),
-    currentTarget: null,
-    detail: detailJson ? JSON.parse(String(detailJson)) : {},
-    stopPropagation: () => {
-      entry.stopped = true;
-      stopPropagation();
-    },
-    stopImmediatePropagation: () => {
-      entry.immediate = true;
-      entry.stopped = true;
-      stopPropagation();
-    },
-  };
-  dispatches.set(eventId, entry);
-  return entry;
-}
-
-/**
  * The standard's `eventPhase` for one step.
  *
  * A step whose target is itself is at-target — crossing a shadow boundary
@@ -1934,86 +1966,6 @@ function eventPhaseOf(node: number, target: unknown, phase: number): number {
     return AT_TARGET;
   }
   return phase === CAPTURE ? CAPTURING_PHASE : BUBBLING_PHASE;
-}
-
-/**
- * One node's turn at one event, called by the host once per node per pass.
- *
- * The host owns the walk. It computes the whole event path while it holds
- * the document, releases it, and only then calls in here — so a callback is
- * free to mutate the tree, which is the reason for that order. What this
- * function owns is one node's listeners: which list the pass selects, their
- * order, `once`, and stopping the rest of them.
- *
- * Both stop methods reach `stopPropagation`, because the standard's
- * `stopImmediatePropagation` implies `stopPropagation` and ending the walk
- * is the host's to do. What does *not* leave is the immediate half — the
- * skipping of this node's remaining listeners — because one delivery covers
- * the whole node and the host has no finer step to withhold.
- *
- * @param phaseId `BUBBLE`, `CAPTURE` or `GLOBAL_PASS`, the pass being run
- * @param detailJson the event's device facts, or an empty string
- * @param eventId names this dispatch, the same for all its calls
- * @param isLastCall whether the host will call again for this id
- */
-function eventListenerCallback(
-  nodeId: unknown,
-  targetNodeId: unknown,
-  phaseId: unknown,
-  eventName: unknown,
-  detailJson: unknown,
-  eventId: unknown,
-  isLastCall: unknown,
-): undefined {
-  const id = Number(eventId);
-  let entry: Dispatch | undefined;
-  try {
-    entry = deliverEvent(
-      id,
-      nodeId as number,
-      targetNodeId as number,
-      phaseId === CAPTURE ? CAPTURE : phaseId === GLOBAL_PASS ? GLOBAL_PASS : BUBBLE,
-      String(eventName).toLowerCase(),
-      detailJson,
-    );
-  } catch (error) {
-    // A listener threw. The host aborts the walk on it, so no further call
-    // carries this id and nothing else would ever end the dispatch.
-    endDispatch(id);
-    throw error;
-  }
-  // A stop ends the dispatch here, because the host only signals the walk's
-  // *last* call. The host goes on making the global-bind calls after a stop —
-  // a `catch` on the path does not suppress them — and each of those finds no
-  // entry and mints a fresh one, so a global handler after a caught walk sees
-  // a new event object rather than the caught one. That is the cost of
-  // ending eagerly, and it costs nothing a handler can observe except object
-  // identity across the boundary between the path and the global deliveries.
-  // The last global call still carries the flag, so the last entry is ended.
-  if (isLastCall || entry === undefined || entry.stopped) {
-    endDispatch(id);
-  }
-  return undefined;
-}
-
-/**
- * Ends one dispatch, on whichever of its three endings came first.
- *
- * The clean-up before the drop is the standard's own last dispatch step:
- * `eventPhase` back to `NONE` and `currentTarget` to null. It is observable,
- * because a listener may keep the event past the walk — a worklet closing
- * over it, an author stashing it — and without this the object it kept would
- * still name whichever node the walk happened to stop on. Only `target`
- * survives, as the standard leaves it.
- */
-function endDispatch(id: number): undefined {
-  const entry = dispatches.get(id);
-  if (entry !== undefined) {
-    entry.event.eventPhase = NONE;
-    entry.event.currentTarget = null;
-    dispatches.delete(id);
-  }
-  return undefined;
 }
 
 /**
@@ -2048,112 +2000,237 @@ function runEventHandler(handler: unknown, event: DispatchedEvent): undefined {
 }
 
 /**
- * One node's turn at one dispatch, for one pass.
- *
- * Passes `BUBBLE` and `CAPTURE` are steps of the event path: the `STATIC`
- * slot's handlers whose form selects this pass, then the closures of the
- * pass's own listener list. Pass `GLOBAL_PASS` is not a step of anything —
- * it is a `global-bindEvent` registration the host delivers after the path,
- * so it runs the `GLOBAL` slot's handlers regardless of form, runs no
- * closures, and leaves `eventPhase` at `NONE` because no phase produced it.
- *
- * Returns the dispatch's entry, or `undefined` when this node contributed
- * nothing and none was needed.
+ * One step of the event path: the node visited, and the target the standard
+ * reports there — the two differ only across a shadow boundary, where
+ * retargeting hands the steps above it the node they can name.
  */
-function deliverEvent(
-  id: number,
-  node: number,
-  targetNodeId: number,
-  phase: number,
-  name: string,
-  detailJson: unknown,
-): Dispatch | undefined {
-  // No handle, no listeners: they lived on the handle and went with it. The
-  // host's index is maintained from here and forgets a node when its element
-  // is dropped, so this is the window between a handle becoming unreachable
-  // and its cleanup job running, not a node that was never named.
-  const handle = handleOf(node);
-  if (handle === undefined) {
-    return dispatches.get(id);
-  }
-  const global = phase === GLOBAL_PASS;
-  const slot = global ? GLOBAL : STATIC;
-  const inThisPass = (filed: FiledHandler | undefined) =>
-    filed !== undefined && (global || phaseOfType(filed.type) === phase)
-      ? filed
-      : undefined;
-  const published = inThisPass(filedHandler(handle, slot, STRING_HANDLER, name));
-  const worklet = inThisPass(filedHandler(handle, slot, WORKLET_HANDLER, name));
-  const list = global ? undefined : listenersOf(handle)?.get(name)?.[phase];
-  const closures = list !== undefined && list.length > 0 ? list : undefined;
-  if (closures === undefined && published === undefined && worklet === undefined) {
-    return dispatches.get(id);
-  }
+interface PathStep {
+  node: number;
+  target: number;
+}
 
-  const entry = dispatchEntry(id, name, targetNodeId, detailJson);
-  const event = entry.event;
-  entry.immediate = false;
-  event.eventPhase = global ? NONE : eventPhaseOf(node, targetNodeId, phase);
-  event.currentTarget = targetInfo(node);
-  // Only across a shadow boundary, where retargeting hands this node a
-  // different target than the last one saw. Rebuilding unconditionally would
-  // spend a host call per node and break `event.target === event.target`
-  // across steps.
-  if (targetNodeId !== entry.targetNodeId) {
-    entry.targetNodeId = targetNodeId;
-    event.target = targetInfo(targetNodeId);
-  } else {
-    // The object stays, but its dataset is read again: web-core rebuilds the
-    // whole descriptor per invocation, so a `data-*` attribute an earlier
-    // listener wrote has to be visible to the steps after it, and to every
-    // background publish. `id` is deliberately not refreshed — see the
-    // cached-target note in docs/tracking/dom-events.md.
-    event.target.dataset = datasetOf(entry.targetNodeId);
+/**
+ * The path the host computed, from its two comma-joined id strings.
+ *
+ * Target-first, root-last: the bubble order, which the capture pass reads
+ * backwards. Two strings rather than one structure because the boundary
+ * carries primitives and structured clones only, and a decimal id cannot
+ * contain the separator — `childElementIds` encodes a list the same way.
+ */
+function pathSteps(pathIds: unknown, targetIds: unknown): PathStep[] {
+  const path = String(pathIds ?? "");
+  if (path === "") {
+    return [];
   }
+  const targets = String(targetIds ?? "").split(",");
+  return path.split(",").map((field, index): PathStep => {
+    const node = Number(field);
+    const target = targets[index];
+    return { node, target: target === undefined ? node : Number(target) };
+  });
+}
+
+/**
+ * The handler of one kind on a path step, or undefined when the one filed
+ * belongs to the other pass.
+ */
+function handlerInPass(
+  filed: FiledHandler | undefined,
+  phase: 0 | 1,
+): FiledHandler | undefined {
+  return filed !== undefined && phaseOfType(filed.type) === phase
+    ? filed
+    : undefined;
+}
+
+/**
+ * One whole dispatch, the single call the host makes per event.
+ *
+ * The host computed the path while it held the document and released it
+ * before calling, which is what lets a listener mutate the tree. Everything
+ * after that is this file's: the standard's capture pass from the path's
+ * far end inwards, its bubble pass back out, then the `global-bindEvent`
+ * pass, which is not over the path at all.
+ *
+ * One event object serves all three, so a property one listener writes is
+ * there for the next. Whatever ends the dispatch — the passes finishing, a
+ * stop, or a listener throwing on its way out of this call — the standard's
+ * last dispatch step runs: `eventPhase` back to `NONE` and `currentTarget`
+ * to null, so an event a listener kept does not go on naming the node the
+ * dispatch stopped on. `target` survives, as the standard leaves it.
+ *
+ * A step whose handle is gone is skipped: its registrations lived on that
+ * handle and went with it, and this is the window between the handle
+ * becoming unreachable and the cleanup that frees its element.
+ */
+function dispatchEvent(
+  pathIds: unknown,
+  targetIds: unknown,
+  eventName: unknown,
+  detailJson: unknown,
+): undefined {
+  const steps = pathSteps(pathIds, targetIds);
+  const first = steps[0];
+  if (first === undefined) {
+    return undefined;
+  }
+  const name = String(eventName).toLowerCase();
+  let stopped = false;
+  let immediate = false;
+  let targetNodeId = first.target;
+  const event: DispatchedEvent = {
+    type: name,
+    eventPhase: NONE,
+    target: targetInfo(targetNodeId),
+    currentTarget: null,
+    detail: detailJson ? JSON.parse(String(detailJson)) : {},
+    stopPropagation: () => {
+      stopped = true;
+    },
+    stopImmediatePropagation: () => {
+      stopped = true;
+      immediate = true;
+    },
+  };
+
+  // Points the event at one delivery. `currentTarget` is rebuilt per step,
+  // as web-core rebuilds it per listener invocation; `target` is kept while
+  // it names the same node, so `event.target === event.target` holds across
+  // a walk as it does in a browser, and only its `dataset` is read again —
+  // a `data-*` attribute an earlier listener wrote has to be visible to the
+  // steps after it. `id` is deliberately not refreshed; see the
+  // cached-target note in docs/tracking/dom-events.md.
+  const aim = (node: number, target: number, phase: number): undefined => {
+    immediate = false;
+    event.eventPhase = phase;
+    event.currentTarget = targetInfo(node);
+    if (target === targetNodeId) {
+      event.target.dataset = datasetOf(targetNodeId);
+    } else {
+      targetNodeId = target;
+      event.target = targetInfo(target);
+    }
+    return undefined;
+  };
 
   // The string handler, then the worklet, then the `__AddEventListener`
   // closures, which is web-core's per-node order in both its path walk and
   // its global-bind delivery.
-  //
-  // Before either handler rather than after: a `catch` form ends the walk
-  // because of what it is, so it has to end it even when its handler is a
-  // background-thread name delivered asynchronously. Either kind's form can
-  // be the catch. No `global-bindEvent` registration is ever one.
-  if (
-    (published !== undefined && isCatchType(published.type)) ||
-    (worklet !== undefined && isCatchType(worklet.type))
-  ) {
-    event.stopPropagation();
-  }
-  if (published !== undefined) {
-    runEventHandler(published.handler, event);
-  }
-  if (worklet !== undefined && !entry.immediate) {
-    runEventHandler(worklet.handler, event);
-  }
-
-  // Skipped whole when a handler above stopped immediate propagation:
-  // the rest of this node's registrations is exactly what that suppresses.
-  if (closures !== undefined && !entry.immediate) {
-    // A copy, so a callback that adds or removes listeners for this same
-    // node and name changes what the *next* event sees, not this one — the
-    // standard's rule, one level down from the path the host froze.
-    for (const registration of closures.slice()) {
-      if (registration.removed) {
+  const runPass = (ordered: PathStep[], phase: 0 | 1): undefined => {
+    for (const step of ordered) {
+      if (stopped) {
+        return undefined;
+      }
+      const handle = handleOf(step.node);
+      if (handle === undefined) {
         continue;
       }
-      if (registration.once) {
-        removeListener(handle, name, registration.callback, {
-          capture: phase === CAPTURE,
-        });
+      const published = handlerInPass(
+        filedHandler(handle, STATIC, STRING_HANDLER, name),
+        phase,
+      );
+      const worklet = handlerInPass(
+        filedHandler(handle, STATIC, WORKLET_HANDLER, name),
+        phase,
+      );
+      const list = listenersOf(handle)?.get(name)?.[phase];
+      const closures = list !== undefined && list.length > 0 ? list : undefined;
+      if (
+        closures === undefined && published === undefined && worklet === undefined
+      ) {
+        continue;
       }
-      registration.callback(event);
-      if (entry.immediate) {
-        break;
+      aim(step.node, step.target, eventPhaseOf(step.node, step.target, phase));
+      // Before either handler rather than after: a `catch` form ends the
+      // walk because of what it is, so it has to end it even when its
+      // handler is a background-thread name delivered asynchronously. Either
+      // kind's form can be the catch.
+      if (
+        (published !== undefined && isCatchType(published.type)) ||
+        (worklet !== undefined && isCatchType(worklet.type))
+      ) {
+        event.stopPropagation();
+      }
+      if (published !== undefined) {
+        runEventHandler(published.handler, event);
+      }
+      if (worklet !== undefined && !immediate) {
+        runEventHandler(worklet.handler, event);
+      }
+      // Skipped whole when a handler above stopped immediate propagation:
+      // the rest of this node's registrations is exactly what that
+      // suppresses.
+      if (closures === undefined || immediate) {
+        continue;
+      }
+      // A copy, so a callback that adds or removes listeners for this same
+      // node and name changes what the *next* event sees, not this one — the
+      // standard's rule, one level down from the path the host froze.
+      for (const registration of closures.slice()) {
+        if (registration.removed) {
+          continue;
+        }
+        if (registration.once) {
+          removeListener(handle, name, registration.callback, {
+            capture: phase === CAPTURE,
+          });
+        }
+        registration.callback(event);
+        if (immediate) {
+          break;
+        }
       }
     }
+    return undefined;
+  };
+
+  // The `global-bindEvent` registrations, in registration order. Not a pass
+  // over the path — a global registration is delivered for every event of
+  // its name whatever path it took — so it runs whether or not a `catch`
+  // ended the walk over the path, which is what web-core's
+  // `common_event_handler` does when it calls `dispatch_global_bind_event`
+  // unconditionally. It runs no closures: `__AddEventListener` carries no
+  // Lynx form and so never files globally. `eventPhase` is `NONE`, since no
+  // step of any path produced the delivery, and `target` is the event's own.
+  const runGlobalPass = (): undefined => {
+    const registered = globalNodes.get(name);
+    if (registered === undefined) {
+      return undefined;
+    }
+    // A snapshot: a handler may file or clear a global registration, and the
+    // set it would change is this one.
+    for (const nodeId of [...registered]) {
+      const handle = handleOf(nodeId);
+      if (handle === undefined) {
+        continue;
+      }
+      const maps = handlersOf(handle);
+      const published = maps?.[GLOBAL][STRING_HANDLER].get(name);
+      const worklet = maps?.[GLOBAL][WORKLET_HANDLER].get(name);
+      if (published === undefined && worklet === undefined) {
+        continue;
+      }
+      aim(nodeId, first.target, NONE);
+      if (published !== undefined) {
+        runEventHandler(published.handler, event);
+      }
+      if (worklet !== undefined && !immediate) {
+        runEventHandler(worklet.handler, event);
+      }
+    }
+    return undefined;
+  };
+
+  try {
+    // The reversed copy is the capture order; a path is a handful of steps.
+    runPass(steps.slice().reverse(), CAPTURE);
+    runPass(steps, BUBBLE);
+    runGlobalPass();
+  } finally {
+    event.eventPhase = NONE;
+    event.currentTarget = null;
   }
-  return entry;
+  return undefined;
 }
 
 export function __AddEventListener(
@@ -2175,9 +2252,8 @@ export function __RemoveEventListener(
 }
 
 /**
- * Native Lynx takes the event object here, and so does this: the object is
- * minted per delivery and carries the methods, so the PAPI form is the same
- * call by another name.
+ * Native Lynx takes the event object here, and so does this: the object
+ * carries the methods, so the PAPI form is the same call by another name.
  */
 export function __StopPropagation(event: unknown): undefined {
   (event as { stopPropagation?: () => void })?.stopPropagation?.();
@@ -2274,7 +2350,7 @@ export function __FlushElementTree(): undefined {
   return undefined;
 }
 
-// The host calls this export once per node per pass. It is deliberately not
-// part of the entry preamble's PAPI imports; it is the module-namespace return
-// path from Rust into the realm.
-export { eventListenerCallback as __BobcatDispatchEvent };
+// The host calls this export once per dispatch, with the whole path. It is
+// deliberately not part of the entry preamble's PAPI imports; it is the
+// module-namespace return path from Rust into the realm.
+export { dispatchEvent as __BobcatDispatchEvent };

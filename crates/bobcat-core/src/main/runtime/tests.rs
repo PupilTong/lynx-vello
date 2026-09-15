@@ -2,7 +2,7 @@ use tokio::sync::mpsc;
 
 use super::*;
 use crate::background::{WorkerCommand, WorkerEvent};
-use crate::link::{DetachedView, ViewObserver, detached_outbox};
+use crate::link::{DetachedView, detached_outbox};
 use crate::main::tree::{PageConfig, Viewport};
 use crate::main::workers::WorkerFactory;
 use crate::view::NoWakeup;
@@ -263,6 +263,21 @@ impl PublishedNames {
     fn contains(&mut self, name: &str) -> bool {
         self.0.published.sync();
         self.0.published.has_listener(name)
+    }
+
+    /// The whole published set, sorted, for a test about which names the
+    /// realm has opened rather than about one of them.
+    fn names(&mut self) -> Vec<String> {
+        self.0.published.sync();
+        let mut names: Vec<String> = self
+            .0
+            .published
+            .listener_names()
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
+        names.sort();
+        names
     }
 }
 
@@ -586,7 +601,7 @@ fn a_failed_boot_leaves_the_group_s_other_view_alone() {
         second
             .dispatch_event(&mut js_runtime, node_id(2), &tap(), &no_detail())
             .expect("the second view's dispatch is not the first view's failure"),
-        "the listener ran"
+        "the second view's realm published the dispatch export"
     );
     assert!(
         second.run_due_timers(&mut js_runtime).is_empty(),
@@ -1289,112 +1304,70 @@ fn clearing_inline_styles_removes_the_attribute_and_layout_effect() {
     );
 }
 
-/// The two indexes are one fact written twice, so every mutation has to
-/// leave them agreeing — and the painting side has to hear exactly the
-/// global edges of the name set, no more and no fewer.
+/// The painting side routes against the published name set, and the realm is
+/// the only thing that can maintain it: every registration lives there, in
+/// six places per element, and the host is told only the global edges — a
+/// name's first registration anywhere, and the removal of its last.
 #[test]
-fn the_listener_indexes_and_the_published_edges_stay_in_step() {
-    let (outbox, mut far_end) = detached_outbox(Arc::new(NoWakeup));
-    let state = EventState::new(outbox);
-    let (a, b) = (node_id(3), node_id(4));
-    // One call at a time, so what crossed and what did not is asserted per
-    // registration rather than inferred from the set afterwards. The names
-    // come back sorted because a set has no order of its own.
-    let published = |observer: &mut ViewObserver| {
-        observer.sync();
-        let mut names: Vec<String> = observer
-            .listener_names()
-            .iter()
-            .map(std::string::ToString::to_string)
-            .collect();
-        names.sort();
-        names
-    };
-    let edge = |observer: &mut ViewObserver| observer.take_published_edge();
+fn the_published_names_are_the_global_edges_of_the_realm_registrations() {
+    let (mut js_runtime, mut runtime, _elements, mut names) =
+        runtime_over_watching_names(ingredients());
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const outer = __CreateView(0);
+                  const inner = __CreateView(0);
+                  __AppendElement(page, outer);
+                  __AppendElement(outer, inner);
+                  globalThis.held = [page, outer, inner];
+                  globalThis.listener = () => {};
+                  // Two handles on one name, and on one of them a second
+                  // registration of another kind entirely: still one name.
+                  __AddEventListener(outer, 'tap', globalThis.listener, {});
+                  __AddEventListener(inner, 'tap', globalThis.listener, { capture: true });
+                  __AddEvent(inner, 'bindEvent', 'tap', '3:0:bindtap');
+                  __AddEvent(outer, 'global-bindEvent', 'swipe', '3:0:swipe');
+                };
+                ",
+            "app:///edges.js",
+        )
+        .expect("main-thread script");
+    assert_eq!(names.names(), ["swipe", "tap"]);
 
-    state.enable(a, "tap", ListenerPass::Bubble);
-    assert!(
-        edge(&mut far_end.published),
-        "a name's first registration crosses"
-    );
-    state.enable(a, "tap", ListenerPass::Capture);
-    assert!(
-        !edge(&mut far_end.published),
-        "its second anywhere does not"
-    );
-    state.enable(a, "scroll", ListenerPass::Bubble);
-    assert!(edge(&mut far_end.published));
-    state.enable(b, "tap", ListenerPass::Bubble);
-    assert!(!edge(&mut far_end.published));
-    assert_eq!(published(&mut far_end.published), ["scroll", "tap"]);
-    assert_eq!(state.by_node.borrow()[&a].len(), 3);
-    assert_eq!(state.by_node.borrow()[&b].len(), 1);
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                import { __AddEvent, __RemoveEventListener } from 'bobcat:element';
+                const [, outer, inner] = globalThis.held;
+                // `inner` still has its `__AddEvent` handler, and `outer`
+                // still has its closure, so neither of these closes `tap`.
+                __RemoveEventListener(inner, 'tap', globalThis.listener, { capture: true });
+                __AddEvent(outer, 'global-bindEvent', 'swipe', null);
+                ",
+            "app:///partial.mjs",
+            "unregistering",
+        )
+        .expect("unregistration");
+    assert_eq!(names.names(), ["tap"]);
 
-    // A repeat registration is not a second one — neither index moves,
-    // so no edge is published either.
-    state.enable(a, "tap", ListenerPass::Bubble);
-    assert_eq!(state.by_node.borrow()[&a].len(), 3);
-    assert!(
-        !edge(&mut far_end.published),
-        "a repeat registration publishes nothing"
-    );
-
-    // A global registration is a registration like any other to both
-    // indexes and to the published edge — it is only its *delivery* that
-    // leaves the path.
-    state.enable(a, "swipe", ListenerPass::Global);
-    assert!(
-        edge(&mut far_end.published),
-        "a global-only name is published too, so the painter routes it"
-    );
-    assert_eq!(
-        published(&mut far_end.published),
-        ["scroll", "swipe", "tap"]
-    );
-    state.enable(a, "swipe", ListenerPass::Global);
-    assert_eq!(
-        state.listeners.borrow()["swipe"].global,
-        vec![a],
-        "a repeat global registration is not a second delivery"
-    );
-    state.disable(a, "swipe", ListenerPass::Global);
-    assert!(
-        edge(&mut far_end.published),
-        "removing the only global registration closes its name"
-    );
-
-    state.disable(a, "scroll", ListenerPass::Bubble);
-    assert!(
-        edge(&mut far_end.published),
-        "the last removal closes the name"
-    );
-    assert_eq!(published(&mut far_end.published), ["tap"]);
-    assert_eq!(state.by_node.borrow()[&a].len(), 2);
-
-    // Dropping an element takes its own registrations and only those.
-    state.forget_node(a);
-    assert!(!state.by_node.borrow().contains_key(&a));
-    assert!(
-        !edge(&mut far_end.published),
-        "the sibling registration still holds the name open"
-    );
-    assert_eq!(
-        state.listeners.borrow()["tap"]
-            .path
-            .iter()
-            .copied()
-            .collect::<Vec<_>>(),
-        vec![(b, false)]
-    );
-
-    state.forget_node(b);
-    assert!(state.listeners.borrow().is_empty());
-    assert!(state.by_node.borrow().is_empty());
-    assert!(
-        edge(&mut far_end.published),
-        "the last listener unpublishes its name"
-    );
-    assert!(published(&mut far_end.published).is_empty());
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                import { __AddEvent, __RemoveEventListener } from 'bobcat:element';
+                const [, outer, inner] = globalThis.held;
+                __AddEvent(inner, 'bindEvent', 'tap', null);
+                __RemoveEventListener(outer, 'tap', globalThis.listener, {});
+                ",
+            "app:///last.mjs",
+            "unregistering",
+        )
+        .expect("unregistration");
+    assert!(names.names().is_empty(), "the last registration closes it");
 }
 
 /// The replica is what the painting side filters against, so a
@@ -1412,7 +1385,8 @@ fn registering_a_listener_publishes_its_name_to_the_painting_side() {
                   const view = __CreateView(0);
                   __AppendElement(page, view);
                   globalThis.held = [page, view];
-                  __AddEventListener(view, 'tap', () => {}, {});
+                  globalThis.listener = () => {};
+                  __AddEventListener(view, 'tap', globalThis.listener, {});
                 };
                 ",
             "app:///publish.js",
@@ -1422,14 +1396,15 @@ fn registering_a_listener_publishes_its_name_to_the_painting_side() {
     assert!(!names.contains("scroll"));
 
     // A second module rather than a second entry: the point is a later
-    // unregistration, not a second boot.
+    // unregistration, not a second boot. It goes through the PAPI, because
+    // the host has no member that could take one — the realm decides when a
+    // name's last registration anywhere is gone.
     runtime
         .evaluate_module(
             &mut js_runtime,
             r"
-                import { __GetElementUniqueID } from 'bobcat:element';
-                import { disableEventListener } from 'bobcat-internal:host';
-                disableEventListener(__GetElementUniqueID(globalThis.held[1]), 0, 'tap');
+                import { __RemoveEventListener } from 'bobcat:element';
+                __RemoveEventListener(globalThis.held[1], 'tap', globalThis.listener, {});
                 ",
             "app:///unpublish.mjs",
             "unpublishing",
@@ -1441,8 +1416,11 @@ fn registering_a_listener_publishes_its_name_to_the_painting_side() {
     );
 }
 
+/// The host hands the realm the whole path and nothing else. Which steps
+/// have a listener, and in which pass, is the realm's alone — so what is
+/// observable here is which listeners ran, in which order, with which phase.
 #[test]
-fn a_dispatch_reaches_only_the_nodes_that_registered_a_listener() {
+fn a_dispatch_runs_the_path_listeners_and_skips_the_steps_with_none() {
     let (mut js_runtime, mut runtime, _elements) = runtime();
     runtime
         .run_main_thread_script(
@@ -1463,7 +1441,7 @@ fn a_dispatch_reaches_only_the_nodes_that_registered_a_listener() {
                     seen.push(label + ':' + event.currentTarget.uid + ':' + event.eventPhase);
                   __AddEventListener(page, 'tap', note('page-capture'), { capture: true });
                   __AddEventListener(inner, 'tap', note('inner'), {});
-                  // `outer` registers nothing, so the walk must skip it.
+                  // `outer` registers nothing, so the walk must pass over it.
                 };
                 ",
             "app:///listeners.js",
@@ -1479,6 +1457,7 @@ fn a_dispatch_reaches_only_the_nodes_that_registered_a_listener() {
             &Arc::from("{\"x\":1}"),
         )
         .expect("dispatch");
+    // All the host learns: the realm published the export it called.
     assert!(delivered);
 
     runtime
@@ -1496,7 +1475,7 @@ fn a_dispatch_reaches_only_the_nodes_that_registered_a_listener() {
 }
 
 #[test]
-fn add_event_registers_against_the_real_index_and_a_catch_form_ends_the_walk() {
+fn add_event_delivers_on_the_real_path_and_a_catch_form_ends_the_walk() {
     let (mut js_runtime, mut runtime, _elements) = runtime();
     runtime
         .run_main_thread_script(
@@ -1526,8 +1505,8 @@ fn add_event_registers_against_the_real_index_and_a_catch_form_ends_the_walk() {
                   // decide that, from the `stopPropagation` the catch causes.
                   __AddEvent(inner, 'catchEvent', 'tap', note('inner-catch'));
                   __AddEvent(outer, 'bindEvent', 'tap', note('outer-bind'));
-                  // The same node, same name, other pass: a separate index
-                  // entry, and one the bubble walk must not reach.
+                  // The same node, same name, other pass: the capture pass
+                  // runs it, and the bubble pass must not reach it twice.
                   __AddEvent(page, 'capture-bind', 'tap', note('page-capture'));
                 };
                 ",
@@ -1691,16 +1670,29 @@ fn a_global_only_registration_publishes_its_name_and_is_delivered() {
         !names.contains("swipe"),
         "the last global registration closes its name like any other"
     );
-    assert!(
-        !runtime
-            .dispatch_event(
-                &mut js_runtime,
-                node_id(2),
-                &Arc::from("swipe"),
-                &no_detail()
-            )
-            .expect("dispatch")
-    );
+
+    // The painting side is what drops an event nobody wants; a dispatch that
+    // reaches the realm anyway finds nothing registered and runs nothing.
+    runtime
+        .dispatch_event(
+            &mut js_runtime,
+            node_id(2),
+            &Arc::from("swipe"),
+            &no_detail(),
+        )
+        .expect("dispatch");
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                if (seen.join('|') !== '3') {
+                  throw new Error('a cleared registration was delivered to');
+                }
+                ",
+            "app:///verify-cleared.js",
+            "verifying",
+        )
+        .expect("verification");
 }
 
 /// `__QuerySelector`/`__QuerySelectorAll` are `Element.querySelector`'s
@@ -1819,7 +1811,7 @@ fn a_replaced_add_event_handler_moves_its_node_between_passes() {
                 if (__GetEvent(held[1], 'tap', 'bindEvent') !== undefined) {
                   throw new Error('the replaced form must not still answer');
                 }
-                // Removing it leaves the node out of the index entirely, so a
+                // Removing it leaves the node with nothing filed, so a
                 // further dispatch reaches nobody at all.
                 __AddEvent(held[1], 'capture-bind', 'tap', undefined);
                 ",
@@ -1828,20 +1820,31 @@ fn a_replaced_add_event_handler_moves_its_node_between_passes() {
         )
         .expect("verification");
 
-    assert!(
-        !runtime
-            .dispatch_event(&mut js_runtime, node_id(3), &tap(), &no_detail())
-            .expect("dispatch")
-    );
+    runtime
+        .dispatch_event(&mut js_runtime, node_id(3), &tap(), &no_detail())
+        .expect("dispatch");
+
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                if (seen.join('|') !== 'capture') {
+                  throw new Error('a cleared handler was still delivered to');
+                }
+                ",
+            "app:///verify-cleared.js",
+            "verifying",
+        )
+        .expect("verification");
 }
 
-/// The id and the last-call flag are the two things a delivery carries
-/// beyond the path itself, and both are observable from the realm: the id
-/// is what makes one walk hold one event object, and the flag is what ends
-/// the dispatch — which the standard makes visible by resetting
-/// `eventPhase` and `currentTarget` on an event a listener kept.
+/// One call is one dispatch, which is what makes one event object serve the
+/// whole walk — a property one listener writes reaches the next — and what
+/// makes the end of the walk a fact the realm owns: the standard's last
+/// dispatch step resets `eventPhase` and `currentTarget` on an event a
+/// listener kept.
 #[test]
-fn one_id_names_a_whole_walk_and_only_its_last_delivery_is_flagged() {
+fn one_call_is_one_dispatch_with_one_event_object_that_is_reset_at_its_end() {
     let (mut js_runtime, mut runtime, _elements) = runtime();
     runtime
         .run_main_thread_script(
@@ -1898,9 +1901,8 @@ fn one_id_names_a_whole_walk_and_only_its_last_delivery_is_flagged() {
                 if (phases !== '1|2|1|2') {
                   throw new Error('phases: ' + phases);
                 }
-                // The last delivery of each walk was flagged, so the realm
-                // ended the dispatch rather than leaving the kept event still
-                // naming whichever node it stopped on.
+                // Each walk ended in the realm, rather than leaving the kept
+                // event still naming whichever node it stopped on.
                 for (const { event } of seen) {
                   if (event.eventPhase !== 0 || event.currentTarget !== null) {
                     throw new Error('a dispatch outlived its walk');
@@ -2037,8 +2039,11 @@ fn stopping_propagation_ends_the_walk() {
         .expect("verification");
 }
 
+/// The host filters nothing: the painting side already refuses to route a
+/// name no listener anywhere has registered, and a dispatch that arrives for
+/// one anyway reaches a realm that finds nothing and runs nothing.
 #[test]
-fn a_document_whose_script_registered_nothing_never_enters_the_realm() {
+fn a_dispatch_with_nothing_registered_reaches_the_realm_and_runs_nothing() {
     let (mut js_runtime, mut runtime, _elements) = runtime();
     runtime
         .run_main_thread_script(
@@ -2054,10 +2059,10 @@ fn a_document_whose_script_registered_nothing_never_enters_the_realm() {
         .expect("main-thread script");
 
     assert!(
-        !runtime
+        runtime
             .dispatch_event(&mut js_runtime, node_id(3), &tap(), &no_detail())
             .expect("dispatch"),
-        "with an empty listener index the walk crosses the boundary zero times"
+        "the realm published the export, which is all the answer means now"
     );
 }
 

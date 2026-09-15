@@ -430,10 +430,10 @@ impl Page {
                 // A listener that panics is not fatal to the view: the
                 // payload is dropped, the rest of the burst applies, and the
                 // epilogue still runs.
-                let delivered = catch_unwind(AssertUnwindSafe(|| {
+                let dispatched = catch_unwind(AssertUnwindSafe(|| {
                     runtime.dispatch_event(js, target, name, &detail)
                 }));
-                if let Ok(Err(error)) = delivered {
+                if let Ok(Err(error)) = dispatched {
                     self.outbox
                         .engine_event(EngineEvent::ListenerFailed(error.into_script_error()));
                 }

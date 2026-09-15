@@ -80,16 +80,15 @@ interface BobcatNative {
   /** Commits pending mutations through style and layout. */
   flushElementTree(): void;
   /**
-   * Records that `nodeId` has at least one listener for `eventName` in the
-   * given pass (`0` bubble, `1` capture), so the walk stops skipping it —
-   * or, for pass `2`, that it holds a `global-bindEvent` handler, which the
-   * host delivers after the walk whatever path the event took.
+   * Records that something in the realm is now registered for `eventName`,
+   * where nothing was — the first registration anywhere in the document.
+   * The painting side routes against that name set; the host keeps no
+   * per-element listener index at all, and never hears a second
+   * registration for a name already open.
    */
-  enableEventListener(nodeId: number, phase: number, eventName: string): void;
-  /** The reverse: the last listener for that pair went away. */
-  disableEventListener(nodeId: number, phase: number, eventName: string): void;
-  /** Ends the walk in progress after the current node. */
-  stopPropagation(): void;
+  listenerNameOpened(eventName: string): void;
+  /** The reverse: the last registration for that name anywhere went away. */
+  listenerNameClosed(eventName: string): void;
   /**
    * Arms one timer `delayMilliseconds` from now — repeating until cleared
    * when `repeats` — and returns the id it is armed under. The delay goes
@@ -163,9 +162,8 @@ declare module "bobcat-internal:host" {
   export const swapElement: BobcatNative["swapElement"];
   export const dropElement: BobcatNative["dropElement"];
   export const flushElementTree: BobcatNative["flushElementTree"];
-  export const enableEventListener: BobcatNative["enableEventListener"];
-  export const disableEventListener: BobcatNative["disableEventListener"];
-  export const stopPropagation: BobcatNative["stopPropagation"];
+  export const listenerNameOpened: BobcatNative["listenerNameOpened"];
+  export const listenerNameClosed: BobcatNative["listenerNameClosed"];
   export const setTimer: BobcatNative["setTimer"];
   export const clearTimer: BobcatNative["clearTimer"];
   export const initData: BobcatNative["initData"];
