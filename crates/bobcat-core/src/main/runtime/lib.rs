@@ -24,7 +24,7 @@
 //! handle, which is when the `LynxDocument` drops. JavaScript goes first, then
 //! the Rust object it named.
 
-use std::cell::{Cell, RefCell, RefMut};
+use std::cell::{RefCell, RefMut};
 use std::fmt::{self, Write as _};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
@@ -32,7 +32,6 @@ use std::sync::Arc;
 
 use dom::StylePool;
 use quickjs_rust_bridge::{HostArgument, HostValue};
-use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
 use super::quickjs::{ScriptEngine, ScriptRuntime};
@@ -57,14 +56,6 @@ const EVENT_DISPATCH_EXPORT: &str = "__BobcatDispatchEvent";
 /// Declarations one `__SetInlineStyles` record carries without touching the
 /// heap. Compiled `ReactLynx` records are a handful of properties.
 const INLINE_DECLARATIONS: usize = 16;
-
-/// Registrations one node carries without touching the heap. A `ReactLynx`
-/// element with more than four distinct listener kinds is unusual.
-const INLINE_NODE_LISTENERS: usize = 4;
-
-/// Steps of one event path delivered without touching the heap. Deeper paths
-/// exist; a path with more than this many *listening* nodes does not.
-const INLINE_DELIVERIES: usize = 8;
 
 const ELEMENT_PAPI_SOURCE: &str = crate::esm::runtime_source!("element-papi");
 const RUNTIME_MODULE_SOURCE: &str = crate::esm::runtime_source!("main-thread-runtime");
@@ -126,6 +117,9 @@ import {
   __RemoveEventListener,
   __StopPropagation,
   __StopImmediatePropagation,
+  __GetPageElement,
+  __QuerySelector,
+  __QuerySelectorAll,
   __FlushElementTree,
 } from "bobcat:element";
 //# allFunctionsCalledOnLoad
@@ -384,141 +378,6 @@ fn construction_phase<T>(phase: &str, work: impl FnOnce() -> T) -> Result<T, Str
     })
 }
 
-/// The nodes a walk should visit for one event name: `(node, is capture pass)`.
-type ListenerNodes = FxHashSet<(dom::NodeId, bool)>;
-
-/// The `(name, is capture pass)` pairs one node carries listeners for.
-type NodeListeners = SmallVec<[(Arc<str>, bool); INLINE_NODE_LISTENERS]>;
-
-/// What the realm has told the host about listeners, and what it tells it
-/// during a walk.
-///
-/// Shared with the host functions that maintain it, so it is `Rc` rather than
-/// owned: the native `enableEventListener` export and the dispatch driver are
-/// different stack frames on the same thread.
-struct EventState {
-    /// The nodes the realm has a listener on, per event name and pass. Keyed
-    /// by name first so a walk resolves it once and then tests each step
-    /// without touching the name again — and so an event no listener wants
-    /// costs one lookup for the whole walk.
-    listeners: RefCell<FxHashMap<Arc<str>, ListenerNodes>>,
-    /// The same registrations keyed the other way, so dropping an element
-    /// costs its own listeners rather than a scan of every name.
-    by_node: RefCell<FxHashMap<dom::NodeId, NodeListeners>>,
-    /// Where the painter's replica of the name set is fed from.
-    ///
-    /// Sent from here rather than at a batch boundary because this is where
-    /// the realm has just been told, and only on a global edge of
-    /// `listeners`: the first registration for a name and the removal of its
-    /// last. A second listener for a name already open sends nothing, so the
-    /// traffic is registration edges, never registrations. Every send happens
-    /// after the index it announces has been updated and its borrow released,
-    /// so the truth is never behind what has crossed, and no `RefCell` is
-    /// held across one.
-    outbox: ViewOutbox,
-    /// Set by the native `stopPropagation` export. A pure flag write: the
-    /// realm is inside a `call_module_export` when it runs, and re-entering
-    /// the realm from a host function would nest an execution guard, which
-    /// `QuickJS` refuses.
-    stopped: Cell<bool>,
-}
-
-impl EventState {
-    fn new(outbox: ViewOutbox) -> Self {
-        Self {
-            listeners: RefCell::default(),
-            by_node: RefCell::default(),
-            outbox,
-            stopped: Cell::default(),
-        }
-    }
-
-    /// Records that `node` now has a listener for `(name, capture)`.
-    fn enable(&self, node: dom::NodeId, name: &str, capture: bool) {
-        let shared: Arc<str> = self
-            .listeners
-            .borrow()
-            .get_key_value(name)
-            .map_or_else(|| Arc::from(name), |(existing, _)| Arc::clone(existing));
-        let mut listeners = self.listeners.borrow_mut();
-        let nodes = listeners.entry(Arc::clone(&shared)).or_default();
-        // No name is ever left keyed to an empty set, so an empty one here is
-        // the entry `or_default` just made: this is the name's first listener
-        // anywhere in the document.
-        let first_for_name = nodes.is_empty();
-        let fresh_registration = nodes.insert((node, capture));
-        drop(listeners);
-        if fresh_registration {
-            self.by_node
-                .borrow_mut()
-                .entry(node)
-                .or_default()
-                .push((Arc::clone(&shared), capture));
-            if first_for_name {
-                self.outbox.listener_edge(shared, true);
-            }
-        }
-    }
-
-    /// The reverse: that registration went away.
-    fn disable(&self, node: dom::NodeId, name: &str, capture: bool) {
-        let mut listeners = self.listeners.borrow_mut();
-        let Some(nodes) = listeners.get_mut(name) else {
-            return;
-        };
-        if !nodes.remove(&(node, capture)) {
-            return;
-        }
-        // The key comes back out with the removal: it is the `Arc` every
-        // index already shares, so publishing the edge allocates nothing.
-        let closed = if nodes.is_empty() {
-            listeners.remove_entry(name).map(|(name, _)| name)
-        } else {
-            None
-        };
-        drop(listeners);
-        self.forget_node_listener(node, name, capture);
-        if let Some(name) = closed {
-            self.outbox.listener_edge(name, false);
-        }
-    }
-
-    /// Drops every registration on an element that is going away.
-    fn forget_node(&self, node: dom::NodeId) {
-        let Some(registrations) = self.by_node.borrow_mut().remove(&node) else {
-            return;
-        };
-        let mut closed = SmallVec::<[Arc<str>; INLINE_NODE_LISTENERS]>::new();
-        let mut listeners = self.listeners.borrow_mut();
-        for (name, capture) in registrations {
-            if let Some(nodes) = listeners.get_mut(&name)
-                && nodes.remove(&(node, capture))
-                && nodes.is_empty()
-            {
-                // A drop is a removal like any other: an element that took
-                // the last listener for a name with it closes that name.
-                listeners.remove(&name);
-                closed.push(name);
-            }
-        }
-        drop(listeners);
-        for name in closed {
-            self.outbox.listener_edge(name, false);
-        }
-    }
-
-    fn forget_node_listener(&self, node: dom::NodeId, name: &str, capture: bool) {
-        let mut by_node = self.by_node.borrow_mut();
-        let Some(registrations) = by_node.get_mut(&node) else {
-            return;
-        };
-        registrations.retain(|(registered, pass)| registered.as_ref() != name || *pass != capture);
-        if registrations.is_empty() {
-            by_node.remove(&node);
-        }
-    }
-}
-
 /// The private main-thread runtime used by the engine pipeline.
 ///
 /// **The field order is the release, and it must stay in this order.** Fields
@@ -539,13 +398,7 @@ pub(crate) struct MainThreadRuntime {
     /// from.
     workers: Rc<super::workers::WorkerOwner>,
     slot: Rc<RefCell<DocumentSlot>>,
-    events: Rc<EventState>,
     timers: Rc<TimerState>,
-    /// Names one dispatch, so the realm can keep one event object alive across
-    /// the whole walk instead of minting one per node. Not shared with the
-    /// host functions: only [`Self::dispatch_event`] reads or advances it, and
-    /// it holds `&mut self` while it does.
-    next_event_id: u32,
 }
 
 impl fmt::Debug for MainThreadRuntime {
@@ -585,7 +438,6 @@ impl MainThreadRuntime {
         let mut engine = js_runtime
             .create_realm()
             .map_err(|error| MainThreadError::from_engine("creating the script realm", error))?;
-        let events = Rc::new(EventState::new(outbox.clone()));
         let timers = Rc::new(TimerState::new());
         let frame_outbox = outbox.clone();
         crate::script_frames::install(&mut engine, js_runtime, move |pending| {
@@ -601,7 +453,6 @@ impl MainThreadRuntime {
             js_runtime,
             ingredients,
             outbox.clone(),
-            &events,
             &timers,
         )?;
         style_sheets::install_styles(&mut engine, js_runtime, &slot, &outbox)?;
@@ -614,9 +465,7 @@ impl MainThreadRuntime {
                 engine,
                 workers,
                 slot,
-                events,
                 timers,
-                next_event_id: 0,
             },
             incoming,
         ))
@@ -806,19 +655,28 @@ impl MainThreadRuntime {
 
     /// Delivers one routed event the painting side decided: the type and
     /// the target crossed as plain data; the propagation path is computed
-    /// here, where the document is.
+    /// here, where the document is, and the dispatch over it is the realm's.
     ///
     /// A target freed since the decision formed resolves to nothing rather
     /// than a path — a `NodeId` names one node for the life of the document,
     /// so the check is one lookup and can never hit a stranger.
     ///
-    /// Each walk carries an id naming it, and each call says whether it is the
-    /// last. Together they let the realm hold one event object for the whole
-    /// dispatch — which is what makes a property a listener writes visible to
-    /// the next one, as a real `Event` does — without the host retaining
-    /// anything of the realm's.
+    /// The path crosses as the standard's event path — the bubble steps, in
+    /// target-first, root-last order, each with its shadow-retargeted target
+    /// — encoded as two comma-joined decimal id strings, which is how
+    /// `childElementIds` carries a list already: the boundary takes
+    /// primitives and structured clones only, a clone can be minted by the
+    /// realm alone, and a decimal id cannot contain the separator. One call
+    /// carries the whole dispatch, and what the realm then runs over it —
+    /// the two passes, the `global-bindEvent` pass after them, whether any
+    /// listener exists at all — is the realm's business, because every
+    /// registration lives there.
     ///
-    /// Returns whether anything was delivered.
+    /// The document is released before the call, which is what lets a
+    /// listener mutate the tree.
+    ///
+    /// Returns whether the realm published the export, which is all the host
+    /// can know: nothing here says whether anything ran.
     pub(crate) fn dispatch_event(
         &mut self,
         js_runtime: &mut ScriptRuntime,
@@ -826,11 +684,6 @@ impl MainThreadRuntime {
         name: &str,
         detail_json: &str,
     ) -> Result<bool, MainThreadError> {
-        // Reject an event nobody listens for before computing its DOM path.
-        let listeners = self.events.listeners.borrow();
-        let Some(nodes) = listeners.get(name) else {
-            return Ok(false);
-        };
         let steps = {
             let mut slot = self.slot.borrow_mut();
             let document = slot.document_mut();
@@ -839,62 +692,35 @@ impl MainThreadRuntime {
             }
             document.event_steps(target, true, true)
         };
-        let mut deliverable: SmallVec<[(dom::NodeId, dom::NodeId, bool); INLINE_DELIVERIES]> =
-            SmallVec::new();
-        deliverable.extend(
-            steps
-                .steps()
-                .iter()
-                .filter(|step| nodes.contains(&(step.node, step.capture)))
-                .map(|step| (step.node, step.target, step.capture)),
-        );
-        drop(listeners);
-        if deliverable.is_empty() {
-            return Ok(false);
+        let mut nodes = String::new();
+        let mut targets = String::new();
+        for step in steps.steps().iter().filter(|step| !step.capture) {
+            if !nodes.is_empty() {
+                nodes.push(',');
+                targets.push(',');
+            }
+            write!(nodes, "{}", packed_node_id(step.node)).expect("writing to a String");
+            write!(targets, "{}", packed_node_id(step.target)).expect("writing to a String");
         }
 
-        self.events.stopped.set(false);
-
-        // Fresh per dispatch, and never reused by a live one: dispatch takes
-        // `&mut self`, so a listener cannot start a second walk from inside
-        // this one, and the realm drops its entry before this call returns.
-        // The wrap is therefore unreachable rather than merely unlikely.
-        let event_id = self.next_event_id;
-        self.next_event_id = self.next_event_id.wrapping_add(1);
-
-        let last = deliverable.len() - 1;
-        let mut delivered = false;
-        for (index, (node, target, capture)) in deliverable.into_iter().enumerate() {
-            if self.events.stopped.get() {
-                break;
-            }
-            let arguments = [
-                HostArgument::Number(packed_node_id(node)),
-                HostArgument::Number(packed_node_id(target)),
-                HostArgument::Number(f64::from(u8::from(capture))),
-                HostArgument::String(name),
-                HostArgument::String(detail_json),
-                HostArgument::Number(f64::from(event_id)),
-                HostArgument::Boolean(index == last),
-            ];
-            let called = self.engine.call_module_export(
+        let called = self
+            .engine
+            .call_module_export(
                 js_runtime,
                 ELEMENT_MODULE_SPECIFIER,
                 EVENT_DISPATCH_EXPORT,
-                &arguments,
-            );
-            if !called
-                .map_err(|error| MainThreadError::from_engine("delivering an event", error))?
-            {
-                // The realm published no callback; nothing on this path will.
-                break;
-            }
-            delivered = true;
-        }
+                &[
+                    HostArgument::String(&nodes),
+                    HostArgument::String(&targets),
+                    HostArgument::String(name),
+                    HostArgument::String(detail_json),
+                ],
+            )
+            .map_err(|error| MainThreadError::from_engine("delivering an event", error))?;
         // Listeners remove elements too; the count they ran up is settled
-        // here, at the end of the walk, rather than per node.
+        // here, at the end of the dispatch.
         self.finish_batch(js_runtime, true)?;
-        Ok(delivered)
+        Ok(called)
     }
 
     /// When the earliest armed timer comes due, if one is armed.
@@ -1139,7 +965,6 @@ fn install_bobcat(
     js_runtime: &mut ScriptRuntime,
     ingredients: DocumentIngredients,
     outbox: ViewOutbox,
-    events: &Rc<EventState>,
     timers: &Rc<TimerState>,
 ) -> Result<Rc<RefCell<DocumentSlot>>, MainThreadError> {
     for (name, is_error) in [("reportScriptError", true), ("logScriptMessage", false)] {
@@ -1155,6 +980,7 @@ fn install_bobcat(
             Ok(HostValue::Undefined)
         })?;
     }
+    let events = outbox.clone();
     let handle = Rc::new(RefCell::new(DocumentSlot {
         ingredients: Some(ingredients),
         document: None,
@@ -1162,8 +988,8 @@ fn install_bobcat(
         outbox,
     }));
 
-    install_host_module(engine, js_runtime, &handle, events)?;
-    install_event_members(engine, js_runtime, events)?;
+    install_host_module(engine, js_runtime, &handle)?;
+    install_event_members(engine, js_runtime, &events)?;
     install_timer_members(engine, js_runtime, timers)
         .map_err(|error| MainThreadError::from_engine("installing the timer members", error))?;
 
@@ -1220,7 +1046,6 @@ fn install_host_module(
     engine: &mut ScriptEngine,
     js_runtime: &mut ScriptRuntime,
     handle: &Rc<RefCell<DocumentSlot>>,
-    events: &Rc<EventState>,
 ) -> Result<(), MainThreadError> {
     tree_members! { engine, js_runtime, handle;
         fn createPage() |document| {
@@ -1286,14 +1111,14 @@ fn install_host_module(
     install_attribute_members(engine, js_runtime, handle)?;
 
     let tree = Rc::clone(handle);
-    let state = Rc::clone(events);
     // The realm's handle for `node` has been collected, and a handle is the
     // one thing that holds an element: the node is freed now. Only the node —
     // its element children are unlinked and go on as detached roots, each
     // held by the handle that names it. Host-owned text children are freed
     // with the node because no realm handle names them. Every
     // listener the realm had on it is gone too, since those lived on the
-    // handle, so the index stops naming the node.
+    // handle — which the realm settles itself, before it calls this, by
+    // closing whatever event names that handle alone held open.
     install(engine, js_runtime, "dropElement", 1, move |arguments| {
         const NAME: &str = "bobcat-internal:host.dropElement";
         let node = node_id_argument(NAME, arguments, 0)?;
@@ -1310,11 +1135,6 @@ fn install_host_module(
                  graph and the tree disagree"
             ));
         }
-        // Before the drop, so an id that somehow fails to free still leaves
-        // the painter's listener index naming nothing — and after the two
-        // checks above, so a refused drop leaves a live element with its
-        // registrations intact.
-        state.forget_node(node);
         document.drop_element(node);
         Ok(HostValue::Undefined)
     })?;
@@ -1387,59 +1207,28 @@ fn install_page_data(
     Ok(())
 }
 
-/// Installs the three members the realm's `EventTarget` speaks to.
+/// Installs the two members the realm's event registrations speak to.
 ///
-/// None of them touches the document. The first two only maintain an index —
-/// which nodes are worth visiting — and the third only sets a flag; see
-/// [`EventState::stopped`].
+/// Neither touches the document, and neither carries a node: the realm owns
+/// every registration and the whole walk over an event path, so all the host
+/// is told is the *name* set the painting side routes against — and only its
+/// global edges, the first registration for a name anywhere and the removal
+/// of its last. A name already open hears nothing, so the traffic is edges,
+/// never registrations, and the `Arc` each one allocates is rare enough to
+/// be free.
 fn install_event_members(
     engine: &mut ScriptEngine,
     js_runtime: &mut ScriptRuntime,
-    events: &Rc<EventState>,
+    outbox: &ViewOutbox,
 ) -> Result<(), MainThreadError> {
-    let state = Rc::clone(events);
-    install(
-        engine,
-        js_runtime,
-        "enableEventListener",
-        3,
-        move |arguments| {
-            let node = node_id_argument("bobcat-internal:host.enableEventListener", arguments, 0)?;
-            let capture =
-                capture_argument("bobcat-internal:host.enableEventListener", arguments, 1)?;
-            let name = string_argument("bobcat-internal:host.enableEventListener", arguments, 2)?;
-            state.enable(node, name, capture);
+    for (member, available) in [("listenerNameOpened", true), ("listenerNameClosed", false)] {
+        let outbox = outbox.clone();
+        install(engine, js_runtime, member, 1, move |arguments| {
+            let name = string_argument(member, arguments, 0)?;
+            outbox.listener_edge(Arc::from(name), available);
             Ok(HostValue::Undefined)
-        },
-    )?;
-
-    let state = Rc::clone(events);
-    install(
-        engine,
-        js_runtime,
-        "disableEventListener",
-        3,
-        move |arguments| {
-            let node = node_id_argument("bobcat-internal:host.disableEventListener", arguments, 0)?;
-            let capture =
-                capture_argument("bobcat-internal:host.disableEventListener", arguments, 1)?;
-            let name = string_argument("bobcat-internal:host.disableEventListener", arguments, 2)?;
-            state.disable(node, name, capture);
-            Ok(HostValue::Undefined)
-        },
-    )?;
-
-    let state = Rc::clone(events);
-    install(
-        engine,
-        js_runtime,
-        "stopPropagation",
-        0,
-        move |_arguments| {
-            state.stopped.set(true);
-            Ok(HostValue::Undefined)
-        },
-    )?;
+        })?;
+    }
 
     Ok(())
 }
@@ -1495,12 +1284,17 @@ fn install_attribute_members(
         fn queryElementIds(
             root: node_id_argument,
             selector: string_argument,
-            first_only: capture_argument
+            first_only: flag_argument,
+            include_root: flag_argument
         ) |document| {
             validate_live_element(document, NAME, root)?;
-            // SelectorQuery is Lynx's inclusive query scope. Matching itself
-            // still uses the same standard selector engine as the cascade.
-            let matches_root = document.matches(root, selector).map_err(|e| e.to_string())?;
+            // SelectorQuery is Lynx's inclusive query scope, so it asks for
+            // the root to be considered; the Element PAPI's `__QuerySelector`
+            // is `Element.querySelector`'s, which is root-exclusive, and asks
+            // for it to be skipped. Matching the root itself still uses the
+            // same standard selector engine as the cascade.
+            let matches_root =
+                include_root && document.matches(root, selector).map_err(|e| e.to_string())?;
             let mut ids = if matches_root { vec![root] } else { Vec::new() };
             if !first_only || ids.is_empty() {
                 if first_only {
@@ -1774,8 +1568,9 @@ fn optional_node_id_argument(
     }
 }
 
-/// The `type_id` the realm registers with: `0` bubble, `1` capture.
-fn capture_argument(function: &str, arguments: &[HostValue], index: usize) -> Result<bool, String> {
+/// A flag the realm spells as `0` or `1`, which is every boolean the host
+/// module takes.
+fn flag_argument(function: &str, arguments: &[HostValue], index: usize) -> Result<bool, String> {
     match *argument(arguments, index) {
         HostValue::Number(0.0) => Ok(false),
         HostValue::Number(1.0) => Ok(true),

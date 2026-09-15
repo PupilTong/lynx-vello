@@ -742,9 +742,13 @@ fn string_handlers_reach_background_with_event_snapshots() {
         const [child, page] = results;
         if (child[0] !== '' || page[0] !== 'opaque:root') throw Error('handler name changed');
         const e = child[1];
+        // The `target` object is one for the whole walk, but its dataset is
+        // read again at each step, so what the listener wrote reaches the
+        // step after it. `id` is the one field the cache does freeze.
         if (e.target.id !== 'button' || e.currentTarget.uid !== 3 ||
             e.target.dataset.itemName !== 'first' || e.detail.answer !== 42 ||
             e.target.dataset.count !== 7 || e.target.dataset.nested.value !== 'before' ||
+            page[1].target.id !== 'button' ||
             page[1].target.dataset.nested.value !== 'after' ||
             'elementRefptr' in e.target || 'stopPropagation' in e ||
             page[1].currentTarget.uid !== 2) throw Error(JSON.stringify(results));

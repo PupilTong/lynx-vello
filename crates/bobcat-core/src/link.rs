@@ -411,7 +411,7 @@ impl ViewOutbox {
 /// What a view publishes, as a reader that is not a painter sees it.
 ///
 /// One adopted snapshot plus the watch it came from, which is exactly what
-/// the listener index is read through. The crate's benchmarks and the tests
+/// the published listener names are read through. The crate's benchmarks and the tests
 /// that drive a document in place hold one; a painter keeps the two halves
 /// apart instead, because its snapshot has to outlive the view it detached
 /// from.
@@ -448,14 +448,6 @@ impl ViewObserver {
     #[cfg(test)]
     pub(crate) fn listener_names(&self) -> Vec<Arc<str>> {
         self.published.listeners.iter().cloned().collect()
-    }
-
-    /// Whether the published state moved since this was last asked, which
-    /// for a test driving the listener index alone is whether an edge
-    /// crossed.
-    #[cfg(test)]
-    pub(crate) fn take_published_edge(&mut self) -> bool {
-        self.adopt()
     }
 
     /// The commit the newest published frame came from, for a test that is

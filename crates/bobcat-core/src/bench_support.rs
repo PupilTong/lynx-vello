@@ -145,7 +145,11 @@ impl ScriptHarness {
         self.with_document(|document| document.event_steps(target, true, true))
     }
 
-    /// Delivers one routed event to `target`, reporting whether anything ran.
+    /// Delivers one routed event to `target`.
+    ///
+    /// The answer is only whether the realm published its dispatch export:
+    /// the path is computed here and everything over it — which steps have a
+    /// registration, and whether any does — belongs to the realm.
     ///
     /// # Panics
     ///

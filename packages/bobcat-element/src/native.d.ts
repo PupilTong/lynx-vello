@@ -24,7 +24,18 @@ interface BobcatNative {
   setInlineStyles(nodeId: number, record: string): void;
   setInlineStyleProperty(nodeId: number, name: string, value: string): void;
   supportsStyleProperty(name: string): boolean;
-  queryElementIds(root: number, selector: string, firstOnly: 0 | 1): string;
+  /**
+   * The `NodeId`s matching `selector` under `root`, joined by commas, or the
+   * empty string for no match. `includeRoot` picks the scope: `1` is Lynx's
+   * SelectorQuery, which considers `root` itself first, `0` is
+   * `Element.querySelector`'s, which does not.
+   */
+  queryElementIds(
+    root: number,
+    selector: string,
+    firstOnly: 0 | 1,
+    includeRoot: 0 | 1,
+  ): string;
   removeAttribute(nodeId: number, name: string): void;
   /** The attribute's value, or null when the element does not carry it. */
   getAttribute(nodeId: number, name: string): string | null;
@@ -69,14 +80,15 @@ interface BobcatNative {
   /** Commits pending mutations through style and layout. */
   flushElementTree(): void;
   /**
-   * Records that `nodeId` has at least one listener for `eventName` in the
-   * given pass (`0` bubble, `1` capture), so the walk stops skipping it.
+   * Records that something in the realm is now registered for `eventName`,
+   * where nothing was — the first registration anywhere in the document.
+   * The painting side routes against that name set; the host keeps no
+   * per-element listener index at all, and never hears a second
+   * registration for a name already open.
    */
-  enableEventListener(nodeId: number, phase: number, eventName: string): void;
-  /** The reverse: the last listener for that pair went away. */
-  disableEventListener(nodeId: number, phase: number, eventName: string): void;
-  /** Ends the walk in progress after the current node. */
-  stopPropagation(): void;
+  listenerNameOpened(eventName: string): void;
+  /** The reverse: the last registration for that name anywhere went away. */
+  listenerNameClosed(eventName: string): void;
   /**
    * Arms one timer `delayMilliseconds` from now — repeating until cleared
    * when `repeats` — and returns the id it is armed under. The delay goes
@@ -150,9 +162,8 @@ declare module "bobcat-internal:host" {
   export const swapElement: BobcatNative["swapElement"];
   export const dropElement: BobcatNative["dropElement"];
   export const flushElementTree: BobcatNative["flushElementTree"];
-  export const enableEventListener: BobcatNative["enableEventListener"];
-  export const disableEventListener: BobcatNative["disableEventListener"];
-  export const stopPropagation: BobcatNative["stopPropagation"];
+  export const listenerNameOpened: BobcatNative["listenerNameOpened"];
+  export const listenerNameClosed: BobcatNative["listenerNameClosed"];
   export const setTimer: BobcatNative["setTimer"];
   export const clearTimer: BobcatNative["clearTimer"];
   export const initData: BobcatNative["initData"];

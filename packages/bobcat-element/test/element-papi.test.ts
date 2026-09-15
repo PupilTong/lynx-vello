@@ -37,9 +37,8 @@ rstest.mockRequire("bobcat-internal:host", () => {
     swapElement: native.swapElement,
     dropElement: native.dropElement,
     flushElementTree: native.flushElementTree,
-    enableEventListener: native.enableEventListener,
-    disableEventListener: native.disableEventListener,
-    stopPropagation: native.stopPropagation,
+    listenerNameOpened: native.listenerNameOpened,
+    listenerNameClosed: native.listenerNameClosed,
     setTimer: native.setTimer,
     clearTimer: native.clearTimer,
   };
@@ -71,10 +70,25 @@ rstest.mockRequire("bobcat:runtime", () => ({
  */
 const DOCUMENT_REFUSAL = new Error("the realm already created its document");
 
-/** Every native member, plus the recorded calls and a filter over them. */
+/**
+ * Every native member, plus the recorded calls, a filter over them, and the
+ * selector answer a test installs.
+ *
+ * The runtime captures the module's bindings at import, so a test cannot
+ * replace `queryElementIds` itself; `answerQuery` is the hook the recorded
+ * member delegates to, read at call time. Its default refuses, because the
+ * selector engine is the real DOM's and lives in
+ * crates/bobcat-core/src/main/runtime/tests.rs.
+ */
 type MockBobcat = BobcatNative & {
   calls: unknown[][];
   named: (name: string) => unknown[][];
+  answerQuery: (
+    root: number,
+    selector: string,
+    firstOnly: 0 | 1,
+    includeRoot: 0 | 1,
+  ) => string;
 };
 
 /**
@@ -182,7 +196,29 @@ function createMockBobcat(issuedIds?: number[]): MockBobcat {
       calls.push(["setInlineStyleProperty", nodeId("setInlineStyleProperty", node), name, value]);
     },
     supportsStyleProperty: (name: string) => name === "background-color" || name === "width",
-    queryElementIds: () => { throw new Error("selectors are tested against the real DOM"); },
+    answerQuery: () => {
+      throw new Error("selectors are tested against the real DOM");
+    },
+    queryElementIds: (
+      root: unknown,
+      selector: unknown,
+      firstOnly: unknown,
+      includeRoot: unknown,
+    ) => {
+      calls.push([
+        "queryElementIds",
+        nodeId("queryElementIds", root),
+        selector,
+        firstOnly,
+        includeRoot,
+      ]);
+      return host.answerQuery(
+        root as number,
+        selector as string,
+        firstOnly as 0 | 1,
+        includeRoot as 0 | 1,
+      );
+    },
     /**
      * Decodes the record payload the way the native side does, so the
      * expectations below read as declarations rather than as wire text — and
@@ -331,22 +367,11 @@ function createMockBobcat(issuedIds?: number[]): MockBobcat {
     flushElementTree: () => {
       calls.push(["flushElementTree"]);
     },
-    enableEventListener: (
-      node: unknown,
-      phase: unknown,
-      eventName: unknown,
-    ) => {
-      calls.push(["enableEventListener", node, phase, eventName]);
+    listenerNameOpened: (eventName: unknown) => {
+      calls.push(["listenerNameOpened", eventName]);
     },
-    disableEventListener: (
-      node: unknown,
-      phase: unknown,
-      eventName: unknown,
-    ) => {
-      calls.push(["disableEventListener", node, phase, eventName]);
-    },
-    stopPropagation: () => {
-      calls.push(["stopPropagation"]);
+    listenerNameClosed: (eventName: unknown) => {
+      calls.push(["listenerNameClosed", eventName]);
     },
     // The Element PAPI reaches none of these; they are here because the
     // mock stands in for the whole native module, not part of it.
@@ -423,6 +448,9 @@ describe("installation", () => {
       ["__RemoveEventListener", 4],
       ["__StopPropagation", 1],
       ["__StopImmediatePropagation", 1],
+      ["__GetPageElement", 0],
+      ["__QuerySelector", 3],
+      ["__QuerySelectorAll", 3],
       ["__FlushElementTree", 0],
     ];
     for (const [name, arity] of arities) {
@@ -440,7 +468,7 @@ describe("installation", () => {
         "Document",
       ].sort(),
     );
-    expect(elementModule.__BobcatDispatchEvent).toHaveLength(7);
+    expect(elementModule.__BobcatDispatchEvent).toHaveLength(4);
   });
 
   it("creates the realm's document once, with no arguments", () => {
@@ -1154,48 +1182,40 @@ function tree() {
   return { page, outer, inner };
 }
 
-let nextEventId = 0;
-
-/** Delivers one node's turn as the only call of its own dispatch. */
-function deliver(
-  node: object,
-  target: object,
-  phase: number,
-  name: string,
-  detailJson: string = "",
-) {
-  walk([{ node, target, phase }], name, detailJson);
-}
-
 /**
- * Delivers a whole path under one event id, the way the host does: one id
- * for the walk, `isLastCall` only on the final step.
+ * Dispatches one event the way the host does: one call carrying the whole
+ * path as two comma-joined id strings, target-first and root-last.
+ *
+ * `targets` is that step's own target — the same node for every step unless a
+ * test is exercising shadow retargeting — so it defaults to the path's first
+ * entry, the node the event happened at.
  */
-function walk(
-  steps: { node: object; target: object; phase: number }[],
+function dispatch(
+  path: object[],
   name: string,
   detailJson: string = "",
+  targets?: object[],
 ) {
-  const eventId = nextEventId;
-  nextEventId += 1;
-  steps.forEach((step, index) => {
-    elementModule.__BobcatDispatchEvent(
-      __GetElementUniqueID(step.node),
-      __GetElementUniqueID(step.target),
-      step.phase,
-      name,
-      detailJson,
-      eventId,
-      index === steps.length - 1,
-    );
-  });
+  const nodes = path.map((handle) => __GetElementUniqueID(handle));
+  const targeted = targets === undefined
+    ? nodes.map(() => nodes[0])
+    : targets.map((handle) => __GetElementUniqueID(handle));
+  elementModule.__BobcatDispatchEvent(
+    nodes.join(","),
+    targeted.join(","),
+    name,
+    detailJson,
+  );
 }
 
-const BUBBLE = 0;
-const CAPTURE = 1;
+/** The standard's `Event.eventPhase` values. */
+const CAPTURING_PHASE = 1;
+const AT_TARGET = 2;
+const BUBBLING_PHASE = 3;
 
-/** The identity half of an event's `target` and `currentTarget`. */
+/** An event's `target` and `currentTarget` descriptor. */
 interface TargetInfo {
+  dataset: Record<string, unknown>;
   id: string | null;
   uid: number;
   elementRefptr: object;
@@ -1204,8 +1224,8 @@ interface TargetInfo {
 /**
  * The event object as a listener sees it during delivery, typed as these
  * tests read and write it: the fields the runtime sets, the `marker` a test
- * writes to see one object serve a whole walk, and the `detail` fields the
- * tests send.
+ * writes to see one object serve a whole dispatch, and the `detail` fields
+ * the tests send.
  */
 interface ListenerEvent {
   type: string;
@@ -1219,57 +1239,62 @@ interface ListenerEvent {
 }
 
 describe("event listeners", () => {
-  it("tells the host the first listener arrived, and only the first", () => {
-    const { inner } = tree();
-    const uid = __GetElementUniqueID(inner);
+  it("opens the name with the host once, however many handles want it", () => {
+    const { outer, inner } = tree();
 
     __AddEventListener(inner, "tap", () => {}, {});
     __AddEventListener(inner, "tap", () => {}, {});
+    __AddEventListener(outer, "tap", () => {}, {});
 
-    expect(mock.named("enableEventListener")).toEqual([
-      ["enableEventListener", uid, BUBBLE, "tap"],
+    // The host keeps no per-element index: all it hears is that the name
+    // went from wanted by nobody to wanted by somebody.
+    expect(mock.named("listenerNameOpened")).toEqual([
+      ["listenerNameOpened", "tap"],
     ]);
   });
 
-  it("tells the host the last listener left, and only the last", () => {
-    const { inner } = tree();
-    const uid = __GetElementUniqueID(inner);
+  it("closes the name when the last handle anywhere gives it up", () => {
+    const { outer, inner } = tree();
     const a = () => {};
     const b = () => {};
     __AddEventListener(inner, "tap", a, {});
     __AddEventListener(inner, "tap", b, {});
+    __AddEventListener(outer, "tap", a, {});
 
     __RemoveEventListener(inner, "tap", a, {});
-    expect(mock.named("disableEventListener")).toEqual([]);
-
+    expect(mock.named("listenerNameClosed")).toEqual([]);
     __RemoveEventListener(inner, "tap", b, {});
-    expect(mock.named("disableEventListener")).toEqual([
-      ["disableEventListener", uid, BUBBLE, "tap"],
+    expect(mock.named("listenerNameClosed")).toEqual([]);
+
+    __RemoveEventListener(outer, "tap", a, {});
+    expect(mock.named("listenerNameClosed")).toEqual([
+      ["listenerNameClosed", "tap"],
     ]);
   });
 
-  it("counts each pass separately, which is what the phase argument is for", () => {
+  it("counts a handle once per name, whichever passes it registers in", () => {
     const { inner } = tree();
-    const uid = __GetElementUniqueID(inner);
     const handler = () => {};
 
     __AddEventListener(inner, "tap", handler, {});
     __AddEventListener(inner, "tap", handler, { capture: true });
 
-    expect(mock.named("enableEventListener")).toEqual([
-      ["enableEventListener", uid, BUBBLE, "tap"],
-      ["enableEventListener", uid, CAPTURE, "tap"],
+    expect(mock.named("listenerNameOpened")).toEqual([
+      ["listenerNameOpened", "tap"],
     ]);
 
     // Capture is part of the identity, so a bubble removal leaves the capture
-    // registration — and the host still hears about this node.
+    // registration — and that one still wants the name.
     __RemoveEventListener(inner, "tap", handler, {});
-    expect(mock.named("disableEventListener")).toEqual([
-      ["disableEventListener", uid, BUBBLE, "tap"],
+    expect(mock.named("listenerNameClosed")).toEqual([]);
+
+    __RemoveEventListener(inner, "tap", handler, { capture: true });
+    expect(mock.named("listenerNameClosed")).toEqual([
+      ["listenerNameClosed", "tap"],
     ]);
   });
 
-  it("runs the pass's own listeners in registration order", () => {
+  it("runs the capture pass before the bubble one, each in registration order", () => {
     const { inner } = tree();
     const order: string[] = [];
     __AddEventListener(inner, "tap", () => order.push("bubble-1"), {});
@@ -1278,8 +1303,7 @@ describe("event listeners", () => {
       capture: true,
     });
 
-    deliver(inner, inner, CAPTURE, "tap");
-    deliver(inner, inner, BUBBLE, "tap");
+    dispatch([inner], "tap");
 
     expect(order).toEqual(["capture", "bubble-1", "bubble-2"]);
   });
@@ -1293,8 +1317,8 @@ describe("event listeners", () => {
     __AddEventListener(inner, "tap", handler, {});
     __AddEventListener(inner, "tap", handler, { once: true });
 
-    deliver(inner, inner, BUBBLE, "tap");
-    deliver(inner, inner, BUBBLE, "tap");
+    dispatch([inner], "tap");
+    dispatch([inner], "tap");
 
     expect(runs).toBe(2);
   });
@@ -1306,11 +1330,13 @@ describe("event listeners", () => {
       runs += 1;
     }, { once: true });
 
-    deliver(inner, inner, BUBBLE, "tap");
-    deliver(inner, inner, BUBBLE, "tap");
+    dispatch([inner], "tap");
+    dispatch([inner], "tap");
 
     expect(runs).toBe(1);
-    expect(mock.named("disableEventListener")).toHaveLength(1);
+    expect(mock.named("listenerNameClosed")).toEqual([
+      ["listenerNameClosed", "tap"],
+    ]);
   });
 
   it("matches the event name case-insensitively on both sides", () => {
@@ -1320,19 +1346,19 @@ describe("event listeners", () => {
       runs += 1;
     };
     __AddEventListener(inner, "TAP", handler, {});
-    deliver(inner, inner, BUBBLE, "tap");
+    dispatch([inner], "tap");
     expect(runs).toBe(1);
 
     __RemoveEventListener(inner, "Tap", handler, {});
-    deliver(inner, inner, BUBBLE, "tap");
+    dispatch([inner], "tap");
     expect(runs).toBe(1);
   });
 
   it("ignores a non-callable registration", () => {
     const { inner } = tree();
     __AddEventListener(inner, "tap", "handlerName", {});
-    expect(mock.named("enableEventListener")).toEqual([]);
-    expect(() => deliver(inner, inner, BUBBLE, "tap")).not.toThrow();
+    expect(mock.named("listenerNameOpened")).toEqual([]);
+    expect(() => dispatch([inner], "tap")).not.toThrow();
   });
 
   it("hands the callback an event carrying both identities and the detail", () => {
@@ -1349,7 +1375,7 @@ describe("event listeners", () => {
       currentTarget = event.currentTarget;
     }, {});
 
-    deliver(outer, inner, BUBBLE, "tap", JSON.stringify({ x: 12, y: 30 }));
+    dispatch([inner, outer], "tap", JSON.stringify({ x: 12, y: 30 }));
 
     expect(received.type).toBe("tap");
     expect(received.detail).toEqual({ x: 12, y: 30 });
@@ -1359,23 +1385,50 @@ describe("event listeners", () => {
     expect(currentTarget.elementRefptr).toBe(outer);
   });
 
-  it("reports the standard's at-target phase where the passes meet", () => {
+  it("reports the standard's phase numbers for every step it visits", () => {
     const { outer, inner } = tree();
     const phases: number[] = [];
     const record = (event: ListenerEvent) => phases.push(event.eventPhase);
-    __AddEventListener(inner, "tap", record, {});
-    __AddEventListener(inner, "tap", record, { capture: true });
     __AddEventListener(outer, "tap", record, { capture: true });
+    __AddEventListener(inner, "tap", record, { capture: true });
+    __AddEventListener(inner, "tap", record, {});
+    __AddEventListener(outer, "tap", record, {});
 
-    deliver(outer, inner, CAPTURE, "tap");
-    deliver(inner, inner, CAPTURE, "tap");
-    deliver(inner, inner, BUBBLE, "tap");
+    dispatch([inner, outer], "tap");
 
-    // 1 capturing on the ancestor, 2 at the target in both passes.
-    expect(phases).toEqual([CAPTURE, 2, 2]);
+    // Capturing at the ancestor, at-target in both passes on the target
+    // itself — a step whose target is itself is at-target whichever pass
+    // reached it — then bubbling back out.
+    expect(phases).toEqual([
+      CAPTURING_PHASE,
+      AT_TARGET,
+      AT_TARGET,
+      BUBBLING_PHASE,
+    ]);
   });
 
-  it("one event object serves the whole walk, so a listener can write to it", () => {
+  it("skips a step that registered nothing, and one whose handle is gone", () => {
+    const { page, outer, inner } = tree();
+    const order: string[] = [];
+    __AddEventListener(page, "tap", () => order.push("page"), {});
+    __AddEventListener(inner, "tap", () => order.push("inner"), {});
+
+    // `outer` is on the path and registered nothing; the id past it names no
+    // handle at all, which is what a step whose handle was collected before
+    // its element was freed looks like from here.
+    elementModule.__BobcatDispatchEvent(
+      `${__GetElementUniqueID(inner)},${__GetElementUniqueID(outer)},9999,${
+        __GetElementUniqueID(page)
+      }`,
+      new Array(4).fill(__GetElementUniqueID(inner)).join(","),
+      "tap",
+      "",
+    );
+
+    expect(order).toEqual(["inner", "page"]);
+  });
+
+  it("one event object serves the whole dispatch, so a listener can write to it", () => {
     const { page, outer, inner } = tree();
     const seen: unknown[] = [];
     __AddEventListener(page, "tap", (event: ListenerEvent) => {
@@ -1389,11 +1442,7 @@ describe("event listeners", () => {
       seen.push(event);
     }, {});
 
-    walk([
-      { node: page, target: inner, phase: CAPTURE },
-      { node: inner, target: inner, phase: BUBBLE },
-      { node: outer, target: inner, phase: BUBBLE },
-    ], "tap");
+    dispatch([inner, outer, page], "tap");
 
     const [first, second, marker, third] = seen;
     expect(second).toBe(first);
@@ -1401,19 +1450,16 @@ describe("event listeners", () => {
     expect(marker).toBe("from page");
   });
 
-  it("drops the event on the last call, so the next walk starts clean", () => {
+  it("mints one event per dispatch, so the next one starts clean", () => {
     const { inner } = tree();
     const seen: unknown[] = [];
     __AddEventListener(inner, "tap", (event: ListenerEvent) => {
       seen.push(event, event.marker);
       event.marker = "written";
     }, {});
-    const uid = __GetElementUniqueID(inner);
 
-    // The same id twice, which the host never does — that is the point. If
-    // the last call did not drop the object, the second walk would find it.
-    elementModule.__BobcatDispatchEvent(uid, uid, BUBBLE, "tap", "", 66, true);
-    elementModule.__BobcatDispatchEvent(uid, uid, BUBBLE, "tap", "", 66, true);
+    dispatch([inner], "tap");
+    dispatch([inner], "tap");
 
     const [first, firstMarker, second, secondMarker] = seen;
     expect(firstMarker).toBeUndefined();
@@ -1421,31 +1467,29 @@ describe("event listeners", () => {
     expect(second).not.toBe(first);
   });
 
-  it("drops the event when a listener throws, since the host ends the walk", () => {
-    const { inner } = tree();
-    const seen: unknown[] = [];
-    let shouldThrow = true;
+  it("ends the dispatch even when a listener throws its way out of it", () => {
+    const { outer, inner } = tree();
+    let retained!: ListenerEvent;
     __AddEventListener(inner, "tap", (event: ListenerEvent) => {
-      seen.push(event.marker);
-      event.marker = "written";
-      if (shouldThrow) {
-        throw new Error("listener failed");
-      }
+      retained = event;
+      throw new Error("listener failed");
     }, {});
-    const uid = __GetElementUniqueID(inner);
+    let ancestorRan = false;
+    __AddEventListener(outer, "tap", () => {
+      ancestorRan = true;
+    }, {});
 
-    // The host aborts on the throw, so no call ever carries `isLastCall` for
-    // this id. Reusing the id is how a retained object would show itself.
-    expect(() =>
-      elementModule.__BobcatDispatchEvent(uid, uid, BUBBLE, "tap", "", 77, false)
-    ).toThrow("listener failed");
-    shouldThrow = false;
-    elementModule.__BobcatDispatchEvent(uid, uid, BUBBLE, "tap", "", 77, true);
+    // The host reports it as a failed listener; the walk does not resume.
+    expect(() => dispatch([inner, outer], "tap")).toThrow("listener failed");
 
-    expect(seen).toEqual([undefined, undefined]);
+    expect(ancestorRan).toBe(false);
+    // The standard's last dispatch step still ran, so the object the
+    // listener kept does not go on naming the node it threw at.
+    expect(retained.currentTarget).toBeNull();
+    expect(retained.eventPhase).toBe(0);
   });
 
-  it("refuses a target no handle names instead of dropping the walk", () => {
+  it("refuses a target no handle names instead of delivering the event", () => {
     const { inner } = tree();
     const seen: unknown[] = [];
     __AddEventListener(inner, "tap", (event: ListenerEvent) => {
@@ -1457,32 +1501,16 @@ describe("event listeners", () => {
     // one — its parent's handle holds it — so this is the ownership graph
     // and the tree disagreeing, and it is reported rather than swallowed.
     expect(() =>
-      elementModule.__BobcatDispatchEvent(uid, 999, BUBBLE, "tap", "", 88, false)
+      elementModule.__BobcatDispatchEvent(String(uid), "999", "tap", "")
     ).toThrow("ownership graph");
     expect(seen).toEqual([]);
 
-    // And the walk left nothing behind: the next dispatch is a fresh one.
-    elementModule.__BobcatDispatchEvent(uid, uid, BUBBLE, "tap", "", 89, true);
+    // And it left nothing behind: the next dispatch is a fresh one.
+    dispatch([inner], "tap");
     expect(seen).toEqual([uid]);
   });
 
-  it("drops the event when a listener stops propagation mid-walk", () => {
-    const { inner } = tree();
-    const seen: unknown[] = [];
-    __AddEventListener(inner, "tap", (event: ListenerEvent) => {
-      seen.push(event.marker);
-      event.marker = "written";
-      event.stopPropagation();
-    }, {});
-    const uid = __GetElementUniqueID(inner);
-
-    elementModule.__BobcatDispatchEvent(uid, uid, BUBBLE, "tap", "", 88, false);
-    elementModule.__BobcatDispatchEvent(uid, uid, BUBBLE, "tap", "", 88, true);
-
-    expect(seen).toEqual([undefined, undefined]);
-  });
-
-  it("leaves a retained event reporting no current target once the walk ends", () => {
+  it("leaves a retained event reporting no current target once it ends", () => {
     const { page, inner } = tree();
     let retained!: ListenerEvent;
     __AddEventListener(inner, "tap", (event: ListenerEvent) => {
@@ -1490,16 +1518,13 @@ describe("event listeners", () => {
     }, {});
     __AddEventListener(page, "tap", () => {}, {});
 
-    walk([
-      { node: inner, target: inner, phase: BUBBLE },
-      { node: page, target: inner, phase: BUBBLE },
-    ], "tap");
+    dispatch([inner, page], "tap");
 
     // The standard's last dispatch step. Without it the object a listener kept
     // would still name `page`, the node the walk happened to stop on.
     expect(retained.currentTarget).toBeNull();
     expect(retained.eventPhase).toBe(0);
-    // `target` outlives the walk, which the standard does not clear.
+    // `target` outlives the dispatch, which the standard does not clear.
     expect(retained.target.uid).toBe(__GetElementUniqueID(inner));
   });
 
@@ -1512,13 +1537,9 @@ describe("event listeners", () => {
       }, {});
     }
 
-    walk([
-      { node: inner, target: inner, phase: BUBBLE },
-      { node: outer, target: inner, phase: BUBBLE },
-      // What crossing a shadow boundary looks like from here: the host hands
-      // the same walk a different target.
-      { node: page, target: outer, phase: BUBBLE },
-    ], "tap");
+    // What crossing a shadow boundary looks like from here: the step above it
+    // is told a different target than the steps below.
+    dispatch([inner, outer, page], "tap", "", [inner, inner, outer]);
 
     expect(targets[1]).toBe(targets[0]);
     expect(targets[2]).not.toBe(targets[0]);
@@ -1527,40 +1548,63 @@ describe("event listeners", () => {
     );
   });
 
-  it("ends the walk through the host when a listener stops propagation", () => {
-    const { inner } = tree();
-    __AddEventListener(inner, "tap", (event: ListenerEvent) => event.stopPropagation(), {});
+  it("ends the remaining steps when a listener stops propagation", () => {
+    const { outer, inner } = tree();
+    const order: string[] = [];
+    __AddEventListener(inner, "tap", (event: ListenerEvent) => {
+      order.push("inner");
+      event.stopPropagation();
+    }, {});
+    __AddEventListener(outer, "tap", () => order.push("outer"), {});
 
-    deliver(inner, inner, BUBBLE, "tap");
+    dispatch([inner, outer], "tap");
 
-    expect(mock.named("stopPropagation")).toHaveLength(1);
+    // Nothing about the stop crosses the boundary: the walk it ends is here.
+    expect(order).toEqual(["inner"]);
+    expect(mock.calls.filter(([name]) => String(name).startsWith("listenerName")))
+      .toHaveLength(1);
+  });
+
+  it("stops a capture-pass listener from reaching the bubble pass at all", () => {
+    const { outer, inner } = tree();
+    const order: string[] = [];
+    __AddEventListener(outer, "tap", (event: ListenerEvent) => {
+      order.push("outer-capture");
+      __StopPropagation(event);
+    }, { capture: true });
+    __AddEventListener(inner, "tap", () => order.push("inner-bubble"), {});
+
+    dispatch([inner, outer], "tap");
+
+    expect(order).toEqual(["outer-capture"]);
   });
 
   it("keeps stopImmediatePropagation inside this node, and still ends the walk", () => {
-    const { inner } = tree();
+    const { outer, inner } = tree();
     const order: string[] = [];
     __AddEventListener(inner, "tap", (event: ListenerEvent) => {
       order.push("first");
       __StopImmediatePropagation(event);
     }, {});
     __AddEventListener(inner, "tap", () => order.push("second"), {});
+    __AddEventListener(outer, "tap", () => order.push("outer"), {});
 
-    deliver(inner, inner, BUBBLE, "tap");
+    dispatch([inner, outer], "tap");
 
     expect(order).toEqual(["first"]);
-    expect(mock.named("stopPropagation")).toHaveLength(1);
   });
 
   it("__StopPropagation does not skip the rest of this node", () => {
-    const { inner } = tree();
+    const { outer, inner } = tree();
     const order: string[] = [];
     __AddEventListener(inner, "tap", (event: ListenerEvent) => {
       order.push("first");
       __StopPropagation(event);
     }, {});
     __AddEventListener(inner, "tap", () => order.push("second"), {});
+    __AddEventListener(outer, "tap", () => order.push("outer"), {});
 
-    deliver(inner, inner, BUBBLE, "tap");
+    dispatch([inner, outer], "tap");
 
     expect(order).toEqual(["first", "second"]);
   });
@@ -1573,30 +1617,11 @@ describe("event listeners", () => {
       __AddEventListener(inner, "tap", () => order.push("late"), {});
     }, {});
 
-    deliver(inner, inner, BUBBLE, "tap");
+    dispatch([inner], "tap");
     expect(order).toEqual(["first"]);
 
-    deliver(inner, inner, BUBBLE, "tap");
+    dispatch([inner], "tap");
     expect(order).toEqual(["first", "first", "late"]);
-  });
-
-  it("reports the standard's phase numbers, not the pass it was told", () => {
-    const { outer, inner } = tree();
-    const phases: number[] = [];
-    const record = (event: ListenerEvent) => phases.push(event.eventPhase);
-    __AddEventListener(outer, "tap", record, { capture: true });
-    __AddEventListener(inner, "tap", record, { capture: true });
-    __AddEventListener(inner, "tap", record, {});
-    __AddEventListener(outer, "tap", record, {});
-
-    deliver(outer, inner, CAPTURE, "tap");
-    deliver(inner, inner, CAPTURE, "tap");
-    deliver(inner, inner, BUBBLE, "tap");
-    deliver(outer, inner, BUBBLE, "tap");
-
-    // CAPTURING_PHASE, AT_TARGET twice, BUBBLING_PHASE. The bubbling one is
-    // the case the pass id gets wrong: `BUBBLE` is 0, which is `Event.NONE`.
-    expect(phases).toEqual([1, 2, 2, 3]);
   });
 
   it("does not run a listener an earlier one removed", () => {
@@ -1609,16 +1634,9 @@ describe("event listeners", () => {
     }, {});
     __AddEventListener(inner, "tap", second, {});
 
-    deliver(inner, inner, BUBBLE, "tap");
+    dispatch([inner], "tap");
 
     expect(order).toEqual(["first"]);
-  });
-
-  it("delivers nothing for a node id no handle names", () => {
-    tree();
-    expect(() =>
-      elementModule.__BobcatDispatchEvent(9999, 9999, BUBBLE, "tap", "", 9000, true)
-    ).not.toThrow();
   });
 
   it("listeners are scoped to their own element", () => {
@@ -1628,10 +1646,59 @@ describe("event listeners", () => {
       runs += 1;
     }, {});
 
-    deliver(outer, outer, BUBBLE, "tap");
+    // A path that does not visit `inner` never reaches its listeners.
+    dispatch([outer], "tap");
     expect(runs).toBe(0);
-    deliver(inner, inner, BUBBLE, "tap");
+    dispatch([inner, outer], "tap");
     expect(runs).toBe(1);
+  });
+
+  it("closes the names a collected handle held, and prunes its global registration", async () => {
+    // The registry the module captures at import, replaced with one this test
+    // can drive: a collection is what calls the cleanup, and no test can
+    // schedule one.
+    rstest.resetModules();
+    const registered: { held: unknown }[] = [];
+    let cleanup!: (held: never) => void;
+    const real = globalThis.FinalizationRegistry;
+    globalThis.FinalizationRegistry = class {
+      constructor(callback: (held: never) => void) {
+        cleanup = callback;
+      }
+      register(_target: object, held: unknown) {
+        registered.push({ held });
+      }
+      unregister() {}
+    } as unknown as typeof FinalizationRegistry;
+    let papi: typeof elementPapi;
+    try {
+      papi = await import("../src/element-papi.ts");
+    } finally {
+      globalThis.FinalizationRegistry = real;
+    }
+
+    const page = papi.__CreatePage("card", 0);
+    const view = papi.__CreateView(0);
+    papi.__AppendElement(page, view);
+    papi.__AddEventListener(view, "tap", () => {}, {});
+    papi.__AddEvent(view, "global-bindEvent", "swipe", "3:0:swipe");
+    expect(mock.named("listenerNameOpened")).toEqual([
+      ["listenerNameOpened", "tap"],
+      ["listenerNameOpened", "swipe"],
+    ]);
+    const held = registered.at(-1)?.held;
+
+    // What a collection does: the cleanup gets the record the handle left,
+    // which is the only place its registrations are still named.
+    cleanup(held as never);
+
+    expect(mock.named("listenerNameClosed")).toEqual([
+      ["listenerNameClosed", "tap"],
+      ["listenerNameClosed", "swipe"],
+    ]);
+    expect(mock.named("dropElement")).toEqual([
+      ["dropElement", papi.__GetElementUniqueID(view)],
+    ]);
   });
 });
 
@@ -1677,58 +1744,58 @@ describe("__AddEvent", () => {
     ]);
   });
 
-  it("removes on a nullish handler", () => {
+  it("removes on a nullish handler, closing the name it held open", () => {
     const { inner } = tree();
-    const uid = __GetElementUniqueID(inner);
     __AddEvent(inner, "bindEvent", "tap", "3:0:bindtap");
 
     __AddEvent(inner, "bindEvent", "tap", undefined);
 
     expect(__GetEvents(inner)).toEqual([]);
-    expect(mock.named("disableEventListener")).toEqual([
-      ["disableEventListener", uid, BUBBLE, "tap"],
+    expect(mock.named("listenerNameClosed")).toEqual([
+      ["listenerNameClosed", "tap"],
     ]);
   });
 
-  it("indexes the pass its type selects, and moves when the type moves", () => {
-    const { inner } = tree();
-    const uid = __GetElementUniqueID(inner);
-    const handler = "3:0:bindtap";
+  it("delivers in the pass its type selects, and moves when the type moves", () => {
+    const { outer, inner } = tree();
+    const order: string[] = [];
+    __AddEvent(inner, "bindEvent", "tap", worklet(() => order.push("inner")));
+    __AddEvent(outer, "capture-bind", "tap", worklet(() => order.push("outer")));
 
-    __AddEvent(inner, "bindEvent", "tap", handler);
-    expect(mock.named("enableEventListener")).toEqual([
-      ["enableEventListener", uid, BUBBLE, "tap"],
-    ]);
+    dispatch([inner, outer], "tap");
+    expect(order).toEqual(["outer", "inner"]);
 
-    __AddEvent(inner, "capture-bind", "tap", handler);
-    expect(mock.named("disableEventListener")).toEqual([
-      ["disableEventListener", uid, BUBBLE, "tap"],
+    // The same name, the other form: the entry moves to the bubble pass, and
+    // the host hears nothing, because the name it holds open is the same one.
+    order.length = 0;
+    __AddEvent(outer, "bindEvent", "tap", worklet(() => order.push("outer")));
+
+    dispatch([inner, outer], "tap");
+    expect(order).toEqual(["inner", "outer"]);
+    expect(mock.named("listenerNameOpened")).toEqual([
+      ["listenerNameOpened", "tap"],
     ]);
-    expect(mock.named("enableEventListener")).toEqual([
-      ["enableEventListener", uid, BUBBLE, "tap"],
-      ["enableEventListener", uid, CAPTURE, "tap"],
-    ]);
+    expect(mock.named("listenerNameClosed")).toEqual([]);
   });
 
-  it("shares the host index with __AddEventListener, and neither switches the other off", () => {
+  it("shares the name count with __AddEventListener, and neither closes it for the other", () => {
     const { inner } = tree();
-    const uid = __GetElementUniqueID(inner);
     const callback = () => {};
 
     __AddEventListener(inner, "tap", callback, {});
     __AddEvent(inner, "bindEvent", "tap", "3:0:bindtap");
-    // One index entry covers both kinds, so the second registration says
-    // nothing new.
-    expect(mock.named("enableEventListener")).toEqual([
-      ["enableEventListener", uid, BUBBLE, "tap"],
+    // One count per handle and name, so the second registration says nothing
+    // new.
+    expect(mock.named("listenerNameOpened")).toEqual([
+      ["listenerNameOpened", "tap"],
     ]);
 
     __RemoveEventListener(inner, "tap", callback, {});
-    expect(mock.named("disableEventListener")).toEqual([]);
+    expect(mock.named("listenerNameClosed")).toEqual([]);
 
     __AddEvent(inner, "bindEvent", "tap", null);
-    expect(mock.named("disableEventListener")).toEqual([
-      ["disableEventListener", uid, BUBBLE, "tap"],
+    expect(mock.named("listenerNameClosed")).toEqual([
+      ["listenerNameClosed", "tap"],
     ]);
   });
 
@@ -1751,22 +1818,22 @@ describe("__AddEvent", () => {
     __AddEvent(inner, "bindEvent", "tap", () => {});
 
     expect(__GetEvents(inner)).toEqual([]);
-    expect(mock.named("enableEventListener")).toEqual([]);
+    expect(mock.named("listenerNameOpened")).toEqual([]);
   });
 
   it("runs a worklet handler through the realm's own runWorklet", () => {
     const { inner } = tree();
     const runs: unknown[] = [];
     const value = { _wkltId: "abc" };
-    // Read inside the call: the walk resets `currentTarget` when it ends, so
-    // an event kept past it no longer names the node it was delivered to.
+    // Read inside the call: the dispatch resets `currentTarget` when it ends,
+    // so an event kept past it no longer names the node it was delivered to.
     globalThis.runWorklet = (worklet, params) => {
       const event = params[0] as ListenerEvent;
       runs.push(worklet, event.type, event.detail.x, event.currentTarget.uid);
     };
     __AddEvent(inner, "bindEvent", "tap", { type: "worklet", value });
 
-    deliver(inner, inner, BUBBLE, "tap", JSON.stringify({ x: 12 }));
+    dispatch([inner], "tap", JSON.stringify({ x: 12 }));
 
     // The worklet body reaches `runWorklet` unwrapped, as its `value`, with
     // the event as the single positional parameter.
@@ -1777,7 +1844,7 @@ describe("__AddEvent", () => {
     const { inner } = tree();
     __AddEvent(inner, "bindEvent", "tap", { type: "worklet", value: {} });
 
-    expect(() => deliver(inner, inner, BUBBLE, "tap")).not.toThrow();
+    expect(() => dispatch([inner], "tap")).not.toThrow();
   });
 
   it("publishes an opaque background-thread handler name with its event", () => {
@@ -1787,10 +1854,10 @@ describe("__AddEvent", () => {
     __AddEvent(inner, "bindEvent", "tap", "3:0:bindtap");
 
     expect(__GetEvent(inner, "tap", "bindEvent")).toBe("3:0:bindtap");
-    expect(mock.named("enableEventListener")).toEqual([
-      ["enableEventListener", uid, BUBBLE, "tap"],
+    expect(mock.named("listenerNameOpened")).toEqual([
+      ["listenerNameOpened", "tap"],
     ]);
-    deliver(inner, inner, BUBBLE, "tap", JSON.stringify({ x: 12 }));
+    dispatch([inner], "tap", JSON.stringify({ x: 12 }));
 
     const target = { dataset: {}, id: null, uid };
     expect(mock.named("publishEvent")).toEqual([
@@ -1808,7 +1875,7 @@ describe("__AddEvent", () => {
     const { inner } = tree();
     __AddEvent(inner, "bindEvent", "tap", "");
 
-    deliver(inner, inner, BUBBLE, "tap");
+    dispatch([inner], "tap");
 
     expect(__GetEvent(inner, "tap", "bindEvent")).toBe("");
     expect(mock.named("publishEvent")).toHaveLength(1);
@@ -1832,10 +1899,11 @@ describe("__AddEvent", () => {
       __SetAttribute(inner, "data-item-name", "after");
     }, {});
 
-    walk([
-      { node: inner, target: inner, phase: BUBBLE },
-      { node: outer, target: inner, phase: BUBBLE },
-    ], "tap", JSON.stringify({ nested: { value: "before" } }));
+    dispatch(
+      [inner, outer],
+      "tap",
+      JSON.stringify({ nested: { value: "before" } }),
+    );
 
     expect(retained.currentTarget).toBeNull();
     expect(retained.target.elementRefptr).toBe(inner);
@@ -1874,27 +1942,33 @@ describe("__AddEvent", () => {
   });
 
   it("stops a catch form before publishing and then runs its local closures", () => {
-    const { inner } = tree();
+    const { outer, inner } = tree();
     __AddEventListener(inner, "tap", () => mock.calls.push(["closure"]), {});
     __AddEvent(inner, "catchEvent", "tap", "3:0:catchtap");
+    __AddEvent(outer, "bindEvent", "tap", "3:0:bindtap");
 
-    deliver(inner, inner, BUBBLE, "tap");
+    dispatch([inner, outer], "tap");
 
-    expect(mock.calls
-      .filter(([name]) => ["stopPropagation", "publishEvent", "closure"].includes(String(name)))
-      .map(([name]) => name))
-      .toEqual(["stopPropagation", "publishEvent", "closure"]);
+    // The catch stopped the walk before its own handler was published, and
+    // everything on its own node still ran; the ancestor never did.
+    expect(
+      mock.calls
+        .filter(([name]) => ["publishEvent", "closure"].includes(String(name)))
+        .map(([name, , handler]) => name === "closure" ? name : handler),
+    ).toEqual(["3:0:catchtap", "closure"]);
   });
 
   it("ends the walk for a catch form after its handler ran", () => {
-    const { inner } = tree();
+    const { outer, inner } = tree();
     const order: string[] = [];
     __AddEvent(inner, "capture-catch", "tap", worklet(() => order.push("handler")));
+    __AddEvent(outer, "bindEvent", "tap", worklet(() => order.push("outer")));
 
-    deliver(inner, inner, CAPTURE, "tap");
+    dispatch([inner, outer], "tap");
 
+    // The capture pass reached the target and stopped there, so the bubble
+    // pass never ran at all.
     expect(order).toEqual(["handler"]);
-    expect(mock.named("stopPropagation")).toHaveLength(1);
   });
 
   it("runs before the __AddEventListener closures on the same node", () => {
@@ -1903,7 +1977,7 @@ describe("__AddEvent", () => {
     __AddEventListener(inner, "tap", () => order.push("closure"), {});
     __AddEvent(inner, "bindEvent", "tap", worklet(() => order.push("handler")));
 
-    deliver(inner, inner, BUBBLE, "tap");
+    dispatch([inner], "tap");
 
     expect(order).toEqual(["handler", "closure"]);
   });
@@ -1922,27 +1996,136 @@ describe("__AddEvent", () => {
       }),
     );
 
-    deliver(inner, inner, BUBBLE, "tap");
+    dispatch([inner], "tap");
 
     expect(order).toEqual(["handler"]);
   });
 
-  it("is scoped to its own element and pass", () => {
+  it("is scoped to its own element", () => {
     const { outer, inner } = tree();
     let runs = 0;
     __AddEvent(inner, "bindEvent", "tap", worklet(() => {
       runs += 1;
     }));
 
-    deliver(outer, outer, BUBBLE, "tap");
-    deliver(inner, inner, CAPTURE, "tap");
+    dispatch([outer], "tap");
     expect(runs).toBe(0);
 
-    deliver(inner, inner, BUBBLE, "tap");
+    dispatch([inner, outer], "tap");
     expect(runs).toBe(1);
   });
 
-  it("files global-bindEvent apart, and never indexes it", () => {
+  it("files a string and a worklet for one name side by side, and runs both", () => {
+    const { inner } = tree();
+    const order: string[] = [];
+    globalThis.runWorklet = (value) => {
+      order.push("worklet");
+      void value;
+    };
+
+    __AddEvent(inner, "bindEvent", "tap", "3:0:bindtap");
+    __AddEvent(inner, "bindEvent", "tap", { type: "worklet", value: {} });
+
+    // Two maps, one per kind: neither filing displaced the other.
+    expect(__GetEvent(inner, "tap", "bindEvent")).toBe("3:0:bindtap");
+    expect(__GetEvents(inner)).toEqual([
+      { type: "bindevent", name: "tap", function: "3:0:bindtap" },
+      {
+        type: "bindevent",
+        name: "tap",
+        function: { type: "worklet", value: {} },
+      },
+    ]);
+    // One name count covers both kinds.
+    expect(mock.named("listenerNameOpened")).toEqual([
+      ["listenerNameOpened", "tap"],
+    ]);
+
+    __AddEventListener(inner, "tap", () => order.push("closure"), {});
+    dispatch([inner], "tap");
+
+    // web-core's per-node order: the cross-thread handler, then the worklet,
+    // then the `__AddEventListener` closures.
+    expect(
+      mock.calls
+        .filter(([name]) => name === "publishEvent")
+        .map(() => "publish"),
+    ).toEqual(["publish"]);
+    expect(order).toEqual(["worklet", "closure"]);
+  });
+
+  it("files the two kinds under different forms without either clearing the other", () => {
+    const { inner } = tree();
+    const order: string[] = [];
+    const handler = worklet(() => order.push("worklet"));
+
+    __AddEvent(inner, "capture-bind", "tap", handler);
+    __AddEvent(inner, "bindEvent", "tap", "3:0:bindtap");
+
+    // Each kind keeps its own form, so this node is delivered to in both
+    // passes — and holds the one name open once.
+    expect(__GetEvent(inner, "tap", "bindEvent")).toBe("3:0:bindtap");
+    expect(__GetEvents(inner)).toEqual([
+      { type: "bindevent", name: "tap", function: "3:0:bindtap" },
+      { type: "capture-bind", name: "tap", function: handler },
+    ]);
+    expect(mock.named("listenerNameOpened")).toEqual([
+      ["listenerNameOpened", "tap"],
+    ]);
+
+    dispatch([inner], "tap");
+
+    expect(order).toEqual(["worklet"]);
+    expect(mock.named("publishEvent")).toHaveLength(1);
+  });
+
+  it("__GetEvent answers the string kind only", () => {
+    const { inner } = tree();
+    const handler = { type: "worklet", value: {} };
+
+    __AddEvent(inner, "bindEvent", "tap", handler);
+
+    // web-core's `get_event` reads its cross-thread map and never its
+    // worklet one, so a name carrying only a worklet answers nothing.
+    expect(__GetEvent(inner, "tap", "bindEvent")).toBeUndefined();
+    expect(__GetEvents(inner)).toEqual([
+      { type: "bindevent", name: "tap", function: handler },
+    ]);
+  });
+
+  it("clears both kinds on a nullish handler, and closes the name", () => {
+    const { inner } = tree();
+    __AddEvent(inner, "bindEvent", "tap", "3:0:bindtap");
+    __AddEvent(inner, "bindEvent", "tap", { type: "worklet", value: {} });
+
+    __AddEvent(inner, "bindEvent", "tap", null);
+
+    expect(__GetEvents(inner)).toEqual([]);
+    expect(mock.named("listenerNameClosed")).toEqual([
+      ["listenerNameClosed", "tap"],
+    ]);
+  });
+
+  it("ends the walk when either kind carries the catch form", () => {
+    const { outer, inner } = tree();
+    const order: string[] = [];
+
+    // The catch is the worklet's form; the string beside it is a plain bind.
+    __AddEvent(inner, "bindEvent", "tap", "3:0:bindtap");
+    __AddEvent(inner, "catchEvent", "tap", worklet(() => order.push("worklet")));
+    __AddEvent(outer, "bindEvent", "tap", "3:0:outer");
+
+    dispatch([inner, outer], "tap");
+
+    // Both of the target's own kinds ran — the form decides the stop, not the
+    // handler — and the ancestor's did not.
+    expect(order).toEqual(["worklet"]);
+    expect(mock.named("publishEvent").map((call) => call[2])).toEqual([
+      "3:0:bindtap",
+    ]);
+  });
+
+  it("files global-bindEvent apart, and opens the name from its own slot", () => {
     const { inner } = tree();
     let runs = 0;
     const handler = worklet(() => {
@@ -1951,15 +2134,134 @@ describe("__AddEvent", () => {
 
     __AddEvent(inner, "global-bindEvent", "tap", handler);
 
-    expect(__GetEvent(inner, "tap", "global-bindEvent")).toBe(handler);
-    // Its own map: a global registration does not displace a path one.
+    expect(__GetEvent(inner, "tap", "global-bindEvent")).toBeUndefined();
+    // Its own slot: a global registration does not displace a path one.
     expect(__GetEvent(inner, "tap", "bindEvent")).toBeUndefined();
-    // The host walks the event path and nothing else, so indexing it would
-    // deliver a subset no reference implementation produces.
-    expect(mock.named("enableEventListener")).toEqual([]);
+    expect(__GetEvents(inner)).toEqual([
+      { type: "global-bindevent", name: "tap", function: handler },
+    ]);
+    // A global registration alone is enough to make the painting side route
+    // the name, because the event it wants took no particular path.
+    expect(mock.named("listenerNameOpened")).toEqual([
+      ["listenerNameOpened", "tap"],
+    ]);
 
-    deliver(inner, inner, BUBBLE, "tap");
+    // Not a step of the path, and not filtered by one either: the delivery
+    // happens whether or not the registered element is on it, and exactly
+    // once per dispatch.
+    dispatch([inner], "tap");
+    expect(runs).toBe(1);
+  });
+
+  it("closes the name when the last global handler goes", () => {
+    const { inner } = tree();
+    __AddEvent(inner, "global-bindEvent", "tap", "3:0:globaltap");
+    __AddEvent(inner, "global-bindEvent", "tap", { type: "worklet", value: {} });
+    expect(mock.named("listenerNameOpened")).toEqual([
+      ["listenerNameOpened", "tap"],
+    ]);
+
+    __AddEvent(inner, "global-bindEvent", "tap", undefined);
+
+    expect(__GetEvents(inner)).toEqual([]);
+    expect(mock.named("listenerNameClosed")).toEqual([
+      ["listenerNameClosed", "tap"],
+    ]);
+
+    // And nothing is delivered for it afterwards.
+    let runs = 0;
+    globalThis.runWorklet = () => {
+      runs += 1;
+    };
+    dispatch([inner], "tap");
     expect(runs).toBe(0);
+  });
+
+  it("runs both global handler kinds with no phase and its own currentTarget", () => {
+    const { outer, inner } = tree();
+    const seen: { uid: number; phase: number }[] = [];
+    globalThis.runWorklet = (_value, params) => {
+      const event = params[0] as ListenerEvent;
+      seen.push({ uid: event.currentTarget.uid, phase: event.eventPhase });
+    };
+    __AddEvent(outer, "global-bindEvent", "tap", "outer:global");
+    __AddEvent(outer, "global-bindEvent", "tap", {
+      type: "worklet",
+      value: {},
+    });
+
+    // The registered node is not the path: a global delivery is not a step
+    // of the path the event took, and here `outer` is not even on it.
+    dispatch([inner], "tap", JSON.stringify({ x: 1 }));
+
+    const published = mock.named("publishEvent");
+    expect(published).toHaveLength(1);
+    expect(published[0]?.[2]).toBe("outer:global");
+    const event = published[0]?.[3] as {
+      eventPhase: number;
+      target: { uid: number };
+      currentTarget: { uid: number };
+    };
+    expect(event.eventPhase).toBe(0);
+    expect(event.target.uid).toBe(__GetElementUniqueID(inner));
+    expect(event.currentTarget.uid).toBe(__GetElementUniqueID(outer));
+    // The string first, then the worklet, as on the path.
+    expect(seen).toEqual([
+      { uid: __GetElementUniqueID(outer), phase: 0 },
+    ]);
+  });
+
+  it("runs the global pass after a catch ended the walk over the path", () => {
+    const { page, outer, inner } = tree();
+    const order: string[] = [];
+    __AddEvent(inner, "catchEvent", "tap", worklet(() => order.push("catch")));
+    __AddEvent(outer, "bindEvent", "tap", worklet(() => order.push("outer")));
+    __AddEvent(page, "global-bindEvent", "tap", worklet(() => order.push("global")));
+
+    dispatch([inner, outer, page], "tap");
+
+    // web-core's `common_event_handler` calls `dispatch_global_bind_event`
+    // unconditionally: the catch ends the path, not the pass after it.
+    expect(order).toEqual(["catch", "global"]);
+  });
+
+  it("delivers global registrations in registration order, re-filing in place", () => {
+    const { page, outer, inner } = tree();
+    const order: string[] = [];
+    __AddEvent(outer, "global-bindEvent", "tap", worklet(() => order.push("outer")));
+    __AddEvent(page, "global-bindEvent", "tap", worklet(() => order.push("page")));
+    // Re-filing a handler on an element already registered must not move it
+    // behind the ones that followed it.
+    __AddEvent(outer, "global-bindEvent", "tap", worklet(() => order.push("outer")));
+
+    dispatch([inner], "tap");
+
+    expect(order).toEqual(["outer", "page"]);
+  });
+
+  it("carries the dataset on both descriptors a worklet and a closure see", () => {
+    const { inner } = tree();
+    __SetAttribute(inner, "data-item-name", "row");
+    __SetDataset(inner, { typed: 7 });
+    const seen: unknown[] = [];
+    __AddEvent(
+      inner,
+      "bindEvent",
+      "tap",
+      worklet((event: ListenerEvent) => {
+        seen.push(event.target.dataset, event.currentTarget.dataset);
+      }),
+    );
+    __AddEventListener(inner, "tap", (event: ListenerEvent) => {
+      seen.push(event.target.dataset, event.currentTarget.dataset);
+    }, {});
+
+    dispatch([inner], "tap");
+
+    // web-core's `generateTargetObject` gives every descriptor a `dataset`,
+    // the `data-*` attributes camelCased with the typed values merged over.
+    const dataset = { itemName: "row", typed: 7 };
+    expect(seen).toEqual([dataset, dataset, dataset, dataset]);
   });
 });
 
@@ -1985,7 +2287,6 @@ describe("__GetEvents and __SetEvents", () => {
 
   it("clears before it adds, so a name absent from the list is gone", () => {
     const { inner } = tree();
-    const uid = __GetElementUniqueID(inner);
     __AddEvent(inner, "bindEvent", "tap", "old");
 
     __SetEvents(inner, [
@@ -1994,8 +2295,8 @@ describe("__GetEvents and __SetEvents", () => {
 
     expect(__GetEvent(inner, "tap", "bindEvent")).toBeUndefined();
     expect(__GetEvent(inner, "longpress", "bindEvent")).toBe("new");
-    expect(mock.named("disableEventListener")).toEqual([
-      ["disableEventListener", uid, BUBBLE, "tap"],
+    expect(mock.named("listenerNameClosed")).toEqual([
+      ["listenerNameClosed", "tap"],
     ]);
   });
 
@@ -2003,6 +2304,9 @@ describe("__GetEvents and __SetEvents", () => {
     const { inner, outer } = tree();
     __AddEvent(inner, "capture-bind", "tap", "a");
     __AddEvent(inner, "global-bindEvent", "scroll", "b");
+    // Both kinds of one name, which is the case the round trip could only
+    // carry once the two stopped sharing a slot.
+    __AddEvent(inner, "capture-bind", "tap", { type: "worklet", value: {} });
 
     __SetEvents(outer, __GetEvents(inner));
 
@@ -2030,6 +2334,71 @@ describe("__GetEvents and __SetEvents", () => {
     __SetEvents(inner, undefined);
 
     expect(__GetEvents(inner)).toEqual([]);
+  });
+});
+
+describe("__GetPageElement", () => {
+  it("is undefined before __CreatePage and the page handle after it", () => {
+    expect(__GetPageElement()).toBeUndefined();
+    const page = __CreatePage("card", 0);
+    // web-core's is `() => page`, the binding its own `__CreatePage` assigns.
+    expect(__GetPageElement()).toBe(page);
+  });
+});
+
+describe("__QuerySelector and __QuerySelectorAll", () => {
+  it("ask the host for a root-exclusive match and map the ids to handles", () => {
+    const { page, outer, inner } = tree();
+    mock.answerQuery = (_root, _selector, firstOnly) =>
+      firstOnly
+        ? String(__GetElementUniqueID(outer))
+        : `${__GetElementUniqueID(outer)},${__GetElementUniqueID(inner)}`;
+
+    expect(__QuerySelector(page, ".row", {})).toBe(outer);
+    expect(__QuerySelectorAll(page, ".row", {})).toEqual([outer, inner]);
+
+    // `includeRoot` 0: these two are `Element.querySelector`'s scope, which
+    // never answers the element it was asked on — unlike SelectorQuery's.
+    expect(mock.named("queryElementIds")).toEqual([
+      ["queryElementIds", __GetElementUniqueID(page), ".row", 1, 0],
+      ["queryElementIds", __GetElementUniqueID(page), ".row", 0, 0],
+    ]);
+  });
+
+  it("stringifies the selector and ignores the params object", () => {
+    const { page } = tree();
+    mock.answerQuery = () => "";
+
+    expect(__QuerySelector(page, 7, { onlyCurrentComponent: true }))
+      .toBeUndefined();
+    expect(__QuerySelectorAll(page, 7)).toEqual([]);
+
+    expect(mock.named("queryElementIds").map((call) => call[2])).toEqual([
+      "7",
+      "7",
+    ]);
+  });
+
+  it("lets a selector the host refuses throw", () => {
+    const { page } = tree();
+    const refusal = new Error("'!' is not a valid selector");
+    mock.answerQuery = () => {
+      throw refusal;
+    };
+
+    // The DOM throws a SyntaxError for an unparsable selector and so does
+    // web-core's; nothing here catches the host's refusal.
+    expect(() => __QuerySelector(page, "!", {})).toThrow(refusal);
+    expect(() => __QuerySelectorAll(page, "!", {})).toThrow(refusal);
+  });
+
+  it("refuses a match no live handle names", () => {
+    const { page } = tree();
+    mock.answerQuery = () => "4242";
+
+    expect(() => __QuerySelectorAll(page, ".row", {})).toThrow(
+      "a queried live node has no handle",
+    );
   });
 });
 

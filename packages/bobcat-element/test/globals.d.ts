@@ -41,5 +41,12 @@ declare global {
   var __RemoveEventListener: typeof elementPapi.__RemoveEventListener;
   var __StopPropagation: typeof elementPapi.__StopPropagation;
   var __StopImmediatePropagation: typeof elementPapi.__StopImmediatePropagation;
+  var __GetPageElement: typeof elementPapi.__GetPageElement;
+  var __QuerySelector: typeof elementPapi.__QuerySelector;
+  var __QuerySelectorAll: typeof elementPapi.__QuerySelectorAll;
+  var __SetDataset: typeof elementPapi.__SetDataset;
+  var __GetDataset: typeof elementPapi.__GetDataset;
+  var __AddDataset: typeof elementPapi.__AddDataset;
+  var __AddInlineStyle: typeof elementPapi.__AddInlineStyle;
   var __FlushElementTree: typeof elementPapi.__FlushElementTree;
 }

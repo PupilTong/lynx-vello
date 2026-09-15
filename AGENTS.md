@@ -748,8 +748,8 @@ Rust parses structured input only when Rust behavior actually needs its fields
   `setAttribute`, `setInlineStyles`, `removeAttribute`, `getAttribute`,
   `tagName`, `attributeNames`, `childElementIds`, `parentNode`,
   `insertBefore`, `removeElement`, `replaceElement`,
-  `swapElement`, `dropElement`, `flushElementTree`, `enableEventListener`,
-  `disableEventListener`, `stopPropagation`, `setTimer`, `clearTimer`,
+  `swapElement`, `dropElement`, `flushElementTree`, `listenerNameOpened`,
+  `listenerNameClosed`, `setTimer`, `clearTimer`,
   `createWorker`, `sendWorkerMessage`, `terminateWorker`, and the page-data
   pair `initData` and `globalProps`, which hand over the view's JSON text once
   as plain strings, unread — the tree and
@@ -888,21 +888,26 @@ Rust parses structured input only when Rust behavior actually needs its fields
   of `__AddEventListener` that depend on them — `closure_type` selecting a
   handler string, and `bind_type` selecting Lynx's `catch` forms, which an
   author writes as a listener that calls `__StopPropagation` first.
-  The realm tells the host which nodes are worth visiting: a listener list
-  going empty-to-occupied calls the imported native
-  `enableEventListener(node, capture, name)` and back calls
-  `disableEventListener`, keyed by a weak
-  `NodeId`→handle index cleared by the same sweep that drops the element. The
-  host walks and calls the Element module's `__BobcatDispatchEvent` export
-  through `quickjs::ScriptEngine::call_module_export`, the one Rust-to-JS path
-  in the tree, once per node per pass, carrying an id naming the dispatch and whether
-  the call is its last. Those two let the realm keep one event object for the
-  whole walk, so a property one listener writes is there for the next, while
-  the host retains nothing of the realm's. `stopImmediatePropagation` never
-  leaves the realm, since it only skips the rest of one node's listeners;
-  `stopPropagation` calls the imported native `stopPropagation`, which is a
-  pure flag write because re-entering the realm from a host function would
-  nest a `QuickJS` execution guard.
+  The walk is the realm's. The host computes the event path while it holds
+  the document, releases it, and makes one call to the Element module's
+  `__BobcatDispatchEvent` export through
+  `quickjs::ScriptEngine::call_module_export`, the one Rust-to-JS path in the
+  tree, carrying the whole path: the standard's bubble steps, target-first,
+  as two comma-joined decimal id strings — the nodes, and position for
+  position each step's shadow-retargeted target — plus the name and the
+  detail JSON. One call is one dispatch, so one event object serves it and a
+  property one listener writes is there for the next, while the host retains
+  nothing of the realm's and keeps no listener index at all. The realm runs
+  the capture pass, the bubble pass and the `global-bindEvent` pass over that
+  path, derives `eventPhase` per step, and ends the dispatch itself; neither
+  `stopPropagation` nor `stopImmediatePropagation` crosses the boundary,
+  because there is no walk on the other side to end. What the host is told is
+  the *name* set the painting side routes against, and only its global edges:
+  the imported native `listenerNameOpened(name)` for the first registration
+  for a name anywhere in the realm and `listenerNameClosed(name)` for the
+  removal of its last, the count behind them kept in the realm because every
+  registration kind is — including the ones a collected handle takes with
+  it, which its `FinalizationRegistry` record closes.
   `__SetCSSId` is absent rather than unimplemented — it names the author-CSS
   scope an element cascades in, and until a layer lowers a decoded `StyleInfo`
   into **scoped** author rules there is nothing to validate an encoding against
@@ -1452,7 +1457,7 @@ Rust parses structured input only when Rust behavior actually needs its fields
   symbol — so a registration can never keep its element alive, and QuickJS's
   non-ephemeron `WeakMap` never gets the chance to — and the per-node
   dispatch, the standard's `eventPhase`, and `once` are all resolved here,
-  with only enable/disable and `stopPropagation` crossing to the host.
+  with only the event name's open/close edges crossing to the host.
   An element handle is a plain object carrying its DOM `NodeId`
   under a realm-local symbol (web-core's `uniqueIdSymbol` shape) — one
   object per element for its whole life, so every PAPI return of an element
