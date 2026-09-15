@@ -234,9 +234,17 @@ async fn workers_load_relative_to_entry_and_route_back_to_their_own_views() {
             __SetInlineStyles(box, 'width:32px;height:24px;background:black');
             __AppendElement(page, box);
             const received = [];
+            // A Worker reachable only through its own handler is a cycle, not
+            // a root, and this engine collects such a handle and stops the
+            // worker (docs/destruction-runtime.md). The two views share one
+            // QuickJS runtime, so the second view's boot can run the
+            // collection that would take the first view's workers away
+            // mid-message. A page that waits for an answer names its workers.
+            globalThis.running = [];
             // Both requests can reach the painter in the same pump turn.
             for (const name of ['first', 'second']) {
                 const worker = new Worker('./worker.js', {name});
+                running.push(worker);
                 worker.onmessage = event => {
                     received.push(event.data);
                     if (received.length === 2) {
@@ -245,6 +253,7 @@ async fn workers_load_relative_to_entry_and_route_back_to_their_own_views() {
                         __SetInlineStyles(box, `width:32px;height:24px;background:${event.data.color}`);
                     }
                     worker.terminate();
+                    running.splice(running.indexOf(worker), 1);
                 };
                 worker.postMessage('ready');
             }
