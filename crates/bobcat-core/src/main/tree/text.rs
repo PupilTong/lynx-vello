@@ -111,6 +111,16 @@ fn parse_count(value: Option<&str>) -> Option<f64> {
 /// same way: zero, its initial value, leaves the truncation marker in the
 /// colour of the run the cut landed in, which is native Lynx's default.
 ///
+/// `text-overflow` is an attribute as well as a property on native Lynx —
+/// `TextElement::ProcessAttributeForNormalLayoutMode` caches the attribute onto
+/// `kPropertyIDTextOverflow` (`core/renderer/dom/fiber/text_element.cc:176-182`)
+/// — and web-core observes it nowhere, so a 2026-09-16 ruling follows native
+/// here (`docs/tracking/deviations.md`). It is a selector rule rather than a
+/// presentational hint because it needs no parsing of its own: native's enum
+/// reader accepts the two literals and nothing else, so two UA rules keyed on
+/// those literals say the whole thing. Plain declarations, so author CSS still
+/// outranks the attribute the way it outranks every other UA rule.
+///
 /// An `inline-truncation` is content wherever it is written *directly* inside
 /// a `text`, and generates no box anywhere else — the same scope web-core's
 /// `:scope > inline-truncation` query honours. It carries
@@ -124,6 +134,8 @@ pub(super) const UA_RULES: &str = r#"
 @property --lynx-inline-truncation { syntax: "<integer>"; inherits: false; initial-value: 0; }
 text { box-sizing: border-box; display: -lynx-text !important; color: initial; }
 text[text] { content: attr(text); }
+text[text-overflow="ellipsis"] { text-overflow: ellipsis; }
+text[text-overflow="clip"] { text-overflow: clip; }
 inline-text { display: -lynx-text !important; }
 inline-image, inline-truncation { display: none; }
 text > * { display: none; }
@@ -146,6 +158,7 @@ mod tests {
     const MAX_LINES: &str = "text-maxline";
     const MAX_CHARS: &str = "text-maxlength";
     const TAIL_COLOR_CONVERT: &str = "tail-color-convert";
+    const TEXT_OVERFLOW: &str = "text-overflow";
 
     fn set_limit(
         document: &mut LynxDocument,
@@ -421,6 +434,68 @@ mod tests {
                 width
             );
         }
+    }
+
+    /// The width of the paragraph `text` establishes, after a layout.
+    fn paragraph_width(document: &mut LynxDocument, text: dom::NodeId) -> f32 {
+        document.layout();
+        document.text_block_size(text).expect("paragraph").width
+    }
+
+    /// Native Lynx reads `text-overflow` off the element as well as out of
+    /// CSS (`text_element.cc:176-182`), and the UA sheet's two attribute rules
+    /// are how this engine honours that. Native's enum reader accepts the two
+    /// literals only, so every other value — a removal, a different case, an
+    /// empty string — leaves the initial `clip`.
+    #[test]
+    fn text_overflow_attribute_selects_the_ellipsis_path_through_the_ua_sheet() {
+        let (mut document, text) = paragraph("abc def");
+        set_limit(&mut document, text, MAX_CHARS, Some("1"));
+        for (value, width) in [
+            (Some("ellipsis"), 80.0),
+            (Some("clip"), 20.0),
+            (Some("ellipsis"), 80.0),
+            (None, 20.0),
+            (Some("ELLIPSIS"), 20.0),
+            (Some("garbage"), 20.0),
+            (Some(""), 20.0),
+            (Some("ellipsis"), 80.0),
+        ] {
+            set_limit(&mut document, text, TEXT_OVERFLOW, value);
+            assert_eq!(
+                paragraph_width(&mut document, text),
+                width,
+                "text-overflow={value:?}",
+            );
+            assert_eq!(
+                document.get(text).unwrap().attribute(TEXT_OVERFLOW),
+                value,
+                "and the attribute itself is never rewritten",
+            );
+        }
+    }
+
+    /// The attribute's rules are UA origin and plain, so a page's own CSS
+    /// overrides them exactly as it overrides the rest of the UA sheet.
+    #[test]
+    fn author_css_outranks_the_text_overflow_attribute() {
+        let (mut document, text) = paragraph("abc def");
+        set_limit(&mut document, text, MAX_CHARS, Some("1"));
+        set_limit(&mut document, text, TEXT_OVERFLOW, Some("ellipsis"));
+        document.add_class(text, "override");
+        document.add_stylesheet(
+            "@layer limits { .override { text-overflow: clip; } }",
+            dom::StylesheetOrigin::Author,
+        );
+        assert_eq!(paragraph_width(&mut document, text), 20.0);
+        assert_eq!(
+            document.get(text).unwrap().attribute(TEXT_OVERFLOW),
+            Some("ellipsis"),
+            "the author declaration wins the cascade without touching the attribute",
+        );
+
+        document.remove_class(text, "override");
+        assert_eq!(paragraph_width(&mut document, text), 80.0);
     }
 
     #[test]

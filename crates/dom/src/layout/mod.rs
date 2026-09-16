@@ -24,7 +24,7 @@ use stylo::servo_arc::Arc;
 
 pub(crate) use self::style::{
     DisplayMode, StyleView, box_parent, converts_tail_color, display_mode,
-    establishes_absolute_containing_block, establishes_fixed_containing_block,
+    establishes_absolute_containing_block, establishes_fixed_containing_block, generates_no_box,
     paragraph_limits_changed, shaping_inputs_changed, skips_contents,
 };
 use crate::tree::document::{Document, NodeLayoutState, RelayoutKind};

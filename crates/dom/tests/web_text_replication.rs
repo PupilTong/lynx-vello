@@ -90,6 +90,10 @@ fn is_black(color: [u8; 4]) -> bool {
     color[0] < 60 && color[1] < 60 && color[2] < 60
 }
 
+fn is_blue(color: [u8; 4]) -> bool {
+    color[2] > 200 && color[0] < 60 && color[1] < 60
+}
+
 /// Replicates `x-text/text-not-resize-detect-new-line`
 /// (`packages/web-platform/web-elements/tests/fixtures/x-text/text-not-resize-detect-new-line.
 /// html`, `packages/web-platform/web-elements/tests/web-elements.spec.ts:378`): moving
@@ -478,15 +482,24 @@ fn a_truncation_atom_is_placed_at_the_clamp_and_hidden_without_one() {
     );
 }
 
-/// The `inline-truncation` element itself never paints: it is a text scope,
-/// so it has no paragraph of its own, and the slot the paragraph leaves it is
-/// empty whether or not its content is shown.
+/// The `inline-truncation` element itself gets no *box*: it is a text scope,
+/// so it has no paragraph and no layout box of its own, and the slot the
+/// paragraph leaves it is empty whether or not its content is shown.
 ///
-/// What paints is its *runs*, through the flattened paragraph and in the
-/// marker's own colour. A background colour on the marker is the probe: it
-/// would cover the clamp line if the element had a box.
+/// What paints is its *runs* — through the flattened paragraph, in the
+/// marker's own colour — and, since the 2026-09-16 ruling, its own
+/// `background-color` behind exactly those runs, as the inline box it is. A
+/// background on the marker is therefore the probe for both halves: it must
+/// cover the marker's fragment and nothing else — not the rest of the clamp
+/// line, not the paragraph, which is what an element with a box would have
+/// painted.
+///
+/// The marker's content is a space and an `H`, not a bare `H`: Ahem's glyphs
+/// are solid em squares, so ink covering the whole fragment would hide the
+/// very background this samples. The blank first unit is where the background
+/// is read.
 #[test]
-fn a_shown_truncation_marker_paints_its_runs_and_never_its_own_box() {
+fn a_shown_truncation_marker_paints_its_runs_and_a_background_behind_them_only() {
     fn readback_marker(content: &str) -> Vec<u8> {
         let mut doc = Doc::with_device(device(200.0, 100.0));
         doc.add_ua_css(LIMIT_PROPERTIES);
@@ -504,27 +517,38 @@ fn a_shown_truncation_marker_paints_its_runs_and_never_its_own_box() {
         let run = doc.dom.create_text_node(content, ());
         doc.dom.append_child(text, run);
         let marker = doc.el(text, "view.marker");
-        let marker_run = doc.dom.create_text_node("H", ());
+        let marker_run = doc.dom.create_text_node(" H", ());
         doc.dom.append_child(marker, marker_run);
         readback(
-            "a_shown_truncation_marker_paints_its_runs_and_never_its_own_box",
+            "a_shown_truncation_marker_paints_its_runs_and_a_background_behind_them_only",
             &mut doc,
             200,
             100,
         )
     }
 
-    let is_blue = |color: [u8; 4]| color[2] > 200 && color[0] < 60 && color[1] < 60;
-
     let shown = readback_marker(&"H".repeat(30));
+    // Three kept squares, then the marker's two units: a blank one carrying
+    // the background and the marker's own glyph.
     assert!(
-        is_red(pixel(&shown, 200, 70, 30)),
+        is_red(pixel(&shown, 200, 90, 30)),
         "the marker's own run paints, in the marker's colour",
     );
     assert!(
-        (0..100).all(|y| (0..200).all(|x| !is_blue(pixel(&shown, 200, x, y)))),
-        "and the marker element itself paints nothing: the paragraph leaves \
-         its slot empty rather than giving it a box",
+        is_blue(pixel(&shown, 200, 70, 22)) && is_blue(pixel(&shown, 200, 70, 38)),
+        "and its background paints behind its own fragment, over the fragment's          whole content area",
+    );
+    assert!(
+        (0..100).all(|y| (0..60).all(|x| !is_blue(pixel(&shown, 200, x, y)))),
+        "and nowhere left of the cut: the marker has no box, so its background          is the inline fragment's and not the clamp line's",
+    );
+    assert!(
+        (0..100).all(|y| (100..200).all(|x| !is_blue(pixel(&shown, 200, x, y)))),
+        "and nowhere past the paragraph either",
+    );
+    assert!(
+        (0..20).all(|y| (0..200).all(|x| !is_blue(pixel(&shown, 200, x, y)))),
+        "and not on the line above the clamp, which holds none of its runs",
     );
 
     let hidden = readback_marker("HHHHH");
@@ -533,8 +557,334 @@ fn a_shown_truncation_marker_paints_its_runs_and_never_its_own_box() {
             let color = pixel(&hidden, 200, x, y);
             !is_blue(color) && !is_red(color)
         })),
-        "and with nothing to clamp neither its runs nor a box of its own reach \
-         the frame",
+        "and with nothing to clamp neither its runs nor a background of its own \
+         reach the frame",
+    );
+}
+
+/// A nested `<text>` scope has no box of its own — the paragraph is flattened
+/// and its slot hidden — so until the 2026-09-16 ruling a `background-color`
+/// on it painted nothing at all. It now paints as css-backgrounds-3 says an
+/// *inline box* does, which is what web-core gets by making a nested
+/// `x-text`/`inline-text` `display: inline`
+/// (`packages/web-platform/web-elements/src/elements/XText/x-text.css:52-67`
+/// adds nothing to that but `background-clip: inherit`): one fragment per
+/// line, spanning that scope's own glyphs horizontally and the font's content
+/// area — ascent over descent — vertically.
+///
+/// Native Lynx fills the *line box* instead (Android `BackgroundColorSpan` /
+/// `LynxTextBackgroundSpan`, iOS `NSBackgroundColorAttributeName`); this
+/// engine follows web-core, and the `line-height: 40px` below is what tells
+/// the two apart — the 10px of half-leading above and below the 20px content
+/// area must stay unpainted.
+///
+/// Every test in this group paints the nested run's ink `transparent`. Ahem's
+/// glyphs are solid em squares that cover the whole content area, which is
+/// exactly the band the background fills, so visible ink would hide the
+/// subject.
+#[test]
+fn a_nested_scope_s_background_paints_behind_its_own_fragments_only() {
+    let mut doc = Doc::with_device(device(300.0, 60.0));
+    doc.add_css(
+        "page { display: flex; align-items: flex-start; }
+         .text { display: -lynx-text; width: 300px; color: #000000;
+                 font-family: Ahem; font-size: 20px; line-height: 40px; }
+         .tag { display: -lynx-text; color: transparent;
+                background-color: #0000ff; }",
+    );
+    assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
+    let root = doc.root;
+    let text = doc.el(root, "view.text");
+    let before = doc.dom.create_text_node("AAA", ());
+    doc.dom.append_child(text, before);
+    let tag = doc.el(text, "view.tag");
+    let nested = doc.dom.create_text_node("BBB", ());
+    doc.dom.append_child(tag, nested);
+    let after = doc.dom.create_text_node("AAA", ());
+    doc.dom.append_child(text, after);
+    let pixels = readback(
+        "a_nested_scope_s_background_paints_behind_its_own_fragments_only",
+        &mut doc,
+        300,
+        60,
+    );
+
+    // Nine em squares at 20px: the nested run is the fourth through sixth, so
+    // its fragment is x 60..120.
+    for x in [62, 90, 118] {
+        assert!(
+            is_blue(pixel(&pixels, 300, x, 20)),
+            "the nested scope's background covers its own run (x={x})",
+        );
+    }
+    for x in [10, 50, 130, 170] {
+        assert!(
+            is_black(pixel(&pixels, 300, x, 20)),
+            "and never reaches the runs around it, which keep their own ink \
+             over the block's background (x={x})",
+        );
+    }
+
+    // The line box is 40px and the content area 20px, so the half-leading is
+    // y 0..10 and y 30..40. A native-style line-box fill would paint it.
+    for y in [2, 8, 32, 38] {
+        assert!(
+            is_white(pixel(&pixels, 300, 90, y)),
+            "and the half-leading stays unpainted: the fragment is the content \
+             area, not the line box (y={y})",
+        );
+    }
+}
+
+/// `box-decoration-break: slice`, approximated: a nested scope that wraps gets
+/// one fragment per line, each covering only the part of the scope that landed
+/// on that line.
+#[test]
+fn a_nested_scope_that_wraps_paints_one_fragment_per_line() {
+    let mut doc = Doc::with_device(device(200.0, 100.0));
+    doc.add_css(
+        "page { display: flex; align-items: flex-start; }
+         .text { display: -lynx-text; width: 100px; word-break: break-all;
+                 color: #000000; font-family: Ahem; font-size: 20px;
+                 line-height: 20px; }
+         .tag { display: -lynx-text; color: transparent;
+                background-color: #0000ff; }",
+    );
+    assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
+    let root = doc.root;
+    let text = doc.el(root, "view.text");
+    let before = doc.dom.create_text_node("AAA", ());
+    doc.dom.append_child(text, before);
+    let tag = doc.el(text, "view.tag");
+    let nested = doc.dom.create_text_node("BBBBBB", ());
+    doc.dom.append_child(tag, nested);
+    let pixels = readback(
+        "a_nested_scope_that_wraps_paints_one_fragment_per_line",
+        &mut doc,
+        200,
+        100,
+    );
+
+    // Five squares per 100px line: AAA and two of the six B squares on the
+    // first, the remaining four on the second.
+    assert!(
+        is_blue(pixel(&pixels, 200, 62, 10)) && is_blue(pixel(&pixels, 200, 98, 10)),
+        "the first fragment covers the part of the scope on the first line",
+    );
+    assert!(
+        is_black(pixel(&pixels, 200, 50, 10)),
+        "and stops where the scope starts",
+    );
+    assert!(
+        is_blue(pixel(&pixels, 200, 2, 30)) && is_blue(pixel(&pixels, 200, 78, 30)),
+        "the second fragment starts at the line's own origin",
+    );
+    assert!(
+        is_white(pixel(&pixels, 200, 82, 30)) && is_white(pixel(&pixels, 200, 120, 10)),
+        "and neither fragment runs to the block's width",
+    );
+    assert!(
+        (40..100).all(|y| (0..200).all(|x| !is_blue(pixel(&pixels, 200, x, y)))),
+        "and no third fragment exists: the scope ends on the second line",
+    );
+}
+
+/// Paint order within a paragraph's inline backgrounds: outermost scope first,
+/// so a nested scope's background covers the one it sits inside.
+#[test]
+fn an_inner_scope_s_background_covers_its_ancestor_s() {
+    let mut doc = Doc::with_device(device(300.0, 40.0));
+    doc.add_css(
+        "page { display: flex; align-items: flex-start; }
+         .text { display: -lynx-text; width: 300px; color: #000000;
+                 font-family: Ahem; font-size: 20px; line-height: 20px; }
+         .outer { display: -lynx-text; color: transparent;
+                  background-color: #0000ff; }
+         .inner { display: -lynx-text; background-color: #ff0000; }",
+    );
+    assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
+    let root = doc.root;
+    let text = doc.el(root, "view.text");
+    let before = doc.dom.create_text_node("AA", ());
+    doc.dom.append_child(text, before);
+    let outer = doc.el(text, "view.outer");
+    let outer_run = doc.dom.create_text_node("BB", ());
+    doc.dom.append_child(outer, outer_run);
+    let inner = doc.el(outer, "view.inner");
+    let inner_run = doc.dom.create_text_node("CC", ());
+    doc.dom.append_child(inner, inner_run);
+    let pixels = readback(
+        "an_inner_scope_s_background_covers_its_ancestor_s",
+        &mut doc,
+        300,
+        40,
+    );
+
+    assert!(
+        is_blue(pixel(&pixels, 300, 42, 10)) && is_blue(pixel(&pixels, 300, 78, 10)),
+        "the outer scope paints behind the run that is only its own",
+    );
+    assert!(
+        is_red(pixel(&pixels, 300, 82, 10)) && is_red(pixel(&pixels, 300, 118, 10)),
+        "and the inner scope's background covers it where the two overlap",
+    );
+    assert!(
+        is_black(pixel(&pixels, 300, 10, 10)),
+        "and neither reaches the run outside them both",
+    );
+}
+
+/// A `display: contents` element generates no box, so it has no background
+/// painting area either (css-display-3 3.3) — which matters here because the
+/// compiled `wrapper` carrier between a `<text>` and its nested `<text>` is
+/// exactly that element.
+///
+/// The wrapper holds two backgrounded scopes with a plain run between them, so
+/// a pass that let a `display: contents` ancestor into the chain would betray
+/// itself twice over: its fragment is the union of both scopes' runs, and the
+/// gap between them is the one place neither scope paints. The scopes' own
+/// backgrounds still paint, which is what keeps this from passing on a pass
+/// that does nothing at all.
+#[test]
+fn a_wrapper_between_scopes_paints_no_background() {
+    let mut doc = Doc::with_device(device(300.0, 40.0));
+    doc.add_css(
+        "page { display: flex; align-items: flex-start; }
+         .text { display: -lynx-text; width: 300px; color: transparent;
+                 font-family: Ahem; font-size: 20px; line-height: 20px; }
+         .wrapper { display: contents; background-color: #0000ff; }
+         .tag { display: -lynx-text; background-color: #ff0000; }",
+    );
+    assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
+    let root = doc.root;
+    let text = doc.el(root, "view.text");
+    let before = doc.dom.create_text_node("AA", ());
+    doc.dom.append_child(text, before);
+    let wrapper = doc.el(text, "view.wrapper");
+    let first = doc.el(wrapper, "view.tag");
+    let first_run = doc.dom.create_text_node("BB", ());
+    doc.dom.append_child(first, first_run);
+    let between = doc.dom.create_text_node("XX", ());
+    doc.dom.append_child(wrapper, between);
+    let second = doc.el(wrapper, "view.tag");
+    let second_run = doc.dom.create_text_node("CC", ());
+    doc.dom.append_child(second, second_run);
+    let pixels = readback(
+        "a_wrapper_between_scopes_paints_no_background",
+        &mut doc,
+        300,
+        40,
+    );
+
+    assert!(
+        is_red(pixel(&pixels, 300, 42, 10)) && is_red(pixel(&pixels, 300, 158, 10)),
+        "both scopes under the wrapper paint their own background",
+    );
+    assert!(
+        is_white(pixel(&pixels, 300, 100, 10)),
+        "the run between them carries no background of its own",
+    );
+    assert!(
+        (0..40).all(|y| (0..300).all(|x| !is_blue(pixel(&pixels, 300, x, y)))),
+        "and the `display: contents` wrapper around all three paints nothing",
+    );
+}
+
+/// An atomic inline box inside a nested scope is part of that scope's
+/// fragment: the background runs behind the atom as it does behind the glyphs
+/// beside it.
+///
+/// The atom is unioned into the fragment on *both* axes. A browser keeps the
+/// band at the inline box's own font metrics and lets a taller atom overflow
+/// it; the union is the approximation this engine takes, because it is also
+/// what lets a scope whose only content is an atom — which has no glyph run to
+/// take metrics from — paint anything at all
+/// (`crates/dom/src/paint/text.rs`'s `inline_background_fragments`).
+#[test]
+fn an_atom_inside_a_nested_scope_is_covered_by_its_background() {
+    let mut doc = Doc::with_device(device(300.0, 40.0));
+    doc.add_css(
+        "page { display: flex; align-items: flex-start; }
+         .text { display: -lynx-text; width: 300px; color: transparent;
+                 font-family: Ahem; font-size: 20px; line-height: 20px; }
+         .tag { display: -lynx-text; background-color: #0000ff; }
+         .icon { display: flex; width: 40px; height: 10px; }",
+    );
+    assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
+    let root = doc.root;
+    let text = doc.el(root, "view.text");
+    let before = doc.dom.create_text_node("AA", ());
+    doc.dom.append_child(text, before);
+    let tag = doc.el(text, "view.tag");
+    let nested = doc.dom.create_text_node("B", ());
+    doc.dom.append_child(tag, nested);
+    doc.el(tag, "view.icon");
+    let pixels = readback(
+        "an_atom_inside_a_nested_scope_is_covered_by_its_background",
+        &mut doc,
+        300,
+        40,
+    );
+
+    // Two squares of plain run, then the scope: one square and a 40px atom.
+    assert!(
+        is_blue(pixel(&pixels, 300, 42, 10)),
+        "the scope's background covers its own glyph",
+    );
+    assert!(
+        is_blue(pixel(&pixels, 300, 70, 10)) && is_blue(pixel(&pixels, 300, 98, 10)),
+        "and reaches across the atom beside it",
+    );
+    assert!(
+        is_white(pixel(&pixels, 300, 10, 10)) && is_white(pixel(&pixels, 300, 110, 10)),
+        "and stops at the scope's two ends",
+    );
+}
+
+/// A `background-image` layer on a nested scope fills the same fragment its
+/// `background-color` would, gradient box and all — the fragment is handed to
+/// the ordinary background painter, so every layer the property supports
+/// resolves against it.
+#[test]
+fn a_gradient_background_image_on_a_nested_scope_fills_its_fragment() {
+    let mut doc = Doc::with_device(device(300.0, 40.0));
+    doc.add_css(
+        "page { display: flex; align-items: flex-start; }
+         .text { display: -lynx-text; width: 300px; color: #000000;
+                 font-family: Ahem; font-size: 20px; line-height: 20px; }
+         .tag { display: -lynx-text; color: transparent;
+                background-image: linear-gradient(90deg, #ff0000, #0000ff); }",
+    );
+    assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
+    let root = doc.root;
+    let text = doc.el(root, "view.text");
+    let before = doc.dom.create_text_node("AAA", ());
+    doc.dom.append_child(text, before);
+    let tag = doc.el(text, "view.tag");
+    let nested = doc.dom.create_text_node("BBB", ());
+    doc.dom.append_child(tag, nested);
+    let pixels = readback(
+        "a_gradient_background_image_on_a_nested_scope_fills_its_fragment",
+        &mut doc,
+        300,
+        40,
+    );
+
+    // The ramp spans the fragment, x 60..120, and nothing wider: a tile taken
+    // from the block would have run the whole 300px.
+    let left = pixel(&pixels, 300, 62, 10);
+    let right = pixel(&pixels, 300, 118, 10);
+    assert!(
+        left[0] > 200 && left[2] < 60,
+        "the ramp starts at its first stop inside the fragment ({left:?})",
+    );
+    assert!(
+        right[2] > 200 && right[0] < 60,
+        "and reaches its last one by the fragment's far edge ({right:?})",
+    );
+    assert!(
+        is_white(pixel(&pixels, 300, 130, 10)),
+        "and paints nothing past the fragment",
     );
 }
 

@@ -87,7 +87,7 @@
 mod build;
 pub(crate) mod curves;
 pub(crate) mod frame;
-mod geometry;
+pub(crate) mod geometry;
 mod hit;
 mod motion;
 mod stacking;

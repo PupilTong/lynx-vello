@@ -820,8 +820,59 @@ fn paint_item<T>(
             // shadow, stroke and decorations; the establishing element answers
             // for the synthesized ellipsis and for anything unresolvable.
             let runs = text::RunPaints::resolve(document, element, block, gradient_box);
+            // A nested scope has no box of its own, so its background is an
+            // inline box's: one fragment per line, under every shadow and
+            // every glyph in the paragraph. Only paragraphs that have one pay.
+            if runs.has_inline_backgrounds() {
+                paint_inline_backgrounds(sink, chain, document, block, &runs, transform, images);
+            }
             text::paint(sink.scene_for(chain), layout, transform, &runs);
         }
+    }
+}
+
+/// Paints one fragment per line per backgrounded nested scope, outermost scope
+/// first, through the same `background::paint` an element box uses.
+///
+/// The geometry is [`text::inline_background_fragments`]'s; what is decided
+/// here is the box each fragment presents to the background painter. A
+/// fragment has no border and no padding, so its border, padding and content
+/// boxes coincide, and `border-radius` resolves against the fragment's own
+/// size — `box-decoration-break: clone` where the web default is `slice`.
+/// `background-clip: text` on an inline scope is treated as `border-box`: the
+/// glyph silhouette a text clip needs is the paragraph's, which is the box
+/// being painted into, so clipping to it is a no-op the `None` below spells
+/// directly.
+fn paint_inline_backgrounds<T>(
+    sink: &mut WalkSink<'_>,
+    chain: ComposeChain,
+    document: &Document<T>,
+    block: &hughie::text::block::TextBlock,
+    runs: &text::RunPaints<'_>,
+    transform: Affine,
+    images: &ImageRegistry,
+) {
+    let mut fragments = Vec::new();
+    text::inline_background_fragments(block.display(), block, runs, &mut fragments);
+    for (node, rect) in fragments {
+        let size = crate::Size2D::new(rect.width() as f32, rect.height() as f32);
+        if size.width <= 0.0 || size.height <= 0.0 {
+            continue;
+        }
+        let Some(style) = document.paint_style(node) else {
+            continue;
+        };
+        let box_rect = Rect::from_origin_size((0.0, 0.0), rect.size());
+        let fragment = crate::paint::BoxFragment {
+            transform: transform * Affine::translate(rect.origin().to_vec2()),
+            border_box: box_rect,
+            padding_box: box_rect,
+            content_box: box_rect,
+            radii: crate::visual::geometry::resolve_corner_radii(style, size),
+            border_widths: crate::layout::Edges::uniform(0.0),
+            padding_widths: crate::layout::Edges::uniform(0.0),
+        };
+        background::paint(sink, chain, style, &fragment, images, None);
     }
 }
 

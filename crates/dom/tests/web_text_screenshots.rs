@@ -574,7 +574,8 @@ inline-truncation { display: none; }
 /// in `crates/dom/tests/web_text_replication.rs`, whose fixture this is — the
 /// same 100px break-all paragraph of thirty Ahem squares clamped to two lines,
 /// with a one-square marker — and
-/// `a_shown_truncation_marker_paints_its_runs_and_never_its_own_box` beside it
+/// `a_shown_truncation_marker_paints_its_runs_and_a_background_behind_them_only`
+/// beside it
 /// for the empty-with-nothing-to-clamp half. Both sample single pixels; what
 /// they cannot show, and this golden can, is the *whole* clamp line at once:
 /// that exactly three black squares are kept, that the red square is the
@@ -608,4 +609,44 @@ fn a_custom_truncation_marker_is_laid_in_at_the_clamp_in_its_own_colour() {
         100.0,
     );
     assert_web_text_golden("text-maxline-with-custom-truncation", &actual);
+}
+
+/// **Not** a `lynx-stack` case: no web-elements fixture puts a background on
+/// an inline `text`, so there is no reference picture to replicate. What it
+/// pins is the reference *behaviour* — web-core makes a nested
+/// `x-text`/`inline-text` `display: inline` and adds nothing to it but
+/// `background-clip: inherit`
+/// (`packages/web-platform/web-elements/src/elements/XText/x-text.css:52-67`),
+/// so the browser paints its background as an inline box's: one fragment per
+/// line, over the font's content area rather than the line box. Native Lynx
+/// fills the line box instead; the 2026-09-16 ruling follows web-core
+/// (`docs/tracking/web-text-test-replication.md`, conflict 8).
+///
+/// Sibling metric tests: the whole inline-background group in
+/// `crates/dom/tests/web_text_replication.rs`, from
+/// `a_nested_scope_s_background_paints_behind_its_own_fragments_only`. Those
+/// sample single pixels of Ahem em squares with the ink painted transparent,
+/// because solid squares would hide the very band they measure. This golden is
+/// the other half: real letterforms over a background a reviewer can see is
+/// *behind the text and nothing else* — the first paragraph's `line-height:
+/// 40px` leaves visible half-leading above and below the band, which is the
+/// whole difference from the native geometry, and the second shows the two
+/// fragments a wrapped scope paints, each rounded by its own `border-radius`
+/// (`box-decoration-break: clone`, an approximation of the web default this
+/// engine has no property to express).
+#[test]
+fn a_nested_scope_paints_a_background_behind_its_own_line_fragments() {
+    const FRAGMENT: &str = r#"
+<div style="display: flex; flex-direction: column; gap: 16px; width: 400px; height: 200px; padding: 10px; box-sizing: border-box; background-color: white; font-family: Roboto">
+  <div class="text-block" style="width: 380px; font-size: 24px; line-height: 40px; font-weight: bold">I am bold <span class="text-block" style="color: red; background-color: #ffe08a">and red</span> again</div>
+  <div class="text-block" style="width: 200px; font-size: 24px; line-height: 36px">go <span class="text-block" style="background-image: linear-gradient(90deg, #4a90e2, #e94e77); border-radius: 6px; color: white">over two whole lines of it</span> now</div>
+</div>
+"#;
+    let actual = screenshot::capture(
+        "a_nested_scope_paints_a_background_behind_its_own_line_fragments",
+        FRAGMENT,
+        400.0,
+        200.0,
+    );
+    assert_web_text_golden("inline-text-background", &actual);
 }

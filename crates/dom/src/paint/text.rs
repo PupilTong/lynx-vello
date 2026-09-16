@@ -20,14 +20,20 @@
 //!   draws two lines a thickness apart. The stylo fork compiles `overline` out of
 //!   `text-decoration-line` under the `lynx` feature (Lynx's decoration bitflags have no overline),
 //!   so only underline and line-through can reach the painter.
+//! - Inline backgrounds: a nested `<text>`/`<span>` scope has no layout box of its own — the
+//!   paragraph is flattened and its slot hidden — so `background-color`/`background-image` declared
+//!   on it paints as an *inline box*: one fragment per line, behind that scope's own glyphs
+//!   ([`inline_background_fragments`]). The fragments are handed back to the walker, which paints
+//!   them with the same `background::paint` an element box uses.
 //! - The whole painter works in the text item's local space (origin at the text box's top-left,
 //!   which is also the Parley layout origin); `transform` already includes the device scale.
 
+use hughie::text::block::PlacedBox;
 use parley::{GlyphRun, Layout, PositionedLayoutItem};
 use smallvec::SmallVec;
 use stylo::computed_values::text_decoration_style::T as TextDecorationStyle;
 use stylo::properties::ComputedValues;
-use stylo::values::computed::{ColorPropertyValue, TextDecorationLine};
+use stylo::values::computed::{ColorPropertyValue, Image, TextDecorationLine};
 
 use crate::paint::background::{GradientBrush, gradient_brush};
 use crate::paint::convert;
@@ -102,7 +108,23 @@ fn text_fill(style: &ComputedValues, gradient_box: Option<Rect>) -> TextFill {
 pub(crate) struct RunPaints<'doc> {
     by_style: Vec<RunPaint<'doc>>,
     fallback: RunPaint<'doc>,
+    /// Which nested scopes paint a background behind the runs of one parley
+    /// style index, outermost ancestor first.
+    ///
+    /// One entry per *index that has such a chain*, not one per index: almost
+    /// every paragraph has none at all, and the ones that do have a handful, so
+    /// the per-line pass scans a list that is as long as the paragraph has
+    /// backgrounded scopes rather than allocating a table the width of the
+    /// style space.
+    backgrounds: SmallVec<[(usize, BackgroundChain); 2]>,
+    /// The same for atomic inline boxes, keyed by the [`PlacedBox`] id the
+    /// paragraph placed them under. An atom paints its *own* background as an
+    /// element box, so its chain starts at its parent.
+    atom_backgrounds: SmallVec<[(u64, BackgroundChain); 1]>,
 }
+
+/// The inline scopes that paint a background behind one run, outermost first.
+type BackgroundChain = SmallVec<[crate::NodeId; 2]>;
 
 pub(crate) struct RunPaint<'doc> {
     style: &'doc ComputedValues,
@@ -159,6 +181,7 @@ impl<'doc> RunPaints<'doc> {
         // whose only gradient is the block's own, so the layout pass below
         // never runs for them.
         let mut nested: SmallVec<[(usize, crate::NodeId); 2]> = SmallVec::new();
+        let mut backgrounds: SmallVec<[(usize, BackgroundChain); 2]> = SmallVec::new();
         for index in 0..block.style_count() {
             // The dots are shaped in the run holding the last visible byte, so
             // that run's element answers for them exactly as it answers for its
@@ -182,6 +205,12 @@ impl<'doc> RunPaints<'doc> {
                     if !converted && node != element && needs_gradient_box(style) {
                         nested.push((index, node));
                     }
+                    if node != element {
+                        let chain = background_chain(document, node, element);
+                        if !chain.is_empty() {
+                            backgrounds.push((index, chain));
+                        }
+                    }
                     RunPaint {
                         style,
                         fill_style: if converted { block_style } else { style },
@@ -200,7 +229,31 @@ impl<'doc> RunPaints<'doc> {
         if !nested.is_empty() {
             assign_nested_tiles(block.display(), &mut by_style, &nested);
         }
-        Self { by_style, fallback }
+        // An atom is a box of its own, so its *own* background already paints
+        // through the element-box path; what it can still sit inside is a
+        // backgrounded scope, which is why the walk starts at its parent.
+        let mut atom_backgrounds: SmallVec<[(u64, BackgroundChain); 1]> = SmallVec::new();
+        for placed in block.boxes() {
+            let PlacedBox::Visible { id, .. } = *placed else {
+                continue;
+            };
+            let Some(parent) = box_source(id, sources, truncation_sources)
+                .and_then(|node| document.get(node))
+                .and_then(crate::tree::node::Node::flat_parent_id)
+            else {
+                continue;
+            };
+            let chain = background_chain(document, parent, element);
+            if !chain.is_empty() {
+                atom_backgrounds.push((id, chain));
+            }
+        }
+        Self {
+            by_style,
+            fallback,
+            backgrounds,
+            atom_backgrounds,
+        }
     }
 
     fn at(&self, style_index: usize) -> &RunPaint<'doc> {
@@ -210,6 +263,90 @@ impl<'doc> RunPaints<'doc> {
     fn block_style_run(&self) -> &RunPaint<'doc> {
         &self.fallback
     }
+
+    /// Whether any nested scope in this paragraph paints a background, and the
+    /// per-line fragment pass therefore has to run at all.
+    pub(crate) fn has_inline_backgrounds(&self) -> bool {
+        !self.backgrounds.is_empty() || !self.atom_backgrounds.is_empty()
+    }
+
+    fn background_chain(&self, style_index: usize) -> &[crate::NodeId] {
+        self.backgrounds
+            .iter()
+            .find(|(index, _)| *index == style_index)
+            .map_or(&[][..], |(_, chain)| chain)
+    }
+
+    fn atom_background_chain(&self, id: u64) -> &[crate::NodeId] {
+        self.atom_backgrounds
+            .iter()
+            .find(|(placed, _)| *placed == id)
+            .map_or(&[][..], |(_, chain)| chain)
+    }
+}
+
+/// The node behind one placed atomic box.
+///
+/// `InlineBoxSpec::id` is the flattened item index, with the truncation flow's
+/// ids offset past the content flow's
+/// (`crates/dom/src/layout/text_block.rs:410-411`), so the two source tables
+/// concatenate into that one id space.
+fn box_source(
+    id: u64,
+    sources: &[crate::NodeId],
+    truncation: &[crate::NodeId],
+) -> Option<crate::NodeId> {
+    let index = usize::try_from(id).ok()?;
+    match sources.get(index) {
+        Some(node) => Some(*node),
+        None => truncation.get(index - sources.len()).copied(),
+    }
+}
+
+/// The inline scopes strictly between `node` and the establishing `element`
+/// (inclusive of `node`, exclusive of `element`) that paint a background of
+/// their own, outermost first.
+///
+/// Outermost first is the paint order css-backgrounds-3 wants: an inner
+/// scope's background covers its ancestor's.
+fn background_chain<T>(
+    document: &crate::Document<T>,
+    node: crate::NodeId,
+    element: crate::NodeId,
+) -> BackgroundChain {
+    let mut chain = BackgroundChain::new();
+    let mut current = Some(node);
+    while let Some(id) = current {
+        if id == element {
+            break;
+        }
+        let Some(dom_node) = document.get(id) else {
+            break;
+        };
+        if document.paint_style(id).is_some_and(paints_background) {
+            chain.push(id);
+        }
+        current = dom_node.flat_parent_id();
+    }
+    chain.reverse();
+    chain
+}
+
+/// Whether an inline scope has a background worth a fragment.
+fn paints_background(style: &ComputedValues) -> bool {
+    // A `display: contents` element — what the compiled `wrapper` carrier
+    // computes to — generates no box at all, so it has no background painting
+    // area either (css-display-3 3.3).
+    if crate::layout::generates_no_box(style) {
+        return false;
+    }
+    let background = style.get_background();
+    convert::resolve_color(style, &background.background_color).components[3] > 0.0
+        || background
+            .background_image
+            .0
+            .iter()
+            .any(|image| !matches!(image, Image::None))
 }
 
 /// Gives each nested run with a gradient-valued `color` the tile its ramp fills
@@ -264,6 +401,126 @@ fn assign_nested_tiles(
         // truncation removed — keeps the block's tile it was built with.
         if let Some((_, tile)) = tiles.iter().find(|(seen, _)| *seen == node) {
             by_style[index].gradient_box = Some(*tile);
+        }
+    }
+}
+
+/// The background fragments every nested scope of this paragraph paints, in
+/// paragraph-local space and in paint order.
+///
+/// CSS geometry of an inline box's background (css-backgrounds-3 2, CSS 2.1
+/// 10.6.1), which is what web-core gets for free by making a nested
+/// `x-text`/`inline-text` `display: inline`
+/// (`packages/web-platform/web-elements/src/elements/XText/x-text.css:52-67`
+/// adds nothing but `background-clip: inherit`): the scope is split into one
+/// fragment per line, and each fragment covers
+///
+/// * horizontally, that scope's own run of the line — the union of the advances of the glyph runs
+///   on the line whose source element is the scope or a descendant of it;
+/// * vertically, the *content area*: the font's ascent above and descent below the baseline. Not
+///   the line box — `line-height: 40px` on a 20px font leaves the half-leading unpainted, which is
+///   what a browser draws. This is deliberately a different box from the gradient tile
+///   [`assign_nested_tiles`] builds, which spans the whole line box because web-core's `color:
+///   <gradient>` rewrite makes the ramp a background of the *box*, not of the text's content area.
+///
+/// Native Lynx fills the line box instead (Android `BackgroundColorSpan` /
+/// `LynxTextBackgroundSpan`, iOS `NSBackgroundColorAttributeName`); the
+/// 2026-09-16 ruling follows web-core. `docs/tracking/web-text-test-replication
+/// .md` records the conflict.
+///
+/// Two deliberate approximations, both of the `box-decoration-break` family:
+///
+/// * each fragment is painted as a whole box, so `border-radius` rounds every fragment rather than
+///   only the run's two outer ends — `clone` where the web default is `slice`. The fork has no
+///   `box-decoration-break` property to say otherwise.
+/// * an atomic inline box under the scope is unioned into the fragment on both axes, so a tall atom
+///   grows the background band. A browser keeps the band at the inline box's own font metrics and
+///   lets the atom overflow it. The union is what keeps a scope whose only content *is* an atom —
+///   which has no glyph run to take metrics from — painting anything at all.
+pub(crate) fn inline_background_fragments(
+    layout: &Layout<crate::layout::TextBrush>,
+    block: &hughie::text::block::TextBlock,
+    runs: &RunPaints<'_>,
+    out: &mut Vec<(crate::NodeId, Rect)>,
+) {
+    // Insertion order *is* paint order: a chain is walked outermost first and
+    // every chain that holds a descendant holds its ancestors too, so an
+    // ancestor is always pushed before the scope nested in it.
+    let mut scopes: SmallVec<[(crate::NodeId, Rect); 4]> = SmallVec::new();
+    let atoms = !runs.atom_backgrounds.is_empty();
+    for (index, line) in layout.lines().enumerate() {
+        scopes.clear();
+        for item in line.items() {
+            let PositionedLayoutItem::GlyphRun(glyph_run) = item else {
+                continue;
+            };
+            // parley splits a run at every style change, so the first glyph
+            // answers for the whole run — the same lookup `paint_pass` makes.
+            let Some(glyph) = glyph_run.glyphs().next() else {
+                continue;
+            };
+            let chain = runs.background_chain(glyph.style_index());
+            if chain.is_empty() {
+                continue;
+            }
+            let metrics = glyph_run.run().metrics();
+            let baseline = f64::from(glyph_run.baseline());
+            let x = f64::from(glyph_run.offset());
+            union_into(
+                &mut scopes,
+                chain,
+                Rect::new(
+                    x,
+                    baseline - f64::from(metrics.ascent),
+                    x + f64::from(glyph_run.advance()),
+                    baseline + f64::from(metrics.descent),
+                ),
+            );
+        }
+        if atoms {
+            let line_index = u32::try_from(index).unwrap_or(u32::MAX);
+            for placed in block.boxes() {
+                let PlacedBox::Visible {
+                    id,
+                    line: placed_line,
+                    origin,
+                    size,
+                } = *placed
+                else {
+                    continue;
+                };
+                if placed_line != line_index {
+                    continue;
+                }
+                let chain = runs.atom_background_chain(id);
+                if chain.is_empty() {
+                    continue;
+                }
+                union_into(
+                    &mut scopes,
+                    chain,
+                    Rect::new(
+                        f64::from(origin.x),
+                        f64::from(origin.y),
+                        f64::from(origin.x + size.width),
+                        f64::from(origin.y + size.height),
+                    ),
+                );
+            }
+        }
+        out.extend(scopes.iter().copied());
+    }
+}
+
+fn union_into(
+    scopes: &mut SmallVec<[(crate::NodeId, Rect); 4]>,
+    chain: &[crate::NodeId],
+    fragment: Rect,
+) {
+    for &node in chain {
+        match scopes.iter_mut().find(|(seen, _)| *seen == node) {
+            Some((_, rect)) => *rect = rect.union(fragment),
+            None => scopes.push((node, fragment)),
         }
     }
 }
