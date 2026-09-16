@@ -151,8 +151,9 @@ Task: {TASK}. Relevant spec: docs/tracking/{FILE}.md and docs/{DOC}.md.
 Relevant code: {CRATE_PATH}. Relevant reference source: lynx/{PATH} or
 lynx-stack/{PATH} (see AGENTS.md "Reference repos" for their absolute paths;
 use Paws/{PATH} instead for a DOM/CSS implementation-pattern question, not for
-Lynx behavior). Before finishing: ./.github/scripts/fmt-check.sh (not
-cargo fmt --all), pnpm install --frozen-lockfile and
+Lynx behavior). Before finishing: format with cargo fmt -p <crate> per crate
+touched, never cargo fmt --all (it reaches vendor/stylo), then run CI's
+./.github/scripts/fmt-check.sh; pnpm install --frozen-lockfile and
 pnpm --filter reactlynx-test-fixtures build, then
 cargo clippy --all-targets -- -D warnings and the subsystem's tests. The PR
 body needs before/after Mermaid diagrams.

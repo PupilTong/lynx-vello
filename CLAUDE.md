@@ -32,7 +32,8 @@ subsystem from scratch in the main thread.
 
 ## Commands
 
-- Format with `./.github/scripts/fmt-check.sh`, never `cargo fmt --all`.
+- Format with `cargo fmt -p <crate>` per crate touched, never `cargo fmt --all`
+  (it reaches `vendor/stylo`); then run CI's `./.github/scripts/fmt-check.sh`.
 - `pnpm install --frozen-lockfile` and
   `pnpm --filter reactlynx-test-fixtures build` before any cargo command.
 - `pnpm test:type` (and `pnpm --filter bobcat-element test`) when TS changed.

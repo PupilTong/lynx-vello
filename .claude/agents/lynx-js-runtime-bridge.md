@@ -103,15 +103,16 @@ Shorthand `lynx/`, `lynx-stack/`, `Paws/`; absolute paths live once in AGENTS.md
 
 ## Before finishing
 
-- `./.github/scripts/fmt-check.sh` — never `cargo fmt --all`.
+- Format with `cargo fmt -p <crate>` per crate touched, never `cargo fmt --all`
+  (it reaches `vendor/stylo`); then run CI's `./.github/scripts/fmt-check.sh`.
 - `pnpm install --frozen-lockfile` and
   `pnpm --filter reactlynx-test-fixtures build` first — `bobcat-core`'s build
   compiles the realm runtime into `OUT_DIR`, so a stale install breaks cargo.
 - `cargo clippy --all-targets -- -D warnings`.
 - `cargo test -p bobcat-core` — `tests/main_thread.rs` runs the emitted JS
   through the real realm, beside `startup`, `multi_view`, `web_bundle`,
-  `style_sheets` and the in-crate `src/main/runtime/{tests,worker_tests}.rs`
-  and `src/background/tests.rs`.
+  `style_sheets`, `src/main/runtime/{tests,worker_tests}.rs` and
+  `src/background/tests.rs`.
 - TypeScript changes: `pnpm test:type` and `pnpm --filter bobcat-element test`
   (Rstest). CI also asserts `packages/bobcat-element/dist` stays untracked.
 - Screenshot goldens: `FLASHBULB_UPDATE_SNAPSHOTS=1` only after looking at the

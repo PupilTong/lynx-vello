@@ -87,7 +87,8 @@ Shorthand `lynx/`, `lynx-stack/`, `Paws/`; absolute paths live once in AGENTS.md
 
 ## Before finishing
 
-- `./.github/scripts/fmt-check.sh` — never `cargo fmt --all`.
+- Format with `cargo fmt -p <crate>` per crate touched, never `cargo fmt --all`
+  (it reaches `vendor/stylo`); then run CI's `./.github/scripts/fmt-check.sh`.
 - `pnpm install --frozen-lockfile` and
   `pnpm --filter reactlynx-test-fixtures build` before cargo test, clippy or
   benches.

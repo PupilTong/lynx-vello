@@ -45,8 +45,11 @@ vello is the only wgpu dependency in this workspace, so it pins wgpu's major
 - `render/`: `gpu.rs` (`PlaneBank`, headless GPU floor), `image.rs`
   (`FrameImages`, `ImageReports`, `ImageInbox`).
 - The committed frame is baked **unscrolled** as fragments plus a compose
-  program; scrollers are retained GPU planes and scroll offsets never cross the
-  channel. A commit publishes one immutable `Arc<CommittedFrame>`.
+  program; scrollers are retained GPU planes. Offsets stay on the painter's
+  side between refills — a scroll recomposes the retained planes without a
+  commit — and cross only as a `ToMain::Refill` when an offset leaves its
+  slot's `ScrollSlot::encode_window`, which the main thread answers with a
+  recentered commit. A commit publishes one immutable `Arc<CommittedFrame>`.
 - Animations: stylo's animation engine plus an engine-owned timeline;
   `Document::advance_animations`; composite `opacity`/`transform` curves are
   exported as `AnimationSlot`. The `has_animations` node bit is load-bearing.
@@ -95,7 +98,8 @@ Shorthand `lynx/`, `lynx-stack/`, `Paws/`; absolute paths live once in AGENTS.md
 
 ## Before finishing
 
-- `./.github/scripts/fmt-check.sh` — never `cargo fmt --all`.
+- Format with `cargo fmt -p <crate>` per crate touched, never `cargo fmt --all`
+  (it reaches `vendor/stylo`); then run CI's `./.github/scripts/fmt-check.sh`.
 - `pnpm install --frozen-lockfile` and
   `pnpm --filter reactlynx-test-fixtures build` before cargo test, clippy or
   benches.
