@@ -1,8 +1,20 @@
 # lynx-vello — Agent Guide
 
-This is the canonical project/architecture doc for coding agents working in this
-repo (Claude Code and Codex both start here — `CLAUDE.md` is a short pointer to
-this file plus Claude-specific notes).
+This is the canonical project/architecture doc for coding agents working in
+this repo. Claude Code and Codex both start here: `CLAUDE.md` is a short
+pointer to this file plus Claude-specific notes, `.codex/agents/` mirrors
+`.claude/agents/`, and `.agents/skills/` mirrors `.claude/skills/`.
+
+**How to read this file.** Mission, Standards policy and Dependency policy set
+what to build; Workspace map and Crates describe what exists, one section per
+crate and pnpm package; Reference repos, Reference knowledge, Toolchain and
+Testing say where to look things up and how to run them. Format Rust with
+`cargo fmt -p <crate>` for the crates you touched — never `cargo fmt --all`,
+which reaches into `vendor/stylo` — then run `./.github/scripts/fmt-check.sh`,
+which is CI's check and only verifies formatting. Run
+`pnpm install --frozen-lockfile` and
+`pnpm --filter reactlynx-test-fixtures build` before any Rust test, clippy or
+bench run.
 
 ## Pull-request descriptions
 
@@ -59,70 +71,55 @@ remain outside the runtime target.
 
 ## Standards policy
 
-Every CSS/DOM/JS feature Lynx supports falls into exactly one of two buckets
-— classify a feature before implementing it, by what Lynx's implementation
-*is*, not by what its name resembles:
+Every CSS/DOM/JS feature Lynx supports falls into exactly one of two buckets —
+classify a feature before implementing it, by what Lynx's implementation *is*,
+not by what its name resembles:
 
-1. **Lynx supports a real W3C/CSS/DOM feature.** The feature exists in the
-   relevant spec, even if Lynx's own implementation of it is buggy,
-   incomplete, or non-conformant. Implement the **W3C-correct behavior**
-   for it, not Lynx's quirk. Confirmed examples:
-   - `z-index`/stacking context — Lynx reparents same-`z-index` elements
-     once to the nearest "stacking context node" and sorts by raw integer
-     value, instead of running the real recursive, per-stacking-context
-     CSS algorithm. Implement the real CSS algorithm instead.
-   - `position: fixed` — in every mode Lynx supports (the legacy path and
-     both newer `enable-fixed-new`/`enable-unify-fixed-behavior` paths), a
-     fixed element's containing block is always the single page-root
-     element (`ElementManager::root()`, sized to the viewport), reached
-     either by literally reparenting the element under the root in the
-     render tree (legacy: `FiberElement::InsertFixedElement`,
-     `fiber_element.cc:5037-5096`) or via a dedicated root pointer plus a
-     root-only measurement pass (`LayoutObject::GetRoot()`,
-     `LayoutAlgorithm::InitializeFixedNode`, `layout_algorithm.cc:102-130`).
-     Scroll offset from *every* scrollable ancestor is excluded not by
-     per-ancestor coordinate math but structurally: the fixed element's
-     native view is simply never mounted inside any scrollable ancestor's
-     view hierarchy (`ElementContainer::InsertElementContainerAccordingToElement`,
+1. **Lynx supports a real W3C/CSS/DOM feature**, even where Lynx's own
+   implementation is buggy, incomplete, or non-conformant. Implement the
+   **W3C-correct behavior**, not Lynx's quirk. Confirmed examples:
+   - `z-index`/stacking context — Lynx reparents same-`z-index` elements once
+     to the nearest "stacking context node" and sorts by raw integer value.
+     Implement the real recursive, per-stacking-context CSS algorithm instead.
+   - `position: fixed` — in every mode Lynx supports (legacy,
+     `enable-fixed-new`, `enable-unify-fixed-behavior`) the containing block
+     is always the viewport-sized page root (`ElementManager::root()`),
+     reached by reparenting under it (`FiberElement::InsertFixedElement`,
+     `fiber_element.cc:5037-5096`) or by a root pointer plus a root-only
+     measurement pass (`LayoutObject::GetRoot()`,
+     `LayoutAlgorithm::InitializeFixedNode`, `layout_algorithm.cc:102-130`);
+     ancestor scroll offset is excluded structurally, since the fixed
+     element's view is never mounted inside a scrollable ancestor's hierarchy
+     (`ElementContainer::InsertElementContainerAccordingToElement`,
      `element_container.cc:321-327`). There is **no exception anywhere for
      ancestors with `transform`/`filter`/`perspective`/`will-change`/`contain`**
-     (confirmed absent — no `transform` reference exists anywhere in
-     `core/renderer/starlight/layout/`, and Lynx has no `contain` property
-     at all) — properties that, per the real CSS spec, establish a *new*
-     containing block for fixed descendants instead of the viewport. Nor is
-     there any component-boundary-scoped containing block: fixed is always
-     page-root-relative regardless of `<component>` nesting depth.
-     **Implement the real W3C algorithm**: viewport-equivalent containing
-     block by default, re-anchored to the nearest ancestor with a
-     qualifying transform/filter/perspective/will-change/contain when one
-     exists — not Lynx's unconditional escape-to-root behavior.
+     (confirmed absent: no `transform` reference in
+     `core/renderer/starlight/layout/`, and Lynx has no `contain` property),
+     and no component-boundary-scoped containing block whatever the
+     `<component>` nesting depth. **Implement the real W3C algorithm**:
+     viewport-equivalent containing block by default, re-anchored to the
+     nearest qualifying ancestor where one exists.
 2. **Lynx supports a Lynx-only extension with no W3C equivalent** (e.g.
    `display: linear`, `relative-*` positioning, the `rpx`/`ppx` units).
-   Implement **Lynx's actual behavior**, faithfully — there's no spec to
-   defer to, so match what Lynx does, not what would be more "standard."
-   **Do not extend these features**: don't add capability, generalize the
-   value grammar, or otherwise "improve" a Lynx-only feature beyond what
-   Lynx itself actually does.
+   Implement **Lynx's actual behavior**, faithfully. **Do not extend these
+   features**: do not add capability, generalize the value grammar, or
+   otherwise "improve" a Lynx-only feature beyond what Lynx itself does.
 
-**Watch for false friends.** A Lynx feature can share a name with a W3C
-feature (`position: fixed`, `filter`, ...) while quietly implementing
-different semantics underneath — that belongs in bucket 1, but only once
-you've actually confirmed, by reading `lynx/` source, that Lynx claims to
-implement that spec feature and that the deviation is real, not assumed. If
-you find a case like this and Lynx's behavior is ambiguous, the bucket-1-vs-2
-classification itself is unclear, or the decision is consequential — **don't
-decide silently. Ask the user** before choosing which behavior to implement.
-
-See `docs/tracking/deviations.md` for the running list of confirmed
-divergences found so far.
+**Watch for false friends.** A Lynx feature can share a name with a W3C feature
+(`position: fixed`, `filter`, ...) while implementing different semantics
+underneath — bucket 1, but only once you have confirmed from `lynx/` source
+that Lynx claims that spec feature and the deviation is real. Where Lynx's
+behavior is ambiguous, the bucket-1-vs-2 classification is unclear, or the
+decision is consequential, **do not decide silently. Ask the user.** See
+`docs/tracking/deviations.md` for the confirmed divergences found so far.
 
 **Scope exceptions.** A feature can be deliberately deferred or narrowed
 relative to the compat target by an explicit, user-confirmed decision — the
-styling-system set lives in `docs/style-assumptions.md` (e.g.
-element text `content` is supported; generated boxes and `::before`/`::after` remain
-deferred despite browser passthrough on the web target). Those decisions override the
-default "match web-core" expectation until their recorded revisit milestone;
-follow them rather than re-deriving the classification.
+styling-system set lives in `docs/style-assumptions.md` (e.g. element text
+`content` is supported; generated boxes and `::before`/`::after` remain
+deferred despite browser passthrough on the web target). Those decisions
+override the default "match web-core" expectation until their recorded revisit
+milestone; follow them rather than re-deriving the classification.
 
 ## Dependency policy
 
@@ -144,1928 +141,1568 @@ pass primitive binding arguments and construct the JS object in JavaScript.
 Rust parses structured input only when Rust behavior actually needs its fields
 (for example, page configuration or styles), not merely to forward it to JS.
 
+## Workspace map
+
+| Path | Role | Details |
+| --- | --- | --- |
+| `crates/bobcat-source` | Owner of Lynx source parsing: ZIP, restricted XML, `.web.bundle`, `.lynx.bundle`. | [→](#cratesbobcat-source) |
+| `crates/bobcat-core` | The native runtime core: group, view, painter, QuickJS realms, page policy. | [→](#cratesbobcat-core) |
+| `crates/quickjs-rust-bridge` | Owner-thread-bound safe Rust wrapper around the pinned `vendor/quickjs` submodule. | [→](#cratesquickjs-rust-bridge) |
+| `crates/bobcat-resources` | Reference resource system: transports, MIME pipeline, caches, platform image decoding. | [→](#cratesbobcat-resources) |
+| `crates/bobcat-cli` | The `bobcat` product (`cli`) and the `bobcat-server` screenshot service (`server`), both embedders. | [cli](#cratesbobcat-cli-cli-feature), [server](#cratesbobcat-cli-server-feature) |
+| `crates/bobcat-wasm` | The pure-Rust `wasm-bindgen` browser embedder and npm facade. | [→](#cratesbobcat-wasm) |
+| `crates/dom` | Generic W3C-DOM-subset document tree and standards-oriented CSS computation core. | [→](#cratesdom) |
+| `crates/hughie` | The from-scratch Flexbox, Grid, and Starlight Relative and Linear layout engine. | [→](#crateshughie) |
+| `crates/flashbulb` | Screenshot testing: RGBA image, PNG codec, pixelmatch port, golden store. | [→](#cratesflashbulb) |
+| `packages/bobcat-element` | Dependency-free TypeScript sources of the ESMs `bobcat-core` preloads into its realms. | [→](#packagesbobcat-element) |
+| `packages/reactlynx-test-fixtures` | ReactLynx source fixtures and bundle generators for Bobcat integration tests. | [→](#other-pnpm-packages) |
+| `packages/explorer-homepage` | The Lynx Explorer home screen, written in ReactLynx. | [→](#other-pnpm-packages) |
+| `packages/explorer-lib` | Navigation, launch-command, history and theme helpers shared by the Explorer pages. | [→](#other-pnpm-packages) |
+| `packages/explorer-showcase` | The Lynx Explorer showcase menu in ReactLynx, and the `@lynx-example` packages. | [→](#other-pnpm-packages) |
+| `packages/github-pages` | The rsbuild site on GitHub Pages, over `bobcat-wasm` and the Explorer homepage. | [→](#other-pnpm-packages) |
+| `examples/` | `lynx-stack`'s own examples, re-pointed at published package versions. | [→](#other-pnpm-packages) |
+
 ## Crates
 
-- `crates/bobcat-source` — the single owner of Lynx source parsing and
-  adaptation, including the always-available `ZipSource` API for bounded ZIP
-  decoding, entry selection through `PageSource`, and resource registration.
-  Native and Wasm embedders share that API; IO and resource-scope lifetime
-  remain the host's responsibility. `xml` is the zero-dependency, zero-copy restricted envelope parser
-  (`engine-version`, `thread="main"` / `thread="background"`); it retains UTF-16
-  and UTF-8 error offsets. `web` decodes `SDRA WROF` using the unchanged rkyv 0.7
-  wire model. `native` decodes source-based flexible external `.lynx.bundle`
-  files directly into that same model and can explicitly encode a web bundle.
-  It rejects real QuickJS/Lepus bytecode, rather than attempting execution or
-  decompilation. Named external modules are preserved; they do not acquire an
-  invented page root. `PageSource::from_native_bundle` requires an explicit
-  entry name, while `from_bytes` requires `root` for binary page inputs.
-  `PageSource`, browser response registration, shared StyleInfo lowering and
-  all three parsers are always available: the crate has no Cargo feature flags.
-  All embedders, including Wasm, depend on the complete crate and its
-  core/resources dependencies. IO and view construction stay with the embedder;
-  the browser's `loadLynxXml` API still accepts only XML responses. Native XML keeps
-  strict UTF-8 and private memory URLs; the browser retains replacement
-  decoding, final-response fragment URLs and host PageConfig. Both register
-  raw XML background scripts for the BTS worker. See `docs/source-architecture.md` for boundaries,
-  migration and parser resource bounds.
-- `crates/bobcat-core` — unified native runtime core. Its public runtime is the
-  opaque `LynxGroup`, `LynxView<F>` and `Painter` facades plus the
-  protocol-only, host-injected
-  `ResourceFetcher`, draw-target, OS-input, and
-  lifecycle-wakeup capabilities. The script engine is deliberately *not* one of
-  them: core owns its `QuickJS` realm outright, and the only script surface an
-  embedder sees is the sanitized `script::ScriptError` a failure is reported
-  with. A view is built from one `ViewSources` — `PageConfig`, owned font
-  containers, an optional default font family, author stylesheet URLs in
-  cascade order, the one entry MTS module URL, and optional `init_data` and
-  `global_props` JSON text that only the realm parses — plus a builder that turns
-  the view's `ImageReports` into its concrete `ResourceFetcher`. Both are
-  passed to `LynxGroup::create_lynx_view` with device metrics.
-  **A view is built from a group, never on its own**:
-  `LynxGroup::new` takes the lifecycle wakeup and `StyleThreads`, starts both
-  of the group's threads — `bobcat-workers` first, then `bobcat-main`, which
-  is handed one sender on it — and awaits the QuickJS runtime and Stylo pool every view in
-  that group will share.
-  **Both engine threads run a tokio `current_thread` runtime under a
-  `LocalSet`**, and on both of them each asynchronous wait is a task of
-  its own, so tokio owns its polling, parking and waking and the engine only
-  decides which page operation a ready task calls. Synchronous stylesheet
-  adoption can instead park MTS on a source response, as described below. A view's tasks
-  are its owner (`serve_view`, whose one wait is the view's end), its boot
-  future, one ordered consumer of the command channel, one ordered consumer of
-  its workers' events, one future per resource load an import produced, and one
-  clock task (`lifetime.rs`'s `serve_clock`) waiting on its realm's next timer
-  deadline and on the runtime-wide checkpoint generation; a `Worker` realm on
-  `bobcat-workers` has the same shape minus the document. Nothing is spawned
-  per input: an ordered stream stays serial because one consumer reads it with
-  `while let Some(x) = rx.recv().await`. Every one of those tasks reaches the
-  realm through one boundary, `main/page.rs`'s `Page::enter`, which runs one
-  synchronous operation under the borrows of the shared runtime and the realm
-  and then the epilogue that operation left owing, in this order: the timers
-  that came due, the commit, the boot report once, the `BeginFrame`
-  acknowledgement, the module requests that entry produced, the next timer
-  deadline, and the checkpoint generation as of this entry. `Page::settle` is
-  the epilogue alone, for a wake that carries no operation of its own.
-  A view owns its channels end to end, all `tokio::sync` and
-  none of them addressed, so no message names its view and no receiver has to
-  defer a sibling's. Three cross that link: a `ToMain` mpsc carrying
-  `DispatchEvent`, `Resize`, `BeginFrame`, `Refill` and `ImageEvents` in; a
-  `ViewNotice` mpsc carrying lifecycle events and resource asks back; and one
-  `watch<Published>` carrying what an observer wants the *latest* of rather
-  than the history of — the newest committed frame, the listener-name set, and
-  the newest serviced `BeginFrame`. Commands are a FIFO because the order two
-  of them arrive in is what they mean; a frame is not, because a painter wants
-  the newest and never the ones it slept through.
-  `create_lynx_view` validates the metrics, sends the far half of that link to
-  the group's thread, and builds the fetcher in place on the calling thread. It
-  is **synchronous and takes no draw target**: it builds nothing that could
-  block, and where the pixels go is a separate object's question. The view's
-  `F` parameter is that view-owned fetcher; the wakeup is a separate group
-  constructor generic held by `bobcat-main`.
-  Construction returns a loading view at once.
-  The view's owner validates the fonts and the default family first — a
-  `dom::TextContext`'s business, with no document and zero fetches on failure —
-  then requests each stylesheet in cascade order followed by the entry module,
-  staging what arrives as the `DocumentIngredients` its document will be built
-  from. `LynxView::pump` services those requests and the view's images in
-  ordinary turns. `ResourceFetcher::request_source`
-  owns URL resolution, fetching and UTF-8 validation. Its concrete, non-cloneable
-  `SourceCompletion` holds one end of the one-shot minted with the request and
-  answers whichever task is awaiting it, so the host never learns which; no
-  resource Future, poll loop, callback trait object or resource waker lives in core.
-  Main's lifecycle notifications still wake the host through `EventRequester`.
-  Main then opens the realm and evaluates `bobcat:boot`, whose first statement
-  creates the document — which is what mounts the staged sheets, in cascade
-  order, before the entry loads. Success is
-  `ScriptFinished`; resource, font, realm, or boot failure is `StartupFailed`.
-  That failure stays the failing view's, and is reported once: an entry that
-  throws under boot's top-level `await` rejects through the promise-job queue
-  the group's realms share, and what it leaves there neither reaches the next
-  view to boot, dispatch an event, or run a timer on that runtime, nor comes
-  back at the failing realm's own next entry. Queued *jobs* still run — they
-  are the runtime's work, and the next checkpoint finishes them. A checkpoint
-  drains that queue until it is empty, as a browser's microtask checkpoint
-  does: there is no per-checkpoint job budget and no incomplete checkpoint for
-  a later entry into the realm to resume instead of running its own operation.
-  That the queue
-  is the runtime's is also why a view has to notice a sibling's entry into
-  JavaScript: `ScriptEngine::checkpoint` bumps a runtime-wide generation on a
-  `watch<u64>`, every view has a task following it, and a page whose import
-  finished inside a sibling's checkpoint therefore settles what its own realm
-  owes. Comparing that generation against the one the page recorded at the end
-  of its own last entry is what keeps a page's own bumps from waking it.
-  Constructor errors cover metrics and attachment only.
-  Dropping a loading view marks source work cancelled and stops that view before
-  QuickJS begins — one `tokio_util::sync::CancellationToken` per view, minted on
-  the embedder's thread and cancelled there by the view's drop and by a fatal
-  lifecycle event, and by a guard on every exit from the view's owner, so a host
-  still holding a `SourceCompletion` reads cancellation without waiting for a
-  turn. It is the view's end signal: the owner reclaims its ordinary tasks,
-  then waits for MTS JavaScript disposal before releasing the realm. Workers
-  have independent tokens and remain live for that disposal exchange. A burst of
-  commands queued behind that release is discarded rather than applied: the
-  view's one command consumer reads the token at each wake, before it applies
-  anything, so a command sent before the release ends the view instead of
-  reaching it — the embedder released the view and can observe nothing of it.
-  A burst already inside an entry when the cancel lands finishes. An attached
-  painter loses nothing to the discard: the view's handle on the host resource
-  system goes with the release, so past one a painter adopts no commit whose
-  pixels it is not already holding.
-  Fetchers skip cancelled queued work; IO or synchronous JavaScript
-  already executing may finish, and late source results are discarded. The group
-  and other views keep running.
-  The default family is prepended to the `system-ui`, `sans-serif`,
-  and `serif` generic maps, so a Wasm embedder can supply its otherwise-absent
-  system-font backend without baking a particular font into core; a name neither
-  the containers nor the platform has fails with `EngineError::UnknownFontFamily`.
-  Bundle retrieval, `.web.bundle` decoding, and config parsing are embedder
-  responsibilities; the fetcher supplies validated source text, and core registers
-  its resolved URL in QuickJS's preloaded ESM graph. Construction does not wait
-  for boot; its outcome arrives through `pump`. The protocol's
-  `request_source` answers stylesheet requests with either
-  CSS text or a `PreparsedStyleSheet` (`bobcat_core::style`) the host parsed
-  itself, since a `.web.bundle` ships CSS a build step already tokenized and
-  re-serializing it to a sheet blob is the startup cost the design rules out.
-  Lowering it produces no stylesheet text: rules, keyframes, and font-face
-  rules are built directly through `dom`'s branded `CssRule` builders, leaving
-  stylo one selector-list parse per rule and one value parse per declaration —
-  the floor, because the wire format keeps attribute selectors and functional
-  pseudo-classes as text and stylo builds specified values only through its
-  value parsers. Decoding a container stays embedder work: core owns the
-  `PreparsedStyleSheet` vocabulary, and the embedder fills it. Source requests
-  select a stylesheet or entry payload and carry a specifier; the fetcher supplies
-  the base URL and transport policy. The protocol also offers the optional
-  `preload_source` hint, `request_image`/`service_images` and the `FrameImages` supertrait: every
-  method is synchronous, so no resource future crosses it, and core names
-  none of a fetcher's own transport API — `bobcat-resources`' caches, MIME
-  pipeline and HTTP client are that crate's own surface, reached only by an
-  embedder that builds one. The protocol carries no response-size limit
-  either; each fetcher owns the memory bound for the response it
-  materializes. `PageSource` registers named CSS under ordinary entry-relative
-  resource URLs. Boot supplies the entry response URL to the JS runtime before
-  importing the entry, whose `__Card__` import reads that value. JS replaces
-  the `"__Card__"` alias and maps the compiler's `CSS` section to
-  `<entry-url>/index.css`. `__LoadStyleSheet` returns a fresh opaque JS handle
-  associated only with that URL and sends a `ResourceFetcher::preload_source`
-  hint, which a fetcher may ignore. Every `__AdoptStyleSheet` requests the URL
-  through `SourceRequest::StyleSheet`, synchronously obtains its response and
-  mounts it before returning, including repeated adoption. The fetcher owns
-  pending loads, cached responses and failures. The reference `Resources`
-  shares them by resolved URL within a scope and invalidates registered URLs
-  when replaced or removed. Core holds only the current call's receiver.
-  The embedder returns CSS text or a `PreparsedStyleSheet`; JS sees neither.
-  An incomplete request parks MTS until the response arrives or the view is
-  cancelled, without executing JS jobs or sibling views. Errors throw at
-  adoption; an unused preload changes no styles. Collection releases only
-  the JS handle's URL association; resource lifetime belongs to the fetcher,
-  while adopted rules belong to the document. No native stylesheet handles,
-  load state or adoption queue live in `MainThreadRuntime`. See
-  `docs/named-styles-runtime.md` for URL mapping and load timing.
-  Per-component css-id scoping is
-  **not** implemented — every fragment mounts globally, which is what
-  web-core itself emits for a `enableRemoveCSSScope = true` bundle. The
-  document, tree, engine, and realm cannot be borrowed or decomposed from the
-  facade.
-  Ordinary ECMAScript `import()` loads JavaScript ESM through
-  `SourceRequest::Module` and the same concrete `SourceCompletion` channel,
-  during and after boot. Core normalizes module URLs against the importing
-  module's response URL; the fetcher owns transport and UTF-8 validation.
-  Built-in sources remain group-wide; entries and imported sources are
-  realm-local, with one request, namespace and evaluation per normalized URL.
-  The QuickJS fork preflights static dependencies with unlinked compilation,
-  defers incomplete import graphs, and resumes the original promises on main
-  when sources arrive. Cycles never become partially linked while fetching.
-  Top-level await can span resource and timer turns; `ScriptFinished` waits
-  for the boot promise alone. Handled import failures leave the realm usable, and
-  dropping the view cancels outstanding completions and releases continuations.
-  This is JavaScript ESM loading; import maps, import attributes, JSON modules
-  and Lynx component-bundle imports remain unsupported.
-  The crate-private `quickjs::ScriptEngine` is the whole script surface: it
-  installs named host callbacks, registers named preloaded ESM source,
-  evaluates a module through its TLA completion promise, calls an export the
-  realm published back, and provides the GC seam. It is created on the
-  engine-owned Lynx main thread and never leaves it, which is why nothing
-  about it is `Send`. Values crossing it are `quickjs-rust-bridge`'s
-  `HostValue`/`HostArgument` — primitives plus opaque structured clones, which
-  is what lets an object or a typed array cross a thread without the host
-  naming any of it — so realm values and DOM handles
-  never cross as themselves. The private
-  `MainThreadRuntime` owns the realm integration and, through it, the document.
-  **The realm creates its own document, and says so.** The boot module's first
-  statement is `export const document = new Document();`; `bobcat:element`'s
-  `Document` constructor calls the host member `createDocument`; and that
-  member builds the document out of the `DocumentIngredients` the view's task
-  staged before the realm opened — viewport, page config, the validated text
-  context, the author sheets in cascade order, the group's style pool, and any
-  image reports that arrived first — mounting and replaying them in that order.
-  Every phase runs under a catch, because the bridge erases a panic into "the
-  host function panicked" and this is the one member that runs the whole
-  document pipeline behind a single call. A second construction is refused
-  whichever module asks: the ingredients are spent. The realm holds what it
-  built in the private `DocumentSlot` every tree member borrows; that
-  `Rc<RefCell<…>>` exists only so same-thread native QuickJS callbacks can
-  reach the owner, and is not a cross-thread sharing mechanism.
-  **The document lives exactly as long as the realm.** The boot module's
-  exported binding holds it from that first statement on, and nothing in the
-  realm releases it: there is no release member, no `FinalizationRegistry` over
-  the `Document`, and no "no document" answer a host member can give. That is
-  the opposite of the element path, where cards genuinely unroot handles and a
-  collection every `REMOVALS_PER_COLLECTION` removals frees what they named.
-  Release is the view's task ending: dropping the `LynxView` closes its command
-  channel, the task returns, and `MainThreadRuntime`'s fields drop in
-  declaration order — everything that names this realm first (the
-  `ScriptEngine`, which carries the context's `Rc`), which is what frees
-  the realm together
-  with the host functions it held and their clones of the slot, and the
-  runtime's own `slot` handle after it, which is when the `LynxDocument` drops.
-  JavaScript goes first, then the Rust object it named; the field order is the
-  whole mechanism, and there is no `Drop` impl behind it. So every tree and
-  attribute member takes the document unconditionally, and the one refusal left
-  in this area is a second `createDocument`. The one window where a document is
-  absent is the load — everything before the boot module constructs its
-  `Document` — and the task serves through it: a `Resize` writes the
-  ingredients, image reports are buffered and replayed, a `BeginFrame` is still
-  acknowledged so an offscreen host is never blocked by a load, and dispatch
-  and refill are dropped.
-  Each `bobcat-internal:host` call is a plain owner-thread mutation, and
-  `__FlushElementTree` runs the style + layout + paint commit and publishes one
-  immutable `Arc<CommittedFrame>` on the view's watch. The document is never
-  taken from, returned to, or observed by another thread, and cannot be:
-  `Node`'s arena backpointer is a raw pointer, so a `Document` is not `Send`,
-  and the realm that creates it never leaves `bobcat-main` — the same shape as
-  the `Painter`, whose `!Send` keeps it on the thread that built its target.
-  The core depends on `dom` and re-exports exactly one narrow seam of it: the
-  `input` module republishes `dom::Point2D` and
-  `dom::input::{InputEvent, InputKind, PointerId, PointerKind, PointerPhase}`
-  so an embedder can name the input vocabulary without depending on `dom`
-  itself. Wheel deltas crossing that seam are always viewport CSS pixels;
-  conversion from physical-pixel, line, or page units is embedder policy.
-  Nothing else crosses — no document, no node, no hit-test result —
-  and that list is the whole of it. **`Painter` is a standalone public object
-  rather than something the view owns**: `Painter::new(DrawTarget, width,
-  height, device_pixel_ratio)` builds one over a target before any view exists,
-  `attach(&view)` points it at a view and `detach()` releases it. Everything it
-  holds of a view is non-owning — a watch receiver, and a `Weak` on the view's
-  seat, which is the view's own command sender and its handle on the host's
-  resource system as one releasable thing — so a painter cannot keep a
-  released view alive, and a view dropped under one leaves it showing and
-  capturing the last frame it drew. At most one interactive painter per view,
-  and at most one *live* view per painter: a second `attach` is
-  `EngineError::PainterAttached` — the refusal is the weak count of the view's
-  seat, and `Painter::attach` is the only place one is downgraded — while a
-  seat whose view is already gone is not an attachment at all and needs no
-  `detach` by hand.
-  Attaching drops everything derived from the previous view — the adopted
-  snapshot, the scroll intents, the gesture arena, the resolved pixels, and
-  what the draw target holds, which is its compose key and its plane bank,
-  because commit ids restart at one per document — rebases the frame clock onto
-  the view's own timeline epoch, seeds the `BeginFrame` sequence past whatever
-  has been serviced, and sends its metrics as a `Resize`: **the painter owns
-  device metrics**, so a view built at one size and shown at another is resized
-  rather than showing a frame its target cannot present. Detaching resets the
-  same minus the target, so the last frame stays up — and stays capturable —
-  while the next page loads.
-  Every entry point begins by polling the link — adopting the newest
-  `Published` together with the pixels it draws, and only then noticing a view
-  that has gone, so a commit published in the release turn is still adopted and
-  what was adopted stays drawable. A commit
-  whose pixels could not be read in the same step is not adopted, because a
-  frame indexes its store's bitmaps by draw order and a frame over another
-  commit's table would draw the wrong images.
-  A painter retains the newest published frame and runs input routing,
-  gestures, compositor scrolling, composition, and presentation inside the
-  embedder's own calls; vsync interacts with the OS only there. Commands that
-  require the live tree go to `bobcat-main`, which
-  answers by publishing a later frame. A long JavaScript task therefore cannot
-  stop scrolling or re-presentation of the retained frame, while a
-  half-applied batch is unobservable because only commits publish. Embedders provide user input, device
-  metrics, OS initialization, a draw target, and IO primitives, and relay
-  OS facts in (`Painter::{dispatch_input, resize, set_occluded, refresh, pump,
-  tick, capture}` and `LynxView::pump`);
-  they never start or steer the pipeline. Engine events are enqueued and then
-  wake the host through the group's `EventRequester`, so the next
-  `LynxView::pump` finds them;
-  `ScriptFinished` reports successful entry-module boot,
-  `StartupFailed` reports source/configuration/boot failure, `ScriptRunError` reports a fatal script-runtime failure
-  during later owner-thread work, `ListenerFailed` reports a listener that
-  threw during event delivery, and `TimerFailed` reports a `setTimeout` or
-  `setInterval` callback that threw when it came due — the last two separate
-  because neither is fatal: the walk continues, a repeating timer stays armed,
-  the realm stays usable, and later events and timers are delivered as normal;
-  a frame the engine wants drawn rides the same wakeup, and the `Painter::pump`
-  that answers it is the turn that draws it — so no OS frame callback and no
-  vsync round trip stands between a commit and its pixels.
-  **A host takes two turns per wakeup, and they are different calls.**
-  `LynxView::pump` is the only one that advances the resource protocol: it
-  hands each `RequestSource` to the fetcher, gives the fetcher its
-  `service_images` moment, names every source the last paint walk discovered,
-  drains the image inbox back to `bobcat-main`, and returns the lifecycle
-  events the turn produced — and after a fatal event it hands the host nothing
-  further. `Painter::pump` draws the frame the painter owes. A painter asks the
-  host for nothing, so a host that wants an image to arrive takes the view's
-  turn. Pacing is the
-  embedder's, and the engine names no interval for it: after each turn
-  `owes_frame` answers whether the painter still has a frame to put on its
-  window — a running animation, a swap chain that had no image to give, a
-  commit the turn did not draw — and a host takes that frame at **its own
-  next display frame**, whatever its display clock is (a `CVDisplayLink` on
-  the window's monitor, `requestAnimationFrame` in a Worker). `is_animating`
-  is the narrower fact, answered for any target, that an offscreen host with
-  no display to pace against asks instead. **A realm timer is not the host's
-  to wait out**: every live realm — a view's and a worker's alike — has a
-  `serve_clock` task of its own holding one pinned sleep on that realm's next
-  deadline, re-armed only when the deadline moves and fed by the watch that
-  realm's epilogue publishes, and
-  the commit its firing produces wakes the host like any other publication.
-  Natively that sleep is tokio's own time driver; on wasm32, where tokio's
-  reads `std::time::Instant` and would panic, `src/alarm.rs` serves it — one
-  process-wide `bobcat-alarm` Worker holding a heap of deadlines and the wakers
-  waiting on them, parked with `park_timeout`, and `crate::clock::sleep_until`
-  picks between the two by `cfg`. A draw that fails is the return value of
-  `Painter::{pump, tick, capture}`, reported once because there is no
-  recovering a lost surface; there is no `RenderFailed` event.
-  **A view spans two threads**: the embedder's own — whichever one created its
-  `LynxGroup` — which owns the window, the input capture, the surface
-  (the one call macOS allows nowhere else), the host's whole resource system,
-  and the `Painter`
-  (routing, gestures, scrolling, composition, and every GPU call), and the
-  Lynx main thread (document + realm). The embedder picks the first by
-  picking where it constructs the group, and neither half can leave it: a
-  `Painter` is `!Send` because its target is, and a `LynxView` is `!Send`
-  because it holds `Rc`s of the group and of the fetcher. That is what the
-  browser always
-  needed — `wgpu`'s handles are not `Send` under shared memory and an
-  `OffscreenCanvas` cannot be transferred on again, so the Render Worker
-  holds both and each turn runs inside its own calls — and now the only
-  shape there is. Dropping a view cancels its source work, detaches its image
-  inbox, and then closes its command channel, which is the goodbye its task
-  ends on; the group handle it holds is the last field to drop, so the group's
-  threads are joined only once nothing is left on them.
-  **Views in a group share one thread, one `QuickJS` runtime and one Stylo
-  pool.** The group owns all three; `create_lynx_view` is the only way to
-  build a view, because naming the group is the only way to say which thread
-  it runs on. One group per thread and one thread per group: a group hands out
-  `Rc`s of what it owns, so it is `!Send` and `!Sync`, and the thread that
-  creates it is the thread every view in it paints on — which is also why one
-  `EventRequester` serves the whole group. Views in a group take turns rather
-  than run at once — every entry into a realm is one synchronous stretch on
-  that thread — so a second view costs no second
-  heap, no second module graph and no second set of workers, at the price of
-  the two never restyling in parallel; the assumption that buys is that a
-  person drives one view at a time. A host that needs two pages genuinely
-  parallel gives them a group each, on a thread each.
-  **A group also owns a second thread and a second `QuickJS` runtime,
-  `bobcat-workers`**, for the worker realms every view in it shares — an
-  independent runtime environment started by `LynxGroup::new` beside
-  `bobcat-main`, not under it, and joined by the group handle's drop after
-  `bobcat-main` has returned, so a
-  thread that will not start is a failure to build the *group* rather than of
-  whichever worker happened to be first. What `bobcat-main` has of it is one
-  sender, and all it ever does to it is send: start a context with its script,
-  post to a context, stop a context — and hear events back. Nothing else
-  crosses, and a released view stops its own workers by sending each of them
-  that stop. That eagerness is what buys every
-  path below it: the group holds one command sender, everything that names a
-  worker holds a clone, and there is no lazily-built state, no lock and no
-  second way for a worker to fail. The price is one parked thread and one
-  idle runtime per group. Separate from `bobcat-main`'s runtime because that
-  is what a worker is for: script that must not stop the thread that owns the
-  document. Since `QuickJS` binds a runtime to one thread, putting the
-  workers' runtime on a thread of its own is also what makes "a worker cannot
-  touch the document" a fact about the program rather than a rule someone has
-  to keep — there is no path from a worker realm to a `LynxDocument`, and no
-  value of either runtime can be named by the other. One realm per live
-  worker, so a second worker costs a global object and a module graph rather
-  than a heap, at the price of the group's workers taking turns. **One task
-  per live worker, and a worker's whole state is that task**: a `WorkerStart`
-  carries its key, its name, the one-shot its script will arrive on, the
-  receiving end of its message channel, the sender its events go back on —
-  which is the creating MTS realm's `WorkerEvent` channel — and the Worker's
-  own cancellation token. MTS routes events through weak references to JS
-  Worker objects. Their finalizers and explicit `terminate()` release sending
-  handles; releasing the MTS realm closes its remaining senders naturally.
-  Host functions reference the channel owner weakly, so queued finalizers
-  cannot keep a released realm's workers or group thread alive. The script wait is a
-  `biased` select over the message channel first and that token behind it, so a
-  `terminate` that lands in the same instant as the script wins and a worker
-  told to stop never boots. The timer
-  machinery both kinds of realm run on — the schedule, the two host members,
-  the firing loop — is `crate::timers` beside `crate::clock`, owned by neither
-  thread, and both kinds of task wait their own deadlines out the same way. So
-  a second realm kind costs the view realms no widening at all.
-  **The main-thread `Worker` class is exported by `bobcat-internal`.**
-  It is an explicit ESM import, creates a distinct context on the group's
-  existing `bobcat-workers` thread, and supports `postMessage`, `terminate`,
-  `onmessage`, `onerror` and the shared EventTarget listener methods. It uses
-  module scripts (also with omitted options) and the worker scope's
-  structured-clone transport — the value is serialized by the engine's own
-  serializer at the host boundary and rebuilt in the receiving realm, so
-  `undefined`, `NaN`, `Date`, `BigInt`, typed arrays, cycles and shared
-  references survive, while a function, `Symbol`, `Map`, `Set`, `RegExp`,
-  `Error`, `DataView` or accessor property throws synchronously at the
-  `postMessage` call; transfer lists remain pending. External
-  ESM imports now load through the view's resource fetcher and support TLA. `main/workers.rs` installs its three native
-  operations — `createWorker`, `sendWorkerMessage`, `terminateWorker` — before
-  entry boot. The `Start` goes out before the host is asked for anything;
-  `SourceRequest::Worker` carries the entry's resolved URL as its
-  base, and what the host is handed is the far end of the one-shot that
-  already rode to `bobcat-workers` inside that `Start`, so the script reaches
-  the worker without a main-thread turn and nothing the painter holds ever
-  names a worker. Every concurrent worker request is preserved.
-  Worker entry/import requests use the Worker's cancellation scope. Host
-  release does not cancel it ahead of JS disposal. Once the MTS realm is
-  released, closing its senders ends remaining Workers, including after failed
-  boot; Rust has no Worker termination sweep.
-  A `WorkerEvent` delivers messages and errors to the owning realm; worker
-  errors also produce nonfatal `EngineEvent::WorkerFailed`. See
-  `docs/runtime-architecture.md` for the transport and lifetime boundaries.
-  **After the MTS entry import succeeds, boot creates a BTS Worker** named
-  `lynx-bg` through that same class, using the engine entry `bobcat:bts`.
-  `bobcat:bts` installs its JS initializer from `bobcat:bts-runtime`, then
-  returns. Its first Worker message supplies initial data and starts the
-  optional `ViewSources.background_entry` import.
-  MTS JavaScript owns BTS disposal: send `dispose`, await `disposed`, then
-  terminate its Worker. BTS calls the current app hook, reports any throw and
-  replies after an ordinary Promise boundary. The MTS disposal Promise also
-  handles repeated destroy notifications. Disposal bypasses an unfinished BTS
-  entry import, since a released view cannot supply its remaining resources.
-  Object observers follow web-core: a plain object registered with a JS
-  `FinalizationRegistry` that directly invokes its callback. See
-  `docs/destruction-runtime.md`.
-  Raw BTS application entries explicitly import their bindings from
-  `bobcat:bts-runtime`; neither runtime installs `globalThis.lynx`.
-  Keeping the runtime separate lets the app import its bindings without a
-  dependency back to the bootstrap that starts it.
-  XML uses this identical startup path. The bootstrap contains no application
-  source and does not fetch it in advance. A worker carries a `SourceRequester`
-  that sends module requests directly to the view's resource host. ESM
-  completion and timers continue during entry TLA; posted messages wait for
-  entry settlement. Each completion shares its worker's cancellation token.
-  ReactLynx compiled module execution and lazy-bundle APIs remain a later
-  layer over this resource transport. Bypassing `lynx_core.js` does not require
-  its `requestScript`/`readScript` source-text interfaces; see
-  `docs/worker-resources-runtime.md`. Without an entry, only the built-in
-  environment runs. All workers use the same scope and protocol.
-  MTS `lynx.getJSContext()` and this BTS Context are
-  stable `CrossThreadContext extends EventTarget` instances returned directly
-  by `createCrossThreadContext`. `dispatchEvent({type, data})` validates the
-  string type and data property, captures the public envelope, sends to the peer and
-  returns `0`. Context `postMessage(value)` sends a message event. Listeners
-  receive the original null/undefined data and an undefined receiver, and
-  ignore DOM listener options. The shared `bobcat:event-target` EventTarget
-  every Context, `Worker` and engine target extends follows the DOM's
-  inner-invoke rule: a listener that throws is reported and the walk continues
-  with the next listener — in the MTS realm through `lynx.reportError` and the
-  host's `reportScriptError`, as a nonfatal `ScriptReported`; in a worker realm
-  through the worker global's `reportError`, so it reaches the parent
-  `Worker`'s `error` event and a nonfatal `WorkerFailed`.
-  Origins identify the sending CoreContext or
-  JSContext. MTS queues payload references until the Worker is connected;
-  Worker postMessage takes the structured-clone snapshot, for early and
-  connected sends alike — so `undefined` members, the special numbers,
-  `BigInt`, `Date`, typed arrays and cycles all survive, and `toJSON` is never
-  consulted, because structured clone has no such hook. Do not add a custom
-  codec or a deep clone on top of that transport; a value it refuses throws at
-  the call. A worker's own task
-  queues what is posted until its bootstrap has evaluated. BTS JS then waits
-  on the application import before delivering later messages, so application
-  listeners exist before first delivery. Raw XML
-  adapters supply the optional entry; compiled bundle manifests still need
-  the Lynx Core module/init shell and remain pending. Each view costs one
-  additional realm on the group's existing worker runtime. MTS boot does not
-  await BTS: `ScriptFinished` means MTS boot finished — the entry module
-  evaluated, its top-level await settled, and its first flush committed. The
-  BTS Worker's state is no part of it, so a BTS entry whose top-level await
-  never settles does not keep the view from becoming ready. A BTS entry that throws
-  is reported like any worker script: `reportError` in the worker realm
-  surfaces it at the `Worker`'s `error` event and as a nonfatal
-  `WorkerFailed`; the BTS keeps running and still takes messages. No BTS
-  failure ends the view. MTS keeps its Worker reference after that Worker ends;
-  a post to an ended Worker is dropped by the host, as a browser drops
-  `postMessage` to a terminated worker, and the pre-connection FIFO holds only
-  what the MTS entry sends before boot constructs the Worker.
-  BTS also exposes stable `getApp()` and `getNativeApp()` objects. The current
-  app hooks receive `OnLifecycleEvent`, `publishEvent`, `publicComponentEvent`
-  and `callDestroyLifetimeFun`; the native app's `callLepusMethod` invokes a
-  named MTS global function and asynchronously returns its resolved result
-  to an optional callback. String `__AddEvent` handlers publish snapshots
-  containing target/currentTarget `dataset`, `id` and `uid`, never handles.
-  Current PAPI elements have no component metadata and use `publishEvent`;
-  explicit component calls preserve the supplied ID. An explicit JS engine
-  `__DestroyLifetime` event starts the same JS disposal Promise used by MTS
-  teardown, terminating BTS only after its acknowledgement. Rust starts and
-  awaits MTS disposal through the existing ESM evaluator and routes ordinary
-  Worker events while it waits; it neither identifies BTS nor calls its hook.
-  `bobcat-main` builds the group's one `dom::StylePool` — sized by the
-  `StyleThreads` passed to `LynxGroup::new`, `Auto` being the usual choice —
-  before any view attaches, and every document it goes on to carry holds an
-  `Rc` of it. Stylo's bloom filter and style-sharing cache are per-OS-thread
-  borrows held for a whole traversal, so two documents traversing on one
-  worker at once is an aliasing bug. Two facts rule it out rather than guard
-  against it: different groups draw from disjoint pools, and documents in one
-  group cannot traverse at once, because the single thread driving them both
-  is already inside whichever traversal is running. The process-wide mutex
-  that used to serialize every document's flush against every other's is gone
-  with them.
-  **`bobcat-main` is index zero of its group's pool**, taken over in place by
-  rayon's `use_current_thread` — which is why the pool can only be built on
-  `bobcat-main`, and why `StyleThreads` counts it: `Fixed(3)` starts two
-  threads, not three. Stylo's global pool did exactly this and Gecko relies on
-  it, so a lone view restyles on the same threads, with the same parallelism
-  and with the same inline root closure it had before these pools stopped being
-  process-wide; the managed members take over only where a level is wider than
-  the traversal's work unit. The takeover is permanent: rayon leaks about 25 KB
-  per pool (the managed threads still exit on drop; the `WorkerThread` box and
-  `Registry` do not) and refuses a second pool on the same thread forever.
-  **That refusal is why the pool has to be the group's rather than any view's**:
-  one thread can only ever build one, so every view it carries shares that one
-  or has none. A host that replaces groups — every `BobcatRenderer::load` —
-  pays that 25 KB per replacement, in the same Wasm linear memory.
-  `StyleThreads::Sequential` — and `Auto` where the pool would have held
-  `bobcat-main` and nothing else — gives a group no pool at all and traverses
-  on `bobcat-main` alone, which is a configuration rather than a fallback.
-  `dom::MAX_STYLE_THREADS` is six, counted the same way Stylo counts its own
-  six: a ceiling, not a tuning knob, because Stylo indexes its per-traversal
-  thread-local storage by Rayon thread index into an array that long, so a
-  wider pool is a construction error rather than a silent clamp — reported the
-  way any other boot failure is, and by `LynxGroup::new`, so no group and
-  therefore no view exists for it.
-  **Wasm takes the same path.** `navigator.hardwareConcurrency` reaches
-  `StyleThreads::for_parallelism`, which is `Auto`'s own arithmetic, so
-  comparable hardware gets the same pool on both targets and the facade does no
-  thread arithmetic of its own.
-  **The draw target is an argument to `Painter::new`, named once and kept for
-  that painter's whole life**: `DrawTarget::window(...)` takes anything
-  convertible into
-  `WindowTarget` — a `'static` surface target, so a windowing embedder passes
-  a shared handle (`Arc<winit::Window>`) and a browser an owned canvas — and
-  `DrawTarget::Offscreen` asks for a windowless GPU target instead. Either is
-  built inside `Painter::new`, on the thread that will draw into it, which is
-  the only thread macOS lets a surface be created from. There is no attaching a
-  target later, and no painter that has none; what a painter *does* point at
-  later is a view, and it shows whichever views it attaches to through that one
-  target. An offscreen target is refused on Wasm at construction rather than
-  hanging: building one blocks the calling thread on a device request, and in a
-  browser that thread is the one whose event loop would answer it.
-  `FrameSize::for_viewport` exposes the physical size `Painter::new` and
-  `Painter::resize` will compute, for a host that must size the surface's
-  backing store — a canvas — before it hands the target over.
-  **Images are entirely the embedder's.** The core fetches, decodes, caches
-  and retains no pixel of its own. The one resource system a view has — its
-  `ResourceFetcher`, which is also its `dom::FrameImages`, owned by the
-  `LynxView` as an `Rc` and read by an attached painter through the view's
-  seat, which the painter holds only a `Weak` of — is
-  asked for one
-  image at a time by source string (the `url(…)` value CSS produced, or a
-  replaced element's source): named through `request_image`, answered
-  through `ImageReports` with the intrinsic size layout needs, given its
-  moment in every `LynxView::pump` through `service_images` (where a host whose
-  loads complete off-thread forwards them into the reports), and read back
-  synchronously when a painter adopts a commit, through `FrameImages::read`, which
-  carries a `dom::ImageSizeHint` — the largest device-pixel extent the frame
-  draws that source at, computed per draw from its extent under its
-  transform and unioned per source — so a host decodes to the draw rather
-  than to the file. No container sniffing, no codec contract, no cache
-  policy and no byte budget lives in `bobcat-core` or `dom`; the reference
-  implementation of all of that is `crates/bobcat-resources`, which all
-  shipped embedders use. `FrameImages::retain` — the sources one resolve pass
-  met, in paint order — carries **no default body**, so every store writes what
-  its working set is where someone can see it rather than inheriting a silent
-  no-op. `LynxView::prefetch_images` warms sources ahead of
-  the walk that would discover them. The Lynx `<image>` element loads through
-  that path from its `src` alone (`tree::image`); the rest of its element
-  surface remains unwired (`mode`, `auto-size`, `placeholder` racing,
-  `cap-insets`, `blur-radius`, `load`/`error` events).
-  `LynxDocument`, `Viewport`, `DocumentIngredients`, `DocumentSlot`,
-  `new_document`, `MainThreadRuntime`, the view's link (`ToMain`, `ViewNotice`,
-  `Published`) and the concrete QuickJS adapter are all
-  crate-private. `Painter` is not: it is public, and `LynxDocument` is what an
-  embedder still cannot name.
-  The private `MainThreadRuntime`
-  registers the native QuickJS ESM `bobcat-internal:host` (one Rust-backed
-  named function export per member — `createDocument`,
-  `createPage`, `createElement`,
-  `setAttribute`, `setInlineStyles`, `removeAttribute`, `getAttribute`,
-  `tagName`, `attributeNames`, `childElementIds`, `parentNode`,
-  `insertBefore`, `removeElement`, `replaceElement`,
-  `swapElement`, `dropElement`, `flushElementTree`, `listenerNameOpened`,
-  `listenerNameClosed`, `setTimer`, `clearTimer`,
-  `createWorker`, `sendWorkerMessage`, `terminateWorker`, and the page-data
-  pair `initData` and `globalProps`, which hand over the view's JSON text once
-  as plain strings, unread — the tree and
-  attribute members speaking DOM vocabulary
-  over numeric `NodeId`s; the two that answer with a list encode it in the
-  return string, since the boundary's value type carries no array —
-  `attributeNames` as the same length-prefixed record `setInlineStyles`
-  accepts, and `childElementIds` as comma-joined ids, which need no length
-  prefix because a decimal id cannot contain the separator), then registers the
-  core-owned compatibility shell as `bobcat:runtime`, the Element PAPI
-  runtime as `bobcat:element`, the timer runtime as `bobcat:timers`, and the
-  shared `EventTarget` as `bobcat:event-target` and the typed Context protocol
-  as `bobcat:cross-thread-context`,
-  as built-in sources in QuickJS's ESM loader. The group's worker runtime
-  gets a deliberately shorter list — `bobcat:event-target`, the worker global
-  scope as `bobcat:worker`, `bobcat:timers`, `bobcat:cross-thread-context`, and
-  the BTS bindings `bobcat:bts-runtime` and `bobcat:global-event-emitter` — because a worker has no
-  document to reach and no page to be the main thread of, so an import of
-  `bobcat:element` fails to resolve rather than failing late. A worker's own
-  script is *inlined* into the one module its realm evaluates, exactly as
-  `ENTRY_PREAMBLE` carries the MTS entry, and never registered on the
-  runtime: an evaluated module belongs to the realm that evaluated it, so two
-  views resolving one URL to different bytes cannot collide and no worker
-  leaves a registration behind.
-  The runtime modules live together in `packages/bobcat-element/src` as
-  TypeScript; core embeds, with `include_str!`, the JavaScript TypeScript 7
-  emits during the Cargo build into its private `OUT_DIR` (see that package
-  below). The Element module imports
-  native
-  operations directly from `bobcat-internal:host`; no host object and no
-  element member is installed on `globalThis`. A `.web.bundle`'s
-  `lepusCode.root` or
-  raw XML main body becomes a real ESM at its resolved entry URL: core
-  prepends named imports from both built-ins. The `bobcat:boot` ESM imports
-  its lifecycle helpers from `bobcat:runtime`, `Document` and
-  `__FlushElementTree` from `bobcat:element`, and `bobcat:timers` for its effect.
-  The runtime parses the view's `init_data` and `global_props` JSON in MTS;
-  missing values become `{}` and malformed inputs fail boot. Boot creates its
-  document, initializes `__Card__` and MTS inputs, retains the host render
-  argument, then awaits the entry. It processes the retained argument and
-  posts the result plus host props and SystemInfo as the first BTS Worker
-  message, before rendering. The BTS bootstrap returns after installing a JS
-  receiver; that message initializes its inputs before importing the entry.
-  Later internal messages wait on the import Promise and are delivered in order
-  once it settles, success or failure.
-  Lifecycle hooks and engine listeners run synchronously, with no intervening
-  Promise-job checkpoint. Boot awaits a `Promise.resolve().then` flush after
-  rendering. That flush's commit completes MTS boot, which is the whole of
-  public readiness; BTS acknowledges nothing.
-  Boot reads `PageConfig.enable_js_data_processor` and `Viewport` directly
-  from the staged document ingredients. `ViewSources.initial_processor` is a
-  plain `String`, handed to JS by the one-shot startup-data binding without
-  JSON serialization or source interpolation. JS constructs SystemInfo from
-  runtime constants and those metrics, and sends its snapshot to BTS. Entries receive runtime bindings through prepended ESM imports.
-  Global props updates replace the live module binding; there is no native
-  evaluator or separate Script lexical environment.
-  `LynxView::{update_data, reset_data, update_global_props, reload}` use the
-  existing ordered command/Worker links. Embedders serialize data and global
-  event argument lists into `String`; core passes them unchanged to JS, which
-  parses them and constructs Worker messages. Update/reset/reload take a separate
-  processor-name `String`, with an empty name selecting the default processor.
-  All are accepted once MTS boot has finished and
-  otherwise return `EngineError::NotReady`, just like global events; the BTS
-  Worker still loading is no reason to refuse one. Initial
-  data and props come from `ViewSources`; there is no early props cache or
-  initial-render update gate. MTS runs its own hook at once and forwards the
-  update to BTS with `Worker.postMessage`; the BTS runtime queues that message
-  behind its entry import and delivers it in order once the import settles.
-  Rust never sends page data to BTS — MTS `postMessage` is the only path.
-  A reload retains the realms and entry; the framework recreates component state.
-  See `docs/data-lifecycle-runtime.md` for processor selection, snapshots,
-  readiness, engine-event precedence and the BTS reload callback boundary.
-  Native Context behavior, the BTS GlobalEventEmitter and
-  `LynxView::send_global_event` are described in `docs/events-diagnostics-runtime.md`.
-  `LynxView::pump` records readiness before returning `ScriptFinished`, exposed
-  by `is_ready()`. Global events require that observed MTS boot and otherwise
-  return `EngineError::NotReady`; rejected events are never queued or replayed. Accepted
-  events retain host FIFO order. Internal pre-connection MTS messages still wait
-  for Worker construction.
-  `ScriptReported` and `ConsoleMessage` are nonfatal host notices; their BTS
-  path remains ordinary Worker postMessage delivery with JS-side dispatch.
-  `lynx.getEngine()` returns one stable, realm-local `EventTarget`; its
-  listeners never cross the host boundary. Render, update, component removal
-  and global-prop events carry argument arrays, taking precedence over legacy
-  global hooks. Listeners receive the engine as `this`, with no `origin` field.
-  The MTS `getCoreContext` and `getNative`
-  sinks retain and deliver nothing,
-  and the module does not invent the background-only `lynxCoreInject` realm.
-  The PAPI runtime exports
-  the supported Element PAPI only as named ESM bindings; transformed entries
-  receive them through the prepended import:
-  every ReactLynx Snapshot
-  constructor except `__CreateFrame` (`__CreatePage`, `__CreateElement`,
-  `__CreateWrapperElement`, `__CreateText`, `__CreateImage`, `__CreateView`,
-  `__CreateScrollView`, `__CreateRawText`, `__CreateList`), all six tree
-  mutation calls (`__AppendElement`, `__InsertElementBefore`,
-  `__RemoveElement`, `__ReplaceElement`, `__ReplaceElements`,
-  `__SwapElement`), the property surface a Snapshot's `create`/`update`
-  functions write through (`__SetClasses`, `__SetID`, `__SetAttribute`,
-  `__SetInlineStyles`, `__AddInlineStyle`, `__SetDataset`, `__AddDataset`)
-  with the queries that read it back
-  (`__GetID`, `__GetTag`, `__GetElementUniqueID`, `__GetDataset`), the listener surface
-  (`__AddEventListener`, `__RemoveEventListener`, `__StopPropagation`,
-  `__StopImmediatePropagation`), and `__FlushElementTree`;
-  `__SetInlineStyles` keeps the whole-value policy in JavaScript: a string is
-  one `style` attribute write, while a record crosses in a single
-  `setInlineStyles` call as a length-prefixed payload — `<utf16Length>:<text>`
-  fields, name then value, in enumeration order — from which the host builds
-  one declaration block from empty. Length-prefixing rather than delimiting is
-  what lets a declaration value contain any character, a `;` included, without
-  escaping or a guessed boundary.
-  Ordinary camelCase keys are hyphenated, while case-sensitive `--*` custom
-  property names pass through unchanged.
-  The host operation implements the name/value subset of CSSOM
-  `style.setProperty` (there is no priority argument, so an embedded
-  `!important` is invalid) and intentionally has no numeric-style-id variant:
-  `__AddInlineStyle` updates one named property in the existing block and
-  removes it for empty/nullish values; numeric Lynx CSS property IDs remain
-  unsupported on both surfaces;
-  unsupported globals remain precise `ReferenceError`s, including
-  `__DropElement`, which no web-core generation has.
-  `__CreateList` consumes only its numeric parent-component argument for now;
-  callback storage/execution remains part of the unimplemented list surface,
-  and `__SetAttribute` throws for `update-list-info` — the one name that is a
-  list command rather than an attribute — instead of writing a stringified
-  command object onto the element.
-  An element handle is an `EventTarget`. `__AddEventListener` /
-  `__RemoveEventListener` keep the standard's registration identity
-  (element, name, callback, capture) with its idempotence, `once`, and
-  case-insensitive names; listener closures live only in the realm and die
-  with their handle, so a registration cannot keep an element alive and
-  nothing about a handler ever crosses into Rust. `__AddEvent`, `__GetEvent`
-  and `__GetEvents` are **gone**: they stored a background-thread handler name
-  and a worklet per (type, name) with overwrite semantics, and cross-thread
-  event delivery is out of scope, so neither was deliverable. So are the parts
-  of `__AddEventListener` that depend on them — `closure_type` selecting a
-  handler string, and `bind_type` selecting Lynx's `catch` forms, which an
-  author writes as a listener that calls `__StopPropagation` first.
-  The walk is the realm's. The host computes the event path while it holds
-  the document, releases it, and makes one call to the Element module's
-  `__BobcatDispatchEvent` export through
-  `quickjs::ScriptEngine::call_module_export`, the one Rust-to-JS path in the
-  tree, carrying the whole path: the standard's bubble steps, target-first,
-  as two comma-joined decimal id strings — the nodes, and position for
-  position each step's shadow-retargeted target — plus the name and the
-  detail JSON. One call is one dispatch, so one event object serves it and a
-  property one listener writes is there for the next, while the host retains
-  nothing of the realm's and keeps no listener index at all. The realm runs
-  the capture pass, the bubble pass and the `global-bindEvent` pass over that
-  path, derives `eventPhase` per step, and ends the dispatch itself; neither
-  `stopPropagation` nor `stopImmediatePropagation` crosses the boundary,
-  because there is no walk on the other side to end. What the host is told is
-  the *name* set the painting side routes against, and only its global edges:
-  the imported native `listenerNameOpened(name)` for the first registration
-  for a name anywhere in the realm and `listenerNameClosed(name)` for the
-  removal of its last, the count behind them kept in the realm because every
-  registration kind is — including the ones a collected handle takes with
-  it, which its `FinalizationRegistry` record closes.
-  `__SetCSSId` is absent rather than unimplemented — it names the author-CSS
-  scope an element cascades in, and until a layer lowers a decoded `StyleInfo`
-  into **scoped** author rules there is nothing to validate an encoding against
-  (ingestion has landed, but mounts every fragment globally)
-  (web-core writes `l-css-id`/`l-e-name` attributes; native Lynx keeps css_id
-  on the element). It lands with the ingestion side that reads it, together
-  with the parent-component css-id inheritance that feeds it.
-  Creation calls return plain JavaScript handle objects minted by the PAPI
-  runtime; each carries its DOM `NodeId` under a realm-local symbol and is
-  registered with a `FinalizationRegistry` whose cleanup calls the imported
-  native `dropElement`. **The handle is the one thing that holds its
-  element**, and what keeps a handle alive while its element is on screen is
-  the handle above it: every handle carries an unordered strong `Set` of its
-  children's handles, maintained by the six tree mutations, and the page's
-  handle is permanent, so every *connected* element's handle is reachable
-  from it. The link the other way is the owner's node id, a number resolved
-  through the same weak `NodeId`→handle index the dispatch side uses, so no
-  parent/child pair is a reference cycle and an unreachable subtree is freed
-  by plain reference counting. The set holds membership only: order is the
-  native tree's, and mirroring it here would be a second answer to a question
-  the tree already answers. `Document::drop_element` frees exactly the node
-  the collected handle named — its **element** children are unlinked and go
-  on as detached roots, each held by its own handle, while what no handle
-  could ever name goes with it: host-owned text nodes and a
-  host's shadow tree in full. Generated `raw-text` content has no DOM node. So an unmount is `__RemoveElement` on the
-  snapshot's root, which takes it out of its parent's set, and then the
-  card's own references going away; the whole subtree's handles become
-  unreachable together and each finalizes into one free. A ReactLynx list
-  handing a recycled cell's elements between snapshot instances and deleting
-  the old `__elements` array takes nothing away — those elements are
-  connected, so their handles are held above them. Cleanup runs as a pending
-  job at the job checkpoints, and pending jobs never run at realm teardown,
-  which preserves the last committed tree. A collection comes from QuickJS's
-  allocation pressure, or from the runtime itself: every
-  `REMOVALS_PER_COLLECTION` removals, the batch that crosses the count ends
-  with one, so the handles an unmount left behind are finalized — including
-  any caught in a cycle, which reference counting cannot free — without
-  waiting for allocation to reach the threshold. Per-handle realm state
-  (listeners, `__AddEvent` handlers, the index bookkeeping, list callbacks)
-  lives on the handle object under realm-local symbols rather than in a
-  `WeakMap` keyed by it: QuickJS's `WeakMap` marks its values
-  unconditionally, so a closure that captured its own element would otherwise
-  keep the handle, and through it the whole subtree, alive for the life of
-  the realm. No handle is ever minted after the first and there is no
-  `retain`: a future query member that has to answer with a handle for a node
-  whose handle has died must fail loudly, and so must a dispatch whose target
-  has none — a connected element always has one, so a target without one is
-  the ownership graph and the tree disagreeing.
-  Core owns Lynx page policy in its `tree` module — the `page` root tag,
-  `Viewport`/stylo `Device` construction, the Lynx UA cascade defaults, and
-  the image component and tag-owned UA rules (`tree::raw_text` now contains
-  only generated-content CSS and its tests);
-  the native host-module functions call `dom::Document` directly — while tag
-  vocabulary, handle lifecycle, and the PAPI member surface live in
-  `packages/bobcat-element`. Element identity is the DOM `NodeId`, which is
-  also the element's Lynx `unique_id` — one number, issued by the DOM, never
-  reissued; the JS side mints no ids of its own; the host
-  boundary validates primitive arguments, live IDs, and tree-mutation
-  preconditions before entering `dom`, returning misuse as a JavaScript
-  exception (unexpected internal panics remain fatal on abort-only Wasm). An unflushed batch may
-  present once its evaluation ends — web-core's visibility model, where
-  the browser paints the live DOM regardless of `__FlushElementTree`.
-  **Text** reaches the engine as an attribute and becomes generated paragraph
-  content. Script writes `__CreateRawText(value)` — a `raw-text` element
-  carrying `text` — and its UA rule `raw-text { content: attr(text); }`
-  feeds the same DOM generated-content path as author CSS. There is no custom
-  element reflection or synthetic DOM text child. `text[text]` uses the same
-  rule. Content replaces rendered children while preserving DOM structure.
-  The element's primary text style shapes and paints its run; attribute changes invalidate the paragraph,
-  and unchanged text/style reuse its shaping. `text` establishes one flattened
-  paragraph whatever `defaultDisplayLinear` says, `wrapper` is `display: contents`, and
-  `raw-text` dissolves into the `text` it is written inside
-  (`display: none` anywhere else) with
-  `white-space-collapse: preserve-breaks`, the one place Lynx keeps a literal
-  newline. Sibling runs and nested text share the establishing element's
-  paragraph. Core reflects `text-maxline` and `text-maxlength` into
-  `--lynx-text-maxline` / `--lynx-text-maxlength` presentational hints through
-  `Document::set_presentational_hint`. Each element's optional declaration
-  block enters Stylo at `CascadeOrigin::PresHints`, independently of inline
-  style: author CSS can override a limit, and replacing or removing inline
-  style reveals the attribute's current value. The UA registers both with
-  `<integer>` syntax and `inherits: false`. DOM's borrowed `StyleView` reads
-  their computed values through `TextContainerStyle`, and
-  `BlockStyle::from_container_style` consumes those inputs. Normal and animated
-  style refreshes merge effective limit changes into layout damage to re-break
-  the retained glyphs through existing box invalidation. Original attribute
-  strings remain available to selectors. No text custom element, separate paragraph-limit
-  storage, or public limit setter participates. Computed `text-overflow`
-  selects clip or the existing literal-dots ellipsis. Custom inline-truncation
-  content, `tail-color-convert`, and the text layout event remain unwired.
-  `docs/text-measurement-and-ifc.md` records the earlier design investigation;
-  current integration status lives in `docs/tracking/css-text.md`.
-  The resource module must not decode images/fonts/templates, upload render
-  resources, or own cache/retry policy. Runtime configuration, raw realm/value
-  handles, interrupts, and source-evaluation entry points remain private. The
-  bridge owns the generic source/native-module loader, deferred import
-  continuations, loaded-module namespace access, and settled Promise inspection;
-  Bobcat's specifiers, entry transform, graph membership, and boot policy stay
-  in the core adapter.
-- `crates/quickjs-rust-bridge` — owner-thread-bound safe Rust wrapper around
-  the pinned `vendor/quickjs` submodule. It exposes QuickJS's two objects as
-  two types: a `Runtime` (heap, atom table, job queue, execution limits,
-  registered module source) and the `Context` realms created on it, as many
-  as the host wants, all on the owning thread. Realms share what the runtime
-  owns and nothing else — a `Value` never crosses between them, one
-  registered module source compiles into a separate instance per realm,
-  native host modules are installed per realm under one runtime-wide
-  specifier namespace, and a *failure* belongs to a realm even though the
-  queue it came out of does not: a pending-job drain names the realm it
-  reports for, runs every queued job whichever realm queued it, and reports
-  only that realm's unhandled rejections. A sibling's stays queued for the
-  sibling's own next drain, and is freed with that realm; a caller that has
-  reported one realm's failure can drop what that realm still has queued
-  behind it, since one throw rejects a module's evaluation promise and
-  everything awaiting it, and pending jobs are not touched by that.
-  It owns the QuickJS C build and the
-  narrow unsafe FFI shim, realm/value lifetime and affinity checks, exact
-  ECMAScript string conversion, exception sanitization, pending-job pump,
-  synchronous preloaded source/native-module loader, loaded-module namespace
-  access, and module-evaluation Promise state.
-  Every heap allocation made by the C shim or the five compiled QuickJS C
-  translation units is redirected through a private C ABI into Rust's global
-  allocator; a fixed aligned prefix supplies the size required for matching
-  `realloc`/`free` and QuickJS memory accounting. QuickJS's `snprintf` and
-  `vsnprintf` calls are likewise redirected to a crate-private wrapper around
-  the pinned, allocator-free `nanoprintf` header; native and Wasm builds use
-  the same integer/string formatter without importing libc `stdio`, `FILE`,
-  locale, or another heap. All targets compile the C sources against the same
-  crate-private `stdlib`/`stdio`/`inttypes`/`string`/`math` declaration facade:
-  host allocation and the audited C gaps route to Rust, stack and basic
-  memory operations remain compiler builtins, and the bridge-unexposed
-  `FILE`/standard-stream diagnostic API is compiled out rather than modelled
-  as a platform ABI. The realm deliberately does
-  not install JavaScript shared-memory primitives: both `Atomics` and
-  `SharedArrayBuffer` are absent, while ordinary `ArrayBuffer`, typed arrays,
-  and `DataView` remain available. This does not disable Rust-side atomics used
-  for interruption or host synchronization. Because QuickJS formerly coupled
-  its process-global class-ID mutex to the same feature, the bridge allocates
-  its one host class ID through a Rust `OnceLock` and registers that ID
-  separately in each runtime, preserving concurrent native realm creation.
-  It also owns the **host-function seam**: `Realm::function`,
-  `define_global_function`, and `register_host_module_function` back a JS
-  callable with a Rust `FnMut`, dispatched
-  through one C trampoline (`JS_NewCFunctionData` + a realm-owned callback
-  table reached via the context opaque). Host callbacks speak `HostValue`, a
-  primitives-only boundary (undefined/null/bool/number/string) — ordinary
-  objects, arrays, functions, symbols, and ill-formed UTF-16 strings are
-  rejected on the way in rather than lossily converted; element identity
-  crosses as plain numbers, and handle objects never leave JavaScript. This
-  boundary keeps ordinary callbacks as leaf operations. Their `FnMut` closure
-  is borrowed through a `RefCell`, so reentry is refused rather than aliasing
-  it; a panicking callback becomes a JS exception and leaves the slot usable.
-  Runtime JS reads ReactLynx's hooks directly from `globalThis`.
-  Runtime/PAPI identifiers remain module imports; named Lepus chunks execute
-  through a direct-eval closure in the selected entry's scope. No native Script
-  evaluator or second set of global bindings is installed.
-  Named calls and replies belong to the two JS
-  Worker message handlers; Rust transports opaque messages and performs no
-  Lepus-specific dispatch or reply flush.
-  Boot's deferred flush uses ordinary Promise scheduling and the existing
-  outer checkpoint, with its rejection attribution and generation
-  notification. See `docs/mts-execution-runtime.md` for the boot and chunk
-  execution boundaries.
-  A closure's lifetime follows its JS function object rather than the realm: the closure
-  sits at its own stable heap address, which a companion JS object holds and
-  the collector hands back through a finalizer — so nothing is indexed,
-  recycled, or aliasable by a stale reference, and discarding a function drops
-  its closure. Without this a realm registering a handler per element per
-  update (events, worklets) would accumulate every closure it ever made.
-  The finalizer only *records* the address; the drop happens at the next
-  `&mut Realm` entry point, because a handler may own a `Value` whose `Drop`
-  calls `JS_FreeValue` and re-entering QuickJS from inside its own GC is
-  unsound. Capturing a same-realm `Value` is therefore safe, but forms a
-  reference cycle that leaks the realm unless the function is collected first.
-  The crate must remain independent of Bobcat, the DOM, resources, and runtime
-  policy — it knows nothing about Lynx.
-- `crates/bobcat-resources` — the cross-platform reference resource system:
-  one `ResourceFetcher` for macOS, Linux and the browser, which all shipped
-  embedders use instead of the in-memory fetchers they used to carry. It is
-  the worked example of what the protocol expects, not part of the
-  protocol, and core stays exactly as free of resources as before. Four
-  things live here and nowhere else in the workspace. **Transports**:
-  contents the embedder registers under any URL (`Resources::register` and
-  `register_style_sheet` — a decoded bundle's scripts and `StyleInfo` sheet,
-  a browser-fetched script's bytes, a test's PNG), `data:` URLs, `file:`
-  URLs natively, and `http(s)` through the platform's own client: libcurl
-  loaded at runtime with `libloading` on macOS and Linux (no build-time
-  link, no bundled HTTP or TLS stack; a host without it gets a precise
-  `Unavailable`), and the Render Worker's `fetch` in the browser.
-  **A MIME-keyed preprocessing pipeline**: every payload is sniffed (image
-  magic beats the label, a label beats a byte scan, a BOM names a charset),
-  classified, and treated by class — text transcoded to UTF-8 with its BOM
-  removed so the engine's strict validation sees what a browser's decoder
-  would have produced, JSON validated, images container-sniffed and
-  header-probed for their intrinsic size without decoding a pixel, the rest
-  passed through. **Tiered caching**: decoded bitmaps in a memory tier under
-  a byte budget with the frame's working set pinned against eviction, and
-  fetched bytes in a disk tier under its own budget with RFC 9111
-  freshness, `ETag`/`Last-Modified` revalidation, and the fetch cache modes
-  mapped from `CachePolicy` (natively; the browser's HTTP cache plays that
-  role there). Stylesheet responses, including pending loads and failures,
-  are shared by resolved URL within a resource scope. Preload hints populate
-  that same cache; registration changes invalidate the affected URLs.
-  **Platform image decoding**: no codec is compiled in —
-  `ImageIO` on macOS (`CGImageSourceCreateThumbnailAtIndex` with a maximum
-  pixel size, so a photo shown small is decoded small), gdk-pixbuf on Linux
-  (loaded at runtime; `gdk_pixbuf_loader_set_size` from the header probe),
-  and the main thread's `Image` element in the browser (the Render Worker
-  fetches the bytes and hands them over as a Blob), each asked to downsample
-  during decode. Natively a load is one task on the crate's own
-  `current_thread` tokio runtime — built by `Resources::new` and moved to a
-  `bobcat-resources-driver` thread that drives it and shuts it down — whose
-  blocking pool (`max_blocking_threads = worker_threads`) runs the transport
-  read, the preprocessing and the decode; a `Semaphore` sized by
-  `decode_parallelism` is acquired *before* a decode closure is submitted, so
-  a decode that has to wait holds no pool thread, and a panic inside a closure
-  becomes that image's or source's reported failure. In the browser a load is
-  a local task instead. Either way completions are delivered through the
-  wakeup the embedder supplies, and are applied in the next `LynxView::pump`
-  through the protocol's `service_images` hook. The frame reads each image
-  with the size it draws it at: a resident bitmap far larger than its draw
-  is re-decoded at the drawn size in the background and replaced, one that
-  was evicted is restored inside the read from the retained bytes or the
-  disk tier — on the embedder's own thread, synchronously and with no decode
-  permit, which is why the transport keeps a blocking entry point and
-  `tokio::fs` is not adopted — and one drawn larger than it was decoded is
-  refined back up as long as the image has more to give. In the browser that restore is the one
-  place the Render Worker blocks: the main thread never waits, so a job's
-  mailbox in shared Wasm memory and `Atomics.wait` are what let a read that
-  must not miss wait for it (`crates/bobcat-wasm/js/image-decoder.ts` is the
-  main thread's half). Shape: `Resources` is the shared system (registry, caches,
-  executor, decoder; cheaply cloned, bound to the embedder's thread) and the
-  only holder of the executor, so the runtime is shut down — without waiting
-  for work already picked up — when the last clone of the last scope drops on
-  that thread; `Resources::builder` yields the per-view `ViewResources` that
-  `LynxGroup::create_lynx_view` takes and that carries that view's
-  `ImageReports`.
-  Recorded limits: only an image's first frame is decoded (no animated
-  playback), no `region-to-decode`, no `blur-radius` post-processing, and none
-  of the `<image>` element surface past `src` — the pipeline serves whatever
-  source string the paint walk names, today `url(…)` layers and the source an
-  `<image>`'s `src` installs through `Document::set_image_source`.
-  The macOS decoder is type-checked against the Apple target but exercised
-  only where ImageIO exists; the Linux decoder and libcurl transport are
-  tested for real against the system libraries, and the browser path is
-  linted for wasm32 and exercised only in a browser.
-- `crates/bobcat-cli` (`cli` feature) — the native `bobcat` product over
-  `bobcat-core`. Its workspace dependencies are
-  `bobcat-core`, `bobcat-resources`, and `bobcat-source`.
-  `bobcat -i file:///…` content-sniffs and boots either one web bundle or one
-  raw Lynx XML source card; other URL schemes remain rejected at the boundary.
-  The CLI is an **embedder** of the opaque `bobcat_core::LynxGroup`,
-  `LynxView` and `Painter`: it owns
-  argument parsing, local input IO, the `PageSource` instance, the reference
-  resource system with the extracted scripts/styles registered, the winit
-  window and event loop, device metrics, input
-  translation, the stdin prompt, and PNG writing — and nothing of the
-  pipeline. It builds both halves on its own thread — the view from the group,
-  the painter from the window — and attaches the one to the other. Every event
-  handler is a relay into the painter
-  (`dispatch_input`, `resize`, `set_occluded`, clock ticks in
-  headless mode); the engine owns the tree, commits, scheduling, and its
-  script thread. The window it hands `Painter::new` is
-  the draw target and nothing else: frames and lifecycle
-  events alike wake the event loop through the injected `EventRequester`, and
-  the turn that wakeup opens ends in `about_to_wait`, which takes both turns in
-  order — `painter.pump()` draws the frame it owes, then `view.pump()` services
-  the host's resources and hands back what the realm had to say. Winit's
-  `RedrawRequested` is not relayed at all. Drawing there rather than in the
-  relays coalesces a turn's events into one frame and keeps the frame's vsync
-  wait out of winit's proxy-event drain, which iterates until empty. The
-  painter goes first deliberately: the pixels a fatal script error left behind
-  reach the screen on the turn that reports it. The loop always waits — a realm
-  timer is not its deadline to keep, because the engine waits its own out and
-  wakes this thread like any other publication — and what wakes it for a
-  *frame* is the window's own display: while `Painter::owes_frame` holds, a
-  `CVDisplayLink` on the monitor the window is on posts one wakeup per refresh
-  and stops the moment nothing is owed. The CLI renders
-  one page, so it starts one group and gives its single `create_lynx_view` the
-  author CSS and entry MTS URL as a `ViewSources`, reporting any group,
-  resource or TLA boot failure as `CliError::StartView`; after successful
-  construction it consumes the preserved `ScriptFinished` edge and any later
-  `ScriptRunError` through `view.pump()`. Headed
-  mode builds its painter over the window; headless mode builds one over
-  `DrawTarget::Offscreen` and relays synthetic
-  vsync ticks into `Painter::tick` — whether a tick becomes GPU work is the
-  engine's decision. Fields drop in the order `vsync, painter, view, …,
-  window`, so the display link is stopped before what it wakes goes away and
-  the surface is released before the last handle to the window does.
-  The CLI's resource system is `bobcat-resources`: the decoded input's
-  scripts and stylesheet are registered under `bobcat-memory://` URLs, the
-  input's own `file://` URL is the base every relative `url(…)` resolves
-  against, and a disk tier lives under the user's cache directory — so a
-  page's images, beside the input, inline as `data:`, or on the network,
-  load and decode through the platform. A load completing on the fetcher's
-  driver thread wakes the event loop exactly as a commit does.
-  Headed mode uses a native winit window with display-backed
-  vsync and tracks both logical viewport size and device-pixel ratio. Headless mode uses a
-  configurable synthetic vsync rate, skips catch-up bursts after slow frames,
-  and retains its Vello renderer, render texture, and staging buffer across
-  frames. Both modes expose a GDB-like stdin command prompt (`continue`,
-  `pause`, `frame`, `screenshot`, `help`, `quit`; headless also supports
-  `set/show vsync`). Screenshots are captured only through that live prompt;
-  there is no one-shot startup flag. PNG readback happens only on a screenshot.
-  It must not
-  duplicate runtime, DOM, layout, painting, or source-lowering policy: missing
-  MTS/PAPI support remains a precise `bobcat-core` QuickJS error.
-  `bobcat-source` lowers a decoded `StyleInfo` into
-  `bobcat_core::PreparsedStyleSheet`, flattening every `css_id` fragment in
-  reverse-topological order so imported fragments precede their importers.
-  Each native embedder registers that sheet in `bobcat-resources` under the
-  URL it names in `ViewSources::style_sheets`. A bundle carrying non-zero
-  fragment ids warns that per-component scoping is not implemented rather
-  than claiming compatibility.
-  For XML, a present `<style>` body instead uses the fetcher's raw CSS-text arm
-  and the fixed page configuration is `false`/`false`/`true` for default
-  linear display, visible overflow, and selector support. A present background
-  section is retained under `/app-service.js` and warned about, but not
-  executed until Bobcat has a background-thread realm.
-- `crates/bobcat-cli` (`server` feature) — the `bobcat-server` HTTP screenshot
-  **embedder** in the same crate, not runtime
-  infrastructure inside `bobcat-core`. It follows UI Judge's public capture
-  surface: `GET /health` and multipart `POST /screenshot/lynxml`,
-  `/screenshot/template`, `/screenshot/template/url`, `/screenshot/zip/upload`,
-  and `/screenshot/zip/url`. The old JSON `/screenshot` route is removed.
-  All routes require a safe `entry` path and route-specific `source`, `url`,
-  or `file` part. Viewports default to 800×600 at DPR 1, accept dimensions up
-  to 8192 with at most 2,621,440 pixels, and return raw `image/bmp` with
-  `Cache-Control: no-store`. BMP output matches UI Judge's top-down 32-bit
-  BITMAPV4HEADER/BI_BITFIELDS layout, preserving alpha without a second white
-  composite. Multipart fields share a 10 MiB bound plus 64 KiB framing and a
-  10-second upload deadline; remote URLs are bounded to 8 KiB.
-  `/screenshot/template` and `/screenshot/lynxml` accept `screenshotSettleMs`
-  (default 16) and `timeoutMs` (default 60000); the other routes use 500 ms
-  and 60000 ms and reject timing fields. JSON/query parameters, duplicate or
-  unknown fields, and old snake_case aliases are rejected. `initData` and
-  `globalProps` must be objects; `.lynxml` entries reject `globalProps` even
-  when empty. Non-empty page-data objects remain explicit 422 errors: the
-  server does not forward them to its views yet, though `ViewSources` takes
-  both as JSON text. See `crates/bobcat-cli/SERVER.md` for examples.
-  Axum accepts HTTP requests concurrently, but a bounded FIFO of eight waiting
-  jobs feeds one dedicated capture thread. That is the embedder thread for
-  each job: it starts a fresh `LynxGroup`, constructs its non-`Send`
-  `LynxView`, builds a `Painter` over `DrawTarget::Offscreen` beside it and
-  attaches the two — both stay on that thread, the view because it owns the
-  host's resource system and the painter because it owns the GPU target. It
-  settles on a plain frame interval, taking `view.pump()` and then
-  `painter.tick(false)` per step, and returns its RGBA capture. Dropping that
-  view releases
-  its group, including the Lynx main thread, QuickJS runtime, and Stylo pool;
-  no runtime is shared across capture jobs. The server adds no separate
-  rendering owner.
-  BMP encoding then runs on Tokio's blocking pool after the view is gone, so
-  it cannot retain the view or hold the GPU lane. Queue saturation and an
-  unavailable worker are 503, input/render failures are 422, and encoding
-  failures are 500; capture/upload timeouts are 408. A worker panic makes `/health` unavailable and initiates
-  graceful server shutdown.
-  Remote template/ZIP downloads follow UI Judge's public HTTP(S), no-credentials,
-  no-redirect policy, pin DNS results, and enforce 10 MiB/10-second bounds.
-  XML bytes and downloaded templates enter `PageSource`; archives use the
-  shared `ZipSource`, registering members at `zip:///` URLs in each job's
-  resource system without filesystem extraction. ZIP validation errors are
-  400; unsupported source/rendering errors remain 422. Source-based native
-  bundles require a `root` module; real bytecode remains unsupported.
-  It listens on all IPv4 and IPv6 interfaces and has no auth, TLS, or CORS.
-  Captures still require trusted JavaScript: fresh groups on a capture thread
-  do not provide UI Judge's process isolation, and page subresources use the
-  ordinary resource transport. `timeoutMs` cannot preempt synchronous QuickJS
-  execution, GPU driver calls, or synchronous view teardown. Source fetching,
-  HTTP policy, BMP encoding, queueing, and server lifecycle stay outside core.
-- `crates/bobcat-wasm` — the pure-Rust `wasm-bindgen` browser embedder and npm
-  facade, built for `wasm32-unknown-unknown` with shared memory. It exposes
-  `loadTemplate` for binary web and source-based native bundles,
-  delegating decoding, page configuration and StyleInfo registration to
-  `bobcat-source::PageSource`. Its original response URL remains the resource
-  base. The Pages Canvas tab passes local ZIP bytes and an entry URL through
-  `loadZip` to `bobcat-source::ZipSource`. Each page gets a separate resource
-  scope, retaining archive assets after boot and isolating image caches and
-  completion queues while sharing the platform decoder. The browser has no
-  executor at all: each load there is a local task on the Render Worker.
-  The service worker only provides cross-origin isolation headers;
-  `loadLynxXml` retains its XML-only, host-configured contract.
-  The browser UI thread is a JavaScript-only host coordinator: it creates one explicit
-  embedder Worker and transfers an `OffscreenCanvas`, but never instantiates
-  Wasm or owns engine state. That Worker initializes the module, constructs one
-  opaque `LynxGroup` and one `LynxView` in it per page through
-  `BobcatRenderer::load`, keeps **one `Painter` for its canvas across page
-  loads** (rebuilt only when it is missing or its target has failed),
-  permanently owns
-  every thread-affine GPU object — crates.io Vello 0.10/wgpu 29 Device, Queue,
-  Surface, Renderer, and OffscreenCanvas — and uses `wasm_thread` to create the
-  two Workers each group is made of: its nested Lynx main/VM Worker and the
-  worker-realm Worker beside it. A `load` is `painter.detach()` → drop the old
-  view → drop its group (which ends the Lynx-main Worker and then the
-  worker-realm one) → new group and
-  view → `painter.attach(&view)`, and the canvas is deliberately *not* resized
-  along the way: it already carries the right resolution, and setting a
-  canvas's size clears its bitmap, which would blank the previous page's last
-  frame while the next one loads. `BobcatRenderer::pump` stays one method and
-  takes both turns in order, the painter's first. That Worker in turn spawns its group's Rayon
-  style Workers the same way, with `wasm_thread` as the spawner, leaving the
-  vendored Stylo sources unchanged. Core creates its owner-thread-bound QuickJS realm
-  inside that Worker; Element-PAPI
-  batches, Stylo/Rayon, layout, and
-  render hand-off then synchronize through Rust channels, mutexes, atomics,
-  and the shared Wasm memory exactly as in a native embedder. JavaScript
-  `postMessage` is only the browser host boundary (initial Canvas transfer,
-  URL-based script requests/results, resize/input/lifecycle) or a library's
-  Worker bootstrap control plane; it is not a DOM/render reconciliation
-  protocol. URL requests are serialized, and a lost-wake-safe `EventSignal`
-  Promise wakes script completion independently of Worker rAF, so a hidden page
-  may pause drawing without stranding the `load` Promise. The UI facade, nested
-  VM Worker startup, and built-in QuickJS configuration impose no wall-clock
-  deadline on loading or execution. QuickJS drains its owned pending jobs and
-  waits for the TLA boot module's evaluation Promise to settle at its host
-  checkpoint; there is no browser microtask-completion protocol. The
-  underlying QuickJS bridge retains an
-  opt-in execution timeout for its direct users and tests.
-  A Wasm instance owns nothing of Stylo's but the Worker bootstrap
-  `configure_wasm_workers` installs — one script URL, which is what every
-  Worker a group spawns is made of — while each `LynxGroup` owns its own
-  Lynx-main Worker, worker-realm Worker, style Workers and both QuickJS
-  runtimes, and each `LynxView` in
-  it its own realm, document and endpoints, just as a native group does. Every
-  public `BobcatCanvas` gets a separate Render Worker and Wasm instance; a
-  renderer holds neither group nor view until `BobcatRenderer::load` builds
-  both, and each later load replaces them. A page gets a group of its own
-  rather than reusing the renderer's, because the script runtime is the
-  group's: a page loaded twice would otherwise register its entry module a
-  second time under a name the previous load already took. Dropping the view
-  stops it and dropping its group ends the Lynx-main Worker and, after it, the
-  worker-realm Worker, once the Lynx-main Worker has released the document and
-  thread-bound QuickJS realm; ending is all it is on this target, since
-  `panic=abort` leaves a trapped Worker never signalling its join handle, so
-  wasm teardown says the goodbye and does not wait.
-  Replacement construction starts only after that teardown. The
-  transferred OffscreenCanvas, module instance, configuration, latest metrics,
-  resource provider, registered font containers, selected default font family,
-  and Stylo worker *count* are the renderer's own, reapplied to each group it
-  builds; the workers themselves belong to the group and retire when it is
-  dropped. Registered script and stylesheet bytes remain available until the
-  startup outcome arrives; cleanup leaves ZIP assets and the next page's staged
-  sources intact. The Render Worker is not a pool member; the group's Lynx-main
-  Worker is index zero of the pool it builds, taken over in place by rayon's
-  `use_current_thread`, and the rest are managed Workers it spawns.
-  `BobcatRenderer::create` therefore takes a count of one to
-  `MAX_STYLE_THREADS` counted the way `StyleThreads` counts everywhere — the
-  Lynx-main Worker included — and the facade asks for the machine's threads
-  less the Render Worker. The UI never
-  blocks, while Worker-side Rust may block wherever the native runtime does.
-  The browser target enables `parking_lot_core/nightly` so transitive
-  Stylo/wgpu parking_lot locks use Wasm atomic wait/notify instead of the
-  non-atomic Wasm backend that panics on contention.
-  Release packaging pins Binaryen 132 through the JavaScript workspace and
-  runs `wasm-opt -Oz` after wasm-bindgen with an explicit mirror of every
-  enabled Rust/LLVM Wasm feature; the build rejects a different optimizer
-  version instead of accepting wasm-pack's older fallback. Package
-  verification requires the optimized module to omit its debugging `name`
-  section while retaining `target_features`.
-  Browser builds disable Parley's `complex-scripts` feature to avoid embedding
-  ICU's multi-megabyte CJK and Southeast Asian dictionaries; native targets
-  retain it. Grapheme segmentation, shaping, and ordinary Unicode line
-  breaking remain available, while Thai, Khmer, Lao, and Myanmar text may use
-  cluster-level emergency breaks and report a larger intrinsic minimum width.
-  `wasm_thread` is pinned to the upstream
-  `spawn_from_worker` change because its crates.io release otherwise forwards
-  nested spawns to a parent protocol handler that an explicit embedder Worker
-  does not have; Chrome 135 supports the resulting nested module Worker.
-  Page sources still arrive through the Render Worker's own `fetch`: it
-  registers the raw stylesheet and entry-MTS bytes with the
-  `bobcat-resources` system it owns and calls
-  `BobcatRenderer::load(entry_url, style_sheet_urls)`; the entry's final
-  response URL is the ESM specifier imported by `bobcat:boot` and the base
-  its images resolve against. Images a page names are fetched by the
-  resource system itself through the same Worker `fetch` and decoded on the
-  main thread by an `Image` element in the package's `js/image-decoder.ts`,
-  over a `MessageChannel` whose Worker end the facade hands to
-  `BobcatRenderer::create` at init.
-  `loadLynxXml(url)` fetches an XML envelope once, decodes it with the web
-  loader's replacement-mode UTF-8 behavior, parses it with `bobcat-source::xml`, and hands any
-  raw stylesheet and its main-thread body to the same `load`; both are repeatable. The
-  exported `LYNX_XML_PAGE_CONFIG` names the source format's fixed page defaults;
-  a host may still deliberately override them.
-  The optional background body is registered at its section URL and loaded
-  into the view's BTS worker, with the Context MVP described above.
-  Transferring the canvas does not transfer its DOM event target, so the
-  `BobcatCanvas` facade retains that element and automatically forwards active
-  `pointerdown`/`pointermove`/`pointerup`/`pointercancel` sequences. It claims
-  each accepted pointer, maps client coordinates through the canvas bounds
-  into viewport CSS px, and sends compact fire-and-forget records through the
-  same ordered Render-Worker queue as load/resize. The Worker stamps input
-  with its own `performance.now()` before `BobcatRenderer` writes the shared
-  manual clock and calls `LynxView::dispatch_input`; this keeps gesture time on
-  the Worker rAF timeline and prevents an idle frame clock from making
-  `longpress` fire immediately. Each load clears active captures, disposal removes
-  all listeners and restores the canvas's prior inline `touch-action`, and
-  unexpected capture loss becomes `pointercancel`. Hover moves, secondary
-  mouse buttons, and wheel input do not cross the boundary.
-  The facade exposes no create/append/drop/flush,
-  document, tree, or engine API. It does not decode `.web.bundle` containers;
-  callers supply `PageConfig` and either executable script URLs or a raw Lynx
-  XML URL. Synchronous GPU
-  capture is likewise absent because
-  browser WebGPU completion is Promise-driven.
-- `packages/bobcat-element` — the dependency-free TypeScript sources of the
-  ESMs `bobcat-core` preloads into its QuickJS realms. Six go on the
-  main-thread runtime: `src/main-thread-runtime.ts` provides
-  `bobcat:runtime`, `src/element-papi.ts` provides `bobcat:element`,
-  `src/timers.ts` provides `bobcat:timers`, `src/event-target.ts`
-  provides `bobcat:event-target`, `src/cross-thread-context.ts` provides
-  `bobcat:cross-thread-context`, and `src/worker.ts` provides the `Worker`
-  class as `bobcat-internal`. The group's *worker* runtime gets
-  `src/worker-runtime.ts` as `bobcat:worker` and
-  `src/background-thread-runtime.ts` as `bobcat:bts-runtime`, plus
-  `bobcat:selector-query`, `bobcat:event-target`, `bobcat:cross-thread-context` and
-  `bobcat:timers` again — registered per runtime, because a source is
-  runtime-wide and no value crosses between two runtimes. What core embeds,
-  with `include_str!`, is the JavaScript TypeScript 7 compiles from `src/*.ts`
-  during the Cargo build. `bobcat-core/build.rs` invokes the package's build
-  script with an output directory under Cargo's `OUT_DIR`; each target/profile
-  owns its emit, so parallel builds never write into a shared source directory.
-  Cargo tracks the sources, build script, TypeScript configuration and pnpm
-  dependency files. Run `pnpm install --frozen-lockfile` before Cargo; Node is
-  a build dependency for native and Wasm consumers alike. Generated JS is not
-  committed. `pnpm --filter bobcat-element build` emits to ignored `dist/` for
-  local inspection. QuickJS error lines refer to emitted JS, not TS. The
-  Rstest suite imports the same modules and verifies every named export. The
-  package owns the
-  supported `__*` PAPI members and their web-core arities,
-  plus the Lynx tag vocabulary
-  (`wrapper`/`text`/`image`/`view`/`scroll-view`/`raw-text`/
-  `list`). It also owns the value coercions web-core gets from the HTML DOM for
-  free: truthiness-not-null clearing for classes, ids, and inline styles,
-  `String(value)` for DOM attributes, and camelCase-to-kebab hyphenation of a
-  record-shaped inline style. Lynx attribute readback retains a separate typed
-  container copy, and datasets merge typed keys in the MTS handle. BTS
-  `lynx.createSelectorQuery()` builds `NodesRef` tasks carrying selection tokens
-  over the existing Worker messages. MTS resolves those through the document's
-  selector engine, including the query root, and returns fields/path data;
-  `setNativeProps` applies CSS/attributes and commits before the next request.
-  `invoke` delivers selection and unsupported-method failures; actual UI methods
-  remain unimplemented. No callback or document handle crosses into Rust's
-  Worker transport. See `docs/node-query-runtime.md` for the supported fields,
-  callback semantics and remaining boundaries.
-  The package also owns the event half: a handle is an `EventTarget`, its
-  listeners are closures filed on the handle itself under a realm-local
-  symbol — so a registration can never keep its element alive, and QuickJS's
-  non-ephemeron `WeakMap` never gets the chance to — and the per-node
-  dispatch, the standard's `eventPhase`, and `once` are all resolved here,
-  with only the event name's open/close edges crossing to the host.
-  An element handle is a plain object carrying its DOM `NodeId`
-  under a realm-local symbol (web-core's `uniqueIdSymbol` shape) — one
-  object per element for its whole life, so every PAPI return of an element
-  yields the same object.
-  `parentComponentUniqueID` and `__CreatePage`'s arguments are accepted for
-  PAPI shape and unused. Lifecycle: collection is the only way a handle
-  lets go of its element — web-core's model, where a swept `WeakRef` is
-  what ends a wrapper. Every non-page handle is registered with a
-  `FinalizationRegistry` whose cleanup calls the imported native
-  `dropElement`, which frees that element and nothing else; cleanup runs as
-  a pending job at the host's job checkpoints, and never at realm teardown,
-  which preserves the last committed tree. Keeping a connected element's
-  handle alive is this layer's own job, through the per-handle child set
-  described above. The JavaScript layer
-  deliberately does
-  not validate handles: a foreign handle resolves to `undefined`, which the
-  private native boundary rejects as a JavaScript error before entering
-  `dom`. Native access is limited to named imports from the native
-  `bobcat-internal:host` ESM; the realm has no `globalThis.bobcat`, no
-  `console`, and no DOM. Named exports are the only Element-PAPI surface
-  for transformed MTS entries; local named Lepus chunks retain those imports
-  through an entry-scope direct-eval closure. Rstest
-  imports the TypeScript directly, and TypeScript 7 checks the sources as a
-  program with `lib: es2023` and no ambient types — the realm has neither DOM
-  nor Node — resolving each `bobcat:*` specifier to its file through `paths`
-  and declaring the two native modules' contracts in a `.d.ts`.
-  `src/timers.ts` is the one module here that does install globals, because
-  bare `setTimeout`/`setInterval`/`clearTimeout`/`clearInterval` are how a
-  card reaches them. It keeps only the callbacks, filed under the id the
-  host's `setTimer` hands back; the schedule and HTML's `long` delay
-  conversion and nesting clamp are `bobcat-main`'s, and the first step of the
-  epilogue that follows every entry into a realm is what calls the module's
-  `__BobcatRunTimer` back for whatever is due — before that entry's commit, so
-  a callback's mutation rides the same frame. The engine waits its own
-  deadlines out: each realm has a waiter task of its own holding one pinned
-  sleep on that realm's next deadline, re-armed only when the deadline moves
-  and fed by a watch the epilogue publishes, so a due timer needs no host
-  protocol of any kind — no deadline crosses the link and no host turn is owed
-  for one.
-  `src/element-papi.ts` also exports `class Document`, whose constructor calls
-  the native `createDocument`. It is on no collection schedule at all, which is
-  the opposite of the element path in the same file: cards genuinely unroot
-  handles, while the boot module holds the document in an exported binding for
-  the realm's life, and the host frees the `LynxDocument` after the realm
-  rather than from a cleanup job.
-- `crates/dom` — generic W3C-DOM-subset document tree and
-  standards-oriented CSS computation core. `docs/dom-public-api.md` is the
-  authoritative normal-build versus test-feature API boundary. It owns a
-  fixed-address boxed
-  `TreeArenas<T>` containing two `Slab`s: a primary `Slab<Node<T>>` (slot
-  zero is the real DOM Document node and carries its node-visible style
-  context; later slots are element/text nodes) plus a slot-aligned payload
-  slab. A separate inline
-  `DocumentLayoutState` owns slot-aligned layout state — a lazily sized
-  vector rather than a third lockstep slab: creating a node costs nothing
-  there, a node that is never laid out never allocates layout state,
-  `Document::layout`/`render` size it to the arena's slot bound in one
-  resize, and an absent entry reads as "never laid out" (an empty layout
-  cache) everywhere else.
-  Identity and storage are deliberately split (`tree/arena.rs`): a `NodeId`
-  is an index into `TreeArenas::slots`, a `Vec<Option<NodeSlot>>` whose entry
-  holds the arena slot the node's state actually occupies. Ids only count
-  upward and a freed one is never reissued, so a `NodeId` names one node for
-  the life of the document and a stale id resolves to nothing rather than to
-  a stranger — which is why the tree carries no generation counters and no
-  epoch gate on the retained frame, and why the same number can be handed to
-  script as Lynx's element `unique_id`. The arena slot *is* recycled, so
-  only the four-byte table entry leaks, per node ever created. The raw slabs
-  are private to `tree/arena.rs`: nothing else can index one with a `NodeId`,
-  which is what keeps the split enforced rather than merely documented. Stylo's
-  per-element style data (the upstream `ElementDataWrapper`, no outer cell)
-  and its traversal/invalidation flags live inline on `Node` (bench-defended
-  2026-08-03: the paired A/B showed no traversal regression and a measurably
-  faster no-op-commit fast path). The
-  primary slab selects each raw-`usize` ID; the payload slab allocates and
-  removes in lockstep with it and asserts it received that same key (it
-  reserves a payload-less sentinel at document slot zero), while the layout
-  vector resets a freed key's entry so the key's next occupant starts clean
-  (ONE TREE policy: nodes are created and mutated only through `Document`
-  methods). The **document element is
-  permanent and pre-created**: `Document::new(device, root_tag, root_payload)`
-  builds it at slot one (tag injected — the core still owns no tag
-  vocabulary), `document_element()` returns it non-optionally, and it can
-  never be detached or removed, so the document node's child list is
-  structurally immutable after construction and no "empty document" code path
-  exists in flush, layout, visual, or paint. Computed styles remain with the
-  primary nodes; layout/text state does not. The crate's entire `unsafe`
-  surface is two blocks — the arena backpointer deref and the
-  `TElement::ensure_data` contract call — plus the `unsafe fn` signatures
-  Stylo's traits mandate (all bodies safe). Both blocks carry a `SAFETY`
-  comment stating the invariant they rest on, and a crate-local
-  `#![warn(clippy::undocumented_unsafe_blocks)]` keeps that true.
-  `Document<T>` also owns one private concrete `Painter`, including its
-  reusable walk scratch and retained `vello::Scene`, plus the
-  embedder-installed `Arc<dyn ImageStore>` the walk reads.
-  `render` privately builds `PaintOrder` and invokes that painter
-  only for a dirty scene. The Painter records which private visual epoch its
-  scene represents, so `render`/`needs_render` own retained-scene scheduling without
-  publishing that epoch. `scene` lends a guarded shared borrow, while
-  `set_image_store` and `note_images_changed` are the narrow image seams and
-  invalidate the scene conservatively. There is no renderer type parameter,
-  `DocumentRenderer` trait, `with_renderer`, public Painter, public visual
-  epoch, or public paint-order constructor. The crate also owns the DOM-free
-  render floor absorbed from the former `pulsar` crate (2026-08-04): the
-  `render` module holds the `ImageStore` trait (re-exported at the crate
-  root) and the `render::gpu` wgpu render-to-texture/readback backend
-  (`gpu::Headless`, plus the `read_texture`/`renderer_options`/`render_params`
-  seams windowed embedders build against); the crate root re-exports the one
-  workspace `vello` version, and embedders configure wgpu/peniko/kurbo
-  exclusively through that re-export; the root likewise re-exports `stylo` as the CSS
-  vocabulary door for the layers above (strict linear chain: cli → resources
-  → core → element → dom). The embedder-facing `dom::Device` profile exposes exactly
-  the inputs that vary between views — `Device::new(width, height,
-  device_pixel_ratio)` — and locks the rest: screen media type, standards
-  (no-quirks) mode, light color scheme, coarse touch pointers, and
-  CSS-values-4 fallback font metrics. Quirks stays hard-wired in matching,
-  the `Stylist`, and the doc-hidden `standards_device` test seam, so neither
-  the quirks knob nor any stylo device vocabulary exists above this crate;
-  view metrics read back through `Document::{viewport_size,
-  device_pixel_ratio}`. `Headless::new` reports `NoAdapter`;
-  every GPU-backed test treats that as a hard failure, including in CI.
-  Nothing in `render` knows about nodes, computed styles, layout, or paint
-  order. Source layout groups the crate by subsystem: `tree/` (arena set,
-  `Node`, `Document`, shadow roots and the flat tree), `style/` (engine, Stylo
-  traits, flush, invalidation, damage, containment), `layout/`, `visual/`,
-  `paint/` (painter, walker, fragment painters), `scroll/`, `input/`, and
-  `render/`.
-  **Shadow DOM** (W3C, so W3C behavior) adds a fourth `NodeData` kind:
-  `Document::attach_shadow(host, mode)` creates a shadow root attached to its
-  host rather than listed among its children, so a host's child list stays its
-  light children. Three trees then coexist. The **node tree** is what
-  selectors match and what the public `Node` navigation reports; a combinator
-  runs out of parents at a shadow root, and Stylo retries against the
-  featureless host, which is what makes `:host` — and only `:host` — reach
-  across. The **flat tree** (hosts replaced by their shadow trees, `<slot>`s
-  by their assigned nodes, or by the slot's own children as fallback) is what
-  Stylo traverses, what inherited values inherit through, and what layout,
-  paint, and hit testing walk; it is reached exclusively through
-  `Node::flat_children`/`flat_parent_id`, both of which return arena slices so
-  every consumer keeps its `&[NodeId]` iteration. Each shadow root owns an
-  `AuthorStyles<DocumentStyleSheet>` whose scoped `CascadeData`
-  (`Document::add_shadow_stylesheet`) replaces the document's author rules
-  inside that tree; `::slotted()` and `::part()`/`exportparts` work off the
-  same data. Slot assignment is eager — every mutation that can change it
-  (host child list, shadow-tree slot set, `slot`/`name` attribute) resolves the
-  affected tree in the same call, gated on a live-shadow-root counter so a
-  document with none pays one branch — but eager is not the same as
-  recomputing the tree: appending a light child and removing one touch only
-  the slot involved (the shadow root caches its slot list for that, rebuilt
-  only when the slot set changes and debug-checked on every hit), and a full
-  reassignment is reserved for the cases that can re-target more than one node.
-  That split is benchmark-defended, not assumed: with the append path
-  reassigning the whole tree, building a 1024-row host cost 51× the same rows
-  with no shadow root, and 1.4× after
-  (`benches/shadow.rs::build_wide_host_{plain,shadow}`; the whole bench file is
-  paired plain-versus-shadow for exactly this reason). Per-node cost is one
-  `Option<Box<ShadowLinks>>` word, allocated only for hosts, slots, and
-  slotted nodes; the flat tree costs nothing on a no-op commit and ~1.02× on a
-  frame. Recorded limits: `TElement::slotted_nodes` keeps Stylo's
-  empty default (assignment changes dirty the host subtree wholesale instead
-  of invalidating `::slotted` per slot), `:host-context()` is absent from the
-  vendored selector grammar, and a node that leaves the flat tree keeps its
-  last computed style and geometry — the same contract detached subtrees
-  already have, and nothing renders it either way.
-  **Custom elements** (W3C, so W3C behavior, within a deliberately narrowed
-  scope) are the other half of the component model.
-  `Document::define(local_name, Box<dyn CustomElement<T>>)` registers one
-  handler per tag — a definition here is per-tag rather than the standard's
-  per-instance constructor, because this crate has no script realm to hold
-  instances in, so every callback names its element by `NodeId` and per-element
-  state belongs to the layer owning `T`. The handler receives `constructed`,
-  `connected_callback`, `disconnected_callback`, and
-  `attribute_changed_callback`, the last filtered by an `observed_attributes`
-  list read once at definition time.
-  **Scope: user-agent components, not script-defined elements.** Definitions
-  come from the engine layer above, never from application script, and
-  `define` *requires* that every definition precede any element with its tag —
-  it panics otherwise, since nothing later moves an element into a definition.
-  That single contract removes the standard's entire upgrade half: no
-  `undefined` state and therefore no `:defined` transition, no *upgrade an
-  element*, no *try to upgrade*, no `define`-time document sweep, no replay of
-  attributes an element already carried, and no *valid custom element name*
-  predicate (whose only job was deciding whether a definitionless element
-  counted as `undefined`). The document element is the one exception, because
-  `Document::new` creates it before any definition can exist, so defining its
-  tag constructs it. Restoring script-defined elements later is additive — an
-  `undefined` state, an upgrade reaction, and a sweep — and moves neither the
-  trait nor the dispatch contract.
-  What the narrowing does **not** remove, and the thing to not assume is
-  simpler than it is: reactions are still **queued, never called inline**, and
-  drained at the end of the public mutation that raised them (the standard's
-  `[CEReactions]` boundary), because a lifecycle callback mutates the tree
-  while its handler lives inside the `Document` being mutated — as true of an
-  engine-authored handler as of a script one. Dispatch clones an
-  `Arc<dyn CustomElement<T>>` out of the registry rather than vacating the
-  slot, which is what lets a callback on `x-row` create another `x-row` (the
-  ordinary list shape) instead of hitting a re-entrancy panic. Scopes are
-  watermarks into one flattened element queue while the per-element reaction
-  queue is shared across them, which reproduces a browser's
-  `A.disc, A.conn, B.disc, B.conn` for a subtree move. Three `Node` fields carry
-  the definition pointer, the `Uncustomized`/`Constructing`/`Custom` state, and
-  a conservative shadow-including-subtree summary; all fit in the existing
-  tail padding (stride unchanged, asserted). The summary rejects a lifecycle
-  walk at an ordinary subtree root and prunes ordinary branches when a walk is
-  needed; insertion propagates it upward, while removal may leave harmless
-  false positives instead of charging every ordinary mutation for exact
-  descendant counts. Reaction scratch collects only constructed custom
-  elements, so it is proportional to callbacks rather than all nodes visited;
-  `Constructing` earns its byte by suppressing the reactions a constructor's
-  own mutations would otherwise raise back at it. `:defined` is answered but
-  never moves — with no `undefined` state it matches everything, which is why
-  the `:not(:defined)` FOUC idiom is a script-defined-elements feature.
-  Both a nesting depth and a per-scope fixpoint budget bound the drain, and
-  both panic rather than hang. This is the crate's first self-authored `dyn`
-  (the other two are mandated by upstream Stylo signatures), admitted by
-  explicit user ruling because a document holds N behaviors keyed by N tag
-  names discovered at runtime, which a type parameter cannot express. The
-  trait carries no `Send + Sync` supertrait: it was justified as what kept
-  `Document<T>` `Send`, and a document is deliberately not `Send` any more.
-  Benchmarked
-  (`benches/custom_elements.rs`, three-way plain/unmatched/defined): a document
-  that defines nothing pays 1.00× on a no-op commit and 1.01× on creation; the
-  same suite's 4096-descendant `remove_element` cases defend the
-  unmatched-definition negative fast path and the dense callback path separately.
-  Further recorded limits: no `adoptedCallback` (no second document exists), no
-  `connectedMoveCallback` (every move is disconnect-then-connect, the
-  standard's own fallback), no customized built-ins/`is`/`extends`, no scoped
-  registries, no `whenDefined`/`get`/`upgrade(root)`, and no `failed` state or
-  construction stack — all of which exists to police a JavaScript constructor
-  that can throw. `disconnected_callback` takes a shared `&Document`, not a
-  mutable one: it is the only callback that runs with a free already committed,
-  so a mutable handle would let it re-attach the subtree being freed, link a
-  child to a node about to die, or free the node its caller still holds — three
-  hazards every removal would then have to detect and refuse. A callback that
-  *can* mutate may detach any node but may not *free* one the mutation that
-  called it is still holding: `create_element` and the constructor call pin
-  that id, `drop_element`/`drop_subtree` refuse to free a pinned node, because
-  freeing retires the id permanently and the mutation would otherwise link in
-  and return a handle that already names nothing.
-  Every node points directly back only to `TreeArenas`, and the
-  same plain one-word `&Node` implements Stylo's document/node/element/shadow-root traits
-  according to its `NodeData` (styling runs in place, no mirror tree),
-  inline-style parsing, and a private per-document `StyleEngine` containing
-  the `Stylist`, cascade pipeline, device, stylesheet set, and
-  `SharedRwLock`. `Document::new` creates that entire context afresh, so
-  different documents cannot share stylesheets. Author CSS enters either as
-  text (`add_stylesheet`) or, for CSS a host already parsed, as rules the
-  document itself builds — `build_style_rule` / `build_keyframes_rule` /
-  `build_font_face_rule` mint an opaque `CssRule` branded with the lock that
-  created it, and `append_rules` mounts a batch of them as one sheet, refusing
-  any rule minted by another document. That keeps the `SharedRwLock`, the base
-  URL, and stylo's own rule types inside the crate while letting the layer
-  above skip the sheet, at-rule, and declaration-block parsers.
-  The generic `T` payload remains associated with
-  each element/text node in the NodeId-aligned payload slab but is opaque and read-only to the DOM
-  core; selector-visible state comes only
-  from real DOM fields, so payloads cannot synthesize attributes. DOM setters
-  own snapshot/restyle scheduling, while stylesheet and device methods on the
-  document schedule its root in the same call — embedders cannot
-  set/clear dirty state or write computed styles. Mutation APIs follow a let-it-crash contract
-  (`debug_assert` + panic on stale handles rather than silent no-ops).
-  A document's style traversal runs on the workers
-  `Document::set_style_pool` gives it and on no others: one `StylePool` per
-  document, moved in rather than shared, which is what lets two documents
-  restyle at the same time with nothing serializing them. A document that was
-  never given one — every test and benchmark here, and any embedder asking
-  for a sequential view — traverses on the thread that flushed it, so the CSS
-  benchmarks measure cascade and matching work rather than Rayon dispatch.
-  Style
-  flush and its per-node `StyleDamage` (repaint / stacking / overflow /
-  relayout classes) are internal parts of `Document::layout`; harvested
-  damage is then **cleared** (the fix for stylo's never-cleared-damage
-  re-traversal bug). During that same harvest,
-  relayout-class damage is consumed immediately into boundary-stopped layout
-  cache invalidation, so no external damage report is needed to preserve
-  layout work; the module also owns the
-  `effective_containment` fold (`contain` + `content-visibility` → effect
-  bits). Layout invalidation stops early at the deepest ancestor whose
-  committed input hughie marked **content-independent** — the committing
-  parent proved the input's known dimensions, parent size, and available
-  space cannot move when only that subtree's content changes (pure-length
-  sizing, stable percentage bases, imposed stretch, content-free automatic
-  minimums, chained from the viewport-anchored root input; distinct from CSS
-  *definiteness*, which admits content-measured sizes). `run_layout` relays
-  such a subtree in place under the stored input and accepts the result only
-  when the output reproduces bit for bit — anything else escalates to the
-  whole-tree pass, which reuses the caches the attempt just filled. This is
-  what makes the ReactLynx steady state (text/attribute updates inside
-  fixed-size rows under the `page { width/height: 100% }` UA anchor) cost a
-  subtree instead of the document; `contain: strict` boundaries keep their
-  parked-relayout path as the containment-guaranteed special case of the
-  same machinery. Second and later invalidations in a batch stop at the
-  first already-cleared ancestor, so a burst of mutations pays one spine
-  walk, not one per mutation. Equivalence tests
-  (`tests/incremental_relayout.rs`) pin every path — in-place, escalated,
-  and root-reaching — to the geometry of a fresh document built directly in
-  the final state.
-  Its `layout` module is the concrete `hughie` host:
-  `Document::layout` flushes styles then lays out with
-  the single `LayoutTree` trait implemented on `TreeArenas<T>`. Plain
-  `NodeId`s identify nodes, and every engine entry receives `&TreeArenas`
-  alongside a separate `&mut DocumentLayoutState`; there is no
-  `LayoutTreeView`, session, or store adapter. After each completed
-  traversal, the exclusive damage harvest clones every visited element's
-  primary `Arc<ComputedValues>` into a per-node layout-style snapshot;
-  layout/paint borrow that snapshot with no `ElementData` borrow check or
-  per-read `Arc` bump, and the `Arc` keeps the value alive, so reads are
-  always memory-safe. The harvest descends wherever Stylo's dirty-descendants
-  bits point *or* the element's own snapshot identity changed — the latter
-  covers initially styled and freshly cleared (`display: none`) subtrees,
-  which set no dirty bits. A debug assertion at every snapshot read reports
-  divergence from Stylo's live primary style (an invalidation bug or an
-  incomplete traversal); release builds read the stale-but-owned snapshot
-  instead of crashing. Public computed-style
-  access still uses Stylo's guarded borrow. Layout and text state use ordinary
-  exclusive Rust borrows with no runtime borrow checking. Display dispatch routes
-  flex/grid/linear/relative with `display: none` hiding and a leaf
-  fallback, text nodes through concrete Parley measurement, and the
-  positioned pass implements the W3C `position: fixed`
-  containing-block rule via the protocol's scheme override.
-  `display: contents` elements generate no box: the engine's
-  `flattened_children` splices them out of every item collection, and the host
-  denies them containing-block, containment, skipped-contents, and hoisting
-  status and zeroes their `LayoutSlot` in the positioned pass (the document
-  element is exempt — Stylo blockifies it). Replaced leaf
-  content reads a closed `NaturalSize` value stored in lazily allocated
-  node content; its internal update path automatically invalidates the
-  affected cache path. Mutually exclusive literal text, natural size, and
-  test-only leaf metadata reuse the node's single nullable content pointer.
-  `Document::set_natural_size` and `Document::set_image_source` are the public
-  replaced-content update seams (public because both halves arrive from above
-  `dom`, out of the embedder's `ImageStore`, independently and in either
-  order). The natural size always invalidates layout; a source invalidates only
-  the scene *unless* it is the call that makes the element replaced, because
-  being replaced forces `DisplayMode::Leaf` and hides every child — a layout
-  input, not a paint one. Both getters stay paint/layout-internal, setting an
-  equal value is a structural no-op, clearing a source an element never had is
-  a no-op rather than a conversion to a replaced leaf, and the DOM core still
-  knows no tag names.
-  Each `DocumentLayoutState` entry owns one `LayoutSlot` containing the
-  measurement cache, static position, and durable rounded/unrounded results;
-  `Document::rounded_layout` is the public geometry query; unrounded geometry
-  and cache contents stay internal (the cache probe is `#[cfg(test)]`).
-  `Layout` is non-`Clone`; rounding reads its `Copy` fields and constructs the
-  rounded record without duplicating the whole value.
-  Style-driven relayout is automatic (every style
-  flush consumes harvested `StyleDamage` into boundary-stopped invalidation);
-  the internal invalidation funnel for mutations styles cannot see
-  (content/child-list changes with identical computed styles). Public
-  mutation methods perform that invalidation themselves; only the
-  `layout-test-utils` feature exposes an explicit benchmark hook.
-  Its `visual` module owns the post-layout visual order:
-  the full W3C stacking-context predicate, CSS2 Appendix E paint order
-  (a private flat back-to-front `PaintOrder` of items with
-  viewport-space transform matrices and overflow/`contain: paint` clip
-  chains that honor containing-block escape), transform resolution
-  (transform + transform-origin + parent perspective, always flattened —
-  the fork has no authorable `preserve-3d`), and reverse-paint-order hit
-  testing (`Document::elements_from_point{,s}` and input targeting, pure
-  reads of the frame the last render retained, honoring `visibility`,
-  `pointer-events`, border-radius, and inverse-matrix point mapping). It walks the same flattened box-tree the layout host feeds the
-  engine, so `display: contents` dissolves identically in paint and hit
-  order. Group-effect stacking contexts (`opacity`, `filter`,
-  `clip-path`, `mask`, plus the storage-only blend/isolation triggers)
-  additionally surface as `RenderLayer` entries — preorder, parent-linked,
-  each with the establishing element, its world transform/size, and the
-  contiguous item range the group encloses — which is exactly what the
-  document-owned Painter composites; group effects still do not affect hit
-  testing (recorded limit). Lynx-specific
-  hit-test policy (hit-slop, `user-interaction-enabled`, event-through)
-  belongs to the future runtime-policy layer, never here. No retained
-  visual cache exists yet; `StyleDamage`'s stacking class is the
-  designated hook.
-  The private `painter`/`walker`/`paint`/`shape` modules turn that order into
-  the retained Vello scene. Item clip chains diff against Vello layers;
-  `RenderLayer` scopes composite opacity, filters, clip paths, and masks; box
-  fragments paint shadows, backgrounds, replaced content, borders, outlines,
-  and retained Parley glyphs. Internal style access is `Document::paint_style`
-  (post-flush, no `Arc` bump), geometry is the rounded layout, and the
-  document Device supplies viewport/DPR so paint cannot disagree with layout.
-  The authoritative paint limits are recorded in
-  `crates/dom/src/paint/painter.rs`; DOM-aware paint tests and the paint benchmark
-  live under `crates/dom/tests` and `crates/dom/benches`.
-  Its `scroll` module owns CSSOM-View scrolling — scrollport/scrolling-area
-  geometry off the layout engine's accumulated `content_size`, a per-node
-  offset in the layout arena that re-clamps itself on every read (so a
-  shrinking relayout or a restyle out of scroll-container-hood needs no
-  invalidation hook), `scroll_to`/`scroll_by` (which returns the
-  **unconsumed remainder**, the primitive chaining is built from), and
-  `scroll_chain`. Both the "which box scrolls" walk and the chaining advance
-  follow the **containing-block** chain, not DOM ancestry, so they agree with
-  what `visual` actually moves: a wheel over an `absolute` box anchored above a
-  scroller scrolls nothing, rather than sliding content behind a box that
-  visibly stays put. Only `overflow: scroll` is user-scrollable; `hidden` is a
-  scroll container that moves only programmatically (load-bearing here,
-  because the Lynx UA cascade puts `hidden` on every element) and `clip` is
-  not a scroll container at all — it clips, has no offset, and its content
-  does not reach into an ancestor's scrolling area either (`hughie`'s
-  `accumulate_scrollable_overflow` asks per axis). `visual` bakes the offsets
-  into the frame — a scroll container's contents are translated as they are
-  collected, with containing-block-keyed escape sharing the clip chain's own
-  struct, so painting and hit testing see scrolled geometry and the lower
-  render/GPU floor needs no knowledge of scrolling. Clipping is likewise per axis, because
-  `clip` on one axis with `visible` on the other is a pair the style adjuster
-  leaves mixed; a one-axis clip is an infinite strip and carries no radii.
-  Its `input` module is the host seam: `InputEvent` is plain `Copy` data
-  (pointer + wheel, viewport CSS px) that a canvas, a native window, or a
-  test literal all produce equally, and `Document::route_input(InputEvent)`
-  is a pure read that reports the node the event hit through the rendered
-  frame. The crate has **no default-action machinery and no recognizer**:
-  deciding and driving the user-agent scroll belongs to `bobcat-core`'s
-  input router (`gesture.rs`), which calls `scroll_by`/`scroll_chain` —
-  whose unconsumed remainders exist for exactly that caller — and there is
-  no second dom consumer a duplicate would serve.
-  `InputEvent::default_prevented` is the `preventDefault()` seam an embedder
-  hands to that router after its own arbitration; this crate never reads it.
-  Its `event` module is the other half, and it does **not** dispatch:
-  `Document::event_steps(target, bubbles, composed)` returns the ordered node
-  visits one event resolves to — the capture pass root-inward, the bubble pass
-  target-outward, the target in both — as plain `Copy` `EventStep`s owning no
-  borrow. Path construction is the standard's, including its shadow rules: a
-  slotted node's event parent is its assigned slot, a shadow root's is its
-  host, `composed` gates the crossing, and crossing retargets so every step
-  from the host outward reports the host. The shadow-crossing test is a single
-  comparison rather than the standard's per-step ancestor walk, and the
-  equivalence is argued in `event_path`'s doc comment and pinned by a
-  differential test.
-  Dispatch itself belongs to `bobcat-core`, split across its two threads
-  because the realm cannot move and scrolling must stay responsive: the
-  painter routes the input (`route_input`, one hit test), feeds it
-  to the input router — which decides the user-agent scroll and every event's
-  type and target in one place — executes those decisions in order, and sends
-  each emitted event's type, target, and detail to the script thread. The
-  script thread builds its path from the exclusively owned
-  document and delivers it there — that order is what lets a listener mutate
-  the tree. Nothing guards the window in between: a `NodeId` names one node
-  for the life of the document, so a step
-  that outlived its node resolves to no handle and reaches no one, and no later
-  element can take its place. There is no `preventDefault` and no
-  cancelable event anywhere on this path — Lynx dispatches none — so
-  suppressing a user-agent default action stays gesture arbitration's job,
-  arriving on the separate `InputEvent::default_prevented` seam.
-  `DocumentLayoutState` lazily boxes the shared Parley `TextContext`; each
-  `display: -lynx-text` element's layout-state entry lazily boxes the
-  probe/commit `TextBlockStore` holding the one paragraph its whole subtree
-  flattens into. A text node generates no box and retains nothing: it is
-  content of the block above it, and its run reads inherited font/text values
-  from its innermost element ancestor.
-  Font registration takes the shared `FontBlob` resource through
-  `Engine` → `Document` → `TextContext`; an owned loader
-  buffer is moved into Parley without copying its payload, while
-  `FontBlob::copy_from_slice` is the explicit copying fallback.
-  Relayout damage on an element evicts its direct text children's
-  measurement caches and retained artifacts because text nodes have no Stylo
-  damage record of their own. Parley is unconditional and there is no
-  arbitrary payload callback. It must not contain Lynx runtime-element vocabulary or
-  Lynx device/unit policy —
-  Lynx computed defaults (border-box, `overflow: hidden`, `display: linear`
-  on every element, …) stay embedder cascade policy (UA sheet). Relies on
-  the vendored stylo fork (`vendor/stylo`, tracking the
-  canonical `lynx` branch, tip `a1973b41f`): `contain` was already seeded
-  in the fork's lynx grammar; fork PR #9 (squash-merged into `lynx`) added
-  `content-visibility` / `contain-intrinsic-size` under the `lynx` feature,
-  pref-gated for stock servo builds; fork PR #10 (squash-merged into
-  `lynx`) un-gated `background-clip: text` from gecko the same way and
-  seeded the `outline-*` rows (`outline-offset` deliberately omitted —
-  Lynx outlines are flush rings); fork PR #11 (squash-merged into `lynx`)
-  seeded `object-fit` / `object-position`, which were already ungated in
-  `longhands.toml` and compiled out only by absence from the allowlist —
-  replaced content needs them for the css-images-3 concrete-object-size
-  rules; and fork PR #12 (squash-merged into `lynx`)
-  un-gated `overflow: scroll | clip` and added
-  `Overflow::is_user_scrollable`. The native engine's grammar really is
-  `visible | hidden`, but the **web** bundle this stack consumes uses the
-  other two directly (`web-elements`' own `scroll-view.css` authors
-  `overflow-y: scroll` and `overflow-x: clip`), so no bundle could express a
-  scrollable box at all. **`auto` stays out** (user decision, 2026-07-29):
-  this engine paints no scrollbars, so `auto` would be indistinguishable from
-  `scroll` everywhere except `to_scrollable()`, where it is the value a
-  `visible` axis pairs into — that now pairs into `hidden`, a recorded
-  deviation (an axis that genuinely overflows is clipped rather than
-  draggable). The three non-`visible` values stay genuinely distinct:
-  `scroll` is user-scrollable, `hidden` is a scroll container that moves only
-  programmatically, `clip` is not a scroll container at all.
-  Five commits have landed on `lynx` since #12, and the tip above is the last
-  of them: fork PR #14 required `Send` of `FontMetricsProvider` implementations
-  and fork PR #25 reverted it, restoring upstream's `Debug + Sync`. `Send`
-  bought exactly one thing — the right to *move* a `Device`, and with it a
-  `Document`, to the thread that would run it — and nothing does that any
-  more, less than ever: what crosses to `bobcat-main` is a view's *sources*,
-  the view's task stages them as `DocumentIngredients`, and the document is
-  built where it will live, by the boot module running in the realm on that
-  thread. `Sync` is the bound Stylo
-  itself needs, since the parallel traversal shares one `Device` across Rayon
-  workers by reference. Fork PR #13
-  corrects `ElementData` reference documentation, fork PR #21 moves the
-  `display` longhand's initial value from `inline` to `Display::initial()`,
-  which under the `lynx` feature is `flex`, and fork PR #27 adds
-  `DisplayInside::LynxText` — the block-level, **non**-item-container value
-  naming one flattened Lynx paragraph. It is the cascade's way of saying what
-  Lynx says structurally (`TextElement::OnNodeAdded` converts every added
-  child; no author CSS can undo it), so a `<text>`'s subtree is inline content
-  rather than child boxes. The variant carries
-  `#[css(keyword = "-lynx-text")]` because the derived `DisplayInside` `ToCss`
-  would otherwise kebab-case the variant name and silently drop the vendor
-  prefix. Read PR #21 against the
-  paragraph above rather than as a contradiction of it: the *initial* value is
-  what an element computes to with no declaration reaching it at all, while
-  Lynx's `display: linear` default is a UA-sheet declaration this embedder
-  cascades. Confirm the tip with `git -C vendor/stylo rev-parse --short HEAD`
-  before trusting this line — the gitlink moves and the prose does not.
-- `crates/hughie` — the Flexbox, Grid, and
-  Starlight Relative and Linear engine: trait-based host⇄engine integration
-  with static dispatch only (no `dyn`), one `LayoutTree` protocol with a
-  `Copy + Debug` `NodeId`, immutable topology/styles for the flush, and a
-  separately borrowed mutable host state containing per-node `LayoutSlot`s.
-  The split permits recursive mutation without copying style/layout records
-  and without `RefCell`/`AtomicRefCell` checks. Style traits speak the stylo fork's computed-value
-  vocabulary directly (requires the `stylo` workspace dep + python3 for its
-  build script; the old zero-dependency/standalone pillar is retired), and
-  host-side display dispatch. The style traits are split by algorithm:
-  `CoreStyle` carries the box model, containment, the alignment accessors and
-  `order`, while `FlexboxStyle`, `GridStyle`, `LinearStyle` and
-  `RelativeStyle` each carry the properties only their own algorithm reads and
-  are demanded at that algorithm's entry point. `TextContainerStyle` supplies
-  paragraph-wide `text_maxline` and `text_maxlength` inputs from non-inherited
-  integer custom properties, defaulting to unlimited. `LayoutTree::flattened_children`
-  is the box-tree view every algorithm collects items through, flattening
-  `display: contents` subtrees. Leaf content is deliberately closed: replaced
-  content uses the `NaturalSize` value path, while text uses the crate's
-  concrete `TextBlock::probe`/`commit` paragraph path; arbitrary host
-  measurers are not supported. **Flexbox, Grid, Relative, and Linear
-  implemented** —
-  the shared root/leaf/cache/positioned/rounding machinery, CSS Flexbox Level
-  1, numeric CSS Grid Level 2 (excluding subgrid/named areas), id-constrained
-  Starlight Relative Layout Level 1, and Lynx's `display: linear` algorithm
-  and `linear-*` style/source protocol are live. Text shaping, line breaking,
-  intrinsic/height-for-width measurement, baselines, and retained Parley
-  layouts are unconditional crate behavior.
-  **CSS containment (css-contain-2)** is landed layout-side: the stylo
-  `Contain`/`ContainIntrinsicSize` containment accessors on `CoreStyle`,
-  size-substitution + layout-containment baseline suppression,
-  `compute_skipped_contents_layout`, and the `invalidate` module
-  (`is_relayout_boundary`, `invalidate_for_relayout`) — the
-  containment-bounded, damage-driven cache-invalidation host workflow
-  (single-axis / container queries out of scope). `LayoutGoal::Commit`
-  carries per-axis `content_independent` flags — input *stability* under
-  subtree content change, proven by the committing algorithm (flexbox, grid,
-  linear, relative and the absolute pass all set them; the root input is
-  viewport-stable by construction; a measurement carries no such claim, which
-  is why only a commit has the field). They ride inside the committed cache
-  entry, outside its key, so `LayoutSlot::committed_input` hands a host the
-  complete input it can relayout a subtree in place under, and verify by
-  output comparison. The per-node measurement cache has a 32-entry ceiling
-  but inlines only two slots, spilling to the heap for the
-  nodes whose containers probe many constraint shapes. Read
-  `docs/layout-architecture.md` before touching it. It must not depend on
-  other workspace crates or own host tree/style storage, DOM/runtime types,
-  resolved device-unit policy, or paint order.
-- Remaining runtime-layout integration — the `LayoutTree` host, display
-  dispatch, fixed/hoisted positioned pass, per-node cache storage, and the
-  automatic style-damage→layout-invalidation wiring (boundary-stopped and
-  engine-internal — not a runtime-adapter concern) now live in `dom`
-  (see above). Still L3 work in the runtime adapter: the remaining Element-PAPI
-  surface, `rpx`-aware view/device policy, per-component css-id scoping,
-  sticky lowering,
-  component-specific staggered layout, and the rest of the Lynx text policy —
-  custom inline-truncation content, `tail-color-convert`, and text layout events.
-  The flattened paragraph and `text-maxline`/`text-maxlength` attribute wiring
-  are implemented (see `tree::text` above). The
-  `raw-text` generated-content rule and its UA display/newline
-  policy have landed in `bobcat-core`'s `tree::raw_text` (see above), as has
-  the `<image>` tag's `src`-to-replaced-content reflection and its UA box in
-  `tree::image`. Generic W3C
-  text style, document context, and artifact storage already live in `dom`.
-- `crates/flashbulb` — screenshot testing infrastructure, and the only crate
-  here that exists for the test suite rather than the product (`publish =
-  false`, dev-dependency everywhere). It owns RGBA `Image` + PNG codec, a
-  port of the `pixelmatch` algorithm Playwright compares screenshots with
-  (squared-YIQ per-pixel distance against `35215 * threshold²`, anti-aliasing
-  detection, `max_diff_pixels`/`max_diff_pixel_ratio` budgets), and
-  `Screenshots`, the golden store: path resolution from a name-segment list,
-  `FLASHBULB_UPDATE_SNAPSHOTS=1` to accept, and `-expected`/`-actual`/`-diff`
-  PNGs written to a git-ignored `tests/artifacts/` on failure. A newly
-  *created* golden fails its own run so an unreviewed baseline cannot pass;
-  an explicitly *accepted* one does not. The optional `render` feature adds
-  `capture_document` (`Document::render` → retained scene → `dom`'s headless GPU) over the whole painted
-  frame, `viewport * device_pixel_ratio` device pixels — the render floor scales the
-  scene up by that ratio, so anything smaller is a crop. Playwright instead
-  downsamples to CSS pixels; the two coincide at a ratio of 1, which is what
-  lynx-stack pins for determinism and what every viewport here uses.
-  Its `TestImages` is the in-memory `dom::ImageStore` the image suites install
-  on a document before capture — the only image store in this workspace, and
-  deliberately a test double: it fetches nothing, decodes nothing and evicts
-  nothing. `capture_document` takes no store of its own, because the document
-  it renders already carries the one an embedder installed. `headless` requires a usable GPU adapter and panics when one is
-  unavailable, so local and CI test runs obey the same mandatory-GPU policy.
-  DOM-aware screenshot suites live in `dom`, which also keeps the direct GPU
-  smoke tests. Goldens are not platform-suffixed: cross-platform
-  rasterizer noise is absorbed by tolerance, not by per-platform baselines.
-- *(planned, not yet scaffolded)* the remaining runtime crates — see
-  `docs/tracking/` for the behavior surface each will need to cover before
-  scaffolding begins, and `.claude/agents/` for the subsystem-scoped agent
-  personas already set up for this work. `packages/bobcat-element` with
-  `bobcat-core`'s `tree` and `quickjs` modules are the first
-  pieces of this layer to land, joined by `StyleInfo` ingestion; the background
-  thread, the event model, css-id scoping, and the remaining Element PAPI
-  members are still ahead.
+### crates/bobcat-source
+
+The single owner of Lynx source parsing and adaptation: the always-available
+`ZipSource` API for bounded ZIP decoding, entry selection through `PageSource`,
+and resource registration. Native and Wasm embedders share that API; IO and
+resource-scope lifetime stay the host's.
+
+`xml` is the zero-dependency, zero-copy restricted envelope parser
+(`engine-version`, `thread="main"` / `thread="background"`), retaining UTF-16
+and UTF-8 error offsets. `web` decodes `SDRA WROF` on the unchanged rkyv 0.7
+wire model. `native` decodes source-based flexible external `.lynx.bundle`
+files into that same model and can explicitly encode a web bundle; it rejects
+real QuickJS/Lepus bytecode rather than executing or decompiling it. Named
+external modules are preserved and acquire no invented page root.
+`PageSource::from_native_bundle` requires an explicit entry name, `from_bytes`
+a `root` for binary page inputs.
+
+`PageSource`, browser response registration, shared StyleInfo lowering and all
+three parsers are always available: the crate has no Cargo feature flags, so
+every embedder including Wasm depends on the complete crate. IO and view
+construction stay with the embedder; the browser's `loadLynxXml` accepts only
+XML responses. Native XML keeps strict UTF-8 and private memory URLs; the
+browser keeps replacement decoding, final-response fragment URLs and host
+PageConfig. The two register the raw XML background script under different
+URLs: native under `bobcat-memory://lynx-xml/app-service.js`, the browser's
+`register_lynx_xml_response` at `<final-response-URL>#background-thread`, which
+keeps the response URL as the base for that script's own relative imports.
+Either way the URL is named in `ViewSources::background_entry`, so the view's
+BTS Worker imports it. See `docs/source-architecture.md` for boundaries,
+migration and parser resource bounds.
+
+### crates/bobcat-core
+
+The unified native runtime core. Source layout follows the ownership
+boundaries. `main/` is everything on the Lynx main thread: `page.rs`'s one
+realm entry point, `quickjs.rs`'s script engine, `runtime/` for realm
+integration, `workers.rs` for the `Worker` class, `tree/` for Lynx page policy.
+`background/` is the `bobcat-workers` thread and its worker realms. `view/` is
+the public view facade, `paint/` the `Painter` with its `gesture.rs` input
+router, `images.rs` image protocol and `graphics.rs` GPU target. `link.rs` is
+the one channel set a view spans its two threads with, `lifetime.rs` the view's
+task set, `timers.rs` and `clock.rs`/`alarm.rs` the timer machinery both realm
+kinds share, `esm.rs` the preloaded module specifiers, `script.rs` the
+sanitized error a failure is reported with, `style.rs` the
+`PreparsedStyleSheet` vocabulary, `resource.rs` the host protocol, and
+`threads.rs` the two engine threads.
+
+#### Public surface and the two engine threads
+
+The public runtime is the opaque `LynxGroup`, `LynxView<F>` and `Painter`
+facades plus the protocol-only, host-injected `ResourceFetcher`, draw-target,
+OS-input and lifecycle-wakeup capabilities. The script engine is deliberately
+not one of them: core owns its `QuickJS` realm, and an embedder sees only the
+sanitized `script::ScriptError`. A view is built from one `ViewSources` —
+`PageConfig`, owned font containers, an optional default font family, author
+stylesheet URLs in cascade order, the entry MTS module URL, and optional
+`init_data` and `global_props` JSON text only the realm parses — plus a builder
+turning the view's `ImageReports` into its `ResourceFetcher`; both go to
+`LynxGroup::create_lynx_view` with device metrics.
+
+**A view is built from a group, never on its own**: `LynxGroup::new` takes the
+lifecycle wakeup and `StyleThreads`, starts `bobcat-workers` then `bobcat-main`
+(handed one sender on it), and awaits the QuickJS runtime and Stylo pool every
+view in that group shares.
+
+**Both engine threads run a tokio `current_thread` runtime under a
+`LocalSet`**, each asynchronous wait a task of its own. Synchronous stylesheet
+adoption can instead park MTS on a source response. A view's tasks are its
+owner (`serve_view`, whose one wait is the view's end), its boot future, one
+ordered consumer of the command channel, one ordered consumer of its workers'
+events, one future per resource load an import produced, and one clock task
+(`lifetime.rs`'s `serve_clock`) waiting on its realm's next timer deadline and
+on the runtime-wide checkpoint generation; a `Worker` realm on `bobcat-workers`
+has the same shape minus the document. Nothing is spawned per input: one
+consumer reads each ordered stream with `while let Some(x) = rx.recv().await`.
+Every task reaches the realm through one boundary, `main/page.rs`'s
+`Page::enter`, which runs one synchronous operation under the borrows of the
+shared runtime and the realm and then that operation's epilogue, in this order:
+the timers that came due, the commit, the boot report once, the `BeginFrame`
+acknowledgement, the module requests entry produced, the next timer deadline,
+and the checkpoint generation as of this entry. `Page::settle` is the epilogue
+alone, for a wake carrying no operation.
+
+A view owns its channels end to end, all `tokio::sync` and none addressed.
+Three cross that link: a `ToMain` mpsc carrying commands in; a `ViewNotice`
+mpsc carrying lifecycle events and resource asks back; and one
+`watch<Published>` carrying what an observer wants the *latest* of — the newest
+committed frame, the listener-name set, and the newest serviced `BeginFrame`.
+Commands are a FIFO because their arrival order is what they mean; a frame is
+not. `ToMain` carries a `PageUpdate` (the data, global-prop, global-event and
+reload commands a host accepted after observing MTS boot, in host FIFO order),
+a `DispatchEvent` (one event's type, target and detail JSON), a `Resize` (the
+painter's metrics), a `Vsync` (the display-frame reading a realm that called
+`requestScriptFrame` asked for), a `BeginFrame` (a timeline reading plus the
+sequence number the acknowledgement reports), a `Refill` (the scroll offsets
+the painter moved past a slot's encode window, written back), and `ImageEvents`
+(completed or failed host loads — no variant can carry pixels, which makes
+"`ImageData` never crosses a channel" a property of the type).
+
+`create_lynx_view` validates the metrics, sends the far half of that link to
+the group's thread, and builds the fetcher in place on the calling thread. It
+is **synchronous and takes no draw target**. The view's `F` parameter is that
+view-owned fetcher; the wakeup is a separate group constructor generic held by
+`bobcat-main`. Construction returns a loading view at once, whose boot outcome
+arrives through `pump`; constructor errors cover metrics and attachment only.
+
+The view's owner validates the fonts and default family first — a
+`dom::TextContext`'s business, with no document and zero fetches on failure —
+then requests each stylesheet in cascade order followed by the entry module,
+staging what arrives as the `DocumentIngredients` its document is built from;
+`LynxView::pump` services those requests and the view's images in ordinary
+turns. The default family is prepended to the `system-ui`, `sans-serif` and
+`serif` generic maps, so a Wasm embedder can supply its otherwise-absent
+system-font backend without baking a font into core; a name neither the
+containers nor the platform has fails with `EngineError::UnknownFontFamily`.
+
+Dropping a loading view marks source work cancelled and stops that view before
+QuickJS begins. One `tokio_util::sync::CancellationToken` per view is minted on
+the embedder's thread and cancelled there by the view's drop, by a fatal
+lifecycle event, and by a guard on every exit from the view's owner, so a host
+holding a `SourceCompletion` reads cancellation without waiting for a turn. It
+is the view's end signal: the owner reclaims its ordinary tasks, then waits for
+MTS JavaScript disposal before releasing the realm. Workers have independent
+tokens and stay live for that exchange. Commands queued behind that release are
+discarded rather than applied — the one command consumer reads the token at
+each wake, before applying anything — while a burst already inside an entry
+finishes. The view's handle on the host resource system goes with the release,
+so past one a painter adopts no commit whose pixels it is not already holding.
+Fetchers skip cancelled queued work; IO or synchronous JavaScript already
+executing may finish, late source results are discarded, and the group and
+other views keep running.
+
+**A view spans two threads**: the embedder's own — whichever created its
+`LynxGroup` — which owns the window, the input capture, the surface (the one
+call macOS allows nowhere else), the host's whole resource system and the
+`Painter` (routing, gestures, scrolling, composition and every GPU call), and
+the Lynx main thread (document + realm). Neither half can leave it: a `Painter`
+is `!Send` because its target is, and a `LynxView` is `!Send` because it holds
+`Rc`s of the group and of the fetcher — the only shape the browser allows,
+where `wgpu`'s handles are not `Send` under shared memory and an
+`OffscreenCanvas` cannot be transferred on again. Dropping a view cancels its
+source work, detaches its image inbox, then closes its command channel, the
+goodbye its task ends on; the group handle drops last, so the group's threads
+are joined only once nothing is left on them.
+
+**Views in a group share one thread, one `QuickJS` runtime and one Stylo
+pool.** `create_lynx_view` is the only way to build a view, because naming the
+group is the only way to say which thread it runs on. One group per thread and
+one thread per group: a group hands out `Rc`s of what it owns, so it is `!Send`
+and `!Sync`, and the thread that creates it is the thread every view in it
+paints on, which is why one `EventRequester` serves the whole group. Views take
+turns — every entry into a realm is one synchronous stretch — so a second view
+costs no second heap, module graph or set of workers, at the price of never
+restyling in parallel, on the assumption that a person drives one view at a
+time. A host that needs two pages genuinely parallel gives them a group each,
+on a thread each.
+
+`bobcat-main` builds the group's one `dom::StylePool` — sized by the
+`StyleThreads` passed to `LynxGroup::new`, `Auto` being the usual choice —
+before any view attaches, and every document it carries holds an `Rc` of it.
+Stylo's bloom filter and style-sharing cache are per-OS-thread borrows held for
+a whole traversal, so two documents traversing on one worker at once is an
+aliasing bug. Two facts rule that out: different groups draw from disjoint
+pools, and documents in one group cannot traverse at once.
+
+**`bobcat-main` is index zero of its group's pool**, taken over in place by
+rayon's `use_current_thread` — which is why the pool can only be built on
+`bobcat-main`, and why `StyleThreads` counts it: `Fixed(3)` starts two threads,
+not three. A lone view therefore restyles with the same parallelism and the
+same inline root closure Stylo's global pool gave it. The takeover is
+permanent: rayon leaks about 25 KB per pool (the managed threads still exit on
+drop; the `WorkerThread` box and `Registry` do not) and refuses a second pool
+on the same thread forever. **That refusal is why the pool has to be the
+group's rather than any view's.** A host that replaces groups — every
+`BobcatRenderer::load` — pays that 25 KB per replacement, in the same Wasm
+linear memory. `StyleThreads::Sequential`, and `Auto` where the pool would have
+held `bobcat-main` and nothing else, gives a group no pool at all and traverses
+on `bobcat-main` alone, a configuration rather than a fallback.
+`dom::MAX_STYLE_THREADS` is six, counted the way Stylo counts its own six: a
+ceiling, not a tuning knob, because Stylo indexes its per-traversal
+thread-local storage by Rayon thread index into an array that long, so a wider
+pool is a construction error rather than a silent clamp, reported by
+`LynxGroup::new` like any other boot failure. **Wasm takes the same path.**
+`navigator.hardwareConcurrency` reaches `StyleThreads::for_parallelism`, which
+is `Auto`'s own arithmetic, so comparable hardware gets the same pool on both
+targets and the facade does no thread arithmetic of its own.
+
+#### Resource protocol, stylesheets and ESM loading
+
+`ResourceFetcher::request_source` owns URL resolution, fetching and UTF-8
+validation. Its concrete, non-cloneable `SourceCompletion` holds one end of the
+one-shot minted with the request and answers whichever task awaits it, so the
+host never learns which; no resource Future, poll loop, callback trait object
+or resource waker lives in core. Main's lifecycle notifications wake the host
+through `EventRequester`.
+
+Bundle retrieval, `.web.bundle` decoding and config parsing are embedder
+responsibilities; the fetcher supplies validated source text and core registers
+its resolved URL in QuickJS's preloaded ESM graph. `request_source` answers
+stylesheet requests with CSS text or a `PreparsedStyleSheet`
+(`bobcat_core::style`) the host parsed itself, since a `.web.bundle` ships CSS
+a build step already tokenized and re-serializing it to a sheet blob is the
+startup cost the design rules out. Lowering it produces no stylesheet text:
+rules, keyframes and font-face rules are built through `dom`'s branded
+`CssRule` builders, leaving stylo one selector-list parse per rule and one
+value parse per declaration — the floor, because the wire format keeps
+attribute selectors and functional pseudo-classes as text and stylo builds
+specified values only through its value parsers. Decoding a container stays
+embedder work: core owns the `PreparsedStyleSheet` vocabulary, the embedder
+fills it. Source requests select a stylesheet or entry payload and carry a
+specifier; the fetcher supplies the base URL and transport policy. The protocol
+also offers the optional `preload_source` hint,
+`request_image`/`service_images` and the `FrameImages` supertrait: every method
+is synchronous, so no resource future crosses it, and core names none of a
+fetcher's own transport API. It carries no response-size limit either; each
+fetcher owns the memory bound for the response it materializes. The resource
+module must not decode images, fonts or templates, upload render resources, or
+own cache/retry policy.
+
+`PageSource` registers named CSS under entry-relative resource URLs. Boot
+supplies the entry response URL to the JS runtime before importing the entry,
+whose `__Card__` import reads that value; JS replaces the `"__Card__"` alias
+and maps the compiler's `CSS` section to `<entry-url>/index.css`.
+`__LoadStyleSheet` returns a fresh opaque JS handle associated only with that
+URL and sends a `ResourceFetcher::preload_source` hint a fetcher may ignore.
+Every `__AdoptStyleSheet` requests the URL through `SourceRequest::StyleSheet`,
+synchronously obtains its response and mounts it before returning, repeated
+adoption included. The fetcher owns pending loads, cached responses and
+failures; the reference `Resources` shares them by resolved URL within a scope
+and invalidates registered URLs when replaced or removed. Core holds only the
+current call's receiver. The embedder returns CSS text or a
+`PreparsedStyleSheet`; JS sees neither. An incomplete request parks MTS until
+the response arrives or the view is cancelled, without executing JS jobs or
+sibling views. Errors throw at adoption; an unused preload changes no styles.
+Collection releases only the JS handle's URL association; resource lifetime
+belongs to the fetcher, adopted rules to the document. No native stylesheet
+handles, load state or adoption queue live in `MainThreadRuntime`. See
+`docs/named-styles-runtime.md` for URL mapping and load timing. Per-component
+css-id scoping is **not** implemented: every fragment mounts globally, which is
+what web-core emits for an `enableRemoveCSSScope = true` bundle (see
+`__SetCSSId` below).
+
+Ordinary ECMAScript `import()` loads JavaScript ESM through
+`SourceRequest::Module` and the same `SourceCompletion` channel, during and
+after boot. Core normalizes module URLs against the importing module's response
+URL; the fetcher owns transport and UTF-8 validation. Built-in sources stay
+group-wide; entries and imported sources are realm-local, one request,
+namespace and evaluation per normalized URL. The QuickJS fork preflights static
+dependencies with unlinked compilation, defers incomplete import graphs and
+resumes the original promises on main when sources arrive, so cycles never
+become partially linked while fetching. Top-level await can span resource and
+timer turns; `ScriptFinished` waits for the boot promise alone. Handled import
+failures leave the realm usable, and dropping the view cancels outstanding
+completions and releases continuations. This is JavaScript ESM loading: import
+maps, import attributes, JSON modules and Lynx component-bundle imports remain
+unsupported, and runtime configuration, raw realm/value handles, interrupts and
+source-evaluation entry points stay private. The bridge owns the generic
+source/native-module loader, deferred import continuations, loaded-module
+namespace access and settled Promise inspection; Bobcat's specifiers, entry
+transform, graph membership and boot policy stay in the core adapter.
+
+#### Realm, document and boot
+
+The crate-private `quickjs::ScriptEngine` is the whole script surface: it
+installs named host callbacks, registers named preloaded ESM source, evaluates
+a module through its TLA completion promise, calls an export the realm
+published back, and provides the GC seam. Created on the engine-owned Lynx main
+thread and never leaving it, nothing about it is `Send`. Values crossing it are
+`quickjs-rust-bridge`'s `HostValue`/`HostArgument` — primitives plus opaque
+structured clones, so realm values and DOM handles never cross as themselves.
+The private `MainThreadRuntime` owns the realm integration and, through it, the
+document. `LynxDocument`, `Viewport`, `DocumentIngredients`, `DocumentSlot`,
+`new_document`, `MainThreadRuntime`, the view's link (`ToMain`, `ViewNotice`,
+`Published`) and the concrete QuickJS adapter are crate-private; `Painter` is
+public, and `LynxDocument` is what an embedder cannot name.
+
+**The realm creates its own document, and says so.** The boot module's first
+statement is `export const document = new Document();`; `bobcat:element`'s
+`Document` constructor calls the host member `createDocument`, which builds the
+document from the `DocumentIngredients` the view's task staged before the realm
+opened — viewport, page config, the validated text context, the author sheets
+in cascade order, the group's style pool, and any image reports that arrived
+first — mounting and replaying them in that order. Every phase runs under a
+catch, because the bridge erases a panic into "the host function panicked". A
+second construction is refused whichever module asks: the ingredients are
+spent. The realm holds what it built in the private `DocumentSlot` every tree
+member borrows; that `Rc<RefCell<…>>` exists only so same-thread native QuickJS
+callbacks can reach the owner, not as a cross-thread sharing mechanism.
+
+**The document lives exactly as long as the realm.** The boot module's exported
+binding holds it from that first statement on, and nothing in the realm
+releases it: no release member, no `FinalizationRegistry` over the `Document`,
+and no "no document" answer a host member can give. Release is the view's task
+ending: dropping the `LynxView` closes its command channel, the task returns,
+and `MainThreadRuntime`'s fields drop in declaration order — the `ScriptEngine`
+first, carrying the context's `Rc`, freeing the realm with the host functions
+and their clones of the slot, then the runtime's own `slot` handle, which is
+when the `LynxDocument` drops. That field order is the whole mechanism; there
+is no `Drop` impl behind it. Every tree and attribute member therefore takes
+the document unconditionally, and the one refusal left here is a second
+`createDocument`. The one window where a document is absent is the load, and
+the task serves through it: a `Resize` writes the ingredients, image reports
+are buffered and replayed, a `BeginFrame` is still acknowledged so an offscreen
+host is never blocked by a load, and dispatch and refill are dropped.
+
+Main opens the realm and evaluates `bobcat:boot`, whose first statement creates
+the document and so mounts the staged sheets, in cascade order, before the
+entry loads. Success is `ScriptFinished`; resource, font, realm, or boot
+failure is `StartupFailed`. That failure stays the failing view's and is
+reported once: an entry that throws under boot's top-level `await` rejects
+through the promise-job queue the group's realms share, and what it leaves
+there reaches neither the next view nor the failing realm's own next entry.
+Queued *jobs* still run, and the next checkpoint finishes them. A checkpoint
+drains that queue until it is empty, as a browser's microtask checkpoint does:
+there is no per-checkpoint job budget and no incomplete checkpoint for a later
+entry to resume. Because the queue is the runtime's, a view has to notice a
+sibling's entry into JavaScript: `ScriptEngine::checkpoint` bumps a
+runtime-wide generation on a `watch<u64>`, every view has a task following it,
+and a page whose import finished inside a sibling's checkpoint settles what its
+own realm owes. Comparing that generation against the one recorded at the end
+of the page's own last entry keeps a page's own bumps from waking it.
+
+A `.web.bundle`'s `lepusCode.root` or raw XML main body becomes a real ESM at
+its resolved entry URL: core prepends named imports from both built-ins. The
+`bobcat:boot` ESM imports its lifecycle helpers from `bobcat:runtime`,
+`Document` and `__FlushElementTree` from `bobcat:element`, and `bobcat:timers`
+for its effect. The runtime parses the view's `init_data` and `global_props`
+JSON in MTS; missing values become `{}` and malformed inputs fail boot. Boot
+creates its document, initializes `__Card__` and MTS inputs, retains the host
+render argument, then awaits the entry; it processes that argument and posts
+the result plus host props and SystemInfo as the first BTS Worker message,
+before rendering. The BTS bootstrap returns after installing a JS receiver, and
+that message initializes its inputs before importing the entry. Later internal
+messages wait on the import Promise and are delivered in order once it settles,
+success or failure.
+
+Lifecycle hooks and engine listeners run synchronously, with no intervening
+Promise-job checkpoint. Boot awaits a `Promise.resolve().then` flush after
+rendering; that flush's commit completes MTS boot, the whole of public
+readiness, and BTS acknowledges nothing. Boot reads
+`PageConfig.enable_js_data_processor` and `Viewport` from the staged document
+ingredients. `ViewSources.initial_processor` is a plain `String`, handed to JS
+by the one-shot startup-data binding without JSON serialization or source
+interpolation. JS constructs SystemInfo from runtime constants and those
+metrics and sends its snapshot to BTS. Entries receive runtime bindings through
+prepended ESM imports; global props updates replace the live module binding,
+and there is no native evaluator or separate Script lexical environment.
+
+Runtime JS reads ReactLynx's hooks directly from `globalThis`, while runtime
+and PAPI identifiers remain module imports; named Lepus chunks execute through
+a direct-eval closure in the selected entry's scope. Named calls and replies
+belong to the two JS Worker message handlers; Rust transports opaque messages
+and performs no Lepus-specific dispatch or reply flush. Boot's deferred flush
+uses ordinary Promise scheduling and the existing outer checkpoint, with its
+rejection attribution and generation notification. See
+`docs/mts-execution-runtime.md` for the boot and chunk execution boundaries.
+
+`LynxView::{update_data, reset_data, update_global_props, reload}` use the
+existing ordered command/Worker links. Embedders serialize data and global
+event argument lists into `String`; core passes them unchanged to JS, which
+parses them and builds Worker messages. Update/reset/reload take a separate
+processor-name `String`, an empty name selecting the default processor. All are
+accepted once MTS boot has finished and otherwise return
+`EngineError::NotReady`, like global events; the BTS Worker still loading is no
+reason to refuse one. Initial data and props come from `ViewSources`; there is
+no early props cache or initial-render update gate. MTS runs its own hook at
+once and forwards the update to BTS with `Worker.postMessage`; the BTS runtime
+queues that message behind its entry import and delivers it in order once the
+import settles. Rust never sends page data to BTS — MTS `postMessage` is the
+only path. A reload retains the realms and entry; the framework recreates
+component state. See `docs/data-lifecycle-runtime.md` for processor selection,
+snapshots, readiness, engine-event precedence and the BTS reload callback
+boundary, and `docs/events-diagnostics-runtime.md` for native Context behavior,
+the BTS GlobalEventEmitter and `LynxView::send_global_event`.
+
+`LynxView::pump` records readiness before returning `ScriptFinished`, exposed
+by `is_ready()`. Global events require that observed MTS boot and otherwise
+return `EngineError::NotReady`; rejected events are never queued or replayed,
+accepted ones retain host FIFO order. Internal pre-connection MTS messages
+still wait for Worker construction. `ScriptReported` and `ConsoleMessage` are
+nonfatal host notices, their BTS path ordinary Worker postMessage delivery with
+JS-side dispatch. `lynx.getEngine()` returns one stable, realm-local
+`EventTarget` whose listeners never cross the host boundary. Render, update,
+component removal and global-prop events carry argument arrays, taking
+precedence over legacy global hooks; listeners receive the engine as `this`,
+with no `origin` field. The MTS `getCoreContext` and `getNative` sinks retain
+and deliver nothing, and the module does not invent the background-only
+`lynxCoreInject` realm.
+
+#### Painter, frames, pacing and images
+
+The core depends on `dom` and re-exports one seam: the `input` module
+republishes `dom::Point2D` and
+`dom::input::{InputEvent, InputKind, PointerId, PointerKind, PointerPhase}`.
+Wheel deltas there are viewport CSS pixels; converting physical-pixel, line or
+page units is embedder policy. No document, node or hit-test result crosses.
+
+**`Painter` is a standalone public object, not the view's**:
+`Painter::new(DrawTarget, width, height, device_pixel_ratio)` builds one over a
+target before any view exists, `attach(&view)` points it at a view, `detach()`
+releases it. It holds only a watch receiver and a `Weak` on the view's seat
+(the view's command sender plus its handle on the host's resource system, as
+one releasable thing), so a view dropped under a painter leaves it showing and
+capturing its last frame. One interactive painter per view, one *live* view per
+painter: a second `attach` is `EngineError::PainterAttached`, refused by the
+seat's weak count, which `Painter::attach` is the only place to downgrade; a
+seat whose view is gone needs no `detach`. Attaching drops everything derived
+from the previous view — adopted snapshot, scroll intents, gesture arena,
+resolved pixels, the target's compose key and plane bank, since commit ids
+restart at one per document — rebases the frame clock onto the view's timeline
+epoch, seeds the `BeginFrame` sequence past what has been serviced, and sends
+its metrics as a `Resize`: **the painter owns device metrics**. Detaching
+resets the same minus the target, so the last frame stays up and capturable
+while the next page loads.
+
+Every entry point first polls the link, adopting the newest `Published` with
+the pixels it draws before noticing a view that has gone, so a commit published
+in the release turn is still adopted. A commit whose pixels could not be read
+in the same step is not adopted, because a frame indexes its store's bitmaps by
+draw order. The painter retains the newest frame and runs input routing,
+gestures, compositor scrolling, composition and presentation inside the
+embedder's own calls; vsync touches the OS only there. Commands needing the
+live tree go to `bobcat-main`, which answers by publishing a later frame, so a
+long JavaScript task cannot stop scrolling or re-presentation; only commits
+publish, so a half-applied batch is unobservable. Scroll offsets stay on the
+painter between refills and a scroll recomposes the retained frame without a
+commit; when an offset leaves its `ScrollSlot::encode_window` the painter sends
+`ToMain::Refill { offsets }` and the main thread answers with a recentered
+commit. Embedders provide input, device metrics, OS initialization, a draw
+target and IO primitives, and relay OS facts in
+(`Painter::{dispatch_input, resize, set_occluded, refresh, pump, tick, capture}`
+and `LynxView::pump`); they never start or steer the pipeline. Engine events are
+enqueued and wake the host through the group's `EventRequester` for the next
+`LynxView::pump`: `ScriptFinished` (entry-module boot), `StartupFailed`
+(source/configuration/boot failure), `ScriptRunError` (a fatal script-runtime
+failure in later owner-thread work), `ListenerFailed` (a listener that threw
+during event delivery) and `TimerFailed` (a `setTimeout` or `setInterval`
+callback that threw when it came due) — the last two separate because neither
+is fatal: the walk continues, a repeating timer stays armed, and later events
+and timers are delivered as normal. A frame the engine wants drawn rides the
+same wakeup, and the `Painter::pump` answering it draws it.
+
+**A host takes two turns per wakeup, and they are different calls.**
+`LynxView::pump` alone advances the resource protocol: it hands each
+`RequestSource` to the fetcher, gives it its `service_images` moment, names
+every source the last paint walk discovered, drains the image inbox back to
+`bobcat-main`, and returns the turn's lifecycle events — after a fatal event,
+nothing further. `Painter::pump` draws the frame owed and asks the host for
+nothing, so a host that wants an image to arrive takes the view's turn. Pacing
+is the embedder's and the engine names no interval for it: after each turn
+`owes_frame` answers whether a frame is still owed — a running animation, a
+swap chain that had no image to give, a commit the turn did not draw — and the
+host takes it at **its own next display frame**, whatever its display clock is
+(a `CVDisplayLink` on the window's monitor, `requestAnimationFrame` in a
+Worker). `is_animating` is the narrower fact, answered for any target, that an
+offscreen host asks instead. **A realm timer is not the host's to wait out**:
+every live realm, a view's and a worker's alike, has a `serve_clock` task
+holding one pinned sleep on that realm's next deadline, re-armed only when the
+deadline moves and fed by the watch that realm's epilogue publishes. Natively
+that sleep is tokio's own time driver; on wasm32, where tokio's reads
+`std::time::Instant` and would panic, `src/alarm.rs` serves it — one
+process-wide `bobcat-alarm` Worker holding a heap of deadlines and the wakers
+waiting on them, parked with `park_timeout` — and `crate::clock::sleep_until`
+picks between the two by `cfg`. A draw that fails is the return value of
+`Painter::{pump, tick, capture}`, reported once because there is no recovering
+a lost surface; there is no `RenderFailed` event.
+
+**The draw target is an argument to `Painter::new`, named once and kept for
+that painter's whole life**: `DrawTarget::window(...)` takes anything
+convertible into `WindowTarget` — a `'static` surface target, so a windowing
+embedder passes a shared handle (`Arc<winit::Window>`) and a browser an owned
+canvas — and `DrawTarget::Offscreen` asks for a windowless GPU target. Either
+is built inside `Painter::new`, on the thread that will draw into it, the only
+thread macOS lets a surface be created from. No target is attached later and no
+painter has none; what a painter points at later is a view. An offscreen target
+is refused on Wasm at construction rather than hanging, since building one
+blocks the calling thread on a device request that thread's own event loop
+would have to answer. `FrameSize::for_viewport` exposes the physical size
+`Painter::new` and `Painter::resize` will compute, for a host that must size a
+canvas's backing store first.
+
+**Images are entirely the embedder's**; core fetches, decodes, caches and
+retains no pixel of its own. A view's one resource system — its
+`ResourceFetcher`, which is also its `dom::FrameImages`, owned by the
+`LynxView` as an `Rc` and read by an attached painter through the view's seat —
+is asked for one image at a time by source string (the `url(…)` value CSS
+produced, or a replaced element's source): named through `request_image`,
+answered through `ImageReports` with the intrinsic size layout needs, given its
+moment in every `LynxView::pump` through `service_images` (where a host whose
+loads complete off-thread forwards them into the reports), and read back
+synchronously when a painter adopts a commit through `FrameImages::read`, which
+carries a `dom::ImageSizeHint` — the largest device-pixel extent the frame
+draws that source at, computed per draw under its transform and unioned per
+source — so a host decodes to the draw rather than to the file. No container
+sniffing, codec contract, cache policy or byte budget lives in `bobcat-core` or
+`dom`; `crates/bobcat-resources` is the reference implementation every shipped
+embedder uses. `FrameImages::retain` — the sources one resolve pass met, in
+paint order — carries **no default body**, so every store writes its working
+set where someone can see it rather than inheriting a silent no-op.
+`LynxView::prefetch_images` warms sources ahead of the walk that would discover
+them.
+
+#### Workers, the BTS and cross-thread messages
+
+**A group also owns a second thread and a second `QuickJS` runtime,
+`bobcat-workers`**, for the worker realms every view in it shares.
+`LynxGroup::new` starts it beside `bobcat-main`, and the group handle's drop
+joins it after `bobcat-main` has returned, so a thread that will not start
+fails the *group*. `bobcat-main` holds one sender on it and only ever sends:
+start a context with its script, post to a context, stop a context — and hears
+events back. A released view stops its own workers by sending each that stop.
+The price is one parked thread and one idle runtime per group; there is no
+lazily-built state and no lock. The runtime is separate from `bobcat-main`'s
+because worker script must not stop the thread that owns the document, and
+since `QuickJS` binds a runtime to one thread, no path runs from a worker realm
+to a `LynxDocument` and no value of either runtime can be named by the other.
+One realm per live worker, and the group's workers take turns. **One task per
+live worker, and a worker's whole state is that task**: a `WorkerStart` carries
+its key, its name, the one-shot its script will arrive on, the receiving end of
+its message channel, the sender its events go back on — the creating MTS
+realm's `WorkerEvent` channel — and the Worker's own cancellation token. MTS
+routes events through weak references to JS Worker objects; their finalizers
+and explicit `terminate()` release sending handles, and releasing the MTS realm
+closes its remaining senders. Host functions reference the channel owner
+weakly, so queued finalizers cannot keep a released realm's workers or group
+thread alive. The script wait is a `biased` select over the message channel
+first and that token behind it, so a `terminate` landing in the same instant as
+the script wins and a worker told to stop never boots. The timer machinery both
+realm kinds run on — the schedule, the two host members, the firing loop — is
+`crate::timers` beside `crate::clock`, owned by neither thread.
+
+**The main-thread `Worker` class is exported by `bobcat-internal`.** It is an
+explicit ESM import, creates a distinct context on the group's existing
+`bobcat-workers` thread, and supports `postMessage`, `terminate`, `onmessage`,
+`onerror` and the shared EventTarget listener methods. It uses module scripts
+(also with omitted options) and the worker scope's structured-clone transport,
+so `undefined`, `NaN`, `Date`, `BigInt`, typed arrays, cycles and shared
+references survive, while a function, `Symbol`, `Map`, `Set`, `RegExp`,
+`Error`, `DataView` or accessor property throws synchronously at the
+`postMessage` call; transfer lists remain pending. External ESM imports load
+through the view's resource fetcher and support TLA. `main/workers.rs` installs
+its three native operations — `createWorker`, `sendWorkerMessage`,
+`terminateWorker` — before entry boot. The `Start` goes out before the host is
+asked for anything, `SourceRequest::Worker` carries the entry's resolved URL as
+its base, and the host is handed the far end of the one-shot that already rode
+to `bobcat-workers` inside that `Start`, so the script reaches the worker
+without a main-thread turn. Every concurrent worker request is preserved.
+Worker entry/import requests use the Worker's cancellation scope, and host
+release does not cancel it ahead of JS disposal. Once the MTS realm is
+released, closing its senders ends remaining Workers, including after failed
+boot; Rust has no Worker termination sweep. A `WorkerEvent` delivers messages
+and errors to the owning realm; worker errors also produce nonfatal
+`EngineEvent::WorkerFailed`. See `docs/runtime-architecture.md` for the
+transport and lifetime boundaries.
+
+**After the MTS entry import succeeds, boot creates a BTS Worker** named
+`lynx-bg` through that same class, using the engine entry `bobcat:bts`, which
+installs its JS initializer from `bobcat:bts-runtime` and returns. Its first
+Worker message supplies initial data and starts the optional
+`ViewSources.background_entry` import. MTS JavaScript owns BTS disposal: send
+`dispose`, await `disposed`, then terminate its Worker. BTS calls the current
+app hook, reports any throw and replies after an ordinary Promise boundary. The
+MTS disposal Promise also handles repeated destroy notifications, and disposal
+bypasses an unfinished BTS entry import. Object observers follow web-core: a
+plain object registered with a JS `FinalizationRegistry` that directly invokes
+its callback (`docs/destruction-runtime.md`). Raw BTS application entries
+explicitly import their bindings from `bobcat:bts-runtime`; neither runtime
+installs `globalThis.lynx`. XML uses this identical startup path, and the
+bootstrap contains no application source and does not fetch it in advance. A
+worker carries a `SourceRequester` that sends module requests directly to the
+view's resource host. ESM completion and timers continue during entry TLA;
+posted messages wait for entry settlement, and each completion shares its
+worker's cancellation token. ReactLynx compiled module execution and
+lazy-bundle APIs remain a later layer over this transport; bypassing
+`lynx_core.js` does not require its `requestScript`/`readScript` source-text
+interfaces (`docs/worker-resources-runtime.md`). Without an entry, only the
+built-in environment runs, and all workers use the same scope and protocol.
+
+MTS `lynx.getJSContext()` and this BTS Context are stable
+`CrossThreadContext extends EventTarget` instances returned directly by
+`createCrossThreadContext`. `dispatchEvent({type, data})` validates the string
+type and data property, captures the public envelope, sends to the peer and
+returns `0`; Context `postMessage(value)` sends a message event. Listeners
+receive the original null/undefined data and an undefined receiver, and ignore
+DOM listener options. The shared `bobcat:event-target` EventTarget every
+Context, `Worker` and engine target extends follows the DOM's inner-invoke
+rule: a listener that throws is reported and the walk continues with the next —
+in the MTS realm through `lynx.reportError` and the host's `reportScriptError`,
+as a nonfatal `ScriptReported`; in a worker realm through the worker global's
+`reportError`, reaching the parent `Worker`'s `error` event and a nonfatal
+`WorkerFailed`. Origins identify the sending CoreContext or JSContext. MTS
+queues payload references until the Worker is connected; Worker postMessage
+takes the structured-clone snapshot above for early and connected sends alike,
+and `toJSON` is never consulted. Do not add a custom codec or a deep clone on
+top of that transport; a value it refuses throws at the call. A worker's own
+task queues what is posted until its bootstrap has evaluated, and BTS JS waits
+on the application import before delivering later messages, so application
+listeners exist before first delivery. Raw XML adapters supply the optional
+entry; compiled bundle manifests still need the Lynx Core module/init shell and
+remain pending. Each view costs one additional realm on the group's worker
+runtime.
+
+MTS boot does not await BTS: `ScriptFinished` means MTS boot finished — the
+entry module evaluated, its top-level await settled, and its first flush
+committed. The BTS Worker's state is no part of it, so a BTS entry whose
+top-level await never settles does not keep the view from becoming ready. A BTS
+entry that throws is reported like any worker script: `reportError` in the
+worker realm surfaces it at the `Worker`'s `error` event and as a nonfatal
+`WorkerFailed`; the BTS keeps running and still takes messages, and no BTS
+failure ends the view. MTS keeps its Worker reference after that Worker ends; a
+post to an ended Worker is dropped by the host, and the pre-connection FIFO
+holds only what the MTS entry sends before boot constructs the Worker.
+
+BTS also exposes stable `getApp()` and `getNativeApp()` objects. The current
+app hooks receive `OnLifecycleEvent`, `publishEvent`, `publicComponentEvent`
+and `callDestroyLifetimeFun`; the native app's `callLepusMethod` invokes a
+named MTS global function and asynchronously returns its resolved result to an
+optional callback. String `__AddEvent` handlers publish snapshots containing
+target/currentTarget `dataset`, `id` and `uid`, never handles. Current PAPI
+elements have no component metadata and use `publishEvent`; explicit component
+calls preserve the supplied ID. An explicit JS engine `__DestroyLifetime` event
+starts the same JS disposal Promise used by MTS teardown, terminating BTS only
+after its acknowledgement. Rust starts and awaits MTS disposal through the
+existing ESM evaluator and routes ordinary Worker events while it waits; it
+neither identifies BTS nor calls its hook.
+
+#### The host module and the Element PAPI runtime
+
+The private `MainThreadRuntime` registers the native QuickJS ESM
+`bobcat-internal:host` as one Rust-backed named function export per member, and
+`packages/bobcat-element/src/native.d.ts` is the authoritative enumeration: a
+`declare module "bobcat-internal:host"` block for the MTS realm and
+`"bobcat-internal:worker"` for a worker's, which carries `postWorkerMessage`
+and `closeWorker` and nothing else. The MTS members group as the document's own
+life, tree vocabulary over numeric `NodeId`s, attributes and style, selector
+queries, the commit, the event-name edges, timers, the page-data triple handed
+over once as plain JSON and processor-name strings the realm alone reads, the
+stylesheet pair, the diagnostics pair, the display-frame demand, and the three
+worker operations.
+
+The two members that answer with a list encode it in the return string, since
+the boundary's value type carries no array: `attributeNames` as the
+length-prefixed record `setInlineStyles` accepts, `childElementIds` and
+`queryElementIds` as comma-joined ids, which need no length prefix.
+
+Each call is a plain owner-thread mutation, and `__FlushElementTree` runs the
+style + layout + paint commit and publishes one immutable `Arc<CommittedFrame>`
+on the view's watch. `Node`'s arena backpointer is a raw pointer, so a
+`Document` is not `Send`, and its realm never leaves `bobcat-main`. The
+boundary validates primitive arguments, live IDs and tree-mutation
+preconditions before entering `dom`, returning misuse as a JavaScript exception
+(unexpected internal panics remain fatal on abort-only Wasm). An unflushed
+batch may present once its evaluation ends — web-core's visibility model.
+
+Beside the host module, each runtime registers a fixed set of built-in ESM
+sources in QuickJS's loader: `install_shared_modules` for `bobcat-main`,
+`install_worker_modules` for `bobcat-workers`, the specifiers in `esm.rs`, and
+the per-runtime lists with their TypeScript sources in the
+`packages/bobcat-element` section below. The worker list is deliberately
+different, so importing `bobcat:element` or `bobcat:runtime` there fails to
+resolve rather than failing late. `bobcat:bts` is the BTS Worker's engine
+entry, `bobcat:boot` the MTS boot module's own specifier. A worker's own script
+is *inlined* into the one module its realm evaluates, as `ENTRY_PREAMBLE`
+carries the MTS entry, and never registered on the runtime. The Element module
+imports native operations directly from `bobcat-internal:host`; no host object
+and no element member is installed on `globalThis`.
+
+The PAPI runtime exports the supported Element PAPI only as named ESM bindings,
+which transformed entries receive through the prepended import, and **the
+header table of `packages/bobcat-element/src/element-papi.ts` is the
+authoritative enumeration** — it names every member and what backs it, and
+`ENTRY_PREAMBLE` in `main/runtime/lib.rs` imports exactly that set. By kind:
+every ReactLynx Snapshot constructor except `__CreateFrame`; all six tree
+mutations; the properties and queries a Snapshot's `create`/`update` functions
+write through and read back, among them `__SetInlineStyles` and the name-based
+`__AddInlineStyle`, with `__SetCSSId` accepted and ignored; the event
+registration and propagation members, `__AddEvent` and `__AddEventListener`
+included; `__CreateList` with `__UpdateListCallbacks`; and
+`__FlushElementTree`. Everything else is not implemented, `__CreateFrame` and
+`__DropElement` (which no web-core generation has) included; a bundle reaching
+for another member fails at the missing name with a precise `ReferenceError`,
+not silently.
+
+`__SetInlineStyles` keeps the whole-value policy in JavaScript: a string is one
+`style` attribute write, a record crosses in a single `setInlineStyles` call as
+a length-prefixed payload — `<utf16Length>:<text>` fields, name then value, in
+enumeration order — from which the host builds one declaration block from
+empty, so a value may contain any character, `;` included, without escaping.
+Ordinary camelCase keys are hyphenated; case-sensitive `--*` custom property
+names pass through unchanged. The host operation implements the name/value
+subset of CSSOM `style.setProperty` (no priority argument, so an embedded
+`!important` is invalid) and intentionally has no numeric-style-id variant:
+`__AddInlineStyle` updates one named property in the existing block and removes
+it for empty/nullish values, and numeric Lynx CSS property IDs remain
+unsupported on both surfaces. `__CreateList` consumes only its numeric
+parent-component argument for now; cell recycling remains part of the
+unimplemented list surface, and `__SetAttribute` throws for `update-list-info`,
+the one name that is a list command rather than an attribute.
+
+An element handle is an `EventTarget`, and the registration half lives in
+`packages/bobcat-element`: listener closures live only in the realm and nothing
+about a handler ever crosses into Rust. The parts of `__AddEventListener` that
+duplicate `__AddEvent` are deliberately absent: `closure_type` selecting a
+handler string and `bind_type` selecting Lynx's `catch` forms are not honored.
+
+`__AddEvent` is the other registration form, and the one ReactLynx's compiled
+output uses for every `bind*`/`catch*` prop: it files handlers under a Lynx
+dispatch form — `bindEvent`, `catchEvent`, `capture-bind`, `capture-catch`,
+`global-bindEvent`. **Two handler kinds, filed apart**: a *string* is an opaque
+background-thread handler name, an *object* is a worklet, each element holds
+one of each per event name, and a call of one kind never disturbs the other, so
+a `main-thread:bindtap` and a `bindtap` on the same element both run (native
+Lynx's `static_events_` beside `lepus_events_`; web-core's cross-thread-handler
+map beside its run-worklet map). Only a nullish handler clears, and it clears
+both kinds. Within a kind the key is the event *name* alone, the dispatch form
+carried inside the entry, so filing `catchtap` over `bindtap` of the same kind
+replaces it, form included. A worklet runs through the card's own `runWorklet`;
+a string is published with a snapshot of the event through the MTS runtime. A
+`catch` form ends the walk before either kind is delivered. Anything else
+non-nullish is ignored, which is web-core's behavior. `global-bindEvent` is
+filed in its own slot and delivered in a pass of its own after the two path
+passes, not a pass over the path: every element holding a global registration
+for the name is delivered to, in registration order, whatever path the event
+took and whether or not a `catch` ended the walk, so a global delivery has
+`eventPhase` `NONE`.
+
+The walk is the realm's. The host computes the event path while it holds the
+document, releases it, and makes one call to the Element module's
+`__BobcatDispatchEvent` export through
+`quickjs::ScriptEngine::call_module_export`, the one Rust-to-JS path in the
+tree, carrying the whole path: the standard's bubble steps, target-first, as
+two comma-joined decimal id strings — the nodes, and position for position each
+step's shadow-retargeted target — plus the name and the detail JSON. One call
+is one dispatch, so one event object serves it, and the host keeps no listener
+index at all. The realm runs the capture, bubble and `global-bindEvent` passes,
+derives `eventPhase` per step, and ends the dispatch itself; neither
+`stopPropagation` nor `stopImmediatePropagation` crosses the boundary. What the
+host is told is the *name* set the painting side routes against, and only its
+global edges: `listenerNameOpened(name)` for the first registration for a name
+anywhere in the realm, `listenerNameClosed(name)` for the removal of its last,
+the count behind them kept in the realm, including the registrations a
+collected handle takes with it, which its `FinalizationRegistry` record closes.
+
+`__SetCSSId` is a sink rather than an implementation: it names the author-CSS
+scope an element cascades in, and no layer lowers a decoded `StyleInfo` into
+**scoped** author rules yet (ingestion has landed but mounts every fragment
+globally; web-core writes `l-css-id`/`l-e-name` attributes, native Lynx keeps
+css_id on the element). A compiled card calls it while installing its snapshot
+runtime, so it accepts the call and drops the id. The scoping behavior lands
+with the ingestion side that reads it, together with the parent-component
+css-id inheritance that feeds it.
+
+`Document::drop_element` frees exactly the node the collected handle named: its
+**element** children are unlinked and go on as detached roots, each held by its
+own handle, while what no handle could ever name goes with it — host-owned text
+nodes and a host's shadow tree in full. Generated `raw-text` content has no DOM
+node.
+
+#### Page policy: tags, text and the UA sheet
+
+Core owns Lynx page policy in its `tree` module — the `page` root tag,
+`Viewport`/stylo `Device` construction, the Lynx UA cascade defaults, and the
+components the engine defines — while tag vocabulary, handle lifecycle, and the
+PAPI member surface live in `packages/bobcat-element`. The module is one file
+per tag, each owning that tag's UA rules and its tests: `tree::raw_text`
+(generated-content CSS and the rules that dissolve a carrier into the `text` it
+is written inside), `tree::text` (the paragraph attribute limits and what may
+generate a box inside a run), `tree::image` (the `src`-to-replaced-content
+reflection and its UA box), and `tree::scroll_container` (`scroll-view` and
+`list` as scroll containers — which axis scrolls, which one clips, and which
+way the subtree stacks, from `web-elements`' own `scroll-view.css` and
+`x-list.css`; `enable-scroll="false"` leaves the box a scroll container only
+script can move). `tree::ua_sheet` owns what those tags agree on, the order
+they cascade in, and `PageConfig`; `tree/lib.rs` only mints the document they
+describe. That order is mostly documentation, with one exception that is
+mechanism: `image`'s child suppression ties on specificity with `view`'s,
+`scroll-view`'s, `list`'s and `wrapper`'s own `display` rules, so it wins only
+by being assembled last.
+
+The native host-module functions call `dom::Document` directly. Element
+identity is the DOM `NodeId`, which is also the element's Lynx `unique_id` —
+one number, issued by the DOM, never reissued; the JS side mints no ids.
+
+**Text** reaches the engine as an attribute and becomes generated paragraph
+content. Script writes `__CreateRawText(value)` — a `raw-text` element carrying
+`text` — and its UA rule `raw-text { content: attr(text); }` feeds the same DOM
+generated-content path as author CSS; `text[text]` uses the same rule. There is
+no custom element reflection or synthetic DOM text child. Content replaces
+rendered children while preserving DOM structure. The element's primary text
+style shapes and paints its run; attribute changes invalidate the paragraph,
+and unchanged text/style reuse its shaping. `text` establishes one flattened
+paragraph whatever `defaultDisplayLinear` says, `wrapper` is
+`display: contents`, and `raw-text` dissolves into the `text` it is written
+inside (`display: none` anywhere else) with
+`white-space-collapse: preserve-breaks`, the one place Lynx keeps a literal
+newline. Sibling runs and nested text share the establishing element's
+paragraph. Core reflects `text-maxline`, `text-maxlength` and
+`tail-color-convert` into `--lynx-text-maxline` / `--lynx-text-maxlength` /
+`--lynx-tail-color-convert` presentational hints through
+`Document::set_presentational_hint`, and marks a `text > inline-truncation`
+subtree with `--lynx-inline-truncation` so `crates/dom` can lay it in at the
+clamp without naming a Lynx tag. Each element's optional declaration block
+enters Stylo at `CascadeOrigin::PresHints`, independently of inline style, so
+author CSS can override a limit and replacing or removing inline style reveals
+the attribute's current value. The UA registers them with `<integer>` syntax
+and `inherits: false`. DOM's borrowed `StyleView` reads their computed values
+through `TextContainerStyle`, and `BlockStyle::from_container_style` consumes
+those inputs. Normal and animated style refreshes merge effective limit changes
+into layout damage to re-break the retained glyphs through existing box
+invalidation. Original attribute strings remain available to selectors. No text
+custom element, separate paragraph-limit storage, or public limit setter
+participates. Computed `text-overflow` selects clip or the literal-dots
+ellipsis. The text `layout` event remains unwired.
+`docs/text-measurement-and-ifc.md` records the earlier design investigation;
+current integration status lives in `docs/tracking/css-text.md`.
+
+### crates/quickjs-rust-bridge
+
+An owner-thread-bound safe Rust wrapper around the pinned `vendor/quickjs`
+submodule. It exposes QuickJS's two objects as two types: a `Runtime` (heap,
+atom table, job queue, execution limits, registered module source) and the
+`Context` realms created on it, as many as the host wants, all on the owning
+thread. Realms share what the runtime owns and nothing else — a `Value` never
+crosses between them, one registered module source compiles into a separate
+instance per realm, native host modules are installed per realm under one
+runtime-wide specifier namespace, and a *failure* belongs to a realm even
+though the queue it came out of does not: a pending-job drain names the realm
+it reports for, runs every queued job whichever realm queued it, and reports
+only that realm's unhandled rejections. A sibling's stays queued for the
+sibling's own next drain and is freed with that realm; a caller that has
+reported one realm's failure can drop what that realm still has queued, since
+one throw rejects a module's evaluation promise and everything awaiting it.
+
+It owns the QuickJS C build and the narrow unsafe FFI shim, realm/value
+lifetime and affinity checks, exact ECMAScript string conversion, exception
+sanitization, pending-job pump, synchronous preloaded source/native-module
+loader, loaded-module namespace access, and module-evaluation Promise state.
+Every heap allocation made by the C shim or the five compiled QuickJS C
+translation units is redirected through a private C ABI into Rust's global
+allocator; a fixed aligned prefix supplies the size required for matching
+`realloc`/`free` and QuickJS memory accounting. QuickJS's `snprintf` and
+`vsnprintf` calls are likewise redirected to a crate-private wrapper around the
+pinned, allocator-free `nanoprintf` header, so native and Wasm builds share one
+integer/string formatter without importing libc `stdio`, `FILE`, locale, or
+another heap. All targets compile the C sources against the same crate-private
+`stdlib`/`stdio`/`inttypes`/`string`/`math` declaration facade: host allocation
+and the audited C gaps route to Rust, stack and basic memory operations remain
+compiler builtins, and the bridge-unexposed `FILE`/standard-stream diagnostic
+API is compiled out rather than modelled as a platform ABI.
+
+The realm deliberately does not install JavaScript shared-memory primitives:
+both `Atomics` and `SharedArrayBuffer` are absent, while ordinary
+`ArrayBuffer`, typed arrays, and `DataView` remain available. This does not
+disable Rust-side atomics used for interruption or host synchronization.
+Because QuickJS formerly coupled its process-global class-ID mutex to the same
+feature, the bridge allocates its one host class ID through a Rust `OnceLock`
+and registers that ID separately in each runtime, preserving concurrent native
+realm creation.
+
+It also owns the **host-function seam**: `Realm::function`,
+`define_global_function`, and `register_host_module_function` back a JS
+callable with a Rust `FnMut`, dispatched through one C trampoline
+(`JS_NewCFunctionData` + a realm-owned callback table reached via the context
+opaque). Host callbacks speak `HostValue`, a primitives-only boundary
+(undefined/null/bool/number/string) — ordinary objects, arrays, functions,
+symbols, and ill-formed UTF-16 strings are rejected on the way in rather than
+lossily converted, element identity crosses as plain numbers, and handle
+objects never leave JavaScript — which keeps ordinary callbacks leaf
+operations. Their `FnMut` closure is borrowed through a `RefCell`, so reentry
+is refused rather than aliasing it; a panicking callback becomes a JS exception
+and leaves the slot usable.
+
+A closure's lifetime follows its JS function object rather than the realm: the
+closure sits at its own stable heap address, which a companion JS object holds
+and the collector hands back through a finalizer, so nothing is indexed,
+recycled, or aliasable by a stale reference, and discarding a function drops
+its closure. Without this a realm registering a handler per element per update
+(events, worklets) would accumulate every closure it ever made. The finalizer
+only *records* the address; the drop happens at the next `&mut Realm` entry
+point, because a handler may own a `Value` whose `Drop` calls `JS_FreeValue`
+and re-entering QuickJS from inside its own GC is unsound. Capturing a
+same-realm `Value` is therefore safe, but forms a reference cycle that leaks
+the realm unless the function is collected first. The crate must remain
+independent of Bobcat, the DOM, resources, and runtime policy — it knows
+nothing about Lynx.
+
+### crates/bobcat-resources
+
+The cross-platform reference resource system: one `ResourceFetcher` for macOS,
+Linux and the browser, which every shipped embedder uses. It is the worked
+example of what the protocol expects, not part of the protocol, and core stays
+free of resources. Four things live here and nowhere else in the workspace.
+
+**Transports**: contents the embedder registers under any URL
+(`Resources::register` and `register_style_sheet` — a decoded bundle's scripts
+and `StyleInfo` sheet, a browser-fetched script's bytes, a test's PNG), `data:`
+URLs, `file:` URLs natively, and `http(s)` through the platform's own client:
+libcurl loaded at runtime with `libloading` on macOS and Linux (no build-time
+link, no bundled HTTP or TLS stack; a host without it gets a precise
+`Unavailable`), and the Render Worker's `fetch` in the browser.
+
+**A MIME-keyed preprocessing pipeline**: every payload is sniffed (image magic
+beats the label, a label beats a byte scan, a BOM names a charset), classified,
+and treated by class — text transcoded to UTF-8 with its BOM removed so the
+engine's strict validation sees what a browser's decoder would have produced,
+JSON validated, images container-sniffed and header-probed for their intrinsic
+size without decoding a pixel, the rest passed through.
+
+**Tiered caching**: decoded bitmaps in a memory tier under a byte budget with
+the frame's working set pinned against eviction, and fetched bytes in a disk
+tier under its own budget with RFC 9111 freshness, `ETag`/`Last-Modified`
+revalidation, and the fetch cache modes mapped from `CachePolicy` (natively;
+the browser's HTTP cache plays that role there). Stylesheet responses,
+including pending loads and failures, are shared by resolved URL within a
+resource scope. Preload hints populate that same cache; registration changes
+invalidate the affected URLs.
+
+**Platform image decoding**: no codec is compiled in — `ImageIO` on macOS
+(`CGImageSourceCreateThumbnailAtIndex` with a maximum pixel size, so a photo
+shown small is decoded small), gdk-pixbuf on Linux (loaded at runtime;
+`gdk_pixbuf_loader_set_size` from the header probe), and the main thread's
+`Image` element in the browser (the Render Worker fetches the bytes and hands
+them over as a Blob), each asked to downsample during decode. Natively a load
+is one task on the crate's own `current_thread` tokio runtime, built by
+`Resources::new` and moved to a `bobcat-resources-driver` thread that drives
+and shuts it down; its blocking pool (`max_blocking_threads = worker_threads`)
+runs the transport read, the preprocessing and the decode, and a `Semaphore`
+sized by `decode_parallelism` is acquired *before* a decode closure is
+submitted, so a decode that has to wait holds no pool thread. A panic inside a
+closure becomes that image's or source's reported failure. In the browser a
+load is a local task instead. Either way completions are delivered through the
+wakeup the embedder supplies and applied in the next `LynxView::pump` through
+`service_images`.
+
+The frame reads each image at the size it draws it: a resident bitmap far
+larger than its draw is re-decoded at the drawn size in the background and
+replaced; one that was evicted is restored inside the read from the retained
+bytes or the disk tier — on the embedder's own thread, synchronously and with
+no decode permit, which is why the transport keeps a blocking entry point and
+`tokio::fs` is not adopted; and one drawn larger than it was decoded is refined
+back up while the image has more to give. In the browser that restore is the
+one place the Render Worker blocks: the main thread never waits, so a job's
+mailbox in shared Wasm memory and `Atomics.wait` are what let a read that must
+not miss wait for it (`crates/bobcat-wasm/js/image-decoder.ts` is the main
+thread's half).
+
+Shape: `Resources` is the shared system (registry, caches, executor, decoder;
+cheaply cloned, bound to the embedder's thread) and the only holder of the
+executor, so the runtime shuts down — without waiting for work already picked
+up — when the last clone of the last scope drops on that thread.
+`Resources::builder` yields the per-view `ViewResources` that
+`LynxGroup::create_lynx_view` takes, carrying that view's `ImageReports`.
+
+Recorded limits: only an image's first frame is decoded (no animated playback),
+no `region-to-decode`, no `blur-radius` post-processing, and none of the
+`<image>` element surface past `src` — the pipeline serves whatever source
+string the paint walk names, today `url(…)` layers and the source an
+`<image>`'s `src` installs through `Document::set_image_source`. The macOS
+decoder is type-checked against the Apple target but exercised only where
+ImageIO exists; the Linux decoder and libcurl transport are tested for real
+against the system libraries, and the browser path is linted for wasm32 and
+exercised only in a browser.
+
+### crates/bobcat-cli (`cli` feature)
+
+The native `bobcat` product over `bobcat-core`, depending on it plus
+`bobcat-resources` and `bobcat-source`. `bobcat -i file:///…` content-sniffs
+and boots one web bundle or one raw Lynx XML source card; other URL schemes are
+rejected at the boundary.
+
+The CLI is an **embedder** of the opaque `bobcat_core::LynxGroup`, `LynxView`
+and `Painter`: it owns argument parsing, local input IO, the `PageSource`
+instance, the reference resource system with the extracted scripts/styles
+registered, the winit window and event loop, device metrics, input translation,
+the stdin prompt, and PNG writing — and nothing of the pipeline. It builds the
+view from the group and the painter from the window on its own thread and
+attaches them. Every event handler is a relay into the painter
+(`dispatch_input`, `resize`, `set_occluded`, clock ticks in headless mode).
+
+The window it hands `Painter::new` is the draw target and nothing else: frames
+and lifecycle events wake the event loop through the injected `EventRequester`,
+and that turn ends in `about_to_wait`, taking both turns in order —
+`painter.pump()` draws the frame owed, then `view.pump()` services resources
+and returns what the realm had to say. Winit's `RedrawRequested` is not
+relayed. Drawing there coalesces a turn's events into one frame and keeps the
+vsync wait out of winit's proxy-event drain, which iterates until empty. The
+painter goes first deliberately: the pixels a fatal script error left behind
+reach the screen on the turn that reports it. The loop always waits — a realm
+timer is not its deadline to keep — and what wakes it for a *frame* is the
+window's own display: while `Painter::owes_frame` holds, a `CVDisplayLink` on
+the window's monitor posts one wakeup per refresh and stops when nothing is
+owed.
+
+It renders one page: one group, one `create_lynx_view` given the author CSS and
+entry MTS URL as a `ViewSources`, any group, resource or TLA boot failure
+reported as `CliError::StartView`, and the preserved `ScriptFinished` edge and
+any later `ScriptRunError` consumed through `view.pump()`. Headed mode builds
+its painter over the window; headless builds one over `DrawTarget::Offscreen`
+and relays synthetic vsync ticks into `Painter::tick`, whether a tick becomes
+GPU work being the engine's decision. Fields drop in the order `vsync, painter,
+view, …, window`, so the display link stops before what it wakes goes away and
+the surface is released before the last window handle.
+
+Its resource system is `bobcat-resources`: the decoded input's scripts and
+stylesheet registered under `bobcat-memory://` URLs, the input's own `file://`
+URL the base every relative `url(…)` resolves against, and a disk tier under
+the user's cache directory, so a page's images — beside the input, inline as
+`data:`, or on the network — load and decode through the platform. A load
+completing on the fetcher's driver thread wakes the event loop exactly as a
+commit does.
+
+Headed mode uses a native winit window with display-backed vsync and tracks
+both logical viewport size and device-pixel ratio; headless mode uses a
+configurable synthetic vsync rate, skips catch-up bursts after slow frames, and
+retains its Vello renderer, render texture and staging buffer across frames.
+Both expose a GDB-like stdin command prompt (`continue`, `pause`, `frame`,
+`screenshot`, `help`, `quit`; headless also `set/show vsync`). Screenshots are
+captured only through that live prompt — there is no one-shot startup flag —
+and PNG readback happens only on a screenshot.
+
+It must not duplicate runtime, DOM, layout, painting, or source-lowering
+policy: missing MTS/PAPI support remains a precise `bobcat-core` QuickJS error.
+`bobcat-source` lowers a decoded `StyleInfo` into
+`bobcat_core::PreparsedStyleSheet`, flattening every `css_id` fragment in
+reverse-topological order so imported fragments precede their importers, and
+each native embedder registers that sheet in `bobcat-resources` under the URL
+it names in `ViewSources::style_sheets`. A bundle carrying non-zero fragment
+ids warns that per-component scoping is not implemented rather than claiming
+compatibility. For XML, a present `<style>` body instead uses the fetcher's raw
+CSS-text arm and the fixed page configuration is `false`/`false`/`true` for
+default linear display, visible overflow, and selector support; a present
+background section is registered under the native in-memory URL
+`bobcat-memory://lynx-xml/app-service.js` and named in
+`ViewSources::background_entry`, so the view's BTS Worker imports and runs it.
+
+### crates/bobcat-cli (`server` feature)
+
+The `bobcat-server` HTTP screenshot **embedder** in the same crate, not runtime
+infrastructure inside `bobcat-core`. It follows UI Judge's public capture
+surface: `GET /health` and multipart `POST /screenshot/lynxml`,
+`/screenshot/template`, `/screenshot/template/url`, `/screenshot/zip/upload`,
+and `/screenshot/zip/url`. There is no JSON `/screenshot` route. All routes
+require a safe `entry` path and route-specific `source`, `url`, or `file` part.
+Viewports default to 800×600 at DPR 1, accept dimensions up to 8192 with at
+most 2,621,440 pixels, and return raw `image/bmp` with
+`Cache-Control: no-store`; BMP output matches UI Judge's top-down 32-bit
+BITMAPV4HEADER/BI_BITFIELDS layout, preserving alpha without a second white
+composite. Multipart fields share a 10 MiB bound plus 64 KiB framing and a
+10-second upload deadline; remote URLs are bounded to 8 KiB.
+`/screenshot/template` and `/screenshot/lynxml` accept `screenshotSettleMs`
+(default 16) and `timeoutMs` (default 60000); the other routes use 500 ms and
+60000 ms and reject timing fields. JSON/query parameters, duplicate or unknown
+fields, and snake_case aliases are rejected. `initData` and `globalProps` must
+be objects; `.lynxml` entries reject `globalProps` even when empty. Non-empty
+page-data objects remain explicit 422 errors: the server does not forward them
+to its views yet, though `ViewSources` takes both as JSON text. See
+`crates/bobcat-cli/SERVER.md` for examples.
+
+Axum accepts HTTP requests concurrently, but a bounded FIFO of eight waiting
+jobs feeds one dedicated capture thread — the embedder thread for each job. It
+starts a fresh `LynxGroup`, constructs its non-`Send` `LynxView`, builds a
+`Painter` over `DrawTarget::Offscreen` beside it and attaches the two; both
+stay on that thread, the view because it owns the host's resource system and
+the painter because it owns the GPU target. It settles on a plain frame
+interval, taking `view.pump()` then `painter.tick(false)` per step, and returns
+its RGBA capture. Dropping that view releases its group, including the Lynx
+main thread, QuickJS runtime and Stylo pool; no runtime is shared across jobs.
+BMP encoding runs on Tokio's blocking pool after the view is gone, so it cannot
+retain the view or hold the GPU lane. Queue saturation and an unavailable
+worker are 503, input/render failures 422, encoding failures 500, and
+capture/upload timeouts 408. A worker panic makes `/health` unavailable and
+initiates graceful server shutdown.
+
+Remote template/ZIP downloads follow UI Judge's public HTTP(S), no-credentials,
+no-redirect policy, pin DNS results, and enforce 10 MiB/10-second bounds. XML
+bytes and downloaded templates enter `PageSource`; archives use the shared
+`ZipSource`, registering members at `zip:///` URLs in each job's resource
+system without filesystem extraction. ZIP validation errors are 400;
+unsupported source/rendering errors remain 422. Source-based native bundles
+require a `root` module; real bytecode remains unsupported. It listens on all
+IPv4 and IPv6 interfaces and has no auth, TLS, or CORS. Captures still require
+trusted JavaScript: fresh groups on a capture thread do not provide UI Judge's
+process isolation, and page subresources use the ordinary resource transport.
+`timeoutMs` cannot preempt synchronous QuickJS execution, GPU driver calls, or
+synchronous view teardown. Source fetching, HTTP policy, BMP encoding,
+queueing, and server lifecycle stay outside core.
+
+### crates/bobcat-wasm
+
+The pure-Rust `wasm-bindgen` browser embedder and npm facade, built for
+`wasm32-unknown-unknown` with shared memory. `loadTemplate` takes binary web
+and source-based native bundles, delegating decoding, page configuration and
+StyleInfo registration to `bobcat-source::PageSource`; the original response
+URL remains the resource base. The Pages Canvas tab passes local ZIP bytes and
+an entry URL through `loadZip` to `bobcat-source::ZipSource`. Each page gets a
+separate resource scope, retaining archive assets after boot and isolating
+image caches and completion queues while sharing the platform decoder. The
+browser has no executor: each load is a local task on the Render Worker. The
+service worker only provides cross-origin isolation headers; `loadLynxXml`
+retains its XML-only, host-configured contract.
+
+The browser UI thread is a JavaScript-only host coordinator: it creates one
+explicit embedder Worker and transfers an `OffscreenCanvas`, but never
+instantiates Wasm or owns engine state. That Worker initializes the module,
+constructs one opaque `LynxGroup` and one `LynxView` per page through
+`BobcatRenderer::load`, keeps **one `Painter` for its canvas across page
+loads** (rebuilt only when it is missing or its target has failed), permanently
+owns every thread-affine GPU object — crates.io Vello 0.10/wgpu 29 Device,
+Queue, Surface, Renderer, and OffscreenCanvas — and uses `wasm_thread` to
+create the two Workers each group is made of: its nested Lynx main/VM Worker
+and the worker-realm Worker beside it. A `load` is `painter.detach()` → drop
+the old view → drop its group (ending the Lynx-main Worker and then the
+worker-realm one) → new group and view → `painter.attach(&view)`, and the
+canvas is deliberately *not* resized along the way: it already carries the
+right resolution, and setting a canvas's size clears its bitmap, blanking the
+previous page's last frame. `BobcatRenderer::pump` stays one method and takes
+both turns in order, the painter's first. That Worker also spawns its group's
+Rayon style Workers with `wasm_thread`, leaving the vendored Stylo sources
+unchanged. Core creates its owner-thread-bound QuickJS realm inside that
+Worker; Element-PAPI batches, Stylo/Rayon, layout and render hand-off
+synchronize through Rust channels, mutexes, atomics and the shared Wasm memory
+exactly as natively. JavaScript `postMessage` is only the browser host boundary
+(initial Canvas transfer, URL-based script requests/results,
+resize/input/lifecycle) or a library's Worker bootstrap control plane; it is
+not a DOM/render reconciliation protocol. URL requests are serialized, and a
+lost-wake-safe `EventSignal` Promise wakes script completion independently of
+Worker rAF, so a hidden page may pause drawing without stranding the `load`
+Promise. The UI facade, nested VM Worker startup and built-in QuickJS
+configuration impose no wall-clock deadline: QuickJS drains its owned pending
+jobs and waits for the TLA boot module's evaluation Promise to settle at its
+host checkpoint, and there is no browser microtask-completion protocol. The
+bridge retains an opt-in execution timeout for its direct users and tests.
+
+A Wasm instance owns nothing of Stylo's but the Worker bootstrap
+`configure_wasm_workers` installs — one script URL, which every Worker a group
+spawns is made of — while each `LynxGroup` owns its Lynx-main Worker,
+worker-realm Worker, style Workers and both QuickJS runtimes, and each
+`LynxView` its own realm, document and endpoints, as natively. Every public
+`BobcatCanvas` gets a separate Render Worker and Wasm instance; a renderer
+holds neither group nor view until `BobcatRenderer::load` builds both, and each
+later load replaces them. A page gets a group of its own rather than reusing
+the renderer's, because the script runtime is the group's: a page loaded twice
+would otherwise register its entry module a second time under a name the
+previous load already took. Dropping the view stops it and dropping its group
+ends the Lynx-main Worker and then the worker-realm Worker, once the Lynx-main
+Worker has released the document and thread-bound QuickJS realm; ending is all
+it is on this target, since `panic=abort` leaves a trapped Worker never
+signalling its join handle, so wasm teardown says the goodbye and does not
+wait. Replacement construction starts only after that teardown. The transferred
+OffscreenCanvas, module instance, configuration, latest metrics, resource
+provider, registered font containers, selected default font family, and Stylo
+worker *count* are the renderer's own, reapplied to each group it builds, while
+the workers belong to the group and retire with it. Registered script and
+stylesheet bytes remain available until the startup outcome arrives; cleanup
+leaves ZIP assets and the next page's staged sources intact. The Render Worker
+is not a pool member; the group's Lynx-main Worker is index zero of the pool it
+builds, and the rest are managed Workers it spawns. `BobcatRenderer::create`
+therefore takes a count of one to `MAX_STYLE_THREADS`, counted the way
+`StyleThreads` counts everywhere — the Lynx-main Worker included — and the
+facade asks for the machine's threads less the Render Worker. The UI never
+blocks, while Worker-side Rust may block wherever the native runtime does. The
+browser target enables `parking_lot_core/nightly` so transitive Stylo/wgpu
+parking_lot locks use Wasm atomic wait/notify instead of the non-atomic backend
+that panics on contention.
+
+Release packaging pins Binaryen 132 through the JavaScript workspace and runs
+`wasm-opt -Oz` after wasm-bindgen with an explicit mirror of every enabled
+Rust/LLVM Wasm feature; the build rejects a different optimizer version instead
+of accepting wasm-pack's older fallback. Package verification requires the
+optimized module to omit its debugging `name` section while retaining
+`target_features`. Browser builds disable Parley's `complex-scripts` feature to
+avoid embedding ICU's multi-megabyte CJK and Southeast Asian dictionaries;
+native targets retain it, so grapheme segmentation, shaping and ordinary
+Unicode line breaking remain available while Thai, Khmer, Lao and Myanmar text
+may use cluster-level emergency breaks and report a larger intrinsic minimum
+width. `wasm_thread` is pinned to the upstream `spawn_from_worker` change,
+whose crates.io release otherwise forwards nested spawns to a parent protocol
+handler an explicit embedder Worker does not have; Chrome 135 supports the
+resulting nested module Worker.
+
+Page sources arrive through the Render Worker's own `fetch`: it registers the
+raw stylesheet and entry-MTS bytes with the `bobcat-resources` system it owns
+and calls `BobcatRenderer::load(entry_url, style_sheet_urls)`; the entry's
+final response URL is the ESM specifier `bobcat:boot` imports and the base its
+images resolve against. Images are fetched by the resource system through the
+same Worker `fetch` and decoded on the main thread by an `Image` element in the
+package's `js/image-decoder.ts`, over a `MessageChannel` whose Worker end the
+facade hands to `BobcatRenderer::create` at init. `loadLynxXml(url)` fetches an
+XML envelope once, decodes it with the web loader's replacement-mode UTF-8
+behavior, parses it with `bobcat-source::xml`, and hands any raw stylesheet and
+its main-thread body to the same `load`; both are repeatable. The exported
+`LYNX_XML_PAGE_CONFIG` names the source format's fixed page defaults, which a
+host may still deliberately override. The optional background body is
+registered at its section URL, `<final-response-URL>#background-thread`, and
+named in `ViewSources::background_entry` for the view's BTS Worker.
+
+Transferring the canvas does not transfer its DOM event target, so the
+`BobcatCanvas` facade retains that element and forwards active
+`pointerdown`/`pointermove`/`pointerup`/`pointercancel` sequences. It claims
+each accepted pointer, maps client coordinates through the canvas bounds into
+viewport CSS px, and sends compact fire-and-forget records through the same
+ordered Render-Worker queue as load/resize. The Worker stamps input with its
+own `performance.now()` before `BobcatRenderer` writes the shared manual clock
+and calls `LynxView::dispatch_input`, which keeps gesture time on the Worker
+rAF timeline and prevents an idle frame clock from making `longpress` fire
+immediately. Each load clears active captures, disposal removes all listeners
+and restores the canvas's prior inline `touch-action`, and unexpected capture
+loss becomes `pointercancel`. Hover moves, secondary mouse buttons and wheel
+input do not cross the boundary. The facade exposes no
+create/append/drop/flush, document, tree, or engine API, and does not decode
+`.web.bundle` containers; callers supply `PageConfig` and either executable
+script URLs or a raw Lynx XML URL. Synchronous GPU capture is absent because
+browser WebGPU completion is Promise-driven.
+
+### packages/bobcat-element
+
+The dependency-free TypeScript sources of the ESMs `bobcat-core` preloads into
+its QuickJS realms, one file per module. The main-thread runtime gets
+`src/main-thread-runtime.ts` as `bobcat:runtime`, `src/element-papi.ts` as
+`bobcat:element`, `src/timers.ts` as `bobcat:timers`, `src/event-target.ts` as
+`bobcat:event-target`, `src/cross-thread-context.ts` as
+`bobcat:cross-thread-context`, and `src/worker.ts` as the `Worker` class under
+`bobcat-internal`. The group's *worker* runtime gets `src/worker-runtime.ts` as
+`bobcat:worker`, `src/background-thread-runtime.ts` as `bobcat:bts-runtime`,
+`src/global-event-emitter.ts` as `bobcat:global-event-emitter`,
+`src/lynx-modules.ts` as `bobcat:lynx-modules`, `src/selector-query.ts` as
+`bobcat:selector-query`, plus `bobcat:event-target`,
+`bobcat:cross-thread-context` and `bobcat:timers` again — registered per
+runtime, because a source is runtime-wide and no value crosses between two
+runtimes. `src/native.d.ts` declares the two native modules' contracts and is
+the authoritative list of what `bobcat-internal:host` and
+`bobcat-internal:worker` export.
+
+What core embeds, with `include_str!`, is the JavaScript TypeScript 7 compiles
+from `src/*.ts` during the Cargo build. `bobcat-core/build.rs` invokes the
+package's build script with an output directory under Cargo's `OUT_DIR`, so
+each target/profile owns its emit and parallel builds never share a source
+directory. Cargo tracks the sources, build script, TypeScript configuration and
+pnpm dependency files. Run `pnpm install --frozen-lockfile` before Cargo; Node
+is a build dependency for native and Wasm consumers alike. Generated JS is not
+committed; `pnpm --filter bobcat-element build` emits an ignored `dist/` for
+local inspection, and QuickJS error lines refer to emitted JS, not TS. The
+Rstest suite imports the same modules and verifies every named export.
+
+The package owns the supported `__*` PAPI members and their web-core arities,
+plus the Lynx tag vocabulary
+(`wrapper`/`text`/`image`/`view`/`scroll-view`/`raw-text`/ `list`). It also
+owns the value coercions web-core gets from the HTML DOM for free:
+truthiness-not-null clearing for classes, ids, and inline styles,
+`String(value)` for DOM attributes, and camelCase-to-kebab hyphenation of a
+record-shaped inline style. Lynx attribute readback retains a separate typed
+container copy, and datasets merge typed keys in the MTS handle. BTS
+`lynx.createSelectorQuery()` builds `NodesRef` tasks carrying selection tokens
+over the existing Worker messages; MTS resolves those through the document's
+selector engine, including the query root, and returns fields/path data, while
+`setNativeProps` applies CSS/attributes and commits before the next request.
+`invoke` delivers selection and unsupported-method failures; actual UI methods
+remain unimplemented. No callback or document handle crosses into Rust's Worker
+transport. See `docs/node-query-runtime.md` for the supported fields, callback
+semantics and remaining boundaries.
+
+The package also owns the event half: a handle is an `EventTarget`, its
+listeners are closures filed on the handle itself under a realm-local symbol,
+and `__AddEventListener` / `__RemoveEventListener` keep the standard's
+registration identity (element, name, callback, capture) with its idempotence,
+`once`, and case-insensitive names. Per-handle realm state (listeners,
+`__AddEvent` handlers, the index bookkeeping, list callbacks) lives on the
+handle object under realm-local symbols rather than in a `WeakMap` keyed by it:
+QuickJS's `WeakMap` marks its values unconditionally, so a closure that
+captured its own element would otherwise keep the handle, and through it the
+whole subtree, alive for the life of the realm. The per-node dispatch, the
+standard's `eventPhase`, and `once` are all resolved here, with only the event
+name's open/close edges crossing to the host.
+
+**Identity and lifecycle.** An element handle is a plain object carrying its
+DOM `NodeId` under a realm-local symbol (web-core's `uniqueIdSymbol` shape) —
+one object per element for its whole life, so every PAPI return of an element
+yields the same object and no handle is ever minted after the first. There is
+no `retain`: a future query member that has to answer with a handle for a node
+whose handle has died must fail loudly, and so must a dispatch whose target has
+none, since a connected element always has one. `parentComponentUniqueID` and
+`__CreatePage`'s arguments are accepted for PAPI shape and unused. Collection
+is the only way a handle lets go of its element — web-core's model, where a
+swept `WeakRef` is what ends a wrapper. Every non-page handle is registered
+with a `FinalizationRegistry` whose cleanup calls the imported native
+`dropElement`, which frees that element and nothing else; cleanup runs as a
+pending job at the host's job checkpoints, and never at realm teardown, which
+preserves the last committed tree. A collection comes from QuickJS's allocation
+pressure, or from the runtime itself: every `REMOVALS_PER_COLLECTION` removals,
+the batch that crosses the count ends with one, so the handles an unmount left
+behind are finalized — including any caught in a cycle, which reference
+counting cannot free — without waiting for allocation to reach the threshold.
+
+**The handle is the one thing that holds its element**, and the handle above it
+is what keeps it alive while its element is on screen: every handle carries an
+unordered strong `Set` of its children's handles, maintained by the six tree
+mutations, and the page's handle is permanent, so every *connected* element's
+handle is reachable from it. The link the other way is the owner's node id,
+resolved through the same weak `NodeId`→handle index the dispatch side uses, so
+no parent/child pair is a reference cycle and an unreachable subtree is freed
+by plain reference counting. The set holds membership only; order is the native
+tree's. An unmount is therefore `__RemoveElement` on the snapshot's root, which
+takes it out of its parent's set, and then the card's own references going
+away: the subtree's handles become unreachable together and each finalizes into
+one free. A ReactLynx list handing a recycled cell's elements between snapshot
+instances and deleting the old `__elements` array takes nothing away — those
+elements are connected, so their handles are held above them.
+
+The JavaScript layer deliberately does not validate handles: a foreign handle
+resolves to `undefined`, which the private native boundary rejects as a
+JavaScript error before entering `dom`. Native access is limited to named
+imports from the native `bobcat-internal:host` ESM; the realm has no
+`globalThis.bobcat`, no `console`, and no DOM. Named exports are the only
+Element-PAPI surface for transformed MTS entries; local named Lepus chunks
+retain those imports through an entry-scope direct-eval closure. Rstest imports
+the TypeScript directly, and TypeScript 7 checks the sources as a program with
+`lib: es2023` and no ambient types, resolving each `bobcat:*` specifier to its
+file through `paths` and declaring the two native modules' contracts in a
+`.d.ts`.
+
+`src/timers.ts` is the one module here that does install globals, because bare
+`setTimeout`/`setInterval`/`clearTimeout`/`clearInterval` are how a card
+reaches them. It keeps only the callbacks, filed under the id the host's
+`setTimer` hands back; the schedule and HTML's `long` delay conversion and
+nesting clamp are `bobcat-main`'s, and the first step of the epilogue that
+follows every entry into a realm calls the module's `__BobcatRunTimer` back for
+whatever is due — before that entry's commit, so a callback's mutation rides
+the same frame. No deadline crosses the link and no host turn is owed for one.
+
+`src/element-papi.ts` also exports `class Document`, whose constructor calls
+the native `createDocument`. It is on no collection schedule at all, which is
+the opposite of the element path in the same file.
+
+### Other pnpm packages
+
+- `packages/reactlynx-test-fixtures` — the JSX/CSS/JS sources of the compiled
+  ReactLynx cards the integration tests, decoder tests and benchmarks run.
+  `lynx.config.js` declares the entries and their independent output
+  directories, and the package scripts invoke the public `rspeedy build` CLI
+  once in production and once in development mode; no script creates a compiler
+  or imports an internal Rspeedy entry point. Run
+  `pnpm --filter reactlynx-test-fixtures build` before Rust tests, clippy or
+  benches: the emitted `dist/index.rs` registry is what names the bundles, and
+  no compiled fixture is versioned. Upstream provenance for the five `basic-*`
+  cards is in that package's `NOTICE.lynx-stack`.
+- `packages/explorer-homepage`, `packages/explorer-showcase` and
+  `packages/explorer-lib` — the Lynx Explorer home screen and showcase menu in
+  ReactLynx, over the navigation, launch-command, history and theme helpers the
+  `lib` package shares between them.
+- `packages/github-pages` — the rsbuild site published to GitHub Pages, built
+  by `pnpm build:github-pages`, which builds `bobcat-wasm` and the Explorer
+  homepage first and then this package over both.
+- `examples/` — `lynx-stack`'s own examples, adapted so their `workspace:*`
+  dependencies name published package versions and they install independently
+  of the `lynx-stack` source tree. See `examples/README.md` for the TypeScript
+  arrangement each one needs.
+
+### crates/dom
+
+Generic W3C-DOM-subset document tree and standards-oriented CSS computation
+core, on stylo's cascade. `docs/dom-public-api.md` is the authoritative
+normal-build versus test-feature API boundary. It must not contain Lynx
+runtime-element vocabulary or Lynx device/unit policy: Lynx computed defaults
+(border-box, `overflow: hidden`, `display: linear` on every element, …) stay
+embedder cascade policy in the UA sheet.
+
+Subsystems:
+
+- `tree/` — the boxed `TreeArenas<T>`, `Node`, `Document`, shadow roots, the
+  flat tree, custom-element definitions and reactions.
+- `style/` — the per-document `StyleEngine` (`Stylist`, cascade pipeline,
+  device, stylesheet set, `SharedRwLock`), flush, invalidation, `StyleDamage`.
+- `layout/` — the concrete `hughie` host: `Document::layout`, the `LayoutTree`
+  impl, per-node `LayoutSlot`s in `DocumentLayoutState`.
+- `visual/` — stacking contexts, CSS2 Appendix E paint order, transforms,
+  `RenderLayer` group effects, reverse-paint-order hit testing.
+- `paint/` — the document-owned private `Painter`, walker, fragment painters
+  and the retained `vello::Scene` a `commit` publishes as `CommittedFrame`.
+- `scroll/` — CSSOM-View geometry, per-node offsets, `scroll_to`/`scroll_by`/
+  `scroll_chain`.
+- `input/` and `event/` — the `InputEvent` host seam and
+  `Document::event_steps`, which computes a path and dispatches nothing.
+- `render/` — the DOM-free floor absorbed from the former `pulsar` crate
+  (2026-08-04): `FrameImages` and the `render::gpu` wgpu backend.
+
+Rulings and limits to know before touching it:
+
+- The whole `unsafe` surface is two blocks, each with a `SAFETY` comment kept
+  honest by `#![warn(clippy::undocumented_unsafe_blocks)]`.
+- A `NodeId` is never reissued (no generation counters, no epoch gate on the
+  retained frame) and the document element is permanent and pre-created.
+- `overflow: auto` stays out (user decision, 2026-07-29) and a `visible` axis
+  pairs into `hidden`; only `scroll` is user-scrollable, `hidden` is a scroll
+  container only script moves, `clip` is no container at all, and scroll
+  containers are forced stacking contexts.
+- The crate dispatches no events and has no `preventDefault` and no gesture
+  recognizer; `InputEvent::default_prevented` is the embedder's seam.
+- Custom elements are user-agent components only, `define` must precede any
+  element with its tag, reactions are queued rather than called inline, and
+  `disconnected_callback` takes a shared `&Document`.
+- Attribute-derived style enters through `Document::set_presentational_hint` at
+  `CascadeOrigin::PresHints`, never the author's inline block.
+- Stylo's per-element style data and its traversal/invalidation flags live
+  inline on `Node` (bench-defended 2026-08-03: no traversal regression, a
+  measurably faster no-op-commit fast path).
+- One `StylePool` per document through `Document::set_style_pool`;
+  `MAX_STYLE_THREADS` is six, a ceiling rather than a tuning knob.
+- Confirm the vendored fork tip with `git -C vendor/stylo rev-parse --short
+  HEAD` rather than trusting a written one.
+
+Everything else about the crate's internals is in `docs/dom-architecture.md`.
+
+### crates/hughie
+
+The Flexbox, Grid, and Starlight Relative and Linear engine: trait-based
+host⇄engine integration with static dispatch only (no `dyn`), one `LayoutTree`
+protocol with a `Copy + Debug` `NodeId`, immutable topology/styles for the
+flush, and a separately borrowed mutable host state of per-node `LayoutSlot`s.
+That split permits recursive mutation without copying style/layout records and
+without `RefCell`/`AtomicRefCell` checks. Style traits speak the stylo fork's
+computed-value vocabulary directly (requiring the `stylo` workspace dep +
+python3 for its build script; the old zero-dependency/standalone pillar is
+retired), with host-side display dispatch. They are split by algorithm:
+`CoreStyle` carries the box model, containment, the alignment accessors and
+`order`, while `FlexboxStyle`, `GridStyle`, `LinearStyle` and `RelativeStyle`
+each carry what only their own algorithm reads and are demanded at that
+algorithm's entry point. `TextContainerStyle` supplies paragraph-wide
+`text_maxline` and `text_maxlength` inputs from non-inherited integer custom
+properties, defaulting to unlimited. `LayoutTree::flattened_children` is the
+box-tree view every algorithm collects items through, flattening `display:
+contents` subtrees. Leaf content is deliberately closed: replaced content uses
+the `NaturalSize` value path, text the crate's concrete
+`TextBlock::probe`/`commit` paragraph path; arbitrary host measurers are not
+supported.
+
+**Flexbox, Grid, Relative, and Linear implemented** — the shared
+root/leaf/cache/positioned/rounding machinery, CSS Flexbox Level 1, numeric CSS
+Grid Level 2 (excluding subgrid/named areas), id-constrained Starlight Relative
+Layout Level 1, and Lynx's `display: linear` algorithm and `linear-*`
+style/source protocol are live. Text shaping, line breaking,
+intrinsic/height-for-width measurement, baselines, and retained Parley layouts
+are unconditional crate behavior, in `src/text/block` — including
+`truncate.rs`, which lays an `<inline-truncation>` subtree in at the clamp and
+applies `tail-color-convert`'s native semantics.
+
+**CSS containment (css-contain-2)** is landed layout-side: the stylo
+`Contain`/`ContainIntrinsicSize` accessors on `CoreStyle`, size-substitution +
+layout-containment baseline suppression, `compute_skipped_contents_layout`, and
+the `invalidate` module (`is_relayout_boundary`, `invalidate_for_relayout`) —
+the containment-bounded, damage-driven cache-invalidation host workflow
+(single-axis / container queries out of scope). `LayoutGoal::Commit` carries
+per-axis `content_independent` flags: input *stability* under subtree content
+change, proven by the committing algorithm (flexbox, grid, linear, relative and
+the absolute pass all set them; the root input is viewport-stable by
+construction; a measurement carries no such claim, which is why only a commit
+has the field). They ride inside the committed cache entry, outside its key, so
+`LayoutSlot::committed_input` hands a host the complete input it can relayout a
+subtree in place under and verify by output comparison. The per-node
+measurement cache has a 32-entry ceiling but inlines two slots, spilling to the
+heap for nodes whose containers probe many constraint shapes. Read
+`docs/layout-architecture.md` before touching it. It must not depend on other
+workspace crates or own host tree/style storage, DOM/runtime types, resolved
+device-unit policy, or paint order.
+
+The runtime-layout integration — the `LayoutTree` host, display dispatch,
+fixed/hoisted positioned pass, per-node cache storage, and the automatic
+style-damage→layout-invalidation wiring (boundary-stopped and engine-internal,
+not a runtime-adapter concern) — lives in `dom`; generic W3C text style,
+document context, and artifact storage live there too.
+
+### crates/flashbulb
+
+Screenshot testing infrastructure, and the only crate here that exists for the
+test suite rather than the product (`publish = false`, dev-dependency
+everywhere). It owns RGBA `Image` + PNG codec, a port of the `pixelmatch`
+algorithm Playwright compares screenshots with (squared-YIQ per-pixel distance
+against `35215 * threshold²`, anti-aliasing detection,
+`max_diff_pixels`/`max_diff_pixel_ratio` budgets), and `Screenshots`, the
+golden store: path resolution from a name-segment list,
+`FLASHBULB_UPDATE_SNAPSHOTS=1` to accept, and `-expected`/`-actual`/`-diff`
+PNGs written to a git-ignored `tests/artifacts/` on failure. A newly *created*
+golden fails its own run so an unreviewed baseline cannot pass; an explicitly
+*accepted* one does not.
+
+The optional `render` feature adds `capture_document` (`Document::render` →
+retained scene → `dom`'s headless GPU) over the whole painted frame, `viewport
+* device_pixel_ratio` device pixels: the render floor scales the scene up by
+that ratio, so anything smaller is a crop. Playwright instead downsamples to
+CSS pixels; the two coincide at a ratio of 1, which lynx-stack pins for
+determinism and every viewport here uses. Its `TestImages` is the in-memory
+`dom::FrameImages` the image suites hand to a capture — the only image store in
+this workspace, and deliberately a test double: it fetches, decodes and evicts
+nothing. `pump_images` drives one round of the document-to-host image protocol
+(every source `take_wanted_images` named, then the reports back through
+`apply_image_events`) and `render_with_images` loops that to quiescence.
+`headless` requires a usable GPU adapter and panics without one, so local and
+CI runs obey the same mandatory-GPU policy. DOM-aware screenshot suites live in
+`dom`, which also keeps the direct GPU smoke tests. Goldens are not
+platform-suffixed: cross-platform rasterizer noise is absorbed by tolerance,
+not by per-platform baselines.
+
+### Still ahead
+
+What the runtime layer does not implement yet, each recorded with the code that
+would host it:
+
+- **Per-component css-id scoping.** `__SetCSSId` is a sink and every
+  `StyleInfo` fragment mounts globally; the encoding lands with the ingestion
+  side that reads it, together with the parent-component css-id inheritance
+  that feeds it.
+- **The list surface.** `crates/bobcat-core/src/main/tree/scroll_container.rs`
+  carries only what a UA sheet can say about `scroll-view` and `list`; there
+  is no cell recycling, no scroll-to-index and no threshold events, and
+  `__SetAttribute(element, "update-list-info", …)` throws rather than
+  pretending.
+- **Gesture detectors and the arena.** `crates/bobcat-core/src/paint/gesture.rs`
+  has no fling or velocity, no `:active` driving, no `consume-slide-event`, no
+  per-element `GestureDetector`/arena relations and no `click`; `tapSlop` is
+  the default 50 px rather than the page config's.
+- **The rest of the `<image>` element surface.** `src` loads; `mode`,
+  `auto-size`, `placeholder` racing, `cap-insets`, `blur-radius` and the
+  `load`/`error` events do not.
+- **UI methods via `invoke`.** `packages/bobcat-element/src/selector-query.ts`
+  delivers selection and unsupported-method failures; no actual UI method is
+  implemented.
+- **The text `layout` event.** The per-line ranges `hughie`'s
+  `text/block/content.rs` computes have no delivery path.
+- **`rpx`-aware view/device policy**, sticky lowering (it parses and paints as
+  normal flow but never pins), and component-specific staggered layout.
+- **Animated image playback.** `bobcat-resources` decodes an image's first
+  frame only, with no `region-to-decode` and no `blur-radius`
+  post-processing.
+- **Import maps, import attributes, JSON modules and Lynx component-bundle
+  imports**, and the Lynx Core module/init shell compiled bundle manifests
+  still need.
+
+See `docs/tracking/` for the behavior surface each of these is scoped against,
+and `.claude/agents/` for the subsystem-scoped agent personas set up for this
+work.
 
 See `docs/runtime-architecture.md` for the runtime dependency graph, feature
 boundary, private paint pipeline, and frame walkthrough;
@@ -2081,41 +1718,48 @@ style/layout ownership rules.
   (ReactLynx framework) and `packages/web-platform/*` (`web-core` dual-thread
   runtime, `web-elements` built-in components). This is the architectural
   reference for the dual-thread execution model lynx-vello must replicate
-  natively (no literal worker/iframe threads).
+  natively — with the engine's own threads (`bobcat-main` and `bobcat-workers`,
+  the second hosting the BTS as a W3C `Worker`, and both real Web Workers on
+  wasm) rather than with the browser's Worker/iframe hosting.
 - `/Users/akiwah/repos/paws-libs/Paws` — a sibling native Rust UI engine
-  (`stylo` + Taffy + `parley`, WASM-driven, UIKit/wgpu-painted). **Not** a
-  Lynx project and **not** a behavior spec — it's an implementation-pattern
-  reference for DOM system and CSS system design: how to wire `stylo`'s
-  cascade/`RuleTree` onto a custom arena-based DOM (`engine/src/dom/`,
-  `engine/src/style.rs`, `engine/src/style/css_style_sheet.rs`), a real
-  spec-conformant CSS stacking-context implementation
-  (`engine/src/layout/stacking.rs` — relevant to the z-index deviation
-  above), and DOM-style event dispatch/hit-testing with no browser
-  underneath (`engine/src/events/`, `engine/src/hit_test/`). Its
-  `paws-style-ir/` crate is a second, independent rkyv-based style-IR design
-  worth comparing against our own `RawStyleInfo` (it targets rkyv `0.8.x`;
-  ours stays pinned at `0.7`, see Dependency policy above).
+  (`stylo` + Taffy + `parley`, WASM-driven, UIKit/wgpu-painted). **Not** a Lynx
+  project and **not** a behavior spec — an implementation-pattern reference for
+  DOM and CSS system design: wiring `stylo`'s cascade/`RuleTree` onto a custom
+  arena-based DOM (`engine/src/dom/`, `engine/src/style.rs`,
+  `engine/src/style/css_style_sheet.rs`), a spec-conformant CSS
+  stacking-context implementation (`engine/src/layout/stacking.rs` — relevant
+  to the z-index deviation above), and DOM-style event dispatch/hit-testing
+  with no browser underneath (`engine/src/events/`, `engine/src/hit_test/`).
+  Its `paws-style-ir/` crate is a second, independent rkyv-based style-IR
+  design worth comparing against our own `RawStyleInfo` (it targets rkyv
+  `0.8.x`; ours stays pinned at `0.7`, see Dependency policy above).
 
-Elsewhere in this repo (subagent personas, tracking docs, prompts), these
-three are referred to by shorthand as `lynx/`, `lynx-stack/`, and `Paws/` —
-this section is the only place the absolute paths are spelled out.
+Elsewhere in this repo (subagent personas, tracking docs, prompts), these three
+are referred to by shorthand as `lynx/`, `lynx-stack/`, and `Paws/` — this
+section is the only place the absolute paths are spelled out.
 
 ## Reference knowledge
 
 - `docs/lynx-xml-template.md` — the implementation-derived Lynx XML source
   format: exact restricted grammar, section extraction, errors and offsets,
-  fixed template mapping, and the intentional CSS difference between the
-  merged XML-to-`.web.bundle` encoder and the still-proposed raw web loader.
+  fixed template mapping, and the intentional CSS difference between the merged
+  XML-to-`.web.bundle` encoder and the still-proposed raw web loader.
   `bobcat-source::xml` implements its source parsing boundary. XML is a source
   front end, not a third bundle encoding.
 - `docs/web-binary-template.md` — **read this before touching
   `crates/bobcat-source/src/web` or any StyleInfo/wire-format code.** The
-  web-target bundle format this repo decodes today: container layout,
-  section encodings, and the rkyv 0.7 `RawStyleInfo` CSS data model (mirrored
-  1:1 in the decoder crate — field/variant order there is wire format, do not
+  web-target bundle format this repo decodes today: container layout, section
+  encodings, and the rkyv 0.7 `RawStyleInfo` CSS data model (mirrored 1:1 in
+  the decoder crate — field/variant order there is wire format, do not
   reorder).
 - `docs/lynx-binary-template.md` — the *native* `.lynx.bundle` format ("lynx"
-  target), implemented for source-based external bundles by `bobcat-source::native`.
+  target), implemented for source-based external bundles by
+  `bobcat-source::native`.
+- `docs/dom-architecture.md` — `crates/dom`'s internals: arenas and identity,
+  shadow DOM and custom elements, the style engine and invalidation, the
+  layout host, visual order and the committed frame, scroll/input/event
+  paths, text, and the vendored stylo fork. The `crates/dom` section here
+  keeps only the charter and the rulings.
 - `docs/tracking/` — the behavior/feature inventory (CSS properties, layout
   algorithms, DOM/event model, JS runtime APIs, `web-core` runtime
   architecture, built-in components, ReactLynx surface) that future
@@ -2123,35 +1767,37 @@ this section is the only place the absolute paths are spelled out.
   implementing any new subsystem.** Start at `docs/tracking/README.md`.
 - `docs/agent-prompts.md` — copy-pasteable task-kickoff prompts for recurring
   work (adding a CSS property, porting a built-in component, auditing a JS API
-  for parity, etc.), usable from either Claude Code or Codex.
+  for parity), usable from either Claude Code or Codex.
 - `docs/text-rendering-research.md` — **read before proposing any text-painting
-  performance work.** Why vello has no glyph atlas and cannot get one, what
-  a text-heavy frame actually costs here (measured), where the ecosystem's
-  answer lives (`glifo` via `vello_hybrid`), and why `glyphon` and a
-  hand-rolled atlas are both ruled out. Conclusion is *don't switch renderers
-  yet* — so the useful contribution is evidence, not a port.
+  performance work.** Why vello has no glyph atlas and cannot get one, what a
+  text-heavy frame actually costs here (measured), where the ecosystem's answer
+  lives (`glifo` via `vello_hybrid`), and why `glyphon` and a hand-rolled atlas
+  are both ruled out. Conclusion is *don't switch renderers yet*, so the useful
+  contribution is evidence, not a port.
 
 ## Toolchain
 
-- Nightly Rust (`rust-toolchain.toml`), edition 2024, resolver 3, workspace lints.
+- Nightly Rust (`rust-toolchain.toml`), edition 2024, resolver 3, workspace
+  lints.
 - The pnpm workspace (`packages/*`, `examples/*`, `crates/bobcat-wasm`) is
   TypeScript and ESM throughout, checked by TypeScript 7.0.2 (`pnpm test:type`)
-  under the strict options in `tsconfig.base.json`; Node (`^22.18 || ^24`)
-  runs its `.ts` scripts directly by type stripping.
+  under the strict options in `tsconfig.base.json`; Node (`^22.18 || ^24`) runs
+  its `.ts` scripts directly by type stripping.
 - Cargo builds of `bobcat-core` require Node and a prior
   `pnpm install --frozen-lockfile`; the built-in JS runtime is compiled into
   `OUT_DIR` during the build, including for Wasm targets.
-- `cargo fmt` (nightly rustfmt options in `rustfmt.toml`), `cargo clippy`,
-  `cargo test`, `cargo bench` (CodSpeed-compatible `divan` benches).
-- **`cargo fmt --all` reaches into `vendor/stylo`** even though the fork is
-  excluded from the workspace, and the fork carries pre-existing upstream
-  rustfmt drift, so it "fixes" files nobody touched. Check
-  `git -C vendor/stylo status` afterwards and revert anything outside your own
-  change, or the next fork commit ships unrelated reformatting. Use
-  `./.github/scripts/fmt-check.sh` instead — it is what CI runs, it names the
-  members from `cargo metadata` rather than from a list someone has to
-  remember to extend. The hand-written list it replaced had been missing
-  `bobcat-source::xml` since that crate was added.
+- `cargo clippy`, `cargo test`, `cargo bench` (CodSpeed-compatible `divan`
+  benches).
+- **Formatting: `cargo fmt -p <crate>` for the crates you touched, then
+  `./.github/scripts/fmt-check.sh`**, which is what CI runs — it names the
+  members from `cargo metadata` rather than from a list someone has to remember
+  to extend, and only runs `cargo fmt --check`, so it reports drift rather than
+  fixing it. **Do not run `cargo fmt --all`**: it reaches into `vendor/stylo`
+  even though the fork is excluded from the workspace, and the fork carries
+  pre-existing upstream rustfmt drift, so it "fixes" files nobody touched. If
+  you ever do, check `git -C vendor/stylo status` afterwards and revert
+  anything outside your own change, or the next fork commit ships unrelated
+  reformatting. Nightly rustfmt options live in `rustfmt.toml`.
 
 ## Testing
 
@@ -2165,76 +1811,38 @@ Upstream source provenance and licensing are in that package's NOTICE/LICENSE.
 
 ### Input robustness at the external-byte boundaries
 
-`bobcat-source::web` and `bobcat-source::xml` are the parsers fed bytes the engine did
-not produce — a downloaded `.web.bundle` and an authored `.lynx.xml`. Both are
-written in the `Result` style and both have grammar tests, but every input in
-those tests is one a *correct* encoder produced, which cannot establish the
-property that matters at a trust boundary: that no input takes the process
-down. The XML and web modules answer that differently, because their exposure differs.
-Native external parsing additionally bounds Lepus/CSS recursion, rejects overlapping
-section payloads, and caps CSS fallback expansion work; see
-`docs/source-architecture.md` and `crates/bobcat-source/tests/conversion.rs`.
-
-**`bobcat-source::xml`** carries `tests/robustness.rs`: a fixed-seed character-level
-mutator over seed documents, plus named degenerate cases for every construct
-with a terminator, asserting panic-freedom and two invariants a partial-index
-bug would break silently — the returned sections borrow from the source, and a
-`ParseError` offset lands on a real UTF-8 boundary (which keeps the crate's own
-`debug_assert!` live). It ends on a coverage floor: if a grammar change made
-*nothing* parse, the success-branch assertions would quietly stop running and
-the test would still pass, so it fails instead. 20 000 inputs in under a tenth
-of a second, in the ordinary suite.
-
-This is deliberately not a fuzzer. Coverage-guided mutation buys little on a
-543-line zero-dependency parser over `&str` — the input is already valid UTF-8,
-there are no length fields, and nothing allocates on a source-controlled count
-— and it is not worth a separate package and a scheduled job.
-
-**`bobcat-source::web`'s `StyleInfo` validation stays on the calling
-thread on every platform**, including Wasm. It never starts a decoder worker
-or requests a stack sized from the input. The rkyv 0.7 field and enum layouts
-remain unchanged, and the crate still forbids unsafe code.
-
-Three bounds apply before a caller receives an owned tree:
-
-- **Section length**, 1 MiB, bounds the copied archive and validation work.
-- **Validation subtree depth**, 72, is enforced during byte validation using
-  rkyv 0.7's `ArchiveValidator::with_max_depth` and the safe
-  `check_archived_root_with_context` API. This model has no shared pointers,
-  so the validator supplies all required checks. Each recursive rule's
-  children vector consumes a subtree level; the allowance above 64 accounts
-  for the root, map and leaf vectors/strings. Excessive nesting is rejected
-  before deserialization can construct an unbounded owned tree.
-- **Rule depth**, 64, remains the limit on the returned tree. The iterative
-  depth check rejects deeper rules after bounded validation/deserialization;
-  even that failure's drop is bounded by the validation limit.
-
-The previous implementation incorrectly treated rkyv 0.7 as having no depth
-control and moved validation onto a large-stack thread. Its default validator
-has no configured limit, but `ArchiveValidator::with_max_depth` does. The
-thread workaround is gone. Regression tests exercise an 8000-level archive
-and a populated 64-level tree on a 256 KiB caller stack, the 65-level rejection,
-and real web-bundle fixtures on native and Wasm. Test-only threads establish
-the small caller stack or generate the deep fixture; decoding itself is
-synchronous and thread-free. See
-`crates/bobcat-source/src/web/style_info.rs` and
-`crates/bobcat-source/tests/decode_web_bundle.rs`.
+`bobcat-source::web` and `bobcat-source::xml` are the parsers fed bytes the
+engine did not produce — a downloaded `.web.bundle` and an authored `.lynx.xml`
+— so the property that matters is that no input takes the process down.
+`StyleInfo` validation stays on the calling thread on every platform, the crate
+forbids unsafe code, and three bounds hold before a caller receives an owned
+tree: a 1 MiB section length, a validation subtree depth of 72 enforced with
+rkyv 0.7's `ArchiveValidator::with_max_depth` and the safe
+`check_archived_root_with_context` API, and a 64-level rule depth on the
+returned tree (`crates/bobcat-source/src/web/style_info.rs`).
+`crates/bobcat-source/tests/robustness.rs` (a fixed-seed mutator, 20 000
+inputs, named degenerate cases, a coverage floor) and
+`crates/bobcat-source/tests/decode_web_bundle.rs` (an 8000-level archive, a
+populated 64-level tree on a 256 KiB caller stack, the 65-level rejection, real
+fixtures on native and Wasm) pin them. This is deliberately not a fuzzer. See
+`docs/source-architecture.md` and `crates/bobcat-source/tests/conversion.rs`
+for the native parser's Lepus/CSS recursion bounds, overlapping-payload
+rejection and CSS fallback expansion cap.
 
 ### The unsafe floor
 
-`hughie`, `flashbulb`, and `bobcat-source` carry
-`#![forbid(unsafe_code)]`. The workspace-wide `unsafe_code = "warn"` is a lint
-any module can silence locally; `forbid` cannot be overridden from inside the
-crate, so `unsafe` appearing in one of these three has to be a deliberate edit
-to that line.
+`hughie`, `flashbulb`, and `bobcat-source` carry `#![forbid(unsafe_code)]`. The
+workspace-wide `unsafe_code = "warn"` is a lint any module can silence locally;
+`forbid` cannot be overridden from inside the crate, so `unsafe` appearing in
+one of these three has to be a deliberate edit to that line.
 
 Where `unsafe` is unavoidable, the bar is a `SAFETY` comment per block,
 enforced by a crate-local `#![warn(clippy::undocumented_unsafe_blocks)]` in
 `bobcat-cli` (which now holds no `unsafe` at all, the lint standing as a bar
-for any that arrives) and in `dom` (its two). The lint is still
-crate-local rather than workspace-wide because `quickjs-rust-bridge` (133
-blocks) is the last holdout and is being restructured separately; raising it
-there is what would let this move into `[workspace.lints.clippy]`.
+for any that arrives) and in `dom` (its two). The lint is still crate-local
+rather than workspace-wide because `quickjs-rust-bridge` (133 blocks) is the
+last holdout and is being restructured separately; raising it there is what
+would let this move into `[workspace.lints.clippy]`.
 
 One trap, worth knowing before writing the comment: the lint does **not** scan
 past an intervening attribute. Where an unsafe site carries
@@ -2247,9 +1855,9 @@ move it either way.
 
 Cargo unifies the features of a package's dev-dependencies into that package's
 own library whenever dev targets are in the build. `hughie` dev-depends on
-`dom` with `layout-test-utils` for its bench harness, and `dom` depends on
+`dom` with `layout-test-utils` for its bench harness and `dom` depends on
 `hughie`, so the cycle turns the feature on for both libraries in any build
-that includes bench targets:
+with bench targets:
 
 ```sh
 cargo build --unit-graph -Z unstable-options --workspace            # dom: []
@@ -2258,15 +1866,15 @@ cargo build --unit-graph -Z unstable-options --workspace --benches  # dom: [layo
 
 The second line is what `cargo codspeed build` and `cargo llvm-cov` resolve.
 The cost is one `test_leaf_metrics()` probe per leaf in
-`crates/dom/src/layout/host.rs` that a release build does not contain — so the
-CodSpeed numbers, which are the authority for this repo (single-run local
-walltime here is noise), describe a `dom` that is one branch away from the
-shipped one. On the `hughie` side the feature only adds the
+`crates/dom/src/layout/host.rs` that a release build does not contain, so the
+CodSpeed numbers — the authority for this repo, since single-run local walltime
+is noise — describe a `dom` one branch away from the shipped one. On the
+`hughie` side the feature only adds the
 `compute_leaf_layout_with_measurement_for_testing` wrapper and costs nothing.
 
 **This is accepted, not fixed.** Breaking the cycle means moving hughie's
-dom-based benches into `dom`, which renumbers every CodSpeed benchmark id and
-throws away its history — a worse trade than one predictable branch.
+dom-based benches into `dom`, renumbering every CodSpeed benchmark id and
+throwing away its history — a worse trade than one predictable branch.
 `.github/scripts/check-bench-feature-parity.py` runs in CI and holds the line:
 it diffs the two resolutions, prints the two recorded deviations, and fails on
 a third appearing or on a recorded one silently going away. Any new entry needs
@@ -2274,39 +1882,37 @@ a written reason for the same cost the existing ones state.
 
 ### Restricted-environment troubleshooting
 
-Some agent runners and automation environments may restrict GPU interfaces,
-Git metadata, or network access. Treat that as a hypothesis to test, not as the
-default explanation for a failure:
+Some agent runners restrict GPU interfaces, Git metadata, or network access.
+Treat that as a hypothesis to test, not the default explanation for a failure.
 
-- If a GPU-backed command reports that no adapter is available on a host that
-  is expected to expose one, retry the exact command outside the restricted
-  environment or with a narrowly scoped sandbox escalation, when available. A
-  successful retry identifies an environment limitation; if the retry still
-  fails, continue diagnosing the renderer, driver, and adapter selection.
-- If a Git operation needed to prepare or publish a pull request — such as
-  branch creation, staging, committing, or pushing — fails with a permission,
-  network, or authentication-like error, check whether the worktree's Git
-  metadata or required network access sits outside the current sandbox. Retry
-  only the failing operation with narrowly scoped escalation, when available;
-  if it still fails, diagnose the repository, credentials, or network itself.
-- If a `--target wasm32-unknown-unknown` build fails in `quickjs-rust-bridge`'s
-  build script with `No available targets are compatible with triple
-  "wasm32-unknown-unknown"`, that is toolchain *selection*, not a missing
-  capability: Apple's clang has no wasm32 target, and the build script invokes
-  whatever `CC` names. Point it at the same LLVM the CI jobs install and the
-  build succeeds, with no effect on host builds:
+- **No GPU adapter** on a host expected to expose one: retry the exact command
+  outside the restricted environment or with a narrowly scoped sandbox
+  escalation. A successful retry identifies an environment limitation; if it
+  still fails, keep diagnosing the renderer, driver, and adapter selection.
+- **A Git operation needed to prepare or publish a PR** (branch creation,
+  staging, committing, pushing) failing with a permission, network, or
+  authentication-like error: check whether the worktree's Git metadata or
+  required network access sits outside the sandbox, retry only the failing
+  operation with narrowly scoped escalation, and otherwise diagnose the
+  repository, credentials, or network itself.
+- **`--target wasm32-unknown-unknown` failing in `quickjs-rust-bridge`'s build
+  script** with
+  `No available targets are compatible with triple "wasm32-unknown-unknown"` is
+  toolchain *selection*, not a missing capability: Apple's clang has no wasm32
+  target, and the build script invokes whatever `CC` names. Point it at the
+  same LLVM the CI jobs install, with no effect on host builds:
 
   ```sh
   export CC="$(brew --prefix llvm@22)/bin/clang"
   export CXX="$(brew --prefix llvm@22)/bin/clang++"
   ```
 
-  Reach for this before reporting the Wasm target as unbuildable, because
-  `crates/bobcat-wasm/src/browser.rs` is `#[cfg(target_arch = "wasm32")]`:
-  `cargo check --workspace --all-targets`, `cargo clippy`, and the test suite
-  never type-check it, so anything touching the browser embedder — or any
-  `#[cfg]`-gated import it depends on — is unverified until that target builds.
-  CI's `browser` job now lints that target, so the gap is no longer silent:
+  Reach for this before reporting the Wasm target as unbuildable:
+  `crates/bobcat-wasm/src/browser.rs` is `#[cfg(target_arch = "wasm32")]`, so
+  `cargo check --workspace --all-targets`, `cargo clippy` and the test suite
+  never type-check it and anything touching the browser embedder — or any
+  `#[cfg]`-gated import it depends on — is unverified until that target
+  builds. CI's `browser` job lints it, so the gap is no longer silent:
 
   ```sh
   cargo clippy --target wasm32-unknown-unknown --lib \
@@ -2316,11 +1922,10 @@ default explanation for a failure:
 
   `--lib`, not `--all-targets`. `bobcat-core`'s own tokio dependency builds for
   wasm32 because its feature set is target-gated: `rt`, `sync` and `macros`
-  everywhere, and `time` only under `cfg(not(target_arch = "wasm32"))` —
-  tokio's timer reads `std::time::Instant`, which panics there, so that target
-  gets `src/alarm.rs` instead and never enables the driver. Its *dev*
-  dependency is the problem: it asks for `rt-multi-thread`, which refuses to
-  compile for wasm32 at all, and feature
+  everywhere, and `time` only under `cfg(not(target_arch = "wasm32"))`, since
+  tokio's timer reads `std::time::Instant`, which panics there — that target
+  gets `src/alarm.rs` instead. Its *dev* dependency is the problem: it asks for
+  `rt-multi-thread`, which refuses to compile for wasm32 at all, and feature
   unification drags it into anything that builds dev targets. The packages are
   named rather than `--workspace` because `bobcat-cli` is a native binary. The
   two `-Ctarget-feature` warnings `.cargo/config.toml` produces on every crate
@@ -2330,19 +1935,21 @@ default explanation for a failure:
 The Element PAPI runtime has two suites over the same source:
 `pnpm --filter bobcat-element test` (Rstest, over a recording native mock) and
 `pnpm --filter bobcat-element test:type` (TypeScript 7, `tsc -b`), while
-`crates/bobcat-core/tests/main_thread.rs` drives the same module, as
-TypeScript 7 emitted it into Cargo's `OUT_DIR`, through the real QuickJS realm,
-`bobcat` object, and collector. The type suite checks every runtime module, the
-colocated `main-thread-runtime.ts` included, whose behavior is covered by the
-core main-thread tests. After changing a source, Cargo regenerates the JS before
-embedding it. Commit the TypeScript source only; `dist/` and Cargo's output
-are generated artifacts and must stay out of version control.
+`crates/bobcat-core/tests/main_thread.rs` drives the same module, as TypeScript
+7 emitted it into Cargo's `OUT_DIR`, through the real QuickJS realm, its native
+`bobcat-internal:host` module, and the collector — the realm has no
+`globalThis.bobcat`, and a main-thread test asserts its absence. The type suite
+checks every runtime module, the colocated `main-thread-runtime.ts` included,
+whose behavior is covered by the core main-thread tests. After changing a
+source, Cargo regenerates the JS before embedding it. Commit the TypeScript
+source only; `dist/` and Cargo's output are generated artifacts and must stay
+out of version control.
 
 `pnpm test:type` type-checks every TypeScript program in the workspace with
 TypeScript 7.0.2 — `tsc -b` over the root `tsconfig.json`, each program
 extending the strict options in `tsconfig.base.json` — except the bobcat-wasm
-Workers, which are typed against the glue a `wasm-pack` build generates and
-are checked by `pnpm --filter bobcat-wasm build` once it exists. Node runs the
+Workers, which are typed against the glue a `wasm-pack` build generates and are
+checked by `pnpm --filter bobcat-wasm build` once it exists. Node runs the
 workspace's `.ts` scripts directly by type stripping. Each rspeedy example also
 installs TypeScript 5.9.3, used by nothing but rspeedy's `lynx.config.ts`
 loader (see the `rspeedy` catalog in `pnpm-workspace.yaml`).
@@ -2350,33 +1957,33 @@ loader (see the `rspeedy` catalog in `pnpm-workspace.yaml`).
 **Screenshot tests** live in `crates/*/tests/screenshots.rs` — plus per-topic
 siblings (`dom` also has `text_screenshots.rs` and `css_atlas.rs`) — with
 committed goldens in `crates/*/tests/screenshots/`, driven by
-`crates/flashbulb`. The ordinary screenshot suites share one capture harness
-in `tests/support/screenshot.rs`; the browser-referenced CSS atlas owns the
-separate workflow documented below. The golden store is per *crate*, so every
-screenshot binary in a crate writes into the same tree. They require a GPU
-adapter; without one the test run fails, including in CI, so a green run always
-means the pixels were rendered and compared. To accept a new rendering in the
-ordinary suites, look at the image first, then (dropping `--test` to catch every
-ordinary screenshot binary in the crate):
+`crates/flashbulb`. The ordinary suites share one capture harness in
+`tests/support/screenshot.rs`; the browser-referenced CSS atlas owns the
+separate workflow below. The golden store is per *crate*, so every screenshot
+binary in a crate writes into the same tree. They require a GPU adapter;
+without one the test run fails, including in CI, so a green run always means
+the pixels were rendered and compared. To accept a new rendering in the
+ordinary suites, look at the image first, then (dropping `--test` to catch
+every ordinary screenshot binary in the crate):
 
 ```sh
 FLASHBULB_UPDATE_SNAPSHOTS=1 cargo test -p <crate>
 ```
 
-A golden that does not exist yet is written *and fails its run* — review it
-and re-run. Failures write `-expected`/`-actual`/`-diff` PNGs to the
-git-ignored `crates/<crate>/tests/artifacts/`; the panic message names all
-three plus the exact differing-pixel count. Never accept a golden you have not
-looked at: a blank or all-white image compares happily against itself forever.
-Browser-owned suites can reject `FLASHBULB_UPDATE_SNAPSHOTS`; follow their
-checked capture and audit workflow instead. The CSS paint atlas has two
-explicit reference owners: 666 Chromium matches remain browser-owned, while
-145 W3C-correct differences (84 rasterization/sampling cases plus 61
-standards-permitted UA choices) use native DOM/Parley snapshots in a
-separate directory. Native atlas references may be updated only with the
-filtered `CSS_PAINT_UPDATE_NATIVE=1 ... css_native_` workflow, which cannot
-overwrite browser references; the other 189 cases remain ignored. The browser
-stage uses `isolation: isolate` to match the native document element's
-stacking-context role, so all 22 negative-z probes are Chromium-owned exact
-matches. The CSS paint matrix records the exact capture, update, and
-full-browser-audit workflow in `docs/css-paint-screenshot-matrix.md`.
+A golden that does not exist yet is written *and fails its run* — review it and
+re-run. Failures write `-expected`/`-actual`/`-diff` PNGs to the git-ignored
+`crates/<crate>/tests/artifacts/`; the panic message names all three plus the
+exact differing-pixel count. Never accept a golden you have not looked at: a
+blank or all-white image compares happily against itself forever. Browser-owned
+suites can reject `FLASHBULB_UPDATE_SNAPSHOTS`; follow their checked capture
+and audit workflow instead. The CSS paint atlas has two explicit reference
+owners: 666 Chromium matches remain browser-owned, while 145 W3C-correct
+differences (84 rasterization/sampling cases plus 61 standards-permitted UA
+choices) use native DOM/Parley snapshots in a separate directory. Native atlas
+references may be updated only with the filtered
+`CSS_PAINT_UPDATE_NATIVE=1 ... css_native_` workflow, which cannot overwrite
+browser references; the other 189 cases remain ignored. The browser stage uses
+`isolation: isolate` to match the native document element's stacking-context
+role, so all 22 negative-z probes are Chromium-owned exact matches. The CSS
+paint matrix records the exact capture, update, and full-browser-audit workflow
+in `docs/css-paint-screenshot-matrix.md`.
