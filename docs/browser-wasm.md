@@ -2,7 +2,7 @@
 
 `crates/bobcat-wasm` is the `wasm-bindgen` browser embedder and npm facade for
 `wasm32-unknown-unknown`. It builds with shared memory and uses crates.io
-Vello 0.9/wgpu 29. It runs the same core-owned QuickJS engine as native
+Vello 0.10/wgpu 29. It runs the same core-owned QuickJS engine as native
 Bobcat.
 
 ## Execution and ownership

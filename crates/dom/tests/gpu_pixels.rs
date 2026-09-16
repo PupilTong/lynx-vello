@@ -237,10 +237,10 @@ fn isolated_atlas_cell_matches_standalone_group_effects() {
 /// test currently FAILS, and it documents a live defect rather than a
 /// migration hazard.
 ///
-/// Mechanism, confirmed in vello 0.9.0's own source: an encoding with no
+/// Mechanism, confirmed in vello 0.10.0's own source: an encoding with no
 /// patches at all — solid paths only, so no image, no gradient ramp and no
 /// glyph run — takes `Resolver::resolve`'s early return and reports
-/// `Images::default()` (`vello_encoding/src/resolve.rs:188-192`). That
+/// `Images::default()` (`vello_encoding/src/resolve.rs:189-191`). That
 /// zero-sized report clamps the atlas to 1x1
 /// (`vello/src/render.rs:160-161`), which no longer matches the persistent
 /// proxy, so the renderer frees the real atlas texture and installs a 1x1

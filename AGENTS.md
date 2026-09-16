@@ -1297,7 +1297,7 @@ Rust parses structured input only when Rust behavior actually needs its fields
   `BobcatRenderer::load`, keeps **one `Painter` for its canvas across page
   loads** (rebuilt only when it is missing or its target has failed),
   permanently owns
-  every thread-affine GPU object — crates.io Vello 0.9/wgpu 29 Device, Queue,
+  every thread-affine GPU object — crates.io Vello 0.10/wgpu 29 Device, Queue,
   Surface, Renderer, and OffscreenCanvas — and uses `wasm_thread` to create the
   two Workers each group is made of: its nested Lynx main/VM Worker and the
   worker-realm Worker beside it. A `load` is `painter.detach()` → drop the old
@@ -2125,7 +2125,7 @@ this section is the only place the absolute paths are spelled out.
   work (adding a CSS property, porting a built-in component, auditing a JS API
   for parity, etc.), usable from either Claude Code or Codex.
 - `docs/text-rendering-research.md` — **read before proposing any text-painting
-  performance work.** Why vello 0.9 has no glyph atlas and cannot get one, what
+  performance work.** Why vello has no glyph atlas and cannot get one, what
   a text-heavy frame actually costs here (measured), where the ecosystem's
   answer lives (`glifo` via `vello_hybrid`), and why `glyphon` and a
   hand-rolled atlas are both ruled out. Conclusion is *don't switch renderers
