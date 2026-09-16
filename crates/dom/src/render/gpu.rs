@@ -31,11 +31,22 @@ pub struct Headless {
 /// A commit re-bakes each of the frame's planes once; every frame after
 /// that composes them as textured draws. Each composite render re-copies
 /// the plane textures into vello's image atlas (one GPU texture-to-texture
-/// copy per plane, window-sized): vello 0.9 frees its persistent atlas
-/// whenever a scene without images renders — the bake scenes here included
-/// — while its cache still counts the planes resident and clean, so pixels
-/// only survive under an every-use dirty mark. The scroll frame still
-/// encodes and rasterizes none of the scroller content.
+/// copy per plane, window-sized). That copy is the documented cost of
+/// `Renderer::register_texture` — vello cannot see when a texture we render
+/// into changed, so only an every-use dirty mark keeps the atlas truthful.
+///
+/// The same mark also carries the frame's *content* bitmaps, for a second
+/// reason. vello frees its persistent atlas whenever a scene with no patch
+/// at all renders — no image, no gradient ramp, no glyph run — while its
+/// cache still counts every resident image clean, so nothing re-uploads
+/// afterwards. A plane whose ops are solid paths only bakes exactly such a
+/// scene, and the bakes run one after another on this renderer, so a
+/// solid-only plane between two planes drawing one bitmap would cost the
+/// second its pixels. Hence [`Self::prepare`] re-marks the content bitmaps
+/// before every bake and before the composite that follows.
+///
+/// The scroll frame still encodes and rasterizes none of the scroller
+/// content.
 #[derive(Default)]
 pub struct PlaneBank {
     /// The commit the retained textures were baked from.
@@ -63,7 +74,8 @@ impl PlaneBank {
     /// Brings the retained textures up to `frame`'s plan: on a new commit,
     /// each plane is (re)baked into its texture; textures are reused across
     /// commits while their sizes hold. Call once before every composite
-    /// render — every call re-marks the planes dirty so the atlas re-copy
+    /// render, with the same `images` that render will draw — every call
+    /// re-marks the planes and those bitmaps dirty so the atlas re-copy
     /// happens on use (see the type docs for why that is mandatory).
     ///
     /// # Panics
@@ -84,9 +96,7 @@ impl PlaneBank {
         // dirties the document, and every rebuild takes a new commit id, so
         // there is nothing an image could change that this does not catch.
         if self.commit == Some(frame.commit_id()) {
-            for image in &self.images {
-                renderer.mark_override_image_dirty(image);
-            }
+            Self::mark_resident(renderer, &self.images, images);
             return Ok(());
         }
         while self.planes.len() > plan.plane_count() {
@@ -125,6 +135,11 @@ impl PlaneBank {
             }
             self.bake_scene.reset();
             frame.bake_plane(index, &mut self.bake_scene, images);
+            // Every bake is its own render, so a plane whose ops are solid
+            // paths only frees the atlas here, between two planes that draw
+            // the same bitmap. The content images must therefore be dirty
+            // going into each bake, not once for the whole loop.
+            Self::mark_content(renderer, images);
             renderer
                 .render_to_texture(
                     device,
@@ -137,7 +152,32 @@ impl PlaneBank {
             renderer.mark_override_image_dirty(&self.images[index]);
         }
         self.commit = Some(frame.commit_id());
+        // The composite render that follows draws the planes and whatever
+        // content images sit outside them; the last bake may have freed the
+        // atlas under both.
+        Self::mark_content(renderer, images);
         Ok(())
+    }
+
+    /// Marks every image the next render may sample, so the atlas re-copy
+    /// happens on use.
+    fn mark_resident(
+        renderer: &mut vello::Renderer,
+        planes: &[vello::peniko::ImageData],
+        images: &[Option<vello::peniko::ImageData>],
+    ) {
+        for image in planes {
+            renderer.mark_override_image_dirty(image);
+        }
+        Self::mark_content(renderer, images);
+    }
+
+    /// Marks the frame's content bitmaps alone — the planes are marked where
+    /// they are baked.
+    fn mark_content(renderer: &mut vello::Renderer, images: &[Option<vello::peniko::ImageData>]) {
+        for image in images.iter().flatten() {
+            renderer.mark_override_image_dirty(image);
+        }
     }
 
     /// The registered images, index-parallel with the plan's planes — what

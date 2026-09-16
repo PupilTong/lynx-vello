@@ -23,6 +23,7 @@ fn pixel(pixels: &[u8], width: u32, x: u32, y: u32) -> [u8; 4] {
 
 const BLUE: [u8; 4] = [0, 0, 255, 255];
 const WHITE: [u8; 4] = [255, 255, 255, 255];
+const RED: [u8; 4] = [255, 0, 0, 255];
 
 /// A 100x100 scroller over a red then a blue 100px row, on a 200x150 page,
 /// so pixels beside the scroller prove the scrollport clip holds.
@@ -102,4 +103,73 @@ fn a_new_commit_rebakes_the_planes() {
     let frame = doc.dom.commit();
     let composed = render_layered(&mut gpu, &frame, 0.0);
     assert_eq!(pixel(&composed, 200, 50, 20), BLUE, "the re-baked row");
+}
+
+/// A plane whose bake draws only solid paths costs every content image the
+/// earlier planes uploaded.
+///
+/// `PlaneBank::prepare` bakes the planes in order on one `vello::Renderer`,
+/// so a page whose scrollers run image / solid-only / image produces the
+/// sequence the patch-free atlas defect needs: the first bake uploads the
+/// bitmap and `finish_resolve` marks it clean, the solid-only bake takes
+/// `Resolver::resolve`'s patch-free early return and frees the atlas
+/// (`vello_encoding-0.10.0/src/resolve.rs:189-191`,
+/// `vello-0.10.0/src/render.rs:160-171`), and the third bake finds the cache
+/// entry still resident and clean, re-uploads nothing, and samples an empty
+/// atlas. The bank marks its own plane textures dirty on every use, which is
+/// what keeps *those* alive — content images drawn inside a bake are not
+/// covered by that.
+#[test]
+fn a_solid_only_plane_does_not_cost_a_later_plane_its_image() {
+    let mut gpu = headless("a_solid_only_plane_does_not_cost_a_later_plane_its_image");
+    let mut doc = Doc::with_css_sized(
+        "page { display: flex; flex-direction: column; width: 120px; height: 300px; }
+         .scroller { display: flex; flex-direction: column; overflow: scroll;
+                     flex-shrink: 0; width: 100px; height: 100px; }
+         .tall { display: flex; flex-shrink: 0; width: 100px; height: 200px; }
+         .shot { background-image: url(shot); background-size: 100px 200px;
+                 background-repeat: no-repeat; image-rendering: pixelated; }
+         .solid { background-color: #00ff00; }",
+        120.0,
+        300.0,
+    );
+    let root = doc.root;
+    for class in ["shot", "solid", "shot"] {
+        let scroller = doc.el(root, "scroller");
+        doc.el(scroller, &format!("tall {class}"));
+    }
+
+    // One pure-red texel, so any pixel inside the draw reads back exactly
+    // and a blank atlas cannot be mistaken for a correct sample.
+    let red = flashbulb::rgba8(1, 1, vec![255, 0, 0, 255]);
+    let store = flashbulb::TestImages::new();
+    store.insert("shot", red.clone());
+    flashbulb::render_with_images(&mut doc.dom, &store);
+
+    let frame = doc.dom.commit();
+    let plan = frame.composite_plan().expect("three scrollers must layer");
+    assert_eq!(plan.plane_count(), 3, "one plane per scroller");
+
+    // The painter resolves one entry per image draw; both draws name the
+    // one source, so both carry the same blob — and so the same cache entry.
+    let images = vec![Some(red.clone()), Some(red)];
+
+    gpu.prepare_planes(&frame, &images).expect("plane bake");
+    let offsets = |_: &dom::ScrollSlot| Some(Vector2D::new(0.0, 0.0));
+    let mut layered = Scene::new();
+    frame.composite_into(&mut layered, gpu.plane_images(), &images, &offsets, None);
+    let composed = gpu
+        .render(&layered, 120, 300, Color::WHITE)
+        .expect("layered render");
+
+    assert_eq!(
+        pixel(&composed, 120, 50, 50),
+        RED,
+        "the first image plane, baked before any solid-only plane"
+    );
+    assert_eq!(
+        pixel(&composed, 120, 50, 250),
+        RED,
+        "the image plane baked after a solid-only one lost the atlas"
+    );
 }
