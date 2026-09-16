@@ -1,7 +1,10 @@
 //! Shared-memory browser composition exported through `wasm-bindgen`.
 
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
@@ -9,8 +12,9 @@ use std::{fmt, mem};
 
 use bobcat_core::input::{InputEvent, Point2D, PointerKind, PointerPhase};
 use bobcat_core::{
-    DrawTarget, EngineEvent, EventRequester, FontBlob, FrameSize, LynxGroup, LynxView, PageConfig,
-    Painter, StyleThreads, ViewSources, WindowTarget, configure_wasm_workers,
+    DrawTarget, EngineEvent, EventRequester, FontBlob, FrameSize, LynxGroup, LynxView, ModuleCall,
+    ModuleCallback, NativeModule, PageConfig, Painter, StyleThreads, ViewSources, WindowTarget,
+    configure_wasm_workers,
 };
 use bobcat_resources::{Resources, ResourcesConfig, ViewResources};
 use bobcat_source::{PageSource, ZipSource, register_lynx_xml_response};
@@ -108,6 +112,105 @@ impl Future for EventWait {
     }
 }
 
+/// The Render Worker's half of a host native module: the one JavaScript
+/// function every module's every call goes out through, and the callbacks the
+/// page has yet to answer.
+///
+/// The handlers themselves are not here and never can be: `localStorage` and
+/// navigation belong to the page's main thread, and this Worker is not it. So
+/// a call becomes a message — `on_call` posts it — and the answer comes back
+/// as an ordinary facade operation, [`BobcatRenderer::answer_native_module_callback`].
+///
+/// `Rc`/`Cell`/`RefCell` rather than their threaded spellings because a
+/// [`NativeModule`] is invoked only inside [`LynxView::pump`], on the thread
+/// that built the view, which is the thread that built this.
+struct HostModuleBridge {
+    /// `(call, module, method, arguments, callbackIndices)`, the Render
+    /// Worker's `onNativeModuleCall`.
+    on_call: js_sys::Function,
+    /// The next call number. Numbers are this renderer's, not a view's: the
+    /// map below is cleared when a view is replaced, so nothing outlives the
+    /// realm that minted its callbacks.
+    next: Cell<u64>,
+    /// The callbacks of every call the page has not finished answering, by
+    /// call number. A module that never answers keeps its entry until the next
+    /// load clears it, which releases the JavaScript functions — the same
+    /// thing native's release does, deferred to the only moment this side can
+    /// know nobody will answer.
+    calls: RefCell<HashMap<u64, Vec<ModuleCallback>>>,
+}
+
+impl fmt::Debug for HostModuleBridge {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HostModuleBridge")
+            .field("outstanding_calls", &self.calls.borrow().len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// One `NativeModules.<name>` the host declared at `BobcatCanvas.create`,
+/// answering every method by posting it to the page.
+///
+/// The name and method list are the table the facade validated; nothing here
+/// knows what the page's handler does, and there is no reply to wait for.
+#[derive(Debug)]
+struct HostModule {
+    name: String,
+    methods: Vec<String>,
+    bridge: Rc<HostModuleBridge>,
+}
+
+impl NativeModule for HostModule {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn methods(&self) -> Vec<String> {
+        self.methods.clone()
+    }
+
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "a call number reaches JavaScript as the Number it will be compared as"
+    )]
+    fn invoke(&self, call: ModuleCall) {
+        let id = self.bridge.next.get();
+        self.bridge.next.set(id.wrapping_add(1));
+        // The indices, not the callbacks: what crosses is which arguments were
+        // functions, so the page can put a wrapper back in each slot.
+        let indices = call
+            .callbacks
+            .iter()
+            .map(|callback| callback.argument_index().to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let has_callbacks = !call.callbacks.is_empty();
+        if has_callbacks {
+            self.bridge.calls.borrow_mut().insert(id, call.callbacks);
+        }
+        let posted = self.bridge.on_call.apply(
+            &JsValue::NULL,
+            &Array::of5(
+                &JsValue::from_f64(id as f64),
+                &JsValue::from_str(&self.name),
+                &JsValue::from_str(&call.method),
+                &JsValue::from_str(&call.arguments),
+                &JsValue::from_str(&indices),
+            ),
+        );
+        if let Err(error) = posted {
+            // The call is the page's, not this Worker's: a bridge that threw
+            // is reported and the callbacks released, rather than failing the
+            // view that made an ordinary call.
+            console_error(&error);
+            if has_callbacks {
+                drop(self.bridge.calls.borrow_mut().remove(&id));
+            }
+        }
+    }
+}
+
 /// A complete browser embedder, permanently owned by the explicit Render
 /// Worker that constructs it. Its canvas, Wasm instance and image decoder
 /// outlive every page it shows; each document, element tree,
@@ -152,6 +255,14 @@ pub struct BobcatRenderer {
     /// workers themselves are the group's and retire with it; only the size
     /// is wrapper state.
     style_threads: StyleThreads,
+    /// The host's `NativeModules` table — each module's name and the method
+    /// names the facade checked were functions. Wrapper state like the fonts:
+    /// the page declared it once at `BobcatCanvas.create`, and every view this
+    /// renderer builds gets a fresh set of modules made from it.
+    native_modules: Vec<(String, Vec<String>)>,
+    /// The one bridge those modules share, kept across loads because the
+    /// Render Worker's `onNativeModuleCall` is.
+    module_bridge: Rc<HostModuleBridge>,
     /// The group the current view belongs to, and the one thing that ends its
     /// two Workers: the Lynx-main one, and the worker-realm one after it.
     ///
@@ -192,11 +303,34 @@ impl BobcatRenderer {
         default_display_linear: bool,
         default_overflow_visible: bool,
         enable_css_selector: bool,
+        native_module_names: Vec<String>,
+        native_module_methods: Vec<String>,
+        on_native_module_call: js_sys::Function,
     ) -> Result<BobcatRenderer, JsValue> {
         FrameSize::for_viewport(width, height, device_pixel_ratio).map_err(js_error)?;
         if worker_url.is_empty() {
             return Err(js_error("the Bobcat worker URL must not be empty"));
         }
+        if native_module_names.len() != native_module_methods.len() {
+            return Err(js_error(
+                "each Bobcat native module needs one comma-joined method list",
+            ));
+        }
+        // Two flat `string[]`s rather than a JavaScript object, because this
+        // is the internal Worker seam and the facade already has the table in
+        // the only order it matters in.
+        let native_modules: Vec<_> = native_module_names
+            .into_iter()
+            .zip(native_module_methods)
+            .map(|(name, methods)| {
+                let methods = if methods.is_empty() {
+                    Vec::new()
+                } else {
+                    methods.split(',').map(str::to_owned).collect()
+                };
+                (name, methods)
+            })
+            .collect();
         // `available_parallelism` cannot answer on Wasm, so the machine's
         // parallelism arrives from `navigator.hardwareConcurrency` — and then
         // takes exactly the path a native view's does, through the same
@@ -262,6 +396,12 @@ impl BobcatRenderer {
                 fonts: Vec::new(),
                 default_font_family: None,
                 style_threads,
+                native_modules,
+                module_bridge: Rc::new(HostModuleBridge {
+                    on_call: on_native_module_call,
+                    next: Cell::new(1),
+                    calls: RefCell::new(HashMap::new()),
+                }),
                 script_finished: false,
                 disposed: false,
             })
@@ -288,6 +428,7 @@ impl BobcatRenderer {
         entry_url: String,
         style_sheet_urls: Vec<String>,
         background_entry_url: Option<String>,
+        global_props: Option<String>,
     ) -> Result<(), JsValue> {
         self.ensure_running()?;
 
@@ -298,14 +439,19 @@ impl BobcatRenderer {
             background_entry: background_entry_url,
             ..ViewSources::new(entry_url)
         };
-        self.load_sources(sources, base_url).await
+        self.load_sources(sources, base_url, global_props).await
     }
 
     /// Decode a fetched page container through the shared source adapter.
     /// Bundle configuration belongs to this page; subsequent raw loads still
     /// use the host configuration. Relative assets resolve against the input.
     #[wasm_bindgen(js_name = loadTemplate)]
-    pub async fn load_template(&mut self, url: String, bytes: Vec<u8>) -> Result<(), JsValue> {
+    pub async fn load_template(
+        &mut self,
+        url: String,
+        bytes: Vec<u8>,
+        global_props: Option<String>,
+    ) -> Result<(), JsValue> {
         self.ensure_running()?;
         let input = Url::parse(&url).map_err(js_error)?;
         let page = PageSource::from_bytes(&input, &bytes).map_err(js_error)?;
@@ -313,12 +459,18 @@ impl BobcatRenderer {
             console_warn(&JsValue::from(warning.to_string()));
         }
         page.register_with(&self.resources);
-        self.load_sources(page.view_sources(), input).await
+        self.load_sources(page.view_sources(), input, global_props)
+            .await
     }
 
     /// Load a ZIP through bobcat-source's platform-independent archive API.
     #[wasm_bindgen(js_name = loadZip)]
-    pub async fn load_zip(&mut self, entry_url: String, bytes: Vec<u8>) -> Result<(), JsValue> {
+    pub async fn load_zip(
+        &mut self,
+        entry_url: String,
+        bytes: Vec<u8>,
+        global_props: Option<String>,
+    ) -> Result<(), JsValue> {
         self.ensure_running()?;
         let input = Url::parse(&entry_url).map_err(js_error)?;
         let archive = ZipSource::from_bytes(&bytes).map_err(js_error)?;
@@ -330,7 +482,8 @@ impl BobcatRenderer {
             .register_with(&self.resources, &input)
             .map_err(js_error)?;
         page.register_with(&self.resources);
-        self.load_sources(page.view_sources(), input).await
+        self.load_sources(page.view_sources(), input, global_props)
+            .await
     }
 
     /// Internal Render-Worker seam: retain bytes that the browser host already
@@ -605,6 +758,53 @@ impl BobcatRenderer {
         Ok(())
     }
 
+    /// Answer one function argument of one host native-module call.
+    ///
+    /// The page's handler is the only thing that can say this, and it says it
+    /// once: the callback with that argument index is taken out of the call
+    /// and consumed, so a second answer finds nothing and is ignored — as is
+    /// an answer to a call whose view has already been replaced. `arguments`
+    /// is JSON array text the BTS realm parses and spreads; `undefined`
+    /// releases the JavaScript function without calling it.
+    #[wasm_bindgen(js_name = answerNativeModuleCallback)]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the call number is the Number this renderer minted for it"
+    )]
+    pub fn answer_native_module_callback(
+        &mut self,
+        call: f64,
+        index: u32,
+        arguments: Option<String>,
+    ) {
+        if !call.is_finite() || call < 0.0 {
+            return;
+        }
+        let id = call as u64;
+        let index = index as usize;
+        let mut calls = self.module_bridge.calls.borrow_mut();
+        let Some(callbacks) = calls.get_mut(&id) else {
+            return;
+        };
+        let Some(position) = callbacks
+            .iter()
+            .position(|callback| callback.argument_index() == index)
+        else {
+            return;
+        };
+        let callback = callbacks.remove(position);
+        if callbacks.is_empty() {
+            calls.remove(&id);
+        }
+        // The invocation is a message the callback sends as it drops, so the
+        // borrow is released first rather than held across it.
+        drop(calls);
+        if let Some(arguments) = arguments {
+            callback.invoke(arguments);
+        }
+    }
+
     /// Apply browser device metrics and resize the Worker-owned surface.
     /// Metrics that arrive before a page is loaded become the next view's.
     #[wasm_bindgen(js_name = resize)]
@@ -645,6 +845,7 @@ impl BobcatRenderer {
         drop(self.painter.take());
         self.page_resources = None;
         self.boot_urls.clear();
+        self.module_bridge.calls.borrow_mut().clear();
     }
 }
 
@@ -653,6 +854,7 @@ impl BobcatRenderer {
         &mut self,
         mut sources: ViewSources,
         base_url: Url,
+        global_props: Option<String>,
     ) -> Result<(), JsValue> {
         // Detaching first, then dropping the previous view — which stops it —
         // and then the group it belonged to, which is what ends its two
@@ -673,6 +875,10 @@ impl BobcatRenderer {
         drop(self.group.take());
         self.page_resources = None;
         self.boot_urls.clear();
+        // The outgoing page's unanswered native-module calls belonged to its
+        // realm, which is gone: dropping them releases the JavaScript
+        // functions, and the next page's calls start from an empty map.
+        self.module_bridge.calls.borrow_mut().clear();
         // Release the old page's post-boot waiter. The Render Worker advances
         // its generation before calling load, so it exits without pumping the
         // replacement view.
@@ -683,6 +889,8 @@ impl BobcatRenderer {
         self.resources.set_base_url(Some(base_url));
         sources.fonts = self.fonts.clone();
         sources.default_font_family = self.default_font_family.clone();
+        // JSON text the host serialized and Rust never reads.
+        sources.global_props = global_props;
         // A draw target that failed cannot be reached again, so a page loaded
         // after one gets a painter of its own. Dropping the old one first is
         // what releases this canvas's WebGPU context before the replacement
@@ -711,12 +919,26 @@ impl BobcatRenderer {
         let boot_urls: Vec<_> = std::iter::once(sources.entry.clone())
             .chain(sources.style_sheets.iter().cloned())
             .collect();
+        // One set of modules per view, made from the table the facade
+        // declared: a module is the view's, and the bridge behind them all is
+        // this renderer's.
+        let native_modules: Vec<Box<dyn NativeModule>> = self
+            .native_modules
+            .iter()
+            .map(|(name, methods)| {
+                Box::new(HostModule {
+                    name: name.clone(),
+                    methods: methods.clone(),
+                    bridge: Rc::clone(&self.module_bridge),
+                }) as Box<dyn NativeModule>
+            })
+            .collect();
         let built = group.create_lynx_view(
             self.width,
             self.height,
             self.device_pixel_ratio,
             resources.builder(),
-            Vec::new(),
+            native_modules,
             sources,
         );
         warn_notes(&resources);

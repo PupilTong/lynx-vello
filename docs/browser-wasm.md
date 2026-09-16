@@ -46,9 +46,12 @@ out at the canvas's.
 
 The UI thread never instantiates Wasm and never owns an engine, document,
 tree, scene, GPU object, or Rust session registry. Its public operations are
-limited to canvas creation with `PageConfig`, URL-based page loads, font and
+limited to canvas creation with `PageConfig` and the host's `NativeModules`,
+URL-based page loads with their `globalProps`, font and
 default-family registration, resize, error observation, disposal, and
-automatic pointer forwarding from the attached HTML canvas.
+automatic pointer forwarding from the attached HTML canvas. Running the host's
+native-module handlers is its one piece of engine-facing work, and it is
+exactly the work that has to happen there.
 
 The Render Worker calls `configure_wasm_workers` once, then sizes its
 `OffscreenCanvas` to `FrameSize::for_viewport` before building its `Painter`
@@ -201,6 +204,69 @@ outcome arrives; ZIP images and other assets remain available for later frames.
 Sources staged for the next page belong to a separate scope and are not cleared
 when the current page completes.
 
+## Host native modules and page data
+
+`BobcatCanvas.create` takes an optional
+`{ nativeModules }`, a `Record<string, Record<string, (...args) => void>>`: the
+host capabilities a page reaches as `NativeModules.<name>.<method>(...)` from
+its background thread. Every member must be a function, checked before the
+Render Worker is created, and the table is retained for every page the canvas
+loads, exactly like its fonts and default family. Only the names cross the
+Worker boundary — `InitMessage.nativeModules`, then two flat `string[]`s to
+`BobcatRenderer::create` — and each load builds a fresh `Vec<Box<dyn
+NativeModule>>` from them for the view it constructs.
+
+**The handlers run on the page's main thread**, not on the Render Worker and
+not in the realm that called them. That is the whole reason for the option:
+`localStorage`, navigation and the rest of the DOM are there. So a call is a
+message, `bobcat-native-module`, carrying the call number, the module and
+method names, the arguments as JSON array text with each function argument
+`null`, and the indices of those function arguments. The facade parses the
+text, puts a wrapper back in each named slot and calls the handler. The answer
+is the other message, `bobcat-native-module-callback`, quoting the call number
+and the argument index; the Render Worker queues
+`BobcatRenderer::answerNativeModuleCallback` on the same ordered queue as
+pointer input and the facade operations, so an answer arriving mid-load cannot
+re-enter the Wasm wrapper while that load owns its mutable borrow.
+
+Nothing returns. The realm's method answered `undefined` before this side ever
+saw the call — native Lynx's shape, not a promise's — so a handler's return
+value is discarded and a handler that throws is reported to `console.error`
+rather than failing anything: the call is the page's. Each wrapper is
+single-shot, like the `ModuleCallback` it answers: the first call posts the
+answer and later ones do nothing. A callback nobody answers keeps its
+JavaScript function alive until the next load, which clears the renderer's
+outstanding calls and releases them all. A call naming a module the host did
+not declare, or an answer to a call whose view has been replaced, is dropped.
+
+`load`, `loadLynxXml`, `loadTemplate` and `loadZip` each take an optional
+`{ globalProps }`: any JSON-serializable value, which the facade stringifies
+(a `TypeError` if JSON refuses it) and the engine hands the page as
+`lynx.__globalProps` without reading. `undefined` means the page gets none.
+
+`packages/github-pages` uses both for the Lynx Explorer homepage it loads
+first. Its `ExplorerModule` answers `openSchema` by resolving what the page
+asked for — an absolute URL, a relative path, or the
+`file://lynx?local://<path>[?query]` scheme the Explorer's `navigateTo` builds,
+whose path resolves against the document base — into the page's own entry field
+and running the same load the **Load template** button runs, so a bundle this
+demo does not publish fails in the upload status like any other bad URL.
+`openScan` says the browser demo has no camera scanner; `setThreadMode` and
+`openDevtoolSwitchPage` are `console.info` no-ops, Bobcat having one thread
+strategy and no DevTool switches; `saveThemePreferences` and
+`saveToLocalStorage` write under a `bobcat-explorer:` prefix. `getSettingInfo`
+and `readFromLocalStorage` exist only so the page's `typeof` checks pass and
+read back as nothing — a module method has no synchronous answer to give.
+
+It passes **no `globalProps` yet**, deliberately. web-core's Explorer hands its
+view a `theme`, but the homepage also reads `screenWidth`/`screenHeight` and
+switches to a two-column landscape layout whenever the width exceeds the
+height, which is the wrong shape for this preview canvas. With the field
+absent the page renders its portrait single-column layout and its default
+theme, so the demo exercises the load option's absence rather than its
+content; the facade, Render Worker and `ViewSources::global_props` path is
+there and tested for the embedder that wants it.
+
 ## Pointer input
 
 `transferControlToOffscreen()` transfers drawing control, not the DOM canvas's
@@ -317,8 +383,10 @@ directory is checked in. The verification script
 checks that optimization removed the debugging name section while preserving
 `target_features`, shared imported/exported memory, the Worker-only Wasm
 import, the facade's four page and font declarations and their dispatches, that
-a load registers a page's sources before building the view, and the absence of
-the private pointer method and the removed direct DOM API.
+a load registers a page's sources before building the view, that the facade
+validates the host's module table and answers calls with single-shot callbacks
+while the Render Worker queues those answers on its request queue, and the
+absence of the private pointer method and the removed direct DOM API.
 
 The `wasm32` target disables Parley's `complex-scripts` feature, while native
 targets retain it. This keeps grapheme segmentation, shaping, and ordinary

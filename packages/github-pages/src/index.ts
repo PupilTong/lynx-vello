@@ -1,6 +1,6 @@
 import './styles.css';
 
-import type { BobcatCanvas, PageConfig } from 'bobcat-wasm';
+import type { BobcatCanvas, NativeModules, PageConfig } from 'bobcat-wasm';
 
 const MAX_LYNX_XML_BYTES = 16 * 1024 * 1024;
 const RELOAD_MARKER = `bobcat-coi-reload:${new URL('.', document.baseURI).pathname}`;
@@ -9,6 +9,12 @@ const TAB_PARAMETER = 'tab';
 // The Lynx Explorer homepage, built by `@explorer/homepage` and copied beside
 // the page; the Canvas tab loads it first.
 const HOMEPAGE_TEMPLATE = 'explorer-homepage/main.web.bundle';
+// `ExplorerModule.navigateTo` builds this scheme around a bundle path that is
+// relative to the Explorer's local template root, which here is the page.
+const LOCAL_SCHEMA_PREFIX = 'file://lynx?local://';
+// One namespace for everything the demo's ExplorerModule stores, so the page
+// shares no key with anything else served from this origin.
+const STORAGE_PREFIX = 'bobcat-explorer:';
 
 type IndicatorState = 'pending' | 'ok' | 'error';
 type SourceState = 'idle' | 'pending' | 'ok' | 'error';
@@ -487,10 +493,122 @@ function nextAnimationFrame(): Promise<void> {
   return new Promise((resolve) => requestAnimationFrame(() => resolve()));
 }
 
+/**
+ * How `ExplorerModule.openSchema` reaches the page's template loader. It is a
+ * holder rather than the function because the module is built before the
+ * canvas exists and the loader before anything can be rendered.
+ */
+interface TemplateLoader {
+  load?: (label: string, template?: boolean) => Promise<void>;
+}
+
+/**
+ * Resolves what the Explorer homepage asks to open into a URL this demo can
+ * fetch: an absolute URL or a relative path as they are, and the
+ * `file://lynx?local://<path>[?query]` scheme `navigateTo` builds by taking
+ * the path — query and all — relative to this page. Only the homepage bundle
+ * is published beside the page, so a card naming another one resolves fine and
+ * then fails its fetch, which the upload status reports.
+ */
+function explorerTemplateUrl(raw: string): string {
+  const value = raw.trim();
+  const path = value.startsWith(LOCAL_SCHEMA_PREFIX)
+    ? value.slice(LOCAL_SCHEMA_PREFIX.length)
+    : value;
+  return new URL(path, document.baseURI).href;
+}
+
+function storeExplorerValue(key: string, value: unknown): void {
+  try {
+    localStorage.setItem(`${STORAGE_PREFIX}${key}`, String(value));
+  } catch (error) {
+    console.warn(`Could not store the Explorer preference ${key}`, error);
+  }
+}
+
+/**
+ * The host capabilities the Lynx Explorer homepage reaches through
+ * `NativeModules.ExplorerModule`, as far as a browser demo can answer them.
+ *
+ * Every handler runs on this thread, after the page's call has already
+ * returned `undefined` to it, so nothing here can answer synchronously:
+ * `readFromLocalStorage` and `getSettingInfo` exist only so the homepage's
+ * `typeof` checks pass, and read back as nothing. `saveThemePreferences` and
+ * `saveToLocalStorage` really do write, but nothing reads them back yet: this
+ * demo passes its pages no `globalProps` at all, so the homepage sees no
+ * `preferredTheme` and lays itself out in its portrait default.
+ */
+function createExplorerModule(
+  shell: Shell,
+  loader: TemplateLoader,
+): NativeModules {
+  return {
+    ExplorerModule: {
+      openSchema(...args: unknown[]): void {
+        const requested = args[0];
+        if (typeof requested !== 'string' || requested.trim() === '') {
+          shell.uploadStatus.textContent = 'The page asked to open an empty URL';
+          return;
+        }
+        let url: string;
+        try {
+          url = explorerTemplateUrl(requested);
+        } catch (error) {
+          shell.uploadStatus.textContent = `Could not open ${requested}: ${errorMessage(error)}`;
+          return;
+        }
+        // The same load the "Load template" button runs, from the same
+        // fields, so its status, busy state and error text are the ones the
+        // page already has.
+        shell.entryInput.value = url;
+        shell.zipInput.value = '';
+        shell.zipStatus.textContent = 'No ZIP selected';
+        const load = loader.load;
+        if (load === undefined) {
+          console.warn('Bobcat is not ready to open', url);
+          return;
+        }
+        void load(url, true).catch((error: unknown) => {
+          console.error(error);
+        });
+      },
+      openScan(): void {
+        shell.uploadStatus.textContent =
+          'QR scanning is unavailable in this browser demo; paste a template URL instead';
+        console.warn(
+          'ExplorerModule.openScan: this demo has no camera scanner',
+        );
+      },
+      setThreadMode(): void {
+        console.info(
+          'ExplorerModule.setThreadMode: Bobcat has one thread strategy',
+        );
+      },
+      openDevtoolSwitchPage(): void {
+        console.info(
+          'ExplorerModule.openDevtoolSwitchPage: this demo ships no DevTool switches',
+        );
+      },
+      saveThemePreferences(...args: unknown[]): void {
+        storeExplorerValue(String(args[0]), args[1]);
+      },
+      saveToLocalStorage(...args: unknown[]): void {
+        storeExplorerValue(String(args[0]), args[1]);
+      },
+      // Present for the page's feature detection, and nothing more: a module
+      // method runs off the page's JavaScript thread, so it has no return
+      // value to give. The homepage treats both as absent.
+      readFromLocalStorage(): void {},
+      getSettingInfo(): void {},
+    },
+  };
+}
+
 class PreviewRenderer {
   readonly #config: PageConfig;
   readonly #factory: BobcatCanvasFactory;
   readonly #fontBytes: Uint8Array;
+  readonly #nativeModules: NativeModules;
   readonly #reportFatal: (error: Error) => void;
   readonly #resizeObserver: ResizeObserver;
   readonly #shell: Shell;
@@ -506,12 +624,14 @@ class PreviewRenderer {
     factory: BobcatCanvasFactory,
     config: PageConfig,
     fontBytes: Uint8Array,
+    nativeModules: NativeModules,
     reportFatal: (error: Error) => void,
   ) {
     this.#shell = shell;
     this.#factory = factory;
     this.#config = config;
     this.#fontBytes = fontBytes;
+    this.#nativeModules = nativeModules;
     this.#reportFatal = reportFatal;
     this.#resizeObserver = new ResizeObserver(() => this.scheduleResize());
     this.#resizeObserver.observe(shell.canvasHost);
@@ -560,6 +680,7 @@ class PreviewRenderer {
     await this.#load((view) => view.loadZip(bytes, entryUrl));
   }
 
+  // This demo hands its pages no `globalProps`; see `createExplorerModule`.
   async #load(load: (view: BobcatCanvas) => Promise<void>): Promise<void> {
     const generation = ++this.#generation;
     let view = this.#view;
@@ -580,6 +701,8 @@ class PreviewRenderer {
           initial.height,
           initial.dpr,
           this.#config,
+          // Retained for every page this canvas loads, like the fonts.
+          { nativeModules: this.#nativeModules },
         );
       } catch (error) {
         if (this.#canvas === canvas) {
@@ -834,11 +957,16 @@ async function start(shell: Shell, router: TabRouter): Promise<void> {
 
   await init();
 
+  // The Explorer homepage opens templates through its own native module; the
+  // loader it uses is the page's, and exists only once `installSources` has
+  // built it below.
+  const loader: TemplateLoader = {};
   const renderer = new PreviewRenderer(
     shell,
     BobcatCanvas,
     LYNX_XML_PAGE_CONFIG,
     fontBytes,
+    createExplorerModule(shell, loader),
     (error) => {
       setIndicator(shell.renderer, 'Failed', 'error');
       setSourceStatus(shell, `Renderer failed: ${error.message}`, 'error');
@@ -854,6 +982,7 @@ async function start(shell: Shell, router: TabRouter): Promise<void> {
   );
   router.subscribe(() => renderer.scheduleResize());
   const renderSource = installSources(shell, renderer);
+  loader.load = renderSource;
   const initialTab = workspaceTab(
     new URL(window.location.href).searchParams.get(TAB_PARAMETER),
   );

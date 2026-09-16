@@ -63,10 +63,40 @@ for (const requiredConfigValue of [
   }
 }
 if (
-  !facade.includes('async loadLynxXml(url: string | URL)') ||
+  !facade.includes('async loadLynxXml(url: string | URL, options: LoadOptions') ||
   !facade.includes("this.#request('loadLynxXml'")
 ) {
   throw new Error('browser facade does not dispatch loadLynxXml')
+}
+// Host native modules run here, on the page's main thread: the facade takes
+// the table at `create`, checks every member is callable before a Worker
+// exists, and answers each call the Worker forwards.
+for (const requiredNativeModuleStep of [
+  'options.nativeModules',
+  'nativeModuleTable(options.nativeModules)',
+  'must be a function',
+  "message?.type === 'bobcat-native-module'",
+  'deliverNativeModuleCall(this.#modules, message,',
+  "type: 'bobcat-native-module-callback'",
+]) {
+  if (!facade.includes(requiredNativeModuleStep)) {
+    throw new Error(
+      `browser facade native module bridge is missing ${requiredNativeModuleStep}`,
+    )
+  }
+}
+// A callback wrapper is single-shot, the way the Rust handle it answers is.
+if (!/answered = true\b/.test(facade) || !facade.includes('if (answered) {')) {
+  throw new Error('browser facade native module callbacks must be single-shot')
+}
+// Every load hands its page `globalProps` as text the engine never reads, and
+// a page given none carries no field at all.
+if (
+  !facade.includes('function globalPropsText(value: unknown)') ||
+  !facade.includes('JSON.stringify(value)') ||
+  !facade.includes('return globalProps === undefined ? {} : { globalProps }')
+) {
+  throw new Error('browser facade must serialize globalProps for every load')
 }
 for (const requiredPointerStep of [
   "canvas.addEventListener('pointerdown'",
@@ -89,6 +119,7 @@ for (const [operation, method, message] of [
     'async load(\n' +
       '    url: string | URL,\n' +
       '    styleSheetUrls: readonly (string | URL)[] = [],\n' +
+      '    options: LoadOptions = {},\n' +
       '  ): Promise<void>',
     'a page load',
   ],
@@ -143,7 +174,7 @@ for (const requiredLoadStep of [
   "await fetchSource('script', message.url, MAX_SCRIPT_BYTES)",
   'renderer!.registerStyleSheet(sheet.url, sheet.bytes)',
   'renderer.registerScript(entry.url, entry.bytes)',
-  'await replaceNativeView(request, () => renderer!.load(entryUrl, styleSheetUrls))',
+  'await replaceNativeView(request, () =>\n        renderer!.load(\n          entryUrl,\n          styleSheetUrls,\n          undefined,\n          message.globalProps,\n        ),\n      )',
 ]) {
   if (!loadDispatch.includes(requiredLoadStep)) {
     throw new Error(`Render Worker page load is missing ${requiredLoadStep}`)
@@ -191,7 +222,7 @@ for (const requiredLynxXmlDispatchStep of [
   'console.warn(',
   'await replaceNativeView(',
   'styleSheetUrl === null ? [] : [styleSheetUrl]',
-  'backgroundThreadScriptUrl,\n        )',
+  'backgroundThreadScriptUrl,\n          message.globalProps,\n        )',
 ]) {
   if (!lynxXmlDispatch.includes(requiredLynxXmlDispatchStep)) {
     throw new Error(
@@ -230,6 +261,29 @@ for (const requiredReplaceStep of [
 }
 if (!renderWorker.includes('requestQueue = requestQueue.then(dispatch)')) {
   throw new Error('Render Worker must serialize every facade operation')
+}
+// The module table crosses as two flat `string[]`s, and the bridge back is
+// the one function the engine calls for every module of every view.
+for (const requiredNativeModuleStep of [
+  'const nativeModuleNames = Object.keys(message.nativeModules)',
+  'nativeModuleNames.map((name) =>',
+  'postNativeModuleCall,',
+  "type: 'bobcat-native-module',",
+  "message?.type === 'bobcat-native-module-callback'",
+  'renderer.answerNativeModuleCallback(',
+]) {
+  if (!renderWorker.includes(requiredNativeModuleStep)) {
+    throw new Error(
+      `Render Worker native module bridge is missing ${requiredNativeModuleStep}`,
+    )
+  }
+}
+// An answer shares the queue with pointer input and the facade operations: it
+// must not re-enter the Wasm wrapper while a load owns its mutable borrow.
+if (!renderWorker.includes('requestQueue = requestQueue.then(answer)')) {
+  throw new Error(
+    'Render Worker must queue native module answers on the request queue',
+  )
 }
 for (const requiredPointerStep of [
   "message?.type === 'bobcat-pointer'",
@@ -344,6 +398,7 @@ for (const requiredMethod of [
   'registerLynxXml(',
   'loadTemplate(',
   'loadZip(',
+  'answerNativeModuleCallback(',
   'bobcatrenderer_load(',
   'pump(',
   'registerFonts(',
@@ -389,9 +444,12 @@ const declarations = await readFile(
 )
 for (const requiredDeclaration of [
   'pageConfig: PageConfig',
+  'options?: BobcatCanvasOptions',
+  'nativeModules?: NativeModules',
+  'globalProps?: unknown',
   'LYNX_XML_PAGE_CONFIG: Readonly<PageConfig>',
-  'load(url: string | URL, styleSheetUrls?: readonly (string | URL)[])',
-  'loadLynxXml(url: string | URL)',
+  'load(url: string | URL, styleSheetUrls?: readonly (string | URL)[], options?: LoadOptions)',
+  'loadLynxXml(url: string | URL, options?: LoadOptions)',
   'registerFonts(data: ArrayBuffer | Uint8Array)',
   'setDefaultFontFamily(family: string)',
 ]) {

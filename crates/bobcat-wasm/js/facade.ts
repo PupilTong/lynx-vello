@@ -1,6 +1,8 @@
 import { ImageDecoder } from './image-decoder.ts'
 import type {
   InitMessage,
+  NativeModuleCallMessage,
+  NativeModuleCallbackMessage,
   Operation,
   PointerDevice,
   PointerFields,
@@ -28,6 +30,36 @@ export interface PageConfig {
   defaultDisplayLinear: boolean
   defaultOverflowVisible: boolean
   enableCSSSelector: boolean
+}
+
+/**
+ * The host capabilities a page reaches as `NativeModules.<name>.<method>()`
+ * from its background thread.
+ *
+ * Every handler runs here, on the page's main thread, because that is where
+ * `localStorage`, navigation and the rest of the DOM are — and it runs after
+ * the calling script has moved on, so there is nothing to return. A handler
+ * that has an answer takes a function argument and calls it: the page passes
+ * a function, the engine hands this side a single-shot wrapper in that
+ * argument's place, and calling it delivers the answer to the realm.
+ */
+export type NativeModules = Record<
+  string,
+  Record<string, (...args: unknown[]) => void>
+>
+
+/** What a canvas keeps for every page it loads, beyond its metrics. */
+export interface BobcatCanvasOptions {
+  nativeModules?: NativeModules
+}
+
+/** What one load hands the page it builds. */
+export interface LoadOptions {
+  /**
+   * `lynx.__globalProps` for this page: any JSON-serializable value, which
+   * the engine carries as text and never reads.
+   */
+  globalProps?: unknown
 }
 
 /** web-core raw-loader defaults; callers may spread this object to override. */
@@ -88,6 +120,130 @@ function validateMetrics(
   throw new TypeError(
     `Bobcat viewport metrics must be finite, positive, and no larger than ${String(MAX_RENDER_DIMENSION)} physical pixels per axis`,
   )
+}
+
+/**
+ * Reads the host's modules into the name/method table the Worker declares to
+ * the realm, rejecting anything that is not a function: the table says what
+ * exists on the page's `NativeModules` object, so a member that could not be
+ * called must not appear in it.
+ */
+function nativeModuleTable(
+  modules: NativeModules | undefined,
+): Record<string, string[]> {
+  if (modules === undefined) {
+    return {}
+  }
+  if (modules === null || typeof modules !== 'object') {
+    throw new TypeError('BobcatCanvas.create nativeModules must be an object')
+  }
+  const table: Record<string, string[]> = {}
+  for (const [name, module] of Object.entries(modules)) {
+    if (module === null || typeof module !== 'object') {
+      throw new TypeError(`Bobcat nativeModules.${name} must be an object`)
+    }
+    const methods: string[] = []
+    for (const [method, handler] of Object.entries(module)) {
+      if (typeof handler !== 'function') {
+        throw new TypeError(
+          `Bobcat nativeModules.${name}.${method} must be a function`,
+        )
+      }
+      methods.push(method)
+    }
+    table[name] = methods
+  }
+  return table
+}
+
+/**
+ * Serializes one load's `globalProps` into the text the engine carries.
+ * `undefined` means the page gets none; anything JSON refuses is the caller's
+ * mistake, reported before the load crosses the Worker boundary.
+ */
+function globalPropsText(value: unknown): string | undefined {
+  if (value === undefined) {
+    return undefined
+  }
+  let text: string | undefined
+  try {
+    text = JSON.stringify(value)
+  } catch (error) {
+    throw new TypeError(
+      `Bobcat globalProps must be JSON-serializable: ${errorMessage(error)}`,
+    )
+  }
+  if (text === undefined) {
+    throw new TypeError('Bobcat globalProps must be JSON-serializable')
+  }
+  return text
+}
+
+/**
+ * The `globalProps` field a load message carries, or no field at all: a page
+ * given none and a page given `undefined` are the same page.
+ */
+function globalPropsFields(options: LoadOptions): { globalProps?: string } {
+  if (options === null || typeof options !== 'object') {
+    throw new TypeError('Bobcat load options must be an object')
+  }
+  const globalProps = globalPropsText(options.globalProps)
+  return globalProps === undefined ? {} : { globalProps }
+}
+
+/**
+ * Runs one `bobcat-native-module` call against the host's handlers.
+ *
+ * The arguments arrive as JSON array text with each function argument `null`;
+ * every index the Worker named gets a wrapper that posts the page's answer
+ * back, the first time it is called and only then. The handler's own return
+ * value is nothing — the realm's method already answered `undefined` — so a
+ * handler that throws is reported here rather than propagated: the call is the
+ * page's, not the Worker's, and nothing upstream is waiting on it.
+ */
+export function deliverNativeModuleCall(
+  modules: NativeModules,
+  message: NativeModuleCallMessage,
+  post: (answer: NativeModuleCallbackMessage) => void,
+): void {
+  const handler = modules[message.module]?.[message.method]
+  if (typeof handler !== 'function') {
+    return
+  }
+  let args: unknown[]
+  try {
+    const parsed: unknown = JSON.parse(message.args)
+    args = Array.isArray(parsed) ? parsed : []
+  } catch (error) {
+    console.error(
+      `Bobcat could not read the arguments of NativeModules.${message.module}.${message.method}`,
+      error,
+    )
+    return
+  }
+  for (const index of message.callbacks) {
+    let answered = false
+    args[index] = (...answer: unknown[]): void => {
+      if (answered) {
+        return
+      }
+      answered = true
+      post({
+        args: JSON.stringify(answer),
+        call: message.call,
+        index,
+        type: 'bobcat-native-module-callback',
+      })
+    }
+  }
+  try {
+    handler(...args)
+  } catch (error) {
+    console.error(
+      `NativeModules.${message.module}.${message.method} threw`,
+      error,
+    )
+  }
 }
 
 function pointerDevice(pointerType: string): PointerDevice {
@@ -341,6 +497,7 @@ interface PendingRequest {
 class RenderWorkerClient {
   #fatalError: Error | undefined
   #fatalListeners = new Set<(error: Error) => void>()
+  #modules: NativeModules
   #nextRequest = 1
   #pending = new Map<number, PendingRequest>()
   #ready: Promise<void>
@@ -349,7 +506,8 @@ class RenderWorkerClient {
   #readySettled = false
   #worker: Worker
 
-  constructor(worker: Worker) {
+  constructor(worker: Worker, modules: NativeModules) {
+    this.#modules = modules
     this.#worker = worker
     this.#ready = new Promise((resolve, reject) => {
       this.#resolveReady = resolve
@@ -407,6 +565,21 @@ class RenderWorkerClient {
     }
     if (message?.type === 'bobcat-error') {
       this.#fail(new Error(message.message))
+      return
+    }
+    if (message?.type === 'bobcat-native-module') {
+      // The handlers are the page's; a failure of theirs is theirs to hear
+      // about, so nothing here touches the fatal path.
+      deliverNativeModuleCall(this.#modules, message, (answer) => {
+        if (this.#fatalError !== undefined) {
+          return
+        }
+        try {
+          this.#worker.postMessage(answer)
+        } catch (error) {
+          console.error('Bobcat could not deliver a native module answer', error)
+        }
+      })
       return
     }
     if (message?.type !== 'bobcat-response') {
@@ -554,6 +727,7 @@ export class BobcatCanvas {
     height: number,
     devicePixelRatio: number,
     pageConfig: PageConfig,
+    options: BobcatCanvasOptions = {},
   ): Promise<BobcatCanvas> {
     await init()
     if (
@@ -568,6 +742,13 @@ export class BobcatCanvas {
     if (pageConfig === null || typeof pageConfig !== 'object') {
       throw new TypeError('BobcatCanvas.create pageConfig must be an object')
     }
+    if (options === null || typeof options !== 'object') {
+      throw new TypeError('BobcatCanvas.create options must be an object')
+    }
+    // Checked before the Worker exists: a module table the page cannot
+    // answer is the caller's mistake, not a runtime failure of the canvas.
+    const modules = options.nativeModules ?? {}
+    const nativeModules = nativeModuleTable(options.nativeModules)
     validateMetrics(width, height, devicePixelRatio)
     const config = {
       defaultDisplayLinear: pageConfig.defaultDisplayLinear,
@@ -592,7 +773,7 @@ export class BobcatCanvas {
         name: 'bobcat-render',
         type: 'module',
       })
-      client = new RenderWorkerClient(worker)
+      client = new RenderWorkerClient(worker, modules)
       worker.postMessage(
         {
           type: 'bobcat-init',
@@ -602,6 +783,7 @@ export class BobcatCanvas {
           height,
           imagePort: images.port2,
           hardwareConcurrency: hardwareConcurrency(),
+          nativeModules,
           workerUrl: THREAD_WORKER_URL,
           width,
         } satisfies InitMessage,
@@ -647,16 +829,20 @@ export class BobcatCanvas {
    * rejects on fetch, VM initialization, or evaluation failure, leaving the
    * previous page running if the fetch was what failed. Relative URLs resolve
    * against this document's base URL. Nothing here imposes a deadline.
+   *
+   * `options.globalProps` becomes the page's `lynx.__globalProps`.
    */
   async load(
     url: string | URL,
     styleSheetUrls: readonly (string | URL)[] = [],
+    options: LoadOptions = {},
   ): Promise<void> {
     if (!Array.isArray(styleSheetUrls)) {
       throw new TypeError('BobcatCanvas.load styleSheetUrls must be an array')
     }
     this.#pointerInput.reset()
     await this.#request('load', {
+      ...globalPropsFields(options),
       styleSheetUrls: styleSheetUrls.map(documentUrl),
       url: documentUrl(url),
     })
@@ -670,9 +856,12 @@ export class BobcatCanvas {
    * available. Page configuration remains the host's `BobcatCanvas.create`
    * choice; `LYNX_XML_PAGE_CONFIG` supplies web-core's raw-loader defaults.
    */
-  async loadLynxXml(url: string | URL): Promise<void> {
+  async loadLynxXml(url: string | URL, options: LoadOptions = {}): Promise<void> {
     this.#pointerInput.reset()
-    await this.#request('loadLynxXml', { url: documentUrl(url) })
+    await this.#request('loadLynxXml', {
+      ...globalPropsFields(options),
+      url: documentUrl(url),
+    })
   }
 
   /**
@@ -681,9 +870,12 @@ export class BobcatCanvas {
    * resources against its response URL. Native bytecode is rejected by the
    * shared parser.
    */
-  async loadTemplate(url: string | URL): Promise<void> {
+  async loadTemplate(url: string | URL, options: LoadOptions = {}): Promise<void> {
     this.#pointerInput.reset()
-    await this.#request('loadTemplate', { url: documentUrl(url) })
+    await this.#request('loadTemplate', {
+      ...globalPropsFields(options),
+      url: documentUrl(url),
+    })
   }
 
   /**
@@ -696,6 +888,7 @@ export class BobcatCanvas {
   async loadZip(
     data: ArrayBuffer | Uint8Array,
     entryUrl: string | URL,
+    options: LoadOptions = {},
   ): Promise<void> {
     if (!(data instanceof ArrayBuffer) && !(data instanceof Uint8Array)) {
       throw new TypeError('BobcatCanvas.loadZip requires an ArrayBuffer or Uint8Array')
@@ -705,6 +898,7 @@ export class BobcatCanvas {
     }
     this.#pointerInput.reset()
     await this.#request('loadZip', {
+      ...globalPropsFields(options),
       bytes: new Uint8Array(data),
       url: String(entryUrl),
     })
