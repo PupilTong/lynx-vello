@@ -1,7 +1,9 @@
 // The `bobcat:runtime` compatibility ESM imported by each transformed MTS entry.
 //
 // The JS Context and lifecycle/event calls reach this view's BTS Worker.
-// Native modules remain sinks. Diagnostics reach the view's host; global
+// This realm has no `NativeModules` of its own — Lepus has none — and only
+// carries the embedder's module table to the BTS Worker, which does.
+// Diagnostics reach the view's host; global
 // events reach BTS through the same Worker FIFO as Context messages. This
 // realm never waits on the BTS: a BTS that closed itself, failed, or trapped
 // leaves the view running, and later messages go to its Worker all the same,
@@ -33,7 +35,7 @@ import { __BobcatQueryNodes } from "bobcat:element";
 import type { NodeQueryRequest } from "bobcat:selector-query";
 import "bobcat:timers";
 import { requestScriptFrame } from "bobcat-internal:host";
-import { initialProcessor as getInitialProcessor, globalProps, initData, reportScriptError, logScriptMessage, preloadStyleSheet, adoptStyleSheet } from "bobcat-internal:host";
+import { initialProcessor as getInitialProcessor, globalProps, initData, nativeModuleTable, reportScriptError, logScriptMessage, preloadStyleSheet, adoptStyleSheet } from "bobcat-internal:host";
 import type { Worker } from "bobcat-internal";
 import type { TimerGlobals } from "bobcat:timers";
 
@@ -243,7 +245,7 @@ export function __BobcatConnectBackground(worker: Worker, data: unknown) {
     }
   });
   // Snapshot initial data before queued events or render can mutate it.
-  worker.postMessage({bobcat: "runtime", method: "initialize", ...__BobcatBackgroundData(data), systemInfo: SystemInfo});
+  worker.postMessage({bobcat: "runtime", method: "initialize", ...__BobcatBackgroundData(data), systemInfo: SystemInfo, nativeModules: hostNativeModules});
   backgroundWorker = worker;
   const queued = pendingBackgroundMessages;
   pendingBackgroundMessages = [];
@@ -343,6 +345,42 @@ export let __globalProps = parsePageData("globalProps", globalProps()) as Record
 // Host state is separate from the copies the two script realms may mutate.
 let hostGlobalPropsJson = "{}";
 const hostInitialProcessor = getInitialProcessor() ?? "";
+
+/**
+ * Reads a `<utf16Length>:<text>` record the native side wrote, the twin of
+ * element-papi's own reader: the writer counted UTF-16 code units, so
+ * `String.prototype.slice` takes each field without a scan and a field may
+ * contain any character at all, the delimiter included. The writer is Bobcat,
+ * so nothing here validates the payload.
+ */
+function splitRecord(record: string): string[] {
+  const fields: string[] = [];
+  let rest = record;
+  while (rest !== "") {
+    const separator = rest.indexOf(":");
+    const units = Number(rest.slice(0, separator));
+    const body = rest.slice(separator + 1);
+    fields.push(body.slice(0, units));
+    rest = body.slice(units);
+  }
+  return fields;
+}
+
+/**
+ * The embedder's native modules, read once as this module evaluates: two
+ * fields per module, its name then its method names joined with commas. This
+ * realm only carries them to the BTS Worker, which is where `NativeModules`
+ * lives — the MTS `NativeModules` stays `undefined`, as Lepus has none.
+ */
+const hostNativeModules: Record<string, string[]> = (() => {
+  const fields = splitRecord(nativeModuleTable());
+  const modules: Record<string, string[]> = {};
+  for (let index = 0; index + 1 < fields.length; index += 2) {
+    const methods = fields[index + 1]!;
+    modules[fields[index]!] = methods === "" ? [] : methods.split(",");
+  }
+  return modules;
+})();
 let initialProcessor = hostInitialProcessor;
 let jsDataProcessor = false;
 

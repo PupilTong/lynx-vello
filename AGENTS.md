@@ -268,7 +268,8 @@ the group's thread, and builds the fetcher in place on the calling thread. It
 is **synchronous and takes no draw target**. The view's `F` parameter is that
 view-owned fetcher; the wakeup is a separate group constructor generic held by
 `bobcat-main`. Construction returns a loading view at once, whose boot outcome
-arrives through `pump`; constructor errors cover metrics and attachment only.
+arrives through `pump`; constructor errors cover metrics, attachment, and two
+native modules claiming one name.
 
 The view's owner validates the fonts and default family first — a
 `dom::TextContext`'s business, with no document and zero fetches on failure —
@@ -382,6 +383,35 @@ fetcher's own transport API. It carries no response-size limit either; each
 fetcher owns the memory bound for the response it materializes. The resource
 module must not decode images, fonts or templates, upload render resources, or
 own cache/retry policy.
+
+**`NativeModules` is the other host-injected, thread-bound capability.**
+`LynxGroup::create_lynx_view` takes a `Vec<Box<dyn NativeModule>>` beside the
+fetcher builder, and for the same reason: a module runs on the embedder's own
+thread, inside `LynxView::pump`, so it needs neither `Send` nor `Sync` and a
+Wasm module may hold `JsValue`s. One `dyn` handler per `NativeModules` key,
+`dom::CustomElement`'s shape: `name()` and `methods()` are read once at
+construction — two modules of one name is `EngineError::DuplicateNativeModule`,
+returned as `LynxViewError::Engine` — and the table crosses to the realm as
+data, so nothing asks a module a question while script is running. The call
+shape is native Lynx's, not a promise's: every function argument becomes a
+single-shot `ModuleCallback` the module invokes later with JSON array text, the
+method itself answers `undefined`, and there is no synchronous return value and
+no error channel. `ModuleCallback::invoke` consumes the handle, dropping one
+releases the JavaScript function uninvoked, and the answer rides the calling
+Worker's inbox weakly — the very handle the view already registered from
+`ViewNotice::WorkerCreated` for frame demand, so nothing is carried across a
+second time. A callback therefore holds no realm open however long a module
+keeps it, and `is_cancelled()` is that handle's own liveness: a worker's
+receiving end drops with its task, so there is nothing left to answer exactly
+when there is nothing left to answer *through*. An answer is delivered to the
+BTS realm the moment it arrives, never queued behind BTS boot: an entry
+awaiting its own call's answer would otherwise deadlock.
+`NativeModules` is **BTS only** — MTS's stays `undefined`, as Lepus has no
+module binding — an unknown module is `undefined` (web-core's answer, where
+native answers `null`; see `docs/tracking/deviations.md`), an undeclared method
+is `undefined` on both references, and a call naming a module this view lacks
+is never assembled at all, which leaves its functions released. No built-in module ships: `bridge`,
+`LynxUIMethodModule`, exposure and intersection are all absent.
 
 `PageSource` registers named CSS under entry-relative resource URLs. Boot
 supplies the entry response URL to the JS runtime before importing the entry,
@@ -796,13 +826,18 @@ The private `MainThreadRuntime` registers the native QuickJS ESM
 `bobcat-internal:host` as one Rust-backed named function export per member, and
 `packages/bobcat-element/src/native.d.ts` is the authoritative enumeration: a
 `declare module "bobcat-internal:host"` block for the MTS realm and
-`"bobcat-internal:worker"` for a worker's, which carries `postWorkerMessage`
-and `closeWorker` and nothing else. The MTS members group as the document's own
+`"bobcat-internal:worker"` for a worker's, which carries `postWorkerMessage`,
+`closeWorker` and `invokeNativeModule` and nothing else. The MTS members group as the document's own
 life, tree vocabulary over numeric `NodeId`s, attributes and style, selector
 queries, the commit, the event-name edges, timers, the page-data triple handed
 over once as plain JSON and processor-name strings the realm alone reads, the
+native-module table handed over once as one length-prefixed record, the
 stylesheet pair, the diagnostics pair, the display-frame demand, and the three
-worker operations.
+worker operations. Those four one-shot strings do not arrive separately:
+they, the entry's own text and resolved URL, and the BTS entry specifier are
+one `RealmStartup`, which is everything a realm is opened with and nothing
+that is ever updated — `LynxView::update_data`, `update_global_props` and
+`reload` reach the realm through `ToMain::PageUpdate` and never touch it.
 
 The two members that answer with a list encode it in the return string, since
 the boundary's value type carries no array: `attributeNames` as the
@@ -1372,7 +1407,54 @@ rAF timeline and prevents an idle frame clock from making `longpress` fire
 immediately. Each load clears active captures, disposal removes all listeners
 and restores the canvas's prior inline `touch-action`, and unexpected capture
 loss becomes `pointercancel`. Hover moves, secondary mouse buttons and wheel
-input do not cross the boundary. The facade exposes no
+input do not cross the boundary.
+
+**Host `NativeModules` and `globalProps` are the page's, not the Worker's.**
+`BobcatCanvas.create` takes an optional
+`nativeModules: Record<string, Record<string, (...args) => void>>`, checked
+member by member before a Worker exists and retained for every page the canvas
+loads, like its fonts; only the name/method table crosses, as
+`InitMessage.nativeModules` and then two flat `string[]`s to
+`BobcatRenderer::create`, from which each load builds a fresh
+`Vec<Box<dyn NativeModule>>`. The handlers themselves run on the page's main
+thread — that is the point, since `localStorage` and navigation are there — so
+a `HostModule::invoke` posts `bobcat-native-module` (call number, module,
+method, arguments as JSON array text, the function arguments' indices) and the
+facade restores a single-shot wrapper in each named slot before calling the
+handler. The answer returns as `bobcat-native-module-callback` and reaches
+`BobcatRenderer::answerNativeModuleCallback` through the *same* ordered queue
+as pointer input, so it cannot re-enter the Wasm wrapper while an async load
+owns its mutable borrow. A handler that throws is `console.error`ed rather than
+propagated, an unknown module or a call whose view has been replaced is
+dropped, and callbacks nobody answered are released by the next load.
+`load`/`loadLynxXml`/`loadTemplate`/`loadZip` each take an optional
+`{ globalProps }`, JSON-stringified on the facade and written into
+`ViewSources::global_props` unread. `packages/github-pages` is the one embedder
+of both: its `ExplorerModule` gives the `@explorer/homepage` bundle it loads
+first an `openSchema` that resolves an absolute URL, a relative path, or
+`file://lynx?local://<path>[?query]` against the document base and runs the
+page's own template load. Those local paths have targets because the Pages
+build also publishes `@explorer/showcase`'s menus as
+`showcase/menu/<name>.web.bundle` and each `@lynx-example/<category>` it
+depends on as the package's whole `dist/` under `showcase/<category>/`, both
+bundle flavours and the `static/` assets a demo names relative to itself; the
+category list comes from the showcase's dependencies and the packages are
+found through a `createRequire` rooted at its manifest, pnpm's layout keeping
+them under its own `node_modules`. A `.lynx.bundle` local path is loaded as
+the `.web.bundle` beside it, retrying the named file once if that rejects —
+which is how the demos shipping only a source-based `.lynx.bundle` open, while
+a bytecode one fails both. It also has
+`localStorage`-backed preference writes, and
+documented no-ops where a browser demo has no answer — no camera scanner, one
+thread strategy, and no synchronous return value for
+`readFromLocalStorage`/`getSettingInfo`. It passes **no `globalProps`**
+deliberately: web-core's Explorer hands its view a `theme`, but the homepage
+also reads `screenWidth`/`screenHeight` and flips to a two-column landscape
+layout when the width exceeds the height, which is the wrong shape for this
+preview canvas — with the field absent the page keeps its portrait
+single-column layout and default theme.
+
+The facade exposes no
 create/append/drop/flush, document, tree, or engine API, and does not decode
 `.web.bundle` containers; callers supply `PageConfig` and either executable
 script URLs or a raw Lynx XML URL. Synchronous GPU capture is absent because

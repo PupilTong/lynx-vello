@@ -218,15 +218,36 @@ impl DocumentIngredients {
     }
 }
 
-/// The host's initial processor name and page-data strings.
+/// Everything one realm is opened with, in one value.
 ///
-/// The realm takes each through a host member. `bobcat:runtime` parses the
-/// data and props as JSON and uses the processor name unchanged.
+/// One struct because all of it shares one lifetime: it is handed over exactly
+/// once, as the realm opens, and nothing ever updates it.
+/// [`LynxView::update_data`](crate::LynxView::update_data),
+/// [`update_global_props`](crate::LynxView::update_global_props) and
+/// [`reload`](crate::LynxView::reload) reach the realm through
+/// `ToMain::PageUpdate` instead, and never touch any of this. The four strings
+/// below become one-shot host members the realm alone reads; `source` and
+/// `url` are what the runtime evaluates; and `background_entry` is spliced
+/// into the BTS Worker's boot script by `WorkerFactory::install`.
 #[derive(Default)]
-pub(crate) struct PageData {
+pub(crate) struct RealmStartup {
+    /// The entry module's text and the resolved URL it is named by, which the
+    /// runtime evaluates once this realm is furnished.
+    pub(crate) source: String,
+    pub(crate) url: String,
+    /// The BTS entry `bobcat:bts` imports, if the view named one.
+    pub(crate) background_entry: Option<String>,
+    /// The host's processor name, page data and global props, as the strings
+    /// it passed in. `bobcat:runtime` parses the data and props as JSON and
+    /// uses the processor name unchanged.
     pub(crate) initial_processor: String,
     pub(crate) init_data: Option<String>,
     pub(crate) global_props: Option<String>,
+    /// The embedder's modules as one `<utf16Length>:<text>` record, two fields
+    /// per module: its name, then its method names joined with commas. Empty
+    /// for a view built with none. The realm reads it into the
+    /// `{name: methods}` object it sends the BTS Worker.
+    pub(crate) native_modules: String,
 }
 
 /// The realm's document and the ingredients it is built out of, plus the
@@ -420,14 +441,15 @@ impl MainThreadRuntime {
     /// this realm creates is still the realm's own business — the boot module
     /// constructs the built-in background context, during the entry evaluation
     /// this call does not make.
+    ///
+    /// It takes the strings it installs out of the startup, leaving the entry
+    /// for the caller to evaluate.
     pub(crate) fn new(
         js_runtime: &mut ScriptRuntime,
         ingredients: DocumentIngredients,
         outbox: ViewOutbox,
         workers: &super::workers::WorkerFactory,
-        base_url: &str,
-        background_entry: Option<String>,
-        page_data: PageData,
+        startup: &mut RealmStartup,
     ) -> Result<
         (
             Self,
@@ -456,9 +478,15 @@ impl MainThreadRuntime {
             &timers,
         )?;
         style_sheets::install_styles(&mut engine, js_runtime, &slot, &outbox)?;
-        install_page_data(&mut engine, js_runtime, page_data)?;
+        install_startup_strings(&mut engine, js_runtime, startup)?;
         let (workers, incoming) = workers
-            .install(&mut engine, js_runtime, outbox, base_url, background_entry)
+            .install(
+                &mut engine,
+                js_runtime,
+                outbox,
+                &startup.url,
+                startup.background_entry.take(),
+            )
             .map_err(|error| MainThreadError::from_engine("installing Worker", error))?;
         Ok((
             Self {
@@ -1179,26 +1207,35 @@ fn install_document_members(
     Ok(())
 }
 
-/// Installs `initData`, `globalProps` and `initialProcessor`, handing the realm
-/// the original strings. Missing initial data or props become `undefined`.
+/// Installs `initData`, `globalProps`, `initialProcessor` and
+/// `nativeModuleTable`, handing the realm the original strings. Missing
+/// initial data or props become `undefined`.
 ///
 /// Each hands its string over once and keeps nothing. `bobcat:runtime` parses
-/// the initial data and props, and uses the processor name as a plain string.
-/// All answer before `createDocument` has run.
-fn install_page_data(
+/// the initial data and props, uses the processor name as a plain string, and
+/// reads the module table as the record the realm decodes. All answer before
+/// `createDocument` has run.
+///
+/// The four are *taken* out of the startup rather than copied out of it: each
+/// is handed over once and never read again, so the move says what the
+/// lifetime is. What is left behind is the entry, which the caller is about to
+/// evaluate.
+fn install_startup_strings(
     engine: &mut ScriptEngine,
     js_runtime: &mut ScriptRuntime,
-    page_data: PageData,
+    startup: &mut RealmStartup,
 ) -> Result<(), MainThreadError> {
-    let PageData {
-        init_data,
-        global_props,
-        initial_processor,
-    } = page_data;
     for (name, mut value) in [
-        ("initData", init_data),
-        ("globalProps", global_props),
-        ("initialProcessor", Some(initial_processor)),
+        ("initData", startup.init_data.take()),
+        ("globalProps", startup.global_props.take()),
+        (
+            "initialProcessor",
+            Some(std::mem::take(&mut startup.initial_processor)),
+        ),
+        (
+            "nativeModuleTable",
+            Some(std::mem::take(&mut startup.native_modules)),
+        ),
     ] {
         install(engine, js_runtime, name, 0, move |_arguments| {
             Ok(value.take().map_or(HostValue::Undefined, HostValue::String))
@@ -1404,7 +1441,7 @@ fn take_record_field<'a>(function: &str, rest: &'a str) -> Result<(&'a str, &'a 
 
 /// Appends one `<units>:<text>` field, [`take_record_field`]'s inverse; the
 /// count is in UTF-16 code units because `String.prototype.slice` consumes it.
-fn write_record_field(record: &mut String, text: &str) {
+pub(crate) fn write_record_field(record: &mut String, text: &str) {
     let units: usize = text.chars().map(char::len_utf16).sum();
     write!(record, "{units}:").expect("writing to a String cannot fail");
     record.push_str(text);

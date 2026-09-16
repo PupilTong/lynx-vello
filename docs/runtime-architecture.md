@@ -76,8 +76,12 @@ a stateful type whose owner is fixed lives under `paint` or `main`.
 Construction sends `ViewSources` whole to the view's task on `bobcat-main`,
 since nothing in it belongs on the embedder's thread. The task stages the
 document inputs, and what the source specifiers fetch, as the ingredients the
-realm's own `Document` will be built from, and hands the page data to the
-realm.
+realm's own `Document` will be built from, and collects the rest — the fetched
+entry's text and URL, the BTS entry, the page data, the processor name and the
+module table — into one `RealmStartup` that opens the realm. Everything in it
+is handed over exactly once, as the realm opens; `LynxView::update_data`,
+`update_global_props` and `reload` reach the realm through `ToMain::PageUpdate`
+afterwards and never touch it.
 
 `ViewSources::init_data` and `global_props` are optional JSON text, and Rust
 never reads it. `MainThreadRuntime::new` puts each behind a
@@ -89,6 +93,19 @@ hands to `processData`. A value that was not given arrives as `undefined` and
 is `{}` there, as in web-core. Text that is not JSON fails boot with
 `StartupFailed`, naming the input, before the entry runs. The background
 thread does not receive either value yet.
+
+The embedder's native modules travel the same page-data path. `LynxGroup::create_lynx_view`
+reads each module's `name()` and `methods()` once, encodes them as one
+length-prefixed record, and `MainThreadRuntime::new` puts it behind the
+`nativeModuleTable` host member; `bobcat:runtime` reads it as it evaluates and
+sends it to the BTS Worker in the `initialize` message, where
+`__BobcatInitializeBTS` builds `NativeModules` out of it. The modules
+themselves never leave the embedder's thread: a call arrives back as
+`ViewNotice::NativeModuleCall` — the call's text and the indices of its
+function arguments, nothing built — and `LynxView::pump` assembles the
+`ModuleCall` there, over the weak handle on the calling worker's inbox that
+`ViewNotice::WorkerCreated` already registered, then hands it to the module of
+that name.
 
 Main asks for loads through the view's own `ViewNotice` channel, and
 `LynxView::pump` is what hands each ask to the host's `ResourceFetcher`.
@@ -137,7 +154,8 @@ QuickJS ESM graph — shared built-ins and per-worker imports, on bobcat-workers
     ├──▶ bobcat:worker (packages/bobcat-element/src/worker-runtime.ts)
     │     ├── the global scope: self, postMessage, close, name, onmessage
     │     ├──▶ bobcat:event-target
-    │     └──▶ bobcat-internal:worker (postWorkerMessage, closeWorker)
+    │     └──▶ bobcat-internal:worker (postWorkerMessage, closeWorker,
+    │                                   invokeNativeModule)
     ├──▶ bobcat:timers ──▶ bobcat-internal:host (setTimer, clearTimer only)
     └── the worker's entry source
           └── bobcat:bts (bootstrap)

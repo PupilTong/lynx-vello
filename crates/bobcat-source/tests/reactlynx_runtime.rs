@@ -32,7 +32,7 @@ async fn boot_registered(sources: bobcat_core::ViewSources, resources: Resources
         .await
         .unwrap();
     let mut view = group
-        .create_lynx_view(393.0, 727.0, 1.0, resources.builder(), sources)
+        .create_lynx_view(393.0, 727.0, 1.0, resources.builder(), Vec::new(), sources)
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut finished = false;
@@ -206,7 +206,7 @@ async fn paint_registered(
         .await
         .unwrap();
     let mut view = group
-        .create_lynx_view(240.0, 240.0, 1.0, resources.builder(), sources)
+        .create_lynx_view(240.0, 240.0, 1.0, resources.builder(), Vec::new(), sources)
         .unwrap();
     let mut painter = Painter::new(DrawTarget::Offscreen, 240.0, 240.0, 1.0)
         .await

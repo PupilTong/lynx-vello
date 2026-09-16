@@ -30,6 +30,7 @@ use crate::link::{Published, ToMain, ViewNotice, ViewSeat};
 pub use crate::main::configure_wasm_workers;
 use crate::main::tree::PageConfig;
 use crate::main::{GroupLink, spawn_group};
+use crate::native_module::{NativeModule, NativeModuleTable};
 pub use crate::paint::WindowTarget;
 use crate::resource::ResourceFetcher;
 use crate::script::ScriptError;
@@ -204,6 +205,12 @@ pub enum EngineError {
     /// in the way is what clears it.
     #[error("a painter is already attached")]
     PainterAttached,
+    /// Two of a view's native modules answer to one `NativeModules` key. The
+    /// realm's object has one property per name, so there is no second module
+    /// for a name to reach and nothing to arbitrate between them; naming the
+    /// clash where the view is built is the whole of the resolution.
+    #[error("two native modules are named `{0}`")]
+    DuplicateNativeModule(String),
 }
 
 /// A view construction or startup failure. Construction reports target and
@@ -539,16 +546,25 @@ impl LynxGroup {
     /// The fetcher needs neither `Send` nor `Sync`; only the concrete source
     /// completion and the fetcher's own job inputs leave this thread.
     ///
+    /// The embedder's [`NativeModule`]s are injected here, beside its
+    /// fetcher and for the same reason: both are host capabilities that stay
+    /// on this thread and are served inside [`LynxView::pump`]. Their names
+    /// and methods are read once, here, and cross to the realm as data — so a
+    /// module is never asked a question while script is running, and
+    /// `NativeModules` carries exactly the methods declared at this call.
+    ///
     /// # Errors
     ///
-    /// [`LynxViewError`] if the metrics are invalid, or the group's main
-    /// thread cannot accept the attachment.
+    /// [`LynxViewError`] if the metrics are invalid, if two native modules
+    /// answer to one name, or if the group's main thread cannot accept the
+    /// attachment.
     pub fn create_lynx_view<F, B>(
         &self,
         width: f32,
         height: f32,
         device_pixel_ratio: f32,
         resources: B,
+        native_modules: Vec<Box<dyn NativeModule>>,
         sources: ViewSources,
     ) -> Result<LynxView<F>, LynxViewError>
     where
@@ -559,6 +575,16 @@ impl LynxGroup {
         // metrics the document lays out against, and a painter that later
         // attaches imposes its own.
         FrameSize::for_viewport(width, height, device_pixel_ratio)?;
+        // Read once, before anything is sent: the table is what crosses, and
+        // the modules themselves stay here.
+        let mut table = NativeModuleTable::with_capacity(native_modules.len());
+        for module in &native_modules {
+            let name = module.name();
+            if table.iter().any(|(existing, _)| existing == name) {
+                return Err(EngineError::DuplicateNativeModule(name.to_owned()).into());
+            }
+            table.push((name.to_owned(), module.methods()));
+        }
         let viewport = Viewport::new(width, height).with_device_pixel_ratio(device_pixel_ratio);
         // One view, one set of channels and one end signal: nothing here is
         // shared with a sibling, so nothing has to be addressed or deferred.
@@ -575,6 +601,7 @@ impl LynxGroup {
                 viewport,
                 // Main owns source ordering; the view owns the fetcher.
                 sources,
+                native_modules: crate::native_module::encode_table(&table),
                 commands: command_receiver,
                 notices,
                 frames,
@@ -608,6 +635,7 @@ impl LynxGroup {
             frames: frame_receiver,
             inbox,
             fetcher,
+            native_modules,
             state: ViewState::Loading,
             timeline_epoch: ClockInstant::now(),
             group: Rc::clone(&self.inner),
@@ -657,6 +685,11 @@ pub struct LynxView<F> {
     /// an attached painter to read pixels through — so this view dropping
     /// both is what releases it.
     fetcher: Rc<F>,
+    /// The embedder's native modules, held rather than read: the realm was
+    /// told their names and methods at construction, and these are what serves
+    /// a call under one of those names. Called only from [`Self::pump`], on
+    /// this thread, which is why they need be neither `Send` nor `Sync`.
+    native_modules: Vec<Box<dyn NativeModule>>,
     /// Updated by pump from boot/failure notices on the host thread.
     state: ViewState,
     /// When this view's document started, which is the epoch its animations
@@ -885,6 +918,39 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
                         self.fetcher.request_source(request, completion);
                     }
                 }
+                // Assembled here, because here is where the handle a callback
+                // answers through already is: `WorkerCreated` registered it,
+                // and it precedes every call that worker makes on this one
+                // FIFO — so a sender this turn cannot find is a worker that
+                // has since gone, and there is nobody left to answer.
+                //
+                // A module nothing here is named for is no error either: the
+                // realm's `NativeModules` object never carried that name, so
+                // such a call can only come from a script importing the host
+                // member directly, and what it registered is its own affair.
+                // Either way no call is built and nothing is answered — there
+                // is nobody left to answer, or nobody was ever asked.
+                ViewNotice::NativeModuleCall {
+                    worker,
+                    call,
+                    module,
+                    method,
+                    arguments,
+                    callbacks,
+                } => {
+                    if self.state != ViewState::Failed
+                        && !self.cancel.is_cancelled()
+                        && let Some(native_module) = self
+                            .native_modules
+                            .iter()
+                            .find(|candidate| candidate.name() == module)
+                        && let Some(reply) = self.seat.frame_demand.borrow().sender(worker)
+                    {
+                        native_module.invoke(crate::native_module::ModuleCall::assemble(
+                            call, method, arguments, &callbacks, &reply,
+                        ));
+                    }
+                }
             }
         }
         // The host's own moment in the turn comes before the sources this
@@ -1009,6 +1075,10 @@ pub(crate) enum GroupCommand {
 pub(crate) struct ViewAttachment {
     pub(crate) viewport: Viewport,
     pub(crate) sources: ViewSources,
+    /// The embedder's native modules as the realm hears about them: one
+    /// `<utf16Length>:<text>` record of names and comma-joined method lists.
+    /// The modules themselves stay on the view, on the embedder's thread.
+    pub(crate) native_modules: String,
     pub(crate) commands: mpsc::UnboundedReceiver<ToMain>,
     pub(crate) notices: mpsc::UnboundedSender<ViewNotice>,
     pub(crate) frames: watch::Sender<Published>,

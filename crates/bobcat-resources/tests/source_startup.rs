@@ -42,7 +42,7 @@ async fn view(
     sources: ViewSources,
 ) -> (LynxView<ViewResources>, Painter) {
     let view = group
-        .create_lynx_view(32.0, 24.0, 1.0, resources.builder(), sources)
+        .create_lynx_view(32.0, 24.0, 1.0, resources.builder(), Vec::new(), sources)
         .unwrap();
     let mut painter = Painter::new(DrawTarget::Offscreen, 32.0, 24.0, 1.0)
         .await
@@ -340,7 +340,14 @@ async fn xml_background_loads_esm_through_the_view_fetcher() {
     .unwrap();
     page.register_with(&resources);
     let mut view = group
-        .create_lynx_view(32.0, 24.0, 1.0, resources.builder(), page.view_sources())
+        .create_lynx_view(
+            32.0,
+            24.0,
+            1.0,
+            resources.builder(),
+            Vec::new(),
+            page.view_sources(),
+        )
         .unwrap();
     assert!(!view.is_ready());
     let deadline = std::time::Instant::now() + Duration::from_secs(30);

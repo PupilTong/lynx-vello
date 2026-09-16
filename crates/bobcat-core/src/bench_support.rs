@@ -20,7 +20,8 @@ use crate::link::{DetachedView, detached_outbox};
 use crate::main::WorkerFactory;
 use crate::main::quickjs::ScriptRuntime;
 use crate::main::runtime::{
-    DocumentIngredients, MainThreadRuntime, PageData, entry_module_source, install_shared_modules,
+    DocumentIngredients, MainThreadRuntime, RealmStartup, entry_module_source,
+    install_shared_modules,
 };
 use crate::main::tree::{LynxDocument, PageConfig, Viewport};
 use crate::view::NoWakeup;
@@ -81,9 +82,12 @@ impl ScriptHarness {
             ingredients,
             outbox,
             &WorkerFactory::new(workers),
-            "bench:///main.js",
-            None,
-            PageData::default(),
+            // The script is evaluated afterwards, so this supplies the base
+            // URL alone.
+            &mut RealmStartup {
+                url: "bench:///main.js".to_owned(),
+                ..RealmStartup::default()
+            },
         )
         .expect("the benchmark realm boots");
         Self {

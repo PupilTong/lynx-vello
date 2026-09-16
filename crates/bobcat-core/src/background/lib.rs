@@ -135,6 +135,16 @@ pub(crate) enum WorkerMessage {
     Vsync(f64),
     /// One value, primitive or structured clone, for the worker's realm.
     Post(HostValue),
+    /// An embedder's native module answering one function argument of one
+    /// call: the call the realm numbered, which argument it was, and the JSON
+    /// array text to spread — or `None`, which releases the function
+    /// uninvoked. Delivered as soon as it arrives, boot or no boot: a call
+    /// made during the entry's own top-level await is waiting for it.
+    ModuleCallback {
+        call: u64,
+        index: u32,
+        arguments: Option<String>,
+    },
     /// Explicit termination or GC of the MTS Worker object: end it between
     /// tasks and discard what was queued behind this.
     Terminate,

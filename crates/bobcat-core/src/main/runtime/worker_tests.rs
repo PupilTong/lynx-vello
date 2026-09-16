@@ -68,10 +68,84 @@ impl Pair {
     }
 
     fn unbooted(background_source: Option<&str>) -> Self {
-        Self::unbooted_with_data(background_source, PageData::default())
+        Self::unbooted_with_data(background_source, RealmStartup::default())
     }
 
-    fn unbooted_with_data(background_source: Option<&str>, page_data: PageData) -> Self {
+    /// A booted pair whose view was built with these native modules, as
+    /// `create_lynx_view` would have encoded them. The test is the embedder,
+    /// so what it plays is the other half: it takes the calls off the notice
+    /// queue and answers their callbacks by hand.
+    fn with_native_modules(
+        script: &str,
+        background_source: &str,
+        modules: &[(&str, &[&str])],
+    ) -> Self {
+        let table = modules
+            .iter()
+            .map(|(name, methods)| {
+                (
+                    (*name).to_owned(),
+                    methods.iter().map(|method| (*method).to_owned()).collect(),
+                )
+            })
+            .collect();
+        let mut pair = Self::unbooted_with_data(
+            Some(background_source),
+            RealmStartup {
+                native_modules: crate::native_module::encode_table(&table),
+                ..RealmStartup::default()
+            },
+        );
+        pair.boot(script).unwrap();
+        pair
+    }
+
+    /// Waits for the next native-module call the BTS realm made, and
+    /// assembles it out of the reply handle this test registered from
+    /// `WorkerCreated` — which is exactly what `LynxView::pump` does.
+    fn module_call(&mut self) -> (String, crate::native_module::ModuleCall) {
+        let deadline = ClockInstant::now() + PATIENCE;
+        loop {
+            self.pump_host();
+            let waiting = self
+                .deferred_notices
+                .iter()
+                .position(|notice| matches!(notice, ViewNotice::NativeModuleCall { .. }));
+            if let Some(position) = waiting
+                && let Some(ViewNotice::NativeModuleCall {
+                    worker,
+                    call,
+                    module,
+                    method,
+                    arguments,
+                    callbacks,
+                }) = self.deferred_notices.remove(position)
+            {
+                let reply = self
+                    .frame_demand
+                    .sender(worker)
+                    .expect("the worker announced itself before it called");
+                return (
+                    module,
+                    crate::native_module::ModuleCall::assemble(
+                        call, method, arguments, &callbacks, &reply,
+                    ),
+                );
+            }
+            assert!(
+                ClockInstant::now() < deadline,
+                "the BTS realm called a native module"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// `startup` carries the page data and module table a test wants; this
+    /// fills in the base URL and the BTS entry, and the main script is
+    /// evaluated afterwards by [`Self::boot`].
+    fn unbooted_with_data(background_source: Option<&str>, mut startup: RealmStartup) -> Self {
+        startup.url = "app:///nested/main.js".to_owned();
+        startup.background_entry = background_source.map(|_| "test:bts-entry".to_owned());
         let home = match background_source {
             Some(source) => {
                 WorkerHome::with_entry_for_test((source.to_owned(), "test:bts-entry".to_owned()))
@@ -91,9 +165,7 @@ impl Pair {
             ingredients,
             outbox,
             &WorkerFactory::new(home.commands()),
-            "app:///nested/main.js",
-            background_source.map(|_| "test:bts-entry".to_owned()),
-            page_data,
+            &mut startup,
         )
         .unwrap();
         Self {
@@ -308,10 +380,12 @@ fn bts_entry_receives_processed_initial_data_before_it_installs_app_hooks() {
         lynx.getCoreContext().dispatchEvent({type:'reply',data});
         ",
         ),
-        PageData {
+        RealmStartup {
             initial_processor: String::new(),
             init_data: Some(serde_json::json!({"raw":41}).to_string()),
             global_props: Some(serde_json::json!({"theme":"dark"}).to_string()),
+            native_modules: String::new(),
+            ..RealmStartup::default()
         },
     );
 
@@ -409,10 +483,12 @@ fn lifecycle_hooks_and_bts_snapshots_precede_queued_mts_jobs() {
             app.onAppReload = data => reply('reload', data);
         ",
             ),
-            PageData {
+            RealmStartup {
                 initial_processor: String::new(),
                 init_data: Some(serde_json::json!({"count":1}).to_string()),
                 global_props: None,
+                native_modules: String::new(),
+                ..RealmStartup::default()
             },
         );
 
@@ -502,12 +578,14 @@ fn global_props_initialize_bts_before_hooks_and_notify_before_mts_events() {
         lynx.getCoreContext().dispatchEvent({type:'reply',data:['initial',props.seed]});
     ",
         ),
-        PageData {
+        RealmStartup {
             initial_processor: String::new(),
             init_data: None,
             global_props: Some(
                 serde_json::json!({"seed":1,"keep":1,"nested":{"value":2}}).to_string(),
             ),
+            native_modules: String::new(),
+            ..RealmStartup::default()
         },
     );
 
@@ -549,7 +627,7 @@ fn global_props_initialize_bts_before_hooks_and_notify_before_mts_events() {
 #[test]
 fn initial_processor_preserves_its_string_and_reads_the_page_config_switch() {
     let processor = "selected'\"\\\n中文";
-    // This is a JS assertion literal, while PageData receives the original Rust string.
+    // This is a JS assertion literal, while RealmStartup receives the original Rust string.
     let expected_processor = r#""selected'\"\\\n中文""#;
     for enable_js_data_processor in [false, true] {
         let expected_name = if enable_js_data_processor {
@@ -566,10 +644,12 @@ fn initial_processor_preserves_its_string_and_reads_the_page_config_switch() {
                 lynx.getCoreContext().dispatchEvent({{type:'reply',data:params.updateData.value}});
                 ",
             )),
-            PageData {
+            RealmStartup {
                 initial_processor: processor.to_owned(),
                 init_data: Some(serde_json::json!({"value":3}).to_string()),
                 global_props: None,
+                native_modules: String::new(),
+                ..RealmStartup::default()
             },
         );
         pair.runtime
@@ -630,10 +710,12 @@ fn initial_processor_non_tables_and_exceptions_preserve_host_data_in_both_realms
             lynx.getCoreContext().dispatchEvent({type:'reply',data});
             ",
             ),
-            PageData {
+            RealmStartup {
                 initial_processor: String::new(),
                 init_data: Some(serde_json::json!({"seed":3}).to_string()),
                 global_props: None,
+                native_modules: String::new(),
+                ..RealmStartup::default()
             },
         );
 
@@ -2412,9 +2494,9 @@ fn verify_react_teardown(reload: bool, development: bool) {
     );
     let mut pair = Pair::unbooted_with_data(
         Some(&background),
-        PageData {
+        RealmStartup {
             init_data: Some(serde_json::json!({"seed":0,"keep":"retained"}).to_string()),
-            ..PageData::default()
+            ..RealmStartup::default()
         },
     );
 
@@ -2487,5 +2569,117 @@ fn verify_react_teardown(reload: bool, development: bool) {
         } else {
             "reload-cleanup 0"
         }
+    );
+}
+
+#[test]
+fn a_background_module_call_reaches_the_embedder_and_its_callback_answers_the_realm() {
+    let mut pair = Pair::with_native_modules(
+        r"
+        globalThis.results = [];
+        lynx.getJSContext().addEventListener('reply', e => results.push(e.data));
+        ",
+        r"
+        const answered = lynx.getApp().NativeModules.Echo.ping(1, {x:1}, (...args) => {
+            lynx.getCoreContext().dispatchEvent({ type: 'reply', data: args });
+        }, 's');
+        if (answered !== undefined) throw Error('a module method answers nothing');
+        ",
+        &[("Echo", &["ping"])],
+    );
+
+    let (module, call) = pair.module_call();
+    assert_eq!(module, "Echo");
+    assert_eq!(call.method, "ping");
+    assert_eq!(
+        call.arguments, r#"[1,{"x":1},null,"s"]"#,
+        "the function argument is null in the JSON and a callback beside it"
+    );
+    let [callback] = <[_; 1]>::try_from(call.callbacks).expect("one function argument");
+    assert_eq!(callback.argument_index(), 2);
+    assert!(!callback.is_cancelled());
+    callback.invoke(r#"["pong",2]"#.to_owned());
+
+    pair.deliver();
+    pair.check(
+        r#"if (JSON.stringify(results) !== '[["pong",2]]') throw Error(JSON.stringify(results));"#,
+    );
+    assert!(worker_failures(pair.notices()).is_empty());
+}
+
+#[test]
+fn a_callback_released_uninvoked_never_runs_and_fails_nothing() {
+    let mut pair = Pair::with_native_modules(
+        r"
+        globalThis.results = [];
+        lynx.getJSContext().addEventListener('reply', e => results.push(e.data));
+        ",
+        r"
+        const core = lynx.getCoreContext();
+        const modules = lynx.getApp().NativeModules;
+        modules.Echo.ping(() => core.dispatchEvent({ type: 'reply', data: 'released' }));
+        modules.Echo.ping(() => core.dispatchEvent({ type: 'reply', data: 'answered' }));
+        ",
+        &[("Echo", &["ping"])],
+    );
+
+    // Dropped rather than invoked: the realm hears that its function is over,
+    // and the function itself never runs.
+    let (_, released) = pair.module_call();
+    drop(released);
+    let (_, answered) = pair.module_call();
+    let [callback] = <[_; 1]>::try_from(answered.callbacks).expect("one function argument");
+    callback.invoke("[]".to_owned());
+
+    pair.deliver();
+    pair.check(
+        r#"if (JSON.stringify(results) !== '["answered"]') throw Error(JSON.stringify(results));"#,
+    );
+    assert!(worker_failures(pair.notices()).is_empty());
+}
+
+#[test]
+fn a_module_the_view_lacks_and_a_method_it_did_not_declare_are_both_undefined() {
+    let mut pair = Pair::with_native_modules(
+        "",
+        &format!(
+            r"
+            const modules = lynx.getApp().NativeModules;
+            if (modules.Missing !== undefined) throw Error('an absent module is undefined');
+            if (modules.Echo.nope !== undefined) throw Error('an undeclared method is undefined');
+            if (typeof modules.Echo.ping !== 'function') throw Error('a declared method is callable');
+            postMessage('{BTS_ENTRY_RAN}');
+            "
+        ),
+        &[("Echo", &["ping"])],
+    );
+    pair.await_background_entry();
+    assert!(worker_failures(pair.notices()).is_empty());
+}
+
+#[test]
+fn a_callback_for_a_worker_that_has_ended_says_so_and_invoking_it_does_nothing() {
+    let mut pair = Pair::with_native_modules(
+        "",
+        r"lynx.getApp().NativeModules.Echo.ping(() => postMessage('unreachable'));",
+        &[("Echo", &["ping"])],
+    );
+    let (_, call) = pair.module_call();
+    let [callback] = <[_; 1]>::try_from(call.callbacks).expect("one function argument");
+
+    // The realm that made the call is gone with the runtime that owned its
+    // Worker handle, so there is nothing left to answer.
+    let events = pair.finish();
+    assert!(
+        callback.is_cancelled(),
+        "a callback whose worker has ended says so"
+    );
+    callback.invoke("[]".to_owned());
+    assert!(
+        !events.iter().any(|event| matches!(
+            event.payload,
+            WorkerPayload::Message(ref value) if posted(value, "unreachable")
+        )),
+        "the released realm ran nothing"
     );
 }

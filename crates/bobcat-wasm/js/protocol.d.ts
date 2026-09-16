@@ -43,8 +43,32 @@ export interface InitMessage {
   height: number
   imagePort: MessagePort
   hardwareConcurrency: number
+  /**
+   * The host's `NativeModules` surface, by module name: the methods it
+   * declared, in declaration order. Only the names cross — the handlers
+   * themselves stay on the page's main thread, where `localStorage` and
+   * navigation are — and they are retained for every page the canvas loads,
+   * like the fonts.
+   */
+  nativeModules: Record<string, string[]>
   workerUrl: string
   width: number
+}
+
+/**
+ * The facade's answer to one function argument of one native-module call.
+ *
+ * Single-shot: the wrapper the facade put in that argument slot posts this
+ * the first time the page's handler calls it, and does nothing afterwards.
+ */
+export interface NativeModuleCallbackMessage {
+  type: 'bobcat-native-module-callback'
+  /** The call number the Worker sent. */
+  call: number
+  /** Which argument of that call the answered function was. */
+  index: number
+  /** The answer's arguments as JSON array text, which the realm spreads. */
+  args: string
 }
 
 /** Pointer input. The Worker answers nothing. */
@@ -52,20 +76,29 @@ export interface PointerMessage extends PointerFields {
   type: 'bobcat-pointer'
 }
 
-/** What each operation carries besides `type`, `operation` and `request`. */
+/**
+ * What each operation carries besides `type`, `operation` and `request`.
+ *
+ * Every load carries an optional `globalProps`: the JSON text the facade
+ * serialized for `lynx.__globalProps`, which Rust hands to the page unread.
+ */
 export interface RequestFields {
   load: {
+    globalProps?: string
     styleSheetUrls: string[]
     url: string
   }
   loadLynxXml: {
+    globalProps?: string
     url: string
   }
   loadTemplate: {
+    globalProps?: string
     url: string
   }
   loadZip: {
     bytes: Uint8Array
+    globalProps?: string
     url: string
   }
   registerFonts: {
@@ -96,7 +129,11 @@ export type RequestMessage<O extends Operation = Operation> = {
   } & RequestFields[P]
 }[O]
 
-export type FacadeMessage = InitMessage | PointerMessage | RequestMessage
+export type FacadeMessage =
+  | InitMessage
+  | NativeModuleCallbackMessage
+  | PointerMessage
+  | RequestMessage
 
 // Render Worker → facade.
 
@@ -114,6 +151,29 @@ export interface ErrorMessage {
   message: string
 }
 
+/**
+ * One `NativeModules.<module>.<method>(...)` the page's BTS realm made,
+ * on its way to the handler the host gave `BobcatCanvas.create`.
+ *
+ * Nothing is awaited: the method answered `undefined` in the realm already.
+ * `args` is the whole argument list as JSON array text, with each function
+ * argument `null` and its index named in `callbacks`; the facade puts a
+ * single-shot wrapper back in each of those slots before calling the handler.
+ */
+export interface NativeModuleCallMessage {
+  type: 'bobcat-native-module'
+  /** This call's number, which a callback answer quotes back. */
+  call: number
+  /** The `NativeModules` key. */
+  module: string
+  /** The method name, always one the host declared. */
+  method: string
+  /** The arguments as JSON array text. */
+  args: string
+  /** The argument indices that were functions. */
+  callbacks: number[]
+}
+
 /** The outcome of the request with the same number. */
 export type ResponseMessage =
   | {
@@ -128,4 +188,8 @@ export type ResponseMessage =
       request: number
     }
 
-export type RenderWorkerMessage = ReadyMessage | ErrorMessage | ResponseMessage
+export type RenderWorkerMessage =
+  | ErrorMessage
+  | NativeModuleCallMessage
+  | ReadyMessage
+  | ResponseMessage

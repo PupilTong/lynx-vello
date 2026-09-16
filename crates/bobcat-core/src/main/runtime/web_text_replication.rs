@@ -135,9 +135,12 @@ fn runtime_over(
         ingredients,
         outbox,
         &WorkerFactory::new(workers),
-        "app:///main.js",
-        None,
-        PageData::default(),
+        // The script is evaluated afterwards, so this supplies the base URL
+        // alone.
+        &mut RealmStartup {
+            url: "app:///main.js".to_owned(),
+            ..RealmStartup::default()
+        },
     )
     .expect("main-thread runtime");
     let probe = DocumentProbe {
@@ -204,9 +207,13 @@ fn background_pair(main: &str, background: &str) -> BackgroundPair {
         ingredients,
         outbox,
         &WorkerFactory::new(home.commands()),
-        "app:///main.js",
-        Some("test:bts-entry".to_owned()),
-        PageData::default(),
+        // The main script is evaluated below, so this names the BTS entry and
+        // the base URL and nothing else.
+        &mut RealmStartup {
+            url: "app:///main.js".to_owned(),
+            background_entry: Some("test:bts-entry".to_owned()),
+            ..RealmStartup::default()
+        },
     )
     .expect("main-thread runtime");
     let slot = Rc::clone(&runtime.slot);

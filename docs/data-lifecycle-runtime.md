@@ -36,8 +36,11 @@ parsed data before its entry runs:
 processed data, and `_params.cacheData` is empty under the default host policy.
 The runtime reads `PageConfig.enable_js_data_processor` and `Viewport` from the
 staged document ingredients. `ViewSources.initial_processor` remains a plain
-`String`: the existing one-shot startup-data binding hands it directly to JS,
-without serializing it or embedding it in generated source. JS constructs
+`String`: it rides the `RealmStartup` the realm is opened with, and the
+existing one-shot startup-data binding hands it directly to JS, without
+serializing it or embedding it in generated source. Nothing in that startup is
+ever updated — the host's update, reset and reload calls below take the
+`PageUpdate` path instead. JS constructs
 SystemInfo from its runtime constants and viewport metrics, then sends it to BTS.
 Initial global props come solely from `ViewSources.global_props`.
 

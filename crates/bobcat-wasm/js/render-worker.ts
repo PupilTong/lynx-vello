@@ -100,12 +100,40 @@ async function nextEngineWakeup(): Promise<boolean> {
   return false
 }
 
+// A host native module runs on the page's main thread, not here: the engine
+// hands this Worker the call and the indices of its function arguments, and
+// this posts it on. Nothing is awaited — the realm's method already answered
+// `undefined` — so this returns as soon as the message is queued.
+function postNativeModuleCall(
+  call: number,
+  module: string,
+  method: string,
+  args: string,
+  callbackIndices: string,
+): void {
+  self.postMessage({
+    args,
+    call,
+    callbacks:
+      callbackIndices === '' ? [] : callbackIndices.split(',').map(Number),
+    method,
+    module,
+    type: 'bobcat-native-module',
+  } satisfies RenderWorkerMessage)
+}
+
 async function initialize(message: InitMessage): Promise<void> {
   if (initialized) {
     throw new Error('Bobcat Render Worker was initialized more than once')
   }
   initialized = true
   await initWasm()
+  // Two parallel `string[]`s: the engine reads the table once, and a flat
+  // pair crosses the wasm-bindgen seam without a JavaScript object model.
+  const nativeModuleNames = Object.keys(message.nativeModules)
+  const nativeModuleMethods = nativeModuleNames.map((name) =>
+    (message.nativeModules[name] ?? []).join(','),
+  )
   renderer = await BobcatRenderer.create(
     message.canvas,
     message.width,
@@ -117,6 +145,9 @@ async function initialize(message: InitMessage): Promise<void> {
     message.config.defaultDisplayLinear,
     message.config.defaultOverflowVisible,
     message.config.enableCSSSelector,
+    nativeModuleNames,
+    nativeModuleMethods,
+    postNativeModuleCall,
   )
   running = true
   self.postMessage({ type: 'bobcat-ready' } satisfies RenderWorkerMessage)
@@ -294,12 +325,16 @@ async function dispatchRequest(message: RequestMessage): Promise<void> {
   const { operation, request } = message
   switch (operation) {
     case 'loadZip': {
-      await replaceNativeView(request, () => renderer!.loadZip(message.url, message.bytes))
+      await replaceNativeView(request, () =>
+        renderer!.loadZip(message.url, message.bytes, message.globalProps),
+      )
       break
     }
     case 'loadTemplate': {
       const entry = await fetchSource('template', message.url, MAX_SCRIPT_BYTES)
-      await replaceNativeView(request, () => renderer!.loadTemplate(entry.url, entry.bytes))
+      await replaceNativeView(request, () =>
+        renderer!.loadTemplate(entry.url, entry.bytes, message.globalProps),
+      )
       break
     }
     case 'load': {
@@ -314,7 +349,14 @@ async function dispatchRequest(message: RequestMessage): Promise<void> {
         renderer!.registerStyleSheet(sheet.url, sheet.bytes),
       )
       const entryUrl = renderer.registerScript(entry.url, entry.bytes)
-      await replaceNativeView(request, () => renderer!.load(entryUrl, styleSheetUrls))
+      await replaceNativeView(request, () =>
+        renderer!.load(
+          entryUrl,
+          styleSheetUrls,
+          undefined,
+          message.globalProps,
+        ),
+      )
       break
     }
     case 'loadLynxXml': {
@@ -334,6 +376,7 @@ async function dispatchRequest(message: RequestMessage): Promise<void> {
           mainThreadScriptUrl,
           styleSheetUrl === null ? [] : [styleSheetUrl],
           backgroundThreadScriptUrl,
+          message.globalProps,
         ),
       )
       break
@@ -400,6 +443,26 @@ self.addEventListener('message', (event) => {
     // Input shares the facade-operation queue so it cannot re-enter the Wasm
     // wrapper while an async native-view load owns its mutable borrow.
     requestQueue = requestQueue.then(dispatch)
+  } else if (message?.type === 'bobcat-native-module-callback') {
+    const answer = (): void => {
+      if (!running || renderer === undefined) {
+        return
+      }
+      try {
+        renderer.answerNativeModuleCallback(
+          message.call,
+          message.index,
+          message.args,
+        )
+      } catch (error) {
+        reportFatal(error)
+      }
+    }
+    // Same queue as pointer input and for the same reason: an answer that
+    // arrives during an async load must not re-enter the Wasm wrapper while
+    // that load owns its mutable borrow. A call whose view has been replaced
+    // is unknown to the renderer by then and is ignored there.
+    requestQueue = requestQueue.then(answer)
   } else if (message?.type === 'bobcat-request') {
     const dispatch = async () => {
       try {

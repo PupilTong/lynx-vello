@@ -131,6 +131,7 @@ async fn public_updates_require_mts_boot_then_preserve_order() {
                 pending,
                 released: Rc::clone(&released),
             },
+            Vec::new(),
             sources,
         )
         .unwrap();

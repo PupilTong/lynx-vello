@@ -68,6 +68,9 @@ jobs:
       - name: Build the Explorer homepage for the Canvas tab
         run: pnpm --filter @explorer/homepage build
 
+      - name: Build the Explorer showcase the homepage opens
+        run: pnpm --filter @explorer/showcase build
+
       - name: Build GitHub Pages
         run: pnpm --filter github-pages build
         env:

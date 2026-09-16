@@ -37,7 +37,7 @@ async fn compiled_processors_feed_initial_data_updates_reset_and_reload() {
             .await
             .unwrap();
         let mut view = group
-            .create_lynx_view(120.0, 120.0, 1.0, resources.builder(), sources)
+            .create_lynx_view(120.0, 120.0, 1.0, resources.builder(), Vec::new(), sources)
             .unwrap();
         let mut painter = Painter::new(DrawTarget::Offscreen, 120.0, 120.0, 1.0)
             .await

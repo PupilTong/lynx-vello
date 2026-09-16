@@ -586,6 +586,15 @@ consequential choice about whether to follow the spec or the quirk.
   Android implementation is documented as a "shared, polluted, process-global"
   value not maintained per-view — worth a cleaner per-view accessor in
   lynx-vello rather than copying that specific bug.
+- **`NativeModules.<name>` for a module the host does not have** — native's
+  `LynxJSIModuleBinding::get` answers `null`
+  (`lynx_jsi_module_binding.cc:23`), while web-core builds a plain object out
+  of `createNativeModules`, so a missing name is simply `undefined`.
+  **Decision: `undefined`** — web-core is the default resolution, and every
+  in-repo consumer tolerates either (compiled bundles probe with `?.`,
+  explorer-lib guards on `typeof`). A method a module did not declare is
+  `undefined` on both references, and so here. MTS `NativeModules` stays
+  `undefined` altogether, as Lepus has no module binding.
 - **Accessibility**: Lynx has **no implicit ARIA-like semantic
   roles/focusability** (nothing is focusable/announced unless explicitly
   opted in via `accessibility-element`), and `accessibility-traits` is a flat

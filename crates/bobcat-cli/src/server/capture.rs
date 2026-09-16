@@ -368,6 +368,7 @@ async fn capture_page(request: &CaptureRequest) -> Result<Screenshot, CaptureFai
             f32::from(request.height),
             DEVICE_PIXEL_RATIO,
             resources.builder(),
+            Vec::new(),
             sources,
         )?;
         let mut painter = Painter::new(
