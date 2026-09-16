@@ -11,6 +11,14 @@ release and WGPU 29; the former private Vello/WGPU forks have been removed.
 The WGPU 29 compatibility notes for `vello_hybrid` 0.0.9 therefore apply to
 the current workspace again.
 
+Dependency update, 2026-09-16: this workspace now uses Vello 0.10, which keeps
+WGPU on the 29 line (`vello` 0.10.0 depends on `wgpu` 29.0.3), so every WGPU-29
+alignment note below still holds. The structural claims were re-read at 0.10
+and are unchanged: `vello_encoding-0.10.0/src/glyph_cache.rs` still caches only
+outline path encodings, `resolve_patches` still runs per frame, and 0.10's
+dependency list still has no `glifo`. The measurements below were taken on 0.9
+and have not been retaken.
+
 ## Short answer
 
 Painting glyphs *correctly* is done: `dom::paint::text` already drives

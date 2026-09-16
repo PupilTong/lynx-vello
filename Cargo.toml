@@ -82,7 +82,7 @@ wasm_thread = { git = "https://github.com/utooland/wasm_thread", rev = "94438ff7
 web-sys = "0.3"
 winit = { version = "0.30.13", default-features = false, features = ["rwh_06"] }
 
-vello = { version = "0.9", default-features = false }
+vello = { version = "0.10", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "warn"
