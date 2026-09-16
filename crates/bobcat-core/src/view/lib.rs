@@ -918,21 +918,37 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
                         self.fetcher.request_source(request, completion);
                     }
                 }
-                // A module nothing here is named for is no error: an
-                // application probes for modules a host may not have, and
-                // `NativeModules.<name>` was already `undefined` over there.
-                // Dropping the call is what releases its callbacks, exactly
-                // as dropping a source completion answers its request with
-                // nothing.
-                ViewNotice::NativeModuleCall { module, call } => {
+                // Assembled here, because here is where the handle a callback
+                // answers through already is: `WorkerCreated` registered it,
+                // and it precedes every call that worker makes on this one
+                // FIFO — so a sender this turn cannot find is a worker that
+                // has since gone, and there is nobody left to answer.
+                //
+                // A module nothing here is named for is no error either: the
+                // realm's `NativeModules` object never carried that name, so
+                // such a call can only come from a script importing the host
+                // member directly, and what it registered is its own affair.
+                // Either way no call is built and nothing is answered — there
+                // is nobody left to answer, or nobody was ever asked.
+                ViewNotice::NativeModuleCall {
+                    worker,
+                    call,
+                    module,
+                    method,
+                    arguments,
+                    callbacks,
+                } => {
                     if self.state != ViewState::Failed
                         && !self.cancel.is_cancelled()
                         && let Some(native_module) = self
                             .native_modules
                             .iter()
                             .find(|candidate| candidate.name() == module)
+                        && let Some(reply) = self.seat.frame_demand.borrow().sender(worker)
                     {
-                        native_module.invoke(call);
+                        native_module.invoke(crate::native_module::ModuleCall::assemble(
+                            call, method, arguments, &callbacks, &reply,
+                        ));
                     }
                 }
             }

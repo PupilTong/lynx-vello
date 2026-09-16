@@ -157,7 +157,6 @@ impl Group {
             key,
             name: name.to_owned(),
             script: awaiting,
-            inbox: messages.downgrade(),
             messages: incoming,
             events: self.views[view].events.clone(),
             token,

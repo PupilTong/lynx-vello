@@ -78,13 +78,6 @@ impl HostOutbox {
         self.notify(ViewNotice::PreloadSource(request));
     }
 
-    /// The end signal everything this outbox hands out carries: the creating
-    /// worker's own token, which is what a native module's callback is
-    /// answered against.
-    pub(crate) const fn token(&self) -> &CancellationToken {
-        &self.token
-    }
-
     fn send(&self, request: SourceRequest, completion: SourceCompletion) {
         self.notify(ViewNotice::RequestSource {
             request,
@@ -178,12 +171,25 @@ pub(crate) enum ViewNotice {
         completion: SourceCompletion,
     },
     /// One `NativeModules.<module>.<method>(...)` the BTS realm made, for the
-    /// embedder's own module of that name to serve. A view that has failed or
-    /// been released drops it instead, which releases the call's callbacks the
-    /// way a dropped [`SourceCompletion`] answers its request with nothing.
+    /// embedder's own module of that name to serve.
+    ///
+    /// Raw fields rather than a built
+    /// [`ModuleCall`](crate::native_module::ModuleCall): a callback answers
+    /// through the calling worker's inbox, and the handle on that inbox is
+    /// the one the view already registered from
+    /// [`ViewNotice::WorkerCreated`] — so the call is assembled where that
+    /// handle is, in `LynxView::pump`, rather than carrying a second copy of
+    /// it across. A view that has failed or been released assembles nothing,
+    /// which leaves the realm's functions released the way a dropped
+    /// [`SourceCompletion`] answers its request with nothing.
     NativeModuleCall {
+        worker: WorkerKey,
+        call: u64,
         module: String,
-        call: crate::native_module::ModuleCall,
+        method: String,
+        arguments: String,
+        /// The indices of the arguments that were functions, in order.
+        callbacks: Vec<u32>,
     },
 }
 
@@ -249,6 +255,18 @@ impl FrameDemand {
         messages: mpsc::WeakUnboundedSender<WorkerMessage>,
     ) {
         self.workers.insert(key, (messages, false));
+    }
+
+    /// The registered handle on one worker's inbox, for the other thing a
+    /// view sends a worker: a native module's answer to a call that worker
+    /// made. `None` is a worker this view never heard of — every
+    /// `WorkerCreated` precedes that worker's own traffic on the one notice
+    /// FIFO — or one whose entry a frame demand has already swept.
+    pub(crate) fn sender(
+        &self,
+        key: WorkerKey,
+    ) -> Option<mpsc::WeakUnboundedSender<WorkerMessage>> {
+        self.workers.get(&key).map(|(messages, _)| messages.clone())
     }
 
     pub(crate) fn set(&mut self, worker: Option<WorkerKey>, pending: bool) {

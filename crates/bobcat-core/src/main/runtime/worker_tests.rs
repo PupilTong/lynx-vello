@@ -100,8 +100,9 @@ impl Pair {
         pair
     }
 
-    /// Waits for the next native-module call the BTS realm made, as the view
-    /// would find it in its own pump.
+    /// Waits for the next native-module call the BTS realm made, and
+    /// assembles it out of the reply handle this test registered from
+    /// `WorkerCreated` — which is exactly what `LynxView::pump` does.
     fn module_call(&mut self) -> (String, crate::native_module::ModuleCall) {
         let deadline = ClockInstant::now() + PATIENCE;
         loop {
@@ -111,10 +112,25 @@ impl Pair {
                 .iter()
                 .position(|notice| matches!(notice, ViewNotice::NativeModuleCall { .. }));
             if let Some(position) = waiting
-                && let Some(ViewNotice::NativeModuleCall { module, call }) =
-                    self.deferred_notices.remove(position)
+                && let Some(ViewNotice::NativeModuleCall {
+                    worker,
+                    call,
+                    module,
+                    method,
+                    arguments,
+                    callbacks,
+                }) = self.deferred_notices.remove(position)
             {
-                return (module, call);
+                let reply = self
+                    .frame_demand
+                    .sender(worker)
+                    .expect("the worker announced itself before it called");
+                return (
+                    module,
+                    crate::native_module::ModuleCall::assemble(
+                        call, method, arguments, &callbacks, &reply,
+                    ),
+                );
             }
             assert!(
                 ClockInstant::now() < deadline,

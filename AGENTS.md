@@ -398,15 +398,19 @@ single-shot `ModuleCallback` the module invokes later with JSON array text, the
 method itself answers `undefined`, and there is no synchronous return value and
 no error channel. `ModuleCallback::invoke` consumes the handle, dropping one
 releases the JavaScript function uninvoked, and the answer rides the calling
-Worker's inbox weakly — so a callback a module keeps forever holds no realm
-open, and `is_cancelled()` says when there is no longer anyone to answer. An
-answer is delivered to the BTS realm the moment it arrives, never queued behind
-BTS boot: an entry awaiting its own call's answer would otherwise deadlock.
+Worker's inbox weakly — the very handle the view already registered from
+`ViewNotice::WorkerCreated` for frame demand, so nothing is carried across a
+second time. A callback therefore holds no realm open however long a module
+keeps it, and `is_cancelled()` is that handle's own liveness: a worker's
+receiving end drops with its task, so there is nothing left to answer exactly
+when there is nothing left to answer *through*. An answer is delivered to the
+BTS realm the moment it arrives, never queued behind BTS boot: an entry
+awaiting its own call's answer would otherwise deadlock.
 `NativeModules` is **BTS only** — MTS's stays `undefined`, as Lepus has no
 module binding — an unknown module is `undefined` (web-core's answer, where
 native answers `null`; see `docs/tracking/deviations.md`), an undeclared method
 is `undefined` on both references, and a call naming a module this view lacks
-is dropped, releasing its callbacks. No built-in module ships: `bridge`,
+is never assembled at all, which leaves its functions released. No built-in module ships: `bridge`,
 `LynxUIMethodModule`, exposure and intersection are all absent.
 
 `PageSource` registers named CSS under entry-relative resource URLs. Boot

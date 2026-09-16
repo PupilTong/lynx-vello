@@ -97,7 +97,11 @@ length-prefixed record, and `MainThreadRuntime::new` puts it behind the
 sends it to the BTS Worker in the `initialize` message, where
 `__BobcatInitializeBTS` builds `NativeModules` out of it. The modules
 themselves never leave the embedder's thread: a call arrives back as
-`ViewNotice::NativeModuleCall` and is served inside `LynxView::pump`.
+`ViewNotice::NativeModuleCall` — the call's text and the indices of its
+function arguments, nothing built — and `LynxView::pump` assembles the
+`ModuleCall` there, over the weak handle on the calling worker's inbox that
+`ViewNotice::WorkerCreated` already registered, then hands it to the module of
+that name.
 
 Main asks for loads through the view's own `ViewNotice` channel, and
 `LynxView::pump` is what hands each ask to the host's `ResourceFetcher`.

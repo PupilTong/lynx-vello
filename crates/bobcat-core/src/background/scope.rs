@@ -7,9 +7,8 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use quickjs_rust_bridge::HostValue;
-use tokio::sync::mpsc;
 
-use crate::background::WorkerMessage;
+use crate::background::WorkerKey;
 use crate::esm::{
     BTS_RUNTIME_MODULE_SOURCE, BTS_RUNTIME_MODULE_SPECIFIER, CONTEXT_MODULE_SOURCE,
     CONTEXT_MODULE_SPECIFIER, EVENT_TARGET_MODULE_SPECIFIER, EVENT_TARGET_SOURCE,
@@ -18,7 +17,6 @@ use crate::esm::{
 };
 use crate::link::{HostOutbox, ViewNotice};
 use crate::main::quickjs::{ScriptEngine, ScriptRuntime};
-use crate::native_module::{ModuleCall, ModuleCallback};
 use crate::script::ScriptError;
 use crate::timers::{TimerState, install_timer_members};
 
@@ -99,12 +97,12 @@ pub(super) fn install_worker_members(
     js_runtime: &mut ScriptRuntime,
     timers: &Rc<TimerState>,
     closing: &Rc<Cell<bool>>,
+    key: WorkerKey,
     host: &HostOutbox,
-    inbox: &mpsc::WeakUnboundedSender<WorkerMessage>,
     mut post: impl FnMut(HostValue) + 'static,
 ) -> Result<(), ScriptError> {
     install_timer_members(engine, js_runtime, timers)?;
-    install_native_modules(engine, js_runtime, host, inbox)?;
+    install_native_modules(engine, js_runtime, key, host)?;
 
     engine.register_host_module_function(
         js_runtime,
@@ -141,19 +139,19 @@ pub(super) fn install_worker_members(
 ///
 /// Everything crosses as text, because everything here is JavaScript's: the
 /// arguments are the realm's own JSON, and the function arguments are named by
-/// the indices they occupied rather than carried. What Rust builds out of that
-/// is one [`ModuleCall`] with one [`ModuleCallback`] per index, and the notice
-/// it rides is the same one a source request uses — so a view that has ended
-/// drops it, and the dropped callbacks release their functions.
+/// the indices they occupied rather than carried. Nothing is built here but
+/// the notice itself — the view assembles the call, because the handle a
+/// callback answers through is the one the view already registered for this
+/// worker. It rides the channel a source request uses, so a view that has
+/// ended assembles nothing and the realm's functions are released.
 fn install_native_modules(
     engine: &mut ScriptEngine,
     js_runtime: &mut ScriptRuntime,
+    key: WorkerKey,
     host: &HostOutbox,
-    inbox: &mpsc::WeakUnboundedSender<WorkerMessage>,
 ) -> Result<(), ScriptError> {
     const NAME: &str = "bobcat-internal:worker.invokeNativeModule";
     let host = host.clone();
-    let inbox = inbox.clone();
     engine.register_host_module_function(
         js_runtime,
         WORKER_HOST_MODULE_SPECIFIER,
@@ -170,19 +168,16 @@ fn install_native_modules(
                 .map(|index| {
                     index
                         .parse()
-                        .map(|index| {
-                            ModuleCallback::new(call, index, inbox.clone(), host.token().clone())
-                        })
                         .map_err(|_| format!("{NAME} expects argument indices for argument 4"))
                 })
-                .collect::<Result<Vec<_>, _>>()?;
+                .collect::<Result<Vec<u32>, _>>()?;
             host.notify(ViewNotice::NativeModuleCall {
+                worker: key,
+                call,
                 module,
-                call: ModuleCall {
-                    method,
-                    arguments: call_arguments,
-                    callbacks,
-                },
+                method,
+                arguments: call_arguments,
+                callbacks,
             });
             Ok(HostValue::Undefined)
         }),

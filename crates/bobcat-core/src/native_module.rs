@@ -15,7 +15,6 @@
 //! dropped simply keeps its JavaScript function alive, as native's does.
 
 use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
 
 use crate::background::WorkerMessage;
 
@@ -81,6 +80,33 @@ pub struct ModuleCall {
     pub callbacks: Vec<ModuleCallback>,
 }
 
+impl ModuleCall {
+    /// Builds one call out of what the realm said and the handle on the inbox
+    /// that answers it.
+    ///
+    /// The two halves meet here rather than in the realm: what crosses from
+    /// `bobcat-workers` is the call's text and the indices of its function
+    /// arguments, and the reply handle is the one the view already registered
+    /// for that worker. `LynxView::pump` is where both are in hand, and this
+    /// is what it assembles them with.
+    pub(crate) fn assemble(
+        call: u64,
+        method: String,
+        arguments: String,
+        callbacks: &[u32],
+        reply: &mpsc::WeakUnboundedSender<WorkerMessage>,
+    ) -> Self {
+        Self {
+            method,
+            arguments,
+            callbacks: callbacks
+                .iter()
+                .map(|&index| ModuleCallback::new(call, index, reply.clone()))
+                .collect(),
+        }
+    }
+}
+
 /// The single-shot right to call one JavaScript function argument back.
 ///
 /// Native's `ModuleCallback`, with its one-invocation rule made a property of
@@ -99,10 +125,11 @@ pub struct ModuleCallback {
     /// Which argument of that call it was.
     index: u32,
     /// The calling worker's own inbox, weakly: a callback a module never gets
-    /// round to must not keep a worker realm alive.
+    /// round to must not keep a worker realm alive. It is also the whole of
+    /// what [`Self::is_cancelled`] reads — a worker's receiving end drops with
+    /// its task, so a handle that no longer upgrades *is* the realm being
+    /// gone.
     reply: mpsc::WeakUnboundedSender<WorkerMessage>,
-    /// The calling worker's end signal.
-    token: CancellationToken,
     /// What [`Self::invoke`] left for [`Drop`] to send. `None` is a release.
     arguments: Option<String>,
 }
@@ -124,13 +151,11 @@ impl ModuleCallback {
         call: u64,
         index: u32,
         reply: mpsc::WeakUnboundedSender<WorkerMessage>,
-        token: CancellationToken,
     ) -> Self {
         Self {
             call,
             index,
             reply,
-            token,
             arguments: None,
         }
     }
@@ -144,12 +169,16 @@ impl ModuleCallback {
     /// Whether the realm that made the call is gone — the worker ended, or
     /// the view that owned it was released.
     ///
+    /// Read off the reply handle itself, which is the same fact: the worker's
+    /// receiving end drops with its task, so there is nothing left to answer
+    /// exactly when there is nothing left to answer *through*.
+    ///
     /// Invoking afterwards is a silent no-op rather than an error, the way a
     /// post to a terminated worker is, so this is an optimization for a module
     /// about to do expensive work rather than a check it has to make.
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
-        self.token.is_cancelled() || self.reply.upgrade().is_none_or(|sender| sender.is_closed())
+        self.reply.upgrade().is_none_or(|sender| sender.is_closed())
     }
 
     /// Calls the JavaScript function with `arguments`, JSON array text the
@@ -220,9 +249,25 @@ mod tests {
     #[test]
     fn a_released_callback_sends_no_arguments_and_an_invoked_one_sends_its_own() {
         let (sender, mut inbox) = mpsc::unbounded_channel();
-        let token = CancellationToken::new();
-        ModuleCallback::new(7, 2, sender.downgrade(), token.clone());
-        ModuleCallback::new(7, 3, sender.downgrade(), token.clone()).invoke("[1]".to_owned());
+        let call = ModuleCall::assemble(
+            7,
+            "ping".to_owned(),
+            "[null,null]".to_owned(),
+            &[2, 3],
+            &sender.downgrade(),
+        );
+        assert_eq!(
+            call.callbacks
+                .iter()
+                .map(ModuleCallback::argument_index)
+                .collect::<Vec<_>>(),
+            [2, 3],
+            "one callback per function argument, in argument order"
+        );
+        let [released, invoked] =
+            <[_; 2]>::try_from(call.callbacks).expect("two function arguments");
+        drop(released);
+        invoked.invoke("[1]".to_owned());
         let sent: Vec<_> = std::iter::from_fn(|| inbox.try_recv().ok())
             .map(|message| match message {
                 WorkerMessage::ModuleCallback {
@@ -239,11 +284,12 @@ mod tests {
             "a release carries no arguments and an invocation carries its own"
         );
 
-        // The worker's end signal is what a module reads before doing work
-        // it would only do to answer a realm that is still there.
-        let live = ModuleCallback::new(7, 4, sender.downgrade(), token.clone());
+        // The reply handle is what a module reads before doing work it would
+        // only do to answer a realm that is still there: the worker's
+        // receiving end drops with its task, and that is the whole of it.
+        let live = ModuleCallback::new(7, 4, sender.downgrade());
         assert!(!live.is_cancelled());
-        token.cancel();
+        drop(inbox);
         assert!(live.is_cancelled());
     }
 }

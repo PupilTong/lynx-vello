@@ -115,10 +115,6 @@ pub(crate) struct WorkerStart {
     /// What the MTS Worker object posts. Its finalizer or explicit terminate
     /// sends `Terminate`; releasing the MTS realm closes the channel.
     pub(crate) messages: mpsc::UnboundedReceiver<WorkerMessage>,
-    /// The sending end of that same channel, weakly, so this realm can hand
-    /// it to whoever owes it an answer — a native module's callback — without
-    /// that holder keeping the worker alive.
-    pub(crate) inbox: mpsc::WeakUnboundedSender<WorkerMessage>,
     /// Where this worker reports, which is the creating view's own channel.
     pub(crate) events: mpsc::UnboundedSender<WorkerEvent>,
     /// This worker's end signal, independent of its creating view's token.

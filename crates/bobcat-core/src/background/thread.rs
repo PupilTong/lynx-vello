@@ -194,10 +194,6 @@ struct Worker {
     /// has a latch of its own on the lifetime.
     reported: Cell<bool>,
     sources: HostOutbox,
-    /// This worker's own inbox, weakly, as it is handed to whoever owes this
-    /// realm an answer: a native module's callback, which may be held for as
-    /// long as the module's work takes and must not keep the realm alive.
-    inbox: mpsc::WeakUnboundedSender<WorkerMessage>,
     /// Messages wait for entry evaluation, including imports and top-level
     /// await. Timers and module completions continue to enter the realm.
     boot_finished: watch::Sender<bool>,
@@ -214,7 +210,6 @@ impl Worker {
         events: mpsc::UnboundedSender<WorkerEvent>,
         token: CancellationToken,
         sources: HostOutbox,
-        inbox: mpsc::WeakUnboundedSender<WorkerMessage>,
     ) -> Rc<Self> {
         Rc::new(Self {
             js,
@@ -224,7 +219,6 @@ impl Worker {
             lifetime: Lifetime::new(token),
             reported: Cell::new(false),
             sources,
-            inbox,
             boot_finished: watch::channel(false).0,
             #[cfg(test)]
             epilogues: Cell::new(0),
@@ -385,14 +379,7 @@ impl Worker {
                 // asked for. Each hears the same reason.
                 Err(error) => Err(error.clone()),
                 Ok(js) => {
-                    open_realm(
-                        js,
-                        self.events.clone(),
-                        self.key,
-                        &self.sources,
-                        &self.inbox,
-                    )
-                    .map(|mut realm| {
+                    open_realm(js, self.events.clone(), self.key, &self.sources).map(|mut realm| {
                         let (source, url) = script;
                         let source = worker_boot_source(name, &source);
                         if let Err(error) = realm.engine.start_module(js, &source, &url) {
@@ -479,13 +466,12 @@ async fn serve_worker(js: WorkerRuntime, start: WorkerStart) {
         key,
         name,
         script,
-        inbox,
         messages,
         events,
         token,
         sources,
     } = start;
-    let worker = Worker::new(js, key, events, token, sources, inbox);
+    let worker = Worker::new(js, key, events, token, sources);
     worker.spawn(boot_worker(Rc::clone(&worker), name, script, messages));
     worker.run_owner().await;
 }
@@ -709,7 +695,6 @@ fn open_realm(
     events: mpsc::UnboundedSender<WorkerEvent>,
     key: WorkerKey,
     host: &HostOutbox,
-    inbox: &mpsc::WeakUnboundedSender<WorkerMessage>,
 ) -> Result<WorkerRealm, ScriptError> {
     let mut engine = js_runtime
         .create_realm()
@@ -729,8 +714,8 @@ fn open_realm(
         js_runtime,
         &timers,
         &closing,
+        key,
         host,
-        inbox,
         move |data| {
             let _ = events.send(WorkerEvent {
                 key,
@@ -861,7 +846,6 @@ mod tests {
                 std::sync::Arc::new(crate::NoWakeup),
                 CancellationToken::new(),
             ),
-            messages.downgrade(),
         );
         worker.spawn(boot_worker(
             Rc::clone(&worker),

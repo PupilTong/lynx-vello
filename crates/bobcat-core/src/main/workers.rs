@@ -182,7 +182,6 @@ impl WorkerOwner {
                 key,
                 name,
                 script: awaiting,
-                inbox: messages.downgrade(),
                 messages: incoming,
                 events: self.events.clone(),
                 token,
