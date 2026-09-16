@@ -98,7 +98,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::quickjs::ScriptRuntime;
-use super::runtime::{DocumentIngredients, MainThreadRuntime, PageData};
+use super::runtime::{DocumentIngredients, MainThreadRuntime, RealmStartup};
 use super::{AttachedView, GroupContext};
 use crate::background::WorkerEvent;
 #[cfg(test)]
@@ -166,7 +166,11 @@ pub(super) struct Page {
 }
 
 /// Everything boot still needs once the fonts have been validated and the
-/// document's ingredients staged.
+/// document's ingredients staged: the pre-fetch form, mirroring
+/// [`ViewSources`], of what becomes one
+/// [`RealmStartup`](super::runtime::RealmStartup) as soon as the entry has
+/// arrived — the sheets and the entry *specifier* here, the entry's own text
+/// and resolved URL there.
 struct BootSources {
     style_sheets: Vec<String>,
     entry: String,
@@ -540,13 +544,11 @@ impl Page {
     /// released again; the checkpoint receiver is created while that borrow
     /// is still held, so no sibling's bump between boot and the clock task's
     /// first poll can be lost.
-    fn open_realm(
-        self: &Rc<Self>,
-        source: &str,
-        url: &str,
-        background_entry: Option<String>,
-        page_data: PageData,
-    ) {
+    ///
+    /// The [`RealmStartup`] is everything that realm is opened with, and
+    /// opening spends it: `MainThreadRuntime::new` takes the strings it
+    /// installs out of it, leaving the entry this then evaluates.
+    fn open_realm(self: &Rc<Self>, mut startup: RealmStartup) {
         // A view that has already ended builds no realm and runs no entry:
         // its tasks are about to be reclaimed, and the ingredients go with the
         // page rather than into a document nobody will ever see.
@@ -568,9 +570,7 @@ impl Page {
                 *ingredients,
                 self.outbox.clone(),
                 &self.context.workers,
-                url,
-                background_entry,
-                page_data,
+                &mut startup,
             ) {
                 Ok(opened) => opened,
                 Err(error) => return Some(Err(error.into_script_error().into())),
@@ -580,7 +580,7 @@ impl Page {
             if self.outbox.is_cancelled() {
                 return None;
             }
-            if let Err(error) = runtime.run_main_thread_script(js, source, url) {
+            if let Err(error) = runtime.run_main_thread_script(js, &startup.source, &startup.url) {
                 if self.outbox.is_cancelled() {
                     return None;
                 }
@@ -921,17 +921,15 @@ async fn boot_page(page: Rc<Page>, sources: BootSources) {
         page.end();
         return;
     }
-    page.open_realm(
-        &source,
-        &url,
+    page.open_realm(RealmStartup {
+        source,
+        url,
         background_entry,
-        PageData {
-            initial_processor,
-            init_data,
-            global_props,
-            native_modules,
-        },
-    );
+        initial_processor,
+        init_data,
+        global_props,
+        native_modules,
+    });
 }
 
 /// One resource load an import produced.

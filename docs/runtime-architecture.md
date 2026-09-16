@@ -76,8 +76,12 @@ a stateful type whose owner is fixed lives under `paint` or `main`.
 Construction sends `ViewSources` whole to the view's task on `bobcat-main`,
 since nothing in it belongs on the embedder's thread. The task stages the
 document inputs, and what the source specifiers fetch, as the ingredients the
-realm's own `Document` will be built from, and hands the page data to the
-realm.
+realm's own `Document` will be built from, and collects the rest — the fetched
+entry's text and URL, the BTS entry, the page data, the processor name and the
+module table — into one `RealmStartup` that opens the realm. Everything in it
+is handed over exactly once, as the realm opens; `LynxView::update_data`,
+`update_global_props` and `reload` reach the realm through `ToMain::PageUpdate`
+afterwards and never touch it.
 
 `ViewSources::init_data` and `global_props` are optional JSON text, and Rust
 never reads it. `MainThreadRuntime::new` puts each behind a

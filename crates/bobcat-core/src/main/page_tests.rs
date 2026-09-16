@@ -283,8 +283,11 @@ impl OwnedPage {
     /// Opens the realm over `entry` and turns until its first frame is
     /// published.
     async fn boot(&mut self, entry: &str) -> u64 {
-        self.page
-            .open_realm(entry, "app:///main.js", None, PageData::default());
+        self.page.open_realm(RealmStartup {
+            source: entry.to_owned(),
+            url: "app:///main.js".to_owned(),
+            ..RealmStartup::default()
+        });
         for _ in 0..TURNS {
             if self.view.published.commit().is_some() {
                 break;
@@ -580,7 +583,11 @@ fn a_siblings_checkpoint_makes_a_parked_page_settle() {
             ingredients(),
             view.token.clone(),
         );
-        page.open_realm(ONE_BOX, "app:///main.js", None, PageData::default());
+        page.open_realm(RealmStartup {
+            source: ONE_BOX.to_owned(),
+            url: "app:///main.js".to_owned(),
+            ..RealmStartup::default()
+        });
         for _ in 0..TURNS {
             if view.published.commit().is_some() {
                 break;
@@ -633,7 +640,11 @@ fn a_pages_own_entries_never_wake_its_clock_task() {
         );
         // The listener is what makes the dispatch below a real entry into
         // JavaScript rather than a walk that meets nobody.
-        page.open_realm(LISTENING_BOX, "app:///main.js", None, PageData::default());
+        page.open_realm(RealmStartup {
+            source: LISTENING_BOX.to_owned(),
+            url: "app:///main.js".to_owned(),
+            ..RealmStartup::default()
+        });
         for _ in 0..TURNS {
             if view.published.commit().is_some() {
                 break;

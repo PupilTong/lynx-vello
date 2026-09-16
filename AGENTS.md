@@ -833,7 +833,11 @@ queries, the commit, the event-name edges, timers, the page-data triple handed
 over once as plain JSON and processor-name strings the realm alone reads, the
 native-module table handed over once as one length-prefixed record, the
 stylesheet pair, the diagnostics pair, the display-frame demand, and the three
-worker operations.
+worker operations. Those four one-shot strings do not arrive separately:
+they, the entry's own text and resolved URL, and the BTS entry specifier are
+one `RealmStartup`, which is everything a realm is opened with and nothing
+that is ever updated — `LynxView::update_data`, `update_global_props` and
+`reload` reach the realm through `ToMain::PageUpdate` and never touch it.
 
 The two members that answer with a list encode it in the return string, since
 the boundary's value type carries no array: `attributeNames` as the

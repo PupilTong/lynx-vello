@@ -68,7 +68,7 @@ impl Pair {
     }
 
     fn unbooted(background_source: Option<&str>) -> Self {
-        Self::unbooted_with_data(background_source, PageData::default())
+        Self::unbooted_with_data(background_source, RealmStartup::default())
     }
 
     /// A booted pair whose view was built with these native modules, as
@@ -91,9 +91,9 @@ impl Pair {
             .collect();
         let mut pair = Self::unbooted_with_data(
             Some(background_source),
-            PageData {
+            RealmStartup {
                 native_modules: crate::native_module::encode_table(&table),
-                ..PageData::default()
+                ..RealmStartup::default()
             },
         );
         pair.boot(script).unwrap();
@@ -140,7 +140,12 @@ impl Pair {
         }
     }
 
-    fn unbooted_with_data(background_source: Option<&str>, page_data: PageData) -> Self {
+    /// `startup` carries the page data and module table a test wants; this
+    /// fills in the base URL and the BTS entry, and the main script is
+    /// evaluated afterwards by [`Self::boot`].
+    fn unbooted_with_data(background_source: Option<&str>, mut startup: RealmStartup) -> Self {
+        startup.url = "app:///nested/main.js".to_owned();
+        startup.background_entry = background_source.map(|_| "test:bts-entry".to_owned());
         let home = match background_source {
             Some(source) => {
                 WorkerHome::with_entry_for_test((source.to_owned(), "test:bts-entry".to_owned()))
@@ -160,9 +165,7 @@ impl Pair {
             ingredients,
             outbox,
             &WorkerFactory::new(home.commands()),
-            "app:///nested/main.js",
-            background_source.map(|_| "test:bts-entry".to_owned()),
-            page_data,
+            &mut startup,
         )
         .unwrap();
         Self {
@@ -377,11 +380,12 @@ fn bts_entry_receives_processed_initial_data_before_it_installs_app_hooks() {
         lynx.getCoreContext().dispatchEvent({type:'reply',data});
         ",
         ),
-        PageData {
+        RealmStartup {
             initial_processor: String::new(),
             init_data: Some(serde_json::json!({"raw":41}).to_string()),
             global_props: Some(serde_json::json!({"theme":"dark"}).to_string()),
             native_modules: String::new(),
+            ..RealmStartup::default()
         },
     );
 
@@ -479,11 +483,12 @@ fn lifecycle_hooks_and_bts_snapshots_precede_queued_mts_jobs() {
             app.onAppReload = data => reply('reload', data);
         ",
             ),
-            PageData {
+            RealmStartup {
                 initial_processor: String::new(),
                 init_data: Some(serde_json::json!({"count":1}).to_string()),
                 global_props: None,
                 native_modules: String::new(),
+                ..RealmStartup::default()
             },
         );
 
@@ -573,13 +578,14 @@ fn global_props_initialize_bts_before_hooks_and_notify_before_mts_events() {
         lynx.getCoreContext().dispatchEvent({type:'reply',data:['initial',props.seed]});
     ",
         ),
-        PageData {
+        RealmStartup {
             initial_processor: String::new(),
             init_data: None,
             global_props: Some(
                 serde_json::json!({"seed":1,"keep":1,"nested":{"value":2}}).to_string(),
             ),
             native_modules: String::new(),
+            ..RealmStartup::default()
         },
     );
 
@@ -621,7 +627,7 @@ fn global_props_initialize_bts_before_hooks_and_notify_before_mts_events() {
 #[test]
 fn initial_processor_preserves_its_string_and_reads_the_page_config_switch() {
     let processor = "selected'\"\\\n中文";
-    // This is a JS assertion literal, while PageData receives the original Rust string.
+    // This is a JS assertion literal, while RealmStartup receives the original Rust string.
     let expected_processor = r#""selected'\"\\\n中文""#;
     for enable_js_data_processor in [false, true] {
         let expected_name = if enable_js_data_processor {
@@ -638,11 +644,12 @@ fn initial_processor_preserves_its_string_and_reads_the_page_config_switch() {
                 lynx.getCoreContext().dispatchEvent({{type:'reply',data:params.updateData.value}});
                 ",
             )),
-            PageData {
+            RealmStartup {
                 initial_processor: processor.to_owned(),
                 init_data: Some(serde_json::json!({"value":3}).to_string()),
                 global_props: None,
                 native_modules: String::new(),
+                ..RealmStartup::default()
             },
         );
         pair.runtime
@@ -703,11 +710,12 @@ fn initial_processor_non_tables_and_exceptions_preserve_host_data_in_both_realms
             lynx.getCoreContext().dispatchEvent({type:'reply',data});
             ",
             ),
-            PageData {
+            RealmStartup {
                 initial_processor: String::new(),
                 init_data: Some(serde_json::json!({"seed":3}).to_string()),
                 global_props: None,
                 native_modules: String::new(),
+                ..RealmStartup::default()
             },
         );
 
@@ -2486,9 +2494,9 @@ fn verify_react_teardown(reload: bool, development: bool) {
     );
     let mut pair = Pair::unbooted_with_data(
         Some(&background),
-        PageData {
+        RealmStartup {
             init_data: Some(serde_json::json!({"seed":0,"keep":"retained"}).to_string()),
-            ..PageData::default()
+            ..RealmStartup::default()
         },
     );
 

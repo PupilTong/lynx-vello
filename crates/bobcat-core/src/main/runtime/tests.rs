@@ -300,9 +300,12 @@ fn runtime_over_watching_names(
         ingredients,
         outbox,
         &WorkerFactory::new(workers),
-        "app:///main.js",
-        None,
-        PageData::default(),
+        // No entry here: these tests evaluate their own scripts against the
+        // realm afterwards, so the startup supplies the base URL alone.
+        &mut RealmStartup {
+            url: "app:///main.js".to_owned(),
+            ..RealmStartup::default()
+        },
     )
     .expect("main-thread runtime");
     let probe = DocumentProbe {
@@ -321,12 +324,12 @@ fn two_view_group() -> (
     MainThreadRuntime,
     GroupFarEnds,
 ) {
-    two_view_group_with([PageData::default(), PageData::default()])
+    two_view_group_with([RealmStartup::default(), RealmStartup::default()])
 }
 
-/// The same group, each view given its own page data.
+/// The same group, each view opened with its own startup.
 fn two_view_group_with(
-    pages: [PageData; 2],
+    pages: [RealmStartup; 2],
 ) -> (
     ScriptRuntime,
     MainThreadRuntime,
@@ -340,16 +343,17 @@ fn two_view_group_with(
     let (workers, inbox) = mpsc::unbounded_channel();
     ends.workers = Some(inbox);
     let workers = WorkerFactory::new(workers);
-    for page_data in pages {
+    for mut startup in pages {
+        // The base URL every worker specifier in these tests resolves
+        // against; each view's own script is evaluated by hand afterwards.
+        startup.url = "app:///main.js".to_owned();
         let (outbox, far_end) = detached_outbox(Arc::new(NoWakeup));
         let (runtime, worker_events) = MainThreadRuntime::new(
             &mut js_runtime,
             ingredients(),
             outbox,
             &workers,
-            "app:///main.js",
-            None,
-            page_data,
+            &mut startup,
         )
         .expect("main-thread runtime");
         ends.views.push(far_end);
@@ -376,13 +380,14 @@ struct GroupFarEnds {
 #[test]
 fn page_data_is_parsed_by_the_realm_it_was_given_to() {
     let (mut js, mut first, mut second, _workers) = two_view_group_with([
-        PageData {
+        RealmStartup {
             initial_processor: String::new(),
             init_data: Some(r#"{"count": 2, "text": "中文 🦀"}"#.to_owned()),
             global_props: Some(r#"{"theme": "dark"}"#.to_owned()),
             native_modules: String::new(),
+            ..RealmStartup::default()
         },
-        PageData::default(),
+        RealmStartup::default(),
     ]);
     first
         .run_main_thread_script(
@@ -426,17 +431,19 @@ fn page_data_is_parsed_by_the_realm_it_was_given_to() {
 #[test]
 fn malformed_page_data_fails_boot_before_the_entry_runs() {
     let (mut js, first, second, _workers) = two_view_group_with([
-        PageData {
+        RealmStartup {
             initial_processor: String::new(),
             init_data: Some("{".to_owned()),
             global_props: None,
             native_modules: String::new(),
+            ..RealmStartup::default()
         },
-        PageData {
+        RealmStartup {
             initial_processor: String::new(),
             init_data: None,
             global_props: Some("[1,".to_owned()),
             native_modules: String::new(),
+            ..RealmStartup::default()
         },
     ]);
     for (mut runtime, named) in [
@@ -461,7 +468,7 @@ fn malformed_page_data_fails_boot_before_the_entry_runs() {
 #[test]
 fn initial_values_reach_each_view_before_its_entry_and_render() {
     let (mut js, mut first, mut second, _workers) = two_view_group_with([
-        PageData {
+        RealmStartup {
             initial_processor: String::new(),
             init_data: Some(
                 serde_json::json!({
@@ -472,12 +479,14 @@ fn initial_values_reach_each_view_before_its_entry_and_render() {
             ),
             global_props: Some(serde_json::json!({"theme": "dark"}).to_string()),
             native_modules: String::new(),
+            ..RealmStartup::default()
         },
-        PageData {
+        RealmStartup {
             initial_processor: String::new(),
             init_data: Some("null".to_owned()),
             global_props: None,
             native_modules: String::new(),
+            ..RealmStartup::default()
         },
     ]);
     first.engine.collect_garbage(&mut js).unwrap();
@@ -514,17 +523,19 @@ fn initial_values_reach_each_view_before_its_entry_and_render() {
 #[test]
 fn entry_initialization_cannot_replace_the_host_render_argument() {
     let (mut js, mut first, mut second, _workers) = two_view_group_with([
-        PageData {
+        RealmStartup {
             initial_processor: String::new(),
             init_data: Some(r#"{"showInitial":false}"#.to_owned()),
             global_props: None,
             native_modules: String::new(),
+            ..RealmStartup::default()
         },
-        PageData {
+        RealmStartup {
             initial_processor: String::new(),
             init_data: Some("null".to_owned()),
             global_props: None,
             native_modules: String::new(),
+            ..RealmStartup::default()
         },
     ]);
     first
