@@ -20,25 +20,15 @@ DOM system and CSS system design (wiring stylo onto a custom DOM, stacking
 context, event dispatch/hit-testing). It's cited in the files below where
 relevant; see `AGENTS.md` for its full scope.
 
-These files are primarily research/spec rather than a status tracker: most of
-what they describe is still unimplemented, and rows carry an explicit
-done/in-progress marker only where implementation has landed. The CSS/layout
-and visual files have the most such markers; the runtime ones have the fewest.
-
-The runtime work that has landed so far, none of which these files were
-written to track: the Lynx element layer is split between
-`crates/bobcat-core`'s `tree` module (Lynx page policy: `<page>` root tag,
-the UA cascade defaults, view metrics) and
-`packages/bobcat-element` (the Element PAPI runtime: member surface, tag
-vocabulary, handle lifecycle over a symbol-keyed node id and
-`FinalizationRegistry`), and `bobcat-core`'s feature-gated
-`quickjs` module runs a `.web.bundle`'s main-thread script against them with
-every ReactLynx Snapshot constructor except `__CreateFrame`, plus all six
-tree mutation calls (`__AppendElement`, `__InsertElementBefore`,
-`__RemoveElement`, `__ReplaceElement`, `__ReplaceElements`,
-`__SwapElement`) and `__FlushElementTree`. `js-runtime.md` still declines to enumerate the
-Element PAPI; the authoritative list of what exists is the header of
-`packages/bobcat-element/src/element-papi.ts`.
+These files are research/spec rather than a status tracker. Implementation
+status lives in [`AGENTS.md`](../../AGENTS.md)'s Workspace map and Crates
+sections, one heading per crate and pnpm package, and in the
+`docs/*-runtime.md` files for the runtime subsystems. The authoritative
+enumeration of the Element PAPI is the header table of
+`packages/bobcat-element/src/element-papi.ts`, which names every supported
+member and what backs it; no file here reproduces it. Rows below carry
+done/in-progress markers only where noted — the CSS/layout and visual files
+have the most, the runtime ones the fewest.
 
 ## Column conventions
 
@@ -75,14 +65,11 @@ Most files use a table with these columns:
 
 ## Status
 
-Initial research pass complete: a 30-agent sweep (10 initial topics + 2
-rounds of completeness-critique gap-filling) read `lynx/` and `lynx-stack/`
-and produced 28 sections, assembled into the files above. One malformed
-section (a critique-round artifact literally titled "test", 4 characters of
-content) was discarded rather than force-fit into a file. `css-selectors-cascade.md`,
-`css-at-rules.md`, `media-resources.md`, and `accessibility.md` didn't exist
-as original stubs — they're new files the critique pass identified as gaps
-in the original ten topics. None of this has been independently
-double-checked against the source repos yet (only the agents that produced
-it verified their own citations) — treat file/line references as a strong
-starting point, not ground truth, especially for anything load-bearing.
+The initial research pass is complete: a 30-agent sweep of `lynx/` and
+`lynx-stack/` produced the sections assembled into the files above, including
+`css-selectors-cascade.md`, `css-at-rules.md`, `media-resources.md` and
+`accessibility.md`, which the critique round identified as gaps in the original
+ten topics. None of it has been independently double-checked against the source
+repos: only the agents that produced each section verified their own citations.
+**Treat file/line references as a strong starting point, not ground truth,
+especially for anything load-bearing.**

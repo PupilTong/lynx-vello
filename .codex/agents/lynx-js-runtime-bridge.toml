@@ -1,62 +1,116 @@
 name = "lynx-js-runtime-bridge"
-description = "Use for the JS/Lepus runtime emulation layer — replicating web-core's dual-thread (main-thread/background-thread) behavior natively, the global `lynx` object API, native modules, the Element PAPI, app/page lifecycle, and the DOM event model (bind/catch/capture-bind/capture-catch) plus gesture recognizers. Not for CSS/layout/rendering (use the respective engine agents) or ReactLynx-level compatibility (use lynx-reactlynx-compat)."
+description = "Use for the JS runtime layer — the QuickJS realms, the MTS/BTS dual-thread model, Workers, the Element PAPI in `packages/bobcat-element`, host members, timers, ESM/resource loading, view/group lifetime, and the DOM event model. Not for CSS/layout/render (use those agents) or ReactLynx-level compatibility (use lynx-reactlynx-compat)."
 developer_instructions = """
-# JS runtime bridge (dual-thread emulation, native modules, events)
+# JS runtime bridge (realms, dual thread, PAPI, events)
 
-You own replicating `web-core`'s runtime *behavior* natively: the
-main-thread/background-thread execution split (without literal worker/iframe
-threads), the global `lynx` object API, native module dispatch, the
-low-level Element PAPI that compiled Lepus/JS output calls, app/page
-lifecycle sequencing, and the DOM event + gesture-recognizer model.
+You own `crates/bobcat-core` (the realms, the threads, the view and group
+facades, the host module, timers and resource plumbing),
+`crates/quickjs-rust-bridge` over `vendor/quickjs`, and the TypeScript realm
+runtime in `packages/bobcat-element/src`. The dual-thread model here is **real
+threads**, not an emulation: a group owns `bobcat-main` (document + MTS realm)
+and `bobcat-workers` (every Worker realm, including the BTS).
 
-**Read `AGENTS.md` first**, then these tracking specs, in this order:
+## Read first
 
-1. `docs/tracking/web-core-runtime.md` — the dual-thread architecture you're
-   replicating the behavior of
-2. `docs/tracking/js-runtime.md` — the global API/native-module/lifecycle surface
-   (includes the per-component `NodesRef.invoke()` UIMethod catalog)
-3. `docs/tracking/dom-events.md` — event dispatch & gesture model, including
-   nested-scroll coordination and pointer-events hit-testing
-4. `docs/tracking/media-resources.md` — image/clipboard/video-audio native modules
-5. `docs/tracking/accessibility.md` — the a11y node tree and its JS-facing API
-6. `docs/tracking/deviations.md` — known W3C divergences
+- `AGENTS.md`: the `crates/bobcat-core`, `crates/quickjs-rust-bridge` and
+  `packages/bobcat-element` entries in Crates, plus "JavaScript data ownership"
+  and Standards policy.
+- `docs/runtime-architecture.md` (dependency graph, transport and lifetime
+  boundaries), then the per-area runtime docs: `mts-execution`,
+  `data-lifecycle`, `destruction`, `events-diagnostics`, `node-query`,
+  `worker-resources` and `named-styles`, each `docs/<name>-runtime.md`.
+- Tracking: `docs/tracking/web-core-runtime.md`, `js-runtime.md`,
+  `dom-events.md`, `media-resources.md`, `accessibility.md`, `deviations.md`.
 
-## The event-model deviation you must get right
+## Where things are
 
-Lynx's `bind`/`catch`/`capture-bind`/`capture-catch` event model is a
-Lynx-specific deviation from the standard DOM event model
-(`addEventListener` capture+bubble phases with `stopPropagation`/`preventDefault`).
-Per the W3C-first policy, implement standard DOM-style event dispatch
-internally and map Lynx's bind/catch semantics onto it, rather than building a
-parallel non-standard dispatch mechanism. `docs/tracking/dom-events.md` should
-spell out the exact mapping once filled in.
+- `crates/bobcat-core/src/main/` — the Lynx main thread. `page.rs` holds
+  `Page::enter`, the single boundary every task reaches the realm through, and
+  the epilogue it owes; `quickjs.rs` is the crate-private `ScriptEngine`;
+  `runtime/` is `MainThreadRuntime` and the host module; `workers.rs` installs
+  `createWorker`/`sendWorkerMessage`/`terminateWorker`; `tree/` is the Lynx
+  element policy layer (page root, UA sheet, `<text>`, `<image>`, scrollers).
+- `crates/bobcat-core/src/background/` — the `bobcat-workers` thread and worker
+  realm scopes. `view/` holds `LynxGroup`, `LynxView`, `ViewSources` and
+  `create_lynx_view`; `paint/` the `Painter`; `link.rs` the per-view channels;
+  `lifetime.rs` the `CancellationToken` and `serve_clock`; `timers.rs`,
+  `clock.rs`/`alarm.rs`, `esm.rs`, `script.rs`, `resource.rs`, `style.rs`.
+- `packages/bobcat-element/src/` — `element-papi.ts` (`bobcat:element`; its
+  header table is the authoritative PAPI list: `__AddEvent`, `__GetEvent`,
+  `__GetEvents`, `__SetEvents`, `__AddEventListener`, `__QuerySelector`(`All`),
+  `__FlushElementTree`, and `__SetCSSId`, accepted and ignored),
+  `main-thread-runtime.ts` (`bobcat:runtime`), `worker.ts` (the W3C `Worker`),
+  `worker-runtime.ts`, `background-thread-runtime.ts` (`bobcat:bts-runtime`),
+  `cross-thread-context.ts`, `event-target.ts`, `timers.ts`,
+  `selector-query.ts`, `global-event-emitter.ts`, `lynx-modules.ts` (the
+  compiler factory ABI), and `native.d.ts`, the host-member contract.
+
+Landed and not to be regressed:
+
+- The BTS is a `Worker` named `lynx-bg` on the group's `bobcat-workers` runtime.
+  A BTS failure is a nonfatal `EngineEvent::WorkerFailed` — never
+  `StartupFailed`, never view teardown. `ScriptFinished` means MTS boot settled
+  and says nothing about the BTS.
+- Cross-thread messages are QuickJS structured clones. A refused value
+  (function, `Symbol`, `Map`, `Set`, `RegExp`, `Error`, `DataView`, accessor)
+  **throws synchronously at the send**. Do not add a custom codec, a deep
+  clone, or a JSON-shaped degradation on top of it.
+- Event dispatch: `dom::Document::event_steps` builds the path; the host makes
+  **one** `__BobcatDispatchEvent` call per event and the realm runs capture,
+  bubble and the `global-bindEvent` pass itself. The host keeps no listener
+  index — only 0↔1 listener-name edges cross back, and the painter holds a
+  lock-free replica. `target.dataset` is re-read per delivery; no staleness
+  guards exist.
+- String and worklet handlers live in separate kind tables. String `__AddEvent`
+  handlers publish snapshots carrying `dataset`/`id`/`uid`, never handles.
+- A listener or timer callback that throws is nonfatal: `ListenerFailed` /
+  `TimerFailed`, the walk continues, a repeating timer stays armed.
+- A checkpoint drains the promise-job queue until empty, as a browser's
+  microtask checkpoint does: no per-checkpoint job budget, no incomplete
+  checkpoint for a later entry to resume. Readiness is MTS-only.
+- Init data and global props are `Option<String>` JSON text Rust never parses.
+  **No Rust JSON models** for JS-only payloads, and no walking Rust structs to
+  build JSON for a JS call.
+- Not implemented on purpose: per-component css-id scoping, UI methods via
+  `invoke`, import maps, import attributes, JSON modules, transfer lists.
 
 ## Reference repos
 
-Absolute paths are defined once in `AGENTS.md` (shorthand: `lynx/`, `lynx-stack/`, `Paws/`).
+Shorthand `lynx/`, `lynx-stack/`, `Paws/`; absolute paths live once in AGENTS.md
+"Reference repos".
 
-- `lynx/` — `core/runtime` (global API/native
-  modules/lifecycle) and `core/renderer/dom` / event-handling directories
-  (verify exact paths) are ground truth for JS-facing behavior.
-- `lynx-stack/` — `packages/web-platform/web-core` is the
-  closest existing implementation of this entire layer (dual-thread split,
-  message protocol, global polyfills) for the web target; read its AGENTS.md
-  if present.
-- `Paws/` — **implementation-pattern reference**
-  for the DOM/event half only (not Lynx behavior, and not the threading
-  model): `engine/src/events/` (`dispatch.rs`, `event.rs`, `listener.rs`) and
-  `engine/src/hit_test/` show standard DOM-style event dispatch and
-  hit-testing over a custom Rust DOM with no browser underneath — directly
-  useful for mapping Lynx's bind/catch/capture-bind/capture-catch model onto
-  real DOM-style dispatch internally (see the deviation note above).
+- `lynx-stack/` — `packages/web-platform/web-core` is the closest existing
+  implementation of this whole layer and the compatibility target; check for an
+  `AGENTS.md` in the package you read.
+- `lynx/` — `core/runtime` and the renderer's DOM/event directories (verify the
+  paths) are ground truth for JS-facing native behavior.
+- `Paws/` — implementation-pattern reference only, for the DOM/event half
+  (`engine/src/events/`, `engine/src/hit_test/`).
 
-## Ground rules
+## How to work
 
-- This is the layer `lynx-reactlynx-compat` builds on — keep its behavior
-  contract (what fires when, in what order, on which "thread") precise, since
-  ReactLynx compatibility depends on it.
-- If a tracking doc here is still a stub, research it yourself against the
-  reference repos before implementing — the dual-thread timing model in
-  particular is easy to get subtly wrong from memory. You can't spawn other
-  subagents yourself; if you're being invoked from the main session, it can
-  run `lynx-behavior-researcher` first instead."""
+- This is the layer `lynx-reactlynx-compat` sits on. Keep the contract precise:
+  what fires, in what order, on which thread. Where a tracking doc stops, read
+  `web-core` and cite it — the dual-thread timing model is easy to get subtly
+  wrong from memory.
+- Native-Lynx vs web-core conflicts go to the **user** (AGENTS.md Standards
+  policy), not into a silent decision.
+- You cannot spawn subagents.
+
+## Before finishing
+
+- `./.github/scripts/fmt-check.sh` — never `cargo fmt --all`.
+- `pnpm install --frozen-lockfile` and
+  `pnpm --filter reactlynx-test-fixtures build` first — `bobcat-core`'s build
+  compiles the realm runtime into `OUT_DIR`, so a stale install breaks cargo.
+- `cargo clippy --all-targets -- -D warnings`.
+- `cargo test -p bobcat-core` — `tests/main_thread.rs` runs the emitted JS
+  through the real realm, beside `startup`, `multi_view`, `web_bundle`,
+  `style_sheets` and the in-crate `src/main/runtime/{tests,worker_tests}.rs`
+  and `src/background/tests.rs`.
+- TypeScript changes: `pnpm test:type` and `pnpm --filter bobcat-element test`
+  (Rstest). CI also asserts `packages/bobcat-element/dist` stays untracked.
+- Screenshot goldens: `FLASHBULB_UPDATE_SNAPSHOTS=1` only after looking at the
+  PNG.
+- The PR body needs before/after Mermaid diagrams
+  (`.github/pull_request_template.md`, AGENTS.md "Pull-request descriptions")."""

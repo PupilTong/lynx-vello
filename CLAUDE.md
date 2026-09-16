@@ -5,15 +5,39 @@ crates, reference repos, toolchain, testing — lives in
 [AGENTS.md](AGENTS.md). **Read that first.** This file only adds
 Claude-Code-specific notes on top of it.
 
-## Claude-Code-specific
+## Subagents ([`.claude/agents/`](.claude/agents/))
 
-- Skills: [`.claude/skills/lynx-template-format`](.claude/skills/lynx-template-format/SKILL.md)
-  — byte-level `.web.bundle`/`.lynx.bundle` format knowledge, triggers
-  automatically for template/format work.
-- Subagents: [`.claude/agents/`](.claude/agents/) — specialized personas for
-  the style/layout/text/render/runtime/ReactLynx-compat subsystems described
-  in `AGENTS.md` and `docs/tracking/`. Prefer delegating subsystem work to the
-  matching subagent over researching that subsystem from scratch in the main
-  thread.
-- Format with `cargo fmt` before finishing any Rust change (nightly rustfmt
-  options in `rustfmt.toml`).
+Delegate subsystem work to the matching persona rather than researching that
+subsystem from scratch in the main thread.
+
+- `lynx-css-engine` — StyleInfo decode/lowering, cascade, computed style,
+  selectors, at-rules, UA sheet, the stylo fork's `lynx` grammar.
+- `lynx-layout-engine` — `hughie` and its `dom` host: Flexbox, Grid, Linear,
+  Relative, containment, the positioned pass.
+- `lynx-text-engine` — the `<text>` block on parley: shaping, truncation, fonts.
+- `lynx-render-engine` — stacking, paint order, the vello scene, committed
+  frames and compose program, scroll planes, animations.
+- `lynx-js-runtime-bridge` — QuickJS realms, MTS/BTS threads, Workers, the
+  Element PAPI in `packages/bobcat-element`, timers, ESM, events.
+- `lynx-reactlynx-compat` — compiled ReactLynx apps end to end: fixtures, page
+  data, selector queries, censuses over `bobcat-server`.
+- `lynx-behavior-researcher` — read-only spec research against `lynx/`,
+  `lynx-stack/`, `Paws/`. Only the main session can invoke it.
+
+## Skill
+
+[`.claude/skills/lynx-template-format`](.claude/skills/lynx-template-format/SKILL.md)
+— byte-level `.web.bundle`/`.lynx.bundle`/XML knowledge over
+`crates/bobcat-source`; triggers automatically for format work.
+
+## Commands
+
+- Format with `./.github/scripts/fmt-check.sh`, never `cargo fmt --all`.
+- `pnpm install --frozen-lockfile` and
+  `pnpm --filter reactlynx-test-fixtures build` before any cargo command.
+- `pnpm test:type` (and `pnpm --filter bobcat-element test`) when TS changed.
+
+## Mirrors
+
+`.codex/agents/*.toml` and `.agents/skills/` mirror `.claude/agents/` and
+`.claude/skills/` for Codex. Update them in the same change.
