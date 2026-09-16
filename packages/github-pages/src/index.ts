@@ -12,6 +12,9 @@ const HOMEPAGE_TEMPLATE = 'explorer-homepage/main.web.bundle';
 // `ExplorerModule.navigateTo` builds this scheme around a bundle path that is
 // relative to the Explorer's local template root, which here is the page.
 const LOCAL_SCHEMA_PREFIX = 'file://lynx?local://';
+// What a native Explorer opens, and what Bobcat opens instead.
+const LYNX_BUNDLE_SUFFIX = '.lynx.bundle';
+const WEB_BUNDLE_SUFFIX = '.web.bundle';
 // One namespace for everything the demo's ExplorerModule stores, so the page
 // shares no key with anything else served from this origin.
 const STORAGE_PREFIX = 'bobcat-explorer:';
@@ -503,19 +506,34 @@ interface TemplateLoader {
 }
 
 /**
- * Resolves what the Explorer homepage asks to open into a URL this demo can
- * fetch: an absolute URL or a relative path as they are, and the
- * `file://lynx?local://<path>[?query]` scheme `navigateTo` builds by taking
- * the path — query and all — relative to this page. Only the homepage bundle
- * is published beside the page, so a card naming another one resolves fine and
- * then fails its fetch, which the upload status reports.
+ * Resolves what the Explorer homepage asks to open into the URLs this demo
+ * should try, in order.
+ *
+ * An absolute URL or a relative path is taken as it is. The
+ * `file://lynx?local://<path>[?query]` scheme `navigateTo` builds resolves its
+ * path — query and all — against this page, where the showcase menus and the
+ * `@lynx-example` demos are published under `showcase/`. Those paths name
+ * `.lynx.bundle`, because that is what a native Explorer loads; Bobcat
+ * consumes the `.web.bundle` beside it, so the web sibling is tried first and
+ * the named file second. The retry is what serves the demos that ship only a
+ * source-based `.lynx.bundle`; one carrying real bytecode fails both, and the
+ * upload status reports it.
  */
-function explorerTemplateUrl(raw: string): string {
+function explorerTemplateUrls(raw: string): string[] {
   const value = raw.trim();
-  const path = value.startsWith(LOCAL_SCHEMA_PREFIX)
-    ? value.slice(LOCAL_SCHEMA_PREFIX.length)
-    : value;
-  return new URL(path, document.baseURI).href;
+  if (!value.startsWith(LOCAL_SCHEMA_PREFIX)) {
+    return [new URL(value, document.baseURI).href];
+  }
+  const url = new URL(
+    value.slice(LOCAL_SCHEMA_PREFIX.length),
+    document.baseURI,
+  );
+  if (!url.pathname.endsWith(LYNX_BUNDLE_SUFFIX)) {
+    return [url.href];
+  }
+  const web = new URL(url.href);
+  web.pathname = `${url.pathname.slice(0, -LYNX_BUNDLE_SUFFIX.length)}${WEB_BUNDLE_SUFFIX}`;
+  return [web.href, url.href];
 }
 
 function storeExplorerValue(key: string, value: unknown): void {
@@ -550,25 +568,38 @@ function createExplorerModule(
           shell.uploadStatus.textContent = 'The page asked to open an empty URL';
           return;
         }
-        let url: string;
+        let urls: string[];
         try {
-          url = explorerTemplateUrl(requested);
+          urls = explorerTemplateUrls(requested);
         } catch (error) {
           shell.uploadStatus.textContent = `Could not open ${requested}: ${errorMessage(error)}`;
           return;
         }
-        // The same load the "Load template" button runs, from the same
-        // fields, so its status, busy state and error text are the ones the
-        // page already has.
-        shell.entryInput.value = url;
-        shell.zipInput.value = '';
-        shell.zipStatus.textContent = 'No ZIP selected';
         const load = loader.load;
         if (load === undefined) {
-          console.warn('Bobcat is not ready to open', url);
+          console.warn('Bobcat is not ready to open', requested);
           return;
         }
-        void load(url, true).catch((error: unknown) => {
+        shell.zipInput.value = '';
+        shell.zipStatus.textContent = 'No ZIP selected';
+        void (async (): Promise<void> => {
+          for (const [index, url] of urls.entries()) {
+            // The same load the "Load template" button runs, from the same
+            // fields, so its status, busy state and error text are the ones
+            // the page already has.
+            shell.entryInput.value = url;
+            try {
+              await load(url, true);
+              return;
+            } catch (error) {
+              // The last candidate's failure is the one the page keeps.
+              if (index === urls.length - 1) {
+                throw error;
+              }
+              console.info(`Retrying ${requested} as ${urls[index + 1]!}`);
+            }
+          }
+        })().catch((error: unknown) => {
           console.error(error);
         });
       },

@@ -251,6 +251,23 @@ asked for — an absolute URL, a relative path, or the
 whose path resolves against the document base — into the page's own entry field
 and running the same load the **Load template** button runs, so a bundle this
 demo does not publish fails in the upload status like any other bad URL.
+
+The targets of those local paths are published beside the page. The build
+copies `@explorer/showcase`'s menu bundles to `showcase/menu/<name>.web.bundle`
+and, for each `@lynx-example/<category>` the showcase depends on, that
+package's whole `dist/` to `showcase/<category>/` — both bundle flavours and
+the `static/` images and fonts a demo names relative to itself, which only
+resolve if the tree is published as the package ships it. The category list is
+read from the showcase's own dependencies, and the packages are located with a
+`createRequire` rooted at its manifest, because pnpm's strict layout keeps them
+under its `node_modules`. A local path names `.lynx.bundle`, which is what a
+native Explorer loads; Bobcat consumes the `.web.bundle` beside it, so
+`openSchema` tries the web sibling first and retries the named file once if
+that load rejects — which is what serves the demos shipping only a
+source-based `.lynx.bundle` (`fetch`, `lazy-bundle`, `animation/animate`,
+`layout/relative`). A bundle carrying real bytecode fails both attempts and
+the upload status reports it. The query is kept on either URL.
+
 `openScan` says the browser demo has no camera scanner; `setThreadMode` and
 `openDevtoolSwitchPage` are `console.info` no-ops, Bobcat having one thread
 strategy and no DevTool switches; `saveThemePreferences` and

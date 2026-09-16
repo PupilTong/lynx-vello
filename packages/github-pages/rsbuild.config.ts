@@ -1,12 +1,43 @@
 import { defineConfig } from '@rsbuild/core';
 import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+const pagesDirectory = path.dirname(fileURLToPath(import.meta.url));
 const packageDirectory = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
+  pagesDirectory,
   '../../crates/bobcat-wasm',
 );
+const showcaseDirectory = path.resolve(pagesDirectory, '../explorer-showcase');
+
+// The showcase menus the Explorer homepage navigates to, one bundle per
+// `rspeedy` entry, published as `showcase/menu/<name>.web.bundle`.
+const showcaseMenus = path.join(showcaseDirectory, 'dist');
+
+// The demo categories, taken from the showcase's own `@lynx-example`
+// dependencies rather than restated here: each package name's unscoped half is
+// exactly the directory the menus link to (`showcase/scroll-view/…`).
+const showcasePackage = JSON.parse(
+  readFileSync(path.join(showcaseDirectory, 'package.json'), 'utf8'),
+) as { dependencies: Record<string, string> };
+// pnpm's strict layout puts these under the showcase's own `node_modules`, so
+// they are resolved from its manifest rather than from this package.
+const requireFromShowcase = createRequire(
+  path.join(showcaseDirectory, 'package.json'),
+);
+const showcaseCategories = Object.keys(showcasePackage.dependencies)
+  .filter((name) => name.startsWith('@lynx-example/'))
+  .map((name) => ({
+    // The whole `dist/`: both bundle flavours and the `static/` images and
+    // fonts a demo names relative to itself, which only resolve if the tree
+    // is published the way the package ships it.
+    from: path.join(
+      path.dirname(requireFromShowcase.resolve(`${name}/package.json`)),
+      'dist',
+    ),
+    to: path.posix.join('showcase', name.slice('@lynx-example/'.length)),
+  }));
 // These modules execute as native ESM, so the npm package allowlist is also
 // the Pages asset manifest. A new facade dependency then reaches both outputs.
 const browserFiles = (
@@ -58,13 +89,26 @@ export default defineConfig({
           },
           {
             // The template the Canvas tab loads first.
-            from: path.resolve(
-              path.dirname(fileURLToPath(import.meta.url)),
+            from: path.join(
+              pagesDirectory,
               '../explorer-homepage/dist/main.web.bundle',
             ),
             to: 'explorer-homepage/main.web.bundle',
             info: { minimized: true },
           },
+          {
+            // The homepage's showcase menus. `ExplorerModule.openSchema` is
+            // handed `showcase/menu/<name>.lynx.bundle` and loads the web
+            // sibling, so only that flavour is published here.
+            from: path.join(showcaseMenus, '*.web.bundle'),
+            to: 'showcase/menu/[name][ext]',
+            info: { minimized: true },
+          },
+          ...showcaseCategories.map(({ from, to }) => ({
+            from,
+            to,
+            info: { minimized: true },
+          })),
           ...browserFiles.map((file) => ({
             from: path.join(packageDirectory, file),
             to: path.posix.join('bobcat-wasm', file),

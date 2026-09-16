@@ -1425,7 +1425,18 @@ dropped, and callbacks nobody answered are released by the next load.
 of both: its `ExplorerModule` gives the `@explorer/homepage` bundle it loads
 first an `openSchema` that resolves an absolute URL, a relative path, or
 `file://lynx?local://<path>[?query]` against the document base and runs the
-page's own template load, `localStorage`-backed preference writes, and
+page's own template load. Those local paths have targets because the Pages
+build also publishes `@explorer/showcase`'s menus as
+`showcase/menu/<name>.web.bundle` and each `@lynx-example/<category>` it
+depends on as the package's whole `dist/` under `showcase/<category>/`, both
+bundle flavours and the `static/` assets a demo names relative to itself; the
+category list comes from the showcase's dependencies and the packages are
+found through a `createRequire` rooted at its manifest, pnpm's layout keeping
+them under its own `node_modules`. A `.lynx.bundle` local path is loaded as
+the `.web.bundle` beside it, retrying the named file once if that rejects —
+which is how the demos shipping only a source-based `.lynx.bundle` open, while
+a bytecode one fails both. It also has
+`localStorage`-backed preference writes, and
 documented no-ops where a browser demo has no answer — no camera scanner, one
 thread strategy, and no synchronous return value for
 `readFromLocalStorage`/`getSettingInfo`. It passes **no `globalProps`**

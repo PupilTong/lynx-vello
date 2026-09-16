@@ -749,6 +749,9 @@ importers:
       '@explorer/homepage':
         specifier: workspace:*
         version: link:../explorer-homepage
+      '@explorer/showcase':
+        specifier: workspace:*
+        version: link:../explorer-showcase
       '@rsbuild/core':
         specifier: 2.2.4
         version: 2.2.4
