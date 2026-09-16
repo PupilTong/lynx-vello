@@ -58,9 +58,10 @@ Landed and not to be regressed:
   view repaints. A BTS throw is nonfatal — the page degrades rather than
   failing.
 - Page data and global props are JSON text Rust never parses.
-- Not implemented on purpose: list cell recycling, UI methods via `invoke`,
-  per-component css-id scoping (every fragment mounts globally, which is what
-  web-core emits for `enableRemoveCSSScope = true`), and gesture detectors.
+- Not implemented on purpose: list cell recycling, UI methods other than
+  `boundingClientRect`, per-component css-id scoping (every fragment mounts
+  globally, which is what web-core emits for `enableRemoveCSSScope = true`), and
+  gesture detectors.
 
 ## Reference repos
 

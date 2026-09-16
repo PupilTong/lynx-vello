@@ -1783,6 +1783,299 @@ fn the_query_selector_papi_never_answers_the_element_it_was_asked_on() {
         .expect("verification");
 }
 
+/// The one UI method the engine dispatches: `boundingClientRect` answers the
+/// border box of the last layout pass, and — as native does, where web-core
+/// reports the id alone — the element's `id` attribute and `dataset` ride
+/// along. `right` and `bottom` are sums the realm derives.
+#[test]
+fn invoke_answers_a_bounding_client_rect_carrying_the_elements_id_and_dataset() {
+    let (mut js_runtime, mut runtime, _elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const view = __CreateView(0);
+                  __SetInlineStyles(view, 'width:100px;height:50px;margin-left:20px');
+                  __AppendElement(page, view);
+                  globalThis.held = [page, view];
+                };
+                ",
+            "app:///invoke.js",
+        )
+        .expect("main-thread script");
+
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                import {
+                  __FlushElementTree,
+                  __InvokeUIMethod,
+                  __SetDataset,
+                  __SetID,
+                } from 'bobcat:element';
+                const [, view] = held;
+                // The callback is synchronous and runs exactly once, which is
+                // what a card that measures and then acts in one job needs.
+                globalThis.measure = (element, method) => {
+                  let answer;
+                  let calls = 0;
+                  __InvokeUIMethod(element, method, {}, result => {
+                    answer = result;
+                    calls += 1;
+                  });
+                  if (calls !== 1) throw new Error('the callback ran ' + calls + ' times');
+                  return answer;
+                };
+                __FlushElementTree();
+                const measured = measure(view, 'boundingClientRect');
+                const expected = {
+                  id: '', dataset: {}, left: 20, top: 0,
+                  right: 120, bottom: 50, width: 100, height: 50,
+                };
+                if (measured.code !== 0) throw new Error(JSON.stringify(measured));
+                for (const key of Object.keys(expected)) {
+                  if (JSON.stringify(measured.data[key]) !== JSON.stringify(expected[key])) {
+                    throw new Error(key + ': ' + JSON.stringify(measured.data));
+                  }
+                }
+                __SetID(view, 'target');
+                __SetDataset(view, {k: 1});
+                const named = measure(view, 'boundingClientRect');
+                if (named.data.id !== 'target' || named.data.dataset.k !== 1) {
+                  throw new Error(JSON.stringify(named));
+                }
+                // Neither attribute moved the box, and neither did measuring.
+                if (named.data.left !== 20 || named.data.width !== 100) {
+                  throw new Error(JSON.stringify(named));
+                }
+                // Any other method is unknown to the engine: the shared
+                // table's code 3, without a throw and without a `data`.
+                const unsupported = measure(view, 'scrollIntoView');
+                if (unsupported.code !== 3 || unsupported.data !== undefined) {
+                  throw new Error(JSON.stringify(unsupported));
+                }
+                ",
+            "app:///measure.js",
+            "measuring",
+        )
+        .expect("measuring");
+}
+
+/// Measuring runs no pipeline step. A job that mutates and then measures
+/// sees the box the last pass produced; the new one arrives only once the
+/// realm flushes itself, or once the entry's epilogue commits for it.
+#[test]
+fn a_measurement_reports_the_last_pass_until_something_else_flushes() {
+    let (mut js_runtime, mut runtime, _elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const view = __CreateView(0);
+                  __SetInlineStyles(view, 'width:100px;height:50px;margin-left:20px');
+                  __AppendElement(page, view);
+                  globalThis.held = [page, view];
+                };
+                globalThis.left = element => {
+                  let answer;
+                  __InvokeUIMethod(element, 'boundingClientRect', {}, result => {
+                    answer = result;
+                  });
+                  if (answer.code !== 0) throw new Error(JSON.stringify(answer));
+                  if (answer.data.width !== 100) throw new Error(JSON.stringify(answer));
+                  return answer.data.left;
+                };
+                ",
+            "app:///no-flush.js",
+        )
+        .expect("main-thread script");
+
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                import { __FlushElementTree, __SetInlineStyles } from 'bobcat:element';
+                const [, view] = held;
+                __SetInlineStyles(view, {width: '100px', height: '50px', marginLeft: '40px'});
+                if (left(view) !== 20) throw new Error('measuring flushed: ' + left(view));
+                __FlushElementTree();
+                if (left(view) !== 40) throw new Error('the flush was not seen: ' + left(view));
+                __SetInlineStyles(view, {width: '100px', height: '50px', marginLeft: '60px'});
+                if (left(view) !== 40) throw new Error('measuring flushed: ' + left(view));
+                ",
+            "app:///mutate.js",
+            "mutating",
+        )
+        .expect("mutating");
+
+    // The epilogue every entry into the realm owes, which is why the
+    // background thread's query path is always measuring a current tree.
+    runtime.commit_if_dirty();
+
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                const [, view] = held;
+                if (left(view) !== 60) throw new Error('the epilogue did not commit: ' + left(view));
+                ",
+            "app:///next-entry.js",
+            "next entry",
+        )
+        .expect("next entry");
+}
+
+/// Both readback members go through the same element validation as every
+/// other tree primitive: a handle whose element has been freed is a script
+/// error, not a zero rect or an empty style.
+#[test]
+fn measuring_or_reading_the_style_of_a_freed_element_fails_the_entry() {
+    let (mut js_runtime, mut runtime, _elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                import { dropElement } from 'bobcat-internal:host';
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const gone = __CreateView(0);
+                  __AppendElement(page, gone);
+                  __RemoveElement(page, gone);
+                  // Called directly, where a finalizer would.
+                  dropElement(__GetElementUniqueID(gone));
+                  globalThis.gone = gone;
+                };
+                ",
+            "app:///freed.js",
+        )
+        .expect("main-thread script");
+
+    for (source, name) in [
+        (
+            "import { __InvokeUIMethod } from 'bobcat:element';
+                 __InvokeUIMethod(globalThis.gone, 'boundingClientRect', {}, () => {});",
+            "app:///measure-freed.js",
+        ),
+        (
+            "import { __GetComputedStyleByKey } from 'bobcat:element';
+                 __GetComputedStyleByKey(globalThis.gone, 'width');",
+            "app:///style-freed.js",
+        ),
+    ] {
+        let error = runtime
+            .evaluate_module(&mut js_runtime, source, name, "reading a freed element")
+            .expect_err("a freed element cannot be read");
+        assert!(error.source.message.contains("stale element id"), "{error}");
+    }
+}
+
+/// `__GetComputedStyleByKey` is CSSOM's `getPropertyValue`, so it takes CSS
+/// property names and nothing else — no IDL spelling, no shorthand — and it
+/// reports the resolved value without running a pass to produce one.
+#[test]
+fn computed_style_by_key_answers_css_names_off_the_last_flush() {
+    let (mut js_runtime, mut runtime, _elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const view = __CreateView(0);
+                  __SetInlineStyles(view, 'width:100px;height:50px;margin-left:20px');
+                  __AppendElement(page, view);
+                  globalThis.held = [page, view, __CreateView(0)];
+                };
+                ",
+            "app:///computed.js",
+        )
+        .expect("main-thread script");
+
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                import { __FlushElementTree, __GetComputedStyleByKey } from 'bobcat:element';
+                const [, view, detached] = held;
+                __FlushElementTree();
+                const answers = {
+                  'margin-top': __GetComputedStyleByKey(view, 'margin-top'),
+                  'margin-left': __GetComputedStyleByKey(view, 'margin-left'),
+                  // An IDL name is not a CSS name, a shorthand is not a
+                  // longhand, and neither is a property at all.
+                  'marginTop': __GetComputedStyleByKey(view, 'marginTop'),
+                  'margin': __GetComputedStyleByKey(view, 'margin'),
+                  'not-a-property': __GetComputedStyleByKey(view, 'not-a-property'),
+                  // Live, but no pass has ever reached it.
+                  'detached': __GetComputedStyleByKey(detached, 'width'),
+                };
+                const expected = {
+                  'margin-top': '0px', 'margin-left': '20px', 'marginTop': '',
+                  'margin': '', 'not-a-property': '', 'detached': '',
+                };
+                for (const key of Object.keys(expected)) {
+                  if (answers[key] !== expected[key]) throw new Error(key + ': ' + JSON.stringify(answers));
+                }
+                ",
+            "app:///read-style.js",
+            "reading styles",
+        )
+        .expect("reading styles");
+}
+
+/// The Typed OM half: a whole-style snapshot of computed values, in which a
+/// non-custom name that is not a property is a `TypeError` and an absent
+/// custom property is simply missing.
+#[test]
+fn the_computed_style_map_snapshots_every_property_of_a_flushed_element() {
+    let (mut js_runtime, mut runtime, _elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const view = __CreateView(0);
+                  __SetInlineStyles(view, 'width:100px;height:50px;margin-left:20px');
+                  __AppendElement(page, view);
+                  globalThis.held = [page, view];
+                };
+                ",
+            "app:///style-map.js",
+        )
+        .expect("main-thread script");
+
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                import { __BobcatComputedStyleMap, __FlushElementTree } from 'bobcat:element';
+                const [, view] = held;
+                __FlushElementTree();
+                const map = __BobcatComputedStyleMap(view);
+                // Computed, not resolved: the declared width verbatim.
+                if (String(map.get('width')) !== '100px') {
+                  throw new Error('width: ' + map.get('width'));
+                }
+                if (map.has('--nope') !== false || map.get('--nope') !== undefined) {
+                  throw new Error('an absent custom property is present');
+                }
+                if (!(map.size > 50)) throw new Error('size: ' + map.size);
+                let thrown;
+                try { map.get('bogus'); } catch (error) { thrown = error; }
+                if (!(thrown instanceof TypeError)) throw new Error('bogus: ' + thrown);
+                ",
+            "app:///read-map.js",
+            "reading the style map",
+        )
+        .expect("reading the style map");
+}
+
 #[test]
 fn a_replaced_add_event_handler_moves_its_node_between_passes() {
     let (mut js_runtime, mut runtime, _elements) = runtime();

@@ -576,6 +576,51 @@ consequential choice about whether to follow the spec or the quirk.
   explicit `.exec()`, callback-based `invoke()`. This shape (async/batched
   query, not live synchronous DOM references) recurs across most of the
   JS-facing element API — treat it as the systemic pattern, not a one-off.
+- **`invoke('boundingClientRect')` excludes transforms** — the two references
+  disagree with each other. Native's own engine-side conversion
+  (`core/renderer/dom/fragment/event/platform_event_target_helper.cc`) sums
+  each ancestor's `Left()`/`Top()` plus scroll offsets under an explicit
+  `TODO: add transform support`, and Android excludes them unless
+  `androidEnableTransformProps` is passed; only iOS, which goes through
+  UIKit's `convertRect:toView:`, folds them in, as does web-core, which calls
+  DOM `getBoundingClientRect()`. **Decision: follow the engine path** — the
+  rect is the untransformed border box the layout pass produced, so a rotated
+  or translated element reports where it was laid out, not where it paints.
+  `relativeTo`, `androidEnableTransformProps` and `iOSEnableAnimationProps`
+  are not accepted at all; the `params` object is ignored.
+- **The rect carries `id` and `dataset`** — native's result bundles both
+  (`LynxUI.m`, `platform_event_target_helper.cc`); web-core's carries the
+  geometry and the id only, because DOM `getBoundingClientRect()` has neither.
+  **Decision: follow native** and include the typed `dataset` copy, which is
+  what a card that measures a list row then reads its keys off the same answer
+  expects. This is one of the places where the web default is not taken.
+- **An unknown UI method answers 3, not 1** — the code table is shared
+  (`lynx_get_ui_result.h`, web-core's `constants.ts`), but native reports the
+  generic `UNKNOWN = 1` for a method its per-class registry has no entry for,
+  while web-core reports `METHOD_NOT_FOUND = 3`. **Decision: 3** — web-core is
+  the default resolution and the code is the one that actually names the
+  failure. Node-resolution codes are unchanged: 2 for no match, 5 for a
+  selector the query layer refuses.
+- **Measurement and computed-style readback never flush** — neither
+  `__InvokeUIMethod` nor `__GetComputedStyleByKey` runs style, layout or
+  paint; they report the last completed pass and the styles it was computed
+  from. **Not a deviation from either reference so much as a contract worth
+  stating**, because it is observable: a BTS query is always current (the
+  entry that queued it returned and its epilogue committed), while an MTS
+  worklet that mutates and measures in one job reads the pre-mutation geometry
+  until it calls `__FlushElementTree` — the order ReactLynx's own
+  `Element.invoke` uses, since it flushes *after* the PAPI call. An element no
+  pass has reached answers zeros for the rect and nothing at all for style.
+  Within style, the CSSOM and Typed OM halves differ as the specs do:
+  `__GetComputedStyleByKey` reports *resolved* values, so `width`, `height`,
+  `margin-*` and `padding-*` come back as the used px of the last layout when
+  the element has a box, while `__BobcatComputedStyleMap` reports computed
+  values and is a per-call snapshot rather than the standard's `[SameObject]`
+  live map. **Known gap:** shorthands are reported by neither — absent from
+  the map, `""` by key — because Typed OM excludes them and the two references
+  disagree on what a shorthand's text should be. Non-custom names match
+  ASCII-case-insensitively, as stylo's own parse does; `--*` names match
+  exactly, so `marginTop` is empty where `margin-top` answers.
 - **`requestAnimationFrame`/timers** — signature-compatible with the W3C
   APIs, but callback timing is tied to Lynx's own frame/vsync pump (paused in
   background, no guaranteed cadence). Implement by driving our own frame pump

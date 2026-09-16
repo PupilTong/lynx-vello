@@ -1698,12 +1698,21 @@ fn bts_native_props_mutate_the_document_before_the_next_query() {
     )));
 }
 
+/// The background thread's `invoke` reaches the same `__InvokeUIMethod` the
+/// main thread's does, and the geometry it answers is current without the
+/// query flushing for it: the entry that built the tree had already run a
+/// pass over it — boot's own deferred flush here, the dirty-commit epilogue
+/// for every entry after it — by the time the Worker's request crosses back.
+/// Node resolution keeps its own codes either side of that: 2 for a selector
+/// that matched nothing, and 5 for the `selectAll` an `invoke` cannot take,
+/// which `selector-query.ts` refuses locally without a crossing at all.
 #[test]
-fn bts_invoke_reports_failures_and_later_queries_still_complete() {
+fn bts_invoke_measures_the_committed_tree_and_keeps_its_node_resolution_codes() {
     let mut pair = Pair::with_background(
         r"
         const page = __CreatePage();
         const item = __CreateView(); __SetID(item, 'item');
+        __SetInlineStyles(item, 'width:100px;height:50px;margin-left:20px');
         __AppendElement(page, item);
         globalThis.result = null;
         lynx.getJSContext().addEventListener('queryDone', event => { result = event.data; });
@@ -1713,16 +1722,15 @@ fn bts_invoke_reports_failures_and_later_queries_still_complete() {
         void (async () => {
             const query = lynx.createSelectorQuery();
             const invoke = nodes => new Promise(resolve => nodes.invoke({
-                method:'boundingClientRect', fail:resolve,
-                success:() => { throw Error('UI method unexpectedly implemented'); },
+                method:'boundingClientRect', fail:resolve, success:resolve,
             }).exec());
-            const unsupported = await invoke(query.select('#item'));
+            const measured = await invoke(query.select('#item'));
             const missing = await invoke(query.select('#absent'));
             const multiple = await invoke(query.selectAll('view'));
             const after = await new Promise(resolve => query.select('#item').fields(
                 {id:true}, (data, status) => resolve({data, status}),
             ).exec());
-            lynx.getCoreContext().dispatchEvent({type:'queryDone', data:{unsupported, missing, multiple, after}});
+            lynx.getCoreContext().dispatchEvent({type:'queryDone', data:{measured, missing, multiple, after}});
         })();
         ",
         ),
@@ -1733,7 +1741,10 @@ fn bts_invoke_reports_failures_and_later_queries_still_complete() {
         pair.deliver();
     }
     pair.check(r"
-        if (result.unsupported.code !== 1 || !result.unsupported.data.includes('not implemented')) throw Error(JSON.stringify(result));
+        const rect = result.measured;
+        if (rect.id !== 'item' || typeof rect.dataset !== 'object') throw Error(JSON.stringify(result));
+        if (rect.left !== 20 || rect.top !== 0 || rect.width !== 100 || rect.height !== 50) throw Error(JSON.stringify(result));
+        if (rect.right !== 120 || rect.bottom !== 50) throw Error(JSON.stringify(result));
         if (result.missing.code !== 2 || result.multiple.code !== 5) throw Error(JSON.stringify(result));
         if (result.after.status.code !== 0 || result.after.data.id !== 'item') throw Error(JSON.stringify(result));
     ");

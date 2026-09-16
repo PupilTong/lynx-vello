@@ -49,4 +49,7 @@ declare global {
   var __AddDataset: typeof elementPapi.__AddDataset;
   var __AddInlineStyle: typeof elementPapi.__AddInlineStyle;
   var __FlushElementTree: typeof elementPapi.__FlushElementTree;
+  var __InvokeUIMethod: typeof elementPapi.__InvokeUIMethod;
+  var __GetComputedStyleByKey: typeof elementPapi.__GetComputedStyleByKey;
+  var __BobcatComputedStyleMap: typeof elementPapi.__BobcatComputedStyleMap;
 }
