@@ -214,6 +214,7 @@ impl MacApplication {
                 css_height,
                 scale_factor,
                 resources.builder(),
+                Vec::new(),
                 program.sources(),
             )
             .map_err(|source| CliError::StartView {

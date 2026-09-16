@@ -44,6 +44,7 @@ mod lifetime;
 mod link;
 #[path = "main/lib.rs"]
 mod main;
+pub mod native_module;
 #[path = "paint/lib.rs"]
 mod paint;
 pub mod resource;
@@ -69,6 +70,7 @@ pub use dom::{
     MAX_RENDERABLE_DIMENSION, MAX_STYLE_THREADS, NoImages, is_renderable, vello,
 };
 pub use main::tree::PageConfig;
+pub use native_module::{ModuleCall, ModuleCallback, NativeModule};
 pub use paint::Painter;
 pub use style::{PreparsedDeclaration, PreparsedKeyframe, PreparsedRule, PreparsedStyleSheet};
 #[cfg(target_arch = "wasm32")]

@@ -262,7 +262,7 @@ impl TestViewSpec {
                 .await
                 .expect("the test group starts");
             let view = group
-                .create_lynx_view(width, height, 1.0, |_reports| fetcher, sources)
+                .create_lynx_view(width, height, 1.0, |_reports| fetcher, Vec::new(), sources)
                 .expect("the test view is built");
             let painter = if with_painter {
                 let mut painter = match target {

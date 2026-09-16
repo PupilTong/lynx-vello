@@ -658,7 +658,14 @@ async fn named_lepus_chunks_load_on_demand_in_the_selected_entry_scope() {
     );
     page.register_with(&resources);
     let mut view = group
-        .create_lynx_view(32.0, 24.0, 1.0, resources.builder(), page.view_sources())
+        .create_lynx_view(
+            32.0,
+            24.0,
+            1.0,
+            resources.builder(),
+            Vec::new(),
+            page.view_sources(),
+        )
         .unwrap();
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     loop {
@@ -716,7 +723,7 @@ async fn named_css_is_loaded_by_url_after_native_web_conversion() {
             let resources = Resources::new(ResourcesConfig::default(), || {});
             page.register_with(&resources);
             let mut view = group
-                .create_lynx_view(32.0, 24.0, 1.0, resources.builder(), sources)
+                .create_lynx_view(32.0, 24.0, 1.0, resources.builder(), Vec::new(), sources)
                 .unwrap();
             let mut painter = Painter::new(DrawTarget::Offscreen, 32.0, 24.0, 1.0)
                 .await

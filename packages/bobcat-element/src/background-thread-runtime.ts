@@ -1,4 +1,4 @@
-import "bobcat:worker";
+import { callNativeModule } from "bobcat:worker";
 import { requestScriptFrame } from "bobcat-internal:host";
 import type { WorkerGlobalScope } from "bobcat:worker";
 import {
@@ -23,8 +23,16 @@ const coreContext = createCrossThreadContext();
 type AppHook = (...args: unknown[]) => unknown;
 const emitter = new GlobalEventEmitter();
 const jsModules = new Map<string, unknown>([["GlobalEventEmitter", emitter]]);
-// Platform modules are absent; the compiler still receives the proxy slot.
-const nativeModuleProxy = new Proxy({}, {get() { return null; }});
+// The embedder's `NativeModule`s, as the objects a card calls: one property
+// per module the view was built with, filled in by `__BobcatInitializeBTS`
+// before the entry imports. A module the host does not have is `undefined`
+// — web-core's answer, a missing key on the object `createNativeModules`
+// builds, where native answers `null`.
+//
+// The property name `nativeModuleProxy` stays although nothing is a Proxy any
+// more: it is the name ReactLynx reads (`nativeApp.nativeModuleProxy
+// .LynxUIMethodModule`), and renaming it would only break that lookup.
+const nativeModules: Record<string, object> = {};
 const app: {
   NativeModules: object;
   _apiList: object;
@@ -45,7 +53,7 @@ const app: {
   registerModule(name: string, value: unknown): void;
   getJSModule(name: string): unknown;
 } = {
-  NativeModules: nativeModuleProxy,
+  NativeModules: nativeModules,
   _apiList: {},
   _params: {initData: null, updateData: undefined, processorName: "", cacheData: []},
   GlobalEventEmitter: emitter,
@@ -67,7 +75,10 @@ let nextAnimationId = 1;
  * `bobcat: "runtime"`, or a Context event's public fields, which carry no tag.
  */
 type FromMainThread =
-  | ({ bobcat: "runtime"; method: "initialize" } & BackgroundData & {systemInfo?: Record<string, unknown>})
+  | ({ bobcat: "runtime"; method: "initialize" } & BackgroundData & {
+      systemInfo?: Record<string, unknown>;
+      nativeModules?: Record<string, string[]>;
+    })
   | {
       bobcat: "runtime";
       method: "publishEvent" | "publicComponentEvent" | "updateGlobalProps" | "updateCardData" | "onAppReload" | "processCardConfig";
@@ -136,7 +147,7 @@ const sendQuery: SendQuery = (operation, token, params, callback) => {
 };
 
 const nativeApp = {
-  nativeModuleProxy,
+  nativeModuleProxy: nativeModules,
   createJSObjectDestructionObserver(callback: () => unknown): object {
     const observer = {};
     destructionRegistry.register(observer, callback);
@@ -195,7 +206,7 @@ coreContext.connect((event) => scope.postMessage({ type: event.type, data: event
 // message supplies inputs; ordinary messages wait for the entry's imports to
 // settle, whether they finished or threw. Nothing outside this realm waits on
 // that: the view is ready once MTS has booted, whatever becomes of the BTS.
-let startBackground: ((options: BackgroundData & {systemInfo?: Record<string, unknown>}) => Promise<void>) | undefined;
+let startBackground: ((options: InitializeOptions) => Promise<void>) | undefined;
 let entryReady: Promise<void> | undefined;
 
 function noop() {
@@ -418,13 +429,29 @@ interface BackgroundData {
   cacheData?: unknown[];
 }
 
-export function __BobcatInitializeBTS(options: BackgroundData & {
+/**
+ * What the main thread opens this realm with: the page's data, the runtime
+ * target, and the modules the embedder injected at `create_lynx_view`, as
+ * `{name: methods}`.
+ */
+interface InitializeOptions extends BackgroundData {
   systemInfo?: Record<string, unknown>;
-}) {
+  nativeModules?: Record<string, string[]>;
+}
+
+export function __BobcatInitializeBTS(options: InitializeOptions) {
   const params = options;
   app._params = { initData:params.initData ?? null, updateData:params.updateData, processorName:params.processorName ?? "", cacheData:params.cacheData ?? [] };
   lynx.__initData = Object.hasOwn(params, "updateData") ? params.updateData : params.initData;
   lynx.__globalProps = params.globalProps || {};
+  // Every declared method, and nothing else: a method a module did not
+  // declare is `undefined`, which is what native answers for one its module
+  // does not carry. Each returns `undefined` — a module answers through the
+  // callbacks among its arguments, never through a return value.
+  for (const [name, methods] of Object.entries(options.nativeModules ?? {})) {
+    nativeModules[name] = Object.fromEntries(methods.map(method =>
+      [method, (...args: unknown[]) => callNativeModule(name, method, args)]));
+  }
   if (options.systemInfo) SystemInfo = Object.freeze({ ...SystemInfo, ...options.systemInfo });
   lynx.SystemInfo = SystemInfo;
   // Keep the raw BTS environment consistent with its module snapshot.

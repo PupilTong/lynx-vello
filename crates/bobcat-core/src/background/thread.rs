@@ -43,8 +43,8 @@ use tokio::task::{self, JoinError, JoinSet, LocalSet};
 use tokio_util::sync::CancellationToken;
 
 use super::scope::{
-    WORKER_DELIVER_EXPORT, WORKER_MODULE_SPECIFIER, install_worker_members, install_worker_modules,
-    worker_boot_source,
+    WORKER_DELIVER_EXPORT, WORKER_MODULE_CALLBACK_EXPORT, WORKER_MODULE_SPECIFIER,
+    install_worker_members, install_worker_modules, worker_boot_source,
 };
 use super::{WorkerCommand, WorkerEvent, WorkerKey, WorkerMessage, WorkerPayload, WorkerStart};
 use crate::lifetime::{EndOnUnwind, Lifetime, Settles, serve_clock};
@@ -194,6 +194,10 @@ struct Worker {
     /// has a latch of its own on the lifetime.
     reported: Cell<bool>,
     sources: HostOutbox,
+    /// This worker's own inbox, weakly, as it is handed to whoever owes this
+    /// realm an answer: a native module's callback, which may be held for as
+    /// long as the module's work takes and must not keep the realm alive.
+    inbox: mpsc::WeakUnboundedSender<WorkerMessage>,
     /// Messages wait for entry evaluation, including imports and top-level
     /// await. Timers and module completions continue to enter the realm.
     boot_finished: watch::Sender<bool>,
@@ -210,6 +214,7 @@ impl Worker {
         events: mpsc::UnboundedSender<WorkerEvent>,
         token: CancellationToken,
         sources: HostOutbox,
+        inbox: mpsc::WeakUnboundedSender<WorkerMessage>,
     ) -> Rc<Self> {
         Rc::new(Self {
             js,
@@ -219,6 +224,7 @@ impl Worker {
             lifetime: Lifetime::new(token),
             reported: Cell::new(false),
             sources,
+            inbox,
             boot_finished: watch::channel(false).0,
             #[cfg(test)]
             epilogues: Cell::new(0),
@@ -379,7 +385,14 @@ impl Worker {
                 // asked for. Each hears the same reason.
                 Err(error) => Err(error.clone()),
                 Ok(js) => {
-                    open_realm(js, self.events.clone(), self.key, &self.sources).map(|mut realm| {
+                    open_realm(
+                        js,
+                        self.events.clone(),
+                        self.key,
+                        &self.sources,
+                        &self.inbox,
+                    )
+                    .map(|mut realm| {
                         let (source, url) = script;
                         let source = worker_boot_source(name, &source);
                         if let Err(error) = realm.engine.start_module(js, &source, &url) {
@@ -466,12 +479,13 @@ async fn serve_worker(js: WorkerRuntime, start: WorkerStart) {
         key,
         name,
         script,
+        inbox,
         messages,
         events,
         token,
         sources,
     } = start;
-    let worker = Worker::new(js, key, events, token, sources);
+    let worker = Worker::new(js, key, events, token, sources, inbox);
     worker.spawn(boot_worker(Rc::clone(&worker), name, script, messages));
     worker.run_owner().await;
 }
@@ -509,7 +523,10 @@ async fn boot_worker(
                     return;
                 }
                 Some(WorkerMessage::Post(data)) => queued.push(data),
-                Some(WorkerMessage::Vsync(_)) => {},
+                // Neither can reach a realm that does not exist yet: nothing
+                // has called a module, and the painter's frame is the same
+                // kind of nothing to answer.
+                Some(WorkerMessage::Vsync(_) | WorkerMessage::ModuleCallback { .. }) => {},
             },
             // A worker that ended before its boot task was polled must not
             // evaluate the arriving source.
@@ -568,6 +585,39 @@ fn deliver_vsync(worker: &Rc<Worker>, milliseconds: f64) {
     });
 }
 
+/// One native module's answer to one function argument of one call.
+///
+/// `arguments` is the JSON array text the realm spreads; `None` releases the
+/// function without calling it, which is what a module that dropped its
+/// callback owes. A callback for a call the realm has forgotten is a no-op
+/// over there, so nothing here has to know which calls are outstanding.
+fn deliver_module_callback(worker: &Rc<Worker>, call: u64, index: u32, arguments: Option<&str>) {
+    worker.enter(|realm, js| {
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "the realm mints these counting up from one"
+        )]
+        let delivered = realm.engine.call_module_export(
+            js,
+            WORKER_MODULE_SPECIFIER,
+            WORKER_MODULE_CALLBACK_EXPORT,
+            &[
+                HostArgument::Number(call as f64),
+                HostArgument::Number(f64::from(index)),
+                arguments.map_or(HostArgument::Undefined, HostArgument::String),
+            ],
+        );
+        if let Err(error) = delivered {
+            report(
+                &worker.events,
+                worker.key,
+                "running a native module callback",
+                error,
+            );
+        }
+    });
+}
+
 /// The one ordered consumer of what is posted to this worker.
 async fn consume_messages(
     worker: Rc<Worker>,
@@ -585,6 +635,12 @@ async fn consume_messages(
                 }
                 Some(WorkerMessage::Post(data)) => queued.push(data),
                 Some(WorkerMessage::Vsync(milliseconds)) => deliver_vsync(&worker, milliseconds),
+                // Immediately, like a frame and unlike a post: the entry that
+                // has not finished importing may itself be awaiting this
+                // answer, so queuing it behind boot would deadlock the call.
+                Some(WorkerMessage::ModuleCallback { call, index, arguments }) => {
+                    deliver_module_callback(&worker, call, index, arguments.as_deref());
+                }
             },
             changed = ready.changed() => if changed.is_err() { return; },
         }
@@ -597,6 +653,11 @@ async fn consume_messages(
             // Explicit termination or collection of the MTS handle.
             WorkerMessage::Terminate => break,
             WorkerMessage::Vsync(milliseconds) => deliver_vsync(&worker, milliseconds),
+            WorkerMessage::ModuleCallback {
+                call,
+                index,
+                arguments,
+            } => deliver_module_callback(&worker, call, index, arguments.as_deref()),
             WorkerMessage::Post(data) => {
                 worker.enter(|realm, js| deliver(&worker.events, worker.key, realm, js, &data));
             }
@@ -648,26 +709,35 @@ fn open_realm(
     events: mpsc::UnboundedSender<WorkerEvent>,
     key: WorkerKey,
     host: &HostOutbox,
+    inbox: &mpsc::WeakUnboundedSender<WorkerMessage>,
 ) -> Result<WorkerRealm, ScriptError> {
     let mut engine = js_runtime
         .create_realm()
         .map_err(|error| context_of("creating the worker realm", error))?;
     engine.enable_module_loading();
-    let host = host.clone();
+    let frames = host.clone();
     crate::script_frames::install(&mut engine, js_runtime, move |pending| {
-        host.notify(crate::link::ViewNotice::ScriptFrameDemand {
+        frames.notify(crate::link::ViewNotice::ScriptFrameDemand {
             worker: Some(key),
             pending,
         });
     })?;
     let timers = Rc::new(TimerState::new());
     let closing = Rc::new(Cell::new(false));
-    install_worker_members(&mut engine, js_runtime, &timers, &closing, move |data| {
-        let _ = events.send(WorkerEvent {
-            key,
-            payload: WorkerPayload::Message(data),
-        });
-    })?;
+    install_worker_members(
+        &mut engine,
+        js_runtime,
+        &timers,
+        &closing,
+        host,
+        inbox,
+        move |data| {
+            let _ = events.send(WorkerEvent {
+                key,
+                payload: WorkerPayload::Message(data),
+            });
+        },
+    )?;
     Ok(WorkerRealm {
         engine,
         timers,
@@ -791,6 +861,7 @@ mod tests {
                 std::sync::Arc::new(crate::NoWakeup),
                 CancellationToken::new(),
             ),
+            messages.downgrade(),
         );
         worker.spawn(boot_worker(
             Rc::clone(&worker),

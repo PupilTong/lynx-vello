@@ -111,6 +111,7 @@ async fn a_second_painter_on_one_view_is_refused() {
             24.0,
             1.0,
             |_reports| Rc::new(FetcherDouble::new(page("#ff0000")).resolving_to(SCRIPT_URL)),
+            Vec::new(),
             ViewSources::new(SCRIPT_URL),
         )
         .expect("the view is built");
@@ -144,6 +145,7 @@ async fn a_detached_view_can_be_painted_by_another_painter() {
             24.0,
             1.0,
             |_reports| Rc::new(FetcherDouble::new(page("#ff0000")).resolving_to(SCRIPT_URL)),
+            Vec::new(),
             ViewSources::new(SCRIPT_URL),
         )
         .expect("the view is built");
@@ -188,6 +190,7 @@ async fn a_view_dropped_under_its_painter_leaves_the_last_frame_standing() {
             24.0,
             1.0,
             |_reports| Rc::new(FetcherDouble::new(page("#ff0000")).resolving_to(SCRIPT_URL)),
+            Vec::new(),
             ViewSources::new(SCRIPT_URL),
         )
         .expect("the view is built");
@@ -240,6 +243,7 @@ async fn a_dropped_views_last_frame_keeps_the_image_pixels_it_read() {
                         .serving(sink),
                 )
             },
+            Vec::new(),
             ViewSources::new(SCRIPT_URL),
         )
         .expect("the view is built");
@@ -301,6 +305,7 @@ async fn one_painter_re_attached_to_a_second_view_shows_the_second_page() {
             24.0,
             1.0,
             |_reports| Rc::new(FetcherDouble::new(page("#ff0000")).resolving_to(SCRIPT_URL)),
+            Vec::new(),
             ViewSources::new(SCRIPT_URL),
         )
         .expect("the first view is built");
@@ -325,6 +330,7 @@ async fn one_painter_re_attached_to_a_second_view_shows_the_second_page() {
             24.0,
             1.0,
             |_reports| Rc::new(FetcherDouble::new(page("#0000ff")).resolving_to(SCRIPT_URL)),
+            Vec::new(),
             ViewSources::new(SCRIPT_URL),
         )
         .expect("the second view is built");
@@ -362,6 +368,7 @@ async fn a_painter_whose_view_is_gone_attaches_to_the_next_one() {
             24.0,
             1.0,
             |_reports| Rc::new(FetcherDouble::new(page("#ff0000")).resolving_to(SCRIPT_URL)),
+            Vec::new(),
             ViewSources::new(SCRIPT_URL),
         )
         .expect("the first view is built");
@@ -382,6 +389,7 @@ async fn a_painter_whose_view_is_gone_attaches_to_the_next_one() {
             24.0,
             1.0,
             |_reports| Rc::new(FetcherDouble::new(page("#0000ff")).resolving_to(SCRIPT_URL)),
+            Vec::new(),
             ViewSources::new(SCRIPT_URL),
         )
         .expect("the second view is built");
@@ -418,6 +426,7 @@ async fn a_painter_re_attached_through_the_auto_detach_resets_what_it_kept() {
             24.0,
             1.0,
             |_reports| Rc::new(FetcherDouble::new(page("#ff0000")).resolving_to(SCRIPT_URL)),
+            Vec::new(),
             ViewSources::new(SCRIPT_URL),
         )
         .expect("the first view is built");
@@ -443,6 +452,7 @@ async fn a_painter_re_attached_through_the_auto_detach_resets_what_it_kept() {
             24.0,
             1.0,
             |_reports| Rc::new(FetcherDouble::new(page("#0000ff")).resolving_to(SCRIPT_URL)),
+            Vec::new(),
             ViewSources::new(SCRIPT_URL),
         )
         .expect("the second view is built");
@@ -484,6 +494,7 @@ async fn a_re_attached_painter_bakes_the_new_pages_planes() {
             |_reports| {
                 Rc::new(FetcherDouble::new(scroller("#ff0000", "#0000ff")).resolving_to(SCRIPT_URL))
             },
+            Vec::new(),
             ViewSources::new(SCRIPT_URL),
         )
         .expect("the first view is built");
@@ -505,6 +516,7 @@ async fn a_re_attached_painter_bakes_the_new_pages_planes() {
             |_reports| {
                 Rc::new(FetcherDouble::new(scroller("#0000ff", "#ff0000")).resolving_to(SCRIPT_URL))
             },
+            Vec::new(),
             ViewSources::new(SCRIPT_URL),
         )
         .expect("the second view is built");

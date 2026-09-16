@@ -742,7 +742,14 @@ mod tests {
                 .await
                 .unwrap();
             let mut view = group
-                .create_lynx_view(32.0, 24.0, 1.0, resources.builder(), page.view_sources())
+                .create_lynx_view(
+                    32.0,
+                    24.0,
+                    1.0,
+                    resources.builder(),
+                    Vec::new(),
+                    page.view_sources(),
+                )
                 .unwrap();
             let deadline = Instant::now() + Duration::from_secs(20);
             let mut reported = false;

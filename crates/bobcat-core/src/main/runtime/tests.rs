@@ -380,6 +380,7 @@ fn page_data_is_parsed_by_the_realm_it_was_given_to() {
             initial_processor: String::new(),
             init_data: Some(r#"{"count": 2, "text": "中文 🦀"}"#.to_owned()),
             global_props: Some(r#"{"theme": "dark"}"#.to_owned()),
+            native_modules: String::new(),
         },
         PageData::default(),
     ]);
@@ -429,11 +430,13 @@ fn malformed_page_data_fails_boot_before_the_entry_runs() {
             initial_processor: String::new(),
             init_data: Some("{".to_owned()),
             global_props: None,
+            native_modules: String::new(),
         },
         PageData {
             initial_processor: String::new(),
             init_data: None,
             global_props: Some("[1,".to_owned()),
+            native_modules: String::new(),
         },
     ]);
     for (mut runtime, named) in [
@@ -468,11 +471,13 @@ fn initial_values_reach_each_view_before_its_entry_and_render() {
                 .to_string(),
             ),
             global_props: Some(serde_json::json!({"theme": "dark"}).to_string()),
+            native_modules: String::new(),
         },
         PageData {
             initial_processor: String::new(),
             init_data: Some("null".to_owned()),
             global_props: None,
+            native_modules: String::new(),
         },
     ]);
     first.engine.collect_garbage(&mut js).unwrap();
@@ -513,11 +518,13 @@ fn entry_initialization_cannot_replace_the_host_render_argument() {
             initial_processor: String::new(),
             init_data: Some(r#"{"showInitial":false}"#.to_owned()),
             global_props: None,
+            native_modules: String::new(),
         },
         PageData {
             initial_processor: String::new(),
             init_data: Some("null".to_owned()),
             global_props: None,
+            native_modules: String::new(),
         },
     ]);
     first

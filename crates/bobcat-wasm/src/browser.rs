@@ -716,6 +716,7 @@ impl BobcatRenderer {
             self.height,
             self.device_pixel_ratio,
             resources.builder(),
+            Vec::new(),
             sources,
         );
         warn_notes(&resources);

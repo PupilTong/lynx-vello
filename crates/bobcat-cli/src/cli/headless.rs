@@ -64,6 +64,7 @@ pub(crate) fn run(program: &Program, options: &Options) -> Result<(), CliError> 
             options.viewport_height,
             options.device_pixel_ratio,
             resources.builder(),
+            Vec::new(),
             program.sources(),
         )
         .map_err(|source| CliError::StartView {

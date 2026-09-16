@@ -475,6 +475,7 @@ async fn a_pending_view_does_not_block_a_sibling_in_the_same_group() {
                 24.0,
                 1.0,
                 |_| Rc::clone(&fetcher),
+                Vec::new(),
                 ViewSources::new("pending.js"),
             )
             .expect("pending view");
@@ -491,6 +492,7 @@ async fn a_pending_view_does_not_block_a_sibling_in_the_same_group() {
                 24.0,
                 1.0,
                 |_| FetcherDouble::new(Vec::new()),
+                Vec::new(),
                 ViewSources::new("sibling.js"),
             )
             .expect("sibling view");
@@ -651,6 +653,7 @@ fn dropping_the_group_joins_both_of_its_threads() {
                                     worker: "setInterval(() => { throw new Error('tick'); }, 10);",
                                 })
                             },
+                            Vec::new(),
                             ViewSources::new("main.js"),
                         )
                         .expect("the view is created");

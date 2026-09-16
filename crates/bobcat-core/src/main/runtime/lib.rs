@@ -218,15 +218,21 @@ impl DocumentIngredients {
     }
 }
 
-/// The host's initial processor name and page-data strings.
+/// The host's initial processor name, page-data strings, and the native
+/// modules its embedder injected.
 ///
 /// The realm takes each through a host member. `bobcat:runtime` parses the
-/// data and props as JSON and uses the processor name unchanged.
+/// data and props as JSON, uses the processor name unchanged, and reads the
+/// module record into the `{name: methods}` object it sends the BTS Worker.
 #[derive(Default)]
 pub(crate) struct PageData {
     pub(crate) initial_processor: String,
     pub(crate) init_data: Option<String>,
     pub(crate) global_props: Option<String>,
+    /// The embedder's modules as one `<utf16Length>:<text>` record, two fields
+    /// per module: its name, then its method names joined with commas. Empty
+    /// for a view built with none.
+    pub(crate) native_modules: String,
 }
 
 /// The realm's document and the ingredients it is built out of, plus the
@@ -1179,12 +1185,14 @@ fn install_document_members(
     Ok(())
 }
 
-/// Installs `initData`, `globalProps` and `initialProcessor`, handing the realm
-/// the original strings. Missing initial data or props become `undefined`.
+/// Installs `initData`, `globalProps`, `initialProcessor` and
+/// `nativeModuleTable`, handing the realm the original strings. Missing
+/// initial data or props become `undefined`.
 ///
 /// Each hands its string over once and keeps nothing. `bobcat:runtime` parses
-/// the initial data and props, and uses the processor name as a plain string.
-/// All answer before `createDocument` has run.
+/// the initial data and props, uses the processor name as a plain string, and
+/// reads the module table as the record the realm decodes. All answer before
+/// `createDocument` has run.
 fn install_page_data(
     engine: &mut ScriptEngine,
     js_runtime: &mut ScriptRuntime,
@@ -1194,11 +1202,13 @@ fn install_page_data(
         init_data,
         global_props,
         initial_processor,
+        native_modules,
     } = page_data;
     for (name, mut value) in [
         ("initData", init_data),
         ("globalProps", global_props),
         ("initialProcessor", Some(initial_processor)),
+        ("nativeModuleTable", Some(native_modules)),
     ] {
         install(engine, js_runtime, name, 0, move |_arguments| {
             Ok(value.take().map_or(HostValue::Undefined, HostValue::String))
@@ -1404,7 +1414,7 @@ fn take_record_field<'a>(function: &str, rest: &'a str) -> Result<(&'a str, &'a 
 
 /// Appends one `<units>:<text>` field, [`take_record_field`]'s inverse; the
 /// count is in UTF-16 code units because `String.prototype.slice` consumes it.
-fn write_record_field(record: &mut String, text: &str) {
+pub(crate) fn write_record_field(record: &mut String, text: &str) {
     let units: usize = text.chars().map(char::len_utf16).sum();
     write!(record, "{units}:").expect("writing to a String cannot fail");
     record.push_str(text);

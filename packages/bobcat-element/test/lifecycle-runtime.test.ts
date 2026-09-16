@@ -15,7 +15,10 @@ rstest.mockRequire("bobcat:element", () => ({ __BobcatQueryNodes: queryNodes }))
 
 rstest.mockRequire("bobcat:event-target", () => eventTarget);
 rstest.mockRequire("bobcat:cross-thread-context", () => crossThreadContext);
-rstest.mockRequire("bobcat:worker", () => ({}));
+// This suite drives no native module; the BTS runtime only needs the
+// transport to exist, because `callNativeModule` is what its method wrappers
+// close over.
+rstest.mockRequire("bobcat:worker", () => ({ callNativeModule: rstest.fn() }));
 rstest.mockRequire("bobcat:timers", () => ({}));
 const requestScriptFrame = rstest.fn();
 const preloadStyleSheet = rstest.fn();
@@ -31,6 +34,7 @@ rstest.mockRequire("bobcat-internal:host", () => ({
   initialProcessor: () => "",
   initData: () => undefined,
   globalProps: () => undefined,
+  nativeModuleTable: () => "",
 }));
 
 /**
@@ -554,7 +558,7 @@ describe("runtime events and diagnostics", () => {
 
   it("reports a throwing BTS Context listener in the worker realm and runs the rest", () => {
     // worker-runtime.ts installs the worker realm's reporter, and this suite
-    // does not load it (`bobcat:worker` is mocked as `{}`), so stand in for it
+    // does not load it (`bobcat:worker` is mocked), so stand in for it
     // with the same function it would install: the realm's `reportError`.
     const reportError = rstest.fn();
     scope.reportError = reportError;

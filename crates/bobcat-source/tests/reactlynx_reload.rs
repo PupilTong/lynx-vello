@@ -187,6 +187,7 @@ async fn prepare_view(before_background: bool, development: bool) -> ReloadView 
                 pending: PendingSource::default(),
                 released: Rc::clone(&released),
             },
+            Vec::new(),
             sources,
         )
         .unwrap();

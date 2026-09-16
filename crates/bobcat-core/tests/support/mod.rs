@@ -44,7 +44,14 @@ where
 {
     let view = LynxGroup::new(event_requester, StyleThreads::Auto)
         .await?
-        .create_lynx_view(width, height, device_pixel_ratio, resources, sources)?;
+        .create_lynx_view(
+            width,
+            height,
+            device_pixel_ratio,
+            resources,
+            Vec::new(),
+            sources,
+        )?;
     let mut painter = Painter::new(target, width, height, device_pixel_ratio).await?;
     painter.attach(&view)?;
     Ok((view, painter))

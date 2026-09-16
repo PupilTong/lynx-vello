@@ -123,6 +123,7 @@ fn run_view(color: &'static str, ready: &Barrier) -> ViewReport {
                 24.0,
                 1.0,
                 |_reports| fetcher(entry_url, color),
+                Vec::new(),
                 sources(entry_url),
             )
             .expect("the view is built");
@@ -215,6 +216,7 @@ async fn two_views_in_one_group_share_its_thread_and_still_paint_their_own_page(
                 24.0,
                 1.0,
                 |_reports| fetcher(entry_url, color),
+                Vec::new(),
                 sources(entry_url),
             )
             .expect("the view is built on the group's thread");

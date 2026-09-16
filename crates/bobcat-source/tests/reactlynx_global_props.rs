@@ -120,6 +120,7 @@ impl PropsView {
                     pending: PendingSource::default(),
                     released: Rc::clone(&released),
                 },
+                Vec::new(),
                 sources,
             )
             .unwrap();

@@ -175,6 +175,9 @@ struct BootSources {
     init_data: Option<String>,
     initial_processor: String,
     global_props: Option<String>,
+    /// The embedder's native modules, already encoded as the record the MTS
+    /// realm reads their names and methods out of.
+    native_modules: String,
 }
 
 impl Page {
@@ -541,10 +544,8 @@ impl Page {
         self: &Rc<Self>,
         source: &str,
         url: &str,
-        init_data: Option<String>,
-        global_props: Option<String>,
         background_entry: Option<String>,
-        initial_processor: String,
+        page_data: PageData,
     ) {
         // A view that has already ended builds no realm and runs no entry:
         // its tasks are about to be reclaimed, and the ingredients go with the
@@ -569,11 +570,7 @@ impl Page {
                 &self.context.workers,
                 url,
                 background_entry,
-                PageData {
-                    initial_processor,
-                    init_data,
-                    global_props,
-                },
+                page_data,
             ) {
                 Ok(opened) => opened,
                 Err(error) => return Some(Err(error.into_script_error().into())),
@@ -749,6 +746,7 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
     let AttachedView {
         viewport,
         sources,
+        native_modules,
         commands,
         cancel,
     } = view;
@@ -795,6 +793,7 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
             init_data,
             initial_processor,
             global_props,
+            native_modules,
         },
     ));
     page.run_owner().await;
@@ -860,6 +859,7 @@ async fn boot_page(page: Rc<Page>, sources: BootSources) {
         init_data,
         initial_processor,
         global_props,
+        native_modules,
     } = sources;
     for url in style_sheets {
         if page.outbox.is_cancelled() {
@@ -924,10 +924,13 @@ async fn boot_page(page: Rc<Page>, sources: BootSources) {
     page.open_realm(
         &source,
         &url,
-        init_data,
-        global_props,
         background_entry,
-        initial_processor,
+        PageData {
+            initial_processor,
+            init_data,
+            global_props,
+            native_modules,
+        },
     );
 }
 

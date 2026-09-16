@@ -90,6 +90,15 @@ is `{}` there, as in web-core. Text that is not JSON fails boot with
 `StartupFailed`, naming the input, before the entry runs. The background
 thread does not receive either value yet.
 
+The embedder's native modules travel the same page-data path. `LynxGroup::create_lynx_view`
+reads each module's `name()` and `methods()` once, encodes them as one
+length-prefixed record, and `MainThreadRuntime::new` puts it behind the
+`nativeModuleTable` host member; `bobcat:runtime` reads it as it evaluates and
+sends it to the BTS Worker in the `initialize` message, where
+`__BobcatInitializeBTS` builds `NativeModules` out of it. The modules
+themselves never leave the embedder's thread: a call arrives back as
+`ViewNotice::NativeModuleCall` and is served inside `LynxView::pump`.
+
 Main asks for loads through the view's own `ViewNotice` channel, and
 `LynxView::pump` is what hands each ask to the host's `ResourceFetcher`.
 Fetched source bytes cross to `main`; the fetcher, caches, and decoded images
@@ -137,7 +146,8 @@ QuickJS ESM graph — shared built-ins and per-worker imports, on bobcat-workers
     ├──▶ bobcat:worker (packages/bobcat-element/src/worker-runtime.ts)
     │     ├── the global scope: self, postMessage, close, name, onmessage
     │     ├──▶ bobcat:event-target
-    │     └──▶ bobcat-internal:worker (postWorkerMessage, closeWorker)
+    │     └──▶ bobcat-internal:worker (postWorkerMessage, closeWorker,
+    │                                   invokeNativeModule)
     ├──▶ bobcat:timers ──▶ bobcat-internal:host (setTimer, clearTimer only)
     └── the worker's entry source
           └── bobcat:bts (bootstrap)

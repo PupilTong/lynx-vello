@@ -78,6 +78,13 @@ impl HostOutbox {
         self.notify(ViewNotice::PreloadSource(request));
     }
 
+    /// The end signal everything this outbox hands out carries: the creating
+    /// worker's own token, which is what a native module's callback is
+    /// answered against.
+    pub(crate) const fn token(&self) -> &CancellationToken {
+        &self.token
+    }
+
     fn send(&self, request: SourceRequest, completion: SourceCompletion) {
         self.notify(ViewNotice::RequestSource {
             request,
@@ -169,6 +176,14 @@ pub(crate) enum ViewNotice {
     RequestSource {
         request: SourceRequest,
         completion: SourceCompletion,
+    },
+    /// One `NativeModules.<module>.<method>(...)` the BTS realm made, for the
+    /// embedder's own module of that name to serve. A view that has failed or
+    /// been released drops it instead, which releases the call's callbacks the
+    /// way a dropped [`SourceCompletion`] answers its request with nothing.
+    NativeModuleCall {
+        module: String,
+        call: crate::native_module::ModuleCall,
     },
 }
 

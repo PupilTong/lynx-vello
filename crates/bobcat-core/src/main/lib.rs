@@ -234,8 +234,9 @@ async fn group_task(context: Rc<GroupContext>, mut attach: mpsc::UnboundedReceiv
         tokio::select! {
             command = attach.recv() => match command {
                 Some(GroupCommand::Attach(attachment)) => {
-                    let ViewAttachment { viewport, sources, commands, notices, frames, cancel } =
-                        *attachment;
+                    let ViewAttachment {
+                        viewport, sources, native_modules, commands, notices, frames, cancel,
+                    } = *attachment;
                     let outbox = ViewOutbox::new(
                         notices,
                         frames,
@@ -249,7 +250,7 @@ async fn group_task(context: Rc<GroupContext>, mut attach: mpsc::UnboundedReceiv
                             outbox.engine_event(EngineEvent::ScriptRunError(error));
                         })
                     });
-                    let view = AttachedView { viewport, sources, commands, cancel };
+                    let view = AttachedView { viewport, sources, native_modules, commands, cancel };
                     let handle = views.spawn_local(page::serve_view(
                         Rc::clone(&context),
                         view,
@@ -302,6 +303,9 @@ fn finish_view(
 struct AttachedView {
     viewport: Viewport,
     sources: ViewSources,
+    /// The embedder's native modules, as the realm is told about them: the
+    /// record `create_lynx_view` encoded out of their names and methods.
+    native_modules: String,
     commands: mpsc::UnboundedReceiver<ToMain>,
     /// This view's end signal, minted on the embedder's thread. It is what the
     /// view's owner waits on, what its own end cancels, and the parent of the

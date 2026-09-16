@@ -106,6 +106,14 @@ interface BobcatNative {
   initData(): string | undefined;
   /** The view's global props, handed over like `initData`. */
   globalProps(): string | undefined;
+  /**
+   * The native modules the embedder injected when the view was built, as one
+   * record payload: a flat sequence of `<utf16Length>:<text>` fields, two per
+   * module — its `NativeModules` key, then its method names joined with
+   * commas, empty for a module that declared none. Empty for a view built with
+   * no modules at all. Answers once, like `initData`.
+   */
+  nativeModuleTable(): string;
 }
 
 /**
@@ -125,6 +133,28 @@ interface BobcatWorkerNative {
    * timers go with it.
    */
   closeWorker(): void;
+  /**
+   * Hands one `NativeModules.<module>.<method>(...)` call to the embedder's
+   * module of that name, and returns at once: a module answers through the
+   * callbacks among its arguments, never through a result.
+   *
+   * `call` is this realm's own number for the call, which a callback's answer
+   * carries back. `arguments` is the argument list as JSON array text, with
+   * each function argument written as `null`; `callbacks` names those
+   * arguments by index, joined with commas and empty when there are none. The
+   * host mints one single-shot callback per index, and each is answered — or
+   * released unanswered — through `__BobcatNativeModuleCallback`.
+   *
+   * A module no view of this group carries is not an error here: the call is
+   * dropped and its callbacks released.
+   */
+  invokeNativeModule(
+    call: number,
+    module: string,
+    method: string,
+    args: string,
+    callbacks: string,
+  ): void;
 }
 
 declare module "bobcat-internal:host" {
@@ -168,9 +198,11 @@ declare module "bobcat-internal:host" {
   export const clearTimer: BobcatNative["clearTimer"];
   export const initData: BobcatNative["initData"];
   export const globalProps: BobcatNative["globalProps"];
+  export const nativeModuleTable: BobcatNative["nativeModuleTable"];
 }
 
 declare module "bobcat-internal:worker" {
   export const postWorkerMessage: BobcatWorkerNative["postWorkerMessage"];
   export const closeWorker: BobcatWorkerNative["closeWorker"];
+  export const invokeNativeModule: BobcatWorkerNative["invokeNativeModule"];
 }
