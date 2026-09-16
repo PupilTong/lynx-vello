@@ -23,8 +23,9 @@ relevant; see `AGENTS.md` for its full scope.
 These files are research/spec rather than a status tracker. Implementation
 status lives in [`AGENTS.md`](../../AGENTS.md)'s Workspace map and Crates
 sections, one heading per crate and pnpm package, and in the
-`docs/*-runtime.md` files for the runtime subsystems. The authoritative
-enumeration of the Element PAPI is the header table of
+`docs/*-runtime.md` files for the runtime subsystems, with `crates/dom`'s
+internals in [`docs/dom-architecture.md`](../dom-architecture.md). The
+authoritative enumeration of the Element PAPI is the header table of
 `packages/bobcat-element/src/element-papi.ts`, which names every supported
 member and what backs it; no file here reproduces it. Rows below carry
 done/in-progress markers only where noted — the CSS/layout and visual files
