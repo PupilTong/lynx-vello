@@ -312,11 +312,14 @@ or public paint-order constructor.
 **The frame is baked unscrolled** and carried split — per-chain scene fragments
 plus a compose program — so a consumer composes at its own current offsets per
 `ScrollSlot` and a scroll recomposes instead of recommitting, for as long as
-every offset stays inside its slot's `encode_window`. When one leaves it,
-`note_scroll_windows_stale` is the consumer's refill request, which the painter
-sends as `ToMain::Refill { offsets }` and the main thread answers with a
-recentered commit. A frame with scroller content carries a `CompositePlan`; a
-GPU target bakes each plane once per commit (`bake_plane`, held in the render
+every offset stays inside its slot's `encode_window`. Bobcat's painter requests
+a refill as encoding headroom runs low, with the threshold inside the window:
+it sends `ToMain::Refill { offsets }`, and the main thread applies those offsets
+and calls `note_scroll_windows_stale` to invalidate the document's paint. Its
+next commit recenters the windows. The threshold and per-commit coalescing are
+documented in [the runtime architecture](runtime-architecture.md#scroll-composes-a-refill-recommits).
+A frame with scroller content carries a `CompositePlan`; a GPU target bakes
+each plane once per commit (`bake_plane`, held in the render
 module's `PlaneBank`) and draws the frame as raw steps plus one textured draw
 per plane, so a scroll frame never re-encodes scroller content. Scroll
 containers are forced stacking contexts (matching Lynx's native scroll views;
