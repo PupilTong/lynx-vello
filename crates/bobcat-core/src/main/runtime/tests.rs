@@ -2262,6 +2262,65 @@ fn replacing_inline_styles_preserves_attribute_text_limits() {
     }
 }
 
+/// Native Lynx accepts `text-overflow` as an element attribute on `<text>`
+/// as well as a CSS property (`text_element.cc:176-182`), and the Lynx UA
+/// sheet's attribute selectors are how this engine honours that
+/// (`crates/bobcat-core/src/main/tree/text.rs`). This drives the whole path a
+/// compiled card drives — `__SetAttribute` on a text already flushed — in
+/// both directions: `ellipsis` widens the clamped paragraph by the three-dot
+/// marker, and `clip` takes it away again.
+#[test]
+#[expect(clippy::float_cmp, reason = "Ahem em squares have exact metrics")]
+fn the_text_overflow_attribute_from_papi_reaches_the_paragraph_marker() {
+    let (mut js_runtime, mut runtime, elements) = text_runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const texts = ['widened', 'restored'].map((name) => {
+                    const text = __CreateText(0);
+                    __SetID(text, name);
+                    __SetInlineStyles(text, 'font-family:Ahem;font-size:20px;line-height:21px');
+                    __SetAttribute(text, 'text-maxlength', '1');
+                    __AppendElement(text, __CreateRawText('abc def'));
+                    __AppendElement(page, text);
+                    return text;
+                  });
+                  // The clamp is committed with no text-overflow at all first,
+                  // so each later write is an update rather than a first pass.
+                  __FlushElementTree();
+                  for (const text of texts) __SetAttribute(text, 'text-overflow', 'ellipsis');
+                  __FlushElementTree();
+                  __SetAttribute(texts[1], 'text-overflow', 'clip');
+                };
+                ",
+            "app:///text-overflow-attribute.js",
+        )
+        .expect("main-thread script");
+
+    let tree = elements.tree();
+    for (name, width, attribute) in [("widened", 80.0, "ellipsis"), ("restored", 20.0, "clip")] {
+        let text = tree
+            .document_element()
+            .children()
+            .find(|node| node.attribute("id") == Some(name))
+            .expect("the text element");
+        assert_eq!(
+            text.attribute("text-overflow"),
+            Some(attribute),
+            "{name}: the attribute reaches the document verbatim"
+        );
+        let id = text.id();
+        assert_eq!(
+            tree.text_block_size(id).expect("paragraph").width,
+            width,
+            "{name}: one em square, plus the three-dot marker under `ellipsis`"
+        );
+    }
+}
+
 #[test]
 fn rewriting_the_text_attribute_updates_generated_content() {
     let (mut js_runtime, mut runtime, elements) = text_runtime();

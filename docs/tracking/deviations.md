@@ -141,6 +141,26 @@ consequential choice about whether to follow the spec or the quirk.
 
 ## Text layout (see [css-text.md](css-text.md))
 
+- **The `text-overflow` *attribute* on `<text>` is honoured, where web-core
+  ignores it** — native Lynx reads `text-overflow` off the element as well as
+  out of CSS: `TextElement::ProcessAttributeForNormalLayoutMode` caches the
+  attribute's value onto `kPropertyIDTextOverflow`
+  (`lynx/core/renderer/dom/fiber/text_element.cc:176-182`), and the Android
+  shadow node declares it as a prop with the default `clip`
+  (`BaseTextShadowNode.java:158`). The web target observes no such attribute:
+  `x-text` watches `text-maxline`, `text-maxlength`, `tail-color-convert` and
+  `text` only, so a `text-overflow` attribute lands in the DOM verbatim and
+  nothing reads it — `text-overflow` is CSS-only there, inherited into the
+  shadow part by `x-text::part(inner-box) { text-overflow: inherit; }`
+  (`lynx-stack/packages/web-platform/web-elements/src/elements/XText/x-text.css:28-31`).
+  A user ruling of 2026-09-16 follows native rather than web-core here. The
+  mechanism is two UA-sheet attribute selectors keyed on the two literals
+  native's enum parser accepts, `text[text-overflow="ellipsis"]` and
+  `text[text-overflow="clip"]` (`crates/bobcat-core/src/main/tree/text.rs`),
+  rather than a presentational hint: the attribute needs no parsing of its own
+  and maps onto an existing CSS property. They are plain declarations, so
+  author CSS outranks the attribute the way it outranks the rest of the UA
+  sheet, and the attribute's own value is never rewritten.
 - **`text-align: justify` does not parse, and the declaration is dropped
   without a trace** — the vendored fork excludes `Justify` from
   `TextAlignKeyword` under its `lynx` feature

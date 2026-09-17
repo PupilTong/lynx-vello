@@ -30,10 +30,10 @@ see [F](#f-recorded-deviations-not-gaps).
 | [`crates/hughie/tests/web_text_replication.rs`](../../crates/hughie/tests/web_text_replication.rs) | paragraph algorithm: clamping, cut points, tail fitting, word-break | 17 | 3 |
 | [`crates/bobcat-core/src/main/tree/web_text_replication.rs`](../../crates/bobcat-core/src/main/tree/web_text_replication.rs) | the `<text>` element, its UA sheet and its attributes | 33 | 5 |
 | [`crates/bobcat-core/src/main/runtime/web_text_replication.rs`](../../crates/bobcat-core/src/main/runtime/web_text_replication.rs) | the Element PAPI: content, restyle, truncation, `setNativeProps`, layout events | 15 | 6 |
-| [`crates/dom/tests/web_text_replication.rs`](../../crates/dom/tests/web_text_replication.rs) | relayout, percentage sizing, scroll targets, glyph and atom paint | 17 | 1 |
-| [`crates/dom/tests/web_text_screenshots.rs`](../../crates/dom/tests/web_text_screenshots.rs) | golden screenshots — the originals' own oracle, for the cases whose claim is visual | 11 | 0 |
+| [`crates/dom/tests/web_text_replication.rs`](../../crates/dom/tests/web_text_replication.rs) | relayout, percentage sizing, scroll targets, glyph, atom and inline-background paint | 23 | 1 |
+| [`crates/dom/tests/web_text_screenshots.rs`](../../crates/dom/tests/web_text_screenshots.rs) | golden screenshots — the originals' own oracle, for the cases whose claim is visual | 12 | 0 |
 | [`crates/bobcat-source/tests/web_text_css_replication.rs`](../../crates/bobcat-source/tests/web_text_css_replication.rs) | text CSS across the `.web.bundle` wire | 9 | 0 |
-| **Total** | | **102** | **15** |
+| **Total** | | **109** | **15** |
 
 A gap-ignored test asserts the `web-core` behavior and is marked
 `#[ignore = "GAP: …"]` naming the cause with a `file:line`. It is a real
@@ -52,8 +52,11 @@ layout but show nothing about what the text *looks* like, so
 whose claim is visual — per-run colour on one line, mixed sizes on one baseline,
 an atomic box drawn inline, a gradient running down real letterforms, a literal
 newline breaking where it is written, and custom truncation content laid in at
-the clamp in its own colour while a paragraph that fits shows none of it.
-Refresh with
+the clamp in its own colour while a paragraph that fits shows none of it. A
+twelfth, `inline-text-background`, replicates no original: no web-elements
+fixture puts a background on inline text, so it pins the *behaviour* the
+reference implies instead
+(conflict [8](#8-inline-text-background-geometry)). Refresh with
 `FLASHBULB_UPDATE_SNAPSHOTS=1 cargo test -p dom --test web_text_screenshots`.
 
 **A golden is committed only where the frame is right.** Where a case renders
@@ -70,10 +73,12 @@ siblings instead.
 230 cases were catalogued across `web-elements/tests/web-elements.spec.ts`
 (`x-text`, `x-textarea`, and the text-adjacent `layout`/`scroll-view` cases),
 `web-core-e2e/tests/reactlynx.spec.ts`, `web-core/tests/*`, and the compiled
-cards under `web-tests/dist/`. 85 became the 117 tests above — a case splits
-where it carries independent claims, and a visual case is replicated twice,
-once as a metric and once as a golden. The remaining 145 are out of scope, for
-the reasons in [Not replicated](#not-replicated).
+cards under `web-tests/dist/`. 85 became 117 of the 124 tests above — a case
+splits where it carries independent claims, and a visual case is replicated
+twice, once as a metric and once as a golden. The other seven replicate no
+catalogued case: they are the inline-background group, which pins behaviour the
+reference implies but no fixture pictures. The remaining 145 are out of scope,
+for the reasons in [Not replicated](#not-replicated).
 
 ## What closed since the first assessment
 
@@ -363,6 +368,26 @@ Asserted by `a_gradient_color_on_a_nested_run_fills_only_that_run`
 (`crates/dom/tests/web_text_replication.rs:923`), which was the gap-ignored test
 for this row and now runs.
 
+A `background-color`/`background-image` on a nested scope used to paint nothing
+at all for the same structural reason: the scope has no layout box, so there was
+no box to paint a background into. Since the 2026-09-16 ruling it paints as an
+**inline box's** background — one fragment per line, each spanning that
+scope's own glyphs horizontally and the font's content area vertically — which
+is what `web-core` gets by making a nested `x-text`/`inline-text` a
+`display: inline` box (conflict [8](#8-inline-text-background-geometry)).
+Six replicas assert it, from
+`a_nested_scope_s_background_paints_behind_its_own_fragments_only`
+(`crates/dom/tests/web_text_replication.rs`), with the golden
+`inline-text-background` beside them.
+
+That ruling narrows one older claim. An `inline-truncation` marker still gets
+no *box* — its slot stays empty, so nothing paints across the clamp line — but
+a background declared on it now paints behind the marker's own fragment, as any
+other inline scope's does.
+`a_shown_truncation_marker_paints_its_runs_and_a_background_behind_them_only`
+asserts both halves: blue behind the marker's own units, and nowhere left of the
+cut, past the paragraph, or on the line above it.
+
 ### E. Absent surfaces
 
 Each blocks replicas that could not be written at all.
@@ -471,7 +496,8 @@ failure mode is easy to reintroduce.
 ## Native ↔ web conflicts
 
 `AGENTS.md` resolves these to `web-core` by default. Conflicts 1, 3 and 7 were
-put to the user and decided the other way; the rest stand as `web-core`.
+put to the user and decided the other way; conflict 8 was put to the user and
+confirmed as `web-core`; the rest stand as `web-core`.
 
 ### 1. Truncation marker gating
 
@@ -532,6 +558,24 @@ reflects unconditionally. Since #227 this engine follows `web-core`.
 
 **Decided (user, 2026-09-15): the clamp stays.** See
 [F](#f-recorded-deviations-not-gaps).
+
+### 8. Inline-text background geometry
+
+| | Behavior | Evidence |
+| --- | --- | --- |
+| native | Fills the **line box**: an inline `text`'s background is a span over the paragraph's characters, drawn from the line's top to its bottom | Android — `InlineTextShadowNode.buildStyledSpan` attaches a `BackgroundColorSpan` for the colour and a `LynxTextBackgroundSpan` for the image (`platform/android/lynx_android/src/main/java/com/lynx/tasm/behavior/shadow/text/InlineTextShadowNode.java:97-105`), and the latter's `drawBackground` sets the drawable's bounds to `(start, top, end, bottom)` — the line's own top and bottom (`LynxTextBackgroundSpan.java:23-39`). iOS sets `NSBackgroundColorAttributeName` on the attributed string (`platform/darwin/ios/lynx/base/LynxTextStyle.m:269`), which `NSLayoutManager` fills over the line fragment |
+| web-core | The **inline box's** background area, one fragment per line over the font's content area — ascent above the baseline, descent below — because a nested `x-text`/`inline-text` is `display: inline` and the browser paints it as css-backgrounds-3 says | `packages/web-platform/web-elements/src/elements/XText/x-text.css:52-67`, which adds nothing to that but `background-clip: inherit` |
+| lynx-vello | One fragment per line over the content area — **matches web-core** | `crates/dom/src/paint/text.rs`'s `inline_background_fragments`; `crates/dom/src/paint/walker.rs`'s `paint_inline_backgrounds` |
+
+**Decided (user, 2026-09-16): inline-text backgrounds are supported, and follow
+web-core.** The observable difference is the half-leading: with `line-height`
+larger than the font's content area, the web leaves the leading unpainted and
+native does not. Two approximations are recorded with the implementation rather
+than as gaps: each fragment is painted as a whole box, so `border-radius` rounds
+every fragment (`box-decoration-break: clone` where the web default is `slice`,
+and the fork has no property to say otherwise), and an atomic inline box inside
+a scope is unioned into its fragment on both axes where a browser would let a
+taller atom overflow the band.
 
 ## Not replicated
 
