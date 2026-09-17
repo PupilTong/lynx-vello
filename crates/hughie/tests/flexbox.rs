@@ -892,6 +892,114 @@ fn aspect_ratio_does_not_disable_cross_axis_stretch() {
     assert_size(tree.layout(item).size, Size::new(50.0, 100.0));
 }
 
+/// A replaced 40x20 leaf: it answers a known axis through its own ratio, the
+/// way `NaturalSize::measure` answers for a decoded bitmap.
+fn bitmap_leaf(input: LeafMeasureInput) -> LeafMetrics {
+    let known = input.known_dimensions;
+    LeafMetrics::new(match (known.width, known.height) {
+        (Some(width), Some(height)) => Size::new(width, height),
+        (Some(width), None) => Size::new(width, width / 2.0),
+        (None, Some(height)) => Size::new(height * 2.0, height),
+        (None, None) => Size::new(40.0, 20.0),
+    })
+}
+
+/// css-flexbox-1 §9.8 makes the cross size of an item the container will
+/// stretch *definite*, and §9.2 steps B/E then produce that item's flex base
+/// size from a measurement that knows it — so an auto-sized replaced item ends
+/// up as large as the stretch made it, not as large as its own pixels.
+///
+/// Both directions are asserted, because the whole of the rule is that the
+/// transfer follows the *cross* axis wherever that is.
+#[test]
+fn a_stretched_cross_size_reaches_the_flex_base_measurement() {
+    for (flex_direction, expected) in [
+        (flex_direction::T::Row, Size::new(200.0, 100.0)),
+        (flex_direction::T::Column, Size::new(100.0, 50.0)),
+    ] {
+        let mut tree = TestTree::default();
+        let item = tree.push_measured_leaf(TestStyle::default(), bitmap_leaf);
+        let root = flex_container(
+            &mut tree,
+            TestStyle {
+                flex_direction,
+                ..TestStyle::default()
+            },
+            &[item],
+        );
+
+        definite_layout(&tree, root, 100.0, 100.0);
+        assert_size(tree.layout(item).size, expected);
+    }
+}
+
+/// The stretched cross size handed to that measurement is the item's own
+/// clamped one, not the line's: a cross-axis `max-*` caps what it sees.
+#[test]
+fn a_stretched_cross_size_is_clamped_before_the_measurement_reads_it() {
+    let mut tree = TestTree::default();
+    let item = tree.push_measured_leaf(
+        TestStyle {
+            max_size: Size::new(max_px(60.0), max_none()),
+            ..TestStyle::default()
+        },
+        bitmap_leaf,
+    );
+    let root = flex_container(
+        &mut tree,
+        TestStyle {
+            flex_direction: flex_direction::T::Column,
+            ..TestStyle::default()
+        },
+        &[item],
+    );
+
+    definite_layout(&tree, root, 100.0, 100.0);
+    assert_size(tree.layout(item).size, Size::new(60.0, 30.0));
+}
+
+/// An item the container will *not* stretch measures at its own size, which is
+/// what keeps the rule above from reaching every flex item.
+#[test]
+fn an_unstretched_item_measures_at_its_own_size() {
+    let mut tree = TestTree::default();
+    let item = tree.push_measured_leaf(TestStyle::default(), bitmap_leaf);
+    let root = flex_container(
+        &mut tree,
+        TestStyle {
+            flex_direction: flex_direction::T::Column,
+            align_items: items(AlignFlags::FLEX_START),
+            ..TestStyle::default()
+        },
+        &[item],
+    );
+
+    definite_layout(&tree, root, 100.0, 100.0);
+    assert_size(tree.layout(item).size, Size::new(40.0, 20.0));
+}
+
+/// §9.8 grants the definite stretched cross size to *single-line* containers
+/// alone, so a wrapping one measures its items at their own size and only
+/// stretches them afterwards — the item ends up 100 wide and 20 tall rather
+/// than 100x50.
+#[test]
+fn a_wrapping_container_does_not_pre_impose_the_stretched_cross_size() {
+    let mut tree = TestTree::default();
+    let item = tree.push_measured_leaf(TestStyle::default(), bitmap_leaf);
+    let root = flex_container(
+        &mut tree,
+        TestStyle {
+            flex_direction: flex_direction::T::Column,
+            flex_wrap: flex_wrap::T::Wrap,
+            ..TestStyle::default()
+        },
+        &[item],
+    );
+
+    definite_layout(&tree, root, 100.0, 100.0);
+    assert_size(tree.layout(item).size, Size::new(100.0, 20.0));
+}
+
 #[test]
 fn nowrap_auto_cross_size_clamped_by_min_stretches_its_line() {
     let mut tree = TestTree::default();

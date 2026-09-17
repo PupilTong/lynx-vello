@@ -42,7 +42,9 @@ use crate::esm::{
     TIMER_MODULE_SPECIFIER,
 };
 use crate::link::{ViewNotice, ViewOutbox};
-use crate::main::tree::{LynxDocument, PageConfig, apply_attribute_style, new_document};
+use crate::main::tree::{
+    ImageOutcomes, LynxDocument, PageConfig, apply_attribute_style, new_document,
+};
 use crate::resource::StyleSheetSource;
 use crate::script::ScriptError;
 use crate::timers::{TimerState, install_timer_members, run_due_timers};
@@ -52,6 +54,12 @@ const BOOT_MODULE_SPECIFIER: &str = "bobcat:boot";
 const ELEMENT_MODULE_SPECIFIER: &str = "bobcat:element";
 const RUNTIME_MODULE_SPECIFIER: &str = "bobcat:runtime";
 const EVENT_DISPATCH_EXPORT: &str = "__BobcatDispatchEvent";
+
+/// What an element's own image source settling is called. Both are web-core's
+/// names, which are the browser's (`XImage/ImageEvents.ts`), and both are
+/// non-bubbling.
+const LOAD_EVENT: &str = "load";
+const ERROR_EVENT: &str = "error";
 
 /// Declarations one `__SetInlineStyles` record carries without touching the
 /// heap. Compiled `ReactLynx` records are a handful of properties.
@@ -263,6 +271,13 @@ struct DocumentSlot {
     /// What a `createDocument` builds from, taken by the first one that runs.
     ingredients: Option<DocumentIngredients>,
     document: Option<LynxDocument>,
+    /// The `load`s and `error`s the document's images owe, from both
+    /// producers: the `image` component, which settles a `src` inside the
+    /// `__SetAttribute` that wrote it, and [`MainThreadRuntime::apply_image_events`],
+    /// which settles one from the painting side's report. Held here rather
+    /// than inside the document because the component is the far end of it and
+    /// reaches nothing else; the runtime drains it once per entry.
+    image_outcomes: ImageOutcomes,
     /// Removals since the last collection; see [`REMOVALS_PER_COLLECTION`].
     removals: u32,
     /// Where committed frames leave for the painting side.
@@ -307,8 +322,9 @@ impl DocumentSlot {
             style_pool,
             pending_image_events,
         } = ingredients;
+        let outcomes = self.image_outcomes.clone();
         let mut document = construction_phase("building the page", || {
-            let mut document = new_document(viewport, config);
+            let mut document = new_document(viewport, config, outcomes);
             if let Some(pool) = style_pool {
                 document.set_style_pool(pool);
             }
@@ -330,7 +346,16 @@ impl DocumentSlot {
             }
         })?;
         construction_phase("replaying the image reports that arrived first", || {
-            document.apply_image_events(&pending_image_events);
+            // No element exists yet — the boot module's first statement is
+            // this construction — so no report can name one, and the outcomes
+            // are empty rather than dropped. What these reports do is settle
+            // the registry, so the card's first `src` naming one of them
+            // settles at its bind instead.
+            let outcomes = document.apply_image_events(&pending_image_events);
+            debug_assert!(
+                outcomes.is_empty(),
+                "a document with no elements cannot owe an image event"
+            );
         })?;
         self.document = Some(document);
         Ok(())
@@ -669,11 +694,68 @@ impl MainThreadRuntime {
         }
     }
 
+    /// Applies the painting side's image reports, queueing the `load`s and
+    /// `error`s they settle for this entry's epilogue to dispatch.
+    ///
+    /// Queued rather than dispatched here for one reason only — so that both
+    /// producers answer the same way. The other one is the `image` component,
+    /// which settles a `src` from inside the `__SetAttribute` that wrote it
+    /// and may not re-enter the realm at all.
     pub(crate) fn apply_image_events(&mut self, events: &[dom::ImageEvent]) {
-        self.slot
-            .borrow_mut()
-            .document_mut()
-            .apply_image_events(events);
+        let mut slot = self.slot.borrow_mut();
+        let outcomes = slot.document_mut().apply_image_events(events);
+        slot.image_outcomes.extend(outcomes);
+    }
+
+    /// Whether any image event is still waiting for a turn to be delivered on.
+    ///
+    /// A listener may queue one — a `load` handler that writes a `src` this
+    /// document has already settled — and a listener runs inside the drain
+    /// below, so what it queues belongs to the next turn. The page's epilogue
+    /// asks this to know whether it owes itself one.
+    pub(crate) fn has_image_outcomes(&self) -> bool {
+        !self.slot.borrow().image_outcomes.is_empty()
+    }
+
+    /// Dispatches everything [`Self::apply_image_events`] and the `image`
+    /// component have queued, in the order they settled.
+    ///
+    /// Each is one non-bubbling dispatch at the element whose own `src`
+    /// settled, which is web-core's shape for both events
+    /// (`commonEventInitConfiguration.ts`: `bubbles: false`). An element freed
+    /// between the outcome forming and this call resolves to nothing, exactly
+    /// as a routed input event at a freed target does.
+    ///
+    /// Returns what the listeners threw. A `load` handler that throws is
+    /// nonfatal, the standing every event listener has here.
+    pub(crate) fn dispatch_image_outcomes(
+        &mut self,
+        js_runtime: &mut ScriptRuntime,
+    ) -> Vec<MainThreadError> {
+        let outcomes = self.slot.borrow().image_outcomes.take();
+        let mut failures = Vec::new();
+        for outcome in outcomes {
+            // An empty detail is the realm's `{}`, which is web-core's `error`
+            // detail exactly; a `load` carries the bitmap's *intrinsic* size,
+            // web-core's `naturalWidth`/`naturalHeight`, not the box it drew
+            // into.
+            let (target, name, detail) = match outcome {
+                dom::ImageOutcome::Loaded {
+                    node,
+                    width,
+                    height,
+                } => (
+                    node,
+                    LOAD_EVENT,
+                    format!(r#"{{"width":{width},"height":{height}}}"#),
+                ),
+                dom::ImageOutcome::Failed { node } => (node, ERROR_EVENT, String::new()),
+            };
+            if let Err(error) = self.dispatch_event(js_runtime, target, name, &detail, false) {
+                failures.push(error);
+            }
+        }
+        failures
     }
 
     /// Runs `probe` against the realm's document — the observation seam for
@@ -691,7 +773,7 @@ impl MainThreadRuntime {
     /// than a path — a `NodeId` names one node for the life of the document,
     /// so the check is one lookup and can never hit a stranger.
     ///
-    /// The path crosses as the standard's event path — the bubble steps, in
+    /// The path crosses as the standard's event path — every step, in
     /// target-first, root-last order, each with its shadow-retargeted target
     /// — encoded as two comma-joined decimal id strings, which is how
     /// `childElementIds` carries a list already: the boundary takes
@@ -701,6 +783,15 @@ impl MainThreadRuntime {
     /// the two passes, the `global-bindEvent` pass after them, whether any
     /// listener exists at all — is the realm's business, because every
     /// registration lives there.
+    ///
+    /// `bubbles` crosses as itself rather than as a shortened path, because
+    /// the passes narrow differently: a non-bubbling event still captures down
+    /// the whole path, binds on its target alone, and runs no
+    /// `global-bindEvent` pass at all — web-core's `common_event_handler`
+    /// (`web-core/src/main_thread/client/element_apis/event_apis.rs:413-432`),
+    /// which is handed the same one flag off the DOM event
+    /// (`WASMJSBinding.ts:254-258`). Sending a narrowed path instead would
+    /// lose the capture pass.
     ///
     /// The document is released before the call, which is what lets a
     /// listener mutate the tree.
@@ -713,6 +804,7 @@ impl MainThreadRuntime {
         target: dom::NodeId,
         name: &str,
         detail_json: &str,
+        bubbles: bool,
     ) -> Result<bool, MainThreadError> {
         let steps = {
             let mut slot = self.slot.borrow_mut();
@@ -744,6 +836,7 @@ impl MainThreadRuntime {
                     HostArgument::String(&targets),
                     HostArgument::String(name),
                     HostArgument::String(detail_json),
+                    HostArgument::Boolean(bubbles),
                 ],
             )
             .map_err(|error| MainThreadError::from_engine("delivering an event", error))?;
@@ -1014,6 +1107,7 @@ fn install_bobcat(
     let handle = Rc::new(RefCell::new(DocumentSlot {
         ingredients: Some(ingredients),
         document: None,
+        image_outcomes: ImageOutcomes::default(),
         removals: 0,
         outbox,
     }));

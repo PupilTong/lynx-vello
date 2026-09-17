@@ -7,7 +7,7 @@ use dom::stylo::properties::ComputedValues;
 use dom::stylo::servo_arc::Arc;
 use dom::stylo::values::computed::{Display, Overflow};
 
-use super::{LynxDocument, PageConfig, Viewport, new_document};
+use super::{ImageOutcomes, LynxDocument, PageConfig, Viewport, new_document};
 
 /// A document on a phone-shaped viewport with the default page config.
 pub(super) fn document() -> LynxDocument {
@@ -15,7 +15,17 @@ pub(super) fn document() -> LynxDocument {
 }
 
 pub(super) fn with_config(config: PageConfig) -> LynxDocument {
-    new_document(Viewport::new(393.0, 727.0), config)
+    with_image_outcomes(config).0
+}
+
+/// The same document, plus the queue its `image` elements leave a `src` that
+/// settled at its bind in — what the runtime holds the other end of.
+pub(super) fn with_image_outcomes(config: PageConfig) -> (LynxDocument, ImageOutcomes) {
+    let outcomes = ImageOutcomes::default();
+    (
+        new_document(Viewport::new(393.0, 727.0), config, outcomes.clone()),
+        outcomes,
+    )
 }
 
 /// Attaches `tag` under the page, with `style` as its inline style.

@@ -314,14 +314,21 @@ impl Page {
     /// 1. **Due timers.** A timer that has come due runs before the commit, so its mutation rides
     ///    the same frame as whatever else this entry changed. A zero-delay timer armed during boot
     ///    therefore fires inside boot's own epilogue and adds no commit of its own.
-    /// 2. **The commit**, which is what publishes the frame and the image sources the walk
+    /// 2. **The image events** this entry settled: a `load` or an `error` per element whose own
+    ///    source finished, whether it finished through a report from the painting side or at the
+    ///    bind that asked for it. Here rather than where they are produced because one producer is
+    ///    inside a JavaScript call — the `__SetAttribute` that wrote the `src` — and an event
+    ///    dispatched from there would re-enter the realm in the middle of it. Before the commit,
+    ///    for the same reason a due timer is: what a listener changes rides this entry's frame.
+    /// 3. **The commit**, which is what publishes the frame and the image sources the walk
     ///    discovered.
-    /// 3. **The boot report**, once, so the frame exists before the event that implies it.
-    /// 4. **The `BeginFrame` acknowledgement**, for the same reason: a host blocked on the sequence
+    /// 4. **The boot report**, once, so the frame exists before the event that implies it.
+    /// 5. **The `BeginFrame` acknowledgement**, for the same reason: a host blocked on the sequence
     ///    number is blocked on that frame.
-    /// 5. **The module requests** this entry produced, each spawned as a load of its own.
-    /// 6. **The next timer deadline**, republished only when it moved.
-    /// 7. **The checkpoint generation**, so the clock task can tell this page's own bumps from a
+    /// 6. **The module requests** this entry produced, each spawned as a load of its own.
+    /// 7. **The next wake**: the earliest armed timer, or *now* when a listener queued an image
+    ///    event of its own, which is the next turn's rather than this one's.
+    /// 8. **The checkpoint generation**, so the clock task can tell this page's own bumps from a
     ///    sibling's.
     fn epilogue(self: &Rc<Self>, runtime: &mut MainThreadRuntime, js: &mut ScriptRuntime) {
         if self.ended() {
@@ -331,6 +338,10 @@ impl Page {
         self.epilogues.set(self.epilogues.get() + 1);
         for failure in runtime.run_due_timers(js) {
             self.outbox.engine_event(EngineEvent::TimerFailed(failure));
+        }
+        for failure in runtime.dispatch_image_outcomes(js) {
+            self.outbox
+                .engine_event(EngineEvent::ListenerFailed(failure.into_script_error()));
         }
         runtime.commit_if_dirty();
         if !self.boot_reported.get() {
@@ -364,7 +375,16 @@ impl Page {
         for request in runtime.take_font_face_requests() {
             self.spawn(load_font_face(Rc::clone(self), request));
         }
-        self.lifetime.arm_deadline(runtime.next_timer_deadline());
+        // An image event a listener queued during the drain above is the next
+        // turn's, not this one's — the same rule a timer armed from inside a
+        // timer callback follows — so the wake that brings that turn is
+        // immediate rather than the timers' own. Nothing is lost by dropping
+        // their deadline for one turn: the next epilogue republishes it.
+        self.lifetime.arm_deadline(if runtime.has_image_outcomes() {
+            Some(crate::clock::ClockInstant::now())
+        } else {
+            runtime.next_timer_deadline()
+        });
         self.lifetime.record_checkpoint(js.checkpoint_generation());
     }
 
@@ -445,7 +465,11 @@ impl Page {
                 // payload is dropped, the rest of the burst applies, and the
                 // epilogue still runs.
                 let dispatched = catch_unwind(AssertUnwindSafe(|| {
-                    runtime.dispatch_event(js, target, name, &detail)
+                    // Every routed event bubbles: the painting side routes
+                    // what a gesture produced, and Lynx has no non-bubbling
+                    // input event. The two that do not bubble are an image's
+                    // `load` and `error`, which the epilogue dispatches.
+                    runtime.dispatch_event(js, target, name, &detail, true)
                 }));
                 if let Ok(Err(error)) = dispatched {
                     self.outbox

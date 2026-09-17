@@ -18,11 +18,26 @@ use std::sync::{Arc, Mutex};
 use dom::vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
 use dom::{Document, FrameImages, ImageEvent, ImageReports, ImageSizeHint};
 
+/// What this store answers for one source.
+///
+/// The three states a real host has, so a test can hold one source pending
+/// while another has pixels and a third will never produce any — and so that
+/// "failed" is a state rather than the absence of one.
+#[derive(Default)]
+enum Entry {
+    /// Asked for; no pixels published.
+    #[default]
+    Pending,
+    Ready(ImageData),
+    /// Named as one that will never produce pixels.
+    Failed,
+}
+
 /// Decoded images keyed by the source string the paint walk asks for.
 #[derive(Default)]
 pub struct TestImages {
     /// One source, one content — the same shape the engine's own registry has.
-    entries: Mutex<HashMap<String, Option<ImageData>>>,
+    entries: Mutex<HashMap<String, Entry>>,
     /// Where completed loads are reported. Absent until the painter installs
     /// one, which lets a test publish images before the view exists.
     ///
@@ -63,7 +78,7 @@ impl TestImages {
     pub fn insert(&self, source: impl Into<String>, image: ImageData) {
         let source = source.into();
         let (width, height) = (image.width, image.height);
-        self.entries().insert(source.clone(), Some(image));
+        self.entries().insert(source.clone(), Entry::Ready(image));
         self.report_loaded(&source, width, height);
     }
 
@@ -87,13 +102,25 @@ impl TestImages {
         self.insert(source, rgba8(width, height, pixels));
     }
 
+    /// Names `source` as one that will never produce pixels, and reports the
+    /// failure the way [`Self::insert`] reports a load.
+    ///
+    /// Terminal, as it is for a real host: later requests for the source
+    /// answer the same failure, which is how a test failing a source before
+    /// the view exists still fails it for the bind that comes later.
+    pub fn fail(&self, source: impl Into<String>) {
+        let source = source.into();
+        self.entries().insert(source.clone(), Entry::Failed);
+        self.report_failed(&source);
+    }
+
     /// Drops the pixels for `source`, so later reads miss.
     ///
     /// Deliberately keeps the id: a real store's eviction does not retract an
     /// id either, and nothing above the store may observe residency.
     pub fn remove(&self, source: &str) {
         if let Some(entry) = self.entries().get_mut(source) {
-            *entry = None;
+            *entry = Entry::Pending;
         }
     }
 
@@ -101,18 +128,21 @@ impl TestImages {
     /// image already published so a store warmed before the view still
     /// reports its contents.
     pub fn attach(&self, sink: ImageReports) {
-        let published: Vec<(String, u32, u32)> = self
+        let published: Vec<(String, Option<(u32, u32)>)> = self
             .entries()
             .iter()
-            .filter_map(|(source, image)| {
-                image
-                    .as_ref()
-                    .map(|image| (source.clone(), image.width, image.height))
+            .filter_map(|(source, entry)| match entry {
+                Entry::Pending => None,
+                Entry::Ready(image) => Some((source.clone(), Some((image.width, image.height)))),
+                Entry::Failed => Some((source.clone(), None)),
             })
             .collect();
         *self.sink.borrow_mut() = Some(sink);
-        for (source, width, height) in published {
-            self.report_loaded(&source, width, height);
+        for (source, loaded) in published {
+            match loaded {
+                Some((width, height)) => self.report_loaded(&source, width, height),
+                None => self.report_failed(&source),
+            }
         }
     }
 
@@ -139,7 +169,7 @@ impl TestImages {
     pub fn len(&self) -> usize {
         self.entries()
             .values()
-            .filter(|image| image.is_some())
+            .filter(|entry| matches!(entry, Entry::Ready(_)))
             .count()
     }
 
@@ -148,21 +178,38 @@ impl TestImages {
         self.len() == 0
     }
 
-    fn entries(&self) -> std::sync::MutexGuard<'_, HashMap<String, Option<ImageData>>> {
+    fn entries(&self) -> std::sync::MutexGuard<'_, HashMap<String, Entry>> {
         self.entries.lock().expect("test image store")
     }
 
     fn report_loaded(&self, source: &str, width: u32, height: u32) {
+        self.report(ImageEvent::Loaded {
+            source: Arc::from(source),
+            width,
+            height,
+        });
+    }
+
+    fn report_failed(&self, source: &str) {
+        self.report(ImageEvent::Failed {
+            source: Arc::from(source),
+        });
+    }
+
+    fn report(&self, event: ImageEvent) {
         self.pending
             .lock()
             .expect("test image reports")
-            .push(ImageEvent::Loaded {
-                source: Arc::from(source),
-                width,
-                height,
-            });
+            .push(event.clone());
         if let Some(sink) = self.sink.borrow().as_ref() {
-            sink.loaded(source, width, height);
+            match event {
+                ImageEvent::Loaded {
+                    source,
+                    width,
+                    height,
+                } => sink.loaded(&source, width, height),
+                ImageEvent::Failed { source } => sink.failed(&source),
+            }
         }
     }
 
@@ -182,7 +229,10 @@ impl FrameImages for TestImages {
             .lock()
             .expect("test image read log")
             .push((source.to_owned(), hint));
-        self.entries().get(source)?.clone()
+        match self.entries().get(source)? {
+            Entry::Ready(image) => Some(image.clone()),
+            Entry::Pending | Entry::Failed => None,
+        }
     }
 
     /// Records the working set a resolve pass reported.
@@ -202,14 +252,19 @@ impl TestImages {
     /// on. A `bobcat-core` test wraps this in its own adapter.
     pub fn request(&self, source: &str) {
         // Single-flight is trivial here: one entry per source, and a source
-        // already holding pixels starts no work.
-        let load = {
+        // that has already settled either way starts no work.
+        let settled = {
             let mut entries = self.entries();
-            let entry = entries.entry(source.to_owned()).or_default();
-            entry.as_ref().map(|image| (image.width, image.height))
+            match entries.entry(source.to_owned()).or_default() {
+                Entry::Pending => None,
+                Entry::Ready(image) => Some(Some((image.width, image.height))),
+                Entry::Failed => Some(None),
+            }
         };
-        if let Some((width, height)) = load {
-            self.report_loaded(source, width, height);
+        match settled {
+            Some(Some((width, height))) => self.report_loaded(source, width, height),
+            Some(None) => self.report_failed(source),
+            None => {}
         }
     }
 }
@@ -240,7 +295,9 @@ pub fn pump_images<T>(document: &mut Document<T>, store: &TestImages) -> bool {
     if events.is_empty() {
         return false;
     }
-    document.apply_image_events(&events);
+    // The outcomes go nowhere: they are what an embedder turns into `load`
+    // and `error` events, and a screenshot has no realm to dispatch one in.
+    let _outcomes = document.apply_image_events(&events);
     true
 }
 

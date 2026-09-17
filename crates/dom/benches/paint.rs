@@ -440,8 +440,10 @@ fn tile_page() -> (Document<()>, Rc<TestImages>) {
             ),
         );
         dom.append_child(root, tile);
-        dom.set_natural_size(tile, natural);
+        // The source first: for an element that has one, the document owns the
+        // natural size and recomputes it from the bitmap the element draws.
         dom.set_image_source(tile, Some(TILE_SOURCE));
+        dom.set_natural_size(tile, natural);
     }
     (dom, images)
 }

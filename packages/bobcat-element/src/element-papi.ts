@@ -123,14 +123,14 @@ import { __BobcatPublishEvent } from "bobcat:runtime";
 //
 // **The whole walk is this file's.** The host computes the event path while
 // it holds the document, releases it, and makes one call:
-// `__BobcatDispatchEvent(nodes, targets, name, detail)`, where `nodes` is the
-// path in target-first order as comma-joined decimal node ids and `targets`
-// carries, position for position, the shadow-retargeted target of that step.
-// Two strings because the boundary takes primitives and structured clones
-// only, a clone can be minted by the realm alone, and a decimal id cannot
-// contain the separator — the same encoding `childElementIds` uses.
-// Releasing the document before the call is what lets a listener mutate the
-// tree.
+// `__BobcatDispatchEvent(nodes, targets, name, detail, bubbles)`, where
+// `nodes` is the path in target-first order as comma-joined decimal node ids
+// and `targets` carries, position for position, the shadow-retargeted target
+// of that step. Two strings because the boundary takes primitives and
+// structured clones only, a clone can be minted by the realm alone, and a
+// decimal id cannot contain the separator — the same encoding
+// `childElementIds` uses. Releasing the document before the call is what lets
+// a listener mutate the tree.
 //
 // From there this file runs the standard's dispatch over that path: the
 // capture pass from the last entry to the first, the bubble pass from the
@@ -142,6 +142,21 @@ import { __BobcatPublishEvent } from "bobcat:runtime";
 // listener threw — the standard's last dispatch step runs: `eventPhase` back
 // to `NONE` and `currentTarget` to null, so an event a listener kept does not
 // go on naming the node the walk stopped on.
+//
+// **A non-bubbling event narrows two of the three passes and cancels the
+// third.** The whole path is always sent, because the capture pass runs over
+// all of it whether the event bubbles or not; `bubbles` is what decides the
+// rest. The bubble pass runs on the at-target steps alone — the target, plus
+// any shadow host standing in for it — and the `global-bindEvent` pass does
+// not run at all. That is web-core's `common_event_handler`
+// (`web-core/src/main_thread/client/element_apis/event_apis.rs:413-432`):
+// capture over the full path unconditionally, then either the full path or
+// `[path.first()]`, and `dispatch_global_bind_event` only `if is_bubble`. It
+// is handed the event's own `bubbles`
+// (`ts/client/mainthread/elementAPIs/WASMJSBinding.ts:254-258`), so nothing
+// about it is per-event-name. Lynx's own `<image>` `load` and `error` are the
+// events this carries today: web-core builds both with `bubbles: false`
+// (`web-elements/src/elements/common/commonEventInitConfiguration.ts`).
 //
 // Both stop methods are pure local state now. `stopPropagation` ends the
 // remaining steps and `stopImmediatePropagation` also skips the rest of the
@@ -2262,6 +2277,9 @@ function handlerInPass(
  * far end inwards, its bubble pass back out, then the `global-bindEvent`
  * pass, which is not over the path at all.
  *
+ * `bubbles` narrows the last two and never the first: a non-bubbling event
+ * binds on its at-target steps alone and runs no global pass. See the header.
+ *
  * One event object serves all three, so a property one listener writes is
  * there for the next. Whatever ends the dispatch — the passes finishing, a
  * stop, or a listener throwing on its way out of this call — the standard's
@@ -2278,6 +2296,7 @@ function dispatchEvent(
   targetIds: unknown,
   eventName: unknown,
   detailJson: unknown,
+  bubbles: unknown,
 ): undefined {
   const steps = pathSteps(pathIds, targetIds);
   const first = steps[0];
@@ -2434,8 +2453,18 @@ function dispatchEvent(
   try {
     // The reversed copy is the capture order; a path is a handful of steps.
     runPass(steps.slice().reverse(), CAPTURE);
-    runPass(steps, BUBBLE);
-    runGlobalPass();
+    // A non-bubbling event binds on its at-target steps alone — the target,
+    // and any shadow host retargeting made stand in for it, which is the same
+    // set the host would have sent had it built a non-bubbling path itself
+    // (`dom`'s `event_steps` keeps exactly the at-target entries). web-core,
+    // which has no retargeting to carry, narrows to the path's first entry.
+    runPass(
+      bubbles ? steps : steps.filter((step) => step.node === step.target),
+      BUBBLE,
+    );
+    if (bubbles) {
+      runGlobalPass();
+    }
   } finally {
     event.eventPhase = NONE;
     event.currentTarget = null;

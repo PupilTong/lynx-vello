@@ -791,14 +791,17 @@ fn paint_item<T>(
             shadow::paint_outset(sink.scene_for(chain), &mut scratch.paths, style, &fragment);
             background::paint(sink, chain, style, &fragment, images, text_clip.as_ref());
             shadow::paint_inset(sink.scene_for(chain), &mut scratch.paths, style, &fragment);
-            if let Some(source) = document.image_source(item.node) {
+            // Of a replaced element's two sources, the registry picks the one
+            // whose bitmap the node's natural size was recomputed from, so
+            // `object-fit` fits the bitmap drawn here.
+            let (source, placeholder) = document.image_sources(item.node);
+            if let Some((image, _)) = images.resolve_presented(source, placeholder) {
                 background::paint_replaced_content(
                     sink,
                     chain,
                     style,
                     &fragment,
-                    images,
-                    source,
+                    image,
                     document.natural_size(item.node),
                 );
             }
