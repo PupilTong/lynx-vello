@@ -60,12 +60,19 @@ impl Default for PageConfig {
 /// web-elements merely forces is written here as a plain declaration a page's
 /// own CSS can still override (`docs/style-assumptions.md` §D.15).
 ///
-/// The one exception is `display: -lynx-text` on `text` and `inline-text`.
-/// Lynx does not decide inline-ness by cascade at all: `ConvertToInlineElement`
-/// runs when a child is *added* to a text, and no author CSS can undo it. A
-/// declaration a page could override would therefore misdescribe the engine,
-/// not merely permit a different one. `the_ua_sheet_is_important_free_apart_from_the_text_block`
-/// pins the exception to exactly those two rules.
+/// The exceptions are all the paragraph's, and all of the same shape: a fact
+/// the cascade is merely *reporting* rather than a default it is *choosing*.
+/// `display: -lynx-text` on `text`, on `inline-text` and on a `text`'s own
+/// `inline-truncation` child is the first three — Lynx does not decide
+/// inline-ness by cascade at all: `ConvertToInlineElement` runs when a child is
+/// *added* to a text, and no author CSS can undo it. `padding: 0` on an
+/// `image` that is inline content of a paragraph is the fourth: web-core gives
+/// the authored element no box at all and rebuilds one in its shadow tree
+/// without inheriting `padding`, so there is no box for an author's padding to
+/// reach, and a declaration a page could override would misdescribe both
+/// references. [`super::text`] carries the citation for each.
+/// `the_ua_sheet_is_important_free_apart_from_the_text_block` pins the set to
+/// exactly those four rules.
 #[must_use]
 pub(super) fn ua_stylesheet(config: PageConfig) -> String {
     let display = if config.default_display_linear {
@@ -244,13 +251,26 @@ mod tests {
     /// only place Lynx treats it as the paragraph's custom truncation content
     /// — a structural role, established by where it is written rather than by
     /// what any sheet declares.
+    ///
+    /// The fourth, `padding: 0` on an inline `image`, is the argument reached
+    /// from the other end. web-core gives the authored host element no box at
+    /// all (`x-text > x-image { display: contents !important }`) and rebuilds
+    /// one in the shadow tree out of an inherited property list `padding` is
+    /// not on, so no author CSS there can make an inline image's padding
+    /// matter. Here the authored element *is* the box, and a normal
+    /// declaration would lose to the author's own `padding` — which would
+    /// describe an engine neither reference has. [`super::text`] carries the
+    /// full citation.
     #[test]
     fn the_ua_sheet_is_important_free_apart_from_the_text_block() {
-        const ALLOWED: [&str; 3] = [
+        const ALLOWED: [&str; 4] = [
             "text { box-sizing: border-box; display: -lynx-text !important; color: initial; }",
             "inline-text { display: -lynx-text !important; }",
             "text > inline-truncation { display: -lynx-text !important; \
              --lynx-inline-truncation: 1; }",
+            "text > image, text > wrapper > image, inline-text > image, \
+             inline-text > wrapper > image, text > inline-truncation > image, \
+             text > inline-truncation > wrapper > image { padding: 0 !important; }",
         ];
 
         for config in [

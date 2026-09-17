@@ -189,7 +189,14 @@ in the paragraph protocol: direction is resolved at style time into a physical
 Scope note: this is the spec for the `parley` integration — see `.claude/agents/lynx-text-engine.md`.
 
 Implementation note (2026-09-06): `display: -lynx-text` flattens its subtree
-through `dom` into `hughie::text::block`, including atomic inline boxes.
+through `dom` into `hughie::text::block`, including atomic inline boxes. An
+atom reaches the paragraph as its **margin** box and is placed back at the
+establishing element's content-box origin plus that margin, so glyphs and
+inline boxes share one coordinate system; `padding` on an inline `image` is
+erased by a UA rule, since neither reference gives the authored host a box that
+could carry it. Only `absolute` and `fixed` leave the paragraph's flow, and a
+`relative` atom's own insets are ignored — native Lynx's behaviour, by user
+ruling, against web-core's ([deviations.md](deviations.md)).
 Core reflects `text-maxline` / `text-maxlength` into the custom properties
 `--lynx-text-maxline` / `--lynx-text-maxlength`. Its UA stylesheet registers both
 with `<integer>` syntax and `inherits: false`; the initial values (`0` and `-1`)

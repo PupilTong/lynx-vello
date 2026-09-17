@@ -24,7 +24,7 @@
 //! The last row is what makes an inline `<view>` atomic: its inner text can
 //! never join this paragraph, because the walk does not descend through a box.
 
-use hughie::geometry::Size;
+use hughie::geometry::{Edges, Point, Size};
 use hughie::style::{CoreStyle, PositionProperty};
 use hughie::text::TextContext;
 use hughie::text::block::{
@@ -112,6 +112,27 @@ struct Flattened {
     markers: Vec<NodeSlot>,
 }
 
+/// Whether a positioned child leaves the paragraph's flow.
+///
+/// The paragraph asks this in four places — the flatten walk, the truncation
+/// marker test, the out-of-flow pass and the post-placement hide loop — so it
+/// is one function, and they cannot drift apart.
+///
+/// Only `absolute` and `fixed` leave the flow, which is the split every other
+/// algorithm here uses. The value is the one `StyleView::position` resolves,
+/// so an `absolute` with no containing-block ancestor has already been lowered
+/// to `fixed` and is still out of flow. `relative` and `sticky` are ordinary
+/// inline content: a relative atom advances the line and sits exactly where a
+/// static one would — its insets are ignored, per native Lynx
+/// (`docs/tracking/deviations.md`) — and a sticky one is left unpinned exactly
+/// as it is everywhere else in this engine.
+const fn out_of_flow(position: PositionProperty) -> bool {
+    matches!(
+        position,
+        PositionProperty::Absolute | PositionProperty::Fixed
+    )
+}
+
 /// Whether this child is the paragraph's custom truncation content.
 ///
 /// A computed-style fact, never a tag: the Lynx UA sheet flags an
@@ -124,12 +145,10 @@ fn is_truncation_marker<T>(node: &Node<T>) -> bool {
         return false;
     }
     let view = StyleView::of(node);
-    view.position() == PositionProperty::Static
-        && display_mode(view.display()) == DisplayMode::Text
-        && {
-            use hughie::style::TextContainerStyle;
-            view.is_inline_truncation()
-        }
+    !out_of_flow(view.position()) && display_mode(view.display()) == DisplayMode::Text && {
+        use hughie::style::TextContainerStyle;
+        view.is_inline_truncation()
+    }
 }
 
 /// Splits `element`'s flat subtree into the paragraph's content and the
@@ -218,14 +237,19 @@ fn collect_content<T>(
         // Out-of-flow children are not inline content: an absolutely
         // positioned or fixed box is placed by the absolute pass against its
         // containing block, and swallowing it as an atom would both grow the
-        // paragraph and lay it out twice.
-        if view.position() != PositionProperty::Static {
+        // paragraph and lay it out twice. A `relative` or `sticky` child is
+        // still in flow and is collected below like any other.
+        if out_of_flow(view.position()) {
             continue;
         }
         match display_mode(view.display()) {
             // A nested scope and a transparent box are both walked through;
             // the difference is only which style its runs carry, and that is
             // read per run from the innermost element ancestor anyway.
+            //
+            // Neither generates a box, so `position: relative` on one is inert
+            // twice over: its insets are ignored like any in-flow child's, and
+            // there would be nothing for them to move anyway.
             DisplayMode::Text | DisplayMode::Contents => {
                 if !collect_generated(tree, slot, &mut collected) {
                     stack.extend(node.flat_children().iter().rev().copied());
@@ -503,6 +527,71 @@ pub(crate) fn constraint_for<T>(
 pub(crate) const ATOM_SPACE: hughie::tree::AvailableSpace =
     hughie::tree::AvailableSpace::MaxContent;
 
+/// One atomic inline box: the node behind it, the box id it holds in the
+/// paragraph, and the margins the line advanced by.
+///
+/// The margins are carried rather than re-read at placement because the same
+/// numbers have to answer twice, and the two answers must agree: once as the
+/// margin box the paragraph breaks against, once as the step from that margin
+/// box's origin down to the border box's.
+#[derive(Clone, Copy)]
+struct Atom {
+    slot: NodeSlot,
+    id: u64,
+    margin: Edges<f32>,
+}
+
+/// The establishing element's own box model for this pass.
+///
+/// Resolved from style and from the size this pass just produced, never from
+/// the element's layout slot: a parent writes a child's layout only once that
+/// child's `compute_layout` has returned, so while this one runs its own slot
+/// still holds the previous pass's box — or, on the first pass, none at all.
+/// The inline basis is the one the box wrapper resolved its own padding
+/// against, so the two cannot disagree.
+struct BlockBox {
+    size: Size<f32>,
+    border: Edges<f32>,
+    padding: Edges<f32>,
+}
+
+impl BlockBox {
+    fn of<T>(view: &StyleView<'_, T>, size: Size<f32>, inline_basis: Option<f32>) -> Self {
+        Self {
+            size,
+            border: hughie::compute::used_border(view),
+            padding: hughie::compute::used_padding(view, inline_basis),
+        }
+    }
+
+    /// The content-box origin, in the border-box space `Layout::location` means.
+    fn content_origin(&self) -> Point<f32> {
+        Point::new(
+            self.border.left + self.padding.left,
+            self.border.top + self.padding.top,
+        )
+    }
+
+    /// The padding box: the containing block of an out-of-flow child.
+    fn padding_box(&self) -> Size<f32> {
+        Size::new(
+            (self.size.width - self.border.horizontal_sum()).max(0.0),
+            (self.size.height - self.border.vertical_sum()).max(0.0),
+        )
+    }
+}
+
+/// The margin box the line advances by.
+///
+/// Floored at zero on each axis: negative margins legitimately shrink the
+/// advance, but a box dimension the breaker sees must never go below nothing.
+fn margin_box(border_box: Size<f32>, margin: Edges<f32>) -> Size<f32> {
+    Size::new(
+        (border_box.width + margin.horizontal_sum()).max(0.0),
+        (border_box.height + margin.vertical_sum()).max(0.0),
+    )
+}
+
 pub(crate) fn context_and_block(
     state: &mut DocumentLayoutState,
     element: NodeSlot,
@@ -518,10 +607,11 @@ pub(crate) fn context_and_block(
 /// never be live at once.
 ///
 /// 1. **Refresh** — walk the subtree, rebuild the paragraph if its content moved.
-/// 2. **Atoms** — measure each inline box once, at max-content, and write the sizes in.
+/// 2. **Atoms** — measure each inline box once, at max-content, and write its *margin* box in.
 ///    Constraint-independent by construction: Lynx measures an inline view as an independent
 ///    subtree, and a size that moved between a probe and its commit would poison both the width
-///    memo and the committed break.
+///    memo and the committed break. That is why the margins come from style on both paths: a
+///    measurement writes no layout, so a margin read back from a slot would be the last pass's.
 /// 3. **Paragraph** — probe or commit, then place the atoms and hide the nodes the paragraph
 ///    consumed.
 pub(crate) fn compute_text_block_layout<T>(
@@ -537,6 +627,7 @@ pub(crate) fn compute_text_block_layout<T>(
 
     // Phase 2. Each atom is laid out as its own subtree; the paragraph only
     // ever sees the margin-box result.
+    let mut placed_atoms: Vec<Atom> = Vec::with_capacity(atoms.len());
     for &(atom, id) in &atoms {
         let output = if input.goal.commits() {
             hughie::compute::compute_inline_box_layout(
@@ -558,11 +649,26 @@ pub(crate) fn compute_text_block_layout<T>(
                 ),
             )
         };
+        let margin = hughie::compute::used_margins(&tree.style(atom), input.parent_size.width);
         if let Some((_, store)) = context_and_block(state, element) {
+            // A baseline is measured from the border box's top edge, so it
+            // moves down with the margin box's. Without one the block's own
+            // fallback puts the box's bottom edge on the baseline — which, the
+            // box being the margin box, is the bottom *margin* edge CSS asks
+            // for an inline-block that has no baseline of its own.
+            let baseline = output
+                .first_baselines
+                .y
+                .map(|baseline| (baseline + margin.top).max(0.0));
             store
                 .block
-                .set_box_size(id, output.size, output.first_baselines.y);
+                .set_box_size(id, margin_box(output.size, margin), baseline);
         }
+        placed_atoms.push(Atom {
+            slot: atom,
+            id,
+            margin,
+        });
     }
 
     // Phase 3.
@@ -596,7 +702,8 @@ pub(crate) fn compute_text_block_layout<T>(
     });
 
     if input.goal.commits() {
-        place_and_hide(tree, state, element, &atoms);
+        let block = BlockBox::of(&view, output.size, input.parent_size.width);
+        place_and_hide(tree, state, element, &placed_atoms, &block);
     } else {
         state.note_probed_text(element);
     }
@@ -608,7 +715,8 @@ fn place_and_hide<T>(
     tree: &TreeArenas<T>,
     state: &mut DocumentLayoutState,
     element: NodeSlot,
-    atoms: &[(NodeSlot, u64)],
+    atoms: &[Atom],
+    block: &BlockBox,
 ) {
     use hughie::text::block::PlacedBox;
     use hughie::tree::LayoutTree;
@@ -636,12 +744,13 @@ fn place_and_hide<T>(
         let PlacedBox::Visible { id, .. } = *placed else {
             continue;
         };
-        if let Some(&(slot, _)) = atoms.iter().find(|(_, atom_id)| *atom_id == id) {
-            placed_slots.push(slot);
+        if let Some(atom) = atoms.iter().find(|atom| atom.id == id) {
+            placed_slots.push(atom.slot);
         }
     }
     let carriers = atom_carriers(tree, element, &placed_slots);
 
+    let content_origin = block.content_origin();
     for placed in placements {
         let (id, origin) = match placed {
             PlacedBox::Visible { id, origin, .. } => (id, Some(origin)),
@@ -649,14 +758,25 @@ fn place_and_hide<T>(
             // position, so it generates no box this frame.
             PlacedBox::Hidden { id } => (id, None),
         };
-        let Some(&(slot, _)) = atoms.iter().find(|(_, atom_id)| *atom_id == id) else {
+        let Some(&atom) = atoms.iter().find(|atom| atom.id == id) else {
             continue;
         };
         match origin {
             Some(origin) => {
+                // `left`/`top`/`right`/`bottom` on an in-flow atom are ignored,
+                // following native Lynx: `CalcRelativePosition` runs only over
+                // a `LayoutAlgorithm`'s in-flow items
+                // (`starlight/layout/layout_algorithm.cc:215-228`), and a
+                // `<text>` has a `measure_func_`, so it never builds one
+                // (`layout_object.cc:684-696`). This deviates from web-core,
+                // where `x-view` is a `position: relative` `inline-flex` box
+                // the browser shifts; user ruling 2026-09-17, recorded in
+                // `docs/tracking/deviations.md`. A relative atom therefore
+                // sits exactly where a static one does.
+                //
                 // The atom keeps the box its own layout produced; the
                 // paragraph decides only where it sits.
-                let slot_layout = tree.layout_mut(state, slot);
+                let slot_layout = tree.layout_mut(state, atom.slot);
                 let mut placed_layout =
                     hughie::tree::Layout::with_order(slot_layout.unrounded.order);
                 placed_layout.size = slot_layout.unrounded.size;
@@ -664,28 +784,27 @@ fn place_and_hide<T>(
                 placed_layout.border = slot_layout.unrounded.border;
                 placed_layout.padding = slot_layout.unrounded.padding;
                 placed_layout.margin = slot_layout.unrounded.margin;
-                placed_layout.location = origin;
-                tree.set_unrounded_layout(state, slot, placed_layout);
+                // Two changes of space, in order. The paragraph's origin is
+                // the element's *content* box, while `location` is read
+                // against its border box; and the paragraph placed the atom's
+                // *margin* box, while `location` names its border box.
+                placed_layout.location = Point::new(
+                    content_origin.x + origin.x + atom.margin.left,
+                    content_origin.y + origin.y + atom.margin.top,
+                );
+                tree.set_unrounded_layout(state, atom.slot, placed_layout);
             }
-            None => hughie::compute::hide_subtree(tree, state, slot),
+            None => hughie::compute::hide_subtree(tree, state, atom.slot),
         }
     }
 
     // Out-of-flow children never entered the paragraph, so the block lays
     // them out itself against its own padding box — the same thing every
     // other container algorithm does for the children it does not flow.
-    let container = tree.layout_mut(state, element).unrounded.size;
-    let border = tree.layout_mut(state, element).unrounded.border;
-    let padding = tree.layout_mut(state, element).unrounded.padding;
-    let padding_box = Size::new(
-        (container.width - border.left - border.right).max(0.0),
-        (container.height - border.top - border.bottom).max(0.0),
-    );
-    let content_origin =
-        hughie::geometry::Point::new(border.left + padding.left, border.top + padding.top);
+    let padding_box = block.padding_box();
     for child in tree.children(element) {
         let node = tree.at(child);
-        if !node.is_element() || StyleView::of(node).position() == PositionProperty::Static {
+        if !node.is_element() || !out_of_flow(StyleView::of(node).position()) {
             continue;
         }
         let mut layout = hughie::compute::compute_absolute_layout(
@@ -693,10 +812,14 @@ fn place_and_hide<T>(
             state,
             child,
             padding_box,
-            content_origin,
+            // The static position, in the padding-box space the containing
+            // block is: where an in-flow box would have started, which is the
+            // content-box origin.
+            Point::new(block.padding.left, block.padding.top),
         );
-        layout.location.x += border.left;
-        layout.location.y += border.top;
+        // And back out to the border-box space `location` is read in.
+        layout.location.x += block.border.left;
+        layout.location.y += block.border.top;
         tree.set_unrounded_layout(state, child, layout);
     }
 
@@ -715,14 +838,14 @@ fn place_and_hide<T>(
     while let Some(child) = stack.pop() {
         // Atoms are exempt — they were just placed — and hiding one would zero
         // the geometry this pass gave it.
-        if atoms.iter().any(|(slot, _)| *slot == child) {
+        if atoms.iter().any(|atom| atom.slot == child) {
             continue;
         }
         // An out-of-flow child is not the paragraph's to hide: it never
         // entered the flatten walk, and the absolute pass places it against
         // its containing block.
         let node = tree.at(child);
-        if node.is_element() && StyleView::of(node).position() != PositionProperty::Static {
+        if node.is_element() && out_of_flow(StyleView::of(node).position()) {
             continue;
         }
         if !carriers.contains(&child) {

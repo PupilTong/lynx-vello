@@ -1686,26 +1686,30 @@ fn an_atomic_inline_box_keeps_the_size_it_measured() {
 /// border and padding.
 ///
 /// In web-core the paragraph and everything in it lay out inside the content
-/// box, so padding moves the two together. Here the paragraph writes an atom's
-/// paragraph-space origin straight into `location`
-/// (`crates/dom/src/layout/text_block.rs:667`) while every reader of
-/// `location` takes it as border-box relative: the frame builder adds it to
-/// the element's own border-box offset
-/// (`crates/dom/src/visual/build.rs:750-756`) and adds the content-box inset
-/// only to the glyphs (`crates/dom/src/visual/build.rs:920-925`), and the
-/// same function's own out-of-flow pass puts its children in that space by
-/// adding the border back (`crates/dom/src/layout/text_block.rs:698-699`).
-/// Glyphs and inline boxes therefore end up in two different coordinate
-/// systems, the atom short by the border plus padding.
+/// box, so padding moves the two together. That is now what happens here:
+/// `place_and_hide` (`crates/dom/src/layout/text_block.rs`) converts an atom's
+/// paragraph-space origin into the border-box space every reader of `location`
+/// works in, by adding the establishing element's content-box inset — the same
+/// inset the frame builder adds to the glyphs
+/// (`crates/dom/src/visual/build.rs`'s `push_paragraph` and the
+/// `DisplayMode::Text` branch of `collect_in_context`). Before that conversion
+/// the atom landed short by the border plus padding: with the 10px padding
+/// below it reported `location` `(0, 0)`.
 ///
 /// The assertion is on `location` rather than on pixels so that it answers
 /// only for the origin: the atom's size is a separate claim, carried by
 /// `an_atomic_inline_box_keeps_the_size_it_measured`, and whether the frame
 /// builder descends to the atom at all is a third one, carried by
-/// `a_boxed_child_paints_from_a_text_block_that_is_its_own_context`. Measured:
-/// with the 10px padding below, the atom reports `location` `(0, 0)`.
+/// `a_boxed_child_paints_from_a_text_block_that_is_its_own_context`.
+///
+/// Both insets are covered, and they are deliberately different numbers so
+/// that neither can stand in for the other. A third block puts its atom under
+/// a `display: contents` carrier: a carrier keeps an empty layout at `(0, 0)`
+/// rather than a hidden one, so the atom beneath it is still read against the
+/// establishing element's border box and the same conversion has to answer for
+/// it — which is the composition the frame builder relies on, since
+/// `flattened_children` never yields the carrier a box of its own.
 #[test]
-#[ignore = "GAP: an atom's paragraph-space origin is written into `location`, which every reader takes as border-box relative (crates/dom/src/layout/text_block.rs:667)"]
 fn an_atomic_inline_box_sits_inside_the_blocks_border_and_padding() {
     let mut doc = Doc::with_device(device(200.0, 100.0));
     doc.add_css(
@@ -1714,6 +1718,8 @@ fn an_atomic_inline_box_sits_inside_the_blocks_border_and_padding() {
                  width: 160px; height: 80px; box-sizing: border-box;
                  padding: 10px;
                  font-family: Ahem; font-size: 20px; line-height: 20px; }
+         .bordered { border: 4px solid #0000ff; padding-left: 6px; padding-top: 2px; }
+         .carrier { display: contents; }
          .atom { display: flex; width: 40px; height: 20px;
                  background-color: #ff0000; }",
     );
@@ -1721,6 +1727,11 @@ fn an_atomic_inline_box_sits_inside_the_blocks_border_and_padding() {
     let root = doc.root;
     let text = doc.el(root, "view.text");
     let atom = doc.el(text, "view.atom");
+    let bordered = doc.el(root, "view.text.bordered");
+    let inside_border = doc.el(bordered, "view.atom");
+    let wrapping = doc.el(root, "view.text");
+    let carrier = doc.el(wrapping, "view.carrier");
+    let under_carrier = doc.el(carrier, "view.atom");
     doc.flush();
 
     assert_eq!(
@@ -1734,5 +1745,322 @@ fn an_atomic_inline_box_sits_inside_the_blocks_border_and_padding() {
         (10.0, 10.0),
         "the atom is the first thing on the first line, so it starts at the \
          content-box origin — the same origin the glyphs beside it get",
+    );
+    let (x, y, _, _) = rect(&doc, inside_border);
+    assert_eq!(
+        (x, y),
+        (10.0, 6.0),
+        "and the content-box origin is border plus padding, not padding alone: \
+         4 + 6 across and 4 + 2 down",
+    );
+    assert_eq!(
+        rect(&doc, carrier),
+        (0.0, 0.0, 0.0, 0.0),
+        "a carrier keeps an empty layout rather than a hidden one, so the walk \
+         below it still descends",
+    );
+    let (x, y, _, _) = rect(&doc, under_carrier);
+    assert_eq!(
+        (x, y),
+        (10.0, 10.0),
+        "and the atom under it lands exactly where an unwrapped one does: the \
+         carrier contributes no origin of its own",
+    );
+}
+
+/// The atom half of `x-text/inline-image-padding-and-margin`
+/// (`packages/web-platform/web-elements/tests/fixtures/x-text/inline-image-padding-and-margin.
+/// html`, `packages/web-platform/web-elements/tests/web-elements.spec.ts:189`) at the
+/// layer that owns it: an atomic inline box's margins are what the line
+/// advances by, and what its border box is then stepped back in from.
+///
+/// The tag half of the same fixture — that `padding` on an inline `image`
+/// contributes nothing, because web-core's host element has no box — is a UA
+/// cascade claim and lives with the sheet, in
+/// `an_inline_image_s_margin_reaches_the_line_s_advance_and_its_padding_does_not`
+/// (`crates/bobcat-core/src/main/tree/web_text_replication.rs`). `crates/dom`
+/// names no Lynx tag, so the atom here is spelled as the `display: flex` box
+/// the UA sheet gives one.
+///
+/// Four claims, each against the same unmargined control:
+///
+/// - `margin-left` is outer advance ahead of the box, and moves the border box with it;
+/// - a *negative* `margin-left` shrinks that advance and pulls the border box back over what
+///   precedes it, which is legal and is not floored away;
+/// - `margin-top` grows the line, and moves the border box down inside its own margin box;
+/// - `margin-bottom` grows the line by the same amount and leaves the border box where it was.
+///
+/// The last two are one rule: an atom with no baseline of its own sits with
+/// its bottom *margin* edge on the line's baseline, so the whole margin box —
+/// both vertical margins included — is above-baseline contribution. What
+/// differs is only where inside that box the border box sits.
+///
+/// That rule is CSS's and web-core's, and it is a **ruled** deviation from
+/// native (2026-09-17, `docs/tracking/deviations.md`): native puts the bottom
+/// *border* edge on the baseline and lets `margin-bottom` hang below it —
+/// `GetOffsetFromTopMarginEdgeToBaseline` returns `margin-top + offset_height_`
+/// when a box reports no baseline of its own
+/// (`lynx/core/renderer/starlight/layout/layout_object.cc:1118-1124`), and
+/// `offset_height_` is the border-box height. So this engine's `.down` line is
+/// 68 tall where native's would be 60.
+///
+/// The atom is deliberately much taller than the run, so that the line's
+/// height is the box's contribution and nothing else; the two pixels by which
+/// the box overhangs the line's top edge are the recorded all-ascent
+/// deviation (`docs/tracking/deviations.md`, "Text layout"), not this
+/// fixture's claim.
+#[test]
+fn an_atoms_margins_reach_the_line_and_step_its_border_box_in() {
+    let mut doc = Doc::with_device(device(400.0, 400.0));
+    doc.add_css(
+        "page { display: flex; flex-direction: column; width: 400px; height: 400px; }
+         .text { display: -lynx-text; width: 400px;
+                 font-family: Ahem; font-size: 20px; line-height: 20px; }
+         .atom { display: flex; width: 40px; height: 60px; }
+         .left { margin-left: 10px; }
+         .back { margin-left: -10px; }
+         .up { margin-top: 8px; }
+         .down { margin-bottom: 8px; }",
+    );
+    assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
+    let root = doc.root;
+    let mut paragraph = |classes: &str| {
+        let text = doc.el(root, "view.text");
+        let run = doc.dom.create_text_node("AB", ());
+        doc.dom.append_child(text, run);
+        let atom = doc.el(text, &format!("view.atom{classes}"));
+        (text, atom)
+    };
+    let (plain, plain_atom) = paragraph("");
+    let (left, left_atom) = paragraph(".left");
+    let (back, back_atom) = paragraph(".back");
+    let (up, up_atom) = paragraph(".up");
+    let (down, down_atom) = paragraph(".down");
+    doc.flush();
+
+    assert_eq!(
+        ink(&doc, plain),
+        (80.0, 60.0),
+        "the control: two em squares, then a 40x60 box that is the whole of the \
+         line's height",
+    );
+    assert_eq!(rect(&doc, plain_atom), (40.0, -2.0, 40.0, 60.0));
+
+    assert_eq!(
+        ink(&doc, left),
+        (90.0, 60.0),
+        "`margin-left` is advance the line grows by ahead of the box",
+    );
+    assert_eq!(
+        rect(&doc, left_atom),
+        (50.0, -2.0, 40.0, 60.0),
+        "and the border box starts one margin past the margin box's origin, \
+         keeping the size its own layout produced and its place on the baseline",
+    );
+
+    assert_eq!(
+        ink(&doc, back),
+        (70.0, 60.0),
+        "a negative margin shrinks the advance rather than being clamped away",
+    );
+    assert_eq!(
+        rect(&doc, back_atom),
+        (30.0, -2.0, 40.0, 60.0),
+        "and pulls the border box back over the run before it",
+    );
+
+    assert_eq!(
+        ink(&doc, up),
+        (80.0, 68.0),
+        "`margin-top` is above-baseline contribution: the line grows by it",
+    );
+    assert_eq!(
+        rect(&doc, up_atom),
+        (40.0, 6.0, 40.0, 60.0),
+        "and the border box moves down inside the margin box by that margin",
+    );
+
+    assert_eq!(
+        ink(&doc, down),
+        (80.0, 68.0),
+        "`margin-bottom` is above the baseline too, because it is the bottom \
+         margin edge that sits on it, so the line grows by the same 8",
+    );
+    assert_eq!(
+        rect(&doc, down_atom),
+        (40.0, -2.0, 40.0, 60.0),
+        "while the border box, which the margin hangs below, does not move",
+    );
+}
+
+/// An out-of-flow child of a `<text>` is placed against the block's own
+/// padding box, and that box has to be read from this pass rather than from
+/// the element's layout slot.
+///
+/// The slot is the hazard: a parent writes a child's layout only once that
+/// child's `compute_layout` has returned, so while a text block's own
+/// algorithm runs its slot still holds the previous pass's box — on a first
+/// flush, none at all. Reading the containing block from there gave every
+/// absolutely positioned child of a text a `0x0` box at `(0, 0)` on the first
+/// flush, and the layout cache then kept that answer for every later one.
+/// `BlockBox` (`crates/dom/src/layout/text_block.rs`) resolves the border and
+/// padding from style instead, against the same inline basis the box wrapper
+/// used, and takes the size from the output this pass just produced.
+///
+/// Percentages are what make the test answer for the containing block rather
+/// than for an offset: a `50%` against a stale `0` is `0`.
+#[test]
+fn an_out_of_flow_child_of_a_text_resolves_against_the_blocks_padding_box() {
+    let mut doc = Doc::with_device(device(200.0, 200.0));
+    doc.add_css(
+        "page { display: flex; position: relative; width: 200px; height: 200px; }
+         .text { display: -lynx-text; position: relative;
+                 width: 160px; height: 100px; box-sizing: border-box;
+                 border: 5px solid #0000ff; padding: 10px;
+                 font-family: Ahem; font-size: 20px; line-height: 20px; }
+         .out { position: absolute; left: 0; top: 0; width: 50%; height: 50%; }
+         .static-position { position: absolute; width: 20px; height: 20px; }",
+    );
+    assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
+    let root = doc.root;
+    let text = doc.el(root, "view.text");
+    let out = doc.el(text, "view.out");
+    let anchored = doc.el(text, "view.static-position");
+    doc.flush();
+
+    assert_eq!(
+        rect(&doc, out),
+        (5.0, 5.0, 75.0, 45.0),
+        "the containing block is the 150x90 padding box, and `left: 0` counts \
+         from the padding edge — so the box lands one border in",
+    );
+    assert_eq!(
+        rect(&doc, anchored),
+        (15.0, 15.0, 20.0, 20.0),
+        "and a box with no insets falls back to the static position, which is \
+         the content-box origin: border plus padding, counted once",
+    );
+}
+
+/// A `position: relative` or `sticky` child of a `<text>` stays in the
+/// paragraph's flow; only `absolute` and `fixed` leave it. Its insets are
+/// ignored.
+///
+/// There is no lynx-stack original for this: web-core gets it from the
+/// browser, where `position: relative` on an inline-level box is an ordinary
+/// in-flow box that paints offset. Here the paragraph used to test its
+/// children against `position: static` in four places, so a relative child was
+/// dropped from the flatten walk and then laid out by the out-of-flow pass —
+/// it vanished from the line and landed at its static position. The split is
+/// now `out_of_flow` (`crates/dom/src/layout/text_block.rs`), the same
+/// `Absolute | Fixed` split `Document::layout_rect` and every hughie algorithm
+/// uses.
+///
+/// The insets are the deviation, and it is a ruled one (2026-09-17,
+/// `docs/tracking/deviations.md`). **Native** never applies them to inline
+/// content of a paragraph: `CalcRelativePosition`
+/// (`lynx/core/renderer/starlight/layout/position_layout_utils.cc:38-71`) has
+/// exactly one caller, `LayoutAlgorithm::HandleRelativePosition`
+/// (`layout_algorithm.cc:215-228`), which walks the container algorithm's
+/// `inflow_items_` — and a `<text>` has a `measure_func_`, so it returns before
+/// any `LayoutAlgorithm` is built (`layout_object.cc:684-696`) and the inline
+/// view's position comes only from `AlignmentByPlatform`. **web-core** differs:
+/// `x-view` carries `position: relative`
+/// (`packages/web-platform/web-elements/src/elements/common-css/linear.css:142`)
+/// and `x-text > x-view` is `display: inline-flex !important`
+/// (`XText/x-text.css:90-93`), so the browser shifts the box while leaving the
+/// advance alone. This engine follows native, so an authored inset on an atom
+/// is a silent no-op.
+///
+/// Native Lynx's own default `position` is `relative`
+/// (`lynx/core/renderer/starlight/style/default_layout_style.h:65`), so on
+/// that engine this is the ordinary case rather than an authored one; here,
+/// as in web-core, the computed default is `static` and a card reaches this
+/// path by declaring it. That default is also why ignoring the insets costs
+/// native nothing: on it, honouring them for every element would be the
+/// surprising behaviour.
+#[test]
+fn a_relative_atom_stays_in_the_line_and_only_absolute_leaves_it() {
+    let mut doc = Doc::with_device(device(400.0, 400.0));
+    doc.add_css(
+        "page { display: flex; flex-direction: column; width: 400px; height: 400px; }
+         .text { display: -lynx-text; position: relative; width: 400px;
+                 font-family: Ahem; font-size: 20px; line-height: 30px; }
+         .atom { display: flex; width: 40px; height: 20px; }
+         .relative { position: relative; }
+         .inset { position: relative; left: 7px; top: 5px; }
+         .sticky { position: sticky; }
+         .absolute { position: absolute; }",
+    );
+    assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
+    let root = doc.root;
+    let mut paragraph = |classes: &str| {
+        let text = doc.el(root, "view.text");
+        let run = doc.dom.create_text_node("AB", ());
+        doc.dom.append_child(text, run);
+        let first = doc.el(text, &format!("view.atom{classes}"));
+        let second = doc.el(text, "view.atom");
+        (text, first, second)
+    };
+    let (plain, plain_first, plain_second) = paragraph("");
+    let (relative, relative_first, relative_second) = paragraph(".relative");
+    let (inset, inset_first, inset_second) = paragraph(".inset");
+    let (sticky, sticky_first, sticky_second) = paragraph(".sticky");
+    let (absolute, absolute_first, absolute_second) = paragraph(".absolute");
+    doc.flush();
+
+    let control = ink(&doc, plain);
+    assert_eq!(control, (120.0, 30.0), "two em squares and two 40px boxes");
+    assert_eq!(rect(&doc, plain_first), (40.0, 3.0, 40.0, 20.0));
+    assert_eq!(rect(&doc, plain_second), (80.0, 3.0, 40.0, 20.0));
+
+    for (label, text, first, second) in [
+        ("relative", relative, relative_first, relative_second),
+        ("sticky", sticky, sticky_first, sticky_second),
+    ] {
+        assert_eq!(ink(&doc, text), control, "{label} is still in the line");
+        assert_eq!(rect(&doc, first), rect(&doc, plain_first), "{label} atom");
+        assert_eq!(
+            rect(&doc, second),
+            rect(&doc, plain_second),
+            "{label}: the atom after it is where the static control puts it",
+        );
+    }
+
+    assert_eq!(
+        ink(&doc, inset),
+        control,
+        "an inset changes no break and no advance, so the paragraph is the \
+         same one",
+    );
+    assert_eq!(
+        rect(&doc, inset_first),
+        rect(&doc, plain_first),
+        "and it does not move the box either: `left: 7px; top: 5px` on an \
+         in-flow atom is ignored, so it sits exactly where the static control \
+         puts it",
+    );
+    assert_eq!(
+        rect(&doc, inset_second),
+        rect(&doc, plain_second),
+        "while the atom after it does not move at all",
+    );
+
+    assert_eq!(
+        ink(&doc, absolute),
+        (80.0, 30.0),
+        "an absolutely positioned child never entered the paragraph: the line \
+         advances by the run and the one remaining atom alone",
+    );
+    assert_eq!(
+        rect(&doc, absolute_first),
+        (0.0, 0.0, 40.0, 20.0),
+        "it is laid out by the block's own out-of-flow pass instead, at the \
+         static position its containing block's content origin gives it",
+    );
+    assert_eq!(
+        rect(&doc, absolute_second),
+        (40.0, 3.0, 40.0, 20.0),
+        "and the in-flow atom beside it closes the gap the escape left",
     );
 }

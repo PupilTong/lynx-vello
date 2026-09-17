@@ -32,6 +32,32 @@ where
 {
     leaf::compute_leaf_layout_with_measurement(input, style, None, true, measure)
 }
+
+/// The used margins of a box whose placement its host performs itself.
+///
+/// `auto` is zero here, unlike the root and absolute paths above: a host that
+/// places a box against a line rather than against a containing block has no
+/// free space to distribute. Negative margins survive — they legitimately
+/// shrink the advance a box occupies.
+#[must_use]
+pub fn used_margins<Style: CoreStyle>(style: &Style, inline_basis: Option<f32>) -> Edges<f32> {
+    auto_edges_to_zero(resolve_margins(style.margin(), inline_basis))
+}
+
+/// The used padding of a box, percentages resolved against the inline basis —
+/// which for every edge, vertical ones included, is the containing block's
+/// *width*.
+#[must_use]
+pub fn used_padding<Style: CoreStyle>(style: &Style, inline_basis: Option<f32>) -> Edges<f32> {
+    resolve_padding(style.padding(), inline_basis)
+}
+
+/// The used border widths, with a `none`/`hidden` side reading zero.
+#[must_use]
+pub fn used_border<Style: CoreStyle>(style: &Style) -> Edges<f32> {
+    resolve_border(&style.border())
+}
+
 pub use linear::compute_linear_layout;
 pub use relative::compute_relative_layout;
 use stylo::computed_values::direction;
@@ -1151,6 +1177,83 @@ mod tests {
                 (edges(Some(5.0), None, None, None), edges(false, true, false, false),
                  definite, 40.0) => edges(5.0, 55.0, 0.0, 0.0);
         }
+    }
+
+    /// A style carrying exactly what the host-placement accessors read.
+    #[derive(Debug)]
+    struct HostPlacedStyle {
+        margin: Edges<stylo::values::computed::Margin>,
+        padding: Edges<stylo::values::computed::NonNegativeLengthPercentage>,
+        border: Edges<stylo::values::computed::BorderSideWidth>,
+    }
+
+    impl CoreStyle for HostPlacedStyle {
+        fn display(&self) -> Display {
+            Display::Flex
+        }
+
+        fn margin(&self) -> Edges<&stylo::values::computed::Margin> {
+            self.margin.as_ref()
+        }
+
+        fn padding(&self) -> Edges<&stylo::values::computed::NonNegativeLengthPercentage> {
+            self.padding.as_ref()
+        }
+
+        fn border(&self) -> Edges<stylo::values::computed::BorderSideWidth> {
+            self.border.clone()
+        }
+    }
+
+    /// The three accessors a host that places a box itself — the `<text>`
+    /// paragraph is the one in this workspace — resolves its box model with.
+    ///
+    /// There is deliberately no inset accessor beside them: insets on a box a
+    /// host places itself are ignored, following native Lynx
+    /// (`docs/tracking/deviations.md`).
+    #[test]
+    fn host_placement_accessors_resolve_margins_padding_and_border() {
+        use stylo::Zero;
+        use stylo::values::computed::{
+            Au, BorderSideWidth, Length, LengthPercentage, Margin, NonNegativeLengthPercentage,
+            Percentage,
+        };
+        use stylo::values::generics::NonNegative;
+
+        let px = |value: f32| LengthPercentage::new_length(Length::new(value));
+        let style = HostPlacedStyle {
+            margin: edges(
+                Margin::LengthPercentage(px(10.0)),
+                Margin::Auto,
+                Margin::LengthPercentage(px(-4.0)),
+                Margin::LengthPercentage(LengthPercentage::new_percent(Percentage(0.5))),
+            ),
+            padding: edges(
+                NonNegative(px(6.0)),
+                NonNegativeLengthPercentage::zero(),
+                NonNegative(LengthPercentage::new_percent(Percentage(0.25))),
+                NonNegativeLengthPercentage::zero(),
+            ),
+            border: edges(
+                BorderSideWidth(Au::from_f32_px(4.0)),
+                BorderSideWidth(Au::from_f32_px(1.0)),
+                BorderSideWidth(Au::from_f32_px(2.0)),
+                BorderSideWidth(Au::from_f32_px(3.0)),
+            ),
+        };
+
+        assert_eq!(
+            used_margins(&style, Some(40.0)),
+            edges(10.0, 0.0, -4.0, 20.0),
+            "auto is zero for a box placed against a line, a negative margin \
+             survives, and every edge resolves against the inline basis",
+        );
+        assert_eq!(
+            used_padding(&style, Some(40.0)),
+            edges(6.0, 0.0, 10.0, 0.0),
+            "a vertical padding percentage resolves against the width too",
+        );
+        assert_eq!(used_border(&style), edges(4.0, 1.0, 2.0, 3.0));
     }
 
     fn absolute_style() -> ResolvedAbsoluteStyle {

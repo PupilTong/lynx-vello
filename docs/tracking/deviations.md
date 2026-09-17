@@ -299,6 +299,53 @@ consequential choice about whether to follow the spec or the quirk.
   `crates/hughie/src/text/block/mod.rs:778-876`), which is css-ui
   `text-overflow` in its own right and what both references do for a line that
   overflows its measure.
+- **`position: relative` insets on an atomic inline box inside a `<text>` are
+  ignored** — **ruled by the user on 2026-09-17**, following native Lynx
+  against `web-core`. The atom is still ordinary in-flow content: it advances
+  the line, breaks with it and keeps its place among its siblings (only
+  `absolute` and `fixed` leave a paragraph's flow). What is dropped is only the
+  post-placement shift, so `left`/`top`/`right`/`bottom` move nothing.
+  **Native** never applies them to a paragraph's inline content:
+  `CalcRelativePosition`
+  (`lynx/core/renderer/starlight/layout/position_layout_utils.cc:38-71`) has
+  exactly one caller, `LayoutAlgorithm::HandleRelativePosition`
+  (`lynx/core/renderer/starlight/layout/layout_algorithm.cc:215-228`), which
+  walks the container algorithm's `inflow_items_` — and a `<text>` has a
+  `measure_func_`, so it returns before any `LayoutAlgorithm` is built
+  (`lynx/core/renderer/starlight/layout/layout_object.cc:684-696`) and the
+  inline view's position comes only from `AlignmentByPlatform`. **web-core**
+  differs, by inheriting the browser's rule: `x-view` carries
+  `position: relative`
+  (`lynx-stack/packages/web-platform/web-elements/src/elements/common-css/linear.css:142`)
+  and `x-text > x-view` is `display: inline-flex !important`
+  (`.../XText/x-text.css:90-93`), so the browser paints it shifted while
+  leaving the advance alone. **Consequence:** an authored
+  `position: relative; left: …` on a `view` or `image` written inside a `text`
+  is a silent no-op — no diagnostic, and the computed style still reports the
+  authored inset. A nested `text`/`inline-text`, or a `display: contents`
+  wrapper, generates no box at all, so its insets never applied in the first
+  place and nothing changed for those. Reversing the ruling is one term in
+  `place_and_hide` (`crates/dom/src/layout/text_block.rs`) plus the inset
+  resolution to feed it; the guard is
+  `a_relative_atom_stays_in_the_line_and_only_absolute_leaves_it`
+  (`crates/dom/tests/web_text_replication.rs`).
+- **An atomic inline box with no baseline of its own sits with its bottom
+  *margin* edge on the line's baseline** — CSS's and `web-core`'s rule for an
+  inline-block with no in-flow line boxes, and a **ruled** deviation from
+  native (2026-09-17). Native puts the bottom *border* edge there instead and
+  lets `margin-bottom` hang below the baseline:
+  `LayoutObject::GetOffsetFromTopMarginEdgeToBaseline` returns
+  `GetLayoutMarginTop() + offset_height_` whenever the box reports no baseline
+  (`lynx/core/renderer/starlight/layout/layout_object.cc:1118-1124`), and
+  `offset_height_` is the border-box height
+  (`layout_object.h:170`). **Consequence:** `margin-bottom` on such an atom
+  grows the line here and does not on native — a 40x60 atom with
+  `margin-bottom: 8px` makes a 68px line here against native's 60. The wiring
+  is one `max` in phase 2 of `compute_text_block_layout`
+  (`crates/dom/src/layout/text_block.rs`), which shifts the reported baseline
+  down with the margin box's top edge; the guard is the `.down` block of
+  `an_atoms_margins_reach_the_line_and_step_its_border_box_in`
+  (`crates/dom/tests/web_text_replication.rs`).
 
 ## Event model & gestures (see [dom-events.md](dom-events.md))
 
@@ -520,6 +567,44 @@ consequential choice about whether to follow the spec or the quirk.
   Deliberately **not** ported from `x-image.css`: `contain`'s
   layout/paint/style bits, `flex-direction: row !important` and the alignment
   triple (all scaffolding for a shadow `<img>` this engine does not have).
+- **`padding` on an `<image>` inside a `<text>` is a silent no-op**, and it is
+  a no-op in both references too — just by a different mechanism, which is why
+  reproducing it costs a UA-origin `!important`. In web-core the authored host
+  element has no box at all: `x-text > x-image`, and the `inline-text >`,
+  `inline-truncation >` and `lynx-wrapper` variants of it, are
+  `display: contents !important`
+  (`packages/web-platform/web-elements/src/elements/XText/x-text.css:69-82`),
+  and the box that lands on the line is the shadow `::part(img)`, assembled by
+  inheriting `width`, `height`, `border`, `border-radius`,
+  `background-color`, `vertical-align`, `object-fit`, `flex`, `align-self` and
+  `margin` — a list `padding` is not on (`:120-135`; the only
+  `padding: inherit` in web-elements belongs to `x-image[auto-size]::part(img)`,
+  an attribute this engine does not implement). Native is split:
+  `TextLayoutTextra::HandleInlineImageProps`
+  (`core/renderer/ui_wrapper/layout/textra/text_layout_textra.cc:448-537`),
+  Android's `InlineImageSpan` and iOS's default shadow-node path size the image
+  from the specified width and height plus the four margins and read `padding`
+  nowhere, while Harmony and iOS's layout-in-element path measure it as a
+  starlight leaf whose border box is floored at padding plus border
+  (`core/renderer/starlight/layout/layout_object.cc:515-519`). Here the
+  authored `image` *is* the box, so under the Lynx `box-sizing: border-box`
+  default a `width: 22px; padding-left: 50px` image would floor its border box
+  at 50 and advance the line by 50 where web-core advances by 22.
+  `text > image, text > wrapper > image, inline-text > image, … { padding: 0
+  !important; }` in `bobcat_core`'s `tree::text` UA rules is the cascade
+  spelling of the erasure, and it is `!important` for the same reason
+  web-core's is: a normal declaration loses to the author's own `padding`.
+  **Consequences to know:** an author's `padding` — or an inline one, or one
+  written through `setNativeProps` — on an inline image is dropped without a
+  diagnostic, and the computed value reads back `0` where web-core's host
+  element still reports the authored value (web-core's `x-image` keeps its own
+  computed style; only its *box* is gone). `margin` is untouched, because the
+  shadow part inherits it and it does reach the line in both references. A
+  `view` inside a `text` is untouched too: web-core leaves that one a real
+  `inline-flex` box with its padding intact. This is the fourth
+  `!important` in the UA sheet and the second argument
+  [docs/style-assumptions.md](../style-assumptions.md) §D.15 admits;
+  `the_ua_sheet_is_important_free_apart_from_the_text_block` pins the set.
 - **Almost every built-in component exposes a bespoke imperative JS method
   surface** (`invoke()`-based RPC: `scrollTo`, `getScrollInfo`,
   `setInputFilter`, `startAnimate`, etc.) instead of standard DOM
