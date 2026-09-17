@@ -6,6 +6,7 @@ pub(crate) mod text_block;
 
 use std::sync::LazyLock;
 
+use euclid::default::{Point2D, Rect, Size2D, Vector2D};
 #[cfg(feature = "layout-test-utils")]
 use hughie::compute::LeafMetrics;
 pub use hughie::compute::NaturalSize;
@@ -14,8 +15,8 @@ pub(crate) use hughie::geometry::Edges;
 use hughie::geometry::Point;
 pub use hughie::geometry::Size;
 use hughie::invalidate::is_relayout_boundary;
-use hughie::style::CoreStyle;
 pub(crate) use hughie::style::TextBrush;
+use hughie::style::{CoreStyle, PositionProperty};
 use hughie::text::{FontBlob, TextContext};
 pub use hughie::tree::Layout;
 use hughie::tree::LayoutSlot;
@@ -27,7 +28,7 @@ pub(crate) use self::style::{
     establishes_absolute_containing_block, establishes_fixed_containing_block, generates_no_box,
     paragraph_limits_changed, shaping_inputs_changed, skips_contents,
 };
-use crate::tree::document::{Document, NodeLayoutState, RelayoutKind};
+use crate::tree::document::{DOCUMENT_ELEMENT_NODE_ID, Document, NodeLayoutState, RelayoutKind};
 
 pub(crate) static ANONYMOUS_STYLE: LazyLock<Arc<ComputedValues>> = LazyLock::new(|| {
     use stylo::properties::style_structs::Font;
@@ -252,6 +253,95 @@ impl<T> Document<T> {
     pub fn rounded_layout(&self, id: crate::NodeId) -> Option<&Layout> {
         let slot = self.slot(id)?;
         Some(&self.layout_state().get(slot)?.slot.rounded)
+    }
+
+    /// The element's border box in viewport CSS pixels, as of the last
+    /// completed layout pass.
+    ///
+    /// This is Lynx's own engine-side conversion
+    /// (`platform_event_target_helper.cc`), not the web's
+    /// `getBoundingClientRect`, and it differs from it in two ways.
+    ///
+    /// **No transforms.** `transform`, `offset-path` and any animation of
+    /// them are ignored entirely: the rect is the untransformed border box
+    /// the layout pass produced. Native sums each ancestor's `Left()`/`Top()`
+    /// with an explicit `TODO: add transform support`, and Android excludes
+    /// transforms unless asked for them; only iOS folds them in.
+    ///
+    /// **No flush.** Nothing here runs style, layout or paint — it reads
+    /// what the last [`Document::layout`] left behind, so a caller that
+    /// mutated the tree since sees the pre-mutation geometry until it lays
+    /// out again.
+    ///
+    /// Ancestor scroll offsets *are* applied, for every scroll container on
+    /// this box's containing-block chain (an out-of-flow box does not move
+    /// with scrollers between it and its containing block, exactly as it
+    /// does not in the paint order). The box's own scroll offset never
+    /// applies: scrolling a container does not move the container.
+    ///
+    /// `None` when the element has no box at all: `display: none` or
+    /// `display: contents`, a node that is not a styled element, a node no
+    /// pass has laid out, or one detached from the document tree.
+    ///
+    /// Coordinates are device-pixel-snapped, like [`Self::rounded_layout`].
+    #[must_use]
+    pub fn bounding_client_rect(&self, id: crate::NodeId) -> Option<Rect<f32>> {
+        let node = self.get(id)?;
+        let style = StyleView::try_of(node)?;
+        if matches!(
+            display_mode(style.display()),
+            DisplayMode::None | DisplayMode::Contents
+        ) {
+            return None;
+        }
+        let layout = self.rounded_layout(id)?;
+        let size = Size2D::new(layout.size.width, layout.size.height);
+        let mut origin = Point2D::new(layout.location.x, layout.location.y);
+        // The position the *escaping* box was keyed on, which decides which
+        // ancestor is its containing block — and so which scroll offsets
+        // move it. It is the computed value, not hughie's parent-lowered
+        // one, so it matches what the paint walk keys its flow contexts on.
+        let mut escape = style.values().clone_position();
+        let mut current = node;
+        let mut top = id;
+        // `box_parent` skips `display: contents` ancestors, which hold a
+        // zero layout and contribute no offset, and stops above the document
+        // element — the node the paint order itself is rooted at.
+        while let Some(ancestor) = box_parent(current) {
+            let ancestor_style = StyleView::of(ancestor);
+            if display_mode(ancestor_style.display()) == DisplayMode::None {
+                // Nothing under a `display: none` box was laid out; whatever
+                // geometry the node still carries is from before it was
+                // hidden.
+                return None;
+            }
+            let ancestor_id = ancestor.id();
+            let ancestor_layout = self.rounded_layout(ancestor_id)?;
+            origin += Vector2D::new(ancestor_layout.location.x, ancestor_layout.location.y);
+            let on_chain = match escape {
+                PositionProperty::Absolute => {
+                    establishes_absolute_containing_block(ancestor, ancestor_style.values())
+                }
+                PositionProperty::Fixed => {
+                    establishes_fixed_containing_block(ancestor, ancestor_style.values())
+                }
+                PositionProperty::Static
+                | PositionProperty::Relative
+                | PositionProperty::Sticky => true,
+            };
+            if on_chain {
+                if self.is_scroll_container(ancestor_id) {
+                    origin -= self.scroll_offset(ancestor_id);
+                }
+                escape = ancestor_style.values().clone_position();
+            }
+            current = ancestor;
+            top = ancestor_id;
+        }
+        // A subtree detached from the document answers nothing, the way a
+        // disconnected element does on the web: its coordinates would be
+        // relative to a root that is not the viewport.
+        (top == DOCUMENT_ELEMENT_NODE_ID).then(|| Rect::new(origin, size))
     }
 
     /// The measured size of the paragraph `id` establishes.

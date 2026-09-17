@@ -30,9 +30,22 @@ queue without clearing it. Selection captures its root at select time.
   code 5. A result value the transport refuses replies with code 1 and releases
   the callback.
 - `invoke()` calls `success(result.data)` or `fail(result)`. Selecting all nodes
-  fails locally with code 5. Missing targets use code 2; an existing target
-  currently fails with code 1 because actual UI methods are unimplemented.
-  A failure without a fail callback is ignored by the production facade.
+  fails locally with code 5. Missing targets use code 2. `boundingClientRect`
+  succeeds, with `{id, dataset, left, top, right, bottom, width, height}`: the
+  border box in viewport CSS px as of the last completed layout pass, with
+  ancestor scroll offsets applied and transforms ignored, `right` and `bottom`
+  derived from the other four. `id` is the attribute, empty when the element
+  carries none; `dataset` is the typed copy `__GetDataset` hands out, which
+  native includes and web-core does not. Every other method name fails with
+  code 3, `METHOD_NOT_FOUND` — web-core's code, where native answers its
+  generic 1. A failure without a fail callback is ignored by the production
+  facade.
+- The measurement runs no flush. It reports the last completed pass, so a BTS
+  query is always current: the entry that queued it has already returned and
+  its epilogue committed, and `setNativeProps` commits before the next request
+  in the same queue. An MTS worklet that mutates and measures inside one job
+  sees the pre-mutation geometry until it calls `__FlushElementTree`, which is
+  also the order ReactLynx's own `Element.invoke` uses.
 - BTS owns callbacks and removes each after delivery, including callbacks that
   throw. Query callbacks run in the message handler; they are distinct from the
   Promise continuation used by named Lepus RPC.
@@ -61,9 +74,12 @@ native numeric-length conversion remain unsupported.
 
 ## Remaining boundaries
 
-Legacy component-scoped roots, direct MTS selector PAPI, actual UI invoke
-methods, animation methods, dataset-to-DOM reflection and cross-realm host
-objects remain pending. Query failures and invalid legacy ReactRef chaining
+Legacy component-scoped roots, direct MTS selector PAPI, UI invoke methods
+other than `boundingClientRect`, animation methods, dataset-to-DOM reflection
+and cross-realm host objects remain pending. `boundingClientRect` takes no
+`relativeTo`, `androidEnableTransformProps` or `iOSEnableAnimationProps`: the
+`params` object is accepted and ignored, since each of those names behavior
+this engine does not have. Query failures and invalid legacy ReactRef chaining
 now use the nonfatal [runtime reporter](events-diagnostics-runtime.md), alongside
 the existing query status replies.
 Compiled ReactLynx bundle loading and ref hydration integration remain later

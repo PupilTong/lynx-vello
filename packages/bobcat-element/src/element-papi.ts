@@ -1,5 +1,6 @@
 import {
   attributeNames,
+  callElementMethod,
   childElementIds,
   createDocument,
   createElement,
@@ -7,6 +8,7 @@ import {
   dropElement,
   flushElementTree,
   getAttribute,
+  getComputedStyleMap,
   insertBefore,
   listenerNameClosed,
   listenerNameOpened,
@@ -78,6 +80,8 @@ import { __BobcatPublishEvent } from "bobcat:runtime";
 // | `__GetPageElement()` | the page handle `__CreatePage` minted |
 // | `__QuerySelector(element, selector, params)` | native `queryElementIds` export + this runtime's handle index |
 // | `__QuerySelectorAll(element, selector, params)` | native `queryElementIds` export + this runtime's handle index |
+// | `__InvokeUIMethod(element, method, params, callback)` | native `callElementMethod` + `getAttribute` exports + this runtime's dataset store |
+// | `__GetComputedStyleByKey(element, key)` | native `getComputedStyleMap` export |
 // | `__FlushElementTree()` | native `flushElementTree` export |
 //
 // Everything else — `__CreateFrame`, `__DropElement` (absent from every
@@ -1184,6 +1188,139 @@ export function __AddInlineStyle(element: unknown, key: unknown, value: unknown)
 }
 
 /**
+ * One property's resolved value as text, or the empty string.
+ *
+ * The key crosses verbatim, which is web-core's contract — it is
+ * `getComputedStyle(element).getPropertyValue(key)`, and CSSOM takes CSS
+ * names, not IDL ones. So `margin-top` answers and `marginTop` is empty, and
+ * so is a shorthand (the host reports longhands and custom properties only)
+ * and anything the style system does not know. A non-string key is empty for
+ * the same reason: no property is named by one.
+ *
+ * Resolved rather than computed, as CSSOM's `getComputedStyle` is: `width`,
+ * `height`, `margin-*` and `padding-*` report the used px of the last layout
+ * pass when the element has a box. Nothing here flushes — an element that
+ * has never been through a flush reports nothing at all.
+ */
+export function __GetComputedStyleByKey(element: unknown, key: unknown): string {
+  if (typeof key !== "string") {
+    return "";
+  }
+  // Name then value, so the value is the second field; an unknown name
+  // answers an empty record and falls through to the empty string.
+  return splitRecord(getComputedStyleMap(nodeIdOf(element), key, 1))[1] ?? "";
+}
+
+/**
+ * One computed CSS value, as CSS Typed OM's base class and nothing more.
+ *
+ * The host serializes every value it reports, so this holds that text and
+ * answers it from `toString()`. None of the numeric subclasses
+ * (`CSSUnitValue`, `CSSKeywordValue`, ...) and no `CSSStyleValue.parse`: a
+ * typed model would have to be minted from text that was computed from a
+ * typed model on the other side of the boundary, and nothing in this runtime
+ * consumes one.
+ */
+export class CSSStyleValue {
+  readonly #text: string;
+
+  constructor(text: string) {
+    this.#text = text;
+  }
+
+  toString(): string {
+    return this.#text;
+  }
+}
+
+/** The read-only `StylePropertyMapReadOnly` shape [`__BobcatComputedStyleMap`] answers. */
+export interface ComputedStyleMap {
+  readonly size: number;
+  get(name: unknown): CSSStyleValue | undefined;
+  getAll(name: unknown): CSSStyleValue[];
+  has(name: unknown): boolean;
+  entries(): IterableIterator<[string, CSSStyleValue[]]>;
+  keys(): IterableIterator<string>;
+  values(): IterableIterator<CSSStyleValue[]>;
+  forEach(
+    callback: (
+      values: CSSStyleValue[],
+      name: string,
+      map: ComputedStyleMap,
+    ) => void,
+    thisArg?: unknown,
+  ): void;
+  [Symbol.iterator](): IterableIterator<[string, CSSStyleValue[]]>;
+}
+
+/**
+ * The element's whole computed style as a CSS Typed OM
+ * `StylePropertyMapReadOnly`: every author-facing longhand in code-point
+ * order, then every custom property it carries, each mapped to a one-element
+ * `CSSStyleValue` list.
+ *
+ * Not a PAPI member — neither reference has one — but the object
+ * `Element.computedStyleMap()` answers, reached by name from the realm the
+ * way `__BobcatQueryNodes` is.
+ *
+ * A **snapshot**, built per call out of one host answer. The standard's map
+ * is `[SameObject]` and live, tracking the element's style as it changes;
+ * reproducing that would mean a call per lookup and a lifetime for the map,
+ * so this file takes the copy instead. Computed values, not resolved ones:
+ * `__GetComputedStyleByKey` is the CSSOM side and this is the Typed OM side,
+ * so a `width: 50%` is `50%` here and used px there. Nothing here flushes,
+ * so an element that has never been through one answers an empty map — in
+ * which every non-custom lookup throws, because to this map no such
+ * property exists.
+ */
+export function __BobcatComputedStyleMap(element: unknown): ComputedStyleMap {
+  const fields = splitRecord(getComputedStyleMap(nodeIdOf(element), "", 0));
+  const properties = new Map<string, CSSStyleValue[]>();
+  for (let field = 0; field + 1 < fields.length; field += 2) {
+    properties.set(fields[field]!, [new CSSStyleValue(fields[field + 1]!)]);
+  }
+  /**
+   * The spec's lookup: ASCII-lowercase the name, and throw a `TypeError` for
+   * a name that is not a valid property. Every author-facing longhand is in
+   * the map, so absence *is* invalidity — except for a custom property,
+   * which is valid whether or not the element carries it and is therefore
+   * simply missing.
+   */
+  const lookup = (name: unknown): CSSStyleValue[] | undefined => {
+    const property = String(name).replace(
+      /[A-Z]/g,
+      (character) => character.toLowerCase(),
+    );
+    const values = properties.get(property);
+    if (values === undefined && !property.startsWith("--")) {
+      throw new TypeError(`${property} is not a valid property name`);
+    }
+    return values;
+  };
+  const map: ComputedStyleMap = {
+    get size() {
+      return properties.size;
+    },
+    get: (name) => lookup(name)?.[0],
+    // A fresh list per call, as the standard's sequence is: what the caller
+    // does to it is the caller's, not this snapshot's.
+    getAll: (name) => [...(lookup(name) ?? [])],
+    has: (name) => lookup(name) !== undefined,
+    entries: () => properties.entries(),
+    keys: () => properties.keys(),
+    values: () => properties.values(),
+    // WebIDL's maplike order: the value, then the key, then the map.
+    forEach: (callback, thisArg) => {
+      for (const [name, values] of properties) {
+        callback.call(thisArg, values, name, map);
+      }
+    },
+    [Symbol.iterator]: () => properties.entries(),
+  };
+  return Object.freeze(map);
+}
+
+/**
  * Accepted and ignored.
  *
  * The PAPI names the author-CSS scope a set of elements cascades in, and
@@ -1245,6 +1382,77 @@ export function __SetAttribute(
     setAttribute(nodeId, key, String(value));
     values.set(key, copyElementValue(value));
   }
+  return undefined;
+}
+
+/** One UI method's answer: the status shape every `invoke` path reports. */
+interface InvokeResult {
+  code: number;
+  data: unknown;
+}
+
+/**
+ * Runs one UI method on one element and shapes its answer.
+ *
+ * The host dispatches by name and answers text, or null for a name it has no
+ * method for — which is code 3, `METHOD_NOT_FOUND`, web-core's code rather
+ * than native's generic 1. `boundingClientRect`, the one method there is,
+ * answers four numbers: `left`, `top`, `width`, `height`. `right` and
+ * `bottom` are derived here rather than sent, because they are sums.
+ *
+ * `id` and `dataset` ride along as native does (web-core reports the id
+ * only): `id` is the attribute, empty when the element carries none, the way
+ * `element.id` is, and `dataset` is the copy `__GetDataset` hands out, so
+ * what the caller receives is the caller's own.
+ *
+ * The rect is the last completed layout pass's, in viewport CSS px with
+ * ancestor scroll offsets applied and transforms ignored — native's own
+ * conversion has no transform support either. Nothing here flushes: a job
+ * that mutates and measures sees the pre-mutation geometry until it calls
+ * `__FlushElementTree`, which is also the order ReactLynx's
+ * `Element.invoke` uses.
+ */
+function invokeUIMethod(handle: Handle, method: string): InvokeResult {
+  const answer = callElementMethod(nodeIdOf(handle), method);
+  if (answer === null) {
+    return { code: 3, data: undefined };
+  }
+  const [left = 0, top = 0, width = 0, height = 0] = answer
+    .split(",")
+    .map(Number);
+  return {
+    code: 0,
+    data: {
+      id: __GetID(handle) ?? "",
+      dataset: __GetDataset(handle),
+      left,
+      top,
+      right: left + width,
+      bottom: top + height,
+      width,
+      height,
+    },
+  };
+}
+
+/**
+ * The MTS UI-method call. `params` is accepted and ignored: no method this
+ * engine has reads one, and the options `boundingClientRect` takes on the
+ * platforms — `relativeTo`, `androidEnableTransformProps`,
+ * `iOSEnableAnimationProps` — each name behavior this engine does not have.
+ *
+ * The callback runs synchronously inside the call, exactly once, as
+ * web-core's does: the answer is already in hand when the host returns, and
+ * a card that measures and then acts in the same job depends on it.
+ */
+export function __InvokeUIMethod(
+  element: unknown,
+  method: unknown,
+  params: unknown,
+  callback: (result: InvokeResult) => void,
+): undefined {
+  void params;
+  callback(invokeUIMethod(element as Handle, String(method)));
   return undefined;
 }
 
@@ -1328,8 +1536,10 @@ export function __BobcatQueryNodes(request: NodeQueryRequest) {
     : !root ? `root node not found with identifier = ${token.identifier}`
     : `no node found for selector '${token.identifier}'`};
   if (operation === "invoke") {
+    // The reply is the bare status, not the `{status, data}` pair the node
+    // operations answer with; the BTS facade reads `code` and `data` off it.
     if (code) return status;
-    throw new Error(`UI method ${(params as { method: string }).method} is not implemented`);
+    return invokeUIMethod(elements[0]!, String((params as { method: unknown }).method));
   }
   if (operation === "setNativeProps") {
     if (code || params === null || typeof params !== "object" || Array.isArray(params)) return;

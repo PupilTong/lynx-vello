@@ -29,6 +29,8 @@ rstest.mockRequire("bobcat-internal:host", () => {
     getAttribute: native.getAttribute,
     tagName: native.tagName,
     attributeNames: native.attributeNames,
+    callElementMethod: native.callElementMethod,
+    getComputedStyleMap: native.getComputedStyleMap,
     childElementIds: native.childElementIds,
     parentNode: native.parentNode,
     insertBefore: native.insertBefore,
@@ -88,6 +90,19 @@ type MockBobcat = BobcatNative & {
     selector: string,
     firstOnly: 0 | 1,
     includeRoot: 0 | 1,
+  ) => string;
+  /**
+   * The UI-method and computed-style answers, scripted the same way: both
+   * members read geometry and style out of a document this file does not
+   * have, so a test states the answer and the member hands it over. The
+   * defaults are the two empty ones — a method the engine does not have, and
+   * an element that has not been through a flush.
+   */
+  answerElementMethod: (nodeId: number, method: string) => string | null;
+  answerComputedStyle: (
+    nodeId: number,
+    properties: string,
+    resolved: 0 | 1,
   ) => string;
 };
 
@@ -277,6 +292,26 @@ function createMockBobcat(issuedIds?: number[]): MockBobcat {
       }
       return tag;
     },
+    answerElementMethod: () => null,
+    callElementMethod: (node: unknown, method: unknown) => {
+      const id = nodeId("callElementMethod", node);
+      calls.push(["callElementMethod", id, method]);
+      return host.answerElementMethod(id, method as string);
+    },
+    answerComputedStyle: () => "",
+    getComputedStyleMap: (
+      node: unknown,
+      properties: unknown,
+      resolved: unknown,
+    ) => {
+      const id = nodeId("getComputedStyleMap", node);
+      calls.push(["getComputedStyleMap", id, properties, resolved]);
+      return host.answerComputedStyle(
+        id,
+        properties as string,
+        resolved as 0 | 1,
+      );
+    },
     attributeNames: (node: unknown) => {
       const id = nodeId("attributeNames", node);
       calls.push(["attributeNames", id]);
@@ -452,6 +487,8 @@ describe("installation", () => {
       ["__GetPageElement", 0],
       ["__QuerySelector", 3],
       ["__QuerySelectorAll", 3],
+      ["__InvokeUIMethod", 4],
+      ["__GetComputedStyleByKey", 2],
       ["__FlushElementTree", 0],
     ];
     for (const [name, arity] of arities) {
@@ -464,6 +501,11 @@ describe("installation", () => {
         ...arities.map(([name]) => name),
         "__BobcatQueryNodes",
         "__BobcatDispatchEvent",
+        // Neither is a PAPI member: the computed-style map is the Typed OM
+        // readback the realm reaches by name, and the value class is the
+        // type its entries carry.
+        "__BobcatComputedStyleMap",
+        "CSSStyleValue",
         // Not a PAPI member: the lifecycle export the boot module
         // constructs, which no entry preamble imports.
         "Document",
@@ -2428,5 +2470,245 @@ describe("list callbacks", () => {
         removeAction: [],
       })
     ).toThrow("indexed child access");
+  });
+});
+
+/**
+ * Encodes fields the way the native side writes a record payload back, so an
+ * expectation below can be written as the values it stands for.
+ */
+function styleRecord(...fields: string[]): string {
+  return fields.map((field) => `${field.length}:${field}`).join("");
+}
+
+describe("__InvokeUIMethod", () => {
+  it("reports a method the engine does not have as code 3", () => {
+    const view = __CreateView(0);
+    const callback = rstest.fn();
+    mock.calls.length = 0;
+
+    expect(__InvokeUIMethod(view, "scrollIntoView", {}, callback)).toBe(
+      undefined,
+    );
+
+    // Already called by the time the PAPI returned: the callback is
+    // synchronous, so a card can measure and act in one job.
+    expect(callback).toHaveBeenCalledTimes(1);
+    expect(callback.mock.calls[0]?.[0]).toStrictEqual({
+      code: 3,
+      data: undefined,
+    });
+  });
+
+  it("derives right and bottom, and carries the id and dataset", () => {
+    const view = __CreateView(0);
+    __SetID(view, "target");
+    __SetDataset(view, { index: 2 });
+    mock.answerElementMethod = () => "20,0,100,50";
+    mock.calls.length = 0;
+    const callback = rstest.fn();
+
+    __InvokeUIMethod(view, "boundingClientRect", { relativeTo: 7 }, callback);
+
+    expect(callback.mock.calls[0]?.[0]).toEqual({
+      code: 0,
+      data: {
+        id: "target",
+        dataset: { index: 2 },
+        left: 20,
+        top: 0,
+        right: 120,
+        bottom: 50,
+        width: 100,
+        height: 50,
+      },
+    });
+    // The host takes the element and the method name and nothing else:
+    // `params` names behavior this engine does not have, so it is dropped
+    // here rather than carried to a boundary that would ignore it.
+    expect(mock.named("callElementMethod")).toEqual([
+      ["callElementMethod", __GetElementUniqueID(view), "boundingClientRect"],
+    ]);
+  });
+
+  it("reports an element carrying no id as the empty string", () => {
+    const view = __CreateView(0);
+    mock.answerElementMethod = () => "0,0,0,0";
+    const callback = rstest.fn();
+
+    __InvokeUIMethod(view, "boundingClientRect", undefined, callback);
+
+    const { data } = callback.mock.calls[0]?.[0] as { data: Record<string, unknown> };
+    // `element.id`'s answer, not the attribute's absence.
+    expect(data['id']).toBe("");
+    expect(data['dataset']).toEqual({});
+  });
+
+  it("hands over a dataset copy the caller owns", () => {
+    const view = __CreateView(0);
+    __SetDataset(view, { index: 2 });
+    mock.answerElementMethod = () => "0,0,0,0";
+    const callback = rstest.fn();
+
+    __InvokeUIMethod(view, "boundingClientRect", {}, callback);
+
+    const { data } = callback.mock.calls[0]?.[0] as { data: Record<string, unknown> };
+    (data['dataset'] as Record<string, unknown>)['index'] = 9;
+    expect(__GetDataset(view)).toEqual({ index: 2 });
+  });
+});
+
+describe("__GetComputedStyleByKey", () => {
+  it("answers the value field of the record the host writes back", () => {
+    const view = __CreateView(0);
+    mock.answerComputedStyle = () => styleRecord("margin-top", "12.5px");
+    mock.calls.length = 0;
+
+    expect(__GetComputedStyleByKey(view, "margin-top")).toBe("12.5px");
+    // Resolved values, which is what CSSOM's getComputedStyle reports.
+    expect(mock.named("getComputedStyleMap")).toEqual([
+      ["getComputedStyleMap", __GetElementUniqueID(view), "margin-top", 1],
+    ]);
+  });
+
+  it("answers the empty string for an empty record", () => {
+    const view = __CreateView(0);
+
+    // The host's answer before the first flush, and for a name it has no
+    // property for.
+    expect(__GetComputedStyleByKey(view, "color")).toBe("");
+    expect(__GetComputedStyleByKey(view, "not-a-property")).toBe("");
+  });
+
+  it("passes the key verbatim, so an IDL name answers nothing", () => {
+    const view = __CreateView(0);
+    mock.answerComputedStyle = (_node, properties) =>
+      properties === "margin-top" ? styleRecord("margin-top", "4px") : "";
+    mock.calls.length = 0;
+
+    expect(__GetComputedStyleByKey(view, "marginTop")).toBe("");
+    expect(mock.named("getComputedStyleMap")[0]).toEqual([
+      "getComputedStyleMap",
+      __GetElementUniqueID(view),
+      "marginTop",
+      1,
+    ]);
+  });
+
+  it("answers the empty string for a key that is not a string, unasked", () => {
+    const view = __CreateView(0);
+    mock.calls.length = 0;
+
+    expect(__GetComputedStyleByKey(view, undefined)).toBe("");
+    expect(__GetComputedStyleByKey(view, Symbol("color"))).toBe("");
+    expect(mock.named("getComputedStyleMap")).toEqual([]);
+  });
+});
+
+describe("__BobcatComputedStyleMap", () => {
+  const style = () =>
+    styleRecord(
+      "color",
+      "rgb(255, 0, 0)",
+      "margin-top",
+      "0px",
+      "--brand",
+      "blue",
+    );
+
+  it("asks for the whole computed style, unresolved", () => {
+    const view = __CreateView(0);
+    mock.answerComputedStyle = style;
+    mock.calls.length = 0;
+
+    const map = __BobcatComputedStyleMap(view);
+
+    expect(mock.named("getComputedStyleMap")).toEqual([
+      ["getComputedStyleMap", __GetElementUniqueID(view), "", 0],
+    ]);
+    expect(map.size).toBe(3);
+  });
+
+  it("answers one value per property, by ASCII-lowercased name", () => {
+    const view = __CreateView(0);
+    mock.answerComputedStyle = style;
+    const map = __BobcatComputedStyleMap(view);
+
+    expect(map.get("color")).toBeInstanceOf(elementModule.CSSStyleValue);
+    expect(String(map.get("color"))).toBe("rgb(255, 0, 0)");
+    expect(String(map.get("COLOR"))).toBe("rgb(255, 0, 0)");
+    expect(map.getAll("margin-top").map(String)).toEqual(["0px"]);
+    expect(map.has("--brand")).toBe(true);
+    expect(String(map.get("--brand"))).toBe("blue");
+  });
+
+  it("throws for a name no property has, and misses an absent custom one", () => {
+    const view = __CreateView(0);
+    mock.answerComputedStyle = style;
+    const map = __BobcatComputedStyleMap(view);
+
+    // Every author-facing longhand is in the map, so absence is invalidity
+    // — the standard's TypeError — everywhere but a custom property, which
+    // is a valid name whether or not the element carries it.
+    expect(() => map.get("not-a-property")).toThrow(TypeError);
+    expect(() => map.getAll("not-a-property")).toThrow(TypeError);
+    expect(() => map.has("not-a-property")).toThrow(TypeError);
+    expect(map.get("--missing")).toBe(undefined);
+    expect(map.getAll("--missing")).toEqual([]);
+    expect(map.has("--missing")).toBe(false);
+  });
+
+  it("iterates in the record's order, as name and value list", () => {
+    const view = __CreateView(0);
+    mock.answerComputedStyle = style;
+    const map = __BobcatComputedStyleMap(view);
+
+    expect([...map].map(([name, values]) => [name, values.map(String)]))
+      .toEqual([
+        ["color", ["rgb(255, 0, 0)"]],
+        ["margin-top", ["0px"]],
+        ["--brand", ["blue"]],
+      ]);
+    expect([...map.keys()]).toEqual(["color", "margin-top", "--brand"]);
+    expect([...map.values()].map((values) => values.map(String))).toEqual([
+      ["rgb(255, 0, 0)"],
+      ["0px"],
+      ["blue"],
+    ]);
+    expect([...map.entries()]).toEqual([...map]);
+    const seen: unknown[][] = [];
+    const thisArg = { marker: true };
+    map.forEach(function(this: unknown, values, name, forEached) {
+      seen.push([name, values.map(String), forEached === map, this]);
+    }, thisArg);
+    // WebIDL's maplike order: the value, the key, then the map itself.
+    expect(seen).toEqual([
+      ["color", ["rgb(255, 0, 0)"], true, thisArg],
+      ["margin-top", ["0px"], true, thisArg],
+      ["--brand", ["blue"], true, thisArg],
+    ]);
+  });
+
+  it("is a snapshot: a later host answer does not reach a built map", () => {
+    const view = __CreateView(0);
+    mock.answerComputedStyle = style;
+    const map = __BobcatComputedStyleMap(view);
+    mock.answerComputedStyle = () => styleRecord("color", "rgb(0, 0, 255)");
+
+    // The standard's map is [SameObject] and live; this one is one host
+    // answer, decoded once.
+    expect(String(map.get("color"))).toBe("rgb(255, 0, 0)");
+    expect(String(__BobcatComputedStyleMap(view).get("color")))
+      .toBe("rgb(0, 0, 255)");
+  });
+
+  it("answers an empty map before the first flush", () => {
+    const view = __CreateView(0);
+    const map = __BobcatComputedStyleMap(view);
+
+    expect(map.size).toBe(0);
+    expect([...map]).toEqual([]);
+    // Nothing is in it, so nothing non-custom is a valid name to it.
+    expect(() => map.get("color")).toThrow(TypeError);
   });
 });

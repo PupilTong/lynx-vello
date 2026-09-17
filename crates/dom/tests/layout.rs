@@ -1857,3 +1857,297 @@ fn hoisted_rank_resolves_through_nested_contents_levels() {
     assert_eq!(h.layout_of(sibling).order, 0);
     assert_eq!(h.layout_of(fixed).order, 1);
 }
+
+/// `bounding_client_rect` as a tuple, for the same reason `dom_rect` exists.
+fn client_rect(dom: &dom::Document<()>, id: NodeId) -> Option<(f32, f32, f32, f32)> {
+    dom.bounding_client_rect(id).map(|rect| {
+        (
+            rect.origin.x,
+            rect.origin.y,
+            rect.size.width,
+            rect.size.height,
+        )
+    })
+}
+
+#[test]
+fn bounding_client_rect_telescopes_nested_offset_boxes() {
+    let mut h = Harness::new(
+        "page { display: flex; width: 400px; height: 300px; }
+         .parent { display: flex; position: relative; left: 10px; top: 10px;
+                   width: 200px; height: 200px; }
+         .child { display: flex; position: relative; left: 30px; top: 20px;
+                  width: 50px; height: 40px; }",
+    );
+    let root = h.doc.root;
+    let parent = h.doc.el(root, "view.parent");
+    let child = h.doc.el(parent, "view.child");
+    h.layout();
+
+    assert_eq!(
+        client_rect(&h.doc.dom, parent),
+        Some((10.0, 10.0, 200.0, 200.0))
+    );
+    // Box-parent-relative locations sum into viewport coordinates.
+    assert_eq!(h.rect(child), (30.0, 20.0, 50.0, 40.0));
+    assert_eq!(
+        client_rect(&h.doc.dom, child),
+        Some((40.0, 30.0, 50.0, 40.0))
+    );
+}
+
+/// The no-transform ruling: the rect is the untransformed border box, as
+/// native's own engine-side conversion produces it.
+#[test]
+fn a_transform_never_moves_the_bounding_client_rect() {
+    let mut h = Harness::new(
+        "page { display: flex; width: 400px; height: 300px; }
+         .parent { display: flex; width: 200px; height: 200px; }
+         .child { display: flex; width: 50px; height: 40px; }",
+    );
+    let root = h.doc.root;
+    let parent = h.doc.el(root, "view.parent");
+    let child = h.doc.el(parent, "view.child");
+    h.layout();
+    let before = client_rect(&h.doc.dom, child);
+    assert_eq!(before, Some((0.0, 0.0, 50.0, 40.0)));
+
+    h.doc.set_inline(child, "transform: rotate(45deg)");
+    h.layout();
+    assert_eq!(client_rect(&h.doc.dom, child), before);
+
+    // Nor does one on the ancestor, which also turns it into a containing
+    // block for everything positioned under it.
+    h.doc.set_inline(parent, "transform: rotate(45deg)");
+    h.layout();
+    assert_eq!(client_rect(&h.doc.dom, child), before);
+}
+
+#[test]
+fn bounding_client_rect_subtracts_ancestor_scroll_offsets_but_not_its_own() {
+    let mut h = Harness::new(
+        "page { display: flex; width: 400px; height: 300px; }
+         .scroller { display: flex; flex-direction: column; overflow: scroll;
+                     margin-left: 20px; margin-top: 10px;
+                     width: 100px; height: 100px; }
+         .tall { display: flex; flex-shrink: 0; width: 80px; height: 400px; }",
+    );
+    let root = h.doc.root;
+    let scroller = h.doc.el(root, "view.scroller");
+    let child = h.doc.el(scroller, "view.tall");
+    h.layout();
+    assert_eq!(
+        client_rect(&h.doc.dom, scroller),
+        Some((20.0, 10.0, 100.0, 100.0))
+    );
+    assert_eq!(
+        client_rect(&h.doc.dom, child),
+        Some((20.0, 10.0, 80.0, 400.0))
+    );
+
+    assert_eq!(
+        h.doc.dom.scroll_to(scroller, dom::Vector2D::new(0.0, 50.0)),
+        dom::Vector2D::new(0.0, 50.0)
+    );
+    assert_eq!(
+        client_rect(&h.doc.dom, child),
+        Some((20.0, -40.0, 80.0, 400.0)),
+        "the child moves by exactly the scroll offset",
+    );
+    assert_eq!(
+        client_rect(&h.doc.dom, scroller),
+        Some((20.0, 10.0, 100.0, 100.0)),
+        "scrolling a container never moves the container",
+    );
+
+    // Scrolled entirely out of the scrollport, the box is still a box.
+    h.doc
+        .dom
+        .scroll_to(scroller, dom::Vector2D::new(0.0, 300.0));
+    assert_eq!(
+        client_rect(&h.doc.dom, child),
+        Some((20.0, -290.0, 80.0, 400.0))
+    );
+}
+
+/// The containing-block escape, on the scroll chain: an out-of-flow box does
+/// not move with scrollers between it and its containing block, and does move
+/// with the containing block's own.
+#[test]
+fn an_out_of_flow_box_follows_only_its_containing_blocks_scroll() {
+    let mut h = Harness::new(
+        "page { display: flex; position: relative; width: 400px; height: 300px; }
+         .scroller { display: flex; flex-direction: column; overflow: scroll;
+                     width: 100px; height: 100px; }
+         .anchored { position: relative; }
+         .tall { display: flex; flex-shrink: 0; width: 80px; height: 400px; }
+         .abs { display: flex; position: absolute; left: 5px; top: 5px;
+                width: 20px; height: 20px; }",
+    );
+    let root = h.doc.root;
+    let scroller = h.doc.el(root, "view.scroller");
+    let escaping = h.doc.el(scroller, "view.abs");
+    h.doc.el(scroller, "view.tall");
+    let anchored_scroller = h.doc.el(root, "view.scroller.anchored");
+    let anchored = h.doc.el(anchored_scroller, "view.abs");
+    h.doc.el(anchored_scroller, "view.tall");
+    h.layout();
+
+    assert_eq!(
+        client_rect(&h.doc.dom, escaping),
+        Some((5.0, 5.0, 20.0, 20.0))
+    );
+    let anchored_before = client_rect(&h.doc.dom, anchored);
+    assert_eq!(anchored_before, Some((105.0, 5.0, 20.0, 20.0)));
+
+    h.doc.dom.scroll_to(scroller, dom::Vector2D::new(0.0, 50.0));
+    h.doc
+        .dom
+        .scroll_to(anchored_scroller, dom::Vector2D::new(0.0, 50.0));
+
+    assert_eq!(
+        client_rect(&h.doc.dom, escaping),
+        Some((5.0, 5.0, 20.0, 20.0)),
+        "the page is its containing block, so the scroller between does not move it",
+    );
+    assert_eq!(
+        client_rect(&h.doc.dom, anchored),
+        Some((105.0, -45.0, 20.0, 20.0)),
+        "its own containing block scrolled, so it scrolled",
+    );
+}
+
+#[test]
+fn a_fixed_box_inside_a_scroller_never_moves() {
+    let mut h = Harness::new(
+        "page { display: flex; position: relative; width: 400px; height: 300px; }
+         .scroller { display: flex; flex-direction: column; overflow: scroll;
+                     margin-left: 20px; width: 100px; height: 100px; }
+         .tall { display: flex; flex-shrink: 0; width: 80px; height: 400px; }
+         .fixed { display: flex; position: fixed; left: 7px; top: 9px;
+                  width: 30px; height: 30px; }",
+    );
+    let root = h.doc.root;
+    let scroller = h.doc.el(root, "view.scroller");
+    let fixed = h.doc.el(scroller, "view.fixed");
+    h.doc.el(scroller, "view.tall");
+    h.layout();
+    assert_eq!(client_rect(&h.doc.dom, fixed), Some((7.0, 9.0, 30.0, 30.0)));
+
+    h.doc.dom.scroll_to(scroller, dom::Vector2D::new(0.0, 60.0));
+    assert_eq!(
+        client_rect(&h.doc.dom, fixed),
+        Some((7.0, 9.0, 30.0, 30.0)),
+        "a viewport-anchored box is on no scroller's chain",
+    );
+}
+
+#[test]
+fn a_box_less_or_detached_element_has_no_bounding_client_rect() {
+    let mut h = Harness::new(
+        "page { display: flex; width: 400px; height: 300px; }
+         .gone { display: none; }
+         .through { display: contents; }
+         .cell { display: flex; width: 40px; height: 40px; }",
+    );
+    let root = h.doc.root;
+    let gone = h.doc.el(root, "view.gone");
+    let through = h.doc.el(root, "view.through");
+    let inside_through = h.doc.el(through, "view.cell");
+    let removed = h.doc.el(root, "view.cell");
+    let removed_child = h.doc.el(removed, "view.cell");
+    let never_attached = h.doc.dom.create_element("view", ());
+    h.layout();
+
+    assert_eq!(client_rect(&h.doc.dom, gone), None, "display: none");
+    assert_eq!(client_rect(&h.doc.dom, through), None, "display: contents");
+    assert_eq!(
+        client_rect(&h.doc.dom, inside_through),
+        Some((0.0, 0.0, 40.0, 40.0)),
+        "a contents box contributes no offset, but its children still have one",
+    );
+    assert_eq!(client_rect(&h.doc.dom, never_attached), None);
+
+    assert_eq!(
+        client_rect(&h.doc.dom, removed_child),
+        Some((40.0, 0.0, 40.0, 40.0))
+    );
+
+    h.doc.dom.remove_element(removed);
+    assert_eq!(
+        client_rect(&h.doc.dom, removed),
+        None,
+        "a detached subtree answers nothing, as a disconnected element does on the web",
+    );
+    assert_eq!(
+        client_rect(&h.doc.dom, removed_child),
+        None,
+        "including a box inside it, whose walk runs off the top of that subtree",
+    );
+}
+
+#[test]
+fn a_hidden_but_laid_out_box_reports_its_real_rect() {
+    let mut h = Harness::new(
+        "page { display: flex; width: 400px; height: 300px; }
+         .cell { display: flex; width: 40px; height: 40px; }
+         .invisible { visibility: hidden; }",
+    );
+    let root = h.doc.root;
+    h.doc.el(root, "view.cell");
+    let hidden = h.doc.el(root, "view.cell.invisible");
+    h.layout();
+
+    assert_eq!(
+        client_rect(&h.doc.dom, hidden),
+        Some((40.0, 0.0, 40.0, 40.0)),
+        "the rect comes from layout, not from the paint order",
+    );
+}
+
+#[test]
+fn bounding_client_rect_is_the_border_box_of_a_padded_text_element() {
+    let mut h = Harness::new(
+        "page { display: flex; align-items: flex-start; width: 400px; height: 300px;
+                font-family: Ahem; font-size: 20px; }
+         .label { display: -lynx-text; padding: 10px; margin-left: 30px; }",
+    );
+    assert_eq!(h.doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
+    let root = h.doc.root;
+    let label = h.doc.el(root, "text.label");
+    let run = h.doc.dom.create_text_node("hi", ());
+    h.doc.dom.append_child(label, run);
+    h.layout();
+
+    let (ink_width, ink_height) = text_ink(&h.doc.dom, label);
+    assert_eq!((ink_width, ink_height), (40.0, 20.0));
+    assert_eq!(
+        client_rect(&h.doc.dom, label),
+        Some((30.0, 0.0, 60.0, 40.0)),
+        "the border box, not the content box the paragraph sits in",
+    );
+}
+
+/// The no-flush contract: the answer is the last completed pass, whatever the
+/// tree has done since.
+#[test]
+fn bounding_client_rect_never_runs_a_pending_layout() {
+    let mut h = Harness::new(
+        "page { display: flex; width: 400px; height: 300px; }
+         .cell { display: flex; width: 40px; height: 40px; }",
+    );
+    let root = h.doc.root;
+    let cell = h.doc.el(root, "view.cell");
+    h.layout();
+    assert_eq!(client_rect(&h.doc.dom, cell), Some((0.0, 0.0, 40.0, 40.0)));
+
+    h.doc.set_inline(cell, "margin-left: 25px");
+    assert_eq!(
+        client_rect(&h.doc.dom, cell),
+        Some((0.0, 0.0, 40.0, 40.0)),
+        "a mutation the pipeline has not seen changes nothing",
+    );
+
+    h.layout();
+    assert_eq!(client_rect(&h.doc.dom, cell), Some((25.0, 0.0, 40.0, 40.0)));
+}

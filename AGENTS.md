@@ -839,10 +839,13 @@ one `RealmStartup`, which is everything a realm is opened with and nothing
 that is ever updated — `LynxView::update_data`, `update_global_props` and
 `reload` reach the realm through `ToMain::PageUpdate` and never touch it.
 
-The two members that answer with a list encode it in the return string, since
-the boundary's value type carries no array: `attributeNames` as the
-length-prefixed record `setInlineStyles` accepts, `childElementIds` and
-`queryElementIds` as comma-joined ids, which need no length prefix.
+The members that answer with a list encode it in the return string, since
+the boundary's value type carries no array: `attributeNames` and
+`getComputedStyleMap` as the length-prefixed record `setInlineStyles` accepts,
+the latter a flat name-then-value sequence; `childElementIds` and
+`queryElementIds` as comma-joined ids, and `callElementMethod`'s
+`boundingClientRect` as the four comma-joined numbers `left`, `top`, `width`
+and `height` — none of which needs a length prefix.
 
 Each call is a plain owner-thread mutation, and `__FlushElementTree` runs the
 style + layout + paint commit and publishes one immutable `Arc<CommittedFrame>`
@@ -874,7 +877,10 @@ authoritative enumeration** — it names every member and what backs it, and
 every ReactLynx Snapshot constructor except `__CreateFrame`; all six tree
 mutations; the properties and queries a Snapshot's `create`/`update` functions
 write through and read back, among them `__SetInlineStyles` and the name-based
-`__AddInlineStyle`, with `__SetCSSId` accepted and ignored; the event
+`__AddInlineStyle`, with `__SetCSSId` accepted and ignored; the readback pair
+`__InvokeUIMethod`, whose one UI method is `boundingClientRect`, and
+`__GetComputedStyleByKey`, neither of which commits anything — both report the
+last completed pass and leave the decision to flush to the caller; the event
 registration and propagation members, `__AddEvent` and `__AddEventListener`
 included; `__CreateList` with `__UpdateListCallbacks`; and
 `__FlushElementTree`. Everything else is not implemented, `__CreateFrame` and
@@ -1502,10 +1508,12 @@ container copy, and datasets merge typed keys in the MTS handle. BTS
 over the existing Worker messages; MTS resolves those through the document's
 selector engine, including the query root, and returns fields/path data, while
 `setNativeProps` applies CSS/attributes and commits before the next request.
-`invoke` delivers selection and unsupported-method failures; actual UI methods
-remain unimplemented. No callback or document handle crosses into Rust's Worker
-transport. See `docs/node-query-runtime.md` for the supported fields, callback
-semantics and remaining boundaries.
+`invoke` answers `boundingClientRect` — the last layout pass's border box,
+plus the element's `id` and `dataset` as native reports them — and fails
+every other method with code 3, `METHOD_NOT_FOUND`, alongside the selection
+failures it already delivered. No callback or document handle crosses into
+Rust's Worker transport. See `docs/node-query-runtime.md` for the supported
+fields, callback semantics and remaining boundaries.
 
 The package also owns the event half: a handle is an `EventTarget`, its
 listeners are closures filed on the handle itself under a realm-local symbol,
@@ -1768,9 +1776,11 @@ would host it:
 - **The rest of the `<image>` element surface.** `src` loads; `mode`,
   `auto-size`, `placeholder` racing, `cap-insets`, `blur-radius` and the
   `load`/`error` events do not.
-- **UI methods via `invoke`.** `packages/bobcat-element/src/selector-query.ts`
-  delivers selection and unsupported-method failures; no actual UI method is
-  implemented.
+- **UI methods other than `boundingClientRect`.** That one dispatches by name
+  through `__InvokeUIMethod`; every other name — `scrollIntoView`,
+  `getScrollInfo`, `requestUIInfo`, `takeScreenshot` and the per-component
+  catalog — answers code 3, `METHOD_NOT_FOUND`. The rect itself ignores
+  transforms and never flushes.
 - **The text `layout` event.** The per-line ranges `hughie`'s
   `text/block/content.rs` computes have no delivery path.
 - **`rpx`-aware view/device policy**, sticky lowering (it parses and paints as

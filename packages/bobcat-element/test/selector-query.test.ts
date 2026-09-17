@@ -56,8 +56,13 @@ describe('native SelectorQuery task semantics', () => {
     query.selectAll('.items').invoke({method:'anything', fail})?.exec();
     expect(send).not.toHaveBeenCalled();
     expect(fail).toHaveBeenCalledWith({code:5, data:'selectAll not supported for invoke method'});
-    query.select('#target').invoke({method:'test', success, fail})?.exec();
-    const complete = send.mock.calls[0]?.[3];
+    query.select('#target').invoke({method:'boundingClientRect', params:{a:1}, success, fail})?.exec();
+    const [operation, token, params, complete] = send.mock.calls[0] ?? [];
+    expect(operation).toBe('invoke');
+    expect(token.identifier).toBe('#target');
+    // The method and its params travel as one object; the MTS decides what
+    // to do with the params, which for boundingClientRect is nothing.
+    expect(params).toEqual({method:'boundingClientRect', params:{a:1}});
     complete({code:0, data:{width:12}});
     complete({code:2, data:'gone'});
     expect(success).toHaveBeenCalledWith({width:12});

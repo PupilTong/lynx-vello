@@ -71,8 +71,12 @@ Landed and not to be regressed:
 - Init data and global props are `Option<String>` JSON text Rust never parses.
   **No Rust JSON models** for JS-only payloads, and no walking Rust structs to
   build JSON for a JS call.
-- Not implemented on purpose: per-component css-id scoping, UI methods via
-  `invoke`, import maps, import attributes, JSON modules, transfer lists.
+- `__InvokeUIMethod` and `__GetComputedStyleByKey` read the last layout pass
+  and **never flush**: the caller decides when to `__FlushElementTree`, so a
+  job that mutates and then measures sees the pre-mutation geometry.
+- Not implemented on purpose: per-component css-id scoping, UI methods other
+  than `boundingClientRect`, import maps, import attributes, JSON modules,
+  transfer lists.
 
 ## Reference repos
 

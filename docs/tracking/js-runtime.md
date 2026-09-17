@@ -174,8 +174,14 @@ In parallel/subsequently, the BTS context is constructed, its `App`/`LynxProxy` 
 ### NodesRef.invoke()/fields() measurement API surface and native UIMethod catalog
 
 Bobcat now implements the structural query facade and Worker transport described
-in [node-query-runtime](../node-query-runtime.md). The UI-method catalog below
-still describes the compatibility target: actual `invoke` methods remain pending.
+in [node-query-runtime](../node-query-runtime.md), plus the one UI method
+`boundingClientRect` (`Document::bounding_client_rect` in
+`crates/dom/src/layout/mod.rs` under the `callElementMethod` host member, shaped
+into the result object by `__InvokeUIMethod` in
+`packages/bobcat-element/src/element-papi.ts`). It ignores transforms and runs
+no flush — see the row below and
+[deviations](deviations.md). The rest of the UI-method catalog below still
+describes the compatibility target and remains pending.
 
 **Architecture, not just an API list.** `NodesRef`/`SelectorQuery` is a dual-mechanism contract, and this matters for lynx-vello's design:
 
@@ -224,7 +230,7 @@ interface NodesRef extends BaseNodesRef {
 
 | Item | Description | Tier | W3C-compliant? | Deviation & what we should do instead | Source refs |
 |---|---|---|---|---|---|
-| `boundingClientRect` | `{id, dataset, left, right, top, bottom, width, height}` relative to the LynxView viewport origin | Core | Partial | Matches `Element.getBoundingClientRect()` geometry, but coordinates are offset-adjusted relative to the LynxView root (not the browser viewport) and the result also bundles `id`/`dataset` (DOM's `getBoundingClientRect()` returns only geometry) — lynx-vello should return a DOMRect-shaped geometry plus these two extra identity fields to match Lynx's shape, with origin relative to the root render surface | `lynx/platform/darwin/ios/lynx/ui/LynxUI.m:1487-1500`; web: `lynx-stack/.../createInvokeUIMethod.ts:16-28`, `BoundingClientRectService` |
+| `boundingClientRect` | `{id, dataset, left, right, top, bottom, width, height}` relative to the LynxView viewport origin | Core | Partial | Matches `Element.getBoundingClientRect()` geometry, but coordinates are offset-adjusted relative to the LynxView root (not the browser viewport) and the result also bundles `id`/`dataset` (DOM's `getBoundingClientRect()` returns only geometry) — lynx-vello should return a DOMRect-shaped geometry plus these two extra identity fields to match Lynx's shape, with origin relative to the root render surface. **Implemented**: `Document::bounding_client_rect` (`crates/dom/src/layout/mod.rs`) behind the `callElementMethod` host member, with `right`/`bottom` derived and `id`/`dataset` attached in `__InvokeUIMethod`. Two contracts to know: transforms are **ignored** (native's own engine conversion has no transform support either, and Android excludes them by default; iOS and web-core include them), and the call runs **no flush** — it reports the last completed layout pass, ancestor scroll offsets applied. | `lynx/platform/darwin/ios/lynx/ui/LynxUI.m:1487-1500`; `lynx/core/renderer/dom/fragment/event/platform_event_target_helper.cc`; web: `lynx-stack/.../createInvokeUIMethod.ts:16-28`, `BoundingClientRectService` |
 | `requestUIInfo` (deprecated) | conditionally returns any of `node`/`id`/`dataset`/`rect`/`size`/`scrollOffset` (`scrollTop`/`scrollLeft`) based on requested keys in `params` | Extended | Partial | Superseded by `boundingClientRect` + `getScrollInfo`; `scrollOffset` sub-fields only populate for scroll-view-backed UIs (else zero-filled) — implement only if replaying legacy templates; otherwise treat as deprecated and unimplemented in lynx-vello, documenting the gap | `lynx/platform/darwin/ios/lynx/ui/LynxUI.m:1503-1547` — marked `// TODO(zhixuan): Deprecated API, remove me.` in source; not present at all in web-core |
 | `scrollIntoView` | scrolls nearest ancestor scroll-view/scroller so target is visible; `scrollIntoViewOptions: {behavior, block, inline}` | Core | Partial | Named/shaped after W3C `Element.scrollIntoView()` options, but semantics are custom: walks the Lynx UI-tree for the nearest `AbsLynxUIScroller`/`LynxUIScrollViewInternal` ancestor rather than using native browser scroll-anchoring; returns `OPERATION_ERROR` if no scrollable ancestor found (W3C's `scrollIntoView` silently no-ops instead) | `lynx/platform/darwin/ios/lynx/ui/LynxUI.m:1549-1615` |
 | `takeScreenshot` | renders the UI's backing view to an image; `params: {format: "png"|"jpeg", scale}`; returns `{width, height, data: <base64 data URI>}` | Rare | No | No W3C equivalent (closest is `canvas.toDataURL`/screen-capture API, both requiring different security models); native-visual-tree specific. Likely low priority for lynx-vello unless snapshot-testing tooling depends on it | `lynx/platform/darwin/ios/lynx/ui/LynxUI.m:1617-1666` |

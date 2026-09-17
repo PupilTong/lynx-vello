@@ -120,6 +120,8 @@ import {
   __GetPageElement,
   __QuerySelector,
   __QuerySelectorAll,
+  __InvokeUIMethod,
+  __GetComputedStyleByKey,
   __FlushElementTree,
 } from "bobcat:element";
 //# allFunctionsCalledOnLoad
@@ -1137,6 +1139,7 @@ fn install_host_module(
 
     install_document_members(engine, js_runtime, handle)?;
     install_attribute_members(engine, js_runtime, handle)?;
+    install_readback_members(engine, js_runtime, handle)?;
 
     let tree = Rc::clone(handle);
     // The realm's handle for `node` has been collected, and a handle is the
@@ -1265,6 +1268,65 @@ fn install_event_members(
             outbox.listener_edge(Arc::from(name), available);
             Ok(HostValue::Undefined)
         })?;
+    }
+
+    Ok(())
+}
+
+/// Installs the two members that read geometry and style back out of the
+/// document.
+///
+/// Neither runs a pipeline step. Both report what the last completed pass
+/// left behind, and the realm decides when the next one runs by calling
+/// `__FlushElementTree` — measuring must not be able to move layout out from
+/// under the job that measures, and a card that wants current numbers says
+/// so. Both still go through [`validate_live_element`], so a freed element
+/// is a script error rather than a zero rect or an empty style.
+fn install_readback_members(
+    engine: &mut ScriptEngine,
+    js_runtime: &mut ScriptRuntime,
+    handle: &Rc<RefCell<DocumentSlot>>,
+) -> Result<(), MainThreadError> {
+    tree_members! { engine, js_runtime, handle;
+        fn callElementMethod(node: node_id_argument, method: string_argument) |document| {
+            validate_live_element(document, NAME, node)?;
+            // One method, dispatched by name because the PAPI is generic:
+            // anything else is "no such method" for the realm to turn into
+            // the shared table's code 3. `params` is not carried — nothing
+            // reads one, and the first method that does brings it.
+            if method != "boundingClientRect" {
+                return Ok(HostValue::Null);
+            }
+            // A box-less element answers zeros rather than nothing, which is
+            // what both references report for one.
+            let rect = document
+                .bounding_client_rect(node)
+                .unwrap_or_else(dom::Rect::zero);
+            Ok(HostValue::String(format!(
+                "{},{},{},{}",
+                rect.origin.x, rect.origin.y, rect.size.width, rect.size.height
+            )))
+        }
+        fn getComputedStyleMap(
+            node: node_id_argument,
+            properties: string_argument,
+            resolved: flag_argument
+        ) |document| {
+            validate_live_element(document, NAME, node)?;
+            // An empty payload is "every property", so it must not become the
+            // one-element filter `"".split(',')` would produce.
+            let filter: Vec<&str> = if properties.is_empty() {
+                Vec::new()
+            } else {
+                properties.split(',').collect()
+            };
+            let mut record = String::new();
+            for (name, value) in document.computed_style_entries(node, &filter, resolved) {
+                write_record_field(&mut record, &name);
+                write_record_field(&mut record, &value);
+            }
+            Ok(HostValue::String(record))
+        }
     }
 
     Ok(())

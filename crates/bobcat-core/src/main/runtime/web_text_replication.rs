@@ -25,22 +25,20 @@
 //!
 //! Two of the assigned cases have no replica, each for its own reason.
 //!
-//! `reactlynx/api-SelectorQuery` (`web-core-e2e/tests/reactlynx.spec.ts:1389`)
-//! runs 30 selector forms and reports each subject's `boundingClientRect`.
-//! Its querying half is reachable: a background-thread card builds a
-//! `SelectorQuery` (`packages/bobcat-element/src/selector-query.ts`) whose
-//! requests `__BobcatQueryNodes` answers against the document's own selector
-//! engine (`packages/bobcat-element/src/element-papi.ts:1176`). Its geometry
-//! half is not, in two ways that both have to close before the card could run.
-//! `nodeFields` answers `id`, `tag`, `unique_id`, `name`, `class`, `dataset`,
-//! `index` and `attribute` and nothing else (`element-papi.ts:1144-1173`), so
-//! no rect of any kind reaches script, and every UI method — the one the card
-//! calls included — is refused by name (`element-papi.ts:1224`). There is also
-//! no direct MTS selector PAPI at all: the query path is the background
-//! thread's. The card's own rows are produced *by* `SelectorQuery`, so its
-//! screenshot cannot be reconstructed from the outside; what can be replicated
-//! of it is the selector matching (in `crates/dom`) and the 8px-on-10px row
-//! geometry (in the tree replicas), neither of which belongs here.
+//! `reactlynx/api-SelectorQuery` (`web-core-e2e/tests/reactlynx.spec.ts:1515`)
+//! runs 30 selector forms and asks each subject for its `boundingClientRect`,
+//! asserting only the `id` the answer carries. Both halves of that are
+//! reachable now: a background-thread card builds a `SelectorQuery`
+//! (`packages/bobcat-element/src/selector-query.ts`) whose requests
+//! `__BobcatQueryNodes` answers against the document's own selector engine,
+//! and its `invoke` operation reaches `__InvokeUIMethod`, which answers the
+//! rect together with the element's `id` and `dataset`. It is still not
+//! replicated here, for a reason that has nothing to do with gaps: the card
+//! asserts no text behaviour at all. Its rows are produced *by*
+//! `SelectorQuery`, so its screenshot cannot be reconstructed from the
+//! outside; what can be replicated of it is the selector matching (in
+//! `crates/dom`) and the 8px-on-10px row geometry (in the tree replicas),
+//! neither of which belongs here.
 //!
 //! `web-core-e2e/web-core/add-class-css-og-style-font-size` calls `__AddClass`,
 //! which is not implemented and is not a global (`element-papi.ts:81-88`

@@ -48,6 +48,39 @@ interface BobcatNative {
    */
   attributeNames(nodeId: number): string;
   /**
+   * Dispatches one Lynx UI method by name on the element and answers its
+   * result as text, or `null` when the engine has no method of that name.
+   *
+   * `boundingClientRect` answers `"<left>,<top>,<width>,<height>"` — the
+   * border box in viewport CSS px as of the last completed layout pass,
+   * ancestor scroll offsets applied, transforms ignored (native's own
+   * conversion ignores them too), zeros for an element with no box.
+   *
+   * Runs no style, layout or paint: it reports the last completed pass, and
+   * user code decides when to flush.
+   */
+  callElementMethod(nodeId: number, method: string): string | null;
+  /**
+   * The element's computed style as one record payload: a flat sequence of
+   * `<utf16Length>:<text>` fields, name then value, two per property.
+   *
+   * The whole style is every author-facing longhand followed by every custom
+   * property present, each group sorted by code point; a non-empty
+   * `properties` — a comma-separated name list — asks for those names only,
+   * in which case an unknown or shorthand name is simply absent from the
+   * answer rather than an error.
+   *
+   * `resolved` `1` substitutes CSSOM resolved values — the used px of the
+   * last layout pass — for `width`, `height`, `margin-*` and `padding-*`
+   * when the element has a box; `0` reports computed values throughout.
+   * Empty before the first flush. Runs no flush.
+   */
+  getComputedStyleMap(
+    nodeId: number,
+    properties: string,
+    resolved: 0 | 1,
+  ): string;
+  /**
    * The `NodeId`s of the element's element children, in tree order, joined by
    * commas — no length prefix, because a decimal id cannot contain the
    * separator. Empty when the element has no element children. Child *nodes*
@@ -184,6 +217,8 @@ declare module "bobcat-internal:host" {
   export const getAttribute: BobcatNative["getAttribute"];
   export const tagName: BobcatNative["tagName"];
   export const attributeNames: BobcatNative["attributeNames"];
+  export const callElementMethod: BobcatNative["callElementMethod"];
+  export const getComputedStyleMap: BobcatNative["getComputedStyleMap"];
   export const childElementIds: BobcatNative["childElementIds"];
   export const parentNode: BobcatNative["parentNode"];
   export const insertBefore: BobcatNative["insertBefore"];
