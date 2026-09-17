@@ -511,7 +511,7 @@ describe("installation", () => {
         "Document",
       ].sort(),
     );
-    expect(elementModule.__BobcatDispatchEvent).toHaveLength(4);
+    expect(elementModule.__BobcatDispatchEvent).toHaveLength(5);
   });
 
   it("creates the realm's document once, with no arguments", () => {
@@ -1232,12 +1232,16 @@ function tree() {
  * `targets` is that step's own target — the same node for every step unless a
  * test is exercising shadow retargeting — so it defaults to the path's first
  * entry, the node the event happened at.
+ *
+ * `bubbles` is the event's own, and the default is what every routed Lynx
+ * event is: the two that are not are an `<image>`'s `load` and `error`.
  */
 function dispatch(
   path: object[],
   name: string,
   detailJson: string = "",
   targets?: object[],
+  bubbles: boolean = true,
 ) {
   const nodes = path.map((handle) => __GetElementUniqueID(handle));
   const targeted = targets === undefined
@@ -1248,6 +1252,7 @@ function dispatch(
     targeted.join(","),
     name,
     detailJson,
+    bubbles,
   );
 }
 
@@ -1466,6 +1471,7 @@ describe("event listeners", () => {
       new Array(4).fill(__GetElementUniqueID(inner)).join(","),
       "tap",
       "",
+      true,
     );
 
     expect(order).toEqual(["inner", "page"]);
@@ -1544,7 +1550,7 @@ describe("event listeners", () => {
     // one — its parent's handle holds it — so this is the ownership graph
     // and the tree disagreeing, and it is reported rather than swallowed.
     expect(() =>
-      elementModule.__BobcatDispatchEvent(String(uid), "999", "tap", "")
+      elementModule.__BobcatDispatchEvent(String(uid), "999", "tap", "", true)
     ).toThrow("ownership graph");
     expect(seen).toEqual([]);
 
@@ -1694,6 +1700,82 @@ describe("event listeners", () => {
     expect(runs).toBe(0);
     dispatch([inner, outer], "tap");
     expect(runs).toBe(1);
+  });
+
+  // web-core's `common_event_handler` (event_apis.rs:413-432) narrows exactly
+  // two of the three passes for a non-bubbling event: the capture pass runs
+  // over the whole path either way, the bind pass over the target alone, and
+  // the `global-bindEvent` pass not at all. An `<image>`'s `load` and `error`
+  // are the events that arrive this way — web-core mints both with
+  // `bubbles: false` (`commonEventInitConfiguration.ts`).
+  it("captures down the whole path for a non-bubbling event", () => {
+    const { page, outer, inner } = tree();
+    const order: string[] = [];
+    for (const [label, handle] of [
+      ["page", page],
+      ["outer", outer],
+      ["inner", inner],
+    ] as const) {
+      __AddEventListener(handle, "load", () => order.push(label), {
+        capture: true,
+      });
+    }
+
+    dispatch([inner, outer, page], "load", "", undefined, false);
+
+    expect(order).toEqual(["page", "outer", "inner"]);
+  });
+
+  it("binds on the target alone for a non-bubbling event", () => {
+    const { page, outer, inner } = tree();
+    const order: string[] = [];
+    for (const [label, handle] of [
+      ["inner", inner],
+      ["outer", outer],
+      ["page", page],
+    ] as const) {
+      __AddEventListener(handle, "load", () => order.push(label), {});
+      // The other registration form files on the same pass, and narrows with
+      // it: a ReactLynx `bindload` is one of these, not a closure.
+      __AddEvent(handle, "bindEvent", "load", `${label}:load`);
+    }
+
+    dispatch([inner, outer, page], "load", "", undefined, false);
+
+    expect(order).toEqual(["inner"]);
+    expect(mock.named("publishEvent").map((call) => call[2])).toEqual([
+      "inner:load",
+    ]);
+  });
+
+  it("runs no global-bindEvent pass for a non-bubbling event", () => {
+    const { page, outer, inner } = tree();
+    __AddEvent(outer, "global-bindEvent", "load", "outer:global");
+
+    dispatch([inner, outer, page], "load", "", undefined, false);
+    expect(mock.named("publishEvent")).toEqual([]);
+
+    // The same registration reached by a bubbling event of the same name:
+    // what the flag suppresses is the pass, not the registration.
+    dispatch([inner, outer, page], "load");
+    expect(mock.named("publishEvent").map((call) => call[2])).toEqual([
+      "outer:global",
+    ]);
+  });
+
+  it("keeps a retargeted at-target step in a non-bubbling bind pass", () => {
+    const { page, outer, inner } = tree();
+    const order: string[] = [];
+    __AddEventListener(inner, "load", () => order.push("inner"), {});
+    __AddEventListener(outer, "load", () => order.push("outer"), {});
+    __AddEventListener(page, "load", () => order.push("page"), {});
+
+    // `outer` stands in for `inner` above a shadow boundary: its step is its
+    // own target, which is what makes it at-target in both passes. `page`
+    // sees `outer` and is not.
+    dispatch([inner, outer, page], "load", "", [inner, outer, outer], false);
+
+    expect(order).toEqual(["inner", "outer"]);
   });
 
   it("closes the names a collected handle held, and prunes its global registration", async () => {

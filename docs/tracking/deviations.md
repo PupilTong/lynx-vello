@@ -511,8 +511,8 @@ consequential choice about whether to follow the spec or the quirk.
   size containment so a single authored axis cannot derive the other.
   Two consequences worth knowing: `contain` is a property Lynx has no
   equivalent of at all, so an author's `contain: none` can switch this off in
-  a way no Lynx target permits (accepted — it is also exactly how the deferred
-  `image[auto-size]` will be written, which is why the UA declaration is not
+  a way no Lynx target permits (accepted — it is also exactly how
+  `image[auto-size]` is written, which is why the UA declaration is not
   `!important`); and the same rule applies to an `<image>` written inside a
   `<text>`, which follows native (an inline image is sized from its own style)
   rather than web-core, which erases the host with `display: contents
@@ -520,6 +520,106 @@ consequential choice about whether to follow the spec or the quirk.
   Deliberately **not** ported from `x-image.css`: `contain`'s
   layout/paint/style bits, `flex-direction: row !important` and the alignment
   triple (all scaffolding for a shadow `<img>` this engine does not have).
+- **`<image auto-size>` is sized the way both references size it.** The
+  attribute lifts the rule above — `image[auto-size]:not([auto-size="false"])
+  { contain: none; max-width: 100%; max-height: 100%; }` — and the box is then
+  an ordinary replaced flex item. Read alone, native's measure functions look
+  as if they disagree with web-core: Android's `AutoSizeImage.measure`
+  (`platform/android/.../image/AutoSizeImage.java:105-156`) and iOS's
+  `measureNode:` (`LynxUIImage.mm:1992-2043`) take the natural size whenever
+  neither axis is exact, and never grow a bitmap on an at-most axis. But
+  starlight hands a stretched item an *exact* cross constraint before it
+  measures it: in a `nowrap` flex container with a definite cross size, an
+  `align-self: stretch` item with an auto cross size and no auto cross margins
+  is measured with `OneSideConstraint::Definite`
+  (`core/renderer/starlight/layout/flex_layout_algorithm.cc:132-146` for the
+  flex base size, `:335-345` for the hypothetical cross size), and linear
+  layout does the same (`linear_layout_algorithm.cc:182-185`). Both measure
+  functions then take the exact axis as given and derive the other through the
+  bitmap's ratio, capped by the at-most constraint on it. That is
+  css-flexbox-1 §9.8 followed by the ratio transfer and `max-*: 100%`, which
+  is what web-core's shadow `<img>` gets from the browser
+  (`x-image.css:55-81`). Walking the six parents of
+  `auto_size_sizes_the_box_from_its_bitmap` through native's code gives the
+  same six sizes Chrome renders for web-core, so no conflict is recorded here.
+  Derived by reading `lynx/`, not by running a native build.
+  Two smaller records under the same attribute. web-core makes `mode` and
+  `blur-radius` inert under `auto-size` (a side effect of the `::part(img)`
+  rules its `display: contents` leaves unmatched, not a decision); native keeps
+  them live and so does this engine, since nothing couples them. And a
+  `placeholder` can size an `auto-size` box here, because `dom` takes the
+  natural size from whichever bitmap is drawn — iOS and web-core do the same,
+  Android sizes from `src` alone.
+- **`<image mode>` loses to author CSS here and wins in web-core.** The three
+  modes that are not `fill` are UA attribute rules
+  (`image[mode="aspectFit"] { object-fit: contain; }` and its two siblings),
+  so a page's own `object-fit` outranks them — the standing PR #261 gave the
+  `text-overflow` attribute. web-core's `x-image[mode=…]` is (0,1,1) in an
+  *author*-level sheet, so there it beats a page's class rule. Accepted.
+  `scaleToFill`, an unknown value and no attribute at all are the initial
+  `fill`, which is Android's (`LynxImageManager.getMode`) and Harmony's
+  (`ui_new_image.cc:220-231`) fallback; iOS's converter falls back to
+  `aspectFill` instead (`LynxUIImage.mm:2063-2081`), a native-internal
+  disagreement this engine resolves toward Android/Harmony and web-core.
+  `center` is `object-fit: none` with the initial `object-position: 50% 50%`,
+  which is Harmony's `ARKUI_OBJECT_FIT_NONE` exactly and web-core's centred,
+  unscaled, host-clipped `<img>` exactly; one source pixel becomes one CSS
+  pixel, which is web-core's basis — Android maps a source pixel to a dip and
+  iOS to a point.
+- **`<image blur-radius>` computes but does not paint, and a unitless value is
+  dropped.** The attribute becomes a `filter: blur(…)` presentational hint over
+  the raw attribute value, which is web-core's grammar (it writes the value
+  into `--blur-radius` and lets `blur(var(--blur-radius))` judge it). So a
+  unitless `blur-radius="10"` is invalid CSS and blurs nothing, while Android
+  reads it as physical pixels (`UnitUtils.toPxWithDisplayMetrics`'s final
+  `Float.parseFloat`) and blurs — **following web-core**. The engine parses
+  `blur()` and paints nothing: `dom`'s `paint::filters` records blur as a v1
+  limit, since it needs an offscreen texture pass. **Open item for that paint
+  work**: both references blur only the bitmap, while a host-level `filter`
+  will blur the element's background and border with it.
+- **`<image>`'s `load` and `error` fire for `src` alone.** Both are web-core's
+  events — `load` detail `{width, height}` from the intrinsic pixel size,
+  `error` detail `{}`, both non-bubbling (`XImage/ImageEvents.ts:44-72` over
+  `commonEventInitConfiguration.ts`) — dispatched per the 2026-09-17 ruling.
+  What differs is what a *placeholder* does. web-core has one inner `<img>`
+  and uses the placeholder as both its initial `src` and its error fallback
+  (`XImage/ImageSrc.ts:28-31, 54-60`), so a placeholder that loads fires the
+  host's `load`; here the two sources are concurrent requests under the native
+  model the same ruling chose, and
+  `dom` has no variant naming a placeholder's outcome, so neither its load nor
+  its failure is an event. Native agrees with this engine: Android's
+  `mPlaceHolderListener` (`platform/android/.../image/LynxImageManager.java:416-437`)
+  sets the drawable on success and does nothing at all on failure, while only
+  the source's listener reaches `onImageLoadSuccess`/`onImageLoadError`.
+- **`error` carries `{}`, where native carries a reason.** Native's detail is
+  `{errMsg, error_code, lynx_categorized_code}`
+  (`ImageErrorCodeUtils.checkImageExceptionCategory`, buckets 1000s/1100s/
+  1200s); web-core's is the empty object a browser's `error` event leaves it,
+  and that is what this engine emits. It is not only a compatibility choice:
+  nothing below this layer produces a reason at all, since a failure reaches
+  the engine as `ImageReports::failed(source)` with no category, message or
+  code. Adding the native fields would mean inventing them here.
+- **A request is issued even for a 0x0 box, so a `load` fires where native
+  fires none.** Binding a `src` is what asks the host for it, whatever the
+  element measures — and `<image>`'s own rule is that an unsized box is 0x0
+  (the first entry in this section). Android refuses the fetch outright in
+  that state: `LynxImageManager.updateImageSource`
+  (`platform/android/.../image/LynxImageManager.java:886-913`) leaves
+  `needRequest` false when the view has no size, no pre-fetch size and no
+  `auto-size`, so an unsized `<image src>` there never loads and never
+  reports. web-core's inner `<img>` carries the `src` whatever the host
+  measures and fires `load` as this engine does. **Following web-core**, which
+  is also the cheaper contract to state: whether an element asks for its
+  source does not depend on layout.
+- **A `load` that settles while the element is detached is still delivered.**
+  web-core buffers it and replays it from `connectedCallback`
+  (`XImage/ImageEvents.ts:44-63`), which is a workaround for its host and its
+  inner `<img>` being two objects. Here an event path is computed for a
+  detached target exactly as the DOM standard specifies — it ends at the
+  topmost ancestor — so the handler on the element itself runs whether or not
+  it is connected. Accepted: a compiled ReactLynx card writes `src` and
+  appends in the same render, so the two differ only for a card that holds an
+  element out of the tree across a turn.
 - **Almost every built-in component exposes a bespoke imperative JS method
   surface** (`invoke()`-based RPC: `scrollTo`, `getScrollInfo`,
   `setInputFilter`, `startAnimate`, etc.) instead of standard DOM

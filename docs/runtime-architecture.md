@@ -698,7 +698,9 @@ imports its native operations directly; nothing is installed as
 `globalThis.bobcat`. Before registering the entry, core prepends its runtime
 and Element-PAPI import declarations. Event delivery travels back through the
 loaded `bobcat:element` namespace's `__BobcatDispatchEvent` export, once per
-dispatch, carrying the whole event path as two comma-joined id strings.
+dispatch, carrying the whole event path as two comma-joined id strings and
+whether the event bubbles — which decides how much of that path the bind pass
+runs on, and whether the `global-bindEvent` pass runs at all.
 
 Because `bobcat-internal:host` resolves from any module in the realm, a card
 can reach `createDocument` too. Constructing a second `Document` is refused,

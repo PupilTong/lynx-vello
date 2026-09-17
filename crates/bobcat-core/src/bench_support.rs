@@ -149,7 +149,8 @@ impl ScriptHarness {
         self.with_document(|document| document.event_steps(target, true, true))
     }
 
-    /// Delivers one routed event to `target`.
+    /// Delivers one routed event to `target`, bubbling as every routed event
+    /// does.
     ///
     /// The answer is only whether the realm published its dispatch export:
     /// the path is computed here and everything over it — which steps have a
@@ -161,7 +162,7 @@ impl ScriptHarness {
     pub fn dispatch(&mut self, target: u64, name: &Arc<str>, detail: &Arc<str>) -> bool {
         let target = dom::NodeId::from_bits(target).expect("a well-formed packed handle");
         self.runtime
-            .dispatch_event(&mut self.js_runtime, target, name, detail)
+            .dispatch_event(&mut self.js_runtime, target, name, detail, true)
             .expect("the benchmark dispatch completes")
     }
 

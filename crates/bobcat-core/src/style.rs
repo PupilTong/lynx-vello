@@ -147,10 +147,14 @@ pub(crate) fn add_style_sheet_text(document: &mut LynxDocument, css: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::main::tree::{PageConfig, Viewport, new_document};
+    use crate::main::tree::{ImageOutcomes, PageConfig, Viewport, new_document};
 
     fn document() -> LynxDocument {
-        new_document(Viewport::new(393.0, 727.0), PageConfig::default())
+        new_document(
+            Viewport::new(393.0, 727.0),
+            PageConfig::default(),
+            ImageOutcomes::default(),
+        )
     }
 
     fn declaration(property: &str, value: &str) -> PreparsedDeclaration {

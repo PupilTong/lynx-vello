@@ -815,6 +815,7 @@ fn string_handlers_reach_background_with_event_snapshots() {
             dom::NodeId::from_bits(3).unwrap(),
             "tap",
             r#"{"answer":42}"#,
+            true,
         )
         .unwrap();
     pair.deliver();
@@ -958,6 +959,7 @@ fn a_published_dom_event_carries_values_only_and_no_propagation_methods() {
             dom::NodeId::from_bits(3).unwrap(),
             "tap",
             r#"{"answer":42}"#,
+            true,
         )
         .unwrap();
     pair.deliver();

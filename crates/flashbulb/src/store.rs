@@ -240,7 +240,9 @@ pub fn pump_images<T>(document: &mut Document<T>, store: &TestImages) -> bool {
     if events.is_empty() {
         return false;
     }
-    document.apply_image_events(&events);
+    // The outcomes go nowhere: they are what an embedder turns into `load`
+    // and `error` events, and a screenshot has no realm to dispatch one in.
+    let _outcomes = document.apply_image_events(&events);
     true
 }
 

@@ -617,7 +617,7 @@ fn a_failed_boot_leaves_the_group_s_other_view_alone() {
 
     assert!(
         second
-            .dispatch_event(&mut js_runtime, node_id(2), &tap(), &no_detail())
+            .dispatch_event(&mut js_runtime, node_id(2), &tap(), &no_detail(), true)
             .expect("the second view's dispatch is not the first view's failure"),
         "the second view's realm published the dispatch export"
     );
@@ -1473,6 +1473,7 @@ fn a_dispatch_runs_the_path_listeners_and_skips_the_steps_with_none() {
             node_id(target),
             &tap(),
             &Arc::from("{\"x\":1}"),
+            true,
         )
         .expect("dispatch");
     // All the host learns: the realm published the export it called.
@@ -1534,7 +1535,7 @@ fn add_event_delivers_on_the_real_path_and_a_catch_form_ends_the_walk() {
 
     assert!(
         runtime
-            .dispatch_event(&mut js_runtime, node_id(4), &tap(), &no_detail())
+            .dispatch_event(&mut js_runtime, node_id(4), &tap(), &no_detail(), true)
             .expect("dispatch")
     );
 
@@ -1602,7 +1603,7 @@ fn global_bind_handlers_run_after_the_path_even_when_a_catch_ended_it() {
 
     assert!(
         runtime
-            .dispatch_event(&mut js_runtime, node_id(4), &tap(), &no_detail())
+            .dispatch_event(&mut js_runtime, node_id(4), &tap(), &no_detail(), true)
             .expect("dispatch")
     );
 
@@ -1664,7 +1665,8 @@ fn a_global_only_registration_publishes_its_name_and_is_delivered() {
                 &mut js_runtime,
                 node_id(2),
                 &Arc::from("swipe"),
-                &no_detail()
+                &no_detail(),
+                true,
             )
             .expect("dispatch"),
         "a global registration alone is enough to deliver"
@@ -1697,6 +1699,7 @@ fn a_global_only_registration_publishes_its_name_and_is_delivered() {
             node_id(2),
             &Arc::from("swipe"),
             &no_detail(),
+            true,
         )
         .expect("dispatch");
     runtime
@@ -2107,7 +2110,7 @@ fn a_replaced_add_event_handler_moves_its_node_between_passes() {
 
     assert!(
         runtime
-            .dispatch_event(&mut js_runtime, node_id(3), &tap(), &no_detail())
+            .dispatch_event(&mut js_runtime, node_id(3), &tap(), &no_detail(), true)
             .expect("dispatch")
     );
 
@@ -2132,7 +2135,7 @@ fn a_replaced_add_event_handler_moves_its_node_between_passes() {
         .expect("verification");
 
     runtime
-        .dispatch_event(&mut js_runtime, node_id(3), &tap(), &no_detail())
+        .dispatch_event(&mut js_runtime, node_id(3), &tap(), &no_detail(), true)
         .expect("dispatch");
 
     runtime
@@ -2183,7 +2186,7 @@ fn one_call_is_one_dispatch_with_one_event_object_that_is_reset_at_its_end() {
     for _ in 0..2 {
         assert!(
             runtime
-                .dispatch_event(&mut js_runtime, node_id(4), &tap(), &no_detail())
+                .dispatch_event(&mut js_runtime, node_id(4), &tap(), &no_detail(), true)
                 .expect("dispatch")
         );
     }
@@ -2250,7 +2253,7 @@ fn a_listener_may_mutate_the_tree_it_was_dispatched_on() {
         .expect("main-thread script");
 
     runtime
-        .dispatch_event(&mut js_runtime, node_id(3), &tap(), &no_detail())
+        .dispatch_event(&mut js_runtime, node_id(3), &tap(), &no_detail(), true)
         .expect("dispatch");
 
     assert_eq!(
@@ -2297,7 +2300,7 @@ fn an_unrelated_element_being_collected_does_not_truncate_the_walk() {
     runtime.collect_garbage(&mut js_runtime).expect("sweep");
 
     runtime
-        .dispatch_event(&mut js_runtime, node_id(3), &tap(), &no_detail())
+        .dispatch_event(&mut js_runtime, node_id(3), &tap(), &no_detail(), true)
         .expect("dispatch");
 
     // A collected handle is routine — a ReactLynx re-render drops them
@@ -2337,7 +2340,7 @@ fn stopping_propagation_ends_the_walk() {
         .expect("main-thread script");
 
     runtime
-        .dispatch_event(&mut js_runtime, node_id(3), &tap(), &no_detail())
+        .dispatch_event(&mut js_runtime, node_id(3), &tap(), &no_detail(), true)
         .expect("dispatch");
 
     runtime
@@ -2371,10 +2374,263 @@ fn a_dispatch_with_nothing_registered_reaches_the_realm_and_runs_nothing() {
 
     assert!(
         runtime
-            .dispatch_event(&mut js_runtime, node_id(3), &tap(), &no_detail())
+            .dispatch_event(&mut js_runtime, node_id(3), &tap(), &no_detail(), true)
             .expect("dispatch"),
         "the realm published the export, which is all the answer means now"
     );
+}
+
+/// The source and the placeholder of the image tests below, and the pixel
+/// count a load reports for the first of them.
+const IMAGE_SOURCE: &str = "app:///a.png";
+const IMAGE_PLACEHOLDER: &str = "app:///holding.png";
+const IMAGE_PIXELS: (u32, u32) = (40, 20);
+
+fn image_loaded(source: &str) -> dom::ImageEvent {
+    dom::ImageEvent::Loaded {
+        source: Arc::from(source),
+        width: IMAGE_PIXELS.0,
+        height: IMAGE_PIXELS.1,
+    }
+}
+
+fn image_failed(source: &str) -> dom::ImageEvent {
+    dom::ImageEvent::Failed {
+        source: Arc::from(source),
+    }
+}
+
+/// One image under the page, with a handler of every form that could see its
+/// events: a worklet `bindload`/`binderror` on the image itself, the same
+/// form on its parent, a `capture-bind` on the page, and a
+/// `global-bindEvent` off the path. What runs is what the non-bubbling shape
+/// allows, and `seen` is the record.
+fn image_page(script_url: &str) -> (ScriptRuntime, MainThreadRuntime, DocumentProbe) {
+    let (mut js_runtime, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.seen = [];
+                globalThis.runWorklet = (value, params) => value.body(params[0]);
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const outer = __CreateView(0);
+                  const image = __CreateImage(0);
+                  const aside = __CreateView(0);
+                  __AppendElement(page, outer);
+                  __AppendElement(outer, image);
+                  __AppendElement(page, aside);
+                  globalThis.held = [page, outer, image, aside];
+                  const note = (label) => ({
+                    type: 'worklet',
+                    value: {
+                      body: (event) =>
+                        seen.push(
+                          label + ':' + event.currentTarget.uid + ':' +
+                          event.type + ':' + JSON.stringify(event.detail),
+                        ),
+                    },
+                  });
+                  for (const name of ['load', 'error']) {
+                    __AddEvent(image, 'bindEvent', name, note('image'));
+                    __AddEvent(outer, 'bindEvent', name, note('outer'));
+                    __AddEvent(page, 'capture-bind', name, note('page-capture'));
+                    __AddEvent(aside, 'global-bindEvent', name, note('aside-global'));
+                  }
+                };
+                ",
+            script_url,
+        )
+        .expect("main-thread script");
+    (js_runtime, runtime, elements)
+}
+
+/// Asserts what the realm has recorded since the last check, and clears it.
+///
+/// The check runs in the realm, as every other event test's does: a
+/// verification module throws, and the failure carries what was delivered.
+fn expect_seen(js_runtime: &mut ScriptRuntime, runtime: &mut MainThreadRuntime, expected: &str) {
+    runtime
+        .evaluate_module(
+            js_runtime,
+            &format!(
+                r"
+                const actual = seen.join('|');
+                seen.length = 0;
+                if (actual !== {expected:?}) {{
+                  throw new Error('unexpected deliveries: ' + actual);
+                }}
+                "
+            ),
+            "app:///verify-images.mjs",
+            "verifying the deliveries",
+        )
+        .expect("the deliveries are what the dispatch owed");
+}
+
+/// An `<image>`'s `load` is web-core's: the intrinsic pixel size as the
+/// detail, and non-bubbling, so the capture pass still runs the whole path,
+/// the bind pass runs on the image alone, and there is no `global-bindEvent`
+/// pass at all.
+#[test]
+fn an_image_load_carries_its_intrinsic_size_and_does_not_bubble() {
+    let (mut js_runtime, mut runtime, _elements) = image_page("app:///image-load.js");
+    js_set_src(&mut js_runtime, &mut runtime, IMAGE_SOURCE);
+    // A source that has not loaded owes nothing.
+    expect_seen(&mut js_runtime, &mut runtime, "");
+
+    runtime.apply_image_events(&[image_loaded(IMAGE_SOURCE)]);
+    assert!(runtime.dispatch_image_outcomes(&mut js_runtime).is_empty());
+
+    expect_seen(
+        &mut js_runtime,
+        &mut runtime,
+        r#"page-capture:2:load:{"width":40,"height":20}|image:4:load:{"width":40,"height":20}"#,
+    );
+}
+
+/// `error` carries `{}`. Native's payload is richer — `errMsg`,
+/// `error_code`, `lynx_categorized_code` — and web-core is what this follows;
+/// see `docs/tracking/deviations.md`.
+#[test]
+fn an_image_error_carries_an_empty_detail() {
+    let (mut js_runtime, mut runtime, _elements) = image_page("app:///image-error.js");
+    js_set_src(&mut js_runtime, &mut runtime, IMAGE_SOURCE);
+
+    runtime.apply_image_events(&[image_failed(IMAGE_SOURCE)]);
+    assert!(runtime.dispatch_image_outcomes(&mut js_runtime).is_empty());
+
+    expect_seen(
+        &mut js_runtime,
+        &mut runtime,
+        "page-capture:2:error:{}|image:4:error:{}",
+    );
+}
+
+/// The placeholder is a second source the page did not ask about, so neither
+/// of its endings is an event — while the `src` behind it still reports its
+/// own, whichever way it ends.
+#[test]
+fn a_placeholder_settling_is_nobody_s_event() {
+    let (mut js_runtime, mut runtime, _elements) = image_page("app:///image-placeholder.js");
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                import { __SetAttribute } from 'bobcat:element';
+                __SetAttribute(held[2], 'placeholder', 'app:///holding.png');
+                __SetAttribute(held[2], 'src', 'app:///a.png');
+                ",
+            "app:///sources.mjs",
+            "writing both sources",
+        )
+        .expect("writing both sources");
+
+    for event in [
+        image_loaded(IMAGE_PLACEHOLDER),
+        image_failed(IMAGE_PLACEHOLDER),
+    ] {
+        runtime.apply_image_events(&[event]);
+        assert!(runtime.dispatch_image_outcomes(&mut js_runtime).is_empty());
+        // A placeholder is an interim picture, not an answer to the page.
+        expect_seen(&mut js_runtime, &mut runtime, "");
+    }
+
+    // The source behind it is still the element's own, and its failure is
+    // still the element's `error` — once.
+    runtime.apply_image_events(&[image_failed(IMAGE_SOURCE), image_failed(IMAGE_SOURCE)]);
+    assert!(runtime.dispatch_image_outcomes(&mut js_runtime).is_empty());
+    expect_seen(
+        &mut js_runtime,
+        &mut runtime,
+        "page-capture:2:error:{}|image:4:error:{}",
+    );
+}
+
+/// Binding is what asks the host for a URL, so a URL this document has
+/// already settled answers at the bind — and no report will ever arrive for
+/// it again. It is still delivered as its own turn's work rather than from
+/// inside the `__SetAttribute` that wrote it, which is web-core's shape too:
+/// an `<img>` load event is a task, cached URL or not.
+#[test]
+fn a_second_mount_of_a_settled_source_is_delivered_after_the_call_that_bound_it() {
+    let (mut js_runtime, mut runtime, _elements) = image_page("app:///image-remount.js");
+    runtime.apply_image_events(&[image_loaded(IMAGE_SOURCE)]);
+    assert!(
+        runtime.dispatch_image_outcomes(&mut js_runtime).is_empty(),
+        "nothing holds the source yet, so the report settles the registry alone"
+    );
+    expect_seen(&mut js_runtime, &mut runtime, "");
+
+    // The bind settled it, and dispatching from inside `__SetAttribute` would
+    // re-enter the realm in the middle of that call.
+    js_set_src(&mut js_runtime, &mut runtime, IMAGE_SOURCE);
+    expect_seen(&mut js_runtime, &mut runtime, "");
+
+    assert!(runtime.dispatch_image_outcomes(&mut js_runtime).is_empty());
+    expect_seen(
+        &mut js_runtime,
+        &mut runtime,
+        r#"page-capture:2:load:{"width":40,"height":20}|image:4:load:{"width":40,"height":20}"#,
+    );
+
+    // Exactly once: the queue was drained, and rewriting the value already
+    // there binds nothing.
+    assert!(runtime.dispatch_image_outcomes(&mut js_runtime).is_empty());
+    js_set_src(&mut js_runtime, &mut runtime, IMAGE_SOURCE);
+    assert!(runtime.dispatch_image_outcomes(&mut js_runtime).is_empty());
+    expect_seen(&mut js_runtime, &mut runtime, "");
+}
+
+/// An element freed between the outcome forming and its delivery resolves to
+/// nothing. A `NodeId` names one node for the life of the document, so the
+/// lookup can never reach a stranger.
+#[test]
+fn an_element_collected_before_its_load_is_delivered_gets_nothing() {
+    let (mut js_runtime, mut runtime, elements) = image_page("app:///image-collected.js");
+    js_set_src(&mut js_runtime, &mut runtime, IMAGE_SOURCE);
+    runtime.apply_image_events(&[image_loaded(IMAGE_SOURCE)]);
+
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                import { __RemoveElement } from 'bobcat:element';
+                __RemoveElement(held[1], held[2]);
+                held[2] = undefined;
+                ",
+            "app:///drop.mjs",
+            "dropping the image",
+        )
+        .expect("dropping the image");
+    runtime
+        .collect_garbage(&mut js_runtime)
+        .expect("collection");
+    assert!(
+        elements.tree().get(node_id(4)).is_none(),
+        "the image is freed before its `load` is delivered"
+    );
+
+    assert!(runtime.dispatch_image_outcomes(&mut js_runtime).is_empty());
+    expect_seen(&mut js_runtime, &mut runtime, "");
+}
+
+/// Writes a `src` the way a card does, through the PAPI.
+fn js_set_src(js_runtime: &mut ScriptRuntime, runtime: &mut MainThreadRuntime, source: &str) {
+    runtime
+        .evaluate_module(
+            js_runtime,
+            &format!(
+                r"
+                import {{ __SetAttribute }} from 'bobcat:element';
+                __SetAttribute(held[2], 'src', '{source}');
+                "
+            ),
+            "app:///src.mjs",
+            "writing the source",
+        )
+        .expect("writing the source");
 }
 
 #[test]
@@ -3286,7 +3542,7 @@ fn an_event_target_no_handle_names_is_an_error_not_a_silent_drop() {
     };
 
     let error = runtime
-        .dispatch_event(&mut js_runtime, run, &tap(), &no_detail())
+        .dispatch_event(&mut js_runtime, run, &tap(), &no_detail(), true)
         .expect_err("a target no handle names cannot be delivered");
     assert!(error.to_string().contains("ownership graph"), "{error}");
 }

@@ -2,14 +2,18 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::{FarEnd, Painter, ToMain};
-use crate::main::tree::{LynxDocument, PageConfig, Viewport, new_document};
+use crate::main::tree::{ImageOutcomes, LynxDocument, PageConfig, Viewport, new_document};
 use crate::resource::SourceRequest;
 use crate::test_support::TestViewSpec;
 use crate::view::{EngineEvent, EventRequester, FrameSize, NoWakeup};
 
 /// A phone-shaped document, for the tests that publish a real frame.
 fn document() -> LynxDocument {
-    new_document(Viewport::new(393.0, 727.0), PageConfig::default())
+    new_document(
+        Viewport::new(393.0, 727.0),
+        PageConfig::default(),
+        ImageOutcomes::default(),
+    )
 }
 
 /// A painter with every seam built but no view task: the view's whole side of
