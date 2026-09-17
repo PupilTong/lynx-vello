@@ -123,18 +123,24 @@ import { __BobcatPublishEvent } from "bobcat:runtime";
 //
 // **The whole walk is this file's.** The host computes the event path while
 // it holds the document, releases it, and makes one call:
-// `__BobcatDispatchEvent(nodes, targets, name, detail, touches, timestamp)`,
-// where `nodes` is the path in target-first order as comma-joined decimal
-// node ids and `targets` carries, position for position, the shadow-retargeted
-// target of that step. `touches` is the touch lists of the four touch events —
-// `identifier,x,y,flags` per point, stride four, all comma-joined, with the
-// flags a decimal bitmask over `touches`/`targetTouches`/`changedTouches` —
-// and the empty string for every other event. Strings because the boundary
-// takes primitives and structured clones only, a clone can be minted by the
-// realm alone, and neither a decimal id nor a finite coordinate can contain
-// the separator — the same encoding `childElementIds` uses. `timestamp` is
-// the event's own, in milliseconds on the view's timeline. Releasing the
-// document before the call is what lets a listener mutate the tree.
+// `__BobcatDispatchEvent(nodes, targets, name, timestamp, x, y, deltaX,
+// deltaY, ...touchNumbers)`, where `nodes` is the path in target-first order
+// as comma-joined decimal node ids and `targets` carries, position for
+// position, the shadow-retargeted target of that step. Two strings because
+// the boundary takes primitives and structured clones only, a clone can be
+// minted by the realm alone, and a decimal id cannot contain the separator —
+// the same encoding `childElementIds` uses. Releasing the document before the
+// call is what lets a listener mutate the tree.
+//
+// Everything else is numbers, and the objects they describe are built here,
+// because their shape is JavaScript's: `timestamp` is the event's own, in
+// milliseconds on the view's timeline; `x`/`y` are the device position the
+// `detail` reports; `deltaX`/`deltaY` are the wheel delta, `undefined` for
+// every event that has none, which is what keeps those two keys out of the
+// `detail` rather than `NaN` in it. `touchNumbers` is four numbers per touch
+// point — `identifier`, `x`, `y`, and a flag bitmask over
+// `touches`/`targetTouches`/`changedTouches` — which the four touch events
+// alone carry.
 //
 // From there this file runs the standard's dispatch over that path: the
 // capture pass from the last entry to the first, the bubble pass from the
@@ -2115,7 +2121,7 @@ interface DispatchedEvent {
   eventPhase: number;
   target: ReturnType<typeof targetInfo>;
   currentTarget: ReturnType<typeof targetInfo> | null;
-  detail: unknown;
+  detail: EventDetail;
   // Milliseconds on the view's timeline, which is this engine's time origin
   // — the semantics DOM's `Event.timeStamp` has. Native Lynx reports epoch
   // milliseconds instead; see docs/tracking/deviations.md.
@@ -2132,6 +2138,22 @@ interface DispatchedEvent {
   touches?: TouchPointValues[];
   targetTouches?: TouchPointValues[];
   changedTouches?: TouchPointValues[];
+}
+
+/**
+ * What every dispatched event reports about where it happened.
+ *
+ * The device position in viewport CSS px, plus — for `wheel` alone — the
+ * scroll delta the host routed. The two delta keys are absent, not
+ * `undefined`-valued, on every other event: the transport carries an
+ * `undefined`-valued key as one. A listener may write into this object; it is
+ * minted per dispatch, like the event that carries it.
+ */
+interface EventDetail {
+  x: number;
+  y: number;
+  deltaX?: number;
+  deltaY?: number;
 }
 
 /**
@@ -2160,31 +2182,31 @@ const TOUCH_TARGET = 2;
 const TOUCH_CHANGED = 4;
 
 /**
- * Decodes the host's touch lists, or nothing when the event carries none.
+ * Sorts the host's touch numbers into the three lists, or nothing when the
+ * event carries none.
  *
- * One flat string, stride four: `identifier,x,y,flags`. A point in more than
- * one list is one object in each, so `event.touches[0] === event.targetTouches[0]`
- * holds when both name the same finger — nothing observes the identity, and
- * one object per finger is what the lists mean.
+ * Four numbers per point, in order: `identifier`, `x`, `y`, flags. A point in
+ * more than one list is one object in each, so
+ * `event.touches[0] === event.targetTouches[0]` holds when both name the same
+ * finger — nothing observes the identity, and one object per finger is what
+ * the lists mean.
  */
-function touchLists(encoded: unknown): {
+function touchLists(numbers: unknown[]): {
   touches: TouchPointValues[];
   targetTouches: TouchPointValues[];
   changedTouches: TouchPointValues[];
 } | undefined {
-  const text = String(encoded ?? "");
-  if (text === "") {
+  if (numbers.length === 0) {
     return undefined;
   }
-  const fields = text.split(",");
   const touches: TouchPointValues[] = [];
   const targetTouches: TouchPointValues[] = [];
   const changedTouches: TouchPointValues[] = [];
-  for (let at = 0; at + 3 < fields.length; at += 4) {
-    const x = Number(fields[at + 1]);
-    const y = Number(fields[at + 2]);
+  for (let at = 0; at + 3 < numbers.length; at += 4) {
+    const x = Number(numbers[at + 1]);
+    const y = Number(numbers[at + 2]);
     const point: TouchPointValues = {
-      identifier: Number(fields[at]),
+      identifier: Number(numbers[at]),
       x,
       y,
       pageX: x,
@@ -2192,7 +2214,7 @@ function touchLists(encoded: unknown): {
       clientX: x,
       clientY: y,
     };
-    const flags = Number(fields[at + 3]);
+    const flags = Number(numbers[at + 3]);
     if (flags & TOUCH_ACTIVE) {
       touches.push(point);
     }
@@ -2364,17 +2386,21 @@ function handlerInPass(
  * handle and went with it, and this is the window between the handle
  * becoming unreachable and the cleanup that frees its element.
  *
- * A touch event arrives with its three lists encoded in the fifth argument;
- * every other event arrives with the empty string there and carries no such
- * keys.
+ * The host passes the facts it owns as numbers and this file builds the
+ * objects: the `detail` out of the position and, for a `wheel`, its delta,
+ * and the three touch lists out of the four numbers per point that follow.
+ * An event with no touch points carries no such keys at all.
  */
 function dispatchEvent(
   pathIds: unknown,
   targetIds: unknown,
   eventName: unknown,
-  detailJson: unknown,
-  touchPoints: unknown,
   timestamp: unknown,
+  x: unknown,
+  y: unknown,
+  deltaX: unknown,
+  deltaY: unknown,
+  ...touchNumbers: unknown[]
 ): undefined {
   const steps = pathSteps(pathIds, targetIds);
   const first = steps[0];
@@ -2388,12 +2414,19 @@ function dispatchEvent(
   // A reading the host could not take — a detached painter's, say — reports
   // the time origin rather than `NaN`.
   const stamp = Number(timestamp ?? 0);
+  // The two delta keys are written only for the one event that has them, so
+  // every other event's `detail` is exactly `{x, y}`.
+  const detail: EventDetail = { x: Number(x), y: Number(y) };
+  if (deltaX !== undefined) {
+    detail.deltaX = Number(deltaX);
+    detail.deltaY = Number(deltaY);
+  }
   const event: DispatchedEvent = {
     type: name,
     eventPhase: NONE,
     target: targetInfo(targetNodeId),
     currentTarget: null,
-    detail: detailJson ? JSON.parse(String(detailJson)) : {},
+    detail,
     timestamp: Number.isNaN(stamp) ? 0 : stamp,
     params: {},
     stopPropagation: () => {
@@ -2407,7 +2440,7 @@ function dispatchEvent(
   // Assigned rather than declared above, so an event that carries no touches
   // has no such keys at all — the transport would carry three
   // `undefined`-valued ones to a background handler otherwise.
-  const lists = touchLists(touchPoints);
+  const lists = touchLists(touchNumbers);
   if (lists !== undefined) {
     Object.assign(event, lists);
   }

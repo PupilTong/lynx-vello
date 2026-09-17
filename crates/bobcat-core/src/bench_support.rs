@@ -16,7 +16,7 @@ use dom::event::EventSteps;
 use tokio::sync::mpsc;
 
 use crate::background::{WorkerCommand, WorkerEvent};
-use crate::link::{DetachedView, detached_outbox};
+use crate::link::{DetachedView, InputEventPayload, detached_outbox};
 use crate::main::WorkerFactory;
 use crate::main::quickjs::ScriptRuntime;
 use crate::main::runtime::{
@@ -149,7 +149,8 @@ impl ScriptHarness {
         self.with_document(|document| document.event_steps(target, true, true))
     }
 
-    /// Delivers one routed event to `target`.
+    /// Delivers one routed event to `target`, with the payload a pointer
+    /// event carries: a position, no wheel delta and no touch points.
     ///
     /// The answer is only whether the realm published its dispatch export:
     /// the path is computed here and everything over it — which steps have a
@@ -158,10 +159,14 @@ impl ScriptHarness {
     /// # Panics
     ///
     /// Panics if a listener throws or the id is malformed.
-    pub fn dispatch(&mut self, target: u64, name: &Arc<str>, detail: &Arc<str>) -> bool {
+    pub fn dispatch(&mut self, target: u64, name: &Arc<str>) -> bool {
         let target = dom::NodeId::from_bits(target).expect("a well-formed packed handle");
+        let payload = InputEventPayload {
+            position: dom::Point2D::new(123.5, 456.25),
+            ..InputEventPayload::default()
+        };
         self.runtime
-            .dispatch_event(&mut self.js_runtime, target, name, detail)
+            .dispatch_input_event(&mut self.js_runtime, target, name, &payload)
             .expect("the benchmark dispatch completes")
     }
 

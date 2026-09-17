@@ -27,7 +27,6 @@ mod tests;
 use std::cell::Cell;
 #[cfg(test)]
 use std::cell::RefCell;
-use std::fmt::Write as _;
 use std::marker::PhantomData;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
@@ -45,11 +44,11 @@ use tokio::sync::mpsc;
 use tokio::sync::watch;
 
 pub(crate) use self::gesture::RouterHost;
-use self::gesture::{EmitEvent, GestureRouter, InputDecision, InputDecisions};
+use self::gesture::{GestureRouter, InputDecision, InputDecisions};
 pub use self::graphics::WindowTarget;
 use self::graphics::{FrameAcquisition, WindowGraphics};
 use crate::clock::ClockInstant;
-use crate::link::{Published, ToMain, ViewSeat, block_on_deadline};
+use crate::link::{InputEventPayload, Published, ToMain, ViewSeat, block_on_deadline};
 use crate::main::tree::Viewport;
 use crate::resource::ResourceFetcher;
 #[cfg(not(target_arch = "wasm32"))]
@@ -349,38 +348,6 @@ impl std::fmt::Debug for Painter {
             .field("attached", &self.is_attached())
             .finish_non_exhaustive()
     }
-}
-
-fn emit_detail(event: &EmitEvent) -> String {
-    let position = event.position;
-    match event.wheel {
-        Some(delta) => format!(
-            r#"{{"x":{},"y":{},"deltaX":{},"deltaY":{}}}"#,
-            position.x, position.y, delta.x, delta.y
-        ),
-        None => format!(r#"{{"x":{},"y":{}}}"#, position.x, position.y),
-    }
-}
-
-/// The touch lists in wire form: `identifier,x,y,flags` per point, stride
-/// four, all comma-joined — the encoding `childElementIds` and the event path
-/// already use, because the boundary takes primitives and structured clones
-/// only and a finite `f32` never prints a comma. The empty string is what
-/// every event that carries no touches sends.
-fn emit_touches(event: &EmitEvent) -> String {
-    let mut encoded = String::new();
-    for point in &event.touches {
-        if !encoded.is_empty() {
-            encoded.push(',');
-        }
-        write!(
-            encoded,
-            "{},{},{},{}",
-            point.identifier, point.position.x, point.position.y, point.flags
-        )
-        .expect("writing to a String");
-    }
-    encoded
 }
 
 #[derive(Debug, Default)]
@@ -980,9 +947,12 @@ impl Painter {
             self.send(ToMain::DispatchEvent {
                 target: event.target,
                 name: event.name,
-                detail: emit_detail(&event),
-                touches: emit_touches(&event),
-                timestamp,
+                payload: InputEventPayload {
+                    position: event.position,
+                    wheel: event.wheel,
+                    touches: event.touches,
+                    timestamp,
+                },
             });
         }
     }

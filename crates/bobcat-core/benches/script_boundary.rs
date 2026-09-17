@@ -198,11 +198,10 @@ fn listening_harness() -> (ScriptHarness, u64) {
 #[divan::bench]
 fn dispatch_to_listeners(bencher: divan::Bencher) {
     let name: Arc<str> = Arc::from("tap");
-    let detail: Arc<str> = Arc::from(r#"{"x":123.5,"y":456.25}"#);
     bencher
         .with_inputs(listening_harness)
         .bench_local_refs(|(harness, label)| {
-            assert!(harness.dispatch(*label, &name, &detail));
+            assert!(harness.dispatch(*label, &name));
         });
 }
 
@@ -216,12 +215,11 @@ fn dispatch_to_listeners(bencher: divan::Bencher) {
 #[divan::bench]
 fn dispatch_with_no_listener(bencher: divan::Bencher) {
     let name: Arc<str> = Arc::from("scroll");
-    let detail: Arc<str> = Arc::from(r#"{"x":123.5,"y":456.25}"#);
     bencher
         .with_inputs(listening_harness)
         .bench_local_refs(|(harness, label)| {
             assert!(!harness.has_listeners(&name));
-            assert!(harness.dispatch(*label, &name, &detail));
+            assert!(harness.dispatch(*label, &name));
         });
 }
 

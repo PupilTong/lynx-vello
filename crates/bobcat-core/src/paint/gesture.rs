@@ -57,6 +57,11 @@ use dom::scroll::ScrollAxes;
 use dom::{HitTarget, NodeId, Point2D, Vector2D};
 use smallvec::SmallVec;
 
+// The touch vocabulary is the link's, because both sides of the link name it:
+// the router fills the points in, and the main thread reads them out into the
+// realm's argument list.
+pub(crate) use crate::link::{TOUCH_ACTIVE, TOUCH_CHANGED, TOUCH_TARGET, TouchPoint, TouchPoints};
+
 /// How far a sequence may travel, in viewport CSS px, and still deliver `tap`.
 ///
 /// Lynx reads this from the page config (`tapSlop`, default `"50px"`); wiring
@@ -89,17 +94,6 @@ pub(crate) const LONG_PRESS_EVENT: &str = "longpress";
 /// The event name a released sequence synthesizes.
 pub(crate) const TAP_EVENT: &str = "tap";
 
-/// In `touches`: the finger is still down once this event has been applied,
-/// so a lifted or cancelled finger never carries it.
-pub(crate) const TOUCH_ACTIVE: u8 = 1;
-
-/// In `targetTouches`: [`TOUCH_ACTIVE`], and the finger's captured target is
-/// the target of the event carrying it.
-pub(crate) const TOUCH_TARGET: u8 = 2;
-
-/// In `changedTouches`: the one finger this event is about.
-pub(crate) const TOUCH_CHANGED: u8 = 4;
-
 /// Whether a pointer of this kind produces touch events.
 ///
 /// Touch and pen do; a mouse produces none, which is what both a browser and
@@ -110,24 +104,6 @@ pub(crate) const TOUCH_CHANGED: u8 = 4;
 pub(crate) fn produces_touch_events(device: PointerKind) -> bool {
     device.drags_to_scroll()
 }
-
-/// One entry of a touch event's three lists: which finger, where it is in
-/// viewport CSS px, and which lists it belongs to ([`TOUCH_ACTIVE`],
-/// [`TOUCH_TARGET`], [`TOUCH_CHANGED`], or-ed together).
-///
-/// One point can sit in all three at once — a move of the only finger down on
-/// the event's own target does — so the lists are one sequence with flags
-/// rather than three.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct TouchPoint {
-    pub(crate) identifier: PointerId,
-    pub(crate) position: Point2D<f32>,
-    pub(crate) flags: u8,
-}
-
-/// The points one touch event carries, in the order their fingers went down,
-/// with a lifted or cancelled finger last. Empty for every other event.
-pub(crate) type TouchPoints = SmallVec<[TouchPoint; 2]>;
 
 /// The published-frame facts the router may ask for while deciding. Borrowed
 /// for exactly one call; the router retains nothing of the host's. Every

@@ -511,7 +511,9 @@ describe("installation", () => {
         "Document",
       ].sort(),
     );
-    expect(elementModule.__BobcatDispatchEvent).toHaveLength(6);
+    // The eight every event carries; the touch numbers are a rest parameter,
+    // which `length` does not count.
+    expect(elementModule.__BobcatDispatchEvent).toHaveLength(8);
   });
 
   it("creates the realm's document once, with no arguments", () => {
@@ -1227,19 +1229,27 @@ function tree() {
 
 /**
  * Dispatches one event the way the host does: one call carrying the whole
- * path as two comma-joined id strings, target-first and root-last.
+ * path as two comma-joined id strings, target-first and root-last, and every
+ * other fact as a number.
  *
  * `targets` is that step's own target — the same node for every step unless a
  * test is exercising shadow retargeting — so it defaults to the path's first
- * entry, the node the event happened at.
+ * entry, the node the event happened at. The payload defaults to the origin
+ * with no wheel delta and no touch points, which is what a test that is not
+ * about the payload wants.
  */
 function dispatch(
   path: object[],
   name: string,
-  detailJson: string = "",
+  payload: {
+    x?: number;
+    y?: number;
+    deltaX?: number;
+    deltaY?: number;
+    touchNumbers?: number[];
+    timestamp?: number;
+  } = {},
   targets?: object[],
-  touchPoints: string = "",
-  timestamp: number = 0,
 ) {
   const nodes = path.map((handle) => __GetElementUniqueID(handle));
   const targeted = targets === undefined
@@ -1249,9 +1259,12 @@ function dispatch(
     nodes.join(","),
     targeted.join(","),
     name,
-    detailJson,
-    touchPoints,
-    timestamp,
+    payload.timestamp ?? 0,
+    payload.x ?? 0,
+    payload.y ?? 0,
+    payload.deltaX,
+    payload.deltaY,
+    ...(payload.touchNumbers ?? []),
   );
 }
 
@@ -1271,15 +1284,15 @@ interface TargetInfo {
 /**
  * The event object as a listener sees it during delivery, typed as these
  * tests read and write it: the fields the runtime sets, the `marker` a test
- * writes to see one object serve a whole dispatch, and the `detail` fields
- * the tests send.
+ * writes to see one object serve a whole dispatch, and the `detail` the
+ * runtime builds from the numbers the host sent.
  */
 interface ListenerEvent {
   type: string;
   eventPhase: number;
   target: TargetInfo;
   currentTarget: TargetInfo;
-  detail: { x: number; nested: { value: string } };
+  detail: { x: number; y: number; deltaX?: number; deltaY?: number };
   marker?: string;
   stopPropagation(): void;
   stopImmediatePropagation(): void;
@@ -1422,7 +1435,7 @@ describe("event listeners", () => {
       currentTarget = event.currentTarget;
     }, {});
 
-    dispatch([inner, outer], "tap", JSON.stringify({ x: 12, y: 30 }));
+    dispatch([inner, outer], "tap", { x: 12, y: 30 });
 
     expect(received.type).toBe("tap");
     expect(received.detail).toEqual({ x: 12, y: 30 });
@@ -1469,9 +1482,11 @@ describe("event listeners", () => {
       }`,
       new Array(4).fill(__GetElementUniqueID(inner)).join(","),
       "tap",
-      "",
-      "",
       0,
+      0,
+      0,
+      undefined,
+      undefined,
     );
 
     expect(order).toEqual(["inner", "page"]);
@@ -1550,7 +1565,16 @@ describe("event listeners", () => {
     // one — its parent's handle holds it — so this is the ownership graph
     // and the tree disagreeing, and it is reported rather than swallowed.
     expect(() =>
-      elementModule.__BobcatDispatchEvent(String(uid), "999", "tap", "", "", 0)
+      elementModule.__BobcatDispatchEvent(
+        String(uid),
+        "999",
+        "tap",
+        0,
+        0,
+        0,
+        undefined,
+        undefined,
+      )
     ).toThrow("ownership graph");
     expect(seen).toEqual([]);
 
@@ -1588,7 +1612,7 @@ describe("event listeners", () => {
 
     // What crossing a shadow boundary looks like from here: the step above it
     // is told a different target than the steps below.
-    dispatch([inner, outer, page], "tap", "", [inner, inner, outer]);
+    dispatch([inner, outer, page], "tap", {}, [inner, inner, outer]);
 
     expect(targets[1]).toBe(targets[0]);
     expect(targets[2]).not.toBe(targets[0]);
@@ -1882,7 +1906,7 @@ describe("__AddEvent", () => {
     };
     __AddEvent(inner, "bindEvent", "tap", { type: "worklet", value });
 
-    dispatch([inner], "tap", JSON.stringify({ x: 12 }));
+    dispatch([inner], "tap", { x: 12, y: 30 });
 
     // The worklet body reaches `runWorklet` unwrapped, as its `value`, with
     // the event as the single positional parameter.
@@ -1906,7 +1930,7 @@ describe("__AddEvent", () => {
     expect(mock.named("listenerNameOpened")).toEqual([
       ["listenerNameOpened", "tap"],
     ]);
-    dispatch([inner], "tap", JSON.stringify({ x: 12 }));
+    dispatch([inner], "tap", { x: 12, y: 30 });
 
     const target = { dataset: {}, id: null, uid };
     expect(mock.named("publishEvent")).toEqual([
@@ -1915,7 +1939,7 @@ describe("__AddEvent", () => {
         eventPhase: 2,
         target,
         currentTarget: target,
-        detail: { x: 12 },
+        detail: { x: 12, y: 30 },
         timestamp: 0,
         params: {},
       }],
@@ -1946,15 +1970,11 @@ describe("__AddEvent", () => {
     let retained!: ListenerEvent;
     __AddEventListener(inner, "tap", (event: ListenerEvent) => {
       retained = event;
-      event.detail.nested.value = "after";
+      event.detail.x = 99;
       __SetAttribute(inner, "data-item-name", "after");
     }, {});
 
-    dispatch(
-      [inner, outer],
-      "tap",
-      JSON.stringify({ nested: { value: "before" } }),
-    );
+    dispatch([inner, outer], "tap", { x: 12, y: 30 });
 
     expect(retained.currentTarget).toBeNull();
     expect(retained.target.elementRefptr).toBe(inner);
@@ -1972,7 +1992,7 @@ describe("__AddEvent", () => {
           id: "button",
           uid: innerUid,
         },
-        detail: { nested: { value: "before" } },
+        detail: { x: 12, y: 30 },
         timestamp: 0,
         params: {},
       }],
@@ -1989,7 +2009,7 @@ describe("__AddEvent", () => {
           id: null,
           uid: outerUid,
         },
-        detail: { nested: { value: "after" } },
+        detail: { x: 99, y: 30 },
         timestamp: 0,
         params: {},
       }],
@@ -2247,7 +2267,7 @@ describe("__AddEvent", () => {
 
     // The registered node is not the path: a global delivery is not a step
     // of the path the event took, and here `outer` is not even on it.
-    dispatch([inner], "tap", JSON.stringify({ x: 1 }));
+    dispatch([inner], "tap", { x: 1, y: 2 });
 
     const published = mock.named("publishEvent");
     expect(published).toHaveLength(1);
@@ -2320,6 +2340,48 @@ describe("__AddEvent", () => {
   });
 });
 
+describe("the event detail", () => {
+  /** Delivers one event and returns the `detail` its listener was handed. */
+  function detailOf(
+    element: object,
+    name: string,
+    payload: Parameters<typeof dispatch>[2],
+  ): Record<string, unknown> {
+    let seen: Record<string, unknown> | undefined;
+    __AddEventListener(element, name, (event: ListenerEvent) => {
+      seen = event.detail as unknown as Record<string, unknown>;
+    }, {});
+    dispatch([element], name, payload);
+    expect(seen, "the listener ran").toBeDefined();
+    return seen as Record<string, unknown>;
+  }
+
+  it("reports the position alone for an event with no wheel delta", () => {
+    const { inner } = tree();
+
+    const detail = detailOf(inner, "tap", { x: 12, y: 30 });
+
+    // Exactly two keys: the two delta ones are absent, not `undefined`-valued,
+    // because the transport carries an `undefined`-valued key as one.
+    expect(detail).toEqual({ x: 12, y: 30 });
+    expect(Object.keys(detail)).toEqual(["x", "y"]);
+  });
+
+  it("adds the delta for the one event that carries one", () => {
+    const { inner } = tree();
+
+    const detail = detailOf(inner, "wheel", {
+      x: 5,
+      y: 6,
+      deltaX: 0,
+      deltaY: 30,
+    });
+
+    expect(detail).toEqual({ x: 5, y: 6, deltaX: 0, deltaY: 30 });
+    expect(Object.keys(detail)).toEqual(["x", "y", "deltaX", "deltaY"]);
+  });
+});
+
 describe("timestamp and params", () => {
   /** The two members every dispatched event carries, whatever its type. */
   interface StampedEvent {
@@ -2334,7 +2396,7 @@ describe("timestamp and params", () => {
       seen.push(event);
     }, {});
 
-    dispatch([inner], "tap", "", undefined, "", 1234.5);
+    dispatch([inner], "tap", { timestamp: 1234.5 });
 
     expect(seen).toHaveLength(1);
     expect(seen[0]?.timestamp).toBe(1234.5);
@@ -2352,8 +2414,10 @@ describe("timestamp and params", () => {
       String(__GetElementUniqueID(inner)),
       String(__GetElementUniqueID(inner)),
       "tap",
-      "",
-      "",
+      undefined,
+      0,
+      0,
+      undefined,
       undefined,
     );
 
@@ -2381,7 +2445,7 @@ describe("timestamp and params", () => {
     const uid = __GetElementUniqueID(inner);
     __AddEvent(inner, "bindEvent", "tap", "3:0:bindtap");
 
-    dispatch([inner], "tap", "", undefined, "", 42);
+    dispatch([inner], "tap", { timestamp: 42 });
 
     const target = { dataset: {}, id: null, uid };
     expect(mock.named("publishEvent")).toEqual([
@@ -2390,7 +2454,7 @@ describe("timestamp and params", () => {
         eventPhase: 2,
         target,
         currentTarget: target,
-        detail: {},
+        detail: { x: 0, y: 0 },
         timestamp: 42,
         params: {},
       }],
@@ -2422,7 +2486,7 @@ describe("touch events", () => {
   function deliver(
     element: object,
     name: string,
-    touchPoints: string,
+    touchNumbers: number[],
   ): TouchEvent {
     let seen: TouchEvent | undefined;
     __AddEventListener(element, name, (event: TouchEvent) => {
@@ -2437,7 +2501,7 @@ describe("touch events", () => {
           : { changedTouches: event.changedTouches }),
       };
     }, {});
-    dispatch([element], name, "", undefined, touchPoints);
+    dispatch([element], name, { touchNumbers });
     expect(seen, "the listener ran").toBeDefined();
     return seen as TouchEvent;
   }
@@ -2447,7 +2511,7 @@ describe("touch events", () => {
 
     // Two fingers: the first is down elsewhere (active only), the second is
     // this event's own, on this target (active, target, changed).
-    const event = deliver(inner, "touchmove", "1,10,20,1,2,30.5,40,7");
+    const event = deliver(inner, "touchmove", [1, 10, 20, 1, 2, 30.5, 40, 7]);
 
     const first = {
       identifier: 1,
@@ -2475,7 +2539,7 @@ describe("touch events", () => {
   it("leaves a lifted finger out of every list but the changed one", () => {
     const { inner } = tree();
 
-    const event = deliver(inner, "touchend", "1,12,20,4");
+    const event = deliver(inner, "touchend", [1, 12, 20, 4]);
 
     expect(event.touches).toEqual([]);
     expect(event.targetTouches).toEqual([]);
@@ -2493,7 +2557,7 @@ describe("touch events", () => {
   it("gives an event with no touch points no such keys at all", () => {
     const { inner } = tree();
 
-    const event = deliver(inner, "tap", "");
+    const event = deliver(inner, "tap", []);
 
     // Absent, not `undefined`-valued: the transport carries an
     // `undefined`-valued key as one rather than dropping it.
@@ -2505,7 +2569,7 @@ describe("touch events", () => {
     const uid = __GetElementUniqueID(inner);
     __AddEvent(inner, "bindEvent", "touchend", "3:0:bindtouchend");
 
-    dispatch([inner], "touchend", "", undefined, "1,12,20,4");
+    dispatch([inner], "touchend", { touchNumbers: [1, 12, 20, 4] });
 
     const target = { dataset: {}, id: null, uid };
     const point = {
@@ -2523,7 +2587,7 @@ describe("touch events", () => {
         eventPhase: 2,
         target,
         currentTarget: target,
-        detail: {},
+        detail: { x: 0, y: 0 },
         timestamp: 0,
         params: {},
         touches: [],

@@ -792,7 +792,7 @@ fn string_handlers_reach_background_with_event_snapshots() {
         __AddEvent(page, 'bindEvent', 'tap', 'opaque:root');
         __AddEvent(child, 'bindEvent', 'tap', '');
         __AddEventListener(child, 'tap', e => {
-            e.detail.answer = 99;
+            e.detail.x = 99;
             __AddDataset(child, 'nested', {value:'after'});
             __SetID(child, 'changed');
         });
@@ -810,11 +810,11 @@ fn string_handlers_reach_background_with_event_snapshots() {
     pair.runtime
         .as_mut()
         .unwrap()
-        .dispatch_event(
+        .dispatch_for_test(
             &mut pair.js,
             dom::NodeId::from_bits(3).unwrap(),
             "tap",
-            r#"{"answer":42}"#,
+            dom::Point2D::new(12.0, 30.0),
         )
         .unwrap();
     pair.deliver();
@@ -826,12 +826,17 @@ fn string_handlers_reach_background_with_event_snapshots() {
         const e = child[1];
         // The `target` object is one for the whole walk, but its dataset is
         // read again at each step, so what the listener wrote reaches the
-        // step after it. `id` is the one field the cache does freeze.
+        // step after it. `id` is the one field the cache does freeze. The
+        // `detail` the realm built from the host's two numbers is one object
+        // for the walk too, copied at each send: the child's step carries the
+        // position, the page's what the listener wrote over it.
         if (e.target.id !== 'button' || e.currentTarget.uid !== 3 ||
-            e.target.dataset.itemName !== 'first' || e.detail.answer !== 42 ||
+            e.target.dataset.itemName !== 'first' ||
+            e.detail.x !== 12 || e.detail.y !== 30 ||
             e.target.dataset.count !== 7 || e.target.dataset.nested.value !== 'before' ||
             page[1].target.id !== 'button' ||
             page[1].target.dataset.nested.value !== 'after' ||
+            page[1].detail.x !== 99 ||
             'elementRefptr' in e.target || 'stopPropagation' in e ||
             page[1].currentTarget.uid !== 2) throw Error(JSON.stringify(results));
         ",
@@ -941,7 +946,7 @@ fn a_published_dom_event_carries_values_only_and_no_propagation_methods() {
                 targetKeys: Object.keys(event.target).sort().join(','),
                 shape: [name, event.type, event.eventPhase, event.target.id,
                         event.target.dataset.itemName, event.target.uid,
-                        event.currentTarget.uid, event.detail.answer,
+                        event.currentTarget.uid, event.detail.x, event.detail.y,
                         event.timestamp, JSON.stringify(event.params),
                         'stopPropagation' in event,
                         'stopImmediatePropagation' in event,
@@ -954,11 +959,11 @@ fn a_published_dom_event_carries_values_only_and_no_propagation_methods() {
     pair.runtime
         .as_mut()
         .unwrap()
-        .dispatch_event(
+        .dispatch_for_test(
             &mut pair.js,
             dom::NodeId::from_bits(3).unwrap(),
             "tap",
-            r#"{"answer":42}"#,
+            dom::Point2D::new(12.0, 30.0),
         )
         .unwrap();
     pair.deliver();
@@ -968,7 +973,7 @@ fn a_published_dom_event_carries_values_only_and_no_propagation_methods() {
         const keys = 'currentTarget,detail,eventPhase,params,target,timestamp,type';
         if (d.keys !== keys) throw Error(d.keys);
         if (d.targetKeys !== 'dataset,id,uid') throw Error(d.targetKeys);
-        const expected = 'handler:tap:2:button:first:3:3:42:0:{}:false:false:false';
+        const expected = 'handler:tap:2:button:first:3:3:12:30:0:{}:false:false:false';
         if (d.shape !== expected) throw Error(d.shape);
         ",
     );

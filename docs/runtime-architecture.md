@@ -698,9 +698,10 @@ imports its native operations directly; nothing is installed as
 `globalThis.bobcat`. Before registering the entry, core prepends its runtime
 and Element-PAPI import declarations. Event delivery travels back through the
 loaded `bobcat:element` namespace's `__BobcatDispatchEvent` export, once per
-dispatch, carrying the whole event path as two comma-joined id strings, the
-event's `timestamp`, and — for a touch event — its touch points as a third
-string.
+dispatch, carrying the whole event path as two comma-joined id strings and
+everything else as numbers: the event's `timestamp`, the position its `detail`
+reports, a wheel delta when it has one, and — for a touch event — four numbers
+per touch point.
 
 Because `bobcat-internal:host` resolves from any module in the realm, a card
 can reach `createDocument` too. Constructing a second `Document` is refused,

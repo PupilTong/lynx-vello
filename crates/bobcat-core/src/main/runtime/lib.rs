@@ -41,7 +41,7 @@ use crate::esm::{
     EVENT_TARGET_MODULE_SPECIFIER, EVENT_TARGET_SOURCE, HOST_MODULE_SPECIFIER, TIMER_MODULE_SOURCE,
     TIMER_MODULE_SPECIFIER,
 };
-use crate::link::{ViewNotice, ViewOutbox};
+use crate::link::{InputEventPayload, ViewNotice, ViewOutbox};
 use crate::main::tree::{LynxDocument, PageConfig, apply_attribute_style, new_document};
 use crate::resource::StyleSheetSource;
 use crate::script::ScriptError;
@@ -702,34 +702,25 @@ impl MainThreadRuntime {
     /// listener exists at all — is the realm's business, because every
     /// registration lives there.
     ///
+    /// Everything else crosses as numbers, and the realm builds the objects:
+    /// the `timestamp`, the position the `detail` reports, the wheel delta
+    /// (`undefined` for every event that has none, which is what makes the
+    /// two `detail` keys absent rather than `NaN`), and then four numbers per
+    /// touch point — `identifier`, `x`, `y`, flags — which the four touch
+    /// events alone carry. No JSON is formatted here and none is parsed
+    /// there.
+    ///
     /// The document is released before the call, which is what lets a
     /// listener mutate the tree.
     ///
     /// Returns whether the realm published the export, which is all the host
     /// can know: nothing here says whether anything ran.
-    pub(crate) fn dispatch_event(
-        &mut self,
-        js_runtime: &mut ScriptRuntime,
-        target: dom::NodeId,
-        name: &str,
-        detail_json: &str,
-    ) -> Result<bool, MainThreadError> {
-        self.dispatch_input_event(js_runtime, target, name, detail_json, "", 0.0)
-    }
-
-    /// [`Self::dispatch_event`] with the two payloads only a routed input
-    /// event has: the touch lists (`identifier,x,y,flags` per point,
-    /// comma-joined, empty for every event but the four touch ones) and the
-    /// `timestamp` in milliseconds on the view's timeline. The export always
-    /// takes six arguments.
     pub(crate) fn dispatch_input_event(
         &mut self,
         js_runtime: &mut ScriptRuntime,
         target: dom::NodeId,
         name: &str,
-        detail_json: &str,
-        touch_points: &str,
-        timestamp: f64,
+        payload: &InputEventPayload,
     ) -> Result<bool, MainThreadError> {
         let steps = {
             let mut slot = self.slot.borrow_mut();
@@ -750,26 +741,66 @@ impl MainThreadRuntime {
             write!(targets, "{}", packed_node_id(step.target)).expect("writing to a String");
         }
 
+        // Inline for the eight an event without touches has; a touch event
+        // spills once, and its points are the only thing that ever grows this.
+        let mut arguments: SmallVec<[HostArgument<'_>; 8]> = SmallVec::from_buf([
+            HostArgument::String(&nodes),
+            HostArgument::String(&targets),
+            HostArgument::String(name),
+            HostArgument::Number(payload.timestamp),
+            HostArgument::Number(f64::from(payload.position.x)),
+            HostArgument::Number(f64::from(payload.position.y)),
+            match payload.wheel {
+                Some(delta) => HostArgument::Number(f64::from(delta.x)),
+                None => HostArgument::Undefined,
+            },
+            match payload.wheel {
+                Some(delta) => HostArgument::Number(f64::from(delta.y)),
+                None => HostArgument::Undefined,
+            },
+        ]);
+        for point in &payload.touches {
+            arguments.push(HostArgument::Number(f64::from(point.identifier)));
+            arguments.push(HostArgument::Number(f64::from(point.position.x)));
+            arguments.push(HostArgument::Number(f64::from(point.position.y)));
+            arguments.push(HostArgument::Number(f64::from(point.flags)));
+        }
+
         let called = self
             .engine
             .call_module_export(
                 js_runtime,
                 ELEMENT_MODULE_SPECIFIER,
                 EVENT_DISPATCH_EXPORT,
-                &[
-                    HostArgument::String(&nodes),
-                    HostArgument::String(&targets),
-                    HostArgument::String(name),
-                    HostArgument::String(detail_json),
-                    HostArgument::String(touch_points),
-                    HostArgument::Number(timestamp),
-                ],
+                &arguments,
             )
             .map_err(|error| MainThreadError::from_engine("delivering an event", error))?;
         // Listeners remove elements too; the count they ran up is settled
         // here, at the end of the dispatch.
         self.finish_batch(js_runtime, true)?;
         Ok(called)
+    }
+
+    /// [`Self::dispatch_input_event`] for a test that is about the dispatch
+    /// rather than about the payload: the event happened at `position`, with
+    /// no wheel delta, no touch points and the time origin for a timestamp.
+    #[cfg(test)]
+    pub(crate) fn dispatch_for_test(
+        &mut self,
+        js_runtime: &mut ScriptRuntime,
+        target: dom::NodeId,
+        name: &str,
+        position: dom::Point2D<f32>,
+    ) -> Result<bool, MainThreadError> {
+        self.dispatch_input_event(
+            js_runtime,
+            target,
+            name,
+            &InputEventPayload {
+                position,
+                ..InputEventPayload::default()
+            },
+        )
     }
 
     /// When the earliest armed timer comes due, if one is armed.
