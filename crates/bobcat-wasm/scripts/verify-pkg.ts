@@ -113,6 +113,22 @@ for (const requiredPointerStep of [
     )
   }
 }
+// The canvas owns wheel scrolling: the listener cannot be passive, a
+// ctrl-held wheel stays the browser's zoom gesture, and everything else is
+// normalized to viewport CSS px and prevented.
+for (const requiredWheelStep of [
+  "canvas.addEventListener('wheel', this.#onWheel, { passive: false })",
+  'if (event.ctrlKey) {',
+  'WHEEL_LINE_CSS_PX',
+  'event.preventDefault()',
+  "type: 'bobcat-wheel'",
+]) {
+  if (!facade.includes(requiredWheelStep)) {
+    throw new Error(
+      `browser facade wheel bridge is missing ${requiredWheelStep}`,
+    )
+  }
+}
 for (const [operation, method, message] of [
   [
     'load',
@@ -289,6 +305,8 @@ for (const requiredPointerStep of [
   "message?.type === 'bobcat-pointer'",
   'renderer.dispatchPointer(',
   'message.defaultPrevented',
+  "message?.type === 'bobcat-wheel'",
+  'renderer.dispatchWheel(',
 ]) {
   if (!renderWorker.includes(requiredPointerStep)) {
     throw new Error(
@@ -393,6 +411,7 @@ for (const requiredExport of [
 }
 for (const requiredMethod of [
   'dispatchPointer(',
+  'dispatchWheel(',
   'registerScript(',
   'registerStyleSheet(',
   'registerLynxXml(',
@@ -457,8 +476,12 @@ for (const requiredDeclaration of [
     throw new Error(`browser declarations are missing ${requiredDeclaration}`)
   }
 }
-if (declarations.includes('dispatchPointer')) {
-  throw new Error('browser declarations expose the private pointer bridge')
+for (const privateInputBridge of ['dispatchPointer', 'dispatchWheel']) {
+  if (declarations.includes(privateInputBridge)) {
+    throw new Error(
+      `browser declarations expose the private input bridge ${privateInputBridge}`,
+    )
+  }
 }
 for (const forbiddenDomApi of forbiddenDomApis) {
   if (declarations.includes(forbiddenDomApi)) {

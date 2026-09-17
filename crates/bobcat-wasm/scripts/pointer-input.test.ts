@@ -17,13 +17,28 @@ interface FakePointerEvent {
   pointerType: string
 }
 
-type FakePointerListener = (event: FakePointerEvent) => void
+interface FakeWheelEvent {
+  clientX: number
+  clientY: number
+  ctrlKey: boolean
+  defaultPrevented: boolean
+  deltaMode: number
+  deltaX: number
+  deltaY: number
+  preventDefault: () => void
+}
+
+type FakeEvent = FakePointerEvent | FakeWheelEvent
+type FakeListener = (event: FakeEvent) => void
 
 // The fields the assertions read from a message the facade posted.
 interface PostedMessage {
   type: string
   bytes?: Uint8Array
   config?: unknown
+  defaultPrevented?: boolean
+  deltaX?: number
+  deltaY?: number
   device?: number
   operation?: string
   phase?: number
@@ -38,27 +53,34 @@ type FakeMessageListener = (event: { data: unknown }) => void
 
 class FakeCanvas {
   #captured = new Set<number>()
-  #listeners = new Map<string, Set<FakePointerListener>>()
+  #listeners = new Map<string, Set<FakeListener>>()
   declare bounds: Bounds
+  declare listenerOptions: Map<string, AddEventListenerOptions | undefined>
   declare released: number[]
   declare style: { touchAction: string }
 
   constructor(bounds: Bounds) {
     this.bounds = bounds
+    this.listenerOptions = new Map()
     this.released = []
     this.style = { touchAction: 'pan-y' }
   }
 
-  addEventListener(name: string, listener: FakePointerListener): void {
+  addEventListener(
+    name: string,
+    listener: FakeListener,
+    options?: AddEventListenerOptions,
+  ): void {
     let listeners = this.#listeners.get(name)
     if (listeners === undefined) {
       listeners = new Set()
       this.#listeners.set(name, listeners)
     }
     listeners.add(listener)
+    this.listenerOptions.set(name, options)
   }
 
-  removeEventListener(name: string, listener: FakePointerListener): void {
+  removeEventListener(name: string, listener: FakeListener): void {
     this.#listeners.get(name)?.delete(listener)
   }
 
@@ -75,6 +97,28 @@ class FakeCanvas {
     for (const listener of this.#listeners.get(name) ?? []) {
       listener(event)
     }
+  }
+
+  /** Dispatches one `wheel` and reports whether it was prevented. */
+  emitWheel(values: Partial<FakeWheelEvent> = {}): boolean {
+    let prevented = false
+    const event: FakeWheelEvent = {
+      clientX: 0,
+      clientY: 0,
+      ctrlKey: false,
+      defaultPrevented: false,
+      deltaMode: 0,
+      deltaX: 0,
+      deltaY: 0,
+      preventDefault: () => {
+        prevented = true
+      },
+      ...values,
+    }
+    for (const listener of this.#listeners.get('wheel') ?? []) {
+      listener(event)
+    }
+    return prevented
   }
 
   getBoundingClientRect(): Bounds {
@@ -270,6 +314,118 @@ test('forwards captured pointer sequences in viewport CSS pixels', async () => {
   assert.equal(canvas.listenerCount(), 0)
   assert.equal(canvas.style.touchAction, 'pan-y')
   assert.equal(worker.terminated, true)
+})
+
+test('forwards wheel deltas in viewport CSS pixels and prevents the page scroll', async () => {
+  FakeWorker.instances.length = 0
+  const canvas = new FakeCanvas({
+    height: 100,
+    left: 10,
+    top: 20,
+    width: 200,
+  })
+  const view = await BobcatCanvas.create(
+    canvas as unknown as HTMLCanvasElement,
+    400,
+    200,
+    2,
+    LYNX_XML_PAGE_CONFIG,
+  )
+  const worker = FakeWorker.instances[0]!
+  const wheelMessages = () =>
+    worker.messages.filter(({ type }) => type === 'bobcat-wheel')
+
+  // Not passive: the listener prevents every wheel it forwards.
+  assert.deepEqual(canvas.listenerOptions.get('wheel'), { passive: false })
+
+  // Pixel mode: page CSS px, scaled by the canvas box like the position is.
+  assert.equal(
+    canvas.emitWheel({ clientX: 110, clientY: 45, deltaX: 3, deltaY: 10 }),
+    true,
+  )
+  // Line mode is this embedder's 40 CSS px per line, with no box scaling.
+  canvas.emitWheel({ clientX: 10, clientY: 20, deltaMode: 1, deltaY: 2 })
+  // Page mode is the viewport itself.
+  canvas.emitWheel({
+    clientX: 10,
+    clientY: 20,
+    deltaMode: 2,
+    deltaX: 0.5,
+    deltaY: 1,
+  })
+  // What another handler already claimed crosses as claimed.
+  canvas.emitWheel({
+    clientX: 10,
+    clientY: 20,
+    defaultPrevented: true,
+    deltaY: 1,
+  })
+  // A wheel that moves nothing is not an input.
+  canvas.emitWheel({ clientX: 10, clientY: 20 })
+
+  assert.deepEqual(wheelMessages(), [
+    {
+      defaultPrevented: false,
+      deltaX: 6,
+      deltaY: 20,
+      type: 'bobcat-wheel',
+      x: 200,
+      y: 50,
+    },
+    {
+      defaultPrevented: false,
+      deltaX: 0,
+      deltaY: 80,
+      type: 'bobcat-wheel',
+      x: 0,
+      y: 0,
+    },
+    {
+      defaultPrevented: false,
+      deltaX: 200,
+      deltaY: 200,
+      type: 'bobcat-wheel',
+      x: 0,
+      y: 0,
+    },
+    {
+      defaultPrevented: true,
+      deltaX: 0,
+      deltaY: 2,
+      type: 'bobcat-wheel',
+      x: 0,
+      y: 0,
+    },
+  ])
+
+  await view.dispose()
+})
+
+test('leaves a ctrl-held wheel to the browser, and every wheel after disposal', async () => {
+  FakeWorker.instances.length = 0
+  const canvas = new FakeCanvas({ height: 100, left: 0, top: 0, width: 100 })
+  const view = await BobcatCanvas.create(
+    canvas as unknown as HTMLCanvasElement,
+    100,
+    100,
+    1,
+    LYNX_XML_PAGE_CONFIG,
+  )
+  const worker = FakeWorker.instances[0]!
+  const wheelMessages = () =>
+    worker.messages.filter(({ type }) => type === 'bobcat-wheel')
+
+  // The browser's zoom gesture stays the page's, unforwarded and unprevented.
+  assert.equal(
+    canvas.emitWheel({ clientX: 5, clientY: 5, ctrlKey: true, deltaY: 4 }),
+    false,
+  )
+  assert.deepEqual(wheelMessages(), [])
+
+  await view.dispose()
+  assert.equal(canvas.emitWheel({ clientX: 5, clientY: 5, deltaY: 4 }), false)
+  assert.deepEqual(wheelMessages(), [])
+  assert.equal(canvas.listenerCount(), 0)
 })
 
 test('ignores secondary mouse buttons and cancels lost capture', async () => {

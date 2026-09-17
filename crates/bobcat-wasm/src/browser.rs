@@ -732,9 +732,13 @@ impl BobcatRenderer {
             return Err(js_error("pointer coordinates must be finite"));
         }
         let device = match device {
-            POINTER_DEVICE_MOUSE => PointerKind::Mouse,
             POINTER_DEVICE_TOUCH => PointerKind::Touch,
-            POINTER_DEVICE_PEN => PointerKind::Pen,
+            // The mouse arrives as a pen. The engine's drag recognizer latches
+            // touch and pen only, and this embedder — like `bobcat-cli`'s
+            // macOS host — wants a primary-button mouse drag to scroll. The
+            // facade keeps reporting the true device, so its `event.button`
+            // filter and this protocol stay truthful.
+            POINTER_DEVICE_MOUSE | POINTER_DEVICE_PEN => PointerKind::Pen,
             _ => return Err(js_error(format!("unknown browser pointer device {device}"))),
         };
         let phase = match phase {
@@ -753,6 +757,39 @@ impl BobcatRenderer {
             painter.dispatch_input(event);
             // Routing happened here, on this Worker; the frame it may owe is
             // this Worker's to take, and the loop is parked until it is told.
+            self.events.request_event();
+        }
+        Ok(())
+    }
+
+    /// Route one browser `WheelEvent` into the opaque native view.
+    ///
+    /// The facade converts the browser's line and page units and the canvas's
+    /// own scale away, so both the position and the delta arrive in viewport
+    /// CSS px, with the browser's sign — a positive delta increases the scroll
+    /// offset — which is the engine's own.
+    #[wasm_bindgen(js_name = dispatchWheel)]
+    pub fn dispatch_wheel(
+        &mut self,
+        x: f32,
+        y: f32,
+        delta_x: f32,
+        delta_y: f32,
+        default_prevented: bool,
+    ) -> Result<(), JsValue> {
+        self.ensure_running()?;
+        if !x.is_finite() || !y.is_finite() {
+            return Err(js_error("wheel coordinates must be finite"));
+        }
+        if !delta_x.is_finite() || !delta_y.is_finite() {
+            return Err(js_error("wheel deltas must be finite"));
+        }
+        let event = InputEvent::wheel(Point2D::new(x, y), (delta_x, delta_y))
+            .with_default_prevented(default_prevented);
+        // As for a pointer: with no page loaded the painter is attached to no
+        // view, so there is nothing to route and nothing to buffer.
+        if let Some(painter) = self.painter.as_mut() {
+            painter.dispatch_input(event);
             self.events.request_event();
         }
         Ok(())

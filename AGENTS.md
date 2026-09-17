@@ -1406,8 +1406,25 @@ and calls `LynxView::dispatch_input`, which keeps gesture time on the Worker
 rAF timeline and prevents an idle frame clock from making `longpress` fire
 immediately. Each load clears active captures, disposal removes all listeners
 and restores the canvas's prior inline `touch-action`, and unexpected capture
-loss becomes `pointercancel`. Hover moves, secondary mouse buttons and wheel
-input do not cross the boundary.
+loss becomes `pointercancel`.
+
+`wheel` crosses too, through the same queue and the same
+`BobcatRenderer::dispatchWheel` shape as a pointer. The facade normalizes the
+delta to viewport CSS px: `deltaMode` 0 is page CSS px and takes the same
+canvas-box scale the position does, `deltaMode` 1 is 40 CSS px per line (the
+`WHEEL_LINE_CSS_PX` `bobcat-cli`'s macOS host uses), `deltaMode` 2 is the
+viewport's own width and height. The sign is the browser's, which already
+means "scroll offset increases" the way core's does — the CLI negates only
+because winit's is the opposite. A ctrl-held wheel is the browser's zoom
+gesture and is exempt: nothing is forwarded and nothing is prevented.
+Everything else is forwarded and unconditionally `preventDefault()`ed, because
+the Worker answers nothing and the facade cannot learn synchronously whether
+the engine consumed the scroll — the canvas owns wheel scrolling outright, the
+way `touch-action: none` makes it own touch panning. A browser mouse is
+reported truthfully by the facade and then fed to the engine as
+`PointerKind::Pen` by `dispatchPointer`, exactly as the macOS host does, so a
+primary-button drag scrolls: the engine's drag recognizer latches touch and pen
+only. Hover moves and secondary mouse buttons do not cross the boundary.
 
 **Host `NativeModules` and `globalProps` are the page's, not the Worker's.**
 `BobcatCanvas.create` takes an optional
