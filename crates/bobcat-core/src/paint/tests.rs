@@ -223,7 +223,7 @@ fn a_commit_whose_pixels_can_no_longer_be_read_is_not_adopted() {
 /// delivery.
 #[test]
 fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
-    use super::gesture::{EmitEvent, InputDecision, InputDecisions, TAP_EVENT};
+    use super::gesture::{EmitEvent, InputDecision, InputDecisions, TAP_EVENT, TouchPoints};
 
     let (mut painter, mut main) = detached();
     // The permanent page element's packed handle, as script would name it.
@@ -235,8 +235,9 @@ fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
             target,
             position: dom::Point2D::new(1.0, 1.0),
             wheel: None,
+            touches: TouchPoints::new(),
         }));
-        painter.execute_decisions(&mut decisions, None);
+        painter.execute_decisions(&mut decisions, None, 0.25);
         assert!(decisions.is_empty(), "the queue is always drained");
     };
 
@@ -271,13 +272,18 @@ fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
         .try_recv()
         .expect("the listened-for name crosses");
     let ToMain::DispatchEvent {
-        name, target: sent, ..
+        name,
+        target: sent,
+        timestamp,
+        ..
     } = command
     else {
         panic!("an emit decision becomes a dispatch command");
     };
     assert_eq!(name, TAP_EVENT);
     assert_eq!(sent, target);
+    // The pass's clock reading, in milliseconds.
+    assert!((timestamp - 250.0).abs() < f64::EPSILON);
 
     // And the edge closes the name again: the main thread publishes the
     // last removal, and from the next poll nothing crosses.
@@ -346,7 +352,7 @@ fn a_scroll_decision_sends_no_command() {
         from: node,
         delta: dom::Vector2D::new(0.0, 5.0),
     });
-    painter.execute_decisions(&mut decisions, None);
+    painter.execute_decisions(&mut decisions, None, 0.0);
     assert!(
         main.commands.try_recv().is_err(),
         "a windowed scroll never crosses the command channel"

@@ -679,6 +679,8 @@ fn a_pages_own_entries_never_wake_its_clock_task() {
             target,
             name: "tap",
             detail: "{}".to_owned(),
+            touches: String::new(),
+            timestamp: 0.0,
         }));
         for _ in 0..64 {
             task::yield_now().await;

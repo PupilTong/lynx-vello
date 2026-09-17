@@ -98,6 +98,13 @@ pub(crate) enum ToMain {
         target: NodeId,
         name: &'static str,
         detail: String,
+        /// The touch lists, `identifier,x,y,flags` per point comma-joined.
+        /// Empty for every event but the four touch ones.
+        touches: String,
+        /// The event's `timestamp`: milliseconds on the view's own timeline,
+        /// taken from the reading of the pass that decided the event — an
+        /// input's arrival, or the gesture tick's `now`.
+        timestamp: f64,
     },
     Resize {
         width: f32,

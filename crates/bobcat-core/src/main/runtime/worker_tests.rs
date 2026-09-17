@@ -942,6 +942,7 @@ fn a_published_dom_event_carries_values_only_and_no_propagation_methods() {
                 shape: [name, event.type, event.eventPhase, event.target.id,
                         event.target.dataset.itemName, event.target.uid,
                         event.currentTarget.uid, event.detail.answer,
+                        event.timestamp, JSON.stringify(event.params),
                         'stopPropagation' in event,
                         'stopImmediatePropagation' in event,
                         'elementRefptr' in event.target].join(':'),
@@ -964,9 +965,10 @@ fn a_published_dom_event_carries_values_only_and_no_propagation_methods() {
     pair.check(
         r"
         const d = results[0];
-        if (d.keys !== 'currentTarget,detail,eventPhase,target,type') throw Error(d.keys);
+        const keys = 'currentTarget,detail,eventPhase,params,target,timestamp,type';
+        if (d.keys !== keys) throw Error(d.keys);
         if (d.targetKeys !== 'dataset,id,uid') throw Error(d.targetKeys);
-        const expected = 'handler:tap:2:button:first:3:3:42:false:false:false';
+        const expected = 'handler:tap:2:button:first:3:3:42:0:{}:false:false:false';
         if (d.shape !== expected) throw Error(d.shape);
         ",
     );

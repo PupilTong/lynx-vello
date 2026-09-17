@@ -511,7 +511,7 @@ describe("installation", () => {
         "Document",
       ].sort(),
     );
-    expect(elementModule.__BobcatDispatchEvent).toHaveLength(4);
+    expect(elementModule.__BobcatDispatchEvent).toHaveLength(6);
   });
 
   it("creates the realm's document once, with no arguments", () => {
@@ -1238,6 +1238,8 @@ function dispatch(
   name: string,
   detailJson: string = "",
   targets?: object[],
+  touchPoints: string = "",
+  timestamp: number = 0,
 ) {
   const nodes = path.map((handle) => __GetElementUniqueID(handle));
   const targeted = targets === undefined
@@ -1248,6 +1250,8 @@ function dispatch(
     targeted.join(","),
     name,
     detailJson,
+    touchPoints,
+    timestamp,
   );
 }
 
@@ -1466,6 +1470,8 @@ describe("event listeners", () => {
       new Array(4).fill(__GetElementUniqueID(inner)).join(","),
       "tap",
       "",
+      "",
+      0,
     );
 
     expect(order).toEqual(["inner", "page"]);
@@ -1544,7 +1550,7 @@ describe("event listeners", () => {
     // one — its parent's handle holds it — so this is the ownership graph
     // and the tree disagreeing, and it is reported rather than swallowed.
     expect(() =>
-      elementModule.__BobcatDispatchEvent(String(uid), "999", "tap", "")
+      elementModule.__BobcatDispatchEvent(String(uid), "999", "tap", "", "", 0)
     ).toThrow("ownership graph");
     expect(seen).toEqual([]);
 
@@ -1910,6 +1916,8 @@ describe("__AddEvent", () => {
         target,
         currentTarget: target,
         detail: { x: 12 },
+        timestamp: 0,
+        params: {},
       }],
     ]);
   });
@@ -1965,6 +1973,8 @@ describe("__AddEvent", () => {
           uid: innerUid,
         },
         detail: { nested: { value: "before" } },
+        timestamp: 0,
+        params: {},
       }],
       ["publishEvent", undefined, "outer:tap", {
         type: "tap",
@@ -1980,6 +1990,8 @@ describe("__AddEvent", () => {
           uid: outerUid,
         },
         detail: { nested: { value: "after" } },
+        timestamp: 0,
+        params: {},
       }],
     ]);
   });
@@ -2305,6 +2317,220 @@ describe("__AddEvent", () => {
     // the `data-*` attributes camelCased with the typed values merged over.
     const dataset = { itemName: "row", typed: 7 };
     expect(seen).toEqual([dataset, dataset, dataset, dataset]);
+  });
+});
+
+describe("timestamp and params", () => {
+  /** The two members every dispatched event carries, whatever its type. */
+  interface StampedEvent {
+    timestamp: number;
+    params: Record<string, unknown>;
+  }
+
+  it("gives every event the host's timestamp and a fresh empty params", () => {
+    const { inner } = tree();
+    const seen: StampedEvent[] = [];
+    __AddEventListener(inner, "tap", (event: StampedEvent) => {
+      seen.push(event);
+    }, {});
+
+    dispatch([inner], "tap", "", undefined, "", 1234.5);
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.timestamp).toBe(1234.5);
+    expect(seen[0]?.params).toEqual({});
+  });
+
+  it("reports the time origin for a reading the host could not take", () => {
+    const { inner } = tree();
+    const seen: number[] = [];
+    __AddEventListener(inner, "tap", (event: StampedEvent) => {
+      seen.push(event.timestamp);
+    }, {});
+
+    elementModule.__BobcatDispatchEvent(
+      String(__GetElementUniqueID(inner)),
+      String(__GetElementUniqueID(inner)),
+      "tap",
+      "",
+      "",
+      undefined,
+    );
+
+    expect(seen).toEqual([0]);
+  });
+
+  it("mints a new params for each dispatch", () => {
+    const { inner } = tree();
+    const seen: Record<string, unknown>[] = [];
+    __AddEventListener(inner, "tap", (event: StampedEvent) => {
+      seen.push(event.params);
+    }, {});
+
+    dispatch([inner], "tap");
+    dispatch([inner], "tap");
+
+    expect(seen).toHaveLength(2);
+    // One object per dispatch, like the event that carries it: what a
+    // listener wrote into one event's `params` is not in the next one's.
+    expect(seen[0]).not.toBe(seen[1]);
+  });
+
+  it("publishes both to a background-thread handler", () => {
+    const { inner } = tree();
+    const uid = __GetElementUniqueID(inner);
+    __AddEvent(inner, "bindEvent", "tap", "3:0:bindtap");
+
+    dispatch([inner], "tap", "", undefined, "", 42);
+
+    const target = { dataset: {}, id: null, uid };
+    expect(mock.named("publishEvent")).toEqual([
+      ["publishEvent", undefined, "3:0:bindtap", {
+        type: "tap",
+        eventPhase: 2,
+        target,
+        currentTarget: target,
+        detail: {},
+        timestamp: 42,
+        params: {},
+      }],
+    ]);
+  });
+});
+
+describe("touch events", () => {
+  /** One entry of a decoded touch list, as these tests read it. */
+  interface TouchPoint {
+    identifier: number;
+    x: number;
+    y: number;
+    pageX: number;
+    pageY: number;
+    clientX: number;
+    clientY: number;
+  }
+
+  /** The event a touch listener sees: the three lists it alone carries. */
+  interface TouchEvent {
+    type: string;
+    touches?: TouchPoint[];
+    targetTouches?: TouchPoint[];
+    changedTouches?: TouchPoint[];
+  }
+
+  /** Delivers one event and returns what the listener was handed. */
+  function deliver(
+    element: object,
+    name: string,
+    touchPoints: string,
+  ): TouchEvent {
+    let seen: TouchEvent | undefined;
+    __AddEventListener(element, name, (event: TouchEvent) => {
+      seen = {
+        type: event.type,
+        ...(event.touches === undefined ? {} : { touches: event.touches }),
+        ...(event.targetTouches === undefined
+          ? {}
+          : { targetTouches: event.targetTouches }),
+        ...(event.changedTouches === undefined
+          ? {}
+          : { changedTouches: event.changedTouches }),
+      };
+    }, {});
+    dispatch([element], name, "", undefined, touchPoints);
+    expect(seen, "the listener ran").toBeDefined();
+    return seen as TouchEvent;
+  }
+
+  it("sorts the points into the three lists by their flags", () => {
+    const { inner } = tree();
+
+    // Two fingers: the first is down elsewhere (active only), the second is
+    // this event's own, on this target (active, target, changed).
+    const event = deliver(inner, "touchmove", "1,10,20,1,2,30.5,40,7");
+
+    const first = {
+      identifier: 1,
+      x: 10,
+      y: 20,
+      pageX: 10,
+      pageY: 20,
+      clientX: 10,
+      clientY: 20,
+    };
+    const second = {
+      identifier: 2,
+      x: 30.5,
+      y: 40,
+      pageX: 30.5,
+      pageY: 40,
+      clientX: 30.5,
+      clientY: 40,
+    };
+    expect(event.touches).toEqual([first, second]);
+    expect(event.targetTouches).toEqual([second]);
+    expect(event.changedTouches).toEqual([second]);
+  });
+
+  it("leaves a lifted finger out of every list but the changed one", () => {
+    const { inner } = tree();
+
+    const event = deliver(inner, "touchend", "1,12,20,4");
+
+    expect(event.touches).toEqual([]);
+    expect(event.targetTouches).toEqual([]);
+    expect(event.changedTouches).toEqual([{
+      identifier: 1,
+      x: 12,
+      y: 20,
+      pageX: 12,
+      pageY: 20,
+      clientX: 12,
+      clientY: 20,
+    }]);
+  });
+
+  it("gives an event with no touch points no such keys at all", () => {
+    const { inner } = tree();
+
+    const event = deliver(inner, "tap", "");
+
+    // Absent, not `undefined`-valued: the transport carries an
+    // `undefined`-valued key as one rather than dropping it.
+    expect(Object.keys(event)).toEqual(["type"]);
+  });
+
+  it("carries the lists to a background-thread handler", () => {
+    const { inner } = tree();
+    const uid = __GetElementUniqueID(inner);
+    __AddEvent(inner, "bindEvent", "touchend", "3:0:bindtouchend");
+
+    dispatch([inner], "touchend", "", undefined, "1,12,20,4");
+
+    const target = { dataset: {}, id: null, uid };
+    const point = {
+      identifier: 1,
+      x: 12,
+      y: 20,
+      pageX: 12,
+      pageY: 20,
+      clientX: 12,
+      clientY: 20,
+    };
+    expect(mock.named("publishEvent")).toEqual([
+      ["publishEvent", undefined, "3:0:bindtouchend", {
+        type: "touchend",
+        eventPhase: 2,
+        target,
+        currentTarget: target,
+        detail: {},
+        timestamp: 0,
+        params: {},
+        touches: [],
+        targetTouches: [],
+        changedTouches: [point],
+      }],
+    ]);
   });
 });
 

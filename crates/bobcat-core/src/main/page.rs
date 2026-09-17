@@ -440,12 +440,14 @@ impl Page {
                 target,
                 name,
                 detail,
+                touches,
+                timestamp,
             } => {
                 // A listener that panics is not fatal to the view: the
                 // payload is dropped, the rest of the burst applies, and the
                 // epilogue still runs.
                 let dispatched = catch_unwind(AssertUnwindSafe(|| {
-                    runtime.dispatch_event(js, target, name, &detail)
+                    runtime.dispatch_input_event(js, target, name, &detail, &touches, timestamp)
                 }));
                 if let Ok(Err(error)) = dispatched {
                     self.outbox

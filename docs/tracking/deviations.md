@@ -366,6 +366,45 @@ consequential choice about whether to follow the spec or the quirk.
     web-core's degradations was rejected.
   - **`click` is not synthesized** (Android and the fragment path emit it
     beside `tap` with re-targeting at release); no consumer yet.
+  - **`timestamp` is milliseconds on the view's timeline epoch**, which is
+    this engine's time origin — web-core's time-origin semantics, and DOM's
+    for `Event.timeStamp`. Native Lynx reports epoch milliseconds instead.
+    Every dispatched event carries one, taken from the clock reading of the
+    pass that decided it: an input's *arrival* (so a due `longpress` flushed
+    ahead of that input and the `tap` synthesized after it share the reading)
+    or the gesture tick's own `now`. `params` rides beside it on every event
+    as a fresh empty object; web-core fills it for `transition*`/`animation*`
+    events alone, neither of which this engine dispatches.
+  - **Touch events (2026-09-17).** `touchstart`/`touchmove`/`touchend`/
+    `touchcancel` are dispatched beside the raw pointer events, and each
+    native-versus-web-core conflict was resolved as follows.
+    - **Multi-touch is always on** (W3C and web-core). Native's
+      `enableMultiTouch` defaults to off — one finger's worth of lists — and
+      the flag is unimplemented here; so is the uid-keyed map payload native
+      produces in its multi-touch mode.
+    - **`touches` excludes the finger that just lifted** (W3C and web-core):
+      the list is every finger still down *after* the event. Native's
+      single-finger mode keeps the lifted one in it.
+    - **Per-touch `x`/`y` are lynx-view-local** (web-core), not native's
+      element-local values, and `clientX`/`clientY` equal `pageX`/`pageY`
+      equal them: one viewport CSS pixel space, the one `InputEvent::position`
+      is already in.
+    - **`identifier` is the host's pointer id**, which is what the embedder's
+      own feed names a finger by.
+    - **The `{x, y}` detail at the last finger's `touchend`/`touchcancel` is
+      that finger's point** (native). web-core yields the number `0` there, by
+      accident of a `??` over an empty `touches`; that is not reproduced.
+      While any finger is still down the detail is `touches[0]`'s point, which
+      is web-core's rule.
+    - **Recorded gaps**, none of them a decision: no `screenX`/`screenY`, no
+      `radiusX`/`radiusY`, no `force`, no `rotationAngle`.
+    - **Touch and pen produce touch events, a mouse does not** (both
+      references agree), which is deliberately unlike the `tap` ruling above,
+      where every pointer kind synthesizes.
+    - **A scroll claim sends no `touchcancel`** and `touchmove` goes on
+      flowing while the drag recognizer scrolls (native; browsers likewise
+      keep sending `touchmove` to a scrolling page). Only
+      `PointerPhase::Cancel` produces `touchcancel`.
 - **`pointer-events: none` hit-test fall-through** — Lynx falls through to
   the *next sibling* under the point; W3C says the element (and normally its
   subtree) becomes fully transparent to hit-testing, continuing the search

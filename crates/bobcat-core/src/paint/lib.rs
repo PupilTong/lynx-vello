@@ -27,6 +27,7 @@ mod tests;
 use std::cell::Cell;
 #[cfg(test)]
 use std::cell::RefCell;
+use std::fmt::Write as _;
 use std::marker::PhantomData;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
@@ -359,6 +360,27 @@ fn emit_detail(event: &EmitEvent) -> String {
         ),
         None => format!(r#"{{"x":{},"y":{}}}"#, position.x, position.y),
     }
+}
+
+/// The touch lists in wire form: `identifier,x,y,flags` per point, stride
+/// four, all comma-joined — the encoding `childElementIds` and the event path
+/// already use, because the boundary takes primitives and structured clones
+/// only and a finite `f32` never prints a comma. The empty string is what
+/// every event that carries no touches sends.
+fn emit_touches(event: &EmitEvent) -> String {
+    let mut encoded = String::new();
+    for point in &event.touches {
+        if !encoded.is_empty() {
+            encoded.push(',');
+        }
+        write!(
+            encoded,
+            "{},{},{},{}",
+            point.identifier, point.position.x, point.position.y, point.flags
+        )
+        .expect("writing to a String");
+    }
+    encoded
 }
 
 #[derive(Debug, Default)]
@@ -891,7 +913,7 @@ impl Painter {
         let mut decisions = InputDecisions::new();
         self.gesture
             .on_input(&event, target, at, &self.published, &mut decisions);
-        self.execute_decisions(&mut decisions, published.as_deref());
+        self.execute_decisions(&mut decisions, published.as_deref(), at);
         if let Some(frame) = &published {
             self.maybe_request_refill(frame);
         }
@@ -912,10 +934,19 @@ impl Painter {
         });
     }
 
+    /// Executes one pass's decisions in order.
+    ///
+    /// `at_seconds` is the clock reading of the pass that produced them — an
+    /// input event's arrival, or the tick's own `now` — and is what every
+    /// event the pass dispatches reports as its `timestamp`. It is one
+    /// reading for the whole pass, so a due `longpress` flushed ahead of the
+    /// event that found it and the `tap` synthesized after it are stamped
+    /// with that event's arrival, which is the moment they all belong to.
     pub(super) fn execute_decisions(
         &mut self,
         decisions: &mut InputDecisions,
         published: Option<&CommittedFrame>,
+        at_seconds: f64,
     ) {
         let mut dispatches = Vec::new();
         {
@@ -941,6 +972,7 @@ impl Painter {
                 }
             }
         }
+        let timestamp = at_seconds * 1000.0;
         for event in dispatches {
             if !self.published.listeners.contains(event.name) {
                 continue;
@@ -949,6 +981,8 @@ impl Painter {
                 target: event.target,
                 name: event.name,
                 detail: emit_detail(&event),
+                touches: emit_touches(&event),
+                timestamp,
             });
         }
     }
@@ -966,7 +1000,7 @@ impl Painter {
         let published = self.frame().cloned();
         let mut decisions = InputDecisions::new();
         self.gesture.on_tick(now, &self.published, &mut decisions);
-        self.execute_decisions(&mut decisions, published.as_deref());
+        self.execute_decisions(&mut decisions, published.as_deref(), now);
     }
 
     /// Applies new device metrics, if they moved at all.

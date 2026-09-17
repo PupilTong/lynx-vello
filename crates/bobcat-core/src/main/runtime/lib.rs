@@ -714,6 +714,23 @@ impl MainThreadRuntime {
         name: &str,
         detail_json: &str,
     ) -> Result<bool, MainThreadError> {
+        self.dispatch_input_event(js_runtime, target, name, detail_json, "", 0.0)
+    }
+
+    /// [`Self::dispatch_event`] with the two payloads only a routed input
+    /// event has: the touch lists (`identifier,x,y,flags` per point,
+    /// comma-joined, empty for every event but the four touch ones) and the
+    /// `timestamp` in milliseconds on the view's timeline. The export always
+    /// takes six arguments.
+    pub(crate) fn dispatch_input_event(
+        &mut self,
+        js_runtime: &mut ScriptRuntime,
+        target: dom::NodeId,
+        name: &str,
+        detail_json: &str,
+        touch_points: &str,
+        timestamp: f64,
+    ) -> Result<bool, MainThreadError> {
         let steps = {
             let mut slot = self.slot.borrow_mut();
             let document = slot.document_mut();
@@ -744,6 +761,8 @@ impl MainThreadRuntime {
                     HostArgument::String(&targets),
                     HostArgument::String(name),
                     HostArgument::String(detail_json),
+                    HostArgument::String(touch_points),
+                    HostArgument::Number(timestamp),
                 ],
             )
             .map_err(|error| MainThreadError::from_engine("delivering an event", error))?;
