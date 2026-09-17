@@ -42,6 +42,9 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
+      - name: APFS worktree cache hook
+        run: python3 .github/scripts/test-worktree-cow.py -v
+
       - name: Independent native embedder features
         run: |
           cargo clippy --locked -p bobcat-cli --no-default-features --features cli --all-targets --no-deps -- -D warnings

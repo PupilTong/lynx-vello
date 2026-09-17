@@ -1908,6 +1908,37 @@ section is the only place the absolute paths are spelled out.
   anything outside your own change, or the next fork commit ships unrelated
   reformatting. Nightly rustfmt options live in `rustfmt.toml`.
 
+### macOS worktree build caches
+
+Install the shared Git hook once with
+`python3 .github/scripts/worktree-cow.py install`. On `git worktree add`, it
+clones the primary checkout's `target` using APFS copy-on-write. Worktrees keep
+independent writable files; subsequent normal checkouts keep their own cache.
+The hook uses the script in the primary checkout so it also works for older
+branches. It does not install dependencies or compile; follow the normal pnpm
+and Cargo prerequisites after checkout.
+
+For existing worktrees, stop builds and rust-analyzer's automatic checks first,
+then run `python3 .github/scripts/worktree-cow.py seed --replace <worktree>` or
+`python3 .github/scripts/worktree-cow.py seed --all --replace`. This replaces
+only existing `target` directories; it leaves sources and Git state intact and
+skips targets already seeded. Cloning must succeed before the old cache is
+removed. Local/path-package fingerprints and local build-script output are
+invalidated; old incremental directories and unrecognized/local dependency
+artifacts are omitted. Incremental compilation settings remain unchanged for
+subsequent builds. External build scripts rerun, so a subsequent build cannot
+mistake the primary checkout's local code for this branch's code. The normal
+build rebuilds these packages while reusable external artifacts remain shared.
+
+The primary checkout must have its submodules/dependencies available for
+`cargo metadata --offline --locked`, and a regular `target` directory on the
+same APFS volume. Custom Cargo target/build directories are not supported.
+Missing or busy seeds cause an explanatory hook message without failing Git;
+retry with `seed <worktree>` later. `BOBCAT_WORKTREE_COW=0` disables automatic
+seeding for one invocation. `--no-checkout` does not run the Git hook; use the
+explicit seed command after checkout. Existing custom hooks are never replaced
+by the installer. See [worktree cache details](docs/worktree-cow.md).
+
 ## Testing
 
 Integration tests and benchmarks build ReactLynx sources from the
