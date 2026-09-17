@@ -10,6 +10,8 @@ import type {
   PointerPhase,
   RenderWorkerMessage,
   RequestFields,
+  WheelFields,
+  WheelMessage,
 } from './protocol.d.ts'
 
 const MAX_RENDER_DIMENSION = 16_384
@@ -23,6 +25,11 @@ const POINTER_PHASE_DOWN = 0
 const POINTER_PHASE_MOVE = 1
 const POINTER_PHASE_UP = 2
 const POINTER_PHASE_CANCEL = 3
+const WHEEL_DELTA_MODE_LINE = 1
+const WHEEL_DELTA_MODE_PAGE = 2
+// This embedder's policy for the browser's abstract line unit, matching the
+// native reference host's `WHEEL_LINE_CSS_PX`. Core accepts CSS pixels only.
+const WHEEL_LINE_CSS_PX = 40
 
 let initialization: Promise<void> | undefined
 
@@ -267,6 +274,17 @@ interface ActivePointer {
   y: number
 }
 
+/**
+ * Where a client point lands in viewport CSS px, and the scale that carries a
+ * client-space length there with it.
+ */
+interface ViewportMapping {
+  scaleX: number
+  scaleY: number
+  x: number
+  y: number
+}
+
 /** Owns the DOM EventTarget half of the browser input bridge. */
 class CanvasPointerInput {
   #active = new Map<number, ActivePointer>()
@@ -275,6 +293,7 @@ class CanvasPointerInput {
   #height: number
   #previousTouchAction: string
   #send: (values: PointerFields) => void
+  #sendWheel: (values: WheelFields) => void
   #width: number
 
   constructor(
@@ -282,11 +301,13 @@ class CanvasPointerInput {
     width: number,
     height: number,
     send: (values: PointerFields) => void,
+    sendWheel: (values: WheelFields) => void,
   ) {
     this.#canvas = canvas
     this.#height = height
     this.#previousTouchAction = canvas.style.touchAction
     this.#send = send
+    this.#sendWheel = sendWheel
     this.#width = width
 
     // Transferring drawing control does not transfer the canvas's DOM events.
@@ -297,6 +318,9 @@ class CanvasPointerInput {
     canvas.addEventListener('pointerup', this.#onPointerUp)
     canvas.addEventListener('pointercancel', this.#onPointerCancel)
     canvas.addEventListener('lostpointercapture', this.#onLostPointerCapture)
+    // Not passive: a forwarded wheel is prevented, so the listener has to be
+    // allowed to prevent it.
+    canvas.addEventListener('wheel', this.#onWheel, { passive: false })
   }
 
   resize(width: number, height: number): void {
@@ -335,6 +359,7 @@ class CanvasPointerInput {
       'lostpointercapture',
       this.#onLostPointerCapture,
     )
+    this.#canvas.removeEventListener('wheel', this.#onWheel)
     this.reset()
     this.#canvas.style.touchAction = this.#previousTouchAction
   }
@@ -413,6 +438,62 @@ class CanvasPointerInput {
     }
   }
 
+  #onWheel = (event: WheelEvent) => {
+    if (this.#disposed) {
+      return
+    }
+    // A ctrl-held wheel is the browser's own zoom gesture. It stays the page's:
+    // nothing is forwarded, and nothing is prevented.
+    if (event.ctrlKey) {
+      return
+    }
+    // A wheel has no active sequence to fall back on, so a canvas box that
+    // cannot be mapped drops the event.
+    const mapped = this.#mapClient(event.clientX, event.clientY)
+    if (mapped === undefined) {
+      return
+    }
+    let deltaX: number
+    let deltaY: number
+    switch (event.deltaMode) {
+      case WHEEL_DELTA_MODE_LINE:
+        deltaX = event.deltaX * WHEEL_LINE_CSS_PX
+        deltaY = event.deltaY * WHEEL_LINE_CSS_PX
+        break
+      case WHEEL_DELTA_MODE_PAGE:
+        deltaX = event.deltaX * this.#width
+        deltaY = event.deltaY * this.#height
+        break
+      default:
+        // Pixel mode: page CSS px, which the canvas's own box carries into the
+        // viewport exactly as it carries a position.
+        deltaX = event.deltaX * mapped.scaleX
+        deltaY = event.deltaY * mapped.scaleY
+        break
+    }
+    if (!Number.isFinite(deltaX) || !Number.isFinite(deltaY)) {
+      return
+    }
+    if (deltaX === 0 && deltaY === 0) {
+      return
+    }
+    // The browser's positive delta already means "scroll offset increases",
+    // which is the engine's convention too, so no sign is flipped here.
+    const defaultPrevented = event.defaultPrevented === true
+    // Read above, before this call: the Worker answers nothing, so the facade
+    // cannot learn synchronously whether the engine consumed the scroll. The
+    // canvas owns wheel scrolling outright, the way `touch-action: none`
+    // makes it own touch panning.
+    event.preventDefault()
+    this.#sendWheel({
+      defaultPrevented,
+      deltaX,
+      deltaY,
+      x: mapped.x,
+      y: mapped.y,
+    })
+  }
+
   #finish(event: PointerEvent, phase: PointerPhase): void {
     const active = this.#active.get(event.pointerId)
     if (this.#disposed || active === undefined) {
@@ -432,28 +513,9 @@ class CanvasPointerInput {
     phase: PointerPhase,
     fallback?: ActivePointer,
   ): PointerFields | undefined {
-    const bounds = this.#canvas.getBoundingClientRect()
-    let x: number
-    let y: number
-    if (
-      Number.isFinite(event.clientX) &&
-      Number.isFinite(event.clientY) &&
-      Number.isFinite(bounds.left) &&
-      Number.isFinite(bounds.top) &&
-      Number.isFinite(bounds.width) &&
-      Number.isFinite(bounds.height) &&
-      bounds.width > 0 &&
-      bounds.height > 0
-    ) {
-      x = ((event.clientX - bounds.left) * this.#width) / bounds.width
-      y = ((event.clientY - bounds.top) * this.#height) / bounds.height
-    } else if (fallback !== undefined) {
-      x = fallback.x
-      y = fallback.y
-    } else {
-      return undefined
-    }
-    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+    const mapped = this.#mapClient(event.clientX, event.clientY)
+    const position = mapped ?? fallback
+    if (position === undefined) {
       return undefined
     }
     return {
@@ -461,9 +523,38 @@ class CanvasPointerInput {
       device,
       phase,
       pointerId: event.pointerId,
-      x,
-      y,
+      x: position.x,
+      y: position.y,
     }
+  }
+
+  /**
+   * Maps a client point through the canvas bounds into viewport CSS px, and
+   * reports the scale that mapping applies. Nothing when the element has no
+   * finite, non-empty box, or when the result is not finite.
+   */
+  #mapClient(clientX: number, clientY: number): ViewportMapping | undefined {
+    const bounds = this.#canvas.getBoundingClientRect()
+    if (
+      !Number.isFinite(clientX) ||
+      !Number.isFinite(clientY) ||
+      !Number.isFinite(bounds.left) ||
+      !Number.isFinite(bounds.top) ||
+      !Number.isFinite(bounds.width) ||
+      !Number.isFinite(bounds.height) ||
+      bounds.width <= 0 ||
+      bounds.height <= 0
+    ) {
+      return undefined
+    }
+    const scaleX = this.#width / bounds.width
+    const scaleY = this.#height / bounds.height
+    const x = (clientX - bounds.left) * scaleX
+    const y = (clientY - bounds.top) * scaleY
+    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+      return undefined
+    }
+    return { scaleX, scaleY, x, y }
   }
 
   #releaseCapture(pointerId: number): void {
@@ -646,6 +737,20 @@ class RenderWorkerClient {
     }
   }
 
+  dispatchWheel(values: WheelFields): void {
+    if (this.#fatalError !== undefined) {
+      return
+    }
+    try {
+      this.#worker.postMessage({
+        type: 'bobcat-wheel',
+        ...values,
+      } satisfies WheelMessage)
+    } catch (error) {
+      this.#fail(error)
+    }
+  }
+
   subscribeFatal(listener: (error: Error) => void): () => boolean {
     this.#fatalListeners.add(listener)
     if (this.#fatalError !== undefined) {
@@ -684,7 +789,8 @@ export default function init(): Promise<void> {
 /**
  * A Worker-owned Bobcat view attached to one HTML canvas. Active
  * `pointerdown`/`pointermove`/`pointerup`/`pointercancel` sequences on the
- * canvas are captured and forwarded to the native input router automatically.
+ * canvas, and its `wheel` events, are captured and forwarded to the native
+ * input router automatically.
  */
 export class BobcatCanvas {
   #client: RenderWorkerClient
@@ -710,6 +816,7 @@ export class BobcatCanvas {
       width,
       height,
       (values) => client.dispatchPointer(values),
+      (values) => client.dispatchWheel(values),
     )
     this.#unsubscribeFatal = client.subscribeFatal((error) => {
       this.#fatalError = error

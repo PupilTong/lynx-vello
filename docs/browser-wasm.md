@@ -49,9 +49,9 @@ tree, scene, GPU object, or Rust session registry. Its public operations are
 limited to canvas creation with `PageConfig` and the host's `NativeModules`,
 URL-based page loads with their `globalProps`, font and
 default-family registration, resize, error observation, disposal, and
-automatic pointer forwarding from the attached HTML canvas. Running the host's
-native-module handlers is its one piece of engine-facing work, and it is
-exactly the work that has to happen there.
+automatic pointer and wheel forwarding from the attached HTML canvas. Running
+the host's native-module handlers is its one piece of engine-facing work, and
+it is exactly the work that has to happen there.
 
 The Render Worker calls `configure_wasm_workers` once, then sizes its
 `OffscreenCanvas` to `FrameSize::for_viewport` before building its `Painter`
@@ -284,7 +284,7 @@ theme, so the demo exercises the load option's absence rather than its
 content; the facade, Render Worker and `ViewSources::global_props` path is
 there and tested for the embedder that wants it.
 
-## Pointer input
+## Pointer and wheel input
 
 `transferControlToOffscreen()` transfers drawing control, not the DOM canvas's
 event target. `BobcatCanvas` therefore retains the `HTMLCanvasElement` and
@@ -308,8 +308,23 @@ core's `InputEvent` and calls the canvas painter's `dispatch_input`, which
 stamps the event's arrival from the engine's own clock — the same clock its
 frames read — so a press after a long idle period cannot derive its `longpress`
 deadline from the last rendered frame, and nothing has to agree on a time
-origin. Each load releases active captures before replacing the view; disposal
-stops input before terminating the Worker. Wheel input is not connected yet.
+origin. A mouse is reported to the Worker as the mouse it is and then handed to
+the engine as `PointerKind::Pen`, the way `bobcat-cli`'s macOS host does it,
+because the engine's drag recognizer latches touch and pen only and a
+primary-button drag is expected to scroll here too. Each load releases active
+captures before replacing the view; disposal stops input before terminating the
+Worker.
+
+`wheel` is forwarded over the same queue, as `bobcat-wheel`, and dispatched by
+`BobcatRenderer::dispatchWheel`. The facade normalizes the delta to viewport
+CSS pixels first: pixel mode takes the same canvas-box scale as a position,
+line mode is 40 CSS pixels per line, and page mode is the viewport's own width
+and height. The browser's sign is already core's, so none is flipped. A
+ctrl-held wheel belongs to the browser's zoom gesture and is neither forwarded
+nor prevented; every other wheel is forwarded and `preventDefault()`ed, because
+the Worker answers nothing and this side cannot learn synchronously whether the
+engine consumed the scroll — the canvas owns wheel scrolling outright, as
+`touch-action: none` gives it touch panning.
 
 ## Synchronization and rendering
 
@@ -403,7 +418,7 @@ import, the facade's four page and font declarations and their dispatches, that
 a load registers a page's sources before building the view, that the facade
 validates the host's module table and answers calls with single-shot callbacks
 while the Render Worker queues those answers on its request queue, and the
-absence of the private pointer method and the removed direct DOM API.
+absence of the private input methods and the removed direct DOM API.
 
 The `wasm32` target disables Parley's `complex-scripts` feature, while native
 targets retain it. This keeps grapheme segmentation, shaping, and ordinary

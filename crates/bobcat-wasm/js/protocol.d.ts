@@ -29,6 +29,19 @@ export interface PointerFields {
   y: number
 }
 
+/**
+ * One wheel event: position and scroll delta both in viewport CSS px. The
+ * facade converts the browser's line and page units, so nothing downstream
+ * knows what `deltaMode` the event carried.
+ */
+export interface WheelFields {
+  defaultPrevented: boolean
+  deltaX: number
+  deltaY: number
+  x: number
+  y: number
+}
+
 // Facade → Render Worker.
 
 /**
@@ -74,6 +87,11 @@ export interface NativeModuleCallbackMessage {
 /** Pointer input. The Worker answers nothing. */
 export interface PointerMessage extends PointerFields {
   type: 'bobcat-pointer'
+}
+
+/** Wheel input. The Worker answers nothing. */
+export interface WheelMessage extends WheelFields {
+  type: 'bobcat-wheel'
 }
 
 /**
@@ -134,6 +152,7 @@ export type FacadeMessage =
   | NativeModuleCallbackMessage
   | PointerMessage
   | RequestMessage
+  | WheelMessage
 
 // Render Worker → facade.
 

@@ -443,6 +443,25 @@ self.addEventListener('message', (event) => {
     // Input shares the facade-operation queue so it cannot re-enter the Wasm
     // wrapper while an async native-view load owns its mutable borrow.
     requestQueue = requestQueue.then(dispatch)
+  } else if (message?.type === 'bobcat-wheel') {
+    const dispatch = () => {
+      if (!running || renderer === undefined) {
+        return
+      }
+      try {
+        renderer.dispatchWheel(
+          message.x,
+          message.y,
+          message.deltaX,
+          message.deltaY,
+          message.defaultPrevented,
+        )
+      } catch (error) {
+        reportFatal(error)
+      }
+    }
+    // The same queue as pointer input, for the same reason.
+    requestQueue = requestQueue.then(dispatch)
   } else if (message?.type === 'bobcat-native-module-callback') {
     const answer = (): void => {
       if (!running || renderer === undefined) {
