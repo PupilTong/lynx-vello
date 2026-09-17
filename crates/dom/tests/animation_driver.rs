@@ -58,8 +58,10 @@ fn an_animated_font_size_remeasures_the_text_it_scales() {
     let run = doc.dom.create_text_node("hello", ());
     doc.dom.append_child(label, run);
 
-    doc.dom.advance_animations(0.0);
     doc.flush();
+    // The flush creates the animation; the tick that follows is the frame it
+    // starts on, so from here the timeline and the animation share an origin.
+    doc.dom.advance_animations(0.0);
     // The paragraph is the element's, so its box is what the animation moves.
     let start = box_of(&doc, label).1;
     assert_eq!(start.width, 80.0, "five Ahem glyphs at 16px");
@@ -105,6 +107,169 @@ fn a_transform_animation_advances_between_samples() {
     assert_eq!(
         end, "none",
         "past the end, `animation-fill-mode: none` gives the base style back"
+    );
+}
+
+/// The timeline only moves when someone ticks it, and an idle page is ticked
+/// by nobody: the flush that creates an animation therefore reads whatever
+/// time the last tick left. The animation still has to start at the first
+/// frame that sees it, not however many seconds earlier that reading is.
+#[test]
+fn an_animation_created_while_the_timeline_was_idle_starts_at_the_first_tick() {
+    let (mut doc, mover) = animated(SLIDE, "view.mover");
+
+    // Ten idle seconds: the flush above created the animation at 0, and this
+    // is the first frame after it.
+    let tick = doc.dom.advance_animations(10.0);
+    assert!(tick.needs_next_frame, "a 10s animation has not run out");
+    assert_eq!(
+        doc.value(mover, "transform"),
+        "translateX(0px)",
+        "the first frame after the animation was created is its start"
+    );
+
+    doc.dom.advance_animations(15.0);
+    assert_eq!(
+        doc.value(mover, "transform"),
+        "translateX(50px)",
+        "and five seconds later it is halfway, not over"
+    );
+    assert!(
+        doc.dom.advance_animations(19.9).needs_next_frame,
+        "still inside its duration, measured from the first frame"
+    );
+    assert!(
+        !doc.dom.advance_animations(20.1).needs_next_frame,
+        "and it ends one whole duration after that frame"
+    );
+}
+
+const DELAYED: &str = "
+    @keyframes slide {
+        from { transform: translateX(0px); }
+        to { transform: translateX(100px); }
+    }
+    .mover { animation: slide 10s linear 5s; width: 20px; height: 20px; }
+    .wide { width: 90px; }
+";
+
+/// A delayed animation is anchored by the same first frame, then left alone:
+/// it waits out its delay from there, and the ticks that pass while it waits
+/// must not push it any further.
+#[test]
+fn a_delayed_animation_is_anchored_once_and_waits_from_there() {
+    let (mut doc, mover) = animated(DELAYED, "view.mover");
+
+    doc.dom.advance_animations(10.0);
+    doc.dom.advance_animations(11.0);
+    doc.dom.advance_animations(14.9);
+    assert_eq!(
+        doc.value(mover, "transform"),
+        "none",
+        "inside its delay the animation contributes nothing"
+    );
+
+    doc.dom.advance_animations(15.0);
+    assert_eq!(
+        doc.value(mover, "transform"),
+        "translateX(0px)",
+        "it starts one delay after the frame that anchored it"
+    );
+    doc.dom.advance_animations(20.0);
+    assert_eq!(
+        doc.value(mover, "transform"),
+        "translateX(50px)",
+        "and runs its whole duration from there"
+    );
+}
+
+/// A negative delay is a head start, and it is a head start on the frame the
+/// animation is anchored to.
+#[test]
+fn a_negative_delay_keeps_its_head_start_at_the_first_tick() {
+    let (mut doc, mover) = animated(
+        "
+        @keyframes slide {
+            from { transform: translateX(0px); }
+            to { transform: translateX(100px); }
+        }
+        .mover { animation: slide 10s linear -2s; width: 20px; height: 20px; }
+        ",
+        "view.mover",
+    );
+
+    doc.dom.advance_animations(10.0);
+    assert_eq!(
+        doc.value(mover, "transform"),
+        "translateX(20px)",
+        "the first frame finds the animation two of its ten seconds in"
+    );
+    assert!(
+        doc.dom.advance_animations(17.9).needs_next_frame,
+        "the head start comes off its end, not its start"
+    );
+    assert!(!doc.dom.advance_animations(18.1).needs_next_frame);
+}
+
+/// The anchor is the driver's own record, keyed by the element and the
+/// animation name, because Stylo's `is_new` is not one: a restyle assigns the
+/// animation over from the new style and sets that flag again, so a delayed
+/// animation on an element that restyles every frame would never start.
+#[test]
+fn a_restyle_while_a_delayed_animation_waits_does_not_postpone_it() {
+    let (mut doc, mover) = animated(DELAYED, "view.mover");
+
+    doc.dom.advance_animations(10.0);
+    doc.add_class(mover, "wide");
+    doc.flush();
+    doc.dom.advance_animations(11.0);
+    doc.remove_class(mover, "wide");
+    doc.flush();
+
+    doc.dom.advance_animations(15.0);
+    assert_eq!(
+        doc.value(mover, "transform"),
+        "translateX(0px)",
+        "the restyles kept the animation's delay running rather than restarting it"
+    );
+}
+
+/// A transition is created by the flush that changes the property, and takes
+/// its start from the first frame after that flush for the same reason an
+/// animation does.
+#[test]
+fn a_transition_created_while_the_timeline_was_idle_starts_at_the_first_tick() {
+    let (mut doc, fader) = animated(
+        "
+        .fader { width: 20px; height: 20px; opacity: 1; transition: opacity 10s linear; }
+        .dim { opacity: 0; }
+        ",
+        "view.fader",
+    );
+    doc.add_class(fader, "dim");
+    doc.flush();
+    assert!(
+        doc.dom.has_active_animations(),
+        "the class change started a transition"
+    );
+
+    let tick = doc.dom.advance_animations(10.0);
+    assert!(tick.needs_next_frame, "a 10s transition has not run out");
+    assert_eq!(
+        doc.value(fader, "opacity"),
+        "1",
+        "the first frame after the transition was created is its start"
+    );
+
+    doc.dom.advance_animations(15.0);
+    assert_eq!(
+        doc.value(fader, "opacity"),
+        "0.5",
+        "and five seconds later it is halfway"
+    );
+    assert!(
+        !doc.dom.advance_animations(20.1).needs_next_frame,
+        "ending one whole duration after that frame"
     );
 }
 
@@ -202,8 +367,10 @@ fn an_infinite_animation_keeps_iterating() {
 #[test]
 fn animation_time_never_runs_backwards() {
     let (mut doc, mover) = animated(SLIDE, "view.mover");
+    doc.dom.advance_animations(0.0);
     doc.dom.advance_animations(5.0);
     let forward = doc.value(mover, "transform");
+    assert_eq!(forward, "translateX(50px)", "halfway through");
     doc.dom.advance_animations(1.0);
     assert_eq!(
         doc.value(mover, "transform"),

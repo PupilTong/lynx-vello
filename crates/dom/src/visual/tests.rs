@@ -1846,6 +1846,11 @@ fn animated_document(animation_css: &str) -> crate::Document<()> {
         crate::Document::new(crate::tree::document::tests::device(), "page", ());
     document.add_stylesheet(animation_css, crate::StylesheetOrigin::Author);
     document.render();
+    // The render's flush creates the animation, and the first tick is the
+    // frame it starts on: taking that tick at zero puts the animation's origin
+    // on the timeline's, which is what the sampled assertions below read
+    // against.
+    document.advance_animations(0.0);
     let tick = document.advance_animations(0.25);
     assert!(tick.needs_next_frame, "the fixture animation must be live");
     document.render();
@@ -1899,6 +1904,9 @@ fn a_transform_animation_composes_and_hits_at_the_sampled_position() {
     document.set_attribute(mover, "class", "mover");
     document.append_child(page, mover);
     document.render();
+    // Starts the animation on the timeline's origin, as `animated_document`
+    // does — the sampled positions below are read against it.
+    document.advance_animations(0.0);
     let tick = document.advance_animations(0.30);
     assert!(tick.needs_next_frame, "the slide must be live");
     document.render();

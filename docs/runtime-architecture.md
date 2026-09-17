@@ -231,6 +231,14 @@ answering yes, the embedder keeps taking a turn per display frame, and each
 one sends `BeginFrame` until a commit reports the timeline idle. Starting and cancelling animations belong to the style
 flush the main thread already runs at `__FlushElementTree`.
 
+Because that is the whole supply of timeline readings, an idle page's timeline
+stands still: the flush that creates an animation reads whatever the last
+`BeginFrame` left, which may be many seconds old. So the flush only arms an
+animation — the first `BeginFrame` after it is what starts it, and the driver
+shifts the pending start time onto that frame's reading (see
+`crates/dom/src/style/animation.rs`). A tap that starts a four-second animation
+after ten idle seconds plays all four seconds.
+
 `bobcat-core` deliberately does not re-export `dom`. The lower-layer crates
 remain independently usable libraries, but an application embedding Bobcat
 cannot reach them through a running view.

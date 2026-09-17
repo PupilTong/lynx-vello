@@ -670,6 +670,99 @@ fn a_finished_curve_hands_the_animation_back_to_the_main_thread() {
     assert!(!finished.has_live_curves());
 }
 
+/// One windowed-painter frame: adopt whatever the view published, then send a
+/// `BeginFrame` only if that frame asks for one — the protocol
+/// [`crate::Painter::pump`] runs, rather than the unconditional tick an
+/// offscreen painter takes.
+fn windowed_frame(engine: &mut TestEngine, now: f64) {
+    // The adoption has to come first: `begin_frame` decides from the frame
+    // this painter holds, not from the one the view has published.
+    engine.painter.published_frame();
+    if let Some(seq) = engine.painter.begin_frame(now, false) {
+        assert!(
+            engine
+                .painter
+                .wait_begin_frame(seq, Duration::from_secs(30)),
+            "the view's task services the tick"
+        );
+    }
+}
+
+fn is_animating(engine: &mut TestEngine) -> bool {
+    engine
+        .probe_document(|tree| tree.has_active_animations())
+        .expect("the view is live")
+}
+
+/// A windowed painter sends no `BeginFrame` while nothing is moving, so an
+/// idle page leaves the timeline wherever the last frame left it — here, at
+/// boot. The animation a tap starts ten seconds later must still run its whole
+/// duration from the frame that follows the tap, rather than being created ten
+/// seconds in the past and finishing on its first frame.
+#[test]
+fn an_animation_started_after_idle_time_runs_from_the_next_frame() {
+    let mut engine = TestViewSpec::new(
+        r"
+        globalThis.renderPage = function () {
+          const page = __CreatePage('card', 0);
+          const view = __CreateView(0);
+          __AppendElement(page, view);
+          globalThis.held = [page, view];
+          __SetInlineStyles(view, 'width:200px;height:200px');
+          __AddEventListener(view, 'tap', () => {
+            __SetClasses(view, 'moving');
+            __SetAttribute(view, 'log', 'tap');
+          }, {});
+          __FlushElementTree();
+        };
+        ",
+    )
+    .with_style_sheet(
+        "@keyframes slide { from { transform: translateX(0px); }
+                            to { transform: translateX(100px); } }
+         .moving { animation: slide 4s linear forwards; }",
+    )
+    .boot();
+
+    // Ten idle seconds. Nothing on the page asked for a frame, so no
+    // `BeginFrame` has crossed since boot and the document's timeline still
+    // reads zero.
+    let tapped_at = 10.0;
+    engine.painter.clock.pin(tapped_at);
+    engine.dispatch_input(touch(1, PointerPhase::Down, 10.0));
+    engine.dispatch_input(touch(1, PointerPhase::Up, 12.0));
+    wait_for_log(&mut engine, "tap");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !engine
+        .painter
+        .published_frame()
+        .is_some_and(|frame| frame.animations_active())
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the tap's commit never armed the animation"
+        );
+        std::thread::yield_now();
+    }
+
+    windowed_frame(&mut engine, tapped_at + 0.016);
+    assert!(
+        is_animating(&mut engine),
+        "the frame after the tap is the animation's first, not its last"
+    );
+    windowed_frame(&mut engine, tapped_at + 3.9);
+    assert!(
+        is_animating(&mut engine),
+        "a 4s animation is still running 3.9s after that frame"
+    );
+    windowed_frame(&mut engine, tapped_at + 4.1);
+    assert!(
+        !is_animating(&mut engine),
+        "and it is over 4.1s after it, having played the whole way"
+    );
+}
+
 #[test]
 fn independent_views_can_own_live_script_threads_in_one_process() {
     let source = r"
