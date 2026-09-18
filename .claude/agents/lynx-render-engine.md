@@ -1,6 +1,6 @@
 ---
 name: lynx-render-engine
-description: Use for painting and compositing — stacking contexts and CSS2 Appendix E paint order, transforms, hit testing, the vello scene build, the baked committed frame and its compose program, retained scroll planes, and the animation driver. Not for layout (lynx-layout-engine), CSS resolution (lynx-css-engine), or text shaping (lynx-text-engine).
+description: Use for painting and compositing — stacking contexts and CSS2 Appendix E paint order, transforms, hit testing, the vello scene build, the baked committed frame and its compose program, scroll composition, and the animation driver. Not for layout (lynx-layout-engine), CSS resolution (lynx-css-engine), or text shaping (lynx-text-engine).
 tools: Read, Edit, Write, Bash, Grep, Glob, WebFetch, WebSearch
 model: opus
 ---
@@ -35,19 +35,19 @@ vello is the only wgpu dependency in this workspace, so it pins wgpu's major
 ## Where things are
 
 - `visual/`: `stacking.rs` (real recursive CSS stacking contexts),
-  `build.rs`, `frame.rs` (`CommittedFrame`, `bake_plane`), `hit.rs` (hit
+  `build.rs`, `frame.rs` (`CommittedFrame`, `compose_into`), `hit.rs` (hit
   testing is a pure read of the retained frame), `transform.rs`, `geometry.rs`,
   `motion.rs`, `curves.rs`.
 - `paint/`: `walker.rs` (viewport + clip culling, zero-alloc paint-order build),
   `painter.rs`, `background.rs`, `border.rs`, `shadow.rs`, `filters.rs`,
-  `mask.rs`, `shape.rs`, `text.rs`, `compose.rs`, `plan.rs` (`CompositePlan`),
-  `convert.rs`, `equivalence.rs`.
-- `render/`: `gpu.rs` (`PlaneBank`, headless GPU floor), `image.rs`
+  `mask.rs`, `shape.rs`, `text.rs`, `compose.rs`, `convert.rs`,
+  `equivalence.rs`.
+- `render/`: `gpu.rs` (headless GPU floor, `AtlasResidency`), `image.rs`
   (`FrameImages`, `ImageReports`, `ImageInbox`).
 - The committed frame is baked **unscrolled** as fragments plus a compose
-  program; scrollers are retained GPU planes. Offsets stay on the painter's
-  side between refills — a scroll recomposes the retained planes without a
-  commit — and cross only as a `ToMain::Refill` when an offset leaves its
+  program, and one render path composes it flat at the painter's offsets.
+  Offsets stay on the painter's side between refills — a scroll recomposes
+  without a commit — and cross only as a `ToMain::Refill` when an offset leaves its
   slot's `ScrollSlot::encode_window`, which the main thread answers with a
   recentered commit. A commit publishes one immutable `Arc<CommittedFrame>`.
 - Animations: stylo's animation engine plus an engine-owned timeline;
@@ -105,7 +105,7 @@ Shorthand `lynx/`, `lynx-stack/`, `Paws/`; absolute paths live once in AGENTS.md
   benches.
 - `cargo clippy --all-targets -- -D warnings`.
 - `cargo test -p dom --test screenshots --test css_atlas --test scene --test
-  plane_compose --test gpu_pixels --test gpu_smoke --test animation_driver`, and
+  gpu_pixels --test gpu_smoke --test animation_driver`, and
   `cargo test -p bobcat-core --test screenshots --test painter --test
   scroll_compose --test animation`.
 - Screenshot goldens: `FLASHBULB_UPDATE_SNAPSHOTS=1` only after looking at the

@@ -15,6 +15,9 @@ const ISOLATION_ATLAS_WIDTH: u32 = 384;
 const ISOLATION_ATLAS_HEIGHT: u32 = 192;
 const ISOLATION_CELL_X: u32 = 128;
 const ISOLATION_CELL_Y: u32 = 32;
+const RED: [u8; 4] = [255, 0, 0, 255];
+const BLUE: [u8; 4] = [0, 0, 255, 255];
+const WHITE: [u8; 4] = [255, 255, 255, 255];
 
 fn pixel(pixels: &[u8], width: u32, x: u32, y: u32) -> [u8; 4] {
     let index = ((y * width + x) * 4) as usize;
@@ -38,7 +41,7 @@ fn background_clip_text_clips_to_glyph_ink() {
     doc.dom.render();
     let scene = doc.dom.scene(&dom::NoImages);
     let pixels = gpu
-        .render(&scene, 200, 100, Color::WHITE)
+        .render(&scene, &[], 200, 100, Color::WHITE)
         .expect("headless render");
 
     let ink = pixel(&pixels, 200, 30, 20);
@@ -73,7 +76,7 @@ fn plain_background_covers_the_box() {
     doc.dom.render();
     let scene = doc.dom.scene(&dom::NoImages);
     let pixels = gpu
-        .render(&scene, 200, 100, Color::WHITE)
+        .render(&scene, &[], 200, 100, Color::WHITE)
         .expect("headless render");
 
     let gap = pixel(&pixels, 200, 60, 40);
@@ -101,7 +104,7 @@ fn gradient_color_fills_glyph_ink_from_the_padding_box() {
     doc.dom.render();
     let scene = doc.dom.scene(&dom::NoImages);
     let pixels = gpu
-        .render(&scene, 200, 100, Color::WHITE)
+        .render(&scene, &[], 200, 100, Color::WHITE)
         .expect("headless render");
 
     let first = pixel(&pixels, 200, 30, 20);
@@ -134,7 +137,7 @@ fn outline_rings_the_border_box() {
     doc.dom.render();
     let scene = doc.dom.scene(&dom::NoImages);
     let pixels = gpu
-        .render(&scene, 200, 100, Color::WHITE)
+        .render(&scene, &[], 200, 100, Color::WHITE)
         .expect("headless render");
 
     let ring = pixel(&pixels, 200, 17, 45);
@@ -170,7 +173,7 @@ fn isolated_atlas_cell_matches_standalone_group_effects() {
     doc.dom.render();
     let scene = doc.dom.scene(&dom::NoImages);
     let standalone = gpu
-        .render(&scene, 128, 128, Color::WHITE)
+        .render(&scene, &[], 128, 128, Color::WHITE)
         .expect("standalone headless render");
 
     let cell_x = f64::from(ISOLATION_CELL_X);
@@ -206,6 +209,7 @@ fn isolated_atlas_cell_matches_standalone_group_effects() {
     let appended = gpu
         .render(
             &atlas,
+            &[],
             ISOLATION_ATLAS_WIDTH,
             ISOLATION_ATLAS_HEIGHT,
             Color::WHITE,
@@ -233,38 +237,58 @@ fn isolated_atlas_cell_matches_standalone_group_effects() {
     );
 }
 
-/// An intervening image-free render costs the atlas its contents. This
-/// test currently FAILS, and it documents a live defect rather than a
-/// migration hazard.
+/// One 64x64 scene drawing `image` over the whole target, with nearest
+/// sampling so a texel reads back exactly and a filtered edge cannot be
+/// mistaken for a wrong atlas.
+fn image_scene(image: &dom::vello::peniko::ImageData, at: Affine) -> Scene {
+    use dom::vello::peniko::{ImageBrush, ImageQuality, ImageSampler};
+
+    let mut scene = Scene::new();
+    scene.draw_image(
+        ImageBrush {
+            image,
+            sampler: ImageSampler::default().with_quality(ImageQuality::Low),
+        },
+        at,
+    );
+    scene
+}
+
+/// A scene of solid paths only, which is the shape that frees the atlas.
+fn solid_scene() -> Scene {
+    let mut scene = Scene::new();
+    scene.fill(
+        Fill::NonZero,
+        Affine::IDENTITY,
+        Color::from_rgb8(0x11, 0x22, 0x33),
+        None,
+        &Rect::new(0.0, 0.0, 64.0, 64.0),
+    );
+    scene
+}
+
+/// An intervening image-free render costs the atlas its contents;
+/// `Headless::render_frame`'s residency bookkeeping is what a target survives
+/// it by, and the render entry point does it, so no caller can forget.
 ///
 /// Mechanism, confirmed in vello 0.10.0's own source: an encoding with no
 /// patches at all — solid paths only, so no image, no gradient ramp and no
 /// glyph run — takes `Resolver::resolve`'s early return and reports
-/// `Images::default()` (`vello_encoding/src/resolve.rs:189-191`). That
+/// `Images::default()` (`vello_encoding/src/resolve.rs:187-191`). That
 /// zero-sized report clamps the atlas to 1x1
 /// (`vello/src/render.rs:160-161`), which no longer matches the persistent
 /// proxy, so the renderer frees the real atlas texture and installs a 1x1
 /// one (`render.rs:166-171`). `ImageCache` is not told: its entries stay
-/// resident and clean (`image_cache.rs:148-160`), so the next render
-/// re-uses the freed slot and samples nothing. The control render below
-/// pins that renderer reuse alone is fine — only the intervening
-/// patch-free render breaks it.
-///
-/// Fixing it needs the set of images the next frame will draw, so those
-/// entries can be marked dirty (`Renderer::mark_override_image_dirty` →
-/// `Resolver::mark_image_dirty`, which applies to any resident image, not
-/// only overrides). Nothing in the tree holds that set today — the images
-/// are buried inside scene encodings. The painter-side image migration
-/// creates it, and un-ignores this test.
+/// resident and clean (`image_cache.rs:148-160`), so the next render would
+/// re-use the freed slot and sample nothing. The control render below pins
+/// that renderer reuse alone is fine — only the intervening patch-free
+/// render breaks it.
 #[test]
-#[ignore = "known defect: a patch-free render frees the atlas; fixed with the painter-side image set"]
 fn an_image_survives_an_intervening_image_free_render() {
-    use dom::vello::peniko::{ImageBrush, ImageQuality, ImageSampler};
-
     let mut gpu = headless("an_image_survives_an_intervening_image_free_render");
 
     // A 2x2 image whose four texels are distinct, so a blank-atlas read is
-    // not mistakable for a correct one.
+    // not mistakable for a correct one; 2x2 texels scaled to fill the target.
     let image = flashbulb::rgba8(
         2,
         2,
@@ -275,33 +299,11 @@ fn an_image_survives_an_intervening_image_free_render() {
             255, 255, 0, 255, // yellow
         ],
     );
-
-    let draw_image = || {
-        let mut scene = Scene::new();
-        scene.draw_image(
-            ImageBrush {
-                image: &image,
-                // Nearest, so a texel reads back exactly and a filtered
-                // edge cannot be mistaken for a wrong atlas.
-                sampler: ImageSampler::default().with_quality(ImageQuality::Low),
-            },
-            // 2x2 texels scaled to fill the 64x64 target.
-            Affine::scale(32.0),
-        );
-        scene
-    };
-
-    let mut solids = Scene::new();
-    solids.fill(
-        Fill::NonZero,
-        Affine::IDENTITY,
-        Color::from_rgb8(0x11, 0x22, 0x33),
-        None,
-        &Rect::new(0.0, 0.0, 64.0, 64.0),
-    );
+    let drawn = [Some(image.clone())];
+    let draw_image = || image_scene(&image, Affine::scale(32.0));
 
     let first = gpu
-        .render(&draw_image(), 64, 64, Color::WHITE)
+        .render(&draw_image(), &drawn, 64, 64, Color::WHITE)
         .expect("first image render");
     assert_eq!(
         pixel(&first, 64, 16, 16),
@@ -312,7 +314,7 @@ fn an_image_survives_an_intervening_image_free_render() {
     // Control: back-to-back image renders, nothing in between. This isolates
     // the intervening render as the cause rather than renderer reuse itself.
     let control = gpu
-        .render(&draw_image(), 64, 64, Color::WHITE)
+        .render(&draw_image(), &drawn, 64, 64, Color::WHITE)
         .expect("control image render");
     assert_eq!(
         control, first,
@@ -320,10 +322,10 @@ fn an_image_survives_an_intervening_image_free_render() {
     );
 
     let _ = gpu
-        .render(&solids, 64, 64, Color::WHITE)
+        .render(&solid_scene(), &[], 64, 64, Color::WHITE)
         .expect("intervening image-free render");
     let third = gpu
-        .render(&draw_image(), 64, 64, Color::WHITE)
+        .render(&draw_image(), &drawn, 64, 64, Color::WHITE)
         .expect("image render after the image-free one");
 
     assert_eq!(
@@ -332,6 +334,114 @@ fn an_image_survives_an_intervening_image_free_render() {
         "an image-free render between two identical image renders must not \
          change what the second one draws"
     );
+}
+
+/// The repair is owed per image, not per frame: a loss is repaired at each
+/// resident image's first later use, however many frames that takes.
+///
+/// A frame drawing both images, then a patch-free one, then a frame drawing
+/// only the first — which repairs only the first — and then both again. The
+/// second image's pixels in that last render are the whole test: a scheme
+/// that only re-marked the images of the first frame after a loss would leave
+/// it sampling the freed slot forever.
+#[test]
+fn a_frame_after_the_atlas_is_lost_repairs_only_the_images_it_draws() {
+    let mut gpu = headless("a_frame_after_the_atlas_is_lost_repairs_only_the_images_it_draws");
+
+    let red = flashbulb::rgba8(1, 1, vec![255, 0, 0, 255]);
+    let blue = flashbulb::rgba8(1, 1, vec![0, 0, 255, 255]);
+    // Side by side, each filling half of the 64x64 target.
+    let both = || {
+        let mut scene = image_scene(&red, Affine::scale_non_uniform(32.0, 64.0));
+        scene.append(
+            &image_scene(&blue, Affine::scale_non_uniform(32.0, 64.0)),
+            Some(Affine::translate((32.0, 0.0))),
+        );
+        scene
+    };
+    let both_drawn = [Some(red.clone()), Some(blue.clone())];
+    let red_drawn = [Some(red.clone())];
+
+    let _ = gpu
+        .render(&both(), &both_drawn, 64, 64, Color::WHITE)
+        .expect("both images render");
+    let _ = gpu
+        .render(&solid_scene(), &[], 64, 64, Color::WHITE)
+        .expect("the render that frees the atlas");
+    let only_red = gpu
+        .render(
+            &image_scene(&red, Affine::scale_non_uniform(32.0, 64.0)),
+            &red_drawn,
+            64,
+            64,
+            Color::WHITE,
+        )
+        .expect("one image render");
+    assert_eq!(pixel(&only_red, 64, 16, 32), RED, "the repaired image");
+
+    let again = gpu
+        .render(&both(), &both_drawn, 64, 64, Color::WHITE)
+        .expect("both images render again");
+    assert_eq!(pixel(&again, 64, 16, 32), RED);
+    assert_eq!(
+        pixel(&again, 64, 48, 32),
+        BLUE,
+        "the image no frame drew since the loss must still be repaired"
+    );
+}
+
+/// A scroll is a translation applied while the committed frame is put
+/// together, and the scrollport clip does not ride it: the content under the
+/// port moves, and nothing leaks out beside or below it at any offset inside
+/// the encode window.
+#[test]
+fn a_composition_at_a_scroll_offset_stays_inside_the_scrollport() {
+    use dom::Vector2D;
+
+    let mut gpu = headless("a_composition_at_a_scroll_offset_stays_inside_the_scrollport");
+    // A 100x100 scroller over a red then a blue 100px row, on a 200x150 page,
+    // so pixels beside and below the scroller prove the clip holds.
+    let mut doc = Doc::with_css_sized(
+        "page { display: flex; width: 200px; height: 150px; }
+         .scroller { display: flex; flex-direction: column; overflow: scroll;
+                     width: 100px; height: 100px; }
+         .red, .blue { display: flex; flex-shrink: 0; width: 100px; height: 100px; }
+         .red { background-color: #ff0000; }
+         .blue { background-color: #0000ff; }",
+        200.0,
+        150.0,
+    );
+    let root = doc.root;
+    let scroller = doc.el(root, "scroller");
+    doc.el(scroller, "red");
+    doc.el(scroller, "blue");
+    doc.dom.render();
+    let frame = doc
+        .dom
+        .committed_frame()
+        .expect("render leaves a committed frame retained");
+
+    // Screen y plus the offset is content y, so each probe names the row the
+    // port shows there.
+    for (offset, near, far) in [(0.0_f32, RED, RED), (30.0, RED, BLUE), (100.0, BLUE, BLUE)] {
+        let mut scene = Scene::new();
+        frame.compose_into(&mut scene, &[], &|_| Some(Vector2D::new(0.0, offset)), None);
+        let pixels = gpu
+            .render(&scene, &[], 200, 150, Color::WHITE)
+            .expect("headless render");
+        assert_eq!(pixel(&pixels, 200, 50, 20), near, "offset {offset}: y 20");
+        assert_eq!(pixel(&pixels, 200, 50, 95), far, "offset {offset}: y 95");
+        assert_eq!(
+            pixel(&pixels, 200, 150, 50),
+            WHITE,
+            "offset {offset}: beside the scrollport"
+        );
+        assert_eq!(
+            pixel(&pixels, 200, 50, 120),
+            WHITE,
+            "offset {offset}: below the scrollport"
+        );
+    }
 }
 
 /// A nested scope paints in its own colour, not the paragraph root's.
@@ -360,7 +470,7 @@ fn a_nested_scope_paints_in_its_own_colour() {
     doc.dom.render();
     let scene = doc.dom.scene(&dom::NoImages);
     let pixels = gpu
-        .render(&scene, 200, 100, Color::WHITE)
+        .render(&scene, &[], 200, 100, Color::WHITE)
         .expect("headless render");
 
     // First em square is the root run, third is the nested scope's.

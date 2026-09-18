@@ -51,32 +51,6 @@ globalThis.renderPage = function renderPage() {{
     .into_bytes()
 }
 
-/// A scroller over two 100px rows in a 100x100 viewport — the shape that
-/// makes a frame carry a composite plan, so its rows are baked into retained
-/// plane textures instead of drawn straight into the target.
-fn scroller(top: &str, bottom: &str) -> Vec<u8> {
-    format!(
-        r"
-globalThis.renderPage = function renderPage() {{
-  const page = __CreatePage('card', 0);
-  const view = __CreateView(0);
-  const first = __CreateView(0);
-  const second = __CreateView(0);
-  __AppendElement(page, view);
-  __AppendElement(view, first);
-  __AppendElement(view, second);
-  __SetInlineStyles(view,
-    'display:flex;flex-direction:column;overflow:scroll;width:100px;height:100px');
-  __SetInlineStyles(first,
-    'flex-shrink:0;width:100px;height:100px;background-color:{top}');
-  __SetInlineStyles(second,
-    'flex-shrink:0;width:100px;height:100px;background-color:{bottom}');
-}};
-"
-    )
-    .into_bytes()
-}
-
 const RED: [u8; 4] = [255, 0, 0, 255];
 const BLUE: [u8; 4] = [0, 0, 255, 255];
 
@@ -468,64 +442,5 @@ async fn a_painter_re_attached_through_the_auto_detach_resets_what_it_kept() {
         top_left(&mut painter),
         BLUE,
         "and the frame it rendered is the second page's"
-    );
-}
-
-/// A page whose frame is composed out of retained plane textures rather than
-/// drawn straight into the target, which is the other half of what a change of
-/// page has to reset.
-///
-/// The two pages have the identical plan and therefore the identical commit
-/// id; only the colours baked into the planes differ. A bank still holding the
-/// first page's id would answer the second page's first composite with the
-/// first page's planes, and the swap is what makes that visible.
-#[tokio::test]
-async fn a_re_attached_painter_bakes_the_new_pages_planes() {
-    let mut painter = Painter::new(DrawTarget::Offscreen, 100.0, 100.0, 1.0)
-        .await
-        .expect("an offscreen painter is built");
-
-    let first_group = group().await;
-    let mut first = first_group
-        .create_lynx_view(
-            100.0,
-            100.0,
-            1.0,
-            |_reports| {
-                Rc::new(FetcherDouble::new(scroller("#ff0000", "#0000ff")).resolving_to(SCRIPT_URL))
-            },
-            Vec::new(),
-            ViewSources::new(SCRIPT_URL),
-        )
-        .expect("the first view is built");
-    painter.attach(&first).expect("the first page takes it");
-    wait_for_script(&mut first).expect("the first entry boots");
-    painter.tick(true).expect("the first page's frame");
-    assert_eq!(top_left(&mut painter), RED, "the first page's top row");
-
-    painter.detach();
-    drop(first);
-    drop(first_group);
-
-    let second_group = group().await;
-    let mut second = second_group
-        .create_lynx_view(
-            100.0,
-            100.0,
-            1.0,
-            |_reports| {
-                Rc::new(FetcherDouble::new(scroller("#0000ff", "#ff0000")).resolving_to(SCRIPT_URL))
-            },
-            Vec::new(),
-            ViewSources::new(SCRIPT_URL),
-        )
-        .expect("the second view is built");
-    painter.attach(&second).expect("the second page takes it");
-    wait_for_script(&mut second).expect("the second entry boots");
-    painter.tick(true).expect("the second page's frame");
-    assert_eq!(
-        top_left(&mut painter),
-        BLUE,
-        "the planes were baked from the page the painter is now attached to"
     );
 }

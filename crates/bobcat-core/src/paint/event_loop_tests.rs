@@ -533,10 +533,6 @@ const TWO_ROW_SCROLLER_PAGE: &str = r"
 fn a_windowed_scroll_recommits_nothing_and_hits_route_at_the_intent_offsets() {
     let mut engine = booted(TWO_ROW_SCROLLER_PAGE);
     let frame = engine.published_frame().expect("boot published a frame");
-    assert!(
-        frame.composite_plan().is_some(),
-        "a scroller frame layers: targets draw it from retained planes"
-    );
     let boot_commit = frame.commit_id();
     drop(frame);
 

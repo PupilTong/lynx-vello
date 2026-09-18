@@ -409,7 +409,7 @@ fn build_and_render(shard: usize, gpu: &mut Headless) -> Result<Image, String> {
     }
 
     let pixels = gpu
-        .render(&atlas, ATLAS_SIZE, ATLAS_SIZE, Color::WHITE)
+        .render(&atlas, &[], ATLAS_SIZE, ATLAS_SIZE, Color::WHITE)
         .map_err(|error| error.to_string())?;
     Image::from_rgba8(ATLAS_SIZE, ATLAS_SIZE, pixels).map_err(|error| error.to_string())
 }

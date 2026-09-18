@@ -74,7 +74,7 @@ fn readback(test: &str, doc: &mut Doc, width: u32, height: u32) -> Vec<u8> {
     doc.dom.layout();
     doc.dom.render();
     let scene = doc.dom.scene(&dom::NoImages);
-    gpu.render(&scene, width, height, Color::WHITE)
+    gpu.render(&scene, &[], width, height, Color::WHITE)
         .expect("headless render")
 }
 

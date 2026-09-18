@@ -189,55 +189,22 @@ impl Output {
         }
     }
 
-    /// Forgets what this target's retained planes were baked from, and — for a
-    /// target that is itself the only copy of a frame — the frame too.
+    /// Gives up the frame a target that is itself the only copy of one holds.
     ///
-    /// What a painter does when it points at a different document: commit ids
-    /// restart at one per document, so planes baked from the previous page
-    /// would be reused for the next one's first composite.
-    ///
-    /// A window keeps its surface, because what is on screen is the previous
-    /// page's last frame and it stays there until the next one is presented.
-    /// An offscreen target is given up instead and rebuilt on the next render:
+    /// What a painter does when it points at a different document. A window
+    /// keeps its surface, because what is on screen is the previous page's
+    /// last frame and it stays there until the next one is presented. An
+    /// offscreen target is given up instead and rebuilt on the next render:
     /// its texture is the only place a frame exists, so keeping it would hand
     /// a reader the previous document's pixels as this one's.
     fn forget(&mut self) {
-        match self {
-            #[cfg(test)]
-            Self::None => {}
-            Self::Offscreen(gpu) => gpu.forget(),
-            Self::Window(graphics) => graphics.forget(),
+        if let Self::Offscreen(gpu) = self {
+            gpu.forget();
         }
     }
 
-    /// Brings this target's retained plane textures up to a layered frame's
-    /// plan, before the frame is composed over them.
-    fn prepare_planes(
-        &mut self,
-        frame: &CommittedFrame,
-        images: &[Option<ImageData>],
-    ) -> Result<(), EngineError> {
-        match self {
-            #[cfg(test)]
-            Self::None => Ok(()),
-            Self::Offscreen(gpu) => gpu
-                .prepare_planes(frame, images)
-                .map_err(|error| EngineError::Gpu(error.to_string())),
-            Self::Window(graphics) => graphics.prepare_planes(frame, images),
-        }
-    }
-
-    /// The retained planes' registered images, as a composite draws them.
-    fn plane_images(&self) -> &[ImageData] {
-        match self {
-            #[cfg(test)]
-            Self::None => &[],
-            Self::Offscreen(gpu) => gpu.plane_images(),
-            Self::Window(graphics) => graphics.plane_images(),
-        }
-    }
-
-    /// Renders one composed scene into this target at `size`.
+    /// Renders one composed scene, drawing `images`, into this target at
+    /// `size`.
     ///
     /// A window renders into the texture it re-presents rather than into the
     /// swap-chain image, which is what lets re-exposure present the same frame
@@ -245,14 +212,23 @@ impl Output {
     /// a window presents, and an offscreen target's readback polls the device
     /// itself — only [`Painter::tick`], which renders offscreen and reads
     /// nothing back, waits.
-    fn render(&mut self, scene: &Scene, size: FrameSize) -> Result<(), EngineError> {
+    ///
+    /// The scene's bitmaps are named because a target tracks what its
+    /// renderer's image atlas still holds; see
+    /// [`dom::render::gpu::AtlasResidency`].
+    fn render(
+        &mut self,
+        scene: &Scene,
+        images: &[Option<ImageData>],
+        size: FrameSize,
+    ) -> Result<(), EngineError> {
         match self {
             #[cfg(test)]
             Self::None => Ok(()),
             Self::Offscreen(gpu) => gpu
-                .render_frame(scene, size.width, size.height, Color::WHITE)
+                .render_frame(scene, images, size.width, size.height, Color::WHITE)
                 .map_err(|error| EngineError::Gpu(error.to_string())),
-            Self::Window(graphics) => graphics.render_to_target(scene, size),
+            Self::Window(graphics) => graphics.render_to_target(scene, images, size),
         }
     }
 
@@ -329,8 +305,7 @@ pub struct Painter {
     /// skipped and whether there is anything to capture.
     ///
     /// The target's, not the attachment's: what was drawn stays drawn across a
-    /// detach, and [`Painter::attach`] is what clears it, together with the
-    /// planes it was baked from.
+    /// detach, and [`Painter::attach`] is what clears it.
     composed: Option<(ComposeKey, FrameSize)>,
     composed_scene: Scene,
     refill_requested_for: Option<u64>,
@@ -473,9 +448,12 @@ fn clamp_scroll_axis(value: f32, max: f32) -> f32 {
 }
 
 /// Composes one frame and renders it into `output`, whatever kind of target
-/// that is and whether or not the frame is layered.
+/// that is.
 ///
-/// The one render path.
+/// The one render path: a frame is composed flat, with each scroll slot at
+/// the offset the intents carry for it. A frame whose whole program is one
+/// unscrolled fragment, asked for at no offset and no animation instant, is
+/// rendered straight out of the commit — composing it would copy it.
 fn compose_and_render(
     output: &mut Output,
     buffer: &mut Scene,
@@ -485,30 +463,22 @@ fn compose_and_render(
     size: FrameSize,
     animation_now: Option<f64>,
 ) -> Result<(), EngineError> {
-    let offsets: &dyn Fn(&dom::ScrollSlot) -> Option<Vector2D<f32>> =
-        &|slot| intents.offset_for(slot.node);
-    let scene = if frame.composite_plan().is_some() {
-        output.prepare_planes(frame, images)?;
-        buffer.reset();
-        frame.composite_into(
-            buffer,
-            output.plane_images(),
-            images,
-            offsets,
-            animation_now,
-        );
-        &*buffer
-    } else if intents.offsets.is_empty()
+    let scene = if intents.offsets.is_empty()
         && animation_now.is_none()
         && let Some(scene) = frame.scene()
     {
         scene
     } else {
         buffer.reset();
-        frame.compose_into(buffer, images, offsets, animation_now);
+        frame.compose_into(
+            buffer,
+            images,
+            &|slot| intents.offset_for(slot.node),
+            animation_now,
+        );
         &*buffer
     };
-    output.render(scene, size)
+    output.render(scene, images, size)
 }
 
 fn route_published(
@@ -638,10 +608,9 @@ impl Painter {
     ///
     /// Everything derived from whatever came before is dropped first — the
     /// published snapshot, the scroll intents, the gesture arena, the resolved
-    /// pixels, and what the target holds: its compose key and its plane bank.
-    /// Commit ids restart at one per document, so a key kept across the change
-    /// would make the new page's first frame look already drawn and hand it the
-    /// old page's planes.
+    /// pixels, and what the target holds: its compose key. Commit ids restart
+    /// at one per document, so a key kept across the change would make the new
+    /// page's first frame look already drawn.
     ///
     /// The painter's metrics win: attaching sends them to the view, so a view
     /// built at one size and shown at another is resized rather than showing
@@ -745,13 +714,13 @@ impl Painter {
         self.images.forget();
     }
 
-    /// Drops what the draw target holds: the key it was rendered from and the
-    /// planes that key was baked out of.
+    /// Drops what the draw target holds: the key it was rendered from, and —
+    /// for an offscreen target, whose texture is the only copy of that frame —
+    /// the frame itself.
     ///
-    /// The two are one fact and are forgotten together, which is why there is
-    /// one caller: pointing this painter at a different document. Commit ids
-    /// restart at one per document, so either half kept alone would answer the
-    /// new page's first frame with the old page's work.
+    /// One caller: pointing this painter at a different document. Commit ids
+    /// restart at one per document, so a key kept across the change would
+    /// answer the new page's first frame with the old page's work.
     fn forget_target(&mut self) {
         self.composed = None;
         self.output.forget();

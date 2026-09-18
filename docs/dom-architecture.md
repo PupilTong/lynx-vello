@@ -315,10 +315,9 @@ plus a compose program — so a consumer composes at its own current offsets per
 every offset stays inside its slot's `encode_window`. When one leaves it,
 `note_scroll_windows_stale` is the consumer's refill request, which the painter
 sends as `ToMain::Refill { offsets }` and the main thread answers with a
-recentered commit. A frame with scroller content carries a `CompositePlan`; a
-GPU target bakes each plane once per commit (`bake_plane`, held in the render
-module's `PlaneBank`) and draws the frame as raw steps plus one textured draw
-per plane, so a scroll frame never re-encodes scroller content. Scroll
+recentered commit. Composition is the one render path: `compose_into` replays
+the whole program into one flat scene at those offsets, and nothing is retained
+per scroller. Scroll
 containers are forced stacking contexts (matching Lynx's native scroll views;
 the deviation from the web is recorded in `runtime-architecture.md`). Composite
 animations ride the same split: an exportable `opacity`/`transform` animation
@@ -347,10 +346,14 @@ DOM-aware paint tests and the paint benchmark live under `crates/dom/tests` and
 The crate also owns the DOM-free render floor absorbed from the former `pulsar`
 crate (2026-08-04): the `render` module holds the `FrameImages` trait
 (re-exported at the crate root) and the `render::gpu` wgpu
-render-to-texture/readback backend (`gpu::Headless`, the `PlaneBank`, plus the
-`read_texture`/`renderer_options`/`render_params` seams windowed embedders
-build against). Nothing in `render` knows about nodes, computed styles, layout,
-or paint order. `Headless::new` reports `NoAdapter`; every GPU-backed test
+render-to-texture/readback backend (`gpu::Headless`, plus the
+`read_texture`/`renderer_options`/`render_params`/`AtlasResidency` seams
+windowed embedders build against). Nothing in `render` knows about nodes,
+computed styles, layout, or paint order. A render names the bitmaps its scene
+draws: vello frees its persistent image atlas whenever a scene with no patch at
+all renders while its image cache still counts every resident image clean, so
+`AtlasResidency` — one per `vello::Renderer` — re-marks each image once after
+such a loss and nothing in the steady state. `Headless::new` reports `NoAdapter`; every GPU-backed test
 treats that as a hard failure, including in CI.
 
 ## Scroll, input and event paths

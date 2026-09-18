@@ -146,7 +146,7 @@ fn encode_draw(
 ///
 /// A read that misses draws nothing, which is the same one-frame gap a
 /// not-yet-loaded image already produces. `outer` is the device chain
-/// transform when replaying, or the plane translation when baking.
+/// transform the draw composes under.
 pub(crate) fn encode_image(scene: &mut Scene, draw: &ImageDraw, outer: Affine, data: &ImageData) {
     // A bitmap vello cannot place draws as nothing — the same one-frame gap a
     // not-yet-loaded image already produces. This is the only place the bound
@@ -391,6 +391,16 @@ pub(crate) fn snap_offset(offset: Vector2D<f32>, ratio: f32) -> Vector2D<f32> {
 
 /// Replays the program into `scene` with each chain translated by the
 /// offsets `offset_of` reports (falling back to the committed ones).
+///
+/// Each chain composes at its CSS-px transform conjugated into device px,
+/// since encoded content carries the device scale as its outermost factor —
+/// the chain applies inside one scale and outside the other.
+///
+/// Besides pushes, appends and pops this also encodes raw geometry between
+/// appends, for image draws. That is sound because `Encoding::append`
+/// left-multiplies the child's transform stream before `encode_transform`'s
+/// dedup compares against the last one, so an elided tag after an append is
+/// genuinely redundant rather than wrong.
 #[expect(
     clippy::too_many_arguments,
     reason = "one replay's full inputs: the program, its two side tables, and the transforms"
@@ -406,124 +416,15 @@ pub(crate) fn replay(
     ratio: f32,
     offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
 ) {
-    let device_transform = device_chain_transform(slots, samples, ratio, offset_of);
-    replay_ops(
-        scene,
-        fragments,
-        program,
-        image_draws,
-        images,
-        samples,
-        &device_transform,
-    );
-}
-
-/// The device-px transform each chain composes at: the CSS-px chain
-/// transform conjugated into device px, since encoded content carries the
-/// device scale as its outermost factor — the chain applies inside one
-/// scale and outside the other.
-pub(crate) fn device_chain_transform<'a>(
-    slots: &'a [ScrollSlot],
-    samples: &'a [AnimationSample],
-    ratio: f32,
-    offset_of: &'a dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
-) -> impl Fn(ComposeChain) -> Affine + 'a {
     let scale = f64::from(ratio);
-    move |chain: ComposeChain| {
+    let device_transform = |chain: ComposeChain| {
         let css = chain_transform(slots, samples, chain, ratio, offset_of);
         if scale.is_finite() && scale > 0.0 {
             Affine::scale(scale) * css * Affine::scale(1.0 / scale)
         } else {
             css
         }
-    }
-}
-
-/// Encodes one plane run into `scene`, every op placed by `translate` —
-/// the run's uniform chain reduced to the plane-texture translation.
-///
-/// Clip-only pushes riding any chain but the run's head are the walker's
-/// re-pushes of the slot's own clip chain: their shapes must not translate
-/// with the plane, so the bake skips them (pops included) and the composite
-/// applies the chain around the plane's draw instead.
-pub(crate) fn bake_ops(
-    scene: &mut Scene,
-    fragments: &[Scene],
-    program: &[ComposeOp],
-    image_draws: &[ImageDraw],
-    images: &[Option<ImageData>],
-    head: u32,
-    translate: Affine,
-) {
-    let mut kept: Vec<bool> = Vec::new();
-    for op in program {
-        match op {
-            ComposeOp::Fragment { index, .. } => {
-                scene.append(&fragments[*index as usize], Some(translate));
-            }
-            ComposeOp::Push {
-                clip_only,
-                fill,
-                blend,
-                alpha,
-                transform,
-                shape,
-                chain,
-                // Absent inside a plane run by construction.
-                alpha_animation: _,
-            } => {
-                let rides_head = chain.scroll == Some(head) && chain.animation.is_none();
-                if *clip_only && !rides_head {
-                    kept.push(false);
-                    continue;
-                }
-                kept.push(true);
-                let transform = translate * *transform;
-                match (clip_only, shape) {
-                    (true, CapturedShape::Rect(rect)) => {
-                        scene.push_clip_layer(*fill, transform, rect);
-                    }
-                    (true, CapturedShape::Box(shape)) => {
-                        with_shape!(shape, |s| scene.push_clip_layer(*fill, transform, s));
-                    }
-                    (false, CapturedShape::Rect(rect)) => {
-                        scene.push_layer(*fill, *blend, *alpha, transform, rect);
-                    }
-                    (false, CapturedShape::Box(shape)) => {
-                        with_shape!(shape, |s| scene
-                            .push_layer(*fill, *blend, *alpha, transform, s));
-                    }
-                }
-            }
-            ComposeOp::Image { index, .. } => {
-                encode_draw(scene, image_draws, images, *index, translate);
-            }
-            ComposeOp::Pop => {
-                if kept.pop().expect("a plane run's pushes balance its pops") {
-                    scene.pop_layer();
-                }
-            }
-        }
-    }
-}
-
-/// Replays `program` with each chain placed by `device_transform`, resolving
-/// image draws through `pixels`.
-///
-/// Besides pushes, appends and pops this also encodes raw geometry between
-/// appends, for image draws. That is sound because `Encoding::append`
-/// left-multiplies the child's transform stream before `encode_transform`'s
-/// dedup compares against the last one, so an elided tag after an append is
-/// genuinely redundant rather than wrong.
-pub(crate) fn replay_ops(
-    scene: &mut Scene,
-    fragments: &[Scene],
-    program: &[ComposeOp],
-    image_draws: &[ImageDraw],
-    images: &[Option<ImageData>],
-    samples: &[AnimationSample],
-    device_transform: &impl Fn(ComposeChain) -> Affine,
-) {
+    };
     for op in program {
         match op {
             ComposeOp::Fragment { index, chain } => {

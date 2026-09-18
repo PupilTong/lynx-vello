@@ -604,8 +604,8 @@ painter: a second `attach` is `EngineError::PainterAttached`, refused by the
 seat's weak count, which `Painter::attach` is the only place to downgrade; a
 seat whose view is gone needs no `detach`. Attaching drops everything derived
 from the previous view — adopted snapshot, scroll intents, gesture arena,
-resolved pixels, the target's compose key and plane bank, since commit ids
-restart at one per document — rebases the frame clock onto the view's timeline
+resolved pixels, the target's compose key, since commit ids restart at one
+per document — rebases the frame clock onto the view's timeline
 epoch, seeds the `BeginFrame` sequence past what has been serviced, and sends
 its metrics as a `Resize`: **the painter owns device metrics**. Detaching
 resets the same minus the target, so the last frame stays up and capturable

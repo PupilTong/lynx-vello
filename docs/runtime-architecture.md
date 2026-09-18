@@ -1110,30 +1110,28 @@ screen; a future script-facing scroll API must either dirty the paint or
 publish its offsets, since the compositor only knows what crossed the
 channel.
 
-### Scroller content lives in retained planes
+### One render path: a scroll frame recomposes the committed fragments
 
-A scroll container is a forced stacking context (Lynx's native scroll views
-are compositing boundaries; recorded deviation from the web, where
-`overflow` alone creates none), so its subtree encodes as one contiguous
-program run. At commit, the painter partitions the program into a
-*composite plan*: maximal contiguous runs riding one scroll head become
-*planes* — each baked unscrolled into a GPU texture covering its scrollport
-plus encode window — and everything else (root content, which viewport
-culling already bounds by the screen; animation-chained content; groups the
-bake rules refuse) stays raw. Both outputs keep a `PlaneBank`: a new commit
-re-bakes the planes' textures; every frame after that composes raw steps
-plus one textured draw per plane, each under its slot's clip chain. A
-scroll frame therefore re-encodes and re-rasterizes none of the scroller
-content — its whole cost is the raw steps, the plane draws, and vello's
-per-use copy of each plane texture into its image atlas. Plane memory is
-screen-proportional — scrollport-sized windows per scroller, never
-per-fragment — and capped at half vello's 8192×8192 atlas; a frame past
-the budget, and any frame recommitting every tick for an unexported
-animation, plans nothing and composes flat exactly as above. No frame
-materializes a whole composition beside its fragments (that would be a
-content-proportional second encoding): `scene()` borrows the single
-fragment of the common whole-frame shape and answers `None` for every
-other, and consumers needing a flat scene compose one on demand.
+There is one path from a committed frame to pixels. Every presented frame is
+one flat vello scene: `compose_into` replays the commit's compose program —
+pre-encoded per-chain fragments plus the push/pop ops over them — with each
+scroll slot translated by the offset the painter holds for it. Nothing is
+retained per scroller, and a scroll frame's cost is bounded by the commit's
+encode windows, which already discarded everything no clip chain admits.
+Retained per-scroller textures were tried and removed: measured per scroll
+frame they were slower than flat recomposition — each frame copied a plane
+larger than the viewport into vello's image atlas — and every commit re-baked
+all of them.
+
+A scroll container is a forced stacking context (Lynx's native scroll
+views are compositing boundaries; recorded deviation from the web, where
+`overflow` alone creates none), which keeps a scroller's content contiguous
+in the compose program.
+
+No frame materializes a whole composition beside its fragments (that would be
+a content-proportional second encoding): `scene()` borrows the single fragment
+of the common whole-frame shape and answers `None` for every other, and
+consumers needing a flat scene compose one on demand.
 
 ## Composite animations compose; the rest tick
 

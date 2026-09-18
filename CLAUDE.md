@@ -16,7 +16,7 @@ subsystem from scratch in the main thread.
   Relative, containment, the positioned pass.
 - `lynx-text-engine` — the `<text>` block on parley: shaping, truncation, fonts.
 - `lynx-render-engine` — stacking, paint order, the vello scene, committed
-  frames and compose program, scroll planes, animations.
+  frames and compose program, scroll composition, animations.
 - `lynx-js-runtime-bridge` — QuickJS realms, MTS/BTS threads, Workers, the
   Element PAPI in `packages/bobcat-element`, timers, ESM, events.
 - `lynx-reactlynx-compat` — compiled ReactLynx apps end to end: fixtures, page
