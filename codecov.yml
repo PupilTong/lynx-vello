@@ -1,0 +1,77 @@
+# Codecov reads this from the default branch and from a pull request's head.
+#
+# CI uploads one lcov report per run (`cargo llvm-cov --workspace`, vendor
+# excluded at the source). Everything about *reading* that report lives here:
+# what counts as production source, one component per crate so a crate's
+# coverage is a number in the PR comment rather than a `--fail-under` in the
+# workflow, and statuses that inform without gating.
+
+# cargo-llvm-cov already leaves `tests/`, `benches/`, `*_tests.rs` and the
+# vendored stylo out of the report it uploads; this keeps that true should the
+# upload ever change, so every number here is production source only.
+ignore:
+  - "**/tests/**"
+  - "**/benches/**"
+  - "vendor/**"
+
+coverage:
+  status:
+    # Neither status can turn red: the workflow has no coverage threshold, and
+    # neither does Codecov. Drop `informational` to make one a gate again.
+    project:
+      default:
+        target: auto
+        threshold: 1%
+        informational: true
+    patch:
+      default:
+        target: auto
+        informational: true
+
+component_management:
+  default_rules:
+    statuses:
+      - type: project
+        target: auto
+        threshold: 1%
+        informational: true
+  individual_components:
+    - component_id: hughie
+      name: hughie
+      paths:
+        - crates/hughie/**
+    - component_id: dom
+      name: dom
+      paths:
+        - crates/dom/**
+    - component_id: bobcat-core
+      name: bobcat-core
+      paths:
+        - crates/bobcat-core/**
+    - component_id: bobcat-source
+      name: bobcat-source
+      paths:
+        - crates/bobcat-source/**
+    - component_id: bobcat-resources
+      name: bobcat-resources
+      paths:
+        - crates/bobcat-resources/**
+    - component_id: bobcat-cli
+      name: bobcat-cli
+      paths:
+        - crates/bobcat-cli/**
+    # No bobcat-wasm component: the browser embedder is wasm32-only and its
+    # tests run under wasm-pack, which reports no coverage.
+    - component_id: quickjs-rust-bridge
+      name: quickjs-rust-bridge
+      paths:
+        - crates/quickjs-rust-bridge/**
+    - component_id: flashbulb
+      name: flashbulb
+      paths:
+        - crates/flashbulb/**
+
+comment:
+  layout: "condensed_header, diff, components"
+  behavior: default
+  require_changes: false

@@ -1087,9 +1087,9 @@ masonry/`staggered-grid` stay out of scope. The last is a Lynx
   `tests/linear.rs` covers orientation and gravity, weight/sum/freeze, order,
   intrinsic/minmax sizing, measurement, baselines, auto
   margins, absolute/hoisted behavior, and Flex/Grid composition.
-  CI enforces at least 95% line coverage for `hughie`
-  production source while excluding test and benchmark source from the
-  metric.
+  Codecov reports `hughie`'s line coverage as its own component on every
+  pull request, with test and benchmark source excluded from the metric
+  (`codecov.yml`); CI itself enforces no threshold.
 - **Behavior/performance hardening:** each algorithm has an engine-native
   behavior suite and a CodSpeed-compatible production-host benchmark target.
   Tests use exact

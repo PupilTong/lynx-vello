@@ -9,6 +9,12 @@ rust-version.workspace = true
 keywords = ["layout", "flexbox", "grid", "css", "ui"]
 categories = ["gui"]
 
+[lib]
+# Only `benches/` holds benchmarks: keep `cargo build --benches` from compiling
+# this target a second time as a bench harness (AGENTS.md, "Benchmarks are
+# only the `benches/` targets").
+bench = false
+
 [features]
 layout-test-utils = []
 

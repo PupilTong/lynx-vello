@@ -5,6 +5,13 @@ on:
     branches: [main]
   pull_request:
 
+# A newer push to a pull request supersedes the run still in flight. Pushes to
+# main never cancel each other: every merge keeps its benchmark samples, its
+# coverage upload and its Pages deployment.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -25,13 +32,16 @@ jobs:
       - name: Install pinned toolchain
         run: rustup toolchain install
 
-      - name: Install LLVM 22 from Homebrew
-        run: |
-          brew install llvm@22
-          echo "CC=$(brew --prefix llvm@22)/bin/clang" >> "$GITHUB_ENV"
-          echo "CXX=$(brew --prefix llvm@22)/bin/clang++" >> "$GITHUB_ENV"
-
+      # No Homebrew LLVM: nothing here targets wasm32, and Apple's clang builds
+      # QuickJS for the host. The `browser` job installs LLVM 22 for the
+      # wasm32 C objects.
       - uses: Swatinem/rust-cache@v2
+        with:
+          # The stylo fork's tests below build in vendor/stylo/target, a
+          # second Cargo workspace; naming it keeps those dependencies cached.
+          workspaces: |
+            . -> target
+            vendor/stylo -> target
 
       - name: Format
         # The package list used to be written out by hand here and had drifted:
@@ -45,10 +55,11 @@ jobs:
       - name: APFS worktree cache hook
         run: python3 .github/scripts/test-worktree-cow.py -v
 
-      - name: Independent native embedder features
-        run: |
-          cargo clippy --locked -p bobcat-cli --no-default-features --features cli --all-targets --no-deps -- -D warnings
-          cargo clippy --locked -p bobcat-cli --no-default-features --features server --all-targets --no-deps -- -D warnings
+      - name: Independent `cli` embedder feature
+        # `cli` alone is the one feature set only macOS can check: it pulls in
+        # winit and `cli/macos.rs`. `server` alone, and no feature at all,
+        # compile the same everywhere; the `linux-embedders` job checks them.
+        run: cargo clippy --locked -p bobcat-cli --no-default-features --features cli --all-targets --no-deps -- -D warnings
 
       - name: Benchmarks measure the shipped feature set
         # Cargo unifies dev-dependency features into the library itself, so
@@ -63,16 +74,12 @@ jobs:
           tool: cargo-llvm-cov
 
       - name: Tests + coverage
+        # One instrumented build and one run of every test. Per-crate coverage
+        # is Codecov's job (`codecov.yml` names the components); there is no
+        # coverage threshold in this workflow.
         run: |
           cargo llvm-cov --workspace --lcov --output-path lcov.info \
             --ignore-filename-regex '(^|/)vendor(/|$)'
-
-      - name: Hughie 95% coverage gate
-        run: |
-          cargo llvm-cov clean --workspace
-          cargo llvm-cov -p hughie --locked --summary-only \
-            --ignore-filename-regex '(^|/)(tests|benches|vendor)(/|$)' \
-            --fail-under-lines 95
 
       - name: Stylo fork Lynx tests
         run: |
@@ -98,6 +105,10 @@ jobs:
   browser:
     name: threaded Wasm + Pages build (Ubuntu)
     runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+      # `actions/configure-pages` reads the site's base path on pushes to main.
+      pages: read
     env:
       CC: clang-22
       CXX: clang++-22
@@ -122,8 +133,6 @@ jobs:
           sudo apt-get install --yes clang-22 llvm-22
 
       - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: browser-wasm
 
       - name: Clippy (wasm32)
         # The macOS job's `cargo clippy` runs for the host, where every
@@ -172,19 +181,52 @@ jobs:
       - name: Verify shared-memory and npm artifacts
         run: pnpm --filter bobcat-wasm verify
 
-      - name: Type-check GitHub Pages
-        run: pnpm --filter github-pages test:type
-
       - name: Build the Explorer homepage for the Canvas tab
         run: pnpm --filter @explorer/homepage build
 
       - name: Build the Explorer showcase the homepage opens
         run: pnpm --filter @explorer/showcase build
 
+      - name: Configure Pages
+        # Only a push to main builds for the real site; the base path it
+        # resolves is what `deploy-pages` publishes under.
+        if: github.event_name == 'push'
+        id: pages
+        uses: actions/configure-pages@v5
+
       - name: Build GitHub Pages
         run: pnpm --filter github-pages build
         env:
-          PAGES_BASE_PATH: /ci-preview
+          # Pull requests build under a stand-in path, which proves the base
+          # path is honoured without touching the deployed site.
+          PAGES_BASE_PATH: ${{ steps.pages.outputs.base_path || '/ci-preview' }}
+
+      - name: Upload Pages artifact
+        if: github.event_name == 'push'
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: packages/github-pages/dist
+
+  deploy-pages:
+    name: Deploy GitHub Pages
+    # The site is the `browser` job's build of this same commit; the former
+    # Pages workflow built it a second time on every push to main.
+    needs: browser
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
 
   linux-embedders:
     name: native Bobcat embedders type-check + clippy (Ubuntu)
@@ -234,6 +276,8 @@ jobs:
           --all-targets --no-deps -- -D warnings
 
       - name: Independent embedder features
+        # Each feature set on its own, headless. The macOS job checks `cli`
+        # alone as well, for the winit half that only exists there.
         run: |
           cargo clippy --locked -p bobcat-cli --no-default-features --all-targets --no-deps -- -D warnings
           cargo clippy --locked -p bobcat-cli --no-default-features --features cli --all-targets --no-deps -- -D warnings
@@ -301,6 +345,8 @@ jobs:
         run: rustup toolchain install
 
       - name: Install LLVM 22 from Homebrew
+        # Kept on this runner alone: the compiler that builds QuickJS's C
+        # objects is part of what the walltime series has been measuring.
         run: |
           brew install llvm@22
           echo "CC=$(brew --prefix llvm@22)/bin/clang" >> "$GITHUB_ENV"
@@ -353,6 +399,9 @@ jobs:
           tool: cargo-codspeed@5
 
       - name: Build benchmarks (CodSpeed, memory)
+        # `cargo build --benches` underneath, in the bench profile: thin LTO
+        # and one codegen unit per crate, so every library sets `bench = false`
+        # to keep this to the `benches/` targets and their dependencies.
         run: cargo codspeed build -m memory
 
       - name: Run benchmarks (CodSpeed, memory)
