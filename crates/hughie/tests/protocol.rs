@@ -17,17 +17,18 @@ use hughie::prelude::*;
 use style_traits::values::specified::AllowedNumericType;
 use stylo::Zero;
 use stylo::computed_values::{relative_center, relative_layout_once};
-use stylo::values::computed::length_percentage::{CalcNode, ComputedLeaf};
+use stylo::typed_om::NumericBaseType;
+use stylo::values::computed::length_percentage::{CalcNode, CalcPercentageLeaf, ComputedLeaf};
 use stylo::values::computed::{
     Contain, ContainIntrinsicSize, Display, GridLine, GridTemplateComponent, ImplicitGridTracks,
-    Length, LengthPercentage, Margin, NonNegativeLengthPercentage, NonNegativeNumber, Percentage,
+    Length, LengthPercentage, Margin, NonNegativeLengthPercentage, NonNegativeNumber,
     PositionProperty, Size as StyleSize,
 };
-use stylo::values::generics::NonNegative;
 use stylo::values::generics::grid::{
     ImplicitGridTracks as GenericImplicitGridTracks, RepeatCount, TrackBreadth, TrackList,
     TrackListValue, TrackRepeat, TrackSize,
 };
+use stylo::values::generics::{NonNegative, Optional};
 
 fn px(value: f32) -> LengthPercentage {
     LengthPercentage::new_length(Length::new(value))
@@ -42,7 +43,10 @@ fn calc_lp(length: f32, percentage: f32) -> NonNegativeLengthPercentage {
         CalcNode::Sum(
             vec![
                 CalcNode::Leaf(ComputedLeaf::Length(Length::new(length))),
-                CalcNode::Leaf(ComputedLeaf::Percentage(Percentage(percentage))),
+                CalcNode::Leaf(ComputedLeaf::Percentage(CalcPercentageLeaf::new(
+                    percentage,
+                    Optional::Some(NumericBaseType::Length),
+                ))),
             ]
             .into(),
         ),

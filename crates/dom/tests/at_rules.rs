@@ -111,7 +111,7 @@ fn font_face_full_descriptor_set() {
         Some("100 900")
     );
     assert_eq!(
-        font_face_descriptor(body, DescriptorId::FontStretch).as_deref(),
+        font_face_descriptor(body, DescriptorId::FontWidth).as_deref(),
         Some("75% 125%")
     );
     assert_eq!(
@@ -140,7 +140,7 @@ fn font_face_defaults_stay_unset() {
     assert!(font_face_descriptor(body, DescriptorId::Src).is_some());
     for id in [
         DescriptorId::FontWeight,
-        DescriptorId::FontStretch,
+        DescriptorId::FontWidth,
         DescriptorId::FontStyle,
         DescriptorId::FontVariationSettings,
         DescriptorId::UnicodeRange,
@@ -201,7 +201,7 @@ fn font_face_weight_and_style_forms() {
     assert_eq!(
         font_face_descriptor(
             &format!("{base} font-stretch: 0.4%;"),
-            DescriptorId::FontStretch
+            DescriptorId::FontWidth
         )
         .as_deref(),
         Some("0.4%")
@@ -220,7 +220,7 @@ fn font_face_invalid_optional_descriptors_dropped() {
     assert!(font_face_descriptor(&body, DescriptorId::Src).is_some());
     for id in [
         DescriptorId::FontWeight,
-        DescriptorId::FontStretch,
+        DescriptorId::FontWidth,
         DescriptorId::FontStyle,
         DescriptorId::FontVariationSettings,
         DescriptorId::UnicodeRange,

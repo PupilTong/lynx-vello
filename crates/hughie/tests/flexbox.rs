@@ -104,7 +104,7 @@ fn wrapping_accounts_for_column_and_row_gaps() {
     let second = fixed_leaf(&mut tree, 100.0, 20.0);
     let third = fixed_leaf(&mut tree, 100.0, 20.0);
     let container_style = TestStyle {
-        flex_wrap: flex_wrap::T::Wrap,
+        flex_wrap: flex_wrap::T::WRAP,
         gap: Size::new(gap_px(10.0), gap_px(5.0)),
         ..TestStyle::default()
     };
@@ -135,7 +135,7 @@ mod line_collection {
         let root = flex_container(
             &mut tree,
             TestStyle {
-                flex_wrap: flex_wrap::T::Wrap,
+                flex_wrap: flex_wrap::T::WRAP,
                 align_items: items(AlignFlags::FLEX_START),
                 ..TestStyle::default()
             },
@@ -171,7 +171,7 @@ mod line_collection {
         let root = flex_container(
             &mut tree,
             TestStyle {
-                flex_wrap: flex_wrap::T::Wrap,
+                flex_wrap: flex_wrap::T::WRAP,
                 align_items: items(AlignFlags::FLEX_START),
                 ..TestStyle::default()
             },
@@ -211,7 +211,7 @@ mod line_collection {
         let root = flex_container(
             &mut tree,
             TestStyle {
-                flex_wrap: flex_wrap::T::Wrap,
+                flex_wrap: flex_wrap::T::WRAP,
                 align_items: items(AlignFlags::FLEX_START),
                 ..TestStyle::default()
             },
@@ -450,7 +450,7 @@ mod alignment {
         let root = flex_container(
             &mut tree,
             TestStyle {
-                flex_wrap: flex_wrap::T::Wrap,
+                flex_wrap: flex_wrap::T::WRAP,
                 gap: Size::new(gap_px(0.0), gap_px(10.0)),
                 align_content: content(AlignFlags::CENTER),
                 align_items: items(AlignFlags::FLEX_START),
@@ -743,11 +743,11 @@ fn automatic_minimum_size_depends_on_scroll_container_overflow() {
 fn column_wrapping_uses_rtl_and_wrap_reverse_for_cross_start() {
     for (wrap, expected) in [
         (
-            flex_wrap::T::Wrap,
+            flex_wrap::T::WRAP,
             [Point::new(50.0, 0.0), Point::new(40.0, 0.0)],
         ),
         (
-            flex_wrap::T::WrapReverse,
+            flex_wrap::T::WRAP_REVERSE,
             [Point::new(0.0, 0.0), Point::new(10.0, 0.0)],
         ),
     ] {
@@ -964,7 +964,7 @@ fn multiline_column_min_content_cross_size_uses_largest_column() {
         &mut tree,
         TestStyle {
             flex_direction: flex_direction::T::Column,
-            flex_wrap: flex_wrap::T::Wrap,
+            flex_wrap: flex_wrap::T::WRAP,
             ..TestStyle::default()
         },
         &[first, second],
@@ -991,7 +991,7 @@ fn start_and_flex_start_remain_distinct_under_reversal() {
             &mut tree,
             TestStyle {
                 flex_direction: flex_direction::T::RowReverse,
-                flex_wrap: flex_wrap::T::WrapReverse,
+                flex_wrap: flex_wrap::T::WRAP_REVERSE,
                 justify_content: content(alignment),
                 align_items: items(alignment),
                 ..TestStyle::default()
@@ -1014,7 +1014,7 @@ fn negative_margin_affects_line_breaking_without_being_clamped() {
     let root = flex_container(
         &mut tree,
         TestStyle {
-            flex_wrap: flex_wrap::T::Wrap,
+            flex_wrap: flex_wrap::T::WRAP,
             align_items: items(AlignFlags::FLEX_START),
             ..TestStyle::default()
         },

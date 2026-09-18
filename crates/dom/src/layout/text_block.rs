@@ -281,11 +281,7 @@ fn generated_content<T>(node: &Node<T>) -> Option<(&ComputedValues, &[ContentIte
     let items = &content.items[..content.alt_start];
     items
         .iter()
-        .all(|item| match item {
-            ContentItem::String(_) => true,
-            ContentItem::Attr(attr) => attr.namespace_url.is_empty(),
-            _ => false,
-        })
+        .all(|item| matches!(item, ContentItem::String(_)))
         .then_some((style, items))
 }
 
@@ -319,9 +315,6 @@ fn collect_generated<T>(tree: &TreeArenas<T>, slot: NodeSlot, out: &mut Vec<Coll
     for item in items {
         match item {
             ContentItem::String(value) => text.push_str(value),
-            ContentItem::Attr(attr) => {
-                text.push_str(node.attribute(&attr.attribute).unwrap_or(&attr.fallback));
-            }
             _ => unreachable!("generated_content validated the list"),
         }
     }

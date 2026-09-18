@@ -4,7 +4,7 @@ use std::borrow::Cow;
 use std::sync::Arc as StdArc;
 use std::sync::atomic::AtomicBool;
 
-use cssparser::{Parser, ParserInput};
+use cssparser::Parser;
 use stylo::author_styles::AuthorStyles;
 use stylo::context::QuirksMode;
 use stylo::custom_properties::AttrTaint;
@@ -495,15 +495,14 @@ impl StyleEngine {
         // would leave `"spin"` unable to match `spin`, and would make the names
         // that only exist in string form (`"none"`) unreachable.
         let context = self.parser_context(CssRuleType::Keyframes);
-        let mut input = ParserInput::new(name);
-        let name = Parser::new(&mut input)
+        let name = Parser::new(name)
             .parse_entirely(|input| KeyframesName::parse(&context, input))
             .ok()?;
         let keyframes = keyframes
             .into_iter()
             .filter_map(|keyframe| {
-                let mut input = ParserInput::new(keyframe.selector);
-                let selector = KeyframeSelectors::parse(&mut Parser::new(&mut input)).ok()?;
+                let selector =
+                    KeyframeSelectors::parse(&mut Parser::new(keyframe.selector)).ok()?;
                 let block =
                     self.parse_declaration_block(keyframe.declarations, CssRuleType::Keyframe);
                 Some(Arc::new(self.lock.wrap(Keyframe {
@@ -532,8 +531,7 @@ impl StyleEngine {
     #[must_use]
     pub(crate) fn build_font_face_rule(&self, descriptors: &str) -> CssRule {
         let context = self.parser_context(CssRuleType::FontFace);
-        let mut input = ParserInput::new(descriptors);
-        let mut parser = Parser::new(&mut input);
+        let mut parser = Parser::new(descriptors);
         let rule =
             parse_font_face_block(&context, &mut parser, SourceLocation { line: 0, column: 0 });
         CssRule::new(

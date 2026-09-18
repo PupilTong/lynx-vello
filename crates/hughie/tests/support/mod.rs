@@ -16,8 +16,9 @@ use stylo::computed_values::{
     box_sizing, direction, flex_direction, flex_wrap, linear_direction, relative_center,
     relative_layout_once,
 };
+use stylo::typed_om::NumericBaseType;
 use stylo::values::computed::length::NonNegativeLengthPercentageOrNormal;
-use stylo::values::computed::length_percentage::{CalcNode, ComputedLeaf};
+use stylo::values::computed::length_percentage::{CalcNode, CalcPercentageLeaf, ComputedLeaf};
 use stylo::values::computed::lynx_layout::{RelativeAlign, RelativeReference};
 use stylo::values::computed::{
     AspectRatio, Au, BorderSideWidth, Contain, ContainIntrinsicSize, ContentDistribution, Display,
@@ -27,7 +28,7 @@ use stylo::values::computed::{
     SelfAlignment, Size as StyleSize,
 };
 use stylo::values::generics::position::PreferredRatio;
-use stylo::values::generics::{NonNegative, grid as generic_grid};
+use stylo::values::generics::{NonNegative, Optional, grid as generic_grid};
 use stylo::values::specified::align::AlignFlags;
 
 pub(super) fn px(value: f32) -> LengthPercentage {
@@ -43,7 +44,10 @@ pub(super) fn calc_lp(length: f32, percentage: f32) -> LengthPercentage {
         CalcNode::Sum(
             vec![
                 CalcNode::Leaf(ComputedLeaf::Length(Length::new(length))),
-                CalcNode::Leaf(ComputedLeaf::Percentage(Percentage(percentage))),
+                CalcNode::Leaf(ComputedLeaf::Percentage(CalcPercentageLeaf::new(
+                    percentage,
+                    Optional::Some(NumericBaseType::Length),
+                ))),
             ]
             .into(),
         ),
@@ -440,7 +444,7 @@ impl Default for TestStyle {
             linear_direction: linear_direction::T::Column,
             linear_weight_sum: nn(0.0),
             flex_direction: flex_direction::T::Row,
-            flex_wrap: flex_wrap::T::Nowrap,
+            flex_wrap: flex_wrap::T::NOWRAP,
             gap: Size::new(gap_normal(), gap_normal()),
             align_content: ContentDistribution::normal(),
             align_items: ItemPlacement::normal(),

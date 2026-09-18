@@ -159,7 +159,7 @@ mod tests {
         let style = Defaults;
 
         assert_eq!(style.flex_direction(), flex_direction::T::Row);
-        assert_eq!(style.flex_wrap(), flex_wrap::T::Nowrap);
+        assert_eq!(style.flex_wrap(), flex_wrap::T::NOWRAP);
         assert_eq!(style.flex_basis(), &FlexBasis::auto());
         assert_eq!(style.flex_grow().0, 0.0);
         assert_eq!(style.flex_shrink().0, 1.0);

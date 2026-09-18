@@ -62,8 +62,7 @@ fn pointer_device(capabilities: PointerCapabilities) -> Device {
 }
 
 fn media_css(query: &str) -> String {
-    let mut input = cssparser::ParserInput::new(query);
-    let mut parser = cssparser::Parser::new(&mut input);
+    let mut parser = cssparser::Parser::new(query);
     let url_data = url_data();
     let mut context = ParserContext::new(
         Origin::Author,
