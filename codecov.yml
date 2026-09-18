@@ -6,8 +6,9 @@
 # coverage is a number in the PR comment rather than a `--fail-under` in the
 # workflow, and statuses that inform without gating.
 
-# Test and benchmark source is instrumented like any other file; keep it out
-# of every metric, as the former hughie gate did with `--ignore-filename-regex`.
+# cargo-llvm-cov already leaves `tests/`, `benches/`, `*_tests.rs` and the
+# vendored stylo out of the report it uploads; this keeps that true should the
+# upload ever change, so every number here is production source only.
 ignore:
   - "**/tests/**"
   - "**/benches/**"
@@ -59,10 +60,8 @@ component_management:
       name: bobcat-cli
       paths:
         - crates/bobcat-cli/**
-    - component_id: bobcat-wasm
-      name: bobcat-wasm
-      paths:
-        - crates/bobcat-wasm/**
+    # No bobcat-wasm component: the browser embedder is wasm32-only and its
+    # tests run under wasm-pack, which reports no coverage.
     - component_id: quickjs-rust-bridge
       name: quickjs-rust-bridge
       paths:
