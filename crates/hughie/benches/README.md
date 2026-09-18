@@ -4,6 +4,7 @@ Each layout algorithm has one Cargo benchmark target and one scenario module:
 
 - `flexbox.rs` → `scenarios/flexbox.rs`
 - `grid.rs` → `scenarios/grid.rs`
+- `grid_lanes.rs` → `scenarios/grid_lanes.rs`
 - `linear.rs` → `scenarios/linear.rs`
 - `relative.rs` → `scenarios/relative.rs`
 
@@ -19,6 +20,18 @@ cost tiers: cold build+layout, retained re-break at an alternating width,
 the steady-state no-op, truncating layouts (dots, inline-truncation content,
 maxlength), the `set_box_size` measure/align round trip, and a
 thousand-style-run fragmentation case.
+
+`grid_lanes.rs` covers the two sizing paths `display: grid-lanes` can take and
+the stacking pass over them: fixed-length lanes, where no track consults its
+items and the pass materialises no per-candidate-position sizing item;
+`minmax(0, 1fr)` lanes at `flow-tolerance: 0` — the shape the Lynx
+`<list list-type="waterfall">` component lowers onto — and
+`minmax(min-content, 1fr)` lanes with overflowing items, both of which do
+materialise them; mixed spans with a full-span item every eighth, which levels
+every lane; and one dirty item in the middle of a waterfall, whose successors
+all have to be re-placed. It carries no text-bearing clones: the text path is
+already measured by the four algorithm suites, and nothing about it is
+lanes-specific.
 
 The box-layout targets also include 20 text-bearing production-host workloads:
 five clones of existing complex scenarios per algorithm. Flex clones its five

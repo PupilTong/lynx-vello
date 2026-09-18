@@ -44,7 +44,7 @@ pub mod algorithms;
 pub mod containment;
 pub mod text;
 
-pub use algorithms::{FlexboxStyle, GridStyle, LinearStyle, RelativeStyle};
+pub use algorithms::{FlexboxStyle, GridLanesStyle, GridStyle, LinearStyle, RelativeStyle};
 use containment::effective_containment;
 pub use stylo::computed_values::{
     box_sizing, direction, flex_direction, flex_wrap, linear_direction, relative_center,
@@ -54,8 +54,8 @@ pub use stylo::values::computed::length::NonNegativeLengthPercentageOrNormal;
 pub use stylo::values::computed::lynx_layout::{RelativeAlign, RelativeReference};
 pub use stylo::values::computed::{
     AspectRatio, Au, BorderSideWidth, Contain, ContainIntrinsicSize, ContentDistribution,
-    ContentVisibility, Display, FlexBasis, FontFamily, FontFeatureSettings, FontStyle,
-    FontVariationSettings, FontWeight, GridAutoFlow, GridLine, GridTemplateComponent,
+    ContentVisibility, Display, FlexBasis, FlowTolerance, FontFamily, FontFeatureSettings,
+    FontStyle, FontVariationSettings, FontWeight, GridAutoFlow, GridLine, GridTemplateComponent,
     ImplicitGridTracks, Inset, ItemPlacement, JustifyItems, LengthPercentage, LetterSpacing,
     LineHeight, Margin, MaxSize, NonNegativeLengthPercentage, NonNegativeNumber, Overflow,
     PositionProperty, SelfAlignment, Size as StyleSize, TextAlign, TextIndent, WordBreak,

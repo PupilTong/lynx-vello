@@ -90,11 +90,14 @@ pub(super) struct LayoutFixture {
 
 impl LayoutFixture {
     pub(super) fn new(viewport: Size<f32>, root_style: &str) -> Self {
+        // Each arm is the whole declaration, not a prefix of one: `grid` and
+        // `grid-lanes` are two displays whose spellings share a prefix.
         let expected_display = root_style
             .split(';')
             .find_map(|declaration| match declaration.trim() {
                 "display:flex" => Some(Display::Flex),
                 "display:grid" => Some(Display::Grid),
+                "display:grid-lanes" => Some(Display::GridLanes),
                 "display:linear" => Some(Display::Linear),
                 "display:relative" => Some(Display::LynxRelative),
                 _ => None,

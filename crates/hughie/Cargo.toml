@@ -46,6 +46,10 @@ name = "grid"
 harness = false
 
 [[bench]]
+name = "grid_lanes"
+harness = false
+
+[[bench]]
 name = "relative"
 harness = false
 

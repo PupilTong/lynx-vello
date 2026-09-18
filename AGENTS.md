@@ -52,7 +52,8 @@ cross-platform engine built on:
 
 The from-scratch layout engine (successor to the C++ engine's `starlight`) is
 `crates/hughie` — its host protocol, shared layout machinery, and CSS
-flexbox, Grid, and Starlight `display: relative` and `display: linear`
+flexbox, Grid, CSS Grid Level 3 `display: grid-lanes`, and Starlight
+`display: relative` and `display: linear`
 algorithms are implemented as first-class peers. Its concrete document/stylo
 host lives in `crates/dom`'s `layout` module
 (`Document::layout`, results queried by `NodeId` from the document); the Lynx-specific runtime
@@ -152,7 +153,7 @@ Rust parses structured input only when Rust behavior actually needs its fields
 | `crates/bobcat-cli` | The `bobcat` product (`cli`) and the `bobcat-server` screenshot service (`server`), both embedders. | [cli](#cratesbobcat-cli-cli-feature), [server](#cratesbobcat-cli-server-feature) |
 | `crates/bobcat-wasm` | The pure-Rust `wasm-bindgen` browser embedder and npm facade. | [→](#cratesbobcat-wasm) |
 | `crates/dom` | Generic W3C-DOM-subset document tree and standards-oriented CSS computation core. | [→](#cratesdom) |
-| `crates/hughie` | The from-scratch Flexbox, Grid, and Starlight Relative and Linear layout engine. | [→](#crateshughie) |
+| `crates/hughie` | The from-scratch Flexbox, Grid, grid-lanes, and Starlight Relative and Linear layout engine. | [→](#crateshughie) |
 | `crates/flashbulb` | Screenshot testing: RGBA image, PNG codec, pixelmatch port, golden store. | [→](#cratesflashbulb) |
 | `packages/bobcat-element` | Dependency-free TypeScript sources of the ESMs `bobcat-core` preloads into its realms. | [→](#packagesbobcat-element) |
 | `packages/reactlynx-test-fixtures` | ReactLynx source fixtures and bundle generators for Bobcat integration tests. | [→](#other-pnpm-packages) |
@@ -1693,8 +1694,9 @@ Everything else about the crate's internals is in `docs/dom-architecture.md`.
 
 ### crates/hughie
 
-The Flexbox, Grid, and Starlight Relative and Linear engine: trait-based
-host⇄engine integration with static dispatch only (no `dyn`), one `LayoutTree`
+The Flexbox, Grid, grid-lanes, and Starlight Relative and Linear engine:
+trait-based host⇄engine integration with static dispatch only (no `dyn`),
+one `LayoutTree`
 protocol with a `Copy + Debug` `NodeId`, immutable topology/styles for the
 flush, and a separately borrowed mutable host state of per-node `LayoutSlot`s.
 That split permits recursive mutation without copying style/layout records and
@@ -1705,7 +1707,10 @@ retired), with host-side display dispatch. They are split by algorithm:
 `CoreStyle` carries the box model, containment, the alignment accessors and
 `order`, while `FlexboxStyle`, `GridStyle`, `LinearStyle` and `RelativeStyle`
 each carry what only their own algorithm reads and are demanded at that
-algorithm's entry point. `TextContainerStyle` supplies paragraph-wide
+algorithm's entry point; `GridLanesStyle: GridStyle` is the one that extends
+another algorithm's trait rather than `CoreStyle`, adding `flow_tolerance` and
+the computed `font_size` that `flow-tolerance: normal`'s `1em` resolves
+against. `TextContainerStyle` supplies paragraph-wide
 `text_maxline` and `text_maxlength` inputs from non-inherited integer custom
 properties, defaulting to unlimited. `LayoutTree::flattened_children` is the
 box-tree view every algorithm collects items through, flattening `display:
@@ -1714,11 +1719,20 @@ the `NaturalSize` value path, text the crate's concrete
 `TextBlock::probe`/`commit` paragraph path; arbitrary host measurers are not
 supported.
 
-**Flexbox, Grid, Relative, and Linear implemented** — the shared
+**Flexbox, Grid, grid lanes, Relative, and Linear implemented** — the shared
 root/leaf/cache/positioned/rounding machinery, CSS Flexbox Level 1, numeric CSS
-Grid Level 2 (excluding subgrid/named areas), id-constrained Starlight Relative
+Grid Level 2 (excluding subgrid/named areas), CSS Grid Level 3
+`display: grid-lanes` on that Grid machinery, id-constrained Starlight Relative
 Layout Level 1, and Lynx's `display: linear` algorithm and `linear-*`
-style/source protocol are live. Text shaping, line breaking,
+style/source protocol are live. Grid lanes is a **user-directed W3C extension
+beyond Lynx parity** (2026-09-18) rather than a compat obligation — native
+Lynx has no such `display` value and no `flow-tolerance` property — and it
+excludes `inline-grid-lanes`, the orientation property and
+`grid-auto-flow: normal`,
+`dense` backfilling, intrinsic `repeat(auto-fill, auto)`, virtual-item
+grouping, stacking-axis self-alignment, baseline alignment/sharing, subgrid and
+fragmentation; do not add any of those without a user decision
+(`docs/style-assumptions.md` §24). Text shaping, line breaking,
 intrinsic/height-for-width measurement, baselines, and retained Parley layouts
 are unconditional crate behavior, in `src/text/block` — including
 `truncate.rs`, which lays an `<inline-truncation>` subtree in at the clamp and
@@ -1731,7 +1745,8 @@ the `invalidate` module (`is_relayout_boundary`, `invalidate_for_relayout`) —
 the containment-bounded, damage-driven cache-invalidation host workflow
 (single-axis / container queries out of scope). `LayoutGoal::Commit` carries
 per-axis `content_independent` flags: input *stability* under subtree content
-change, proven by the committing algorithm (flexbox, grid, linear, relative and
+change, proven by the committing algorithm (flexbox, grid, grid lanes, linear,
+relative and
 the absolute pass all set them; the root input is viewport-stable by
 construction; a measurement carries no such claim, which is why only a commit
 has the field). They ride inside the committed cache entry, outside its key, so
@@ -1793,7 +1808,10 @@ would host it:
   carries only what a UA sheet can say about `scroll-view` and `list`; there
   is no cell recycling, no scroll-to-index and no threshold events, and
   `__SetAttribute(element, "update-list-info", …)` throws rather than
-  pretending.
+  pretending. That consumer is the prerequisite for *any* list content — it is
+  the only path a compiled `<list>` receives children on — so it blocks the
+  surface regardless of layout mode, now that `display: grid-lanes` gives
+  `list-type="waterfall"` one (`docs/tracking/deviations.md`).
 - **Gesture detectors and the arena.** `crates/bobcat-core/src/paint/gesture.rs`
   has no fling or velocity, no `:active` driving, no `consume-slide-event`, no
   per-element `GestureDetector`/arena relations and no `click`; `tapSlop` is
@@ -1809,7 +1827,9 @@ would host it:
 - **The text `layout` event.** The per-line ranges `hughie`'s
   `text/block/content.rs` computes have no delivery path.
 - **`rpx`-aware view/device policy**, sticky lowering (it parses and paints as
-  normal flow but never pins), and component-specific staggered layout.
+  normal flow but never pins), and the `<list>` component surface over
+  `display: grid-lanes` (attribute→CSS mapping, the gap properties,
+  virtualization).
 - **Animated image playback.** `bobcat-resources` decodes an image's first
   frame only, with no `region-to-decode` and no `blur-radius`
   post-processing.

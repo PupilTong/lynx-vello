@@ -11,14 +11,17 @@ state, with no layout/text runtime borrow checks. The style traits speak the
 (`stylo` with the `lynx` feature is a required dependency, and its build
 script needs `python3`; the crate is no longer standalone-publishable).
 
-> **Status: Flexbox, Grid, Linear, Relative Level 1, and text measurement
-> implemented.** The
+> **Status: Flexbox, Grid, grid lanes, Linear, Relative Level 1, and text
+> measurement implemented.** The
 > protocol, shared layout machinery, leaf/absolute sizing, cache, rounding,
-> CSS Flexbox Level 1, numeric CSS Grid Level 2, Starlight `display: linear`,
+> CSS Flexbox Level 1, numeric CSS Grid Level 2, CSS Grid Level 3
+> `display: grid-lanes`, Starlight `display: linear`,
 > Starlight Relative Layout Level 1, and the concrete Parley shaping and
 > line-breaking core are implemented. Grid
 > deliberately excludes subgrid and
-> host-lowered named lines/areas. See
+> host-lowered named lines/areas; grid lanes excludes `inline-grid-lanes`,
+> `dense` backfilling, gap-adjacent self-alignment, and baseline alignment.
+> See
 > `docs/layout-architecture.md` in the repository root for the full design,
 > algorithm plans, milestones, and rationale.
 
@@ -34,9 +37,12 @@ positions, and cache slots only through the disjoint mutable state. A style
 borrow can therefore stay live across recursive layout without copying the
 style, cloning a layout record, or invoking `RefCell`/`AtomicRefCell`.
 The style side is split by algorithm: `CoreStyle` holds what every algorithm
-reads, and `FlexboxStyle`/`GridStyle`/`LinearStyle`/`RelativeStyle` hold the
+reads, and `FlexboxStyle`/`GridStyle`/`GridLanesStyle`/`LinearStyle`/
+`RelativeStyle` hold the
 properties exactly one algorithm reads, demanded by that algorithm's entry
 point (`T::Style<'tree>: GridStyle`) rather than by the `Style` GAT bound.
+`GridLanesStyle` extends `GridStyle` with `flow-tolerance` and the element's
+computed font size, which is what `flow-tolerance: normal` resolves against.
 `TextContainerStyle` supplies the paragraph's `text_maxline` and
 `text_maxlength` inputs, defaulting to unlimited. The DOM style view reads
 these from the establishing element's non-inherited integer custom properties
@@ -46,8 +52,8 @@ resolves it itself. There are deliberately no `LayoutTreeView`,
 `LayoutSession`, or `LayoutStore` layers.
 Recursion flows *through the host*: the engine calls
 `tree.compute_layout(state, child, input)`, and the host's impl dispatches each
-child to the right algorithm. Flex, Grid, and Lynx's non-CSS Linear and
-Relative modes are all first-class hughie entry points; a host can
+child to the right algorithm. Flex, Grid, grid lanes, and Lynx's non-CSS
+Linear and Relative modes are all first-class hughie entry points; a host can
 still add other container algorithms through the same dispatch seam.
 Leaf content is closed rather than extensible: replaced content enters as a
 `NaturalSize`, and the concrete Parley path accepts host-owned
