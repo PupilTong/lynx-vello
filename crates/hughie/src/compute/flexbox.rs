@@ -63,7 +63,7 @@ fn flex_axes(
     let main_base_reverse = is_row && rtl;
     let main_reverse = main_base_reverse ^ direction_is_reverse(direction);
     let cross_base_reverse = !is_row && rtl;
-    let cross_reverse = cross_base_reverse ^ (wrap == flex_wrap::T::WrapReverse);
+    let cross_reverse = cross_base_reverse ^ wrap.contains(flex_wrap::T::WRAP_REVERSE);
     FlowAxes {
         main,
         cross: main.other(),
@@ -663,7 +663,7 @@ fn collect_flex_lines<N>(
     gap: f32,
     axes: Axes,
 ) -> FlexLines {
-    if wrap == flex_wrap::T::Nowrap || available_main == AvailableSpace::MaxContent {
+    if wrap == flex_wrap::T::NOWRAP || available_main == AvailableSpace::MaxContent {
         return SmallVec::from_buf([FlexLine {
             start: 0,
             end: items.len(),
@@ -944,7 +944,7 @@ fn determine_hypothetical_cross_sizes<T>(
             .map(|offset| line.start + offset)
             .or_else(|| (!line_items.is_empty()).then_some(line.start))
     });
-    let nowrap_cross = (wrap == flex_wrap::T::Nowrap)
+    let nowrap_cross = (wrap == flex_wrap::T::NOWRAP)
         .then(|| axes.cross.size(container_inner_size))
         .flatten();
 
@@ -1069,7 +1069,7 @@ fn calculate_line_cross_sizes<N>(
     wrap: flex_wrap::T,
     known_inner_cross: Option<f32>,
 ) {
-    if wrap == flex_wrap::T::Nowrap
+    if wrap == flex_wrap::T::NOWRAP
         && let (Some(line), Some(cross_size)) = (lines.first_mut(), known_inner_cross)
     {
         line.cross_size = cross_size.max(0.0);
@@ -1136,7 +1136,7 @@ fn stretch_lines(
     inner_cross: f32,
     cross_gap: f32,
 ) {
-    if wrap == flex_wrap::T::Nowrap || align_content != AlignFlags::STRETCH || lines.is_empty() {
+    if wrap == flex_wrap::T::NOWRAP || align_content != AlignFlags::STRETCH || lines.is_empty() {
         return;
     }
     let used = lines.iter().map(|line| line.cross_size).sum::<f32>()
@@ -1267,7 +1267,7 @@ fn align_lines(
     let used = lines.iter().map(|line| line.cross_size).sum::<f32>()
         + cross_gap * lines.len().saturating_sub(1) as f32;
     let free_space = inner_cross - used;
-    let effective_alignment = if wrap == flex_wrap::T::Nowrap {
+    let effective_alignment = if wrap == flex_wrap::T::NOWRAP {
         AlignFlags::FLEX_START
     } else {
         align_content
@@ -1914,7 +1914,7 @@ where
         calculate_line_cross_sizes(&items, &mut lines, axes, flex_wrap, Some(inner_cross));
     }
     let cross_gap = axes.cross.size(gap);
-    if flex_wrap == flex_wrap::T::Nowrap
+    if flex_wrap == flex_wrap::T::NOWRAP
         && let Some(line) = lines.first_mut()
     {
         line.cross_size = inner_cross;
@@ -1925,7 +1925,7 @@ where
         &lines,
         axes,
         container_independent
-            .map(|independent| flex_wrap == flex_wrap::T::Nowrap && axes.cross.size(independent)),
+            .map(|independent| flex_wrap == flex_wrap::T::NOWRAP && axes.cross.size(independent)),
     );
     distribute_main_axis(
         &mut items,
@@ -2191,7 +2191,7 @@ mod tests {
             tree,
             state,
             node: TestRef(0),
-            axes: row_axes(flex_wrap::T::Nowrap),
+            axes: row_axes(flex_wrap::T::NOWRAP),
             known_dimensions: Size::NONE,
             definite_dimensions: Size::new(false, false),
             parent_size: Size::NONE,
@@ -2290,10 +2290,10 @@ mod tests {
     fn nowrap_line_uses_inline_storage() {
         let lines = collect_flex_lines(
             &[item(10.0, 5.0)],
-            flex_wrap::T::Nowrap,
+            flex_wrap::T::NOWRAP,
             AvailableSpace::Definite(100.0),
             0.0,
-            row_axes(flex_wrap::T::Nowrap),
+            row_axes(flex_wrap::T::NOWRAP),
         );
 
         assert!(!lines.spilled());
@@ -2326,7 +2326,7 @@ mod tests {
 
     #[test]
     fn flex_base_size_skips_unconsumed_intrinsic_probes() {
-        let axes = row_axes(flex_wrap::T::Nowrap);
+        let axes = row_axes(flex_wrap::T::NOWRAP);
         let mut items = [item(0.0, 0.0)];
         items[0].min_size.width = Some(0.0);
         let tree = TestTree;
@@ -2358,7 +2358,7 @@ mod tests {
 
     #[test]
     fn content_flex_basis_ignores_a_definite_available_main_size() {
-        let axes = row_axes(flex_wrap::T::Nowrap);
+        let axes = row_axes(flex_wrap::T::NOWRAP);
         let tree = TestTree;
 
         for available in [11.0, 37.0, 400.0] {
@@ -2400,7 +2400,7 @@ mod tests {
         items[2].max_size.height = Some(23.0);
 
         configure_measurement(22.0, Some(7.0));
-        measure_cross(&mut items, flex_wrap::T::Wrap, 50.0);
+        measure_cross(&mut items, flex_wrap::T::WRAP, 50.0);
 
         assert_eq!(TEST_MEASURE_CALLS.get(), 1);
         assert_eq!(
@@ -2416,7 +2416,7 @@ mod tests {
         fallback[0].preferred_size.height = Some(18.0);
         fallback[1].preferred_size.height = Some(19.0);
         configure_measurement(18.0, Some(6.0));
-        measure_cross(&mut fallback, flex_wrap::T::Wrap, 50.0);
+        measure_cross(&mut fallback, flex_wrap::T::WRAP, 50.0);
         assert_eq!(TEST_MEASURE_CALLS.get(), 1);
         assert_eq!(fallback[0].measured_baselines.y, Some(6.0));
         assert_eq!(fallback[1].measured_baselines, Point::NONE);
@@ -2441,7 +2441,7 @@ mod tests {
         );
 
         configure_measurement(25.0, None);
-        measure_cross(&mut items, flex_wrap::T::Wrap, 50.0);
+        measure_cross(&mut items, flex_wrap::T::WRAP, 50.0);
 
         assert_eq!(TEST_MEASURE_CALLS.get(), 3);
         assert_eq!(
@@ -2452,7 +2452,7 @@ mod tests {
 
     #[test]
     fn definite_nowrap_stretch_elides_only_overwritten_cross_probes() {
-        let axes = row_axes(flex_wrap::T::Nowrap);
+        let axes = row_axes(flex_wrap::T::NOWRAP);
         let mut items = [item(10.0, 0.0), item(10.0, 0.0), item(10.0, 0.0)];
         items[1].margin.top = 2.0;
         items[1].margin.bottom = 3.0;
@@ -2460,7 +2460,7 @@ mod tests {
         let mut lines = [test_line(3, 0.0)];
 
         configure_measurement(13.0, Some(5.0));
-        measure_cross(&mut items, flex_wrap::T::Nowrap, 40.0);
+        measure_cross(&mut items, flex_wrap::T::NOWRAP, 40.0);
 
         assert_eq!(TEST_MEASURE_CALLS.get(), 1);
         assert_eq!(
@@ -2468,7 +2468,7 @@ mod tests {
             [13.0, 30.0, 40.0]
         );
         assert_eq!(items[0].measured_baselines.y, Some(5.0));
-        calculate_line_cross_sizes(&items, &mut lines, axes, flex_wrap::T::Nowrap, Some(40.0));
+        calculate_line_cross_sizes(&items, &mut lines, axes, flex_wrap::T::NOWRAP, Some(40.0));
         determine_used_cross_sizes(&mut items, &lines, axes, Some(true));
         assert_eq!(
             items.each_ref().map(|item| item.target_cross),
@@ -2481,7 +2481,7 @@ mod tests {
         let mut items = [item(10.0, 0.0), item(20.0, 0.0)];
 
         configure_measurement(17.0, None);
-        measure_cross(&mut items, flex_wrap::T::Wrap, 40.0);
+        measure_cross(&mut items, flex_wrap::T::WRAP, 40.0);
 
         assert_eq!(TEST_MEASURE_CALLS.get(), 2);
         assert_eq!(
@@ -2540,11 +2540,11 @@ mod tests {
 
     #[test]
     fn intrinsic_line_helpers_cover_empty_min_max_and_definite_constraints() {
-        let axes = row_axes(flex_wrap::T::Wrap);
+        let axes = row_axes(flex_wrap::T::WRAP);
         assert!(
             collect_flex_lines::<TestRef>(
                 &[],
-                flex_wrap::T::Wrap,
+                flex_wrap::T::WRAP,
                 AvailableSpace::Definite(10.0),
                 0.0,
                 axes
@@ -2559,7 +2559,7 @@ mod tests {
         items[1].max_content_contribution = 24.0;
         let lines = collect_flex_lines(
             &items,
-            flex_wrap::T::Wrap,
+            flex_wrap::T::WRAP,
             AvailableSpace::MinContent,
             2.0,
             axes,
@@ -2593,8 +2593,8 @@ mod tests {
 
     #[test]
     fn baseline_and_cross_alignment_cover_auto_margin_overflow_and_reversal() {
-        let normal = row_axes(flex_wrap::T::Wrap);
-        let reversed = row_axes(flex_wrap::T::WrapReverse);
+        let normal = row_axes(flex_wrap::T::WRAP);
+        let reversed = row_axes(flex_wrap::T::WRAP_REVERSE);
         let mut baseline_items = vec![item(10.0, 20.0), item(10.0, 15.0)];
         baseline_items[0].align_self = AlignFlags::BASELINE;
         baseline_items[0].baseline = 12.0;
@@ -2615,7 +2615,7 @@ mod tests {
             &baseline_items,
             &mut lines,
             normal,
-            flex_wrap::T::Wrap,
+            flex_wrap::T::WRAP,
             None,
         );
         assert_eq!(lines[0].cross_size, 27.0);
@@ -2659,14 +2659,15 @@ mod tests {
 
     #[test]
     fn absolute_static_cross_alignment_uses_logical_start_and_end() {
-        use flex_wrap::T::{Wrap, WrapReverse};
+        let wrap = flex_wrap::T::WRAP;
+        let wrap_reverse = flex_wrap::T::WRAP_REVERSE;
 
         let origin = Point::new(5.0, 7.0);
         let end = Point::new(5.0, 47.0);
-        assert_eq!(static_cross(AlignFlags::START, Wrap), origin);
-        assert_eq!(static_cross(AlignFlags::START, WrapReverse), origin);
-        assert_eq!(static_cross(AlignFlags::END, Wrap), end);
-        assert_eq!(static_cross(AlignFlags::END, WrapReverse), end);
-        assert_eq!(static_cross(AlignFlags::FLEX_END, Wrap), end);
+        assert_eq!(static_cross(AlignFlags::START, wrap), origin);
+        assert_eq!(static_cross(AlignFlags::START, wrap_reverse), origin);
+        assert_eq!(static_cross(AlignFlags::END, wrap), end);
+        assert_eq!(static_cross(AlignFlags::END, wrap_reverse), end);
+        assert_eq!(static_cross(AlignFlags::FLEX_END, wrap), end);
     }
 }

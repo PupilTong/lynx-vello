@@ -8,7 +8,7 @@ use stylo::dom::{TElement, TNode};
 use stylo::driver;
 use stylo::shared_lock::StylesheetGuards;
 use stylo::thread_state::{self, ThreadState};
-use stylo::traversal::{DomTraversal, PerLevelTraversalData, recalc_style_at};
+use stylo::traversal::{DomTraversal, recalc_style_at};
 use stylo::traversal_flags::TraversalFlags;
 use stylo_atoms::Atom;
 
@@ -71,7 +71,6 @@ impl<'a> RecalcStyle<'a> {
 impl<'a, T: Sync> DomTraversal<&'a Node<T>> for RecalcStyle<'a> {
     fn process_preorder<F>(
         &self,
-        traversal_data: &PerLevelTraversalData,
         context: &mut StyleContext<&'a Node<T>>,
         node: &'a Node<T>,
         note_child: F,
@@ -94,14 +93,7 @@ impl<'a, T: Sync> DomTraversal<&'a Node<T>> for RecalcStyle<'a> {
         // off that queue, and each entry is popped into `process_preorder`
         // exactly once.
         let mut data = unsafe { element.ensure_data() };
-        recalc_style_at(
-            self,
-            traversal_data,
-            context,
-            element,
-            &mut data,
-            note_child,
-        );
+        recalc_style_at(self, context, element, &mut data, note_child);
     }
 
     fn process_postorder(&self, _: &mut StyleContext<&'a Node<T>>, _: &'a Node<T>) {

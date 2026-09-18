@@ -1,11 +1,10 @@
-use cssparser::{BasicParseErrorKind, ParseError, Parser, ParserInput, Token};
+use cssparser::{BasicParseErrorKind, ParseError, Parser, Token};
 
 use super::ConvertError;
 use crate::web::style_info::{ValueToken, token_types};
 
 pub(crate) fn value_tokens(source: &str) -> Result<Vec<ValueToken>, ConvertError> {
-    let mut input = ParserInput::new(source);
-    let mut parser = Parser::new(&mut input);
+    let mut parser = Parser::new(source);
     let mut tokens = Vec::new();
     tokenize_parser(&mut parser, &mut tokens, 0).map_err(|error| {
         ConvertError::UnsupportedCss(format!(
@@ -15,15 +14,15 @@ pub(crate) fn value_tokens(source: &str) -> Result<Vec<ValueToken>, ConvertError
     Ok(tokens)
 }
 
-fn tokenize_parser<'i>(
-    parser: &mut Parser<'i, '_>,
+fn tokenize_parser(
+    parser: &mut Parser<'_>,
     output: &mut Vec<ValueToken>,
     depth: usize,
-) -> Result<(), ParseError<'i, ()>> {
+) -> Result<(), ParseError<()>> {
     // Each nested cssparser block adds Rust stack frames. Bound this before
     // entering the block so source-controlled nesting cannot abort the process.
     if depth >= 64 {
-        return Err(parser.new_custom_error(()));
+        return Err(ParseError::custom(()));
     }
     loop {
         let start = parser.position();

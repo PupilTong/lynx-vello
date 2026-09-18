@@ -328,8 +328,10 @@ fn implicit_track(
 mod tests {
     use style_traits::values::specified::AllowedNumericType;
     use stylo::Zero;
-    use stylo::values::computed::length_percentage::{CalcNode, ComputedLeaf};
+    use stylo::typed_om::NumericBaseType;
+    use stylo::values::computed::length_percentage::{CalcNode, CalcPercentageLeaf, ComputedLeaf};
     use stylo::values::computed::{Integer, Percentage, TrackList, TrackSize};
+    use stylo::values::generics::Optional;
     use stylo::values::generics::grid::{Flex, TrackRepeat};
 
     use super::*;
@@ -479,7 +481,10 @@ mod tests {
         let calc = LengthPercentage::new_calc(
             CalcNode::Sum(
                 vec![
-                    CalcNode::Leaf(ComputedLeaf::Percentage(Percentage(0.1))),
+                    CalcNode::Leaf(ComputedLeaf::Percentage(CalcPercentageLeaf::new(
+                        0.1,
+                        Optional::Some(NumericBaseType::Length),
+                    ))),
                     CalcNode::Leaf(ComputedLeaf::Length(Length::new(10.0))),
                 ]
                 .into(),

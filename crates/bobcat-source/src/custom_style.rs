@@ -171,8 +171,7 @@ fn declarations(rule: &Value) -> Option<Vec<PreparsedDeclaration>> {
 }
 
 fn declaration(property: String, source: &str) -> PreparsedDeclaration {
-    let mut input = cssparser::ParserInput::new(source);
-    let mut parser = cssparser::Parser::new(&mut input);
+    let mut parser = cssparser::Parser::new(source);
     let mut end = source.len();
     let mut important = false;
     while !parser.is_exhausted() {

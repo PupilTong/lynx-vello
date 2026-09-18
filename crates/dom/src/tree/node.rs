@@ -404,7 +404,7 @@ impl<T> Node<T> {
     pub fn has_class(&self, class: &str) -> bool {
         self.classes
             .iter()
-            .any(|existing| existing.as_ref() == class)
+            .any(|existing| AsRef::<str>::as_ref(existing) == class)
     }
 
     pub fn classes(&self) -> impl ExactSizeIterator<Item = &str> {

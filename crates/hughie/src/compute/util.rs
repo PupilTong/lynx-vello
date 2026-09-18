@@ -1264,9 +1264,10 @@ mod tests {
     #![allow(clippy::float_cmp)]
 
     use style_traits::values::specified::AllowedNumericType;
+    use stylo::typed_om::NumericBaseType;
     use stylo::values::computed::Percentage;
-    use stylo::values::computed::length_percentage::{CalcNode, ComputedLeaf};
-    use stylo::values::generics::NonNegative;
+    use stylo::values::computed::length_percentage::{CalcNode, CalcPercentageLeaf, ComputedLeaf};
+    use stylo::values::generics::{NonNegative, Optional};
 
     use super::*;
 
@@ -1289,7 +1290,10 @@ mod tests {
         let mixed_calc = LengthPercentage::new_calc(
             CalcNode::Sum(
                 vec![
-                    CalcNode::Leaf(ComputedLeaf::Percentage(Percentage(0.5))),
+                    CalcNode::Leaf(ComputedLeaf::Percentage(CalcPercentageLeaf::new(
+                        0.5,
+                        Optional::Some(NumericBaseType::Length),
+                    ))),
                     CalcNode::Leaf(ComputedLeaf::Length(Length::new(4.0))),
                 ]
                 .into(),
@@ -1328,7 +1332,10 @@ mod tests {
         let clamped_calc = LengthPercentage::new_calc(
             CalcNode::Sum(
                 vec![
-                    CalcNode::Leaf(ComputedLeaf::Percentage(Percentage(0.25))),
+                    CalcNode::Leaf(ComputedLeaf::Percentage(CalcPercentageLeaf::new(
+                        0.25,
+                        Optional::Some(NumericBaseType::Length),
+                    ))),
                     CalcNode::Leaf(ComputedLeaf::Length(Length::new(-8.0))),
                 ]
                 .into(),

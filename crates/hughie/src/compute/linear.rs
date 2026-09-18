@@ -1619,11 +1619,12 @@ where
 mod tests {
     use style_traits::values::specified::AllowedNumericType;
     use stylo::Zero;
-    use stylo::values::computed::length_percentage::{CalcNode, ComputedLeaf};
+    use stylo::typed_om::NumericBaseType;
+    use stylo::values::computed::length_percentage::{CalcNode, CalcPercentageLeaf, ComputedLeaf};
     use stylo::values::computed::{
         Display, Length, MaxSize, NonNegativeLengthPercentage, Percentage, Size as StyleSize,
     };
-    use stylo::values::generics::NonNegative;
+    use stylo::values::generics::{NonNegative, Optional};
 
     use super::*;
 
@@ -1705,7 +1706,10 @@ mod tests {
         let mixed_calc = LengthPercentage::new_calc(
             CalcNode::Sum(
                 vec![
-                    CalcNode::Leaf(ComputedLeaf::Percentage(Percentage(0.5))),
+                    CalcNode::Leaf(ComputedLeaf::Percentage(CalcPercentageLeaf::new(
+                        0.5,
+                        Optional::Some(NumericBaseType::Length),
+                    ))),
                     CalcNode::Leaf(ComputedLeaf::Length(Length::new(10.0))),
                 ]
                 .into(),

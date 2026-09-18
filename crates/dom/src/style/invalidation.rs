@@ -598,22 +598,34 @@ impl<T> Document<T> {
         insert_restyle_hint(node, RestyleHint::RESTYLE_STYLE_ATTRIBUTE);
     }
 
+    /// Notes an attribute change this element's own style reads through
+    /// `attr()`.
+    ///
+    /// Stylo resolves `attr()` while cascading, not while laying out: the
+    /// attribute's text is substituted into the declaration and the computed
+    /// value carries the result, so a changed attribute needs the element
+    /// cascaded again before layout can see it. `attribute_references` is the
+    /// set of names the last cascade actually queried, which is the exact
+    /// dependency set — an attribute no declaration reads costs nothing here.
+    ///
+    /// The recascade is requested directly rather than through a snapshot: a
+    /// snapshot drives selector re-matching, and an `attr()` reference moves
+    /// no selector. That also means the ancestors have to be marked here,
+    /// because an attribute that no *rule* selects on never reaches
+    /// [`Self::note_attribute_change`]'s snapshot path.
     fn note_generated_attribute_change(&mut self, id: NodeId, name: &LocalName) {
-        use stylo::values::computed::{Content, ContentItem};
         let depends = self
             .live_element(id)
             .layout_computed_style()
             .is_some_and(|style| {
-                let Content::Items(content) = &style.get_counters().content else {
-                    return false;
-                };
-                content.items[..content.alt_start].iter().any(|item| {
-                    matches!(item,
-                ContentItem::Attr(attr) if attr.namespace_url.is_empty()
-                    && attr.attribute.as_ref() == name.as_ref())
-                })
+                style
+                    .attribute_references
+                    .as_ref()
+                    .is_some_and(|references| references.contains_key(name))
             });
         if depends {
+            insert_restyle_hint(self.live_node_mut(id), RestyleHint::RECASCADE_SELF);
+            self.mark_ancestors_dirty_descendants(id);
             self.invalidate_layout(id);
         }
     }
