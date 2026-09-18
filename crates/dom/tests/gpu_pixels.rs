@@ -617,6 +617,48 @@ fn a_white_blurred_square_over_white_grows_no_halo() {
     }
 }
 
+/// A sigma small enough to need no decimation blurs correctly.
+///
+/// That is its own code path, and the one place a texture is both read and
+/// written inside one bake: with no pyramid the horizontal half-pass writes
+/// back into the bake target, which the premultiply pass consumed. A missing
+/// barrier or an aliasing mistake there shows up as a smeared or doubled
+/// profile, so the same monotone-and-symmetric assertions apply.
+#[test]
+fn an_undecimated_blur_reuses_the_bake_target_correctly() {
+    let mut gpu = headless("an_undecimated_blur_reuses_the_bake_target_correctly");
+    // Sigma 2 is exactly the largest the kernel covers, so this bakes at
+    // level 0 and allocates no pong at all.
+    let mut doc = blur_page(128.0, 48.0, "filter: blur(2px);");
+    let pixels = render_filtered(&mut gpu, &mut doc, 128);
+
+    assert!(
+        luma(&pixels, 128, 64, 64) < 8,
+        "the centre keeps the fill ({})",
+        luma(&pixels, 128, 64, 64),
+    );
+    // The right border is x = 88.0, so 87 and 88 are the symmetric pair.
+    for distance in 0..=5_u32 {
+        let inside = luma(&pixels, 128, 87 - distance, 64);
+        let outside = luma(&pixels, 128, 88 + distance, 64);
+        assert!(
+            (inside + outside - 255).abs() <= 6,
+            "the profile is symmetric about the border at {distance} px \
+             ({inside} inside, {outside} outside)",
+        );
+    }
+    assert!(
+        luma(&pixels, 128, 90, 64) < 250,
+        "ink reaches past the border box ({})",
+        luma(&pixels, 128, 90, 64),
+    );
+    assert!(
+        luma(&pixels, 128, 97, 64) >= 254,
+        "and effectively none past 4 sigma ({})",
+        luma(&pixels, 128, 97, 64),
+    );
+}
+
 /// A sigma large enough to force decimation still centres on the box and
 /// stays symmetric — the box downsample and the tent upsample have to agree
 /// about where the pixel grid is, or the result slides by half a level.

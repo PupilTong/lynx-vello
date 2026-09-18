@@ -1663,7 +1663,10 @@ Subsystems:
 - `input/` and `event/` — the `InputEvent` host seam and
   `Document::event_steps`, which computes a path and dispatches nothing.
 - `render/` — the DOM-free floor absorbed from the former `pulsar` crate
-  (2026-08-04): `FrameImages` and the `render::gpu` wgpu backend.
+  (2026-08-04): `FrameImages` and the `render::gpu` wgpu backend. `render::blur`
+  is the one exception: a `filter: blur()` bake is a partial replay of a
+  committed frame's compose program, so it reads `CommittedFrame`'s filter side
+  table, while still naming no node, style, layout or paint-order type.
 
 Rulings and limits to know before touching it:
 

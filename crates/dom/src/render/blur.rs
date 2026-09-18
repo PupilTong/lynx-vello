@@ -51,8 +51,10 @@
 //!    account for it: `V = (V − 0.917) / 4`. The 0.917 is the variance the resample pair itself
 //!    contributes in source px² — 0.25 for the box downsample plus 0.667 for the bilinear tent that
 //!    brings it back up.
-//! 4. **Blur.** One separable gaussian at `σ_k` = √V ≤ 2, radius `ceil(3σ_k)` ≤ 6, horizontal
-//!    vertical, each half-pass ≤ 7 texture fetches thanks to the linear-sampling pair trick.
+//! 4. **Blur.** One separable gaussian at `σ_k` = √V ≤ 2, radius `ceil(3σ_k)` ≤ 6, horizontal then
+//!    vertical, each half-pass ≤ 7 texture fetches thanks to the linear-sampling pair trick. The
+//!    horizontal pass writes into the deepest level's `pong`, or — with no decimation, where the
+//!    bake target has already been consumed — straight back into the bake target.
 //! 5. **Interpolate back.** 2× bilinear upsamples to level 0. The last one writes the output
 //!    texture.
 //!
@@ -68,10 +70,13 @@
 //! over a frame's groups, consumed in program order. A group past the cap
 //! gets no texture, and the compose program's documented fallback takes over:
 //! its ops replay raw and that group renders **unblurred** rather than not at
-//! all. One admitted group costs about four RGBA8 textures of its own area
-//! (vello's bake target, the premultiplied level 0, the ⅓-area pyramid, and
-//! the output), so the area cap bounds a frame's filter memory at roughly
-//! four times `MAX_FILTER_AREA` in bytes times four.
+//! all. One admitted group costs three RGBA8 textures of its own area — vello's
+//! bake target, the premultiplied level 0, and the output — plus, when it
+//! decimates, the under-⅓-area pyramid and one plane at the deepest level; see
+//! `Bank`. At four bytes a pixel and at most four full-res planes' worth per
+//! group, the cap therefore bounds a frame's whole filter memory at about
+//! 256 MiB — a number only a pathological page approaches, and in practice
+//! vello's 8192² atlas binds first.
 
 use euclid::default::Vector2D;
 use vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
@@ -103,9 +108,17 @@ const RESAMPLE_VARIANCE: f64 = 0.917;
 /// which is exactly the largest σ the ≤ 7-tap kernel covers to 3σ.
 const DECIMATE_ABOVE: f64 = 4.0;
 
-/// Decimation levels a bake may take. Eight levels divide σ by 256, which is
-/// past any σ a 8192-px bake rect can hold.
-const MAX_LEVELS: u32 = 8;
+/// Decimation levels a bake may take.
+///
+/// This is a guard, not the stop that normally fires: the size floor in
+/// [`decimate`] halts a `MAX_FILTER_DIMENSION`-wide rect after 12 levels
+/// anyway (8192 halves to 2 in twelve steps). It has to be at least that
+/// large to be inert, because the largest σ a bake rect can carry is the one
+/// whose own 6σ extent fills it — σ ≈ 8192/6 ≈ 1365 — and twelve levels
+/// divide that by 4096, comfortably inside the kernel's σ ≤ 2 reach. A
+/// smaller ceiling would leave σ in the hundreds capped at the kernel's
+/// radius and silently under-blurred.
+const MAX_LEVELS: u32 = 12;
 
 /// Symmetric taps one separable half-pass may use, the first being the
 /// centre: radius 6 as three linear-sampled pairs.
@@ -327,18 +340,33 @@ impl Plane {
 
 /// Every texture one filter group's bake needs, and the handle its result is
 /// drawn through.
+///
+/// Three planes are always full-res — `target`, `levels[0]` and `output` —
+/// and the rest depends on how far the bake decimates:
+///
+/// - **No decimation** (`sigma_device` <= 2): those three and nothing else. `pong` stays `None`,
+///   because the horizontal half-pass writes into `target`, which the premultiply pass has already
+///   consumed.
+/// - **`n` levels**: plus `levels[1..=n]`, whose areas are a geometric quarter-series summing to
+///   under a third of full-res, plus one `pong` at level `n`'s size.
+///
+/// So an admitted group costs between three and roughly four full-res RGBA8
+/// textures of its own area, which is what [`MAX_FILTER_AREA`] is sized
+/// against.
 struct Bank {
     width: u32,
     height: u32,
     /// vello's own render target. Also the horizontal half-pass's
     /// destination when the bake takes no decimation level, which is sound
-    /// because the premultiply pass has already consumed it by then.
+    /// because the premultiply pass has already consumed it by then — and is
+    /// why an undecimated bake allocates no `pong`.
     target: Plane,
     /// The decimation pyramid, index 0 being the premultiplied full-res
     /// level. Grown to whatever depth a bake asks for and kept.
     levels: Vec<Plane>,
-    /// The second half of the separable pair at the level the blur happens
-    /// at, reallocated when that level moves.
+    /// The second half of the separable pair, at the deepest level's size.
+    /// `None` until a decimated bake needs one, and reallocated when that
+    /// level moves.
     pong: Option<Plane>,
     output: Plane,
     handle: ImageData,
@@ -811,8 +839,13 @@ impl FilterTextures {
 
             let plan = decimate(f64::from(group.sigma), width, height);
             bank.ensure_levels(device, plan.levels);
-            let (deep_w, deep_h) = level_size(width, height, plan.levels);
-            bank.ensure_pong(device, deep_w, deep_h);
+            // Only a decimated bake needs a second plane for the separable
+            // pair; at level 0 the bake target is free again and serves. See
+            // `run_chain`.
+            if plan.levels > 0 {
+                let (deep_w, deep_h) = level_size(width, height, plan.levels);
+                bank.ensure_pong(device, deep_w, deep_h);
+            }
 
             let mut passes = Passes {
                 device,
@@ -857,25 +890,30 @@ fn run_chain(passes: &mut Passes<'_>, bank: &Bank, plan: &Decimation) {
     }
     let deepest = &levels[plan.levels as usize];
     let kernel = kernel(plan.sigma);
-    // With no decimation the bake target is free again — the premultiply pass
-    // already read it — so it serves as the horizontal half-pass's
-    // destination and no extra full-res texture exists.
-    let pong = bank
-        .pong
-        .as_ref()
-        .filter(|plane| plane.width == deepest.width && plane.height == deepest.height)
-        .map_or(&bank.target, |plane| plane);
+    // The horizontal half-pass needs somewhere to put its result that is not
+    // its own source. A decimated bake uses `pong`, allocated at the deepest
+    // level's size; an undecimated one uses the *bake target*, which the
+    // premultiply pass has already read and which is full-res by
+    // construction — so no full-res plane is allocated for it.
+    let (pong, vertical_target) = if plan.levels == 0 {
+        (&bank.target, &bank.output)
+    } else {
+        let pong = bank
+            .pong
+            .as_ref()
+            .expect("a decimated bake ensures its pong before running the chain");
+        debug_assert!(
+            pong.width == deepest.width && pong.height == deepest.height,
+            "the pong is ensured at the deepest level's size",
+        );
+        (pong, deepest)
+    };
     passes.run(
         Stage::Gaussian,
         &deepest.view,
         &pong.view,
         &Params::plain(deepest.width, deepest.height).with_kernel(&kernel, false),
     );
-    let vertical_target = if plan.levels == 0 {
-        &bank.output
-    } else {
-        deepest
-    };
     passes.run(
         Stage::Gaussian,
         &pong.view,
@@ -926,7 +964,10 @@ fn ensure_bank<'bank>(
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use super::{DECIMATE_ABOVE, MAX_TAPS, Params, decimate, kernel, level_size};
+    use super::{
+        DECIMATE_ABOVE, MAX_FILTER_DIMENSION, MAX_LEVELS, MAX_TAPS, Params, decimate, kernel,
+        level_size,
+    };
 
     /// A kernel is a probability distribution: the centre plus twice every
     /// symmetric tap has to be one, or the blur changes the image's total
@@ -973,7 +1014,7 @@ mod tests {
     /// and each level accounts for the resample pair's own variance.
     #[test]
     fn decimation_stops_at_a_kernel_sized_sigma() {
-        for sigma in [1.0_f64, 2.0, 4.0, 16.0, 64.0, 400.0] {
+        for sigma in [1.0_f64, 2.0, 4.0, 16.0, 64.0, 400.0, 1365.0] {
             let plan = decimate(sigma, 4096, 4096);
             assert!(
                 plan.sigma * plan.sigma <= DECIMATE_ABOVE + 1e-9,
@@ -994,6 +1035,25 @@ mod tests {
             decimate(1.0, 64, 64).levels,
             0,
             "a small sigma decimates none"
+        );
+    }
+
+    /// The largest sigma a bake rect can carry — the one whose own 6 sigma
+    /// extent fills `MAX_FILTER_DIMENSION` — still decimates into the
+    /// kernel's reach rather than stopping at `MAX_LEVELS` and under-blurring.
+    #[test]
+    fn the_largest_bakeable_sigma_still_reaches_the_kernel() {
+        let plan = decimate(1365.0, MAX_FILTER_DIMENSION, MAX_FILTER_DIMENSION);
+        assert!(
+            plan.levels < MAX_LEVELS,
+            "the size floor, not the level ceiling, is what stops this bake \
+             (stopped at {})",
+            plan.levels,
+        );
+        assert!(
+            plan.sigma <= 2.0,
+            "sigma 1365 must decimate to within the kernel's reach, got {}",
+            plan.sigma,
         );
     }
 
