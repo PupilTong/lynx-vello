@@ -35,6 +35,7 @@ pub use stylo;
 pub use stylo_dom::ElementState;
 pub use vello;
 
+pub use crate::paint::compose::FilterGroup;
 pub use crate::render::image::{
     FrameImages, ImageEvent, ImageInbox, ImageReports, ImageSizeHint, MAX_RENDERABLE_DIMENSION,
     NoImages, is_renderable,

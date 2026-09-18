@@ -17,7 +17,18 @@
 //!
 //! Translation per chain is the sum of the chain's slot offsets, each
 //! snapped to the device pixel grid so composed edges stay crisp.
+//!
+//! One op pair is not a layer-stack operation: [`ComposeOp::PushFilter`] and
+//! [`ComposeOp::PopFilter`] bracket the ops of a `filter: blur()` group. The
+//! program carries both the bracket and the ops inside it, so the same
+//! program serves two purposes — replayed with a baked texture for the group
+//! the bracket is replaced by one `draw_image` and the range is skipped, and
+//! replayed without one (no GPU, or a group over the memory budget) the range
+//! plays raw and the frame simply is not blurred. The bake itself replays
+//! that range into an offscreen scene; see
+//! [`crate::CommittedFrame::bake_filter`].
 
+use std::ops::Range;
 use std::sync::Arc;
 
 use euclid::default::Vector2D;
@@ -26,7 +37,9 @@ use crate::paint::shape::{BoxShape, with_shape};
 use crate::render::image::{ImageSizeHint, is_renderable};
 use crate::vello::Scene;
 use crate::vello::kurbo::{Affine, Point, Rect, Size};
-use crate::vello::peniko::{BlendMode, BrushRef, Fill, ImageBrush, ImageData, ImageSampler};
+use crate::vello::peniko::{
+    BlendMode, BrushRef, Extend, Fill, ImageBrush, ImageData, ImageQuality, ImageSampler,
+};
 use crate::visual::{AnimationSample, ScrollSlot};
 
 /// The compose-time coordinate context one op or fragment rides: the scroll
@@ -214,6 +227,89 @@ pub(crate) enum ComposeOp {
         index: u32,
         chain: ComposeChain,
     },
+    /// Open `filter_groups[index]`: draw its baked texture and skip to
+    /// `ops.end` if the composer supplied one, otherwise replay the range.
+    PushFilter {
+        index: u32,
+    },
+    /// Close the innermost open filter group. A no-op on replay — the bracket
+    /// exists so the group's op range is a fact about the program rather than
+    /// something a consumer has to rediscover.
+    PopFilter,
+}
+
+impl ComposeOp {
+    /// The scroll/animation chain this op's own geometry rides, where it has
+    /// one. `Pop` and `PopFilter` carry none: they close whatever the
+    /// matching push opened.
+    fn chain(&self, groups: &[FilterGroup]) -> Option<ComposeChain> {
+        match self {
+            Self::Fragment { chain, .. } | Self::Push { chain, .. } | Self::Image { chain, .. } => {
+                Some(*chain)
+            }
+            Self::PushFilter { index } => Some(groups[*index as usize].chain),
+            Self::Pop | Self::PopFilter => None,
+        }
+    }
+}
+
+/// One `filter: blur()` group: the ops whose composed pixels are baked
+/// offscreen, blurred, and drawn back as one image.
+///
+/// Everything here is decided at commit time on the document's thread, in
+/// device pixels, and carries no GPU resource: a frame stays `Send + Sync`
+/// and device-free. `rect` already includes the 3σ ink margin and is
+/// integer-valued, so the bake's own render target size is `rect`'s and the
+/// texture composes at an integer offset — which is why nearest sampling
+/// reproduces it exactly on an unanimated chain.
+#[derive(Debug)]
+pub struct FilterGroup {
+    /// The blur's standard deviation, in device px.
+    pub sigma: f32,
+    /// The device-px region baked, integer-valued, 3σ larger than the
+    /// group's own bounds on every side.
+    pub rect: Rect,
+    /// The chain the *texture* composes under. Content inside the group may
+    /// ride inner scroll chains; see [`Self::inner_chains`].
+    pub(crate) chain: ComposeChain,
+    /// The ops strictly between this group's `PushFilter` and its
+    /// `PopFilter`, as indices into the program.
+    pub(crate) ops: Range<u32>,
+    /// Whether some op in `ops` rides a scroll chain other than `chain` —
+    /// the one condition under which the bake's pixels depend on a scroll
+    /// offset, and therefore the one condition under which a scroll
+    /// invalidates the bake.
+    pub(crate) inner_chains: bool,
+    /// The group this one nests inside, so the assembly needs no open-filter
+    /// stack of its own.
+    pub(crate) parent: Option<u32>,
+}
+
+impl FilterGroup {
+    /// A group over `rect` at `sigma`, before the assembly brackets it.
+    pub(crate) fn new(sigma: f32, rect: Rect, chain: ComposeChain) -> Self {
+        Self {
+            sigma,
+            rect,
+            chain,
+            ops: 0..0,
+            inner_chains: false,
+            parent: None,
+        }
+    }
+
+    /// The bake target's device-pixel size.
+    #[must_use]
+    pub fn size(&self) -> (u32, u32) {
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "the walker records only finite, positive, integer-valued rects"
+        )]
+        {
+            (self.rect.width() as u32, self.rect.height() as u32)
+        }
+    }
 }
 
 /// The compose sink the walker fills: fragments plus the program over them.
@@ -222,8 +318,12 @@ pub(crate) struct ComposeAssembly {
     pub(crate) fragments: Vec<Scene>,
     pub(crate) program: Vec<ComposeOp>,
     pub(crate) image_draws: Vec<ImageDraw>,
+    pub(crate) filter_groups: Vec<FilterGroup>,
     /// The chain of the currently open fragment, if one is open.
     current: Option<ComposeChain>,
+    /// The innermost open filter group; its own `parent` is the rest of the
+    /// stack, so nesting costs no allocation.
+    open_filter: Option<u32>,
     /// Emptied scenes to encode the next fragments into.
     pool: Vec<Scene>,
 }
@@ -246,17 +346,23 @@ impl ComposeAssembly {
         fragments: Vec<Scene>,
         program: Vec<ComposeOp>,
         image_draws: Vec<ImageDraw>,
+        filter_groups: Vec<FilterGroup>,
         pool: Vec<Scene>,
     ) -> Self {
         debug_assert!(
-            fragments.is_empty() && program.is_empty() && image_draws.is_empty(),
+            fragments.is_empty()
+                && program.is_empty()
+                && image_draws.is_empty()
+                && filter_groups.is_empty(),
             "recycled containers are emptied before they are handed back",
         );
         Self {
             fragments,
             program,
             image_draws,
+            filter_groups,
             current: None,
+            open_filter: None,
             pool,
         }
     }
@@ -323,12 +429,71 @@ impl ComposeAssembly {
         self.program.push(ComposeOp::Fragment { index, chain });
     }
 
-    /// Finishes the assembly, returning fragments, program, and the unused
-    /// pool.
-    pub(crate) fn finish(mut self) -> (Vec<Scene>, Vec<ComposeOp>, Vec<ImageDraw>, Vec<Scene>) {
+    /// Opens a filter group: seals the open fragment, records the bracket,
+    /// and answers the group's index in the side table.
+    pub(crate) fn push_filter(&mut self, mut group: FilterGroup) -> u32 {
         self.seal_fragment();
-        (self.fragments, self.program, self.image_draws, self.pool)
+        let index =
+            u32::try_from(self.filter_groups.len()).expect("a frame cannot hold 2^32 filters");
+        // The op right after the `PushFilter` this is about to record.
+        let start =
+            u32::try_from(self.program.len() + 1).expect("a frame cannot hold 2^32 program ops");
+        group.parent = self.open_filter;
+        group.ops = start..start;
+        self.filter_groups.push(group);
+        self.program.push(ComposeOp::PushFilter { index });
+        self.open_filter = Some(index);
+        index
     }
+
+    /// Closes the innermost open filter group, completing its op range and
+    /// deciding whether anything inside it rides another scroll chain.
+    pub(crate) fn pop_filter(&mut self) {
+        self.seal_fragment();
+        let Some(index) = self.open_filter else {
+            debug_assert!(false, "pop_filter is only called with an open filter group");
+            return;
+        };
+        let end = u32::try_from(self.program.len()).expect("a frame cannot hold 2^32 program ops");
+        let (chain, parent, start) = {
+            let group = &mut self.filter_groups[index as usize];
+            group.ops.end = end;
+            (group.chain, group.parent, group.ops.start)
+        };
+        let inner = self.program[start as usize..end as usize].iter().any(|op| {
+            op.chain(&self.filter_groups)
+                .is_some_and(|op| op.scroll != chain.scroll)
+        });
+        self.filter_groups[index as usize].inner_chains = inner;
+        self.open_filter = parent;
+        self.program.push(ComposeOp::PopFilter);
+    }
+
+    /// Finishes the assembly, returning fragments, program, the two side
+    /// tables, and the unused pool.
+    pub(crate) fn finish(mut self) -> Finished {
+        self.seal_fragment();
+        debug_assert!(
+            self.open_filter.is_none(),
+            "every filter group the walk opened is closed before the frame is sealed",
+        );
+        Finished {
+            fragments: self.fragments,
+            program: self.program,
+            image_draws: self.image_draws,
+            filter_groups: self.filter_groups,
+            pool: self.pool,
+        }
+    }
+}
+
+/// What one sealed assembly hands back.
+pub(crate) struct Finished {
+    pub(crate) fragments: Vec<Scene>,
+    pub(crate) program: Vec<ComposeOp>,
+    pub(crate) image_draws: Vec<ImageDraw>,
+    pub(crate) filter_groups: Vec<FilterGroup>,
+    pub(crate) pool: Vec<Scene>,
 }
 
 /// One chain's full compose transform in CSS px: the animation chain's
@@ -403,7 +568,7 @@ pub(crate) fn snap_offset(offset: Vector2D<f32>, ratio: f32) -> Vector2D<f32> {
 /// genuinely redundant rather than wrong.
 #[expect(
     clippy::too_many_arguments,
-    reason = "one replay's full inputs: the program, its two side tables, and the transforms"
+    reason = "one replay's full inputs: the program, its three side tables, and the transforms"
 )]
 pub(crate) fn replay(
     scene: &mut Scene,
@@ -411,24 +576,101 @@ pub(crate) fn replay(
     program: &[ComposeOp],
     image_draws: &[ImageDraw],
     images: &[Option<ImageData>],
+    filter_groups: &[FilterGroup],
+    filtered: &[Option<ImageData>],
     slots: &[ScrollSlot],
     samples: &[AnimationSample],
     ratio: f32,
     offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
 ) {
+    let transform = device_transform(slots, samples, ratio, offset_of);
+    replay_ops(
+        scene,
+        Tables {
+            fragments,
+            program,
+            image_draws,
+            images,
+            filter_groups,
+            filtered,
+            samples,
+        },
+        0..program.len(),
+        &transform,
+    );
+}
+
+/// One chain's full compose transform in *device* px: the CSS-px chain
+/// transform conjugated by the device scale.
+pub(crate) fn device_transform<'a>(
+    slots: &'a [ScrollSlot],
+    samples: &'a [AnimationSample],
+    ratio: f32,
+    offset_of: &'a dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
+) -> impl Fn(ComposeChain) -> Affine + 'a {
     let scale = f64::from(ratio);
-    let device_transform = |chain: ComposeChain| {
+    move |chain| {
         let css = chain_transform(slots, samples, chain, ratio, offset_of);
         if scale.is_finite() && scale > 0.0 {
             Affine::scale(scale) * css * Affine::scale(1.0 / scale)
         } else {
             css
         }
-    };
-    for op in program {
-        match op {
-            ComposeOp::Fragment { index, chain } => {
-                scene.append(&fragments[*index as usize], Some(device_transform(*chain)));
+    }
+}
+
+/// Everything one replay reads besides the transform and the op range: the
+/// program and every side table it indexes.
+#[derive(Clone, Copy)]
+pub(crate) struct Tables<'a> {
+    pub(crate) fragments: &'a [Scene],
+    pub(crate) program: &'a [ComposeOp],
+    pub(crate) image_draws: &'a [ImageDraw],
+    pub(crate) images: &'a [Option<ImageData>],
+    pub(crate) filter_groups: &'a [FilterGroup],
+    /// One entry per [`Tables::filter_groups`] entry: the baked texture for
+    /// that group, or `None` for the unblurred fallback.
+    pub(crate) filtered: &'a [Option<ImageData>],
+    pub(crate) samples: &'a [AnimationSample],
+}
+
+/// Replays one contiguous slice of the program.
+///
+/// `device_transform` maps a chain to the device-px transform its content
+/// composes under. A whole-frame replay passes the chain transform itself; a
+/// bake passes the same thing conjugated into the bake target's own origin
+/// and chain, which is how one program serves both.
+///
+/// A `PushFilter` whose group has a baked texture draws that texture and
+/// skips the group's ops; one without replays them raw — the documented
+/// unblurred fallback.
+pub(crate) fn replay_ops(
+    scene: &mut Scene,
+    tables: Tables<'_>,
+    ops: Range<usize>,
+    device_transform: &dyn Fn(ComposeChain) -> Affine,
+) {
+    let Tables {
+        fragments,
+        program,
+        image_draws,
+        images,
+        filter_groups,
+        filtered,
+        samples,
+    } = tables;
+    let end = ops.end.min(program.len());
+    let mut index = ops.start.min(end);
+    while index < end {
+        match &program[index] {
+            ComposeOp::Fragment {
+                index: fragment,
+                chain,
+            } => {
+                scene.append(
+                    &fragments[*fragment as usize],
+                    Some(device_transform(*chain)),
+                );
             }
             ComposeOp::Push {
                 clip_only,
@@ -460,10 +702,294 @@ pub(crate) fn replay(
                     }
                 }
             }
-            ComposeOp::Image { index, chain } => {
-                encode_draw(scene, image_draws, images, *index, device_transform(*chain));
+            ComposeOp::Image { index: draw, chain } => {
+                encode_draw(scene, image_draws, images, *draw, device_transform(*chain));
             }
             ComposeOp::Pop => scene.pop_layer(),
+            ComposeOp::PushFilter { index: group } => {
+                let group_index = *group as usize;
+                let group = &filter_groups[group_index];
+                if let Some(Some(image)) = filtered.get(group_index) {
+                    // The texture is the group's own pixels already blurred,
+                    // in device px at `rect`'s origin; only the group's own
+                    // chain is left to apply. `Extend::Pad` never fires — the
+                    // draw covers exactly the image — and nearest sampling
+                    // reproduces the texture byte for byte at the integer
+                    // offsets a scroll chain snaps to. An animation chain can
+                    // land it anywhere, so that case samples bilinearly.
+                    let quality = if group.chain.animation.is_none() {
+                        ImageQuality::Low
+                    } else {
+                        ImageQuality::Medium
+                    };
+                    scene.draw_image(
+                        ImageBrush {
+                            image,
+                            sampler: ImageSampler {
+                                x_extend: Extend::Pad,
+                                y_extend: Extend::Pad,
+                                quality,
+                                alpha: 1.0,
+                            },
+                        },
+                        device_transform(group.chain)
+                            * Affine::translate((group.rect.x0, group.rect.y0)),
+                    );
+                    // Straight to the matching `PopFilter`, which is a no-op.
+                    index = group.ops.end as usize;
+                    continue;
+                }
+            }
+            ComposeOp::PopFilter => {}
         }
+        index += 1;
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+    use crate::vello::peniko::{Compose, Mix};
+
+    fn assembly() -> ComposeAssembly {
+        ComposeAssembly::with_storage(Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())
+    }
+
+    /// A clip push on `chain` — the cheapest op that carries one.
+    fn push(chain: ComposeChain) -> ComposeOp {
+        ComposeOp::Push {
+            clip_only: true,
+            fill: Fill::NonZero,
+            blend: BlendMode::new(Mix::Normal, Compose::SrcOver),
+            alpha: 1.0,
+            transform: Affine::IDENTITY,
+            shape: CapturedShape::Rect(Rect::ZERO),
+            chain,
+            alpha_animation: None,
+        }
+    }
+
+    fn group(chain: ComposeChain) -> FilterGroup {
+        FilterGroup::new(2.0, Rect::new(0.0, 0.0, 8.0, 8.0), chain)
+    }
+
+    fn scrolled(slot: u32) -> ComposeChain {
+        ComposeChain {
+            scroll: Some(slot),
+            animation: None,
+        }
+    }
+
+    /// Nested brackets pair up, and each group's range is exactly the ops
+    /// strictly between its own pair.
+    #[test]
+    fn nested_filter_brackets_pair_and_bound_their_own_ops() {
+        let mut assembly = assembly();
+        let outer = assembly.push_filter(group(ComposeChain::default()));
+        assembly.push_op(push(ComposeChain::default()));
+        let inner = assembly.push_filter(group(ComposeChain::default()));
+        assembly.push_op(push(ComposeChain::default()));
+        assembly.pop_filter();
+        assembly.pop_filter();
+        let finished = assembly.finish();
+
+        assert_eq!((outer, inner), (0, 1), "groups are numbered in push order");
+        assert_eq!(
+            finished.program.len(),
+            6,
+            "PushFilter, Push, PushFilter, Push, PopFilter, PopFilter",
+        );
+        assert!(matches!(
+            finished.program[0],
+            ComposeOp::PushFilter { index: 0 }
+        ));
+        assert!(matches!(
+            finished.program[2],
+            ComposeOp::PushFilter { index: 1 }
+        ));
+        assert!(matches!(finished.program[4], ComposeOp::PopFilter));
+        assert!(matches!(finished.program[5], ComposeOp::PopFilter));
+        assert_eq!(finished.filter_groups[0].ops, 1..5, "the outer range");
+        assert_eq!(finished.filter_groups[1].ops, 3..4, "the inner range");
+        assert_eq!(finished.filter_groups[1].parent, Some(0));
+        assert_eq!(finished.filter_groups[0].parent, None);
+        assert!(
+            finished.filter_groups[1].ops.end < finished.filter_groups[0].ops.end,
+            "bake order is increasing range end, so the inner group bakes first",
+        );
+    }
+
+    /// `inner_chains` is exactly "some op in the range rides another scroll
+    /// chain" — the one condition that makes a bake depend on a scroll
+    /// offset.
+    #[test]
+    fn inner_chains_reports_only_a_differing_scroll_chain() {
+        // Content on the group's own chain: the group and its content move
+        // together, so the bake is offset-independent.
+        let mut same = assembly();
+        same.push_filter(group(scrolled(0)));
+        same.push_op(push(scrolled(0)));
+        same.pop_filter();
+        assert!(!same.finish().filter_groups[0].inner_chains);
+
+        // Content on a chain the group is not on: the content slides under
+        // the blur.
+        let mut differing = assembly();
+        differing.push_filter(group(ComposeChain::default()));
+        differing.push_op(push(scrolled(0)));
+        differing.pop_filter();
+        assert!(differing.finish().filter_groups[0].inner_chains);
+
+        // An animation chain is not a scroll chain: a bake samples no
+        // instant, so it cannot depend on one.
+        let mut animated = assembly();
+        animated.push_filter(group(ComposeChain::default()));
+        animated.push_op(push(ComposeChain {
+            scroll: None,
+            animation: Some(0),
+        }));
+        animated.pop_filter();
+        assert!(!animated.finish().filter_groups[0].inner_chains);
+    }
+
+    /// One fragment drawing a teal square, so a replay has real content to
+    /// append.
+    fn fragment() -> Scene {
+        let mut scene = Scene::default();
+        scene.fill(
+            Fill::NonZero,
+            Affine::IDENTITY,
+            crate::vello::peniko::Color::from_rgb8(0, 128, 128),
+            None,
+            &Rect::new(0.0, 0.0, 8.0, 8.0),
+        );
+        scene
+    }
+
+    fn replay_program(
+        program: &[ComposeOp],
+        groups: &[FilterGroup],
+        filtered: &[Option<ImageData>],
+    ) -> Scene {
+        let fragments = [fragment()];
+        let mut scene = Scene::default();
+        replay(
+            &mut scene,
+            &fragments,
+            program,
+            &[],
+            &[],
+            groups,
+            filtered,
+            &[],
+            &[],
+            1.0,
+            &|_| None,
+        );
+        scene
+    }
+
+    /// The bracket ops encode nothing at all when no texture was baked: the
+    /// raw fallback's encoding is byte-for-byte the encoding of the same
+    /// program without the bracket.
+    ///
+    /// This is the property the fallback rests on. A bracket that encoded
+    /// anything — even a redundant transform tag — would make "no GPU" and
+    /// "over budget" observable in the drawing rather than only in the blur.
+    #[test]
+    fn a_filter_bracket_encodes_nothing_without_a_baked_texture() {
+        let bare = [
+            push(ComposeChain::default()),
+            ComposeOp::Fragment {
+                index: 0,
+                chain: ComposeChain::default(),
+            },
+            ComposeOp::Pop,
+        ];
+        let bracketed = [
+            push(ComposeChain::default()),
+            ComposeOp::PushFilter { index: 0 },
+            ComposeOp::Fragment {
+                index: 0,
+                chain: ComposeChain::default(),
+            },
+            ComposeOp::PopFilter,
+            ComposeOp::Pop,
+        ];
+        let mut group = group(ComposeChain::default());
+        group.ops = 2..3;
+        let groups = [group];
+
+        let without = replay_program(&bare, &[], &[]);
+        for filtered in [&[][..], &[None][..]] {
+            let with = replay_program(&bracketed, &groups, filtered);
+            crate::paint::equivalence::assert_scenes_identical(&with, &without);
+        }
+    }
+
+    /// With a texture the bracket draws it once, at the group's own device
+    /// rect, and the group's ops are skipped rather than drawn underneath.
+    #[test]
+    fn a_baked_group_is_drawn_once_and_its_ops_skipped() {
+        let program = [
+            push(ComposeChain::default()),
+            ComposeOp::PushFilter { index: 0 },
+            ComposeOp::Fragment {
+                index: 0,
+                chain: ComposeChain::default(),
+            },
+            ComposeOp::PopFilter,
+            ComposeOp::Pop,
+        ];
+        let mut group = group(ComposeChain::default());
+        group.ops = 2..3;
+        let groups = [group];
+        let baked = ImageData {
+            data: crate::vello::peniko::Blob::new(Arc::new([0_u8, 0, 0, 0])),
+            format: crate::vello::peniko::ImageFormat::Rgba8,
+            alpha_type: crate::vello::peniko::ImageAlphaType::AlphaPremultiplied,
+            width: 8,
+            height: 8,
+        };
+
+        let raw = replay_program(&program, &groups, &[None]);
+        let composed = replay_program(&program, &groups, &[Some(baked)]);
+        assert_eq!(
+            composed.encoding().resources.patches.len(),
+            1,
+            "the group's texture, once",
+        );
+        assert_eq!(
+            raw.encoding().resources.patches.len(),
+            0,
+            "and none in the fallback",
+        );
+        assert_eq!(
+            composed.encoding().n_open_clips,
+            0,
+            "skipping the range leaves the layer stack balanced",
+        );
+        assert_eq!(
+            composed.encoding().draw_tags.len(),
+            raw.encoding().draw_tags.len(),
+            "one image fill replaces one content fill",
+        );
+    }
+
+    /// A nested group's own chain counts as an op's chain, so an inner
+    /// scroller reaches the outer group through the bracket alone.
+    #[test]
+    fn a_nested_group_reports_its_own_chain_to_the_group_around_it() {
+        let mut assembly = assembly();
+        assembly.push_filter(group(ComposeChain::default()));
+        assembly.push_filter(group(scrolled(0)));
+        assembly.pop_filter();
+        assembly.pop_filter();
+        let finished = assembly.finish();
+        assert!(
+            finished.filter_groups[0].inner_chains,
+            "the outer group's range holds a bracket on another chain",
+        );
     }
 }

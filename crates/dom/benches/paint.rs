@@ -659,6 +659,7 @@ fn frame_scroll_tick(bencher: divan::Bencher<'_, '_>, rows: usize) {
         frame.compose_into(
             &mut scene,
             &[],
+            &[],
             &|slot| Some(dom.scroll_offset(slot.node)),
             None,
         );

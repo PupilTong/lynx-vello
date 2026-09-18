@@ -21,12 +21,13 @@
 //! is the frame being produced for the next refresh, not one produced a
 //! pipeline-depth earlier.
 
+use dom::render::blur::FilterTextures;
 #[cfg(not(target_arch = "wasm32"))]
 use dom::render::gpu::read_texture;
 use dom::render::gpu::{AtlasResidency, render_params, renderer_options};
-use dom::vello;
-use dom::vello::peniko::Color;
+use dom::vello::peniko::{Color, ImageData};
 use dom::vello::util::{RenderContext, RenderSurface};
+use dom::{CommittedFrame, ScrollSlot, Vector2D, vello};
 
 use crate::view::{EngineError, FrameSize};
 
@@ -63,6 +64,9 @@ pub(crate) struct WindowGraphics {
     /// What that renderer's image atlas still holds; see
     /// [`dom::render::gpu::AtlasResidency`].
     atlas: AtlasResidency,
+    /// The `filter: blur()` bakes of the frame this renderer last composed;
+    /// see [`dom::render::blur::FilterTextures`].
+    filters: FilterTextures,
     #[cfg(not(target_arch = "wasm32"))]
     capture: Option<CaptureTarget>,
 }
@@ -111,6 +115,7 @@ impl WindowGraphics {
             surface,
             renderer,
             atlas: AtlasResidency::default(),
+            filters: FilterTextures::default(),
             #[cfg(not(target_arch = "wasm32"))]
             capture: None,
         })
@@ -178,11 +183,14 @@ impl WindowGraphics {
     pub(super) fn render_to_target(
         &mut self,
         scene: &vello::Scene,
-        images: &[Option<vello::peniko::ImageData>],
+        images: &[Option<ImageData>],
         size: FrameSize,
     ) -> Result<(), EngineError> {
         self.configure_for(size);
-        self.atlas.prepare(&mut self.renderer, scene, images);
+        // The filter bakes are override images this scene may draw, so the
+        // residency has to see them too or a post-loss repair is missed.
+        self.atlas
+            .prepare_all(&mut self.renderer, scene, images, self.filters.images());
         let handle = &self.context.devices[self.surface.dev_id];
         self.renderer
             .render_to_texture(
@@ -193,6 +201,47 @@ impl WindowGraphics {
                 &render_params(Color::WHITE, size.width, size.height),
             )
             .map_err(|error| EngineError::Render(error.to_string()))
+    }
+
+    /// Bakes `frame`'s `filter: blur()` groups on the window's own device.
+    ///
+    /// Call before composing; a frame with no filter group asks nothing of
+    /// the device.
+    pub(super) fn prepare_filters(
+        &mut self,
+        frame: &CommittedFrame,
+        images: &[Option<ImageData>],
+        offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
+        scroll_generation: u64,
+    ) -> Result<&[Option<ImageData>], EngineError> {
+        let Self {
+            context,
+            surface,
+            renderer,
+            atlas,
+            filters,
+            ..
+        } = self;
+        let handle = &context.devices[surface.dev_id];
+        filters
+            .prepare(
+                renderer,
+                &handle.device,
+                &handle.queue,
+                atlas,
+                frame,
+                images,
+                offset_of,
+                scroll_generation,
+            )
+            .map_err(|error| EngineError::Gpu(error.to_string()))
+    }
+
+    /// Forgets which frame the filter bakes belong to. The window keeps its
+    /// surface and its last presented frame; only the bake cache's identity
+    /// is given up, because commit ids restart per document.
+    pub(super) fn forget_filters(&mut self) {
+        self.filters.forget();
     }
 
     /// Presents the retained target into the image [`Self::acquire`] took:

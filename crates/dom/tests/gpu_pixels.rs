@@ -425,7 +425,13 @@ fn a_composition_at_a_scroll_offset_stays_inside_the_scrollport() {
     // port shows there.
     for (offset, near, far) in [(0.0_f32, RED, RED), (30.0, RED, BLUE), (100.0, BLUE, BLUE)] {
         let mut scene = Scene::new();
-        frame.compose_into(&mut scene, &[], &|_| Some(Vector2D::new(0.0, offset)), None);
+        frame.compose_into(
+            &mut scene,
+            &[],
+            &[],
+            &|_| Some(Vector2D::new(0.0, offset)),
+            None,
+        );
         let pixels = gpu
             .render(&scene, &[], 200, 150, Color::WHITE)
             .expect("headless render");
@@ -483,5 +489,400 @@ fn a_nested_scope_paints_in_its_own_colour() {
     assert!(
         nested[2] > 200 && nested[0] < 60,
         "the nested scope paints in its own blue, not the root's red ({nested:?})"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `filter: blur()`
+//
+// The whole blur path is only observable in pixels: the compose program's
+// bracket ops replay raw without a GPU, so every property below — that the
+// bake happens at all, that it is premultiplied, that its margin survives the
+// viewport edge, that a decimated sigma still centres — needs a real render.
+// The assertions are analytic rather than golden: a monotone profile, a
+// symmetry, an ink bound at 3 sigma.
+// ---------------------------------------------------------------------------
+
+/// A page with one absolutely-positioned square carrying `extra` declarations.
+fn blur_page(size: f32, square: f32, extra: &str) -> Doc {
+    let css = format!(
+        "page {{ display: flex; position: relative; width: {size}px; height: {size}px; }}
+         .box {{ display: flex; position: absolute; left: {left}px; top: {left}px;
+                 width: {square}px; height: {square}px; background-color: #000000; {extra} }}",
+        left = (size - square) / 2.0,
+    );
+    let mut doc = Doc::with_css_sized(&css, size, size);
+    let root = doc.root;
+    doc.el(root, "box");
+    doc
+}
+
+/// Renders a document through the same path an embedder's painter takes: the
+/// committed frame, its filter bakes, then the composition.
+fn render_filtered(gpu: &mut dom::render::gpu::Headless, doc: &mut Doc, size: u32) -> Vec<u8> {
+    doc.dom.render();
+    // One `Headless` here renders several independent documents, and commit
+    // ids restart at one per document, so the bake cache's key cannot tell
+    // them apart on its own.
+    gpu.forget_filters();
+    let frame = doc
+        .dom
+        .committed_frame()
+        .expect("render leaves a committed frame retained");
+    let filtered: Vec<Option<dom::vello::peniko::ImageData>> = gpu
+        .prepare_filters(&frame, &[], &|_| None, 0)
+        .expect("the filter bakes render")
+        .to_vec();
+    let mut scene = Scene::new();
+    frame.compose_into(&mut scene, &[], &filtered, &|_| None, None);
+    gpu.render(&scene, &[], size, size, Color::WHITE)
+        .expect("headless render")
+}
+
+/// The luminance of one pixel, 0 for black ink and 255 for the white page.
+fn luma(pixels: &[u8], width: u32, x: u32, y: u32) -> i32 {
+    i32::from(pixel(pixels, width, x, y)[0])
+}
+
+/// A black square under `blur(4px)`: the centre keeps the fill, the profile
+/// across an edge is monotone and symmetric about the border, ink exists
+/// outside the box within 3 sigma, and effectively none past 4 sigma.
+#[test]
+fn a_blurred_square_spreads_monotonically_and_symmetrically() {
+    let mut gpu = headless("a_blurred_square_spreads_monotonically_and_symmetrically");
+    let mut doc = blur_page(128.0, 48.0, "filter: blur(4px);");
+    let pixels = render_filtered(&mut gpu, &mut doc, 128);
+
+    // The square is 48px at (40, 40); sigma is 4, so the right border is at
+    // x = 88 and the ink cutoff at 3 sigma is x = 100.
+    assert!(
+        luma(&pixels, 128, 64, 64) < 8,
+        "the centre keeps the fill ({:?})",
+        pixel(&pixels, 128, 64, 64),
+    );
+    let profile: Vec<i32> = (76..=104).map(|x| luma(&pixels, 128, x, 64)).collect();
+    for pair in profile.windows(2) {
+        assert!(
+            pair[1] >= pair[0] - 1,
+            "the profile across the edge must not go back down: {profile:?}",
+        );
+    }
+    // The border is at x = 88.0, so the two pixels straddling it are 87
+    // (centre 87.5) and 88 (centre 88.5) — the symmetric pair, and the pair
+    // whose mean is the coverage at the border itself.
+    let at_border = i32::midpoint(luma(&pixels, 128, 87, 64), luma(&pixels, 128, 88, 64));
+    assert!(
+        (100..=155).contains(&at_border),
+        "the border sits at half coverage ({at_border})",
+    );
+    for distance in 0..=10_u32 {
+        let inside = luma(&pixels, 128, 87 - distance, 64);
+        let outside = luma(&pixels, 128, 88 + distance, 64);
+        assert!(
+            (inside + outside - 255).abs() <= 6,
+            "the profile is symmetric about the border at {distance} px \
+             ({inside} inside, {outside} outside)",
+        );
+    }
+    assert!(
+        luma(&pixels, 128, 94, 64) < 250,
+        "ink reaches past the border box, within 3 sigma",
+    );
+    assert!(
+        luma(&pixels, 128, 105, 64) >= 254,
+        "and effectively none past 4 sigma ({})",
+        luma(&pixels, 128, 105, 64),
+    );
+}
+
+/// A WHITE square blurred over a WHITE page stays white everywhere.
+///
+/// This is the premultiply pass's test and nothing else's: vello writes its
+/// render target unpremultiplied, so filtering it directly averages the
+/// colour of the transparent margin — which is whatever the divide by a tiny
+/// alpha left there — into the square's own edge, and a dark halo appears.
+#[test]
+fn a_white_blurred_square_over_white_grows_no_halo() {
+    let mut gpu = headless("a_white_blurred_square_over_white_grows_no_halo");
+    let mut doc = blur_page(128.0, 48.0, "background-color: #ffffff; filter: blur(4px);");
+    let pixels = render_filtered(&mut gpu, &mut doc, 128);
+    for y in (40..=100).step_by(4) {
+        for x in (28..=100).step_by(4) {
+            assert_eq!(
+                pixel(&pixels, 128, x, y),
+                WHITE,
+                "white on white must stay white at ({x}, {y})",
+            );
+        }
+    }
+}
+
+/// A sigma large enough to force decimation still centres on the box and
+/// stays symmetric — the box downsample and the tent upsample have to agree
+/// about where the pixel grid is, or the result slides by half a level.
+#[test]
+fn a_decimated_blur_stays_centred_and_symmetric() {
+    let mut gpu = headless("a_decimated_blur_stays_centred_and_symmetric");
+    let mut doc = blur_page(256.0, 64.0, "filter: blur(16px);");
+    let pixels = render_filtered(&mut gpu, &mut doc, 256);
+
+    // The square is 64 px at (96, 96), so its centre is x = y = 128.0 and the
+    // symmetric pixel pairs are `127 − k` (centre 127.5 − k) against
+    // `128 + k` (centre 128.5 + k).
+    for distance in [8_u32, 16, 32, 48] {
+        let left = luma(&pixels, 256, 127 - distance, 128);
+        let right = luma(&pixels, 256, 128 + distance, 128);
+        let up = luma(&pixels, 256, 128, 127 - distance);
+        let down = luma(&pixels, 256, 128, 128 + distance);
+        assert!(
+            (left - right).abs() <= 2 && (up - down).abs() <= 2 && (left - up).abs() <= 3,
+            "a decimated blur must stay centred at {distance} px \
+             (l {left}, r {right}, u {up}, d {down})",
+        );
+    }
+    assert!(
+        luma(&pixels, 256, 128, 128) < 90,
+        "the centre of a 64 px square under sigma 16 keeps most of its ink ({})",
+        luma(&pixels, 256, 128, 128),
+    );
+    assert!(
+        luma(&pixels, 256, 128, 30) >= 253,
+        "and nothing reaches past 3 sigma of the box ({})",
+        luma(&pixels, 256, 128, 30),
+    );
+}
+
+/// A blurred square straddling the viewport edge shows exactly the pixels the
+/// same square fully inside shows, translated.
+///
+/// The proof that the group's bake keeps its 3 sigma margin *outside* the
+/// viewport: inflating the layer bounds after the viewport intersection would
+/// cut the margin the visible pixels read from, and the edge would come out
+/// darker than it should.
+#[test]
+fn a_blurred_square_straddling_the_viewport_edge_matches_one_inside() {
+    let mut gpu = headless("a_blurred_square_straddling_the_viewport_edge_matches_one_inside");
+    let css = "page { display: flex; position: relative; width: 128px; height: 128px; }
+         .box { display: flex; position: absolute; top: 40px;
+                width: 48px; height: 48px; background-color: #000000;
+                filter: blur(4px); }";
+
+    let read = |gpu: &mut dom::render::gpu::Headless, left: f32| -> Vec<u8> {
+        let mut doc = Doc::with_css_sized(css, 128.0, 128.0);
+        let root = doc.root;
+        let boxed = doc.el(root, "box");
+        doc.dom.set_inline_style(boxed, &format!("left: {left}px"));
+        render_filtered(gpu, &mut doc, 128)
+    };
+    // 40 px inside, then 24 px off the left edge: the same square, shifted by
+    // 64 px, so the pixel at x is the pixel at x + 64 of the inside render.
+    let inside = read(&mut gpu, 40.0);
+    let straddling = read(&mut gpu, -24.0);
+    for x in 0..40_u32 {
+        for y in (44..=84).step_by(8) {
+            let expected = luma(&inside, 128, x + 64, y);
+            let actual = luma(&straddling, 128, x, y);
+            assert!(
+                (expected - actual).abs() <= 2,
+                "({x}, {y}) reads {actual} where the same square inside reads {expected}",
+            );
+        }
+    }
+}
+
+/// A blurred box inside a scroller composes at the painter's offset and stays
+/// inside the scrollport.
+///
+/// The blur is baked in the scroller's own chain, so the texture has to move
+/// with the offset while the scrollport clip does not.
+#[test]
+fn a_blurred_box_in_a_scroller_moves_with_the_offset() {
+    use dom::Vector2D;
+
+    let mut gpu = headless("a_blurred_box_in_a_scroller_moves_with_the_offset");
+    let mut doc = Doc::with_css_sized(
+        "page { display: flex; width: 200px; height: 200px; }
+         .scroller { display: flex; flex-direction: column; overflow: scroll;
+                     width: 100px; height: 100px; }
+         .spacer { display: flex; flex-shrink: 0; width: 100px; height: 60px; }
+         .box { display: flex; flex-shrink: 0; width: 60px; height: 40px;
+                background-color: #000000; filter: blur(3px); }
+         .tail { display: flex; flex-shrink: 0; width: 100px; height: 200px; }",
+        200.0,
+        200.0,
+    );
+    let root = doc.root;
+    let scroller = doc.el(root, "scroller");
+    doc.el(scroller, "spacer");
+    doc.el(scroller, "box");
+    doc.el(scroller, "tail");
+    doc.dom.render();
+    let frame = doc
+        .dom
+        .committed_frame()
+        .expect("render leaves a committed frame retained");
+    assert!(
+        !frame.filter_groups().is_empty(),
+        "the blurred box records a filter group"
+    );
+
+    gpu.forget_filters();
+    for offset in [0.0_f32, 40.0] {
+        let filtered: Vec<Option<dom::vello::peniko::ImageData>> = gpu
+            .prepare_filters(&frame, &[], &|_| Some(Vector2D::new(0.0, offset)), 0)
+            .expect("the filter bakes render")
+            .to_vec();
+        let mut scene = Scene::new();
+        frame.compose_into(
+            &mut scene,
+            &[],
+            &filtered,
+            &|_| Some(Vector2D::new(0.0, offset)),
+            None,
+        );
+        let pixels = gpu
+            .render(&scene, &[], 200, 200, Color::WHITE)
+            .expect("headless render");
+        // The box's content-space centre is y = 80, so it shows at 80 - offset.
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "both offsets put the probe at a whole pixel inside the port"
+        )]
+        let centre = (80.0 - offset) as u32;
+        assert!(
+            luma(&pixels, 200, 30, centre) < 40,
+            "offset {offset}: the blurred box shows at y {centre} ({})",
+            luma(&pixels, 200, 30, centre),
+        );
+        assert_eq!(
+            pixel(&pixels, 200, 150, centre),
+            WHITE,
+            "offset {offset}: nothing leaks beside the scrollport",
+        );
+        assert_eq!(
+            pixel(&pixels, 200, 30, 150),
+            WHITE,
+            "offset {offset}: nothing leaks below the scrollport",
+        );
+    }
+}
+
+/// A blurred child inside a blurred parent renders, and blurs more than
+/// either blur alone.
+///
+/// Nested bakes are ordered by op range end, so the child's texture exists
+/// before the parent's bake replays the op that draws it.
+#[test]
+fn a_nested_blur_blurs_more_than_either_alone() {
+    let mut gpu = headless("a_nested_blur_blurs_more_than_either_alone");
+    let css = "page { display: flex; position: relative; width: 192px; height: 192px; }
+         .outer { display: flex; position: absolute; left: 64px; top: 64px;
+                  width: 64px; height: 64px; }
+         .inner { display: flex; width: 64px; height: 64px;
+                  background-color: #000000; }";
+
+    let read = |gpu: &mut dom::render::gpu::Headless, outer: &str, inner: &str| -> Vec<u8> {
+        let mut doc = Doc::with_css_sized(css, 192.0, 192.0);
+        let root = doc.root;
+        let outer_box = doc.el(root, "outer");
+        let inner_box = doc.el(outer_box, "inner");
+        doc.dom.set_inline_style(outer_box, outer);
+        doc.dom.set_inline_style(inner_box, inner);
+        render_filtered(gpu, &mut doc, 192)
+    };
+
+    let outer_only = read(&mut gpu, "filter: blur(4px)", "");
+    let inner_only = read(&mut gpu, "", "filter: blur(4px)");
+    let both = read(&mut gpu, "filter: blur(4px)", "filter: blur(4px)");
+
+    // 6 px outside the box's right border (x = 128), where more blur means
+    // more ink and therefore a lower luminance.
+    let probe = |pixels: &[u8]| luma(pixels, 192, 134, 96);
+    assert!(
+        probe(&both) < probe(&outer_only) - 4 && probe(&both) < probe(&inner_only) - 4,
+        "nesting two blurs must spread further than either \
+         (both {}, outer {}, inner {})",
+        probe(&both),
+        probe(&outer_only),
+        probe(&inner_only),
+    );
+    assert!(
+        luma(&both, 192, 96, 96) < 60,
+        "and the centre still keeps its ink ({})",
+        luma(&both, 192, 96, 96),
+    );
+}
+
+/// A group whose bake would exceed the area budget renders unblurred rather
+/// than not at all, and nothing panics.
+///
+/// The group's rect is device pixels, so a large enough device pixel ratio
+/// puts a modest CSS box past `MAX_FILTER_DIMENSION` without a huge viewport.
+#[test]
+fn a_group_over_the_budget_renders_unblurred() {
+    let mut gpu = headless("a_group_over_the_budget_renders_unblurred");
+    let mut doc = blur_page(128.0, 48.0, "filter: blur(4px);");
+    doc.dom.render();
+    gpu.forget_filters();
+    let frame = doc
+        .dom
+        .committed_frame()
+        .expect("render leaves a committed frame retained");
+    let groups = frame.filter_groups();
+    assert_eq!(groups.len(), 1, "one blurred group");
+    let (width, height) = groups[0].size();
+    assert!(
+        u64::from(width) * u64::from(height) <= dom::render::blur::MAX_FILTER_AREA,
+        "this group is inside the budget",
+    );
+
+    // The bake is refused by making the *page* ask for more than the budget
+    // allows: a 3000x3000 blurred box at DPR 2 is 36 Mpx of device area
+    // against a 16.7 Mpx cap.
+    let mut wide = Doc::with_css_sized(
+        "page { display: flex; position: relative; width: 4000px; height: 4000px; }
+         .box { display: flex; position: absolute; left: 0px; top: 0px;
+                width: 3000px; height: 3000px; background-color: #000000;
+                filter: blur(4px); }",
+        4000.0,
+        4000.0,
+    );
+    let root = wide.root;
+    wide.el(root, "box");
+    wide.dom.set_device_pixel_ratio(2.0);
+    wide.dom.render();
+    gpu.forget_filters();
+    let frame = wide
+        .dom
+        .committed_frame()
+        .expect("render leaves a committed frame retained");
+    let groups = frame.filter_groups();
+    assert_eq!(groups.len(), 1, "the group is still recorded");
+    let (width, height) = groups[0].size();
+    assert!(
+        u64::from(width) * u64::from(height) > dom::render::blur::MAX_FILTER_AREA,
+        "and it is past the budget ({width}x{height})",
+    );
+    let filtered: Vec<Option<dom::vello::peniko::ImageData>> = gpu
+        .prepare_filters(&frame, &[], &|_| None, 0)
+        .expect("a refused group is not an error")
+        .to_vec();
+    assert_eq!(filtered.len(), 1);
+    assert!(
+        filtered[0].is_none(),
+        "a group over the budget gets no texture"
+    );
+    let mut scene = Scene::new();
+    frame.compose_into(&mut scene, &[], &filtered, &|_| None, None);
+    // Rendered at a viewport-sized target, which is all the retained scene is
+    // valid for; the point is that the unblurred fallback draws.
+    let pixels = gpu
+        .render(&scene, &[], 256, 256, Color::WHITE)
+        .expect("the unblurred fallback renders");
+    assert!(
+        luma(&pixels, 256, 128, 128) < 8,
+        "the fallback paints the box, hard-edged ({})",
+        luma(&pixels, 256, 128, 128),
     );
 }

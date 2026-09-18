@@ -13,8 +13,14 @@
 //! Deliberate v1 limits (the compatibility bar is behavioral, not
 //! pixel-perfect):
 //!
-//! - `filter: blur()` needs an offscreen texture pass and is ignored. Color filters use
-//!   blend-composite approximations; factors above one are only partially expressible.
+//! - `filter: blur()` bakes the group offscreen and blurs it on the GPU (`render/blur.rs`), which
+//!   costs four recorded approximations: sigma is isotropic, scaled by the arithmetic mean of the
+//!   two singular values of the group's local-to-viewport linear map, so a non-uniform scale or a
+//!   skew gets one sigma where the spec's filter region is anisotropic; `filter` is never exported
+//!   as a composite curve, so an animated blur recommits and re-bakes every tick; the bakes share a
+//!   device-pixel area budget and a group past it renders *unblurred* rather than not at all; and
+//!   several `blur()` functions in one list fold into the first by variance addition. Color filters
+//!   use blend-composite approximations; factors above one are only partially expressible.
 //! - Perspective-projected items use the affine map agreeing with the true projection at three
 //!   border-box corners because Vello transforms are affine; hit testing remains projectively
 //!   exact.
@@ -74,6 +80,8 @@ pub(crate) struct Painter {
     spare_program: Vec<crate::paint::compose::ComposeOp>,
     /// A retired frame's emptied image-draw table, capacity intact.
     spare_image_draws: Vec<crate::paint::compose::ImageDraw>,
+    /// A retired frame's emptied filter-group table, capacity intact.
+    spare_filter_groups: Vec<crate::paint::compose::FilterGroup>,
 }
 
 impl std::fmt::Debug for Painter {
@@ -96,6 +104,7 @@ impl Painter {
             std::mem::take(&mut self.spare_fragments),
             std::mem::take(&mut self.spare_program),
             std::mem::take(&mut self.spare_image_draws),
+            std::mem::take(&mut self.spare_filter_groups),
             std::mem::take(&mut self.spare_scenes),
         );
         // A panicking walk drops the half-encoded assembly here and leaves
@@ -108,7 +117,13 @@ impl Painter {
             &frame,
             document.images(),
         );
-        let (fragments, program, image_draws, pool) = assembly.finish();
+        let crate::paint::compose::Finished {
+            fragments,
+            program,
+            image_draws,
+            filter_groups,
+            pool,
+        } = assembly.finish();
         self.spare_scenes = pool;
         let committed = Arc::new(CommittedFrame {
             order: frame,
@@ -116,6 +131,7 @@ impl Painter {
                 fragments,
                 program,
                 image_draws,
+                filter_groups,
             },
             animations_active,
             needs_main_ticks,
@@ -144,7 +160,7 @@ impl Painter {
             mut fragments,
             mut program,
             mut image_draws,
-            ..
+            mut filter_groups,
         } = inner.presentation;
         for mut scene in fragments.drain(..) {
             scene.reset();
@@ -155,6 +171,8 @@ impl Painter {
         self.spare_program = program;
         image_draws.clear();
         self.spare_image_draws = image_draws;
+        filter_groups.clear();
+        self.spare_filter_groups = filter_groups;
     }
 
     /// The spare frame buffers' and the build scratch's capacities, for the

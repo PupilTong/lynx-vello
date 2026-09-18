@@ -19,7 +19,7 @@ use euclid::default::{Point2D, Size2D, Vector2D};
 
 use super::{AnimationSample, PaintOrder};
 use crate::NodeId;
-use crate::paint::compose::{self, ComposeOp};
+use crate::paint::compose::{self, ComposeOp, FilterGroup};
 use crate::scroll::ScrollAxes;
 use crate::vello::Scene;
 use crate::vello::kurbo::Affine;
@@ -160,6 +160,9 @@ pub(crate) struct Presentation {
     /// One entry per [`ComposeOp::Image`], in program order. Carries names
     /// and geometry; never pixels.
     pub(crate) image_draws: Vec<crate::paint::compose::ImageDraw>,
+    /// One entry per [`ComposeOp::PushFilter`], in program order. Carries
+    /// device geometry and σ; never a GPU resource.
+    pub(crate) filter_groups: Vec<FilterGroup>,
 }
 
 impl std::fmt::Debug for CommittedFrame {
@@ -199,6 +202,7 @@ impl CommittedFrame {
         &self,
         scene: &mut Scene,
         images: &[Option<ImageData>],
+        filtered: &[Option<ImageData>],
         offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
         animation_now: Option<f64>,
     ) {
@@ -209,10 +213,72 @@ impl CommittedFrame {
             &self.presentation.program,
             &self.presentation.image_draws,
             images,
+            &self.presentation.filter_groups,
+            filtered,
             self.order.slots(),
             &samples,
             self.device_pixel_ratio,
             offset_of,
+        );
+    }
+
+    /// The frame's `filter: blur()` groups, in program order. Empty for the
+    /// overwhelmingly common frame, which is why the whole bake pre-step is
+    /// skipped on one test of this slice.
+    #[must_use]
+    pub fn filter_groups(&self) -> &[FilterGroup] {
+        &self.presentation.filter_groups
+    }
+
+    /// Replays filter group `index`'s own ops into `scene`, in the bake
+    /// target's coordinates: device px with the group's `rect` origin at
+    /// `(0, 0)` and the group's own chain factored *out*, because that chain
+    /// is applied when the baked texture is drawn rather than baked into it.
+    ///
+    /// No animation instant is sampled. Export eligibility refuses a scroll
+    /// container inside an animated subtree and an animated element's whole
+    /// subtree rides its own slot, so content inside a group never sits on a
+    /// different *animation* chain than the group; only an inner *scroll*
+    /// chain produces a non-identity relative transform, and that is exactly
+    /// what `FilterGroup`'s `inner_chains` reports.
+    ///
+    /// `filtered` must already hold the textures of every group nested
+    /// inside this one — bake in order of increasing `ops.end`.
+    pub fn bake_filter(
+        &self,
+        index: usize,
+        scene: &mut Scene,
+        images: &[Option<ImageData>],
+        filtered: &[Option<ImageData>],
+        offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
+    ) {
+        let groups = &self.presentation.filter_groups;
+        let Some(group) = groups.get(index) else {
+            return;
+        };
+        let samples = self.order.sample_animations(None);
+        let chain_transform = compose::device_transform(
+            self.order.slots(),
+            &samples,
+            self.device_pixel_ratio,
+            offset_of,
+        );
+        let own = chain_transform(group.chain).inverse();
+        let origin = Affine::translate((-group.rect.x0, -group.rect.y0));
+        let transform = |chain| origin * chain_transform(chain) * own;
+        compose::replay_ops(
+            scene,
+            compose::Tables {
+                fragments: &self.presentation.fragments,
+                program: &self.presentation.program,
+                image_draws: &self.presentation.image_draws,
+                images,
+                filter_groups: groups,
+                filtered,
+                samples: &samples,
+            },
+            group.ops.start as usize..group.ops.end as usize,
+            &transform,
         );
     }
 

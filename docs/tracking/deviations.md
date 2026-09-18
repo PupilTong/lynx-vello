@@ -125,6 +125,36 @@ consequential choice about whether to follow the spec or the quirk.
 - **`filter`** — standard CSS accepts a space-separated chain of any number
   of filter functions (`blur(2px) grayscale(50%)`); Lynx's parser hard-fails
   after the first function. Implement the real chained grammar.
+- **`filter: blur()`** — every Lynx backend diverges from filter-effects-1
+  here, in a different way, and **we follow W3C on all of them** (user
+  decision, 2026-09-19). What the length means: filter-effects-1 says the
+  length **is** σ, while Clay treats it as a *radius* and converts with
+  Skia's `SkBlurMask` formula, σ = 0.57735·r + 0.5
+  (`clay/gfx/graphics_context.cc:481-483`, reached for `filter` at
+  `clay/ui/painter/painting_context.cc:90-97`), so a Clay `blur(4px)` is
+  σ ≈ 2.81 where ours is σ = 4. Edge mode: the spec's is transparent black,
+  which Clay matches (`TileMode::kDecal`, same lines) but Android ≥ 31 does
+  not — `RenderEffect.createBlurEffect(radius, radius, Shader.TileMode.CLAMP)`
+  in `platform/android/lynx_android/src/main/java/com/lynx/tasm/utils/BlurUtils.java:47-70`
+  extends the edge pixels instead. Filter region: Android < 31 has no
+  `RenderEffect` at all and falls back to a `ViewTreeObserver.OnPreDrawListener`
+  that redraws the view into a bitmap of the view's own size
+  (`.../behavior/ui/view/AndroidView.java:61-76,436-449`), so its blur is
+  clipped to the view box rather than overflowing it by 3σ. Grouping: iOS sets
+  the `CIFilter` on the view's own layer *and separately* on the background,
+  border and outline layers (`platform/darwin/ios/lynx/ui/LynxUI.m:3670-3676`
+  with `.../base/background/LynxBackgroundManager.m:1622-1626`), so those blur
+  as independent layers instead of as one composed group. Animation: native
+  interpolates the *amount* of one filter function and falls back to the start
+  value whenever the function type or unit differs
+  (`core/animation/keyframed_animation_curve.cc:915-971`,
+  `gfx::DiscreteFallback::kUseStart`); we animate `filter` as a real CSS
+  filter list through stylo's own engine. `filter` is never exported as a
+  composite curve, so an animated blur recommits and re-bakes every tick —
+  accepted, and recorded in `crates/dom/src/paint/painter.rs`'s v1 limits
+  together with the two approximations the offscreen implementation carries
+  (one isotropic σ under a non-uniform scale or skew, and an area budget past
+  which a group renders *unblurred*).
 - **`background-clip: border-area`** — a genuine Lynx-only value with no CSS
   equivalent (distinct from `border-box`); needs its own behavioral
   spec-mining rather than mapping to any standard box.
