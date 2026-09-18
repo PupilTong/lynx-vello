@@ -1099,13 +1099,20 @@ already equals has served its purpose and drops; the rest re-clamp to the
 new bounds.
 
 The encode is windowed: each slot's fragments cover one scrollport past its
-committed offset per scrollable axis (`ENCODE_WINDOW_SCROLLPORTS`). When an
-intent moves past half its remaining window headroom, the engine sends one
-`Refill` per committed frame carrying the offsets the screen is showing;
-the main thread writes them into the document, marks the paint stale, and
-its next commit re-bakes the windows centered on them — no script
-involvement anywhere. The refill write-back is the only way a user scroll
-reaches the document, so between refills document-side offset reads lag the
+committed offset per scrollable axis (`ENCODE_WINDOW_SCROLLPORTS`). On either
+axis, the painter requests a refill once an intent moves more than halfway
+from the committed offset toward an encode-window edge. The threshold is
+inside the window; it does not wait for an offset to leave it.
+`axis_refill_due` and `Painter::maybe_request_refill` in
+`crates/bobcat-core/src/paint/lib.rs` implement this threshold and send at most
+one `ToMain::Refill { offsets }` per committed frame, carrying the offsets the
+screen is showing. The main thread applies them in
+`MainThreadRuntime::refill_scroll_windows`, then calls the document's
+`note_scroll_windows_stale` to mark paint stale. That method is a local
+invalidation, not a channel send. The next commit re-bakes the windows
+centered on the applied offsets, with no script involvement.
+The refill write-back is the only way a user scroll reaches the document, so
+between refills document-side offset reads lag the
 screen; a future script-facing scroll API must either dirty the paint or
 publish its offsets, since the compositor only knows what crossed the
 channel.

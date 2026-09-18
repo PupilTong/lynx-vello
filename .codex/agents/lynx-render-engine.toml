@@ -43,9 +43,13 @@ vello is the only wgpu dependency in this workspace, so it pins wgpu's major
 - The committed frame is baked **unscrolled** as fragments plus a compose
   program; scrollers are retained GPU planes. Offsets stay on the painter's
   side between refills — a scroll recomposes the retained planes without a
-  commit — and cross only as a `ToMain::Refill` when an offset leaves its
-  slot's `ScrollSlot::encode_window`, which the main thread answers with a
-  recentered commit. A commit publishes one immutable `Arc<CommittedFrame>`.
+  commit. The painter sends current offsets in `ToMain::Refill` once movement
+  uses more than half the headroom from the committed offset toward a
+  `ScrollSlot::encode_window` edge, at most once per committed frame.
+  The main thread applies the offsets,
+  calls `note_scroll_windows_stale`, and commits recentered windows. See
+  `docs/runtime-architecture.md`'s "Scroll composes; a refill recommits"
+  section. A commit publishes one immutable `Arc<CommittedFrame>`.
 - Animations: stylo's animation engine plus an engine-owned timeline;
   `Document::advance_animations`; composite `opacity`/`transform` curves are
   exported as `AnimationSlot`. The `has_animations` node bit is load-bearing.

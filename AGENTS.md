@@ -260,8 +260,8 @@ decided as values: the position, the wheel delta, the timestamp and — for the
 four touch events — its touch points), a `Resize` (the
 painter's metrics), a `Vsync` (the display-frame reading a realm that called
 `requestScriptFrame` asked for), a `BeginFrame` (a timeline reading plus the
-sequence number the acknowledgement reports), a `Refill` (the scroll offsets
-the painter moved past a slot's encode window, written back), and `ImageEvents`
+sequence number the acknowledgement reports), a `Refill` (the painter's current
+scroll offsets, written back to recenter encoding windows), and `ImageEvents`
 (completed or failed host loads — no variant can carry pixels, which makes
 "`ImageData` never crosses a channel" a property of the type).
 
@@ -622,10 +622,13 @@ live tree go to `bobcat-main`, which answers by publishing a later frame, so a
 long JavaScript task cannot stop scrolling or re-presentation; only commits
 publish, so a half-applied batch is unobservable. Scroll offsets stay on the
 painter between refills and a scroll recomposes the retained frame without a
-commit; when an offset leaves its `ScrollSlot::encode_window` the painter sends
-`ToMain::Refill { offsets }` and the main thread answers with a recentered
-commit. Embedders provide input, device metrics, OS initialization, a draw
-target and IO primitives, and relay OS facts in
+commit. Refill requests start inside `ScrollSlot::encode_window`: when movement
+uses more than half the headroom from the committed offset toward either edge,
+the painter sends `ToMain::Refill { offsets }`, at most once per committed
+frame. The main thread applies the offsets, calls `note_scroll_windows_stale`,
+and commits recentered windows. See `docs/runtime-architecture.md`'s
+"Scroll composes; a refill recommits" section. Embedders provide input, device
+metrics, OS initialization, a draw target and IO primitives, and relay OS facts in
 (`Painter::{dispatch_input, resize, set_occluded, refresh, pump, tick, capture}`
 and `LynxView::pump`); they never start or steer the pipeline. Engine events are
 enqueued and wake the host through the group's `EventRequester` for the next
