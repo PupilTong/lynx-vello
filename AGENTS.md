@@ -255,7 +255,9 @@ committed frame, the listener-name set, and the newest serviced `BeginFrame`.
 Commands are a FIFO because their arrival order is what they mean; a frame is
 not. `ToMain` carries a `PageUpdate` (the data, global-prop, global-event and
 reload commands a host accepted after observing MTS boot, in host FIFO order),
-a `DispatchEvent` (one event's type, target and detail JSON), a `Resize` (the
+a `DispatchEvent` (one event's type and target, plus the payload the router
+decided as values: the position, the wheel delta, the timestamp and — for the
+four touch events — its touch points), a `Resize` (the
 painter's metrics), a `Vsync` (the display-frame reading a realm that called
 `requestScriptFrame` asked for), a `BeginFrame` (a timeline reading plus the
 sequence number the acknowledgement reports), a `Refill` (the scroll offsets
@@ -937,7 +939,13 @@ document, releases it, and makes one call to the Element module's
 `quickjs::ScriptEngine::call_module_export`, the one Rust-to-JS path in the
 tree, carrying the whole path: the standard's bubble steps, target-first, as
 two comma-joined decimal id strings — the nodes, and position for position each
-step's shadow-retargeted target — plus the name and the detail JSON. One call
+step's shadow-retargeted target — plus the name and then numbers alone: the
+`timestamp` (milliseconds on the view's timeline), the position the `detail`
+reports, the wheel delta (`undefined` for every event without one, which keeps
+the two keys out of the `detail`), and four numbers per touch point
+(`identifier`, `x`, `y`, flags) for the four touch events. The realm builds
+the `detail` object and the three touch lists out of them; no JSON is
+formatted on the host side and none is parsed in the realm. One call
 is one dispatch, so one event object serves it, and the host keeps no listener
 index at all. The realm runs the capture, bubble and `global-bindEvent` passes,
 derives `eventPhase` per step, and ends the dispatch itself; neither

@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::*;
 use crate::background::{WorkerCommand, WorkerMessage, WorkerStart};
-use crate::link::{DetachedView, ViewNotice, detached_outbox};
+use crate::link::{DetachedView, InputEventPayload, ViewNotice, detached_outbox};
 use crate::main::WorkerFactory;
 use crate::main::runtime::install_shared_modules;
 use crate::main::tree::PageConfig;
@@ -678,7 +678,7 @@ fn a_pages_own_entries_never_wake_its_clock_task() {
         page.apply(std::iter::once(ToMain::DispatchEvent {
             target,
             name: "tap",
-            detail: "{}".to_owned(),
+            payload: InputEventPayload::default(),
         }));
         for _ in 0..64 {
             task::yield_now().await;

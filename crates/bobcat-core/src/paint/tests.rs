@@ -223,7 +223,7 @@ fn a_commit_whose_pixels_can_no_longer_be_read_is_not_adopted() {
 /// delivery.
 #[test]
 fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
-    use super::gesture::{EmitEvent, InputDecision, InputDecisions, TAP_EVENT};
+    use super::gesture::{EmitEvent, InputDecision, InputDecisions, TAP_EVENT, TouchPoints};
 
     let (mut painter, mut main) = detached();
     // The permanent page element's packed handle, as script would name it.
@@ -235,8 +235,9 @@ fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
             target,
             position: dom::Point2D::new(1.0, 1.0),
             wheel: None,
+            touches: TouchPoints::new(),
         }));
-        painter.execute_decisions(&mut decisions, None);
+        painter.execute_decisions(&mut decisions, None, 0.25);
         assert!(decisions.is_empty(), "the queue is always drained");
     };
 
@@ -271,13 +272,21 @@ fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
         .try_recv()
         .expect("the listened-for name crosses");
     let ToMain::DispatchEvent {
-        name, target: sent, ..
+        name,
+        target: sent,
+        payload,
     } = command
     else {
         panic!("an emit decision becomes a dispatch command");
     };
     assert_eq!(name, TAP_EVENT);
     assert_eq!(sent, target);
+    // The decision's own facts, as values: nothing is encoded on this side.
+    assert_eq!(payload.position, dom::Point2D::new(1.0, 1.0));
+    assert_eq!(payload.wheel, None, "a tap carries no wheel delta");
+    assert!(payload.touches.is_empty(), "a tap carries no touch points");
+    // The pass's clock reading, in milliseconds.
+    assert!((payload.timestamp - 250.0).abs() < f64::EPSILON);
 
     // And the edge closes the name again: the main thread publishes the
     // last removal, and from the next poll nothing crosses.
@@ -288,6 +297,70 @@ fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
         main.commands.try_recv().is_err(),
         "the closing edge stops the crossing"
     );
+}
+
+/// The two payloads a plain pointer event does not have — the wheel delta and
+/// the touch points — cross as the values the router decided, in the order it
+/// decided them. The realm is the side that gives them a shape.
+#[test]
+fn a_wheel_delta_and_touch_points_cross_as_values() {
+    use super::gesture::{
+        EmitEvent, InputDecision, InputDecisions, TOUCH_ACTIVE, TOUCH_CHANGED, TOUCH_TARGET,
+        TouchPoint, TouchPoints,
+    };
+
+    let (mut painter, mut main) = detached();
+    let target = dom::NodeId::from_bits(2).expect("a well-formed packed handle");
+    main.outbox.listener_edge(Arc::from("wheel"), true);
+    main.outbox.listener_edge(Arc::from("touchmove"), true);
+    painter.poll_link();
+
+    let mut touches = TouchPoints::new();
+    touches.push(TouchPoint {
+        identifier: 1,
+        position: dom::Point2D::new(10.0, 20.0),
+        flags: TOUCH_ACTIVE,
+    });
+    touches.push(TouchPoint {
+        identifier: 2,
+        position: dom::Point2D::new(30.5, 40.0),
+        flags: TOUCH_ACTIVE | TOUCH_TARGET | TOUCH_CHANGED,
+    });
+    let mut decisions = InputDecisions::new();
+    decisions.push(InputDecision::Emit(EmitEvent {
+        name: "wheel",
+        target,
+        position: dom::Point2D::new(5.0, 6.0),
+        wheel: Some(dom::Vector2D::new(0.0, 30.0)),
+        touches: TouchPoints::new(),
+    }));
+    decisions.push(InputDecision::Emit(EmitEvent {
+        name: "touchmove",
+        target,
+        position: dom::Point2D::new(30.5, 40.0),
+        wheel: None,
+        touches: touches.clone(),
+    }));
+    painter.execute_decisions(&mut decisions, None, 0.5);
+
+    let ToMain::DispatchEvent { payload, .. } = main
+        .commands
+        .try_recv()
+        .expect("the wheel event crosses first")
+    else {
+        panic!("an emit decision becomes a dispatch command");
+    };
+    assert_eq!(payload.wheel, Some(dom::Vector2D::new(0.0, 30.0)));
+    assert_eq!(payload.position, dom::Point2D::new(5.0, 6.0));
+
+    let ToMain::DispatchEvent { payload, .. } =
+        main.commands.try_recv().expect("then the touch event")
+    else {
+        panic!("an emit decision becomes a dispatch command");
+    };
+    assert_eq!(payload.touches.as_slice(), touches.as_slice());
+    assert_eq!(payload.wheel, None);
+    assert!((payload.timestamp - 500.0).abs() < f64::EPSILON);
 }
 
 /// A poll adopts whatever arrived, in order, and stops at the last of
@@ -346,7 +419,7 @@ fn a_scroll_decision_sends_no_command() {
         from: node,
         delta: dom::Vector2D::new(0.0, 5.0),
     });
-    painter.execute_decisions(&mut decisions, None);
+    painter.execute_decisions(&mut decisions, None, 0.0);
     assert!(
         main.commands.try_recv().is_err(),
         "a windowed scroll never crosses the command channel"

@@ -21,8 +21,9 @@ fn tap() -> Arc<str> {
     Arc::from("tap")
 }
 
-fn no_detail() -> Arc<str> {
-    Arc::from("")
+/// Where a test's event happened, when the position is not what it is about.
+fn event_point() -> dom::Point2D<f32> {
+    dom::Point2D::new(12.0, 30.0)
 }
 
 /// The ingredients a test stages when the document is not what it is about.
@@ -617,7 +618,7 @@ fn a_failed_boot_leaves_the_group_s_other_view_alone() {
 
     assert!(
         second
-            .dispatch_event(&mut js_runtime, node_id(2), &tap(), &no_detail())
+            .dispatch_for_test(&mut js_runtime, node_id(2), &tap(), event_point())
             .expect("the second view's dispatch is not the first view's failure"),
         "the second view's realm published the dispatch export"
     );
@@ -1456,7 +1457,8 @@ fn a_dispatch_runs_the_path_listeners_and_skips_the_steps_with_none() {
                   // snapshot instances do; this stands in for them.
                   globalThis.held = [page, outer, inner];
                   const note = (label) => (event) =>
-                    seen.push(label + ':' + event.currentTarget.uid + ':' + event.eventPhase);
+                    seen.push(label + ':' + event.currentTarget.uid + ':' +
+                              event.eventPhase + ':' + event.detail.x);
                   __AddEventListener(page, 'tap', note('page-capture'), { capture: true });
                   __AddEventListener(inner, 'tap', note('inner'), {});
                   // `outer` registers nothing, so the walk must pass over it.
@@ -1468,12 +1470,7 @@ fn a_dispatch_runs_the_path_listeners_and_skips_the_steps_with_none() {
 
     let target = 4;
     let delivered = runtime
-        .dispatch_event(
-            &mut js_runtime,
-            node_id(target),
-            &tap(),
-            &Arc::from("{\"x\":1}"),
-        )
+        .dispatch_for_test(&mut js_runtime, node_id(target), &tap(), event_point())
         .expect("dispatch");
     // All the host learns: the realm published the export it called.
     assert!(delivered);
@@ -1482,7 +1479,9 @@ fn a_dispatch_runs_the_path_listeners_and_skips_the_steps_with_none() {
         .evaluate_module(
             &mut js_runtime,
             r"
-                if (seen.join('|') !== 'page-capture:2:1|inner:4:2') {
+                // The position the host decided reaches every listener as the
+                // event's own `detail`, built in the realm from two numbers.
+                if (seen.join('|') !== 'page-capture:2:1:12|inner:4:2:12') {
                   throw new Error('unexpected deliveries: ' + seen.join('|'));
                 }
                 ",
@@ -1534,7 +1533,7 @@ fn add_event_delivers_on_the_real_path_and_a_catch_form_ends_the_walk() {
 
     assert!(
         runtime
-            .dispatch_event(&mut js_runtime, node_id(4), &tap(), &no_detail())
+            .dispatch_for_test(&mut js_runtime, node_id(4), &tap(), event_point())
             .expect("dispatch")
     );
 
@@ -1602,7 +1601,7 @@ fn global_bind_handlers_run_after_the_path_even_when_a_catch_ended_it() {
 
     assert!(
         runtime
-            .dispatch_event(&mut js_runtime, node_id(4), &tap(), &no_detail())
+            .dispatch_for_test(&mut js_runtime, node_id(4), &tap(), event_point())
             .expect("dispatch")
     );
 
@@ -1660,11 +1659,11 @@ fn a_global_only_registration_publishes_its_name_and_is_delivered() {
 
     assert!(
         runtime
-            .dispatch_event(
+            .dispatch_for_test(
                 &mut js_runtime,
                 node_id(2),
                 &Arc::from("swipe"),
-                &no_detail()
+                event_point()
             )
             .expect("dispatch"),
         "a global registration alone is enough to deliver"
@@ -1692,11 +1691,11 @@ fn a_global_only_registration_publishes_its_name_and_is_delivered() {
     // The painting side is what drops an event nobody wants; a dispatch that
     // reaches the realm anyway finds nothing registered and runs nothing.
     runtime
-        .dispatch_event(
+        .dispatch_for_test(
             &mut js_runtime,
             node_id(2),
             &Arc::from("swipe"),
-            &no_detail(),
+            event_point(),
         )
         .expect("dispatch");
     runtime
@@ -2107,7 +2106,7 @@ fn a_replaced_add_event_handler_moves_its_node_between_passes() {
 
     assert!(
         runtime
-            .dispatch_event(&mut js_runtime, node_id(3), &tap(), &no_detail())
+            .dispatch_for_test(&mut js_runtime, node_id(3), &tap(), event_point())
             .expect("dispatch")
     );
 
@@ -2132,7 +2131,7 @@ fn a_replaced_add_event_handler_moves_its_node_between_passes() {
         .expect("verification");
 
     runtime
-        .dispatch_event(&mut js_runtime, node_id(3), &tap(), &no_detail())
+        .dispatch_for_test(&mut js_runtime, node_id(3), &tap(), event_point())
         .expect("dispatch");
 
     runtime
@@ -2183,7 +2182,7 @@ fn one_call_is_one_dispatch_with_one_event_object_that_is_reset_at_its_end() {
     for _ in 0..2 {
         assert!(
             runtime
-                .dispatch_event(&mut js_runtime, node_id(4), &tap(), &no_detail())
+                .dispatch_for_test(&mut js_runtime, node_id(4), &tap(), event_point())
                 .expect("dispatch")
         );
     }
@@ -2250,7 +2249,7 @@ fn a_listener_may_mutate_the_tree_it_was_dispatched_on() {
         .expect("main-thread script");
 
     runtime
-        .dispatch_event(&mut js_runtime, node_id(3), &tap(), &no_detail())
+        .dispatch_for_test(&mut js_runtime, node_id(3), &tap(), event_point())
         .expect("dispatch");
 
     assert_eq!(
@@ -2297,7 +2296,7 @@ fn an_unrelated_element_being_collected_does_not_truncate_the_walk() {
     runtime.collect_garbage(&mut js_runtime).expect("sweep");
 
     runtime
-        .dispatch_event(&mut js_runtime, node_id(3), &tap(), &no_detail())
+        .dispatch_for_test(&mut js_runtime, node_id(3), &tap(), event_point())
         .expect("dispatch");
 
     // A collected handle is routine — a ReactLynx re-render drops them
@@ -2337,7 +2336,7 @@ fn stopping_propagation_ends_the_walk() {
         .expect("main-thread script");
 
     runtime
-        .dispatch_event(&mut js_runtime, node_id(3), &tap(), &no_detail())
+        .dispatch_for_test(&mut js_runtime, node_id(3), &tap(), event_point())
         .expect("dispatch");
 
     runtime
@@ -2371,7 +2370,7 @@ fn a_dispatch_with_nothing_registered_reaches_the_realm_and_runs_nothing() {
 
     assert!(
         runtime
-            .dispatch_event(&mut js_runtime, node_id(3), &tap(), &no_detail())
+            .dispatch_for_test(&mut js_runtime, node_id(3), &tap(), event_point())
             .expect("dispatch"),
         "the realm published the export, which is all the answer means now"
     );
@@ -3286,7 +3285,7 @@ fn an_event_target_no_handle_names_is_an_error_not_a_silent_drop() {
     };
 
     let error = runtime
-        .dispatch_event(&mut js_runtime, run, &tap(), &no_detail())
+        .dispatch_for_test(&mut js_runtime, run, &tap(), event_point())
         .expect_err("a target no handle names cannot be delivered");
     assert!(error.to_string().contains("ownership graph"), "{error}");
 }

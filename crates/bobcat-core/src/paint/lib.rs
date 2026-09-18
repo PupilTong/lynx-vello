@@ -44,11 +44,11 @@ use tokio::sync::mpsc;
 use tokio::sync::watch;
 
 pub(crate) use self::gesture::RouterHost;
-use self::gesture::{EmitEvent, GestureRouter, InputDecision, InputDecisions};
+use self::gesture::{GestureRouter, InputDecision, InputDecisions};
 pub use self::graphics::WindowTarget;
 use self::graphics::{FrameAcquisition, WindowGraphics};
 use crate::clock::ClockInstant;
-use crate::link::{Published, ToMain, ViewSeat, block_on_deadline};
+use crate::link::{InputEventPayload, Published, ToMain, ViewSeat, block_on_deadline};
 use crate::main::tree::Viewport;
 use crate::resource::ResourceFetcher;
 #[cfg(not(target_arch = "wasm32"))]
@@ -347,17 +347,6 @@ impl std::fmt::Debug for Painter {
             .field("frame_size", &self.frame_size)
             .field("attached", &self.is_attached())
             .finish_non_exhaustive()
-    }
-}
-
-fn emit_detail(event: &EmitEvent) -> String {
-    let position = event.position;
-    match event.wheel {
-        Some(delta) => format!(
-            r#"{{"x":{},"y":{},"deltaX":{},"deltaY":{}}}"#,
-            position.x, position.y, delta.x, delta.y
-        ),
-        None => format!(r#"{{"x":{},"y":{}}}"#, position.x, position.y),
     }
 }
 
@@ -891,7 +880,7 @@ impl Painter {
         let mut decisions = InputDecisions::new();
         self.gesture
             .on_input(&event, target, at, &self.published, &mut decisions);
-        self.execute_decisions(&mut decisions, published.as_deref());
+        self.execute_decisions(&mut decisions, published.as_deref(), at);
         if let Some(frame) = &published {
             self.maybe_request_refill(frame);
         }
@@ -912,10 +901,19 @@ impl Painter {
         });
     }
 
+    /// Executes one pass's decisions in order.
+    ///
+    /// `at_seconds` is the clock reading of the pass that produced them — an
+    /// input event's arrival, or the tick's own `now` — and is what every
+    /// event the pass dispatches reports as its `timestamp`. It is one
+    /// reading for the whole pass, so a due `longpress` flushed ahead of the
+    /// event that found it and the `tap` synthesized after it are stamped
+    /// with that event's arrival, which is the moment they all belong to.
     pub(super) fn execute_decisions(
         &mut self,
         decisions: &mut InputDecisions,
         published: Option<&CommittedFrame>,
+        at_seconds: f64,
     ) {
         let mut dispatches = Vec::new();
         {
@@ -941,6 +939,7 @@ impl Painter {
                 }
             }
         }
+        let timestamp = at_seconds * 1000.0;
         for event in dispatches {
             if !self.published.listeners.contains(event.name) {
                 continue;
@@ -948,7 +947,12 @@ impl Painter {
             self.send(ToMain::DispatchEvent {
                 target: event.target,
                 name: event.name,
-                detail: emit_detail(&event),
+                payload: InputEventPayload {
+                    position: event.position,
+                    wheel: event.wheel,
+                    touches: event.touches,
+                    timestamp,
+                },
             });
         }
     }
@@ -966,7 +970,7 @@ impl Painter {
         let published = self.frame().cloned();
         let mut decisions = InputDecisions::new();
         self.gesture.on_tick(now, &self.published, &mut decisions);
-        self.execute_decisions(&mut decisions, published.as_deref());
+        self.execute_decisions(&mut decisions, published.as_deref(), now);
     }
 
     /// Applies new device metrics, if they moved at all.

@@ -237,6 +237,41 @@ fn a_quick_release_delivers_tap_to_the_realm() {
     wait_for_log(&mut engine, "tap:12");
 }
 
+/// The page a `timestamp`/`params` test reads: one `tap` listener that
+/// logs what every dispatched event carries beside its detail.
+const STAMPED_GESTURE_PAGE: &str = r"
+        globalThis.renderPage = function () {
+          const page = __CreatePage('card', 0);
+          const view = __CreateView(0);
+          __AppendElement(page, view);
+          globalThis.held = [page, view];
+          __SetInlineStyles(view, 'width:200px;height:200px');
+          __AddEventListener(view, 'tap', (event) => {
+            __SetAttribute(
+              view,
+              'log',
+              typeof event.timestamp + ':' + event.timestamp
+                + ':' + typeof event.params
+                + ':' + JSON.stringify(event.params),
+            );
+          }, {});
+          __FlushElementTree();
+        };
+        ";
+
+/// Every dispatched event carries a `timestamp` and a `params`. The clock
+/// is pinned before the release, so the value the listener reads is that
+/// arrival reading in milliseconds — this engine's time origin is the
+/// view's timeline, as web-core's is the document's.
+#[test]
+fn a_delivered_event_carries_its_timestamp_and_params() {
+    let mut engine = booted(STAMPED_GESTURE_PAGE);
+    engine.dispatch_input(touch(1, PointerPhase::Down, 10.0));
+    engine.painter.clock.pin(0.25);
+    engine.dispatch_input(touch(1, PointerPhase::Up, 12.0));
+    wait_for_log(&mut engine, "number:250:object:{}");
+}
+
 /// Travel beyond the 50px tap slop disqualifies the sequence; the later
 /// fence tap proves the suppressed one was never sent, because the
 /// command channel is ordered.
@@ -292,6 +327,46 @@ fn a_release_after_the_deadline_delivers_longpress_before_the_release() {
     engine.dispatch_input(touch(1, PointerPhase::Down, 30.0));
     engine.dispatch_input(touch(1, PointerPhase::Up, 30.0));
     wait_for_log(&mut engine, "longpress:10,tap:30");
+}
+
+/// The touch suite's page: the same 200x200 view, with listeners that log
+/// what only a touch event carries — the detail point and the three lists.
+const TOUCH_PAGE: &str = r"
+        globalThis.renderPage = function () {
+          const page = __CreatePage('card', 0);
+          const view = __CreateView(0);
+          __AppendElement(page, view);
+          globalThis.held = [page, view];
+          globalThis.entries = [];
+          __SetInlineStyles(view, 'width:200px;height:200px');
+          const note = (event) => {
+            entries.push([
+              event.type,
+              event.detail.x,
+              event.touches.length,
+              event.targetTouches.length,
+              event.changedTouches.length,
+              event.changedTouches[0].identifier,
+            ].join(':'));
+            __SetAttribute(view, 'log', entries.join());
+          };
+          __AddEventListener(view, 'touchmove', note, {});
+          __AddEventListener(view, 'touchend', note, {});
+          __FlushElementTree();
+        };
+        ";
+
+/// One finger's move and release reach a listener with their lists decoded:
+/// the move while the finger is down reports it in all three, and the
+/// release reports it in `changedTouches` alone, with the detail point
+/// falling back to the finger that lifted.
+#[test]
+fn a_touch_sequence_delivers_its_lists_to_the_realm() {
+    let mut engine = booted(TOUCH_PAGE);
+    engine.dispatch_input(touch(1, PointerPhase::Down, 10.0));
+    engine.dispatch_input(touch(1, PointerPhase::Move, 20.0));
+    engine.dispatch_input(touch(1, PointerPhase::Up, 22.0));
+    wait_for_log(&mut engine, "touchmove:20:1:1:1:1,touchend:22:0:0:1:1");
 }
 
 /// A scrollable page: the 200x200 view scrolls a 1000px-tall child, and
