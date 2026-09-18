@@ -620,20 +620,6 @@ pub(crate) fn block_on_deadline<F: Future>(future: F, deadline: ClockInstant) ->
     }
 }
 
-/// Waits for work completed by another thread, without entering a runtime or
-/// running JavaScript jobs. The future must also wake on owner cancellation.
-pub(crate) fn block_on<F: Future>(future: F) -> F::Output {
-    let waker = Waker::from(Arc::new(Unpark(thread::current())));
-    let mut context = Context::from_waker(&waker);
-    let mut future = pin!(tokio::task::coop::unconstrained(future));
-    loop {
-        if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
-            return output;
-        }
-        thread::park();
-    }
-}
-
 struct Unpark(thread::Thread);
 
 impl Wake for Unpark {

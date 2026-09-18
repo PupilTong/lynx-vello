@@ -1,11 +1,11 @@
 //! What a view's tasks owe each other, driven with the test standing in for
 //! both ends of the link.
 //!
-//! Real `QuickJS`, a real `LocalSet` and the real [`serve_view`], with no
+//! Real `QuickJS`, a real [`JsThread`] and the real [`serve_view`], with no
 //! group thread, no painter and no GPU: the test answers every source request
 //! by hand and reads what the view published. That is the whole seam these
-//! pins need, because what they are about is which task ran, in what order,
-//! and how many entries into the realm it took.
+//! pins need, because what they are about is which task ran, which job ran, in
+//! what order, and how many entries into the realm it took.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -13,11 +13,11 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 use tokio::task;
-use tokio::task::LocalSet;
 use tokio_util::sync::CancellationToken;
 
 use super::*;
 use crate::background::{WorkerCommand, WorkerMessage, WorkerStart};
+use crate::jobs::{JsThread, JsThreadHandle};
 use crate::link::{DetachedView, InputEventPayload, ViewNotice, detached_outbox};
 use crate::main::WorkerFactory;
 use crate::main::runtime::install_shared_modules;
@@ -31,19 +31,22 @@ use crate::view::NoWakeup;
 /// this many turns is a step that never will.
 const TURNS: usize = 512;
 
-/// Runs one test body on a `LocalSet` over a current-thread runtime, which is
-/// the shape `bobcat-main` itself runs.
-fn on_a_local_set<F: std::future::Future<Output = ()>>(body: F) {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_time()
-        .build()
-        .expect("a current-thread runtime asks the platform for nothing");
-    LocalSet::new().block_on(&runtime, body);
+/// Runs one test body as the `main` task of a [`JsThread`], which is the shape
+/// `bobcat-main` itself runs: the body's own turns are scheduler turns, and the
+/// jobs its views queue run between them.
+fn on_a_js_thread<F, B>(body: B)
+where
+    F: std::future::Future<Output = ()> + 'static,
+    B: FnOnce(JsThreadHandle) -> F,
+{
+    let thread = JsThread::new();
+    let body = body(thread.handle());
+    thread.run(body);
 }
 
 /// One group's shared runtime, with the test holding the worker thread's end
 /// of the factory so a `Start` is observable and no worker ever boots.
-fn group() -> (Rc<GroupContext>, mpsc::UnboundedReceiver<WorkerCommand>) {
+fn group(thread: &JsThreadHandle) -> (Rc<GroupContext>, mpsc::UnboundedReceiver<WorkerCommand>) {
     let mut js = ScriptRuntime::new().expect("a QuickJS runtime");
     install_shared_modules(&mut js).expect("the shared modules register");
     let (workers, commands) = mpsc::unbounded_channel();
@@ -52,6 +55,7 @@ fn group() -> (Rc<GroupContext>, mpsc::UnboundedReceiver<WorkerCommand>) {
         style_pool: None,
         requester: Arc::new(NoWakeup),
         workers: WorkerFactory::new(workers),
+        thread: thread.clone(),
     };
     (Rc::new(context), commands)
 }
@@ -78,6 +82,14 @@ struct Harness {
 impl Harness {
     fn new(context: Rc<GroupContext>, workers: mpsc::UnboundedReceiver<WorkerCommand>) -> Self {
         Self::serving(context, workers, ViewSources::new("app:///main.js"))
+    }
+
+    /// A second view in the same group. The group has one worker channel and
+    /// the first harness holds it, so this one watches a channel of its own:
+    /// the pins that build two views are about which view's *own* work runs,
+    /// and neither of them boots a BTS.
+    fn sibling(context: Rc<GroupContext>, sources: ViewSources) -> Self {
+        Self::serving(context, mpsc::unbounded_channel().1, sources)
     }
 
     fn serving(
@@ -162,6 +174,32 @@ impl Harness {
             source: source.to_owned(),
             url: url.to_owned(),
         }));
+    }
+
+    /// Answers one outstanding stylesheet request with author CSS.
+    fn answer_style_sheet(&mut self, css: &str) {
+        let position = self
+            .sources
+            .iter()
+            .position(|(request, _)| matches!(request, SourceRequest::StyleSheet(_)))
+            .expect("a stylesheet request is outstanding");
+        let (_, completion) = self.sources.remove(position);
+        completion.complete(Ok(LoadedSource::StyleSheet(
+            crate::resource::StyleSheetSource::Text(css.to_owned()),
+        )));
+    }
+
+    /// Whether this view has asked for a stylesheet and not been answered.
+    fn wants_a_style_sheet(&self) -> bool {
+        self.sources
+            .iter()
+            .any(|(request, _)| matches!(request, SourceRequest::StyleSheet(_)))
+    }
+
+    fn finished(&self) -> bool {
+        self.events
+            .iter()
+            .any(|event| matches!(event, EngineEvent::ScriptFinished))
     }
 
     /// Answers one outstanding source request with a failure.
@@ -283,11 +321,13 @@ impl OwnedPage {
     /// Opens the realm over `entry` and turns until its first frame is
     /// published.
     async fn boot(&mut self, entry: &str) -> u64 {
-        self.page.open_realm(RealmStartup {
-            source: entry.to_owned(),
-            url: "app:///main.js".to_owned(),
-            ..RealmStartup::default()
-        });
+        self.page
+            .open_realm(RealmStartup {
+                source: entry.to_owned(),
+                url: "app:///main.js".to_owned(),
+                ..RealmStartup::default()
+            })
+            .await;
         for _ in 0..TURNS {
             if self.view.published.commit().is_some() {
                 break;
@@ -320,6 +360,16 @@ globalThis.renderPage = function () {
 };
 ";
 
+/// A page whose entry adopts a stylesheet as it evaluates, which is the one
+/// synchronous wait a realm can make.
+const ADOPTING_BOX: &str = r"
+__AdoptStyleSheet(__LoadStyleSheet('CSS', '__Card__'));
+globalThis.renderPage = function () {
+  const page = __CreatePage('card', 0);
+  __AppendElement(page, __CreateView(0));
+};
+";
+
 /// The same page, with a timer far enough out that nothing will ever fire it,
 /// so the deadline a live realm publishes is there to be withdrawn.
 const ONE_BOX_WITH_TIMER: &str = r"
@@ -348,8 +398,8 @@ globalThis.renderPage = function () {
 /// data. Each side checks its own, so a swap anywhere on the way fails boot.
 #[test]
 fn page_data_reaches_the_realm_it_was_given_to() {
-    on_a_local_set(async {
-        let (context, workers) = group();
+    on_a_js_thread(|thread| async move {
+        let (context, workers) = group(&thread);
         let mut harness = Harness::serving(
             context,
             workers,
@@ -377,8 +427,8 @@ fn page_data_reaches_the_realm_it_was_given_to() {
 /// commit and one acknowledgement — not one of each per command.
 #[test]
 fn a_burst_of_commands_is_one_commit_and_one_acknowledgement() {
-    on_a_local_set(async {
-        let (context, workers) = group();
+    on_a_js_thread(|thread| async move {
+        let (context, workers) = group(&thread);
         let mut harness = Harness::new(context, workers);
         let booted = harness.boot(ONE_BOX).await;
 
@@ -417,14 +467,15 @@ fn a_burst_of_commands_is_one_commit_and_one_acknowledgement() {
 /// is committed without a command to carry it.
 #[test]
 fn data_updates_are_visible_to_the_next_command_and_commit_without_an_explicit_flush() {
-    on_a_local_set(async {
-        let (context, _workers) = group();
+    on_a_js_thread(|thread| async move {
+        let (context, _workers) = group(&thread);
         let mut owned = OwnedPage::new(context);
         let booted = owned.boot(&format!(
             "{ONE_BOX}\nglobalThis.updatePage = data => __SetAttribute(box, 'data-value', String(data.value));"
         )).await;
-        owned.page.apply(
-            [
+        owned
+            .page
+            .apply(vec![
                 ToMain::PageUpdate(crate::link::PageUpdate::Data {
                     data: r#"{"value":7}"#.into(),
                     processor_name: String::new(),
@@ -434,9 +485,8 @@ fn data_updates_are_visible_to_the_next_command_and_commit_without_an_explicit_f
                     let node = document.document_element().children().next().unwrap();
                     assert_eq!(node.attribute("data-value"), Some("7"));
                 })),
-            ]
-            .into_iter(),
-        );
+            ])
+            .await;
         assert_eq!(owned.view.published.commit(), Some(booted + 1));
         assert!(!owned.page.ended());
     });
@@ -444,8 +494,8 @@ fn data_updates_are_visible_to_the_next_command_and_commit_without_an_explicit_f
 
 #[test]
 fn a_module_completion_commits_with_no_command_behind_it() {
-    on_a_local_set(async {
-        let (context, workers) = group();
+    on_a_js_thread(|thread| async move {
+        let (context, workers) = group(&thread);
         let mut harness = Harness::new(context, workers);
         let booted = harness
             .boot(&format!(
@@ -491,8 +541,8 @@ fn a_module_completion_commits_with_no_command_behind_it() {
 /// whole, `BeginFrame` included.
 #[test]
 fn a_fatal_module_failure_ends_every_task_of_the_view() {
-    on_a_local_set(async {
-        let (context, workers) = group();
+    on_a_js_thread(|thread| async move {
+        let (context, workers) = group(&thread);
         let mut harness = Harness::new(context, workers);
         let booted = harness
             .boot(&format!("{ONE_BOX}\nimport('app:///dep.js');"))
@@ -574,8 +624,8 @@ fn a_fatal_module_failure_ends_every_task_of_the_view() {
 /// nothing to publish says out loud.
 #[test]
 fn a_siblings_checkpoint_makes_a_parked_page_settle() {
-    on_a_local_set(async {
-        let (context, _workers) = group();
+    on_a_js_thread(|thread| async move {
+        let (context, _workers) = group(&thread);
         let (outbox, mut view) = detached_outbox(Arc::new(NoWakeup));
         let page = Page::new(
             Rc::clone(&context),
@@ -587,7 +637,8 @@ fn a_siblings_checkpoint_makes_a_parked_page_settle() {
             source: ONE_BOX.to_owned(),
             url: "app:///main.js".to_owned(),
             ..RealmStartup::default()
-        });
+        })
+        .await;
         for _ in 0..TURNS {
             if view.published.commit().is_some() {
                 break;
@@ -629,8 +680,8 @@ fn a_siblings_checkpoint_makes_a_parked_page_settle() {
 /// at the end of every entry is what tells its own bumps from a sibling's.
 #[test]
 fn a_pages_own_entries_never_wake_its_clock_task() {
-    on_a_local_set(async {
-        let (context, _workers) = group();
+    on_a_js_thread(|thread| async move {
+        let (context, _workers) = group(&thread);
         let (outbox, mut view) = detached_outbox(Arc::new(NoWakeup));
         let page = Page::new(
             Rc::clone(&context),
@@ -644,7 +695,8 @@ fn a_pages_own_entries_never_wake_its_clock_task() {
             source: LISTENING_BOX.to_owned(),
             url: "app:///main.js".to_owned(),
             ..RealmStartup::default()
-        });
+        })
+        .await;
         for _ in 0..TURNS {
             if view.published.commit().is_some() {
                 break;
@@ -662,11 +714,12 @@ fn a_pages_own_entries_never_wake_its_clock_task() {
 
         // The probe is how the test learns which node to aim the dispatch at.
         let (target, listening) = std::sync::mpsc::channel();
-        page.apply(std::iter::once(ToMain::Probe(Box::new(move |document| {
+        page.apply(vec![ToMain::Probe(Box::new(move |document| {
             let page = document.document_element().id();
             let box_id = document.get(page).expect("the page is live").child_ids()[0];
             let _ = target.send(box_id);
-        }))));
+        }))])
+        .await;
         let target = listening.try_recv().expect("the probe ran");
         for _ in 0..64 {
             task::yield_now().await;
@@ -675,11 +728,12 @@ fn a_pages_own_entries_never_wake_its_clock_task() {
 
         // One entry of this page's own, which enters JavaScript and so bumps
         // the generation every realm on the runtime shares.
-        page.apply(std::iter::once(ToMain::DispatchEvent {
+        page.apply(vec![ToMain::DispatchEvent {
             target,
             name: "tap",
             payload: InputEventPayload::default(),
-        }));
+        }])
+        .await;
         for _ in 0..64 {
             task::yield_now().await;
         }
@@ -701,8 +755,8 @@ fn a_pages_own_entries_never_wake_its_clock_task() {
 /// owner's turn would have seen.
 #[test]
 fn a_task_that_traps_ends_the_view_before_a_sibling_runs() {
-    on_a_local_set(async {
-        let (context, workers) = group();
+    on_a_js_thread(|thread| async move {
+        let (context, workers) = group(&thread);
         let mut harness = Harness::new(context, workers);
         harness.boot(ONE_BOX).await;
 
@@ -750,8 +804,8 @@ fn a_task_that_traps_ends_the_view_before_a_sibling_runs() {
 /// never come, so releasing it is the last thing the view owes it.
 #[test]
 fn the_end_acknowledges_the_begin_frame_a_painter_is_blocked_on() {
-    on_a_local_set(async {
-        let (context, mut workers) = group();
+    on_a_js_thread(|thread| async move {
+        let (context, mut workers) = group(&thread);
         let mut owned = OwnedPage::new(context);
         owned.boot(ONE_BOX_WITH_TIMER).await;
         assert!(
@@ -795,8 +849,8 @@ fn the_end_acknowledges_the_begin_frame_a_painter_is_blocked_on() {
 /// `LynxView::pump` leaves.
 #[test]
 fn a_burst_queued_behind_a_release_is_never_applied() {
-    on_a_local_set(async {
-        let (context, workers) = group();
+    on_a_js_thread(|thread| async move {
+        let (context, workers) = group(&thread);
         let mut harness = Harness::new(context, workers);
         let booted = harness.boot(ONE_BOX).await;
 
@@ -831,8 +885,8 @@ fn a_burst_queued_behind_a_release_is_never_applied() {
 /// that failed and then trapped says both.
 #[test]
 fn a_view_that_already_failed_still_reports_a_task_that_traps() {
-    on_a_local_set(async {
-        let (context, _workers) = group();
+    on_a_js_thread(|thread| async move {
+        let (context, _workers) = group(&thread);
         let mut owned = OwnedPage::new(context);
         owned
             .page
@@ -882,8 +936,8 @@ fn script_finished_is_published_once_without_any_bts_acknowledgement() {
     // Boot is the MTS entry's: the module evaluated and its first flush
     // committed. The BTS Worker here is taken and never booted, so it says
     // nothing at all — and the view is ready anyway, exactly once.
-    on_a_local_set(async {
-        let (context, workers) = group();
+    on_a_js_thread(|thread| async move {
+        let (context, workers) = group(&thread);
         let mut sources = ViewSources::new("app:///main.js");
         sources.background_entry = Some("app:///background.js".into());
         let mut harness = Harness::serving(context, workers, sources);
@@ -928,8 +982,8 @@ fn disposal_finishes_behind_a_job_heavy_worker_event() {
     // not, the jobs one worker event queued were finished out of the *next*
     // event's entry — and the reply disposal was waiting for was spent
     // there instead of reaching JavaScript, so the view never ended.
-    on_a_local_set(async {
-        let (context, workers) = group();
+    on_a_js_thread(|thread| async move {
+        let (context, workers) = group(&thread);
         let mut harness = Harness::new(context, workers);
         harness
             .until("entry request", |h| !h.sources.is_empty())
@@ -993,8 +1047,8 @@ lynx.getJSContext().addEventListener('flood', () => {
 
 #[test]
 fn a_bts_worker_that_fails_reports_worker_failed_and_leaves_boot_alone() {
-    on_a_local_set(async {
-        let (context, workers) = group();
+    on_a_js_thread(|thread| async move {
+        let (context, workers) = group(&thread);
         let mut sources = ViewSources::new("app:///main.js");
         sources.background_entry = Some("app:///background.js".into());
         let mut harness = Harness::serving(context, workers, sources);
@@ -1079,8 +1133,8 @@ fn a_bts_worker_that_fails_reports_worker_failed_and_leaves_boot_alone() {
 
 #[test]
 fn card_url_uses_the_entry_response_url_before_requesting_styles() {
-    on_a_local_set(async {
-        let (context, workers) = group();
+    on_a_js_thread(|thread| async move {
+        let (context, workers) = group(&thread);
         let mut harness = Harness::new(context, workers);
         harness
             .until("the entry was not requested", |h| h.sources.len() == 1)
@@ -1106,8 +1160,8 @@ fn card_url_uses_the_entry_response_url_before_requesting_styles() {
 
 #[test]
 fn view_release_waits_for_js_dispose_before_terminating_its_bts() {
-    on_a_local_set(async {
-        let (context, workers) = group();
+    on_a_js_thread(|thread| async move {
+        let (context, workers) = group(&thread);
         let mut harness = Harness::new(context, workers);
         harness.boot(ONE_BOX).await;
         let mut background = harness.background_worker();
@@ -1137,8 +1191,8 @@ fn view_release_waits_for_js_dispose_before_terminating_its_bts() {
 
 #[test]
 fn a_disposal_reply_queued_with_view_release_is_not_discarded() {
-    on_a_local_set(async {
-        let (context, workers) = group();
+    on_a_js_thread(|thread| async move {
+        let (context, workers) = group(&thread);
         let mut harness = Harness::new(context, workers);
         harness.boot(&format!(
             "{ONE_BOX}\nglobalThis.updatePage = () => lynx.getEngine().dispatchEvent({{type:'__DestroyLifetime'}});"
@@ -1179,5 +1233,219 @@ fn a_disposal_reply_queued_with_view_release_is_not_discarded() {
             Ok(WorkerMessage::Terminate)
         ));
         harness.owner.await.unwrap();
+    });
+}
+
+/// What a synchronous adoption stops and what it does not.
+///
+/// View A's entry adopts a stylesheet and the test withholds the answer, so
+/// A's job is parked inside [`crate::jobs::JsThread::wait`] for the whole of
+/// this test's middle. While it is:
+///
+/// - the scheduler keeps running, so a still-loading view B has its source requests answered and
+///   its `BeginFrame` acknowledged — the acknowledgement an offscreen host blocks on is not queued
+///   behind a sibling's load;
+/// - no JavaScript of B's runs, because B's entry is a job and jobs are one FIFO;
+/// - once A's answer arrives the queue drains in order and both views finish boot.
+#[test]
+fn a_synchronous_adoption_parks_javascript_and_leaves_a_siblings_tasks_running() {
+    on_a_js_thread(|thread| async move {
+        let (context, workers) = group(&thread);
+        let mut adopting = Harness::new(Rc::clone(&context), workers);
+        adopting
+            .until("A never asked for its entry", |h| !h.sources.is_empty())
+            .await;
+        adopting.answer("app:///main.js", ADOPTING_BOX);
+        adopting
+            .until("A never adopted a stylesheet", |h| h.wants_a_style_sheet())
+            .await;
+
+        // A's job is parked from here to the answer below. Everything that
+        // follows happens while it is.
+        let mut loading = Harness::sibling(
+            context,
+            ViewSources {
+                style_sheets: vec!["app:///b.css".to_owned()],
+                ..ViewSources::new("app:///b.js")
+            },
+        );
+        loading
+            .until("B never asked for its stylesheet", |h| {
+                h.wants_a_style_sheet()
+            })
+            .await;
+        loading.answer_style_sheet(".box{width:10px}");
+        loading
+            .until("B's boot never went on to its entry", |h| {
+                !h.sources.is_empty()
+            })
+            .await;
+        loading.answer("app:///b.js", ONE_BOX);
+
+        // B's next step is a job, which cannot run yet — so B is still loading,
+        // and a loading page answers a `BeginFrame` on its own task.
+        loading
+            .commands
+            .send(ToMain::BeginFrame { now: 0.0, seq: 4 })
+            .expect("B is still serving");
+        loading
+            .until("B's BeginFrame was queued behind A's load", |h| {
+                h.view.published.begin_frame_serviced() == 4
+            })
+            .await;
+        assert!(
+            !loading.finished() && loading.view.published.commit().is_none(),
+            "no JavaScript of B's ran while A's job held the thread"
+        );
+        assert!(
+            !adopting.finished(),
+            "and A's own boot is still inside the adoption"
+        );
+
+        adopting.answer_style_sheet(".box{width:20px}");
+        adopting
+            .until("A never finished after its adoption returned", |h| {
+                h.finished()
+            })
+            .await;
+        loading
+            .until("B never booted once the queue drained", |h| h.finished())
+            .await;
+    });
+}
+
+/// Releasing a view whose job is parked in an adoption ends the wait, and the
+/// realm is released afterwards without a panic.
+///
+/// The wait's `select!` is biased on this view's own token, so the cancel wins
+/// over an answer that never comes; the message it throws with is pinned in
+/// `runtime/tests.rs`. What this pins is the rest: the owner runs its tail
+/// — the disposal exchange and the release job — behind the job that was
+/// parked, so nothing re-borrows a realm that is still under a JavaScript
+/// stack.
+#[test]
+fn releasing_a_view_whose_job_is_waiting_ends_the_wait_and_releases_its_realm() {
+    on_a_js_thread(|thread| async move {
+        let (context, workers) = group(&thread);
+        let mut harness = Harness::new(context, workers);
+        harness
+            .until("the view never asked for its entry", |h| {
+                !h.sources.is_empty()
+            })
+            .await;
+        harness.answer("app:///main.js", ADOPTING_BOX);
+        harness
+            .until("the entry never adopted a stylesheet", |h| {
+                h.wants_a_style_sheet()
+            })
+            .await;
+
+        harness.view.token.cancel();
+        harness
+            .until("the released view's owner never returned", |h| {
+                h.owner.is_finished()
+            })
+            .await;
+        // A panic in any job of the view — a `BorrowMutError` from a release
+        // landing on a realm still under a JavaScript stack, above all — would
+        // come back here.
+        (&mut harness.owner).await.expect("the owner did not trap");
+
+        let (_, withheld) = harness
+            .sources
+            .pop()
+            .expect("the stylesheet request the test never answered");
+        assert!(
+            withheld.is_cancelled(),
+            "the host sees the request cancelled without waiting for a turn"
+        );
+        assert!(
+            !harness.events.iter().any(|event| matches!(
+                event,
+                EngineEvent::StartupFailed(_) | EngineEvent::ScriptRunError(_)
+            )),
+            "a release is not a failure, so nothing is reported"
+        );
+    });
+}
+
+/// A clock task whose deadline passed while another view's job holds the
+/// thread queues **one** settle and then waits for it.
+///
+/// It awaits the settle because the deadline its epilogue republishes is not
+/// visible until that job has run: a turn that looped without waiting would
+/// re-read the deadline it just passed, re-arm an already-expired sleep, and go
+/// on queueing settles for as long as the other view stayed parked. What this
+/// pins is that the queue does not grow with how long the park lasts — the
+/// second reading is taken after twice the wait of the first.
+#[test]
+fn a_passed_deadline_queues_one_settle_while_a_sibling_holds_the_thread() {
+    on_a_js_thread(|thread| async move {
+        let (context, workers) = group(&thread);
+        // The timer view boots first, because a boot is itself a job. It is an
+        // `OwnedPage` rather than a `Harness` because what this reads — the
+        // armed deadline, and that the epilogue ran at all — is not something a
+        // page with nothing to publish says out loud.
+        //
+        // A repeat rather than a one-shot, so that however long this view's own
+        // boot took, a deadline is always at most one period away when the
+        // sibling parks below.
+        let mut ticking = OwnedPage::new(Rc::clone(&context));
+        ticking
+            .boot(
+                r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  __AppendElement(page, __CreateView(0));
+                  setInterval(() => {}, 100);
+                };
+                ",
+            )
+            .await;
+        let settled = ticking.page.epilogue_count();
+        assert!(
+            ticking.page.armed_deadline().is_some(),
+            "the booted realm armed a timer"
+        );
+
+        let mut adopting = Harness::new(context, workers);
+        adopting
+            .until("A never asked for its entry", |h| !h.sources.is_empty())
+            .await;
+        adopting.answer("app:///main.js", ADOPTING_BOX);
+        adopting
+            .until("A never adopted a stylesheet", |h| h.wants_a_style_sheet())
+            .await;
+
+        // Both sleeps are spent inside A's job, and tokio's own timer is driven
+        // by the `block_on` that job's wait re-entered — which is why the
+        // deadline passes at all while a job holds the thread.
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        let parked = thread.queued();
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert_eq!(
+            parked, 1,
+            "the passed deadline queued exactly one settle, and the clock task \
+             is waiting for it"
+        );
+        assert_eq!(
+            thread.queued(),
+            parked,
+            "and the queue did not grow over twice as long a park"
+        );
+
+        adopting.answer_style_sheet(".box{width:20px}");
+        adopting
+            .until("A never finished after its adoption returned", |h| {
+                h.finished()
+            })
+            .await;
+        for _ in 0..64 {
+            task::yield_now().await;
+        }
+        assert!(
+            ticking.page.epilogue_count() > settled,
+            "and the settle it queued ran once the queue drained"
+        );
     });
 }

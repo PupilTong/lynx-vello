@@ -39,10 +39,19 @@ no script errors.
 Each `__AdoptStyleSheet(handle)` reads the URL in JS and makes an ordinary
 `SourceRequest::StyleSheet` through the same loader used for startup styles.
 It synchronously mounts the response and returns null. Only that call holds a
-response receiver. If the response has not arrived, MTS parks until the embedder
-completes it or the view's cancellation token fires. This wait runs no JS jobs,
-timers or sibling-view tasks on the group's shared MTS thread. The resource host
-continues servicing requests through `LynxView::pump`.
+response receiver. If the response has not arrived, the adoption parks the job
+it is running in until the embedder completes it or the view's cancellation
+token fires — a `JsThread::wait`, biased on the view's own token so a release
+ends the wait rather than waiting out an answer that will never come.
+
+What that wait does and does not run follows from `bobcat-main` being a
+`JsThread`: JavaScript runs in jobs, and the jobs are one FIFO, so no promise
+job, no timer callback and no sibling view's entry runs before this adoption
+returns. The thread's *tasks* keep running throughout — the command consumers,
+the boot futures, the clock tasks, and the notice traffic that carries this very
+request to the host — so a sibling view that is still loading goes on staging
+what arrives and acknowledging the `BeginFrame` an offscreen host is blocked on.
+The resource host continues servicing requests through `LynxView::pump`.
 
 The reference fetcher, `bobcat-resources`, owns a stylesheet response cache keyed
 by resolved URL. Preload and ordinary requests share pending work and reuse its

@@ -148,6 +148,13 @@ pub(crate) enum WorkerMessage {
     /// Explicit termination or GC of the MTS Worker object: end it between
     /// tasks and discard what was queued behind this.
     Terminate,
+    /// The seam standing in for a synchronous host member this thread does not
+    /// have yet: the entry it produces parks on this worker's own token.
+    ///
+    /// Two answers ride this channel, in order: `false` as the wait begins,
+    /// and `true` once this worker's end released it.
+    #[cfg(test)]
+    Block(std::sync::mpsc::Sender<bool>),
 }
 
 /// One worker realm → the view whose realm created it.

@@ -7,6 +7,7 @@ use tokio::sync::mpsc;
 
 use super::*;
 use crate::background::{WorkerEvent, WorkerHome, WorkerPayload};
+use crate::jobs::JsThread;
 use crate::link::{DetachedView, ViewNotice, block_on_deadline, detached_outbox};
 use crate::main::workers::WorkerFactory;
 use crate::resource::{LoadedSource, SourceCompletion, SourceRequest};
@@ -46,6 +47,9 @@ struct Pair {
     /// The host's view cancellation signal. Worker handles and their sources
     /// have independent lifetimes, which these tests exercise explicitly.
     cancel: tokio_util::sync::CancellationToken,
+    /// The engine thread the MTS realm was opened with, held for its life:
+    /// `__AdoptStyleSheet` would park on it.
+    _thread: Rc<JsThread>,
     /// The group's worker thread. `Option` only so a test can drop it in the
     /// middle of its body: that is what waits for the thread, and two pins here
     /// ask what the realm's channels hold once it has returned.
@@ -160,11 +164,13 @@ impl Pair {
             crate::view::Viewport::new(32.0, 24.0),
             crate::main::tree::PageConfig::default(),
         );
+        let thread = JsThread::new();
         let (runtime, events) = MainThreadRuntime::new(
             &mut js,
             ingredients,
             outbox,
             &WorkerFactory::new(home.commands()),
+            thread.handle(),
             &mut startup,
         )
         .unwrap();
@@ -176,6 +182,7 @@ impl Pair {
             frame_demand: crate::link::FrameDemand::default(),
             deferred_notices: VecDeque::new(),
             cancel,
+            _thread: thread,
             home: Some(home),
         }
     }

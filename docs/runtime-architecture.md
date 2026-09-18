@@ -367,31 +367,53 @@ names none of a fetcher's own transport API. The protocol carries no
 response-size limit; each fetcher owns the bound for the response it
 materializes.
 
-A view is a set of tasks on the group's `LocalSet`, one per thing it can wait
-for, and tokio owns the polling, parking and waking. `serve_view` is the owner
-and has exactly one wait of its own — the view's end; `boot_page` requests the
-sheets in cascade order, then the entry, then opens the realm; `consume_commands`
-is the one ordered consumer of the command channel; `consume_worker_events` is
-the one ordered consumer of this view's workers; one `load_module` future runs
-per resource load an import produced; `serve_clock` owns the realm's one pinned
+An engine thread is `jobs.rs`'s `JsThread`: a tokio `current_thread` runtime
+with a `LocalSet`, and a FIFO of jobs its top loop runs *between* two turns of
+that scheduler. The split is the execution model. **Tasks wait and route**; they
+never run JavaScript, touch a document or borrow the shared `ScriptRuntime`.
+**Jobs are the only place any of that happens**, and because the loop calls them
+outside every `block_on`, a job may block: `JsThread::wait` is a fresh
+`block_on` over the same `LocalSet`. While a job is parked on one, the
+scheduler keeps going — channel reads, lifecycle signals, acknowledgements,
+resource routing, other realms' timers — and no other job runs. Jobs pushed
+meanwhile queue behind the parked one and run in order once it returns, which is
+why an entry may hold both its borrows across its own wait.
+
+A view is a set of tasks on that `LocalSet`, one per thing it can wait for, and
+tokio owns the polling, parking and waking. `serve_view` is the owner and has
+exactly one wait of its own — the view's end; `boot_page` requests the sheets in
+cascade order, then the entry, then opens the realm; `consume_commands` is the
+one ordered consumer of the command channel; `consume_worker_events` is the one
+ordered consumer of this view's workers; one `load_module` future runs per
+resource load an import produced; `serve_clock` owns the realm's one pinned
 sleep and watches the runtime-wide checkpoint generation.
 Nothing is spawned per input: an ordered stream stays serial because one
 consumer reads it with `while let Some(x) = rx.recv().await`.
 
 Every one of them reaches the realm through `Page::enter`, the one JavaScript
-execution boundary. It runs one synchronous operation under the borrows of the
-shared runtime and the realm, and then the epilogue, in this order — due timers
-first, because whatever just ran may have armed or cleared one and its mutation
-should ride the same frame; the commit next, so the frame exists before
-anything implying it; then the boot report, the `BeginFrame` acknowledgement,
-the module requests that entry produced, the next timer deadline republished
-only when it moved, and finally the checkpoint generation as of this entry.
-`Page::settle` is the epilogue alone, for a wake that carries no operation of
-its own. `Page::open_realm` is the one documented exception, because the realm
-it would enter does not exist until it returns. A command opens a burst: the
-rest of what is already queued goes with it, bounded by the length the count
-was taken from, so a host's whole round of input is one entry, one commit and
-one acknowledgement rather than one of each per command.
+execution boundary. It queues a job and answers with what that job returned. The
+job runs one synchronous operation under the borrows of the shared runtime and
+the realm, and then the epilogue, in this order — due timers first, because
+whatever just ran may have armed or cleared one and its mutation should ride the
+same frame; the commit next, so the frame exists before anything implying it;
+then the boot report, the `BeginFrame` acknowledgement, the module requests that
+entry produced, the next timer deadline republished only when it moved, and
+finally the checkpoint generation as of this entry. `Page::settle` is the
+epilogue alone, for a wake that carries no operation of its own.
+`Page::open_realm` is a job too and the only one outside `enter`, because the
+realm it would enter does not exist until it returns; the disposal exchange in
+`Page::run_owner` is the other, running past the latch and the epilogue because
+the view has already ended. A command opens a burst: the rest of what is already
+queued goes with it, bounded by the length the count was taken from, so a host's
+whole round of input is one entry, one commit and one acknowledgement rather
+than one of each per command. The consumer awaits that burst's job before
+reading the channel again, so what arrives meanwhile is one later burst.
+
+A page that has not opened its realm yet answers a burst on the task instead.
+Its `DocumentIngredients` are a field of their own and nothing holds them across
+a wait, so a resize, an image report and the `BeginFrame` acknowledgement an
+offscreen host blocks on are served at once, whatever a sibling view's job is
+parked on. `Page::stage_sheet` is task-side for the same reason.
 
 That checkpoint watch is a runtime-wide `u64` bumped inside
 `ScriptEngine::checkpoint`. The promise-job queue belongs to the runtime rather
@@ -985,9 +1007,10 @@ thread every view in it paints on.
 Views in a group take turns rather than run at once. Each has a set of tasks
 of its own on that thread's `LocalSet`, one per thing it can wait for, so a
 view waiting for its entry parks on its own channels and nothing it waits for
-holds up a sibling — but every entry into a realm is one synchronous stretch
-inside `Page::enter`, and only one task is inside the shared runtime at a
-time. A second view therefore costs no second heap,
+holds up a sibling — but every entry into a realm is one job on that thread's
+one queue, and the jobs run one at a time. A view parked on a synchronous
+stylesheet therefore holds up every *realm* on the thread while holding up no
+task of any of them. A second view costs no second heap,
 no second module graph and no second set of Stylo workers, at the price of
 the two never restyling in parallel. The assumption that buys is that a
 person drives one view at a time. A host that needs two pages genuinely
@@ -1170,9 +1193,10 @@ not wasm32  -> std::thread::Builder
 wasm32      -> wasm_thread::Builder
 ```
 
-Both engine threads run a tokio `current_thread` runtime under a `LocalSet`,
-and both need to wait out their realms' timer deadlines. Natively they enable
-tokio's time driver. On wasm32 that driver reads `std::time::Instant`, which
+Both engine threads are a `jobs.rs` `JsThread` — a tokio `current_thread`
+runtime with a `LocalSet`, plus the job queue its top loop drains between two
+turns of that scheduler — and both need to wait out their realms' timer
+deadlines. Natively they enable tokio's time driver. On wasm32 that driver reads `std::time::Instant`, which
 panics there, so `crate::clock::sleep_until` is served instead by `alarm.rs`:
 one process-wide `bobcat-alarm` `wasm_thread` Worker holding a heap of
 deadlines and the wakers waiting on them, parked with `park_timeout`, which
@@ -1312,9 +1336,11 @@ importing the entry. JS resolves the card alias into a CSS resource URL.
 returns a JS handle associated only with the URL. Each `__AdoptStyleSheet` sends
 an ordinary stylesheet request and synchronously mounts its response before
 returning. The fetcher owns pending loads, caching and failures; core holds only
-that call's response receiver. An unfinished request parks MTS until completion
-or view cancellation; it runs no JS jobs or sibling view tasks. The embedder
-supplies text or preparsed styles without exposing that choice to JS. Cache
+that call's response receiver. An unfinished request parks the job the adoption
+is running in until completion or view cancellation: no JavaScript job runs
+meanwhile, this realm's or a sibling's, while `bobcat-main`'s tasks — the ones
+that route that very response among them — carry on. The embedder supplies text
+or preparsed styles without exposing that choice to JS. Cache
 ownership and synchronous failures are described in
 [named stylesheet loading and adoption](named-styles-runtime.md).
 

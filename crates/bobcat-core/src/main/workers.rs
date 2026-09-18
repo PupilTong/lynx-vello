@@ -199,8 +199,14 @@ impl WorkerOwner {
     }
 
     /// `Worker.terminate()`: the worker takes nothing more, including what is
-    /// already queued for it, which is why this is a message rather than
-    /// simply dropping the sender.
+    /// already queued for it.
+    ///
+    /// A message rather than simply dropping the sender, because dropping is
+    /// the *other* thing: a closed channel is read to its end, so everything
+    /// queued would be delivered first. This is read in order like any other
+    /// message, and reading it ends the worker at once — which discards the
+    /// deliveries queued ahead of it that have not run, the way HTML's
+    /// "terminate a worker" discards its queued tasks.
     fn terminate(&self, key: WorkerKey) {
         if let Some(messages) = self.live.borrow_mut().remove(&key) {
             let _ = messages.send(WorkerMessage::Terminate);

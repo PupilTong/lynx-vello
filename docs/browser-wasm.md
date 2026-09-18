@@ -72,6 +72,14 @@ handle, so wasm teardown says the goodbye and does not wait.
 The public facade still creates one fresh Render Worker and Wasm instance per
 `BobcatCanvas`, not per load.
 
+Both engine Workers run the same execution model they do natively: a tokio
+`current_thread` runtime with a `LocalSet` for their tasks, and a queue of jobs
+the thread's top loop runs between two turns of that scheduler, JavaScript only
+ever inside one. A synchronous stylesheet adoption re-enters `block_on` from
+inside a job, which on this target is the same primitive it is natively — the
+Worker is already inside one, with atomics — so nothing about the wait is
+wasm-specific.
+
 The Render Worker is not a member of any style pool. Each group's Lynx-main
 Worker is index zero of the pool it builds, taken over in place by rayon's
 `use_current_thread`, and the count `BobcatRenderer::create` is given includes
