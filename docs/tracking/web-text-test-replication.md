@@ -28,18 +28,18 @@ see [F](#f-recorded-deviations-not-gaps).
 | File | Cases | Passing | Gap-ignored |
 | --- | --- | --- | --- |
 | [`crates/hughie/tests/web_text_replication.rs`](../../crates/hughie/tests/web_text_replication.rs) | paragraph algorithm: clamping, cut points, tail fitting, word-break | 17 | 3 |
-| [`crates/bobcat-core/src/main/tree/web_text_replication.rs`](../../crates/bobcat-core/src/main/tree/web_text_replication.rs) | the `<text>` element, its UA sheet and its attributes | 33 | 5 |
+| [`crates/bobcat-core/src/main/tree/web_text_replication.rs`](../../crates/bobcat-core/src/main/tree/web_text_replication.rs) | the `<text>` element, its UA sheet and its attributes | 35 | 3 |
 | [`crates/bobcat-core/src/main/runtime/web_text_replication.rs`](../../crates/bobcat-core/src/main/runtime/web_text_replication.rs) | the Element PAPI: content, restyle, truncation, `setNativeProps`, layout events | 15 | 6 |
-| [`crates/dom/tests/web_text_replication.rs`](../../crates/dom/tests/web_text_replication.rs) | relayout, percentage sizing, scroll targets, glyph, atom and inline-background paint | 23 | 1 |
+| [`crates/dom/tests/web_text_replication.rs`](../../crates/dom/tests/web_text_replication.rs) | relayout, percentage sizing, scroll targets, glyph, atom and inline-background paint | 27 | 0 |
 | [`crates/dom/tests/web_text_screenshots.rs`](../../crates/dom/tests/web_text_screenshots.rs) | golden screenshots — the originals' own oracle, for the cases whose claim is visual | 12 | 0 |
 | [`crates/bobcat-source/tests/web_text_css_replication.rs`](../../crates/bobcat-source/tests/web_text_css_replication.rs) | text CSS across the `.web.bundle` wire | 9 | 0 |
-| **Total** | | **109** | **15** |
+| **Total** | | **115** | **12** |
 
 A gap-ignored test asserts the `web-core` behavior and is marked
 `#[ignore = "GAP: …"]` naming the cause with a `file:line`. It is a real
 assertion, never weakened — run any file with `-- --ignored` and every one of
-the 15 fails on the assertion its own string names, so no ignore is masking a
-test that would now pass. Four of the 15 are marked `DEVIATION` instead: they
+the 12 fails on the assertion its own string names, so no ignore is masking a
+test that would now pass. Four of the 12 are marked `DEVIATION` instead: they
 assert `web-core` against a ruling that this engine follows native Lynx, and
 are listed in [F](#f-recorded-deviations-not-gaps).
 
@@ -73,20 +73,23 @@ siblings instead.
 230 cases were catalogued across `web-elements/tests/web-elements.spec.ts`
 (`x-text`, `x-textarea`, and the text-adjacent `layout`/`scroll-view` cases),
 `web-core-e2e/tests/reactlynx.spec.ts`, `web-core/tests/*`, and the compiled
-cards under `web-tests/dist/`. 85 became 117 of the 124 tests above — a case
+cards under `web-tests/dist/`. 85 became 118 of the 127 tests above — a case
 splits where it carries independent claims, and a visual case is replicated
-twice, once as a metric and once as a golden. The other seven replicate no
-catalogued case: they are the inline-background group, which pins behaviour the
-reference implies but no fixture pictures. The remaining 145 are out of scope,
-for the reasons in [Not replicated](#not-replicated).
+twice, once as a metric and once as a golden. The other nine replicate no
+catalogued case: the inline-background group, which pins behaviour the
+reference implies but no fixture pictures, plus the two positioned-child
+replicas in [B](#b-atomic-inline-boxes--closed), which pin behaviour web-core
+gets from the browser rather than from a fixture of its own. The remaining 145
+are out of scope, for the reasons in [Not replicated](#not-replicated).
 
 ## What closed since the first assessment
 
 The suite was first written against the branch point 6cac1d42 and scored 55
 passing / 35 gap-ignored. Re-run unchanged against 22d9ac1c, 24 commits later,
 it scored **67 / 23**: twelve gaps closed, no regressions. (The table above
-reads 102 / 15 because later rounds added the screenshots and closed the
-coverage holes below; the twelve closures are the engine delta.)
+reads 115 / 12 because later rounds added the screenshots, closed the coverage
+holes below and closed further gaps; the twelve closures are that round's
+engine delta.)
 
 **All twelve trace to one commit**, d19cbea2 *"feat(dom): render element text
 content and migrate raw-text to CSS" (#227)*, in two clauses:
@@ -97,7 +100,7 @@ content and migrate raw-text to CSS" (#227)*, in two clauses:
   be inert, and since the ReactLynx compiler collapses a static text child into
   exactly that call, a typical card's whole body measured `0×0`. Four closures.
 - The `input.goal.commits()` branch into `hughie::compute::compute_inline_box_layout`
-  (`crates/dom/src/layout/text_block.rs:540-548`) closed the **atom-never-committed**
+  (`crates/dom/src/layout/text_block.rs:640-659`) closed the **atom-never-committed**
   defect: an atomic inline box used to be laid out under `LayoutInput::measure`,
   which writes no layout, so `place_and_hide` copied an unwritten zero and every
   `<view>`/`<image>` inside a `<text>` ended the pass `0×0`. Eight closures.
@@ -117,7 +120,7 @@ re-labelled two `text-maxline="1"` tests GAP → DEVIATION). The third had no ro
 of its own to close into, so it is written up here; the fourth — the custom
 `<inline-truncation>` wiring, which closed an [E](#e-absent-surfaces) absent
 surface and the `display: contents` wrapper row
-[B3](#b-atomic-inline-boxes--what-227-did-not-fix) with it — has the section
+[B3](#b-atomic-inline-boxes--closed) with it — has the section
 after this one to itself.
 
 - **`@font-face` → shaping** — was the last bullet of [E. Absent
@@ -167,9 +170,9 @@ truncation slice.
   `:scope > inline-truncation` — so a marker written through a wrapper or
   outside a paragraph keeps the tag's default `display: none`.
 - `crates/dom` keys on the flag rather than on the tag
-  (`is_truncation_marker`, `crates/dom/src/layout/text_block.rs:122`), collects
+  (`is_truncation_marker`, `crates/dom/src/layout/text_block.rs:142`), collects
   the **first** such child's subtree as a second flow
-  (`collect_block`, `:142`) and hands it to the paragraph (`:452-453`). The two
+  (`collect_block`, `:160`) and hands it to the paragraph (`:475-476`). The two
   flows share one box-id space, so one measurement pass, one placement pass and
   one fingerprint serve both, and
   `SourceItem::Truncation(i)` resolves through
@@ -190,7 +193,7 @@ The same commit closed the `display: contents` wrapper row: `place_and_hide`
 used to hide every consumed child's whole subtree, which zeroed an atom under a
 wrapper and left the wrapper's own slot unwritten, so the rounding walk stopped
 there. A consumed element holding a placed atom now keeps an **empty** layout
-instead of a hidden one (`crates/dom/src/layout/text_block.rs:643,:715-735`),
+instead of a hidden one (`crates/dom/src/layout/text_block.rs:760,:842-862`),
 which preserves paint order and keeps the walk descending. Four ignored tests
 un-ignored at the tree layer, one at the dom layer, and three new tests added
 (one at the tree layer, two at the dom layer).
@@ -312,12 +315,103 @@ served. `an_overflowing_nowrap_line_is_marked_by_text_overflow_ellipsis`
 (`crates/hughie/tests/web_text_replication.rs:1256-1290`) is un-ignored and
 passes.
 
-### B. Atomic inline boxes — what #227 did not fix
+### B. Atomic inline boxes — closed
 
-| # | Gap | Cause |
-| --- | --- | --- |
-| B1 | An atom's origin **omits** border+padding | `crates/dom/src/layout/text_block.rs:667` writes the paragraph-space origin into `location`, which every reader takes as border-box relative. The atom lands **short** by the content-box inset: `location == (0,0)` where the origin is `(10,10)` under 10px padding. |
-| B2 | An atom's `margin` never reaches the line | `text_block.rs` hands the block the atom's **border** box, so `margin-left: 50px` on an inline image adds nothing to the advance (142 where the reference gives 192). Padding works, because `box-sizing: border-box` folds it in. |
+Nothing is open here. The four rows are recorded because each names a
+coordinate system or a box edge that is easy to lose again.
+
+**B1 is closed.** `place_and_hide` used to write an atom's paragraph-space
+origin straight into `location`, which every reader takes as relative to the
+establishing element's *border* box: the frame builder adds it to that
+element's own border-box offset (`resolve_child`,
+`crates/dom/src/visual/build.rs:753-762`) while adding the content-box inset
+only to the glyphs (`push_paragraph`, `:810-815`, and the `DisplayMode::Text`
+branch of `collect_in_context`, `:916-927`). An atom therefore landed short by
+the block's border plus padding — `location == (0,0)` under 10px of padding.
+Placement now converts the space it is given into the space it is read in
+(`crates/dom/src/layout/text_block.rs`, `place_and_hide`): the element's
+content-box origin, plus the paragraph origin, plus the atom's own margin —
+and nothing else, an in-flow atom's `position: relative` insets being ignored
+(see the third defect below). A `display: contents` carrier and a nested text scope both keep
+an empty layout at `(0, 0)` (`:842-862`), so an atom under either stays in the
+establishing element's border-box space and the same conversion answers for it.
+
+That fix needed the establishing element's own border and padding *during* its
+own pass, which the element's layout slot cannot supply: a parent writes a
+child's layout only once that child's `compute_layout` has returned, so the
+slot still holds the previous pass's box, or on a first flush none at all.
+`BlockBox` (`crates/dom/src/layout/text_block.rs:544-594`) resolves both from
+style against the same inline basis the box wrapper used, and takes the size
+from the output the pass just produced. The out-of-flow pass below it was
+reading exactly that stale slot, so **every absolutely positioned child of a
+`<text>` got a `0x0` box at `(0, 0)` on the first flush** and the layout cache
+kept that answer for every later one; the same pass was also adding the block's
+border twice to the static position. Both are fixed, and
+`an_out_of_flow_child_of_a_text_resolves_against_the_blocks_padding_box`
+(`crates/dom/tests/web_text_replication.rs`) is the guard.
+
+**B2 is closed**, in two independent halves that the one fixture
+`x-text/inline-image-padding-and-margin` asserts together.
+
+- *Margin.* Phase 2 of `compute_text_block_layout` used to hand the paragraph
+  `output.size`, the atom's border box, so a margin reached neither the advance
+  nor the placement. It now hands over the **margin** box
+  (`margin_box`, `crates/dom/src/layout/text_block.rs:593-605`) and placement
+  steps the border box back in by the same margins, which are resolved from
+  style on the probe and the commit path alike (`:660`) — a measurement writes
+  no layout, so a margin read back from a slot would be the previous pass's,
+  and a size that moved between a probe and its commit would poison both the
+  width memo and the committed break. `auto` is zero, a negative margin shrinks
+  the advance without letting a box dimension go below zero, and a baseline
+  moves down with the margin box's top edge, so an atom that reports no
+  baseline still sits with its bottom *margin* edge on the line's — CSS's rule
+  and `web-core`'s, and a ruled deviation from native's border edge, recorded
+  in [F](#f-recorded-deviations-not-gaps).
+- *Padding.* An inline `image` now has none:
+  `text > image, text > wrapper > image, inline-text > image, … { padding: 0 !important; }`
+  (`crates/bobcat-core/src/main/tree/text.rs`'s `UA_RULES`). That is the
+  cascade spelling of what web-core does structurally — the authored host is
+  `display: contents !important` and the box on the line is a shadow
+  `::part(img)` built from an inherited property list `padding` is not on
+  (`x-text.css:69-82`, `:120-135`). Native drops it too, by its own route:
+  `TextLayoutTextra::HandleInlineImageProps`
+  (`core/renderer/ui_wrapper/layout/textra/text_layout_textra.cc:448-537`)
+  fills a placeholder's `ImageProps` from the specified width and height, the
+  four margins, the border radius and `vertical-align`, and reads `padding`
+  nowhere — so this is not a native-versus-web choice, only a difference of
+  mechanism. It is the fourth UA-origin `!important` in this engine, recorded
+  in [`deviations.md`](deviations.md) and pinned by
+  `the_ua_sheet_is_important_free_apart_from_the_text_block`. A `view` inside a
+  `text` keeps its padding: web-core leaves that one a real `inline-flex` box.
+
+A third defect was found and closed with them, carried by no `#[ignore]`d test
+because no catalogued fixture covers it: a `position: relative` or `sticky`
+child of a `<text>` was treated as out of flow, so it left the line entirely
+and was laid out by the absolute pass. The paragraph's four position tests are
+now one `out_of_flow` helper (`crates/dom/src/layout/text_block.rs:115-133`),
+`Absolute | Fixed` only — the split `Document::layout_rect`
+(`crates/dom/src/layout/mod.rs:321-331`) and every hughie algorithm already
+use. A relative atom advances the line, breaks with it and is placed exactly
+where a static one would be: **its own insets are ignored**, which is a
+native-versus-web-core conflict the user ruled for native on 2026-09-17 and
+which [`deviations.md`](deviations.md) carries in full. In short, native's
+`CalcRelativePosition` runs only over a `LayoutAlgorithm`'s `inflow_items_`
+(`lynx/core/renderer/starlight/layout/layout_algorithm.cc:215-228`,
+`position_layout_utils.cc:38-71`) and a `<text>` has a `measure_func_`, so it
+builds no such algorithm (`layout_object.cc:684-696`); web-core instead
+inherits the browser's shift, `x-view` being `position: relative`
+(`web-elements/src/elements/common-css/linear.css:142`) and inline-flex inside
+a text (`XText/x-text.css:90-93`). A relative *scope* (a nested
+`text`/`inline-text`, or a `display: contents` carrier) generates no box at
+all, so its insets never applied under either rule.
+`a_relative_atom_stays_in_the_line_and_only_absolute_leaves_it`
+(`crates/dom/tests/web_text_replication.rs`) covers all four values and the
+ignored inset. Worth knowing: native Lynx's default `position` is `relative`
+(`lynx/core/renderer/starlight/style/default_layout_style.h:65`), where this
+engine's — like web-core's, which declares `position` on `list-item` alone —
+is the CSS initial `static`, so this path is reached by authored CSS rather
+than by every element; on native, honouring the insets would therefore fire for
+*every* atom.
 
 **B3 is closed** by the `inline-truncation` wiring: the post-placement hide loop
 used to exempt only slots that were themselves atoms, so `hide_subtree` zeroed
@@ -332,9 +426,9 @@ box or an out-of-flow child inside it was never emitted, while the in-context
 path did descend. It now pushes the paragraph and falls through to the same
 collection walk (`crates/dom/src/visual/build.rs:563-569`), which is also the
 in-context order — element box, paragraph, then the descent. The glyphs stay
-unique because `collect_child` (`crates/dom/src/visual/build.rs:829-871`) drops
+unique because `collect_child` (`crates/dom/src/visual/build.rs:829-872`) drops
 text nodes and the layout slots `place_and_hide`
-(`crates/dom/src/layout/text_block.rs:607`) hid, so an absorbed nested scope
+(`crates/dom/src/layout/text_block.rs:723`) hid, so an absorbed nested scope
 reaches no second record.
 `a_boxed_child_paints_from_a_text_block_that_is_its_own_context`
 (`crates/dom/tests/web_text_replication.rs:1232`) now runs in CI.
@@ -450,6 +544,37 @@ Each blocks replicas that could not be written at all.
   marked DEVIATION rather than GAP; its passing sibling
   `the_truncation_tail_keeps_the_cut_run_s_font_under_the_native_default` keeps
   the native geometry in CI.
+- **`position: relative` insets on an atomic inline box are ignored.**
+  **Ruled (user, 2026-09-17): this engine follows native Lynx here.** The atom
+  stays in flow — it advances the line and breaks with it, only `absolute` and
+  `fixed` leaving a paragraph — but `left`/`top`/`right`/`bottom` move nothing.
+  Native applies relative offsets only to a `LayoutAlgorithm`'s in-flow items
+  (`CalcRelativePosition`, one caller,
+  `lynx/core/renderer/starlight/layout/layout_algorithm.cc:215-228` over
+  `position_layout_utils.cc:38-71`), and a `<text>` returns at its
+  `measure_func_` before any algorithm is built (`layout_object.cc:684-696`);
+  `web-core` inherits the browser's shift instead, `x-view` carrying
+  `position: relative`
+  (`web-elements/src/elements/common-css/linear.css:142`) and being
+  `display: inline-flex !important` inside a text (`XText/x-text.css:90-93`).
+  No fixture pictures this, so there is no `#[ignore]`d `web-core` replica to
+  mark DEVIATION; the native rule is asserted positively by
+  `a_relative_atom_stays_in_the_line_and_only_absolute_leaves_it`
+  (`crates/dom/tests/web_text_replication.rs`), and reversing the ruling is one
+  term in `place_and_hide`.
+- **A baseline-less atom sits with its bottom *margin* edge on the baseline.**
+  The one deviation here that runs the other way: **ruled (user, 2026-09-17)
+  for CSS and `web-core` against native**. Native puts the bottom *border* edge
+  on the baseline and lets `margin-bottom` hang below it —
+  `GetOffsetFromTopMarginEdgeToBaseline` returns
+  `GetLayoutMarginTop() + offset_height_` when a box reports no baseline
+  (`lynx/core/renderer/starlight/layout/layout_object.cc:1118-1124`;
+  `offset_height_` is the border-box height, `layout_object.h:170`) — so a 40x60
+  atom with `margin-bottom: 8px` makes a 68px line here and a 60px one there.
+  Asserted by the `.down` block of
+  `an_atoms_margins_reach_the_line_and_step_its_border_box_in`
+  (`crates/dom/tests/web_text_replication.rs`); see
+  [`deviations.md`](deviations.md).
 - `var()` inside an `@font-face` descriptor is not substituted. Correct per
   css-variables-1 §3; the browser `web-core` runs on behaves identically.
 - `x-text`, `inline-image` and `inline-text` are `web-core`'s *HTML* mappings of

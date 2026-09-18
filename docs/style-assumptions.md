@@ -216,21 +216,37 @@ the semantics are stylo's.** Everything below refines that sentence.
     instead owned by the native layout engine's element policy, not fought
     out in the cascade.
 
-    *The one exception* (user decision, 2026-09-03): `display: -lynx-text`
-    on `text` and `inline-text`. The test distinguishing it from the
-    `scroll-view` case above is **whether the fact is a default or a
+    *The exceptions* are all the paragraph's. The test distinguishing them
+    from the `scroll-view` case above is **whether the fact is a default or a
     structural invariant**. A scroller's display mode is a default — web-core
     itself gates it on page config, and the question is only *which* layout
-    mode the box gets. A text's inline-ness is not a mode at all: Lynx
-    establishes it at tree-mutation time (`TextElement::OnNodeAdded` calls
-    `ConvertToInlineElement`, which renames the tag and marks the node
-    inline), the paragraph builder never reads `display`, and no author CSS
-    can undo any of it. A cascade value a page could override would therefore
-    describe an engine we do not have. So the exception is spent on facts the
-    cascade is merely *reporting*, never on defaults it is *choosing* —
-    and it is pinned by
-    `the_ua_sheet_is_important_free_apart_from_the_text_block`, which fails
-    on any new important declaration until it earns the same argument.
+    mode the box gets. So the exception is spent on facts the cascade is
+    merely *reporting*, never on defaults it is *choosing* — and the set is
+    pinned by `the_ua_sheet_is_important_free_apart_from_the_text_block`,
+    which fails on any new important declaration until it earns the same
+    argument.
+
+    - `display: -lynx-text` on `text`, on `inline-text`, and on a `text`'s own
+      `inline-truncation` child (user decision, 2026-09-03). A text's
+      inline-ness is not a mode at all: Lynx establishes it at tree-mutation
+      time (`TextElement::OnNodeAdded` calls `ConvertToInlineElement`, which
+      renames the tag and marks the node inline), the paragraph builder never
+      reads `display`, and no author CSS can undo any of it. A cascade value a
+      page could override would therefore describe an engine we do not have.
+    - `padding: 0` on an `image` that is inline content of a paragraph
+      (2026-09-17). The same argument reached from the other end: in web-core
+      the authored host element generates no box at all —
+      `x-text > x-image { display: contents !important }`, with the
+      `inline-text`, `inline-truncation` and `lynx-wrapper` variants of it
+      (`x-text.css:69-82`) — and the box on the line is a shadow
+      `::part(img)` assembled from an inherited property list `padding` is not
+      on (`:120-135`). No author CSS there can make an inline image's padding
+      matter, and web-core's own erasure is itself `!important`. Here the
+      authored element *is* the box, so a normal UA declaration would lose to
+      the author's `padding` and the engine would advance the line by an edge
+      web-core does not have (native is split; see `docs/tracking/deviations.md`). `margin` is deliberately untouched — the shadow
+      part inherits it — and so is a `view` inside a `text`, which web-core
+      leaves a real `inline-flex` box with its padding intact.
 
 16. **cssId scoping is a runtime-adapter concern.** The feature exists for
     pageConfig `enableRemoveCSSScope = false` (that is the exact

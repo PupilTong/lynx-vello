@@ -62,16 +62,17 @@
 //! a UA-origin important declaration outranks every normal one whatever its
 //! specificity — so a `text` written inside an `image` keeps its text block.
 //! Matching it would need a second `!important`, which `§D.15` grants to the
-//! text block alone. It is masked wherever it could matter: an element with a
-//! `src` is replaced, and `dom` hides every child of a replaced box outright,
-//! whatever the cascade said.
+//! paragraph's own rules alone. It is masked wherever it could matter: an
+//! element with a `src` is replaced, and `dom` hides every child of a replaced
+//! box outright, whatever the cascade said.
 //!
 //! `text > image` is [`super::text`]'s rule, not this module's — an image
-//! written *inside* a text is content of that paragraph. Note that
-//! `contain: size` applies to it there too, which follows native (an inline
-//! image is sized from its own style) rather than web-core (which erases the
-//! host element with `display: contents !important` and promotes the shadow
-//! `<img>` in its place).
+//! written *inside* a text is content of that paragraph, and so is the
+//! `padding: 0 !important` that module gives it. Note that `contain: size`
+//! applies to it there too, which follows native (an inline image is sized
+//! from its own style) rather than web-core (which erases the host element
+//! with `display: contents !important` and promotes the shadow `<img>` in its
+//! place).
 //!
 //! # Recorded traps
 //!

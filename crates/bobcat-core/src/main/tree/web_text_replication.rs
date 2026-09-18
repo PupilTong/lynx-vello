@@ -628,15 +628,17 @@ fn a_wrapper_between_a_text_and_an_inline_image_changes_nothing() {
 /// margin's 50px.
 ///
 /// Geometry only: the bitmap and where it sits inside its box are paint.
+///
+/// Both halves were gaps until the atom-placement pass. The margin now reaches
+/// the line because phase 2 of `compute_text_block_layout` hands the paragraph
+/// the atom's *margin* box rather than its border box
+/// (`crates/dom/src/layout/text_block.rs`'s `margin_box`), and the padding no
+/// longer reaches a box at all because the UA sheet gives an `image` that is
+/// inline content of a paragraph `padding: 0 !important`
+/// (`crates/bobcat-core/src/main/tree/text.rs`'s `UA_RULES`) — the cascade
+/// spelling of web-core erasing the host element and rebuilding the box out of
+/// a property list `padding` is not on.
 #[test]
-#[ignore = "GAP (two of them). An atom's margin never reaches the line: \
-            crates/dom/src/layout/text_block.rs:432-460 hands the block \
-            `output.size`, which is the atom's border box, so the margin box \
-            the line should advance by is lost. And an atom's padding inflates \
-            it: this engine gives the authored `image` a real box, so \
-            `padding-left: 50px` grows the border-box width from 22 to 50 under \
-            the Lynx `box-sizing: border-box` default, where web-core drops the \
-            padding entirely because the host box is `display: contents`"]
 fn an_inline_image_s_margin_reaches_the_line_s_advance_and_its_padding_does_not() {
     let mut document = ahem_document();
     let margined = child(&mut document, "text", "font-size: 24px; color: blue");
@@ -1746,13 +1748,10 @@ fn the_compiled_baseline_card_rows_its_blocks_and_shares_one_run_baseline() {
 ///
 /// The asset is a 162x162 PNG drawn at 22x22, and the used size wins: an
 /// `image` box is CSS-sized, never bitmap-sized. Whether the bitmap is drawn is
-/// paint. Two separate defects meet here — the margin the line never advances
-/// by, and the atom's own box, which the `x-text/inline-image` replica names.
+/// paint. The margin reaches the line from the atom-placement pass on: phase 2
+/// of `compute_text_block_layout` hands the paragraph the atom's margin box,
+/// and placement steps the border box back in by the same margin.
 #[test]
-#[ignore = "GAP: an atom's margin never reaches the line — \
-            crates/dom/src/layout/text_block.rs:432-460 hands the block \
-            `output.size`, which is the atom's border box, so the 10px \
-            margin-left is dropped from the advance"]
 fn a_compiled_card_s_inline_image_takes_its_used_size_and_its_margin() {
     let mut document = ahem_document();
     let text = child(&mut document, "text", "font-size: 24px; color: blue");

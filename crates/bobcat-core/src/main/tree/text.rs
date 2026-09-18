@@ -127,6 +127,45 @@ fn parse_count(value: Option<&str>) -> Option<f64> {
 /// `--lynx-inline-truncation` because `crates/dom` names no Lynx tag: which
 /// subtree a paragraph takes its custom truncation content from is a
 /// computed-style fact there, exactly as the paragraph limits are.
+///
+/// # Why an inline `image` has no padding
+///
+/// `padding: 0 !important` on an `image` that is inline content of a paragraph
+/// is the one `!important` this sheet spends outside `display`, and it buys
+/// web-core's geometry rather than a default. There, the authored host element
+/// has no box
+/// at all: `x-text > x-image` — and the `inline-text >`, `inline-truncation >`
+/// and `lynx-wrapper` variants of it — is `display: contents !important`
+/// (`x-text.css:69-82`), so the box on the line is the shadow `::part(img)`,
+/// which is built by inheriting a fixed list: `width`, `height`, `border`,
+/// `border-radius`, `background-color`, `vertical-align`, `object-fit`,
+/// `flex`, `align-self` and `margin` (`x-text.css:120-135`). `padding` is not
+/// on that list, and the one `padding: inherit` in web-elements belongs to
+/// `x-image[auto-size]::part(img)`, an attribute this engine does not
+/// implement. An author's `padding` on an inline image therefore reaches no
+/// box in the reference and must reach none here.
+///
+/// Native is split. `TextLayoutTextra::HandleInlineImageProps`
+/// (`core/renderer/ui_wrapper/layout/textra/text_layout_textra.cc:448-537`)
+/// fills the placeholder's `ImageProps` from the specified width and height,
+/// the four margins, the border radius and `vertical-align`, and never reads
+/// `padding`; Android's `InlineImageSpan` and iOS's default shadow-node path
+/// read the same values and no padding either. Harmony, and iOS's
+/// layout-in-element path, instead measure the image as a starlight leaf, whose
+/// `ClampExactWidth` floors the border box at padding plus border
+/// (`core/renderer/starlight/layout/layout_object.cc:515-519`). The rule here
+/// follows web-core, which the larger part of native matches.
+///
+/// Here the authored `image` *is* the box, so nothing removes its padding for
+/// free: under the Lynx `box-sizing: border-box` default a
+/// `width: 22px; padding-left: 50px` image would floor its border box at 50 and
+/// advance the line by 50 where web-core advances by 22. A normal UA
+/// declaration cannot say so — it loses to the author's own `padding-left` —
+/// which is what makes this the same argument the `display` exceptions carry:
+/// web-core's erasure of the host box is itself `!important` and no author CSS
+/// can undo it. `margin` is a different case and is *not* touched: the shadow
+/// part inherits it, so it reaches the line in both engines. Nor is a `view`,
+/// which web-core leaves as a real `inline-flex` box with its padding intact.
 pub(super) const UA_RULES: &str = r#"
 @property --lynx-text-maxline { syntax: "<integer>"; inherits: false; initial-value: 0; }
 @property --lynx-text-maxlength { syntax: "<integer>"; inherits: false; initial-value: -1; }
@@ -143,6 +182,7 @@ text > wrapper { display: contents; }
 text > view, text > image { display: flex; }
 text > inline-truncation { display: -lynx-text !important; --lynx-inline-truncation: 1; }
 text > text, text > wrapper > text { color: inherit; }
+text > image, text > wrapper > image, inline-text > image, inline-text > wrapper > image, text > inline-truncation > image, text > inline-truncation > wrapper > image { padding: 0 !important; }
 "#;
 
 #[cfg(test)]
