@@ -73,25 +73,12 @@ jobs:
         with:
           tool: cargo-llvm-cov
 
-      - name: Hughie 95% coverage gate
-        # hughie's own tests run first and are reported on their own, before
-        # any other crate's tests can add to hughie's coverage. `--no-report`
-        # keeps the instrumented artifacts and the profiles for the workspace
-        # run below; this step used to `clean` and rebuild stylo, dom and
-        # hughie after it.
-        run: |
-          cargo llvm-cov clean --workspace
-          cargo llvm-cov --no-report -p hughie --locked
-          cargo llvm-cov report -p hughie --summary-only \
-            --ignore-filename-regex '(^|/)(tests|benches|vendor)(/|$)' \
-            --fail-under-lines 95
-
       - name: Tests + coverage
-        # Every test but hughie's, which the gate already ran; the report
-        # merges both runs' profiles.
+        # One instrumented build and one run of every test. Per-crate coverage
+        # is Codecov's job (`codecov.yml` names the components); there is no
+        # coverage threshold in this workflow.
         run: |
-          cargo llvm-cov --no-report --workspace --exclude-from-test hughie
-          cargo llvm-cov report --lcov --output-path lcov.info \
+          cargo llvm-cov --workspace --lcov --output-path lcov.info \
             --ignore-filename-regex '(^|/)vendor(/|$)'
 
       - name: Stylo fork Lynx tests

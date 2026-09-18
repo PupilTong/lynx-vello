@@ -93,9 +93,10 @@ Shorthand `lynx/`, `lynx-stack/`, `Paws/`; absolute paths live once in AGENTS.md
 - `cargo clippy --all-targets -- -D warnings`.
 - `cargo test -p hughie` and `cargo test -p dom --test layout --test
   incremental_relayout --test invalidation`.
-- CI enforces a 95% line-coverage gate on hughie. Reproduce it with
-  `cargo llvm-cov -p hughie --locked --summary-only --ignore-filename-regex
-  '(^|/)(tests|benches|vendor)(/|$)' --fail-under-lines 95`.
+- hughie's line coverage is a Codecov component (`codecov.yml`), reported on
+  every pull request and gated nowhere; it has held above 95%. See it
+  locally with `cargo llvm-cov -p hughie --locked --summary-only
+  --ignore-filename-regex '(^|/)(tests|benches|vendor)(/|$)'`.
 - Benches live in `crates/hughie/benches` and `crates/dom/benches`. CodSpeed is
   the authority; single-run local walltime here is noise, so do not report it as
   evidence.
