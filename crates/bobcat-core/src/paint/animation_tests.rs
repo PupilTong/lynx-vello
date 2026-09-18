@@ -139,6 +139,13 @@ fn animation_frames_need_no_script_thread_work() {
 fn one_reading_places_every_animation_in_a_frame() {
     let mut engine = booted();
 
+    // The boot flush created the animation; the first frame is what starts it,
+    // so taking that frame at zero puts the animation's origin on the clock's.
+    engine.painter.clock.pin(0.0);
+    engine
+        .tick(true)
+        .expect("the frame that starts the animation");
+
     engine.painter.clock.pin(0.5);
     engine.tick(true).expect("frame on the pinned instant");
     let held = red_left_edge(&mut engine);

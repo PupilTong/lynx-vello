@@ -96,6 +96,17 @@ concretely, so the tables above are read as "the target" and this section as
   snapshots, over just the animating elements and whatever inherits from them.
   A property that cannot move a box never reaches layout, because the damage
   harvest only invalidates layout for damage that says relayout.
+- **When an animation starts.** The flush arms it; the first `BeginFrame` after
+  that flush starts it. Because the timeline only moves inside
+  `advance_animations`, and the painting side stops sending `BeginFrame` for an
+  idle page or for an animation an exported curve already covers, the time a
+  flush hands Stylo can be arbitrarily stale — a tap after ten idle seconds
+  would otherwise create an animation ten seconds in the past and finish it on
+  its first frame. Web Animations resolves a pending animation's start time at
+  the first frame after it was created, so the driver shifts every `Pending`
+  animation and transition it has not anchored yet forward by the interval that
+  tick advanced the timeline over, once, keeping delays (positive and negative)
+  intact.
 - **Measured cost** (Apple silicon, `cargo bench -p dom --bench animation`, a
   120-card page; medians). An idle page pays **6.9 ns** per frame — one bool
   and one epoch compare, so a document that never animates never pays for the
@@ -161,8 +172,9 @@ concretely, so the tables above are read as "the target" and this section as
 - **Known gaps.** No animation events yet
   (`animationstart`/`animationend`/`animationiteration`/`animationcancel`) —
   the driver knows the state transitions, nothing relays them to the realm.
-  Transitions are wired (`transition_rule`, `has_css_transitions`) but not yet
-  covered by tests. `element.animate()` has no producer and is out of scope.
+  Transitions are wired (`transition_rule`, `has_css_transitions`) and their
+  timeline start is covered by a test, but nothing else about them is.
+  `element.animate()` has no producer and is out of scope.
 
 ---
 

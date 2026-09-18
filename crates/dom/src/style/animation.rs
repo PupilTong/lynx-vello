@@ -19,12 +19,31 @@
 //! harvest only calls `invalidate_layout` for damage that
 //! [`StyleDamage::needs_relayout`] reports.
 //!
-//! This crate owns no clock (see [`crate::input`]): `now` is a parameter.
+//! This crate owns no clock (see [`crate::input`]): `now` is a parameter. The
+//! timeline therefore only moves in [`Document::advance_animations`], and the
+//! presenting side is free to stop calling it — an idle page sends no frame,
+//! and an animation an exported curve already covers is sampled on the
+//! painting side instead. The flush that creates an animation consequently
+//! reads whatever time the last tick left behind, which can be arbitrarily far
+//! in the past.
+//!
+//! So a created animation is not anchored to the timeline by its flush. Web
+//! Animations resolves a pending animation's start time at the first frame
+//! after it was created, and that is what the driver does: the first tick to
+//! see a `Pending` animation or transition moves its `started_at`/`start_time`
+//! forward by the interval that tick advanced the timeline over, which lands it
+//! at that frame's reading. Both fields already carry the delay, so the shift
+//! preserves a positive delay as well as the head start of a negative one, and
+//! it also lands the start time Stylo computes when a paused animation resumes.
+//! An animation shifted once is recorded as anchored and never shifted again,
+//! however many frames its delay keeps it `Pending` for.
 
+use rustc_hash::{FxHashMap, FxHashSet};
 use stylo::context::{SharedStyleContext, StyleSystemOptions};
 use stylo::dom::OpaqueNode;
 use stylo::driver;
 use stylo::invalidation::element::restyle_hints::RestyleHint;
+use stylo::properties::OwnedPropertyDeclarationId;
 use stylo::properties::longhands::animation_fill_mode::computed_value::single_value::T as AnimationFillMode;
 use stylo::selector_parser::SnapshotMap;
 use stylo::servo::animation::{
@@ -33,6 +52,7 @@ use stylo::servo::animation::{
 };
 use stylo::shared_lock::StylesheetGuards;
 use stylo::traversal_flags::TraversalFlags;
+use stylo_atoms::Atom;
 
 use crate::style::damage::StyleDamage;
 use crate::style::flush::{LayoutThreadStateGuard, NO_PAINTERS, RecalcStyle};
@@ -77,6 +97,47 @@ impl Cancellable for Transition {
     }
 }
 
+/// What one step of Stylo's animation state machine produced.
+#[derive(Default)]
+struct Stepped {
+    /// The elements whose animated values may have moved, for the
+    /// animation-only traversal to re-cascade.
+    hinted: Vec<NodeId>,
+    /// Whether any animation or transition changed state — started, iterated
+    /// or ended. The committed frame describes those states as well as the
+    /// styles they produce, so a step that moved one owes the next frame a
+    /// commit even if no style changed with it.
+    moved: bool,
+}
+
+/// One animation or transition the driver has already anchored to the
+/// timeline and which was still `Pending` when the last tick ended, waiting
+/// out its delay.
+///
+/// Stylo's own `is_new` field answers a different question:
+/// `Animation::update_from_other` assigns the whole animation over, so a
+/// restyle of the element sets `is_new` again and a delayed animation on an
+/// element that restyles every frame would be pushed forward forever. The
+/// identity below survives that, because a restyle keeps both the name and the
+/// transitioned property.
+#[derive(PartialEq, Eq, Hash)]
+struct AnchoredAnimation {
+    /// The map key the animation lives under, so an element and one of its
+    /// pseudo-elements running the same animation name stay distinct.
+    set: AnimationSetKey,
+    what: AnchoredKind,
+}
+
+/// Which animation of a set [`AnchoredAnimation`] names.
+#[derive(PartialEq, Eq, Hash)]
+enum AnchoredKind {
+    /// A `@keyframes` animation, by its `animation-name`.
+    Keyframes(Atom),
+    /// A transition, by the property it animates — the same identity Stylo
+    /// matches a replacement transition against.
+    Transition(OwnedPropertyDeclarationId),
+}
+
 /// The document's animation timeline: Stylo's animation state, the last time
 /// it was sampled at, and whether anything is still moving.
 #[derive(Default)]
@@ -92,6 +153,17 @@ pub(crate) struct AnimationDriver {
     /// Elements currently carrying the `may_have_animations` bit, so the bit
     /// can be cleared again when their last animation goes away.
     flagged: Vec<NodeId>,
+    /// The animations and transitions that were already anchored to the
+    /// timeline and still `Pending` at the end of the last tick, so the next
+    /// tick shifts the ones it has never seen and leaves these alone.
+    ///
+    /// A set rather than a list: a page of staggered delays holds one entry per
+    /// waiting animation for its whole delay, and every tick asks about each of
+    /// them, which over a list is one pass per animation per frame.
+    anchored: FxHashSet<AnchoredAnimation>,
+    /// The set the previous tick's [`Self::anchored`] is rebuilt into, kept so
+    /// a tick of a page with a delayed animation allocates nothing.
+    anchored_spare: FxHashSet<AnchoredAnimation>,
     /// Animations that have finished but whose fill mode keeps their last
     /// value in the cascade.
     ///
@@ -140,6 +212,8 @@ impl AnimationDriver {
         self.flagged.retain(|flagged| !ids.contains(flagged));
         self.marked.retain(|marked| !ids.contains(marked));
         self.held.retain(|(id, _)| !ids.contains(id));
+        self.anchored
+            .retain(|entry| !ids.iter().any(|id| id.arena_key() == entry.set.node.0));
         let mut sets = self.sets.sets.write();
         if sets.is_empty() {
             return;
@@ -192,15 +266,25 @@ impl<T: Sync> Document<T> {
     /// Safe to call every frame: with nothing animating it reads one bool.
     /// Time never runs backwards; a `now` behind the last sample is clamped
     /// forward rather than rewinding the timeline.
+    ///
+    /// The interval between this sample and the last one is also what anchors
+    /// an animation created since the last one (see the module docs), which is
+    /// why the previous reading is read before it is overwritten. The inactive
+    /// path records the reading without stepping anything: a flush that creates
+    /// an animation makes the timeline active through
+    /// [`Document::sync_animation_state`], so the first tick that can see a new
+    /// animation always takes the path below, with `previous` at the time the
+    /// animation was created.
     pub fn advance_animations(&mut self, now: f64) -> AnimationTick {
         if !self.animations().is_active() {
             self.animations_mut().now = now;
             return AnimationTick::default();
         }
-        let now = now.max(self.animations().now);
+        let previous = self.animations().now;
+        let now = now.max(previous);
         self.animations_mut().now = now;
 
-        let hinted = self.step_animation_states(now);
+        let Stepped { hinted, moved } = self.step_animation_states(now, now - previous);
         if hinted.is_empty() {
             self.sync_animation_state();
             // The timeline was active on entry; if this step ended it, the
@@ -208,7 +292,7 @@ impl<T: Sync> Document<T> {
             // style moved — the frame's animation flag is itself visual
             // state, and a stale `true` would keep the compositor asking
             // for animation ticks forever.
-            if !self.animations().is_active() {
+            if moved || !self.animations().is_active() {
                 self.note_visual_mutation();
             }
             return AnimationTick::default();
@@ -221,8 +305,12 @@ impl<T: Sync> Document<T> {
         self.sync_animation_state();
         tick.needs_next_frame = self.animations().is_active();
         // A restyle is a visual change; so is the timeline going idle, whose
-        // flag rides the committed frame (see above).
-        if tick.restyled > 0 || !tick.needs_next_frame {
+        // flag rides the committed frame (see above). So is a state change on
+        // its own: the exported curves the frame carries are read off these
+        // states, and an animation promoted to running is one the next frame
+        // can hand to the compositor even when its first sample happens to
+        // equal the style already committed.
+        if tick.restyled > 0 || moved || !tick.needs_next_frame {
             self.note_visual_mutation();
         }
         tick
@@ -314,7 +402,7 @@ impl<T: Sync> Document<T> {
     fn restore_held_animations(
         &self,
         held: &mut Vec<(NodeId, Animation)>,
-        sets: &mut rustc_hash::FxHashMap<AnimationSetKey, ElementAnimationSet>,
+        sets: &mut FxHashMap<AnimationSetKey, ElementAnimationSet>,
     ) {
         held.retain(|(id, animation)| {
             if self.arenas().get(*id).is_none() {
@@ -350,10 +438,17 @@ impl<T: Sync> Document<T> {
     /// advance an animation that is still `Pending`, so both the start
     /// promotion and the iteration loop belong to the driver. The loop matters
     /// for a frame that stalled across several iterations.
-    fn step_animation_states(&mut self, now: f64) -> Vec<NodeId> {
+    ///
+    /// `shift` is how far the timeline moved to reach `now`. Every `Pending`
+    /// animation the driver has not anchored yet starts at this frame, so it
+    /// carries that interval before the promotion below considers it.
+    fn step_animation_states(&mut self, now: f64, shift: f64) -> Stepped {
         let handle = self.animations().context_handle();
+        let mut anchored = std::mem::take(&mut self.animations_mut().anchored);
+        let mut pending = std::mem::take(&mut self.animations_mut().anchored_spare);
+        pending.clear();
         let arenas = self.arenas();
-        let mut hinted = Vec::new();
+        let mut stepped = Stepped::default();
         let mut held = Vec::new();
 
         let mut sets = handle.sets.write();
@@ -364,9 +459,20 @@ impl<T: Sync> Document<T> {
             };
             let mut moved = false;
             for animation in &mut set.animations {
-                if animation.state == AnimationState::Pending && animation.started_at <= now {
-                    animation.state = AnimationState::Running;
-                    moved = true;
+                if animation.state == AnimationState::Pending {
+                    let entry = AnchoredAnimation {
+                        set: key.clone(),
+                        what: AnchoredKind::Keyframes(animation.name.clone()),
+                    };
+                    if !anchored.contains(&entry) {
+                        animation.started_at += shift;
+                    }
+                    if animation.started_at <= now {
+                        animation.state = AnimationState::Running;
+                        moved = true;
+                    } else {
+                        pending.insert(entry);
+                    }
                 }
                 while animation.iterate_if_necessary(now) {
                     moved = true;
@@ -383,27 +489,45 @@ impl<T: Sync> Document<T> {
                 }
             }
             for transition in &mut set.transitions {
-                if transition.state == AnimationState::Pending && transition.start_time <= now {
-                    transition.state = AnimationState::Running;
-                    moved = true;
+                if transition.state == AnimationState::Pending {
+                    let entry = AnchoredAnimation {
+                        set: key.clone(),
+                        what: AnchoredKind::Transition(
+                            transition.property_animation.property_id().to_owned(),
+                        ),
+                    };
+                    if !anchored.contains(&entry) {
+                        transition.start_time += shift;
+                    }
+                    if transition.start_time <= now {
+                        transition.state = AnimationState::Running;
+                        moved = true;
+                    } else {
+                        pending.insert(entry);
+                    }
                 }
                 if transition.state == AnimationState::Running && transition.has_ended(now) {
                     transition.state = AnimationState::Finished;
                     moved = true;
                 }
             }
+            stepped.moved |= moved;
             set.clear_canceled_animations();
             if set.is_empty() {
                 return false;
             }
             if set.needs_animation_ticks() || moved {
-                hinted.push(id);
+                stepped.hinted.push(id);
             }
             true
         });
         drop(sets);
-        self.animations_mut().held.append(&mut held);
-        hinted
+        anchored.clear();
+        let driver = self.animations_mut();
+        driver.anchored = pending;
+        driver.anchored_spare = anchored;
+        driver.held.append(&mut held);
+        stepped
     }
 
     /// Marks each animated element for an animation-only restyle and opens the
@@ -599,6 +723,10 @@ mod tests {
             "the animation armed at the flush"
         );
 
+        // The flush arms the animation; the first tick is what starts it, so
+        // the sample below is ten seconds into a 0.1s animation, not ten
+        // seconds after a flush that happened at an unticked zero.
+        document.advance_animations(0.0);
         let tick = document.advance_animations(10.0);
         assert!(!tick.needs_next_frame, "the animation is over");
         assert!(

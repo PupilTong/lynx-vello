@@ -897,6 +897,9 @@ mod tests {
                 ),
                 StylesheetOrigin::Author,
             );
+            document.layout();
+            // The flush above creates the animation; the tick that follows is
+            // the frame it starts on, which puts its origin at zero.
             document.advance_animations(0.0);
             document.layout();
             let rebuilds = document.text_block_rebuilds(label);
