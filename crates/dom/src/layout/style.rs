@@ -4,8 +4,8 @@
 
 use hughie::style::containment::effective_containment;
 use hughie::style::{
-    Contain, ContentVisibility, CoreStyle, Display, FlexboxStyle, GridStyle, LinearStyle,
-    PositionProperty, RelativeStyle, TextContainerStyle, TextRunStyle,
+    Contain, ContentVisibility, CoreStyle, Display, FlexboxStyle, GridLanesStyle, GridStyle,
+    LinearStyle, PositionProperty, RelativeStyle, TextContainerStyle, TextRunStyle,
 };
 use stylo::properties::ComputedValues;
 use stylo::values::computed::motion::OffsetPath;
@@ -19,6 +19,11 @@ pub(crate) enum DisplayMode {
     Contents,
     Flex,
     Grid,
+    /// CSS Grid Level 3 `display: grid-lanes`: one axis carries the tracks,
+    /// items stack along the other. Its children are grid items, so every
+    /// grid-item rule outside layout applies to it as it does to
+    /// [`DisplayMode::Grid`].
+    GridLanes,
     Linear,
     Relative,
     /// The `display: -lynx-text` block: one flattened Lynx paragraph.
@@ -37,6 +42,7 @@ pub(crate) fn display_mode(display: Display) -> DisplayMode {
         Display::Contents => DisplayMode::Contents,
         Display::Flex => DisplayMode::Flex,
         Display::Grid => DisplayMode::Grid,
+        Display::GridLanes => DisplayMode::GridLanes,
         Display::Linear => DisplayMode::Linear,
         Display::LynxRelative => DisplayMode::Relative,
         Display::LynxText => DisplayMode::Text,
@@ -205,6 +211,8 @@ impl<T> FlexboxStyle for StyleView<'_, T> {}
 
 impl<T> GridStyle for StyleView<'_, T> {}
 
+impl<T> GridLanesStyle for StyleView<'_, T> {}
+
 impl<T> LinearStyle for StyleView<'_, T> {}
 
 impl<T> TextContainerStyle for StyleView<'_, T> {}
@@ -342,6 +350,7 @@ mod tests {
         assert_eq!(display_mode(Display::Contents), DisplayMode::Contents);
         assert_eq!(display_mode(Display::Flex), DisplayMode::Flex);
         assert_eq!(display_mode(Display::Grid), DisplayMode::Grid);
+        assert_eq!(display_mode(Display::GridLanes), DisplayMode::GridLanes);
         assert_eq!(display_mode(Display::Linear), DisplayMode::Linear);
         assert_eq!(display_mode(Display::LynxRelative), DisplayMode::Relative);
         assert_eq!(display_mode(Display::LynxText), DisplayMode::Text);

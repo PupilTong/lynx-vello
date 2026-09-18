@@ -8,7 +8,7 @@ use stylo::values::generics::grid::{RepeatCount, TrackListValue};
 use super::placement;
 use super::types::TrackSizingFunction;
 
-const GRID_LINE_LIMIT: i32 = 10_000;
+pub(super) const GRID_LINE_LIMIT: i32 = 10_000;
 const MAX_AXIS_TRACKS: usize = 10_000;
 pub(super) const MAX_MATERIALIZED_TRACKS: usize = 20_000;
 const AUTO_REPEAT_TRACK_FLOOR: f64 = 1.0;

@@ -3,12 +3,14 @@
 #![allow(clippy::cast_precision_loss)]
 
 mod alignment;
+mod lanes;
 mod placement;
 mod sizing;
 mod tracks;
 mod types;
 
 use alignment::{align_tracks, alignment_spacing_from_free_space, item_alignment_offset};
+pub use lanes::compute_grid_lanes_layout;
 use placement::{
     AxisPlacement, GridArea, GridPlacement, PlacementInput, grid_placement, place_items,
     resolve_axis_placement,
@@ -426,25 +428,120 @@ fn run_track_sizing<T>(
     }
 }
 
+/// The container's used outer size on one axis: the parent's or the style's
+/// own size when there is one, otherwise the content it holds plus padding and
+/// border, clamped by min/max and floored at the box inset.
+fn final_outer_axis(metrics: &ResolvedContainerBox, axis: Axis, content: f32) -> f32 {
+    axis.size(metrics.outer).unwrap_or_else(|| {
+        clamp_axis(
+            content + axis.size(metrics.box_inset),
+            axis.size(metrics.min),
+            axis.size(metrics.max),
+            axis.size(metrics.box_inset),
+        )
+    })
+}
+
 fn final_outer_size(metrics: &ResolvedContainerBox, tracks: Size<f32>) -> Size<f32> {
     Size::new(
-        metrics.outer.width.unwrap_or_else(|| {
-            clamp_axis(
-                tracks.width + metrics.box_inset.width,
-                metrics.min.width,
-                metrics.max.width,
-                metrics.box_inset.width,
-            )
-        }),
-        metrics.outer.height.unwrap_or_else(|| {
-            clamp_axis(
-                tracks.height + metrics.box_inset.height,
-                metrics.min.height,
-                metrics.max.height,
-                metrics.box_inset.height,
-            )
-        }),
+        final_outer_axis(metrics, Axis::Horizontal, tracks.width),
+        final_outer_axis(metrics, Axis::Vertical, tracks.height),
     )
+}
+
+/// The container-level values a Grid-family algorithm resolves before it looks
+/// at any item: the box metrics with the intrinsic-keyword available-space
+/// override applied, which axes the style itself makes definite, and the
+/// percentage bases that templates and gutters resolve against.
+struct ContainerPrologue {
+    metrics: ResolvedContainerBox,
+    style_definite: Size<bool>,
+    percentage_basis: Size<Option<f32>>,
+    gap: Size<f32>,
+    repeat_max_basis: Size<Option<f32>>,
+    repeat_min_basis: Size<Option<f32>>,
+    repeat_count_gap: Size<f32>,
+}
+
+fn container_prologue<S: CoreStyle>(style: &S, input: LayoutInput) -> ContainerPrologue {
+    let preferred = style.size();
+    let gap_value = style.gap();
+    let mut metrics = resolve_container_box(style, input);
+    let style_definite = metrics.preferred_definite;
+    let outer_definite = Size::new(
+        input.definite_dimensions.width || style_definite.width,
+        input.definite_dimensions.height || style_definite.height,
+    );
+    if input.sizing_mode != SizingMode::IgnoreSizeStyles {
+        if metrics.inner.width.is_none() {
+            metrics.available_inner.width = match preferred.width {
+                StyleSize::MinContent => AvailableSpace::MinContent,
+                StyleSize::MaxContent => AvailableSpace::MaxContent,
+                _ => metrics.available_inner.width,
+            };
+        }
+        if metrics.inner.height.is_none() {
+            metrics.available_inner.height = match preferred.height {
+                StyleSize::MinContent => AvailableSpace::MinContent,
+                StyleSize::MaxContent => AvailableSpace::MaxContent,
+                _ => metrics.available_inner.height,
+            };
+        }
+    }
+    let percentage_basis = Size::new(
+        outer_definite
+            .width
+            .then_some(metrics.inner.width)
+            .flatten(),
+        outer_definite
+            .height
+            .then_some(metrics.inner.height)
+            .flatten(),
+    );
+    let definite_outer = Size::new(
+        outer_definite
+            .width
+            .then_some(metrics.outer.width)
+            .flatten(),
+        outer_definite
+            .height
+            .then_some(metrics.outer.height)
+            .flatten(),
+    );
+    let gap = resolve_gap(gap_value, percentage_basis);
+    let repeat_max_basis = Size::new(
+        definite_outer.width.or(metrics.max.width).map(|value| {
+            (clamp(value, metrics.min.width, metrics.max.width) - metrics.box_inset.width).max(0.0)
+        }),
+        definite_outer.height.or(metrics.max.height).map(|value| {
+            (clamp(value, metrics.min.height, metrics.max.height) - metrics.box_inset.height)
+                .max(0.0)
+        }),
+    );
+    let repeat_min_basis = Size::new(
+        metrics
+            .min
+            .width
+            .map(|value| (value - metrics.box_inset.width).max(0.0)),
+        metrics
+            .min
+            .height
+            .map(|value| (value - metrics.box_inset.height).max(0.0)),
+    );
+    let repeat_count_basis = Size::new(
+        repeat_max_basis.width.or(repeat_min_basis.width),
+        repeat_max_basis.height.or(repeat_min_basis.height),
+    );
+    let repeat_count_gap = resolve_gap(gap_value, repeat_count_basis);
+    ContainerPrologue {
+        metrics,
+        style_definite,
+        percentage_basis,
+        gap,
+        repeat_max_basis,
+        repeat_min_basis,
+        repeat_count_gap,
+    }
 }
 
 #[derive(Debug)]
@@ -501,6 +598,129 @@ fn span_is_fixed(tracks: &TrackSet, span: crate::compute::grid::placement::Track
     !tracks.tracks[indices]
         .iter()
         .any(|track| track.intrinsic_min || track.intrinsic_max || track.is_flexible())
+}
+
+/// The visual offset `position: relative` adds to an item, taken from
+/// whichever inset of each pair is not `auto`.
+fn relative_item_offset<N>(item: &GridItem<N>) -> Point<f32> {
+    if item.position != PositionProperty::Relative {
+        return Point::ZERO;
+    }
+    Point::new(
+        item.inset
+            .left
+            .unwrap_or_else(|| -item.inset.right.unwrap_or(0.0)),
+        item.inset
+            .top
+            .unwrap_or_else(|| -item.inset.bottom.unwrap_or(0.0)),
+    )
+}
+
+/// One item's child sizing inputs inside an area: the dimensions the area
+/// decides for it, and the available space each axis offers. An axis whose
+/// area is `None` is indefinite — nothing stretches into it, and it offers
+/// max-content space.
+fn item_area_geometry<N>(
+    item: &GridItem<N>,
+    area: Size<Option<f32>>,
+) -> (Size<Option<f32>>, Size<AvailableSpace>) {
+    let resolved_preferred = item.preferred_size;
+    let margin_sum = Size::new(item.margin.horizontal_sum(), item.margin.vertical_sum());
+    let inner = area.zip_map(margin_sum, |edge, margin| {
+        edge.map(|value| (value - margin).max(0.0))
+    });
+    let intrinsic = Size::new(
+        item.intrinsic.preferred(Axis::Horizontal).is_intrinsic(),
+        item.intrinsic.preferred(Axis::Vertical).is_intrinsic(),
+    );
+    let mut known = resolved_preferred;
+    if intrinsic.width {
+        known.width = None;
+    }
+    if intrinsic.height {
+        known.height = None;
+    }
+    let stretches = Size::new(
+        item.justify_self == AlignFlags::STRETCH
+            && known.width.is_none()
+            && !intrinsic.width
+            && !item.margin_auto.start(Axis::Horizontal)
+            && !item.margin_auto.end(Axis::Horizontal),
+        item.align_self == AlignFlags::STRETCH
+            && known.height.is_none()
+            && !intrinsic.height
+            && !item.margin_auto.start(Axis::Vertical)
+            && !item.margin_auto.end(Axis::Vertical),
+    );
+    if stretches.width {
+        known.width = inner.width;
+    }
+    if stretches.height {
+        known.height = inner.height;
+    }
+    known = apply_aspect_ratio(known, item.aspect_ratio);
+    known.width = known
+        .width
+        .map(|value| clamp(value, item.min_size.width, item.max_size.width));
+    known.height = known
+        .height
+        .map(|value| clamp(value, item.min_size.height, item.max_size.height));
+
+    let axis_available = |axis: Axis| match item.intrinsic.preferred(axis) {
+        IntrinsicTag::MinContent => AvailableSpace::MinContent,
+        IntrinsicTag::MaxContent => AvailableSpace::MaxContent,
+        IntrinsicTag::FitContent => axis
+            .size(resolved_preferred)
+            .map_or(AvailableSpace::MaxContent, AvailableSpace::Definite),
+        IntrinsicTag::None => match (axis.size(known), axis.size(inner)) {
+            (Some(_), Some(inner)) => AvailableSpace::Definite(inner),
+            _ => AvailableSpace::MaxContent,
+        },
+    };
+    (
+        known,
+        Size::new(
+            axis_available(Axis::Horizontal),
+            axis_available(Axis::Vertical),
+        ),
+    )
+}
+
+/// The independence a committing container can vouch for on one item's input.
+/// The item's area is what its percentages resolve against and what a stretch
+/// fills, so independence chains off the area rather than the container's own
+/// box. A fixed-function track cannot move at all; an intrinsic or flexible
+/// one moves only with the contributions it collects, which this item's
+/// content cannot touch as long as its own contributions are content-free.
+fn item_commit_independence<T>(
+    tree: &T,
+    item: &GridItem<T::NodeId>,
+    known: Size<Option<f32>>,
+    area_is_fixed: Size<bool>,
+    container: Size<bool>,
+) -> Size<bool>
+where
+    T: LayoutTree,
+{
+    let fixed_area = Size::new(
+        container.width && area_is_fixed.width,
+        container.height && area_is_fixed.height,
+    );
+    let style = tree.style(item.key.node);
+    let (values_stable, edges_stable) = item_value_stability(&style, item.aspect_ratio, fixed_area);
+    let axis_independent = |axis: Axis| {
+        let area_stable = axis.size(fixed_area)
+            || (axis.size(container) && contribution_is_content_free(item, axis));
+        edges_stable
+            && axis.size(values_stable)
+            && !axis_has_intrinsic_style(item, axis)
+            && area_stable
+            && axis.size(known).is_some()
+    };
+    Size::new(
+        axis_independent(Axis::Horizontal),
+        axis_independent(Axis::Vertical),
+    )
 }
 
 /// Whether the item's contributions to its tracks are decided without ever
@@ -574,104 +794,24 @@ where
             Some(CrossAxisTracks::resolved(columns)),
             Size::new(Some(area_size.width), Some(area_size.height)),
         );
-        let mut known = item.preferred_size;
-        let resolved_preferred = item.preferred_size;
-        let intrinsic_width = item.intrinsic.preferred(Axis::Horizontal).is_intrinsic();
-        let intrinsic_height = item.intrinsic.preferred(Axis::Vertical).is_intrinsic();
-        if intrinsic_width {
-            known.width = None;
-        }
-        if intrinsic_height {
-            known.height = None;
-        }
-        let horizontal_stretch = item.justify_self == AlignFlags::STRETCH
-            && known.width.is_none()
-            && !intrinsic_width
-            && !item.margin_auto.start(Axis::Horizontal)
-            && !item.margin_auto.end(Axis::Horizontal);
-        let vertical_stretch = item.align_self == AlignFlags::STRETCH
-            && known.height.is_none()
-            && !intrinsic_height
-            && !item.margin_auto.start(Axis::Vertical)
-            && !item.margin_auto.end(Axis::Vertical);
-        if horizontal_stretch {
-            known.width = Some((area_size.width - item.margin.horizontal_sum()).max(0.0));
-        }
-        if vertical_stretch {
-            known.height = Some((area_size.height - item.margin.vertical_sum()).max(0.0));
-        }
-        known = apply_aspect_ratio(known, item.aspect_ratio);
-        known.width = known
-            .width
-            .map(|value| clamp(value, item.min_size.width, item.max_size.width));
-        known.height = known
-            .height
-            .map(|value| clamp(value, item.min_size.height, item.max_size.height));
-
-        let available = Size::new(
-            match item.intrinsic.preferred(Axis::Horizontal) {
-                IntrinsicTag::MinContent => AvailableSpace::MinContent,
-                IntrinsicTag::MaxContent => AvailableSpace::MaxContent,
-                IntrinsicTag::FitContent => resolved_preferred
-                    .width
-                    .map_or(AvailableSpace::MaxContent, AvailableSpace::Definite),
-                IntrinsicTag::None => known.width.map_or(AvailableSpace::MaxContent, |_| {
-                    AvailableSpace::Definite(
-                        (area_size.width - item.margin.horizontal_sum()).max(0.0),
-                    )
-                }),
-            },
-            match item.intrinsic.preferred(Axis::Vertical) {
-                IntrinsicTag::MinContent => AvailableSpace::MinContent,
-                IntrinsicTag::MaxContent => AvailableSpace::MaxContent,
-                IntrinsicTag::FitContent => resolved_preferred
-                    .height
-                    .map_or(AvailableSpace::MaxContent, AvailableSpace::Definite),
-                IntrinsicTag::None => known.height.map_or(AvailableSpace::MaxContent, |_| {
-                    AvailableSpace::Definite(
-                        (area_size.height - item.margin.vertical_sum()).max(0.0),
-                    )
-                }),
-            },
-        );
-        let parent_size = Size::new(Some(area_size.width), Some(area_size.height));
-        let item_goal = match goal {
-            LayoutGoal::Measure(_) => goal,
-            LayoutGoal::Commit {
-                content_independent: container,
-            } => {
-                // The item's grid area is what its percentages resolve against
-                // and what a stretch fills, so independence chains off the
-                // area rather than the container's own box. A fixed-function
-                // track cannot move at all; an intrinsic or flexible one moves
-                // only with the contributions it collects, which this item's
-                // content cannot touch as long as its own contributions are
-                // content-free.
-                let fixed_area = Size::new(
-                    container.width && span_is_fixed(columns, item.area.column),
-                    container.height && span_is_fixed(rows, item.area.row),
-                );
-                let style = tree.style(item.key.node);
-                let (values_stable, edges_stable) =
-                    item_value_stability(&style, item.aspect_ratio, fixed_area);
-                let axis_independent = |axis: Axis| {
-                    let area_stable = axis.size(fixed_area)
-                        || (axis.size(container) && contribution_is_content_free(item, axis));
-                    edges_stable
-                        && axis.size(values_stable)
-                        && !axis_has_intrinsic_style(item, axis)
-                        && area_stable
-                        && axis.size(known).is_some()
-                };
-                LayoutGoal::Commit {
-                    content_independent: Size::new(
-                        axis_independent(Axis::Horizontal),
-                        axis_independent(Axis::Vertical),
+        let area = area_size.map(Some);
+        let (known, available) = item_area_geometry(item, area);
+        let item_goal = match goal.independence() {
+            None => goal,
+            Some(container) => LayoutGoal::Commit {
+                content_independent: item_commit_independence(
+                    tree,
+                    item,
+                    known,
+                    Size::new(
+                        span_is_fixed(columns, item.area.column),
+                        span_is_fixed(rows, item.area.row),
                     ),
-                }
-            }
+                    container,
+                ),
+            },
         };
-        let input = LayoutInput::new(item_goal, known, parent_size, available);
+        let input = LayoutInput::new(item_goal, known, area, available);
         let output = tree.compute_layout(state, item.key.node, input);
 
         let mut margin = item.margin;
@@ -699,21 +839,10 @@ where
         let item_rtl = item.direction == direction::T::Rtl;
         let offset_x = item_alignment_offset(free_x, item.justify_self, rtl, item_rtl);
         let offset_y = item_alignment_offset(free_y, item.align_self, false, false);
-        let (relative_x, relative_y) = if item.position == PositionProperty::Relative {
-            (
-                item.inset
-                    .left
-                    .unwrap_or_else(|| -item.inset.right.unwrap_or(0.0)),
-                item.inset
-                    .top
-                    .unwrap_or_else(|| -item.inset.bottom.unwrap_or(0.0)),
-            )
-        } else {
-            (0.0, 0.0)
-        };
+        let relative = relative_item_offset(item);
         let location = Point::new(
-            content_origin.x + area_offset.x + margin.left + offset_x + relative_x,
-            content_origin.y + area_offset.y + margin.top + offset_y + relative_y,
+            content_origin.x + area_offset.x + margin.left + offset_x + relative.x,
+            content_origin.y + area_offset.y + margin.top + offset_y + relative.y,
         );
         let mut layout = Layout::with_order(item.key.layout_order);
         layout.location = location;
@@ -1144,74 +1273,15 @@ where
             .unwrap_or(AlignFlags::STRETCH),
         rtl,
     };
-    let preferred = style.size();
-    let mut metrics = resolve_container_box(&style, input);
-    let style_definite = metrics.preferred_definite;
-    let outer_definite = Size::new(
-        input.definite_dimensions.width || style_definite.width,
-        input.definite_dimensions.height || style_definite.height,
-    );
-    if input.sizing_mode != SizingMode::IgnoreSizeStyles {
-        if metrics.inner.width.is_none() {
-            metrics.available_inner.width = match preferred.width {
-                StyleSize::MinContent => AvailableSpace::MinContent,
-                StyleSize::MaxContent => AvailableSpace::MaxContent,
-                _ => metrics.available_inner.width,
-            };
-        }
-        if metrics.inner.height.is_none() {
-            metrics.available_inner.height = match preferred.height {
-                StyleSize::MinContent => AvailableSpace::MinContent,
-                StyleSize::MaxContent => AvailableSpace::MaxContent,
-                _ => metrics.available_inner.height,
-            };
-        }
-    }
-    let initial_percentage_basis = Size::new(
-        outer_definite
-            .width
-            .then_some(metrics.inner.width)
-            .flatten(),
-        outer_definite
-            .height
-            .then_some(metrics.inner.height)
-            .flatten(),
-    );
-    let definite_outer = Size::new(
-        outer_definite
-            .width
-            .then_some(metrics.outer.width)
-            .flatten(),
-        outer_definite
-            .height
-            .then_some(metrics.outer.height)
-            .flatten(),
-    );
-    let initial_gap = resolve_gap(gap_value, initial_percentage_basis);
-    let repeat_max_basis = Size::new(
-        definite_outer.width.or(metrics.max.width).map(|value| {
-            (clamp(value, metrics.min.width, metrics.max.width) - metrics.box_inset.width).max(0.0)
-        }),
-        definite_outer.height.or(metrics.max.height).map(|value| {
-            (clamp(value, metrics.min.height, metrics.max.height) - metrics.box_inset.height)
-                .max(0.0)
-        }),
-    );
-    let repeat_min_basis = Size::new(
-        metrics
-            .min
-            .width
-            .map(|value| (value - metrics.box_inset.width).max(0.0)),
-        metrics
-            .min
-            .height
-            .map(|value| (value - metrics.box_inset.height).max(0.0)),
-    );
-    let repeat_count_basis = Size::new(
-        repeat_max_basis.width.or(repeat_min_basis.width),
-        repeat_max_basis.height.or(repeat_min_basis.height),
-    );
-    let repeat_count_gap = resolve_gap(gap_value, repeat_count_basis);
+    let ContainerPrologue {
+        metrics,
+        style_definite,
+        percentage_basis: initial_percentage_basis,
+        gap: initial_gap,
+        repeat_max_basis,
+        repeat_min_basis,
+        repeat_count_gap,
+    } = container_prologue(&style, input);
     let (explicit_columns, explicit_rows) =
         expand_explicit_tracks(&style, repeat_max_basis, repeat_min_basis, repeat_count_gap);
 

@@ -1582,6 +1582,23 @@ fn stretch_auto_tracks(tracks: &mut TrackSet, available: AvailableSpace, alignme
     }
 }
 
+/// Whether track sizing consults the items placed in this set at all: some
+/// track's used size depends on the contributions it collects, rather than
+/// standing on its own sizing function. A caller that has to assemble the item
+/// list before calling [`size_tracks`] can skip assembling it when this is
+/// false — the same condition `size_tracks` itself fast-paths on, named once so
+/// the two cannot drift.
+///
+/// A flexible track counts: §12.5's "increase sizes to accommodate spanning
+/// items crossing flexible tracks" step runs under every available space, not
+/// only under a max-content constraint.
+pub(super) fn track_sizing_reads_items(tracks: &TrackSet) -> bool {
+    tracks
+        .tracks
+        .iter()
+        .any(|track| track.intrinsic_min || track.intrinsic_max || track.is_flexible())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn size_tracks<T>(
     tree: &T,
@@ -1601,11 +1618,7 @@ pub(super) fn size_tracks<T>(
     if tracks.tracks.is_empty() {
         return;
     }
-    if tracks
-        .tracks
-        .iter()
-        .all(|track| !track.intrinsic_min && !track.intrinsic_max && !track.is_flexible())
-    {
+    if !track_sizing_reads_items(tracks) {
         maximize_tracks(tracks, available, &mut scratch.track_distribution);
         tracks.rebuild_positions();
         return;

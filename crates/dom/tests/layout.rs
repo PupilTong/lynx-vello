@@ -2151,3 +2151,275 @@ fn bounding_client_rect_never_runs_a_pending_layout() {
     h.layout();
     assert_eq!(client_rect(&h.doc.dom, cell), Some((25.0, 0.0, 40.0, 40.0)));
 }
+
+// --- CSS Grid Level 3 `display: grid-lanes` -------------------------------
+
+/// The waterfall shape the Lynx `<list list-type="waterfall">` component will
+/// be lowered onto: fixed `minmax(0, 1fr)` lanes, a gutter in both axes, and
+/// `flow-tolerance: 0` so every item lands in the strictly shortest lane.
+const LANES: &str = "page { display: flex; align-items: flex-start;
+                            width: 400px; height: 400px; }
+     .lanes { display: grid-lanes; width: 200px; gap: 10px; flow-tolerance: 0;
+              grid-template-columns: repeat(2, minmax(0, 1fr)); }";
+
+#[test]
+fn grid_lanes_stacks_items_into_the_shortest_lane() {
+    let mut h = Harness::new(LANES);
+    let root = h.doc.root;
+    let lanes = h.doc.el(root, "view.lanes");
+    let items = [30.0, 50.0, 20.0, 60.0, 40.0, 10.0]
+        .into_iter()
+        .map(|height| {
+            let item = h.doc.el(lanes, "view");
+            h.doc.set_inline(item, &format!("height: {height}px"));
+            item
+        })
+        .collect::<Vec<_>>();
+    h.layout();
+
+    for (index, expected) in [
+        (0.0, 0.0, 95.0, 30.0),
+        (105.0, 0.0, 95.0, 50.0),
+        (0.0, 40.0, 95.0, 20.0),
+        (105.0, 60.0, 95.0, 60.0),
+        (0.0, 70.0, 95.0, 40.0),
+        (0.0, 120.0, 95.0, 10.0),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(h.rect(items[index]), expected, "item {index}");
+    }
+    assert_eq!(h.rect(lanes), (0.0, 0.0, 200.0, 130.0));
+}
+
+/// The same two-lane template written the way the `<list>` UA rule will write
+/// it, so `var()` substitution has to reach the track list before expansion.
+#[test]
+fn grid_lanes_reads_a_var_substituted_track_list() {
+    let mut h = Harness::new(
+        "page { display: flex; align-items: flex-start; width: 400px; height: 400px; }
+         .lanes { display: grid-lanes; width: 200px; gap: 10px; flow-tolerance: 0;
+                  --n: 2;
+                  grid-template-columns: repeat(var(--n), minmax(0, 1fr)); }",
+    );
+    let root = h.doc.root;
+    let lanes = h.doc.el(root, "view.lanes");
+    let items = [30.0, 50.0, 20.0]
+        .into_iter()
+        .map(|height| {
+            let item = h.doc.el(lanes, "view");
+            h.doc.set_inline(item, &format!("height: {height}px"));
+            item
+        })
+        .collect::<Vec<_>>();
+    h.layout();
+
+    assert_eq!(
+        h.doc.value(lanes, "grid-template-columns"),
+        "repeat(2, minmax(0px, 1fr))",
+        "the substituted count reaches the computed track list",
+    );
+    assert_eq!(h.rect(items[0]), (0.0, 0.0, 95.0, 30.0));
+    assert_eq!(h.rect(items[1]), (105.0, 0.0, 95.0, 50.0));
+    assert_eq!(h.rect(items[2]), (0.0, 40.0, 95.0, 20.0));
+}
+
+/// A full-span item spans every lane, so it starts below the longest one and
+/// leaves all of them level behind it.
+#[test]
+fn grid_lanes_full_span_item_levels_every_lane() {
+    let mut h = Harness::new(LANES);
+    let root = h.doc.root;
+    let lanes = h.doc.el(root, "view.lanes");
+    let first = h.doc.el(lanes, "view");
+    h.doc.set_inline(first, "height: 30px");
+    let second = h.doc.el(lanes, "view");
+    h.doc.set_inline(second, "height: 50px");
+    let full = h.doc.el(lanes, "view");
+    h.doc.set_inline(full, "grid-column: 1 / -1; height: 20px");
+    let fourth = h.doc.el(lanes, "view");
+    h.doc.set_inline(fourth, "height: 15px");
+    let fifth = h.doc.el(lanes, "view");
+    h.doc.set_inline(fifth, "height: 25px");
+    h.layout();
+
+    assert_eq!(h.rect(first), (0.0, 0.0, 95.0, 30.0));
+    assert_eq!(h.rect(second), (105.0, 0.0, 95.0, 50.0));
+    assert_eq!(h.rect(full), (0.0, 60.0, 200.0, 20.0));
+    assert_eq!(h.rect(fourth), (0.0, 90.0, 95.0, 15.0));
+    assert_eq!(h.rect(fifth), (105.0, 90.0, 95.0, 25.0));
+    assert_eq!(h.rect(lanes), (0.0, 0.0, 200.0, 115.0));
+}
+
+/// The waterfall as it will actually ship: inside a scroll container whose
+/// scrollable extent is the stacking range the lanes pass produced.
+#[test]
+fn grid_lanes_scroll_extent_is_the_stacking_range_beyond_the_scrollport() {
+    let mut h = Harness::new(
+        "page { display: flex; align-items: flex-start; width: 400px; height: 400px; }
+         .lanes { display: grid-lanes; width: 200px; height: 100px; overflow-y: scroll;
+                  gap: 10px; flow-tolerance: 0;
+                  grid-template-columns: repeat(2, minmax(0, 1fr)); }",
+    );
+    let root = h.doc.root;
+    let lanes = h.doc.el(root, "view.lanes");
+    for height in [30.0, 50.0, 20.0, 60.0, 40.0, 10.0] {
+        let item = h.doc.el(lanes, "view");
+        h.doc.set_inline(item, &format!("height: {height}px"));
+    }
+    h.layout();
+
+    let scroll_box = h
+        .doc
+        .dom
+        .scroll_box(lanes)
+        .expect("the lanes container scrolls");
+    assert_eq!(scroll_box.scrollport.height, 100.0);
+    assert_eq!(scroll_box.scroll_size.height, 130.0, "the stacking range");
+    assert_eq!(scroll_box.max_offset().y, 30.0);
+}
+
+/// `grid-template-rows` alone puts the tracks on the block axis, so the items
+/// stack rightwards and the scrollable extent is horizontal.
+#[test]
+fn row_grid_lanes_stack_along_the_inline_axis_and_scroll_there() {
+    let mut h = Harness::new(
+        "page { display: flex; align-items: flex-start; width: 400px; height: 400px; }
+         .lanes { display: grid-lanes; width: 100px; height: 200px; overflow-x: scroll;
+                  gap: 10px; flow-tolerance: 0;
+                  grid-template-rows: repeat(2, minmax(0, 1fr)); }",
+    );
+    let root = h.doc.root;
+    let lanes = h.doc.el(root, "view.lanes");
+    let items = [30.0, 50.0, 20.0, 60.0, 40.0, 10.0]
+        .into_iter()
+        .map(|width| {
+            let item = h.doc.el(lanes, "view");
+            h.doc.set_inline(item, &format!("width: {width}px"));
+            item
+        })
+        .collect::<Vec<_>>();
+    h.layout();
+
+    for (index, expected) in [
+        (0.0, 0.0, 30.0, 95.0),
+        (0.0, 105.0, 50.0, 95.0),
+        (40.0, 0.0, 20.0, 95.0),
+        (60.0, 105.0, 60.0, 95.0),
+        (70.0, 0.0, 40.0, 95.0),
+        (120.0, 0.0, 10.0, 95.0),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(h.rect(items[index]), expected, "item {index}");
+    }
+    let scroll_box = h
+        .doc
+        .dom
+        .scroll_box(lanes)
+        .expect("the lanes container scrolls");
+    assert_eq!(scroll_box.scrollport.width, 100.0);
+    assert_eq!(scroll_box.scroll_size.width, 130.0);
+    assert_eq!(scroll_box.max_offset().x, 30.0);
+}
+
+/// A `display: contents` wrapper generates no box, so the items it holds are
+/// placed exactly where they would be as direct children.
+#[test]
+fn grid_lanes_flattens_a_display_contents_wrapper() {
+    let mut h = Harness::new(&format!("{LANES} .wrap {{ display: contents; }}"));
+    let root = h.doc.root;
+    let lanes = h.doc.el(root, "view.lanes");
+    let first = h.doc.el(lanes, "view");
+    h.doc.set_inline(first, "height: 30px");
+    let wrap = h.doc.el(lanes, "view.wrap");
+    let wrapped = [50.0, 20.0]
+        .into_iter()
+        .map(|height| {
+            let item = h.doc.el(wrap, "view");
+            h.doc.set_inline(item, &format!("height: {height}px"));
+            item
+        })
+        .collect::<Vec<_>>();
+    let last = h.doc.el(lanes, "view");
+    h.doc.set_inline(last, "height: 60px");
+    h.layout();
+
+    assert_eq!(h.rect(first), (0.0, 0.0, 95.0, 30.0));
+    assert_eq!(h.rect(wrapped[0]), (105.0, 0.0, 95.0, 50.0));
+    assert_eq!(h.rect(wrapped[1]), (0.0, 40.0, 95.0, 20.0));
+    assert_eq!(h.rect(last), (105.0, 60.0, 95.0, 60.0));
+    assert_eq!(h.rect(lanes), (0.0, 0.0, 200.0, 120.0));
+}
+
+/// css-grid-3 §4.2: `flow-tolerance: normal` is `1em` of the container's own
+/// font, so the same three items land in different lanes under two font sizes.
+#[test]
+fn normal_flow_tolerance_resolves_against_the_containers_font_size() {
+    for (font_size, third) in [(16.0_f32, (100.0, 20.0)), (40.0_f32, (0.0, 50.0))] {
+        let mut h = Harness::new(
+            "page { display: flex; align-items: flex-start; width: 400px; height: 400px; }
+             .lanes { display: grid-lanes; width: 200px; gap: 0px;
+                      grid-template-columns: repeat(2, minmax(0, 1fr)); }",
+        );
+        let root = h.doc.root;
+        let lanes = h.doc.el(root, "view.lanes");
+        h.doc
+            .set_inline(lanes, &format!("font-size: {font_size}px"));
+        let items = [50.0, 20.0, 20.0]
+            .into_iter()
+            .map(|height| {
+                let item = h.doc.el(lanes, "view");
+                h.doc.set_inline(item, &format!("height: {height}px"));
+                item
+            })
+            .collect::<Vec<_>>();
+        h.layout();
+
+        assert_eq!(
+            h.doc.value(lanes, "flow-tolerance"),
+            "normal",
+            "the tolerance keyword survives to computed-value time",
+        );
+        assert_eq!(h.rect(items[0]), (0.0, 0.0, 100.0, 50.0), "{font_size}px");
+        assert_eq!(h.rect(items[1]), (100.0, 0.0, 100.0, 20.0), "{font_size}px");
+        assert_eq!(
+            h.rect(items[2]),
+            (third.0, third.1, 100.0, 20.0),
+            "the third item's lane is decided by a {font_size}px tolerance",
+        );
+    }
+}
+
+/// Neither a non-generated box nor an out-of-flow one is a grid item, so
+/// neither occupies a lane or moves the items after it.
+#[test]
+fn grid_lanes_skips_hidden_and_out_of_flow_children() {
+    let mut h = Harness::new(&format!(
+        "{LANES} .gone {{ display: none; }}
+         .badge {{ position: absolute; left: 0; top: 0; }}"
+    ));
+    let root = h.doc.root;
+    let lanes = h.doc.el(root, "view.lanes");
+    let first = h.doc.el(lanes, "view");
+    h.doc.set_inline(first, "height: 20px");
+    let gone = h.doc.el(lanes, "view.gone");
+    h.doc.set_inline(gone, "height: 100px");
+    let badge = h.doc.el(lanes, "view.badge");
+    h.doc.set_inline(badge, "width: 12px; height: 100px");
+    let second = h.doc.el(lanes, "view");
+    h.doc.set_inline(second, "height: 20px");
+    h.layout();
+
+    assert_eq!(h.rect(first), (0.0, 0.0, 95.0, 20.0));
+    assert_eq!(h.rect(second), (105.0, 0.0, 95.0, 20.0));
+    assert_eq!(h.rect(gone), (0.0, 0.0, 0.0, 0.0), "a hidden box is zeroed");
+    assert_eq!(
+        h.rect(lanes),
+        (0.0, 0.0, 200.0, 20.0),
+        "neither child contributes to the stacking range",
+    );
+    assert_eq!(h.rect(badge).3, 100.0, "the out-of-flow box is still sized");
+}

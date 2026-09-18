@@ -194,6 +194,20 @@ enum StreamTarget {
     Pseudo(u32),
 }
 
+/// Whether this box's children are flex or grid items, which is what lets a
+/// non-positioned child's `z-index` apply (CSS Position 3 §9.9.1, Flexbox 1
+/// §4.3, Grid 2 §6).
+///
+/// `grid-lanes` is in the list because its children are grid items: the fork's
+/// `Display::is_item_container` answers `true` for it, so they blockify exactly
+/// as `grid`'s do.
+const fn ranks_children_as_items(mode: DisplayMode) -> bool {
+    matches!(
+        mode,
+        DisplayMode::Flex | DisplayMode::Grid | DisplayMode::GridLanes
+    )
+}
+
 /// The box a collection level is descending into: whose flattened children
 /// are being collected, the origin their locations count from, whether it
 /// ranks them as flex/grid items, and the clip and scroll state in force
@@ -581,7 +595,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
             Cursor {
                 node: root,
                 offset: Point2D::zero(),
-                is_item_container: matches!(mode, DisplayMode::Flex | DisplayMode::Grid),
+                is_item_container: ranks_children_as_items(mode),
                 ctx: &ctx,
             },
             StreamTarget::Context,
@@ -885,7 +899,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         let style = child.view.values();
         let (visible, hit_testable) = item_flags(style);
         let descend = child.mode != DisplayMode::Leaf && !skips_contents(style);
-        let is_item_container = matches!(child.mode, DisplayMode::Flex | DisplayMode::Grid);
+        let is_item_container = ranks_children_as_items(child.mode);
         // A pseudo-context takes its sequence number before descending, so it
         // sorts where it was *found*, not where it finished; a static box takes
         // none at all, because it is not a member.

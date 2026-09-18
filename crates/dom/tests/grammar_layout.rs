@@ -19,7 +19,15 @@ fn computed(declaration: &str, property: &str) -> String {
 
 #[test]
 fn display_grammar_is_the_lynx_value_set_and_includes_contents() {
-    for value in ["none", "contents", "flex", "grid", "linear", "relative"] {
+    for value in [
+        "none",
+        "contents",
+        "flex",
+        "grid",
+        "grid-lanes",
+        "linear",
+        "relative",
+    ] {
         assert!(parses("display", value), "`display: {value}` must parse");
         assert_eq!(
             computed(&format!("display: {value}"), "display"),
@@ -32,11 +40,15 @@ fn display_grammar_is_the_lynx_value_set_and_includes_contents() {
         "inline",
         "inline-block",
         "inline-flex",
+        // css-grid-3 defines `inline-grid-lanes`, but the lynx grammar has no
+        // inline-level container value at all.
+        "inline-grid-lanes",
         "flow-root",
         "table",
         "list-item",
         "block flex",
         "contents flex",
+        "block grid-lanes",
     ] {
         assert!(
             !parses("display", value),
@@ -268,6 +280,41 @@ fn grid_template_tracks() {
         computed("grid-template-rows: none", "grid-template-rows"),
         "none"
     );
+}
+
+/// css-grid-3 §4.2 `flow-tolerance: normal | <length-percentage [0,∞]> |
+/// infinite`. Both keywords survive to computed-value time: layout resolves
+/// `normal` to `1em` and `infinite` to an unbounded tie window.
+#[test]
+fn flow_tolerance_grammar() {
+    assert!(
+        property_is_supported("flow-tolerance"),
+        "flow-tolerance must be an author-facing longhand"
+    );
+    for (input, computed_value) in [
+        ("normal", "normal"),
+        ("infinite", "infinite"),
+        ("0", "0px"),
+        ("10px", "10px"),
+        ("50%", "50%"),
+        ("calc(1em + 2px)", "18px"),
+    ] {
+        assert!(
+            parses("flow-tolerance", input),
+            "`flow-tolerance: {input}` must parse"
+        );
+        assert_eq!(
+            computed(&format!("flow-tolerance: {input}"), "flow-tolerance"),
+            computed_value,
+            "`{input}` computed value"
+        );
+    }
+    for invalid in ["-1px", "-10%", "auto", "5", "none", "infinite 1px", ""] {
+        assert!(
+            !parses("flow-tolerance", invalid),
+            "`flow-tolerance: {invalid}` must be rejected"
+        );
+    }
 }
 
 #[test]

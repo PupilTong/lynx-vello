@@ -3,7 +3,8 @@
 `crates/hughie` is lynx-vello's box-layout engine: the from-scratch
 successor to the Lynx C++ engine's `starlight`
 (`lynx/core/renderer/starlight/`). It implements CSS **flexbox**, CSS **Grid**,
-and Lynx's Starlight **Relative** and **Linear** layouts as first-class peer
+CSS Grid Level 3 **grid lanes**, and Lynx's Starlight **Relative** and
+**Linear** layouts as first-class peer
 algorithms. It is host/storage-agnostic — the engine owns no tree, no styles,
 and no per-node storage — but it **speaks the stylo fork's computed-value
 vocabulary**: style accessors return the lynx stylo fork's computed types
@@ -14,9 +15,11 @@ takes minutes). Every host boundary is **static dispatch**: `dyn` is
 impossible by construction, not by convention. Parley is unconditional:
 decoded natural size and concrete Parley text are the only leaf-content paths.
 
-Status: **Flexbox, Grid, Relative, Linear, and text measurement implemented** —
+Status: **Flexbox, Grid, grid lanes, Relative, Linear, and text measurement
+implemented** —
 `hughie`'s protocol, generic machinery, cache, leaf and positioned
-sizing, rounding, CSS Flexbox Level 1, numeric CSS Grid Level 2, Starlight
+sizing, rounding, CSS Flexbox Level 1, numeric CSS Grid Level 2, CSS Grid
+Level 3 `display: grid-lanes`, Starlight
 Relative Layout Level 1, Starlight Linear algorithms, and the
 Parley text measurement core are implemented and conformance-tested against
 plain tree/state mock hosts. **CSS containment (css-contain-2)** is landed on
@@ -28,7 +31,10 @@ style flush consumes harvested relayout-class `StyleDamage` into
 the crate-private `Document::invalidate_layout` funnel automatically,
 boundary-stopped, entirely inside the engine layer (no runtime adapter
 participates). Grid excludes subgrid
-and named lines/areas, which are outside the current protocol. The concrete
+and named lines/areas, which are outside the current protocol; grid lanes
+additionally excludes `inline-grid-lanes`, `dense` backfilling, stacking-axis
+self-alignment and baseline alignment
+([`style-assumptions.md`](style-assumptions.md) §24). The concrete
 document/stylo host is
 implemented in `dom`'s `layout` module (`Document::layout`):
 `LayoutTree` on immutable `TreeArenas`, with plain `NodeId`s and a separately
@@ -84,9 +90,11 @@ scope are recorded in
 [`docs/layout-conformance.md`](layout-conformance.md). The standalone Linear algorithm is specified in
 [`docs/starlight-linear-layout.md`](starlight-linear-layout.md). Per the
 standards policy in
-[`AGENTS.md`](../AGENTS.md), flex and Grid are implemented from the
-**W3C specs** (Flexbox Level 1, Grid Level 2, Sizing Level 3, Box Alignment
-Level 3), not by porting Starlight's C++. Relative and Linear are Lynx-only
+[`AGENTS.md`](../AGENTS.md), flex, Grid and grid lanes are implemented from the
+**W3C specs** (Flexbox Level 1, Grid Level 2 and Level 3, Sizing Level 3, Box
+Alignment Level 3), not by porting Starlight's C++ — and grid lanes has no
+Lynx counterpart at all, so it is a recorded extension beyond parity rather
+than a compat obligation. Relative and Linear are Lynx-only
 extensions. Relative follows the normative
 [`Starlight Relative Layout Module Level 1`](starlight-relative-layout.md),
 with explicitly documented Rust-surface defaults; Linear follows the
@@ -101,20 +109,21 @@ Text behavior is inventoried in
 ┌──────────────────────────────────┐     ┌─────────────────────────────────┐
 │ dom                              │     │ hughie                          │
 │ immutable TreeArenas + styles    │     │ one LayoutTree protocol         │
-│ mutable DocumentLayoutState      │────▶│ flex / grid / relative / linear │
-│ boxed text context/artifacts     │     │ concrete Parley measurement     │
-│ NodeId dispatch + fixed/dirty    │     │ LayoutSlot shape, no storage    │
-│ future staggered integration     │     │ leaf/hidden/cache/position/round│
+│ mutable DocumentLayoutState      │────▶│ flex / grid / grid-lanes /      │
+│ boxed text context/artifacts     │     │ relative / linear               │
+│ NodeId dispatch + fixed/dirty    │     │ concrete Parley measurement     │
+│ list/component integration ahead │     │ LayoutSlot shape, no storage    │
+│                                  │     │ leaf/hidden/cache/position/round│
 └──────────────────────────────────┘     └─────────────────────────────────┘
 ```
 
 | Layer | Owns | Must not own |
 | --- | --- | --- |
-| `hughie` | Implemented Flex, Grid, Relative, and Linear algorithms; one unified source-backed `CoreStyle` protocol speaking stylo computed values (including the `relative-*` and `linear-*` longhands); the text style/run protocol; closed natural-size and Parley leaf paths, box-generation rules (`display: none` hiding and `display: contents` box-tree flattening through `flattened_children`), hidden-subtree cleanup, positioned layout, rounding; shared private arithmetic; geometry and layout IO; cache semantics | Node/style/content storage, display dispatch, arbitrary host content/measurers, DOM/runtime types, an engine-side style value vocabulary (it re-exports stylo's), resolved device-unit policy (`rpx`, etc.), stacking/paint order |
+| `hughie` | Implemented Flex, Grid, grid lanes, Relative, and Linear algorithms; one unified source-backed `CoreStyle` protocol speaking stylo computed values (including the `relative-*` and `linear-*` longhands); the text style/run protocol; closed natural-size and Parley leaf paths, box-generation rules (`display: none` hiding and `display: contents` box-tree flattening through `flattened_children`), hidden-subtree cleanup, positioned layout, rounding; shared private arithmetic; geometry and layout IO; cache semantics | Node/style/content storage, display dispatch, arbitrary host content/measurers, DOM/runtime types, an engine-side style value vocabulary (it re-exports stylo's), resolved device-unit policy (`rpx`, etc.), stacking/paint order |
 | `hughie::text` (unconditional) | Parley context/font registration, whitespace processing, shaping, line breaking, intrinsic and height-for-width measurement, baselines, and the single retained `TextLayout` artifact per node — one shaped layout re-broken in place for every constraint, memoising both the constraint its lines currently reflect and the last few constraints it reported on, plus the committed break state a probe must hand back before the pass ends | Text truncation and ellipsis, inline boxes, paint styling, runtime/attribute lowering, resource fetching, or host cache and per-node slot storage |
 | `hughie::text::block` (standalone, unwired) | The Lynx text-block semantics on its own parameter structs: the flattened paragraph with atomic inline boxes (size + baseline + vertical-align, no content), the UTF-16 source map, `text-maxline`/`text-maxlength`/`text-overflow` truncation with inline-truncation content, per-line layout-event data, and the retained-natural-layout / rebuilt-display lifecycle | The box-protocol wire format (`LayoutInput`), the measurement path's `TextLayout` store and probe/commit machinery, host tree walking and the scoped style overlay (host cascade), paint styling, runtime/attribute lowering |
 | `dom::layout` (implemented) | `LayoutTree` on immutable `TreeArenas<T>`, plain `NodeId`s, and separately borrowed mutable `DocumentLayoutState` (one protocol; no view/session/store wrapper layers); post-flush style views lending the `ComputedValues` pointer published from Stylo's still-owning primary `Arc` under the exclusive `Document` phase boundary (no `ElementData` borrow check, `Arc` bump, copy, or translation; public computed-style queries remain guarded); logical `relative-*-inline-*` lowering; the W3C fixed/absolute containing-block rule expressed through `position()`; anonymous box geometry plus inherited parent font/text values for text nodes; display dispatch (flex/grid/linear/relative, `display: none` hiding, `display: contents` box-less handling — never a containing block, never contained, never skipped, never hoisted, and zeroed by the positioned pass — `content-visibility: hidden` skipped-contents routing before the cache, natural-size leaf, `-lynx-text` paragraph blocks); lazily boxed shared `TextContext` and per-text-block `TextBlockStore` in layout state; a NodeId-aligned `LayoutSlot` containing cache, static position, unrounded layout, and rounded layout; public `rounded_layout` queries with unrounded and cache state kept internal; automatic dirty-path invalidation when content changes; one fused preorder positioned-and-rounding traversal whose pre-node hook keeps hoisted placement cache-proof, prunes positioning at skipped-contents subtrees so a hoisted descendant cannot be revived, and applies the engine's effective-`order`-0 paint rule for out-of-flow children; device-pixel rounding without a whole-`Layout` clone; the effective-containment fold on the style view (feeding both the relayout-boundary predicate and the content-visibility-aware fixed/absolute containing-block predicate); **automatic style-damage consumption** (every harvest boundary-stops the internal `Document::invalidate_layout` funnel per relayout-damaged node during commit; it also invalidates direct text children, which read inherited style from the damaged element but have no Stylo damage record of their own — always their measurement cache, since the funnel walks upward and nothing else clears it, and their retained shaped layout only when a two-level comparison of the element's `Font` and `InheritedText` structs, pointer first and then narrowed to the shaping fields, says Parley would shape the paragraph differently; the animation harvest routes through the same decision; `Document::layout` re-runs each parked `contain: strict`/skipped boundary in place before the root pass, merging the re-run's scrollable `content_size` back into the boundary's stored layout); and public content/child/style mutations that perform their own invalidation (the explicit hook is `layout-test-utils`-only) | A second layout algorithm, generic content-measurement callbacks, engine-side style copies, layout/text runtime borrow wrappers, Lynx runtime-element vocabulary or device-unit policy (`rpx`), Lynx computed defaults (cascade/UA-sheet policy), text shaping algorithms |
-| Future runtime integration | Lynx view metrics and `rpx` policy; Lynx-specific text attributes, element-backed raw text and truncation; `staggered` integration; sticky lowering | A second Flex/Grid/Relative/Linear/text-measurement implementation, arbitrary host content, engine-side copies of styles, the style-damage→layout wiring (now engine-internal in `dom`) |
+| Future runtime integration | Lynx view metrics and `rpx` policy; Lynx-specific text attributes, element-backed raw text and truncation; the `<list>` component surface over `display: grid-lanes` (attribute→CSS mapping, the `update-list-info` consumer, virtualization); sticky lowering | A second Flex/Grid/grid-lanes/Relative/Linear/text-measurement implementation, arbitrary host content, engine-side copies of styles, the style-damage→layout wiring (now engine-internal in `dom`) |
 
 The engine/host seam keeps the engine storage-free even though its
 vocabulary is stylo's: the Lynx-specific values and algorithms for Relative
@@ -145,21 +154,25 @@ the independent state:
 | `CoreStyle` | one `computed_values()` source plus the defaulted box model (`size`/`min_size`/`max_size`/`aspect_ratio`/`margin`/`padding`/`border`/`box_sizing`/`inset`/`overflow`), `display`, `position`, `direction`, the containment triple, `skips_contents`, the alignment accessors (`gap`, `align_content`, `align_items`, `justify_content`, `align_self`) and `order`; sequence and geometry values remain borrowed | every algorithm, the leaf, the absolute pass, the root, rounding and invalidation |
 | `FlexboxStyle: CoreStyle` | `flex_direction`, `flex_wrap`, `flex_basis`, `flex_grow`, `flex_shrink` | demanded by `compute_flexbox_layout` |
 | `GridStyle: CoreStyle` | `grid_template_rows`/`_columns`, `grid_auto_rows`/`_columns`, `grid_auto_flow`, `justify_items`, `grid_row_start`/`_end`, `grid_column_start`/`_end`, `justify_self` | demanded by `compute_grid_layout` |
+| `GridLanesStyle: GridStyle` | `flow_tolerance` plus the element's computed `font_size`, which is what `flow-tolerance: normal`'s `1em` resolves against | demanded by `compute_grid_lanes_layout` |
 | `LinearStyle: CoreStyle` | `linear_direction`, `linear_weight_sum`, `linear_weight` | demanded by `compute_linear_layout` |
 | `RelativeStyle: CoreStyle` | `relative_layout_once`, `relative_id`, `relative_align`, `relative_adjacent`, `relative_center` | demanded by `compute_relative_layout` |
 | `TextContainerStyle: CoreStyle` | paragraph-level alignment, wrap-mode, word-break, indent, overflow, and `text_maxline` / `text_maxlength` from non-inherited integer custom properties | the Parley text block |
 | `TextRunStyle` | run-level font, spacing, line-height, family, feature, and variation views; a Stylo host can expose one borrowed `computed_text_values()` source | the Parley text block |
 
 One `Style: CoreStyle` associated type still serves every box algorithm; the
-four algorithm traits are demanded at the entry point that reads them, not by
+five algorithm traits are demanded at the entry point that reads them, not by
 the GAT bound. The split constrains *reach*, not *values*: every accessor has a
 default, so a host that writes `impl GridStyle for MyStyle {}` with no bodies
 still answers every grid accessor with its initial value — what the split stops
 is an algorithm naming another algorithm's inputs, not a host from answering
-them. The alignment accessors stay on the core because it spans two or three
-algorithms each (`gap` and `align_content` are Flex and Grid; `align_items`,
-`justify_content` and `align_self` add Linear) and `order` is read by all four
-for paint order, so partitioning them would duplicate rather than divide. A
+them. `GridLanesStyle` is the one that extends another algorithm's trait rather
+than `CoreStyle`, because the grid axis genuinely runs Grid's own sizing and
+placement code over Grid's own longhands. The alignment accessors stay on the
+core because it spans several algorithms each (`gap` and `align_content` are
+Flex, Grid and grid lanes; `align_items`, `justify_content` and `align_self`
+add Linear) and `order` is read by all five for paint order, so partitioning
+them would duplicate rather than divide. A
 Stylo-backed host supplies its post-flush `ComputedValues` through
 `computed_values()` and overrides only genuinely host-dependent lowering
 (currently `position()` in `dom`); the defaults lend all other
@@ -335,12 +348,13 @@ future additional container algorithm, wrapping that
 routing in `compute_cached_layout`. This decision buys three properties at
 once:
 
-1. **Open dispatch with four first-class algorithms.** Flex, Grid, and Lynx's
+1. **Open dispatch with five first-class algorithms.** Flex, Grid, css-grid-3
+   `display: grid-lanes`, and Lynx's
    non-CSS `display: relative` (id-anchored sibling constraint solving) and
    `display: linear` (Android `LinearLayout` semantics:
    `linear-direction`/`linear-weight`/…) are implemented peers in
    `hughie`, against the same tree/state protocol. The `<list>`
-   component's staggered-grid remains a future host peer. The engine owns
+   component surface over `grid-lanes` remains future host work. The engine owns
    **no display enum of its own** — `CoreStyle::display` returns stylo's
    `Display`, the engine consumes it only through `is_none` and
    `is_contents` (the two *box-generation* answers, which item collection
@@ -877,7 +891,8 @@ the painting — layout's job is to never be the frame's bottleneck.
   pool with thread-safe slots (host storage, host threading policy — the
   engine stays thread-unaware). Adding a defaulted method is semver-minor,
   so this ships when profiles earn it, without a protocol break.
-- **Flex, Grid, Relative, and Linear benchmarks are landed; broader
+- **Flex, Grid, grid-lanes, Relative, and Linear benchmarks are landed;
+  broader
   performance hardening remains.** The `divan` (CodSpeed-compatible) suite
   measures CSS-built documents through dom's production host: styles are
   flushed outside the timed region, while measured calls enter through
@@ -889,7 +904,16 @@ the painting — layout's job is to never be the frame's bottleneck.
   The Grid suite covers scaled
   sparse/dense auto-placement, fixed/`fr` tracks, unique intrinsic span
   buckets, flex freeze thresholds, cold/warm nested grids, a root cache hit,
-  and dirty-leaf ancestor invalidation. The Relative suite covers independent
+  and dirty-leaf ancestor invalidation. The grid-lanes suite (`grid_lanes`)
+  covers fixed-length lanes, the `minmax(0, 1fr)` lanes at `flow-tolerance: 0`
+  that a `<list list-type="waterfall">` would lower onto,
+  `minmax(min-content, 1fr)` lanes whose items overflow their own boxes, mixed
+  spans with a full-span item every eighth, and one dirty item in the middle
+  of a waterfall — whose successors all have to be re-placed, because the lane
+  each later item chooses follows its predecessors' sizes. It carries no
+  text-bearing clones: the text path is already measured by the four
+  algorithm suites and nothing about it is lanes-specific. The Relative suite
+  covers independent
   items, reverse dependency chains, duplicate ids, adversarial disjoint
   cycles, one-pass versus two-pass solving, nested cold layout, warm
   descendants, root cache hits, and auto-width refinement. The refinement
@@ -915,9 +939,10 @@ the painting — layout's job is to never be the frame's bottleneck.
   the common Flex subset remain future work — not to copy those engines'
   designs, but to keep "high-performance" falsifiable.
 
-## Algorithms (Flex, Grid, Relative, and Linear implemented)
+## Algorithms (Flex, Grid, grid lanes, Relative, and Linear implemented)
 
-This pass structure documents the implemented L1 Flex and L2 Grid algorithms
+This pass structure documents the implemented L1 Flex and L2 Grid algorithms,
+the CSS Grid Level 3 grid-lanes mode built on Grid's own machinery,
 plus the implemented Relative L1 and first-class Linear algorithms.
 Starlight's C++ mirrors the same spec steps
 (`flex_layout_algorithm.h` literally cites "Algorithm-3"…"Algorithm-15";
@@ -1033,9 +1058,86 @@ dispatches to it.
    first-baseline sharing, direct abs-pos children against a resolved grid
    area, `LayoutSlot::unrounded` writes, container size, and `content_size`.
 
-Last-baseline alignment, subgrid, named lines/areas, fragmentation, and
-masonry/`staggered-grid` stay out of scope. The last is a Lynx
-`<list>`-component concern, not a Grid mode.
+Last-baseline alignment, subgrid, named lines/areas and fragmentation stay out
+of Grid's scope. The masonry model is **not** out of scope any more: it landed
+on 2026-09-18 as CSS Grid Level 3 `display: grid-lanes`, its own entry point
+beside `compute_grid_layout` (see below). Lynx's own
+`staggered_grid_layout_algorithm.cc` is a different thing and stays out —
+it is `display: linear` plus a `column-count` attribute narrowing the
+cross-axis constraint for measurement, not a placement algorithm
+(`lynx/core/renderer/starlight/layout/layout_object.cc:711-718`).
+
+**Grid lanes (css-grid-3)** — `display: grid-lanes`, as a pipeline. One axis
+carries the tracks (the **grid axis**); items stack along the other (the
+**stacking axis**), each landing at the running end of the shortest lane its
+span can occupy. The module is `src/compute/grid/lanes.rs`, under
+`compute/grid/` rather than beside it, because the grid axis reuses regular
+Grid's template expansion, line resolution, §12 track sizing, item resolution
+and alignment helpers verbatim — only placement, stacking and the container's
+stacking-axis size are Level 3's own. Its style bound is
+`GridLanesStyle: GridStyle`, which adds `flow_tolerance` and the element's
+computed `font_size`.
+
+1. **Orientation** (§2.3) — with the orientation property still unspecified,
+   only its initial `normal` behavior exists: the block axis carries the
+   tracks exactly when `grid-template-columns` is `none` and
+   `grid-template-rows` is not. `grid-auto-flow`'s `row`/`column` are ignored.
+2. **Explicit grid + placement resolution** (§3.3.1) — expand the grid
+   axis's template through Grid's own `expand_template`, resolve each item's
+   grid-axis placement longhands only (the stacking axis has no lines of its
+   own), grow the implicit grid until the largest auto-placed span fits, and
+   decide `auto-fit` occupancy up front: because placement runs *after*
+   sizing, occupancy is a heuristic — every track a definite-position item
+   covers, plus the first still-unoccupied tracks up to the total auto-placed
+   span; every other `auto-fit` track collapses and nothing may be placed
+   across it.
+3. **Grid-axis track sizing** (§3.4, Grid §12) — run Grid's track-sizing
+   algorithm once over the grid axis with the stacking axis passed as
+   indefinite. A definite-position item contributes at its own span; an
+   auto-placed item is assumed to sit at every start position its span fits
+   and contributes once per position. Those per-position clones are built only
+   when track sizing reads its item list at all — the predicate is
+   `size_tracks`'s own `track_sizing_reads_items`, borrowed rather than
+   restated, and it holds whenever some track is intrinsic or flexible — so an
+   all-fixed-length grid axis builds none of them.
+   §3.4.2's virtual-item grouping, which would bound the clone count by
+   distinct spans rather than by items, is deliberately not implemented: a
+   contribution here depends on the tracks the item spans (both the automatic
+   minimum and the fixed-maximum clamp read them), so a group maximum would
+   have to be recomputed per candidate position anyway. The axis is re-sized
+   once under its now-definite basis whenever that basis was missing or the
+   gutter it feeds came out at a different value.
+4. **Placement and stacking** (§4.4 steps 1–3, §6.1) — in order-modified
+   document order: choose the lane whose spanned tracks have the smallest
+   maximum running position, counting everything within the `flow-tolerance`
+   threshold of that minimum as equally short and resolving that tie in favour
+   of the first such lane at or after the auto-placement cursor (§4.2); lay
+   the item out against a containing block that is its spanned tracks in the
+   grid axis and indefinite in the stacking axis; then advance every lane it
+   covers to its margin-box end plus the stacking gutter. A definite position
+   is used as-is and leaves the cursor alone. `dense` backfilling (step 4) is
+   not implemented, so the pass is strictly sparse. A percentage stacking
+   gutter against an indefinite stacking size is cyclic: the first pass only
+   measures, so no child is ever committed twice.
+5. **Container size, alignment and baseline** (§5, §6.3, §6.5) — the stacking
+   range is the endmost outer edge any item reached; the stacking axis has one
+   alignment subject, so content distribution collapses to a single offset and
+   the distributed values take their fallback alignment. The first baseline
+   comes from the items that open a track (§6.5) — the highest one among them
+   with lanes down the columns, the first track's with lanes across the rows,
+   and none synthesised for an item that has none; §6.4 stacking-axis
+   self-alignment and baseline alignment/sharing in either axis are not
+   implemented, so a `baseline` self-alignment falls back to `start` before
+   anything reads it.
+6. **Finalize** — `LayoutSlot::unrounded` writes, hidden-subtree cleanup, and
+   the shared absolute pass. §8 gives the stacking axis exactly two lines, the
+   range's own edges, so grid-aligned absolute positioning resolves against a
+   one-track set spanning it, and negative line numbers count back from each
+   axis's own explicit end.
+
+`inline-grid-lanes`, §3.1.1's intrinsic `repeat(auto-fill, auto)`, subgrid and
+fragmentation are out of scope; the grammar side of that list is recorded in
+[`style-assumptions.md`](style-assumptions.md) §24.
 
 **Starlight Relative (L1)** — the non-CSS id-constrained formatting context:
 
@@ -1080,7 +1182,15 @@ masonry/`staggered-grid` stay out of scope. The last is a Lynx
   alignment, RTL, baselines, measurement, nested layout, and
   absolute/hoisted behavior.
   Private unit tests pin placement bit ranges, clamping, repeat expansion, and
-  track cycling. `tests/relative.rs` covers every physical reference family,
+  track cycling. `tests/grid_lanes.rs` covers orientation, lane choice and the
+  auto-placement cursor under every `flow-tolerance` form, auto-placed and
+  definite spans, implicit tracks in both directions, gutters including the
+  cyclic percentage stacking gutter, order-modified document order, hidden and
+  out-of-flow children, grid-line-relative absolutes, intrinsic/flexible/
+  percentage/`auto-fill`/`auto-fit` tracks, stacking-axis intrinsic keywords,
+  containment, measurement, content distribution, self-alignment, auto and
+  negative margins, RTL, row lanes, baselines, and per-axis commit
+  independence. `tests/relative.rs` covers every physical reference family,
   duplicate/reserved ids, both solver modes, cycles, intrinsic and percentage
   sizing, parent min/max feedback, selective wrap-width remeasurement,
   measurement, nested layout, and absolute/hoisted behavior.
@@ -1104,10 +1214,11 @@ masonry/`staggered-grid` stay out of scope. The last is a Lynx
   pass. CSS Fixed root lowering, Sticky/list/component metadata, and anonymous
   text-item generation remain host/integration responsibilities and are not
   hughie behavior contracts.
-- **Remaining Lynx integration:** runtime-level view/device policy,
-  component-specific staggered layout, sticky lowering, and mixed-runtime
-  parity remain future work; the integration layer's final module or crate
-  placement has not been established.
+- **Remaining Lynx integration:** runtime-level view/device policy, the
+  `<list>` component surface (nothing of it is built — see
+  [`tracking/components.md`](tracking/components.md)), sticky lowering, and
+  mixed-runtime parity remain future work; the integration layer's final
+  module or crate placement has not been established.
 
 ## Milestones
 
@@ -1122,6 +1233,13 @@ masonry/`staggered-grid` stay out of scope. The last is a Lynx
 - **L2 — grid** *(complete)*: `compute_grid_layout`, `auto-fill`/`auto-fit`,
   dense packing, first-baseline alignment, and direct-child
   grid-area-relative absolute positioning.
+- **L2M — grid lanes** *(complete, 2026-09-18)*: `compute_grid_lanes_layout`
+  on Grid's own template/line/track-sizing machinery, the `GridLanesStyle`
+  bound, `flow-tolerance` and the auto-placement cursor, the stacking pass and
+  its content distribution, grid-line-relative absolutes against a two-line
+  stacking axis, and the `dom` dispatch arm. A W3C extension beyond Lynx
+  parity ([`style-assumptions.md`](style-assumptions.md) §24), not a Lynx
+  feature — do not add the not-implemented parts without a user decision.
 - **L2R — Starlight relative** *(complete)*: the relative style protocol,
   the one-pass combined and two-pass per-axis dependency solvers,
   intrinsic/percentage remeasurement, deterministic cycles, out-of-flow
@@ -1144,8 +1262,9 @@ masonry/`staggered-grid` stay out of scope. The last is a Lynx
   `DocumentLayoutState`, NodeId display dispatch, fixed positioning,
   post-flush computed-style views, W3C text style lowering, and lazily boxed
   document/per-node text state. Remaining L3 work is sticky lowering, legacy Lynx spelling/attribute lowering,
-  element-backed raw text and truncation, view metrics/`rpx`, and component
-  modes such as `staggered`. No separate text crate is planned.
+  element-backed raw text and truncation, view metrics/`rpx`, and the
+  component surfaces — the `<list>` one now has its layout mode in
+  `grid-lanes` and needs the host half. No separate text crate is planned.
 - **L4 — performance**: probe-trace-tuned cache slots, SoA scratch, arena
   exploration, the batched-children parallel hook if profiles justify it.
 - **L5 — parity hardening**: WPT-derived flex/grid suites, web-core

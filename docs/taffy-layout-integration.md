@@ -46,7 +46,8 @@ Requirements this design satisfies (user directive, 2026-08-12):
 | Percentage-definiteness separate from `known_dimensions` (Flexbox §9.8 nuance) | **No** — definiteness is the `Option`-ness of `known_dimensions`/`parent_size` |
 | Last-baseline alignment | No (first baseline only — parity with hughie today) |
 | DPR-aware rounding | No — `round_layout` rounds to integer CSS px, origin fixed at (0,0) |
-| Subgrid / masonry | No (parity with hughie today) |
+| Subgrid | No (parity with hughie today) |
+| Masonry | No — and no longer parity: hughie gained CSS Grid Level 3 `display: grid-lanes` on 2026-09-18, so this would become another hughie-side algorithm taffy does not replace |
 
 Every "No" above maps to machinery we already have and keep (order sorting,
 positioned pass, containment layer, extended input, our rounding pass), or to
@@ -137,7 +138,9 @@ machinery (no functional loss, but the code cannot be deleted).
   dom flattens (§4), which is requirement 5 anyway.
 
 Parity items (absent on both sides, no change): last-baseline alignment,
-subgrid, masonry.
+subgrid. Masonry was one until 2026-09-18, when hughie landed CSS Grid Level 3
+`display: grid-lanes`; taffy has none, so grid lanes joins Linear and Relative
+as a hughie algorithm the migration would have to keep.
 
 ## 2. Ownership after the migration
 

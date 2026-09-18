@@ -29,7 +29,9 @@ tree/style storage, DOM/runtime types, device-unit policy, or paint order.
   containment, alignment and `order`; `FlexboxStyle`, `GridStyle`,
   `LinearStyle` and `RelativeStyle` each carry only what their own algorithm
   reads and are demanded at that algorithm's entry point;
-  `TextContainerStyle` supplies `text_maxline`/`text_maxlength` from
+  `GridLanesStyle: GridStyle` extends Grid's rather than the core with
+  `flow_tolerance` and the computed `font_size` its `normal` keyword resolves
+  against; `TextContainerStyle` supplies `text_maxline`/`text_maxlength` from
   non-inherited integer custom properties. `LayoutInput` stays one struct.
 - `LayoutTree::flattened_children` is the box-tree view; it flattens
   `display: contents`.
@@ -44,6 +46,19 @@ Landed and not to be regressed:
   id-constrained Starlight Relative Level 1, and Lynx `display: linear` are all
   live. css-contain-2 is landed layout-side; single-axis containment and
   container queries are deliberately out of scope.
+- CSS Grid Level 3 `display: grid-lanes` + `flow-tolerance` landed 2026-09-18
+  (`compute/grid/lanes.rs`, on Grid's own template/line/track-sizing code;
+  `DisplayMode::GridLanes` in `dom`). It is **W3C, not Lynx** — a
+  user-directed extension beyond parity, so the standards policy's bucket-2
+  "don't extend" rule does not apply, but its scope is a recorded user
+  decision (`docs/style-assumptions.md` §24): **do not add the
+  not-implemented parts** — `inline-grid-lanes`, the orientation property and
+  `grid-auto-flow: normal`, `dense` backfilling, intrinsic
+  `repeat(auto-fill, auto)`, §3.4.2 virtual-item grouping, stacking-axis
+  self-alignment, baseline alignment/sharing, subgrid, fragmentation —
+  without a user decision. It exists to carry
+  `<list list-type="waterfall">`; the placement differences from Lynx's own
+  waterfall and the two open decisions are in `docs/tracking/deviations.md`.
 - `LayoutGoal::Commit` carries the per-axis `content_independent` flags —
   input *stability* under subtree content change, proven by the committing
   algorithm. A measurement carries no such claim, which is why only a commit has

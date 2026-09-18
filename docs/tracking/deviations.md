@@ -712,6 +712,103 @@ consequential choice about whether to follow the spec or the quirk.
   builds. Several of those are shadow-part or virtualization machinery that a
   UA sheet cannot express alone; they belong with the component work, not with
   the tag defaults.
+- **List waterfall over `display: grid-lanes` — path assessment
+  (2026-09-18).** The layout mode landed
+  ([style-assumptions.md](../style-assumptions.md) §24); this records how far
+  it can carry `<list list-type="waterfall">` and where it would not match.
+  **Blocking prerequisite, unrelated to layout**: a compiled ReactLynx
+  `<list>` receives its children only through
+  `__SetAttribute(list, "update-list-info", {insertAction, removeAction,
+  updateAction})`
+  (`lynx-stack/packages/react/runtime/src/snapshot/list/listUpdateInfo.ts:112`),
+  which makes the host call the `componentAtIndex` filed by `__CreateList`
+  (`.../snapshot/snapshot/list.ts:11-40`) and append the cell
+  (`.../snapshot/list/list.ts:200-205`). web-core implements the consumer and
+  materialises every `insertAction` as a real DOM child inside a microtask,
+  removing each `removeAction` child after handing it to `enqueueComponent`
+  (`.../web-core/ts/client/mainthread/elementAPIs/createElementAPI.ts:460-498`);
+  it keeps no virtualization of its own. This engine throws for that attribute
+  name (`packages/bobcat-element/src/element-papi.ts`), and its stated reason —
+  no indexed child access — no longer holds, since the `childElementIds` host
+  member exists (`crates/bobcat-core/src/main/runtime/lib.rs`). Until that is
+  implemented a list shows no item under any layout mode.
+  **The placement rule native and web-core agree on**: shortest lane, exact
+  float comparison, lowest lane index on a tie; a full-span item goes at the
+  maximum of every lane and resets them all to that maximum plus its own
+  extent. Native:
+  `lynx/core/renderer/ui_component/list/staggered_grid_layout_manager.cc`
+  (`std::min_element` over `end_lines`, ~:884-898; full span ~:524-549).
+  web-core:
+  `lynx-stack/packages/web-platform/web-elements/src/elements/XList/XListWaterfall.ts`
+  (full span ~:107-136; shortest lane with a strict `<`, so the first minimum
+  wins, ~:137-174). Note that
+  `lynx/core/renderer/starlight/layout/staggered_grid_layout_algorithm.cc` is
+  *not* that algorithm — see [css-layout.md](css-layout.md).
+  **Where css-grid-3 §4.4 placement differs from it:**
+  - (a) `flow-tolerance` defaults to `normal` = `1em`, so lanes within `1em`
+    of the shortest count as equally short. `flow-tolerance: 0` removes this
+    difference entirely.
+  - (b) The auto-placement cursor. Among tied lanes grid-lanes takes the first
+    one at or after the previous auto-placed item's end line; Lynx always takes
+    the lowest index. No CSS value disables the cursor. Minimal case: two
+    lanes, item heights `[100, 200, 100, X]`, gap 0 — Lynx puts `X` in lane 0,
+    grid-lanes in lane 1. The hughie test
+    `flow_tolerance_decides_which_lanes_count_as_equally_short` pins the W3C
+    outcome for a three-lane example.
+  - (c) Main-axis margins: all three differ, and native vs web-core is a
+    conflict by itself. Native advances the lane by the margin box plus the
+    leading gap (`GetDecoratedMeasurement`,
+    `lynx/core/renderer/ui_component/list/list_orientation_helper.cc:59-66`)
+    but sets the item's top to the lane position plus the gap only, so the
+    leading margin never reaches the origin. web-core advances by
+    `getBoundingClientRect()` — the border box, no margins —
+    (`XListWaterfall.ts:103-105`) while writing the result into `left`/`top`
+    on an absolutely positioned cell (`XListWaterfall.ts:177-188`,
+    `x-list.css:270-272`), which positions the *margin* edge. grid-lanes tiles
+    margin boxes in both respects.
+  - (d) web-core only: a non-`list-item` direct child is `display: none`
+    (`x-list.css:16-18`) yet the waterfall pass still walks it
+    (`XListWaterfall.ts:94`) and advances a lane by the main-axis gap for it,
+    because its rect is zero. And a `list-item` nested in a `lynx-wrapper` is
+    not a direct child, so it is never positioned at all while
+    `x-list.css:270-272` keeps it absolutely positioned. grid-lanes does
+    neither: a `display: none` child takes no lane, and a `wrapper` — which
+    this engine's UA sheet already makes `display: contents`
+    (`crates/bobcat-core/src/main/tree/ua_sheet.rs`) — flattens into the item
+    list through `LayoutTree::flattened_children`.
+  **Mechanisms the path would use, none of them built**: web-core carries the
+  column count as the custom property `--list-item-span-count`, set from
+  `span-count`/`column-count`
+  (`.../XList/XListAttributes.ts:33-39`), and writes `list-type="flow"` as
+  real CSS Grid `repeat(var(--list-item-span-count), 1fr)`
+  (`x-list.css:210-240`); here a presentational hint would set the same
+  property and a UA rule read it — `apply_attribute_style`
+  (`crates/bobcat-core/src/main/tree/text.rs`) is the existing hook and is
+  keyed on the attribute name alone. `full-span` must be matched as a value
+  (`[full-span="true"]`, or web-core's `[full-span]:not([full-span="false"])`
+  at `x-list.css:294`) and never as a presence test, because
+  `__SetAttribute` stringifies every value, so `full-span={false}` arrives as
+  `"false"`. A horizontal list maps to `grid-template-rows`.
+  `list-main-axis-gap`/`list-cross-axis-gap` do not exist here
+  (`list_main_axis_gap_is_absent`, `crates/dom/tests/grammar_layout.rs`) and do
+  not exist as properties in web-core either — its style transformer renames
+  both to custom properties
+  (`.../web-core/src/style_transformer/rules.rs:20-21`). The scroll extent
+  needs nothing new: `crates/dom/src/scroll/mod.rs` derives it from the layout
+  algorithm's `content_size`.
+  **Decisions:**
+  1. *The tie-break* — **decided (user, 2026-09-18): accept the W3C cursor.**
+     A list waterfall laid out by `display: grid-lanes` places a tied item
+     where css-grid-3 §4.4 places it, not where Lynx does; the difference in
+     (b) above is a recorded deviation, and no engine-internal switch is added.
+     `display: grid-lanes` stays W3C-correct for authors.
+  2. *How the UA sheet would select it* — **OPEN, deferred with the list
+     work** (the grid-lanes change ships without any `<list>` support).
+     `list[list-type="waterfall"] { display: grid-lanes }` is a per-attribute
+     exception to the 2026-08-21 decision in the entry above ("one rule, one
+     switch, and no per-tag exception"), and because the UA sheet may not use
+     `!important` ([style-assumptions.md](../style-assumptions.md) §D.15) an
+     author `display` on a list would override it.
 
 ## JS runtime & APIs (see [js-runtime.md](js-runtime.md), [accessibility.md](accessibility.md))
 

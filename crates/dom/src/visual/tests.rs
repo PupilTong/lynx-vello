@@ -208,6 +208,75 @@ fn static_flex_item_with_z_index_forms_a_context() {
     assert_eq!(h.hit(50.0, 50.0), Some(trapped));
 }
 
+/// A grid-lanes container's children are grid items (the fork's
+/// `Display::is_item_container` says so), so a non-positioned one's `z-index`
+/// applies and lifts it out of tree order.
+#[test]
+fn static_grid_lanes_item_with_z_index_forms_a_context() {
+    let mut h = Harness::new(
+        "page { display: flex; position: relative; width: 800px; height: 600px; }
+         .lanes { display: grid-lanes; width: 100px; gap: 0px; flow-tolerance: 0;
+                  grid-template-columns: minmax(0, 1fr); }
+         .first { height: 100px; z-index: 5; }
+         .second { height: 100px; margin-top: -100px; }",
+    );
+    let root = h.root();
+    let lanes = h.el(root, "view.lanes");
+    let first = h.el(lanes, "view.first");
+    let second = h.el(lanes, "view.second");
+    // The two items occupy the same 100px of the one lane, so paint order is
+    // what decides which of them is on top.
+    assert_eq!(h.element_order(), vec![root, lanes, second, first]);
+    assert_eq!(h.hit(50.0, 50.0), Some(first));
+}
+
+/// Without a `z-index` the same two items paint in tree order, so the item
+/// after wins — the lift above is the `z-index`, not the display mode.
+#[test]
+fn grid_lanes_items_without_z_index_paint_in_tree_order() {
+    let mut h = Harness::new(
+        "page { display: flex; position: relative; width: 800px; height: 600px; }
+         .lanes { display: grid-lanes; width: 100px; gap: 0px; flow-tolerance: 0;
+                  grid-template-columns: minmax(0, 1fr); }
+         .first { height: 100px; }
+         .second { height: 100px; margin-top: -100px; }",
+    );
+    let root = h.root();
+    let lanes = h.el(root, "view.lanes");
+    let first = h.el(lanes, "view.first");
+    let second = h.el(lanes, "view.second");
+    assert_eq!(h.element_order(), vec![root, lanes, first, second]);
+    assert_eq!(h.hit(50.0, 50.0), Some(second));
+}
+
+/// Hit testing reads the lanes pass's own placement: each point lands in the
+/// item the stacking pass put there, not in document order.
+#[test]
+fn hit_testing_finds_items_at_their_lane_positions() {
+    let mut h = Harness::new(
+        "page { display: flex; align-items: flex-start; position: relative;
+                width: 800px; height: 600px; }
+         .lanes { display: grid-lanes; width: 200px; gap: 10px; flow-tolerance: 0;
+                  grid-template-columns: repeat(2, minmax(0, 1fr)); }",
+    );
+    let root = h.root();
+    let lanes = h.el(root, "view.lanes");
+    let items = [30.0_f32, 50.0, 20.0]
+        .into_iter()
+        .map(|height| {
+            let item = h.el(lanes, "view");
+            h.doc.set_inline(item, &format!("height: {height}px"));
+            item
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(h.hit(10.0, 10.0), Some(items[0]));
+    assert_eq!(h.hit(110.0, 10.0), Some(items[1]));
+    assert_eq!(h.hit(10.0, 45.0), Some(items[2]));
+    // The gutter between the two lanes belongs to the container itself.
+    assert_eq!(h.hit(100.0, 10.0), Some(lanes));
+}
+
 #[test]
 fn will_change_and_containment_create_atomic_contexts() {
     for trigger in [

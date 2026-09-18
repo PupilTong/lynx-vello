@@ -12,9 +12,9 @@
 use hughie::compute::compute_leaf_layout_with_measurement_for_testing;
 use hughie::compute::{
     compute_absolute_layout, compute_boundary_relayout, compute_cached_layout,
-    compute_flexbox_layout, compute_grid_layout, compute_leaf_layout, compute_linear_layout,
-    compute_relative_layout, compute_root_layout, compute_skipped_contents_layout, hide_subtree,
-    round_layout_subtree_with as round_with,
+    compute_flexbox_layout, compute_grid_lanes_layout, compute_grid_layout, compute_leaf_layout,
+    compute_linear_layout, compute_relative_layout, compute_root_layout,
+    compute_skipped_contents_layout, hide_subtree, round_layout_subtree_with as round_with,
 };
 use hughie::geometry::{Point, Size};
 use hughie::invalidate::is_relayout_boundary;
@@ -98,6 +98,7 @@ impl<T> LayoutTree for TreeArenas<T> {
                 DisplayMode::Flex => compute_flexbox_layout(tree, state, node, input),
                 DisplayMode::Text => compute_text_block_layout(tree, state, node, input),
                 DisplayMode::Grid => compute_grid_layout(tree, state, node, input),
+                DisplayMode::GridLanes => compute_grid_lanes_layout(tree, state, node, input),
                 DisplayMode::Linear => compute_linear_layout(tree, state, node, input),
                 DisplayMode::Relative => compute_relative_layout(tree, state, node, input),
                 DisplayMode::Leaf => {

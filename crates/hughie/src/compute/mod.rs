@@ -8,7 +8,7 @@ mod single_axis;
 mod util;
 
 pub use flexbox::compute_flexbox_layout;
-pub use grid::compute_grid_layout;
+pub use grid::{compute_grid_lanes_layout, compute_grid_layout};
 #[cfg(feature = "layout-test-utils")]
 #[doc(hidden)]
 pub use leaf::compute_leaf_layout_with_measurement_for_testing;

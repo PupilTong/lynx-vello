@@ -137,3 +137,34 @@ fn decode_checker(width: u32, height: u32) -> Checker {
     }
     (width, height, rgba)
 }
+
+/// CSS Grid Level 3 `display: grid-lanes`: three `minmax(0, 1fr)` lanes, a
+/// 15px gutter in both axes, `flow-tolerance: 0` so every item lands in the
+/// strictly shortest lane, and one `grid-column: 1 / -1` item that spans them
+/// all and leaves them level behind it.
+///
+/// Solid fills only: the subject is where the boxes land, and a colour per
+/// item is what makes a lane, a gutter and the full-span reset legible.
+const LANES_FRAGMENT: &str = r#"
+<div style="display: grid-lanes; width: 300px; height: 400px; gap: 15px; flow-tolerance: 0; grid-template-columns: repeat(3, minmax(0, 1fr)); background-color: #e5e7eb">
+  <div style="height: 60px; background-color: #2563eb"></div>
+  <div style="height: 90px; background-color: #14b8a6"></div>
+  <div style="height: 40px; background-color: #f59e0b"></div>
+  <div style="height: 70px; background-color: #8b5cf6"></div>
+  <div style="grid-column: 1 / -1; height: 50px; background-color: #1f2937"></div>
+  <div style="height: 80px; background-color: #ef4444"></div>
+  <div style="height: 55px; background-color: #0f766e"></div>
+  <div style="height: 65px; background-color: #22c55e"></div>
+</div>
+"#;
+
+#[test]
+fn grid_lanes_waterfall_matches_reference() {
+    let actual = screenshot::capture(
+        "grid_lanes_waterfall_matches_reference",
+        LANES_FRAGMENT,
+        300.0,
+        400.0,
+    );
+    screenshot::assert_golden(&["grid-lanes-waterfall"], &actual);
+}

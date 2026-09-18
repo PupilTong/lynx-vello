@@ -28,6 +28,10 @@ const CSS: &str = "
                  flex-grow: 1; flex-basis: 0px; }
     .grid-row { display: grid; grid-template-columns: 40px 1fr; padding: 8px; margin: 2px; }
     .grid-cell { display: flex; flex-direction: column; }
+    .lanes-list { display: grid-lanes; grid-template-columns: 1fr; overflow-y: scroll;
+                  flex-grow: 1; flex-basis: 0px; }
+    .lanes-row { display: grid-lanes; grid-template-columns: 40px 1fr; padding: 8px; margin: 2px; }
+    .lanes-cell { display: flex; flex-direction: column; }
     .relative-list { display: relative; overflow-y: scroll; flex-grow: 1; flex-basis: 0px; }
     .relative-row { display: relative; width: 100%; padding: 8px; margin: 2px; }
     .relative-cell { display: flex; flex-direction: column; width: 100%; height: 100%; }
@@ -62,6 +66,13 @@ const GRID: Kind = Kind {
     list: "grid-list",
     row: "grid-row",
     cell: "grid-cell",
+    badge: false,
+};
+
+const LANES: Kind = Kind {
+    list: "lanes-list",
+    row: "lanes-row",
+    cell: "lanes-cell",
     badge: false,
 };
 
@@ -437,6 +448,7 @@ fn repeated_linear_mutations_converge_to_each_fresh_state() {
 fn a_text_change_under_each_algorithm_matches_the_fresh_result() {
     for (name, kind) in [
         ("grid", GRID),
+        ("grid-lanes", LANES),
         ("relative", RELATIVE),
         ("out-of-flow", BADGED),
     ] {
@@ -458,6 +470,7 @@ fn a_text_change_under_each_algorithm_matches_the_fresh_result() {
 fn a_growing_subtree_under_each_algorithm_matches_the_fresh_result() {
     for (name, kind) in [
         ("grid", GRID),
+        ("grid-lanes", LANES),
         ("relative", RELATIVE),
         ("out-of-flow", BADGED),
     ] {
@@ -543,4 +556,159 @@ fn minimal_grow_repro() {
         eprintln!("  {id}: {l}");
     }
     assert_same_geometry(&a, &b);
+}
+
+/// A bare two-lane waterfall: one container, one box per item, every size
+/// written on the item itself.
+fn waterfall(container: &str, heights: &[f32]) -> (Document<()>, dom::NodeId, Vec<dom::NodeId>) {
+    let mut doc = doc();
+    let root = doc.document_element().id();
+    let list = doc.create_element("view", ());
+    doc.set_inline_style(list, container);
+    doc.append_child(root, list);
+    let mut items = Vec::with_capacity(heights.len());
+    for &height in heights {
+        let item = doc.create_element("view", ());
+        doc.set_inline_style(item, &format!("height: {height}px"));
+        doc.append_child(list, item);
+        items.push(item);
+    }
+    (doc, list, items)
+}
+
+fn rect(doc: &Document<()>, id: dom::NodeId) -> (f32, f32, f32, f32) {
+    let layout = doc.rounded_layout(id).expect("node id is live");
+    (
+        layout.location.x,
+        layout.location.y,
+        layout.size.width,
+        layout.size.height,
+    )
+}
+
+fn rects(doc: &Document<()>, ids: &[dom::NodeId]) -> Vec<(f32, f32, f32, f32)> {
+    ids.iter().map(|&id| rect(doc, id)).collect()
+}
+
+const WATERFALL: &str = "display: grid-lanes; width: 200px; gap: 10px; flow-tolerance: 0;
+                         grid-template-columns: repeat(2, minmax(0, 1fr))";
+
+/// One item growing re-runs the lane choice for every item after it: the
+/// stacking position an item lands at is a function of its predecessors.
+#[test]
+fn a_grid_lanes_item_height_change_re_places_the_items_after_it() {
+    let (mut mutated, list, items) = waterfall(WATERFALL, &[30.0, 50.0, 20.0, 60.0, 40.0, 10.0]);
+    mutated.layout();
+    assert_eq!(
+        rects(&mutated, &items),
+        vec![
+            (0.0, 0.0, 95.0, 30.0),
+            (105.0, 0.0, 95.0, 50.0),
+            (0.0, 40.0, 95.0, 20.0),
+            (105.0, 60.0, 95.0, 60.0),
+            (0.0, 70.0, 95.0, 40.0),
+            (0.0, 120.0, 95.0, 10.0),
+        ],
+    );
+
+    mutated.set_inline_style_property(items[0], "height", "80px");
+    mutated.layout();
+    assert_eq!(
+        rects(&mutated, &items),
+        vec![
+            (0.0, 0.0, 95.0, 80.0),
+            (105.0, 0.0, 95.0, 50.0),
+            (105.0, 60.0, 95.0, 20.0),
+            (0.0, 90.0, 95.0, 60.0),
+            (105.0, 90.0, 95.0, 40.0),
+            (105.0, 140.0, 95.0, 10.0),
+        ],
+        "the four items after the taller one all moved",
+    );
+    assert_eq!(rect(&mutated, list), (0.0, 0.0, 200.0, 150.0));
+
+    let (mut fresh, fresh_list, fresh_items) =
+        waterfall(WATERFALL, &[80.0, 50.0, 20.0, 60.0, 40.0, 10.0]);
+    fresh.layout();
+    assert_eq!(rects(&mutated, &items), rects(&fresh, &fresh_items));
+    assert_eq!(rect(&mutated, list), rect(&fresh, fresh_list));
+}
+
+/// `flow-tolerance` only ever changes which lane an item chooses, so a change
+/// to it has to reach the container's own algorithm — nothing about any item
+/// changed.
+#[test]
+fn a_flow_tolerance_change_re_lays_the_container_out() {
+    const TIGHT: &str = "display: grid-lanes; width: 200px; gap: 0px; flow-tolerance: 0;
+                         grid-template-columns: repeat(2, minmax(0, 1fr))";
+    let (mut mutated, list, items) = waterfall(TIGHT, &[50.0, 20.0, 20.0]);
+    mutated.layout();
+    assert_eq!(rect(&mutated, items[2]), (100.0, 20.0, 100.0, 20.0));
+    assert_eq!(rect(&mutated, list), (0.0, 0.0, 200.0, 50.0));
+
+    // 40px is wider than the 30px by which lane 0 overhangs lane 1, so both
+    // lanes now count as equally short and the item falls back to the first
+    // one — the lanes are tied, and no lane sits at or after the cursor.
+    mutated.set_inline_style_property(list, "flow-tolerance", "40px");
+    mutated.layout();
+    assert_eq!(rect(&mutated, items[2]), (0.0, 50.0, 100.0, 20.0));
+    assert_eq!(rect(&mutated, list), (0.0, 0.0, 200.0, 70.0));
+
+    let (mut fresh, fresh_list, fresh_items) = waterfall(
+        &TIGHT.replace("flow-tolerance: 0", "flow-tolerance: 40px"),
+        &[50.0, 20.0, 20.0],
+    );
+    fresh.layout();
+    assert_eq!(rects(&mutated, &items), rects(&fresh, &fresh_items));
+    assert_eq!(rect(&mutated, list), rect(&fresh, fresh_list));
+}
+
+/// Fixed tracks and a fixed item height: the content edit inside an item
+/// cannot move the item, so the in-place relayout the `content_independent`
+/// flags license has to land on exactly the cold result.
+#[test]
+fn a_content_change_inside_a_fixed_grid_lanes_item_relayouts_in_place() {
+    fn build_fixed(text: &str) -> (Document<()>, Vec<dom::NodeId>, Vec<dom::NodeId>) {
+        let mut doc = doc();
+        let root = doc.document_element().id();
+        let list = doc.create_element("view", ());
+        doc.set_inline_style(
+            list,
+            "display: grid-lanes; width: 200px; gap: 8px; flow-tolerance: 0;
+             grid-template-columns: 96px 96px",
+        );
+        doc.append_child(root, list);
+        let mut items = Vec::new();
+        let mut runs = Vec::new();
+        for index in 0..8 {
+            let item = doc.create_element("view", ());
+            doc.set_inline_style(item, &format!("height: {}px", 40 + index % 3 * 12));
+            let label = doc.create_element("text", ());
+            let run = doc.create_text_node(format!("{text} {index}"), ());
+            doc.append_child(label, run);
+            doc.append_child(item, label);
+            doc.append_child(list, item);
+            items.push(item);
+            runs.push(run);
+        }
+        (doc, items, runs)
+    }
+
+    let (mut mutated, items, runs) = build_fixed("alpha");
+    mutated.layout();
+    let before = rects(&mutated, &items);
+    for (index, &run) in runs.iter().enumerate() {
+        mutated.set_text_node_data(run, format!("bravo bravo {index}"));
+    }
+    mutated.layout();
+    assert_eq!(
+        rects(&mutated, &items),
+        before,
+        "no item's box could move: its track and its height are both fixed",
+    );
+
+    let (mut fresh, fresh_items, _) = build_fixed("bravo bravo");
+    fresh.layout();
+    assert_eq!(rects(&mutated, &items), rects(&fresh, &fresh_items));
+    assert_eq!(geometry(&mutated), geometry(&fresh));
 }

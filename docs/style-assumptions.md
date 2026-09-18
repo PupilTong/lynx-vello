@@ -383,6 +383,60 @@ and §D.16 with what the wire format actually permits.)*
     theorem) live in [layout-architecture.md](layout-architecture.md); the
     tracking rows are in [tracking/css-layout.md](tracking/css-layout.md).
 
+24. **CSS Grid Level 3 grid lanes (`display: grid-lanes` +
+    `flow-tolerance`): enabled as a user-directed extension beyond Lynx
+    parity.** *(Recorded 2026-09-18.)* Native Lynx's `display` has no such
+    value — `lynx/tools/css_generator/css_defines/24-display.json` lists only
+    `none/flex/grid/linear/relative/block/auto` — and no `flow-tolerance`
+    property exists in the generated property set, so the `.web.bundle` wire
+    format can carry neither and no real bundle emits them. Like §19 this
+    falls outside the wire-format subset framing of §A: it is a deliberate,
+    user-directed W3C extension, arriving through inline styles, an author
+    sheet, or the UA sheet. In the vendored stylo fork (read
+    `git -C vendor/stylo show HEAD` for the patch) the `lynx` feature adds
+    `DisplayInside::GridLanes` — block-level, and an item container, so a
+    grid-lanes box blockifies its children and flags its `display: contents`
+    children exactly as `grid` does (`Display::is_item_container`) — and the
+    `flow-tolerance` longhand
+    (`normal | <length-percentage [0,∞]> | infinite`, initial `normal`, not
+    inherited, percentages against the container's grid-axis content-box
+    size), which also had to be seeded in `lynx_properties.txt` because
+    `lynx_only` alone does not enable a property. Both keywords survive to
+    computed-value time on purpose: layout, not the cascade, resolves them.
+    On top of that grammar this repo adds the algorithm
+    (`crates/hughie/src/compute/grid/lanes.rs`, the `GridLanesStyle` trait)
+    and its host dispatch (`DisplayMode::GridLanes` in
+    `crates/dom/src/layout/style.rs` and `layout/host.rs`). Motivation: the
+    Lynx `<list list-type="waterfall">` component — the feasibility
+    assessment for that path is recorded in
+    [tracking/deviations.md](tracking/deviations.md).
+
+    **v1 scope:**
+    - **No `inline-grid-lanes`**, which css-grid-3 does define. The fork's
+      lynx grammar has no inline-level container value at all —
+      `inline-flex` and `inline-grid` are gated out the same way
+      (`vendor/stylo/style/values/specified/box.rs`, `DisplayKeyword::parse`)
+      — so the inline-level partner is left out alongside them.
+    - **No orientation property and no `grid-auto-flow: normal`.**
+      css-grid-3 §2.3 still marks the orientation property "TBD", so only the
+      initial-value rule exists: the block axis carries the tracks exactly
+      when `grid-template-columns` is `none` and `grid-template-rows` is not,
+      and `grid-auto-flow`'s `row`/`column` are ignored.
+    - **`flow-tolerance: normal` resolves to `1em` in layout, `infinite` to
+      an unbounded threshold.** The draft's computed-value line names only a
+      computed `<length-percentage>`, so resolving the two keywords against
+      the element's own computed font size is this implementation's choice,
+      recorded as one. It is why `GridLanesStyle` carries a `font_size`
+      accessor — no other length in layout is font-relative.
+    - **Not implemented:** `dense` backfilling (§4.4 step 4), §6.4
+      stacking-axis self-alignment, baseline alignment and baseline sharing
+      in either axis, §3.1.1's intrinsic `repeat(auto-fill, auto)`, §3.4.2's
+      virtual-item grouping, subgrid, and fragmentation.
+
+    The pipeline and what it reuses from Grid live in
+    [layout-architecture.md](layout-architecture.md); the tracking rows are
+    in [tracking/css-layout.md](tracking/css-layout.md).
+
 ## Deliberately still open (known non-decisions)
 
 - The v1 media-feature set `Device` exposes (viewport geometry, orientation,

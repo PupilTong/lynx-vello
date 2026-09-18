@@ -7,7 +7,8 @@ use std::fmt;
 
 use hughie::compute::{
     LeafMeasureInput, LeafMetrics, compute_cached_layout, compute_flexbox_layout,
-    compute_grid_layout, compute_leaf_layout_with_measurement_for_testing, compute_linear_layout,
+    compute_grid_lanes_layout, compute_grid_layout,
+    compute_leaf_layout_with_measurement_for_testing, compute_linear_layout,
     compute_relative_layout, compute_skipped_contents_layout, hide_subtree,
 };
 use hughie::prelude::*;
@@ -22,8 +23,8 @@ use stylo::values::computed::length_percentage::{CalcNode, CalcPercentageLeaf, C
 use stylo::values::computed::lynx_layout::{RelativeAlign, RelativeReference};
 use stylo::values::computed::{
     AspectRatio, Au, BorderSideWidth, Contain, ContainIntrinsicSize, ContentDistribution, Display,
-    FlexBasis, GridAutoFlow, GridLine, GridTemplateComponent, ImplicitGridTracks, Inset,
-    ItemPlacement, JustifyItems, Length, LengthPercentage, Margin, MaxSize,
+    FlexBasis, FlowTolerance, GridAutoFlow, GridLine, GridTemplateComponent, ImplicitGridTracks,
+    Inset, ItemPlacement, JustifyItems, Length, LengthPercentage, Margin, MaxSize,
     NonNegativeLengthPercentage, NonNegativeNumber, Overflow, Percentage, PositionProperty, Ratio,
     SelfAlignment, Size as StyleSize,
 };
@@ -367,10 +368,27 @@ pub(super) fn grid_auto_placement() -> GridLine {
     GridLine::auto()
 }
 
+pub(super) fn tolerance_normal() -> FlowTolerance {
+    FlowTolerance::Normal
+}
+
+pub(super) fn tolerance_px(value: f32) -> FlowTolerance {
+    FlowTolerance::LengthPercentage(npx(value))
+}
+
+pub(super) fn tolerance_pct(fraction: f32) -> FlowTolerance {
+    FlowTolerance::LengthPercentage(npct(fraction))
+}
+
+pub(super) fn tolerance_infinite() -> FlowTolerance {
+    FlowTolerance::Infinite
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TestDisplay {
     Flex,
     Grid,
+    GridLanes,
     Linear,
     Relative,
     Leaf,
@@ -414,6 +432,8 @@ pub(super) struct TestStyle {
     pub(super) grid_row: Line<GridLine>,
     pub(super) grid_column: Line<GridLine>,
     pub(super) justify_self: SelfAlignment,
+    pub(super) flow_tolerance: FlowTolerance,
+    pub(super) font_size: f32,
     pub(super) relative_layout_once: relative_layout_once::T,
     pub(super) relative_id: RelativeReference,
     pub(super) relative_align: Edges<RelativeAlign>,
@@ -464,6 +484,8 @@ impl Default for TestStyle {
             grid_row: Line::new(grid_auto_placement(), grid_auto_placement()),
             grid_column: Line::new(grid_auto_placement(), grid_auto_placement()),
             justify_self: SelfAlignment::auto(),
+            flow_tolerance: tolerance_normal(),
+            font_size: 16.0,
             relative_layout_once: relative_layout_once::T::True,
             relative_id: RELATIVE_NONE,
             relative_align: Edges::uniform(RELATIVE_NONE),
@@ -636,6 +658,16 @@ impl GridStyle for TestStyle {
 
     fn justify_self(&self) -> SelfAlignment {
         self.justify_self
+    }
+}
+
+impl GridLanesStyle for TestStyle {
+    fn flow_tolerance(&self) -> &FlowTolerance {
+        &self.flow_tolerance
+    }
+
+    fn font_size(&self) -> f32 {
+        self.font_size
     }
 }
 
@@ -1159,6 +1191,7 @@ impl LayoutTree for TestTree {
             |tree: &Self, state: &mut TestState, node: TestRef, input| match display {
                 TestDisplay::Flex => compute_flexbox_layout(tree, state, node, input),
                 TestDisplay::Grid => compute_grid_layout(tree, state, node, input),
+                TestDisplay::GridLanes => compute_grid_lanes_layout(tree, state, node, input),
                 TestDisplay::Linear => compute_linear_layout(tree, state, node, input),
                 TestDisplay::Relative => compute_relative_layout(tree, state, node, input),
                 TestDisplay::Leaf => {
@@ -1310,6 +1343,19 @@ impl TestTree {
     pub(super) fn push_grid(&mut self, style: TestStyle, children: Vec<TestId>) -> TestId {
         self.push(TestSourceNode {
             display: TestDisplay::Grid,
+            style,
+            children,
+            measure: TestMeasure::Intrinsic {
+                min_content_size: Size::ZERO,
+                max_content_size: Size::ZERO,
+                first_baseline: None,
+            },
+        })
+    }
+
+    pub(super) fn push_grid_lanes(&mut self, style: TestStyle, children: Vec<TestId>) -> TestId {
+        self.push(TestSourceNode {
+            display: TestDisplay::GridLanes,
             style,
             children,
             measure: TestMeasure::Intrinsic {
