@@ -2028,6 +2028,17 @@ it diffs the two resolutions, prints the two recorded deviations, and fails on
 a third appearing or on a recorded one silently going away. Any new entry needs
 a written reason for the same cost the existing ones state.
 
+### Benchmarks are only the `benches/` targets
+
+Every library, and bobcat-cli's two binaries, sets `bench = false`. Cargo's
+`--benches` selection, which `cargo codspeed build` runs underneath, otherwise
+also compiles each of them as a bench harness of its own: a second, test-mode
+build of the crate that holds no benchmark, since every benchmark is a
+`harness = false` target under `benches/`. In CI's bench-profile build (thin
+LTO, one codegen unit per crate) those harness builds were about a third of
+the compile time. `cargo test` is unaffected: `test` stays on, and the
+`[[bench]]` targets are what `cargo bench` and CodSpeed still build and run.
+
 ### Restricted-environment troubleshooting
 
 Some agent runners restrict GPU interfaces, Git metadata, or network access.

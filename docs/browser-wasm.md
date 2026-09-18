@@ -502,7 +502,8 @@ workers, the browser image decoder and native disk cache remain shared. The
 previous page stays usable if ZIP or template parsing fails before replacement;
 retiring a view releases its scope once outstanding resource work completes.
 ZIP tests live in bobcat-source and run in native CI and the existing Wasm test
-step. The Pages deployment workflow builds and publishes the site.
+step. CI's `browser` job builds the site on every run and, on a push to
+`main`, its `deploy-pages` job publishes that same build.
 
 The **Expand** button sits in the preview heading outside the canvas and hides
 the active source panel. **Restore** or Escape returns to the split layout,

@@ -7,6 +7,12 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[lib]
+# Only `benches/` holds benchmarks: keep `cargo build --benches` from compiling
+# this target a second time as a bench harness (AGENTS.md, "Benchmarks are
+# only the `benches/` targets").
+bench = false
+
 [dependencies]
 bobcat-core = { workspace = true }
 bobcat-resources = { workspace = true }

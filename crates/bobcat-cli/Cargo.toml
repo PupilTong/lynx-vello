@@ -8,6 +8,12 @@ repository.workspace = true
 rust-version.workspace = true
 publish = false
 
+[lib]
+# Only `benches/` holds benchmarks: keep `cargo build --benches` from compiling
+# this target a second time as a bench harness (AGENTS.md, "Benchmarks are
+# only the `benches/` targets").
+bench = false
+
 [features]
 default = ["cli", "server"]
 cli = ["dep:flume", "dep:png", "dep:pollster", "dep:winit"]
@@ -17,11 +23,13 @@ server = ["dep:axum", "dep:reqwest", "dep:serde", "dep:serde_json", "dep:socket2
 name = "bobcat"
 path = "src/bin/bobcat.rs"
 required-features = ["cli"]
+bench = false
 
 [[bin]]
 name = "bobcat-server"
 path = "src/bin/bobcat-server.rs"
 required-features = ["server"]
+bench = false
 
 [[test]]
 name = "headless_cli"
