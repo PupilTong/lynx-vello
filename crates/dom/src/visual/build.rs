@@ -354,7 +354,6 @@ impl<'doc, T: Sync> Builder<'doc, T> {
             offset: scroll_box.offset,
             max_offset: scroll_box.max_offset(),
             scrollport: scroll_box.scrollport,
-            clip: None,
         });
         Some(
             u32::try_from(self.slots.len() - 1)
@@ -1068,12 +1067,6 @@ impl<'doc, T: Sync> Builder<'doc, T> {
                 slot: inner.current.chain,
             });
             inner.current.clip = Some(self.clips.len() - 1);
-            if let Some(slot) = own_slot {
-                // The scrollport clip, in the slot's own row: the compose
-                // plan sizes the slot's retained layer from it.
-                self.slots[slot as usize].clip =
-                    Some(u32::try_from(self.clips.len() - 1).expect("clip indices fit u32"));
-            }
             // A clip rect never rides a sampled delta; anything animated
             // around it falls back to main-thread ticks.
             self.kill_animation_chain(own_animation.or(ctx.current.animation));

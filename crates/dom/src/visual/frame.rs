@@ -51,9 +51,6 @@ pub struct ScrollSlot {
     /// The scrollport (padding box) size, which is also what the encode
     /// window is sized from.
     pub scrollport: Size2D<f32>,
-    /// The scrollport's clip node in the frame's clip table — the shape the
-    /// compose plan sizes this slot's retained layer from.
-    pub(crate) clip: Option<u32>,
 }
 
 impl ScrollSlot {
@@ -156,15 +153,13 @@ pub struct CommittedFrame {
     pub(crate) device_pixel_ratio: f32,
 }
 
-/// The split scene: fragments, the program that assembles them, and the
-/// layer plan when scroller content bakes into retained planes.
+/// The split scene: fragments plus the program that assembles them.
 pub(crate) struct Presentation {
     pub(crate) fragments: Vec<Scene>,
     pub(crate) program: Vec<ComposeOp>,
     /// One entry per [`ComposeOp::Image`], in program order. Carries names
     /// and geometry; never pixels.
     pub(crate) image_draws: Vec<crate::paint::compose::ImageDraw>,
-    pub(crate) plan: Option<crate::paint::plan::CompositePlan>,
 }
 
 impl std::fmt::Debug for CommittedFrame {
@@ -192,130 +187,6 @@ impl CommittedFrame {
                 if *chain == crate::paint::compose::ComposeChain::default()
         )
         .then(|| &self.presentation.fragments[0])
-    }
-
-    /// The frame's layer decomposition, present when its scroller content
-    /// bakes into retained planes a GPU target keeps between commits.
-    #[must_use]
-    pub fn composite_plan(&self) -> Option<&crate::paint::plan::CompositePlan> {
-        self.presentation.plan.as_ref()
-    }
-
-    /// Encodes plane `index` of the frame's plan into `scene`, translated so
-    /// the plane's rect starts at the origin — the scene a target renders
-    /// into the plane's texture, over a transparent base.
-    ///
-    /// # Panics
-    ///
-    /// If the frame has no plan or `index` is out of range.
-    pub fn bake_plane(&self, index: usize, scene: &mut Scene, images: &[Option<ImageData>]) {
-        let plan = self
-            .composite_plan()
-            .expect("bake_plane reads the frame's plan");
-        let spec = &plan.planes[index];
-        let translate = Affine::translate((-spec.rect.x0, -spec.rect.y0));
-        let ops = spec.ops.start as usize..spec.ops.end as usize;
-        compose::bake_ops(
-            scene,
-            &self.presentation.fragments,
-            &self.presentation.program[ops],
-            &self.presentation.image_draws,
-            images,
-            spec.slot,
-            translate,
-        );
-    }
-
-    /// Composes the frame from its plan: raw steps replay at the offsets
-    /// `offset_of` reports, planes draw as `plane_images[index]` — the
-    /// textures a target baked via [`Self::bake_plane`] — translated by
-    /// their slot chains. The per-frame scroll path for a layered frame:
-    /// its cost is the raw (root and animated) content plus one image draw
-    /// per plane, never the scroller content.
-    ///
-    /// # Panics
-    ///
-    /// If the frame has no plan or `plane_images` is shorter than the plan's
-    /// planes.
-    pub fn composite_into(
-        &self,
-        scene: &mut Scene,
-        plane_images: &[crate::vello::peniko::ImageData],
-        images: &[Option<ImageData>],
-        offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
-        animation_now: Option<f64>,
-    ) {
-        use crate::vello::peniko::{Extend, ImageBrush, ImageQuality, ImageSampler};
-        let plan = self
-            .composite_plan()
-            .expect("composite_into reads the frame's plan");
-        let samples = self.order.sample_animations(animation_now);
-        let device_transform = compose::device_chain_transform(
-            self.order.slots(),
-            &samples,
-            self.device_pixel_ratio,
-            offset_of,
-        );
-        for step in &plan.steps {
-            match step {
-                crate::paint::plan::CompositeStep::Ops(range) => {
-                    let ops = range.start as usize..range.end as usize;
-                    compose::replay_ops(
-                        scene,
-                        &self.presentation.fragments,
-                        &self.presentation.program[ops],
-                        &self.presentation.image_draws,
-                        images,
-                        &samples,
-                        &device_transform,
-                    );
-                }
-                crate::paint::plan::CompositeStep::Plane(index) => {
-                    let spec = &plan.planes[*index as usize];
-                    // The slot's clip chain re-applies around the draw, each
-                    // clip at its own chain's offset — the bake skipped these
-                    // shapes because they must not translate with the plane.
-                    let scale = Affine::scale(f64::from(self.device_pixel_ratio));
-                    let slots = self.order.slots();
-                    let clips = self.order.clips();
-                    let mut chain_clips: Vec<u32> = Vec::new();
-                    let mut next = slots[spec.slot as usize].clip;
-                    while let Some(clip) = next {
-                        chain_clips.push(clip);
-                        next = clips[clip as usize]
-                            .parent
-                            .map(|parent| u32::try_from(parent).expect("clip indices fit u32"));
-                    }
-                    for &clip in chain_clips.iter().rev() {
-                        let node = &clips[clip as usize];
-                        let outer = device_transform(crate::paint::walker::clip_chain(node));
-                        crate::paint::walker::encode_clip(scene, node, outer, scale);
-                    }
-                    let chain = crate::paint::compose::ComposeChain {
-                        scroll: Some(spec.slot),
-                        animation: None,
-                    };
-                    // Integer device translations by construction — the rect
-                    // is integer-valued and offsets are snapped — so nearest
-                    // sampling reproduces the texture exactly.
-                    let transform =
-                        device_transform(chain) * Affine::translate((spec.rect.x0, spec.rect.y0));
-                    let brush = ImageBrush {
-                        image: &plane_images[*index as usize],
-                        sampler: ImageSampler {
-                            x_extend: Extend::Pad,
-                            y_extend: Extend::Pad,
-                            quality: ImageQuality::Low,
-                            alpha: 1.0,
-                        },
-                    };
-                    scene.draw_image(brush, transform);
-                    for _ in &chain_clips {
-                        scene.pop_layer();
-                    }
-                }
-            }
-        }
     }
 
     /// Composes the frame into `scene` with each scroll slot at the offset

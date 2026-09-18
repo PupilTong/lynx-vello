@@ -9,9 +9,14 @@
 //! every target rendered through this crate — the headless one here and an
 //! embedder's windowed one — must be constructed from them, or a windowed
 //! frame will not match a headless screenshot of the same scene.
+//!
+//! [`AtlasResidency`] is the second thing every target owes each frame, and
+//! every [`vello::Renderer`] rendered through this crate is paired with one.
 
 use std::fmt;
 
+use rustc_hash::FxHashSet;
+use vello::peniko::ImageData;
 use vello::util::RenderContext;
 use vello::wgpu;
 
@@ -20,183 +25,69 @@ pub struct Headless {
     context: RenderContext,
     device_index: usize,
     renderer: vello::Renderer,
+    atlas: AtlasResidency,
     target: Option<RenderTarget>,
     readback: Option<ReadbackBuffer>,
-    planes: PlaneBank,
 }
 
-/// The retained plane textures of one layered frame, registered with one
-/// renderer as drawable images.
+/// Which bitmaps one [`vello::Renderer`] has re-uploaded since its image
+/// atlas was last freed.
 ///
-/// A commit re-bakes each of the frame's planes once; every frame after
-/// that composes them as textured draws. Each composite render re-copies
-/// the plane textures into vello's image atlas (one GPU texture-to-texture
-/// copy per plane, window-sized). That copy is the documented cost of
-/// `Renderer::register_texture` — vello cannot see when a texture we render
-/// into changed, so only an every-use dirty mark keeps the atlas truthful.
+/// vello frees the atlas whenever a scene with no patch at all renders — no
+/// image, no gradient ramp, no glyph run: `Resolver::resolve` returns
+/// `Images::default()`, which resizes the persistent proxy to 1x1 and drops
+/// the texture — while `ImageCache` still counts every resident image clean,
+/// so nothing re-uploads afterwards and later draws sample the freed slot.
+/// The repair is a dirty mark, which re-uploads the whole bitmap on its next
+/// use; doing that unconditionally would put an image-bytes-linear upload on
+/// every frame, so this records what has already been repaired and marks each
+/// image at most once per loss.
 ///
-/// The same mark also carries the frame's *content* bitmaps, for a second
-/// reason. vello frees its persistent atlas whenever a scene with no patch
-/// at all renders — no image, no gradient ramp, no glyph run — while its
-/// cache still counts every resident image clean, so nothing re-uploads
-/// afterwards. A plane whose ops are solid paths only bakes exactly such a
-/// scene, and the bakes run one after another on this renderer, so a
-/// solid-only plane between two planes drawing one bitmap would cost the
-/// second its pixels. Hence [`Self::prepare`] re-marks the content bitmaps
-/// before every bake and before the composite that follows.
-///
-/// The scroll frame still encodes and rasterizes none of the scroller
-/// content.
-#[derive(Default)]
-pub struct PlaneBank {
-    /// The commit the retained textures were baked from.
-    commit: Option<u64>,
-    planes: Vec<Plane>,
-    images: Vec<vello::peniko::ImageData>,
-    bake_scene: vello::Scene,
+/// Nothing is owed for an image vello has evicted and will reinsert, or has
+/// never seen: both enter the cache dirty by construction, so a skipped mark
+/// cannot cost pixels.
+#[derive(Debug, Default)]
+pub struct AtlasResidency {
+    /// Blob ids ([`vello::peniko::Blob::id`]) marked since the last loss.
+    reuploaded: FxHashSet<u64>,
 }
 
-struct Plane {
-    texture: wgpu::Texture,
-    view: wgpu::TextureView,
-}
-
-impl fmt::Debug for PlaneBank {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PlaneBank")
-            .field("commit", &self.commit)
-            .field("planes", &self.planes.len())
-            .finish_non_exhaustive()
-    }
-}
-
-impl PlaneBank {
-    /// Brings the retained textures up to `frame`'s plan: on a new commit,
-    /// each plane is (re)baked into its texture; textures are reused across
-    /// commits while their sizes hold. Call once before every composite
-    /// render, with the same `images` that render will draw — every call
-    /// re-marks the planes and those bitmaps dirty so the atlas re-copy
-    /// happens on use (see the type docs for why that is mandatory).
-    ///
-    /// # Panics
-    ///
-    /// If `frame` has no composite plan.
+impl AtlasResidency {
+    /// Brings `renderer` up to a render of `scene` drawing `images`. Call
+    /// immediately before that render.
     pub fn prepare(
         &mut self,
         renderer: &mut vello::Renderer,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        frame: &crate::visual::CommittedFrame,
-        images: &[Option<vello::peniko::ImageData>],
-    ) -> Result<(), GpuError> {
-        let plan = frame
-            .composite_plan()
-            .expect("prepare bakes a layered frame's plan");
-        // The commit alone: a load that changes what a plane draws also
-        // dirties the document, and every rebuild takes a new commit id, so
-        // there is nothing an image could change that this does not catch.
-        if self.commit == Some(frame.commit_id()) {
-            Self::mark_resident(renderer, &self.images, images);
-            return Ok(());
-        }
-        while self.planes.len() > plan.plane_count() {
-            self.planes.pop();
-            renderer.unregister_texture(self.images.pop().expect("images pair with planes"));
-        }
-        for index in 0..plan.plane_count() {
-            let (width, height) = plan.plane_size(index);
-            let sized = self.planes.get(index).is_some_and(|plane| {
-                plane.texture.width() == width && plane.texture.height() == height
-            });
-            if !sized {
-                let texture = device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some("dom retained plane"),
-                    size: wgpu::Extent3d {
-                        width,
-                        height,
-                        depth_or_array_layers: 1,
-                    },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::Rgba8Unorm,
-                    usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
-                    view_formats: &[],
-                });
-                let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-                let image = renderer.register_texture(texture.clone());
-                if index < self.planes.len() {
-                    self.planes[index] = Plane { texture, view };
-                    renderer.unregister_texture(std::mem::replace(&mut self.images[index], image));
-                } else {
-                    self.planes.push(Plane { texture, view });
-                    self.images.push(image);
-                }
-            }
-            self.bake_scene.reset();
-            frame.bake_plane(index, &mut self.bake_scene, images);
-            // Every bake is its own render, so a plane whose ops are solid
-            // paths only frees the atlas here, between two planes that draw
-            // the same bitmap. The content images must therefore be dirty
-            // going into each bake, not once for the whole loop.
-            Self::mark_content(renderer, images);
-            renderer
-                .render_to_texture(
-                    device,
-                    queue,
-                    &self.bake_scene,
-                    &self.planes[index].view,
-                    &render_params(vello::peniko::Color::TRANSPARENT, width, height),
-                )
-                .map_err(|error| GpuError::Render(error.to_string()))?;
-            renderer.mark_override_image_dirty(&self.images[index]);
-        }
-        self.commit = Some(frame.commit_id());
-        // The composite render that follows draws the planes and whatever
-        // content images sit outside them; the last bake may have freed the
-        // atlas under both.
-        Self::mark_content(renderer, images);
-        Ok(())
-    }
-
-    /// Marks every image the next render may sample, so the atlas re-copy
-    /// happens on use.
-    fn mark_resident(
-        renderer: &mut vello::Renderer,
-        planes: &[vello::peniko::ImageData],
-        images: &[Option<vello::peniko::ImageData>],
+        scene: &vello::Scene,
+        images: &[Option<ImageData>],
     ) {
-        for image in planes {
-            renderer.mark_override_image_dirty(image);
-        }
-        Self::mark_content(renderer, images);
+        self.prepare_with(
+            scene.encoding().resources.patches.is_empty(),
+            images,
+            |image| renderer.mark_override_image_dirty(image),
+        );
     }
 
-    /// Marks the frame's content bitmaps alone — the planes are marked where
-    /// they are baked.
-    fn mark_content(renderer: &mut vello::Renderer, images: &[Option<vello::peniko::ImageData>]) {
-        for image in images.iter().flatten() {
-            renderer.mark_override_image_dirty(image);
-        }
-    }
-
-    /// The registered images, index-parallel with the plan's planes — what
-    /// [`crate::visual::CommittedFrame::composite_into`] draws.
-    #[must_use]
-    pub fn images(&self) -> &[vello::peniko::ImageData] {
-        &self.images
-    }
-
-    /// Forgets which commit the retained textures were baked from, so the
-    /// next [`Self::prepare`] re-bakes them.
+    /// The decision itself, with the marking supplied, so it is checkable
+    /// without a GPU.
     ///
-    /// For a target that changes documents: commit ids restart at one per
-    /// document, so a bank still holding the previous page's id would answer
-    /// the new page's first frame with the old page's planes. The textures
-    /// themselves stay registered and are reused at their current sizes —
-    /// only the identity is dropped.
-    pub fn forget(&mut self) {
-        self.commit = None;
+    /// The marks are emitted before the loss is recorded: a patch-free scene
+    /// that still names images must leave nothing behind, since the render
+    /// that draws them is the one that frees the atlas.
+    fn prepare_with(
+        &mut self,
+        loses_atlas: bool,
+        images: &[Option<ImageData>],
+        mut mark: impl FnMut(&ImageData),
+    ) {
+        for image in images.iter().flatten() {
+            if self.reuploaded.insert(image.data.id()) {
+                mark(image);
+            }
+        }
+        if loses_atlas {
+            self.reuploaded.clear();
+        }
     }
 }
 
@@ -281,59 +172,33 @@ impl Headless {
             context,
             device_index,
             renderer,
+            atlas: AtlasResidency::default(),
             target: None,
             readback: None,
-            planes: PlaneBank::default(),
         })
     }
 
-    /// Brings this renderer's retained plane textures up to `frame`'s plan;
-    /// see [`PlaneBank::prepare`].
-    ///
-    /// # Panics
-    ///
-    /// If `frame` has no composite plan.
-    pub fn prepare_planes(
-        &mut self,
-        frame: &crate::visual::CommittedFrame,
-        images: &[Option<vello::peniko::ImageData>],
-    ) -> Result<(), GpuError> {
-        let Self {
-            context,
-            device_index,
-            renderer,
-            planes,
-            ..
-        } = self;
-        let handle = &context.devices[*device_index];
-        planes.prepare(renderer, &handle.device, &handle.queue, frame, images)
-    }
-
-    /// The retained planes' registered images; see [`PlaneBank::images`].
-    #[must_use]
-    pub fn plane_images(&self) -> &[vello::peniko::ImageData] {
-        self.planes.images()
-    }
-
-    /// Drops everything this renderer retained of the frames it has drawn:
-    /// the planes' commit identity (see [`PlaneBank::forget`]), the render
-    /// target, and the readback buffer sized for it.
+    /// Drops the render target this renderer retained, and the readback
+    /// buffer sized for it.
     ///
     /// For a target that changes documents. The target is given up rather than
     /// kept because it *is* the last frame here — there is no surface in front
     /// of it, so a reader would otherwise be handed the previous document's
     /// pixels as this one's. [`Self::render_frame`] builds a new one, and
     /// [`Self::read_pixels`] has nothing to read until it does.
+    ///
+    /// The atlas residency is untouched: it mirrors this renderer's image
+    /// cache, which a change of document does not disturb.
     pub fn forget(&mut self) {
-        self.planes.forget();
         self.target = None;
         self.readback = None;
     }
 
-    /// Renders a scene into the retained headless texture.
+    /// Renders a scene drawing `images` into the retained headless texture.
     pub fn render_frame(
         &mut self,
         scene: &vello::Scene,
+        images: &[Option<ImageData>],
         width: u32,
         height: u32,
         base_color: vello::peniko::Color,
@@ -349,9 +214,11 @@ impl Headless {
             context,
             device_index,
             renderer,
+            atlas,
             target,
             ..
         } = self;
+        atlas.prepare(renderer, scene, images);
         let handle = &context.devices[*device_index];
         let view = &target
             .as_ref()
@@ -466,11 +333,12 @@ impl Headless {
     pub fn render(
         &mut self,
         scene: &vello::Scene,
+        images: &[Option<ImageData>],
         width: u32,
         height: u32,
         base_color: vello::peniko::Color,
     ) -> Result<Vec<u8>, GpuError> {
-        self.render_frame(scene, width, height, base_color)?;
+        self.render_frame(scene, images, width, height, base_color)?;
         self.read_pixels()
     }
 
@@ -593,4 +461,95 @@ pub fn read_texture(
         pixels.extend_from_slice(&row[..tight_bytes_per_row as usize]);
     }
     Ok(pixels)
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use std::sync::Arc;
+
+    use vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
+
+    use super::AtlasResidency;
+
+    /// A 1x1 bitmap with an identity of its own — `Blob::new` takes a fresh
+    /// id per call, which is what the residency keys on.
+    fn image() -> ImageData {
+        ImageData {
+            data: Blob::new(Arc::new([255_u8, 0, 0, 255])),
+            format: ImageFormat::Rgba8,
+            alpha_type: ImageAlphaType::Alpha,
+            width: 1,
+            height: 1,
+        }
+    }
+
+    /// How many marks a render of `images` emits, given whether that render
+    /// frees the atlas.
+    fn marks(
+        residency: &mut AtlasResidency,
+        loses_atlas: bool,
+        images: &[Option<ImageData>],
+    ) -> usize {
+        let mut marked = 0;
+        residency.prepare_with(loses_atlas, images, |_| marked += 1);
+        marked
+    }
+
+    /// The steady state: no patch-free render, so a bitmap is marked once
+    /// however many frames draw it, and re-uploads nothing afterwards.
+    #[test]
+    fn a_resident_bitmap_is_marked_once_until_the_atlas_is_lost() {
+        let mut residency = AtlasResidency::default();
+        let drawn = [Some(image())];
+        assert_eq!(marks(&mut residency, false, &drawn), 1, "the first sight");
+        for frame in 0..8 {
+            assert_eq!(
+                marks(&mut residency, false, &drawn),
+                0,
+                "frame {frame} re-uploaded a bitmap vello still holds"
+            );
+        }
+        assert_eq!(
+            marks(&mut residency, true, &[]),
+            0,
+            "a solid-paths frame draws no bitmap to mark"
+        );
+        assert_eq!(
+            marks(&mut residency, false, &drawn),
+            1,
+            "the loss must be repaired at the bitmap's next use"
+        );
+    }
+
+    /// The repair is owed per bitmap, not per frame: a frame after the loss
+    /// that draws only one of two bitmaps must not settle the other's debt.
+    #[test]
+    fn a_frame_after_the_loss_repairs_only_the_bitmaps_it_draws() {
+        let mut residency = AtlasResidency::default();
+        let (first, second) = (image(), image());
+        let both = [Some(first.clone()), Some(second)];
+        assert_eq!(marks(&mut residency, false, &both), 2);
+        assert_eq!(marks(&mut residency, true, &[]), 0);
+        assert_eq!(marks(&mut residency, false, &[Some(first)]), 1);
+        assert_eq!(
+            marks(&mut residency, false, &both),
+            1,
+            "the bitmap the intervening frame did not draw is still owed"
+        );
+    }
+
+    /// A patch-free render that still names bitmaps is the render that frees
+    /// the atlas, so it must leave nothing recorded.
+    #[test]
+    fn a_patch_free_render_naming_bitmaps_records_none_of_them() {
+        let mut residency = AtlasResidency::default();
+        let drawn = [Some(image())];
+        assert_eq!(marks(&mut residency, true, &drawn), 1);
+        assert_eq!(
+            marks(&mut residency, false, &drawn),
+            1,
+            "the atlas went with that render, so the mark is owed again"
+        );
+    }
 }

@@ -110,20 +110,12 @@ impl Painter {
         );
         let (fragments, program, image_draws, pool) = assembly.finish();
         self.spare_scenes = pool;
-        // No plan while an unexported animation recommits every tick:
-        // re-baking planes each frame would cost more than they save.
-        let plan = (!needs_main_ticks)
-            .then(|| {
-                crate::paint::plan::plan(&program, frame.slots(), frame.clips(), device_pixel_ratio)
-            })
-            .flatten();
         let committed = Arc::new(CommittedFrame {
             order: frame,
             presentation: crate::visual::frame::Presentation {
                 fragments,
                 program,
                 image_draws,
-                plan,
             },
             animations_active,
             needs_main_ticks,

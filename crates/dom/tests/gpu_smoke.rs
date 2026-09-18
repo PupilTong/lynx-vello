@@ -30,7 +30,7 @@ fn red_square_over_white_base() {
         &Rect::new(12.0, 12.0, 52.0, 52.0),
     );
     let pixels = headless
-        .render(&scene, 64, 64, Color::WHITE)
+        .render(&scene, &[], 64, 64, Color::WHITE)
         .expect("headless render should succeed");
     assert_eq!(pixels.len(), 64 * 64 * 4);
 
@@ -56,7 +56,7 @@ fn empty_scene_paints_exact_base_color_with_row_padding() {
     let scene = vello::Scene::new();
     let blue = Color::from_rgb8(0, 0, 255);
     let pixels = headless
-        .render(&scene, 33, 17, blue)
+        .render(&scene, &[], 33, 17, blue)
         .expect("headless render should succeed");
     assert_eq!(pixels.len(), 33 * 17 * 4);
 

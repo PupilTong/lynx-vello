@@ -17,7 +17,6 @@ pub(crate) mod equivalence;
 mod filters;
 mod mask;
 pub(crate) mod painter;
-pub(crate) mod plan;
 mod shadow;
 mod shape;
 mod text;

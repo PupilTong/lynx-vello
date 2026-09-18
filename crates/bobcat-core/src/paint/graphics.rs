@@ -23,7 +23,7 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 use dom::render::gpu::read_texture;
-use dom::render::gpu::{PlaneBank, render_params, renderer_options};
+use dom::render::gpu::{AtlasResidency, render_params, renderer_options};
 use dom::vello;
 use dom::vello::peniko::Color;
 use dom::vello::util::{RenderContext, RenderSurface};
@@ -60,9 +60,9 @@ pub(crate) struct WindowGraphics {
     context: RenderContext,
     surface: RenderSurface<'static>,
     renderer: vello::Renderer,
-    /// Retained plane textures for layered frames; see
-    /// [`dom::render::gpu::PlaneBank`].
-    planes: PlaneBank,
+    /// What that renderer's image atlas still holds; see
+    /// [`dom::render::gpu::AtlasResidency`].
+    atlas: AtlasResidency,
     #[cfg(not(target_arch = "wasm32"))]
     capture: Option<CaptureTarget>,
 }
@@ -110,45 +110,10 @@ impl WindowGraphics {
             context,
             surface,
             renderer,
-            planes: PlaneBank::default(),
+            atlas: AtlasResidency::default(),
             #[cfg(not(target_arch = "wasm32"))]
             capture: None,
         })
-    }
-
-    /// Brings the retained plane textures up to a layered frame's plan;
-    /// call before composing the frame for [`Self::render_to_target`].
-    pub(super) fn prepare_planes(
-        &mut self,
-        frame: &dom::CommittedFrame,
-        images: &[Option<dom::vello::peniko::ImageData>],
-    ) -> Result<(), EngineError> {
-        let handle = &self.context.devices[self.surface.dev_id];
-        self.planes
-            .prepare(
-                &mut self.renderer,
-                &handle.device,
-                &handle.queue,
-                frame,
-                images,
-            )
-            .map_err(|error| EngineError::Gpu(error.to_string()))
-    }
-
-    /// The retained planes' registered images.
-    pub(super) fn plane_images(&self) -> &[vello::peniko::ImageData] {
-        self.planes.images()
-    }
-
-    /// Forgets what this surface's retained planes were baked from, so the next
-    /// layered frame bakes its own.
-    ///
-    /// For a target that changes documents: commit ids restart at one per
-    /// document, so planes still carrying the previous page's id would be
-    /// reused for the new one. The textures themselves are kept and re-baked.
-    /// What the surface last rendered is the painter's record, not this one's.
-    pub(super) fn forget(&mut self) {
-        self.planes.forget();
     }
 
     /// Reconfigures the surface when the target size moved.
@@ -207,12 +172,17 @@ impl WindowGraphics {
 
     /// Renders one composed scene into the retained target texture, which
     /// [`Self::present`] then blits into a swap-chain image.
+    ///
+    /// `images` are the bitmaps the scene draws, which the atlas residency
+    /// needs to keep this renderer's uploads truthful.
     pub(super) fn render_to_target(
         &mut self,
         scene: &vello::Scene,
+        images: &[Option<vello::peniko::ImageData>],
         size: FrameSize,
     ) -> Result<(), EngineError> {
         self.configure_for(size);
+        self.atlas.prepare(&mut self.renderer, scene, images);
         let handle = &self.context.devices[self.surface.dev_id];
         self.renderer
             .render_to_texture(
