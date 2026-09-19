@@ -521,3 +521,85 @@ async fn a_blurred_box_reaches_the_embedder_painter() {
         );
     }
 }
+
+/// A 64x64 page: an opaque white ground, a black left half, and one 32x32
+/// box over the seam carrying `backdrop-filter: blur(5px)`.
+///
+/// The ground is painted rather than left to the render's base colour: a
+/// backdrop is made of what the scene drew, so a transparent page would leave
+/// the light half out of the element's backdrop entirely.
+fn backdrop_page() -> Vec<u8> {
+    br"
+globalThis.renderPage = function renderPage() {
+  const page = __CreatePage('card', 0);
+  __SetInlineStyles(page, 'width:64px;height:64px;background-color:#ffffff;position:relative');
+  const half = __CreateView(0);
+  __SetInlineStyles(
+    half,
+    'position:absolute;left:0px;top:0px;width:32px;height:64px;background-color:#000000'
+  );
+  __AppendElement(page, half);
+  const box = __CreateView(0);
+  __SetInlineStyles(
+    box,
+    'position:absolute;left:16px;top:16px;width:32px;height:32px;' +
+      'backdrop-filter:blur(5px)'
+  );
+  __AppendElement(page, box);
+};
+"
+    .to_vec()
+}
+
+/// `backdrop-filter` reaches the embedder's own painter: the black/white seam
+/// is a gradient inside the element's border box and a step beside it.
+///
+/// Same argument as the blur test above — the bake is a pre-step of
+/// `compose_and_render`, and `dom`'s own pixel tests drive the headless
+/// renderer directly, so this is the one test that proves an embedder gets a
+/// backdrop at all.
+#[tokio::test]
+async fn a_backdrop_filtered_box_reaches_the_embedder_painter() {
+    let group = group().await;
+    let mut view = group
+        .create_lynx_view(
+            64.0,
+            64.0,
+            1.0,
+            |_reports| Rc::new(FetcherDouble::new(backdrop_page()).resolving_to(SCRIPT_URL)),
+            Vec::new(),
+            ViewSources::new(SCRIPT_URL),
+        )
+        .expect("the view is built");
+    let mut painter = Painter::new(DrawTarget::Offscreen, 64.0, 64.0, 1.0)
+        .await
+        .expect("an offscreen painter is built");
+    painter.attach(&view).expect("the page takes a painter");
+    wait_for_script(&mut view).expect("the entry module boots");
+    painter.tick(true).expect("the filtered frame renders");
+
+    let shot = painter.capture().expect("the committed frame");
+    let luma = |x: usize, y: usize| i32::from(shot.pixels[(y * 64 + x) * 4]);
+
+    // The box is (16, 16)-(48, 48) and the seam is x = 32. Inside the box the
+    // seam rises monotonically; above the box it is one step.
+    let profile: Vec<i32> = (18..=46).map(|x| luma(x, 32)).collect();
+    for pair in profile.windows(2) {
+        assert!(
+            pair[1] >= pair[0] - 1,
+            "the filtered seam must rise monotonically: {profile:?}",
+        );
+    }
+    assert!(
+        profile[0] < 60 && profile[profile.len() - 1] > 180,
+        "and span the seam ({} to {})",
+        profile[0],
+        profile[profile.len() - 1],
+    );
+    assert!(
+        luma(30, 8) < 8 && luma(34, 8) >= 250,
+        "while above the box it is still a step ({}, {})",
+        luma(30, 8),
+        luma(34, 8),
+    );
+}

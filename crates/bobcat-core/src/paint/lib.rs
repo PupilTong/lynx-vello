@@ -209,8 +209,8 @@ impl Output {
         }
     }
 
-    /// Bakes `frame`'s `filter: blur()` groups into `out`, index-parallel
-    /// with the frame's filter groups.
+    /// Bakes `frame`'s `filter: blur()` groups and `backdrop-filter`
+    /// elements into `out`, index-parallel with the frame's filter entries.
     ///
     /// The table is copied out rather than borrowed because the very next
     /// step needs the target mutably again to render; an `ImageData` is a
@@ -226,21 +226,26 @@ impl Output {
         images: &[Option<ImageData>],
         offset_of: &dyn Fn(&dom::ScrollSlot) -> Option<Vector2D<f32>>,
         scroll_generation: u64,
+        animation_now: Option<f64>,
         out: &mut Vec<Option<ImageData>>,
     ) -> Result<(), EngineError> {
         out.clear();
         let baked = match self {
             #[cfg(test)]
-            // A painter with nowhere to draw bakes nothing, so every group
+            // A painter with nowhere to draw bakes nothing, so every entry
             // falls back to replaying raw — which is what a routing test
             // wants: no device.
             Self::None => return Ok(()),
             Self::Offscreen(gpu) => gpu
-                .prepare_filters(frame, images, offset_of, scroll_generation)
+                .prepare_filters(frame, images, offset_of, scroll_generation, animation_now)
                 .map_err(|error| EngineError::Gpu(error.to_string()))?,
-            Self::Window(graphics) => {
-                graphics.prepare_filters(frame, images, offset_of, scroll_generation)?
-            }
+            Self::Window(graphics) => graphics.prepare_filters(
+                frame,
+                images,
+                offset_of,
+                scroll_generation,
+                animation_now,
+            )?,
         };
         out.extend(baked.iter().cloned());
         Ok(())
@@ -516,9 +521,9 @@ fn compose_and_render(
     size: FrameSize,
     animation_now: Option<f64>,
 ) -> Result<(), EngineError> {
-    // The one optional pre-step. A frame with no `filter: blur()` group — the
-    // overwhelming majority — skips it on this one test and touches no
-    // offscreen texture at all.
+    // The one optional pre-step. A frame with no `filter: blur()` group and
+    // no `backdrop-filter` element — the overwhelming majority — skips it on
+    // this one test and touches no offscreen texture at all.
     if frame.filter_groups().is_empty() {
         filtered.clear();
     } else {
@@ -527,6 +532,7 @@ fn compose_and_render(
             images,
             &|slot| intents.offset_for(slot.node),
             intents.generation,
+            animation_now,
             filtered,
         )?;
     }
@@ -535,7 +541,8 @@ fn compose_and_render(
         && let Some(scene) = frame.scene()
     {
         // A filtered frame is never one unscrolled fragment — it carries at
-        // least one filter bracket op — so this fast path never skips a bake.
+        // least one filter bracket or backdrop op — so this fast path never
+        // skips a bake.
         scene
     } else {
         buffer.reset();

@@ -27,6 +27,16 @@
 //! plays raw and the frame simply is not blurred. The bake itself replays
 //! that range into an offscreen scene; see
 //! [`crate::CommittedFrame::bake_filter`].
+//!
+//! [`ComposeOp::PushBackdrop`] is the `backdrop-filter` half of the same
+//! machinery, and the one op whose range points *backwards*. Its entry sits
+//! in the same side table and its range is everything already painted inside
+//! the element's nearest Backdrop Root ancestor, so its bake reads program
+//! ops that precede it rather than ops it brackets — there is no matching
+//! pop. With a texture the op draws it, shaped by the element's own rounded
+//! border box, as the first thing inside the element's group; without one it
+//! draws nothing at all, and the unfiltered backdrop the op sits on top of
+//! is what shows.
 
 use std::ops::Range;
 use std::sync::Arc;
@@ -236,6 +246,15 @@ pub(crate) enum ComposeOp {
     /// exists so the group's op range is a fact about the program rather than
     /// something a consumer has to rediscover.
     PopFilter,
+    /// Draw `filter_groups[index]`'s baked backdrop, shaped by the element's
+    /// rounded border box, and then that entry's post-blur passes over it.
+    ///
+    /// Unlike [`Self::PushFilter`] this opens nothing and skips nothing: the
+    /// entry's range lies *before* this op. Without a texture it encodes
+    /// nothing, which leaves the unfiltered backdrop showing through.
+    PushBackdrop {
+        index: u32,
+    },
 }
 
 impl ComposeOp {
@@ -247,33 +266,75 @@ impl ComposeOp {
             Self::Fragment { chain, .. } | Self::Push { chain, .. } | Self::Image { chain, .. } => {
                 Some(*chain)
             }
-            Self::PushFilter { index } => Some(groups[*index as usize].chain),
+            Self::PushFilter { index } | Self::PushBackdrop { index } => {
+                Some(groups[*index as usize].chain)
+            }
             Self::Pop | Self::PopFilter => None,
         }
     }
 }
 
-/// One `filter: blur()` group: the ops whose composed pixels are baked
-/// offscreen, blurred, and drawn back as one image.
+/// What a [`FilterGroup`] needs beyond σ and a rect to be a
+/// `backdrop-filter` entry rather than a `filter: blur()` group.
+///
+/// Its presence is what makes an entry a backdrop: the bake pops the layers
+/// its backward range left open, draws the `before` passes over the whole
+/// bake rect, and mirrors at the rect's edges rather than reading the
+/// transparent black a `filter` group's 3σ margin holds.
+#[derive(Debug)]
+pub(crate) struct Backdrop {
+    /// The element's border box with its radii, in the element's own CSS px.
+    /// Both the shape the texture is drawn through and the bound of the
+    /// `after` passes.
+    pub(crate) shape: BoxShape,
+    /// Element-local CSS px to device px within the entry's chain — the
+    /// walker's `scale * local`.
+    pub(crate) transform: Affine,
+    /// The passes preceding the list's first `blur()`, drawn inside the bake.
+    pub(crate) before: Vec<crate::paint::filters::Pass>,
+    /// The passes following it, drawn over the composed backdrop.
+    pub(crate) after: Vec<crate::paint::filters::Pass>,
+    /// Whether some op in the range rides an animation chain other than the
+    /// entry's — the one condition under which the bake's pixels depend on
+    /// the timeline reading, and therefore the one condition under which an
+    /// animation tick invalidates the bake.
+    pub(crate) inner_animations: bool,
+    /// Layers the range leaves open at its end: the group scopes between the
+    /// Backdrop Root and this element. The bake pops exactly this many, so
+    /// the `before` passes do not land inside one.
+    pub(crate) open_pushes: u32,
+}
+
+/// One baked entry: the ops whose composed pixels are baked offscreen,
+/// filtered, and drawn back as one image.
+///
+/// Two properties produce one: `filter: blur()`, whose range is the ops the
+/// entry *brackets*, and `backdrop-filter`, whose range is the ops already
+/// painted *before* it inside its Backdrop Root — [`Self::backdrop`] is
+/// which.
 ///
 /// Everything here is decided at commit time on the document's thread, in
 /// device pixels, and carries no GPU resource: a frame stays `Send + Sync`
-/// and device-free. `rect` already includes the 3σ ink margin and is
-/// integer-valued, so the bake's own render target size is `rect`'s and the
-/// texture composes at an integer offset — which is why nearest sampling
-/// reproduces it exactly on an unanimated chain.
+/// and device-free. `rect` is integer-valued, so the bake's own render
+/// target size is `rect`'s and the texture composes at an integer offset —
+/// which is why nearest sampling reproduces it exactly on an unanimated
+/// chain. For a `filter: blur()` group it already includes the 3σ ink
+/// margin; for a backdrop it is exactly the element's transformed border
+/// box, because `backdrop-filter` enlarges no ink overflow.
 #[derive(Debug)]
 pub struct FilterGroup {
-    /// The blur's standard deviation, in device px.
+    /// The blur's standard deviation, in device px. Zero is a real value for
+    /// a backdrop — a colour-only list still bakes — and never occurs on a
+    /// `filter: blur()` group.
     pub sigma: f32,
-    /// The device-px region baked, integer-valued, 3σ larger than the
-    /// group's own bounds on every side.
+    /// The device-px region baked, integer-valued.
     pub rect: Rect,
-    /// The chain the *texture* composes under. Content inside the group may
+    /// The chain the *texture* composes under. Content inside the range may
     /// ride inner scroll chains; see [`Self::inner_chains`].
     pub(crate) chain: ComposeChain,
-    /// The ops strictly between this group's `PushFilter` and its
-    /// `PopFilter`, as indices into the program.
+    /// For a `filter: blur()` group, the ops strictly between its
+    /// `PushFilter` and its `PopFilter`. For a backdrop, the ops from its
+    /// Backdrop Root's content start up to the element's own scope open.
     pub(crate) ops: Range<u32>,
     /// Whether some op in `ops` rides a scroll chain other than `chain` —
     /// the one condition under which the bake's pixels depend on a scroll
@@ -283,6 +344,8 @@ pub struct FilterGroup {
     /// The group this one nests inside, so the assembly needs no open-filter
     /// stack of its own.
     pub(crate) parent: Option<u32>,
+    /// Set exactly for a `backdrop-filter` entry; see [`Backdrop`].
+    pub(crate) backdrop: Option<Backdrop>,
 }
 
 impl FilterGroup {
@@ -295,7 +358,43 @@ impl FilterGroup {
             ops: 0..0,
             inner_chains: false,
             parent: None,
+            backdrop: None,
         }
+    }
+
+    /// A `backdrop-filter` entry over `rect` at `sigma`, before the assembly
+    /// records its backward range.
+    pub(crate) fn with_backdrop(
+        sigma: f32,
+        rect: Rect,
+        chain: ComposeChain,
+        backdrop: Backdrop,
+    ) -> Self {
+        Self {
+            backdrop: Some(backdrop),
+            ..Self::new(sigma, rect, chain)
+        }
+    }
+
+    /// Whether this entry filters a backdrop rather than a group's own
+    /// pixels — which is what decides its bake's edge mode.
+    #[must_use]
+    pub fn is_backdrop(&self) -> bool {
+        self.backdrop.is_some()
+    }
+
+    /// Whether this entry's baked pixels depend on the timeline reading:
+    /// some op in its range rides an animation chain the entry does not.
+    ///
+    /// Only a backdrop can answer `true`. A `filter: blur()` group's range
+    /// is its own subtree, and an animated element's whole subtree rides its
+    /// own slot, so a group and its content are never on different animation
+    /// chains.
+    #[must_use]
+    pub fn samples_animations(&self) -> bool {
+        self.backdrop
+            .as_ref()
+            .is_some_and(|backdrop| backdrop.inner_animations)
     }
 
     /// The bake target's device-pixel size.
@@ -444,6 +543,82 @@ impl ComposeAssembly {
         self.program.push(ComposeOp::PushFilter { index });
         self.open_filter = Some(index);
         index
+    }
+
+    /// Seals any open fragment and answers the program length: the boundary
+    /// "everything painted so far" ends at.
+    ///
+    /// Records nothing of its own — the seal produces exactly the `Fragment`
+    /// op the next [`Self::push_op`] would have produced, at the same index —
+    /// so a walk that calls this leaves a byte-identical program.
+    pub(crate) fn content_boundary(&mut self) -> u32 {
+        self.seal_fragment();
+        u32::try_from(self.program.len()).expect("a frame cannot hold 2^32 program ops")
+    }
+
+    /// Records a `backdrop-filter` entry over the already-emitted `ops`,
+    /// answering whether one was recorded.
+    ///
+    /// An empty range records nothing and answers `false`: there is nothing
+    /// behind the element to filter, so the op would bake a transparent
+    /// texture and draw it over nothing.
+    pub(crate) fn push_backdrop(&mut self, mut entry: FilterGroup, ops: Range<u32>) -> bool {
+        self.seal_fragment();
+        if ops.start >= ops.end {
+            return false;
+        }
+        debug_assert!(
+            ops.end as usize <= self.program.len(),
+            "a backdrop's range ends at or before the op that draws it",
+        );
+        let chain = entry.chain;
+        let (inner_chains, inner_animations, open_pushes) = self.scan_backdrop(&ops, chain);
+        let index =
+            u32::try_from(self.filter_groups.len()).expect("a frame cannot hold 2^32 filters");
+        entry.parent = self.open_filter;
+        entry.ops = ops;
+        entry.inner_chains = inner_chains;
+        if let Some(backdrop) = entry.backdrop.as_mut() {
+            backdrop.inner_animations = inner_animations;
+            backdrop.open_pushes = open_pushes;
+        } else {
+            debug_assert!(false, "push_backdrop is only called with a backdrop entry");
+        }
+        self.filter_groups.push(entry);
+        self.program.push(ComposeOp::PushBackdrop { index });
+        true
+    }
+
+    /// One pass over a backdrop's backward range: whether it holds another
+    /// scroll chain, whether it holds another animation chain, and how many
+    /// layers it leaves open at its end.
+    fn scan_backdrop(&self, ops: &Range<u32>, chain: ComposeChain) -> (bool, bool, u32) {
+        let mut scrolls = false;
+        let mut animations = false;
+        let mut depth = 0_i64;
+        for op in &self.program[ops.start as usize..ops.end as usize] {
+            match op {
+                ComposeOp::Push { .. } => depth += 1,
+                ComposeOp::Pop => depth -= 1,
+                _ => {}
+            }
+            if let Some(op) = op.chain(&self.filter_groups) {
+                scrolls |= op.scroll != chain.scroll;
+                animations |= op.animation != chain.animation;
+            }
+        }
+        // The range starts and ends with an empty clip stack (every group
+        // scope restarts clip chains), and no scope enclosing the range can
+        // close inside it, so nothing in here pops a layer it did not push.
+        debug_assert!(
+            depth >= 0,
+            "a backdrop's range pops a layer it never pushed"
+        );
+        (
+            scrolls,
+            animations,
+            u32::try_from(depth.max(0)).expect("a frame cannot nest 2^32 layers"),
+        )
     }
 
     /// Closes the innermost open filter group, completing its op range and
@@ -629,7 +804,7 @@ pub(crate) struct Tables<'a> {
     pub(crate) images: &'a [Option<ImageData>],
     pub(crate) filter_groups: &'a [FilterGroup],
     /// One entry per [`Tables::filter_groups`] entry: the baked texture for
-    /// that group, or `None` for the unblurred fallback.
+    /// that entry, or `None` for the unfiltered fallback.
     pub(crate) filtered: &'a [Option<ImageData>],
     pub(crate) samples: &'a [AnimationSample],
 }
@@ -643,7 +818,9 @@ pub(crate) struct Tables<'a> {
 ///
 /// A `PushFilter` whose group has a baked texture draws that texture and
 /// skips the group's ops; one without replays them raw — the documented
-/// unblurred fallback.
+/// unblurred fallback. A `PushBackdrop` with a texture draws it through the
+/// element's border box; one without encodes nothing, and the unfiltered
+/// backdrop underneath is what shows.
 pub(crate) fn replay_ops(
     scene: &mut Scene,
     tables: Tables<'_>,
@@ -741,9 +918,79 @@ pub(crate) fn replay_ops(
                 }
             }
             ComposeOp::PopFilter => {}
+            ComposeOp::PushBackdrop { index: slot } => {
+                let slot = *slot as usize;
+                let entry = &filter_groups[slot];
+                if let (Some(Some(image)), Some(backdrop)) = (filtered.get(slot), &entry.backdrop) {
+                    draw_backdrop(scene, entry, backdrop, image, device_transform);
+                }
+            }
         }
         index += 1;
     }
+}
+
+/// Draws one baked backdrop: the texture through the element's own rounded
+/// border box, then the entry's post-blur passes over it.
+///
+/// The texture is the backdrop already filtered, in device px at `rect`'s
+/// origin, so the brush transform undoes the element's own map and puts the
+/// image back where it was baked from: `transform * brush_transform` is
+/// exactly `device_transform(chain) * translate(rect.origin)`. That is the
+/// spec's "inverse of the element's transforms, then the element's own
+/// transforms again", performed once rather than twice.
+///
+/// No clip layer is opened for the crop. The shape *is* the fill, which
+/// keeps the op a single draw and keeps a fragment cut from ever landing
+/// between a push and its pop.
+fn draw_backdrop(
+    scene: &mut Scene,
+    entry: &FilterGroup,
+    backdrop: &Backdrop,
+    image: &ImageData,
+    device_transform: &dyn Fn(ComposeChain) -> Affine,
+) {
+    let outer = device_transform(entry.chain);
+    let transform = outer * backdrop.transform;
+    let brush_transform =
+        backdrop.transform.inverse() * Affine::translate((entry.rect.x0, entry.rect.y0));
+    // Nearest reproduces the bake byte for byte wherever the composed
+    // placement is a whole-pixel translation, which is every chain a scroll
+    // offset snaps; a sampled animation delta can land it anywhere.
+    let quality = if entry.chain.animation.is_none() && is_integer_translation(outer) {
+        ImageQuality::Low
+    } else {
+        ImageQuality::Medium
+    };
+    let brush = BrushRef::Image(ImageBrush {
+        image,
+        sampler: ImageSampler {
+            x_extend: Extend::Pad,
+            y_extend: Extend::Pad,
+            quality,
+            alpha: 1.0,
+        },
+    });
+    with_shape!(&backdrop.shape, |s| scene.fill(
+        Fill::NonZero,
+        transform,
+        brush,
+        Some(brush_transform),
+        s
+    ));
+    crate::paint::filters::draw_passes_shape(scene, &backdrop.after, &backdrop.shape, transform);
+}
+
+/// Whether `affine` moves an image by a whole number of device pixels and
+/// nothing else — the condition under which nearest sampling is exact.
+fn is_integer_translation(affine: Affine) -> bool {
+    let coefficients = affine.as_coeffs();
+    // Exact comparison on purpose: the question is whether nearest sampling
+    // reproduces the bake byte for byte, and anything but the identity linear
+    // part and a whole-pixel offset means it does not.
+    coefficients[..4] == [1.0, 0.0, 0.0, 1.0]
+        && coefficients[4].fract() == 0.0
+        && coefficients[5].fract() == 0.0
 }
 
 #[cfg(test)]
@@ -974,6 +1221,185 @@ mod tests {
             composed.encoding().draw_tags.len(),
             raw.encoding().draw_tags.len(),
             "one image fill replaces one content fill",
+        );
+    }
+
+    fn backdrop_entry(chain: ComposeChain) -> FilterGroup {
+        FilterGroup::with_backdrop(
+            2.0,
+            Rect::new(0.0, 0.0, 8.0, 8.0),
+            chain,
+            Backdrop {
+                shape: BoxShape::Rect(Rect::new(0.0, 0.0, 8.0, 8.0)),
+                transform: Affine::IDENTITY,
+                before: Vec::new(),
+                after: Vec::new(),
+                inner_animations: false,
+                open_pushes: 0,
+            },
+        )
+    }
+
+    /// A backdrop's range is everything already recorded from the boundary it
+    /// is handed, and the flags are read off exactly that slice.
+    #[test]
+    fn a_backdrop_records_the_program_behind_it() {
+        let mut assembly = assembly();
+        let root_start = assembly.content_boundary();
+        assert_eq!(root_start, 0, "nothing precedes the frame root");
+        assembly.push_op(push(ComposeChain::default()));
+        assembly.push_op(push(scrolled(0)));
+        assembly.push_op(ComposeOp::Pop);
+        let end = assembly.content_boundary();
+        assert!(
+            assembly.push_backdrop(backdrop_entry(ComposeChain::default()), root_start..end),
+            "a non-empty range records an entry",
+        );
+        let finished = assembly.finish();
+
+        let entry = &finished.filter_groups[0];
+        assert_eq!(entry.ops, 0..3, "the whole prefix");
+        assert!(entry.is_backdrop());
+        assert!(
+            entry.inner_chains,
+            "the prefix holds an op on another scroll chain",
+        );
+        assert!(
+            !entry.samples_animations(),
+            "and none on another animation chain",
+        );
+        let backdrop = entry.backdrop.as_ref().expect("a backdrop entry");
+        assert_eq!(
+            backdrop.open_pushes, 1,
+            "two pushes and one pop leave one layer open",
+        );
+        assert!(matches!(
+            finished.program[3],
+            ComposeOp::PushBackdrop { index: 0 }
+        ));
+        assert_eq!(
+            finished.program.len(),
+            4,
+            "and the op opens nothing it has to close",
+        );
+    }
+
+    /// An animation chain the entry is not on is what makes a bake depend on
+    /// the timeline reading — and the only thing that does.
+    #[test]
+    fn inner_animations_reports_only_a_differing_animation_chain() {
+        let animated = ComposeChain {
+            scroll: None,
+            animation: Some(0),
+        };
+        for (chain, op, expected) in [
+            (ComposeChain::default(), animated, true),
+            (animated, animated, false),
+            (ComposeChain::default(), scrolled(0), false),
+        ] {
+            let mut assembly = assembly();
+            assembly.push_op(push(op));
+            let end = assembly.content_boundary();
+            assembly.push_backdrop(backdrop_entry(chain), 0..end);
+            assert_eq!(
+                assembly.finish().filter_groups[0].samples_animations(),
+                expected,
+                "entry on {chain:?} over an op on {op:?}",
+            );
+        }
+    }
+
+    /// Nothing painted behind the element is nothing to filter: the entry is
+    /// refused outright rather than recorded with an empty range, so the
+    /// frame's filter table stays empty and the bake pre-step stays skipped.
+    #[test]
+    fn an_empty_range_records_no_backdrop_at_all() {
+        let mut assembly = assembly();
+        let start = assembly.content_boundary();
+        assert!(!assembly.push_backdrop(backdrop_entry(ComposeChain::default()), start..start));
+        let finished = assembly.finish();
+        assert!(finished.filter_groups.is_empty());
+        assert!(finished.program.is_empty());
+    }
+
+    /// Without a texture the op encodes nothing: the unfiltered backdrop the
+    /// element sits on is what shows, byte for byte.
+    #[test]
+    fn a_backdrop_op_encodes_nothing_without_a_baked_texture() {
+        let bare = [ComposeOp::Fragment {
+            index: 0,
+            chain: ComposeChain::default(),
+        }];
+        let with_op = [
+            ComposeOp::Fragment {
+                index: 0,
+                chain: ComposeChain::default(),
+            },
+            ComposeOp::PushBackdrop { index: 0 },
+        ];
+        let mut entry = backdrop_entry(ComposeChain::default());
+        entry.ops = 0..1;
+        let entries = [entry];
+
+        let without = replay_program(&bare, &[], &[]);
+        for filtered in [&[][..], &[None][..]] {
+            let with = replay_program(&with_op, &entries, filtered);
+            crate::paint::equivalence::assert_scenes_identical(&with, &without);
+        }
+    }
+
+    /// With a texture the op draws it once, through the element's own shape,
+    /// and each post-blur pass adds one blend layer over it.
+    #[test]
+    fn a_baked_backdrop_draws_one_fill_and_its_after_passes() {
+        let program = [
+            ComposeOp::Fragment {
+                index: 0,
+                chain: ComposeChain::default(),
+            },
+            ComposeOp::PushBackdrop { index: 0 },
+        ];
+        let baked = ImageData {
+            data: crate::vello::peniko::Blob::new(Arc::new([0_u8, 0, 0, 0])),
+            format: crate::vello::peniko::ImageFormat::Rgba8,
+            alpha_type: crate::vello::peniko::ImageAlphaType::AlphaPremultiplied,
+            width: 8,
+            height: 8,
+        };
+
+        let plain = {
+            let mut entry = backdrop_entry(ComposeChain::default());
+            entry.ops = 0..1;
+            let entries = [entry];
+            replay_program(&program, &entries, &[Some(baked.clone())])
+        };
+        assert_eq!(
+            plain.encoding().resources.patches.len(),
+            1,
+            "the entry's texture, once",
+        );
+        assert_eq!(
+            plain.encoding().n_open_clips,
+            0,
+            "and the op leaves the layer stack balanced",
+        );
+
+        let with_passes = {
+            let mut entry = backdrop_entry(ComposeChain::default());
+            entry.ops = 0..1;
+            entry.backdrop.as_mut().expect("a backdrop").after = crate::paint::filters::passes(
+                &[stylo::values::computed::effects::Filter::Brightness(
+                    stylo::values::generics::NonNegative(0.5),
+                )],
+                0..1,
+            );
+            let entries = [entry];
+            replay_program(&program, &entries, &[Some(baked)])
+        };
+        assert_eq!(
+            with_passes.encoding().draw_tags.len(),
+            plain.encoding().draw_tags.len() + 3,
+            "one post-blur pass is a blend layer, its flat fill, and the pop",
         );
     }
 

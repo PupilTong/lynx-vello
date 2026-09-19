@@ -203,9 +203,10 @@ impl WindowGraphics {
             .map_err(|error| EngineError::Render(error.to_string()))
     }
 
-    /// Bakes `frame`'s `filter: blur()` groups on the window's own device.
+    /// Bakes `frame`'s `filter: blur()` groups and `backdrop-filter`
+    /// elements on the window's own device.
     ///
-    /// Call before composing; a frame with no filter group asks nothing of
+    /// Call before composing; a frame with no filter entry asks nothing of
     /// the device.
     pub(super) fn prepare_filters(
         &mut self,
@@ -213,6 +214,7 @@ impl WindowGraphics {
         images: &[Option<ImageData>],
         offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
         scroll_generation: u64,
+        animation_now: Option<f64>,
     ) -> Result<&[Option<ImageData>], EngineError> {
         let Self {
             context,
@@ -233,6 +235,7 @@ impl WindowGraphics {
                 images,
                 offset_of,
                 scroll_generation,
+                animation_now,
             )
             .map_err(|error| EngineError::Gpu(error.to_string()))
     }

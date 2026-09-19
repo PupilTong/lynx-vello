@@ -9,8 +9,8 @@
 //! `Document::scene`, for two reasons a screenshot cares about: the frame's
 //! image draws resolve against the store the caller supplied (so a captured
 //! page's bitmaps are the ones it asked for), and its `filter: blur()` groups
-//! get their offscreen bake. `capture_scene` keeps taking a scene somebody
-//! else composed and therefore neither.
+//! and `backdrop-filter` elements get their offscreen bake. `capture_scene`
+//! keeps taking a scene somebody else composed and therefore neither.
 
 use std::fmt;
 
@@ -95,10 +95,10 @@ pub fn capture_document_sized<T: Sync>(
         .expect("`Document::render` always leaves a committed frame retained");
     let (mut images, mut sources) = (Vec::new(), Vec::new());
     frame.resolve_images(pixels, &mut images, &mut sources);
-    // No offsets and no generation: a capture composes the frame exactly as
-    // it was committed.
+    // No offsets, no generation and no timeline reading: a capture composes
+    // the frame exactly as it was committed.
     let filtered: Vec<Option<ImageData>> = gpu
-        .prepare_filters(&frame, &images, &|_| None, 0)
+        .prepare_filters(&frame, &images, &|_| None, 0, None)
         .map_err(CaptureError::Gpu)?
         .to_vec();
     let mut composed = Scene::new();

@@ -284,6 +284,7 @@ fn will_change_and_containment_create_atomic_contexts() {
         "will-change: opacity;",
         "perspective: 100px;",
         "filter: grayscale(1);",
+        "backdrop-filter: blur(4px);",
         "transform: translate(0px, 0px);",
     ] {
         let mut h = Harness::new(&format!(
@@ -1476,6 +1477,9 @@ fn group_effect_contexts_get_render_layers() {
     for trigger in [
         "opacity: 0.5;",
         "filter: grayscale(1);",
+        // filter-effects-2 §2.1: the filtered backdrop is painted inside the
+        // element's own effect layer, so `backdrop-filter` needs a group.
+        "backdrop-filter: blur(4px);",
         "clip-path: circle(40px);",
     ] {
         let mut h = Harness::new(&format!(

@@ -325,27 +325,56 @@ publishes an `AnimationSlot` curve the consumer samples at its own timeline
 reading. `docs/dom-public-api.md`'s "Retained visual output" row is the
 authoritative description of the whole surface.
 
-`filter: blur()` adds the one conditional step in front of that path.
-`CommittedFrame::filter_groups()` — empty unless the page blurs — carries per
-group a device-pixel σ and rect (already 3σ larger than the group's content, so
-the bake's clamped edges read transparent black) plus the range of program ops
-the group encloses, bracketed by `PushFilter`/`PopFilter`. The bracket encodes
-nothing, so one program serves both readings: `compose_into` takes a `filtered`
-table and draws a group's texture in place of its ops where one exists, and
-replays the range raw where none does — which is the documented *unblurred*
-fallback a GPU-less consumer, `Document::scene()`, and a group past the memory
-budget all take. `CommittedFrame::bake_filter` replays one group's range into
-an offscreen scene with the group's own chain factored out, since that chain is
-applied when the texture is drawn. The whole commit stays device-free and
-recyclable: the group table is reclaimed with the frame's other tables.
+`filter: blur()` and `backdrop-filter` add the one conditional step in front of
+that path, and they share it. `CommittedFrame::filter_groups()` — empty unless
+the page uses one of them — carries per entry a device-pixel σ and rect plus a
+range of program ops, and `FilterGroup::is_backdrop` is which of the two an
+entry is.
 
-Because the 3σ ink margin has to survive the viewport edge, the walker inflates
-a filtered layer's bounds *before* intersecting them with the viewport, and
-inflates the cull region by the sum of 3σ over every enclosing filtered layer.
-σ itself is scaled into viewport pixels by the arithmetic mean of the two
-singular values of the group's local-to-viewport linear map (read off
+A **`filter: blur()` group**'s rect is already 3σ larger than the group's
+content, so the bake's clamped edges read transparent black, and its range is
+the ops the entry encloses, bracketed by `PushFilter`/`PopFilter`. A
+**`backdrop-filter` entry**'s rect is exactly the element's transformed border
+box — the crop filter-effects-2 applies before filtering, with no margin
+because the property enlarges no ink overflow — and its range points
+*backwards*: every op from its nearest Backdrop Root ancestor's content start
+up to the element's own scope open, which is exactly "everything painted before
+the element inside that root". Its one op, `PushBackdrop`, is recorded
+innermost inside the element's own layers and before any of its items, so the
+element's `opacity`, `clip-path`, `mask-image` and `filter` apply to the
+backdrop and to the element together.
+
+Neither op encodes anything without a texture, so one program serves both
+readings: `compose_into` takes a `filtered` table and, where one exists, draws
+a group's texture in place of its ops or a backdrop's through the element's own
+rounded border box; where none does, a group replays its range raw and a
+backdrop draws nothing, which are the documented *unfiltered* fallbacks a
+GPU-less consumer, `Document::scene()`, and an entry past the memory budget all
+take. `CommittedFrame::bake_filter` replays one entry's range into an offscreen
+scene with the entry's own chain factored out, since that chain is applied when
+the texture is drawn; for a backdrop it then pops the layers the backward range
+left open and draws the list's pre-blur passes over the whole bake rect. The
+whole commit stays device-free and recyclable: the entry table is reclaimed
+with the frame's other tables.
+
+Because a `filter: blur()`'s 3σ ink margin has to survive the viewport edge,
+the walker inflates a filtered layer's bounds *before* intersecting them with
+the viewport, and inflates the cull region by the sum of 3σ over every
+enclosing filtered layer. `backdrop-filter` inflates nothing. Either way σ is
+scaled into viewport pixels by the arithmetic mean of the two singular values
+of the element's local-to-viewport linear map (read off
 `Affine::nuclear_norm_squared`) — exact under rotation and uniform scale, one
 isotropic number under a non-uniform scale or a skew (recorded limit).
+
+The Backdrop Root set is filter-effects-2's list — `filter`, `opacity < 1`,
+`mask`, `clip-path`, `mix-blend-mode`, `backdrop-filter`, and the root element.
+It is a separate predicate (`walker::is_backdrop_root`) rather than
+`stacking::needs_group_rendering` because that one also answers `true` for
+`isolation: isolate`, which the spec's list does not contain. `will-change`
+roots are **not** honored, which is the one observable gap: `will-change` is in
+the fork's author grammar, so a `backdrop-filter` element inside a
+`will-change: opacity` wrapper reads through that wrapper where a browser would
+stop at it. Ruled, and recorded in `docs/tracking/deviations.md`.
 
 The image seam is the `FrameImages` trait in `crates/dom/src/render/image.rs` —
 `read(source, ImageSizeHint)` and `retain(frame)` — with `ImageReports`,
@@ -374,7 +403,10 @@ windowed embedders build against). `render::blur` is the third seam, and the
 one narrow exception to the floor's DOM-freedom: `FilterTextures::prepare`
 reads a `CommittedFrame`'s filter side table and calls the frame's own
 `bake_filter`, because a bake *is* a partial replay of that frame's compose
-program. It still knows nothing about nodes, computed styles, layout or paint
+program. It binds one of two samplers per entry — clamp-to-edge for a
+`filter: blur()` group's transparent margin, `MirrorRepeat` for a backdrop's
+marginless crop — and skips the whole gaussian at σ = 0, which only a
+colour-only `backdrop-filter` reaches. It still knows nothing about nodes, computed styles, layout or paint
 order — the frame hands it device-pixel geometry and an opaque op range — and
 nothing else in `render` names a frame at all. A render names the bitmaps its scene
 draws: vello frees its persistent image atlas whenever a scene with no patch at
