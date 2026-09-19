@@ -205,7 +205,8 @@ integration, `workers.rs` for the `Worker` class, `tree/` for Lynx page policy.
 `background/` is the `bobcat-workers` thread and its worker realms. `view/` is
 the public view facade, `paint/` the `Painter` with its `gesture.rs` input
 router, `images.rs` image protocol and `graphics.rs` GPU target. `link.rs` is
-the one channel set a view spans its two threads with, `lifetime.rs` the view's
+the one channel set a view spans its two threads with, `jobs.rs` the engine
+thread itself — its scheduler and its job queue — `lifetime.rs` the view's
 task set, `timers.rs` and `clock.rs`/`alarm.rs` the timer machinery both realm
 kinds share, `esm.rs` the preloaded module specifiers, `script.rs` the
 sanitized error a failure is reported with, `style.rs` the
@@ -230,23 +231,40 @@ lifecycle wakeup and `StyleThreads`, starts `bobcat-workers` then `bobcat-main`
 (handed one sender on it), and awaits the QuickJS runtime and Stylo pool every
 view in that group shares.
 
-**Both engine threads run a tokio `current_thread` runtime under a
-`LocalSet`**, each asynchronous wait a task of its own. Synchronous stylesheet
-adoption can instead park MTS on a source response. A view's tasks are its
-owner (`serve_view`, whose one wait is the view's end), its boot future, one
-ordered consumer of the command channel, one ordered consumer of its workers'
-events, one future per resource load an import produced, and one clock task
+**Both engine threads are a `jobs.rs` `JsThread`: a tokio `current_thread`
+runtime with a `LocalSet`, plus a FIFO of jobs its top loop runs between two
+turns of that scheduler.** Tasks wait and route — a channel read, a deadline, a
+lifecycle signal, a spawn — and touch no realm, no document and not the shared
+`ScriptRuntime`; what a task does with what it read is queue a job and await it.
+Jobs are the only place JavaScript runs, and they run outside every `block_on`,
+which is what lets one park: `JsThread::wait` is a fresh `block_on` of the same
+`LocalSet`, so during a synchronous stylesheet adoption every task on the thread
+goes on running while no other job does. Queued jobs run in FIFO order once the
+waiting one returns, so an entry may hold the shared runtime and its realm
+across its own wait.
+
+Each asynchronous wait is a task of its own. A view's tasks are its owner
+(`serve_view`, whose one wait is the view's end), its boot future, one ordered
+consumer of the command channel, one ordered consumer of its workers' events,
+one future per resource load an import produced, and one clock task
 (`lifetime.rs`'s `serve_clock`) waiting on its realm's next timer deadline and
 on the runtime-wide checkpoint generation; a `Worker` realm on `bobcat-workers`
 has the same shape minus the document. Nothing is spawned per input: one
 consumer reads each ordered stream with `while let Some(x) = rx.recv().await`.
 Every task reaches the realm through one boundary, `main/page.rs`'s
-`Page::enter`, which runs one synchronous operation under the borrows of the
-shared runtime and the realm and then that operation's epilogue, in this order:
-the timers that came due, the commit, the boot report once, the `BeginFrame`
-acknowledgement, the module requests entry produced, the next timer deadline,
-and the checkpoint generation as of this entry. `Page::settle` is the epilogue
-alone, for a wake carrying no operation.
+`Page::enter`, which queues a job that runs one synchronous operation under the
+borrows of the shared runtime and the realm and then that operation's epilogue,
+in this order: the timers that came due, the commit, the boot report once, the
+`BeginFrame` acknowledgement, the module requests entry produced, the next timer
+deadline, and the checkpoint generation as of this entry. `Page::settle` is the
+epilogue alone, for a wake carrying no operation. What a *loading* page does
+with a burst is the exception: its document ingredients are a field of their
+own, never held across a wait, so a resize, an image report and the immediate
+`BeginFrame` acknowledgement are served on the task and never queue behind a
+sibling view's load. A `bobcat-workers` consumer never awaits the deliveries it
+queued, because `Terminate` is in band behind them: it queues one job per
+message and ends the worker the moment it reads one, which is what releases a
+job parked on a synchronous wait and discards the posts queued ahead of it.
 
 A view owns its channels end to end, all `tokio::sync` and none addressed.
 Three cross that link: a `ToMain` mpsc carrying commands in; a `ViewNotice`
@@ -428,9 +446,11 @@ adoption included. The fetcher owns pending loads, cached responses and
 failures; the reference `Resources` shares them by resolved URL within a scope
 and invalidates registered URLs when replaced or removed. Core holds only the
 current call's receiver. The embedder returns CSS text or a
-`PreparsedStyleSheet`; JS sees neither. An incomplete request parks MTS until
-the response arrives or the view is cancelled, without executing JS jobs or
-sibling views. Errors throw at adoption; an unused preload changes no styles.
+`PreparsedStyleSheet`; JS sees neither. An incomplete request parks the *job*
+the adoption is running in until the response arrives or the view is cancelled:
+no JavaScript job runs meanwhile, this realm's or a sibling's, while
+`bobcat-main`'s tasks — including the ones that route that very response —
+carry on. Errors throw at adoption; an unused preload changes no styles.
 Collection releases only the JS handle's URL association; resource lifetime
 belongs to the fetcher, adopted rules to the document. No native stylesheet
 handles, load state or adoption queue live in `MainThreadRuntime`. See

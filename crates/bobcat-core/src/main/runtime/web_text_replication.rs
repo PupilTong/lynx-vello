@@ -67,6 +67,7 @@ use tokio::sync::mpsc;
 
 use super::*;
 use crate::background::{WorkerCommand, WorkerEvent, WorkerHome};
+use crate::jobs::JsThread;
 use crate::link::{DetachedView, block_on_deadline, detached_outbox};
 use crate::main::tree::{PageConfig, Viewport};
 use crate::main::workers::WorkerFactory;
@@ -89,6 +90,8 @@ struct DocumentProbe {
     // open so the realm's own boot succeeds.
     _workers: mpsc::UnboundedReceiver<WorkerCommand>,
     _worker_events: mpsc::UnboundedReceiver<WorkerEvent>,
+    /// The engine thread the realm was opened with, held for its life.
+    _thread: Rc<JsThread>,
 }
 
 impl DocumentProbe {
@@ -128,11 +131,13 @@ fn runtime_over(
     let mut js_runtime = ScriptRuntime::new().expect("the test runtime starts");
     install_shared_modules(&mut js_runtime).expect("the shared modules register");
     let (workers, inbox) = mpsc::unbounded_channel();
+    let thread = JsThread::new();
     let (runtime, worker_events) = MainThreadRuntime::new(
         &mut js_runtime,
         ingredients,
         outbox,
         &WorkerFactory::new(workers),
+        thread.handle(),
         // The script is evaluated afterwards, so this supplies the base URL
         // alone.
         &mut RealmStartup {
@@ -145,6 +150,7 @@ fn runtime_over(
         slot: Rc::clone(&runtime.slot),
         _workers: inbox,
         _worker_events: worker_events,
+        _thread: thread,
     };
     (js_runtime, runtime, probe)
 }
@@ -161,6 +167,8 @@ struct BackgroundPair {
     slot: Rc<RefCell<DocumentSlot>>,
     /// The host end of the view's link, held open for as long as the realm is.
     _view: DetachedView,
+    /// The engine thread the realm was opened with, held for its life.
+    _thread: Rc<JsThread>,
     /// **Last field, and it must stay last.** Fields drop in declaration
     /// order, and the realm holds a sender on the thread this owns.
     _home: WorkerHome,
@@ -200,11 +208,13 @@ fn background_pair(main: &str, background: &str) -> BackgroundPair {
     let mut ingredients =
         DocumentIngredients::for_test(Viewport::new(393.0, 727.0), PageConfig::default());
     ingredients.text_context = Some(text);
+    let thread = JsThread::new();
     let (mut runtime, events) = MainThreadRuntime::new(
         &mut js,
         ingredients,
         outbox,
         &WorkerFactory::new(home.commands()),
+        thread.handle(),
         // The main script is evaluated below, so this names the BTS entry and
         // the base URL and nothing else.
         &mut RealmStartup {
@@ -224,6 +234,7 @@ fn background_pair(main: &str, background: &str) -> BackgroundPair {
         events,
         slot,
         _view: view,
+        _thread: thread,
         _home: home,
     }
 }

@@ -6,7 +6,8 @@ use std::rc::Rc;
 use quickjs_rust_bridge::HostValue;
 
 use super::{DocumentSlot, MainThreadError, ScriptEngine, ScriptRuntime, install};
-use crate::link::{ViewOutbox, block_on};
+use crate::jobs::JsThreadHandle;
+use crate::link::ViewOutbox;
 use crate::resource::{LoadedSource, SourceRequest, StyleSheetSource, unanswered_source};
 
 pub(super) fn install_styles(
@@ -14,6 +15,7 @@ pub(super) fn install_styles(
     js: &mut ScriptRuntime,
     document: &Rc<RefCell<DocumentSlot>>,
     outbox: &ViewOutbox,
+    thread: JsThreadHandle,
 ) -> Result<(), MainThreadError> {
     let sources = outbox.host_outbox(outbox.token().clone());
     install(engine, js, "preloadStyleSheet", 1, move |args| {
@@ -34,16 +36,23 @@ pub(super) fn install_styles(
         // This receiver lives only for this call. Cache lookup and sharing an
         // in-flight preload belong to the resource fetcher on the host thread.
         let answer = sources.request(SourceRequest::StyleSheet(url.clone()));
-        let source = block_on(async {
-            tokio::select! {
-                biased;
-                () = token.cancelled() => Err("view was released".to_owned()),
-                result = answer => result
-                    .unwrap_or_else(|_| Err(unanswered_source().into()))
-                    .map_err(|error| error.to_string()),
-            }
-        })
-        .map_err(|error| format!("loading stylesheet {url}: {error}"))?;
+        // The one synchronous wait a realm can make. It is inside a job, so
+        // what it drives is this engine thread's tasks — channel reads,
+        // lifecycle signals, acknowledgements, the routing that answers this
+        // very request — and none of its jobs: no JavaScript of this realm's
+        // or any sibling's runs before this returns. The view's own token is
+        // first, so a release ends the wait rather than the response doing it.
+        let source = thread
+            .wait(async {
+                tokio::select! {
+                    biased;
+                    () = token.cancelled() => Err("view was released".to_owned()),
+                    result = answer => result
+                        .unwrap_or_else(|_| Err(unanswered_source().into()))
+                        .map_err(|error| error.to_string()),
+                }
+            })
+            .map_err(|error| format!("loading stylesheet {url}: {error}"))?;
         let mut slot = document.borrow_mut();
         match source {
             LoadedSource::StyleSheet(StyleSheetSource::Text(css)) => {

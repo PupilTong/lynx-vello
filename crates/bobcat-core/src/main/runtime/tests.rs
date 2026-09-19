@@ -2,6 +2,7 @@ use tokio::sync::mpsc;
 
 use super::*;
 use crate::background::{WorkerCommand, WorkerEvent};
+use crate::jobs::JsThread;
 use crate::link::{DetachedView, detached_outbox};
 use crate::main::tree::{PageConfig, Viewport};
 use crate::main::workers::WorkerFactory;
@@ -242,6 +243,11 @@ struct DocumentProbe {
     // runtime.
     _workers: mpsc::UnboundedReceiver<WorkerCommand>,
     _worker_events: mpsc::UnboundedReceiver<WorkerEvent>,
+    /// The engine thread `__AdoptStyleSheet` parks on. These tests call the
+    /// runtime directly rather than queueing jobs, but a realm is opened with
+    /// a live thread and a synchronous adoption needs one, so the probe holds
+    /// it for as long as the realm lives.
+    _thread: Rc<JsThread>,
 }
 
 impl DocumentProbe {
@@ -296,11 +302,13 @@ fn runtime_over_watching_names(
     let mut js_runtime = ScriptRuntime::new().expect("the test runtime starts");
     install_shared_modules(&mut js_runtime).expect("the shared modules register");
     let (workers, inbox) = mpsc::unbounded_channel();
+    let thread = JsThread::new();
     let (runtime, worker_events) = MainThreadRuntime::new(
         &mut js_runtime,
         ingredients,
         outbox,
         &WorkerFactory::new(workers),
+        thread.handle(),
         // No entry here: these tests evaluate their own scripts against the
         // realm afterwards, so the startup supplies the base URL alone.
         &mut RealmStartup {
@@ -313,6 +321,7 @@ fn runtime_over_watching_names(
         slot: Rc::clone(&runtime.slot),
         _workers: inbox,
         _worker_events: worker_events,
+        _thread: thread,
     };
     (js_runtime, runtime, probe, PublishedNames(far_end))
 }
@@ -344,6 +353,8 @@ fn two_view_group_with(
     let (workers, inbox) = mpsc::unbounded_channel();
     ends.workers = Some(inbox);
     let workers = WorkerFactory::new(workers);
+    let thread = JsThread::new();
+    ends.thread = Some(Rc::clone(&thread));
     for mut startup in pages {
         // The base URL every worker specifier in these tests resolves
         // against; each view's own script is evaluated by hand afterwards.
@@ -354,6 +365,7 @@ fn two_view_group_with(
             ingredients(),
             outbox,
             &workers,
+            thread.handle(),
             &mut startup,
         )
         .expect("main-thread runtime");
@@ -372,6 +384,8 @@ struct GroupFarEnds {
     views: Vec<DetachedView>,
     workers: Option<mpsc::UnboundedReceiver<WorkerCommand>>,
     worker_events: Vec<mpsc::UnboundedReceiver<WorkerEvent>>,
+    /// The engine thread both realms were opened with, held for their life.
+    thread: Option<Rc<JsThread>>,
 }
 
 /// The host's page data reaches the realm it was given to as plain strings,
@@ -3697,9 +3711,13 @@ fn every_adoption_requests_its_url_and_mounts_the_fetchers_response() {
     }
 }
 
-#[tokio::test(flavor = "current_thread")]
+// A plain test rather than a `tokio::test`: the adoption's wait is a
+// `block_on` of the realm's own engine thread, and starting a runtime from
+// inside another one is what tokio refuses. Production is the same shape — the
+// wait happens in a job, which the top loop runs outside its `block_on`.
+#[test]
 #[expect(clippy::float_cmp, reason = "rounded widths are exact CSS pixels")]
-async fn adopt_waits_for_its_own_request_and_reports_errors_synchronously() {
+fn adopt_waits_for_its_own_request_and_reports_errors_synchronously() {
     for outcome in ["success", "failure", "dropped", "cancelled"] {
         let (mut js, mut runtime, elements, mut far) = runtime_over_watching_names(ingredients());
         runtime

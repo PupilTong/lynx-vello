@@ -10,12 +10,14 @@
 //! not a re-export of the runtime. It is `#[doc(hidden)]` and carries no
 //! stability promise.
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use dom::event::EventSteps;
 use tokio::sync::mpsc;
 
 use crate::background::{WorkerCommand, WorkerEvent};
+use crate::jobs::JsThread;
 use crate::link::{DetachedView, InputEventPayload, detached_outbox};
 use crate::main::WorkerFactory;
 use crate::main::quickjs::ScriptRuntime;
@@ -34,6 +36,10 @@ pub struct ScriptHarness {
     /// The runtime the realm lives on, as a group owns one.
     js_runtime: ScriptRuntime,
     runtime: MainThreadRuntime,
+    /// The engine thread the realm's synchronous host members would park on.
+    /// Nothing here is a job — a benchmark calls the runtime directly — but a
+    /// realm is opened with a live thread, so this harness owns one.
+    _thread: Rc<JsThread>,
     /// The far end of the same link the engine builds, so a benchmark can ask
     /// the question the router asks — and pay what it pays. Retaining it is
     /// also what keeps the realm's sends succeeding: these benchmarks measure
@@ -77,11 +83,13 @@ impl ScriptHarness {
         let mut js_runtime = ScriptRuntime::new().expect("the benchmark runtime starts");
         install_shared_modules(&mut js_runtime).expect("the shared modules register");
         let (workers, inbox) = mpsc::unbounded_channel();
+        let thread = JsThread::new();
         let (runtime, worker_events) = MainThreadRuntime::new(
             &mut js_runtime,
             ingredients,
             outbox,
             &WorkerFactory::new(workers),
+            thread.handle(),
             // The script is evaluated afterwards, so this supplies the base
             // URL alone.
             &mut RealmStartup {
@@ -93,6 +101,7 @@ impl ScriptHarness {
         Self {
             js_runtime,
             runtime,
+            _thread: thread,
             view,
             _workers: inbox,
             _worker_events: worker_events,

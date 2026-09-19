@@ -40,6 +40,7 @@ mod background;
 pub mod bench_support;
 mod clock;
 mod esm;
+mod jobs;
 mod lifetime;
 mod link;
 #[path = "main/lib.rs"]

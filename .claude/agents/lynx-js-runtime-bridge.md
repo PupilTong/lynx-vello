@@ -28,6 +28,10 @@ and `bobcat-workers` (every Worker realm, including the BTS).
 
 ## Where things are
 
+- `crates/bobcat-core/src/jobs.rs` — what an engine thread *is*. `JsThread`
+  owns the tokio `current_thread` runtime, the `LocalSet` and a FIFO of jobs its
+  top loop runs between two turns of that scheduler; `JsThreadHandle` is the
+  `Weak` everything inside a task or a realm holds.
 - `crates/bobcat-core/src/main/` — the Lynx main thread. `page.rs` holds
   `Page::enter`, the single boundary every task reaches the realm through, and
   the epilogue it owes; `quickjs.rs` is the crate-private `ScriptEngine`;
@@ -37,8 +41,9 @@ and `bobcat-workers` (every Worker realm, including the BTS).
 - `crates/bobcat-core/src/background/` — the `bobcat-workers` thread and worker
   realm scopes. `view/` holds `LynxGroup`, `LynxView`, `ViewSources` and
   `create_lynx_view`; `paint/` the `Painter`; `link.rs` the per-view channels;
-  `lifetime.rs` the `CancellationToken` and `serve_clock`; `timers.rs`,
-  `clock.rs`/`alarm.rs`, `esm.rs`, `script.rs`, `resource.rs`, `style.rs`.
+  `lifetime.rs` the `CancellationToken`, `serve_clock` and `run_job`;
+  `timers.rs`, `clock.rs`/`alarm.rs`, `esm.rs`, `script.rs`, `resource.rs`,
+  `style.rs`.
 - `packages/bobcat-element/src/` — `element-papi.ts` (`bobcat:element`; its
   header table is the authoritative PAPI list: `__AddEvent`, `__GetEvent`,
   `__GetEvents`, `__SetEvents`, `__AddEventListener`, `__QuerySelector`(`All`),
@@ -51,6 +56,16 @@ and `bobcat-workers` (every Worker realm, including the BTS).
 
 Landed and not to be regressed:
 
+- **JavaScript never runs inside a tokio task's `poll`.** Each engine thread's
+  top loop runs queued jobs one at a time, outside the scheduler; tasks only
+  wait and route, and never touch a realm, a document or the shared
+  `ScriptRuntime`. A job may park on `JsThread::wait` — a fresh `block_on` of
+  the same `LocalSet` — so a synchronous host member (`adoptStyleSheet` today)
+  blocks JavaScript alone: tasks keep running, no other job does, and jobs
+  queued meanwhile run in FIFO order afterwards. A loading page's burst and
+  `stage_sheet` stay task-side so a sibling's load cannot delay a `BeginFrame`
+  acknowledgement; `consume_messages` on `bobcat-workers` never awaits the
+  deliveries it queued, because `Terminate` is in band behind them.
 - The BTS is a `Worker` named `lynx-bg` on the group's `bobcat-workers` runtime.
   A BTS failure is a nonfatal `EngineEvent::WorkerFailed` — never
   `StartupFailed`, never view teardown. `ScriptFinished` means MTS boot settled
