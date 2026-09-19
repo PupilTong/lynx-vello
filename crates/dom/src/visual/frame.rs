@@ -160,8 +160,8 @@ pub(crate) struct Presentation {
     /// One entry per [`ComposeOp::Image`], in program order. Carries names
     /// and geometry; never pixels.
     pub(crate) image_draws: Vec<crate::paint::compose::ImageDraw>,
-    /// One entry per [`ComposeOp::PushFilter`], in program order. Carries
-    /// device geometry and σ; never a GPU resource.
+    /// One entry per [`ComposeOp::PushFilter`] and [`ComposeOp::PushBackdrop`],
+    /// in program order. Carries device geometry and σ; never a GPU resource.
     pub(crate) filter_groups: Vec<FilterGroup>,
 }
 
@@ -222,7 +222,8 @@ impl CommittedFrame {
         );
     }
 
-    /// The frame's `filter: blur()` groups, in program order. Empty for the
+    /// The frame's offscreen-baked entries — `filter: blur()` groups and
+    /// `backdrop-filter` elements — in program order. Empty for the
     /// overwhelmingly common frame, which is why the whole bake pre-step is
     /// skipped on one test of this slice.
     #[must_use]
@@ -230,20 +231,29 @@ impl CommittedFrame {
         &self.presentation.filter_groups
     }
 
-    /// Replays filter group `index`'s own ops into `scene`, in the bake
-    /// target's coordinates: device px with the group's `rect` origin at
-    /// `(0, 0)` and the group's own chain factored *out*, because that chain
+    /// Replays filter entry `index`'s own ops into `scene`, in the bake
+    /// target's coordinates: device px with the entry's `rect` origin at
+    /// `(0, 0)` and the entry's own chain factored *out*, because that chain
     /// is applied when the baked texture is drawn rather than baked into it.
     ///
-    /// No animation instant is sampled. Export eligibility refuses a scroll
-    /// container inside an animated subtree and an animated element's whole
-    /// subtree rides its own slot, so content inside a group never sits on a
-    /// different *animation* chain than the group; only an inner *scroll*
-    /// chain produces a non-identity relative transform, and that is exactly
-    /// what `FilterGroup`'s `inner_chains` reports.
+    /// A `filter: blur()` group samples no animation instant, and
+    /// `animation_now` is ignored for one. Export eligibility refuses a
+    /// scroll container inside an animated subtree and an animated element's
+    /// whole subtree rides its own slot, so content inside a group never sits
+    /// on a different *animation* chain than the group; only an inner
+    /// *scroll* chain produces a non-identity relative transform, and that is
+    /// exactly what `FilterGroup`'s `inner_chains` reports.
     ///
-    /// `filtered` must already hold the textures of every group nested
-    /// inside this one — bake in order of increasing `ops.end`.
+    /// A `backdrop-filter` entry is the opposite case: its range is a prefix
+    /// of the frame, so it can hold any number of *other* elements' exported
+    /// curves. It therefore samples at `animation_now`, and the bake's own
+    /// cache keys on that reading whenever the range actually holds one.
+    /// After the replay it pops the layers the range left open and draws its
+    /// pre-blur passes over the whole bake rect, so neither lands inside a
+    /// clip.
+    ///
+    /// `filtered` must already hold the textures of every entry this one's
+    /// range draws — bake in order of increasing `ops.end`.
     pub fn bake_filter(
         &self,
         index: usize,
@@ -251,12 +261,14 @@ impl CommittedFrame {
         images: &[Option<ImageData>],
         filtered: &[Option<ImageData>],
         offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
+        animation_now: Option<f64>,
     ) {
         let groups = &self.presentation.filter_groups;
         let Some(group) = groups.get(index) else {
             return;
         };
-        let samples = self.order.sample_animations(None);
+        let backdrop = group.backdrop.as_ref();
+        let samples = self.order.sample_animations(backdrop.and(animation_now));
         let chain_transform = compose::device_transform(
             self.order.slots(),
             &samples,
@@ -279,6 +291,19 @@ impl CommittedFrame {
             },
             group.ops.start as usize..group.ops.end as usize,
             &transform,
+        );
+        let Some(backdrop) = backdrop else {
+            return;
+        };
+        for _ in 0..backdrop.open_pushes {
+            scene.pop_layer();
+        }
+        let (width, height) = group.size();
+        crate::paint::filters::draw_passes_rect(
+            scene,
+            &backdrop.before,
+            crate::vello::kurbo::Rect::new(0.0, 0.0, f64::from(width), f64::from(height)),
+            Affine::IDENTITY,
         );
     }
 

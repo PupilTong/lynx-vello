@@ -47,6 +47,18 @@ synonymous with “ignored”: the registry is the union of 145 active native
 snapshots and 189 skips. The asset inventory requires exact basename equality
 for the 666 browser PNGs, 145 native PNGs, and 334 difference fixtures.
 
+The atlas contains **no `backdrop-filter` case**, and cannot: its generator
+predates the property, Lynx has no `backdrop-filter` anywhere (so there is no
+compat surface to reference), and every atlas cell is an isolated 128×128
+document whose Backdrop Root is its own root element — which is exactly the
+one arrangement in which a backdrop of another cell is unrepresentable. The
+property's regression goldens are therefore ours alone, in
+`crates/dom/tests/blur_screenshots.rs` (`backdrop-filter/shapes.png`,
+`backdrop-filter/card-and-edges.png`) beside the four `filter: blur()` pages,
+with the analytic half in `crates/dom/tests/gpu_pixels.rs`. Adding atlas cases
+for it would mean a fresh Chromium capture run and new asserted disposition
+totals, which is the re-audit workflow's job rather than a code change's.
+
 `FLASHBULB_UPDATE_SNAPSHOTS` is rejected by the entire atlas suite. Browser
 references can only come from the Playwright split workflow. Native references
 can only be written through the filtered `CSS_PAINT_UPDATE_NATIVE=1` workflow

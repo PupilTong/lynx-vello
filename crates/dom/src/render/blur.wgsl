@@ -8,10 +8,14 @@
 // color mixes the color of fully transparent pixels into its neighbours,
 // which shows up as a dark halo around a white square on white.
 //
-// The sampler is clamp-to-edge. That is the correct edge mode here rather
-// than a compromise: the bake rect carries a >= 3 sigma transparent margin, so
-// what the clamp extends is transparent black, which is what
-// filter-effects-1 specifies for a filter region's outside.
+// The sampler is supplied per entry and is one of two, both linear. A
+// `filter: blur()` group binds the clamp-to-edge one: its bake rect carries a
+// >= 3 sigma transparent margin, so what the clamp extends is transparent
+// black, which is what filter-effects-1 specifies for a filter region's
+// outside. A `backdrop-filter` entry binds the mirror-repeat one: its rect is
+// the spec's crop with no margin at all, so a clamp would smear the crop's
+// edge row outward and a transparent border would darken it, while mirroring
+// reflects the backdrop back in.
 
 struct Params {
     // 1 / source texture size, in texels.

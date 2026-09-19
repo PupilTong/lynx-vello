@@ -1133,44 +1133,76 @@ a content-proportional second encoding): `scene()` borrows the single fragment
 of the common whole-frame shape and answers `None` for every other, and
 consumers needing a flat scene compose one on demand.
 
-### The one optional pre-step: `filter: blur()` bakes
+### The one optional pre-step: `filter: blur()` and `backdrop-filter` bakes
 
 That render path has exactly one conditional step in front of it, and one test
 selects it: `CommittedFrame::filter_groups()` is empty for every frame of every
-page that does not blur, and `compose_and_render` then behaves exactly as
-above. When it is not empty, each group is baked offscreen and blurred before
-the frame composes, and the composition draws one texture per group in place of
-that group's own ops.
+page that neither blurs nor filters a backdrop, and `compose_and_render` then
+behaves exactly as above. When it is not empty, each entry is baked offscreen
+and filtered before the frame composes, and the composition draws one texture
+per entry.
 
 The commit side stays device-free. A `FilterGroup` is σ and a rect in *device*
-pixels — the rect already 3σ larger than the group's content on every side, so
-the bake's edges read the transparent black filter-effects-1 specifies — plus
-the range of compose-program ops the group encloses, bracketed in the program
-by `PushFilter`/`PopFilter`. Those two ops encode nothing themselves, which is
-what lets one program serve both jobs: with a texture the bracket is one
-`draw_image` and the range is skipped, without one the range replays raw and
-the frame is simply **unblurred**. `Document::scene()` and any consumer with no
-GPU take that fallback by construction.
+pixels plus a range of compose-program ops, and the two properties differ only
+in what those mean.
+
+For a **`filter: blur()` group** the rect is already 3σ larger than the group's
+content on every side, so the bake's clamp-to-edge sampler reads the
+transparent black filter-effects-1 specifies; the range is the ops the group
+encloses, bracketed by `PushFilter`/`PopFilter`.
+
+For a **`backdrop-filter` entry** the rect is exactly the element's transformed
+border box — filter-effects-2 crops the Backdrop Root Image to it *before*
+filtering, and the property enlarges no ink overflow, so there is no margin —
+and the sampler is `MirrorRepeat`, which reflects the backdrop back in at that
+crop rather than smearing an edge row or darkening toward a transparent
+border. The range points **backwards**: from the content start of the
+element's nearest Backdrop Root ancestor (`filter`, `opacity < 1`, `mask`,
+`clip-path`, `mix-blend-mode`, `backdrop-filter`, or the root) to the
+element's own scope open — exactly what was painted before it inside that
+root. A `will-change` naming one of those properties is a Backdrop Root per
+the spec and is deliberately not one here, since no group layer is opened per
+`will-change` element (recorded in `docs/tracking/deviations.md`). Its one op, `PushBackdrop`, has no matching pop; it sits innermost in
+the element's own layers and before any of its items, so the element's
+`opacity`, `clip-path`, `mask-image` and `filter` apply to the backdrop and to
+the element together, and an element carrying both properties has its filtered
+backdrop baked *inside* its own blur group.
+
+Neither op encodes anything without a texture, which is what lets one program
+serve both jobs: with a texture the bracket is one `draw_image` and the range
+is skipped, or the backdrop is one fill through the element's own rounded
+border box; without one the group's range replays raw and the frame is simply
+**unblurred**, and the backdrop op draws nothing so the **unfiltered**
+backdrop it sits on is what shows. `Document::scene()` and any consumer with
+no GPU take that fallback by construction.
 
 The device side is `dom::render::blur::FilterTextures`, one per
 `vello::Renderer`, owned beside that renderer's `AtlasResidency` by `Headless`
-and by the painter's `WindowGraphics`. Its cache key is the commit id, plus the
-painter's scroll generation only when some group's content rides a scroll chain
-the group itself does not — a blurred scroller's content slides under the blur,
-an ordinary blurred box moves with it — so scrolling past an ordinary blurred
-box re-bakes nothing. Commit ids restart per document, so a target pointed at a
-second document must `forget` the cache, the same obligation it already has for
-its own compose key. Bakes happen in post-order, so a nested group's texture
-exists before the group around it bakes; each bake is a `render_to_texture` and
-therefore owes the residency a pass of its own, because a bake of a
-solid-colour group is precisely the patch-free render that frees vello's image
-atlas. The baked textures are override images, so the *composite* render names
-them to the residency too.
+and by the painter's `WindowGraphics`. Its cache key is the commit id plus two
+conditional terms: the painter's scroll generation, only when some entry's
+range rides a scroll chain the entry itself does not — a blurred scroller's
+content slides under the blur, an ordinary blurred box moves with it — and the
+timeline reading, only when some *backdrop* entry's range rides another
+element's animation chain, which a blur group can never be in a position to
+do. So scrolling past an ordinary blurred box, and ticking an animation
+nothing is moving behind, both re-bake nothing. Commit ids restart per
+document, so a target pointed at a second document must `forget` the cache,
+the same obligation it already has for its own compose key. Bakes happen in
+increasing order of range end, so every texture an entry's own range draws
+already exists when it bakes; each bake is a `render_to_texture` and therefore
+owes the residency a pass of its own, because a bake of a solid-colour group
+is precisely the patch-free render that frees vello's image atlas. The baked
+textures are override images, so the *composite* render names them to the
+residency too.
 
 Filter memory is page-complexity-linear, so it is capped: 8192 device px per
-texture side and a quarter of the atlas in total area, consumed in program
-order. A group past the cap gets no texture and takes the unblurred fallback —
-the fallback is the budget's enforcement mechanism, not an error path.
+texture side and a quarter of the atlas in total area, shared by both kinds of
+entry and consumed in program order. An entry past the cap gets no texture and
+takes the unfiltered fallback — the fallback is the budget's enforcement
+mechanism, not an error path.
+
+Neither property is exported as a composite curve, so an animated one
+recommits and re-bakes every tick.
 
 ## Composite animations compose; the rest tick
 

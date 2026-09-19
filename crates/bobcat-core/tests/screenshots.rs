@@ -633,3 +633,162 @@ async fn a_blurred_card_reaches_the_offscreen_draw_target() {
         .expect("captured RGBA image");
     screenshots().assert_matches(&["filter-blur-card"], &image);
 }
+
+/// One `display: flex` rule over `properties` — the backdrop golden's whole
+/// sheet is boxes, and naming `display` in every one of them is noise.
+fn block(selectors: &str, properties: &[(&str, &str)]) -> PreparsedRule {
+    PreparsedRule::Style {
+        selectors: selectors.to_owned(),
+        declarations: std::iter::once(declaration("display", "flex"))
+            .chain(
+                properties
+                    .iter()
+                    .map(|(name, value)| declaration(name, value)),
+            )
+            .collect(),
+    }
+}
+
+/// The backdrop board, built the only way script can: a crimson left half,
+/// two amber bars, one Roboto run, and two `.card` views over them — the
+/// first with `backdrop-filter`, the second opting out.
+const BACKDROP_CARD_SCRIPT: &str = r"
+globalThis.renderPage = function renderPage() {
+  const page = __CreatePage('card', 0);
+  __SetClasses(page, 'page');
+  const board = __CreateView(0);
+  __SetClasses(board, 'board');
+  function part(classes) {
+    const node = __CreateView(0);
+    __SetClasses(node, classes);
+    __AppendElement(board, node);
+  }
+  part('half');
+  part('bar');
+  part('bar lower');
+  const text = __CreateText(0);
+  __SetClasses(text, 'label');
+  __AppendElement(text, __CreateRawText('Frosted over text'));
+  __AppendElement(board, text);
+  part('card');
+  part('card plain');
+  __AppendElement(page, board);
+};
+";
+
+/// Requirement: `backdrop-filter` survives the whole embedder path — an author
+/// sheet the host pre-parsed, a commit on `bobcat-main`, and the painter's own
+/// `compose_and_render`, whose bake pre-step now produces backdrops beside
+/// blur groups.
+///
+/// The two cards are the same translucent rounded box over the same crimson /
+/// white seam and the same amber bar, one above the other, and the lower one
+/// carries `backdrop-filter: none`. So the golden shows a relationship rather
+/// than a picture: everything behind the upper card is filtered and everything
+/// behind the lower one is not.
+#[tokio::test]
+async fn a_backdrop_filtered_card_reaches_the_offscreen_draw_target() {
+    const ROBOTO: &[u8] = include_bytes!("../../hughie/tests/fixtures/Roboto-Regular.ttf");
+
+    let (_view, mut painter) = booted_with_sheet_sources(
+        BACKDROP_CARD_SCRIPT.as_bytes(),
+        PreparsedStyleSheet {
+            rules: vec![
+                PreparsedRule::Style {
+                    selectors: ".page".to_owned(),
+                    declarations: vec![
+                        declaration("display", "flex"),
+                        declaration("padding", "20px"),
+                        declaration("background-color", "#e5e7eb"),
+                        declaration("font-family", "Roboto"),
+                    ],
+                },
+                block(
+                    ".board",
+                    &[
+                        ("position", "relative"),
+                        ("width", "353px"),
+                        ("height", "320px"),
+                        ("background-color", "#ffffff"),
+                    ],
+                ),
+                block(
+                    ".half",
+                    &[
+                        ("position", "absolute"),
+                        ("left", "0px"),
+                        ("top", "0px"),
+                        ("width", "176px"),
+                        ("height", "320px"),
+                        ("background-color", "#dc2626"),
+                    ],
+                ),
+                block(
+                    ".bar",
+                    &[
+                        ("position", "absolute"),
+                        ("left", "0px"),
+                        ("top", "56px"),
+                        ("width", "353px"),
+                        ("height", "24px"),
+                        ("background-color", "#f59e0b"),
+                    ],
+                ),
+                PreparsedRule::Style {
+                    selectors: ".lower".to_owned(),
+                    declarations: vec![declaration("top", "216px")],
+                },
+                PreparsedRule::Style {
+                    selectors: ".label".to_owned(),
+                    declarations: vec![
+                        declaration("position", "absolute"),
+                        declaration("left", "24px"),
+                        declaration("top", "96px"),
+                        declaration("width", "310px"),
+                        declaration("font-size", "24px"),
+                        declaration("color", "#111827"),
+                    ],
+                },
+                block(
+                    ".card",
+                    &[
+                        ("position", "absolute"),
+                        ("left", "36px"),
+                        ("top", "16px"),
+                        ("width", "280px"),
+                        ("height", "130px"),
+                        ("border-radius", "18px"),
+                        ("border", "2px solid rgb(255 255 255 / 70%)"),
+                        ("box-sizing", "border-box"),
+                        ("background-color", "rgb(255 255 255 / 35%)"),
+                        ("backdrop-filter", "blur(7px)"),
+                    ],
+                ),
+                // Source order decides: `.plain` is declared after `.card`, so
+                // the second card keeps every other declaration, drops to the
+                // lower band, and gives up only the filter.
+                PreparsedRule::Style {
+                    selectors: ".plain".to_owned(),
+                    declarations: vec![
+                        declaration("top", "176px"),
+                        declaration("backdrop-filter", "none"),
+                    ],
+                },
+            ],
+        },
+        393.0,
+        360.0,
+        ViewSources {
+            style_sheets: vec!["app:///author.css".to_owned()],
+            fonts: vec![FontBlob::from_static(ROBOTO)],
+            default_font_family: Some("Roboto".to_owned()),
+            ..ViewSources::new(SCRIPT_URL)
+        },
+    )
+    .await;
+
+    let shot = painter.capture().expect("capture the backdrop page");
+    let image = Image::from_rgba8(shot.size.width, shot.size.height, shot.pixels)
+        .expect("captured RGBA image");
+    screenshots().assert_matches(&["backdrop-filter-card"], &image);
+}

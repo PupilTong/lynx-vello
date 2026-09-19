@@ -262,6 +262,31 @@ impl WalkSink<'_> {
             Self::Compose(assembly) => assembly.pop_filter(),
         }
     }
+
+    /// Seals any open fragment and answers the program length — the boundary
+    /// a `backdrop-filter` range starts or ends at. Zero for the monolithic
+    /// sink, which has no program; its ranges are therefore always empty and
+    /// it records no backdrop at all.
+    fn content_boundary(&mut self) -> u32 {
+        match self {
+            Self::Monolithic(..) => 0,
+            Self::Compose(assembly) => assembly.content_boundary(),
+        }
+    }
+
+    /// Records a `backdrop-filter` entry over the already-emitted `ops`,
+    /// answering whether one was recorded.
+    ///
+    /// The monolithic sink records none, for the same reason it records no
+    /// filter group: with no side table and no composer its walk simply
+    /// leaves the backdrop unfiltered, which keeps it a usable culling
+    /// oracle for a page that uses the property.
+    fn push_backdrop(&mut self, entry: FilterGroup, ops: std::ops::Range<u32>) -> bool {
+        match self {
+            Self::Monolithic(..) => false,
+            Self::Compose(assembly) => assembly.push_backdrop(entry, ops),
+        }
+    }
 }
 
 /// Reused per-frame buffers.
@@ -357,6 +382,17 @@ struct Scope {
     /// Whether [`open_scope`] recorded a filter group for this scope, which
     /// [`close_scope`] then has to close.
     blurred: bool,
+    /// The program length right after this scope's own pushes and its
+    /// `PushFilter`, and right *before* its own `PushBackdrop` — where a
+    /// descendant's Backdrop Root Image begins when this scope is that
+    /// descendant's Backdrop Root. Including this scope's own
+    /// `PushBackdrop` is deliberate: filter-effects-2 draws the filtered
+    /// backdrop inside the element's group, so it is part of what a nested
+    /// element sees behind itself.
+    content_start: u32,
+    /// Whether this scope is a Backdrop Root (filter-effects-2 §2.2); see
+    /// [`is_backdrop_root`].
+    backdrop_root: bool,
 }
 
 /// One culled monolithic walk — the pre-compose shape, kept beside
@@ -694,6 +730,13 @@ fn open_scope<T>(
     let style = document
         .paint_style(layer.node)
         .expect("a group-effect stacking context keeps its style for the frame");
+    // filter-effects-2 §2.2: the Backdrop Root Image is everything painted
+    // before *this element*, so the range ends here — before this scope's own
+    // effect layer, its `clip-path` layer and, decisively, the mask pattern
+    // `mask::paint` would otherwise draw into it. The ops from here to the
+    // `PushBackdrop` recorded below are this element's own painting.
+    let backdrop_end = (!style.get_effects().backdrop_filter.0.is_empty())
+        .then(|| (nearest_backdrop_root(scratch), sink.content_boundary()));
     let bounds = scratch.layer_bounds[layer_index];
     let effects = style.get_effects();
     let blend = blend_mode(style);
@@ -723,29 +766,7 @@ fn open_scope<T>(
         )
     });
 
-    if let Some(fragment) = fragment.as_ref()
-        && let Some((clip_shape, fill)) =
-            crate::paint::shape::clip_path_shape(style, &fragment.reference_boxes())
-    {
-        match local {
-            Some(local) => sink.push_layer_box(
-                chain,
-                fill,
-                BlendMode::new(Mix::Normal, Compose::SrcOver),
-                1.0,
-                scale * local,
-                clip_shape,
-            ),
-            None => sink.push_layer_rect(
-                chain,
-                None,
-                Fill::NonZero,
-                BlendMode::new(Mix::Normal, Compose::SrcOver),
-                1.0,
-                Affine::IDENTITY,
-                Rect::ZERO,
-            ),
-        }
+    if push_clip_path(sink, chain, style, fragment.as_ref(), local, scale) {
         pushed += 1;
     }
 
@@ -772,13 +793,180 @@ fn open_scope<T>(
     let blurred = filter_group(scratch, layer_index, chain, ratio)
         .is_some_and(|group| sink.push_filter(group));
 
+    // Innermost of all, and before any item: the filtered backdrop is the
+    // first thing painted inside this element's own group, so this scope's
+    // `opacity`, `clip-path`, `mask-image` and `filter` apply to the backdrop
+    // and to the element together.
+    let content_start = sink.content_boundary();
+    if let Some((root_start, end)) = backdrop_end
+        && let Some(entry) = backdrop_entry(style, layer, chain, scale, ratio)
+    {
+        sink.push_backdrop(entry, root_start..end);
+    }
+
     scratch.scopes.push(Scope {
         layer: layer_index,
         base,
         pushed,
         filtered: !effects.filter.0.is_empty(),
         blurred,
+        content_start,
+        backdrop_root: is_backdrop_root(style),
     });
+}
+
+/// Pushes this scope's `clip-path` layer, answering whether it pushed one.
+///
+/// A full `push_layer` rather than a clip layer, per the module doc's #1198
+/// rule. A singular map has no shape to clip with, so it pushes an empty rect
+/// instead — which encodes the same "nothing gets through".
+fn push_clip_path(
+    sink: &mut WalkSink<'_>,
+    chain: ComposeChain,
+    style: &stylo::properties::ComputedValues,
+    fragment: Option<&BoxFragment>,
+    local: Option<Affine>,
+    scale: Affine,
+) -> bool {
+    let Some(fragment) = fragment else {
+        return false;
+    };
+    let Some((clip_shape, fill)) =
+        crate::paint::shape::clip_path_shape(style, &fragment.reference_boxes())
+    else {
+        return false;
+    };
+    match local {
+        Some(local) => sink.push_layer_box(
+            chain,
+            fill,
+            BlendMode::new(Mix::Normal, Compose::SrcOver),
+            1.0,
+            scale * local,
+            clip_shape,
+        ),
+        None => sink.push_layer_rect(
+            chain,
+            None,
+            Fill::NonZero,
+            BlendMode::new(Mix::Normal, Compose::SrcOver),
+            1.0,
+            Affine::IDENTITY,
+            Rect::ZERO,
+        ),
+    }
+    true
+}
+
+/// Where the Backdrop Root Image of a scope about to open begins: the
+/// content start of the nearest enclosing Backdrop Root, or the start of the
+/// program when there is none.
+///
+/// Falling back to zero *is* the spec's root-element rule: the document root
+/// element is always a Backdrop Root, and nothing is painted before program
+/// index zero.
+fn nearest_backdrop_root(scratch: &Scratch) -> u32 {
+    scratch
+        .scopes
+        .iter()
+        .rev()
+        .find(|scope| scope.backdrop_root)
+        .map_or(0, |scope| scope.content_start)
+}
+
+/// Whether this element is a Backdrop Root (filter-effects-2 §2.2).
+///
+/// The spec's list, and the reason this predicate exists at all rather than
+/// reusing [`crate::visual::stacking::needs_group_rendering`]: that one also
+/// answers `true` for `isolation: isolate`, which the spec's Backdrop Root
+/// list does not contain. `isolation` is not in the fork's author grammar
+/// either, so that exclusion is unobservable here.
+///
+/// The one **observable** omission is `will-change`: a
+/// `will-change: opacity` (or `filter`, `backdrop-filter`, `mask`,
+/// `clip-path`) element is a Backdrop Root per the spec, and this engine
+/// opens no group layer for one, so a `backdrop-filter` element inside such a
+/// wrapper sees through it to the content behind. That is a ruled deviation —
+/// the decision is not to open a layer per `will-change` element — recorded
+/// in `docs/tracking/deviations.md`.
+fn is_backdrop_root(style: &stylo::properties::ComputedValues) -> bool {
+    use stylo::computed_values::mix_blend_mode::T as MixBlendMode;
+    use stylo::values::computed::basic_shape::ClipPath;
+
+    let effects = style.get_effects();
+    effects.opacity < 1.0
+        || !effects.filter.0.is_empty()
+        || !effects.backdrop_filter.0.is_empty()
+        || effects.mix_blend_mode != MixBlendMode::Normal
+        || style.get_svg().clip_path != ClipPath::None
+        || mask::has_mask(style)
+}
+
+/// The `backdrop-filter` entry this layer records, if it can bake one.
+///
+/// `None` for an element with no `backdrop-filter`, a singular or degenerate
+/// map (nothing of the backdrop would be visible through it), and a border
+/// box whose device rect is empty or not finite.
+///
+/// The rect is exactly the element's transformed border box, rounded out —
+/// `backdrop-filter` enlarges no ink overflow, so unlike a `filter: blur()`
+/// group there is no 3σ margin. It is also the crop filter-effects-2 §2.2
+/// applies *before* filtering, and the edge the bake's mirror sampler
+/// reflects at.
+fn backdrop_entry(
+    style: &stylo::properties::ComputedValues,
+    layer: &RenderLayer,
+    chain: ComposeChain,
+    scale: Affine,
+    ratio: f64,
+) -> Option<FilterGroup> {
+    let list = &style.get_effects().backdrop_filter.0;
+    if list.is_empty() {
+        return None;
+    }
+    let local = convert::item_affine(&layer.transform, layer.size)?;
+    let transform = scale * local;
+    if !(transform.determinant().is_finite() && transform.determinant() != 0.0) {
+        return None;
+    }
+    let border_box = Rect::new(0.0, 0.0, layer.size.width as f64, layer.size.height as f64);
+    let device = affine_rect(transform, border_box);
+    if !is_finite(device) {
+        return None;
+    }
+    let rect = Rect::new(
+        device.x0.floor(),
+        device.y0.floor(),
+        device.x1.ceil(),
+        device.y1.ceil(),
+    );
+    if !(rect.width() >= 1.0 && rect.height() >= 1.0) {
+        return None;
+    }
+    let plan = filters::plan(list);
+    // A colour-only list is σ = 0, which bakes and filters as usual; only a
+    // list with no `blur()` at all skips the gaussian.
+    let sigma = plan
+        .sigma
+        .map_or(0.0, |sigma| f64::from(sigma) * mean_scale(local) * ratio);
+    let backdrop = crate::paint::compose::Backdrop {
+        shape: BoxShape::new(border_box, &layer.radii),
+        transform,
+        before: filters::passes(list, plan.before.clone()),
+        after: filters::passes(list, plan.after.clone()),
+        inner_animations: false,
+        open_pushes: 0,
+    };
+    Some(FilterGroup::with_backdrop(
+        if sigma.is_finite() && sigma > 0.0 {
+            sigma as f32
+        } else {
+            0.0
+        },
+        rect,
+        chain,
+        backdrop,
+    ))
 }
 
 /// The filter group this layer bakes, if it blurs at all.
@@ -840,11 +1028,14 @@ fn close_scope<T>(sink: &mut WalkSink<'_>, scratch: &mut Scratch, painting: Pain
         .filtered
         .then(|| document.paint_style(layer.node))
         .flatten()
-        .map(|style| (style, filters::plan(style)));
-    if let Some((style, plan)) = &plan {
+        .map(|style| {
+            let list = &style.get_effects().filter.0;
+            (list, filters::plan(list))
+        });
+    if let Some((list, plan)) = &plan {
         filters::apply(
             sink.scene_for(chain),
-            style,
+            list,
             plan.before.clone(),
             bounds,
             scale,
@@ -853,10 +1044,10 @@ fn close_scope<T>(sink: &mut WalkSink<'_>, scratch: &mut Scratch, painting: Pain
     if scope.blurred {
         sink.pop_filter();
     }
-    if let Some((style, plan)) = &plan {
+    if let Some((list, plan)) = &plan {
         filters::apply(
             sink.scene_for(chain),
-            style,
+            list,
             plan.after.clone(),
             bounds,
             scale,
@@ -1334,20 +1525,27 @@ fn layer_blur_sigma<T>(document: &Document<T>, layer: &RenderLayer) -> f64 {
     let Some(style) = document.paint_style(layer.node) else {
         return 0.0;
     };
-    let Some(sigma) = filters::plan(style).sigma else {
+    let Some(sigma) = filters::plan(&style.get_effects().filter.0).sigma else {
         return 0.0;
     };
     let Some(affine) = convert::item_affine(&layer.transform, layer.size) else {
         // A singular map encodes nothing, so there is nothing to blur.
         return 0.0;
     };
-    let mean = affine.nuclear_norm_squared().sqrt() / 2.0;
-    let scaled = f64::from(sigma) * mean;
+    let scaled = f64::from(sigma) * mean_scale(affine);
     if scaled.is_finite() && scaled > 0.0 {
         scaled
     } else {
         0.0
     }
+}
+
+/// The arithmetic mean of a map's two singular values, read off
+/// `Affine::nuclear_norm_squared` — the nuclear norm *is* their sum. Shared
+/// by `filter` and `backdrop-filter`, which scale σ into device space the
+/// same way.
+fn mean_scale(affine: Affine) -> f64 {
+    affine.nuclear_norm_squared().sqrt() / 2.0
 }
 
 /// `rect` grown by `reach` on every side. A zero reach is the rect itself, so
@@ -1493,8 +1691,8 @@ mod tests {
     use vello::kurbo::Affine;
 
     use super::{
-        PaintItem, PaintItemKind, Rect, Scene, Scratch, can_reach, cull_rect, item_bounds, walk,
-        walk_uncultured,
+        ComposeAssembly, ComposeOp, PaintItem, PaintItemKind, Rect, Scene, Scratch, can_reach,
+        cull_rect, item_bounds, walk, walk_compose, walk_uncultured,
     };
     use crate::Size2D;
     use crate::paint::equivalence::assert_scenes_identical;
@@ -1834,6 +2032,169 @@ mod tests {
         assert_eq!(
             frames.painted, 2,
             "the page and the box whose blur reaches the viewport",
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // `backdrop-filter`
+    // -----------------------------------------------------------------
+
+    /// One compose walk's program and the layer bounds it pushed with.
+    fn compose(doc: &mut Doc) -> (crate::paint::compose::Finished, Vec<Rect>) {
+        let frame = doc.dom.build_paint_order();
+        let images = crate::render::image::ImageRegistry::default();
+        let mut assembly = ComposeAssembly::default();
+        let mut scratch = Scratch::default();
+        walk_compose(&mut assembly, &mut scratch, &doc.dom, &frame, &images);
+        let bounds = scratch.layer_bounds.clone();
+        (assembly.finish(), bounds)
+    }
+
+    /// A marker box, a wrapper carrying `wrapper`, and inside it a second
+    /// marker and a `backdrop-filter` box.
+    ///
+    /// The wrapper is always a group scope, so the two markers always land in
+    /// two fragments; what varies is whether the wrapper is a *Backdrop Root*,
+    /// and therefore whether the outer marker is in the box's range.
+    const BACKDROP_PAGE: &str =
+        "page { display: flex; position: relative; width: 800px; height: 600px; }
+         .mark { display: flex; position: absolute; left: 0px; top: 0px;
+                 width: 50px; height: 50px; background-color: teal; }
+         .wrap { display: flex; position: absolute; left: 0px; top: 0px;
+                 width: 200px; height: 200px; }
+         .box { display: flex; position: absolute; left: 10px; top: 10px;
+                width: 100px; height: 100px; backdrop-filter: blur(4px); }";
+
+    /// How many fragments a `backdrop-filter` box's range holds, on a page
+    /// whose wrapper carries `wrapper`.
+    fn fragments_behind(wrapper: &str) -> (usize, u32) {
+        let mut doc = Doc::with_css(BACKDROP_PAGE);
+        let root = doc.root;
+        doc.el(root, "view.mark");
+        let wrap = doc.el(root, "view.wrap");
+        doc.set_inline(wrap, wrapper);
+        doc.el(wrap, "view.mark");
+        doc.el(wrap, "view.box");
+        let (finished, _) = compose(&mut doc);
+        assert_eq!(finished.filter_groups.len(), 1, "one backdrop entry");
+        let entry = &finished.filter_groups[0];
+        assert!(entry.is_backdrop());
+        let count = finished.program[entry.ops.start as usize..entry.ops.end as usize]
+            .iter()
+            .filter(|op| matches!(op, ComposeOp::Fragment { .. }))
+            .count();
+        (count, entry.ops.start)
+    }
+
+    /// The range begins at the nearest Backdrop Root's content start.
+    ///
+    /// The second loop pins the two deliberate non-roots beside the two
+    /// stacking contexts that were never roots to begin with.
+    /// `isolation: isolate` is not in the spec's Backdrop Root list (and is
+    /// not in the fork's author grammar either, so its exclusion is
+    /// unobservable), while `will-change: opacity` **is** one per the spec:
+    /// this engine opens no group layer for it, so the element inside sees
+    /// through it. Ruled, and recorded in `docs/tracking/deviations.md`.
+    #[test]
+    fn a_backdrops_range_begins_at_its_backdrop_root() {
+        for wrapper in [
+            "opacity: 0.5",
+            "filter: grayscale(1)",
+            "clip-path: inset(0px)",
+            "mask-image: linear-gradient(black, transparent)",
+        ] {
+            let (count, start) = fragments_behind(wrapper);
+            assert_eq!(count, 1, "{wrapper}: only what it painted itself");
+            assert!(start > 0, "{wrapper}: and not from the frame's start");
+        }
+        // A stacking context with no group effect roots nothing, so the range
+        // runs from the frame's own start — which is the document root
+        // element's, the spec's root Backdrop Root. `will-change: opacity` is
+        // the deviation: the spec makes it a Backdrop Root and we do not.
+        for wrapper in [
+            "transform: translate(0px)",
+            "z-index: 1",
+            "will-change: opacity",
+        ] {
+            let (count, start) = fragments_behind(wrapper);
+            assert_eq!(start, 0, "{wrapper} is no Backdrop Root");
+            assert!(count >= 1, "{wrapper}: and the whole prefix is in range");
+        }
+    }
+
+    /// An element with both properties records its blur bracket first, so the
+    /// filtered backdrop is baked *inside* the element's own blur group — and
+    /// the backdrop's own range ends before either, at the element's first
+    /// layer push.
+    #[test]
+    fn a_filter_bracket_precedes_the_backdrop_it_encloses() {
+        let mut doc = Doc::with_css(BACKDROP_PAGE);
+        let root = doc.root;
+        doc.el(root, "view.mark");
+        let boxed = doc.el(root, "view.box");
+        doc.set_inline(boxed, "filter: blur(4px)");
+        let (finished, _) = compose(&mut doc);
+
+        let bracket = finished
+            .program
+            .iter()
+            .position(|op| matches!(op, ComposeOp::PushFilter { .. }))
+            .expect("the blur group's bracket");
+        let backdrop = finished
+            .program
+            .iter()
+            .position(|op| matches!(op, ComposeOp::PushBackdrop { .. }))
+            .expect("the backdrop op");
+        assert_eq!(
+            backdrop,
+            bracket + 1,
+            "the backdrop is innermost, inside the blur bracket",
+        );
+        let entry = finished
+            .filter_groups
+            .iter()
+            .find(|entry| entry.is_backdrop())
+            .expect("the backdrop entry");
+        assert!(
+            entry.ops.end < bracket as u32,
+            "and its own range stops before the element's own painting",
+        );
+        assert!(
+            matches!(
+                finished.program[entry.ops.end as usize],
+                ComposeOp::Push { .. }
+            ),
+            "which is exactly the element's first layer push",
+        );
+    }
+
+    /// `backdrop-filter` enlarges no ink overflow: the group's pushed rect is
+    /// the element's own box, where the same σ as a `filter` grows it by 3σ.
+    #[test]
+    fn a_backdrop_inflates_no_bounds() {
+        let css = "page { display: flex; position: relative; width: 800px; height: 600px; }
+             .box { display: flex; position: absolute; left: 200px; top: 200px;
+                    width: 100px; height: 100px; background-color: teal; }";
+        let mut bounds = Vec::new();
+        for extra in [
+            "opacity: 0.99",
+            "opacity: 0.99; backdrop-filter: blur(20px)",
+            "opacity: 0.99; filter: blur(20px)",
+        ] {
+            let mut doc = Doc::with_css(css);
+            let root = doc.root;
+            let boxed = doc.el(root, "view.box");
+            doc.set_inline(boxed, extra);
+            let (_, layer_bounds) = compose(&mut doc);
+            assert_eq!(layer_bounds.len(), 1, "{extra}: one group layer");
+            bounds.push(layer_bounds[0]);
+        }
+        assert_eq!(bounds[0], bounds[1], "a backdrop inflates nothing");
+        assert!(
+            (bounds[2].x0 - bounds[0].x0 + 60.0).abs() < 1e-6,
+            "while a filter grows the same box by 3 sigma ({:?} vs {:?})",
+            bounds[2],
+            bounds[0],
         );
     }
 }

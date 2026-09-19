@@ -1,22 +1,25 @@
-//! Golden screenshots of `filter: blur()`.
+//! Golden screenshots of `filter: blur()` (pages 1-4) and `backdrop-filter`
+//! (pages 5-6).
 //!
 //! These are regression goldens of *our own* output, not browser references —
 //! the nine Chromium-referenced `filter-04x` cases in `tests/css_atlas.rs`
 //! stay `Skip`, because promoting them is an audited disposition that needs a
 //! Chromium comparison this workspace cannot run.
 //!
-//! The blur path is only observable in pixels: the compose program's bracket
-//! ops encode nothing, so every property below — that the bake happens, that
-//! it is premultiplied, that its 3σ margin survives a cell or a page edge,
-//! that σ scales with the group's transform, that a chain splits where the
-//! list says — is invisible to an encoding comparison and to a numeric probe
-//! that is not already looking at the right pixel. `tests/gpu_pixels.rs`
-//! asserts the analytic half (monotone profiles, symmetry, ink bounds); this
+//! The offscreen path is only observable in pixels: the compose program's
+//! bracket and backdrop ops encode nothing without a baked texture, so every
+//! property below — that the bake happens, that it is premultiplied, that a
+//! filter's 3σ margin survives a cell or a page edge, that a backdrop's crop
+//! is its own border box and its edges mirror, that σ scales with the
+//! element's transform, that a chain splits where the list says — is
+//! invisible to an encoding comparison and to a numeric probe that is not
+//! already looking at the right pixel. `tests/gpu_pixels.rs` asserts the
+//! analytic half (monotone profiles, symmetry, ink bounds, crops); this
 //! binary is the half a reviewer *looks at*.
 //!
-//! Every page carries unblurred controls beside the blurred cells on purpose:
-//! a golden of a blur alone can only regress into "different", while one
-//! beside its own reference regresses into "wrong".
+//! Every page carries unfiltered controls beside the filtered cells on
+//! purpose: a golden of a blur alone can only regress into "different", while
+//! one beside its own reference regresses into "wrong".
 //!
 //! Every fixture renders **vendored Roboto**, never a host font; see
 //! `support/screenshot.rs` for why that is not optional. Refresh with:
@@ -412,4 +415,171 @@ fn checker(width: u32, height: u32) -> (u32, u32, Vec<u8>) {
         }
     }
     (width, height, rgba)
+}
+
+/// The board every `backdrop-filter` cell filters: a white card with a
+/// crimson left half and an amber bar across it, so every subject sits over
+/// one vertical seam, one horizontal seam and two hues.
+///
+/// A backdrop is made of what the *scene* drew, not of the render's base
+/// colour, so the card paints its own opaque white. The two hues are what
+/// makes a colour pass in a chain legible beside a blur.
+fn board(row: usize, col: usize, inner: &str) -> String {
+    format!(
+        r#"<div style="display: flex; position: absolute; left: {left}px; top: {top}px; width: 115px; height: 128px; background-color: #ffffff">
+  <div style="display: flex; position: absolute; left: 0px; top: 0px; width: 57px; height: 128px; background-color: #dc2626"></div>
+  <div style="display: flex; position: absolute; left: 0px; top: 78px; width: 115px; height: 18px; background-color: #f59e0b"></div>
+  {inner}
+</div>"#,
+        left = LEFT[col],
+        top = TOP[row],
+    )
+}
+
+/// Page 5 — `backdrop-filter` geometry.
+///
+/// Every cell is the same board with one subject over its seams, so a reader
+/// compares what is *inside* the subject against the same board beside it.
+/// Nothing here paints a background of its own unless the cell says so: what
+/// is drawn is the element's own backdrop, filtered.
+///
+/// | | c0 | c1 | c2 |
+/// | --- | --- | --- | --- |
+/// | r0 | `blur(6px)` | `blur(6px)` + `border-radius: 24px` | no filter — control |
+/// | r1 | `blur(2px)` | `blur(12px)` — the decimated path | `blur(6px)` on a circle |
+/// | r2 | frosted card: `blur(8px)` + a translucent white background | the same card unfiltered — control | `blur(6px)` + `opacity: 0.6` |
+/// | r3 | `blur(6px)` under `rotate(20deg)`, ringed so the crop is legible | the same ring unfiltered — control | `blur(4px) brightness(0.7)` — a chain |
+/// | r4 | `brightness(0.5)` alone — the σ = 0 bake | `grayscale(1) blur(4px)` | a box **inside** an `opacity: 0.5` wrapper: its backdrop stops at the wrapper |
+#[test]
+fn backdrop_shapes_matrix_matches_reference() {
+    // The rotated pair carries a ring so the crop's own shape is visible:
+    // the blur inside it is bounded by a rotated rectangle, which is the one
+    // place the axis-aligned bake rect and the drawn shape differ.
+    const RING: &str = "border: 2px solid #1d4ed8; box-sizing: border-box; \
+                        transform: rotate(20deg)";
+    let subject = |extra: &str| -> String {
+        format!(
+            r#"<div style="display: flex; position: absolute; left: 16px; top: 28px; width: 84px; height: 72px; {extra}"></div>"#
+        )
+    };
+    let body = [
+        board(0, 0, &subject("backdrop-filter: blur(6px)")),
+        board(
+            0,
+            1,
+            &subject("backdrop-filter: blur(6px); border-radius: 24px"),
+        ),
+        board(0, 2, &subject("")),
+        board(1, 0, &subject("backdrop-filter: blur(2px)")),
+        board(1, 1, &subject("backdrop-filter: blur(12px)")),
+        board(
+            1,
+            2,
+            r#"<div style="display: flex; position: absolute; left: 22px; top: 28px; width: 72px; height: 72px; border-radius: 50%; backdrop-filter: blur(6px)"></div>"#,
+        ),
+        board(
+            2,
+            0,
+            &subject(
+                "backdrop-filter: blur(8px); background-color: rgb(255 255 255 / 45%); \
+                 border-radius: 14px; border: 1px solid rgb(29 78 216 / 60%); \
+                 box-sizing: border-box",
+            ),
+        ),
+        board(
+            2,
+            1,
+            &subject(
+                "background-color: rgb(255 255 255 / 45%); border-radius: 14px; \
+                 border: 1px solid rgb(29 78 216 / 60%); box-sizing: border-box",
+            ),
+        ),
+        board(2, 2, &subject("backdrop-filter: blur(6px); opacity: 0.6")),
+        board(
+            3,
+            0,
+            &subject(&format!("{RING}; backdrop-filter: blur(6px)")),
+        ),
+        board(3, 1, &subject(RING)),
+        board(3, 2, &subject("backdrop-filter: blur(4px) brightness(0.7)")),
+        board(4, 0, &subject("backdrop-filter: brightness(0.5)")),
+        board(4, 1, &subject("backdrop-filter: grayscale(1) blur(4px)")),
+        // The wrapper is a Backdrop Root, so the board behind it is *not* in
+        // the subject's backdrop. What the subject filters is the wrapper's
+        // own teal bar and nothing else, and the wrapper's own `opacity`
+        // fades backdrop and subject together.
+        board(
+            4,
+            2,
+            r#"<div style="display: flex; position: absolute; left: 0px; top: 0px; width: 115px; height: 128px; opacity: 0.5">
+  <div style="display: flex; position: absolute; left: 0px; top: 52px; width: 115px; height: 22px; background-color: #0d9488"></div>
+  <div style="display: flex; position: absolute; left: 16px; top: 28px; width: 84px; height: 72px; backdrop-filter: blur(6px)"></div>
+</div>"#,
+        ),
+    ]
+    .concat();
+
+    let actual = screenshot::capture(
+        "backdrop_shapes_matrix_matches_reference",
+        &page(&body),
+        SCREEN_WIDTH,
+        SCREEN_HEIGHT,
+    );
+    screenshot::assert_golden(&["backdrop-filter", "shapes"], &actual);
+}
+
+/// Page 6 — a frosted card over text, and the crop's own edges.
+///
+/// The top band is the shape the property exists for: a translucent card with
+/// `backdrop-filter: blur()` over body text, beside the identical card with
+/// no filter. Underneath it, four statements about the crop:
+///
+/// - **Nesting.** The small box inside the frosted card filters the card's *filtered* backdrop,
+///   because the card is not a Backdrop Root and its filtered image is painted inside its own
+///   group.
+/// - **Later siblings.** The amber bar is painted *after* the card, so it crosses it with a hard
+///   edge — it is in front of the backdrop, not in it.
+/// - **Straddling a seam.** The middle band's two subjects sit astride a navy/white edge, one
+///   square and one rounded with a colour pass after the blur.
+/// - **The page's own edges.** The last card hangs off the page's left edge and the last box off
+///   its bottom-right corner. Their crops run outside the viewport, where the commit culled
+///   everything; the mirror edge mode is what keeps the visible part from darkening toward the
+///   boundary.
+#[test]
+fn backdrop_card_and_edges_matches_reference() {
+    const FRAGMENT: &str = r#"
+<div style="display: flex; position: relative; width: 393px; height: 727px; background-color: #e5e7eb; font-family: Roboto; color: #111827">
+  <div style="display: flex; position: absolute; left: 12px; top: 12px; width: 369px; height: 200px; background-color: #fef3c7">
+    <div class="text-block" style="display: flex; position: absolute; left: 14px; top: 16px; width: 341px; font-size: 19px">Sphinx of black quartz judge</div>
+    <div class="text-block" style="display: flex; position: absolute; left: 14px; top: 48px; width: 341px; font-size: 19px">Pack my box with five dozen</div>
+    <div class="text-block" style="display: flex; position: absolute; left: 14px; top: 80px; width: 341px; font-size: 19px">The quick brown fox jumps</div>
+    <div class="text-block" style="display: flex; position: absolute; left: 14px; top: 112px; width: 341px; font-size: 19px">How vexingly quick zebras</div>
+    <div class="text-block" style="display: flex; position: absolute; left: 14px; top: 144px; width: 341px; font-size: 19px">Waltz bad nymph for jigs</div>
+    <div style="display: flex; position: absolute; left: 14px; top: 40px; width: 160px; height: 120px; border-radius: 16px; background-color: rgb(255 255 255 / 40%); backdrop-filter: blur(6px)">
+      <div style="display: flex; position: absolute; left: 16px; top: 76px; width: 128px; height: 28px; border-radius: 8px; backdrop-filter: brightness(0.6)"></div>
+    </div>
+    <div style="display: flex; position: absolute; left: 195px; top: 40px; width: 160px; height: 120px; border-radius: 16px; background-color: rgb(255 255 255 / 40%)"></div>
+    <div style="display: flex; position: absolute; left: 0px; top: 92px; width: 369px; height: 12px; background-color: #f59e0b"></div>
+  </div>
+  <div style="display: flex; position: absolute; left: 12px; top: 232px; width: 369px; height: 190px; background-color: #ffffff">
+    <div style="display: flex; position: absolute; left: 0px; top: 0px; width: 185px; height: 190px; background-color: #0f172a"></div>
+    <div style="display: flex; position: absolute; left: 0px; top: 82px; width: 369px; height: 22px; background-color: #0d9488"></div>
+    <div style="display: flex; position: absolute; left: 137px; top: 16px; width: 96px; height: 56px; backdrop-filter: blur(8px)"></div>
+    <div style="display: flex; position: absolute; left: 137px; top: 114px; width: 96px; height: 56px; border-radius: 28px; backdrop-filter: blur(8px) grayscale(1)"></div>
+  </div>
+  <div style="display: flex; position: absolute; left: 12px; top: 442px; width: 369px; height: 150px; background-color: #0f172a"></div>
+  <div style="display: flex; position: absolute; left: 60px; top: 470px; width: 200px; height: 44px; background-color: #f59e0b"></div>
+  <div style="display: flex; position: absolute; left: -48px; top: 460px; width: 240px; height: 120px; background-color: rgb(255 255 255 / 30%); border-radius: 20px; backdrop-filter: blur(10px)"></div>
+  <div style="display: flex; position: absolute; left: 236px; top: 612px; width: 145px; height: 100px; background-color: #0d9488"></div>
+  <div style="display: flex; position: absolute; left: 300px; top: 656px; width: 120px; height: 90px; backdrop-filter: blur(6px)"></div>
+</div>
+"#;
+
+    let actual = screenshot::capture(
+        "backdrop_card_and_edges_matches_reference",
+        FRAGMENT,
+        SCREEN_WIDTH,
+        SCREEN_HEIGHT,
+    );
+    screenshot::assert_golden(&["backdrop-filter", "card-and-edges"], &actual);
 }

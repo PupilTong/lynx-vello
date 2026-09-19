@@ -1,7 +1,14 @@
-//! CSS `filter` (filter-effects-1): the color adjustments as blend-mode
-//! composites, and `blur()` as an offscreen bake the compose program carries.
+//! CSS `filter` (filter-effects-1) and `backdrop-filter` (filter-effects-2):
+//! the color adjustments as blend-mode composites, and `blur()` as an
+//! offscreen bake the compose program carries.
 //!
-//! One element's `filter` list splits at its **first** `blur()`, which is
+//! Both properties share this module, because their value grammar is one
+//! grammar: [`plan`], [`passes`] and [`apply`] take the computed list rather
+//! than the style, and the caller names which of the two it is reading. What
+//! differs is where the halves are drawn — see the `backdrop-filter` section
+//! below.
+//!
+//! One element's filter list splits at its **first** `blur()`, which is
 //! what [`plan`] answers. The walker opens the group's blur scope inside the
 //! scope's own layers, so at scope close the composite order is: the passes
 //! *before* the blur (drawn inside the bake), then the blur itself, then the
@@ -60,16 +67,28 @@
 //! Filter *chains* parse in the fork (filter-effects-1 order); each
 //! function applies in list order — successive `SrcAtop` draws compose
 //! naturally.
+//!
+//! # `backdrop-filter`
+//!
+//! filter-effects-2 applies the same list to a *different* image: the
+//! Backdrop Root Image, which is everything painted before the element
+//! inside its nearest Backdrop Root ancestor, cropped to the element's own
+//! border box. The split is the same one, and so is every pass, but the two
+//! halves land elsewhere: `before` is drawn inside the backdrop's own bake,
+//! over the whole bake rect, and `after` is drawn at compose time over the
+//! drawn backdrop, bounded by the element's rounded border box. Both halves
+//! travel as [`Pass`] values on the frame's filter side table rather than as
+//! a style the bake would have to re-read, because a bake runs on the
+//! painter's thread with no document in reach.
 
 use std::ops::Range;
 
-use stylo::properties::ComputedValues;
-
+use crate::paint::shape::{BoxShape, with_shape};
 use crate::vello::Scene;
 use crate::vello::kurbo::{Affine, Rect};
 use crate::vello::peniko::{BlendMode, Color, Compose, Fill, Mix};
 
-type Filter = stylo::values::computed::effects::Filter;
+pub(crate) type Filter = stylo::values::computed::effects::Filter;
 
 /// One element's `filter` list, split at its first `blur()`.
 ///
@@ -89,14 +108,9 @@ pub(crate) struct FilterPlan {
     pub(crate) sigma: Option<f32>,
 }
 
-/// Splits `style`'s `filter` list at its first `blur()` and folds every
-/// `blur()` σ into one.
-pub(crate) fn plan(style: &ComputedValues) -> FilterPlan {
-    split(&style.get_effects().filter.0)
-}
-
-/// [`plan`] over the list alone, so the split is checkable without a cascade.
-fn split(filters: &[Filter]) -> FilterPlan {
+/// Splits a computed `filter` or `backdrop-filter` list at its first
+/// `blur()` and folds every `blur()` σ into one.
+pub(crate) fn plan(filters: &[Filter]) -> FilterPlan {
     let len = filters.len();
     let mut first_blur = None;
     let mut variance = 0.0_f32;
@@ -128,33 +142,89 @@ fn split(filters: &[Filter]) -> FilterPlan {
 /// Draws the adjustment passes of `range`, in list order.
 pub(crate) fn apply(
     scene: &mut Scene,
-    style: &ComputedValues,
+    filters: &[Filter],
     range: Range<usize>,
     bounds: Rect,
     transform: Affine,
 ) {
-    let filters = &style.get_effects().filter.0;
-    let range = range.start.min(filters.len())..range.end.min(filters.len());
-    for filter in &filters[range] {
-        let Some(pass) = adjustment_pass(filter) else {
-            continue;
-        };
-        scene.push_layer(
+    for filter in &filters[clamp(range, filters.len())] {
+        if let Some(pass) = adjustment_pass(filter) {
+            draw_rect(scene, &pass, bounds, transform);
+        }
+    }
+}
+
+/// The blend passes of `range`, in list order.
+///
+/// [`apply`] over a style the caller still holds; this is the form a
+/// `backdrop-filter` entry carries them in, since its two halves are drawn
+/// by a bake and by a replay, neither of which can reach a computed style.
+pub(crate) fn passes(filters: &[Filter], range: Range<usize>) -> Vec<Pass> {
+    filters[clamp(range, filters.len())]
+        .iter()
+        .filter_map(adjustment_pass)
+        .collect()
+}
+
+/// Draws already-collected passes bounded by `bounds`.
+pub(crate) fn draw_passes_rect(
+    scene: &mut Scene,
+    passes: &[Pass],
+    bounds: Rect,
+    transform: Affine,
+) {
+    for pass in passes {
+        draw_rect(scene, pass, bounds, transform);
+    }
+}
+
+/// Draws already-collected passes bounded by a rounded box — a backdrop's
+/// `after` half, whose bound is the element's own border box.
+pub(crate) fn draw_passes_shape(
+    scene: &mut Scene,
+    passes: &[Pass],
+    shape: &BoxShape,
+    transform: Affine,
+) {
+    for pass in passes {
+        with_shape!(shape, |s| scene.push_layer(
             Fill::NonZero,
             BlendMode::new(pass.mix, Compose::SrcAtop),
             pass.alpha,
             transform,
-            &bounds,
-        );
-        scene.fill(Fill::NonZero, transform, gray(pass.level), None, &bounds);
+            s
+        ));
+        with_shape!(shape, |s| scene.fill(
+            Fill::NonZero,
+            transform,
+            gray(pass.level),
+            None,
+            s
+        ));
         scene.pop_layer();
     }
 }
 
+fn draw_rect(scene: &mut Scene, pass: &Pass, bounds: Rect, transform: Affine) {
+    scene.push_layer(
+        Fill::NonZero,
+        BlendMode::new(pass.mix, Compose::SrcAtop),
+        pass.alpha,
+        transform,
+        &bounds,
+    );
+    scene.fill(Fill::NonZero, transform, gray(pass.level), None, &bounds);
+    scene.pop_layer();
+}
+
+fn clamp(range: Range<usize>, len: usize) -> Range<usize> {
+    range.start.min(len)..range.end.min(len)
+}
+
 /// One filter function's blend pass: a flat achromatic fill composited
 /// `SrcAtop` under `mix` at the layer's `alpha`.
-#[derive(Debug, PartialEq)]
-struct Pass {
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Pass {
     mix: Mix,
     alpha: f32,
     level: f32,
@@ -287,7 +357,7 @@ mod tests {
 
     #[test]
     fn a_list_with_no_blur_applies_whole_at_scope_close() {
-        let plan = split(&[
+        let plan = plan(&[
             Filter::Grayscale(ZeroToOne(1.0)),
             Filter::Contrast(NonNegative(0.5)),
         ]);
@@ -298,7 +368,7 @@ mod tests {
 
     #[test]
     fn the_split_puts_earlier_passes_inside_the_bake() {
-        let plan = split(&[
+        let plan = plan(&[
             Filter::Grayscale(ZeroToOne(1.0)),
             blur(4.0),
             Filter::Contrast(NonNegative(0.5)),
@@ -310,7 +380,7 @@ mod tests {
 
     #[test]
     fn several_blurs_fold_by_variance_at_the_first_one() {
-        let plan = split(&[blur(3.0), Filter::Saturate(NonNegative(0.5)), blur(4.0)]);
+        let plan = plan(&[blur(3.0), Filter::Saturate(NonNegative(0.5)), blur(4.0)]);
         assert_eq!(plan.before, 0..0);
         assert_eq!(plan.after, 1..3);
         let sigma = plan.sigma.expect("the list holds two blurs");
@@ -319,10 +389,10 @@ mod tests {
 
     #[test]
     fn a_zero_or_non_finite_blur_is_no_blur_at_all() {
-        assert_eq!(split(&[blur(0.0)]).sigma, None);
-        assert_eq!(split(&[blur(f32::INFINITY)]).sigma, None);
+        assert_eq!(plan(&[blur(0.0)]).sigma, None);
+        assert_eq!(plan(&[blur(f32::INFINITY)]).sigma, None);
         // The list still splits at the first blur that carries a σ.
-        let plan = split(&[blur(0.0), blur(2.0)]);
+        let plan = plan(&[blur(0.0), blur(2.0)]);
         assert_eq!(plan.sigma, Some(2.0));
         assert_eq!(plan.before, 0..1);
     }
