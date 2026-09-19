@@ -4,13 +4,20 @@
 //! private paint pipeline, submits the retained scene to `dom`'s headless
 //! wgpu surface, and reads the pixels back. Everything else in the crate works
 //! on pixels that are already in hand.
+//!
+//! [`capture_document`] goes through the committed frame rather than through
+//! `Document::scene`, for two reasons a screenshot cares about: the frame's
+//! image draws resolve against the store the caller supplied (so a captured
+//! page's bitmaps are the ones it asked for), and its `filter: blur()` groups
+//! get their offscreen bake. `capture_scene` keeps taking a scene somebody
+//! else composed and therefore neither.
 
 use std::fmt;
 
 use dom::Document;
 use dom::render::gpu::{GpuError, Headless};
 use dom::vello::Scene;
-use dom::vello::peniko::Color;
+use dom::vello::peniko::{Color, ImageData};
 
 use crate::image::{Image, ImageError};
 
@@ -78,7 +85,33 @@ pub fn capture_document_sized<T: Sync>(
     height: u32,
 ) -> Result<Image, CaptureError> {
     document.render();
-    capture_scene_sized(gpu, &document.scene(pixels), background, width, height)
+    // One `Headless` captures many documents in these suites and commit ids
+    // restart at one per document, so the bake cache's key cannot tell them
+    // apart. A capture is of a document just rendered, so there is no reuse
+    // worth keeping anyway.
+    gpu.forget_filters();
+    let frame = document
+        .committed_frame()
+        .expect("`Document::render` always leaves a committed frame retained");
+    let (mut images, mut sources) = (Vec::new(), Vec::new());
+    frame.resolve_images(pixels, &mut images, &mut sources);
+    // No offsets and no generation: a capture composes the frame exactly as
+    // it was committed.
+    let filtered: Vec<Option<ImageData>> = gpu
+        .prepare_filters(&frame, &images, &|_| None, 0)
+        .map_err(CaptureError::Gpu)?
+        .to_vec();
+    let mut composed = Scene::new();
+    let scene = if let Some(scene) = frame.scene() {
+        scene
+    } else {
+        frame.compose_into(&mut composed, &images, &filtered, &|_| None, None);
+        &composed
+    };
+    let pixels = gpu
+        .render(scene, &images, width, height, background)
+        .map_err(CaptureError::Gpu)?;
+    Image::from_rgba8(width, height, pixels).map_err(CaptureError::Image)
 }
 
 /// Captures a scene retained by a document's painter.

@@ -1663,7 +1663,10 @@ Subsystems:
 - `input/` and `event/` — the `InputEvent` host seam and
   `Document::event_steps`, which computes a path and dispatches nothing.
 - `render/` — the DOM-free floor absorbed from the former `pulsar` crate
-  (2026-08-04): `FrameImages` and the `render::gpu` wgpu backend.
+  (2026-08-04): `FrameImages` and the `render::gpu` wgpu backend. `render::blur`
+  is the one exception: a `filter: blur()` bake is a partial replay of a
+  committed frame's compose program, so it reads `CommittedFrame`'s filter side
+  table, while still naming no node, style, layout or paint-order type.
 
 Rulings and limits to know before touching it:
 
@@ -2134,7 +2137,8 @@ installs TypeScript 5.9.3, used by nothing but rspeedy's `lynx.config.ts`
 loader (see the `rspeedy` catalog in `pnpm-workspace.yaml`).
 
 **Screenshot tests** live in `crates/*/tests/screenshots.rs` — plus per-topic
-siblings (`dom` also has `text_screenshots.rs` and `css_atlas.rs`) — with
+siblings (`dom` also has `text_screenshots.rs`, `web_text_screenshots.rs`,
+`blur_screenshots.rs` and `css_atlas.rs`) — with
 committed goldens in `crates/*/tests/screenshots/`, driven by
 `crates/flashbulb`. The ordinary suites share one capture harness in
 `tests/support/screenshot.rs`; the browser-referenced CSS atlas owns the

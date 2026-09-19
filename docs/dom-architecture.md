@@ -325,6 +325,28 @@ publishes an `AnimationSlot` curve the consumer samples at its own timeline
 reading. `docs/dom-public-api.md`'s "Retained visual output" row is the
 authoritative description of the whole surface.
 
+`filter: blur()` adds the one conditional step in front of that path.
+`CommittedFrame::filter_groups()` — empty unless the page blurs — carries per
+group a device-pixel σ and rect (already 3σ larger than the group's content, so
+the bake's clamped edges read transparent black) plus the range of program ops
+the group encloses, bracketed by `PushFilter`/`PopFilter`. The bracket encodes
+nothing, so one program serves both readings: `compose_into` takes a `filtered`
+table and draws a group's texture in place of its ops where one exists, and
+replays the range raw where none does — which is the documented *unblurred*
+fallback a GPU-less consumer, `Document::scene()`, and a group past the memory
+budget all take. `CommittedFrame::bake_filter` replays one group's range into
+an offscreen scene with the group's own chain factored out, since that chain is
+applied when the texture is drawn. The whole commit stays device-free and
+recyclable: the group table is reclaimed with the frame's other tables.
+
+Because the 3σ ink margin has to survive the viewport edge, the walker inflates
+a filtered layer's bounds *before* intersecting them with the viewport, and
+inflates the cull region by the sum of 3σ over every enclosing filtered layer.
+σ itself is scaled into viewport pixels by the arithmetic mean of the two
+singular values of the group's local-to-viewport linear map (read off
+`Affine::nuclear_norm_squared`) — exact under rotation and uniform scale, one
+isotropic number under a non-uniform scale or a skew (recorded limit).
+
 The image seam is the `FrameImages` trait in `crates/dom/src/render/image.rs` —
 `read(source, ImageSizeHint)` and `retain(frame)` — with `ImageReports`,
 `ImageInbox`, `ImageEvent` and the `NoImages` no-op store beside it. The
@@ -348,8 +370,13 @@ crate (2026-08-04): the `render` module holds the `FrameImages` trait
 (re-exported at the crate root) and the `render::gpu` wgpu
 render-to-texture/readback backend (`gpu::Headless`, plus the
 `read_texture`/`renderer_options`/`render_params`/`AtlasResidency` seams
-windowed embedders build against). Nothing in `render` knows about nodes,
-computed styles, layout, or paint order. A render names the bitmaps its scene
+windowed embedders build against). `render::blur` is the third seam, and the
+one narrow exception to the floor's DOM-freedom: `FilterTextures::prepare`
+reads a `CommittedFrame`'s filter side table and calls the frame's own
+`bake_filter`, because a bake *is* a partial replay of that frame's compose
+program. It still knows nothing about nodes, computed styles, layout or paint
+order — the frame hands it device-pixel geometry and an opaque op range — and
+nothing else in `render` names a frame at all. A render names the bitmaps its scene
 draws: vello frees its persistent image atlas whenever a scene with no patch at
 all renders while its image cache still counts every resident image clean, so
 `AtlasResidency` — one per `vello::Renderer` — re-marks each image once after

@@ -198,9 +198,52 @@ impl Output {
     /// its texture is the only place a frame exists, so keeping it would hand
     /// a reader the previous document's pixels as this one's.
     fn forget(&mut self) {
-        if let Self::Offscreen(gpu) = self {
-            gpu.forget();
+        match self {
+            #[cfg(test)]
+            Self::None => {}
+            Self::Offscreen(gpu) => gpu.forget(),
+            // A window keeps its surface and its last presented frame, but
+            // the filter bakes still have to forget which *frame* they belong
+            // to: commit ids restart at one per document.
+            Self::Window(graphics) => graphics.forget_filters(),
         }
+    }
+
+    /// Bakes `frame`'s `filter: blur()` groups into `out`, index-parallel
+    /// with the frame's filter groups.
+    ///
+    /// The table is copied out rather than borrowed because the very next
+    /// step needs the target mutably again to render; an `ImageData` is a
+    /// blob handle plus four fields, and `out` keeps its capacity across
+    /// frames, so the copy allocates nothing in the steady state.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::Gpu`] if a bake render fails.
+    fn prepare_filters(
+        &mut self,
+        frame: &CommittedFrame,
+        images: &[Option<ImageData>],
+        offset_of: &dyn Fn(&dom::ScrollSlot) -> Option<Vector2D<f32>>,
+        scroll_generation: u64,
+        out: &mut Vec<Option<ImageData>>,
+    ) -> Result<(), EngineError> {
+        out.clear();
+        let baked = match self {
+            #[cfg(test)]
+            // A painter with nowhere to draw bakes nothing, so every group
+            // falls back to replaying raw — which is what a routing test
+            // wants: no device.
+            Self::None => return Ok(()),
+            Self::Offscreen(gpu) => gpu
+                .prepare_filters(frame, images, offset_of, scroll_generation)
+                .map_err(|error| EngineError::Gpu(error.to_string()))?,
+            Self::Window(graphics) => {
+                graphics.prepare_filters(frame, images, offset_of, scroll_generation)?
+            }
+        };
+        out.extend(baked.iter().cloned());
+        Ok(())
     }
 
     /// Renders one composed scene, drawing `images`, into this target at
@@ -308,6 +351,10 @@ pub struct Painter {
     /// detach, and [`Painter::attach`] is what clears it.
     composed: Option<(ComposeKey, FrameSize)>,
     composed_scene: Scene,
+    /// The `filter: blur()` textures of the frame being composed, copied out
+    /// of the target's bake cache. Kept here so its capacity outlives a
+    /// frame.
+    composed_filters: Vec<Option<ImageData>>,
     refill_requested_for: Option<u64>,
     /// The pixels this commit draws, read out of the attached view's store.
     images: images::PainterImages,
@@ -454,25 +501,48 @@ fn clamp_scroll_axis(value: f32, max: f32) -> f32 {
 /// the offset the intents carry for it. A frame whose whole program is one
 /// unscrolled fragment, asked for at no offset and no animation instant, is
 /// rendered straight out of the commit — composing it would copy it.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one frame's whole path to pixels: the target, the two compose buffers, the frame, \
+              and the two pixel tables it draws from"
+)]
 fn compose_and_render(
     output: &mut Output,
     buffer: &mut Scene,
+    filtered: &mut Vec<Option<ImageData>>,
     intents: &ScrollIntents,
     frame: &CommittedFrame,
     images: &[Option<ImageData>],
     size: FrameSize,
     animation_now: Option<f64>,
 ) -> Result<(), EngineError> {
+    // The one optional pre-step. A frame with no `filter: blur()` group — the
+    // overwhelming majority — skips it on this one test and touches no
+    // offscreen texture at all.
+    if frame.filter_groups().is_empty() {
+        filtered.clear();
+    } else {
+        output.prepare_filters(
+            frame,
+            images,
+            &|slot| intents.offset_for(slot.node),
+            intents.generation,
+            filtered,
+        )?;
+    }
     let scene = if intents.offsets.is_empty()
         && animation_now.is_none()
         && let Some(scene) = frame.scene()
     {
+        // A filtered frame is never one unscrolled fragment — it carries at
+        // least one filter bracket op — so this fast path never skips a bake.
         scene
     } else {
         buffer.reset();
         frame.compose_into(
             buffer,
             images,
+            filtered,
             &|slot| intents.offset_for(slot.node),
             animation_now,
         );
@@ -545,6 +615,7 @@ impl Painter {
             scroll_intents: ScrollIntents::default(),
             composed: None,
             composed_scene: Scene::new(),
+            composed_filters: Vec::new(),
             refill_requested_for: None,
             images: images::PainterImages::default(),
             thread_bound: PhantomData,
@@ -720,9 +791,12 @@ impl Painter {
     ///
     /// One caller: pointing this painter at a different document. Commit ids
     /// restart at one per document, so a key kept across the change would
-    /// answer the new page's first frame with the old page's work.
+    /// answer the new page's first frame with the old page's work — which is
+    /// also why `Output::forget` gives up the target's `filter: blur()` bake
+    /// cache, keyed the same way.
     fn forget_target(&mut self) {
         self.composed = None;
+        self.composed_filters.clear();
         self.output.forget();
     }
 
@@ -1093,6 +1167,7 @@ impl Painter {
         let Self {
             output,
             composed_scene,
+            composed_filters,
             scroll_intents,
             images,
             ..
@@ -1100,6 +1175,7 @@ impl Painter {
         let rendered = compose_and_render(
             output,
             composed_scene,
+            composed_filters,
             scroll_intents,
             frame,
             images.resolved(),

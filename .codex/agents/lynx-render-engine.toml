@@ -15,10 +15,10 @@ vello is the only wgpu dependency in this workspace, so it pins wgpu's major
 - `AGENTS.md`: Standards policy, the `crates/dom`, `crates/bobcat-core` and
   `crates/flashbulb` entries in Crates.
 - `crates/dom/src/paint/painter.rs`'s module header — it lists the **deliberate
-  v1 limits** (blur filters ignored, affine approximation of perspective,
-  `background-clip` narrowings, `text-shadow` without blur, flush `outline`,
-  first-image-only `mask-*`, no `image-orientation`). Read it before "fixing"
-  any of them.
+  v1 limits** (isotropic `filter: blur()` σ under a non-uniform transform plus
+  its area budget, affine approximation of perspective, `background-clip`
+  narrowings, `text-shadow` without blur, flush `outline`, first-image-only
+  `mask-*`, no `image-orientation`). Read it before "fixing" any of them.
 - `docs/runtime-architecture.md` — the private paint pipeline and the frame
   walkthrough.
 - `docs/css-paint-screenshot-matrix.md` — the 1,000-case browser-referenced
@@ -38,7 +38,9 @@ vello is the only wgpu dependency in this workspace, so it pins wgpu's major
   `painter.rs`, `background.rs`, `border.rs`, `shadow.rs`, `filters.rs`,
   `mask.rs`, `shape.rs`, `text.rs`, `compose.rs`, `convert.rs`,
   `equivalence.rs`.
-- `render/`: `gpu.rs` (headless GPU floor, `AtlasResidency`), `image.rs`
+- `render/`: `gpu.rs` (headless GPU floor, `AtlasResidency`), `blur.rs` +
+  `blur.wgsl` (`FilterTextures`: the `filter: blur()` offscreen bake, its
+  commit-keyed cache, its area budget and its unblurred fallback), `image.rs`
   (`FrameImages`, `ImageReports`, `ImageInbox`).
 - The committed frame is baked **unscrolled** as fragments plus a compose
   program, and one render path composes it flat at the painter's offsets.
@@ -46,6 +48,13 @@ vello is the only wgpu dependency in this workspace, so it pins wgpu's major
   without a commit — and cross only as a `ToMain::Refill` when an offset leaves its
   slot's `ScrollSlot::encode_window`, which the main thread answers with a
   recentered commit. A commit publishes one immutable `Arc<CommittedFrame>`.
+- That render path has **one optional pre-step**: a frame carrying
+  `filter: blur()` groups (`CommittedFrame::filter_groups`, non-empty on almost
+  no page) has each group baked offscreen and blurred before it composes, and
+  the composition draws the textures instead of the groups' ops. The commit
+  itself touches no GPU device — a `FilterGroup` is device px plus an op range
+  — and a group with no texture (no GPU, or past the area budget) replays raw
+  and renders *unblurred*. Do not make the bracket ops encode anything.
 - Animations: stylo's animation engine plus an engine-owned timeline;
   `Document::advance_animations`; composite `opacity`/`transform` curves are
   exported as `AnimationSlot`. The `has_animations` node bit is load-bearing.

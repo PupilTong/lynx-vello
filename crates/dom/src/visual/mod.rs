@@ -482,7 +482,9 @@ impl<T> Document<T> {
             let (mut images, mut sources) = (Vec::new(), Vec::new());
             frame.resolve_images(pixels, &mut images, &mut sources);
             let mut scene = crate::vello::Scene::new();
-            frame.compose_into(&mut scene, &images, &|_| None, None);
+            // No GPU here, so no bake: a `filter: blur()` group replays raw
+            // and this scene is the unblurred one (documented fallback).
+            frame.compose_into(&mut scene, &images, &[], &|_| None, None);
             Box::new(scene)
         });
         SceneRef { frame, composed }

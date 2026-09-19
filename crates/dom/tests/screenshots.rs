@@ -2,8 +2,10 @@
 //! radii and nested flex geometry — over the full test pipeline:
 //! inline-styled fragment → `dom` → headless GPU.
 //!
-//! Text rendering has its own binary, `tests/text_screenshots.rs`; both write
-//! into the same crate-level `tests/screenshots` golden tree. Capture,
+//! Per-topic siblings own the rest: `tests/text_screenshots.rs` and
+//! `tests/web_text_screenshots.rs` for text, `tests/blur_screenshots.rs` for
+//! `filter: blur()`. All of them write into the same crate-level
+//! `tests/screenshots` golden tree, each under its own subdirectory. Capture,
 //! comparison and golden management belong to `flashbulb` — these files only
 //! supply the documents. Refresh with:
 //! `FLASHBULB_UPDATE_SNAPSHOTS=1 cargo test -p dom --test screenshots`.

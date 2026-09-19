@@ -27,10 +27,13 @@
 //!    pushes, outermost to innermost: the effect layer (blend mode + `opacity` alpha, clipped to
 //!    the group's prepass-computed content bounds), a `clip-path` layer (a full `push_layer`, not a
 //!    clip layer, per the #1198 rule above), and for `mask-image` the alpha-mask sandwich — mask
-//!    pattern drawn first, then a `Compose::SrcIn` layer holding the content. Filter adjustments
-//!    draw at scope close, inside the innermost layer, after in-scope clips pop. Composite order on
-//!    pop is therefore filter → mask → clip-path → opacity/blend — clip and mask are both
-//!    intersective alpha ops, so the swap versus the spec's filter → clip → mask is unobservable.
+//!    pattern drawn first, then a `Compose::SrcIn` layer holding the content, and innermost of all
+//!    a `filter: blur()` group's bracket. Filter adjustments draw at scope close, inside the
+//!    innermost layer, after in-scope clips pop: the ones before the list's first `blur()` inside
+//!    the blur bracket, the ones after it outside it. Composite order on pop is therefore pre-blur
+//!    adjustments → blur → post-blur adjustments → mask → clip-path → opacity/blend — clip and mask
+//!    are both intersective alpha ops, so the swap versus the spec's filter → clip → mask is
+//!    unobservable.
 //! 3. **Fragments** — per element box: outset shadows, background, inset shadows, replaced content
 //!    (above the inset shadows — css-backgrounds-3 §7.4.1 paints inner shadows immediately above
 //!    the background, below content, which is why an inset shadow on an `<img>` is invisible in
@@ -57,6 +60,11 @@
 //!   region under the exact matrix the painter would have used — `plan_frame` hands that matrix to
 //!   [`paint_item`], so painter and culler cannot disagree about geometry. A non-finite bound, or a
 //!   reach that cannot be established, paints.
+//! - **A blur admits its own reach.** The bake of a `filter: blur()` group is 3σ larger than the
+//!   group's content on every side, so every item inside one is tested against a region grown by
+//!   the sum of 3σ over each enclosing filtered layer, and the group's own layer bounds are grown
+//!   the same way *before* the viewport intersection — an element straddling the viewport edge
+//!   therefore still bakes the margin its visible pixels read from.
 //! - **Text runs are never culled by geometry.** [`text::extent`] bounds the authored reaches
 //!   (`text-shadow` offset, half the `-webkit-text-stroke` width) exactly, but a run's `size` is
 //!   its line box, and glyph ink leaves that box by font ascent and descent, synthetic oblique
@@ -72,7 +80,7 @@
 use euclid::default::Vector2D;
 
 use crate::Document;
-use crate::paint::compose::{CapturedShape, ComposeAssembly, ComposeChain, ComposeOp};
+use crate::paint::compose::{CapturedShape, ComposeAssembly, ComposeChain, ComposeOp, FilterGroup};
 use crate::paint::shape::{BoxShape, with_shape};
 use crate::paint::{
     BoxFragment, PathScratch, background, border, convert, filters, mask, shadow, text,
@@ -231,6 +239,29 @@ impl WalkSink<'_> {
             Self::Compose(assembly) => assembly.push_op(ComposeOp::Pop),
         }
     }
+
+    /// Opens a `filter: blur()` group, answering whether one was recorded.
+    ///
+    /// The monolithic sink records none: it has no side table and no
+    /// composer, so its walk encodes the group's content inline and the
+    /// frame is simply unblurred — which is what makes it still a usable
+    /// culling oracle for a filtered page.
+    fn push_filter(&mut self, group: FilterGroup) -> bool {
+        match self {
+            Self::Monolithic(..) => false,
+            Self::Compose(assembly) => {
+                assembly.push_filter(group);
+                true
+            }
+        }
+    }
+
+    fn pop_filter(&mut self) {
+        match self {
+            Self::Monolithic(..) => {}
+            Self::Compose(assembly) => assembly.pop_filter(),
+        }
+    }
 }
 
 /// Reused per-frame buffers.
@@ -242,6 +273,17 @@ pub(crate) struct Scratch {
     layer_bounds: Vec<Rect>,
     open_layers: Vec<usize>,
     bounds_acc: Vec<Option<Rect>>,
+    /// Per layer, the blur sigma of its `filter` in *viewport* CSS px — the
+    /// element's own sigma scaled by its local-to-viewport map. Zero for
+    /// every layer with no `blur()`. Index-parallel with
+    /// [`PaintOrder::layers`].
+    layer_sigma: Vec<f64>,
+    /// Per entry of `open_layers`, the running sum of 3-sigma inflations of
+    /// that layer and every filtered layer outside it. Content inside a
+    /// filtered group can put ink 3-sigma past its own box, so the cull test
+    /// has to admit everything within that reach of the admitted region —
+    /// summed, because the reaches of nested blurs compose.
+    open_inflate: Vec<f64>,
     /// Per clip node, the region its whole chain admits, in viewport CSS px,
     /// already intersected with the frame's cull rect. `None` means the chain
     /// admits nothing: it leaves the cull rect, or one of its links has a
@@ -291,6 +333,9 @@ struct Painting<'a, T> {
     /// The document's device scale, applied once at the root: the paint order
     /// is in viewport CSS px and the scene is in device px.
     scale: Affine,
+    /// That scale as a scalar, for the device-pixel geometry a filter bake
+    /// is recorded in.
+    ratio: f64,
 }
 
 // Derived `Copy` would demand `T: Copy`, and the document's payload type has
@@ -309,6 +354,9 @@ struct Scope {
     base: usize,
     pushed: u32,
     filtered: bool,
+    /// Whether [`open_scope`] recorded a filter group for this scope, which
+    /// [`close_scope`] then has to close.
+    blurred: bool,
 }
 
 /// One culled monolithic walk — the pre-compose shape, kept beside
@@ -420,6 +468,7 @@ fn walk_within<T>(
         frame,
         images,
         scale: Affine::scale(ratio),
+        ratio,
     };
     let items = frame.items();
     let layers = frame.layers();
@@ -632,6 +681,7 @@ fn open_scope<T>(
         frame,
         images,
         scale,
+        ratio,
     } = painting;
     let layer = &frame.layers()[layer_index];
     let chain = ComposeChain {
@@ -715,12 +765,54 @@ fn open_scope<T>(
         pushed += 1;
     }
 
+    // The blur scope opens *inside* the scope's own layers, so the group it
+    // bakes is exactly the pixels the effect/clip-path/mask stack will then
+    // clip, mask and fade — filter-effects-1's order, with clip and mask
+    // swapped (both intersective, so unobservable; see the module doc).
+    let blurred = filter_group(scratch, layer_index, chain, ratio)
+        .is_some_and(|group| sink.push_filter(group));
+
     scratch.scopes.push(Scope {
         layer: layer_index,
         base,
         pushed,
         filtered: !effects.filter.0.is_empty(),
+        blurred,
     });
+}
+
+/// The filter group this layer bakes, if it blurs at all.
+///
+/// `None` for a layer with no `blur()`, one whose device rect is empty, and
+/// one whose geometry is not finite: each of those blurs nothing, and a group
+/// that blurs nothing must leave no op behind — a frame with no filter op is
+/// the frame the whole bake pre-step is skipped for.
+fn filter_group(
+    scratch: &Scratch,
+    layer_index: usize,
+    chain: ComposeChain,
+    ratio: f64,
+) -> Option<FilterGroup> {
+    let sigma = scratch.layer_sigma[layer_index] * ratio;
+    if !(sigma.is_finite() && sigma > 0.0) {
+        return None;
+    }
+    let bounds = scratch.layer_bounds[layer_index];
+    if !is_finite(bounds) {
+        return None;
+    }
+    // Rounded out, so the bake covers every device pixel the group's rect
+    // touches and the texture composes at an integer offset.
+    let rect = Rect::new(
+        (bounds.x0 * ratio).floor(),
+        (bounds.y0 * ratio).floor(),
+        (bounds.x1 * ratio).ceil(),
+        (bounds.y1 * ratio).ceil(),
+    );
+    if !(is_finite(rect) && rect.width() >= 1.0 && rect.height() >= 1.0) {
+        return None;
+    }
+    Some(FilterGroup::new(sigma as f32, rect, chain))
 }
 
 fn close_scope<T>(sink: &mut WalkSink<'_>, scratch: &mut Scratch, painting: Painting<'_, T>) {
@@ -735,19 +827,40 @@ fn close_scope<T>(sink: &mut WalkSink<'_>, scratch: &mut Scratch, painting: Pain
         .pop()
         .expect("close_scope is only called with an open scope");
     pop_clips_to(sink, scratch, scope.base);
-    if scope.filtered {
-        let layer = &frame.layers()[scope.layer];
-        if let Some(style) = document.paint_style(layer.node) {
-            filters::apply(
-                sink.scene_for(ComposeChain {
-                    scroll: layer.slot,
-                    animation: layer.animation,
-                }),
-                style,
-                scratch.layer_bounds[scope.layer],
-                scale,
-            );
-        }
+    let layer = &frame.layers()[scope.layer];
+    let chain = ComposeChain {
+        scroll: layer.slot,
+        animation: layer.animation,
+    };
+    let bounds = scratch.layer_bounds[scope.layer];
+    // The list splits at its first `blur()`: what precedes it composites
+    // against the group's own pixels *inside* the bake, what follows it
+    // against the blurred result.
+    let plan = scope
+        .filtered
+        .then(|| document.paint_style(layer.node))
+        .flatten()
+        .map(|style| (style, filters::plan(style)));
+    if let Some((style, plan)) = &plan {
+        filters::apply(
+            sink.scene_for(chain),
+            style,
+            plan.before.clone(),
+            bounds,
+            scale,
+        );
+    }
+    if scope.blurred {
+        sink.pop_filter();
+    }
+    if let Some((style, plan)) = &plan {
+        filters::apply(
+            sink.scene_for(chain),
+            style,
+            plan.after.clone(),
+            bounds,
+            scale,
+        );
     }
     for _ in 0..scope.pushed {
         sink.pop();
@@ -767,6 +880,7 @@ fn paint_item<T>(
         frame,
         images,
         scale,
+        ..
     } = painting;
     sync_clips(sink, scratch, frame, item, scale);
     let chain = frame.item_compose_chain(item);
@@ -1036,9 +1150,14 @@ fn plan_frame<T>(
     let items = frame.items();
     scratch.layer_bounds.clear();
     scratch.open_layers.clear();
+    scratch.open_inflate.clear();
     scratch.item_plan.clear();
     scratch.item_plan.resize(items.len(), None);
     scratch.layer_bounds.resize(layers.len(), Rect::ZERO);
+    scratch.layer_sigma.clear();
+    scratch
+        .layer_sigma
+        .extend(layers.iter().map(|layer| layer_blur_sigma(document, layer)));
     // CSS px, not device px: the paint order this is intersected against carries CSS-px
     // transforms — the device scale is applied once, separately, as the root `scale` affine.
     let viewport_size = document.device().viewport_size();
@@ -1064,6 +1183,10 @@ fn plan_frame<T>(
         }
         while next_open < layers.len() && layers[next_open].items.start == index {
             scratch.bounds_acc[next_open] = layer_root_rect(&layers[next_open]);
+            let outer = scratch.open_inflate.last().copied().unwrap_or(0.0);
+            scratch
+                .open_inflate
+                .push(outer + BLUR_INK_SIGMAS * scratch.layer_sigma[next_open]);
             scratch.open_layers.push(next_open);
             next_open += 1;
         }
@@ -1083,7 +1206,15 @@ fn plan_frame<T>(
             // A sampled delta can move the item anywhere; it always paints.
             None
         } else {
-            cull.map(|cull| admitted_region(scratch, frame, cull, content_chain, item.clip))
+            // Every enclosing blur carries this item's ink 3 sigma further
+            // out, so the region it may reach grows by their sum. That
+            // over-admits a little near an inner clip, which is the safe
+            // direction: culling needs a proof, uncertainty paints.
+            let inflate = scratch.open_inflate.last().copied().unwrap_or(0.0);
+            cull.map(|cull| {
+                admitted_region(scratch, frame, cull, content_chain, item.clip)
+                    .map(|region| inflate_rect(region, inflate))
+            })
         };
 
         // An item whose plain border box already reaches the admitted region
@@ -1148,10 +1279,18 @@ fn close_layer(
         .open_layers
         .pop()
         .expect("close is only called with an open layer");
+    scratch.open_inflate.pop();
     let moving = layers[closed]
         .animation
         .is_some_and(|slot| scratch.animation_moves[slot as usize]);
+    // A blur puts ink 3 sigma past the group's own content, so the group's
+    // pushed rect — which is also the bake's rect — has to carry that margin.
+    // Inflating *before* the viewport intersection is what makes the margin
+    // transparent rather than clipped: the bake's edges read transparent
+    // black, which is filter-effects-1's edge mode.
+    let reach = BLUR_INK_SIGMAS * scratch.layer_sigma[closed];
     scratch.layer_bounds[closed] = scratch.bounds_acc[closed].map_or(Rect::ZERO, |rect| {
+        let rect = inflate_rect(rect, reach);
         if moving {
             // The group's rect and content translate together under the
             // sampled delta, but the *viewport* does not: clipping to it
@@ -1160,7 +1299,7 @@ fn close_layer(
         }
         let (low, high) =
             relative_offset_range(slots, &scratch.slot_windows, layers[closed].slot, None);
-        rect.intersect(expand_region(viewport, low, high))
+        rect.intersect(inflate_rect(expand_region(viewport, low, high), reach))
     });
     if let (Some(bounds), Some(&parent)) = (scratch.bounds_acc[closed], scratch.open_layers.last())
     {
@@ -1170,10 +1309,59 @@ fn close_layer(
             layers[closed].slot,
             layers[parent].slot,
         );
-        let bounds = expand_cover(bounds, low, high);
+        let bounds = expand_cover(inflate_rect(bounds, reach), low, high);
         scratch.bounds_acc[parent] =
             Some(scratch.bounds_acc[parent].map_or(bounds, |united| united.union(bounds)));
     }
+}
+
+/// How many standard deviations of blur ink a group's bounds are grown by.
+///
+/// A gaussian past 3 sigma carries under 0.3% of its mass, which is below one
+/// 8-bit level; filter-effects-1 names the same number for the filter region
+/// of a `blur()`.
+const BLUR_INK_SIGMAS: f64 = 3.0;
+
+/// One layer's blur sigma in *viewport* CSS px: the element's own sigma under
+/// the mean scale of its local-to-viewport linear map.
+///
+/// The mean scale is the arithmetic mean of the map's two singular values,
+/// read off `Affine::nuclear_norm_squared` — the nuclear norm *is* their sum.
+/// Exact for a rotation or a uniform scale, and one isotropic number where a
+/// non-uniform scale or a skew would make the spec's filter region
+/// anisotropic (recorded limit).
+fn layer_blur_sigma<T>(document: &Document<T>, layer: &RenderLayer) -> f64 {
+    let Some(style) = document.paint_style(layer.node) else {
+        return 0.0;
+    };
+    let Some(sigma) = filters::plan(style).sigma else {
+        return 0.0;
+    };
+    let Some(affine) = convert::item_affine(&layer.transform, layer.size) else {
+        // A singular map encodes nothing, so there is nothing to blur.
+        return 0.0;
+    };
+    let mean = affine.nuclear_norm_squared().sqrt() / 2.0;
+    let scaled = f64::from(sigma) * mean;
+    if scaled.is_finite() && scaled > 0.0 {
+        scaled
+    } else {
+        0.0
+    }
+}
+
+/// `rect` grown by `reach` on every side. A zero reach is the rect itself, so
+/// an unfiltered layer pays one comparison.
+fn inflate_rect(rect: Rect, reach: f64) -> Rect {
+    if reach <= 0.0 {
+        return rect;
+    }
+    Rect::new(
+        rect.x0 - reach,
+        rect.y0 - reach,
+        rect.x1 + reach,
+        rect.y1 + reach,
+    )
 }
 
 /// The region admitted for content on `chain`: the innermost enclosing
@@ -1609,6 +1797,43 @@ mod tests {
         assert_eq!(
             frames.cultured_bounds, frames.uncultured_bounds,
             "a culled member still contributes to its group's bounds",
+        );
+    }
+
+    /// A blurred group's bounds carry the 3 sigma ink margin, and the cull
+    /// region admits everything that can reach it.
+    #[test]
+    fn a_blurred_group_keeps_the_ink_margin_in_its_bounds() {
+        let mut doc = Doc::with_css(&format!("{PAGE} .blurred {{ filter: blur(4px); }}"));
+        let root = doc.root;
+        let group = doc.el(root, "view.box.blurred");
+        doc.set_inline(group, "left: 100px; top: 100px");
+        let frames = walk_twice(&mut doc);
+        let bounds = frames.cultured_bounds[0];
+        // The box is 100x100 at (100, 100), so 3 sigma = 12 px of margin
+        // lands its bounds on (88, 88)-(212, 212).
+        assert!(
+            (bounds.x0 - 88.0).abs() < 0.5
+                && (bounds.y0 - 88.0).abs() < 0.5
+                && (bounds.x1 - 212.0).abs() < 0.5
+                && (bounds.y1 - 212.0).abs() < 0.5,
+            "a blurred group's bounds carry 3 sigma on every side ({bounds:?})",
+        );
+        assert_eq!(
+            frames.cultured_bounds, frames.uncultured_bounds,
+            "the margin is not a cull decision",
+        );
+
+        // A box whose own border box is off screen, but whose blur reaches
+        // back onto it, must still paint.
+        let mut doc = Doc::with_css(&format!("{PAGE} .blurred {{ filter: blur(40px); }}"));
+        let root = doc.root;
+        let group = doc.el(root, "view.box.blurred");
+        doc.set_inline(group, "left: 860px; top: 100px");
+        let frames = walk_twice(&mut doc);
+        assert_eq!(
+            frames.painted, 2,
+            "the page and the box whose blur reaches the viewport",
         );
     }
 }

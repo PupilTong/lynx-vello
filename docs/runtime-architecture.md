@@ -1133,6 +1133,45 @@ a content-proportional second encoding): `scene()` borrows the single fragment
 of the common whole-frame shape and answers `None` for every other, and
 consumers needing a flat scene compose one on demand.
 
+### The one optional pre-step: `filter: blur()` bakes
+
+That render path has exactly one conditional step in front of it, and one test
+selects it: `CommittedFrame::filter_groups()` is empty for every frame of every
+page that does not blur, and `compose_and_render` then behaves exactly as
+above. When it is not empty, each group is baked offscreen and blurred before
+the frame composes, and the composition draws one texture per group in place of
+that group's own ops.
+
+The commit side stays device-free. A `FilterGroup` is σ and a rect in *device*
+pixels — the rect already 3σ larger than the group's content on every side, so
+the bake's edges read the transparent black filter-effects-1 specifies — plus
+the range of compose-program ops the group encloses, bracketed in the program
+by `PushFilter`/`PopFilter`. Those two ops encode nothing themselves, which is
+what lets one program serve both jobs: with a texture the bracket is one
+`draw_image` and the range is skipped, without one the range replays raw and
+the frame is simply **unblurred**. `Document::scene()` and any consumer with no
+GPU take that fallback by construction.
+
+The device side is `dom::render::blur::FilterTextures`, one per
+`vello::Renderer`, owned beside that renderer's `AtlasResidency` by `Headless`
+and by the painter's `WindowGraphics`. Its cache key is the commit id, plus the
+painter's scroll generation only when some group's content rides a scroll chain
+the group itself does not — a blurred scroller's content slides under the blur,
+an ordinary blurred box moves with it — so scrolling past an ordinary blurred
+box re-bakes nothing. Commit ids restart per document, so a target pointed at a
+second document must `forget` the cache, the same obligation it already has for
+its own compose key. Bakes happen in post-order, so a nested group's texture
+exists before the group around it bakes; each bake is a `render_to_texture` and
+therefore owes the residency a pass of its own, because a bake of a
+solid-colour group is precisely the patch-free render that frees vello's image
+atlas. The baked textures are override images, so the *composite* render names
+them to the residency too.
+
+Filter memory is page-complexity-linear, so it is capped: 8192 device px per
+texture side and a quarter of the atlas in total area, consumed in program
+order. A group past the cap gets no texture and takes the unblurred fallback —
+the fallback is the budget's enforcement mechanism, not an error path.
+
 ## Composite animations compose; the rest tick
 
 The same compose machinery carries animations. At commit, an element whose

@@ -444,3 +444,80 @@ async fn a_painter_re_attached_through_the_auto_detach_resets_what_it_kept() {
         "and the frame it rendered is the second page's"
     );
 }
+
+/// A 64x64 page holding one 24x24 blurred black box.
+///
+/// Sigma 4 against a 24 px box leaves the centre saturated (the box is six
+/// sigma across), so the fall-off across a border is the clean one-dimensional
+/// profile the assertions below read.
+fn blurred_page() -> Vec<u8> {
+    br"
+globalThis.renderPage = function renderPage() {
+  const page = __CreatePage('card', 0);
+  __SetInlineStyles(page, 'width:64px;height:64px;background-color:#ffffff;position:relative');
+  const box = __CreateView(0);
+  __SetInlineStyles(
+    box,
+    'position:absolute;left:20px;top:20px;width:24px;height:24px;' +
+      'background-color:#000000;filter:blur(4px)'
+  );
+  __AppendElement(page, box);
+};
+"
+    .to_vec()
+}
+
+/// `filter: blur()` reaches the embedder's own painter: a blurred box's ink
+/// leaves its border box, and the fall-off is symmetric about the border.
+///
+/// The bake is a pre-step of `compose_and_render`, so this is the one test
+/// that proves an embedder gets it — `dom`'s own pixel tests drive the
+/// headless renderer directly and would pass with the painter never calling
+/// `prepare_filters` at all.
+#[tokio::test]
+async fn a_blurred_box_reaches_the_embedder_painter() {
+    let group = group().await;
+    let mut view = group
+        .create_lynx_view(
+            64.0,
+            64.0,
+            1.0,
+            |_reports| Rc::new(FetcherDouble::new(blurred_page()).resolving_to(SCRIPT_URL)),
+            Vec::new(),
+            ViewSources::new(SCRIPT_URL),
+        )
+        .expect("the view is built");
+    let mut painter = Painter::new(DrawTarget::Offscreen, 64.0, 64.0, 1.0)
+        .await
+        .expect("an offscreen painter is built");
+    painter.attach(&view).expect("the page takes a painter");
+    wait_for_script(&mut view).expect("the entry module boots");
+    painter.tick(true).expect("the blurred frame renders");
+
+    let shot = painter.capture().expect("the committed frame");
+    let luma = |x: usize, y: usize| i32::from(shot.pixels[(y * 64 + x) * 4]);
+
+    // The box is (20, 20)-(44, 44); its centre is (32, 32) and its right
+    // border is x = 44.
+    assert!(luma(32, 32) < 8, "the box keeps its ink ({})", luma(32, 32));
+    assert!(
+        luma(50, 32) < 250,
+        "and ink reaches 6 px past the border box ({})",
+        luma(50, 32),
+    );
+    assert!(
+        luma(61, 32) >= 253,
+        "but effectively none past 4 sigma ({})",
+        luma(61, 32),
+    );
+    // The border is at x = 44.0, so pixels 43 and 44 are the symmetric pair.
+    for distance in 0..=9_usize {
+        let inside = luma(43 - distance, 32);
+        let outside = luma(44 + distance, 32);
+        assert!(
+            (inside + outside - 255).abs() <= 8,
+            "the fall-off is symmetric about the border at {distance} px \
+             ({inside} inside, {outside} outside)",
+        );
+    }
+}
