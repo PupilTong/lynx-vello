@@ -155,6 +155,18 @@ consequential choice about whether to follow the spec or the quirk.
   together with the two approximations the offscreen implementation carries
   (one isotropic σ under a non-uniform scale or skew, and an area budget past
   which a group renders *unblurred*).
+- **`backdrop-filter`** — Lynx has the property nowhere: no handler, no
+  property ID, no wire enum entry, and `web-core` therefore never emits one.
+  We expose it anyway with filter-effects-2 W3C semantics (user decision,
+  2026-09-19), so this is a superset of the compat target rather than a
+  behavioral conflict. It reuses the `filter` value grammar unchanged and
+  triggers the same three structural effects filter-effects-2 §2.1 names: a
+  stacking context, a group render layer (the filtered backdrop is painted
+  inside the element's own effect layer, so the element's `opacity`,
+  `filter`, `clip-path` and `mask-image` apply to backdrop and element
+  together), and a containing block for absolutely and fixed positioned
+  descendants unless the element is a document root element. Unlike `filter`
+  it does not enlarge the element's ink overflow.
 - **`background-clip: border-area`** — a genuine Lynx-only value with no CSS
   equivalent (distinct from `border-box`); needs its own behavioral
   spec-mining rather than mapping to any standard box.

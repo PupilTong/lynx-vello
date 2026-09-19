@@ -38,7 +38,11 @@ pub(crate) fn establishes_stacking_context(style: &ComputedValues, z_applies: bo
     if style.guarantees_stacking_context() {
         return true;
     }
-    if !style.get_effects().filter.0.is_empty() {
+    let effects = style.get_effects();
+    // filter-effects-1 §2.1 for `filter`, filter-effects-2 §2.1 for
+    // `backdrop-filter`: a non-`none` computed value on either is a stacking
+    // context trigger.
+    if !effects.filter.0.is_empty() || !effects.backdrop_filter.0.is_empty() {
         return true;
     }
     if !matches!(box_style.offset_path, OffsetPath::None) {
@@ -83,6 +87,12 @@ pub(crate) fn needs_group_rendering(style: &ComputedValues) -> bool {
     let effects = style.get_effects();
     effects.opacity < 1.0
         || !effects.filter.0.is_empty()
+        // `backdrop-filter` needs a layer of its own even though it paints
+        // nothing of the element: filter-effects-2 §2.1 puts the filtered
+        // backdrop image inside the element's effect layer, so this element's
+        // `opacity`, `filter`, `clip-path` and `mask-image` apply to the
+        // backdrop and to the element's own painting together.
+        || !effects.backdrop_filter.0.is_empty()
         || effects.mix_blend_mode != MixBlendMode::Normal
         || style.get_svg().clip_path != ClipPath::None
         || style.get_box().isolation == Isolation::Isolate
