@@ -2137,7 +2137,8 @@ installs TypeScript 5.9.3, used by nothing but rspeedy's `lynx.config.ts`
 loader (see the `rspeedy` catalog in `pnpm-workspace.yaml`).
 
 **Screenshot tests** live in `crates/*/tests/screenshots.rs` — plus per-topic
-siblings (`dom` also has `text_screenshots.rs` and `css_atlas.rs`) — with
+siblings (`dom` also has `text_screenshots.rs`, `web_text_screenshots.rs`,
+`blur_screenshots.rs` and `css_atlas.rs`) — with
 committed goldens in `crates/*/tests/screenshots/`, driven by
 `crates/flashbulb`. The ordinary suites share one capture harness in
 `tests/support/screenshot.rs`; the browser-referenced CSS atlas owns the

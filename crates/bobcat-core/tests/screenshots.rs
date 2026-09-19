@@ -155,6 +155,29 @@ async fn booted_with_sheet_at(
     width: f32,
     height: f32,
 ) -> (LynxView<Rc<FetcherDouble>>, Painter) {
+    booted_with_sheet_sources(
+        source,
+        sheet,
+        width,
+        height,
+        ViewSources {
+            style_sheets: vec!["app:///author.css".to_owned()],
+            ..ViewSources::new(SCRIPT_URL)
+        },
+    )
+    .await
+}
+
+/// [`booted_with_sheet_at`] with the view's own `ViewSources` — the shape a
+/// fixture needs when the sheet it mounts styles *text*, since the face has
+/// to be registered at construction.
+async fn booted_with_sheet_sources(
+    source: &[u8],
+    sheet: PreparsedStyleSheet,
+    width: f32,
+    height: f32,
+    sources: ViewSources,
+) -> (LynxView<Rc<FetcherDouble>>, Painter) {
     let (mut view, painter) = solo_view(
         Arc::new(NoWakeup),
         width,
@@ -168,10 +191,7 @@ async fn booted_with_sheet_at(
                     .with_preparsed_style_sheet(sheet),
             )
         },
-        ViewSources {
-            style_sheets: vec!["app:///author.css".to_owned()],
-            ..ViewSources::new(SCRIPT_URL)
-        },
+        sources,
     )
     .await
     .expect("view");
@@ -498,4 +518,118 @@ async fn a_preparsed_author_sheet_paints() {
     let image = Image::from_rgba8(shot.size.width, shot.size.height, shot.pixels)
         .expect("captured RGBA image");
     screenshots().assert_matches(&["preparsed-author-sheet"], &image);
+}
+
+/// A card built the only way script can: two `.card` views, each holding a
+/// `.badge` and a `<text>` run, with the second one opting out of the filter.
+const BLUR_CARD_SCRIPT: &str = r"
+globalThis.renderPage = function renderPage() {
+  const page = __CreatePage('card', 0);
+  __SetClasses(page, 'page');
+  function card(classes, label) {
+    const node = __CreateView(0);
+    __SetClasses(node, classes);
+    const badge = __CreateView(0);
+    __SetClasses(badge, 'badge');
+    __AppendElement(node, badge);
+    const text = __CreateText(0);
+    __SetClasses(text, 'label');
+    __AppendElement(text, __CreateRawText(label));
+    __AppendElement(node, text);
+    __AppendElement(page, node);
+  }
+  card('card', 'Blurred card');
+  card('card plain', 'Crisp card');
+};
+";
+
+/// Requirement: `filter: blur()` survives the whole embedder path — an author
+/// sheet the host pre-parsed, a commit on `bobcat-main`, and the painter's own
+/// `compose_and_render`, which bakes the group offscreen before it composes.
+///
+/// This is the one golden that covers that pre-step end to end. `dom`'s own
+/// blur screenshots drive the headless renderer directly and would pass
+/// unchanged if `Painter` never called `prepare_filters` at all; here the
+/// blurred card would simply come out crisp.
+///
+/// The second card is the same card with `filter: none`, so the golden shows
+/// a relationship rather than a picture: background, 4 px border, 18 px radius,
+/// padding, a badge and a Roboto run are all inside the blurred group, and all
+/// of them have a crisp twin 40 px below to be compared against.
+#[tokio::test]
+async fn a_blurred_card_reaches_the_offscreen_draw_target() {
+    const ROBOTO: &[u8] = include_bytes!("../../hughie/tests/fixtures/Roboto-Regular.ttf");
+
+    let (_view, mut painter) = booted_with_sheet_sources(
+        BLUR_CARD_SCRIPT.as_bytes(),
+        PreparsedStyleSheet {
+            rules: vec![
+                PreparsedRule::Style {
+                    selectors: ".page".to_owned(),
+                    declarations: vec![
+                        declaration("display", "flex"),
+                        declaration("flex-direction", "column"),
+                        declaration("padding", "36px"),
+                        declaration("background-color", "#e5e7eb"),
+                        declaration("font-family", "Roboto"),
+                    ],
+                },
+                PreparsedRule::Style {
+                    selectors: ".card".to_owned(),
+                    declarations: vec![
+                        declaration("display", "flex"),
+                        declaration("flex-direction", "column"),
+                        declaration("width", "260px"),
+                        declaration("height", "150px"),
+                        declaration("padding", "18px"),
+                        declaration("box-sizing", "border-box"),
+                        declaration("margin-bottom", "40px"),
+                        declaration("background-color", "#ffffff"),
+                        declaration("border", "4px solid #2563eb"),
+                        declaration("border-radius", "18px"),
+                        declaration("filter", "blur(3px)"),
+                    ],
+                },
+                // Source order decides: `.plain` is declared after `.card`, so
+                // the second card keeps every other declaration and drops only
+                // the filter.
+                PreparsedRule::Style {
+                    selectors: ".plain".to_owned(),
+                    declarations: vec![declaration("filter", "none")],
+                },
+                PreparsedRule::Style {
+                    selectors: ".badge".to_owned(),
+                    declarations: vec![
+                        declaration("display", "flex"),
+                        declaration("width", "84px"),
+                        declaration("height", "34px"),
+                        declaration("background-color", "#f59e0b"),
+                        declaration("border-radius", "8px"),
+                    ],
+                },
+                PreparsedRule::Style {
+                    selectors: ".label".to_owned(),
+                    declarations: vec![
+                        declaration("margin-top", "16px"),
+                        declaration("font-size", "22px"),
+                        declaration("color", "#111827"),
+                    ],
+                },
+            ],
+        },
+        393.0,
+        727.0,
+        ViewSources {
+            style_sheets: vec!["app:///author.css".to_owned()],
+            fonts: vec![FontBlob::from_static(ROBOTO)],
+            default_font_family: Some("Roboto".to_owned()),
+            ..ViewSources::new(SCRIPT_URL)
+        },
+    )
+    .await;
+
+    let shot = painter.capture().expect("capture the blurred page");
+    let image = Image::from_rgba8(shot.size.width, shot.size.height, shot.pixels)
+        .expect("captured RGBA image");
+    screenshots().assert_matches(&["filter-blur-card"], &image);
 }
