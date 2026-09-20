@@ -1632,6 +1632,112 @@ fn mutation_inside_a_skipped_container_is_deferred_until_reveal() {
     assert_eq!(h.rect(child), (0.0, 0.0, 30.0, 20.0));
 }
 
+/// A box moved under a skipped box arrives with geometry of its own, and no
+/// algorithm will ever lay it out again while the box skips — so the pass
+/// that accepts the move is the one that has to take that geometry away.
+///
+/// Nothing above either node is invalidated: the move parks its `contain:
+/// strict` source and parks the skipped destination as the relayout boundary
+/// it is, and the root pass is served from the root's cache. The skipped box
+/// is therefore re-run in place, by `compute_boundary_relayout` under its own
+/// committed input, and that re-run is what hides the arrival and rounds it
+/// to the zero box.
+#[test]
+fn a_box_moved_under_a_skipped_box_loses_its_geometry_without_a_root_pass() {
+    let mut h = Harness::new(
+        "page { display: flex; width: 200px; height: 200px; align-items: flex-start; }
+         .strict { display: flex; contain: strict; width: 60px; height: 40px;
+                   align-items: flex-start; }
+         .hidden { display: flex; content-visibility: hidden;
+                   contain-intrinsic-size: 40px 30px; width: 40px; height: 30px; }
+         .moved { width: 25px; height: 15px; }",
+    );
+    let root = h.doc.root;
+    let strict = h.doc.el(root, "view.strict");
+    let moved = h.doc.el(strict, "view.moved");
+    let hidden = h.doc.el(root, "view.hidden");
+    h.layout();
+    assert_eq!(h.rect(moved), (0.0, 0.0, 25.0, 15.0));
+
+    h.doc.dom.append_child(hidden, moved);
+    h.layout();
+
+    assert_eq!(
+        h.rect(moved),
+        (0.0, 0.0, 0.0, 0.0),
+        "the parked skipped box hid what arrived under it, and the rounding \
+         walk it owns reached the arrival",
+    );
+    assert_eq!(
+        h.rect(hidden),
+        (60.0, 0.0, 40.0, 30.0),
+        "and the skipped box itself is the same box it was",
+    );
+    assert!(
+        h.doc.dom.render(),
+        "a frame is owed after the move, and this is the one that draws it",
+    );
+    // Dead centre of the skipped box, where the moved node's old box would
+    // now sit: the paint order stops at the box that skips its contents.
+    let inside = euclid::default::Point2D::new(80.0, 15.0);
+    let hit = h.doc.dom.elements_from_point(inside);
+    assert!(
+        hit.contains(&hidden),
+        "the skipped box paints itself: {hit:?}",
+    );
+    assert!(
+        !hit.contains(&moved),
+        "nothing under it paints, whatever geometry it arrived with: {hit:?}",
+    );
+
+    h.doc.set_inline(hidden, "content-visibility: visible");
+    h.layout();
+    assert_eq!(
+        h.rect(moved),
+        (0.0, 0.0, 25.0, 15.0),
+        "the reveal lays the contents the cached skip hid",
+    );
+}
+
+/// A skipped box nested inside another relayout boundary, both parked by one
+/// batch of mutations: the outer boundary owns the rounding walk, and the
+/// result is the one a cold pass produces.
+#[test]
+fn a_parked_skipped_box_inside_a_parked_boundary_matches_a_full_relayout() {
+    let mut h = Harness::new(
+        "page { display: flex; width: 200px; height: 200px; align-items: flex-start; }
+         .strict { display: flex; flex-direction: column; contain: strict;
+                   width: 120px; height: 90px; align-items: flex-start; }
+         .hidden { display: flex; content-visibility: hidden;
+                   contain-intrinsic-size: 40px 30px; width: 40px; height: 30px; }
+         .leaf { width: 20px; height: 20px; }",
+    );
+    let root = h.doc.root;
+    let strict = h.doc.el(root, "view.strict");
+    let sibling = h.doc.el(strict, "view.leaf");
+    let hidden = h.doc.el(strict, "view.hidden");
+    let inner = h.doc.el(hidden, "view.leaf");
+    let ids = [root, strict, sibling, hidden, inner];
+    h.layout();
+    assert_eq!(h.rect(inner), (0.0, 0.0, 0.0, 0.0));
+
+    // One inside the skipped box, one beside it: the skipped box parks at
+    // depth 2 and the strict boundary at depth 1.
+    h.doc.set_inline(inner, "width: 33px");
+    h.doc.set_inline(sibling, "width: 24px");
+    h.layout();
+    let incremental = h.layouts_of(&ids);
+    assert_eq!(h.rect(sibling), (0.0, 0.0, 24.0, 20.0), "the sibling moved");
+    assert_eq!(
+        h.rect(inner),
+        (0.0, 0.0, 0.0, 0.0),
+        "the skipped box's contents stayed hidden through both parks",
+    );
+
+    h.force_full_layout_through_viewport_change();
+    assert_eq!(incremental, h.layouts_of(&ids), "incremental == full");
+}
+
 #[test]
 fn idle_frames_are_skipped_and_stay_idempotent() {
     let mut h = Harness::new(

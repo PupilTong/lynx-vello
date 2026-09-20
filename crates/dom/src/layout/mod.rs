@@ -502,10 +502,7 @@ impl<T> Document<T> {
                     reached_root = false;
                     break;
                 }
-                if style_view.as_ref().is_some_and(CoreStyle::skips_contents) {
-                    reached_root = false;
-                    break;
-                }
+                let skips_contents = style_view.as_ref().is_some_and(CoreStyle::skips_contents);
                 let scheduled = if style_view.as_ref().is_some_and(is_relayout_boundary) {
                     node_state
                         .and_then(LayoutSlot::committed_input)
@@ -526,6 +523,18 @@ impl<T> Document<T> {
                 state.clear_box_cache(node_slot);
                 if let Some(entry) = scheduled {
                     pending = Some(entry);
+                    reached_root = false;
+                    break;
+                }
+                if skips_contents {
+                    // A skipped box is a relayout boundary, so the arm above
+                    // parks it whenever it has a committed input to re-run
+                    // under. Reaching here means it has none — its size was
+                    // only ever probed, or the cache just cleared holds no
+                    // commit — and then there is nothing to re-run and
+                    // nothing above it to tell: its contents are not laid out
+                    // and do not paint until it stops skipping, which
+                    // invalidates it on its own.
                     reached_root = false;
                     break;
                 }
@@ -1348,5 +1357,159 @@ mod tests {
             doc.layout_requires_full_pass(viewport, scale),
             "a root-reaching mutation forces a whole-tree pass",
         );
+    }
+
+    /// A skipped box is a relayout boundary — `SIZE` and `LAYOUT` both — and
+    /// now that it holds a committed input it can be the root of one.
+    ///
+    /// Its re-run is the trivial size it already answered plus the hide sweep,
+    /// so parking it costs one box model and one pass over its children, where
+    /// the alternative is either reflowing from the root or leaving the box
+    /// tree's change unanswered until the box stops skipping.
+    #[test]
+    fn a_mutation_under_a_skipped_box_parks_the_box_itself() {
+        let mut doc: Document<()> =
+            Document::new(crate::tree::document::tests::device(), "page", ());
+        doc.add_stylesheet(
+            "page { display: flex; width: 300px; height: 100px; }
+             .skip { display: flex; content-visibility: hidden;
+                     contain-intrinsic-size: 40px 30px; width: 40px; height: 30px; }
+             .leaf { width: 10px; height: 10px; }",
+            StylesheetOrigin::Author,
+        );
+        let root = doc.document_element().id();
+        let skip = child_of(&mut doc, root, "skip");
+        let hidden_child = child_of(&mut doc, skip, "leaf");
+        doc.layout();
+
+        doc.invalidate_layout(hidden_child);
+
+        let roots = doc.relayout_roots();
+        assert_eq!(roots.len(), 1, "one parked root: {roots:?}");
+        assert_eq!(roots[0].node_id, skip);
+        assert!(
+            matches!(roots[0].kind, RelayoutKind::Boundary),
+            "a skipped box's committed input reproduces its output exactly, \
+             so the re-run is final: {:?}",
+            roots[0].kind,
+        );
+        assert!(
+            doc.slot(skip)
+                .and_then(|slot| doc.layout_state().get(slot))
+                .is_none_or(|state| state.slot.layout_cache_is_empty()),
+            "recording a parked root clears the cache it captured the input from",
+        );
+    }
+
+    /// How a row list skips: `content-visibility: hidden` on the rows the
+    /// page keeps out, or `auto` on rows the render finds outside the encode
+    /// window.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Skipping {
+        Hidden,
+        Auto,
+    }
+
+    /// A fixed-height scroller of `rows` rows, each holding one cell, where
+    /// everything past the first `VISIBLE_ROWS` skips its contents.
+    ///
+    /// The scroller's own box never moves, so every row's committed input is
+    /// the same input on every pass: a row's own cell changing width is the
+    /// one thing dirty about the page.
+    fn skipping_row_list(
+        rows: usize,
+        skipping: Skipping,
+    ) -> (Document<()>, Vec<crate::NodeId>, crate::NodeId) {
+        const VISIBLE_ROWS: usize = 2;
+        let mut doc: Document<()> =
+            Document::new(crate::tree::document::tests::device(), "page", ());
+        let (row_rule, skipped_rule) = match skipping {
+            // `auto` is on every row; which of them skips is the render's
+            // answer, and rows below the encode window are the ones it says
+            // no to.
+            Skipping::Auto => ("content-visibility: auto;", ""),
+            Skipping::Hidden => ("", ".skipped { content-visibility: hidden; }"),
+        };
+        doc.add_stylesheet(
+            &format!(
+                "page {{ display: flex; flex-direction: column; width: 200px; height: 600px;
+                         align-items: flex-start; }}
+                 .list {{ display: flex; flex-direction: column; width: 200px; height: 40px;
+                          overflow: hidden; align-items: flex-start; }}
+                 .row {{ display: flex; width: 200px; flex-shrink: 0; {row_rule}
+                         contain-intrinsic-size: 200px 20px; }}
+                 .cell {{ width: 20px; height: 20px; }}
+                 {skipped_rule}"
+            ),
+            StylesheetOrigin::Author,
+        );
+        let root = doc.document_element().id();
+        let list = child_of(&mut doc, root, "list");
+        let mut row_ids = Vec::with_capacity(rows);
+        let mut first_cell = None;
+        for row in 0..rows {
+            let element = child_of(&mut doc, list, "row");
+            if skipping == Skipping::Hidden && row >= VISIBLE_ROWS {
+                doc.add_class(element, "skipped");
+            }
+            let cell = child_of(&mut doc, element, "cell");
+            first_cell.get_or_insert(cell);
+            row_ids.push(element);
+        }
+        (doc, row_ids, first_cell.expect("the list has rows"))
+    }
+
+    /// The number this cache exists to hold down.
+    ///
+    /// A mutation beside the skipped rows re-runs the list, which asks every
+    /// row for its box — and a skipped box's answer reads no child, so it is
+    /// the same answer as last pass and comes back from the cache. Before it
+    /// did, every skipped row on the page re-resolved its own box model on
+    /// every pass, which is what made a long list of skipped rows more
+    /// expensive to mutate beside than a list of ordinary ones.
+    #[test]
+    fn a_mutation_beside_skipped_rows_re_resolves_no_skipped_box() {
+        for skipping in [Skipping::Hidden, Skipping::Auto] {
+            let mut counts = Vec::new();
+            for rows in [8_usize, 64] {
+                let (mut doc, row_ids, cell) = skipping_row_list(rows, skipping);
+                let settle = |doc: &mut Document<()>| match skipping {
+                    // Relevance is the rendering update's answer, so an
+                    // `auto` page has to render to have one at all.
+                    Skipping::Auto => {
+                        doc.render();
+                    }
+                    Skipping::Hidden => doc.layout(),
+                };
+                settle(&mut doc);
+                let rows_that_skip = row_ids
+                    .iter()
+                    .filter(|&&row| {
+                        let node = doc.get(row).expect("the row is live");
+                        skips_contents(node, node.layout_computed_style().expect("laid out"))
+                    })
+                    .count();
+                doc.set_inline_style_property(cell, "width", "30px");
+                let resolutions = super::host::skipped_size_resolutions_during(|| {
+                    settle(&mut doc);
+                });
+                counts.push((rows_that_skip, resolutions));
+            }
+            let [(few, small_page), (many, large_page)] = counts[..] else {
+                unreachable!("one measurement per row count")
+            };
+            assert!(
+                many > few * 4,
+                "{skipping:?}: {few} then {many} rows skip — the two pages have to \
+                 differ in how much there is to re-resolve for the counts to mean \
+                 anything",
+            );
+            assert_eq!(
+                (small_page, large_page),
+                (0, 0),
+                "{skipping:?}: every skipped row's box came back from its cache, \
+                 whatever the page's row count",
+            );
+        }
     }
 }

@@ -1834,10 +1834,13 @@ applies `tail-color-convert`'s native semantics.
 
 **CSS containment (css-contain-2)** is landed layout-side: the stylo
 `Contain`/`ContainIntrinsicSize` accessors on `CoreStyle`, size-substitution +
-layout-containment baseline suppression, `compute_skipped_contents_layout`
-(whose "is this box skipping?" input is `CoreStyle::skips_contents`, defaulted
-to `content-visibility: hidden` and overridden by `dom` to fold in `auto`
-relevance), and
+layout-containment baseline suppression, the skipped-contents pair
+`compute_skipped_contents_size` + `hide_skipped_contents` (whose "is this box
+skipping?" input is `CoreStyle::skips_contents`, defaulted to
+`content-visibility: hidden` and overridden by `dom` to fold in `auto`
+relevance; the size is cacheable and goes through `compute_cached_layout`, the
+hide sweep answers to the box tree and runs on every committing call outside
+that cache), and
 the `invalidate` module (`is_relayout_boundary`, `invalidate_for_relayout`) —
 the containment-bounded, damage-driven cache-invalidation host workflow
 (single-axis / container queries out of scope). `LayoutGoal::Commit` carries

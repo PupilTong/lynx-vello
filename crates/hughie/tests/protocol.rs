@@ -10,7 +10,7 @@ use hughie::cache::Cache;
 use hughie::compute::{
     compute_absolute_layout, compute_boundary_relayout, compute_cached_layout,
     compute_flexbox_layout, compute_leaf_layout, compute_root_layout,
-    compute_skipped_contents_layout, hide_subtree, round_layout,
+    compute_skipped_contents_size, hide_skipped_contents, hide_subtree, round_layout,
 };
 use hughie::invalidate::{invalidate_for_relayout, is_relayout_boundary};
 use hughie::prelude::*;
@@ -329,7 +329,13 @@ impl LayoutTree for MockTree {
         }
 
         if style.skips_contents() {
-            return compute_skipped_contents_layout(self, state, node, input);
+            // The two halves of a skipped box, composed the way every host
+            // must: the hide sweep answers to the box tree and runs on every
+            // committing call, the size is an ordinary cacheable answer.
+            hide_skipped_contents(self, state, node, input);
+            return compute_cached_layout(self, state, node, input, |tree, _state, node, input| {
+                compute_skipped_contents_size(&tree.style(node), input)
+            });
         }
 
         let display = style.display;
