@@ -259,6 +259,19 @@ where
         .or_else(|| cross_stretches.then_some(cross_area).flatten())
         .map(|value| clamp(value, cross.size(item.min_size), cross.size(item.max_size)));
     cross.set_size(&mut known, resolved_cross);
+    // css-grid-1 §11.5 with css-sizing-4 §5: an item with a preferred aspect
+    // ratio contributes the size that ratio *transfers*, so the transfer needs
+    // a size in the other axis. A definite one — an authored size, or a track
+    // the item is stretched into — is the whole answer. Failing that, replaced
+    // content still has its natural size in that axis to transfer from, which
+    // is what an image carrying its own `aspect-ratio` property contributes to
+    // an `auto` track.
+    let transferred_cross = resolved_cross.or_else(|| {
+        item.aspect_ratio?;
+        cross
+            .size(tree.style(item.key.node).natural_size())
+            .map(|value| clamp(value, cross.size(item.min_size), cross.size(item.max_size)))
+    });
 
     let target_available = available_for(kind);
     let cross_available = cross_area.map_or(AvailableSpace::MaxContent, AvailableSpace::Definite);
@@ -278,7 +291,7 @@ where
         item.measured_baselines.y = Some(output.first_baselines.y.unwrap_or(size.height));
     }
     let mut measured = axis.size(size);
-    if let (Some(ratio), Some(cross_size)) = (item.aspect_ratio, resolved_cross)
+    if let (Some(ratio), Some(cross_size)) = (item.aspect_ratio, transferred_cross)
         && ratio.is_finite()
         && ratio > 0.0
     {
@@ -298,7 +311,10 @@ where
         } else {
             sizing_axis
         };
-        measured = measured.max(ratio_size);
+        // The transferred size *is* the contribution — it does not merely
+        // floor the measured one. A ratio flatter than the content's own is
+        // meant to cut the box down and let the content overflow.
+        measured = ratio_size;
     }
     match kind {
         ContributionKind::Minimum | ContributionKind::MinContent => {

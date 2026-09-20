@@ -1,4 +1,11 @@
 //! CSS Flexible Box Layout Module Level 1 layout algorithm.
+//!
+//! Unlike a grid item (css-grid-1 §6.2), a flex item's `normal` cross
+//! alignment is `stretch` with no exception for replaced content
+//! (css-align-3 §6.2.4), and §9.8 makes that stretched cross size *definite*
+//! in a single-line container — so `determine_flex_base_sizes` hands it to the
+//! §9.2 measurement, and an item with an intrinsic ratio takes its main size
+//! from it.
 
 #![allow(clippy::cast_precision_loss)]
 
@@ -412,6 +419,10 @@ fn determine_flex_base_sizes<'tree, T>(
     flex_basis_percentage_basis: Option<f32>,
     container_main_is_definite: bool,
     needs_intrinsic_main_contributions: bool,
+    // `flex-wrap: nowrap`, which is the only case in which css-flexbox-1 §9.8
+    // calls a stretched item's cross size definite: with one line, and only
+    // then, that size *is* the container's inner cross size.
+    single_line: bool,
     // `Some` only on a commit-goal pass: the flags it derives are consumed
     // exclusively by the in-flow commit, so measure passes skip the style
     // inspection entirely.
@@ -436,7 +447,35 @@ fn determine_flex_base_sizes<'tree, T>(
         let raw_flex_basis = style.flex_basis();
         let inset_size = item.box_floor();
         let main_floor = axes.main.size(inset_size);
-        let cross_preferred = axes.cross.size(item.preferred_size);
+        // css-flexbox-1 §9.8: in a single-line container with a definite cross
+        // size, the cross size of an item the container is going to stretch is
+        // the container's inner cross size, clamped to the item's own cross
+        // min/max — and it is *definite*, which means the measure that produces
+        // the item's flex base size (§9.2 steps B and E) has to be told it.
+        // Without this a replaced item with an intrinsic ratio reports its
+        // natural main size instead of the one the stretched cross size
+        // transfers, and an item whose content reflows reports a main size
+        // measured at the wrong cross size. The container's own intrinsic
+        // passes leave the cross size indefinite, which turns this back off
+        // exactly where it should be.
+        let cross_preferred = axes.cross.size(item.preferred_size).or_else(|| {
+            let stretches = single_line
+                && item.align_self == AlignFlags::STRETCH
+                && axes.cross.size(item.size_is_auto)
+                && !item.margin_auto.flow_start(axes.cross, axes.cross_reverse)
+                && !item.margin_auto.flow_end(axes.cross, axes.cross_reverse);
+            stretches
+                .then(|| axes.cross.size(container_inner_size))
+                .flatten()
+                .map(|cross| {
+                    clamp_axis(
+                        cross - axes.cross.sum(item.margin),
+                        axes.cross.size(item.min_size),
+                        axes.cross.size(item.max_size),
+                        axes.cross.size(inset_size),
+                    )
+                })
+        });
         let mut known = Size::NONE;
         axes.cross.set_size(&mut known, cross_preferred);
         let mut known_is_definite = Size::new(false, false);
@@ -1766,6 +1805,7 @@ where
             .flatten(),
         !main_percentage_basis_was_indefinite,
         axes.main.size(outer_size).is_none() && size_containment.is_none(),
+        flex_wrap == flex_wrap::T::NOWRAP,
         container_independent,
     );
 
@@ -1888,6 +1928,7 @@ where
             },
             !main_percentage_basis_was_indefinite,
             false,
+            flex_wrap == flex_wrap::T::NOWRAP,
             container_independent,
         );
         lines = collect_flex_lines(
@@ -2346,6 +2387,7 @@ mod tests {
             Some(100.0),
             true,
             true,
+            true,
             None,
         );
 
@@ -2376,6 +2418,7 @@ mod tests {
                     AvailableSpace::Definite(20.0),
                 ),
                 Some(available),
+                true,
                 true,
                 true,
                 None,

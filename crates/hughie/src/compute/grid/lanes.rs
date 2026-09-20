@@ -552,11 +552,15 @@ where
         .unwrap_or(AlignFlags::STRETCH);
     let content_alignment = Size::new(justify_content, align_content);
     let align_items = normalize_item_alignment(style.align_items().0, false, rtl);
+    let justify_items = normalize_item_alignment(style.justify_items().computed.0.0, true, rtl);
+    // §6.2: in the grid axis the box alignment properties work exactly as in a
+    // regular grid container, so the `normal` rule of css-grid-1 §6.2 reaches
+    // lanes items through the shared `resolve_grid_item`.
     let item_defaults = ItemDefaults {
         align_items: align_items.unwrap_or(AlignFlags::STRETCH),
         align_items_normal: align_items.is_none(),
-        justify_items: normalize_item_alignment(style.justify_items().computed.0.0, true, rtl)
-            .unwrap_or(AlignFlags::STRETCH),
+        justify_items: justify_items.unwrap_or(AlignFlags::STRETCH),
+        justify_items_normal: justify_items.is_none(),
         rtl,
     };
 

@@ -403,6 +403,9 @@ pub(super) struct TestStyle {
     pub(super) min_size: Size<StyleSize>,
     pub(super) max_size: Size<MaxSize>,
     pub(super) aspect_ratio: AspectRatio,
+    /// The natural size a host reports for replaced content, which containers
+    /// read through `CoreStyle::natural_size`.
+    pub(super) natural_size: Size<Option<f32>>,
     pub(super) margin: Edges<Margin>,
     pub(super) padding: Edges<NonNegativeLengthPercentage>,
     pub(super) border: Edges<BorderSideWidth>,
@@ -455,6 +458,7 @@ impl Default for TestStyle {
             min_size: Size::new(size_auto(), size_auto()),
             max_size: Size::new(max_none(), max_none()),
             aspect_ratio: AspectRatio::auto(),
+            natural_size: Size::NONE,
             margin: Edges::uniform(margin_px(0.0)),
             padding: Edges::uniform(npx(0.0)),
             border: Edges::uniform(border_px(0.0)),
@@ -526,6 +530,10 @@ impl CoreStyle for TestStyle {
 
     fn aspect_ratio(&self) -> AspectRatio {
         self.aspect_ratio
+    }
+
+    fn natural_size(&self) -> Size<Option<f32>> {
+        self.natural_size
     }
 
     fn margin(&self) -> Edges<&Margin> {

@@ -116,6 +116,15 @@ style_protocol! {
                 Size::new(&position.max_width, &position.max_height)
             },
             aspect_ratio -> AspectRatio = style.computed_values().clone_aspect_ratio(),
+            // The natural size of replaced content, as the *host* reports it
+            // — the same `NaturalSize` `compute_leaf_layout` receives, seen
+            // from the container above rather than from inside the leaf. A
+            // container needs it because css-grid-1 §6.2 decides `normal`
+            // self-alignment on whether an item is a replaced box with a
+            // natural size in the axis, and alignment is settled before the
+            // item is ever measured. Every non-replaced box answers `NONE`,
+            // which is the default here.
+            natural_size -> Size<Option<f32>> = Size::NONE,
             margin -> Edges<&Margin> = {
                 let margin = style.computed_values().get_margin();
                 Edges {

@@ -2495,3 +2495,129 @@ fn grid_lanes_skips_hidden_and_out_of_flow_children() {
     );
     assert_eq!(h.rect(badge).3, 100.0, "the out-of-flow box is still sized");
 }
+
+// ---------------------------------------------------------------------------
+// Replaced content with an intrinsic aspect ratio, inside each container
+//
+// The seam: `Document::set_natural_size` makes a node replaced, and the node's
+// natural size then reaches layout twice — as the leaf's own measurement, and
+// as `CoreStyle::natural_size`, which the container above reads to settle
+// css-grid-1 §6.2 `normal` self-alignment before it measures anything. These
+// assert the laid-out size, not any element's behaviour, because every element
+// that carries decoded pixels arrives here the same way.
+// ---------------------------------------------------------------------------
+
+/// Attaches a 40x20 natural size to a fresh child, which is what a decoded
+/// bitmap does and what makes the node replaced.
+fn replaced_child(h: &mut Harness, parent: NodeId, spec: &str) -> NodeId {
+    let node = h.doc.el(parent, spec);
+    h.doc.dom.set_natural_size(
+        node,
+        dom::layout::NaturalSize::from_size(dom::layout::Size::new(40.0, 20.0)),
+    );
+    node
+}
+
+/// css-align-3 §6.2.4: a flex item's `normal` cross alignment is `stretch`,
+/// with no exception for replaced content, and css-flexbox-1 §9.8 makes that
+/// stretched cross size definite for the §9.2 flex-base measurement. The item
+/// fills the 100 of height and its ratio carries the width to 200.
+#[test]
+fn a_replaced_item_stretches_and_transfers_inside_a_flex_row() {
+    let mut h = Harness::new("page { display: flex; width: 300px; height: 100px; }");
+    let root = h.doc.root;
+    let item = replaced_child(&mut h, root, "image");
+    h.layout();
+
+    assert_eq!(h.rect(item), (0.0, 0.0, 200.0, 100.0));
+}
+
+/// css-grid-1 §6.2: `normal` does not stretch a replaced box with a natural
+/// size — it is sized by the block-level rules for replaced elements, at
+/// 40x20. An explicit `stretch` does stretch it, in both axes, which §6.2's
+/// own note says will distort the ratio.
+#[test]
+fn a_replaced_grid_item_keeps_its_natural_size_until_it_is_told_to_stretch() {
+    for (class, expected) in [
+        ("image", (0.0, 0.0, 40.0, 20.0)),
+        ("image.fill", (0.0, 0.0, 200.0, 200.0)),
+    ] {
+        let mut h = Harness::new(
+            "page { display: grid; width: 400px; height: 400px;
+                    grid-template-columns: 200px; grid-template-rows: 200px; }
+             .fill { justify-self: stretch; align-self: stretch; }",
+        );
+        let root = h.doc.root;
+        let item = replaced_child(&mut h, root, class);
+        h.layout();
+
+        assert_eq!(h.rect(item), expected, "{class}");
+    }
+}
+
+/// css-grid-1 §11.5 with css-sizing-4 §5: a replaced item stretched across a
+/// definite column contributes the ratio-transferred height to the `auto` row,
+/// so the row is 100 rather than the item's natural 20.
+#[test]
+fn a_stretched_replaced_grid_item_transfers_into_an_auto_row() {
+    // The grid is nested so that its own block size stays indefinite: a root
+    // box fills the viewport, and css-grid-1 §11.8 would then stretch the
+    // `auto` row to that instead of leaving it at the contribution.
+    let mut h = Harness::new(
+        "page { display: flex; flex-direction: column; align-items: flex-start;
+                width: 400px; height: 400px; }
+         .grid { display: grid; grid-template-columns: 200px;
+                 grid-template-rows: auto; }
+         .fill-inline { justify-self: stretch; }",
+    );
+    let root = h.doc.root;
+    let grid = h.doc.el(root, "view.grid");
+    let item = replaced_child(&mut h, grid, "image.fill-inline");
+    h.layout();
+
+    assert_eq!(h.rect(item), (0.0, 0.0, 200.0, 100.0));
+    assert_eq!(h.rect(grid).3, 100.0, "the auto row takes the transfer");
+}
+
+/// css-grid-3 §6.2 sends grid-axis alignment straight through regular Grid, so
+/// a lanes item told to fill takes its lane's width and its stacking height
+/// from the ratio — and the next item stacks behind it at that height.
+#[test]
+fn replaced_lanes_items_take_their_lane_width_and_stack_by_the_transferred_height() {
+    let mut h = Harness::new(
+        "page { display: grid-lanes; width: 200px; flow-tolerance: 0;
+                grid-template-columns: repeat(2, 100px); }
+         image { justify-self: stretch; }",
+    );
+    let root = h.doc.root;
+    let first = replaced_child(&mut h, root, "image");
+    let second = replaced_child(&mut h, root, "image");
+    let third = replaced_child(&mut h, root, "image");
+    h.layout();
+
+    assert_eq!(h.rect(first), (0.0, 0.0, 100.0, 50.0));
+    assert_eq!(h.rect(second), (100.0, 0.0, 100.0, 50.0));
+    assert_eq!(h.rect(third), (0.0, 50.0, 100.0, 50.0));
+    assert_eq!(h.rect(root).3, 100.0);
+}
+
+/// The same lanes without the fill: §6.2's `normal` leaves each replaced item
+/// at 40x20 inside its 100-wide lane, and the stacking range follows the
+/// smaller items.
+#[test]
+fn normal_alignment_leaves_replaced_lanes_items_at_their_natural_size() {
+    let mut h = Harness::new(
+        "page { display: grid-lanes; width: 200px; flow-tolerance: 0;
+                grid-template-columns: repeat(2, 100px); }",
+    );
+    let root = h.doc.root;
+    let first = replaced_child(&mut h, root, "image");
+    let second = replaced_child(&mut h, root, "image");
+    let third = replaced_child(&mut h, root, "image");
+    h.layout();
+
+    assert_eq!(h.rect(first), (0.0, 0.0, 40.0, 20.0));
+    assert_eq!(h.rect(second), (100.0, 0.0, 40.0, 20.0));
+    assert_eq!(h.rect(third), (0.0, 20.0, 40.0, 20.0));
+    assert_eq!(h.rect(root).3, 40.0);
+}
