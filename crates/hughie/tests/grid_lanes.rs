@@ -1387,3 +1387,376 @@ fn committed_items_claim_grid_axis_independence_only_over_fixed_tracks() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Items with an intrinsic aspect ratio
+//
+// css-grid-3 §6.2 routes grid-axis alignment straight through regular Grid, so
+// css-grid-1 §6.2 decides whether a lanes item fills its lane and css-sizing-4
+// §5 decides what that lane size transfers into the stacking axis. The leaves
+// below are replaced: they carry a natural size and answer a known dimension
+// through their own ratio, the way `NaturalSize::measure` does for a bitmap.
+// ---------------------------------------------------------------------------
+
+/// A replaced 40x20 leaf, ratio 2:1.
+fn wide_bitmap(input: LeafMeasureInput) -> LeafMetrics {
+    let known = input.known_dimensions;
+    LeafMetrics::new(match (known.width, known.height) {
+        (Some(width), Some(height)) => Size::new(width, height),
+        (Some(width), None) => Size::new(width, width / 2.0),
+        (None, Some(height)) => Size::new(height * 2.0, height),
+        (None, None) => Size::new(40.0, 20.0),
+    })
+}
+
+/// The same leaf standing up: 20x40, ratio 1:2.
+fn tall_bitmap(input: LeafMeasureInput) -> LeafMetrics {
+    let known = input.known_dimensions;
+    LeafMetrics::new(match (known.width, known.height) {
+        (Some(width), Some(height)) => Size::new(width, height),
+        (Some(width), None) => Size::new(width, width * 2.0),
+        (None, Some(height)) => Size::new(height / 2.0, height),
+        (None, None) => Size::new(20.0, 40.0),
+    })
+}
+
+fn wide_ratio_item(tree: &mut TestTree, style: TestStyle) -> TestId {
+    tree.push_measured_leaf(
+        TestStyle {
+            natural_size: Size::new(Some(40.0), Some(20.0)),
+            ..style
+        },
+        wide_bitmap,
+    )
+}
+
+fn tall_ratio_item(tree: &mut TestTree, style: TestStyle) -> TestId {
+    tree.push_measured_leaf(
+        TestStyle {
+            natural_size: Size::new(Some(20.0), Some(40.0)),
+            ..style
+        },
+        tall_bitmap,
+    )
+}
+
+fn stretched() -> TestStyle {
+    TestStyle {
+        justify_self: self_align(AlignFlags::STRETCH),
+        ..TestStyle::default()
+    }
+}
+
+/// The waterfall case. Three 100px lanes, four replaced items told to fill
+/// their lane: each is 100 wide, each takes 50 of stacking extent from
+/// css-sizing-4 §5, and §4.4 then places the fourth at the end of the shortest
+/// lane — which after three equal items is the first. The stacking range is
+/// the 100 that lane reaches.
+#[test]
+fn stretched_ratio_items_take_their_stacking_size_from_their_lane() {
+    let mut tree = TestTree::default();
+    let items = (0..4)
+        .map(|_| wide_ratio_item(&mut tree, stretched()))
+        .collect::<Vec<_>>();
+    let root = tree.push_grid_lanes(
+        lanes_style(&[px(100.0), px(100.0), px(100.0)], &[]),
+        items.clone(),
+    );
+
+    let output = sized_layout(&tree, root, Some(300.0), None);
+
+    assert_size(output.size, Size::new(300.0, 100.0));
+    for &item in &items {
+        assert_size(tree.layout(item).size, Size::new(100.0, 50.0));
+    }
+    assert_eq!(
+        locations(&tree, &items),
+        vec![
+            Point::new(0.0, 0.0),
+            Point::new(100.0, 0.0),
+            Point::new(200.0, 0.0),
+            Point::new(0.0, 50.0),
+        ]
+    );
+}
+
+/// css-grid-1 §6.2 through css-grid-3 §6.2: `normal` does not stretch a
+/// replaced item, in lanes either. The same four items keep their natural
+/// 40x20, so lane 0 stacks two of them and the range is 40 — the lane is still
+/// 100 wide, the item simply does not fill it.
+#[test]
+fn normal_leaves_a_replaced_lanes_item_at_its_natural_size() {
+    let mut tree = TestTree::default();
+    let items = (0..4)
+        .map(|_| wide_ratio_item(&mut tree, TestStyle::default()))
+        .collect::<Vec<_>>();
+    let root = tree.push_grid_lanes(
+        lanes_style(&[px(100.0), px(100.0), px(100.0)], &[]),
+        items.clone(),
+    );
+
+    let output = sized_layout(&tree, root, Some(300.0), None);
+
+    assert_size(output.size, Size::new(300.0, 40.0));
+    for &item in &items {
+        assert_size(tree.layout(item).size, Size::new(40.0, 20.0));
+    }
+    assert_point(tree.layout(items[3]).location, Point::new(0.0, 20.0));
+}
+
+/// The grid-axis alignment values §6.2 inherits from Grid, one item per lane
+/// so each is read on its own. `stretch` fills and transfers; `normal`,
+/// `start`, `center` and `end` leave replaced content at 40x20 and only move
+/// it inside the lane.
+#[test]
+fn grid_axis_self_alignment_decides_whether_a_ratio_item_fills_its_lane() {
+    let cases = [
+        (AlignFlags::STRETCH, Size::new(100.0, 50.0), 0.0),
+        (AlignFlags::NORMAL, Size::new(40.0, 20.0), 0.0),
+        (AlignFlags::START, Size::new(40.0, 20.0), 0.0),
+        (AlignFlags::CENTER, Size::new(40.0, 20.0), 30.0),
+        (AlignFlags::END, Size::new(40.0, 20.0), 60.0),
+    ];
+    for (alignment, expected, offset) in cases {
+        let mut tree = TestTree::default();
+        let item = wide_ratio_item(
+            &mut tree,
+            TestStyle {
+                justify_self: self_align(alignment),
+                ..TestStyle::default()
+            },
+        );
+        let root = tree.push_grid_lanes(lanes_style(&[px(100.0)], &[]), vec![item]);
+
+        sized_layout(&tree, root, Some(100.0), None);
+
+        assert_size(tree.layout(item).size, expected);
+        assert_point(tree.layout(item).location, Point::new(offset, 0.0));
+    }
+}
+
+/// `justify-items` on the container is the same decision made once. With
+/// `stretch` every lanes item fills, including the replaced ones `normal`
+/// would have left alone.
+#[test]
+fn justify_items_stretch_fills_every_lane() {
+    let mut tree = TestTree::default();
+    let wide = wide_ratio_item(&mut tree, TestStyle::default());
+    let tall = tall_ratio_item(&mut tree, TestStyle::default());
+    let root = tree.push_grid_lanes(
+        TestStyle {
+            justify_items: justify_items(AlignFlags::STRETCH),
+            ..lanes_style(&[px(100.0), px(100.0)], &[])
+        },
+        vec![wide, tall],
+    );
+
+    let output = sized_layout(&tree, root, Some(200.0), None);
+
+    assert_size(tree.layout(wide).size, Size::new(100.0, 50.0));
+    assert_size(tree.layout(tall).size, Size::new(100.0, 200.0));
+    assert_size(output.size, Size::new(200.0, 200.0));
+}
+
+/// §2.3 puts the tracks in the block axis when `grid-template-rows` alone
+/// names any, and §6.2 then reads `align-self` for the grid axis. A 100-tall
+/// lane transfers into 200 of stacking width for the 2:1 item and 50 for the
+/// 1:2 one, and the two stack along the inline axis.
+#[test]
+fn row_lanes_transfer_the_lane_height_into_the_stacking_width() {
+    let mut tree = TestTree::default();
+    let align_stretch = TestStyle {
+        align_self: self_align(AlignFlags::STRETCH),
+        ..TestStyle::default()
+    };
+    let wide = wide_ratio_item(&mut tree, align_stretch.clone());
+    let tall = tall_ratio_item(&mut tree, align_stretch);
+    let root = tree.push_grid_lanes(lanes_style(&[], &[px(100.0)]), vec![wide, tall]);
+
+    let output = sized_layout(&tree, root, None, Some(100.0));
+
+    assert_size(tree.layout(wide).size, Size::new(200.0, 100.0));
+    assert_size(tree.layout(tall).size, Size::new(50.0, 100.0));
+    assert_size(output.size, Size::new(250.0, 100.0));
+    assert_point(tree.layout(tall).location, Point::new(200.0, 0.0));
+}
+
+/// §3.4 sizes the grid axis with regular Grid's §12, so an `auto` lane takes
+/// the ratio item's max-content contribution — with nothing definite in the
+/// stacking axis to transfer from, that is its natural 40 — and an `fr` lane
+/// takes its share of the container and transfers that.
+#[test]
+fn auto_and_flexible_lanes_size_from_ratio_items() {
+    let mut auto_tree = TestTree::default();
+    let auto_item = wide_ratio_item(&mut auto_tree, stretched());
+    let auto_root = auto_tree.push_grid_lanes(
+        lanes_style(&[support::track_auto(), support::track_auto()], &[]),
+        vec![auto_item],
+    );
+    let auto_output = auto_layout(&auto_tree, auto_root);
+    assert_size(auto_tree.layout(auto_item).size, Size::new(40.0, 20.0));
+    assert_size(auto_output.size, Size::new(80.0, 20.0));
+
+    let mut flex_tree = TestTree::default();
+    let flex_item = wide_ratio_item(&mut flex_tree, stretched());
+    let flex_root =
+        flex_tree.push_grid_lanes(lanes_style(&[fr(1.0), fr(1.0)], &[]), vec![flex_item]);
+    let flex_output = sized_layout(&flex_tree, flex_root, Some(300.0), None);
+    assert_size(flex_tree.layout(flex_item).size, Size::new(150.0, 75.0));
+    assert_size(flex_output.size, Size::new(300.0, 75.0));
+}
+
+/// §4.1 lets an item span lanes, and §6.1's grid-axis gutter is part of the
+/// area it then stretches into: 100 + 20 + 100 transfers to 110 of stacking
+/// extent. The stacking gutter is the 20 between the spanning item and the one
+/// that follows it in lane 0.
+#[test]
+fn a_spanning_ratio_item_stretches_across_its_lanes_and_their_gutter() {
+    let mut tree = TestTree::default();
+    let spanning = wide_ratio_item(
+        &mut tree,
+        TestStyle {
+            grid_column: Line::new(line(1), span(2)),
+            ..stretched()
+        },
+    );
+    let following = wide_ratio_item(&mut tree, stretched());
+    let root = tree.push_grid_lanes(
+        TestStyle {
+            gap: Size::new(gap_px(20.0), gap_px(20.0)),
+            ..lanes_style(&[px(100.0), px(100.0)], &[])
+        },
+        vec![spanning, following],
+    );
+
+    let output = sized_layout(&tree, root, Some(220.0), None);
+
+    assert_size(tree.layout(spanning).size, Size::new(220.0, 110.0));
+    assert_size(tree.layout(following).size, Size::new(100.0, 50.0));
+    assert_point(tree.layout(following).location, Point::new(0.0, 130.0));
+    assert_size(output.size, Size::new(220.0, 180.0));
+}
+
+/// The lane size is clamped by the item's own min/max in the grid axis before
+/// the ratio transfers from it, and a clamp on the stacking axis afterwards
+/// simply breaks the ratio — the same order css-sizing-3 §5.1 gives a grid
+/// item.
+#[test]
+fn item_min_and_max_sizes_clamp_a_lanes_transfer() {
+    let cases = [
+        (
+            Size::new(size_auto(), size_auto()),
+            Size::new(max_px(60.0), support::max_none()),
+            Size::new(60.0, 30.0),
+        ),
+        (
+            Size::new(size_px(160.0), size_auto()),
+            Size::new(support::max_none(), support::max_none()),
+            Size::new(160.0, 80.0),
+        ),
+        (
+            Size::new(size_auto(), size_auto()),
+            Size::new(support::max_none(), max_px(20.0)),
+            Size::new(100.0, 20.0),
+        ),
+    ];
+    for (min_size, max_size, expected) in cases {
+        let mut tree = TestTree::default();
+        let item = wide_ratio_item(
+            &mut tree,
+            TestStyle {
+                min_size,
+                max_size,
+                ..stretched()
+            },
+        );
+        let root = tree.push_grid_lanes(lanes_style(&[px(100.0)], &[]), vec![item]);
+
+        sized_layout(&tree, root, Some(100.0), None);
+        assert_size(tree.layout(item).size, expected);
+    }
+}
+
+/// A ratio item sharing a lane with an authored-size box and a content-sized
+/// one. Only the ratio item's stacking size follows the lane: the authored box
+/// keeps its own 80x30, and the content-sized item is a *non-replaced* box, so
+/// css-grid-1 §6.2 does stretch it to the lane — it is 100 wide at its own 16
+/// of height. The three stack in order behind the §6.1 gutter.
+#[test]
+fn a_ratio_item_stacks_with_fixed_and_content_sized_neighbours() {
+    let mut tree = TestTree::default();
+    let image = wide_ratio_item(&mut tree, stretched());
+    let box_item = fixed(&mut tree, 80.0, 30.0);
+    let content_item = styled(&mut tree, TestStyle::default(), 30.0, 16.0);
+    let root = tree.push_grid_lanes(
+        TestStyle {
+            gap: Size::new(gap_px(0.0), gap_px(10.0)),
+            ..lanes_style(&[px(100.0)], &[])
+        },
+        vec![image, box_item, content_item],
+    );
+
+    let output = sized_layout(&tree, root, Some(100.0), None);
+
+    assert_size(tree.layout(image).size, Size::new(100.0, 50.0));
+    assert_size(tree.layout(box_item).size, Size::new(80.0, 30.0));
+    assert_size(tree.layout(content_item).size, Size::new(100.0, 16.0));
+    assert_point(tree.layout(box_item).location, Point::new(0.0, 60.0));
+    assert_point(tree.layout(content_item).location, Point::new(0.0, 100.0));
+    assert_size(output.size, Size::new(100.0, 116.0));
+}
+
+/// §4.2's tie threshold decides *which* lane an item joins and nothing else.
+/// Under an infinite tolerance every lane counts as equally short, so the
+/// cursor walks them in order instead of chasing the shortest — the four items
+/// change places, and not one of them changes size.
+#[test]
+fn flow_tolerance_moves_ratio_items_without_resizing_them() {
+    let wide_lane = Size::new(100.0, 50.0);
+    let narrow_lane = Size::new(50.0, 25.0);
+    let cases = [
+        // Exact shortest-lane placement: after three items lane 1 holds 50 and
+        // lane 0 holds 50 too, and the tie goes to the first lane.
+        (
+            tolerance_px(0.0),
+            vec![
+                (Point::new(0.0, 0.0), wide_lane),
+                (Point::new(100.0, 0.0), narrow_lane),
+                (Point::new(100.0, 25.0), narrow_lane),
+                (Point::new(0.0, 50.0), wide_lane),
+            ],
+        ),
+        // Every lane ties, so the cursor walks them in order and wraps.
+        (
+            tolerance_infinite(),
+            vec![
+                (Point::new(0.0, 0.0), wide_lane),
+                (Point::new(100.0, 0.0), narrow_lane),
+                (Point::new(0.0, 50.0), wide_lane),
+                (Point::new(100.0, 25.0), narrow_lane),
+            ],
+        ),
+    ];
+    for (tolerance, expected) in cases {
+        let mut tree = TestTree::default();
+        let items = (0..4)
+            .map(|_| wide_ratio_item(&mut tree, stretched()))
+            .collect::<Vec<_>>();
+        let root = tree.push_grid_lanes(
+            TestStyle {
+                flow_tolerance: tolerance,
+                ..lanes_style(&[px(100.0), px(50.0)], &[])
+            },
+            items.clone(),
+        );
+
+        sized_layout(&tree, root, Some(150.0), None);
+
+        // Two lanes, two sizes: whichever lane an item lands in, its size is
+        // that lane's width through the ratio and nothing else.
+        for (&item, (location, size)) in items.iter().zip(expected) {
+            assert_point(tree.layout(item).location, location);
+            assert_size(tree.layout(item).size, size);
+        }
+    }
+}

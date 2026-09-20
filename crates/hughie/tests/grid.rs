@@ -16,12 +16,12 @@ use stylo::values::generics::grid::{Flex, RepeatCount, TrackListValue};
 use stylo::values::generics::position::PreferredRatio;
 use stylo::values::specified::align::{AlignFlags, JustifyItems as SpecifiedJustifyItems};
 use support::{
-    TestId, TestMeasure, TestStyle, assert_close, assert_point, assert_size, border_px,
+    TestId, TestMeasure, TestStyle, assert_close, assert_point, assert_size, border_px, breadth_fr,
     breadth_px as fixed_breadth, definite_layout, gap_pct, gap_px, grid_line as line,
-    grid_span as span, inset_px, justify_items, margin_px, max_px, npx as nn_px, px as lp,
-    size_pct, size_px, snapshot_layout, track_auto as auto_track, track_fr as fr,
-    track_max_content as max_content_track, track_minmax as minmax, track_pct as percent,
-    track_px as px, track_repeat as repeat,
+    grid_span as span, inset_px, justify_items, margin_px, max_none, max_px, npx as nn_px,
+    px as lp, self_align, size_auto, size_pct, size_px, snapshot_layout, track_auto as auto_track,
+    track_fr as fr, track_max_content as max_content_track, track_minmax as minmax,
+    track_pct as percent, track_px as px, track_repeat as repeat,
 };
 
 #[derive(Debug, Default)]
@@ -2515,4 +2515,435 @@ fn template_components_after_the_track_limit_are_dropped() {
 
     assert_size(output.size, Size::new(10_000.0, 10.0));
     assert_close(tree.layout(probe).location.x, 9_999.0);
+}
+
+// ---------------------------------------------------------------------------
+// Items with an intrinsic aspect ratio
+//
+// The fixtures below are replaced leaves: they carry a natural size, and they
+// answer a known dimension through their own ratio the way
+// `NaturalSize::measure` answers for a decoded bitmap. Every expected number
+// is the one css-grid-1 §6.2 (item sizing), §11.5 (intrinsic track sizes) and
+// css-sizing-4 §5 (the aspect-ratio transfer) produce; each was also read off
+// Chrome 153 over the equivalent `<img>` markup, and agrees.
+// ---------------------------------------------------------------------------
+
+/// A replaced 40x20 leaf, ratio 2:1.
+fn wide_bitmap(input: LeafMeasureInput) -> LeafMetrics {
+    let known = input.known_dimensions;
+    LeafMetrics::new(match (known.width, known.height) {
+        (Some(width), Some(height)) => Size::new(width, height),
+        (Some(width), None) => Size::new(width, width / 2.0),
+        (None, Some(height)) => Size::new(height * 2.0, height),
+        (None, None) => Size::new(40.0, 20.0),
+    })
+}
+
+/// The same leaf standing up: 20x40, ratio 1:2.
+fn tall_bitmap(input: LeafMeasureInput) -> LeafMetrics {
+    let known = input.known_dimensions;
+    LeafMetrics::new(match (known.width, known.height) {
+        (Some(width), Some(height)) => Size::new(width, height),
+        (Some(width), None) => Size::new(width, width * 2.0),
+        (None, Some(height)) => Size::new(height / 2.0, height),
+        (None, None) => Size::new(20.0, 40.0),
+    })
+}
+
+/// Marks a style as belonging to replaced content with a natural size, which
+/// is what `CoreStyle::natural_size` reports and what §6.2 keys `normal`
+/// self-alignment on.
+fn with_natural_size(style: TestStyle, width: f32, height: f32) -> TestStyle {
+    TestStyle {
+        natural_size: Size::new(Some(width), Some(height)),
+        ..style
+    }
+}
+
+fn wide_item(tree: &mut TestTree, style: TestStyle) -> TestId {
+    tree.push_measured_leaf(with_natural_size(style, 40.0, 20.0), wide_bitmap)
+}
+
+fn tall_item(tree: &mut TestTree, style: TestStyle) -> TestId {
+    tree.push_measured_leaf(with_natural_size(style, 20.0, 40.0), tall_bitmap)
+}
+
+/// css-grid-1 §6.2, every self-alignment value against a definite 200x200
+/// area.
+///
+/// * `normal` does **not** stretch a replaced box with a natural size: it is sized by CSS 2
+///   §10.3.4/§10.6.2, i.e. at 40x20.
+/// * `stretch` does, in both axes at once, and §6.2's own note says that distorts the ratio —
+///   200x200.
+/// * `start`/`center`/`end` are fit-content sizing, which for replaced content is the natural size
+///   again.
+/// * One axis stretched and the other `normal` transfers: a stretched 200-wide column gives 100 of
+///   height; a stretched 200-tall row gives 400 of width, which overflows the 200-wide column
+///   exactly as Chrome lays it out.
+#[test]
+fn normal_self_alignment_leaves_a_replaced_grid_item_at_its_natural_size() {
+    let cases = [
+        (
+            AlignFlags::NORMAL,
+            AlignFlags::NORMAL,
+            Size::new(40.0, 20.0),
+        ),
+        (
+            AlignFlags::STRETCH,
+            AlignFlags::STRETCH,
+            Size::new(200.0, 200.0),
+        ),
+        (AlignFlags::START, AlignFlags::START, Size::new(40.0, 20.0)),
+        (
+            AlignFlags::CENTER,
+            AlignFlags::CENTER,
+            Size::new(40.0, 20.0),
+        ),
+        (AlignFlags::END, AlignFlags::END, Size::new(40.0, 20.0)),
+        (
+            AlignFlags::STRETCH,
+            AlignFlags::NORMAL,
+            Size::new(200.0, 100.0),
+        ),
+        (
+            AlignFlags::NORMAL,
+            AlignFlags::STRETCH,
+            Size::new(400.0, 200.0),
+        ),
+    ];
+    for (justify, align, expected) in cases {
+        let mut tree = TestTree::default();
+        let item = wide_item(
+            &mut tree,
+            TestStyle {
+                justify_self: self_align(justify),
+                align_self: self_align(align),
+                ..grid_default()
+            },
+        );
+        let root = tree.push_grid(grid_style(&[px(200.0)], &[px(200.0)]), vec![item]);
+
+        definite_layout(&tree, root, 400.0, 400.0);
+        assert_size(tree.layout(item).size, expected);
+    }
+}
+
+/// The same §6.2 sentence read the other way: a box whose ratio is the
+/// `aspect-ratio` *property* and which is not replaced still fills its column
+/// under `normal` (CSS 2 §10.3.3's stretch-fit inline size) and takes its row
+/// size from that width. The asymmetry is the whole point — `normal` is not
+/// simply `start` for everything with a ratio.
+#[test]
+fn normal_self_alignment_still_fills_the_column_for_a_non_replaced_ratio_box() {
+    let mut tree = TestTree::default();
+    let item = tree.push_leaf(
+        TestStyle {
+            aspect_ratio: ratio(1.0, 1.0),
+            ..grid_default()
+        },
+        Size::ZERO,
+        Size::ZERO,
+    );
+    let root = tree.push_grid(grid_style(&[px(200.0)], &[auto_track()]), vec![item]);
+
+    definite_layout(&tree, root, 400.0, 400.0);
+    assert_size(tree.layout(item).size, Size::new(200.0, 200.0));
+}
+
+/// §11.5: a definite track in one axis reaches the item's contribution in the
+/// other, so an `auto` track sizes to the ratio-transferred size rather than
+/// to the item's own pixels. Both orientations, both ratios: a 2:1 item
+/// stretched across a 200px column contributes a 100px row; stretched down a
+/// 200px row it contributes a 400px column; the 1:2 item halves and doubles
+/// the same way.
+#[test]
+fn a_definite_track_transfers_into_the_auto_track_of_the_other_axis() {
+    let cases = [
+        (true, true, Size::new(200.0, 100.0)),
+        (true, false, Size::new(200.0, 400.0)),
+        (false, true, Size::new(400.0, 200.0)),
+        (false, false, Size::new(100.0, 200.0)),
+    ];
+    for (definite_column, wide, expected) in cases {
+        let mut tree = TestTree::default();
+        let item_style = if definite_column {
+            TestStyle {
+                justify_self: self_align(AlignFlags::STRETCH),
+                ..TestStyle::default()
+            }
+        } else {
+            TestStyle {
+                align_self: self_align(AlignFlags::STRETCH),
+                ..TestStyle::default()
+            }
+        };
+        let item = if wide {
+            wide_item(&mut tree, item_style)
+        } else {
+            tall_item(&mut tree, item_style)
+        };
+        let template = if definite_column {
+            grid_style(&[px(200.0)], &[auto_track()])
+        } else {
+            grid_style(&[auto_track()], &[px(200.0)])
+        };
+        let root = tree.push_grid(template, vec![item]);
+
+        support::perform_layout(&tree, root, Size::NONE, Size::MAX_CONTENT);
+        assert_size(tree.layout(item).size, expected);
+    }
+}
+
+/// With nothing definite in either axis there is nothing to transfer from, so
+/// §11.5 falls back to the item's own max-content contribution: both tracks
+/// take the natural size.
+#[test]
+fn two_auto_tracks_size_a_ratio_item_from_its_natural_size() {
+    let mut tree = TestTree::default();
+    let item = wide_item(&mut tree, TestStyle::default());
+    let root = tree.push_grid(grid_style(&[auto_track()], &[auto_track()]), vec![item]);
+
+    let output = support::perform_layout(&tree, root, Size::NONE, Size::MAX_CONTENT);
+    assert_size(tree.layout(item).size, Size::new(40.0, 20.0));
+    assert_size(output.size, Size::new(40.0, 20.0));
+}
+
+/// §11.7 resolves `fr` before items are laid out, so a flexible column is as
+/// definite a transfer source as a fixed one. `minmax(120px, 1fr)` is the same
+/// story through §11.4's two halves. Both give the stretched item half of the
+/// 400px container, and a 200px row from the ratio.
+#[test]
+fn flexible_and_minmax_tracks_transfer_like_fixed_ones() {
+    for columns in [
+        [fr(1.0), fr(1.0)],
+        [minmax(fixed_breadth(120.0), breadth_fr(1.0)), fr(1.0)],
+    ] {
+        let mut tree = TestTree::default();
+        let stretched = wide_item(
+            &mut tree,
+            TestStyle {
+                justify_self: self_align(AlignFlags::STRETCH),
+                ..TestStyle::default()
+            },
+        );
+        let untouched = wide_item(&mut tree, TestStyle::default());
+        let root = tree.push_grid(
+            grid_style(&columns, &[auto_track()]),
+            vec![stretched, untouched],
+        );
+
+        definite_layout(&tree, root, 400.0, 100.0);
+        assert_size(tree.layout(stretched).size, Size::new(200.0, 100.0));
+        assert_size(tree.layout(untouched).size, Size::new(40.0, 20.0));
+    }
+}
+
+/// A spanning item stretches across its whole grid area — the spanned tracks
+/// *and* the gutters between them, per §11.2's definition of a grid area — so
+/// the transfer reads 100 + 10 + 100 and the `auto` row becomes 105.
+#[test]
+fn a_spanning_item_transfers_from_the_tracks_and_the_gutters_it_covers() {
+    let mut tree = TestTree::default();
+    let item = wide_item(
+        &mut tree,
+        TestStyle {
+            grid_column: Line::new(line(1), span(2)),
+            justify_self: self_align(AlignFlags::STRETCH),
+            ..TestStyle::default()
+        },
+    );
+    let root = tree.push_grid(
+        TestStyle {
+            gap: Size::new(gap_px(10.0), gap_px(0.0)),
+            ..grid_style(&[px(100.0), px(100.0)], &[auto_track()])
+        },
+        vec![item],
+    );
+
+    let output = definite_layout(&tree, root, 400.0, 105.0);
+    assert_size(tree.layout(item).size, Size::new(210.0, 105.0));
+    assert_close(output.size.height, 105.0);
+}
+
+/// css-sizing-3 §5.1: the stretched size is clamped by the item's own
+/// min/max in that axis *before* the ratio transfers from it, and the clamp on
+/// the transferred axis applies afterwards and simply breaks the ratio.
+///
+/// * `max-width: 120` on a 200px column: 120 wide, 60 tall.
+/// * `min-width: 300`: 300 wide, 150 tall, overflowing the column.
+/// * `max-height: 40`: still 200 wide, cut to 40 tall.
+#[test]
+fn item_min_and_max_sizes_clamp_the_transfer_on_both_sides() {
+    let cases = [
+        (
+            Size::new(size_auto(), size_auto()),
+            Size::new(max_px(120.0), max_none()),
+            Size::new(120.0, 60.0),
+        ),
+        (
+            Size::new(size_px(0.0), size_auto()),
+            Size::new(max_none(), max_none()),
+            Size::new(200.0, 100.0),
+        ),
+        (
+            Size::new(size_px(300.0), size_auto()),
+            Size::new(max_none(), max_none()),
+            Size::new(300.0, 150.0),
+        ),
+        (
+            Size::new(size_auto(), size_auto()),
+            Size::new(max_none(), max_px(40.0)),
+            Size::new(200.0, 40.0),
+        ),
+    ];
+    for (min_size, max_size, expected) in cases {
+        let mut tree = TestTree::default();
+        let item = wide_item(
+            &mut tree,
+            TestStyle {
+                min_size,
+                max_size,
+                justify_self: self_align(AlignFlags::STRETCH),
+                ..TestStyle::default()
+            },
+        );
+        let root = tree.push_grid(grid_style(&[px(200.0)], &[auto_track()]), vec![item]);
+
+        definite_layout(&tree, root, 400.0, 400.0);
+        assert_size(tree.layout(item).size, expected);
+    }
+}
+
+/// An authored size in one axis is the item's used size there, so it is what
+/// the ratio transfers from — the track the item sits in never gets a say.
+#[test]
+fn an_authored_size_outranks_the_track_as_the_transfer_source() {
+    let mut tree = TestTree::default();
+    let item = wide_item(
+        &mut tree,
+        TestStyle {
+            size: Size::new(size_px(90.0), size_auto()),
+            ..TestStyle::default()
+        },
+    );
+    let root = tree.push_grid(grid_style(&[px(200.0)], &[auto_track()]), vec![item]);
+
+    let output = definite_layout(&tree, root, 400.0, 45.0);
+    assert_size(tree.layout(item).size, Size::new(90.0, 45.0));
+    assert_close(output.size.height, 45.0);
+}
+
+/// §11.5 sizes an `auto` track to the *largest* contribution it collects, so
+/// two ratio items in one column leave it as wide as the wider of the two,
+/// and each item keeps its own size inside it.
+#[test]
+fn an_auto_track_takes_the_largest_of_two_ratio_contributions() {
+    let mut tree = TestTree::default();
+    let sized = wide_item(
+        &mut tree,
+        TestStyle {
+            size: Size::new(size_px(90.0), size_auto()),
+            grid_row: Line::new(line(1), line(2)),
+            ..TestStyle::default()
+        },
+    );
+    let natural = wide_item(
+        &mut tree,
+        TestStyle {
+            grid_row: Line::new(line(2), line(3)),
+            ..TestStyle::default()
+        },
+    );
+    let root = tree.push_grid(
+        grid_style(&[auto_track()], &[auto_track(), auto_track()]),
+        vec![sized, natural],
+    );
+
+    let output = support::perform_layout(&tree, root, Size::NONE, Size::MAX_CONTENT);
+    assert_size(tree.layout(sized).size, Size::new(90.0, 45.0));
+    assert_size(tree.layout(natural).size, Size::new(40.0, 20.0));
+    assert_close(output.size.width, 90.0);
+    assert_point(tree.layout(natural).location, Point::new(0.0, 45.0));
+}
+
+/// Placement decides *where* a ratio item lands, never how it is sized. With
+/// `dense` backfilling, the auto-placed item takes the column the explicitly
+/// placed one left open, and both still stretch to 100 and transfer to 50.
+#[test]
+fn dense_placement_moves_a_ratio_item_without_resizing_it() {
+    let mut tree = TestTree::default();
+    let pinned = wide_item(
+        &mut tree,
+        TestStyle {
+            grid_column: Line::new(line(2), line(3)),
+            justify_self: self_align(AlignFlags::STRETCH),
+            ..TestStyle::default()
+        },
+    );
+    let flowed = wide_item(
+        &mut tree,
+        TestStyle {
+            justify_self: self_align(AlignFlags::STRETCH),
+            ..TestStyle::default()
+        },
+    );
+    let root = tree.push_grid(
+        TestStyle {
+            auto_flow: GridAutoFlow::ROW | GridAutoFlow::DENSE,
+            ..grid_style(&[px(100.0), px(100.0)], &[auto_track()])
+        },
+        vec![pinned, flowed],
+    );
+
+    let output = definite_layout(&tree, root, 400.0, 50.0);
+    assert_size(tree.layout(pinned).size, Size::new(100.0, 50.0));
+    assert_size(tree.layout(flowed).size, Size::new(100.0, 50.0));
+    assert_point(tree.layout(pinned).location, Point::new(100.0, 0.0));
+    assert_point(tree.layout(flowed).location, Point::new(0.0, 0.0));
+    assert_close(output.size.height, 50.0);
+}
+
+/// §11.5 with css-sizing-4 §5 for an item whose ratio is the `aspect-ratio`
+/// property *and* which is replaced: with nothing definite in the other axis
+/// the transfer still has the natural size to work from, so a 1:1 ratio turns
+/// the natural 40 of width into 40 of row rather than leaving the row at the
+/// natural 20. A 4:1 ratio cuts it to 10 — the transferred size *is* the
+/// contribution, not a floor under the content's own.
+#[test]
+fn an_authored_ratio_transfers_from_replaced_contents_natural_size() {
+    for (item_ratio, expected) in [(1.0, 40.0), (4.0, 10.0), (0.25, 160.0)] {
+        let mut tree = TestTree::default();
+        let item = wide_item(
+            &mut tree,
+            TestStyle {
+                aspect_ratio: ratio(item_ratio, 1.0),
+                ..TestStyle::default()
+            },
+        );
+        let root = tree.push_grid(grid_style(&[px(200.0)], &[auto_track()]), vec![item]);
+
+        let output = definite_layout(&tree, root, 400.0, expected);
+        assert_size(tree.layout(item).size, Size::new(40.0, expected));
+        assert_close(output.size.height, expected);
+    }
+}
+
+/// css-contain-2 §3.1 substitutes a size-contained box's contents, but it does
+/// not stop the box from being replaced, so §6.2 still keeps `normal` off
+/// `stretch`. The item is start-aligned at its substituted size, which with no
+/// `contain-intrinsic-size` is zero — the same 0x0 Chrome produces.
+#[test]
+fn size_containment_leaves_a_replaced_item_unstretched_at_its_substituted_size() {
+    let mut tree = TestTree::default();
+    let item = wide_item(
+        &mut tree,
+        TestStyle {
+            containment: hughie::style::Contain::SIZE,
+            ..TestStyle::default()
+        },
+    );
+    let root = tree.push_grid(grid_style(&[px(200.0)], &[px(200.0)]), vec![item]);
+
+    definite_layout(&tree, root, 400.0, 400.0);
+    assert_size(tree.layout(item).size, Size::ZERO);
 }
