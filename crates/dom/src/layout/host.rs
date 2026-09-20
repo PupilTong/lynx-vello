@@ -23,6 +23,7 @@ use hughie::style::{CoreStyle, PositionProperty};
 use hughie::tree::{AvailableSpace, Layout, LayoutInput, LayoutOutput, LayoutSlot, LayoutTree};
 use rustc_hash::FxHashSet;
 
+use super::remembered;
 use super::style::{
     DisplayMode, StyleView, box_parent, display_mode, establishes_absolute_containing_block,
     establishes_fixed_containing_block, resolve_position,
@@ -100,7 +101,17 @@ impl<T> LayoutTree for TreeArenas<T> {
                     |tree, _state, node, input| {
                         #[cfg(test)]
                         note_skipped_size_resolution();
-                        compute_skipped_contents_size(&tree.style(node), input)
+                        let view = tree.style(node);
+                        let output = compute_skipped_contents_size(&view, input);
+                        if input.goal.commits() {
+                            // Skipping turns `Contain::SIZE` on, so this call
+                            // can only ever *remove* a last remembered size —
+                            // the half of css-sizing-4 §5.2.1 that fires when
+                            // the `auto` keyword goes away while the box goes
+                            // on skipping.
+                            remembered::record(tree, node, &view, input, output.size);
+                        }
+                        output
                     },
                 );
             }
@@ -112,7 +123,7 @@ impl<T> LayoutTree for TreeArenas<T> {
         };
 
         compute_cached_layout(self, state, node, input, move |tree, state, node, input| {
-            match display {
+            let output = match display {
                 DisplayMode::None | DisplayMode::Contents => {
                     unreachable!("a box-less element has no box to lay out")
                 }
@@ -153,7 +164,17 @@ impl<T> LayoutTree for TreeArenas<T> {
                     }
                     output
                 }
+            };
+            // The recording moment (css-sizing-4 §5.2.1): this run laid the
+            // box out with its real contents, so its content box is what the
+            // element last rendered at. Only a *committing* run establishes
+            // one, and only a cache miss reaches here — a box served from the
+            // cache produced the same size it already recorded under the same
+            // input.
+            if input.goal.commits() && tree.at(node).is_element() {
+                remembered::record(tree, node, &tree.style(node), input, output.size);
             }
+            output
         })
     }
 

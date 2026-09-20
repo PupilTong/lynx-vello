@@ -17,6 +17,7 @@ use hughie::tree::LayoutSlot;
 use slab::Slab;
 
 use crate::layout::relevance::{Relevance, RelevanceTable};
+use crate::layout::remembered::{RememberedSize, RememberedSizeTable};
 use crate::layout::text_block::TextBlockStore;
 use crate::tree::node::Node;
 
@@ -151,6 +152,12 @@ pub(crate) struct TreeArenas<T> {
     /// alone and has to be able to read it; see
     /// [`crate::layout::relevance`].
     relevance: RelevanceTable,
+    /// The css-sizing-4 last remembered size, keyed by arena key, here for
+    /// the same reason the relevance table is: a
+    /// [`StyleView`](crate::layout::StyleView) substitutes it into
+    /// `contain-intrinsic-*` and can reach nothing but these arenas. See
+    /// [`crate::layout::remembered`].
+    remembered: RememberedSizeTable,
 }
 
 impl<T> TreeArenas<T> {
@@ -160,6 +167,7 @@ impl<T> TreeArenas<T> {
             payloads: Slab::with_capacity(INITIAL_NODE_CAPACITY),
             generations: Vec::with_capacity(INITIAL_NODE_CAPACITY),
             relevance: RelevanceTable::default(),
+            remembered: RememberedSizeTable::default(),
         }
     }
 
@@ -184,6 +192,23 @@ impl<T> TreeArenas<T> {
     /// Ends a render's determinations; see [`RelevanceTable::settle`].
     pub(crate) fn settle_relevance(&mut self) {
         self.relevance.settle();
+    }
+
+    /// One element's last remembered size (css-sizing-4 §5.2.1).
+    #[inline]
+    pub(crate) fn remembered_size(&self, slot: NodeId) -> RememberedSize {
+        self.remembered.get(slot.arena_key())
+    }
+
+    /// Records one element's last remembered size, an empty one being the
+    /// spec's removal.
+    ///
+    /// Shared rather than exclusive, because the recording moment is inside
+    /// the layout pass and `LayoutTree::compute_layout` holds these arenas
+    /// shared; the table carries the interior mutability for it.
+    #[inline]
+    pub(crate) fn record_remembered_size(&self, slot: NodeId, size: RememberedSize) {
+        self.remembered.record(slot.arena_key(), size);
     }
 
     /// Takes arena key zero out of circulation, before any node is filed.
@@ -376,6 +401,10 @@ impl<T> TreeArenas<T> {
         // and its next occupant must start undetermined rather than inherit
         // a stranger's answer.
         self.relevance.reset(id.arena_key());
+        // Its last remembered size goes the same way, and for the same
+        // reason: css-sizing-4 attaches it to the element, so the key's next
+        // occupant is a different element and remembers nothing.
+        self.remembered.reset(id.arena_key());
         (node, payload)
     }
 }

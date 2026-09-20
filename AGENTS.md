@@ -1753,7 +1753,10 @@ Subsystems:
 - `style/` — the per-document `StyleEngine` (`Stylist`, cascade pipeline,
   device, stylesheet set, `SharedRwLock`), flush, invalidation, `StyleDamage`.
 - `layout/` — the concrete `hughie` host: `Document::layout`, the `LayoutTree`
-  impl, per-node `LayoutSlot`s in `DocumentLayoutState`.
+  impl, per-node `LayoutSlot`s in `DocumentLayoutState`, and the two
+  per-element facts a `StyleView` answers with that no computed value carries:
+  `content-visibility: auto` relevance (`relevance.rs`) and the css-sizing-4
+  last remembered size (`remembered.rs`).
 - `visual/` — stacking contexts, CSS2 Appendix E paint order, transforms,
   `RenderLayer` group effects, reverse-paint-order hit testing, and
   `content-visibility: auto` relevance determination (`relevance.rs`), which
@@ -1798,6 +1801,16 @@ Rulings and limits to know before touching it:
   style is not skipped, so an animation that *starts* while skipped is created
   and frozen at its start rather than not created — is in
   `docs/style-assumptions.md` §19.
+- The css-sizing-4 **last remembered size** is `dom`'s in the same way, in a
+  second slot-keyed side table on `TreeArenas`
+  (`crates/dom/src/layout/remembered.rs`): the layout host records a box's
+  content box after every committing run in which it had no size containment,
+  and `StyleView` substitutes it into `CoreStyle::contain_intrinsic_{width,
+  height}` once the box is skipping. This engine has no ResizeObserver, so
+  that commit's layout run is the spec's recording moment, and csswg-drafts
+  #8407 (`content-visibility: auto` implies the `auto` keyword) is folded in
+  here because the fork's own adjuster is `#[cfg(feature = "gecko")]`.
+  `hughie` is unchanged by either: it reads `AutoLength(l)` as `l` already.
 - The crate dispatches no events and has no `preventDefault` and no gesture
   recognizer; `InputEvent::default_prevented` is the embedder's seam.
 - Custom elements are user-agent components only, `define` must precede any

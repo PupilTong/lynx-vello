@@ -409,9 +409,6 @@ and §D.16 with what the wire format actually permits.)*
         occurs". `bubbles` is `true` where the spec is silent (Chromium bubbles; WebKit and Gecko
         do not — w3c/csswg-drafts#11310 is open), `composed` and `cancelable` are false. See
         [tracking/dom-events.md](tracking/dom-events.md).
-      - Still pending, in a later PR: the last-remembered size (css-sizing-4), so a revealed
-        element that later skips re-sizes from `contain-intrinsic-size` rather than from what it
-        last measured.
       - `content-visibility: hidden` is unchanged and fully implemented (skip contents +
         intrinsic size + strict-like containment).
     - **Animations and transitions in skipped contents are frozen** *(2026-09-20)*, for `hidden`
@@ -448,6 +445,45 @@ and §D.16 with what the wire format actually permits.)*
         `both`) during the skip, and an element's `getAnimations()`-equivalent state if one is ever
         exposed. Same for the spec's "it must not start any transitions": a transition is created
         and frozen rather than not created.
+    - **The css-sizing-4 last remembered size is implemented** *(2026-09-20)*. `contain-intrinsic-*`
+      takes `auto? [ none | <length> ]` per axis, and the `auto` keyword means: "if the element has
+      a last remembered size and is currently skipping its contents, its explicit intrinsic inner
+      size in the corresponding axis is the last remembered size in that axis"
+      ([css-sizing-4 §5.2](https://drafts.csswg.org/css-sizing-4/#intrinsic-size-override)). The
+      three parts are all `dom`'s (`crates/dom/src/layout/remembered.rs`); `hughie` is unchanged,
+      because it already reads `AutoLength(l)` as `l` and `AutoNone` as no explicit size and the
+      substituted answer arrives as a plain `Length`.
+      - **The recording moment is the commit's own layout run.** css-sizing-4 §5.2.1 records "at
+        the time that ResizeObserver events are determined and delivered"; this engine has no
+        ResizeObserver, so the host records inside `LayoutTree::compute_layout`, after an
+        algorithm's *committing* run and only on a cache miss (a cache hit reproduces the size
+        already recorded under that same input). It is the same box and the same numbers an
+        observer would have been handed, one step earlier than a browser delivers them: a browser
+        observes after the layout that produced the size, so a same-frame change that starts the
+        box skipping still uses the previous frame's value, while here the commit that laid the
+        box out is the one that remembers it. Both answer the spec's question — what was this box's
+        inner size the last time it was rendered — with the last rendered size.
+      - **What is recorded** is "the current inner dimensions of its principal box": the content
+        box (`size − padding − border`) of that run's own unrounded output, in CSS px, per axis
+        whose effective value carries `auto`, and only while the element does **not** have size
+        containment — which excludes every skipping box, and is what lets a remembered size
+        survive for as long as the box goes on skipping. An axis whose keyword is gone is cleared
+        in the same write, which is the spec's "remove its last remembered size".
+      - **The store is a second slot-keyed side table on `TreeArenas`**, beside the relevance
+        table and for the same structural reason: a `StyleView` is built from the tree arenas
+        alone. It is not in `LayoutSlot` and not in `NodeLayoutState`, it resets on free (the
+        remembered size belongs to the element, so a recycled key must remember nothing), and it
+        allocates nothing for a page that never uses the `auto` keyword. Writing it from a pass
+        that holds the arenas shared is what the table's own `RefCell` is for.
+      - **`content-visibility: auto` implies the keyword**
+        ([csswg-drafts#8407](https://github.com/w3c/csswg-drafts/issues/8407)): `Length(l)` behaves
+        as `AutoLength(l)` and `None` as `AutoNone`. The fork carries the mapping
+        (`ContainIntrinsicSize::add_auto_if_needed`) but applies it in
+        `StyleAdjuster::adjust_for_contain_intrinsic_size`, which is `#[cfg(feature = "gecko")]`
+        and never runs in this build, so `dom` applies the fold on the computed value on the way
+        into layout rather than at cascade time. The observable difference from a cascade-time
+        adjustment is confined to serialization: `getComputedStyle` still reports the authored
+        value.
     - **Paint containment: layout + visual order.** `contain: paint`'s IFC / containing-block
       effects are computed and exposed by layout; since 2026-07-23 its stacking context and
       paint/hit-area clipping are implemented by `dom`'s `visual` module (paint order + hit

@@ -2,6 +2,7 @@
 
 mod host;
 pub(crate) mod relevance;
+pub(crate) mod remembered;
 mod style;
 pub(crate) mod text_block;
 
