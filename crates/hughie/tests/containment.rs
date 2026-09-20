@@ -434,3 +434,57 @@ fn skipped_to_normal_transition_lays_children_out_again() {
     perform_layout(&tree, container, Size::NONE, Size::MAX_CONTENT);
     assert_size(tree.layout(child).size, Size::new(30.0, 20.0));
 }
+
+/// A skipped box's size is an ordinary cached answer: it reads no child, so a
+/// host that has not invalidated it gets the answer it stored, exactly as it
+/// would from any algorithm.
+#[test]
+fn a_skipped_box_serves_its_size_from_the_cache() {
+    let mut tree = TestTree::default();
+    let container = flex_container(&mut tree, skipped_style(40.0, 24.0), &[]);
+    tree.enable_cache();
+
+    let output = perform_layout(&tree, container, Size::NONE, Size::MAX_CONTENT);
+    assert_size(output.size, Size::new(40.0, 24.0));
+
+    // The style moves under the engine with no invalidation behind it — the
+    // one thing a cache is allowed not to notice.
+    tree.source_node_mut(container).style = skipped_style(90.0, 50.0);
+    let cached = perform_layout(&tree, container, Size::NONE, Size::MAX_CONTENT);
+    assert_size(cached.size, Size::new(40.0, 24.0));
+
+    tree.clear_layout_cache(container);
+    let recomputed = perform_layout(&tree, container, Size::NONE, Size::MAX_CONTENT);
+    assert_size(recomputed.size, Size::new(90.0, 50.0));
+}
+
+/// And the other half is *not* cached: the box tree can change under a cache
+/// hit, so every committing call hides the contents again.
+///
+/// The child here arrives with a box of its own and nothing invalidates the
+/// container, which is the shape a host produces whenever it does not treat
+/// every subtree edit as an invalidation of the box above it. Serving the
+/// hide from the cache would leave that box live under a skipped ancestor,
+/// where no algorithm will ever revisit it.
+#[test]
+fn a_cache_served_skipped_box_still_hides_a_child_added_under_it() {
+    let mut tree = TestTree::default();
+    let container = flex_container(&mut tree, skipped_style(40.0, 24.0), &[]);
+    let late = rigid_leaf(&mut tree, 30.0, 20.0);
+    tree.enable_cache();
+
+    perform_layout(&tree, container, Size::NONE, Size::MAX_CONTENT);
+
+    let mut live = Layout::default();
+    live.size = Size::new(30.0, 20.0);
+    tree.set_layout_for_testing(late, live);
+    tree.source_node_mut(container).children.push(late);
+
+    let output = perform_layout(&tree, container, Size::NONE, Size::MAX_CONTENT);
+    assert_size(output.size, Size::new(40.0, 24.0));
+    assert_eq!(
+        tree.layout(late).size,
+        Size::ZERO,
+        "the hide sweep runs outside the cache the size came back from",
+    );
+}

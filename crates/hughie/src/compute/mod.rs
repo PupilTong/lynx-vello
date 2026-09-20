@@ -266,14 +266,46 @@ fn hide_subtree_at_order<T: LayoutTree>(
     }
 }
 
-pub fn compute_skipped_contents_layout<T: LayoutTree>(
+/// Cleans the stale geometry under a box that skips its contents.
+///
+/// The **uncacheable half** of a skipped box. It answers to the box tree, not
+/// to the layout input: a child inserted, moved or re-styled under the box
+/// changes what has to be hidden while changing nothing the box's own size
+/// depends on. A host must therefore run it on **every committing call** —
+/// outside whatever cache serves [`compute_skipped_contents_size`] — or a
+/// subtree re-populated under a box whose size came back from a cache hit
+/// would keep geometry no algorithm ever laid out.
+///
+/// A measurement writes no durable geometry and so hides nothing, which is
+/// why the goal is read here rather than left to the caller.
+pub fn hide_skipped_contents<T: LayoutTree>(
     tree: &T,
     state: &mut T::State,
     node: T::NodeId,
     input: LayoutInput,
-) -> LayoutOutput {
-    let style = tree.style(node);
-    let metrics = resolve_container_box(&style, input);
+) {
+    if !input.goal.commits() {
+        return;
+    }
+    for child in tree.children(node) {
+        hide_subtree(tree, state, child);
+    }
+}
+
+/// The size a box that skips its contents takes: its own styles with
+/// `contain-intrinsic-size` substituted for the content it does not lay out
+/// ([css-contain-2 §3.5](https://drafts.csswg.org/css-contain-2/#content-visibility)).
+///
+/// The **cacheable half**, and a pure function of this style and this input —
+/// no child is read, so nothing a subtree mutation can change is in it. That
+/// is what lets a host serve it through [`compute_cached_layout`] like any
+/// algorithm's output, and what makes the box a relayout boundary
+/// ([`crate::invalidate::is_relayout_boundary`]). Its counterpart is
+/// [`hide_skipped_contents`], which the same host call must run outside that
+/// cache.
+#[must_use]
+pub fn compute_skipped_contents_size<S: CoreStyle>(style: &S, input: LayoutInput) -> LayoutOutput {
+    let metrics = resolve_container_box(style, input);
     let intrinsic = Size::new(
         contain_intrinsic_length(&style.contain_intrinsic_width()),
         contain_intrinsic_length(&style.contain_intrinsic_height()),
@@ -296,12 +328,6 @@ pub fn compute_skipped_contents_layout<T: LayoutTree>(
             )
         }),
     );
-
-    if input.goal.commits() {
-        for child in tree.children(node) {
-            hide_subtree(tree, state, child);
-        }
-    }
 
     LayoutOutput::new(outer_size, outer_size)
 }

@@ -9,7 +9,7 @@ use hughie::invalidate::invalidate_for_relayout;
 use hughie::prelude::*;
 use stylo::computed_values::flex_direction;
 use stylo::values::computed::Contain;
-use support::{TestId, TestStyle, TestTree, basis_px, contain_intrinsic_px, size_px};
+use support::{TestId, TestStyle, TestTree, basis_px, contain_intrinsic_px, nn, size_px};
 
 fn main() {
     divan::main();
@@ -218,4 +218,103 @@ fn uncontained_boundary_stopped_control(bencher: divan::Bencher<'_, '_>) {
     bencher
         .with_inputs(|| fixture(false).warm())
         .bench_local_refs(Fixture::run_boundary_stopped);
+}
+
+/// A virtualized list between two frames: one row on screen has a dirty leaf,
+/// and every row below the window skips its contents.
+///
+/// The list itself is the re-layout root — a row is no boundary, its height
+/// follows its content — so the pass asks all `LIST_ROWS` rows for their box.
+/// A skipped row answers from its cache like any other row, which is what
+/// `skipped_rows` and `plain_rows_control` are here to keep true: the two
+/// should cost the same, where a skipped row that re-resolved its own box
+/// model per pass made the skipping list the more expensive of the two.
+const LIST_ROWS: usize = 512;
+const LIST_VISIBLE_ROWS: usize = 8;
+
+fn list_available() -> Size<AvailableSpace> {
+    Size::new(
+        AvailableSpace::Definite(320.0),
+        AvailableSpace::Definite(192.0),
+    )
+}
+
+struct RowList {
+    tree: TestTree,
+    list: TestId,
+    dirty_row: TestId,
+    dirty_leaf: TestId,
+    wide: bool,
+}
+
+fn row_list(skipping: bool) -> RowList {
+    let mut tree = TestTree::default();
+    let mut rows = Vec::with_capacity(LIST_ROWS);
+    let mut dirty = None;
+    for row in 0..LIST_ROWS {
+        let leaf = tree.push_leaf(dirty_leaf_style(16.0), Size::new(16.0, 12.0), None);
+        let mut style = TestStyle {
+            size: Size::new(size_px(320.0), size_px(24.0)),
+            flex_shrink: nn(0.0),
+            ..TestStyle::default()
+        };
+        if skipping && row >= LIST_VISIBLE_ROWS {
+            style.skips_contents = true;
+            style.containment = Contain::STRICT;
+            style.contain_intrinsic_width = contain_intrinsic_px(320.0);
+            style.contain_intrinsic_height = contain_intrinsic_px(24.0);
+        }
+        let row_id = tree.push_flex(style, vec![leaf]);
+        if row == LIST_VISIBLE_ROWS / 2 {
+            dirty = Some((row_id, leaf));
+        }
+        rows.push(row_id);
+    }
+    let list = tree.push_flex(
+        TestStyle {
+            size: Size::new(size_px(320.0), size_px(192.0)),
+            ..column_flex()
+        },
+        rows,
+    );
+    tree.enable_cache();
+    tree.compute_root_layout(list, list_available());
+    let (dirty_row, dirty_leaf) = dirty.expect("a visible row holds the dirty leaf");
+    RowList {
+        tree,
+        list,
+        dirty_row,
+        dirty_leaf,
+        wide: false,
+    }
+}
+
+impl RowList {
+    fn relayout(&mut self) -> Layout {
+        self.wide = !self.wide;
+        let width = if self.wide { 24.0 } else { 16.0 };
+        self.tree.source_node_mut(self.dirty_leaf).style = dirty_leaf_style(width);
+        // What the host's boundary-stopped walk would clear: the leaf, its
+        // row, and the list the row's height reaches. Every other row keeps
+        // the cache it was committed with.
+        for id in [self.dirty_leaf, self.dirty_row, self.list] {
+            self.tree.clear_layout_cache(id);
+        }
+        self.tree.compute_root_layout(self.list, list_available());
+        self.tree.layout(self.list)
+    }
+}
+
+#[divan::bench]
+fn skipped_rows(bencher: divan::Bencher<'_, '_>) {
+    bencher
+        .with_inputs(|| row_list(true))
+        .bench_local_refs(RowList::relayout);
+}
+
+#[divan::bench]
+fn plain_rows_control(bencher: divan::Bencher<'_, '_>) {
+    bencher
+        .with_inputs(|| row_list(false))
+        .bench_local_refs(RowList::relayout);
 }

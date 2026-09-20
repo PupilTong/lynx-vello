@@ -14,7 +14,8 @@ use hughie::compute::{
     compute_absolute_layout, compute_boundary_relayout, compute_cached_layout,
     compute_flexbox_layout, compute_grid_lanes_layout, compute_grid_layout, compute_leaf_layout,
     compute_linear_layout, compute_relative_layout, compute_root_layout,
-    compute_skipped_contents_layout, hide_subtree, round_layout_subtree_with as round_with,
+    compute_skipped_contents_size, hide_skipped_contents, hide_subtree,
+    round_layout_subtree_with as round_with,
 };
 use hughie::geometry::{Point, Size};
 use hughie::invalidate::is_relayout_boundary;
@@ -81,7 +82,27 @@ impl<T> LayoutTree for TreeArenas<T> {
                 return LayoutOutput::HIDDEN;
             }
             if view.skips_contents() {
-                return compute_skipped_contents_layout(self, state, node, input);
+                // A skipped box has two halves and only one of them is a
+                // function of the layout input. Hiding the contents answers
+                // to the box tree — a child inserted under this box changes
+                // what must be hidden without changing anything the box's own
+                // size reads — so it runs on every committing call, outside
+                // the cache. The size reads no child at all, so it is served
+                // from the cache like every other algorithm's output: a list
+                // of skipped rows re-resolves no box model when a sibling
+                // relayouts.
+                hide_skipped_contents(self, state, node, input);
+                return compute_cached_layout(
+                    self,
+                    state,
+                    node,
+                    input,
+                    |tree, _state, node, input| {
+                        #[cfg(test)]
+                        note_skipped_size_resolution();
+                        compute_skipped_contents_size(&tree.style(node), input)
+                    },
+                );
             }
             if node_ref.is_replaced() {
                 DisplayMode::Leaf
@@ -139,6 +160,34 @@ impl<T> LayoutTree for TreeArenas<T> {
     fn clear_layout_cache(&self, state: &mut Self::State, node: NodeSlot) {
         state.clear_layout_cache(node);
     }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// How many times a box that skips its contents has resolved its own box
+    /// model on this thread — that is, how often the skipped path *missed*
+    /// its cache.
+    ///
+    /// Test-only, because the number is the point of the cache rather than a
+    /// runtime fact anything reads: it must stay flat as skipped boxes are
+    /// added to a page, where before the cache it was one resolution per
+    /// skipped box per pass. Layout runs on the thread that calls it, so a
+    /// thread-local count belongs to the test that produced it.
+    static SKIPPED_SIZE_RESOLUTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn note_skipped_size_resolution() {
+    SKIPPED_SIZE_RESOLUTIONS.with(|count| count.set(count.get() + 1));
+}
+
+/// Runs `pass` and answers how many skipped boxes resolved their own size in
+/// it.
+#[cfg(test)]
+pub(super) fn skipped_size_resolutions_during(pass: impl FnOnce()) -> usize {
+    SKIPPED_SIZE_RESOLUTIONS.with(|count| count.set(0));
+    pass();
+    SKIPPED_SIZE_RESOLUTIONS.with(std::cell::Cell::get)
 }
 
 pub(super) fn run_layout<T: Sync>(

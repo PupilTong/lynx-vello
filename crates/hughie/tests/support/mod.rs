@@ -9,7 +9,7 @@ use hughie::compute::{
     LeafMeasureInput, LeafMetrics, compute_cached_layout, compute_flexbox_layout,
     compute_grid_lanes_layout, compute_grid_layout,
     compute_leaf_layout_with_measurement_for_testing, compute_linear_layout,
-    compute_relative_layout, compute_skipped_contents_layout, hide_subtree,
+    compute_relative_layout, compute_skipped_contents_size, hide_skipped_contents, hide_subtree,
 };
 use hughie::prelude::*;
 use style_traits::values::specified::AllowedNumericType;
@@ -1182,7 +1182,19 @@ impl LayoutTree for TestTree {
         }
 
         if source.style.skips_contents {
-            let output = compute_skipped_contents_layout(self, state, node, input);
+            // The two halves of a skipped box: the hide sweep answers to the
+            // box tree and runs on every committing call, outside the cache;
+            // the size is a pure function of style and input, so it is cached
+            // like any algorithm's output.
+            hide_skipped_contents(self, state, node, input);
+            let size = |tree: &Self, _state: &mut TestState, node: TestRef, input| {
+                compute_skipped_contents_size(&tree.style(node), input)
+            };
+            let output = if state.cache_enabled {
+                compute_cached_layout(self, state, node, input, size)
+            } else {
+                size(self, state, node, input)
+            };
             self.session[node.index].output.set(output);
             return output;
         }
