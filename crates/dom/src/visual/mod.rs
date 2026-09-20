@@ -3,7 +3,9 @@
 //!
 //! [`Document::render`] builds the private `PaintOrder`: a flat item list in
 //! back-to-front order, each item carrying its viewport-space transform and
-//! innermost clip. The private painter walks it forwards, back to front,
+//! innermost clip. It may build it more than once — see
+//! [`relevance`] — but claims one commit id and publishes one frame either
+//! way. The private painter walks it forwards, back to front,
 //! then retains it — together with the encoded scene and the scroll-slot
 //! table — as one immutable [`CommittedFrame`] behind an `Arc`.
 //! [`Document::elements_from_point`], [`Document::elements_from_points`], and
@@ -40,7 +42,12 @@
 //! - Rounded layouts stay in CSS px with parent-relative locations that telescope exactly to
 //!   snapped absolute positions at any device scale.
 //! - Subtrees the layout host zeroes (display:none, unstyled descendants, `DisplayMode::Leaf`
-//!   children, `content-visibility: hidden` contents) are exactly the subtrees this module skips.
+//!   children, skipped `content-visibility` contents) are exactly the subtrees this module skips.
+//!   That is a two-way street for `content-visibility: auto`: the skipping is decided *here*, by
+//!   [`relevance`], out of the frame this module built — so the frame a render publishes is always
+//!   the one built under the bits the layout it was built on used. Note that the decision reads the
+//!   build's [`AutoBox`] records, not its items: relevance is geometric, and a `visibility: hidden`
+//!   `auto` element has no item yet still decides whether its contents lay out.
 //! - `display: contents` (css-display-3 §2.5) dissolves in lockstep with layout: this module walks
 //!   the engine's own `LayoutTree::flattened_children`, so dissolved grandchildren paint, stack,
 //!   and hit as members of the box parent's context; the boxless element itself paints nothing,
@@ -76,6 +83,11 @@
 //! - `transform-style: preserve-3d`, `backface-visibility`, and `perspective-origin` are not
 //!   authorable (the latter two are not even compiled) — everything flattens and perspective
 //!   projects about the border-box center.
+//! - `content-visibility: auto` relevance is decided against the frame's own culling region, so an
+//!   `auto` box whose estimate (`contain-intrinsic-size`) was wrong may move other boxes into or
+//!   out of that region when it reveals. Those are re-determined by the next commit, not this one:
+//!   a box determined in an earlier pass of a commit is deliberately not re-asked in a later one,
+//!   which is what bounds the pass loop. Browsers have the same one-update lag.
 //! - No incremental visual-order structure. The last `PaintOrder` is retained beside the scene, but
 //!   only as the hit-test snapshot: it is never an input to the next build, and every visual
 //!   mutation rebuilds the whole order. Invalidation is one private dirty bit
@@ -91,6 +103,7 @@ pub(crate) mod frame;
 pub(crate) mod geometry;
 mod hit;
 mod motion;
+pub(crate) mod relevance;
 mod stacking;
 #[cfg(test)]
 mod tests;
@@ -114,6 +127,9 @@ pub(crate) struct PaintOrder {
     layers: Vec<RenderLayer>,
     slots: Vec<ScrollSlot>,
     animations: Vec<AnimationSlot>,
+    /// Every `content-visibility: auto` box this build reached, in build
+    /// order. See [`AutoBox`].
+    auto_boxes: Vec<AutoBox>,
     commit_id: u64,
 }
 
@@ -143,17 +159,19 @@ pub(crate) struct FrameBuffers {
     layers: Vec<RenderLayer>,
     slots: Vec<ScrollSlot>,
     animations: Vec<AnimationSlot>,
+    auto_boxes: Vec<AutoBox>,
 }
 
 impl FrameBuffers {
     #[cfg(test)]
-    pub(crate) fn capacities(&self) -> [usize; 5] {
+    pub(crate) fn capacities(&self) -> [usize; 6] {
         [
             self.items.capacity(),
             self.clips.capacity(),
             self.layers.capacity(),
             self.slots.capacity(),
             self.animations.capacity(),
+            self.auto_boxes.capacity(),
         ]
     }
 }
@@ -161,31 +179,49 @@ impl FrameBuffers {
 impl PaintOrder {
     /// Empties this frame and hands back its storage with capacity intact.
     ///
-    /// [`PaintItem`], [`ClipNode`], [`RenderLayer`] and [`ScrollSlot`] own no
-    /// heap data, so each clear is a length write.
+    /// [`PaintItem`], [`ClipNode`], [`RenderLayer`], [`ScrollSlot`] and
+    /// [`AutoBox`] own no heap data, so each clear is a length write.
     pub(crate) fn into_buffers(mut self) -> FrameBuffers {
         self.items.clear();
         self.clips.clear();
         self.layers.clear();
         self.slots.clear();
         self.animations.clear();
+        self.auto_boxes.clear();
         FrameBuffers {
             items: self.items,
             clips: self.clips,
             layers: self.layers,
             slots: self.slots,
             animations: self.animations,
+            auto_boxes: self.auto_boxes,
+        }
+    }
+
+    /// A frame with no storage at all — the placeholder a discarded pass
+    /// leaves behind while its buffers go back to the painter. It allocates
+    /// nothing and is never built, walked or published.
+    pub(crate) const fn empty() -> Self {
+        Self {
+            items: Vec::new(),
+            clips: Vec::new(),
+            layers: Vec::new(),
+            slots: Vec::new(),
+            animations: Vec::new(),
+            auto_boxes: Vec::new(),
+            commit_id: 0,
         }
     }
 
     #[cfg(test)]
-    fn capacities(&self) -> [usize; 5] {
+    fn capacities(&self) -> [usize; 6] {
         [
             self.items.capacity(),
             self.clips.capacity(),
             self.layers.capacity(),
             self.slots.capacity(),
             self.animations.capacity(),
+            self.auto_boxes.capacity(),
         ]
     }
 
@@ -212,6 +248,12 @@ impl PaintOrder {
     #[must_use]
     pub(crate) fn animations(&self) -> &[AnimationSlot] {
         &self.animations
+    }
+
+    /// Every `content-visibility: auto` box this frame's build reached.
+    #[must_use]
+    pub(crate) fn auto_boxes(&self) -> &[AutoBox] {
+        &self.auto_boxes
     }
 
     /// Every animation slot's compose values sampled at `now` — the
@@ -335,6 +377,38 @@ pub(crate) struct ClipNode {
     pub(crate) slot: Option<u32>,
 }
 
+/// One `content-visibility: auto` box the build reached, with exactly the
+/// geometry the relevance test asks about.
+///
+/// **Not an item.** A `visibility: hidden` element paints nothing and so has
+/// no [`PaintItem`], but relevance is a geometric fact about its border box:
+/// it decides whether the element's *contents* — which may be
+/// `visibility: visible` and must then lay out and paint — are skipped. Tying
+/// the record to the item list would leave such an element undetermined and
+/// skipping forever. So the builder records this the moment it reaches the
+/// element, before it decides whether to emit an item at all, and the
+/// relevance pass reads the frame through it: one pass over the `auto` boxes
+/// rather than one over every item, and a page with none pays one `is_empty`
+/// test per render.
+///
+/// `chain` is the *content* translation chain — what
+/// [`PaintOrder::item_translation_chain`] would answer for this element's own
+/// box, which at record time is simply the chain outside it, since a scroll
+/// container's own box rides the scrollers around it rather than its own.
+#[derive(Debug, Clone)]
+pub(crate) struct AutoBox {
+    pub(crate) node: NodeId,
+    pub(crate) transform: Transform3D<f32>,
+    pub(crate) size: Size2D<f32>,
+    pub(crate) clip: Option<usize>,
+    pub(crate) chain: Option<u32>,
+    pub(crate) animation: Option<u32>,
+    /// The innermost enclosing group layer, including one this element opened
+    /// for itself: its blur carries the element's contents' ink outward, so
+    /// the region admitted for them grows with it.
+    pub(crate) layer: Option<usize>,
+}
+
 /// Per-corner elliptical radii, in CSS px: `width` is the horizontal radius,
 /// `height` the vertical.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -360,12 +434,29 @@ impl CornerRadii {
 }
 
 impl<T: Sync> Document<T> {
+    /// One frame built out of band, claiming a commit id of its own — the
+    /// shape the tests that inspect or deliberately strand a paint order
+    /// need. The production path is [`Self::render`], which claims the id
+    /// once and may build more than one frame under it.
+    #[cfg(test)]
     pub(crate) fn build_paint_order(&mut self) -> PaintOrder {
         self.layout();
-        // Claimed before the build so the built frame carries it; a
-        // panicking build or walk leaves the previous frame retained with
-        // its older id, so `needs_render` still reports stale.
+        // Claimed after the layout and before the build, so the built frame
+        // carries it; a panicking build or walk leaves the previous frame
+        // retained with its older id, so `needs_render` still reports stale.
         let _ = self.next_commit_id();
+        self.build_frame()
+    }
+
+    /// One pass: style, layout, paint order, under the commit id already
+    /// claimed.
+    ///
+    /// Split out of [`Self::build_paint_order`] because a render may take
+    /// more than one — a `content-visibility: auto` relevance flip voids the
+    /// frame it was decided on — while the commit id is claimed once per
+    /// render, so every pass builds the *same* commit.
+    fn build_frame(&mut self) -> PaintOrder {
+        self.layout();
         // Both takes finish before `build` reborrows the document shared. The
         // retained frame is not among them: it stays where hit testing can
         // read it for the whole build, and a build that panics loses only one
@@ -379,6 +470,35 @@ impl<T: Sync> Document<T> {
         frame
     }
 
+    /// Builds the frame this render publishes, with
+    /// `content-visibility: auto` relevance determined inside it.
+    ///
+    /// See [`relevance`] for what the determination is and why the reveal
+    /// happens in this same commit: a frame is never published with a
+    /// relevance flip pending.
+    fn build_frame_with_relevance(&mut self) -> PaintOrder {
+        let mut scratch = self.painter.get_mut().take_relevance_scratch();
+        let mut frame = self.build_frame();
+        let mut pass = 1;
+        while pass < relevance::RELEVANCE_PASSES && self.determine_relevance(&mut scratch, &frame) {
+            // The frame the flips were decided on is void; its storage is
+            // not, so it goes back to the painter for the pass that replaces
+            // it.
+            let stale = std::mem::replace(&mut frame, PaintOrder::empty());
+            self.painter.get_mut().restore_spare_buffers(stale);
+            frame = self.build_frame();
+            // The flips invalidated layout, which dirtied the frame they
+            // were decided on. This render owns that dirt and the rebuild
+            // just above is its answer, so it is spent — no second commit id
+            // is claimed, because this is still the same commit.
+            self.clear_visual_dirty();
+            pass += 1;
+        }
+        self.settle_relevance();
+        self.painter.get_mut().restore_relevance_scratch(scratch);
+        frame
+    }
+
     /// Renders only when the retained frame no longer represents the current
     /// document state. Returns whether a new frame was built.
     pub fn render(&mut self) -> bool {
@@ -389,7 +509,12 @@ impl<T: Sync> Document<T> {
         // reads layout slots wholesale, so size them first.
         let bound = self.arenas().slot_bound();
         self.layout_state_mut().ensure_covers(bound);
-        let frame = self.build_paint_order();
+        // Style and layout run before the claim: the flush's damage harvest
+        // invalidates layout, which notes a visual mutation, so an id
+        // claimed ahead of it would be stale the instant it was claimed.
+        self.layout();
+        let _ = self.next_commit_id();
+        let frame = self.build_frame_with_relevance();
         let animations_active = self.animations().is_active();
         let needs_main_ticks = animations_active && self.animation_needs_main_ticks(&frame);
         let viewport = self.viewport_size();
@@ -559,7 +684,7 @@ impl<T> Document<T> {
         let painter = self.painter.borrow();
         let mut out = painter
             .frame()
-            .map_or([0, 0, 0, 0, 0], |frame| frame.order.capacities())
+            .map_or([0, 0, 0, 0, 0, 0], |frame| frame.order.capacities())
             .to_vec();
         let (spare, scratch) = painter.storage_capacities();
         out.extend_from_slice(&spare);

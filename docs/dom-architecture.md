@@ -34,7 +34,11 @@ path). The primary slab selects each raw-`usize` ID; the payload slab allocates
 and removes in lockstep and asserts the same key (reserving a payload-less
 sentinel at document slot zero), while the layout vector resets a freed key's
 entry so the next occupant starts clean (ONE TREE policy: nodes are created and
-mutated only through `Document` methods). The **document element is permanent
+mutated only through `Document` methods). One more slot-keyed side table lives
+on `TreeArenas` itself rather than beside it: `content-visibility: auto`
+relevance (`layout/relevance.rs`), because a `StyleView` is built from these
+arenas alone and the layout state is a separately borrowed parameter it cannot
+reach. It resets on free like the layout vector does. The **document element is permanent
 and pre-created**: `Document::new(device, root_tag, root_payload)` builds it at
 slot one (tag injected — the core owns no tag vocabulary), `document_element()`
 returns it non-optionally, and it can never be detached or removed, so the
@@ -297,6 +301,28 @@ affect hit testing (recorded limit). Lynx-specific hit-test policy (hit-slop,
 `user-interaction-enabled`, event-through) belongs to the future runtime-policy
 layer, never here.
 
+**`content-visibility: auto` relevance is decided here**, not in layout and not
+by a host. `render` claims one commit id, builds the paint order, and asks
+`visual/relevance.rs` whether each `auto` element's own border box still
+reaches the region *that frame's culling* admits — the walker's own
+`CullPlan::admits_box`, which `plan_frame`'s first cull test also calls, over
+the same resolved clip chains, `ScrollSlot::encode_window`s and group blur
+reaches, so "relevant wherever its contents could paint" holds by
+construction. The build records an `AutoBox` (node, world transform, size,
+clip, chain, animation, enclosing group layer) for every `auto` element it
+reaches, independently of the item list: a `visibility: hidden` element emits
+no item and still has to be determined, or its `visibility: visible` contents
+would never lay out. A flip invalidates layout through the ordinary relayout
+machinery and the frame is rebuilt under the same commit id, at most four
+times, with each element determined at most once per commit; the published
+frame is always the last pass's, so no frame carries a pending reveal. The bit
+itself is layout-side per-element state in a slot-keyed side table on
+`TreeArenas` (`layout/relevance.rs`) — never a Stylo `ElementState` and never a
+restyle trigger — read through `StyleView`'s `CoreStyle::skips_contents`
+override, which is the single answer the layout host, the relayout
+invalidation walk, the paint-order build and the stacking predicate all take.
+A page with no `auto` element pays one `is_empty` test per render.
+
 `Document<T>` owns one private concrete `Painter`
 (`crates/dom/src/paint/painter.rs`), including its reusable walk scratch, its
 retained `vello::Scene`, and the `Arc<CommittedFrame>` it retains. `render`
@@ -315,7 +341,12 @@ plus a compose program — so a consumer composes at its own current offsets per
 every offset stays inside its slot's `encode_window`. When one leaves it,
 `note_scroll_windows_stale` is the consumer's refill request, which the painter
 sends as `ToMain::Refill { offsets }` and the main thread answers with a
-recentered commit. Composition is the one render path: `compose_into` replays
+recentered commit. `Document::scroll_to` applies the same rule to its own
+writes: a scroll the retained frame's slot can still compose invalidates
+nothing, and one past that slot's `encode_window`
+(`CommittedFrame::covers_scroll_offset`) makes the frame stale, because past
+it there is no encoded content to compose and no `auto` box was determined
+for it. Composition is the one render path: `compose_into` replays
 the whole program into one flat scene at those offsets, and nothing is retained
 per scroller. Scroll
 containers are forced stacking contexts (matching Lynx's native scroll views;

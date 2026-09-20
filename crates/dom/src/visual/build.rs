@@ -30,7 +30,9 @@
 
 use euclid::default::{Point2D, Rect, Size2D, Transform3D};
 use hughie::style::containment::effective_containment;
-use hughie::style::{Contain, CoreStyle, Overflow, PositionProperty, visibility};
+use hughie::style::{
+    Contain, ContentVisibility, CoreStyle, Overflow, PositionProperty, visibility,
+};
 use hughie::tree::{Layout, LayoutTree};
 use stylo::properties::ComputedValues;
 use stylo::values::computed::{CSSPixelLength, PointerEvents};
@@ -38,8 +40,8 @@ use stylo::values::computed::{CSSPixelLength, PointerEvents};
 use super::geometry::{inner_radii, resolve_corner_radii};
 use super::transform::{ParentPerspective, stacking_context_matrix};
 use super::{
-    AnimationSlot, ClipNode, CornerRadii, FrameBuffers, PaintItem, PaintItemKind, PaintOrder,
-    RenderLayer, ScrollSlot, stacking,
+    AnimationSlot, AutoBox, ClipNode, CornerRadii, FrameBuffers, PaintItem, PaintItemKind,
+    PaintOrder, RenderLayer, ScrollSlot, stacking,
 };
 use crate::layout::{
     DisplayMode, StyleView, box_parent, display_mode, establishes_absolute_containing_block,
@@ -72,6 +74,7 @@ pub(crate) fn build<T: Sync>(
         layers: buffers.layers,
         slots: buffers.slots,
         animations: buffers.animations,
+        auto_boxes: buffers.auto_boxes,
         current_layer: None,
         scratch,
     };
@@ -80,7 +83,8 @@ pub(crate) fn build<T: Sync>(
             && builder.clips.is_empty()
             && builder.layers.is_empty()
             && builder.slots.is_empty()
-            && builder.animations.is_empty(),
+            && builder.animations.is_empty()
+            && builder.auto_boxes.is_empty(),
         "a recycled frame is emptied before it is handed back to the builder",
     );
     builder.scratch.assert_settled();
@@ -109,6 +113,7 @@ pub(crate) fn build<T: Sync>(
             layers: builder.layers,
             slots: builder.slots,
             animations: builder.animations,
+            auto_boxes: builder.auto_boxes,
             commit_id,
         },
         builder.scratch,
@@ -332,6 +337,9 @@ struct Builder<'doc, T> {
     layers: Vec<RenderLayer>,
     slots: Vec<ScrollSlot>,
     animations: Vec<AnimationSlot>,
+    /// Every `content-visibility: auto` box this build reached, in build
+    /// order. Independent of `items`: see [`AutoBox`].
+    auto_boxes: Vec<AutoBox>,
     current_layer: Option<usize>,
     scratch: BuildScratch,
 }
@@ -552,6 +560,25 @@ impl<'doc, T: Sync> Builder<'doc, T> {
             // sampled delta.
             self.kill_animation_chain(animation);
         }
+        // Every `content-visibility: auto` box arrives here and nowhere else:
+        // `auto` implies `LAYOUT | PAINT` containment, so it is always a
+        // stacking context, and a stacking context is always built by this
+        // method. Recorded *before* the visibility branch below, because
+        // relevance is a geometric fact about the border box and a
+        // `visibility: hidden` element — which emits no item — still has to
+        // be determined, or its `visibility: visible` contents would never
+        // lay out.
+        if values.clone_content_visibility() == ContentVisibility::Auto {
+            self.auto_boxes.push(AutoBox {
+                node: root,
+                transform: world,
+                size,
+                clip: seed.current.clip,
+                chain: seed.current.chain,
+                animation,
+                layer: self.current_layer,
+            });
+        }
         let (visible, hit_testable) = item_flags(values);
         if visible {
             self.items.push(PaintItem {
@@ -568,7 +595,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         }
 
         let mode = display_mode(style.display());
-        if mode == DisplayMode::Leaf || skips_contents(values) {
+        if mode == DisplayMode::Leaf || skips_contents(self.node(root), values) {
             self.close_layer(layer);
             return;
         }
@@ -790,7 +817,8 @@ impl<'doc, T: Sync> Builder<'doc, T> {
             || scroll::is_scroll_container(style);
         Some(ChildBox {
             node,
-            level: (stacking::establishes_stacking_context(style, z_applies) || forced_context)
+            level: (stacking::establishes_stacking_context(child_node, style, z_applies)
+                || forced_context)
                 .then(|| stacking::stack_level(style, z_applies)),
             offset,
             size,
@@ -898,7 +926,8 @@ impl<'doc, T: Sync> Builder<'doc, T> {
     ) {
         let style = child.view.values();
         let (visible, hit_testable) = item_flags(style);
-        let descend = child.mode != DisplayMode::Leaf && !skips_contents(style);
+        let descend =
+            child.mode != DisplayMode::Leaf && !skips_contents(self.node(child.node), style);
         let is_item_container = ranks_children_as_items(child.mode);
         // A pseudo-context takes its sequence number before descending, so it
         // sorts where it was *found*, not where it finished; a static box takes
@@ -1048,7 +1077,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         own_animation: Option<u32>,
     ) -> ClipContexts {
         let mut inner = ctx;
-        let clipped = clipped_axes(style);
+        let clipped = clipped_axes(self.node(node), style);
         if clipped.x || clipped.y {
             let (rect, radii) = {
                 let layout = self.rounded(node);
@@ -1184,11 +1213,15 @@ fn member_clip_contexts(position: PositionProperty, ctx: ClipContexts) -> ClipCo
     }
 }
 
-fn clipped_axes(style: &ComputedValues) -> ScrollAxes {
+/// Paint containment clips both axes. `node` is threaded in for the same
+/// reason [`stacking::establishes_stacking_context`] takes one: the
+/// `skips_contents` answer must come from one place, even where — as here,
+/// which reads only `PAINT` — it cannot change the result.
+fn clipped_axes<T>(node: &Node<T>, style: &ComputedValues) -> ScrollAxes {
     if effective_containment(
         style.clone_contain(),
         style.clone_content_visibility(),
-        skips_contents(style),
+        skips_contents(node, style),
     )
     .intersects(Contain::PAINT)
     {

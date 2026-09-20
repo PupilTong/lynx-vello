@@ -637,12 +637,24 @@ incremental relayout (which refreshes only a boundary's *own* `content_size` in 
 a cold full relayout by construction: an ancestor never re-derives a value that includes a scroll
 container's trapped interior.
 
-**Skipped contents** (`content-visibility: hidden`, or `auto` once a host
-reports the box non-relevant): `compute_skipped_contents_layout` sizes the box
+**Skipped contents** (`content-visibility: hidden`, or `auto` while the box is
+not *relevant to the user*): `compute_skipped_contents_layout` sizes the box
 purely from styles + `contain-intrinsic` substitution, lays out **no**
 children, and on Commit calls `hide_subtree` on each child to clean stale
 geometry/caches. It dispatches **before** `compute_cached_layout`, right after
-the `display: none` (`Display::is_none`) check. The child-hiding deliberately **precedes
+the `display: none` (`Display::is_none`) check.
+
+Which boxes those are is the host's answer, not the engine's:
+`CoreStyle::skips_contents` reads `content-visibility: hidden` off computed
+style by default, and `dom`'s `StyleView` overrides it to fold in the `auto`
+relevance bit as well (`crates/dom/src/layout/relevance.rs`). `containment()`
+needs no override beside it — its own default already runs
+`self.skips_contents()` through `effective_containment`, which is where a
+skipped `auto` box gains `SIZE` and with it relayout-boundary status. The bit
+is determined once per commit, by `Document::render`, against the region the
+paint walk's culling admits (`crates/dom/src/visual/relevance.rs`); a box no
+rendering update has reached yet is undetermined and skips. From the engine's
+side nothing about this is visible: it is one more style answer. The child-hiding deliberately **precedes
 and bypasses the cache boundary** (mirroring `hide_subtree`): caching a skipped
 result and later serving it on a hit would leave a re-populated child subtree
 un-hidden; sizing a contentless box is cheap and re-hiding per pass is far
@@ -668,9 +680,10 @@ is read rather than in `compute_layout`, along exactly two lines:
 - **Nothing about the element applies to layout.** It cannot be a containing
   block (`establishes_{fixed,absolute}_containing_block` return false whatever
   `position`/`transform`/`will-change` say), cannot be contained or skipped
-  (`CoreStyle::containment` is empty and `skips_contents` false, so
-  `is_relayout_boundary` is false and host ancestor walks pass straight
-  through), and is never hoisted. Its own `LayoutSlot` is zeroed by the
+  (`CoreStyle::containment` is empty and `skips_contents` false — whatever
+  `content-visibility` computes to, including `auto`, whose relevance bit a
+  box-less element never consults — so `is_relayout_boundary` is false and
+  host ancestor walks pass straight through), and is never hoisted. Its own `LayoutSlot` is zeroed by the
   positioned pass's pre-node hook, which makes it a transparent zero-offset
   pass-through for the rounding walk and for
   `accumulated_unrounded_origin`, and reports an empty box to

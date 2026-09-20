@@ -363,13 +363,42 @@ and §D.16 with what the wire format actually permits.)*
       Single-axis `inline-size` containment parses if the grammar allows but is **ignored by
       layout** — never treated as size containment, never a relayout boundary. Size containment
       always covers both physical axes.
-    - **`content-visibility: auto` relevance is deferred.** v1 computes `auto`'s always-on
-      `layout | paint | style` containment, but the relevance/skipping bit is a **host-pushed
-      signal defaulting to "always relevant"** (`CoreStyle::skips_contents`, the same
-      `ElementState`-style deferral as `:hover`, §C.13). `contentvisibilityautostatechange` is
-      **not** fired — there is no event layer, and half-wiring it would break future `<list>`
-      parity. `content-visibility: hidden` is fully implemented (skip contents + intrinsic size +
-      strict-like containment).
+    - **`content-visibility: auto` relevance is implemented** *(2026-09-20; it was deferred to a
+      host-pushed "always relevant" signal until then)*. `auto` still computes its always-on
+      `layout | paint | style` containment, and on top of that `dom` determines *relevance to the
+      user* (css-contain-2 §4.1) inside the commit that draws the frame: after the paint order is
+      built and before the walk, each `auto` element **the build reached** — i.e. every one not
+      under a skipped or `display: none` ancestor, whether or not it emitted a paint item — is
+      relevant iff its own border box, under its world transform and clip chain, reaches the
+      region that frame's culling admits. The build records the box itself rather than an item
+      index, because relevance is geometric: a `visibility: hidden` `auto` element paints nothing
+      yet still decides whether its (possibly `visibility: visible`) contents lay out. The bit is layout-side per-element state in a slot-keyed side table on
+      `dom`'s tree arenas — never a Stylo `ElementState`, never a restyle trigger — and
+      `StyleView` folds it into `CoreStyle::skips_contents`, which `effective_containment` turns
+      into the `SIZE` bit a skipped box gains. An element no rendering update has reached yet is
+      *undetermined* and skips, matching the spec's "determined in the next rendering update".
+      - **The margin is the painter's encode window** (`ScrollSlot::encode_window`,
+        `ENCODE_WINDOW_SCROLLPORTS = 1.0`), which is exactly the region the walk's culling
+        admits and the compositor may scroll to without a new commit. The relevance test is the
+        walker's own `CullPlan::admits_border_box`, so "relevant wherever its contents could
+        paint" holds by construction rather than by agreement. Anything undecidable — a singular
+        transform, a non-finite bound, an item on a chain a sampled animation delta moves —
+        counts as relevant.
+      - **Reveal is same-commit.** A flip invalidates layout at the flipped nodes through the
+        ordinary relayout machinery and the frame is rebuilt inside the same `render()`, under
+        the same commit id; a later pass only determines elements this commit has not determined
+        yet (the nested `auto` boxes that only now got an item). At most 4 passes, and no frame
+        is ever published with a flip pending. The bounded rule has one accepted consequence: if
+        a revealed element's `contain-intrinsic-size` estimate was wrong, the boxes the resulting
+        reflow moved into or out of the window are re-determined by the *next* commit, not this
+        one — the same one-update lag browsers have.
+      - **Four of the spec's relevance conditions are N/A here**: this engine has no top layer
+        (no `dialog`, no fullscreen), no focus model, no selection, and no view transitions.
+      - Still pending, in later PRs: `contentvisibilityautostatechange` (there is no event layer
+        yet), and the last-remembered size (css-sizing-4), so a revealed element that later skips
+        re-sizes from `contain-intrinsic-size` rather than from what it last measured.
+      - `content-visibility: hidden` is unchanged and fully implemented (skip contents +
+        intrinsic size + strict-like containment).
     - **Paint containment: layout + visual order.** `contain: paint`'s IFC / containing-block
       effects are computed and exposed by layout; since 2026-07-23 its stacking context and
       paint/hit-area clipping are implemented by `dom`'s `visual` module (paint order + hit

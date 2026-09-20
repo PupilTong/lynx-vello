@@ -24,7 +24,7 @@ use rustc_hash::FxHashSet;
 
 use super::style::{
     DisplayMode, StyleView, box_parent, display_mode, establishes_absolute_containing_block,
-    establishes_fixed_containing_block, resolve_position, skips_contents,
+    establishes_fixed_containing_block, resolve_position,
 };
 use super::text_block::compute_text_block_layout;
 use crate::tree::document::{
@@ -328,7 +328,7 @@ fn pre_position<T: Sync>(
         position_hoisted(tree, state, node_id, viewport, fixed);
     }
     display != DisplayMode::Leaf
-        && !skips_contents(style.values())
+        && !style.skips_contents()
         && !(display == DisplayMode::Text && super::text_block::replaces_children(node))
 }
 

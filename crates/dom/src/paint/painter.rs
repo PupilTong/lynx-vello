@@ -64,6 +64,10 @@ use crate::visual::{CommittedFrame, PaintOrder};
 pub(crate) struct Painter {
     scratch: crate::paint::walker::Scratch,
     build_scratch: crate::visual::BuildScratch,
+    /// The `content-visibility: auto` determination's working storage, kept
+    /// here for the same reason `build_scratch` is: a settled page must
+    /// determine relevance without allocating.
+    relevance_scratch: crate::visual::relevance::RelevanceScratch,
     /// The frame the last successful paint committed — the hit-test snapshot,
     /// and the object [`Document::commit`](crate::Document::commit) publishes.
     frame: Option<Arc<CommittedFrame>>,
@@ -188,7 +192,7 @@ impl Painter {
     /// The spare frame buffers' and the build scratch's capacities, for the
     /// reuse tests.
     #[cfg(test)]
-    pub(crate) fn storage_capacities(&self) -> ([usize; 5], Vec<usize>) {
+    pub(crate) fn storage_capacities(&self) -> ([usize; 6], Vec<usize>) {
         (self.spare.capacities(), self.build_scratch.capacities())
     }
 
@@ -202,6 +206,24 @@ impl Painter {
 
     pub(crate) fn take_spare_buffers(&mut self) -> crate::visual::FrameBuffers {
         std::mem::take(&mut self.spare)
+    }
+
+    /// Takes back the storage of a paint order that was built and then
+    /// discarded — a relevance pass whose flips voided it — so the pass that
+    /// replaces it reuses the very buffers it just filled.
+    pub(crate) fn restore_spare_buffers(&mut self, discarded: PaintOrder) {
+        self.spare = discarded.into_buffers();
+    }
+
+    pub(crate) fn take_relevance_scratch(&mut self) -> crate::visual::relevance::RelevanceScratch {
+        std::mem::take(&mut self.relevance_scratch)
+    }
+
+    pub(crate) fn restore_relevance_scratch(
+        &mut self,
+        scratch: crate::visual::relevance::RelevanceScratch,
+    ) {
+        self.relevance_scratch = scratch;
     }
 
     pub(crate) const fn frame(&self) -> Option<&Arc<CommittedFrame>> {

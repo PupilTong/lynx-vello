@@ -1,6 +1,7 @@
 //! Box layout over the document tree — the concrete [`hughie`] host.
 
 mod host;
+pub(crate) mod relevance;
 mod style;
 pub(crate) mod text_block;
 

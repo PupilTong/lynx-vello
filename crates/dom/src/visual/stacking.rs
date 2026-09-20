@@ -18,12 +18,23 @@ use stylo::values::computed::motion::OffsetPath;
 use stylo::values::specified::box_::WillChangeBits;
 
 use crate::layout::skips_contents;
+use crate::tree::node::Node;
 
 pub(crate) fn z_index_applies(position: PositionProperty, is_item: bool) -> bool {
     position != PositionProperty::Static || is_item
 }
 
-pub(crate) fn establishes_stacking_context(style: &ComputedValues, z_applies: bool) -> bool {
+/// `node` is here only so the containment trigger reads the same
+/// `skips_contents` answer layout does. It cannot change this predicate's
+/// result — `effective_containment` gives a `content-visibility: auto` box
+/// `LAYOUT | PAINT` whether or not it is skipping, and the skip bit adds only
+/// `SIZE` — but deriving the same fact two ways is how the two halves of the
+/// pipeline drift apart.
+pub(crate) fn establishes_stacking_context<T>(
+    node: &Node<T>,
+    style: &ComputedValues,
+    z_applies: bool,
+) -> bool {
     let position = style.clone_position();
     if matches!(position, PositionProperty::Fixed | PositionProperty::Sticky) {
         return true;
@@ -74,7 +85,7 @@ pub(crate) fn establishes_stacking_context(style: &ComputedValues, z_applies: bo
     effective_containment(
         style.clone_contain(),
         style.clone_content_visibility(),
-        skips_contents(style),
+        skips_contents(node, style),
     )
     .intersects(Contain::LAYOUT | Contain::PAINT)
 }

@@ -16,6 +16,7 @@ use hughie::text::TextContext;
 use hughie::tree::LayoutSlot;
 use slab::Slab;
 
+use crate::layout::relevance::{Relevance, RelevanceTable};
 use crate::layout::text_block::TextBlockStore;
 use crate::tree::node::Node;
 
@@ -144,6 +145,12 @@ pub(crate) struct TreeArenas<T> {
     nodes: Slab<Node<T>>,
     payloads: Slab<PayloadSlot<T>>,
     generations: Vec<u32>,
+    /// `content-visibility: auto` relevance, keyed by arena key. It lives
+    /// here rather than in `DocumentLayoutState` because a
+    /// [`StyleView`](crate::layout::StyleView) is built from these arenas
+    /// alone and has to be able to read it; see
+    /// [`crate::layout::relevance`].
+    relevance: RelevanceTable,
 }
 
 impl<T> TreeArenas<T> {
@@ -152,7 +159,31 @@ impl<T> TreeArenas<T> {
             nodes: Slab::with_capacity(INITIAL_NODE_CAPACITY),
             payloads: Slab::with_capacity(INITIAL_NODE_CAPACITY),
             generations: Vec::with_capacity(INITIAL_NODE_CAPACITY),
+            relevance: RelevanceTable::default(),
         }
+    }
+
+    /// One element's `content-visibility: auto` relevance.
+    #[inline]
+    pub(crate) fn relevance(&self, slot: NodeId) -> Relevance {
+        self.relevance.state(slot.arena_key())
+    }
+
+    /// Whether the render in flight has already determined this element's
+    /// relevance, and so must not determine it a second time.
+    #[inline]
+    pub(crate) fn relevance_is_fresh(&self, slot: NodeId) -> bool {
+        self.relevance.is_fresh(slot.arena_key())
+    }
+
+    /// Records one determination, answering whether the bit moved.
+    pub(crate) fn determine_relevance(&mut self, slot: NodeId, state: Relevance) -> bool {
+        self.relevance.determine(slot.arena_key(), state)
+    }
+
+    /// Ends a render's determinations; see [`RelevanceTable::settle`].
+    pub(crate) fn settle_relevance(&mut self) {
+        self.relevance.settle();
     }
 
     /// Takes arena key zero out of circulation, before any node is filed.
@@ -341,6 +372,10 @@ impl<T> TreeArenas<T> {
             .try_remove(id.arena_key())
             .expect("removed element/text node must have payload-arena state");
         self.generations[id.arena_key()] = self.generations[id.arena_key()].wrapping_add(1);
+        // A dropped node takes its relevance with it: the key is recycled,
+        // and its next occupant must start undetermined rather than inherit
+        // a stranger's answer.
+        self.relevance.reset(id.arena_key());
         (node, payload)
     }
 }

@@ -315,6 +315,18 @@ impl<T> Document<T> {
         self.visual_dirty = true;
     }
 
+    /// Clears the dirty bit without claiming a commit id.
+    ///
+    /// The one caller is the `content-visibility: auto` pass loop
+    /// ([`crate::visual::relevance`]): a relevance flip invalidates layout,
+    /// which dirties the frame that flip was decided on, and the loop answers
+    /// that by rebuilding the *same* commit rather than by starting another
+    /// one. Nothing else may use it — for any other mutation, a cleared bit
+    /// with no rebuild behind it is a frame that never repaints.
+    pub(crate) const fn clear_visual_dirty(&mut self) {
+        self.visual_dirty = false;
+    }
+
     /// Every live node's layout state, in arena order. The keys are arena
     /// slots, not ids: this walks storage, not identity.
     pub(crate) fn layout_data_mut(

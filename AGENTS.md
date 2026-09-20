@@ -1680,7 +1680,9 @@ Subsystems:
 - `layout/` — the concrete `hughie` host: `Document::layout`, the `LayoutTree`
   impl, per-node `LayoutSlot`s in `DocumentLayoutState`.
 - `visual/` — stacking contexts, CSS2 Appendix E paint order, transforms,
-  `RenderLayer` group effects, reverse-paint-order hit testing.
+  `RenderLayer` group effects, reverse-paint-order hit testing, and
+  `content-visibility: auto` relevance determination (`relevance.rs`), which
+  runs inside `render` between the paint-order build and the walk.
 - `paint/` — the document-owned private `Painter`, walker, fragment painters
   and the retained `vello::Scene` a `commit` publishes as `CommittedFrame`.
 - `scroll/` — CSSOM-View geometry, per-node offsets, `scroll_to`/`scroll_by`/
@@ -1703,6 +1705,13 @@ Rulings and limits to know before touching it:
   pairs into `hidden`; only `scroll` is user-scrollable, `hidden` is a scroll
   container only script moves, `clip` is no container at all, and scroll
   containers are forced stacking contexts.
+- `content-visibility: auto` relevance is `dom`'s, determined once per commit
+  against the region the paint walk's culling admits, and stored as
+  layout-side per-element state in a slot-keyed side table on `TreeArenas` —
+  never a Stylo `ElementState`, never a restyle trigger. `hughie` sees it only
+  as `CoreStyle::skips_contents`. A relevance flip reveals inside the same
+  commit (`crates/dom/src/visual/relevance.rs`, at most four build passes
+  under one commit id), so no frame is published with a reveal pending.
 - The crate dispatches no events and has no `preventDefault` and no gesture
   recognizer; `InputEvent::default_prevented` is the embedder's seam.
 - Custom elements are user-agent components only, `define` must precede any
@@ -1768,7 +1777,10 @@ applies `tail-color-convert`'s native semantics.
 
 **CSS containment (css-contain-2)** is landed layout-side: the stylo
 `Contain`/`ContainIntrinsicSize` accessors on `CoreStyle`, size-substitution +
-layout-containment baseline suppression, `compute_skipped_contents_layout`, and
+layout-containment baseline suppression, `compute_skipped_contents_layout`
+(whose "is this box skipping?" input is `CoreStyle::skips_contents`, defaulted
+to `content-visibility: hidden` and overridden by `dom` to fold in `auto`
+relevance), and
 the `invalidate` module (`is_relayout_boundary`, `invalidate_for_relayout`) —
 the containment-bounded, damage-driven cache-invalidation host workflow
 (single-axis / container queries out of scope). `LayoutGoal::Commit` carries
