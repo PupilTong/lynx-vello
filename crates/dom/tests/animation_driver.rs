@@ -4,7 +4,8 @@
 
 mod common;
 
-use common::Doc;
+use common::{Doc, device};
+use euclid::default::Vector2D;
 
 /// A document with one animated `view`, laid out once so the animation has
 /// started but not yet been ticked.
@@ -566,5 +567,321 @@ fn a_viewport_change_survives_an_animation_tick_before_the_next_flush() {
         doc.value(mover, "transform"),
         "translateX(50px)",
         "and the animation itself still advanced"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// css-contain-2 §4: an animation in a skipped subtree is frozen
+// ---------------------------------------------------------------------------
+//
+// > While an element is skipped, CSS transitions and animations on the
+// > element do not update: "New animations are not created even if
+// > newly-applied style would start one. Existing animations do not advance in
+// > their timeline. Running animations on the element do not end."
+// >
+// > When an element stops being skipped, animations and transitions are
+// > sampled and then resume advancing on their timelines as normal from that
+// > point.
+// >
+// > — https://drafts.csswg.org/css-contain-2/#content-visibility
+//
+// Every case below goes through `Document::render`, never a bare `layout()`:
+// skipping is a fact of the rendering update, and for
+// `content-visibility: auto` it is *decided* by one. The engine deviates on
+// the first clause only — style is not skipped, so Stylo creates the animation
+// anyway and the driver freezes it at its own start.
+
+const SKIPPING: &str = "
+    @keyframes slide {
+        from { transform: translateX(0px); }
+        to { transform: translateX(100px); }
+    }
+    page { display: flex; width: 200px; height: 200px; align-items: flex-start; }
+    .box { width: 100px; height: 100px; }
+    .box.skipping { content-visibility: hidden; }
+    .mover { width: 20px; height: 20px; }
+    .mover.animating { animation: slide 10s linear both; }
+";
+
+/// `page > .box > .mover`. `animation-fill-mode: both` is what makes the
+/// frozen value readable: without it an animation that never started
+/// contributes nothing, and "did not advance" would be indistinguishable from
+/// "was never created".
+struct Skipping {
+    doc: Doc,
+    boxed: dom::NodeId,
+    mover: dom::NodeId,
+}
+
+impl Skipping {
+    fn new(skipping: bool, animating: bool) -> Self {
+        let mut doc = Doc::with_css(SKIPPING);
+        let root = doc.root;
+        let boxed = doc.el(
+            root,
+            if skipping {
+                "view.box.skipping"
+            } else {
+                "view.box"
+            },
+        );
+        let mover = doc.el(
+            boxed,
+            if animating {
+                "view.mover.animating"
+            } else {
+                "view.mover"
+            },
+        );
+        Self { doc, boxed, mover }
+    }
+
+    fn render(&mut self) {
+        self.doc.dom.render();
+    }
+
+    fn tick(&mut self, now: f64) {
+        self.doc.dom.advance_animations(now);
+    }
+
+    fn transform(&self) -> String {
+        self.doc.value(self.mover, "transform")
+    }
+
+    fn animating(&self) -> bool {
+        self.doc.dom.has_active_animations()
+    }
+
+    fn skip(&mut self, skipping: bool) {
+        let boxed = self.boxed;
+        if skipping {
+            self.doc.add_class(boxed, "skipping");
+        } else {
+            self.doc.remove_class(boxed, "skipping");
+        }
+    }
+}
+
+#[test]
+fn an_animation_under_content_visibility_hidden_neither_advances_nor_owes_frames() {
+    let mut skipped = Skipping::new(true, true);
+    skipped.render();
+    assert!(
+        !skipped.animating(),
+        "the document's only animation is skipped, so nothing owes a frame"
+    );
+
+    skipped.tick(0.0);
+    skipped.tick(5.0);
+    skipped.tick(9.0);
+    assert_eq!(
+        skipped.transform(),
+        "translateX(0px)",
+        "nine seconds of timeline moved past a frozen animation"
+    );
+    assert!(
+        !skipped.animating(),
+        "and ticking it did not wake the timeline up"
+    );
+
+    // The same page with the box visible, so the assertion above reads as
+    // "frozen" rather than as "never created".
+    let mut shown = Skipping::new(false, true);
+    shown.render();
+    assert!(shown.animating(), "the control animates");
+    shown.tick(0.0);
+    shown.tick(5.0);
+    assert_eq!(
+        shown.transform(),
+        "translateX(50px)",
+        "half a duration in, at the same five seconds the skipped one ignored"
+    );
+}
+
+#[test]
+fn a_revealed_subtree_resumes_its_animation_where_it_was_frozen() {
+    let mut page = Skipping::new(false, true);
+    page.render();
+    page.tick(0.0);
+    page.tick(3.0);
+    assert_eq!(
+        page.transform(),
+        "translateX(30px)",
+        "three of its ten seconds"
+    );
+
+    page.skip(true);
+    page.render();
+    assert!(
+        !page.animating(),
+        "the box started skipping its contents in this very commit"
+    );
+    page.tick(8.0);
+    page.tick(100.0);
+    assert_eq!(
+        page.transform(),
+        "translateX(30px)",
+        "ninety-seven seconds of timeline went by without it"
+    );
+
+    page.skip(false);
+    page.render();
+    assert!(
+        page.animating(),
+        "and the reveal starts it again in the commit that revealed it"
+    );
+
+    page.tick(101.0);
+    assert_eq!(
+        page.transform(),
+        "translateX(30px)",
+        "the first tick after a reveal is the point it resumes from, not a \
+         ninety-seven-second jump"
+    );
+    page.tick(105.0);
+    assert_eq!(
+        page.transform(),
+        "translateX(70px)",
+        "four seconds on from the three it had when it froze"
+    );
+}
+
+#[test]
+fn an_animation_started_inside_a_skipped_subtree_is_frozen_at_its_start() {
+    let mut page = Skipping::new(true, false);
+    page.render();
+    page.tick(0.0);
+    page.tick(5.0);
+    assert!(!page.animating(), "nothing animates yet");
+
+    // Skipping contents does not skip style, so Stylo's `process_animations`
+    // creates this animation whatever the box above it says. The engine cannot
+    // honor "new animations are not created" and freezes it at its own start
+    // instead — the one deviation, recorded in `style-assumptions.md` §19.
+    let mover = page.mover;
+    page.doc.add_class(mover, "animating");
+    page.render();
+    assert!(
+        !page.animating(),
+        "created and immediately frozen, owing no frames"
+    );
+    page.tick(20.0);
+    assert_eq!(page.transform(), "translateX(0px)");
+
+    page.skip(false);
+    page.render();
+    assert!(page.animating());
+    page.tick(21.0);
+    assert_eq!(
+        page.transform(),
+        "translateX(0px)",
+        "the reveal plays it from zero, not from the fifteen seconds it spent \
+         frozen"
+    );
+    page.tick(26.0);
+    assert_eq!(
+        page.transform(),
+        "translateX(50px)",
+        "and half a duration on from there it is halfway"
+    );
+}
+
+#[test]
+fn the_element_that_skips_its_contents_keeps_its_own_animation() {
+    let mut doc = Doc::with_css(
+        "@keyframes slide {
+             from { transform: translateX(0px); }
+             to { transform: translateX(100px); }
+         }
+         page { display: flex; width: 200px; height: 200px; align-items: flex-start; }
+         .box { width: 100px; height: 100px; content-visibility: hidden;
+                animation: slide 10s linear both; }",
+    );
+    let root = doc.root;
+    let boxed = doc.el(root, "view.box");
+    doc.el(boxed, "view.child");
+
+    doc.dom.render();
+    assert!(
+        doc.dom.has_active_animations(),
+        "the spec skips an element's *contents* — its flat tree descendants — \
+         not the element"
+    );
+    doc.dom.advance_animations(0.0);
+    doc.dom.advance_animations(4.0);
+    assert_eq!(
+        doc.value(boxed, "transform"),
+        "translateX(40px)",
+        "the skipping box's own animation runs as normal"
+    );
+    assert!(
+        doc.dom.has_active_animations(),
+        "and keeps asking for frames"
+    );
+}
+
+/// The `content-visibility: auto` path: the row is skipped because the
+/// rendering update found it outside the region the frame's culling admits,
+/// not because anyone wrote `hidden`. The margin is one scrollport past the
+/// committed offset in each direction, so an offset of 300 leaves row 0
+/// (y 0..20 of a 400px column) out of the admitted band.
+#[test]
+fn an_animation_in_a_scrolled_away_auto_row_freezes_and_resumes() {
+    const ROWS: usize = 20;
+
+    let mut doc = Doc::with_device(device(200.0, 100.0));
+    doc.add_css(
+        "@keyframes slide {
+             from { transform: translateX(0px); }
+             to { transform: translateX(100px); }
+         }
+         page { display: flex; width: 200px; height: 100px; align-items: flex-start; }
+         .scroller { display: flex; flex-direction: column; overflow: hidden;
+                     width: 200px; height: 100px; align-items: flex-start; }
+         .row { display: flex; width: 200px; height: 20px; flex-shrink: 0;
+                content-visibility: auto; contain-intrinsic-size: 200px 20px; }
+         .mover { width: 20px; height: 20px; animation: slide 10s linear both; }",
+    );
+    let root = doc.root;
+    let scroller = doc.el(root, "view.scroller");
+    let rows: Vec<dom::NodeId> = (0..ROWS).map(|_| doc.el(scroller, "view.row")).collect();
+    let mover = doc.el(rows[0], "view.mover");
+
+    doc.dom.render();
+    assert!(
+        doc.dom.has_active_animations(),
+        "row 0 is on screen, so the rendering update found it relevant"
+    );
+    doc.dom.advance_animations(0.0);
+    doc.dom.advance_animations(2.0);
+    assert_eq!(doc.value(mover, "transform"), "translateX(20px)");
+
+    doc.dom.scroll_to(scroller, Vector2D::new(0.0, 300.0));
+    doc.dom.render();
+    assert!(
+        !doc.dom.has_active_animations(),
+        "the row stopped being relevant, so its contents' animation froze"
+    );
+    doc.dom.advance_animations(8.0);
+    doc.dom.advance_animations(40.0);
+    assert_eq!(
+        doc.value(mover, "transform"),
+        "translateX(20px)",
+        "thirty-eight seconds off screen move it nowhere"
+    );
+
+    doc.dom.scroll_to(scroller, Vector2D::new(0.0, 0.0));
+    doc.dom.render();
+    assert!(
+        doc.dom.has_active_animations(),
+        "scrolling back reveals the row in the same commit"
+    );
+    doc.dom.advance_animations(41.0);
+    assert_eq!(doc.value(mover, "transform"), "translateX(20px)");
+    doc.dom.advance_animations(44.0);
+    assert_eq!(
+        doc.value(mover, "transform"),
+        "translateX(50px)",
+        "three seconds on from the two it had when it froze"
     );
 }

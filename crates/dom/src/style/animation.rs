@@ -37,6 +37,57 @@
 //! it also lands the start time Stylo computes when a paused animation resumes.
 //! An animation shifted once is recorded as anchored and never shifted again,
 //! however many frames its delay keeps it `Pending` for.
+//!
+//! # Frozen animations: css-contain-2 §4
+//!
+//! > While an element is skipped, CSS transitions and animations on the
+//! > element do not update: *"New animations are not created even if
+//! > newly-applied style would start one. Existing animations do not advance
+//! > in their timeline. Running animations on the element do not end."*
+//! >
+//! > When an element stops being skipped, animations and transitions are
+//! > sampled and then resume advancing on their timelines as normal from that
+//! > point.
+//! >
+//! > — [css-contain-2 §4](https://drafts.csswg.org/css-contain-2/#content-visibility)
+//!
+//! An element "is skipped" when it is part of some ancestor's *skipped
+//! contents* — "the flat tree descendants of the element", so the box that
+//! skips is itself **not** skipped and its own animations run as normal. That
+//! is [`Document::in_skipped_subtree`], one flat-ancestor walk per element
+//! that owns animation state, asking `crate::layout::skips_contents` — the
+//! same predicate layout and the paint build ask, so `content-visibility:
+//! hidden` and a non-relevant `content-visibility: auto` box freeze by the
+//! same rule they skip by.
+//!
+//! Freezing is the anchoring arithmetic above, applied to an animation that
+//! is already running: a tick that finds an element frozen moves every one of
+//! its start times forward by the interval it advanced the timeline over, so
+//! `now - started_at` — the animation's progress — does not move, and nothing
+//! is promoted, iterated, ended or re-cascaded. Nothing samples a frozen
+//! element either: [`Document::has_active_animations`] and the committed
+//! frame's animation flags ignore frozen sets, so a page whose only
+//! animations are frozen leaves the painter's `owes_frame` false and the host
+//! stops ticking entirely.
+//!
+//! Which is why the carry is decided by [`AnimationDriver::carried`] — the
+//! elements frozen *when the last tick ended* — as well as by the freeze as
+//! of this tick. A reveal is noticed between two ticks, by a style flush or
+//! by the relevance pass inside `Document::render`, and the engine has no
+//! reading for the instant it happened; the interval containing it may even
+//! be an arbitrarily long stretch the host never ticked at all, precisely
+//! because a frozen page owes no frames. Carrying that whole interval is the
+//! only rule that survives it, so an animation resumes at **the first tick
+//! after the reveal** rather than at the reveal itself.
+//!
+//! One deviation from the list above: *new animations are not created*. This
+//! engine cannot honor that, because skipping contents does not skip style —
+//! Stylo's `process_animations` runs in the ordinary flush and creates the
+//! animation or transition the new style names, whatever box is above it. So
+//! a keyframe animation or a transition that starts inside a skipped subtree
+//! is created and then immediately frozen at its own start, and plays from
+//! zero when the subtree reveals. Recorded in `docs/style-assumptions.md`
+//! §19.
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use stylo::context::{SharedStyleContext, StyleSystemOptions};
@@ -54,6 +105,7 @@ use stylo::shared_lock::StylesheetGuards;
 use stylo::traversal_flags::TraversalFlags;
 use stylo_atoms::Atom;
 
+use crate::layout::skips_contents;
 use crate::style::damage::StyleDamage;
 use crate::style::flush::{LayoutThreadStateGuard, NO_PAINTERS, RecalcStyle};
 use crate::tree::document::{Document, NodeId};
@@ -138,6 +190,121 @@ enum AnchoredKind {
     Transition(OwnedPropertyDeclarationId),
 }
 
+/// One element's share of a tick: the instant, the interval, whether the
+/// element is frozen, and the anchoring bookkeeping the two loops share.
+///
+/// Split out of [`Document::step_animation_states`] only so the animation and
+/// transition loops — the same five decisions over two Stylo types that share
+/// no trait — read side by side.
+struct Step<'a> {
+    now: f64,
+    shift: f64,
+    /// css-contain-2 §4: this element is in a skipped subtree, so nothing is
+    /// promoted, iterated or ended for it.
+    skipped: bool,
+    /// Whether this element's start times take [`Self::shift`] whatever their
+    /// state, which is what holds a frozen animation's progress still.
+    carry: bool,
+    anchored: &'a FxHashSet<AnchoredAnimation>,
+    pending: &'a mut FxHashSet<AnchoredAnimation>,
+}
+
+impl Step<'_> {
+    /// Whether a `Pending` animation or transition takes the interval now.
+    ///
+    /// Carry and anchor are exclusive by construction: the shift lands once,
+    /// from whichever of the two claims it, so an animation created inside a
+    /// skipped subtree is not pushed forward twice on the tick that reveals
+    /// it.
+    fn shifts_pending(&self, entry: &AnchoredAnimation) -> bool {
+        self.carry || !self.anchored.contains(entry)
+    }
+
+    /// Advances one element's `@keyframes` animations, collecting the ones
+    /// that finished with a fill mode that keeps their last value. Answers
+    /// whether any of them changed state.
+    fn animations(
+        &mut self,
+        id: NodeId,
+        key: &AnimationSetKey,
+        animations: &mut [Animation],
+        held: &mut Vec<(NodeId, Animation)>,
+    ) -> bool {
+        let mut moved = false;
+        for animation in animations {
+            if animation.state == AnimationState::Pending {
+                let entry = AnchoredAnimation {
+                    set: key.clone(),
+                    what: AnchoredKind::Keyframes(animation.name.clone()),
+                };
+                if self.shifts_pending(&entry) {
+                    animation.started_at += self.shift;
+                }
+                if !self.skipped && animation.started_at <= self.now {
+                    animation.state = AnimationState::Running;
+                    moved = true;
+                } else {
+                    self.pending.insert(entry);
+                }
+            } else if self.carry {
+                animation.started_at += self.shift;
+            }
+            if self.skipped {
+                continue;
+            }
+            while animation.iterate_if_necessary(self.now) {
+                moved = true;
+            }
+            if animation.state == AnimationState::Running && animation.has_ended(self.now) {
+                animation.state = AnimationState::Finished;
+                moved = true;
+                if matches!(
+                    animation.fill_mode,
+                    AnimationFillMode::Forwards | AnimationFillMode::Both
+                ) {
+                    held.push((id, animation.clone()));
+                }
+            }
+        }
+        moved
+    }
+
+    /// The same for one element's transitions, which have no iteration and no
+    /// fill mode to hold.
+    fn transitions(&mut self, key: &AnimationSetKey, transitions: &mut [Transition]) -> bool {
+        let mut moved = false;
+        for transition in transitions {
+            if transition.state == AnimationState::Pending {
+                let entry = AnchoredAnimation {
+                    set: key.clone(),
+                    what: AnchoredKind::Transition(
+                        transition.property_animation.property_id().to_owned(),
+                    ),
+                };
+                if self.shifts_pending(&entry) {
+                    transition.start_time += self.shift;
+                }
+                if !self.skipped && transition.start_time <= self.now {
+                    transition.state = AnimationState::Running;
+                    moved = true;
+                } else {
+                    self.pending.insert(entry);
+                }
+            } else if self.carry {
+                transition.start_time += self.shift;
+            }
+            if self.skipped {
+                continue;
+            }
+            if transition.state == AnimationState::Running && transition.has_ended(self.now) {
+                transition.state = AnimationState::Finished;
+                moved = true;
+            }
+        }
+        moved
+    }
+}
+
 /// The document's animation timeline: Stylo's animation state, the last time
 /// it was sampled at, and whether anything is still moving.
 #[derive(Default)]
@@ -145,6 +312,25 @@ pub(crate) struct AnimationDriver {
     sets: DocumentAnimationSet,
     now: f64,
     active: bool,
+    /// Whether any element that owns animation state sits in a skipped
+    /// subtree, so its animations are frozen (css-contain-2 §4, module docs).
+    ///
+    /// Kept beside [`Self::active`] rather than folded into it because the two
+    /// answer different questions: a frozen animation demands no frame of its
+    /// own — that is the whole point — and yet its start times still have to
+    /// be carried every time the timeline moves.
+    frozen: bool,
+    /// The elements whose animations were frozen when the last tick ended.
+    ///
+    /// A tick carries the start times of every element in here *or* frozen as
+    /// of the tick itself, which is what makes the interval a reveal happened
+    /// in count as frozen rather than as elapsed. See the module docs: the
+    /// reveal is noticed between two ticks and the interval containing it may
+    /// be an arbitrarily long unticked stretch.
+    carried: FxHashSet<NodeId>,
+    /// The set the previous tick's [`Self::carried`] is rebuilt into, so a
+    /// page with a frozen animation ticks without allocating.
+    carried_spare: FxHashSet<NodeId>,
     /// Ancestors marked with the animation-only dirty-descendants bit by the
     /// last tick, kept so the same tick can clear exactly what it set. Stylo
     /// only ever sets that bit on ancestors of a hinted element, so this is a
@@ -191,6 +377,18 @@ impl AnimationDriver {
         self.active
     }
 
+    /// Whether a tick still has work even with nothing active: something is
+    /// frozen right now, or something was frozen when the last tick ended and
+    /// its start times have not been carried across the interval since.
+    ///
+    /// Both terms matter. The first is what keeps a frozen animation's
+    /// progress from drifting while an unrelated animation keeps the host
+    /// ticking; the second is what lets the tick after a reveal carry the
+    /// interval the reveal happened in, however long the host left it.
+    pub(crate) fn has_frozen_animations(&self) -> bool {
+        self.frozen || !self.carried.is_empty()
+    }
+
     /// Whether the document holds no animation state at all — the check that
     /// keeps removal and unlinking free on a page that never animates.
     pub(crate) fn is_empty(&self) -> bool {
@@ -211,6 +409,7 @@ impl AnimationDriver {
         }
         self.flagged.retain(|flagged| !ids.contains(flagged));
         self.marked.retain(|marked| !ids.contains(marked));
+        self.carried.retain(|carried| !ids.contains(carried));
         self.held.retain(|(id, _)| !ids.contains(id));
         self.anchored
             .retain(|entry| !ids.iter().any(|id| id.arena_key() == entry.set.node.0));
@@ -224,7 +423,11 @@ impl AnimationDriver {
             return;
         }
         // This can retire the last animation in the document, and nothing
-        // guarantees a style flush follows to notice.
+        // guarantees a style flush follows to notice. Deliberately blind to
+        // freezing, which needs the tree this half of the driver cannot
+        // reach: the answer is conservative in the safe direction, and
+        // `Document::refresh_animation_activity` corrects it before the next
+        // frame is published.
         self.active = sets
             .values()
             .any(stylo::servo::animation::ElementAnimationSet::needs_animation_ticks);
@@ -233,9 +436,79 @@ impl AnimationDriver {
 
 impl<T: Sync> Document<T> {
     /// Whether any animation or transition still needs frames.
+    ///
+    /// Animations frozen by css-contain-2 §4 — the ones in a subtree whose
+    /// contents are skipped — do not count: they advance no timeline, so a
+    /// page whose only animations are frozen is idle and the host stops
+    /// ticking it. See the module docs.
     #[must_use]
     pub fn has_active_animations(&self) -> bool {
         self.animations().is_active()
+    }
+
+    /// css-contain-2 §4: whether this element is part of some ancestor's
+    /// **skipped contents**, which is what freezes its animations.
+    ///
+    /// The spec skips an element's *contents* — "the flat tree descendants of
+    /// the element, including both text and elements" — so the box that skips
+    /// is itself not skipped and its own animations run as normal. Hence the
+    /// walk starts at the flat parent.
+    ///
+    /// The predicate is `crate::layout::skips_contents`, the one layout and
+    /// the paint build ask, so `content-visibility: hidden` and a non-relevant
+    /// `content-visibility: auto` box freeze by exactly the rule they skip by,
+    /// and the answer moves in the same rendering update the skipping does.
+    /// The walk is per *animated* element and costs a page with no animation
+    /// state nothing at all, because nothing asks.
+    pub(crate) fn in_skipped_subtree(&self, id: NodeId) -> bool {
+        let mut current = self.get(id).and_then(Node::flat_parent_id);
+        while let Some(ancestor) = current {
+            let Some(node) = self.get(ancestor) else {
+                break;
+            };
+            if node
+                .layout_computed_style()
+                .is_some_and(|style| skips_contents(node, style))
+            {
+                return true;
+            }
+            current = node.flat_parent_id();
+        }
+        false
+    }
+
+    /// Re-reads which animations demand frames and which are frozen, and
+    /// answers the former.
+    ///
+    /// Two things move this answer without a tick: a style flush, which is
+    /// where animations start, stop and gain or lose a skipping ancestor; and
+    /// the `content-visibility: auto` relevance pass inside
+    /// [`Document::render`], which reveals or skips subtrees with no style
+    /// change at all. So the render asks again once its frame is final, which
+    /// is what makes a reveal start its animations in the very commit that
+    /// revealed them.
+    pub(crate) fn refresh_animation_activity(&mut self) -> bool {
+        let handle = self.animations().context_handle();
+        let (active, frozen) = {
+            let sets = handle.sets.read();
+            let mut active = false;
+            let mut frozen = false;
+            for (key, set) in &*sets {
+                let Some(id) = self.arenas().id_at_arena_key(key.node.0) else {
+                    continue;
+                };
+                if self.in_skipped_subtree(id) {
+                    frozen = true;
+                } else {
+                    active |= set.needs_animation_ticks();
+                }
+            }
+            (active, frozen)
+        };
+        let driver = self.animations_mut();
+        driver.active = active;
+        driver.frozen = frozen;
+        active
     }
 
     /// Whether anything animating is *not* covered by one of `frame`'s
@@ -252,6 +525,12 @@ impl<T: Sync> Document<T> {
             let Some(id) = arenas.id_at_arena_key(key.node.0) else {
                 return false;
             };
+            // A frozen element has no exported curve either — the build never
+            // descends into a skipped subtree — so it has to be excluded
+            // here rather than fall through as "uncovered, tick it".
+            if self.in_skipped_subtree(id) {
+                return false;
+            }
             !frame
                 .animations()
                 .iter()
@@ -275,8 +554,16 @@ impl<T: Sync> Document<T> {
     /// [`Document::sync_animation_state`], so the first tick that can see a new
     /// animation always takes the path below, with `previous` at the time the
     /// animation was created.
+    ///
+    /// A document with nothing active but something *frozen* takes the path
+    /// below too, and for the same reason the anchoring exists: a frozen
+    /// animation's start times have to be carried by whatever interval the
+    /// timeline moved, or its progress would drift while it was meant to be
+    /// standing still. That step promotes, iterates, ends and hints nothing,
+    /// so it leaves the timeline exactly as idle as it found it.
     pub fn advance_animations(&mut self, now: f64) -> AnimationTick {
-        if !self.animations().is_active() {
+        let was_active = self.animations().is_active();
+        if !was_active && !self.animations().has_frozen_animations() {
             self.animations_mut().now = now;
             return AnimationTick::default();
         }
@@ -287,12 +574,15 @@ impl<T: Sync> Document<T> {
         let Stepped { hinted, moved } = self.step_animation_states(now, now - previous);
         if hinted.is_empty() {
             self.sync_animation_state();
-            // The timeline was active on entry; if this step ended it, the
+            // If the timeline was active on entry and this step ended it, the
             // idle fact must reach the next committed frame even though no
             // style moved — the frame's animation flag is itself visual
             // state, and a stale `true` would keep the compositor asking
-            // for animation ticks forever.
-            if moved || !self.animations().is_active() {
+            // for animation ticks forever. The entry state is what makes that
+            // a transition rather than a standing condition: a tick that only
+            // carries frozen animations finds the timeline idle on both sides
+            // and must not republish a frame for it, every frame, forever.
+            if moved || (was_active && !self.animations().is_active()) {
                 self.note_visual_mutation();
             }
             return AnimationTick::default();
@@ -310,7 +600,7 @@ impl<T: Sync> Document<T> {
         // states, and an animation promoted to running is one the next frame
         // can hand to the compositor even when its first sample happens to
         // equal the style already committed.
-        if tick.restyled > 0 || moved || !tick.needs_next_frame {
+        if tick.restyled > 0 || moved || (was_active && !tick.needs_next_frame) {
             self.note_visual_mutation();
         }
         tick
@@ -321,12 +611,15 @@ impl<T: Sync> Document<T> {
     ///
     /// Both the style flush and the tick mutate the map through Stylo, which
     /// reports neither, so the bookkeeping is rebuilt from the map itself.
+    /// Whether an element's animations are *frozen* is the one question this
+    /// pass does not answer itself: it goes through
+    /// [`Document::refresh_animation_activity`] below, so freezing and the
+    /// render's own re-ask read one rule.
     pub(crate) fn sync_animation_state(&mut self) {
         let handle = self.animations().context_handle();
         let mut held = std::mem::take(&mut self.animations_mut().held);
         let mut animated = Vec::new();
         let mut cancelled = Vec::new();
-        let mut active = false;
         {
             let mut sets = handle.sets.write();
             if !held.is_empty() {
@@ -342,7 +635,6 @@ impl<T: Sync> Document<T> {
                     cancelled.push(id);
                     set.clear_canceled_animations();
                 }
-                active |= set.needs_animation_ticks();
                 if !set.is_empty() {
                     animated.push(id);
                 }
@@ -365,7 +657,7 @@ impl<T: Sync> Document<T> {
             }
         }
         self.animations_mut().flagged = flagged;
-        self.animations_mut().active = active;
+        self.refresh_animation_activity();
 
         if !cancelled.is_empty() {
             self.recascade_cancelled_animations(&cancelled);
@@ -442,12 +734,27 @@ impl<T: Sync> Document<T> {
     /// `shift` is how far the timeline moved to reach `now`. Every `Pending`
     /// animation the driver has not anchored yet starts at this frame, so it
     /// carries that interval before the promotion below considers it.
+    ///
+    /// `shift` is also what freezes an element whose contents are skipped
+    /// (css-contain-2 §4, module docs): carrying *every* one of its start
+    /// times by the interval holds `now - started_at` still, which is the
+    /// animation's progress, and the step then promotes, iterates, ends and
+    /// hints nothing for it. An element carries when it is frozen now or was
+    /// frozen when the last tick ended — the second term is what makes the
+    /// interval a reveal happened in count as frozen, and it is the only one
+    /// that survives the host having stopped ticking a fully frozen page.
+    /// Carry and anchor are exclusive by construction: a `Pending` animation
+    /// takes `shift` once, from whichever of the two claims it.
     fn step_animation_states(&mut self, now: f64, shift: f64) -> Stepped {
         let handle = self.animations().context_handle();
         let mut anchored = std::mem::take(&mut self.animations_mut().anchored);
         let mut pending = std::mem::take(&mut self.animations_mut().anchored_spare);
         pending.clear();
-        let arenas = self.arenas();
+        let mut was_frozen = std::mem::take(&mut self.animations_mut().carried);
+        let mut frozen = std::mem::take(&mut self.animations_mut().carried_spare);
+        frozen.clear();
+        let document: &Self = self;
+        let arenas = document.arenas();
         let mut stepped = Stepped::default();
         let mut held = Vec::new();
 
@@ -457,75 +764,44 @@ impl<T: Sync> Document<T> {
                 // The element was freed without a lifecycle hook reaching us.
                 return false;
             };
-            let mut moved = false;
-            for animation in &mut set.animations {
-                if animation.state == AnimationState::Pending {
-                    let entry = AnchoredAnimation {
-                        set: key.clone(),
-                        what: AnchoredKind::Keyframes(animation.name.clone()),
-                    };
-                    if !anchored.contains(&entry) {
-                        animation.started_at += shift;
-                    }
-                    if animation.started_at <= now {
-                        animation.state = AnimationState::Running;
-                        moved = true;
-                    } else {
-                        pending.insert(entry);
-                    }
-                }
-                while animation.iterate_if_necessary(now) {
-                    moved = true;
-                }
-                if animation.state == AnimationState::Running && animation.has_ended(now) {
-                    animation.state = AnimationState::Finished;
-                    moved = true;
-                    if matches!(
-                        animation.fill_mode,
-                        AnimationFillMode::Forwards | AnimationFillMode::Both
-                    ) {
-                        held.push((id, animation.clone()));
-                    }
-                }
+            let skipped = document.in_skipped_subtree(id);
+            let mut step = Step {
+                now,
+                shift,
+                skipped,
+                // Carrying is what freezes: it applies while the element is
+                // skipped, and once more on the tick that finds it revealed,
+                // for the interval the reveal happened somewhere inside.
+                carry: skipped || was_frozen.contains(&id),
+                anchored: &anchored,
+                pending: &mut pending,
+            };
+            if skipped {
+                frozen.insert(id);
             }
-            for transition in &mut set.transitions {
-                if transition.state == AnimationState::Pending {
-                    let entry = AnchoredAnimation {
-                        set: key.clone(),
-                        what: AnchoredKind::Transition(
-                            transition.property_animation.property_id().to_owned(),
-                        ),
-                    };
-                    if !anchored.contains(&entry) {
-                        transition.start_time += shift;
-                    }
-                    if transition.start_time <= now {
-                        transition.state = AnimationState::Running;
-                        moved = true;
-                    } else {
-                        pending.insert(entry);
-                    }
-                }
-                if transition.state == AnimationState::Running && transition.has_ended(now) {
-                    transition.state = AnimationState::Finished;
-                    moved = true;
-                }
-            }
+            let mut moved = step.animations(id, key, &mut set.animations, &mut held);
+            moved |= step.transitions(key, &mut set.transitions);
             stepped.moved |= moved;
             set.clear_canceled_animations();
             if set.is_empty() {
                 return false;
             }
-            if set.needs_animation_ticks() || moved {
+            // A frozen element is deliberately not hinted: its sampled values
+            // cannot have moved, and re-cascading it every frame is exactly
+            // the work skipping contents exists to avoid.
+            if !skipped && (set.needs_animation_ticks() || moved) {
                 stepped.hinted.push(id);
             }
             true
         });
         drop(sets);
         anchored.clear();
+        was_frozen.clear();
         let driver = self.animations_mut();
         driver.anchored = pending;
         driver.anchored_spare = anchored;
+        driver.carried = frozen;
+        driver.carried_spare = was_frozen;
         driver.held.append(&mut held);
         stepped
     }

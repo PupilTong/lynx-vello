@@ -414,6 +414,40 @@ and §D.16 with what the wire format actually permits.)*
         last measured.
       - `content-visibility: hidden` is unchanged and fully implemented (skip contents +
         intrinsic size + strict-like containment).
+    - **Animations and transitions in skipped contents are frozen** *(2026-09-20)*, for `hidden`
+      and for a non-relevant `auto` box alike. css-contain-2 §4: "While an element is skipped, CSS
+      transitions and animations on the element do not update: [...] Existing animations do not
+      advance in their timeline. Running animations on the element do not end." and "When an
+      element stops being skipped, animations and transitions are sampled and then resume
+      advancing on their timelines as normal from that point." An element "is skipped" when it is
+      part of some ancestor's skipped *contents* — "the flat tree descendants of the element" — so
+      the box that skips is **not** itself skipped and its own animations run as normal.
+      `dom`'s animation driver (`crates/dom/src/style/animation.rs`) asks
+      `crate::layout::skips_contents` up the flat tree, once per element that owns animation
+      state, and freezes by carrying every one of that element's start times forward by the
+      interval the tick advanced over — the arithmetic that already anchors a newly created
+      animation — so `now - started_at`, the progress, does not move and nothing is promoted,
+      iterated, ended or re-cascaded. Frozen sets are excluded from
+      `Document::has_active_animations` and from the committed frame's `animations_active` /
+      `needs_main_ticks`, so a page whose only animations are frozen leaves
+      `Painter::owes_frame` / `is_animating` false and the host stops ticking; the reveal — a
+      style change, or a relevance flip inside `Document::render` — makes it active again in the
+      same commit.
+      - **Resume lands on the first tick after the reveal**, not on the reveal itself. The reveal
+        is noticed between two ticks and the engine has no reading for the instant it happened;
+        the interval containing it may be an arbitrarily long stretch the host never ticked at
+        all, precisely because a frozen page owes no frames. Carrying that whole interval is the
+        only rule that survives it, at the cost of at most one tick interval of freeze.
+      - **One deviation from the spec**, and it is the first bullet of the same list: *"New
+        animations are not created even if newly-applied style would start one."* Skipping
+        contents does not skip **style** in this engine, so Stylo's `process_animations` creates
+        the animation or transition the new style names whatever box is above it. What the driver
+        can do — and does — is freeze it at its own start, so it contributes its start value while
+        skipped and plays **from zero** when the subtree reveals. The observable difference from a
+        browser is the `@keyframes` start value filling (with `animation-fill-mode: backwards` or
+        `both`) during the skip, and an element's `getAnimations()`-equivalent state if one is ever
+        exposed. Same for the spec's "it must not start any transitions": a transition is created
+        and frozen rather than not created.
     - **Paint containment: layout + visual order.** `contain: paint`'s IFC / containing-block
       effects are computed and exposed by layout; since 2026-07-23 its stacking context and
       paint/hit-area clipping are implemented by `dom`'s `visual` module (paint order + hit

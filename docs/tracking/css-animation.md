@@ -107,6 +107,25 @@ concretely, so the tables above are read as "the target" and this section as
   animation and transition it has not anchored yet forward by the interval that
   tick advanced the timeline over, once, keeping delays (positive and negative)
   intact.
+- **When an animation is frozen** (css-contain-2 §4, landed 2026-09-20). An
+  element in a *skipped subtree* — one with a proper flat-tree ancestor whose
+  contents `content-visibility: hidden` or a non-relevant `content-visibility:
+  auto` skips — does not advance: "Existing animations do not advance in their
+  timeline. Running animations on the element do not end." The driver asks
+  `crate::layout::skips_contents` up the flat tree once per element that owns
+  animation state (a page with none asks nothing) and freezes by applying the
+  anchoring arithmetic above to a *running* animation: every start time is
+  carried forward by the tick's interval, so progress stands still and nothing
+  is promoted, iterated, ended or re-cascaded. The skipping element itself is
+  **not** frozen — the spec skips its contents, not the element. Frozen sets
+  are excluded from `has_active_animations`, from the frame's
+  `animations_active`/`needs_main_ticks`, and therefore from `owes_frame`, so a
+  page whose only animations are frozen stops being ticked at all; the reveal
+  (a style change, or a relevance flip inside `render`) makes it active again
+  in the same commit, and the animation resumes at the first tick after it. The
+  one deviation — an animation or transition that *starts* while skipped is
+  created and frozen at its start rather than not created, because style is not
+  skipped — is recorded in `style-assumptions.md` §19.
 - **Measured cost** (Apple silicon, `cargo bench -p dom --bench animation`, a
   120-card page; medians). An idle page pays **6.9 ns** per frame — one bool
   and one epoch compare, so a document that never animates never pays for the
