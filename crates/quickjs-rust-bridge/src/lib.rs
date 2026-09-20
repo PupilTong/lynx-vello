@@ -438,6 +438,65 @@ mod implementation {
             .map_err(|message| Error::bridge(ErrorKind::Engine, ErrorPhase::ConvertValue, message))
     }
 
+    /// The two names one native-module export is registered under, as C
+    /// strings. Both are exact: a native module and a source module share one
+    /// namespace, and neither name is ever normalized.
+    fn host_module_names(
+        module_name: &str,
+        export_name: &str,
+    ) -> Result<(CString, CString), Error> {
+        let named = |name: &str, what: &str| {
+            if name.is_empty() {
+                return Err(Error::bridge(
+                    ErrorKind::InvalidInput,
+                    ErrorPhase::RegisterModule,
+                    format!("{what} is empty"),
+                ));
+            }
+            CString::new(name).map_err(|_| {
+                Error::bridge(
+                    ErrorKind::InvalidInput,
+                    ErrorPhase::RegisterModule,
+                    format!("{what} contains a NUL byte"),
+                )
+            })
+        };
+        Ok((
+            named(module_name, "module name")?,
+            named(export_name, "module export name")?,
+        ))
+    }
+
+    /// What the shim answers a native-module registration with, whichever of
+    /// the two kinds of export it was.
+    fn host_module_status(status: c_int) -> Result<(), Error> {
+        let (kind, message) = match status {
+            0 => return Ok(()),
+            -1 => (
+                ErrorKind::OutOfMemory,
+                "QuickJS could not retain the native module export",
+            ),
+            -2 => (
+                ErrorKind::InvalidInput,
+                "module name is already registered as a source module",
+            ),
+            -3 => (
+                ErrorKind::InvalidInput,
+                "native module export name is already registered",
+            ),
+            -4 => (ErrorKind::InvalidInput, "native module was already loaded"),
+            -6 => (
+                ErrorKind::InvalidInput,
+                "a synchronous loader is already registered",
+            ),
+            _ => (
+                ErrorKind::Engine,
+                "QuickJS returned an unknown native-module registration status",
+            ),
+        };
+        Err(Error::bridge(kind, ErrorPhase::RegisterModule, message))
+    }
+
     fn property_name(name: &str) -> Result<CString, Error> {
         CString::new(name).map_err(|_| {
             Error::bridge(
@@ -931,6 +990,8 @@ mod implementation {
                     runtime: Rc::clone(&self.inner),
                     module_normalizer: RefCell::new(None),
                     normalized_name: RefCell::new(CString::default()),
+                    require_loader: RefCell::new(None),
+                    required: RefCell::new(ParkedRequire::default()),
                 }),
             })
         }
@@ -1153,11 +1214,58 @@ mod implementation {
     /// Synchronous name resolution; source retrieval remains asynchronous.
     pub type ModuleNormalizer = fn(base: &str, specifier: &str) -> Result<String, String>;
 
+    /// Which of the two shapes a synchronously loaded source is read as.
+    ///
+    /// The host decides: this bridge knows nothing about URLs, file
+    /// extensions or media types.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub enum RequiredKind {
+        CommonJs,
+        Json,
+    }
+
+    impl RequiredKind {
+        const fn as_raw(self) -> i32 {
+            match self {
+                Self::CommonJs => ffi::REQUIRED_COMMONJS,
+                Self::Json => ffi::REQUIRED_JSON,
+            }
+        }
+    }
+
+    /// One source a synchronous load produced: the URL it answered from, its
+    /// text, and how to read it.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct RequiredSource {
+        /// The response URL. It names the compiled source and is what the
+        /// answer reports back, so a caller that resolves against it resolves
+        /// against where the source came from rather than where it asked.
+        pub url: String,
+        pub text: String,
+        pub kind: RequiredKind,
+    }
+
+    type RequireLoader = dyn FnMut(&str) -> Result<RequiredSource, String>;
+
+    /// What the last load produced, kept alive for the shim to read out of.
+    ///
+    /// One load at a time: the shim copies the URL and compiles or parses the
+    /// text before it evaluates the compiled script, which is the first thing
+    /// that can start another load.
+    #[derive(Default)]
+    struct ParkedRequire {
+        url: CString,
+        text: String,
+        error: CString,
+    }
+
     struct ContextInner {
         raw: NonNull<ffi::QjsContext>,
         runtime: Rc<RuntimeInner>,
         module_normalizer: RefCell<Option<ModuleNormalizer>>,
         normalized_name: RefCell<CString>,
+        require_loader: RefCell<Option<Box<RequireLoader>>>,
+        required: RefCell<ParkedRequire>,
     }
 
     unsafe extern "C" fn normalize_module(
@@ -1195,6 +1303,62 @@ mod implementation {
             *error = c_int::from(failed);
         }
         context.normalized_name.borrow().as_ptr()
+    }
+
+    unsafe extern "C" fn require_load(
+        opaque: *mut c_void,
+        url: *const c_char,
+        source: *mut ffi::QjsRequiredSource,
+    ) -> c_int {
+        // SAFETY: the shim calls on this context's owner thread, with a valid
+        // C string and out-parameter, and only while its stable Rc allocation
+        // is alive.
+        let (context, url) = unsafe {
+            (
+                &*opaque.cast::<ContextInner>(),
+                CStr::from_ptr(url).to_string_lossy(),
+            )
+        };
+        let loaded = catch_unwind(AssertUnwindSafe(|| {
+            let Ok(mut loader) = context.require_loader.try_borrow_mut() else {
+                return Err("this require loader is already running".to_owned());
+            };
+            loader.as_mut().expect("registered loader")(&url)
+        }))
+        .unwrap_or_else(|_| Err("the require loader panicked".to_owned()));
+        let loaded = loaded.and_then(|loaded| {
+            CString::new(loaded.url)
+                .map(|url| (url, loaded.text, loaded.kind))
+                .map_err(|_| "the response URL contains a NUL byte".to_owned())
+        });
+        let mut parked = context.required.borrow_mut();
+        match loaded {
+            Ok((url, text, kind)) => {
+                parked.url = url;
+                parked.text = text;
+                // SAFETY: the out-parameter is the shim's, valid for this
+                // call; the buffers it borrows are parked here until the next
+                // load, which the shim starts only after it has read them.
+                unsafe {
+                    (*source).url = parked.url.as_ptr();
+                    (*source).text = parked.text.as_ptr();
+                    (*source).text_length = parked.text.len();
+                    (*source).kind = kind.as_raw();
+                }
+                0
+            }
+            // The message the `require` throws, worded here because this is
+            // where the URL asked for and the host's reason are both in hand.
+            Err(message) => {
+                parked.error = CString::new(format!("cannot load '{url}': {message}"))
+                    .unwrap_or_else(|_| c"the require loader failed".to_owned());
+                // SAFETY: as above.
+                unsafe {
+                    (*source).error = parked.error.as_ptr();
+                }
+                -1
+            }
+        }
     }
 
     impl Drop for ContextInner {
@@ -1343,34 +1507,7 @@ mod implementation {
             F: FnMut(&[HostValue]) -> Result<HostValue, HostFunctionError> + 'static,
         {
             self.reclaim();
-            if module_name.is_empty() {
-                return Err(Error::bridge(
-                    ErrorKind::InvalidInput,
-                    ErrorPhase::RegisterModule,
-                    "module name is empty",
-                ));
-            }
-            if export_name.is_empty() {
-                return Err(Error::bridge(
-                    ErrorKind::InvalidInput,
-                    ErrorPhase::RegisterModule,
-                    "module export name is empty",
-                ));
-            }
-            let module_name = CString::new(module_name).map_err(|_| {
-                Error::bridge(
-                    ErrorKind::InvalidInput,
-                    ErrorPhase::RegisterModule,
-                    "module name contains a NUL byte",
-                )
-            })?;
-            let export_name_c = CString::new(export_name).map_err(|_| {
-                Error::bridge(
-                    ErrorKind::InvalidInput,
-                    ErrorPhase::RegisterModule,
-                    "module export name contains a NUL byte",
-                )
-            })?;
+            let (module_name_c, export_name_c) = host_module_names(module_name, export_name)?;
             let function = self
                 .function(export_name, arity, handler)
                 .map_err(|mut error| {
@@ -1380,39 +1517,74 @@ mod implementation {
             let status = unsafe {
                 ffi::qjs_context_add_host_module_export(
                     self.raw().as_ptr(),
-                    module_name.as_ptr(),
+                    module_name_c.as_ptr(),
                     export_name_c.as_ptr(),
                     function.inner.value.raw.as_ptr(),
                 )
             };
-            match status {
-                0 => Ok(()),
-                -1 => Err(Error::bridge(
-                    ErrorKind::OutOfMemory,
-                    ErrorPhase::RegisterModule,
-                    "QuickJS could not retain the native module export",
-                )),
-                -2 => Err(Error::bridge(
-                    ErrorKind::InvalidInput,
-                    ErrorPhase::RegisterModule,
-                    "module name is already registered as a source module",
-                )),
-                -3 => Err(Error::bridge(
-                    ErrorKind::InvalidInput,
-                    ErrorPhase::RegisterModule,
-                    "native module export name is already registered",
-                )),
-                -4 => Err(Error::bridge(
-                    ErrorKind::InvalidInput,
-                    ErrorPhase::RegisterModule,
-                    "native module was already loaded",
-                )),
-                _ => Err(Error::bridge(
-                    ErrorKind::Engine,
-                    ErrorPhase::RegisterModule,
-                    "QuickJS returned an unknown native-module registration status",
-                )),
-            }
+            host_module_status(status)
+        }
+
+        /// Registers `export_name` on the native module `module_name` as a
+        /// synchronous source loader, backed by `load`.
+        ///
+        /// The export it installs is
+        ///
+        /// ```ts
+        /// loadModuleSync(url: string, parameters: string):
+        ///     { url: string; kind: "commonjs" | "json"; value: unknown }
+        /// ```
+        ///
+        /// `url` is asked of `load` as it stands: this entry resolves
+        /// nothing, caches nothing and builds no module object, so a realm's
+        /// `require` algorithm is JavaScript written over it. `parameters` is
+        /// the parameter list of the wrapper a `CommonJs` source is compiled
+        /// inside, verbatim — `"exports, require, module"` answers a function
+        /// of those three, whose body starts on line 1 of the file so its line
+        /// numbers are the file's own. A `Json` source is parsed instead, and
+        /// `parameters` is unread. Either way the source text never becomes a
+        /// JavaScript value, and the compile or parse names
+        /// [`RequiredSource::url`] — the URL the load answered from — so a
+        /// `SyntaxError` and every frame beneath it name the file.
+        ///
+        /// A `load` that fails throws `Error("cannot load '<url>': <reason>")`.
+        ///
+        /// `load` is entered only from this export, is never borrowed while
+        /// JavaScript runs, and must not enter JavaScript itself. A realm has
+        /// one loader, and a second registration is refused whatever name it
+        /// asks for — the export is what carries the loader, so a second one
+        /// would answer the first export from the second `load`. The same name
+        /// on the same module is refused before that, as any other duplicate
+        /// export is.
+        pub fn register_synchronous_loader<F>(
+            &mut self,
+            module_name: &str,
+            export_name: &str,
+            load: F,
+        ) -> Result<(), Error>
+        where
+            F: FnMut(&str) -> Result<RequiredSource, String> + 'static,
+        {
+            self.reclaim();
+            let (module_name, export_name) = host_module_names(module_name, export_name)?;
+            // SAFETY: the stable allocation outlives its C context; the shim
+            // clears the context opaque before releasing any surviving jobs.
+            let status = unsafe {
+                ffi::qjs_context_register_synchronous_loader(
+                    self.raw().as_ptr(),
+                    module_name.as_ptr(),
+                    export_name.as_ptr(),
+                    require_load,
+                    Rc::as_ptr(&self.inner).cast_mut().cast(),
+                )
+            };
+            host_module_status(status)?;
+            // After the registration that took it, and only then: a refused
+            // one leaves whatever loader this realm already had. The shim
+            // retains the trampoline and this allocation rather than the
+            // closure, and no JavaScript runs in between.
+            *self.inner.require_loader.borrow_mut() = Some(Box::new(load));
+            Ok(())
         }
 
         /// Returns the namespace object of a module this realm has linked.
@@ -2286,6 +2458,7 @@ mod implementation {
 
     #[cfg(test)]
     mod tests {
+        use std::collections::HashMap;
         use std::sync::mpsc;
         #[cfg(not(target_arch = "wasm32"))]
         use std::time::Instant;
@@ -2672,6 +2845,382 @@ mod implementation {
                 &mut realm,
                 "if (!rejected) throw Error('attributes were ignored');",
             );
+        }
+
+        /// The specifier these tests register the synchronous loader under.
+        /// Only a name here: what Bobcat puts behind it is a source module of
+        /// its own, and this crate knows nothing about it.
+        const REQUIRE_MODULE: &str = "bobcat:module";
+
+        /// The host half of one load: what each URL answers with, and the log
+        /// of every URL the realm asked for.
+        #[derive(Default)]
+        struct RequireHost {
+            files: HashMap<String, RequiredSource>,
+            loads: Vec<String>,
+        }
+
+        impl RequireHost {
+            /// One `CommonJS` file, answered from the URL it was asked for.
+            fn commonjs(mut self, url: &str, text: &str) -> Self {
+                self.files.insert(
+                    url.to_owned(),
+                    RequiredSource {
+                        url: url.to_owned(),
+                        text: text.to_owned(),
+                        kind: RequiredKind::CommonJs,
+                    },
+                );
+                self
+            }
+
+            /// One `CommonJS` file answered from somewhere other than where it
+            /// was asked for, as a redirect leaves it.
+            fn redirected(mut self, url: &str, response: &str, text: &str) -> Self {
+                self.files.insert(
+                    url.to_owned(),
+                    RequiredSource {
+                        url: response.to_owned(),
+                        text: text.to_owned(),
+                        kind: RequiredKind::CommonJs,
+                    },
+                );
+                self
+            }
+
+            fn json(mut self, url: &str, text: &str) -> Self {
+                self.files.insert(
+                    url.to_owned(),
+                    RequiredSource {
+                        url: url.to_owned(),
+                        text: text.to_owned(),
+                        kind: RequiredKind::Json,
+                    },
+                );
+                self
+            }
+
+            fn load(&mut self, url: &str) -> Result<RequiredSource, String> {
+                self.loads.push(url.to_owned());
+                self.files
+                    .get(url)
+                    .cloned()
+                    .ok_or_else(|| format!("no such file: {url}"))
+            }
+        }
+
+        fn install_loader(realm: &mut Context, host: &Rc<RefCell<RequireHost>>) {
+            let host = Rc::clone(host);
+            realm
+                .register_synchronous_loader(REQUIRE_MODULE, "loadModuleSync", move |url| {
+                    host.borrow_mut().load(url)
+                })
+                .expect("the realm takes the loader");
+        }
+
+        /// A realm with a loader and *no* module normalizer: this entry
+        /// resolves nothing, so it needs none.
+        fn loader_realm(host: RequireHost) -> (Runtime, Context, Rc<RefCell<RequireHost>>) {
+            let runtime = Runtime::new().unwrap();
+            let mut realm = runtime.create_context().unwrap();
+            let host = Rc::new(RefCell::new(host));
+            install_loader(&mut realm, &host);
+            (runtime, realm, host)
+        }
+
+        /// Evaluates one module to settlement, reporting what it threw.
+        fn run_module(
+            runtime: &mut Runtime,
+            realm: &mut Context,
+            name: &str,
+            source: &str,
+        ) -> Result<(), Error> {
+            let evaluation = realm.evaluate(
+                EvalSource {
+                    text: source,
+                    name: Some(name),
+                    line_offset: 0,
+                },
+                EvalOptions {
+                    source_type: SourceType::Module,
+                    ..EvalOptions::default()
+                },
+            )?;
+            let outcome = runtime
+                .drain_pending_jobs(realm)
+                .and_then(|_| realm.settled_promise_result(&evaluation));
+            match outcome {
+                Ok(settled) => {
+                    assert!(settled.is_some(), "the module never settled");
+                    Ok(())
+                }
+                // One failure leaves a rejection per promise awaiting it, and
+                // the next module evaluated here would be handed the rest.
+                Err(error) => {
+                    runtime.discard_unhandled_rejections(realm);
+                    Err(error)
+                }
+            }
+        }
+
+        /// The same, for a body that is only about what the loader answers:
+        /// the import is prepended.
+        fn run_loader(
+            runtime: &mut Runtime,
+            realm: &mut Context,
+            name: &str,
+            body: &str,
+        ) -> Result<(), Error> {
+            let source = format!(
+                "import {{ loadModuleSync }} from '{REQUIRE_MODULE}';\n\
+                 {body}"
+            );
+            run_module(runtime, realm, name, &source)
+        }
+
+        #[test]
+        fn a_commonjs_load_answers_a_function_of_the_parameters_it_was_given() {
+            let (mut runtime, mut realm, host) = loader_realm(RequireHost::default().commonjs(
+                "app:///a.cjs",
+                "return [this.tag, first, second, third].join(':');",
+            ));
+            run_loader(
+                &mut runtime,
+                &mut realm,
+                "entry",
+                "const loaded = loadModuleSync('app:///a.cjs', 'first, second, third');\n\
+                 if (loaded.kind !== 'commonjs') throw Error('kind ' + loaded.kind);\n\
+                 if (loaded.url !== 'app:///a.cjs') throw Error('url ' + loaded.url);\n\
+                 if (typeof loaded.value !== 'function') throw Error('not a function');\n\
+                 if (loaded.value.length !== 3) throw Error('length ' + loaded.value.length);\n\
+                 const answer = loaded.value.call({ tag: 'receiver' }, 1, 2, 3);\n\
+                 if (answer !== 'receiver:1:2:3') throw Error('answer ' + answer);",
+            )
+            .unwrap();
+            assert_eq!(host.borrow().loads, ["app:///a.cjs"]);
+        }
+
+        #[test]
+        fn the_answer_reports_the_url_the_load_came_from() {
+            let (mut runtime, mut realm, _host) = loader_realm(RequireHost::default().redirected(
+                "app:///alias",
+                "https://cdn.test/deep/real.cjs",
+                "return value;",
+            ));
+            run_loader(
+                &mut runtime,
+                &mut realm,
+                "entry",
+                "const loaded = loadModuleSync('app:///alias', 'value');\n\
+                 if (loaded.url !== 'https://cdn.test/deep/real.cjs')\n\
+                   throw Error('url ' + loaded.url);\n\
+                 if (loaded.value('answer') !== 'answer') throw Error('value');",
+            )
+            .unwrap();
+        }
+
+        #[test]
+        fn a_json_load_answers_the_parsed_value() {
+            let (mut runtime, mut realm, _host) = loader_realm(
+                RequireHost::default()
+                    .json("app:///config.json", r#"{"answer": 42, "list": [1, 2]}"#)
+                    .json("app:///broken.json", "{"),
+            );
+            run_loader(
+                &mut runtime,
+                &mut realm,
+                "entry",
+                "const loaded = loadModuleSync('app:///config.json', 'unread');\n\
+                 if (loaded.kind !== 'json') throw Error('kind ' + loaded.kind);\n\
+                 if (loaded.url !== 'app:///config.json') throw Error('url ' + loaded.url);\n\
+                 if (loaded.value.answer !== 42 || loaded.value.list[1] !== 2)\n\
+                   throw Error('parsed');\n\
+                 let name;\n\
+                 try { loadModuleSync('app:///broken.json', 'unread'); }\n\
+                 catch (error) { name = error.name; }\n\
+                 if (name !== 'SyntaxError') throw Error('threw ' + name);",
+            )
+            .unwrap();
+        }
+
+        #[test]
+        fn a_load_failure_is_an_error_naming_the_url() {
+            let (mut runtime, mut realm, _host) = loader_realm(RequireHost::default());
+            let error = run_loader(
+                &mut runtime,
+                &mut realm,
+                "entry",
+                "loadModuleSync('app:///missing.cjs', 'exports');",
+            )
+            .expect_err("a file the host does not serve");
+            assert_eq!(error.name.as_deref(), Some("Error"));
+            assert!(
+                error.message.contains("app:///missing.cjs")
+                    && error.message.contains("no such file"),
+                "{}",
+                error.message
+            );
+        }
+
+        #[test]
+        fn a_syntax_error_names_the_response_url_and_the_line_in_the_file() {
+            let (mut runtime, mut realm, _host) = loader_realm(RequireHost::default().redirected(
+                "app:///alias",
+                "app:///broken.cjs",
+                "const fine = 1;\n\nfunction ( {",
+            ));
+            let error = run_loader(
+                &mut runtime,
+                &mut realm,
+                "entry",
+                "loadModuleSync('app:///alias', 'exports');",
+            )
+            .expect_err("a file that does not parse");
+            assert_eq!(error.name.as_deref(), Some("SyntaxError"));
+            let location = error.location.expect("a parse failure has a location");
+            assert_eq!(location.source.as_deref(), Some("app:///broken.cjs"));
+            assert_eq!(location.line, Some(3));
+        }
+
+        #[test]
+        fn a_throw_reports_the_line_it_is_on_in_the_file() {
+            let (mut runtime, mut realm, _host) = loader_realm(
+                RequireHost::default().commonjs("app:///throws.cjs", "\n\n\nthrow Error('deep');"),
+            );
+            let error = run_loader(
+                &mut runtime,
+                &mut realm,
+                "entry",
+                "loadModuleSync('app:///throws.cjs', 'exports').value();",
+            )
+            .expect_err("a body that throws");
+            assert_eq!(error.message, "deep");
+            let location = error.location.expect("a throw has a location");
+            assert_eq!(location.source.as_deref(), Some("app:///throws.cjs"));
+            assert_eq!(location.line, Some(4));
+        }
+
+        /// Pins the use-after-free a compile that also evaluated would open:
+        /// this file's text closes the wrapper early, so the statements after
+        /// it are the enclosing script's and run inside `JS_EvalFunction` —
+        /// where author code could not otherwise reach, and where a load of
+        /// its own replaces the buffers the outer load lent. The outer answer
+        /// is still the first file's, which is what says the URL was copied
+        /// and the text compiled before any of that ran.
+        #[test]
+        fn a_file_that_closes_the_wrapper_early_runs_after_its_load_is_read() {
+            let (mut runtime, mut realm, host) = loader_realm(
+                RequireHost::default()
+                    .redirected(
+                        "app:///early.cjs",
+                        "https://cdn.test/early.cjs",
+                        "}); globalThis.inner = globalThis.nested('app:///other.cjs');\n\
+                         (function (a, b) { return a + b;",
+                    )
+                    .commonjs("app:///other.cjs", "return 'other';")
+                    .commonjs("app:///after.cjs", "return 'after';"),
+            );
+            run_loader(
+                &mut runtime,
+                &mut realm,
+                "entry",
+                "globalThis.nested = url => loadModuleSync(url, 'exports');\n\
+                 const outer = loadModuleSync('app:///early.cjs', 'a, b');\n\
+                 if (globalThis.inner === undefined)\n\
+                   throw Error('the escaped statement did not run');\n\
+                 if (globalThis.inner.url !== 'app:///other.cjs')\n\
+                   throw Error('nested url ' + globalThis.inner.url);\n\
+                 if (outer.url !== 'https://cdn.test/early.cjs')\n\
+                   throw Error('outer url ' + outer.url);\n\
+                 if (outer.value(2, 3) !== 5) throw Error('outer value');\n\
+                 if (loadModuleSync('app:///after.cjs', 'exports').value() !== 'after')\n\
+                   throw Error('the realm is broken');",
+            )
+            .unwrap();
+            assert_eq!(
+                host.borrow().loads,
+                ["app:///early.cjs", "app:///other.cjs", "app:///after.cjs"],
+                "the escaped load is served like any other"
+            );
+        }
+
+        /// The shim retains the trampoline and the context's own allocation
+        /// rather than the closure, so what a loaded file left in the realm
+        /// keeps neither the loader nor its host alive past the realm.
+        #[test]
+        fn a_realm_releases_its_loader_when_it_is_dropped() {
+            let live = Rc::new(());
+            let (mut runtime, mut realm, host) =
+                loader_realm(RequireHost::default().commonjs("app:///held.cjs", "return 42;"));
+            let held = Rc::clone(&live);
+            realm
+                .register_host_module_function(REQUIRE_MODULE, "held", 0, move |_| {
+                    let _ = &held;
+                    Ok(HostValue::Undefined)
+                })
+                .unwrap();
+            run_loader(
+                &mut runtime,
+                &mut realm,
+                "entry",
+                "globalThis.kept = loadModuleSync('app:///held.cjs', 'exports');\n\
+                 if (globalThis.kept.value() !== 42) throw Error('value');",
+            )
+            .unwrap();
+            drop(realm);
+            runtime.run_gc();
+            assert_eq!(Rc::strong_count(&live), 1);
+            assert_eq!(Rc::strong_count(&host), 1);
+        }
+
+        /// The export is what carries the loader, so a realm takes exactly
+        /// one: a second registration is refused whatever name it asks for,
+        /// and the export already installed goes on answering from the host
+        /// that came with it.
+        #[test]
+        fn a_realm_takes_one_synchronous_loader() {
+            let (mut runtime, mut realm, host) =
+                loader_realm(RequireHost::default().commonjs("app:///a.cjs", "return 42;"));
+            let refused = realm
+                .register_synchronous_loader(REQUIRE_MODULE, "loadAgainSync", |_| {
+                    Err("the second host answers nothing".to_owned())
+                })
+                .expect_err("a realm takes one loader");
+            assert_eq!(refused.kind, ErrorKind::InvalidInput);
+            run_loader(
+                &mut runtime,
+                &mut realm,
+                "entry",
+                "if (loadModuleSync('app:///a.cjs', 'exports').value() !== 42)\n\
+                   throw Error('the first export lost its host');",
+            )
+            .unwrap();
+            assert_eq!(host.borrow().loads, ["app:///a.cjs"]);
+        }
+
+        #[test]
+        fn every_source_module_knows_the_url_it_was_loaded_from() {
+            let (mut runtime, mut realm) = import_test_realm();
+            runtime
+                .register_module_source("bobcat:shared", "export const url = import.meta.url;")
+                .unwrap();
+            realm
+                .complete_module(
+                    "app:///requested.js",
+                    Ok(("app:///response.js", "export const url = import.meta.url;")),
+                )
+                .unwrap();
+            run_module(
+                &mut runtime,
+                &mut realm,
+                "bobcat:boot",
+                "import { url as shared } from 'bobcat:shared';\n\
+                 import { url as local } from 'app:///requested.js';\n\
+                 if (import.meta.url !== 'bobcat:boot') throw Error('eval ' + import.meta.url);\n\
+                 if (shared !== 'bobcat:shared') throw Error('shared ' + shared);\n\
+                 if (local !== 'app:///response.js') throw Error('local ' + local);",
+            )
+            .unwrap();
         }
 
         #[test]
@@ -4005,6 +4554,7 @@ mod implementation {
 
 pub use implementation::{
     CallOutcome, Context, Error, ErrorKind, ErrorPhase, EvalOptions, EvalSource, HostArgument,
-    HostFunctionError, HostValue, InterruptHandle, Member, ModuleNormalizer, Runtime,
-    RuntimeOptions, SourceLocation, SourceType, StructuredClone, Value, ValueKind,
+    HostFunctionError, HostValue, InterruptHandle, Member, ModuleNormalizer, RequiredKind,
+    RequiredSource, Runtime, RuntimeOptions, SourceLocation, SourceType, StructuredClone, Value,
+    ValueKind,
 };

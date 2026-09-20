@@ -552,6 +552,66 @@ fn imported_worker_graph_uses_response_urls_and_queues_messages_until_entry_fini
     assert!(group.views[0].sources.try_recv().is_err());
 }
 
+/// `require` reaches the same host as an import and resolves against the same
+/// response URLs, from the boot job of a worker on the thread every worker of
+/// the group shares: no JavaScript of that thread's runs while a load is out.
+#[test]
+fn a_worker_requires_commonjs_and_json_against_its_own_response_url() {
+    let mut group = Group::new();
+    group.start(
+        r"
+        import { createRequire } from 'bobcat:module';
+        const require = createRequire(import.meta.url);
+        const lib = require('./lib/answer.cjs');
+        const config = require('./config.json');
+        postMessage([lib.answer, lib.dir, config.name].join(':'));
+    ",
+    );
+    let (url, completion) = group.views[0].source();
+    assert_eq!(url, "app:///lib/answer.cjs");
+    completion.complete(Ok(LoadedSource::Entry {
+        source: "exports.answer = require('./deep.cjs').answer + 1;\nexports.dir = __dirname;"
+            .to_owned(),
+        url: "https://cdn.test/lib/answer.cjs".to_owned(),
+    }));
+    let (url, completion) = group.views[0].source();
+    assert_eq!(url, "https://cdn.test/lib/deep.cjs");
+    completion.complete(Ok(LoadedSource::Entry {
+        source: "exports.answer = 41;".to_owned(),
+        url,
+    }));
+    let (url, completion) = group.views[0].source();
+    assert_eq!(url, "app:///config.json");
+    completion.complete(Ok(LoadedSource::Entry {
+        source: r#"{"name": "card"}"#.to_owned(),
+        url,
+    }));
+    assert_eq!(
+        group.message(0),
+        wire("42:https://cdn.test/lib/:card"),
+        "a nested require resolves against the response URL, and `.json` parses"
+    );
+}
+
+#[test]
+fn a_require_nobody_answers_throws_in_the_worker_and_leaves_it_usable() {
+    let mut group = Group::new();
+    let worker = group.start(
+        r"
+        import { createRequire } from 'bobcat:module';
+        let message = '';
+        try { createRequire(import.meta.url)('./missing.cjs'); }
+        catch (error) { message = String(error); }
+        addEventListener('message', event =>
+            postMessage([message.includes('app:///missing.cjs'), event.data]));
+    ",
+    );
+    group.post(worker, "queued");
+    let (_, completion) = group.views[0].source();
+    drop(completion);
+    assert_eq!(wire_json(&group.views[0].message()), r#"[true,"queued"]"#);
+}
+
 #[test]
 fn a_handled_import_failure_keeps_the_worker_usable() {
     let mut group = Group::new();

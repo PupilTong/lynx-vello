@@ -48,6 +48,7 @@ mod main;
 pub mod native_module;
 #[path = "paint/lib.rs"]
 mod paint;
+mod require;
 pub mod resource;
 pub mod script;
 mod script_frames;

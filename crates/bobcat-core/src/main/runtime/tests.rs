@@ -3578,6 +3578,141 @@ fn preload_url(far: &mut PublishedNames) -> String {
     }
 }
 
+fn requested_module(
+    notices: &mut mpsc::UnboundedReceiver<ViewNotice>,
+) -> (String, crate::resource::SourceCompletion) {
+    use crate::link::block_on_deadline;
+    let deadline = ClockInstant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if let ViewNotice::RequestSource {
+            request,
+            completion,
+        } = block_on_deadline(notices.recv(), deadline)
+            .flatten()
+            .unwrap()
+        {
+            let crate::resource::SourceRequest::Module(url) = request else {
+                panic!("expected a module");
+            };
+            return (url, completion);
+        }
+    }
+}
+
+/// One `require` answered, from whichever URL the host says it found it at.
+fn module_source(source: &str, url: &str) -> crate::resource::LoadedSource {
+    crate::resource::LoadedSource::Entry {
+        source: source.to_owned(),
+        url: url.to_owned(),
+    }
+}
+
+// Plain tests rather than `tokio::test`s, for the reason the adoption's own
+// pin below spells out: a `require`'s wait is a `block_on` of the realm's
+// engine thread, which tokio refuses from inside a runtime.
+#[test]
+fn require_waits_for_its_own_request_and_resolves_against_the_response_url() {
+    let (mut js, mut runtime, _elements, far) = runtime_over_watching_names(ingredients());
+    let mut notices = far.0.notices;
+    let host = std::thread::spawn(move || {
+        for (expected, response, source) in [
+            (
+                "app:///lib/answer.cjs",
+                "https://cdn.test/lib/answer.cjs",
+                "exports.answer = require('./deep.cjs').answer + 1;\nexports.dir = __dirname;",
+            ),
+            (
+                "https://cdn.test/lib/deep.cjs",
+                "https://cdn.test/lib/deep.cjs",
+                "exports.answer = 41;",
+            ),
+            (
+                "app:///config.json",
+                "app:///config.json",
+                r#"{"name": "card"}"#,
+            ),
+        ] {
+            let (url, completion) = requested_module(&mut notices);
+            assert_eq!(url, expected);
+            completion.complete(Ok(module_source(source, response)));
+        }
+    });
+    runtime
+        .evaluate_module(
+            &mut js,
+            r"
+        import { createRequire } from 'bobcat:module';
+        const require = createRequire(import.meta.url);
+        let jobRan = false;
+        Promise.resolve().then(() => { jobRan = true; });
+        const lib = require('./lib/answer.cjs');
+        if (lib.answer !== 42) throw Error('answer ' + lib.answer);
+        if (lib.dir !== 'https://cdn.test/lib/') throw Error('dirname ' + lib.dir);
+        if (jobRan) throw Error('require ran JS jobs while waiting');
+        const config = require('./config.json');
+        if (config.name !== 'card') throw Error('config ' + JSON.stringify(config));
+        if (require.resolve('./config.json') !== 'app:///config.json') throw Error('resolve');
+        if (require.cache['app:///config.json'].exports !== config) throw Error('cache');
+    ",
+            "app:///require.js",
+            "requiring through the host",
+        )
+        .unwrap();
+    host.join().unwrap();
+}
+
+#[test]
+fn a_require_that_cannot_load_throws_and_leaves_the_realm_usable() {
+    for outcome in ["failure", "dropped", "cancelled"] {
+        let (mut js, mut runtime, _elements, far) = runtime_over_watching_names(ingredients());
+        let token = far.0.token.clone();
+        let mut notices = far.0.notices;
+        let host = std::thread::spawn(move || {
+            let (url, completion) = requested_module(&mut notices);
+            assert_eq!(url, "app:///missing.cjs");
+            match outcome {
+                "failure" => completion.complete(Err(crate::resource::unanswered_source().into())),
+                "dropped" => drop(completion),
+                // The embedder's release, while this realm is parked on the
+                // answer: the token is the other arm of that wait.
+                "cancelled" => {
+                    token.cancel();
+                    return Some(completion);
+                }
+                _ => unreachable!(),
+            }
+            None
+        });
+        runtime
+            .evaluate_module(
+                &mut js,
+                r"
+            import { createRequire } from 'bobcat:module';
+            const require = createRequire(import.meta.url);
+            let message = '';
+            try { require('./missing.cjs'); }
+            catch (error) { message = String(error); }
+            if (!message.includes('app:///missing.cjs')) throw Error('lost the URL: ' + message);
+            globalThis.caught = message;
+        ",
+                "app:///missing.js",
+                "a require nobody answers",
+            )
+            .unwrap();
+        if let Some(completion) = host.join().unwrap() {
+            assert!(completion.is_cancelled());
+        }
+        runtime
+            .evaluate_module(
+                &mut js,
+                "if (typeof globalThis.caught !== 'string') throw Error('the realm is broken');",
+                "app:///after.js",
+                "the realm after a failed require",
+            )
+            .unwrap();
+    }
+}
+
 fn requested_stylesheet(
     notices: &mut mpsc::UnboundedReceiver<ViewNotice>,
 ) -> (String, crate::resource::SourceCompletion) {

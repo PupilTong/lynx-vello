@@ -153,6 +153,27 @@ typedef struct QjsDeferredImport {
     struct QjsDeferredImport *next;
 } QjsDeferredImport;
 
+enum QjsRequiredKind {
+    QJS_REQUIRED_COMMONJS = 0,
+    QJS_REQUIRED_JSON = 1,
+};
+
+/* One synchronous source load. The host fills either the three source fields
+   or `error`, and keeps owning both: the buffers are borrowed until the
+   callback is entered again, which a load started from a file's own text
+   does, so C copies the URL and compiles or parses the text before it runs
+   anything of that file's. */
+typedef struct QjsRequiredSource {
+    const char *url;
+    const uint8_t *text;
+    size_t text_length;
+    int32_t kind;
+    const char *error;
+} QjsRequiredSource;
+
+typedef int QjsRequireLoad(void *opaque, const char *url,
+                           QjsRequiredSource *source);
+
 struct QjsContext {
     JSContext *raw;
     QjsRuntime *runtime;
@@ -162,6 +183,8 @@ struct QjsContext {
     QjsDeferredImport *deferred_imports;
     QjsModuleNormalize *normalize;
     void *normalize_opaque;
+    QjsRequireLoad *require_load;
+    void *require_opaque;
 };
 
 
@@ -212,6 +235,11 @@ enum QjsEvalFailureStage {
 
 _Static_assert(QJS_EVAL_FAILURE_COMPILE == 1,
                "Rust QJS_EVAL_FAILURE_COMPILE must match shim.c");
+
+_Static_assert(QJS_REQUIRED_COMMONJS == 0,
+               "Rust QJS_REQUIRED_COMMONJS must match shim.c");
+_Static_assert(QJS_REQUIRED_JSON == 1,
+               "Rust QJS_REQUIRED_JSON must match shim.c");
 
 enum QjsRejectionStatus {
     QJS_REJECTION_NONE = 0,
@@ -505,6 +533,26 @@ static void qjs_deferred_import_free(JSContext *raw, QjsDeferredImport *pending)
     free(pending);
 }
 
+/* Gives one compiled module its `import.meta.url`. Called between compiling
+   and linking, which is where the module definition is the host's to reach. */
+static int qjs_set_import_meta_url(JSContext *raw, JSModuleDef *definition,
+                                   const char *url) {
+    JSValue meta = JS_GetImportMeta(raw, definition);
+    JSValue value;
+    int status;
+
+    if (JS_IsException(meta))
+        return -1;
+    value = JS_NewString(raw, url);
+    if (JS_IsException(value)) {
+        JS_FreeValue(raw, meta);
+        return -1;
+    }
+    status = JS_DefinePropertyValueStr(raw, meta, "url", value, JS_PROP_C_W_E);
+    JS_FreeValue(raw, meta);
+    return status;
+}
+
 static JSModuleDef *qjs_module_loader(JSContext *raw_context,
                                       const char *module_name, void *opaque,
                                       JSValueConst attributes) {
@@ -551,6 +599,14 @@ static JSModuleDef *qjs_module_loader(JSContext *raw_context,
         }
         definition = JS_VALUE_GET_PTR(compiled);
         JS_FreeValue(raw_context, compiled);
+        /* A realm-local module knows the URL it answered from; a source the
+           runtime carries is known by the name it was registered under. */
+        if (qjs_set_import_meta_url(
+                raw_context, definition,
+                source->url != NULL ? source->url : source->name) < 0) {
+            free(instance);
+            return NULL;
+        }
         instance->source = source;
         instance->definition = definition;
         instance->next = context->module_instances;
@@ -808,9 +864,12 @@ void qjs_context_free(QjsContext *context) {
     free(context);
 }
 
-int qjs_context_add_host_module_export(QjsContext *context, const char *name,
-                                       const char *export_name,
-                                       const QjsValue *value) {
+/* Adds one already-built export value to a native module of this realm. The
+   module's export list holds a reference of its own, which `qjs_context_free`
+   releases before the context. */
+static int qjs_add_host_module_export(QjsContext *context, const char *name,
+                                      const char *export_name,
+                                      JSValueConst value) {
     QjsHostModule *module;
     QjsHostModuleExport *current;
     QjsHostModuleExport *exported;
@@ -873,7 +932,7 @@ int qjs_context_add_host_module_export(QjsContext *context, const char *name,
         return -1;
     }
     memcpy(exported->name, export_name, export_name_length + 1);
-    exported->value = JS_DupValue(context->raw, value->value);
+    exported->value = JS_DupValue(context->raw, value);
     exported->next = module->exports;
     module->exports = exported;
     if (new_module) {
@@ -881,6 +940,12 @@ int qjs_context_add_host_module_export(QjsContext *context, const char *name,
         context->host_modules = module;
     }
     return 0;
+}
+
+int qjs_context_add_host_module_export(QjsContext *context, const char *name,
+                                       const char *export_name,
+                                       const QjsValue *value) {
+    return qjs_add_host_module_export(context, name, export_name, value->value);
 }
 
 QjsValue *qjs_module_namespace(QjsContext *context, const char *name) {
@@ -916,6 +981,248 @@ void qjs_context_enable_module_loading(QjsContext *context,
                                         void *opaque) {
     context->normalize = normalize;
     context->normalize_opaque = opaque;
+}
+
+/* Node's module wrapper, built around the parameter list the caller names.
+   Neither the prologue nor the infix carries a newline, so a line in the body
+   is the line it sits on in the file. */
+static const char QJS_WRAPPER_PROLOGUE[] = "(function (";
+static const char QJS_WRAPPER_INFIX[] = ") {";
+static const char QJS_WRAPPER_EPILOGUE[] = "\n})";
+
+/* The two shapes a loaded source is read as, as the answer names them. */
+static const char QJS_KIND_COMMONJS[] = "commonjs";
+static const char QJS_KIND_JSON[] = "json";
+
+/* Throws what a failed load reports, as the `Error` the host worded. */
+static JSValue qjs_require_throw_load(JSContext *raw, const char *reason) {
+    JSValue error = JS_NewError(raw);
+    JSValue text = JS_NewString(raw, reason);
+
+    if (JS_IsException(error) || JS_IsException(text)) {
+        JS_FreeValue(raw, error);
+        JS_FreeValue(raw, text);
+        return JS_EXCEPTION;
+    }
+    if (JS_DefinePropertyValueStr(raw, error, "message", text,
+                                  JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE) <
+        0) {
+        JS_FreeValue(raw, error);
+        return JS_EXCEPTION;
+    }
+    return JS_Throw(raw, error);
+}
+
+/* Parses the wrapped body under the response URL, so a `SyntaxError` and
+   every frame beneath it name the file. Source text may contain interior
+   NULs, so the buffer is built by length.
+
+   Compilation only: the *script* this parses is author text, which can leave
+   statements of its own outside the wrapper, and running those is
+   `JS_EvalFunction`'s — which the caller reaches only once it has finished
+   with everything the host lent it. */
+static JSValue qjs_require_compile(JSContext *raw, const char *url,
+                                   const char *parameters,
+                                   const uint8_t *text, size_t text_length) {
+    size_t parameters_length = strlen(parameters);
+    size_t fixed = sizeof(QJS_WRAPPER_PROLOGUE) - 1 +
+                   sizeof(QJS_WRAPPER_INFIX) - 1 +
+                   sizeof(QJS_WRAPPER_EPILOGUE) - 1;
+    size_t length;
+    size_t offset;
+    char *wrapped;
+    JSValue compiled;
+
+    if (text_length > SIZE_MAX - fixed - parameters_length - 1) {
+        return JS_ThrowOutOfMemory(raw);
+    }
+    length = fixed + parameters_length + text_length;
+    wrapped = malloc(length + 1);
+    if (wrapped == NULL) {
+        return JS_ThrowOutOfMemory(raw);
+    }
+    offset = 0;
+    memcpy(wrapped, QJS_WRAPPER_PROLOGUE, sizeof(QJS_WRAPPER_PROLOGUE) - 1);
+    offset += sizeof(QJS_WRAPPER_PROLOGUE) - 1;
+    memcpy(wrapped + offset, parameters, parameters_length);
+    offset += parameters_length;
+    memcpy(wrapped + offset, QJS_WRAPPER_INFIX, sizeof(QJS_WRAPPER_INFIX) - 1);
+    offset += sizeof(QJS_WRAPPER_INFIX) - 1;
+    memcpy(wrapped + offset, text, text_length);
+    offset += text_length;
+    memcpy(wrapped + offset, QJS_WRAPPER_EPILOGUE,
+           sizeof(QJS_WRAPPER_EPILOGUE) - 1);
+    wrapped[length] = '\0';
+    compiled = JS_Eval(raw, wrapped, length, url,
+                       JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_COMPILE_ONLY);
+    free(wrapped);
+    return compiled;
+}
+
+static JSValue qjs_require_parse_json(JSContext *raw, const char *url,
+                                      const uint8_t *text,
+                                      size_t text_length) {
+    char *terminated;
+    JSValue parsed;
+
+    if (text_length == SIZE_MAX) {
+        return JS_ThrowOutOfMemory(raw);
+    }
+    terminated = malloc(text_length + 1);
+    if (terminated == NULL) {
+        return JS_ThrowOutOfMemory(raw);
+    }
+    memcpy(terminated, text, text_length);
+    terminated[text_length] = '\0';
+    parsed = JS_ParseJSON(raw, terminated, text_length, url);
+    free(terminated);
+    return parsed;
+}
+
+/* `loadModuleSync(url, parameters)`: one synchronous load, compiled.
+   Answers `{ url, kind, value }` — the URL the host answered from, which of
+   the two shapes it was read as, and either the wrapper function of a
+   CommonJS file or the parsed value of a JSON one. No resolution, no cache,
+   no module object: `bobcat:module` is where Node's algorithm lives, and this
+   is the one step of it that needs the engine.
+
+   The order of what it does is the whole remaining lifetime invariant. The
+   host keeps owning the buffers it filled in, and lends them only until the
+   next load: so the response URL is copied into a string and the text is
+   compiled or parsed *before* `JS_EvalFunction`, which is the first point
+   author code can run at all — a file whose text closes the wrapper early
+   leaves statements in the enclosing script, and a load from there replaces
+   those buffers. Nothing borrowed is read past that point. */
+static JSValue qjs_load_module_sync(JSContext *raw, JSValueConst this_value,
+                                    int argc, JSValueConst *argv) {
+    QjsContext *context = JS_GetContextOpaque(raw);
+    QjsRequiredSource loaded;
+    const char *url;
+    const char *parameters;
+    JSValue response = JS_UNDEFINED;
+    JSValue value = JS_UNDEFINED;
+    JSValue kind = JS_UNDEFINED;
+    JSValue result = JS_UNDEFINED;
+    int is_json;
+    int failed;
+
+    (void)this_value;
+    if (context == NULL) {
+        return JS_ThrowInternalError(raw, "this realm is being released");
+    }
+    /* Both are required to be strings rather than converted: a conversion
+       would run author code, and this entry's caller is a built-in. */
+    if (argc < 2 || !JS_IsString(argv[0]) || !JS_IsString(argv[1])) {
+        return JS_ThrowTypeError(
+            raw, "loadModuleSync expects a URL and a parameter list");
+    }
+    url = JS_ToCString(raw, argv[0]);
+    if (url == NULL) {
+        return JS_EXCEPTION;
+    }
+    parameters = JS_ToCString(raw, argv[1]);
+    if (parameters == NULL) {
+        JS_FreeCString(raw, url);
+        return JS_EXCEPTION;
+    }
+    loaded.url = NULL;
+    loaded.text = NULL;
+    loaded.text_length = 0;
+    loaded.kind = QJS_REQUIRED_COMMONJS;
+    loaded.error = NULL;
+    failed = context->require_load(context->require_opaque, url, &loaded) != 0;
+    JS_FreeCString(raw, url);
+    if (failed) {
+        JS_FreeCString(raw, parameters);
+        return qjs_require_throw_load(raw, loaded.error);
+    }
+    is_json = loaded.kind == QJS_REQUIRED_JSON;
+    response = JS_NewString(raw, loaded.url);
+    if (JS_IsException(response)) {
+        JS_FreeCString(raw, parameters);
+        return JS_EXCEPTION;
+    }
+    value = is_json ? qjs_require_parse_json(raw, loaded.url, loaded.text,
+                                             loaded.text_length)
+                    : qjs_require_compile(raw, loaded.url, parameters,
+                                          loaded.text, loaded.text_length);
+    JS_FreeCString(raw, parameters);
+    if (JS_IsException(value)) {
+        JS_FreeValue(raw, response);
+        return JS_EXCEPTION;
+    }
+
+    /* Nothing the host lent is read past here. */
+    if (!is_json) {
+        value = JS_EvalFunction(raw, value);
+        if (JS_IsException(value)) {
+            JS_FreeValue(raw, response);
+            return JS_EXCEPTION;
+        }
+    }
+    result = JS_NewObject(raw);
+    if (JS_IsException(result)) {
+        JS_FreeValue(raw, response);
+        JS_FreeValue(raw, value);
+        return JS_EXCEPTION;
+    }
+    kind = JS_NewString(raw, is_json ? QJS_KIND_JSON : QJS_KIND_COMMONJS);
+    if (JS_IsException(kind)) {
+        JS_FreeValue(raw, response);
+        JS_FreeValue(raw, value);
+        JS_FreeValue(raw, result);
+        return JS_EXCEPTION;
+    }
+    /* The three fields are *defined* on an object of this call's own, and
+       each define consumes the value it was given whether or not it
+       succeeds. */
+    if (JS_DefinePropertyValueStr(raw, result, "url", response,
+                                  JS_PROP_C_W_E) < 0) {
+        JS_FreeValue(raw, kind);
+        JS_FreeValue(raw, value);
+        JS_FreeValue(raw, result);
+        return JS_EXCEPTION;
+    }
+    if (JS_DefinePropertyValueStr(raw, result, "kind", kind,
+                                  JS_PROP_C_W_E) < 0) {
+        JS_FreeValue(raw, value);
+        JS_FreeValue(raw, result);
+        return JS_EXCEPTION;
+    }
+    if (JS_DefinePropertyValueStr(raw, result, "value", value,
+                                  JS_PROP_C_W_E) < 0) {
+        JS_FreeValue(raw, result);
+        return JS_EXCEPTION;
+    }
+    return result;
+}
+
+/* A realm takes one loader, and the export is what carries it: a second
+   registration under any name would leave the first export answering from the
+   second host, so it is refused (-6) before anything is built. */
+int qjs_context_register_synchronous_loader(QjsContext *context,
+                                           const char *name,
+                                           const char *export_name,
+                                           QjsRequireLoad *load,
+                                           void *opaque) {
+    JSValue function;
+    int status;
+
+    if (context->require_load != NULL) {
+        return -6;
+    }
+    function =
+        JS_NewCFunction(context->raw, qjs_load_module_sync, export_name, 2);
+    if (JS_IsException(function)) {
+        return -1;
+    }
+    status = qjs_add_host_module_export(context, name, export_name, function);
+    JS_FreeValue(context->raw, function);
+    if (status == 0) {
+        context->require_load = load;
+        context->require_opaque = opaque;
+    }
+    return status;
 }
 
 /* Borrowed until context destruction; taking a request marks it dispatched. */
@@ -1169,6 +1476,14 @@ QjsValue *qjs_eval(QjsContext *context, const uint8_t *source,
                        source_name, flags | JS_EVAL_FLAG_COMPILE_ONLY);
     if (JS_IsException(compiled)) {
         *failure_stage = QJS_EVAL_FAILURE_COMPILE;
+        return NULL;
+    }
+    /* A module evaluated directly is known by the source name it was given,
+       which is the only name this realm has for it. */
+    if ((flags & JS_EVAL_TYPE_MASK) == JS_EVAL_TYPE_MODULE &&
+        qjs_set_import_meta_url(context->raw, JS_VALUE_GET_PTR(compiled),
+                                source_name) < 0) {
+        JS_FreeValue(context->raw, compiled);
         return NULL;
     }
     result = JS_EvalFunction(context->raw, compiled);

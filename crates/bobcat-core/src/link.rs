@@ -64,6 +64,17 @@ impl HostOutbox {
         }
     }
 
+    /// The end signal of whatever holds this outbox: the view's for MTS, the
+    /// Worker's own for a worker.
+    ///
+    /// It is the arm that ends a job parked on a synchronous wait. A view's is
+    /// cancelled by the embedder's release, from the embedder's own thread; a
+    /// Worker's by its own message consumer — a task, which a wait goes on
+    /// running — reading the in-band `Terminate` that queued behind the wait.
+    pub(crate) const fn token(&self) -> &CancellationToken {
+        &self.token
+    }
+
     pub(crate) fn request(&self, request: SourceRequest) -> SourceAnswer {
         let (completion, answer) = SourceCompletion::new(self.token.clone());
         self.send(request, completion);

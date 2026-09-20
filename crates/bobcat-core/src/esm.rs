@@ -22,6 +22,12 @@ pub(crate) const HOST_MODULE_SPECIFIER: &str = "bobcat-internal:host";
 pub(crate) const TIMER_MODULE_SPECIFIER: &str = "bobcat:timers";
 pub(crate) const TIMER_MODULE_SOURCE: &str = runtime_source!("timers");
 
+/// Node's `createRequire`, the one synchronous way into a source a realm has
+/// not imported. The algorithm is JavaScript like every other built-in; what
+/// it is written over is the two host members [`crate::require`] installs.
+pub(crate) const REQUIRE_MODULE_SPECIFIER: &str = "bobcat:module";
+pub(crate) const REQUIRE_MODULE_SOURCE: &str = runtime_source!("module");
+
 /// The `EventTarget` a view's `lynx.getEngine()` and a worker's global scope
 /// are both built on.
 pub(crate) const EVENT_TARGET_MODULE_SPECIFIER: &str = "bobcat:event-target";

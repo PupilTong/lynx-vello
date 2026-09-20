@@ -66,15 +66,31 @@ That caller does not require a separate raw JSON text API.
 
 ## Implementation boundary
 
-The compiled-module and lazy-bundle execution APIs above remain unimplemented
-on this PR's base; `callLepusMethod` already supplies the message boundary.
-They should reuse the existing resource transport while providing execution
-results, exports, caching, and errors at the required API boundary. Lynx module
-factories and section evaluation have different semantics from ESM; reusing
-transport does not make an ordinary `import()` a complete implementation of
-`requireModule` or `loadScript`.
+The compiled-module and lazy-bundle execution APIs above remain unimplemented;
+`callLepusMethod` already supplies the message boundary. They should reuse the
+existing resource transport while providing execution results, exports,
+caching, and errors at the required API boundary. Lynx module factories and
+section evaluation have different semantics from ESM; reusing transport does
+not make an ordinary `import()` a complete implementation of `requireModule` or
+`loadScript`.
+
+The *synchronous* primitive those callers need does exist now, as
+`bobcat:module`: `createRequire(import.meta.url)` answers Node's `require`,
+which resolves through the normalizer imports use, requests
+`SourceRequest::Module` on this same channel, and parks the job it runs in on
+the answer — the engine thread's tasks keep running, and no other job does. It
+reads a source as CommonJS or JSON and keeps a CommonJS cache per realm.
+`lynx.requireModule`, `lynx.loadScript`, the Lynx wrapper's parameter list and
+lynx-core's own module caches are still not implemented and are a layer over
+it, not the same thing: a bundle section is not a file at a URL. The wrapper's
+parameter list is the one thing of theirs that is already reachable: the host
+member underneath, `loadModuleSync(url, parameters)`, compiles a CommonJS
+source inside the wrapper parameter list it is handed, and `bobcat:module`
+passes Node's five.
 
 There is no `ScriptLoad` queue, `SourceRequest::Script` variant, synchronous
-`readScript` binding, or JS source-callback registry. Tests should exercise
-the existing ESM/readiness/cancellation path and, when implemented, the actual
+`readScript` binding, or JS source-callback registry, and no API that hands a
+source's text to JavaScript: the host compiles or parses it inside the engine
+and answers with a function or a parsed value. Tests should exercise the existing
+ESM/require/readiness/cancellation path and, when implemented, the actual
 ReactLynx caller contracts rather than reintroducing a private text-read API.

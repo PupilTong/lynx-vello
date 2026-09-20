@@ -401,7 +401,14 @@ impl Worker {
                 // asked for. Each hears the same reason.
                 Err(error) => Err(error.clone()),
                 Ok(js) => {
-                    open_realm(js, self.events.clone(), self.key, &self.sources).map(|mut realm| {
+                    open_realm(
+                        js,
+                        self.events.clone(),
+                        self.key,
+                        &self.sources,
+                        self.lifetime.thread().clone(),
+                    )
+                    .map(|mut realm| {
                         let (source, url) = script;
                         let source = worker_boot_source(name, &source);
                         if let Err(error) = realm.engine.start_module(js, &source, &url) {
@@ -767,6 +774,7 @@ fn open_realm(
     events: mpsc::UnboundedSender<WorkerEvent>,
     key: WorkerKey,
     host: &HostOutbox,
+    thread: JsThreadHandle,
 ) -> Result<WorkerRealm, ScriptError> {
     let mut engine = js_runtime
         .create_realm()
@@ -779,6 +787,11 @@ fn open_realm(
             pending,
         });
     })?;
+    // This worker's own outbox, so what a `require` asks for is cancelled with
+    // the worker rather than with the view: a `Terminate` read while the job
+    // is parked ends the load, because the token this outbox carries is the
+    // one [`Worker::end`] cancels.
+    crate::require::install(&mut engine, js_runtime, host.clone(), thread)?;
     let timers = Rc::new(TimerState::new());
     let closing = Rc::new(Cell::new(false));
     install_worker_members(
@@ -905,6 +918,10 @@ mod tests {
         messages: mpsc::UnboundedSender<WorkerMessage>,
         /// Held so the channels stay open for as long as the worker does.
         events: mpsc::UnboundedReceiver<WorkerEvent>,
+        /// The host end of what this worker asks for. Held rather than
+        /// dropped: a dropped receiver answers every request with nothing,
+        /// and the pin below needs one load that stays out.
+        sources: mpsc::UnboundedReceiver<crate::link::ViewNotice>,
     }
 
     /// Starts one worker on `js`, with its script already answered.
@@ -930,17 +947,17 @@ mod tests {
             url: format!("app:///worker{key}.js"),
         }));
         // A token of its own rather than a child of anything: no view created
-        // this worker, and nothing here releases one.
+        // this worker, and nothing here releases one. The outbox carries that
+        // same token, the way `WorkerOwner::start` hands it over, so what this
+        // worker asks the host for ends when this worker does.
+        let token = CancellationToken::new();
+        let (sources, sources_rx) = mpsc::unbounded_channel();
         let worker = Worker::new(
             Rc::clone(js),
             WorkerKey::new(key),
             events,
-            CancellationToken::new(),
-            HostOutbox::new(
-                mpsc::unbounded_channel().0,
-                std::sync::Arc::new(crate::NoWakeup),
-                CancellationToken::new(),
-            ),
+            token.clone(),
+            HostOutbox::new(sources, std::sync::Arc::new(crate::NoWakeup), token),
             thread.clone(),
         );
         worker.spawn(boot_worker(
@@ -953,6 +970,7 @@ mod tests {
             worker,
             messages,
             events: events_rx,
+            sources: sources_rx,
         }
     }
 
@@ -1118,63 +1136,92 @@ mod tests {
         });
     }
 
+    /// Lets every ready task run until `ready` says so, or gives up after
+    /// [`TURNS`] of them. `false` is having given up.
+    async fn until(mut ready: impl FnMut() -> bool) -> bool {
+        for _ in 0..TURNS {
+            if ready() {
+                return true;
+            }
+            task::yield_now().await;
+        }
+        false
+    }
+
+    /// The next thing to arrive on `channel`, waited out the same way.
+    /// `None` is nothing having arrived.
+    async fn next<T>(channel: &mut mpsc::UnboundedReceiver<T>) -> Option<T> {
+        let mut arrived = None;
+        until(|| {
+            arrived = channel.try_recv().ok();
+            arrived.is_some()
+        })
+        .await;
+        arrived
+    }
+
     /// A `Terminate` is in band behind whatever was posted before it, so the
     /// consumer cannot wait for the deliveries it queued: if it did, a worker
     /// whose job is parked on a synchronous wait could never be told to stop.
     ///
-    /// The job the test queues below stands in for a synchronous host member
-    /// this thread does not have yet — its wait is the shape a `require`'s will
-    /// be, this worker's own token against an answer that never comes. What the
-    /// pin asserts is the pair: the terminate reaches [`Worker::end`] while the
-    /// job is parked, which is what ends the wait; and the post queued between
-    /// the two is discarded rather than delivered, because its job finds the
-    /// worker ended.
+    /// The wait is a real one — the handler's `require`, asking this worker's
+    /// host for a module the test receives and deliberately never answers.
+    /// What the pin asserts is the pair: the terminate reaches [`Worker::end`]
+    /// while the job is parked, which is what ends the wait and throws into
+    /// the handler's `catch`; and the post queued between the two is
+    /// discarded rather than delivered, because its job finds the worker
+    /// ended.
     #[test]
     fn an_in_band_terminate_ends_a_worker_whose_job_is_waiting_and_discards_what_is_behind_it() {
         on_a_js_thread(|thread| async move {
             let js = worker_runtime();
-            // The script echoes, so a post that was delivered would be heard.
-            let started = start_running(
+            // Every path through the handler posts, so a delivery that
+            // happened at all would be heard.
+            let mut started = start_running(
                 &js,
                 &thread,
                 1,
-                "onmessage = event => postMessage(event.data);".to_owned(),
+                r"
+                import { createRequire } from 'bobcat:module';
+                const require = createRequire(import.meta.url);
+                onmessage = event => {
+                    try { postMessage('loaded ' + require('./never.cjs')); }
+                    catch (error) { postMessage(event.data + ': ' + String(error)); }
+                };
+                "
+                .to_owned(),
             );
-            for _ in 0..TURNS {
-                if started.worker.is_live() {
-                    break;
-                }
-                task::yield_now().await;
-            }
-            assert!(started.worker.is_live(), "the worker booted");
+            assert!(
+                until(|| started.worker.is_live()).await,
+                "the worker booted"
+            );
 
-            // Queued here rather than sent as a message: the job is pushed by
-            // the `enter` call itself, and nothing waits for its answer.
-            let (waited, answers) = std::sync::mpsc::channel();
-            let waiting = Rc::clone(&started.worker);
-            drop(started.worker.enter(move |_, _| {
-                let _ = waited.send(false);
-                let token = waiting.lifetime.token().clone();
-                let ended = waiting.lifetime.thread().wait(async move {
-                    tokio::select! {
-                        biased;
-                        () = token.cancelled() => true,
-                        () = std::future::pending() => false,
-                    }
-                });
-                let _ = waited.send(ended);
-            }));
+            started
+                .messages
+                .send(WorkerMessage::Post(HostValue::String("first".to_owned())))
+                .expect("the worker is serving");
             // This test's own body is a task, so it goes on running inside the
-            // job's wait — which is the property the whole model rests on.
-            for _ in 0..TURNS {
-                if answers.try_recv() == Ok(false) {
-                    break;
-                }
-                task::yield_now().await;
-            }
+            // job's wait — which is the property the whole model rests on, and
+            // which is how the request below is read at all.
+            let Some(crate::link::ViewNotice::RequestSource {
+                request,
+                completion,
+            }) = next(&mut started.sources).await
+            else {
+                panic!("the require asked its host for a module");
+            };
+            assert!(
+                matches!(&request, SourceRequest::Module(url) if url == "app:///never.cjs"),
+                "the require resolved against the worker's own URL"
+            );
+            assert!(
+                next(&mut started.events).await.is_none(),
+                "nothing was posted: the handler is inside its require"
+            );
 
-            // Both sent while that job is still parked: the consumer reads
-            // them anyway, which is what this pins.
+            // Both sent while that job is still parked on `completion`, which
+            // is held rather than answered or dropped: the consumer reads them
+            // anyway, which is what this pins.
             started
                 .messages
                 .send(WorkerMessage::Post(HostValue::String(
@@ -1185,30 +1232,33 @@ mod tests {
                 .messages
                 .send(WorkerMessage::Terminate)
                 .expect("the worker is serving");
-            for _ in 0..TURNS {
-                if started.worker.ended() {
-                    break;
-                }
-                task::yield_now().await;
-            }
-            assert_eq!(
-                answers.try_recv(),
-                Ok(true),
-                "the terminate ended the worker, and the parked wait heard it"
+            assert!(
+                until(|| started.worker.ended()).await,
+                "the terminate ended the worker while its job was parked"
+            );
+            assert!(
+                completion.is_cancelled(),
+                "the request the host still holds is cancelled with the worker"
+            );
+
+            // The end is the wait's other arm, so the `require` threw where
+            // the load would have returned.
+            let posted = next(&mut started.events).await;
+            let Some(WorkerPayload::Message(message)) = posted.map(|event| event.payload) else {
+                panic!("the handler posted what its require did");
+            };
+            let caught = super::super::wire_json(&message);
+            assert!(
+                caught.starts_with("\"first: ") && caught.contains("app:///never.cjs"),
+                "the require threw into the handler's catch: {caught}"
             );
 
             // And the post between the two never reaches the realm: its job
             // was queued behind the waiting one and finds a worker that ended.
-            for _ in 0..TURNS {
-                task::yield_now().await;
-            }
-            let mut events = started.events;
-            while let Ok(event) = events.try_recv() {
-                assert!(
-                    !matches!(event.payload, WorkerPayload::Message(_)),
-                    "a post queued behind a terminate is discarded, not delivered"
-                );
-            }
+            assert!(
+                next(&mut started.events).await.is_none(),
+                "a post queued behind a terminate is discarded, not delivered"
+            );
         });
     }
 }

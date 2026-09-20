@@ -38,8 +38,8 @@ use super::quickjs::{ScriptEngine, ScriptRuntime};
 use crate::clock::ClockInstant;
 use crate::esm::{
     BTS_MODULE_SPECIFIER, CONTEXT_MODULE_SOURCE, CONTEXT_MODULE_SPECIFIER,
-    EVENT_TARGET_MODULE_SPECIFIER, EVENT_TARGET_SOURCE, HOST_MODULE_SPECIFIER, TIMER_MODULE_SOURCE,
-    TIMER_MODULE_SPECIFIER,
+    EVENT_TARGET_MODULE_SPECIFIER, EVENT_TARGET_SOURCE, HOST_MODULE_SPECIFIER,
+    REQUIRE_MODULE_SOURCE, REQUIRE_MODULE_SPECIFIER, TIMER_MODULE_SOURCE, TIMER_MODULE_SPECIFIER,
 };
 use crate::link::{InputEventPayload, ViewNotice, ViewOutbox};
 use crate::main::tree::{LynxDocument, PageConfig, apply_attribute_style, new_document};
@@ -451,8 +451,8 @@ impl MainThreadRuntime {
         ingredients: DocumentIngredients,
         outbox: ViewOutbox,
         workers: &super::workers::WorkerFactory,
-        // What `adoptStyleSheet` parks on: the engine thread this realm's
-        // entries are jobs of.
+        // What `adoptStyleSheet` and a `require` park on: the engine thread
+        // this realm's entries are jobs of.
         thread: crate::jobs::JsThreadHandle,
         startup: &mut RealmStartup,
     ) -> Result<
@@ -482,7 +482,14 @@ impl MainThreadRuntime {
             outbox.clone(),
             &timers,
         )?;
-        style_sheets::install_styles(&mut engine, js_runtime, &slot, &outbox, thread)?;
+        style_sheets::install_styles(&mut engine, js_runtime, &slot, &outbox, thread.clone())?;
+        crate::require::install(
+            &mut engine,
+            js_runtime,
+            outbox.host_outbox(outbox.token().clone()),
+            thread,
+        )
+        .map_err(|error| MainThreadError::from_engine("installing require", error))?;
         install_startup_strings(&mut engine, js_runtime, startup)?;
         let (workers, incoming) = workers
             .install(
@@ -1040,7 +1047,10 @@ pub(crate) fn install_shared_modules(
         })?;
     js_runtime
         .register_module_source(TIMER_MODULE_SPECIFIER, TIMER_MODULE_SOURCE)
-        .map_err(|error| MainThreadError::from_engine("registering the timer module", error))
+        .map_err(|error| MainThreadError::from_engine("registering the timer module", error))?;
+    js_runtime
+        .register_module_source(REQUIRE_MODULE_SPECIFIER, REQUIRE_MODULE_SOURCE)
+        .map_err(|error| MainThreadError::from_engine("registering the require module", error))
 }
 
 fn install_bobcat(

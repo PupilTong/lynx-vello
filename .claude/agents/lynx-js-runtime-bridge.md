@@ -42,17 +42,19 @@ and `bobcat-workers` (every Worker realm, including the BTS).
   realm scopes. `view/` holds `LynxGroup`, `LynxView`, `ViewSources` and
   `create_lynx_view`; `paint/` the `Painter`; `link.rs` the per-view channels;
   `lifetime.rs` the `CancellationToken`, `serve_clock` and `run_job`;
-  `timers.rs`, `clock.rs`/`alarm.rs`, `esm.rs`, `script.rs`, `resource.rs`,
-  `style.rs`.
+  `timers.rs`, `clock.rs`/`alarm.rs`, `esm.rs`, `require.rs`
+  (`resolveModuleUrl` and `loadModuleSync`, the two members `bobcat:module` is
+  written over), `script.rs`, `resource.rs`, `style.rs`.
 - `packages/bobcat-element/src/` — `element-papi.ts` (`bobcat:element`; its
   header table is the authoritative PAPI list: `__AddEvent`, `__GetEvent`,
   `__GetEvents`, `__SetEvents`, `__AddEventListener`, `__QuerySelector`(`All`),
   `__FlushElementTree`, and `__SetCSSId`, accepted and ignored),
   `main-thread-runtime.ts` (`bobcat:runtime`), `worker.ts` (the W3C `Worker`),
   `worker-runtime.ts`, `background-thread-runtime.ts` (`bobcat:bts-runtime`),
-  `cross-thread-context.ts`, `event-target.ts`, `timers.ts`,
-  `selector-query.ts`, `global-event-emitter.ts`, `lynx-modules.ts` (the
-  compiler factory ABI), and `native.d.ts`, the host-member contract.
+  `cross-thread-context.ts`, `event-target.ts`, `timers.ts`, `module.ts`
+  (`bobcat:module` — Node's `require` algorithm), `selector-query.ts`,
+  `global-event-emitter.ts`, `lynx-modules.ts` (the compiler factory ABI), and
+  `native.d.ts`, the host-member contract.
 
 Landed and not to be regressed:
 
@@ -60,12 +62,13 @@ Landed and not to be regressed:
   top loop runs queued jobs one at a time, outside the scheduler; tasks only
   wait and route, and never touch a realm, a document or the shared
   `ScriptRuntime`. A job may park on `JsThread::wait` — a fresh `block_on` of
-  the same `LocalSet` — so a synchronous host member (`adoptStyleSheet` today)
-  blocks JavaScript alone: tasks keep running, no other job does, and jobs
-  queued meanwhile run in FIFO order afterwards. A loading page's burst and
-  `stage_sheet` stay task-side so a sibling's load cannot delay a `BeginFrame`
-  acknowledgement; `consume_messages` on `bobcat-workers` never awaits the
-  deliveries it queued, because `Terminate` is in band behind them.
+  the same `LocalSet` — so a synchronous host member (`adoptStyleSheet`, or a
+  `require`) blocks JavaScript alone: tasks keep running, no other job does,
+  and jobs queued meanwhile run in FIFO order afterwards. A loading page's
+  burst and `stage_sheet` stay task-side so a sibling's load cannot delay a
+  `BeginFrame` acknowledgement; `consume_messages` on `bobcat-workers` never
+  awaits the deliveries it queued, because `Terminate` is in band behind
+  them.
 - The BTS is a `Worker` named `lynx-bg` on the group's `bobcat-workers` runtime.
   A BTS failure is a nonfatal `EngineEvent::WorkerFailed` — never
   `StartupFailed`, never view teardown. `ScriptFinished` means MTS boot settled
@@ -84,6 +87,13 @@ Landed and not to be regressed:
   handlers publish snapshots carrying `dataset`/`id`/`uid`, never handles.
 - A listener or timer callback that throws is nonfatal: `ListenerFailed` /
   `TimerFailed`, the walk continues, a repeating timer stays armed.
+- `bobcat:module` is Node's algorithm in `packages/bobcat-element`, over two
+  host members on `bobcat-internal:host`: `resolveModuleUrl(base, specifier)`,
+  the normalizer an `import` uses, and `loadModuleSync(url, parameters)`, whose
+  bridge half compiles the source (in the given wrapper parameter list, named
+  by the response URL) or JSON-parses it **before** evaluating the compiled
+  script. Do not move the cache, the `module` object or resolution back into
+  the shim, and do not hand source text to JavaScript.
 - A checkpoint drains the promise-job queue until empty, as a browser's
   microtask checkpoint does: no per-checkpoint job budget, no incomplete
   checkpoint for a later entry to resume. Readiness is MTS-only.
@@ -94,8 +104,8 @@ Landed and not to be regressed:
   and **never flush**: the caller decides when to `__FlushElementTree`, so a
   job that mutates and then measures sees the pre-mutation geometry.
 - Not implemented on purpose: per-component css-id scoping, UI methods other
-  than `boundingClientRect`, import maps, import attributes, JSON modules,
-  transfer lists.
+  than `boundingClientRect`, import maps, import attributes, JSON *ESM*
+  modules (`require` does parse a `.json` response), transfer lists.
 
 ## Reference repos
 

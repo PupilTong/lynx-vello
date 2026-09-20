@@ -238,8 +238,8 @@ lifecycle signal, a spawn — and touch no realm, no document and not the shared
 `ScriptRuntime`; what a task does with what it read is queue a job and await it.
 Jobs are the only place JavaScript runs, and they run outside every `block_on`,
 which is what lets one park: `JsThread::wait` is a fresh `block_on` of the same
-`LocalSet`, so during a synchronous stylesheet adoption every task on the thread
-goes on running while no other job does. Queued jobs run in FIFO order once the
+`LocalSet`, so during a synchronous stylesheet adoption or a `require` every
+task on the thread goes on running while no other job does. Queued jobs run in FIFO order once the
 waiting one returns, so an entry may hold the shared runtime and its realm
 across its own wait.
 
@@ -477,6 +477,37 @@ source-evaluation entry points stay private. The bridge owns the generic
 source/native-module loader, deferred import continuations, loaded-module
 namespace access and settled Promise inspection; Bobcat's specifiers, entry
 transform, graph membership and boot policy stay in the core adapter.
+
+**`bobcat:module` is the synchronous way into a source.**
+`import { createRequire } from "bobcat:module"` is available in a view's MTS
+realm and in every Worker realm, the BTS included; it is an explicit import,
+and neither entry preamble carries it. Node's algorithm — the cache, the
+`module` object, cycles, eviction, `require.resolve` — is the
+`packages/bobcat-element` source module `module.ts`, like every other built-in.
+It is written over two host members on `bobcat-internal:host`, which both realm
+kinds have: `resolveModuleUrl(base, specifier)`, the normalizer `import`
+resolves through, so a `require` and an `import` name a module by the same URL;
+and `loadModuleSync(url, parameters)`, which asks the host for that URL through
+the same `SourceRequest::Module` and answers the source *compiled* — the
+wrapper function of a CommonJS file, or the parsed value of a JSON one — so
+source text never becomes a JavaScript value. That load parks the job it runs
+in on the answer exactly as stylesheet adoption does: the engine thread's tasks
+go on running, no other job does, and so no promise job and no sibling realm's
+entry runs while it waits. The other arm of that wait is the requesting realm's
+cancellation token: a view's is written by the embedder's release, from the
+embedder's own thread; a Worker's by the in-band `Terminate` its message
+consumer — a task, still running during the wait — reads, which ends the worker
+and the load with it. A response URL whose path ends in `.json` is parsed as
+JSON and anything else is compiled as CommonJS, so requiring ESM text is a
+`SyntaxError`. The CommonJS cache is the realm's own, reachable as
+`require.cache` and separate from the ESM module map: a URL both imported and
+required is two instances. `module.id` and `module.filename` are the URL that
+was required, and the URL the load answered from is `__filename`, the base a
+nested `require` resolves against and what `__dirname` is one resolution away
+from. `require.resolve` answers the cache key without loading, and a load,
+compile, parse or body that fails leaves nothing cached. Every source module
+carries `import.meta.url` — the response URL for a fetched one, the name it was
+registered under for a built-in.
 
 #### Realm, document and boot
 
@@ -1076,6 +1107,17 @@ It owns the QuickJS C build and the narrow unsafe FFI shim, realm/value
 lifetime and affinity checks, exact ECMAScript string conversion, exception
 sanitization, pending-job pump, synchronous preloaded source/native-module
 loader, loaded-module namespace access, and module-evaluation Promise state.
+It also owns one synchronous load-and-compile entry, which is what a realm's
+`require` is written over: `register_synchronous_loader` exports a
+`loadModuleSync(url, parameters)` on a native module, backed by a host `FnMut`
+that answers one URL at a time. The bridge holds only the mechanism — it
+resolves nothing, caches nothing, and stays ignorant of URLs and media types,
+which of CommonJS and JSON a source is read as being the host's answer beside
+the response URL and the text. What it does own is the order: the response URL
+is copied and the text compiled (under that URL, in a wrapper of the caller's
+parameter list) or JSON-parsed *before* the compiled script is evaluated, which
+is the first point author code can run and so the first point another load can
+replace the buffers the host lent.
 Every heap allocation made by the C shim or the five compiled QuickJS C
 translation units is redirected through a private C ABI into Rust's global
 allocator; a fixed aligned prefix supplies the size required for matching
@@ -1522,17 +1564,18 @@ browser WebGPU completion is Promise-driven.
 The dependency-free TypeScript sources of the ESMs `bobcat-core` preloads into
 its QuickJS realms, one file per module. The main-thread runtime gets
 `src/main-thread-runtime.ts` as `bobcat:runtime`, `src/element-papi.ts` as
-`bobcat:element`, `src/timers.ts` as `bobcat:timers`, `src/event-target.ts` as
-`bobcat:event-target`, `src/cross-thread-context.ts` as
-`bobcat:cross-thread-context`, and `src/worker.ts` as the `Worker` class under
-`bobcat-internal`. The group's *worker* runtime gets `src/worker-runtime.ts` as
-`bobcat:worker`, `src/background-thread-runtime.ts` as `bobcat:bts-runtime`,
+`bobcat:element`, `src/timers.ts` as `bobcat:timers`, `src/module.ts` as
+`bobcat:module`, `src/event-target.ts` as `bobcat:event-target`,
+`src/cross-thread-context.ts` as `bobcat:cross-thread-context`, and
+`src/worker.ts` as the `Worker` class under `bobcat-internal`. The group's
+*worker* runtime gets `src/worker-runtime.ts` as `bobcat:worker`,
+`src/background-thread-runtime.ts` as `bobcat:bts-runtime`,
 `src/global-event-emitter.ts` as `bobcat:global-event-emitter`,
 `src/lynx-modules.ts` as `bobcat:lynx-modules`, `src/selector-query.ts` as
 `bobcat:selector-query`, plus `bobcat:event-target`,
-`bobcat:cross-thread-context` and `bobcat:timers` again — registered per
-runtime, because a source is runtime-wide and no value crosses between two
-runtimes. `src/native.d.ts` declares the two native modules' contracts and is
+`bobcat:cross-thread-context`, `bobcat:timers` and `bobcat:module` again —
+registered per runtime, because a source is runtime-wide and no value crosses
+between two runtimes. `src/native.d.ts` declares the two native modules' contracts and is
 the authoritative list of what `bobcat-internal:host` and
 `bobcat-internal:worker` export.
 

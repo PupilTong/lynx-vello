@@ -410,6 +410,28 @@ impl ScriptEngine {
             .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterHostModuleFunction))
     }
 
+    /// Installs one synchronous source loader as a named export of a native
+    /// ESM module: the realm asks it for a URL and gets back the compiled
+    /// source, and the text never becomes a JavaScript value.
+    ///
+    /// The runtime is taken for the same reason
+    /// [`Self::register_host_module_function`] takes it.
+    pub(crate) fn register_synchronous_loader<F>(
+        &mut self,
+        _runtime: &mut ScriptRuntime,
+        module_specifier: &str,
+        export_name: &str,
+        load: F,
+    ) -> Result<(), ScriptError>
+    where
+        F: FnMut(&str) -> Result<quickjs::RequiredSource, String> + 'static,
+    {
+        self.take_deferred_checkpoint_error()?;
+        self.realm
+            .register_synchronous_loader(module_specifier, export_name, load)
+            .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterHostModuleFunction))
+    }
+
     /// Evaluates classic source, which the runtime never does: every entry and
     /// every built-in is a module. It survives so this module's own tests can
     /// state a realm invariant in a snippet and let a throw fail the test.
@@ -531,7 +553,11 @@ impl ScriptEngine {
 
 /// URL identity is shared by static and dynamic imports. Bare names are
 /// reserved for the built-ins; transport and response policy stay with the host.
-fn normalize_module_url(base: &str, specifier: &str) -> Result<String, String> {
+///
+/// Reachable past this module because a `require` resolves the same way an
+/// `import` does, and the realm runtime that implements it asks through the
+/// host member [`crate::require`] installs over this.
+pub(crate) fn normalize_module_url(base: &str, specifier: &str) -> Result<String, String> {
     if specifier == super::workers::MODULE
         || specifier.starts_with("bobcat:")
         || specifier.starts_with("bobcat-internal:")
