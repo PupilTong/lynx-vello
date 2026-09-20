@@ -19,11 +19,10 @@
 //! which is how a view learns that a sibling's entry into JavaScript may have
 //! finished its own imports.
 //!
-//! This thread is a [`JsThread`](crate::jobs::JsThread): its tasks are what
-//! wait, and its jobs are the only place JavaScript, a document or the shared
-//! runtime is touched. [`group_task`] is the `main` future of that loop, a task
-//! like any other, so a view can attach and a finished one be joined while a
-//! sibling view's job is parked on a synchronous stylesheet.
+//! This thread is one engine thread of [`crate::jobs`], and [`group_task`] is
+//! the `main` future of its loop — a task like any other, so a view can attach
+//! and a finished one be joined while a sibling view's job is parked on a
+//! synchronous stylesheet.
 
 mod page;
 pub(crate) mod quickjs;
@@ -306,9 +305,7 @@ fn finish_view(
     // and the shared runtime belongs to whichever job holds it. Nothing waits
     // for the bump, so the answer is dropped.
     let js = Rc::clone(&context.js);
-    context
-        .thread
-        .enqueue(move || js.borrow().mark_checkpoint());
+    drop(context.thread.run(move || js.borrow().mark_checkpoint()));
 }
 
 /// One view, minus the ends its outbox already took.

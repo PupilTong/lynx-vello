@@ -44,6 +44,16 @@ where
     thread.run(body);
 }
 
+/// Opens one page's realm the way [`boot_page`] does: as one job of that
+/// page's, awaited.
+async fn open_realm(page: &Rc<Page>, startup: RealmStartup) {
+    crate::lifetime::run_job(page, move |page| {
+        page.open_realm(startup);
+        Some(())
+    })
+    .await;
+}
+
 /// One group's shared runtime, with the test holding the worker thread's end
 /// of the factory so a `Start` is observable and no worker ever boots.
 fn group(thread: &JsThreadHandle) -> (Rc<GroupContext>, mpsc::UnboundedReceiver<WorkerCommand>) {
@@ -321,13 +331,15 @@ impl OwnedPage {
     /// Opens the realm over `entry` and turns until its first frame is
     /// published.
     async fn boot(&mut self, entry: &str) -> u64 {
-        self.page
-            .open_realm(RealmStartup {
+        open_realm(
+            &self.page,
+            RealmStartup {
                 source: entry.to_owned(),
                 url: "app:///main.js".to_owned(),
                 ..RealmStartup::default()
-            })
-            .await;
+            },
+        )
+        .await;
         for _ in 0..TURNS {
             if self.view.published.commit().is_some() {
                 break;
@@ -633,11 +645,14 @@ fn a_siblings_checkpoint_makes_a_parked_page_settle() {
             ingredients(),
             view.token.clone(),
         );
-        page.open_realm(RealmStartup {
-            source: ONE_BOX.to_owned(),
-            url: "app:///main.js".to_owned(),
-            ..RealmStartup::default()
-        })
+        open_realm(
+            &page,
+            RealmStartup {
+                source: ONE_BOX.to_owned(),
+                url: "app:///main.js".to_owned(),
+                ..RealmStartup::default()
+            },
+        )
         .await;
         for _ in 0..TURNS {
             if view.published.commit().is_some() {
@@ -691,11 +706,14 @@ fn a_pages_own_entries_never_wake_its_clock_task() {
         );
         // The listener is what makes the dispatch below a real entry into
         // JavaScript rather than a walk that meets nobody.
-        page.open_realm(RealmStartup {
-            source: LISTENING_BOX.to_owned(),
-            url: "app:///main.js".to_owned(),
-            ..RealmStartup::default()
-        })
+        open_realm(
+            &page,
+            RealmStartup {
+                source: LISTENING_BOX.to_owned(),
+                url: "app:///main.js".to_owned(),
+                ..RealmStartup::default()
+            },
+        )
         .await;
         for _ in 0..TURNS {
             if view.published.commit().is_some() {

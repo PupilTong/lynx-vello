@@ -3,12 +3,9 @@
 //! It owns one `QuickJS` runtime, a task set per live worker, and nothing
 //! else at all — no document, no style pool, no fetcher.
 //!
-//! It is a [`JsThread`](crate::jobs::JsThread), the same shape `bobcat-main`
-//! is: tasks wait and route, and jobs are the only place a worker realm or the
-//! shared `ScriptRuntime` is touched. A job may park on a synchronous wait —
-//! this thread's tasks keep running while it does, and its jobs do not — which
-//! is what lets an in-band [`WorkerMessage::Terminate`] end a realm that is
-//! inside one.
+//! It is one engine thread of [`crate::jobs`], the same shape `bobcat-main` is,
+//! which is what lets an in-band [`WorkerMessage::Terminate`] end a realm whose
+//! job is parked on a synchronous wait.
 //!
 //! A worker takes the shape a view has on `bobcat-main`, for the same reason:
 //! each thing it can wait for is a task of its own, and tokio is what polls,
@@ -330,15 +327,6 @@ impl Worker {
         Some(value)
     }
 
-    /// The epilogue alone, for a wake that carries no operation of its own —
-    /// this realm's own deadline passing.
-    fn settle(self: &Rc<Self>) -> impl Future<Output = ()> + use<> {
-        let entered = self.enter(|_, _| ());
-        async move {
-            entered.await;
-        }
-    }
-
     /// Everything one entry into this realm leaves owing: the timers that
     /// have come due, a `close()` whatever just ran may have called, entry
     /// completion, module requests, the next timer deadline, and
@@ -396,20 +384,11 @@ impl Worker {
     /// the exception and goes on to enable the port queue and run the event
     /// loop — and it matters because a script registers its handlers before
     /// whatever optional work fails.
-    fn boot(
-        self: &Rc<Self>,
-        name: String,
-        script: (String, String),
-    ) -> impl Future<Output = Option<watch::Receiver<u64>>> + use<> {
-        run_job(self, move |worker| worker.boot_now(&name, script))
-    }
-
-    /// The body of [`Self::boot`], as the job runs it.
-    fn boot_now(
-        self: &Rc<Self>,
-        name: &str,
-        script: (String, String),
-    ) -> Option<watch::Receiver<u64>> {
+    ///
+    /// A job like every other entry, and the one that does not go through
+    /// [`Self::enter`], because the realm it would enter does not exist until
+    /// it returns. [`boot_worker`] is what queues it.
+    fn boot(self: &Rc<Self>, name: &str, script: (String, String)) -> Option<watch::Receiver<u64>> {
         // Again right before the script is evaluated: a `Terminate` that
         // landed while it was being read still wins.
         if self.ended() {
@@ -508,8 +487,10 @@ impl Settles for Worker {
         &self.lifetime
     }
 
-    fn settle(owner: &Rc<Self>) -> impl Future<Output = ()> {
-        owner.settle()
+    /// The epilogue alone, for a wake that carries no operation of its own —
+    /// this realm's own deadline passing.
+    fn settle(owner: &Rc<Self>) -> impl Future<Output = Option<()>> {
+        owner.enter(|_, _| ())
     }
 
     fn end(owner: &Rc<Self>) {
@@ -575,10 +556,6 @@ async fn boot_worker(
                 // has called a module, and the painter's frame is the same
                 // kind of nothing to answer.
                 Some(WorkerMessage::Vsync(_) | WorkerMessage::ModuleCallback { .. }) => {},
-                // Nor can the seam: there is no realm to enter and no job to
-                // park, so nothing answers it.
-                #[cfg(test)]
-                Some(WorkerMessage::Block(_)) => {},
             },
             // A worker that ended before its boot task was polled must not
             // evaluate the arriving source.
@@ -605,7 +582,7 @@ async fn boot_worker(
     // has already been reported and the first deadline already published by
     // the time this returns — and either of those, or a `Terminate` a task
     // read while the job held the thread, may have ended the worker.
-    let Some(checkpoints) = worker.boot(name, source).await else {
+    let Some(checkpoints) = run_job(&worker, move |worker| worker.boot(&name, source)).await else {
         return;
     };
     if worker.ended() {
@@ -713,8 +690,6 @@ async fn consume_messages(
                 Some(WorkerMessage::ModuleCallback { call, index, arguments }) => {
                     deliver_module_callback(&worker, call, index, arguments);
                 }
-                #[cfg(test)]
-                Some(WorkerMessage::Block(answer)) => deliver_block(&worker, answer),
             },
             changed = ready.changed() => if changed.is_err() { return; },
         }
@@ -733,8 +708,6 @@ async fn consume_messages(
                 arguments,
             } => deliver_module_callback(&worker, call, index, arguments),
             WorkerMessage::Post(data) => deliver_post(&worker, data),
-            #[cfg(test)]
-            WorkerMessage::Block(answer) => deliver_block(&worker, answer),
         }
     }
     worker.end();
@@ -745,30 +718,6 @@ fn deliver_post(worker: &Rc<Worker>, data: HostValue) {
     let delivering = Rc::clone(worker);
     drop(worker.enter(move |realm, js| {
         deliver(&delivering.events, delivering.key, realm, js, &data);
-    }));
-}
-
-/// The seam a test parks a worker's job on, standing in for a synchronous host
-/// member this thread does not have yet — a `require` that must answer before
-/// it returns.
-///
-/// The wait is the shape such a member's is: this worker's own token first, and
-/// behind it the answer that never comes. `false` says the wait has begun,
-/// `true` that this worker's end is what released it.
-#[cfg(test)]
-fn deliver_block(worker: &Rc<Worker>, answer: std::sync::mpsc::Sender<bool>) {
-    let waiting = Rc::clone(worker);
-    drop(worker.enter(move |_, _| {
-        let token = waiting.lifetime.token().clone();
-        let _ = answer.send(false);
-        let ended = waiting.lifetime.thread().wait(async move {
-            tokio::select! {
-                biased;
-                () = token.cancelled() => true,
-                () = std::future::pending() => false,
-            }
-        });
-        let _ = answer.send(ended);
     }));
 }
 
@@ -1173,12 +1122,13 @@ mod tests {
     /// consumer cannot wait for the deliveries it queued: if it did, a worker
     /// whose job is parked on a synchronous wait could never be told to stop.
     ///
-    /// The seam stands in for a synchronous host member this thread does not
-    /// have yet — the wait is the shape a `require`'s will be, this worker's
-    /// own token against an answer that never comes. What the pin asserts is
-    /// the pair: the terminate reaches [`Worker::end`] while the job is parked,
-    /// which is what ends the wait; and the post queued between the two is
-    /// discarded rather than delivered, because its job finds the worker ended.
+    /// The job the test queues below stands in for a synchronous host member
+    /// this thread does not have yet — its wait is the shape a `require`'s will
+    /// be, this worker's own token against an answer that never comes. What the
+    /// pin asserts is the pair: the terminate reaches [`Worker::end`] while the
+    /// job is parked, which is what ends the wait; and the post queued between
+    /// the two is discarded rather than delivered, because its job finds the
+    /// worker ended.
     #[test]
     fn an_in_band_terminate_ends_a_worker_whose_job_is_waiting_and_discards_what_is_behind_it() {
         on_a_js_thread(|thread| async move {
@@ -1198,11 +1148,22 @@ mod tests {
             }
             assert!(started.worker.is_live(), "the worker booted");
 
+            // Queued here rather than sent as a message: the job is pushed by
+            // the `enter` call itself, and nothing waits for its answer.
             let (waited, answers) = std::sync::mpsc::channel();
-            started
-                .messages
-                .send(WorkerMessage::Block(waited))
-                .expect("the worker is serving");
+            let waiting = Rc::clone(&started.worker);
+            drop(started.worker.enter(move |_, _| {
+                let _ = waited.send(false);
+                let token = waiting.lifetime.token().clone();
+                let ended = waiting.lifetime.thread().wait(async move {
+                    tokio::select! {
+                        biased;
+                        () = token.cancelled() => true,
+                        () = std::future::pending() => false,
+                    }
+                });
+                let _ = waited.send(ended);
+            }));
             // This test's own body is a task, so it goes on running inside the
             // job's wait — which is the property the whole model rests on.
             for _ in 0..TURNS {

@@ -17,11 +17,11 @@
 //!
 //! # Tasks and entries
 //!
-//! A task of the object waits and routes. An *entry* into its realm is a job
-//! on [`crate::jobs::JsThread`], queued by whichever task decided one was owed
-//! and awaited by it: [`run_job`] is the one way one is queued, and
-//! [`Settles::settle`] the epilogue-only entry a wake that carries no
-//! operation runs.
+//! An *entry* into the object's realm is a job on the engine thread
+//! [`crate::jobs`] describes, queued by whichever task decided one was owed and
+//! awaited by it: [`run_job`] is the one way one is queued, and
+//! [`Settles::settle`] the epilogue-only entry a wake that carries no operation
+//! runs.
 //!
 //! # The token
 //!
@@ -284,8 +284,10 @@ pub(crate) trait Settles: Sized + 'static {
     fn lifetime(&self) -> &Lifetime;
 
     /// Runs the epilogue alone, for a wake that carries no operation of its
-    /// own. A job, so the caller waits for it: see [`serve_clock`].
-    fn settle(owner: &Rc<Self>) -> impl Future<Output = ()>;
+    /// own. A job, so the caller waits for it: see [`serve_clock`]. `None` is
+    /// an epilogue that never ran, which the one caller has nothing to do
+    /// about.
+    fn settle(owner: &Rc<Self>) -> impl Future<Output = Option<()>>;
 
     /// Ends the object and everything that end owes.
     fn end(owner: &Rc<Self>);
@@ -370,7 +372,7 @@ pub(crate) async fn serve_clock<S: Settles>(
                 // Consumed: the next turn arms a wait of its own rather than
                 // polling this one again.
                 armed = None;
-                S::settle(&owner).await;
+                let _ = S::settle(&owner).await;
             }
             changed = deadlines.changed() => if changed.is_err() { return },
             changed = checkpoints.changed() => {
@@ -380,7 +382,7 @@ pub(crate) async fn serve_clock<S: Settles>(
                 if *checkpoints.borrow_and_update() == owner.lifetime().own_checkpoint.get() {
                     continue;
                 }
-                S::settle(&owner).await;
+                let _ = S::settle(&owner).await;
             }
         }
     }

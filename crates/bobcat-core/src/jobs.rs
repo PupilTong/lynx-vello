@@ -177,15 +177,16 @@ impl JsThread {
 pub(crate) struct JsThreadHandle(Weak<JsThread>);
 
 impl JsThreadHandle {
-    /// Queues one job whose answer nobody waits for.
-    pub(crate) fn enqueue(&self, job: impl FnOnce() + 'static) {
-        self.push(Box::new(job));
-    }
-
     /// Queues one job and answers with what it returned.
     ///
     /// `None` is a job that never ran: the thread was already gone, or the
     /// loop cleared the queue before reaching it.
+    ///
+    /// The job is queued by this call rather than by the future it returns,
+    /// which is why this is not an `async fn`: dropping that future must not
+    /// un-queue the job. A caller with nothing to wait for — the deliveries in
+    /// `consume_messages`, which must go on reading — drops it and the job
+    /// still runs.
     pub(crate) fn run<T, J>(&self, job: J) -> impl Future<Output = Option<T>> + use<T, J>
     where
         T: 'static,
@@ -258,7 +259,7 @@ mod tests {
         let log: Log = Rc::default();
         for name in ["first", "second", "third"] {
             let log = Rc::clone(&log);
-            handle.enqueue(move || log.borrow_mut().push(name));
+            drop(handle.run(move || log.borrow_mut().push(name)));
         }
         thread.run(async {});
         assert_eq!(*log.borrow(), ["first", "second", "third"]);
@@ -276,7 +277,7 @@ mod tests {
 
         {
             let (handle, log) = (handle.clone(), Rc::clone(&log));
-            handle.clone().enqueue(move || {
+            drop(handle.clone().run(move || {
                 log.borrow_mut().push("waiting job entered");
                 // The task below runs inside this wait and pushes a job; the
                 // answer this waits for is what that same task sends.
@@ -284,7 +285,7 @@ mod tests {
                     let _ = released.await;
                 });
                 log.borrow_mut().push("waiting job returned");
-            });
+            }));
         }
 
         let pusher = {
@@ -293,10 +294,10 @@ mod tests {
                 // Spawned onto the set by `run` below, so this runs inside the
                 // waiting job's `wait`.
                 log.borrow_mut().push("task ran during the wait");
-                handle.enqueue({
+                drop(handle.run({
                     let log = Rc::clone(&log);
                     move || log.borrow_mut().push("job pushed during the wait")
-                });
+                }));
                 let _ = release.send(());
             }
         };
@@ -324,11 +325,11 @@ mod tests {
         let log: Log = Rc::default();
         {
             let (handle, log) = (handle.clone(), Rc::clone(&log));
-            handle.clone().enqueue(move || {
+            drop(handle.clone().run(move || {
                 log.borrow_mut().push("first");
                 let log = Rc::clone(&log);
-                handle.enqueue(move || log.borrow_mut().push("second"));
-            });
+                drop(handle.run(move || log.borrow_mut().push("second")));
+            }));
         }
         // `main` finishes at once and nothing is drained after it, so the
         // second job runs only because the first drain picked it up.
@@ -347,7 +348,7 @@ mod tests {
         let body = {
             let (handle, log) = (handle.clone(), Rc::clone(&log));
             async move {
-                handle.enqueue(move || log.borrow_mut().push("never ran"));
+                drop(handle.run(move || log.borrow_mut().push("never ran")));
             }
         };
         thread.run(body);
@@ -401,22 +402,22 @@ mod tests {
         let (spawned, ran) = oneshot::channel::<()>();
         {
             let (handle, log, tasks) = (handle.clone(), Rc::clone(&log), Rc::clone(&tasks));
-            handle.clone().enqueue(move || {
+            drop(handle.clone().run(move || {
                 handle.spawn_into(&mut tasks.borrow_mut(), async move {
                     log.borrow_mut().push("spawned from a job");
                     let _ = spawned.send(());
                 });
-            });
+            }));
         }
         {
             let handle = handle.clone();
-            handle.clone().enqueue(move || {
+            drop(handle.clone().run(move || {
                 // Behind the spawn, so the task above is on the set by now,
                 // and this wait is what lets it run.
                 handle.wait(async {
                     let _ = ran.await;
                 });
-            });
+            }));
         }
         thread.run(async {});
         assert_eq!(*log.borrow(), ["spawned from a job"]);
