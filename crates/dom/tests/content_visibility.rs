@@ -18,8 +18,11 @@
 
 mod common;
 
+use std::sync::{Arc, Mutex};
+
 use common::{Doc, device};
-use dom::{FontBlob, NodeId};
+use dom::event::{ElementEvent, ElementEventKind, EventPhase};
+use dom::{CustomElement, Document, FontBlob, NodeId};
 use euclid::default::{Point2D, Vector2D};
 
 const AHEM: &[u8] = include_bytes!("../../hughie/tests/fixtures/Ahem.ttf");
@@ -66,9 +69,35 @@ struct Page {
     labels: Vec<NodeId>,
 }
 
+/// The tags [`Page::with_components`] builds its scroller and rows from.
+///
+/// Defined tags rather than `view`s, because `Document::define` requires a
+/// definition to precede every element carrying its name and a page's root
+/// is a `view` long before any case runs.
+const SCROLLER_TAG: &str = "x-scroller";
+const ROW_TAG: &str = "x-row";
+
 impl Page {
     /// `extra` is appended to the stylesheet so a case can add its own rules.
     fn new(extra: &str) -> Self {
+        Self::build(extra, "view", "view", |_| {})
+    }
+
+    /// The same page with its scroller and rows built from defined tags, so
+    /// engine components are on the path of everything the commit decides.
+    ///
+    /// `define` runs against the document before the first element exists,
+    /// which is the contract [`Document::define`] asserts for itself.
+    fn with_components(extra: &str, define: impl FnOnce(&mut Document<()>)) -> Self {
+        Self::build(extra, SCROLLER_TAG, ROW_TAG, define)
+    }
+
+    fn build(
+        extra: &str,
+        scroller_tag: &str,
+        row_tag: &str,
+        define: impl FnOnce(&mut Document<()>),
+    ) -> Self {
         let mut doc = Doc::with_device(device(200.0, VIEWPORT_HEIGHT));
         doc.add_css(&format!(
             "page {{ display: flex; width: 200px; height: 100vh;
@@ -82,12 +111,13 @@ impl Page {
              {extra}"
         ));
         assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
+        define(&mut doc.dom);
         let root = doc.root;
-        let scroller = doc.el(root, "view.scroller");
+        let scroller = doc.el(root, &format!("{scroller_tag}#scroller.scroller"));
         let mut rows = Vec::with_capacity(ROWS);
         let mut labels = Vec::with_capacity(ROWS);
-        for _ in 0..ROWS {
-            let row = doc.el(scroller, "view.row");
+        for index in 0..ROWS {
+            let row = doc.el(scroller, &format!("{row_tag}#row{index}.row"));
             let label = doc.el(row, "text.label");
             let run = doc.dom.create_text_node("x", ());
             doc.dom.append_child(label, run);
@@ -116,6 +146,26 @@ impl Page {
 
     fn label_rect(&self, row: usize) -> (f32, f32, f32, f32) {
         rect(&self.doc.dom, self.labels[row])
+    }
+
+    /// The skipping changes the commits since the last call queued, as
+    /// `(row index, skipped)` pairs in the order the document queued them.
+    ///
+    /// Every case that calls this has `auto` on its rows alone, so a change
+    /// naming anything else is the drain reporting something it should not.
+    fn changes(&mut self) -> Vec<(usize, bool)> {
+        let queued = self.doc.dom.take_content_visibility_changes();
+        queued
+            .into_iter()
+            .map(|change| {
+                let row = self
+                    .rows
+                    .iter()
+                    .position(|&row| row == change.node)
+                    .expect("every queued change names one of this page's rows");
+                (row, change.skipped)
+            })
+            .collect()
     }
 
     fn scroll_to(&mut self, offset: f32) -> Vector2D<f32> {
@@ -608,5 +658,486 @@ fn an_invisible_auto_box_outside_the_window_still_skips() {
         page.row_rect(far),
         (0.0, ROW_HEIGHT * far as f32, 200.0, ROW_HEIGHT),
         "and keeps its own contain-intrinsic-size box",
+    );
+}
+
+/// css-contain-2 §4.4: the commit that determines relevance queues one
+/// `contentvisibilityautostatechange` per element whose *skipping* changed,
+/// and the host drains them once.
+///
+/// The first determination is the case the spec's own
+/// `content-visibility-auto-state-changed-first-observation.html` pins, and
+/// it falls out of the three-state bit rather than needing a rule: an
+/// undetermined box skips, so an on-screen box changes state (skipped -> not
+/// skipped) and an off-screen box does not.
+#[test]
+fn the_first_commit_queues_a_change_for_the_rows_it_reveals_and_no_other() {
+    let mut page = Page::new("");
+    assert!(page.doc.dom.render(), "the first render commits a frame");
+
+    let revealed: Vec<(usize, bool)> = admitted_rows(0.0, VIEWPORT_HEIGHT)
+        .into_iter()
+        .map(|row| (row, false))
+        .collect();
+    assert_eq!(
+        page.changes(),
+        revealed,
+        "only the rows whose skipping changed, in frame order",
+    );
+    assert!(
+        page.changes().is_empty(),
+        "and the drain is what empties the queue",
+    );
+}
+
+/// A scroll past the encode window changes both ways at once, and the drain
+/// reports each row once, in frame order — the order the paint build met
+/// them, which is why a re-skipped row above the window comes before a
+/// revealed one below it.
+#[test]
+fn a_scroll_queues_both_directions_once_each_in_frame_order() {
+    let mut page = Page::new("");
+    assert!(page.doc.dom.render());
+    let before: Vec<usize> = page.changes().into_iter().map(|(row, _)| row).collect();
+    assert_eq!(before, admitted_rows(0.0, VIEWPORT_HEIGHT));
+
+    assert_eq!(page.scroll_to(150.0).y, 150.0);
+    assert!(page.doc.dom.render(), "the scroll left a frame owed");
+
+    let after = admitted_rows(150.0, VIEWPORT_HEIGHT);
+    let expected: Vec<(usize, bool)> = (0..ROWS)
+        .filter(|row| before.contains(row) != after.contains(row))
+        .map(|row| (row, !after.contains(&row)))
+        .collect();
+    assert!(
+        expected.iter().any(|&(_, skipped)| skipped)
+            && expected.iter().any(|&(_, skipped)| !skipped),
+        "the case is only worth anything if both directions happened: {expected:?}",
+    );
+    assert_eq!(page.changes(), expected);
+}
+
+/// A commit that determined nothing new queues nothing — including the
+/// commit a mutation forces on a page whose rows all stay where they were.
+#[test]
+fn a_commit_with_no_skipping_change_queues_nothing() {
+    let mut page = Page::new(".marked { opacity: 0.5; }");
+    assert!(page.doc.dom.render());
+    assert!(!page.changes().is_empty(), "the first commit revealed rows");
+
+    // A visual mutation with no bearing on any border box: every row is
+    // re-determined into the state it already had.
+    page.doc.add_class(page.rows[0], "marked");
+    assert!(page.doc.dom.render(), "the mutation commits a frame");
+    assert!(
+        page.changes().is_empty(),
+        "re-determining an element into the state it already had is not a change",
+    );
+
+    // And an idle render commits nothing at all.
+    assert!(!page.doc.dom.render());
+    assert!(page.changes().is_empty());
+}
+
+/// A nested `auto` box is determined by a later pass of the very same
+/// commit, and its change rides the same drain as its ancestor's — one
+/// entry each, because a pass never re-determines what this commit already
+/// did.
+#[test]
+fn a_nested_auto_box_queues_its_change_in_the_commit_that_revealed_it() {
+    let mut page = Page::new(
+        ".inner { display: flex; width: 200px; content-visibility: auto;
+                  contain-intrinsic-size: 200px 20px; }",
+    );
+    let inner = page.doc.el(page.rows[0], "view.inner");
+    let inner_label = page.doc.el(inner, "text.label");
+    let run = page.doc.dom.create_text_node("y", ());
+    page.doc.dom.append_child(inner_label, run);
+
+    assert!(page.doc.dom.render());
+    let queued = page.doc.dom.take_content_visibility_changes();
+    assert_eq!(
+        queued.iter().filter(|change| change.node == inner).count(),
+        1,
+        "the nested box changed once, in the commit that revealed its row: {queued:?}",
+    );
+    assert!(
+        queued
+            .iter()
+            .all(|change| !change.skipped && change.node != page.rows[ROWS - 1]),
+        "and nothing below the window changed state: {queued:?}",
+    );
+    assert!(page.doc.dom.take_content_visibility_changes().is_empty());
+}
+
+/// A row freed between the commit and the drain leaves its change queued,
+/// naming an id that now resolves to nothing. That is the runtime's to drop
+/// at dispatch — the same rule the retained frame's ids follow — rather than
+/// something this queue prunes.
+#[test]
+fn a_freed_row_leaves_a_change_naming_an_id_that_resolves_to_nothing() {
+    let mut page = Page::new("");
+    assert!(page.doc.dom.render());
+    let revealed = page.rows[0];
+    page.doc.dom.remove_element(revealed);
+    page.doc.dom.drop_subtree(revealed);
+
+    let queued = page.doc.dom.take_content_visibility_changes();
+    assert!(
+        queued.iter().any(|change| change.node == revealed),
+        "the change the commit made is still queued: {queued:?}",
+    );
+    assert!(
+        page.doc.dom.get(revealed).is_none(),
+        "and its id names nothing, which is how the runtime drops it",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// css-contain-2 §4.4, delivered: `Document::dispatch_content_visibility_changes`
+// ---------------------------------------------------------------------------
+//
+// The event is fired **Rust-side only**. Its listeners are the engine's own
+// components — a defined `CustomElement`, which is what `<list>` will be —
+// reached through `Document::dispatch_element_event`, and nothing about it
+// touches a script realm. What the cases below pin is the walk: the standard's
+// two passes, one delivery per node, `stopPropagation`, and what a target
+// freed or a tree mutated in the middle of one does.
+
+/// What every component here writes its deliveries into.
+type Log = Arc<Mutex<Vec<String>>>;
+
+fn log() -> Log {
+    Arc::new(Mutex::new(Vec::new()))
+}
+
+fn take(log: &Log) -> Vec<String> {
+    std::mem::take(&mut *log.lock().expect("the log is never poisoned"))
+}
+
+type Action = Box<dyn Fn(&mut Document<()>, NodeId, &mut ElementEvent) + Send + Sync>;
+
+/// An engine component that records every event it hears as
+/// `who:phase:target:state`, naming the target by its `id` attribute.
+///
+/// `on_event` is how a case makes a handler *do* something — stop the walk,
+/// mutate the tree — from inside the delivery.
+struct Recorder {
+    who: &'static str,
+    log: Log,
+    connections: bool,
+    on_event: Option<Action>,
+}
+
+impl Recorder {
+    fn new(who: &'static str, log: &Log) -> Self {
+        Self {
+            who,
+            log: Arc::clone(log),
+            connections: false,
+            on_event: None,
+        }
+    }
+
+    /// Also records `connected_callback`, which is what pins where the
+    /// reaction a handler's own mutation raised runs.
+    fn logging_connections(mut self) -> Self {
+        self.connections = true;
+        self
+    }
+
+    fn on_event(mut self, action: Action) -> Self {
+        self.on_event = Some(action);
+        self
+    }
+
+    fn record(&self, entry: String) {
+        self.log
+            .lock()
+            .expect("the log is never poisoned")
+            .push(entry);
+    }
+}
+
+impl CustomElement<()> for Recorder {
+    fn connected_callback(&self, _document: &mut Document<()>, _element: NodeId) {
+        if self.connections {
+            self.record(format!("{}:connected", self.who));
+        }
+    }
+
+    fn handle_event(&self, document: &mut Document<()>, element: NodeId, event: &mut ElementEvent) {
+        assert_eq!(
+            event.current_target(),
+            element,
+            "the element a hook is called about is the event's currentTarget",
+        );
+        assert_eq!(
+            event.kind().name(),
+            "contentvisibilityautostatechange",
+            "the only kind this suite fires",
+        );
+        let ElementEventKind::ContentVisibilityAutoStateChange { skipped } = event.kind() else {
+            panic!("an engine event this suite never fires: {:?}", event.kind())
+        };
+        let target = document
+            .get(event.target())
+            .and_then(|node| node.attribute("id"))
+            .expect("every target here is a live element with an id")
+            .to_owned();
+        let phase = match event.phase() {
+            EventPhase::Capturing => "capture",
+            EventPhase::AtTarget => "at-target",
+            EventPhase::Bubbling => "bubble",
+        };
+        let state = if skipped { "skipped" } else { "shown" };
+        self.record(format!("{}:{phase}:{target}:{state}", self.who));
+        if let Some(action) = &self.on_event {
+            action(document, element, event);
+        }
+    }
+}
+
+/// A page whose scroller and rows both record, with `row` given `action`.
+fn recording_page(log: &Log, action: Option<Action>) -> Page {
+    let scroller = Recorder::new("scroller", log);
+    let mut row = Recorder::new("row", log);
+    if let Some(action) = action {
+        row = row.on_event(action);
+    }
+    let page = Page::with_components("", move |document| {
+        document.define(SCROLLER_TAG, Box::new(scroller));
+        document.define(ROW_TAG, Box::new(row));
+    });
+    assert!(take(log).is_empty(), "building the page fires no event");
+    page
+}
+
+/// The three deliveries one row's change owes, in order: the scroller hears
+/// it inbound, the row itself hears it at-target, and the scroller hears it
+/// again outbound.
+fn whole_path(row: usize, skipped: bool) -> Vec<String> {
+    let state = if skipped { "skipped" } else { "shown" };
+    vec![
+        format!("scroller:capture:row{row}:{state}"),
+        format!("row:at-target:row{row}:{state}"),
+        format!("scroller:bubble:row{row}:{state}"),
+    ]
+}
+
+/// The first commit's changes reach the components on the path, in the
+/// standard's order: capture root-inward, the target once, bubble outward.
+///
+/// One delivery at the target, not two — the standard visits it in both
+/// passes only because each pass runs a different registration set, and a
+/// component has one `handle_event`.
+#[test]
+fn every_revealed_row_reaches_its_own_component_and_the_scroller_above_it() {
+    let log = log();
+    let mut page = recording_page(&log, None);
+    assert!(page.doc.dom.render(), "the first render commits a frame");
+    assert!(
+        take(&log).is_empty(),
+        "the commit decides the changes and delivers nothing: the dispatch is the host's call",
+    );
+
+    assert!(page.doc.dom.has_pending_content_visibility_changes());
+    page.doc.dom.dispatch_content_visibility_changes();
+    assert!(
+        !page.doc.dom.has_pending_content_visibility_changes(),
+        "the dispatch is what empties the queue",
+    );
+
+    let expected: Vec<String> = admitted_rows(0.0, VIEWPORT_HEIGHT)
+        .into_iter()
+        .flat_map(|row| whole_path(row, false))
+        .collect();
+    assert_eq!(
+        take(&log),
+        expected,
+        "every revealed row, in frame order, each over the whole path",
+    );
+    assert_eq!(
+        (
+            EventPhase::Capturing.value(),
+            EventPhase::AtTarget.value(),
+            EventPhase::Bubbling.value(),
+        ),
+        (1, 2, 3),
+        "the phases report the DOM constants",
+    );
+
+    page.doc.dom.dispatch_content_visibility_changes();
+    assert!(
+        take(&log).is_empty(),
+        "and a second dispatch has nothing left to deliver",
+    );
+}
+
+/// A scroll past the encode window changes rows in both directions, and each
+/// one is delivered once, in frame order — a re-skipped row above the window
+/// before a revealed one below it.
+#[test]
+fn a_scroll_delivers_both_directions_once_each_in_frame_order() {
+    let log = log();
+    let mut page = recording_page(&log, None);
+    assert!(page.doc.dom.render());
+    page.doc.dom.dispatch_content_visibility_changes();
+    let before = admitted_rows(0.0, VIEWPORT_HEIGHT);
+    assert_eq!(take(&log).len(), before.len() * 3);
+
+    assert_eq!(page.scroll_to(150.0).y, 150.0);
+    assert!(page.doc.dom.render(), "the scroll left a frame owed");
+    page.doc.dom.dispatch_content_visibility_changes();
+
+    let after = admitted_rows(150.0, VIEWPORT_HEIGHT);
+    let expected: Vec<String> = (0..ROWS)
+        .filter(|row| before.contains(row) != after.contains(row))
+        .flat_map(|row| whole_path(row, !after.contains(&row)))
+        .collect();
+    assert!(
+        expected.iter().any(|entry| entry.ends_with("skipped"))
+            && expected.iter().any(|entry| entry.ends_with("shown")),
+        "the case is only worth anything if both directions happened: {expected:?}",
+    );
+    assert_eq!(take(&log), expected);
+}
+
+/// A row that stops propagation is the last node the event reaches: the
+/// scroller's bubble delivery never happens, while the capture delivery that
+/// already ran stands.
+#[test]
+fn a_row_that_stops_propagation_keeps_the_scroller_from_hearing_the_bubble() {
+    let log = log();
+    let mut page = recording_page(
+        &log,
+        Some(Box::new(|_document, _element, event| {
+            event.stop_propagation();
+            assert!(event.propagation_stopped());
+        })),
+    );
+    assert!(page.doc.dom.render());
+    page.doc.dom.dispatch_content_visibility_changes();
+
+    let expected: Vec<String> = admitted_rows(0.0, VIEWPORT_HEIGHT)
+        .into_iter()
+        .flat_map(|row| {
+            vec![
+                format!("scroller:capture:row{row}:shown"),
+                format!("row:at-target:row{row}:shown"),
+            ]
+        })
+        .collect();
+    assert_eq!(take(&log), expected);
+}
+
+/// A row freed between the commit that queued its change and the dispatch
+/// delivers nothing at all — not to itself, and not to the scroller above
+/// it, because a dead target resolves to no path.
+#[test]
+fn a_row_freed_before_the_dispatch_delivers_nothing() {
+    let log = log();
+    let mut page = recording_page(&log, None);
+    assert!(page.doc.dom.render());
+    let freed = page.rows[0];
+    page.doc.dom.remove_element(freed);
+    page.doc.dom.drop_subtree(freed);
+
+    page.doc.dom.dispatch_content_visibility_changes();
+    let delivered = take(&log);
+    assert!(
+        !delivered.iter().any(|entry| entry.contains(":row0:")),
+        "nothing was delivered for the freed row: {delivered:?}",
+    );
+    assert_eq!(
+        delivered,
+        admitted_rows(0.0, VIEWPORT_HEIGHT)
+            .into_iter()
+            .filter(|&row| row != 0)
+            .flat_map(|row| whole_path(row, false))
+            .collect::<Vec<_>>(),
+        "and every other row's change was delivered as usual",
+    );
+}
+
+/// A document that defines nothing pays the queue drain and the one check
+/// that says nobody can listen — no path is built and no handler exists to
+/// call.
+#[test]
+fn a_document_with_no_definitions_drains_the_queue_and_does_nothing_else() {
+    let mut page = Page::new("");
+    assert!(page.doc.dom.render());
+    assert!(
+        page.doc.dom.has_pending_content_visibility_changes(),
+        "the commit queued the rows it revealed",
+    );
+
+    page.doc.dom.dispatch_content_visibility_changes();
+    assert!(
+        !page.doc.dom.has_pending_content_visibility_changes(),
+        "the queue is the record of one commit, so it is drained whether or not anyone listens",
+    );
+    assert!(page.doc.dom.take_content_visibility_changes().is_empty());
+}
+
+/// A handler may mutate the tree it is being called about: the write lands in
+/// the document, the rest of the walk runs, and the next render commits it.
+///
+/// The `connected_callback` of a child the handler appends runs **before the
+/// next step** — the mutation that raised it drained it, as every mutation in
+/// this crate does, and the dispatch opens a scope of its own around each
+/// handler so nothing a handler raised can outlive its step.
+#[test]
+fn a_handler_that_mutates_the_tree_is_drained_before_the_next_step() {
+    let log = log();
+    let item = Recorder::new("item", &log).logging_connections();
+    let scroller = Recorder::new("scroller", &log);
+    let row = Recorder::new("row", &log).on_event(Box::new(|document, element, event| {
+        // The first row only, so what the log shows is one step's worth.
+        if document.get(element).and_then(|node| node.attribute("id")) != Some("row0") {
+            return;
+        }
+        document.set_inline_style(element, "width: 120px");
+        let child = document.create_element("x-item", ());
+        document.append_child(event.current_target(), child);
+    }));
+    let mut page = Page::with_components("", move |document| {
+        document.define(SCROLLER_TAG, Box::new(scroller));
+        document.define(ROW_TAG, Box::new(row));
+        document.define("x-item", Box::new(item));
+    });
+    assert!(page.doc.dom.render());
+    assert!(take(&log).is_empty());
+
+    page.doc.dom.dispatch_content_visibility_changes();
+    let delivered = take(&log);
+    assert_eq!(
+        delivered[..4],
+        [
+            "scroller:capture:row0:shown".to_owned(),
+            "row:at-target:row0:shown".to_owned(),
+            "item:connected".to_owned(),
+            "scroller:bubble:row0:shown".to_owned(),
+        ],
+        "the child the handler appended was connected before the walk moved on: {delivered:?}",
+    );
+    assert_eq!(
+        delivered.len(),
+        admitted_rows(0.0, VIEWPORT_HEIGHT).len() * 3 + 1,
+        "and every other row was delivered as usual: {delivered:?}",
+    );
+
+    assert!(
+        page.doc.dom.render(),
+        "the handler's write left a frame owed",
+    );
+    assert_eq!(
+        page.row_rect(0),
+        (0.0, 0.0, 120.0, ROW_HEIGHT),
+        "which the next commit published",
+    );
+    assert!(
+        !page.doc.dom.has_pending_content_visibility_changes(),
+        "and nothing about that commit changed a skipping state",
     );
 }

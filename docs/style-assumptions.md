@@ -394,9 +394,24 @@ and §D.16 with what the wire format actually permits.)*
         one — the same one-update lag browsers have.
       - **Four of the spec's relevance conditions are N/A here**: this engine has no top layer
         (no `dialog`, no fullscreen), no focus model, no selection, and no view transitions.
-      - Still pending, in later PRs: `contentvisibilityautostatechange` (there is no event layer
-        yet), and the last-remembered size (css-sizing-4), so a revealed element that later skips
-        re-sizes from `contain-intrinsic-size` rather than from what it last measured.
+      - **`contentvisibilityautostatechange` (§4.4) is fired, Rust-side and engine-internal**
+        *(2026-09-21, user ruling)*. The commit that determines relevance queues every element
+        whose *skipping* changed — which is why the spec's "first observation" case needs no rule
+        of its own: an undetermined box already skips, so the first determination of an on-screen
+        box is a change and that of an off-screen box is not. The event is then delivered by
+        `dom` itself, over `Document::event_steps`' path, to the **engine's own components** — a
+        defined `dom::CustomElement`, which is what the built-in `<list>` will be — through
+        `CustomElement::handle_event`. It is **never dispatched to JavaScript**: no realm is
+        entered, a card's `addEventListener` for the same name never runs, and there is no Lynx
+        event name, string-handler, worklet or `global-bindEvent` form of it. `bobcat-core`'s
+        only part is *when*: after the commit it posts **one entry of its own** for the batch,
+        which is the spec's "dispatched by posting a task at the time when the state change
+        occurs". `bubbles` is `true` where the spec is silent (Chromium bubbles; WebKit and Gecko
+        do not — w3c/csswg-drafts#11310 is open), `composed` and `cancelable` are false. See
+        [tracking/dom-events.md](tracking/dom-events.md).
+      - Still pending, in a later PR: the last-remembered size (css-sizing-4), so a revealed
+        element that later skips re-sizes from `contain-intrinsic-size` rather than from what it
+        last measured.
       - `content-visibility: hidden` is unchanged and fully implemented (skip contents +
         intrinsic size + strict-like containment).
     - **Paint containment: layout + visual order.** `contain: paint`'s IFC / containing-block

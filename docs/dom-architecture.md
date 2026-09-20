@@ -121,7 +121,10 @@ hold instances in, so every callback names its element by `NodeId` and
 per-element state belongs to the layer owning `T`. The handler receives
 `constructed`, `connected_callback`, `disconnected_callback` and
 `attribute_changed_callback`, the last filtered by an `observed_attributes`
-list read once at definition time. **Scope: user-agent components, not
+list read once at definition time, plus `handle_event` — not a lifecycle
+callback but the engine-side event hook, which is how a component hears
+something the engine decided about it or about its descendants (see the
+`event` module above). **Scope: user-agent components, not
 script-defined elements.** Definitions come from the engine layer above, never
 from application script, and `define` *requires* that every definition precede
 any element with its tag — it panics otherwise. That contract removes the
@@ -481,7 +484,7 @@ exactly that caller. `InputEvent::default_prevented` is the `preventDefault()`
 seam an embedder hands to that router after its own arbitration; this crate
 never reads it.
 
-Its `event` module is the other half, and it does **not** dispatch:
+Its `event` module is the other half, and it does **not** dispatch to script:
 `Document::event_steps(target, bubbles, composed)` returns the ordered node
 visits one event resolves to — the capture pass root-inward, the bubble pass
 target-outward, the target in both — as plain `Copy` `EventStep`s owning no
@@ -501,6 +504,29 @@ its node resolves to no handle and reaches no one. There is no `preventDefault`
 and no cancelable event anywhere on this path — Lynx dispatches none — so
 suppressing a user-agent default action stays gesture arbitration's job,
 arriving on the separate `InputEvent::default_prevented` seam.
+
+There is a second dispatch, and this crate runs all of it: an event the
+*engine* decides, delivered to the engine's own components rather than to
+script. `Document::dispatch_element_event(target, kind, bubbles, composed)`
+builds the same path and walks it here — capture pass root-inward, the target
+once, bubble pass target-outward — calling `CustomElement::handle_event` on
+every step whose node is a constructed custom element, so a `<list>` can hear
+what a commit decided about its rows. It exists because handing the path up so
+the layer above can call back down per step would buy nothing: these handlers
+are Rust, owned by this document, and already called from inside its
+mutations. The at-target capture step is skipped rather than delivered twice
+(a component has one hook, not a registration set per phase); every hook takes
+`&mut Document`, so the path is collected up front and each step re-checks
+liveness before the call; each call is its own `[CEReactions]` scope, so what a
+handler's mutation raised is drained before the next step. `ElementEvent`
+answers `kind`/`target`/`current_target`/`phase` and carries both stop
+methods behind one flag, because a node's local name resolves to at most one
+definition. `ElementEventKind` is the extension point and has one variant,
+css-contain-2 §4.4's `ContentVisibilityAutoStateChange { skipped }`, which
+`Document::dispatch_content_visibility_changes` fires from the queue the
+relevance pass filled — `bubbles`, not composed, not cancelable, and never
+reaching a realm. A document that defines nothing pays one `is_empty` check
+per dispatch and builds no path.
 
 ## Text
 

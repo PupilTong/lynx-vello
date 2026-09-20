@@ -404,6 +404,253 @@ globalThis.renderPage = function () {
 };
 ";
 
+/// A page that is nothing but its root, with a JavaScript listener on it for
+/// the very event the engine fires Rust-side.
+///
+/// That listener is the pin for the ruling: `contentvisibilityautostatechange`
+/// is delivered to engine components and to nothing else, so a realm
+/// registration for it — on an ancestor of every row, in the phase a bubbling
+/// event would reach — must never run. It would mark the page element if it
+/// did.
+const LISTENING_PAGE: &str = r"
+globalThis.renderPage = function () {
+  const page = __CreatePage('card', 0);
+  __SetInlineStyles(page, 'display:flex;width:200px;height:240px;align-items:flex-start');
+  __AddEventListener(page, 'contentvisibilityautostatechange', () => {
+    __SetAttribute(page, 'data-js-heard', 'yes');
+  }, {});
+};
+";
+
+/// How many rows [`build_scrolling_rows`] lays out, how tall each is, and how
+/// tall the scrollport holding them is — all whole CSS pixels, which is what
+/// lets [`admitted_rows`] derive the answer without a float in sight.
+const ROWS: usize = 20;
+const ROW_HEIGHT: usize = 20;
+const SCROLLPORT: usize = 100;
+
+/// The rows the encode window admits at `offset`, derived from the spec of
+/// the margin rather than from the implementation: one scrollport past the
+/// committed offset in each direction, clamped to the scroll range. Touching
+/// the band counts, since the cull test admits whatever it cannot rule out.
+fn admitted_rows(offset: usize) -> Vec<usize> {
+    let max_offset = ROWS * ROW_HEIGHT - SCROLLPORT;
+    let top = offset.saturating_sub(SCROLLPORT);
+    let bottom = SCROLLPORT + (offset + SCROLLPORT).min(max_offset);
+    (0..ROWS)
+        .filter(|&row| {
+            let y = ROW_HEIGHT * row;
+            y <= bottom && y + ROW_HEIGHT >= top
+        })
+        .collect()
+}
+
+/// Where the components below record what they heard.
+type Log = Arc<std::sync::Mutex<Vec<String>>>;
+
+fn take(log: &Log) -> Vec<String> {
+    std::mem::take(&mut *log.lock().expect("the log is never poisoned"))
+}
+
+/// An engine component that records every event it hears as
+/// `who:phase:target`, naming the target by its `id` attribute, and — on the
+/// row — writes to the tree from inside the delivery.
+struct Recorder {
+    who: &'static str,
+    log: Log,
+}
+
+impl dom::CustomElement<()> for Recorder {
+    fn handle_event(
+        &self,
+        document: &mut dom::Document<()>,
+        element: dom::NodeId,
+        event: &mut dom::event::ElementEvent,
+    ) {
+        let dom::event::ElementEventKind::ContentVisibilityAutoStateChange { skipped } =
+            event.kind()
+        else {
+            panic!("an engine event this page never fires: {:?}", event.kind())
+        };
+        let target = document
+            .get(event.target())
+            .and_then(|node| node.attribute("id"))
+            .expect("every target here is a live row")
+            .to_owned();
+        let phase = match event.phase() {
+            dom::event::EventPhase::Capturing => "capture",
+            dom::event::EventPhase::AtTarget => "at-target",
+            dom::event::EventPhase::Bubbling => "bubble",
+        };
+        let state = if skipped { "skipped" } else { "shown" };
+        self.log
+            .lock()
+            .expect("the log is never poisoned")
+            .push(format!("{}:{phase}:{target}:{state}", self.who));
+        // A handler mutates the tree it was called about: whatever this
+        // leaves dirty is the delivery entry's own commit, never the one that
+        // decided the change.
+        document.set_inline_style_property(element, "opacity", "0.5");
+    }
+}
+
+/// The three deliveries one row's change owes, in order.
+fn whole_path(row: usize, skipped: bool) -> Vec<String> {
+    let state = if skipped { "skipped" } else { "shown" };
+    vec![
+        format!("scroller:capture:row{row}:{state}"),
+        format!("row:at-target:row{row}:{state}"),
+        format!("scroller:bubble:row{row}:{state}"),
+    ]
+}
+
+/// Installs the two component definitions and builds the scroller and its
+/// rows under the card's page element, as one probe: `Document::define`
+/// requires a definition to precede every element with its tag, and the tree
+/// is built in the same entry so it does.
+///
+/// A probe rather than JavaScript because an engine component is not
+/// script-reachable at all — there is no PAPI for one, and that is the point.
+/// Returns the scroller, which is what a `Refill` has to name.
+async fn build_scrolling_rows(page: &Rc<Page>, log: &Log) -> dom::NodeId {
+    let (answer, built) = std::sync::mpsc::channel();
+    let log = Arc::clone(log);
+    page.apply(vec![ToMain::Probe(Box::new(move |document| {
+        document.define(
+            "x-scroller",
+            Box::new(Recorder {
+                who: "scroller",
+                log: Arc::clone(&log),
+            }),
+        );
+        document.define("x-row", Box::new(Recorder { who: "row", log }));
+
+        let root = document.document_element().id();
+        let scroller = document.create_element("x-scroller", ());
+        document.set_inline_style(
+            scroller,
+            "display:flex;flex-direction:column;overflow:hidden;\
+             width:200px;height:100px;align-items:flex-start",
+        );
+        document.append_child(root, scroller);
+        for index in 0..ROWS {
+            let row = document.create_element("x-row", ());
+            document.set_inline_style(
+                row,
+                "display:flex;width:200px;height:20px;flex-shrink:0;\
+                 content-visibility:auto;contain-intrinsic-size:200px 20px",
+            );
+            document.set_id_attribute(row, Some(&format!("row{index}")));
+            document.append_child(scroller, row);
+        }
+        let _ = answer.send(scroller);
+    }))])
+    .await;
+    built.try_recv().expect("the probe ran")
+}
+
+/// Whether the realm's listener for the same event name ever ran.
+async fn js_heard(page: &Rc<Page>) -> bool {
+    let (answer, heard) = std::sync::mpsc::channel();
+    page.apply(vec![ToMain::Probe(Box::new(move |document| {
+        let _ = answer.send(
+            document
+                .document_element()
+                .attribute("data-js-heard")
+                .is_some(),
+        );
+    }))])
+    .await;
+    heard.try_recv().expect("the probe ran")
+}
+
+/// css-contain-2 §4.4: the commit that first determines relevance fires a
+/// `contentvisibilityautostatechange` at every `auto` element whose skipping
+/// state changed — which on a first determination is the on-screen ones
+/// alone, since an undetermined box already skips.
+///
+/// The delivery is an entry of its own, because the spec dispatches the event
+/// "by posting a task at the time when the state change occurs": the commit's
+/// own entry queues it and runs no handler, so the epilogue count moves twice
+/// for one burst.
+#[test]
+fn a_commit_delivers_its_state_changes_in_an_entry_of_its_own() {
+    on_a_js_thread(|thread| async move {
+        let (context, _workers) = group(&thread);
+        let mut owned = OwnedPage::new(context);
+        owned.boot(LISTENING_PAGE).await;
+        let log: Log = Arc::default();
+        let settled = owned.page.epilogue_count();
+
+        build_scrolling_rows(&owned.page, &log).await;
+        assert_eq!(
+            owned.page.epilogue_count(),
+            settled + 2,
+            "the burst that built the rows was one entry, and the deliveries \
+             its commit decided were another",
+        );
+
+        let expected: Vec<String> = admitted_rows(0)
+            .into_iter()
+            .flat_map(|row| whole_path(row, false))
+            .collect();
+        assert_eq!(
+            take(&log),
+            expected,
+            "every revealed row, in frame order, over the whole path: the \
+             scroller inbound, the row itself, the scroller outbound",
+        );
+        assert!(
+            !js_heard(&owned.page).await,
+            "the realm's own listener for the same name never runs: this \
+             event is fired Rust-side and reaches engine components alone",
+        );
+    });
+}
+
+/// A refill past the encode window re-determines every row, and the two
+/// directions are one batch: one entry behind the refill's own, one delivery
+/// per row that changed, each exactly once.
+#[test]
+fn a_refill_delivers_both_directions_in_the_entry_after_its_commit() {
+    on_a_js_thread(|thread| async move {
+        let (context, _workers) = group(&thread);
+        let mut owned = OwnedPage::new(context);
+        owned.boot(LISTENING_PAGE).await;
+        let log: Log = Arc::default();
+        let scroller = build_scrolling_rows(&owned.page, &log).await;
+        let before = admitted_rows(0);
+        assert_eq!(take(&log).len(), before.len() * 3);
+        let settled = owned.page.epilogue_count();
+
+        owned
+            .page
+            .apply(vec![ToMain::Refill {
+                offsets: vec![(scroller, dom::Vector2D::new(0.0, 150.0))],
+            }])
+            .await;
+        assert_eq!(
+            owned.page.epilogue_count(),
+            settled + 2,
+            "the refill was one entry and the deliveries its commit decided \
+             were another",
+        );
+
+        let after = admitted_rows(150);
+        let expected: Vec<String> = (0..ROWS)
+            .filter(|row| before.contains(row) != after.contains(row))
+            .flat_map(|row| whole_path(row, !after.contains(&row)))
+            .collect();
+        assert!(
+            expected.iter().any(|entry| entry.ends_with("skipped"))
+                && expected.iter().any(|entry| entry.ends_with("shown")),
+            "the case is only worth anything if both directions happened: {expected:?}",
+        );
+        assert_eq!(take(&log), expected);
+        assert!(!js_heard(&owned.page).await);
+    });
+}
+
 /// The host's page data rides from the view's sources to its realm as the
 /// text it was given, and is parsed there before the entry loads: the entry
 /// sees the global props as it evaluates, and `processData` gets the init

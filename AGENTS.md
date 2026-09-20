@@ -1015,7 +1015,25 @@ formatted on the host side and none is parsed in the realm. One call
 is one dispatch, so one event object serves it, and the host keeps no listener
 index at all. The realm runs the capture, bubble and `global-bindEvent` passes,
 derives `eventPhase` per step, and ends the dispatch itself; neither
-`stopPropagation` nor `stopImmediatePropagation` crosses the boundary. What the
+`stopPropagation` nor `stopImmediatePropagation` crosses the boundary.
+
+One event deliberately does **not** take that path, because it is the
+engine's own rather than script's: css-contain-2 §4.4's
+`contentvisibilityautostatechange`. The commit that determines
+`content-visibility: auto` relevance leaves the elements whose *skipping*
+changed in `dom`'s own queue; the page's epilogue posts **one fresh entry**
+for the batch, which is the spec's "posting a task" — the event is never
+delivered inside the entry that committed — and that entry calls
+`Document::dispatch_content_visibility_changes`, which fires each one through
+`Document::dispatch_element_event`. The walk is `dom`'s, the listeners are
+`dom::CustomElement` definitions (the engine's components — `<image>` today,
+`<list>` next) reached through `CustomElement::handle_event`, and **no realm
+is entered at all**: there is no export, no Lynx event name, no
+`__AddEvent`/worklet table consultation and no `global-bindEvent` pass, and a
+card's own `addEventListener` for that name never runs (user ruling,
+2026-09-21). `bubbles = true` is a recorded choice where the spec is silent
+(Chromium bubbles, WebKit and Gecko do not); `composed = false`; nothing
+cancelable. What the
 host is told is the *name* set the painting side routes against, and only its
 global edges: `listenerNameOpened(name)` for the first registration for a name
 anywhere in the realm, `listenerNameClosed(name)` for the removal of its last,
@@ -1744,8 +1762,11 @@ Subsystems:
   and the retained `vello::Scene` a `commit` publishes as `CommittedFrame`.
 - `scroll/` — CSSOM-View geometry, per-node offsets, `scroll_to`/`scroll_by`/
   `scroll_chain`.
-- `input/` and `event/` — the `InputEvent` host seam and
-  `Document::event_steps`, which computes a path and dispatches nothing.
+- `input/` and `event/` — the `InputEvent` host seam, `Document::event_steps`,
+  which computes a path for a *script* dispatch above, and
+  `Document::dispatch_element_event`, which walks that path here for an event
+  the engine decides, delivering it to defined `CustomElement`s through
+  `handle_event` and to nothing else.
 - `render/` — the DOM-free floor absorbed from the former `pulsar` crate
   (2026-08-04): `FrameImages` and the `render::gpu` wgpu backend. `render::blur`
   is the one exception: a `filter: blur()` bake is a partial replay of a

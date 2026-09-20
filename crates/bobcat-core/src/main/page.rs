@@ -174,6 +174,16 @@ pub(super) struct Page {
     /// epilogue's commit is what publishes.
     pending_begin_frame: Cell<Option<u64>>,
     boot_reported: Cell<bool>,
+    /// Whether an entry that will deliver `dom`'s queued
+    /// `contentvisibilityautostatechange` changes is already queued and has
+    /// not run yet.
+    ///
+    /// The queue outlives the epilogue that noticed it — the drain is the
+    /// delivery entry's, because the point of the entry is that the walk does
+    /// not run inside the commit — so without this latch every entry between
+    /// the two would post one of its own and each would find the batch
+    /// already gone. One post per batch.
+    content_visibility_posted: Cell<bool>,
     /// Every task of this view, the token that ends them, the latch this thread
     /// reads, and the two numbers this realm's clock task waits on — the
     /// deadline it armed and the generation its own last entry recorded.
@@ -226,6 +236,7 @@ impl Page {
             worker_events: RefCell::new(None),
             pending_begin_frame: Cell::new(None),
             boot_reported: Cell::new(false),
+            content_visibility_posted: Cell::new(false),
             lifetime,
             reported: Cell::new(false),
             #[cfg(test)]
@@ -343,12 +354,14 @@ impl Page {
     ///    therefore fires inside boot's own epilogue and adds no commit of its own.
     /// 2. **The commit**, which is what publishes the frame and the image sources the walk
     ///    discovered.
-    /// 3. **The boot report**, once, so the frame exists before the event that implies it.
-    /// 4. **The `BeginFrame` acknowledgement**, for the same reason: a host blocked on the sequence
+    /// 3. **The `contentvisibilityautostatechange` deliveries** that commit decided — posted as an
+    ///    entry of their own, never run here: see [`Self::post_content_visibility_changes`].
+    /// 4. **The boot report**, once, so the frame exists before the event that implies it.
+    /// 5. **The `BeginFrame` acknowledgement**, for the same reason: a host blocked on the sequence
     ///    number is blocked on that frame.
-    /// 5. **The module requests** this entry produced, each spawned as a load of its own.
-    /// 6. **The next timer deadline**, republished only when it moved.
-    /// 7. **The checkpoint generation**, so the clock task can tell this page's own bumps from a
+    /// 6. **The module requests** this entry produced, each spawned as a load of its own.
+    /// 7. **The next timer deadline**, republished only when it moved.
+    /// 8. **The checkpoint generation**, so the clock task can tell this page's own bumps from a
     ///    sibling's.
     fn epilogue(self: &Rc<Self>, runtime: &mut MainThreadRuntime, js: &mut ScriptRuntime) {
         if self.ended() {
@@ -360,6 +373,11 @@ impl Page {
             self.outbox.engine_event(EngineEvent::TimerFailed(failure));
         }
         runtime.commit_if_dirty();
+        if runtime.has_pending_content_visibility_changes()
+            && !self.content_visibility_posted.replace(true)
+        {
+            self.post_content_visibility_changes();
+        }
         if !self.boot_reported.get() {
             // MTS boot alone: the entry module evaluated and its first flush
             // committed. The BTS Worker's own state is not part of it.
@@ -393,6 +411,51 @@ impl Page {
         }
         self.lifetime.arm_deadline(runtime.next_timer_deadline());
         self.lifetime.record_checkpoint(js.checkpoint_generation());
+    }
+
+    /// Queues the entry that delivers one commit's
+    /// `contentvisibilityautostatechange` events
+    /// ([css-contain-2 §4.4](https://drafts.csswg.org/css-contain-2/#content-visibility-auto-state-change-event)),
+    /// and waits for nothing.
+    ///
+    /// The spec dispatches the event "by posting a task at the time when the
+    /// state change occurs", and this is that post: [`Self::enter`] queues
+    /// its job at the call rather than at the first poll of the future it
+    /// answers with, so dropping that future leaves one fresh entry behind
+    /// every job already queued — with an epilogue of its own, so a handler
+    /// that mutates the tree gets its commit. The event is therefore never
+    /// delivered inside the entry that committed, and a view that ends in
+    /// between delivers nothing.
+    ///
+    /// **Nothing here enters JavaScript.** The listeners are the engine's own
+    /// components, the walk is `dom`'s, and this entry is a job only because
+    /// *when* it runs is the whole point. It still goes through
+    /// [`Self::enter`] rather than a bare job, because everything that
+    /// touches this view's document does: one boundary, one epilogue, one
+    /// end latch.
+    ///
+    /// One entry for the whole batch, in the order the commit queued them:
+    /// the queue is drained by this entry rather than by the epilogue that
+    /// noticed it, so [`Self::content_visibility_posted`] is what keeps an
+    /// entry that runs in between from posting a second one. It is cleared
+    /// here, inside the entry; a view that ended before it ran never needs it
+    /// again, because nothing is delivered after the end.
+    ///
+    /// A handler that panics is the view's panic, as a lifecycle callback's
+    /// already is: [`run_job`] catches it, [`Self::trapped`] reports the
+    /// `ScriptRunError` and the view ends. There is no per-change
+    /// `catch_unwind` — a panicking handler leaves the document unspecified,
+    /// which is `dom`'s own recorded contract for one, and delivering the
+    /// rest of the batch into it would be worse than stopping.
+    fn post_content_visibility_changes(self: &Rc<Self>) {
+        let page = Rc::clone(self);
+        drop(self.enter(move |runtime, _js| {
+            // Cleared before the walk, not after: what a handler's own
+            // mutation leaves for this entry's epilogue to commit is a batch
+            // of its own, and it owes an entry of its own too.
+            page.content_visibility_posted.set(false);
+            runtime.dispatch_content_visibility_changes();
+        }));
     }
 
     /// Reports a panic as the failing view's, and ends the view.
