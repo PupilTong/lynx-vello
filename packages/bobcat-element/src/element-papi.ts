@@ -123,9 +123,9 @@ import { __BobcatPublishEvent } from "bobcat:runtime";
 //
 // **The whole walk is this file's.** The host computes the event path while
 // it holds the document, releases it, and makes one call:
-// `__BobcatDispatchEvent(nodes, targets, name, timestamp, x, y, deltaX,
-// deltaY, ...touchNumbers)`, where `nodes` is the path in target-first order
-// as comma-joined decimal node ids and `targets` carries, position for
+// `__BobcatDispatchEvent(nodes, targets, name, bubbles, timestamp,
+// detailKind, ...detailNumbers)`, where `nodes` is the path in target-first
+// order as comma-joined decimal node ids and `targets` carries, position for
 // position, the shadow-retargeted target of that step. Two strings because
 // the boundary takes primitives and structured clones only, a clone can be
 // minted by the realm alone, and a decimal id cannot contain the separator —
@@ -133,14 +133,23 @@ import { __BobcatPublishEvent } from "bobcat:runtime";
 // call is what lets a listener mutate the tree.
 //
 // Everything else is numbers, and the objects they describe are built here,
-// because their shape is JavaScript's: `timestamp` is the event's own, in
-// milliseconds on the view's timeline; `x`/`y` are the device position the
-// `detail` reports; `deltaX`/`deltaY` are the wheel delta, `undefined` for
-// every event that has none, which is what keeps those two keys out of the
-// `detail` rather than `NaN` in it. `touchNumbers` is four numbers per touch
-// point — `identifier`, `x`, `y`, and a flag bitmask over
-// `touches`/`targetTouches`/`changedTouches` — which the four touch events
-// alone carry.
+// because their shape is JavaScript's. `timestamp` is the event's own, in
+// milliseconds on the view's timeline. `detailKind` says which shape the
+// numbers behind it make, and is the only thing that branches: one kind per
+// `detail` *shape*, never per event name, so one export carries every
+// producer the host has.
+//
+// - `DETAIL_POSITION` — every routed input event. `x`/`y` are the device
+//   position the `detail` reports; `deltaX`/`deltaY` are the wheel delta,
+//   `undefined` for every event that has none, which is what keeps those two
+//   keys out of the `detail` rather than `NaN` in it; then four numbers per
+//   touch point — `identifier`, `x`, `y`, and a flag bitmask over
+//   `touches`/`targetTouches`/`changedTouches` — which the four touch events
+//   alone carry.
+// - `DETAIL_SIZE` — an `<image>`'s `load`: the bitmap's intrinsic `width` and
+//   `height`, in px.
+// - `DETAIL_EMPTY` — an `<image>`'s `error`: no numbers, and a `detail` of
+//   `{}`.
 //
 // From there this file runs the standard's dispatch over that path: the
 // capture pass from the last entry to the first, the bubble pass from the
@@ -152,6 +161,21 @@ import { __BobcatPublishEvent } from "bobcat:runtime";
 // listener threw — the standard's last dispatch step runs: `eventPhase` back
 // to `NONE` and `currentTarget` to null, so an event a listener kept does not
 // go on naming the node the walk stopped on.
+//
+// **A non-bubbling event narrows two of the three passes and cancels the
+// third.** The whole path is always sent, because the capture pass runs over
+// all of it whether the event bubbles or not; `bubbles` is what decides the
+// rest. The bubble pass runs on the at-target steps alone — the target, plus
+// any shadow host standing in for it — and the `global-bindEvent` pass does
+// not run at all. That is web-core's `common_event_handler`
+// (`web-core/src/main_thread/client/element_apis/event_apis.rs:413-432`):
+// capture over the full path unconditionally, then either the full path or
+// `[path.first()]`, and `dispatch_global_bind_event` only `if is_bubble`. It
+// is handed the event's own `bubbles`
+// (`ts/client/mainthread/elementAPIs/WASMJSBinding.ts:254-258`), so nothing
+// about it is per-event-name. Lynx's own `<image>` `load` and `error` are the
+// events this carries today: web-core builds both with `bubbles: false`
+// (`web-elements/src/elements/common/commonEventInitConfiguration.ts`).
 //
 // Both stop methods are pure local state now. `stopPropagation` ends the
 // remaining steps and `stopImmediatePropagation` also skips the rest of the
@@ -2141,19 +2165,57 @@ interface DispatchedEvent {
 }
 
 /**
- * What every dispatched event reports about where it happened.
+ * What one dispatched event reports about itself, beyond its name and target.
  *
- * The device position in viewport CSS px, plus — for `wheel` alone — the
- * scroll delta the host routed. The two delta keys are absent, not
- * `undefined`-valued, on every other event: the transport carries an
+ * Every key is optional because the host sends one detail *kind* per
+ * dispatch and each kind writes its own: a routed input event writes the
+ * device position in viewport CSS px and — for `wheel` alone — the scroll
+ * delta; an `<image>`'s `load` writes the bitmap's intrinsic size; its
+ * `error` writes nothing, and the detail is `{}`. A key a kind does not write
+ * is absent, not `undefined`-valued: the transport carries an
  * `undefined`-valued key as one. A listener may write into this object; it is
  * minted per dispatch, like the event that carries it.
  */
 interface EventDetail {
-  x: number;
-  y: number;
+  x?: number;
+  y?: number;
   deltaX?: number;
   deltaY?: number;
+  width?: number;
+  height?: number;
+}
+
+/**
+ * The detail kinds the host discriminates with, mirroring its own `DETAIL_*`
+ * constants (`main/runtime/lib.rs`). One per shape the numbers make, so
+ * nothing here branches on the event's name.
+ */
+const DETAIL_POSITION = 0;
+const DETAIL_SIZE = 1;
+const DETAIL_EMPTY = 2;
+
+/**
+ * The `detail` object one kind's numbers make.
+ *
+ * `DETAIL_EMPTY` spends none and is web-core's `error` detail exactly.
+ * `DETAIL_SIZE` spends two, an image `load`'s `naturalWidth`/`naturalHeight`.
+ * `DETAIL_POSITION` spends two, then two more for a wheel delta that may be
+ * absent; whatever follows those four is the touch numbers, which
+ * [`touchLists`] reads.
+ */
+function detailOf(kind: number, numbers: unknown[]): EventDetail {
+  if (kind === DETAIL_EMPTY) {
+    return {};
+  }
+  if (kind === DETAIL_SIZE) {
+    return { width: Number(numbers[0]), height: Number(numbers[1]) };
+  }
+  const detail: EventDetail = { x: Number(numbers[0]), y: Number(numbers[1]) };
+  if (numbers[2] !== undefined) {
+    detail.deltaX = Number(numbers[2]);
+    detail.deltaY = Number(numbers[3]);
+  }
+  return detail;
 }
 
 /**
@@ -2375,6 +2437,9 @@ function handlerInPass(
  * far end inwards, its bubble pass back out, then the `global-bindEvent`
  * pass, which is not over the path at all.
  *
+ * `bubbles` narrows the last two and never the first: a non-bubbling event
+ * binds on its at-target steps alone and runs no global pass. See the header.
+ *
  * One event object serves all three, so a property one listener writes is
  * there for the next. Whatever ends the dispatch — the passes finishing, a
  * stop, or a listener throwing on its way out of this call — the standard's
@@ -2387,20 +2452,19 @@ function handlerInPass(
  * becoming unreachable and the cleanup that frees its element.
  *
  * The host passes the facts it owns as numbers and this file builds the
- * objects: the `detail` out of the position and, for a `wheel`, its delta,
- * and the three touch lists out of the four numbers per point that follow.
- * An event with no touch points carries no such keys at all.
+ * objects: the `detail` out of the kind it named and the numbers behind it,
+ * and — for a position detail — the three touch lists out of the four numbers
+ * per point that follow. An event with no touch points carries no such keys
+ * at all.
  */
 function dispatchEvent(
   pathIds: unknown,
   targetIds: unknown,
   eventName: unknown,
+  bubbles: unknown,
   timestamp: unknown,
-  x: unknown,
-  y: unknown,
-  deltaX: unknown,
-  deltaY: unknown,
-  ...touchNumbers: unknown[]
+  detailKind: unknown,
+  ...detailNumbers: unknown[]
 ): undefined {
   const steps = pathSteps(pathIds, targetIds);
   const first = steps[0];
@@ -2414,13 +2478,8 @@ function dispatchEvent(
   // A reading the host could not take — a detached painter's, say — reports
   // the time origin rather than `NaN`.
   const stamp = Number(timestamp ?? 0);
-  // The two delta keys are written only for the one event that has them, so
-  // every other event's `detail` is exactly `{x, y}`.
-  const detail: EventDetail = { x: Number(x), y: Number(y) };
-  if (deltaX !== undefined) {
-    detail.deltaX = Number(deltaX);
-    detail.deltaY = Number(deltaY);
-  }
+  const kind = Number(detailKind);
+  const detail = detailOf(kind, detailNumbers);
   const event: DispatchedEvent = {
     type: name,
     eventPhase: NONE,
@@ -2439,8 +2498,12 @@ function dispatchEvent(
   };
   // Assigned rather than declared above, so an event that carries no touches
   // has no such keys at all — the transport would carry three
-  // `undefined`-valued ones to a background handler otherwise.
-  const lists = touchLists(touchNumbers);
+  // `undefined`-valued ones to a background handler otherwise. Only a
+  // position detail can have any: its first four numbers are the position and
+  // the wheel delta, and the points follow them.
+  const lists = kind === DETAIL_POSITION
+    ? touchLists(detailNumbers.slice(4))
+    : undefined;
   if (lists !== undefined) {
     Object.assign(event, lists);
   }
@@ -2576,8 +2639,18 @@ function dispatchEvent(
   try {
     // The reversed copy is the capture order; a path is a handful of steps.
     runPass(steps.slice().reverse(), CAPTURE);
-    runPass(steps, BUBBLE);
-    runGlobalPass();
+    // A non-bubbling event binds on its at-target steps alone — the target,
+    // and any shadow host retargeting made stand in for it, which is the same
+    // set the host would have sent had it built a non-bubbling path itself
+    // (`dom`'s `event_steps` keeps exactly the at-target entries). web-core,
+    // which has no retargeting to carry, narrows to the path's first entry.
+    runPass(
+      bubbles ? steps : steps.filter((step) => step.node === step.target),
+      BUBBLE,
+    );
+    if (bubbles) {
+      runGlobalPass();
+    }
   } finally {
     event.eventPhase = NONE;
     event.currentTarget = null;

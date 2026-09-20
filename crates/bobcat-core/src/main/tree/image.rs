@@ -32,9 +32,17 @@
 //! sheet cannot spell as a finite set of literals. It reflects into
 //! `filter: blur(…)`.
 //!
+//! Writing `src` can also *settle* it in the same call: binding is what asks
+//! the host for a URL, so a URL this document has already seen settle answers
+//! at the bind rather than through a later report. That answer is a `load` or
+//! an `error` this element owes, and it arrives in the middle of a JavaScript
+//! call — inside the `__SetAttribute` that wrote the attribute — where nothing
+//! may dispatch. So it is queued in [`ImageOutcomes`], which the runtime drains
+//! in the epilogue of the entry that produced it; `docs/runtime-architecture.md`
+//! has the entry boundary, and [`super::super::page`] the epilogue's order.
+//!
 //! What is deliberately still missing: `cap-insets` (a 9-slice composite the
-//! paint layer has no primitive for), and the `load`/`error` events, which
-//! nothing here dispatches yet.
+//! paint layer has no primitive for) and the animated-image events.
 //!
 //! # An `<image>` box is CSS-sized, never bitmap-sized
 //!
@@ -156,8 +164,14 @@
 //!   overflows the box, where native and web-core blur only the bitmap and keep it inside the box.
 //!   Ruled 2026-09-20 to stay so in this change; bitmap-only blur is a separate piece of paint
 //!   work, and needs a declaration other than `filter` for this module to write.
+//! - A `load` or an `error` is the *element's own source* settling. The placeholder produces
+//!   neither, which is `dom`'s rule rather than this module's: [`dom::ImageOutcome`] has no variant
+//!   naming a placeholder.
 
-use dom::{CustomElement, ImageRole, NodeId};
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use dom::{CustomElement, ImageOutcome, ImageRole, NodeId};
 
 use super::LynxDocument;
 
@@ -242,10 +256,52 @@ image[auto-size]:not([auto-size="false"]) { contain: none; max-width: 100%; max-
 image > * { display: none; }
 "#;
 
-/// Installs the component. Must run before any element could carry the tag,
-/// which is [`Document::define`](dom::Document::define)'s own precondition.
-pub(super) fn define(document: &mut LynxDocument) {
-    document.define(IMAGE_TAG, Box::new(Image));
+/// The `load`s and `error`s this document has produced and not delivered yet.
+///
+/// A handle rather than a field, because the two producers are on opposite
+/// sides of the document: the component below, which is inside it and reaches
+/// nothing else, and the runtime's own report path, which is outside it. Both
+/// hold a clone of this one queue, and the runtime drains it in the epilogue
+/// of every entry.
+///
+/// Queueing is the only thing either producer can do with an outcome, which is
+/// what keeps one from being dropped — there is no call that both settles a
+/// source and answers somewhere else.
+#[derive(Clone, Default)]
+pub(crate) struct ImageOutcomes(Rc<RefCell<Vec<ImageOutcome>>>);
+
+impl ImageOutcomes {
+    /// Queues what a source bind settled, if it settled anything. `None` is
+    /// the ordinary case — a source still loading, or a write that changed
+    /// nothing.
+    pub(crate) fn queue(&self, outcome: Option<ImageOutcome>) {
+        if let Some(outcome) = outcome {
+            self.0.borrow_mut().push(outcome);
+        }
+    }
+
+    /// Queues a whole report batch's outcomes, in the order `dom` returned
+    /// them.
+    pub(crate) fn extend(&self, outcomes: Vec<ImageOutcome>) {
+        self.0.borrow_mut().extend(outcomes);
+    }
+
+    /// Takes everything queued since the last drain.
+    pub(crate) fn take(&self) -> Vec<ImageOutcome> {
+        std::mem::take(&mut *self.0.borrow_mut())
+    }
+
+    /// Whether anything is waiting for a turn to be delivered on.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.borrow().is_empty()
+    }
+}
+
+/// Installs the component, over the queue its bind-time outcomes go into. Must
+/// run before any element could carry the tag, which is
+/// [`Document::define`](dom::Document::define)'s own precondition.
+pub(super) fn define(document: &mut LynxDocument, outcomes: ImageOutcomes) {
+    document.define(IMAGE_TAG, Box::new(Image { outcomes }));
 }
 
 /// Points the element at whatever its attributes currently name.
@@ -257,7 +313,11 @@ pub(super) fn define(document: &mut LynxDocument) {
 /// removal frees nothing, so a detached image keeps its source and its request,
 /// and the path that does free it raises no reaction at all. The registry
 /// unbind that a free owes belongs where the free is, in `dom`.
-struct Image;
+struct Image {
+    /// Where a `src` that settles at the bind leaves its outcome. The
+    /// reaction runs inside a JavaScript call, so it cannot dispatch.
+    outcomes: ImageOutcomes,
+}
 
 impl CustomElement<()> for Image {
     fn observed_attributes(&self) -> Vec<String> {
@@ -291,12 +351,27 @@ impl CustomElement<()> for Image {
             // No `old == new` guard: the setter already returns before it
             // binds, asks, or invalidates anything when handed the value that
             // role already holds.
-            SRC_ATTRIBUTE => document.set_image_source(element, ImageRole::Source, source(new)),
+            //
+            // A source the registry has already settled answers here, at the
+            // bind, because no report will ever arrive for it again — the
+            // second mount of a URL this document has seen. It is queued
+            // rather than dispatched: this runs inside `__SetAttribute`, and
+            // an event delivered from there would re-enter the realm in the
+            // middle of the call that wrote the attribute. web-core's
+            // equivalent is asynchronous for the same reason — an `<img>`
+            // load event is a task, even for a cached URL.
+            SRC_ATTRIBUTE => self.outcomes.queue(document.set_image_source(
+                element,
+                ImageRole::Source,
+                source(new),
+            )),
             // The placeholder is the same string relayed the same way, into
             // the same setter, because in native it is the same kind of thing:
             // a URL requested in its own right, concurrently with `src`,
             // rather than a fallback the element reaches for when `src` fails.
-            // Only the role differs.
+            // Only the role differs — and with it the outcome, which
+            // `ImageRole::Placeholder` never produces, so there is nothing to
+            // queue here.
             PLACEHOLDER_ATTRIBUTE => {
                 document.set_image_source(element, ImageRole::Placeholder, source(new));
             }
@@ -675,7 +750,7 @@ mod tests {
         let element = element_under(&mut document, parent, IMAGE_TAG, "");
         document.set_attribute(element, AUTO_SIZE_ATTRIBUTE, "");
         document.set_attribute(element, PLACEHOLDER_ATTRIBUTE, PLACEHOLDER);
-        document.apply_image_events(&[dom::ImageEvent::Loaded {
+        let _ = document.apply_image_events(&[dom::ImageEvent::Loaded {
             source: std::sync::Arc::from(PLACEHOLDER),
             width: NATURAL_PIXELS.0,
             height: NATURAL_PIXELS.1,

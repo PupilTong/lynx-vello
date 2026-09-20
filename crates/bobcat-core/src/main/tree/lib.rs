@@ -32,6 +32,7 @@ mod web_text_replication;
 
 use dom::{Document, StylesheetOrigin};
 
+pub(crate) use self::image::ImageOutcomes;
 pub(crate) use self::text::apply_attribute_style;
 pub use self::ua_sheet::PageConfig;
 pub(crate) use crate::view::Viewport;
@@ -43,11 +44,19 @@ pub(crate) const PAGE_TAG: &str = "page";
 
 /// Creates the document with its permanent `page` element, the components the
 /// engine defines, and the UA cascade.
+///
+/// `outcomes` is the queue the `image` component leaves a `src` that settled at
+/// its bind in, for the runtime to dispatch once it is out of the JavaScript
+/// call that wrote it.
 #[must_use]
-pub(crate) fn new_document(viewport: Viewport, config: PageConfig) -> LynxDocument {
+pub(crate) fn new_document(
+    viewport: Viewport,
+    config: PageConfig,
+    outcomes: ImageOutcomes,
+) -> LynxDocument {
     let mut document = Document::new(viewport.device(), PAGE_TAG, ());
     blur_view::define(&mut document);
-    image::define(&mut document);
+    image::define(&mut document, outcomes);
     document.add_stylesheet(
         &ua_sheet::ua_stylesheet(config),
         StylesheetOrigin::UserAgent,

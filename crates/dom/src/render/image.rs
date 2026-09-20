@@ -59,6 +59,10 @@
 //! including one whose pixels land later. The element's natural size names
 //! whichever bitmap that is, because `object-fit` resolves one against the
 //! other.
+//!
+//! Only the element's own source produces an [`ImageOutcome`], which is what
+//! an embedder turns into a `load` or an `error`. A placeholder is an interim
+//! picture the page did not ask about, so neither of its endings is an event.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -386,13 +390,42 @@ pub enum ImageRole {
     Placeholder,
 }
 
+/// One element's own image source settling, for the embedder to turn into a
+/// `load` or an `error`.
+///
+/// A placeholder produces none: it is an interim picture the page did not ask
+/// about, so neither of its outcomes is an event. That asymmetry is the type's
+/// — there is no variant naming a placeholder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImageOutcome {
+    /// The element's source has pixels, with this intrinsic size.
+    Loaded {
+        node: NodeId,
+        width: u32,
+        height: u32,
+    },
+    /// The element's source will never produce pixels.
+    Failed { node: NodeId },
+}
+
+/// What applying one report moved.
+pub(crate) struct ImageApplied {
+    /// The intrinsic size the source ended up with, or `None` for one that
+    /// will never produce pixels. Not the reported size: a report with a zero
+    /// axis is a failure.
+    pub(crate) loaded: Option<(u32, u32)>,
+    /// Every replaced node holding this source, in whichever role.
+    pub(crate) nodes: SmallVec<[(NodeId, ImageRole); 1]>,
+}
+
 /// What the registry holds for one source.
 #[derive(Debug, Default)]
 struct Entry {
     state: ImageState,
     /// Replaced nodes presenting this source, so a completed load knows whose
-    /// natural size to recompute. A `background-image` user is not here: it
-    /// has no natural size, and the load invalidates the frame anyway.
+    /// natural size to recompute and whose element owes an event. A
+    /// `background-image` user is not here: it has no natural size, and the
+    /// load invalidates the frame anyway.
     nodes: SmallVec<[(NodeId, ImageRole); 1]>,
 }
 
@@ -532,13 +565,8 @@ impl ImageRegistry {
     /// Applies one report from the host.
     ///
     /// `None` when nothing moved — a source reported twice, which one URL
-    /// with one content makes a no-op. `Some` carries every replaced node
-    /// holding this source, in whichever role, whose natural size the caller
-    /// must now recompute.
-    pub(crate) fn apply(
-        &mut self,
-        event: &ImageEvent,
-    ) -> Option<SmallVec<[(NodeId, ImageRole); 1]>> {
+    /// with one content makes a no-op.
+    pub(crate) fn apply(&mut self, event: &ImageEvent) -> Option<ImageApplied> {
         let (source, state) = match event {
             // Well-formedness, not the atlas bound: an image with a zero axis
             // has neither an intrinsic size nor an aspect ratio, so it would
@@ -566,7 +594,32 @@ impl ImageRegistry {
             return None;
         }
         entry.state = state;
-        Some(entry.nodes.clone())
+        Some(ImageApplied {
+            loaded: match state {
+                ImageState::Ready { width, height } => Some((width, height)),
+                ImageState::Pending | ImageState::Failed => None,
+            },
+            nodes: entry.nodes.clone(),
+        })
+    }
+
+    /// How `source` has already settled, as the outcome `node` binding to it
+    /// now is owed.
+    ///
+    /// `None` while the source is still pending, where the report itself will
+    /// carry the outcome. A source that settled before this bind is reported
+    /// by nothing else ever again — one URL is reported once — so this is the
+    /// only place a second mount of a known URL can learn what it got.
+    pub(crate) fn outcome_for(&self, source: &str, node: NodeId) -> Option<ImageOutcome> {
+        match self.entries.get(source)?.state {
+            ImageState::Pending => None,
+            ImageState::Ready { width, height } => Some(ImageOutcome::Loaded {
+                node,
+                width,
+                height,
+            }),
+            ImageState::Failed => Some(ImageOutcome::Failed { node }),
+        }
     }
 
     /// The intrinsic dimensions of that same bitmap, for the natural size the
@@ -706,8 +759,8 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        ImageEvent, ImageRegistry, ImageRole, ImageSizeHint, MAX_RENDERABLE_DIMENSION, NoImages,
-        is_renderable,
+        ImageEvent, ImageOutcome, ImageRegistry, ImageRole, ImageSizeHint,
+        MAX_RENDERABLE_DIMENSION, NoImages, is_renderable,
     };
     use crate::render::image::FrameImages;
 
@@ -889,11 +942,12 @@ mod tests {
         let mut document = crate::Document::new(crate::tree::document::tests::device(), "page", ());
         let root = document.create_element("view", ());
         registry.bind_node("app:///a.png", root, ImageRole::Source);
-        let nodes = registry
+        let applied = registry
             .apply(&loaded("app:///a.png", 12, 6))
             .expect("the load moved the entry");
+        assert_eq!(applied.loaded, Some((12, 6)));
         assert_eq!(
-            nodes.as_slice(),
+            applied.nodes.as_slice(),
             [(root, ImageRole::Source)],
             "the bound node relayouts"
         );
@@ -910,23 +964,27 @@ mod tests {
         assert_eq!(registry.take_wanted().len(), 1, "one source, one request");
 
         registry.unbind_node("app:///a.png", element, ImageRole::Source);
-        let nodes = registry
+        let applied = registry
             .apply(&loaded("app:///a.png", 12, 6))
             .expect("the load moved the entry");
-        assert_eq!(nodes.as_slice(), [(element, ImageRole::Placeholder)]);
+        assert_eq!(
+            applied.nodes.as_slice(),
+            [(element, ImageRole::Placeholder)]
+        );
     }
 
-    /// A failure names its nodes too, where it used to report none at all:
-    /// the bitmap they were drawing has stopped being one they can draw.
+    /// A failure names its nodes too — it is what an element owes an `error`
+    /// for — where it used to report none at all.
     #[test]
     fn a_failure_reports_its_nodes() {
         let mut registry = ImageRegistry::default();
         let element = node(1);
         registry.bind_node("app:///a.png", element, ImageRole::Source);
-        let nodes = registry
+        let applied = registry
             .apply(&failed("app:///a.png"))
             .expect("the failure moved the entry");
-        assert_eq!(nodes.as_slice(), [(element, ImageRole::Source)]);
+        assert_eq!(applied.loaded, None);
+        assert_eq!(applied.nodes.as_slice(), [(element, ImageRole::Source)]);
     }
 
     /// A zero axis is a failure, and reports as one rather than as the load
@@ -936,14 +994,44 @@ mod tests {
         let mut registry = ImageRegistry::default();
         let element = node(1);
         registry.bind_node("app:///bad.png", element, ImageRole::Source);
-        let nodes = registry
+        let applied = registry
             .apply(&loaded("app:///bad.png", 0, 4))
             .expect("the report moved the entry");
-        assert_eq!(nodes.as_slice(), [(element, ImageRole::Source)]);
+        assert_eq!(applied.loaded, None);
+        assert_eq!(applied.nodes.as_slice(), [(element, ImageRole::Source)]);
+    }
+
+    /// A source that settled before a node bound to it is never reported
+    /// again, so the bind is the only place its outcome can be learnt.
+    #[test]
+    fn a_settled_source_answers_a_later_bind() {
+        let mut registry = ImageRegistry::default();
+        let element = node(1);
+        registry.bind_node("app:///a.png", element, ImageRole::Source);
         assert_eq!(
-            registry.presented_dimensions(Some("app:///bad.png"), None),
+            registry.outcome_for("app:///a.png", element),
             None,
-            "and it has no dimensions to give the box it was drawn in"
+            "a pending source owes nothing yet: the report will carry it"
+        );
+
+        registry.apply(&loaded("app:///a.png", 12, 6));
+        registry.apply(&failed("app:///b.png"));
+        assert_eq!(
+            registry.outcome_for("app:///a.png", node(2)),
+            Some(ImageOutcome::Loaded {
+                node: node(2),
+                width: 12,
+                height: 6
+            })
+        );
+        assert_eq!(
+            registry.outcome_for("app:///b.png", node(2)),
+            Some(ImageOutcome::Failed { node: node(2) })
+        );
+        assert_eq!(
+            registry.outcome_for("app:///never-seen.png", node(2)),
+            None,
+            "a source nothing has asked for has settled on nothing"
         );
     }
 

@@ -396,9 +396,12 @@ job runs one synchronous operation under the borrows of the shared runtime and
 the realm, and then the epilogue, in this order — due timers first, because
 whatever just ran may have armed or cleared one and its mutation should ride the
 same frame; the commit next, so the frame exists before anything implying it;
-then the boot report, the `BeginFrame` acknowledgement, the module requests that
-entry produced, the next timer deadline republished only when it moved, and
-finally the checkpoint generation as of this entry. `Page::settle` is the
+then the two batches of engine-decided events that commit may have left owing —
+`contentvisibilityautostatechange` and an `<image>`'s `load`/`error`, each
+posted as one fresh entry rather than run here, so a handler's own mutation
+gets a commit of its own — the boot report, the `BeginFrame` acknowledgement,
+the module requests that entry produced, the next timer deadline republished
+only when it moved, and finally the checkpoint generation as of this entry. `Page::settle` is the
 epilogue alone, for a wake that carries no operation of its own.
 `Page::open_realm` is a job too and the only one outside `enter`, because the
 realm it would enter does not exist until it returns; the disposal exchange in
@@ -729,9 +732,12 @@ imports its native operations directly; nothing is installed as
 and Element-PAPI import declarations. Event delivery travels back through the
 loaded `bobcat:element` namespace's `__BobcatDispatchEvent` export, once per
 dispatch, carrying the whole event path as two comma-joined id strings and
-everything else as numbers: the event's `timestamp`, the position its `detail`
-reports, a wheel delta when it has one, and — for a touch event — four numbers
-per touch point.
+everything else as primitives: whether the event bubbles — which decides how
+much of that path the bind pass runs on, and whether the `global-bindEvent`
+pass runs at all — the event's `timestamp`, and a numeric detail kind followed
+by the numbers that kind spends (a position and an optional wheel delta plus
+four numbers per touch point for a routed input event; an intrinsic size for an
+`<image>`'s `load`; none at all for its `error`).
 
 Because `bobcat-internal:host` resolves from any module in the realm, a card
 can reach `createDocument` too. Constructing a second `Document` is refused,

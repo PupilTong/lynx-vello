@@ -37,7 +37,7 @@ pub use vello;
 
 pub use crate::paint::compose::FilterGroup;
 pub use crate::render::image::{
-    FrameImages, ImageEvent, ImageInbox, ImageReports, ImageRole, ImageSizeHint,
+    FrameImages, ImageEvent, ImageInbox, ImageOutcome, ImageReports, ImageRole, ImageSizeHint,
     MAX_RENDERABLE_DIMENSION, NoImages, is_renderable,
 };
 pub use crate::style::animation::AnimationTick;

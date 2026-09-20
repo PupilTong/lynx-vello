@@ -30,7 +30,7 @@ pub(crate) use self::style::{
     establishes_absolute_containing_block, establishes_fixed_containing_block, generates_no_box,
     paragraph_limits_changed, shaping_inputs_changed, skips_contents,
 };
-use crate::render::image::ImageRole;
+use crate::render::image::{ImageOutcome, ImageRole};
 use crate::tree::document::{DOCUMENT_ELEMENT_NODE_ID, Document, NodeLayoutState, RelayoutKind};
 
 pub(crate) static ANONYMOUS_STYLE: LazyLock<Arc<ComputedValues>> = LazyLock::new(|| {
@@ -112,10 +112,13 @@ impl<T> Document<T> {
     /// later. Handing a role the value it already holds does nothing at all:
     /// the call returns before it binds, asks, or invalidates anything.
     ///
-    /// Binding is what asks the host for the source, so a URL this document
-    /// has already seen settle answers here rather than through a later
-    /// report: one URL is reported once, and a second mount of a known one
-    /// gets no report of its own.
+    /// Binding is what asks the host for the source, so the answer may already
+    /// be in: a second mount of a URL this document has already seen settled
+    /// is reported by nothing else ever again, and the [`ImageOutcome`] this
+    /// returns is the only place its caller can learn what it got. `None` for
+    /// a source still loading, whose outcome
+    /// [`Self::apply_image_events`](Self::apply_image_events) will carry, and
+    /// for a call that changed nothing.
     ///
     /// The element's natural size is this document's, not the caller's: it is
     /// recomputed here from whichever source the element now draws, so it
@@ -126,7 +129,12 @@ impl<T> Document<T> {
     /// layout change on its own: being replaced forces `DisplayMode::Leaf`,
     /// which sizes the box from its natural size and hides every child. Either
     /// role alone is enough to make an element replaced.
-    pub fn set_image_source(&mut self, id: crate::NodeId, role: ImageRole, value: Option<&str>) {
+    pub fn set_image_source(
+        &mut self,
+        id: crate::NodeId,
+        role: ImageRole,
+        value: Option<&str>,
+    ) -> Option<ImageOutcome> {
         let (changed, was_replaced, previous) = {
             let node = self
                 .arenas_mut()
@@ -141,17 +149,26 @@ impl<T> Document<T> {
             (node.set_image_source(role, value), was_replaced, previous)
         };
         if !changed {
-            return;
+            return None;
         }
         // The registry has to know which node presents which source, or a
         // completed load has nobody to hand its intrinsic size to.
         if let Some(previous) = previous {
             self.images.unbind_node(&previous, id, role);
         }
+        let mut outcome = None;
         if let Some(value) = value {
             self.images.bind_node(value, id, role);
+            // Only the element's own source has an outcome to report: a
+            // placeholder is an interim picture the page did not ask about, so
+            // neither its load nor its failure is an event. `ImageOutcome` has
+            // no variant naming one, and this is where that stays true.
+            if role == ImageRole::Source {
+                outcome = self.images.outcome_for(value, id);
+            }
         }
         self.note_replaced_change(id, was_replaced);
+        outcome
     }
 
     /// Settles a source change: the natural size the element's new sources
@@ -1359,34 +1376,61 @@ mod tests {
 
     /// A source that settled before this element bound to it is reported by
     /// nothing else ever again — one URL is reported once — so the bind is
-    /// where its size arrives, and the element lays out in the commit that
-    /// first draws it.
+    /// where its outcome and its size both arrive.
     #[test]
-    fn binding_a_settled_source_sizes_the_element() {
+    fn binding_a_settled_source_reports_its_outcome_and_sizes_the_element() {
         let (mut document, first) = image_document();
         let root = document.document_element().id();
-        document.set_image_source(first, ImageRole::Source, Some(SRC));
+        assert_eq!(
+            document.set_image_source(first, ImageRole::Source, Some(SRC)),
+            None,
+            "a pending source owes nothing yet"
+        );
         document.apply_image_events(&[loaded(SRC, 40, 20), failed(OTHER_SRC)]);
 
         let second = document.create_element("image", ());
         document.append_child(root, second);
-        document.set_image_source(second, ImageRole::Source, Some(SRC));
-        assert_eq!(document.natural_size(second), natural_size(40, 20));
+        assert_eq!(
+            document.set_image_source(second, ImageRole::Source, Some(SRC)),
+            Some(crate::ImageOutcome::Loaded {
+                node: second,
+                width: 40,
+                height: 20
+            })
+        );
+        assert_eq!(
+            document.natural_size(second),
+            natural_size(40, 20),
+            "and it lays out in the commit that first draws it"
+        );
 
         let third = document.create_element("image", ());
         document.append_child(root, third);
-        document.set_image_source(third, ImageRole::Source, Some(OTHER_SRC));
         assert_eq!(
-            document.natural_size(third),
-            NaturalSize::NONE,
-            "a source that will never have pixels describes nothing"
+            document.set_image_source(third, ImageRole::Source, Some(OTHER_SRC)),
+            Some(crate::ImageOutcome::Failed { node: third })
+        );
+        assert_eq!(document.natural_size(third), NaturalSize::NONE);
+    }
+
+    /// Rewriting the source that is already there changes nothing, and
+    /// reports nothing — a second `load` for a picture that never moved.
+    #[test]
+    fn rewriting_the_same_source_reports_nothing() {
+        let (mut document, image) = image_document();
+        document.set_image_source(image, ImageRole::Source, Some(SRC));
+        document.apply_image_events(&[loaded(SRC, 40, 20)]);
+
+        assert_eq!(
+            document.set_image_source(image, ImageRole::Source, Some(SRC)),
+            None
         );
     }
 
-    /// One source may be another element's placeholder, and a report reaches
-    /// both: the natural size is the drawn bitmap's whichever role it is in.
+    /// Only the elements the source belongs to are reported: a placeholder is
+    /// an interim picture the page did not ask about.
     #[test]
-    fn a_report_reaches_every_element_holding_the_source_in_either_role() {
+    fn a_report_names_only_the_elements_whose_own_source_settled() {
         let (mut document, owner) = image_document();
         let root = document.document_element().id();
         let borrower = document.create_element("image", ());
@@ -1394,12 +1438,55 @@ mod tests {
         document.set_image_source(owner, ImageRole::Source, Some(SRC));
         document.set_image_source(borrower, ImageRole::Placeholder, Some(SRC));
 
-        document.apply_image_events(&[loaded(SRC, 40, 20)]);
-        assert_eq!(document.natural_size(owner), natural_size(40, 20));
+        assert_eq!(
+            document.apply_image_events(&[loaded(SRC, 40, 20)]),
+            vec![crate::ImageOutcome::Loaded {
+                node: owner,
+                width: 40,
+                height: 20
+            }]
+        );
         assert_eq!(
             document.natural_size(borrower),
             natural_size(40, 20),
             "the placeholder still sizes the element drawing it"
+        );
+
+        let (mut document, image) = image_document();
+        document.set_image_source(image, ImageRole::Placeholder, Some(PLACEHOLDER));
+        assert!(
+            document
+                .apply_image_events(&[failed(PLACEHOLDER)])
+                .is_empty(),
+            "a placeholder failing is nobody's event either"
+        );
+
+        // Nor at the bind, which is the other place an outcome is produced:
+        // the role decides, so a settled URL bound as a placeholder answers
+        // with nothing.
+        let second = document.create_element("image", ());
+        document.append_child(document.document_element().id(), second);
+        assert_eq!(
+            document.set_image_source(second, ImageRole::Placeholder, Some(PLACEHOLDER)),
+            None,
+            "a settled placeholder is still nobody's event"
+        );
+    }
+
+    /// A failure names its elements, where it used to name none: an `error`
+    /// is owed to exactly the elements the source belongs to.
+    #[test]
+    fn a_failed_source_reports_its_elements() {
+        let (mut document, image) = image_document();
+        document.set_image_source(image, ImageRole::Source, Some(SRC));
+
+        assert_eq!(
+            document.apply_image_events(&[failed(SRC)]),
+            vec![crate::ImageOutcome::Failed { node: image }]
+        );
+        assert!(
+            document.apply_image_events(&[failed(SRC)]).is_empty(),
+            "and a source reported twice moved nothing, so it owes nothing"
         );
     }
 
@@ -1435,9 +1522,12 @@ mod tests {
         document.set_image_source(image, ImageRole::Placeholder, Some(PLACEHOLDER));
         document.drop_element(image);
 
-        // A dropped element has no size to set, and an id the registry still
-        // held would reach `set_natural_size` with a stale one.
-        document.apply_image_events(&[loaded(SRC, 40, 20), loaded(PLACEHOLDER, 4, 4)]);
+        assert!(
+            document
+                .apply_image_events(&[loaded(SRC, 40, 20), loaded(PLACEHOLDER, 4, 4)])
+                .is_empty(),
+            "a dropped element owes no events and has no size to set"
+        );
     }
 
     /// Whether the node's committing parent proved its input survives any
