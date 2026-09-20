@@ -729,6 +729,63 @@ consequential choice about whether to follow the spec or the quirk.
   `!important` in the UA sheet and the second argument
   [docs/style-assumptions.md](../style-assumptions.md) §D.15 admits;
   `the_ua_sheet_is_important_free_apart_from_the_text_block` pins the set.
+- **`<blur-view>`'s `blur-radius` is a CSS length here, where web-core and iOS
+  read a number and throw the unit away.** The attribute is the whole of the
+  component: it is reflected into a `backdrop-filter: blur(…)` presentational
+  hint (`crates/bobcat-core/src/main/tree/blur_view.rs`), installed under both
+  the native tag `blur-view` and the tag a compiled `.web.bundle` writes,
+  `x-blur-view` — web-core registers only the latter
+  (`web-elements/src/elements/XView/XBlurView.ts`) and native only the former
+  (`LYNX_LAZY_REGISTER_UI("blur-view")`, `@LynxBehavior(tagName =
+  ["blur-view"])`, `registry.cc`'s `map["blur-view"]`). The four references
+  disagree about units: web-core's `BlurRadius.ts` writes
+  `:host { backdrop-filter: blur(${parseFloat(newVal)}px) }` into a
+  per-instance shadow `<style>`, so `20rpx` becomes `20px`; iOS takes
+  `blur-radius` as a `LYNX_PROP_SETTER(…, CGFloat)` whose conversion is
+  `LynxConverter`'s `toCGFloat`, i.e. `[value doubleValue]`, dropping the
+  suffix the same way; Android runs the string through
+  `UnitUtils.toPxWithDisplayMetrics` (`rpx`, `ppx`, `px`, `%`, `rem`, `em`,
+  `vw`, `vh`); and Harmony parses it with `CSSStringParser::ParseLengthTo`
+  before handing it to ArkUI's `NODE_BACKDROP_BLUR`.
+  **Decision (user, 2026-09-20): unit conversion is the styling engine's job**,
+  so the attribute's text enters the cascade as a CSS length — which is
+  Android's and Harmony's behavior, and gives `rpx`, `em`, `vw` and `calc()`
+  one resolution path instead of a second, component-local one. A bare number
+  is the one rewrite: it is not a CSS length and every reference reads it as
+  pixels, so `25` is reflected as `25px`, from the *parsed* number rather than
+  by gluing `px` onto the text (`5.` is a `parseFloat` number and not a CSS
+  one, and `inf`/`NaN` must never reach a declaration). Consequences to know:
+  a page that wrote `blur-radius="20rpx"` expecting web-core's 20 *pixels* gets
+  ~10.47 px on a 393 px-wide viewport; a value the grammar rejects (`abc`,
+  `-4px`) clears the hint rather than keeping the radius before it, which is
+  why the reflection clears before it sets — `set_presentational_hint` is a
+  no-op on an invalid value; and author CSS or inline style naming
+  `backdrop-filter` outranks the attribute, as web-core's `:host` rule loses to
+  author styles.
+  Two smaller divergences ride along. **The element's own backgrounds and
+  borders paint**, which is web-core (the host element is an ordinary box
+  around a shadow `<slot>`) and not iOS, where `LynxUIBlurView` overrides
+  `background`, `background-color`, `background-image`, `background-size`,
+  `background-position`, `background-repeat`, `background-origin`,
+  `background-clip` and `background-capInsets` with empty bodies because the
+  view *is* a `UIVisualEffectView`. And **every platform-only property is
+  ignored** — `blur-effect` (the iOS `light`/`dark`/`extra-light`/`glass`/
+  `glass-container` system tint), `blur-sampling`, `spacing`,
+  `android-capture-target`, `enable-auto-blur`,
+  `experimental-update-blur-radius`, `ios-user-interface-style`,
+  `glass-interactive`, `glass-tint-color`, `glass-style` — which is what
+  web-core does too, since `BlurRadius` observes `blur-radius` alone.
+  On the cascade side both tags join `tree::ua_sheet`'s container list and its
+  `defaultOverflowVisible` rule, following native, where `LynxUIBlurView`
+  extends `LynxUIView`. web-core is narrower: `x-blur-view` is in
+  `linear.css`'s common block and in the linear *item* rules, but in neither
+  the `--lynx-display-toggle` list `defaultDisplayLinear` drives nor the
+  `[lynx-default-overflow-visible="true"] x-view` escape, so a browser gives it
+  a row flex box that always clips whichever way the two switches are set. That
+  is the same shape of divergence `scroll-view` and `list` record above, and
+  for the same reason: a per-tag exception would have to be `!important`, which
+  [docs/style-assumptions.md](../style-assumptions.md) §D.15 forbids in this
+  sheet.
 - **Almost every built-in component exposes a bespoke imperative JS method
   surface** (`invoke()`-based RPC: `scrollTo`, `getScrollInfo`,
   `setInputFilter`, `startAnimate`, etc.) instead of standard DOM
