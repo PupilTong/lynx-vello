@@ -13,8 +13,8 @@
 //! [`AtlasResidency`] is the second thing every target owes each frame, and
 //! every [`vello::Renderer`] rendered through this crate is paired with one.
 //! [`super::blur::FilterTextures`] is the third, and unlike the other two it
-//! is optional per frame: a frame with no `filter: blur()` group asks nothing
-//! of it.
+//! is optional per frame: a frame with no `filter: blur()` group and no
+//! `backdrop-filter` element asks nothing of it.
 
 use std::fmt;
 
@@ -225,7 +225,7 @@ impl Headless {
         self.filters.forget();
     }
 
-    /// Forgets which frame the `filter: blur()` bakes belong to, keeping the
+    /// Forgets which frame the offscreen bakes belong to, keeping the
     /// render target.
     ///
     /// Every consumer that points this renderer at a *second document* owes
@@ -235,11 +235,13 @@ impl Headless {
         self.filters.forget();
     }
 
-    /// Bakes `frame`'s `filter: blur()` groups, if it has any, and answers
-    /// the table [`crate::CommittedFrame::compose_into`] takes.
+    /// Bakes `frame`'s `filter: blur()` groups and `backdrop-filter`
+    /// elements, if it has any, and answers the table
+    /// [`crate::CommittedFrame::compose_into`] takes.
     ///
-    /// Call before composing. A frame with no filter group answers an empty
-    /// slice and touches no GPU resource.
+    /// Call before composing, at the same `animation_now` the composition
+    /// will use. A frame with no filter entry answers an empty slice and
+    /// touches no GPU resource.
     ///
     /// # Errors
     ///
@@ -250,6 +252,7 @@ impl Headless {
         images: &[Option<ImageData>],
         offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
         scroll_generation: u64,
+        animation_now: Option<f64>,
     ) -> Result<&[Option<ImageData>], GpuError> {
         let Self {
             context,
@@ -269,6 +272,7 @@ impl Headless {
             images,
             offset_of,
             scroll_generation,
+            animation_now,
         )
     }
 

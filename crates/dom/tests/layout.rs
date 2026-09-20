@@ -749,6 +749,64 @@ fn root_filter_is_exempt_from_fixed_containing_block_creation() {
 }
 
 #[test]
+fn backdrop_filter_establishes_the_fixed_containing_block() {
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; }
+         .host { display: flex; width: 300px; height: 200px; margin-left: 100px;
+                 backdrop-filter: blur(4px); }
+         .fixed { position: fixed; left: 10px; top: 20px; width: 30px; height: 40px; }",
+    );
+    let root = h.doc.root;
+    let host = h.doc.el(root, ".host");
+    let fixed = h.doc.el(host, ".fixed");
+    h.layout();
+
+    // Relative to `.host`, which itself starts at x = 100. An uncontained
+    // fixed box would resolve against the viewport and land at x = -90 here.
+    assert_eq!(h.rect(host).0, 100.0);
+    assert_eq!(h.rect(fixed), (10.0, 20.0, 30.0, 40.0));
+}
+
+#[test]
+fn backdrop_filter_establishes_the_absolute_containing_block() {
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; }
+         .host { display: flex; width: 300px; height: 200px; margin-left: 100px;
+                 backdrop-filter: blur(4px); }
+         .abs { position: absolute; left: 10px; top: 20px; width: 30px; height: 40px; }",
+    );
+    let root = h.doc.root;
+    let host = h.doc.el(root, ".host");
+    let abs = h.doc.el(host, ".abs");
+    h.layout();
+
+    assert_eq!(h.rect(abs), (10.0, 20.0, 30.0, 40.0));
+}
+
+#[test]
+fn root_backdrop_filter_is_exempt_from_fixed_containing_block_creation() {
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; border: 10px solid black;
+                backdrop-filter: blur(4px); }
+         .host { display: flex; width: 300px; height: 200px; margin-left: 100px;
+                 backdrop-filter: blur(4px); }
+         .fixed { position: fixed; left: 0; top: 0; width: 30px; height: 40px; }",
+    );
+    let root = h.doc.root;
+    let root_fixed = h.doc.el(root, ".fixed");
+    let host = h.doc.el(root, ".host");
+    let captured_fixed = h.doc.el(host, ".fixed");
+    h.layout();
+
+    // filter-effects-2 §2.1 exempts a document root element: the root's fixed
+    // child resolves against the viewport, so the root's own 10px border does
+    // not shift it. A non-root `backdrop-filter` element does capture its own.
+    assert_eq!(h.rect(root_fixed), (0.0, 0.0, 30.0, 40.0));
+    assert_eq!(h.rect(captured_fixed), (0.0, 0.0, 30.0, 40.0));
+    assert_eq!(h.rect(host).0, 110.0);
+}
+
+#[test]
 fn fixed_inside_nested_hoisted_subtrees_completes_in_preorder() {
     let mut h = Harness::new(
         "page { display: flex; width: 800px; height: 600px; }

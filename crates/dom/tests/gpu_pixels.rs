@@ -530,7 +530,7 @@ fn render_filtered(gpu: &mut dom::render::gpu::Headless, doc: &mut Doc, size: u3
         .committed_frame()
         .expect("render leaves a committed frame retained");
     let filtered: Vec<Option<dom::vello::peniko::ImageData>> = gpu
-        .prepare_filters(&frame, &[], &|_| None, 0)
+        .prepare_filters(&frame, &[], &|_| None, 0, None)
         .expect("the filter bakes render")
         .to_vec();
     let mut scene = Scene::new();
@@ -771,7 +771,7 @@ fn a_blurred_box_in_a_scroller_moves_with_the_offset() {
     gpu.forget_filters();
     for offset in [0.0_f32, 40.0] {
         let filtered: Vec<Option<dom::vello::peniko::ImageData>> = gpu
-            .prepare_filters(&frame, &[], &|_| Some(Vector2D::new(0.0, offset)), 0)
+            .prepare_filters(&frame, &[], &|_| Some(Vector2D::new(0.0, offset)), 0, None)
             .expect("the filter bakes render")
             .to_vec();
         let mut scene = Scene::new();
@@ -907,7 +907,7 @@ fn a_group_over_the_budget_renders_unblurred() {
         "and it is past the budget ({width}x{height})",
     );
     let filtered: Vec<Option<dom::vello::peniko::ImageData>> = gpu
-        .prepare_filters(&frame, &[], &|_| None, 0)
+        .prepare_filters(&frame, &[], &|_| None, 0, None)
         .expect("a refused group is not an error")
         .to_vec();
     assert_eq!(filtered.len(), 1);
@@ -926,5 +926,505 @@ fn a_group_over_the_budget_renders_unblurred() {
         luma(&pixels, 256, 128, 128) < 8,
         "the fallback paints the box, hard-edged ({})",
         luma(&pixels, 256, 128, 128),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `backdrop-filter`
+//
+// Every property here is a relationship between what is inside the element's
+// border box and what is beside it, so the assertions compare the two rather
+// than naming absolute colours: the crop is the border box, the source is
+// what was painted before the element inside its Backdrop Root, and the
+// element's own painting composites over the result.
+// ---------------------------------------------------------------------------
+
+/// A page whose left half is black and right half is white, with one
+/// absolutely positioned box carrying `extra` over the seam.
+///
+/// The seam is the subject: a blur turns the step into a gradient, and every
+/// pixel of that gradient is inside the box while every pixel outside it
+/// stays a hard edge. The page paints its own opaque white, because a
+/// backdrop is made of what the *scene* drew — the render's base colour is
+/// behind the scene, not in it, so a transparent page would leave the
+/// backdrop's light half empty.
+fn backdrop_page(size: f32, box_rect: (f32, f32, f32, f32), extra: &str) -> Doc {
+    let (left, top, width, height) = box_rect;
+    let css = format!(
+        "page {{ display: flex; position: relative; width: {size}px; height: {size}px;
+                 background-color: #ffffff; }}
+         .half {{ display: flex; position: absolute; left: 0px; top: 0px;
+                  width: {half}px; height: {size}px; background-color: #000000; }}
+         .box {{ display: flex; position: absolute; left: {left}px; top: {top}px;
+                 width: {width}px; height: {height}px; {extra} }}",
+        half = size / 2.0,
+    );
+    let mut doc = Doc::with_css_sized(&css, size, size);
+    let root = doc.root;
+    doc.el(root, "half");
+    doc.el(root, "box");
+    doc
+}
+
+/// [`render_filtered`] with the two facts a backdrop test rests on asserted
+/// first: the frame recorded `entries` of them, and every one of them baked.
+///
+/// Without that, a backdrop test asserting "what is beside the element is
+/// untouched" would pass just as happily with no backdrop drawn at all.
+fn render_baked(
+    gpu: &mut dom::render::gpu::Headless,
+    doc: &mut Doc,
+    size: u32,
+    entries: usize,
+) -> Vec<u8> {
+    doc.dom.render();
+    gpu.forget_filters();
+    let frame = doc
+        .dom
+        .committed_frame()
+        .expect("render leaves a committed frame retained");
+    assert_eq!(
+        frame.filter_groups().len(),
+        entries,
+        "the frame's filter entries",
+    );
+    let filtered: Vec<Option<dom::vello::peniko::ImageData>> = gpu
+        .prepare_filters(&frame, &[], &|_| None, 0, None)
+        .expect("the bakes render")
+        .to_vec();
+    assert!(
+        filtered.iter().all(Option::is_some),
+        "every recorded entry baked a texture",
+    );
+    let mut scene = Scene::new();
+    frame.compose_into(&mut scene, &[], &filtered, &|_| None, None);
+    gpu.render(&scene, &[], size, size, Color::WHITE)
+        .expect("headless render")
+}
+
+/// Inside the box the black/white seam is a monotone gradient; outside it the
+/// same seam is still one hard step; and the box's own translucent background
+/// composites over the filtered backdrop rather than under it.
+#[test]
+fn a_backdrop_blur_softens_the_seam_only_inside_the_box() {
+    let mut gpu = headless("a_backdrop_blur_softens_the_seam_only_inside_the_box");
+    let mut doc = backdrop_page(
+        128.0,
+        (32.0, 32.0, 64.0, 64.0),
+        "backdrop-filter: blur(6px); background-color: rgb(255 0 0 / 20%);",
+    );
+    let pixels = render_baked(&mut gpu, &mut doc, 128, 1);
+
+    // Inside the box (y = 64), across the seam at x = 64: monotone and never
+    // a step, because sigma 6 spreads it over some 36 px.
+    let inside: Vec<i32> = (46..=82).map(|x| luma(&pixels, 128, x, 64)).collect();
+    for pair in inside.windows(2) {
+        assert!(
+            pair[1] >= pair[0] - 1,
+            "the blurred seam must rise monotonically: {inside:?}",
+        );
+    }
+    assert!(
+        inside[0] < 60 && inside[inside.len() - 1] > 180,
+        "the gradient must still span the seam ({} to {})",
+        inside[0],
+        inside[inside.len() - 1],
+    );
+    assert!(
+        (inside[14]..=inside[22]).contains(&luma(&pixels, 128, 64, 64)),
+        "and the seam's own pixel sits inside it",
+    );
+
+    // Outside the box (y = 16), the same seam is one step.
+    assert!(
+        luma(&pixels, 128, 60, 16) < 8,
+        "unfiltered black left of it"
+    );
+    assert!(
+        luma(&pixels, 128, 68, 16) >= 250,
+        "unfiltered white right of it",
+    );
+
+    // The box's own 20% red over the blurred backdrop: on the white side the
+    // red channel stays high while green falls, which an unfiltered backdrop
+    // with no box on top could not produce.
+    let over_white = pixel(&pixels, 128, 88, 64);
+    assert!(
+        over_white[0] > 240 && over_white[1] < 215,
+        "the box's own background composites on top ({over_white:?})",
+    );
+}
+
+/// A later sibling overlapping the box is not part of its backdrop.
+///
+/// The Backdrop Root Image is everything painted *before* the element; a box
+/// drawn after it is in front of both the element and its backdrop, and shows
+/// with a hard edge.
+#[test]
+fn a_later_sibling_is_not_in_the_backdrop() {
+    let mut gpu = headless("a_later_sibling_is_not_in_the_backdrop");
+    let css = "page { display: flex; position: relative; width: 128px; height: 128px;
+                background-color: #ffffff; }
+         .under { display: flex; position: absolute; left: 72px; top: 0px;
+                  width: 16px; height: 128px; background-color: #000000; }
+         .box { display: flex; position: absolute; left: 16px; top: 16px;
+                width: 96px; height: 96px; backdrop-filter: blur(6px); }
+         .over { display: flex; position: absolute; left: 32px; top: 0px;
+                 width: 16px; height: 128px; background-color: #000000; }";
+    let mut doc = Doc::with_css_sized(css, 128.0, 128.0);
+    let root = doc.root;
+    doc.el(root, "under");
+    doc.el(root, "box");
+    doc.el(root, "over");
+    let pixels = render_baked(&mut gpu, &mut doc, 128, 1);
+
+    // `.under` is painted before the box, so inside the box its edges (x = 72
+    // and x = 88) are spread and its centre is no longer solid.
+    assert!(
+        (40..=190).contains(&luma(&pixels, 128, 80, 64)),
+        "the earlier bar is blurred inside the box ({})",
+        luma(&pixels, 128, 80, 64),
+    );
+    // `.over` is painted after it, so its edges (x = 32 and x = 48) are not.
+    assert!(
+        luma(&pixels, 128, 40, 64) < 8,
+        "the later bar stays opaque ({})",
+        luma(&pixels, 128, 40, 64),
+    );
+    assert!(
+        luma(&pixels, 128, 30, 64) >= 250 && luma(&pixels, 128, 50, 64) >= 250,
+        "and its edges stay hard ({}, {})",
+        luma(&pixels, 128, 30, 64),
+        luma(&pixels, 128, 50, 64),
+    );
+}
+
+/// An `opacity` ancestor is a Backdrop Root: the element behind it is not in
+/// its descendant's backdrop, and the descendant's own sibling is.
+///
+/// filter-effects-2 §2.2. The whole point of the rule is that an ancestor
+/// which flattens its subtree hides everything behind it, so an element
+/// inside it cannot read through.
+#[test]
+fn an_opacity_ancestor_bounds_the_backdrop() {
+    let mut gpu = headless("an_opacity_ancestor_bounds_the_backdrop");
+    let css = "page { display: flex; position: relative; width: 128px; height: 128px;
+                background-color: #ffffff; }
+         .outside { display: flex; position: absolute; left: 0px; top: 0px;
+                    width: 64px; height: 128px; background-color: #000000; }
+         .root { display: flex; position: absolute; left: 0px; top: 0px;
+                 width: 128px; height: 128px; opacity: 0.5; }
+         .inside { display: flex; position: absolute; left: 0px; top: 0px;
+                   width: 24px; height: 128px; background-color: #ffffff; }
+         .box { display: flex; position: absolute; left: 4px; top: 40px;
+                width: 120px; height: 48px; backdrop-filter: blur(5px); }";
+    let mut doc = Doc::with_css_sized(css, 128.0, 128.0);
+    let root = doc.root;
+    doc.el(root, "outside");
+    let wrap = doc.el(root, "root");
+    doc.el(wrap, "inside");
+    doc.el(wrap, "box");
+    let pixels = render_baked(&mut gpu, &mut doc, 128, 1);
+
+    // `.outside`'s edge is at x = 64, and it is painted before the Backdrop
+    // Root: inside the box it must still be one step, exactly as it is above
+    // the box.
+    for y in [20_u32, 64] {
+        let step = luma(&pixels, 128, 65, y) - luma(&pixels, 128, 63, y);
+        assert!(
+            step > 100,
+            "the edge outside the Backdrop Root is a step at y {y} ({step})",
+        );
+    }
+    assert_eq!(
+        luma(&pixels, 128, 58, 64),
+        luma(&pixels, 128, 58, 20),
+        "and nothing of it bleeds inward under the box",
+    );
+
+    // `.inside`'s edge is at x = 24, inside the Backdrop Root and before the
+    // box: under the box its white spreads onto the black, above the box it
+    // does not.
+    let spread = luma(&pixels, 128, 28, 64) - luma(&pixels, 128, 28, 20);
+    assert!(
+        spread > 10,
+        "the edge inside the Backdrop Root is blurred under the box ({spread})",
+    );
+}
+
+/// A `position: fixed` box over a scroller re-bakes as the scroller moves:
+/// its backdrop rides a chain the box itself does not.
+///
+/// This is `inner_chains` on a backdrop entry. The box never moves, so a
+/// bake that ignored the offset would show the same pixels forever.
+#[test]
+fn a_fixed_backdrop_over_a_scroller_rebakes_per_offset() {
+    use dom::Vector2D;
+
+    let mut gpu = headless("a_fixed_backdrop_over_a_scroller_rebakes_per_offset");
+    let mut doc = Doc::with_css_sized(
+        "page { display: flex; position: relative; width: 128px; height: 128px; }
+         .scroller { display: flex; flex-direction: column; overflow: scroll;
+                     width: 128px; height: 128px; }
+         .stripe { display: flex; flex-shrink: 0; width: 128px; height: 24px;
+                   background-color: #000000; }
+         .gap { display: flex; flex-shrink: 0; width: 128px; height: 24px; }
+         .box { display: flex; position: fixed; left: 16px; top: 40px;
+                width: 96px; height: 48px; backdrop-filter: blur(4px); }",
+        128.0,
+        128.0,
+    );
+    let root = doc.root;
+    let scroller = doc.el(root, "scroller");
+    for class in ["stripe", "gap", "stripe", "gap", "stripe", "gap"] {
+        doc.el(scroller, class);
+    }
+    doc.el(root, "box");
+    doc.dom.render();
+    let frame = doc
+        .dom
+        .committed_frame()
+        .expect("render leaves a committed frame retained");
+    let entries = frame.filter_groups();
+    assert_eq!(entries.len(), 1, "one backdrop entry");
+    assert!(entries[0].is_backdrop());
+
+    gpu.forget_filters();
+    let mut reads = Vec::new();
+    for (generation, offset) in [(0_u64, 0.0_f32), (1, 12.0)] {
+        let filtered: Vec<Option<dom::vello::peniko::ImageData>> = gpu
+            .prepare_filters(
+                &frame,
+                &[],
+                &|_| Some(Vector2D::new(0.0, offset)),
+                generation,
+                None,
+            )
+            .expect("the backdrop bakes")
+            .to_vec();
+        assert!(filtered[0].is_some(), "offset {offset} baked a texture");
+        let mut scene = Scene::new();
+        frame.compose_into(
+            &mut scene,
+            &[],
+            &filtered,
+            &|_| Some(Vector2D::new(0.0, offset)),
+            None,
+        );
+        reads.push(
+            gpu.render(&scene, &[], 128, 128, Color::WHITE)
+                .expect("headless render"),
+        );
+    }
+    let moved = (44..=84_u32)
+        .filter(|&y| (luma(&reads[0], 128, 64, y) - luma(&reads[1], 128, 64, y)).abs() > 12)
+        .count();
+    assert!(
+        moved >= 8,
+        "the fixed box's backdrop must follow the scroller ({moved} rows differ)",
+    );
+}
+
+/// The crop is the element's *rounded* border box: a pixel inside the bounding
+/// box but outside the radius shows the page untouched.
+///
+/// The backdrop is eight-pixel stripes, which a σ = 6 blur washes to mid
+/// gray, so every pixel the crop admits changes and every pixel it refuses
+/// keeps its stripe exactly.
+#[test]
+fn a_rounded_backdrop_crops_to_its_radius() {
+    let mut gpu = headless("a_rounded_backdrop_crops_to_its_radius");
+    let css = "page { display: flex; position: relative; width: 128px; height: 128px;
+                background-color: #ffffff; }
+         .stripe { display: flex; position: absolute; top: 0px;
+                   width: 8px; height: 128px; background-color: #000000; }
+         .box { display: flex; position: absolute; left: 32px; top: 32px;
+                width: 64px; height: 64px; border-radius: 50%;
+                backdrop-filter: blur(6px); }";
+    let mut doc = Doc::with_css_sized(css, 128.0, 128.0);
+    let root = doc.root;
+    for index in 0..8_u32 {
+        let stripe = doc.el(root, "stripe");
+        doc.dom
+            .set_inline_style(stripe, &format!("left: {}px", index * 16));
+    }
+    doc.el(root, "box");
+    let pixels = render_baked(&mut gpu, &mut doc, 128, 1);
+
+    // y = 34 is inside the bounding box and outside the circle (the corner
+    // is 42 px from the centre, the radius is 32).
+    assert!(
+        luma(&pixels, 128, 34, 34) < 12,
+        "a black stripe outside the radius is untouched ({})",
+        luma(&pixels, 128, 34, 34),
+    );
+    assert!(
+        luma(&pixels, 128, 44, 34) > 243,
+        "and so is the white one beside it ({})",
+        luma(&pixels, 128, 44, 34),
+    );
+    // y = 64 is the centre line; these two are deep inside the circle and far
+    // enough from the crop's own edges that the mirror is not what they read.
+    // One sits in a black stripe and one in a white gap, and both wash to the
+    // same middle.
+    for x in [60_u32, 70] {
+        let washed = luma(&pixels, 128, x, 64);
+        assert!(
+            (80..=175).contains(&washed),
+            "inside the radius the stripes wash out at x {x} ({washed})",
+        );
+    }
+}
+
+/// A backdrop that is uniform white inside the crop and black just outside it
+/// stays white to the element's own edge.
+///
+/// The mirror edge mode is what makes that true. A bake that read transparent
+/// black past the crop — which is the edge mode a `filter: blur()` group's
+/// margin deliberately supplies — would leave a dark rim one σ wide all the
+/// way around.
+#[test]
+fn a_backdrop_mirrors_at_its_crop_rather_than_darkening() {
+    let mut gpu = headless("a_backdrop_mirrors_at_its_crop_rather_than_darkening");
+    let css = "page { display: flex; position: relative; width: 128px; height: 128px;
+                background-color: #ffffff; }
+         .frame { display: flex; position: absolute; left: 0px; top: 0px;
+                  width: 128px; height: 128px; background-color: #000000; }
+         .hole { display: flex; position: absolute; left: 32px; top: 32px;
+                 width: 64px; height: 64px; background-color: #ffffff; }
+         .box { display: flex; position: absolute; left: 32px; top: 32px;
+                width: 64px; height: 64px; backdrop-filter: blur(6px); }";
+    let mut doc = Doc::with_css_sized(css, 128.0, 128.0);
+    let root = doc.root;
+    doc.el(root, "frame");
+    doc.el(root, "hole");
+    doc.el(root, "box");
+    let pixels = render_baked(&mut gpu, &mut doc, 128, 1);
+
+    for offset in 0..6_u32 {
+        for along in (34..=94_u32).step_by(6) {
+            for (x, y) in [
+                (32 + offset, along),
+                (95 - offset, along),
+                (along, 32 + offset),
+                (along, 95 - offset),
+            ] {
+                assert!(
+                    luma(&pixels, 128, x, y) >= 250,
+                    "({x}, {y}) is {} — the crop's edge darkened",
+                    luma(&pixels, 128, x, y),
+                );
+            }
+        }
+    }
+    assert!(
+        luma(&pixels, 128, 30, 64) < 8,
+        "and the black outside the element is untouched",
+    );
+}
+
+/// A backdrop whose bake would exceed the area budget draws nothing, leaving
+/// the unfiltered backdrop showing.
+#[test]
+fn a_backdrop_over_the_budget_stays_unfiltered() {
+    let mut gpu = headless("a_backdrop_over_the_budget_stays_unfiltered");
+    let mut doc = Doc::with_css_sized(
+        "page { display: flex; position: relative; width: 4000px; height: 4000px; }
+         .half { display: flex; position: absolute; left: 0px; top: 0px;
+                 width: 2000px; height: 4000px; background-color: #000000; }
+         .box { display: flex; position: absolute; left: 500px; top: 500px;
+                width: 3000px; height: 3000px; backdrop-filter: blur(8px); }",
+        4000.0,
+        4000.0,
+    );
+    let root = doc.root;
+    doc.el(root, "half");
+    doc.el(root, "box");
+    doc.dom.set_device_pixel_ratio(2.0);
+    doc.dom.render();
+    gpu.forget_filters();
+    let frame = doc
+        .dom
+        .committed_frame()
+        .expect("render leaves a committed frame retained");
+    let entries = frame.filter_groups();
+    assert_eq!(entries.len(), 1, "the entry is still recorded");
+    let (width, height) = entries[0].size();
+    assert!(
+        u64::from(width) * u64::from(height) > dom::render::blur::MAX_FILTER_AREA,
+        "and it is past the budget ({width}x{height})",
+    );
+    let filtered: Vec<Option<dom::vello::peniko::ImageData>> = gpu
+        .prepare_filters(&frame, &[], &|_| None, 0, None)
+        .expect("a refused entry is not an error")
+        .to_vec();
+    assert_eq!(filtered.len(), 1);
+    assert!(
+        filtered[0].is_none(),
+        "an entry over the budget gets no texture",
+    );
+    let mut scene = Scene::new();
+    frame.compose_into(&mut scene, &[], &filtered, &|_| None, None);
+    let pixels = gpu
+        .render(&scene, &[], 256, 256, Color::WHITE)
+        .expect("the unfiltered fallback renders");
+    // The seam is at device x = 4000, far outside this target; everything
+    // drawn here is the black half, hard-edged and unfiltered.
+    assert!(
+        luma(&pixels, 256, 128, 128) < 8,
+        "the fallback leaves the backdrop showing ({})",
+        luma(&pixels, 256, 128, 128),
+    );
+}
+
+/// A colour-only `backdrop-filter` bakes at σ = 0 and still isolates its
+/// copy: the backdrop is darkened inside the element's box and nowhere else.
+#[test]
+fn a_colour_only_backdrop_darkens_only_inside_the_box() {
+    let mut gpu = headless("a_colour_only_backdrop_darkens_only_inside_the_box");
+    let mut doc = backdrop_page(
+        128.0,
+        (32.0, 32.0, 64.0, 64.0),
+        "backdrop-filter: brightness(0.5);",
+    );
+    doc.dom.render();
+    gpu.forget_filters();
+    let frame = doc
+        .dom
+        .committed_frame()
+        .expect("render leaves a committed frame retained");
+    assert_eq!(frame.filter_groups().len(), 1, "one backdrop entry");
+    assert!(
+        (frame.filter_groups()[0].sigma - 0.0).abs() < f32::EPSILON,
+        "a colour-only list has no blur",
+    );
+    let filtered: Vec<Option<dom::vello::peniko::ImageData>> = gpu
+        .prepare_filters(&frame, &[], &|_| None, 0, None)
+        .expect("the backdrop bakes")
+        .to_vec();
+    assert!(
+        filtered[0].is_some(),
+        "a zero-sigma backdrop still produces its texture",
+    );
+    let mut scene = Scene::new();
+    frame.compose_into(&mut scene, &[], &filtered, &|_| None, None);
+    let pixels = gpu
+        .render(&scene, &[], 128, 128, Color::WHITE)
+        .expect("headless render");
+
+    let inside = luma(&pixels, 128, 80, 64);
+    assert!(
+        (110..=145).contains(&inside),
+        "the white half is halved inside the box ({inside})",
+    );
+    assert!(
+        luma(&pixels, 128, 80, 16) >= 250,
+        "and untouched above it ({})",
+        luma(&pixels, 128, 80, 16),
+    );
+    assert!(
+        luma(&pixels, 128, 48, 64) < 8,
+        "the black half stays black ({})",
+        luma(&pixels, 128, 48, 64),
     );
 }

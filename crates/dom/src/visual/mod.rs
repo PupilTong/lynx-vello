@@ -49,10 +49,11 @@
 //!   hit-targets that parent — the singular text-hit rule, matching Chrome's `elementFromPoint`.
 //!
 //! Deliberate v1 limits (see docs/tracking/css-layout.md for status):
-//! - Group effects (`opacity`, `filter`, `clip-path`, `mask`) surface as private `RenderLayer`
-//!   boundaries for the private painter to composite; they still do not affect hit testing (a
-//!   `clip-path` that clips painting away does not clip the hit region yet). `backdrop-filter` is
-//!   not compiled in the fork at all, so its stacking-context trigger is structurally deferred.
+//! - Group effects (`opacity`, `filter`, `backdrop-filter`, `clip-path`, `mask`) surface as private
+//!   `RenderLayer` boundaries for the private painter to composite; they still do not affect hit
+//!   testing (a `clip-path` that clips painting away does not clip the hit region yet).
+//!   `backdrop-filter` reaches the cascade, the stacking-context predicate, the group layer and the
+//!   fixed/absolute containing-block rule; the backdrop bake itself is not painted yet.
 //! - Motion paths (motion-1) are composed into the matrix between the individual transforms and the
 //!   transform list: `path()`, `circle()`, `ellipse()`, and `inset()` — the shapes the fork parses,
 //!   with the coord box fixed to the border box. The anchor is always `transform-origin`
@@ -293,8 +294,8 @@ pub(crate) struct PaintItem {
 
 /// A stacking context rendered as a composited group.
 ///
-/// Only contexts with group effects (`opacity`, `filter`, `mix-blend-mode`,
-/// `clip-path`, `mask-image`, `isolation`) get one. A plain transform or
+/// Only contexts with group effects (`opacity`, `filter`, `backdrop-filter`,
+/// `mix-blend-mode`, `clip-path`, `mask-image`, `isolation`) get one. A plain transform or
 /// `z-index` context has no [`RenderLayer`] at all, so this table is not an
 /// index of stacking contexts and cannot be used as one.
 #[derive(Debug, Clone)]

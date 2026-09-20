@@ -155,6 +155,61 @@ consequential choice about whether to follow the spec or the quirk.
   together with the two approximations the offscreen implementation carries
   (one isotropic σ under a non-uniform scale or skew, and an area budget past
   which a group renders *unblurred*).
+- **`backdrop-filter`** — Lynx has the property nowhere: no handler, no
+  property ID, no wire enum entry, and `web-core` therefore never emits one.
+  We expose it anyway with filter-effects-2 W3C semantics (user decision,
+  2026-09-19), so this is a superset of the compat target rather than a
+  behavioral conflict. It reuses the `filter` value grammar unchanged and
+  triggers the same three structural effects filter-effects-2 §2.1 names: a
+  stacking context, a group render layer (the filtered backdrop is painted
+  inside the element's own effect layer, so the element's `opacity`,
+  `filter`, `clip-path` and `mask-image` apply to backdrop and element
+  together), and a containing block for absolutely and fixed positioned
+  descendants unless the element is a document root element. Unlike `filter`
+  it does not enlarge the element's ink overflow.
+
+  It is **painted** as of 2026-09-19, as a prefix bake on the flat render
+  path (`crates/dom/src/paint/compose.rs`'s `PushBackdrop`,
+  `crates/dom/src/render/blur.rs`), with these recorded narrowings:
+
+  - **`will-change` Backdrop Roots are not honored**, and this one *is* observable. `will-change`
+    is in the fork's author grammar, and filter-effects-2 makes an element naming a rooting
+    property (`opacity`, `filter`, `backdrop-filter`, `mask`, `clip-path`) a Backdrop Root. This
+    engine opens a group render layer only for the property actually applied, not for a
+    `will-change` naming it, so a `backdrop-filter` element inside a `will-change: opacity`
+    wrapper reads through that wrapper to the content behind it, where a browser would stop at
+    it. That is the ruled trade — no layer per `will-change` element — and
+    `crates/dom/src/paint/walker.rs`'s `a_backdrops_range_begins_at_its_backdrop_root` pins it.
+  - **`isolation: isolate` is not a Backdrop Root**, which is the spec's own list rather than a
+    deviation: filter-effects-2 does not name `isolation`. It is called out here only because
+    `visual::stacking::needs_group_rendering` *does* open a layer for it, which is why the walker
+    carries a separate `is_backdrop_root` predicate instead of reusing that one. Unobservable
+    either way: `isolation` is absent from the fork's author grammar.
+  - **Mirror at the axis-aligned device bounding box.** The spec crops the Backdrop Root Image to
+    the element's *transformed* border box before filtering. The bake rect is that box's
+    axis-aligned device bbox, so for a rotated or skewed element the kernel mirrors at the bbox
+    rather than at the rotated rectangle. The drawn result is still clipped to the rotated rounded
+    border box, so the difference is confined to what the kernel reads within a few σ of a rotated
+    edge — which is what Chromium does as well.
+  - **One isotropic σ**, scaled by the arithmetic mean of the two singular values of the element's
+    local-to-viewport map, exactly as `filter: blur()` is; a non-uniform scale or a skew gets one
+    number where the spec's filter region would be anisotropic.
+  - **Colour passes fold around one blur.** The list splits at its first `blur()`; every other
+    `blur()` folds into it by variance addition, the passes before it are drawn inside the bake and
+    the passes after it over the composed backdrop. A colour pass sitting *between* two blurs is
+    therefore applied inside the one bake rather than between them, the same approximation `filter`
+    carries.
+  - **Items culled at commit are absent from a straddling crop.** The walker discards items that
+    can put no ink in the viewport, so an element whose border box extends past the viewport bakes
+    a crop in which the off-screen part holds only what survived culling. Those pixels are outside
+    the viewport, so nothing visible reads them directly — but a σ large enough to reach back in
+    can, and that part of the crop will be emptier than the spec's Backdrop Root Image.
+  - **No composite curve**, like `filter`: an animated `backdrop-filter` recommits and re-bakes
+    every tick.
+  - **The area budget is shared with `filter: blur()`** (`MAX_FILTER_DIMENSION`,
+    `MAX_FILTER_AREA`), consumed in program order; an element past it draws no backdrop at all, so
+    what shows is the **unfiltered** backdrop underneath. The same fallback covers a consumer with
+    no GPU.
 - **`background-clip: border-area`** — a genuine Lynx-only value with no CSS
   equivalent (distinct from `border-box`); needs its own behavioral
   spec-mining rather than mapping to any standard box.

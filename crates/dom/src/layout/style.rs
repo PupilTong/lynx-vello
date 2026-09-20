@@ -76,6 +76,12 @@ pub(crate) fn establishes_fixed_containing_block<T>(
         return false;
     }
     let box_style = style.get_box();
+    let effects = style.get_effects();
+    // filter-effects-1 §2.1 and filter-effects-2 §2.1 word this the same way:
+    // a non-`none` value creates both a stacking context and a containing
+    // block for absolutely and fixed positioned descendants, unless the
+    // element it applies to is a document root element.
+    let filters = !effects.filter.0.is_empty() || !effects.backdrop_filter.0.is_empty();
     !box_style.transform.0.is_empty()
         || !matches!(
             box_style.perspective,
@@ -96,7 +102,7 @@ pub(crate) fn establishes_fixed_containing_block<T>(
             skips_contents(style),
         )
         .intersects(Contain::LAYOUT | Contain::PAINT)
-        || (!style.get_effects().filter.0.is_empty() && !is_root_element(node))
+        || (filters && !is_root_element(node))
 }
 
 pub(crate) fn establishes_absolute_containing_block<T>(

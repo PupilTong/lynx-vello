@@ -7,28 +7,42 @@
               MAX_FILTER_DIMENSION, MAX_TAPS, MAX_LEVELS or PARAMS_SIZE"
 )]
 
-//! The offscreen pass behind CSS `filter: blur()`.
+//! The offscreen pass behind CSS `filter: blur()` and `backdrop-filter`.
 //!
-//! A commit records each blurred group as a [`crate::FilterGroup`] — σ in
-//! device px, the device rect to bake (already 3σ larger than the group's own
-//! bounds), and the program ops that make up the group's content. Nothing in
-//! that record is a GPU resource, so the commit stays device-free and the
-//! frame stays `Send + Sync`. [`FilterTextures`] is where the device side
-//! lives: one per [`vello::Renderer`], owned beside that renderer's
-//! [`AtlasResidency`], and asked once per
-//! rendered frame for the table of baked textures the compose program indexes
-//! by group.
+//! A commit records each of them as a [`crate::FilterGroup`] — σ in device
+//! px, the device rect to bake, and the program ops that make up what is
+//! baked. Nothing in that record is a GPU resource, so the commit stays
+//! device-free and the frame stays `Send + Sync`. [`FilterTextures`] is
+//! where the device side lives: one per [`vello::Renderer`], owned beside
+//! that renderer's [`AtlasResidency`], and asked once per rendered frame for
+//! the table of baked textures the compose program indexes by entry.
+//!
+//! The two differ in three places and nowhere else. A `filter: blur()`
+//! group's rect carries a 3σ transparent margin and its sampler is
+//! clamp-to-edge, so what the kernel reads past the content is the
+//! transparent black filter-effects-1 specifies. A `backdrop-filter` entry's
+//! rect is exactly the element's transformed border box — the spec's crop,
+//! with no margin because the property enlarges no ink overflow — and its
+//! sampler is `MirrorRepeat`, so what the kernel reads past the crop is the
+//! backdrop reflected back in (user ruling, 2026-09-19; it is also what
+//! Chromium does). And a backdrop's σ may be zero, because a colour-only
+//! list still has to produce its isolated copy of the backdrop.
 //!
 //! # One pre-step, cached
 //!
 //! [`FilterTextures::prepare`] is the whole of it, and it is skipped
-//! altogether for a frame with no filter group — which is every frame of a
-//! page that does not blur. Its cache key is the commit id, plus the
-//! painter's scroll generation when (and only when) some group's content
-//! rides a scroll chain the group itself does not: a blurred scroller's
-//! *content* moves under the blur, so its bake depends on the offset, while
-//! an ordinary blurred box moves with it and its bake does not. So a scroll
-//! frame over an ordinary blurred box re-bakes nothing.
+//! altogether for a frame with no filter entry — which is every frame of a
+//! page that neither blurs nor filters a backdrop. Its cache key is the
+//! commit id, plus two conditional terms:
+//!
+//! - the painter's **scroll generation**, when some entry's range rides a scroll chain the entry
+//!   itself does not: a blurred scroller's *content* moves under the blur, so its bake depends on
+//!   the offset, while an ordinary blurred box moves with it and its bake does not. So a scroll
+//!   frame over an ordinary blurred box re-bakes nothing.
+//! - the **timeline reading**, when some backdrop entry's range rides another element's animation
+//!   chain. A `filter: blur()` group can never be in that position — an animated element's whole
+//!   subtree rides its own slot — but a backdrop's range is a *prefix of the frame*, so anything
+//!   animating in front of the Backdrop Root is behind the element.
 //!
 //! **That key identifies a commit of *one* document.** Commit ids restart at
 //! one per document, so a consumer pointing this renderer at a second
@@ -38,9 +52,9 @@
 //!
 //! # The pass chain
 //!
-//! Per group, in this order:
+//! Per entry, in this order:
 //!
-//! 1. **Bake.** The group's ops replay into a scratch [`vello::Scene`] with the group's own chain
+//! 1. **Bake.** The entry's ops replay into a scratch [`vello::Scene`] with the entry's own chain
 //!    factored out (see [`crate::CommittedFrame::bake_filter`]) and render into a `STORAGE_BINDING`
 //!    target over `Color::TRANSPARENT`.
 //! 2. **Premultiply.** vello writes its target *unpremultiplied*, and filtering unpremultiplied
@@ -58,6 +72,11 @@
 //! 5. **Interpolate back.** 2× bilinear upsamples to level 0. The last one writes the output
 //!    texture.
 //!
+//! At σ = 0 — only reachable for a colour-only `backdrop-filter` — steps 3
+//! to 5 are skipped and the premultiply writes the output directly, so the
+//! entry still gets the isolated copy of its backdrop that its blend passes
+//! and its element's own group effects compose against.
+//!
 //! The output is bound to a stable `peniko::ImageData` handle through
 //! `Renderer::override_image`, declared `AlphaPremultiplied` so vello's
 //! `fine.wgsl` samples it without premultiplying a second time, and marked
@@ -67,10 +86,12 @@
 //!
 //! Filter memory is page-complexity-linear, so it is capped:
 //! [`MAX_FILTER_DIMENSION`] per texture side and [`MAX_FILTER_AREA`] summed
-//! over a frame's groups, consumed in program order. A group past the cap
-//! gets no texture, and the compose program's documented fallback takes over:
-//! its ops replay raw and that group renders **unblurred** rather than not at
-//! all. One admitted group costs three RGBA8 textures of its own area — vello's
+//! over a frame's entries, consumed in program order. An entry past the cap
+//! gets no texture, and the compose program's documented fallback takes
+//! over: a `filter: blur()` group's ops replay raw and that group renders
+//! **unblurred** rather than not at all, and a `backdrop-filter` element
+//! draws no backdrop of its own, leaving the **unfiltered** backdrop it
+//! already sits on showing. One admitted group costs three RGBA8 textures of its own area — vello's
 //! bake target, the premultiplied level 0, and the output — plus, when it
 //! decimates, the under-⅓-area pyramid and one plane at the deepest level; see
 //! `Bank`. At four bytes a pixel and at most four full-res planes' worth per
@@ -455,7 +476,15 @@ struct Pipelines {
     premultiply: wgpu::RenderPipeline,
     resample: wgpu::RenderPipeline,
     gaussian: wgpu::RenderPipeline,
-    sampler: wgpu::Sampler,
+    /// Clamp-to-edge, for a `filter: blur()` group: its rect carries a 3σ
+    /// transparent margin, so what the clamp extends is the transparent
+    /// black filter-effects-1 specifies for a filter region's outside.
+    clamp: wgpu::Sampler,
+    /// `MirrorRepeat`, for a `backdrop-filter` entry: its rect is the crop
+    /// itself with no margin, so a clamp would smear the crop's edge row
+    /// outward and a transparent border would darken it. Mirroring reflects
+    /// the backdrop back in, which is the ruled edge mode.
+    mirror: wgpu::Sampler,
 }
 
 impl Pipelines {
@@ -530,22 +559,25 @@ impl Pipelines {
         let premultiply = build("dom filter premultiply", "fs_premultiply");
         let resample = build("dom filter resample", "fs_resample");
         let gaussian = build("dom filter gaussian", "fs_gaussian");
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("dom filter blur"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
-            ..wgpu::SamplerDescriptor::default()
-        });
+        let sampler = |label: &str, mode: wgpu::AddressMode| {
+            device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some(label),
+                address_mode_u: mode,
+                address_mode_v: mode,
+                address_mode_w: mode,
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+                ..wgpu::SamplerDescriptor::default()
+            })
+        };
         Self {
             layout,
             premultiply,
             resample,
             gaussian,
-            sampler,
+            clamp: sampler("dom filter clamp", wgpu::AddressMode::ClampToEdge),
+            mirror: sampler("dom filter mirror", wgpu::AddressMode::MirrorRepeat),
         }
     }
 
@@ -555,6 +587,10 @@ impl Pipelines {
             Stage::Resample => &self.resample,
             Stage::Gaussian => &self.gaussian,
         }
+    }
+
+    fn sampler(&self, mirror: bool) -> &wgpu::Sampler {
+        if mirror { &self.mirror } else { &self.clamp }
     }
 }
 
@@ -570,6 +606,10 @@ struct Passes<'a> {
     pipelines: &'a Pipelines,
     uniforms: &'a mut Vec<wgpu::Buffer>,
     next: usize,
+    /// Whether this entry's chain samples with the mirror sampler — set once
+    /// per entry, because the edge mode is a property of what is being
+    /// filtered rather than of a pass.
+    mirror: bool,
     encoder: wgpu::CommandEncoder,
 }
 
@@ -603,7 +643,7 @@ impl Passes<'_> {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.pipelines.sampler),
+                    resource: wgpu::BindingResource::Sampler(self.pipelines.sampler(self.mirror)),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
@@ -655,10 +695,12 @@ pub struct FilterTextures {
     /// Whether each group fits the budget, in program order. A field so the
     /// admission pass allocates nothing.
     admitted: Vec<bool>,
-    /// The groups in bake order — increasing `ops.end`, so a nested group's
-    /// texture exists before the group around it bakes.
+    /// The entries in bake order — increasing `ops.end`, so an entry whose
+    /// range draws another one's texture bakes after it.
     order: Vec<u32>,
-    key: Option<(u64, u64)>,
+    /// `(commit id, scroll generation, timeline reading)`; the last two are
+    /// zero unless some entry actually depends on them. See the module doc.
+    key: Option<(u64, u64, u64)>,
 }
 
 impl std::fmt::Debug for FilterTextures {
@@ -685,7 +727,7 @@ impl FilterTextures {
     #[expect(
         clippy::too_many_arguments,
         reason = "one bake pre-step's full inputs: the renderer's three device handles, the \
-                  residency it shares, and the frame with its two compose inputs"
+                  residency it shares, and the frame with its three compose inputs"
     )]
     pub fn prepare(
         &mut self,
@@ -697,17 +739,10 @@ impl FilterTextures {
         images: &[Option<ImageData>],
         offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
         scroll_generation: u64,
+        animation_now: Option<f64>,
     ) -> Result<&[Option<ImageData>], GpuError> {
         let groups = frame.filter_groups();
-        // A group whose content rides an inner scroll chain bakes different
-        // pixels at a different offset; every other group moves *with* its
-        // content, so its bake outlives any number of scroll frames.
-        let generation = if groups.iter().any(|group| group.inner_chains) {
-            scroll_generation
-        } else {
-            0
-        };
-        let key = (frame.commit_id(), generation);
+        let key = cache_key(frame.commit_id(), groups, scroll_generation, animation_now);
         // The length check is a net, not the contract: a key carries no
         // document identity (see the module doc), and a table of the wrong
         // length is the one such mix-up that is cheap to catch.
@@ -733,7 +768,16 @@ impl FilterTextures {
             self.pipelines = Some(Pipelines::new(device));
         }
         self.plan(groups);
-        self.bake_all(renderer, device, queue, atlas, frame, images, offset_of)?;
+        self.bake_all(
+            renderer,
+            device,
+            queue,
+            atlas,
+            frame,
+            images,
+            offset_of,
+            animation_now,
+        )?;
         self.key = Some(key);
         Ok(&self.images)
     }
@@ -797,6 +841,7 @@ impl FilterTextures {
         frame: &CommittedFrame,
         images: &[Option<ImageData>],
         offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
+        animation_now: Option<f64>,
     ) -> Result<(), GpuError> {
         let Self {
             pipelines,
@@ -822,7 +867,7 @@ impl FilterTextures {
             let bank = ensure_bank(&mut banks[index], renderer, device, width, height);
 
             bake.reset();
-            frame.bake_filter(index, bake, images, filtered, offset_of);
+            frame.bake_filter(index, bake, images, filtered, offset_of, animation_now);
             // Every render through this renderer owes the residency a pass,
             // including a bake: a patch-free bake frees the whole image
             // atlas, which is exactly the loss `AtlasResidency` repairs.
@@ -853,6 +898,7 @@ impl FilterTextures {
                 pipelines,
                 uniforms,
                 next: 0,
+                mirror: group.is_backdrop(),
                 encoder: device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("dom filter blur"),
                 }),
@@ -869,8 +915,54 @@ impl FilterTextures {
     }
 }
 
+/// The cache key for one frame's bakes: the commit id, plus each of the two
+/// compose-time readings *only* when some entry's pixels actually depend on
+/// it.
+///
+/// An entry whose range rides an inner scroll chain bakes different pixels at
+/// a different offset; every other entry moves *with* its content, so its
+/// bake outlives any number of scroll frames. Likewise for the timeline: only
+/// a backdrop whose prefix holds another element's exported curve re-bakes
+/// per tick.
+///
+/// A timeline reading enters as its bit pattern, and an absent one as zero —
+/// which is also `0.0`'s pattern. The two therefore collide at the timeline's
+/// own origin, and the cost is one stale bake in the instant a page's first
+/// exported curve starts.
+fn cache_key(
+    commit_id: u64,
+    groups: &[crate::FilterGroup],
+    scroll_generation: u64,
+    animation_now: Option<f64>,
+) -> (u64, u64, u64) {
+    let generation = if groups.iter().any(|group| group.inner_chains) {
+        scroll_generation
+    } else {
+        0
+    };
+    let instant = if groups.iter().any(crate::FilterGroup::samples_animations) {
+        animation_now.map_or(0, f64::to_bits)
+    } else {
+        0
+    };
+    (commit_id, generation, instant)
+}
+
 /// Records one group's whole pass chain against its bank.
 fn run_chain(passes: &mut Passes<'_>, bank: &Bank, plan: &Decimation) {
+    // A colour-only `backdrop-filter` bakes at σ = 0: there is nothing to
+    // decimate and nothing to convolve, but the entry still owes its element
+    // the isolated, premultiplied copy of the backdrop that its blend passes
+    // and its own group effects compose against.
+    if plan.levels == 0 && plan.sigma <= 0.0 {
+        passes.run(
+            Stage::Premultiply,
+            &bank.target.view,
+            &bank.output.view,
+            &Params::plain(bank.width, bank.height),
+        );
+        return;
+    }
     let levels = &bank.levels;
     let full = &levels[0];
     passes.run(
@@ -965,8 +1057,8 @@ fn ensure_bank<'bank>(
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::{
-        DECIMATE_ABOVE, MAX_FILTER_DIMENSION, MAX_LEVELS, MAX_TAPS, Params, decimate, kernel,
-        level_size,
+        DECIMATE_ABOVE, MAX_FILTER_DIMENSION, MAX_LEVELS, MAX_TAPS, Params, cache_key, decimate,
+        kernel, level_size,
     };
 
     /// A kernel is a probability distribution: the centre plus twice every
@@ -1082,6 +1174,91 @@ mod tests {
         assert_eq!(level_size(7, 3, 1), (4, 2));
         assert_eq!(level_size(7, 3, 2), (2, 1));
         assert_eq!(level_size(7, 3, 0), (7, 3));
+    }
+
+    /// A colour-only `backdrop-filter` plans no work at all: no decimation
+    /// level and no kernel. `run_chain` reads exactly that pair to decide it
+    /// owes only the premultiply.
+    #[test]
+    fn a_zero_sigma_plan_decimates_and_convolves_nothing() {
+        let plan = decimate(0.0, 256, 256);
+        assert_eq!(plan.levels, 0);
+        assert!(plan.sigma <= 0.0, "left {}", plan.sigma);
+        assert!(
+            !(plan.levels == 0 && plan.sigma > 0.0),
+            "which is the condition run_chain short-circuits on",
+        );
+        // And the guard is genuinely narrow: the smallest sigma that still
+        // blurs takes the ordinary path.
+        let smallest = decimate(0.25, 256, 256);
+        assert!(smallest.levels == 0 && smallest.sigma > 0.0);
+    }
+
+    /// The key's two conditional terms are independent, and each stays zero
+    /// unless some entry's own pixels depend on that reading.
+    ///
+    /// This is what keeps a scroll frame over an ordinary blurred box, and an
+    /// animation tick over a backdrop nothing is moving behind, from
+    /// re-baking anything at all.
+    #[test]
+    fn the_cache_key_carries_only_the_readings_an_entry_depends_on() {
+        use crate::paint::compose::{Backdrop, FilterGroup};
+        use crate::vello::kurbo::{Affine, Rect};
+
+        let rect = Rect::new(0.0, 0.0, 8.0, 8.0);
+        let entry = |scrolls: bool, animates: bool| {
+            let mut entry = FilterGroup::with_backdrop(
+                1.0,
+                rect,
+                crate::paint::compose::ComposeChain::default(),
+                Backdrop {
+                    shape: crate::paint::shape::BoxShape::Rect(rect),
+                    transform: Affine::IDENTITY,
+                    before: Vec::new(),
+                    after: Vec::new(),
+                    inner_animations: animates,
+                    open_pushes: 0,
+                },
+            );
+            entry.inner_chains = scrolls;
+            entry
+        };
+
+        let plain = [FilterGroup::new(
+            1.0,
+            rect,
+            crate::paint::compose::ComposeChain::default(),
+        )];
+        assert_eq!(
+            cache_key(3, &plain, 9, Some(2.5)),
+            cache_key(3, &plain, 400, Some(77.0)),
+            "a lone blur group depends on neither reading",
+        );
+        let scrolling = [entry(true, false)];
+        assert_ne!(
+            cache_key(3, &scrolling, 9, None),
+            cache_key(3, &scrolling, 10, None)
+        );
+        assert_eq!(
+            cache_key(3, &scrolling, 9, Some(2.5)),
+            cache_key(3, &scrolling, 9, Some(77.0)),
+            "but not on the timeline",
+        );
+        let animating = [entry(false, true)];
+        assert_ne!(
+            cache_key(3, &animating, 9, Some(2.5)),
+            cache_key(3, &animating, 9, Some(77.0)),
+        );
+        assert_eq!(
+            cache_key(3, &animating, 9, Some(2.5)),
+            cache_key(3, &animating, 10, Some(2.5)),
+            "but not on the scroll generation",
+        );
+        assert_ne!(
+            cache_key(3, &animating, 0, None),
+            cache_key(4, &animating, 0, None),
+            "and the commit id is unconditional",
+        );
     }
 
     /// The uniform block's WGSL offsets, which nothing but this test can see.

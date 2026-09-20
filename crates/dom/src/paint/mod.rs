@@ -14,11 +14,11 @@ pub(crate) mod compose;
 mod convert;
 #[cfg(test)]
 pub(crate) mod equivalence;
-mod filters;
+pub(crate) mod filters;
 mod mask;
 pub(crate) mod painter;
 mod shadow;
-mod shape;
+pub(crate) mod shape;
 mod text;
 pub(crate) mod walker;
 
