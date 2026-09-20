@@ -1,4 +1,11 @@
 //! CSS Flexible Box Layout Module Level 1 layout algorithm.
+//!
+//! Unlike a grid item (css-grid-1 §6.2), a flex item's `normal` cross
+//! alignment is `stretch` with no exception for replaced content
+//! (css-align-3 §6.2.4), and §9.8 makes that stretched cross size *definite*
+//! in a single-line container — so `determine_flex_base_sizes` hands it to the
+//! §9.2 measurement, and an item with an intrinsic ratio takes its main size
+//! from it.
 
 #![allow(clippy::cast_precision_loss)]
 

@@ -918,6 +918,16 @@ consequential choice about whether to follow the spec or the quirk.
     this engine's UA sheet already makes `display: contents`
     (`crates/bobcat-core/src/main/tree/ua_sheet.rs`) — flattens into the item
     list through `LayoutTree::flattened_children`.
+  - (e) Replaced children do not fill their lane by default. css-grid-3 §6.2
+    sends grid-axis alignment through regular Grid, and css-grid-1 §6.2 makes
+    `normal` leave a replaced box with a natural size at that natural size —
+    so an `<image>` in a waterfall lane is laid out at its own pixels unless
+    the lane carries `justify-items: stretch` or the item carries
+    `width: 100%`. That is what a browser does with `<img>` in a grid too, and
+    it is what web-core's own waterfall inherits, since its cells are real
+    CSS boxes. A `<list>` UA rule here would have to supply the stretch the
+    same way `x-list.css` does. See "Items with an intrinsic aspect ratio" in
+    [css-layout.md](css-layout.md).
   **Mechanisms the path would use, none of them built**: web-core carries the
   column count as the custom property `--list-item-span-count`, set from
   `span-count`/`column-count`
