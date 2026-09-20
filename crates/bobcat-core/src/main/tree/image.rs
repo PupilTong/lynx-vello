@@ -48,9 +48,10 @@
 //!
 //! **These rules have to stay last in the sheet.** `image > *` is specificity
 //! (0,0,1) and merely *ties* with the (0,0,1) `display` rules `view`,
-//! `scroll-view`, `list` and `wrapper` carry in [`super::ua_sheet`], so source
+//! `scroll-view`, `list`, `blur-view`, `x-blur-view` and `wrapper` carry in
+//! [`super::ua_sheet`], so source
 //! order is what decides them, and moving this block earlier would let an
-//! image's children generate boxes again. Writing those four tags out a second
+//! image's children generate boxes again. Writing those six tags out a second
 //! time at (0,0,2) would make the block order-free, but only against today's
 //! tag list — a tag module added after this one would tie all the same — so
 //! the guard is `nothing_inside_an_image_generates_a_box`, which fails the
@@ -112,8 +113,9 @@ const SRC_ATTRIBUTE: &str = "src";
 /// native's refusal to let an image take children at all, which makes
 /// leaf-ness a property of the tag rather than of whether a `src` happens to
 /// be set — `dom` hides a replaced element's children, but only once it is
-/// replaced. It ties on specificity with `view`'s, `scroll-view`'s, `list`'s
-/// and `wrapper`'s own `display` rules and wins on source order, which is why
+/// replaced. It ties on specificity with the `display` rules `view`,
+/// `scroll-view`, `list`, `blur-view`, `x-blur-view` and `wrapper` carry, and
+/// wins on source order, which is why
 /// this block is assembled last; see the module docs.
 ///
 /// Nothing here is `!important`: see
@@ -397,6 +399,8 @@ mod tests {
                 "view",
                 "scroll-view",
                 "list",
+                "blur-view",
+                "x-blur-view",
                 "wrapper",
                 "raw-text",
                 "x-foreign",

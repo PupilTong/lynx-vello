@@ -9,15 +9,17 @@
 //! mutation preconditions before entering `dom`, returning misuse as a
 //! JavaScript error.
 //!
-//! One module per tag, each owning that tag's UA rules and its tests — two of
-//! them additionally own a component, because both tags reach the engine as an
-//! attribute and have to become something else: [`raw_text`]'s run becomes a
-//! text node, and [`image`]'s `src` becomes replaced content. What the tags
-//! share, and the order they cascade in, is [`ua_sheet`]; this file only mints
-//! the document they all describe.
+//! One module per tag, each owning that tag's UA rules and its tests — three
+//! of them additionally own a component, because each of those tags reaches
+//! the engine as an attribute and has to become something else: [`raw_text`]'s
+//! run becomes a text node, [`image`]'s `src` becomes replaced content, and
+//! [`blur_view`]'s `blur-radius` becomes a `backdrop-filter` presentational
+//! hint. What the tags share, and the order they cascade in, is [`ua_sheet`];
+//! this file only mints the document they all describe.
 //!
 //! [`NodeId`]: dom::NodeId
 
+mod blur_view;
 mod image;
 pub(crate) mod raw_text;
 mod scroll_container;
@@ -44,6 +46,7 @@ pub(crate) const PAGE_TAG: &str = "page";
 #[must_use]
 pub(crate) fn new_document(viewport: Viewport, config: PageConfig) -> LynxDocument {
     let mut document = Document::new(viewport.device(), PAGE_TAG, ());
+    blur_view::define(&mut document);
     image::define(&mut document);
     document.add_stylesheet(
         &ua_sheet::ua_stylesheet(config),

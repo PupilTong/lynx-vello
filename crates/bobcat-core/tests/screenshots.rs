@@ -792,3 +792,152 @@ async fn a_backdrop_filtered_card_reaches_the_offscreen_draw_target() {
         .expect("captured RGBA image");
     screenshots().assert_matches(&["backdrop-filter-card"], &image);
 }
+
+/// The Lynx `<blur-view>`, written the only way script can: `__CreateElement`
+/// mints the tag and `__SetAttribute` names the radius. The two cards are the
+/// same translucent rounded box with the same `<text>` child over the same
+/// crimson / white seam and amber bar — one is a `blur-view` carrying
+/// `blur-radius="25"`, the other an `x-blur-view` carrying no attribute at all,
+/// which is web-core's own `x-blur-view/basic.html` fixture reduced to blocks.
+const BLUR_VIEW_SCRIPT: &str = r"
+globalThis.renderPage = function renderPage() {
+  const page = __CreatePage('card', 0);
+  __SetClasses(page, 'page');
+  const board = __CreateView(0);
+  __SetClasses(board, 'board');
+  function part(classes) {
+    const node = __CreateView(0);
+    __SetClasses(node, classes);
+    __AppendElement(board, node);
+  }
+  part('half');
+  part('bar');
+  part('bar lower');
+  function frost(tag, classes, radius, label) {
+    const node = __CreateElement(tag, 0);
+    __SetClasses(node, classes);
+    if (radius !== null) __SetAttribute(node, 'blur-radius', radius);
+    const text = __CreateText(0);
+    __SetClasses(text, 'label');
+    __AppendElement(text, __CreateRawText(label));
+    __AppendElement(node, text);
+    __AppendElement(board, node);
+  }
+  frost('blur-view', 'frost', '25', 'blur-radius 25');
+  frost('x-blur-view', 'frost plain', null, 'no blur-radius');
+  __AppendElement(page, board);
+};
+";
+
+/// Requirement: the `blur-radius` attribute reaches the same painter path
+/// author `backdrop-filter` reaches, through the whole embedder stack — the
+/// component's presentational hint, a commit on `bobcat-main`, and the
+/// painter's backdrop bake.
+///
+/// The golden shows a relationship rather than a picture: the two cards differ
+/// only in the attribute, so everything behind the upper one is filtered and
+/// everything behind the lower one is not. The two tag names are split between
+/// them on purpose — `blur-view` above, `x-blur-view` below — so the golden
+/// would also catch one name losing its component.
+#[tokio::test]
+async fn a_blur_view_reaches_the_offscreen_draw_target() {
+    const ROBOTO: &[u8] = include_bytes!("../../hughie/tests/fixtures/Roboto-Regular.ttf");
+
+    let (_view, mut painter) = booted_with_sheet_sources(
+        BLUR_VIEW_SCRIPT.as_bytes(),
+        PreparsedStyleSheet {
+            rules: vec![
+                PreparsedRule::Style {
+                    selectors: ".page".to_owned(),
+                    declarations: vec![
+                        declaration("display", "flex"),
+                        declaration("padding", "20px"),
+                        declaration("background-color", "#e5e7eb"),
+                        declaration("font-family", "Roboto"),
+                    ],
+                },
+                block(
+                    ".board",
+                    &[
+                        ("position", "relative"),
+                        ("width", "353px"),
+                        ("height", "460px"),
+                        ("background-color", "#ffffff"),
+                    ],
+                ),
+                block(
+                    ".half",
+                    &[
+                        ("position", "absolute"),
+                        ("left", "0px"),
+                        ("top", "0px"),
+                        ("width", "176px"),
+                        ("height", "460px"),
+                        ("background-color", "#dc2626"),
+                    ],
+                ),
+                block(
+                    ".bar",
+                    &[
+                        ("position", "absolute"),
+                        ("left", "0px"),
+                        ("top", "140px"),
+                        ("width", "353px"),
+                        ("height", "26px"),
+                        ("background-color", "#f59e0b"),
+                    ],
+                ),
+                PreparsedRule::Style {
+                    selectors: ".lower".to_owned(),
+                    declarations: vec![declaration("top", "340px")],
+                },
+                // No `display` here: the box has to keep the UA sheet's own
+                // container mode, which is what the golden is checking on the
+                // cascade side.
+                PreparsedRule::Style {
+                    selectors: ".frost".to_owned(),
+                    declarations: vec![
+                        declaration("position", "absolute"),
+                        declaration("left", "20px"),
+                        declaration("top", "110px"),
+                        declaration("width", "313px"),
+                        declaration("height", "100px"),
+                        declaration("padding", "18px"),
+                        declaration("box-sizing", "border-box"),
+                        declaration("border-radius", "18px"),
+                        declaration("border", "2px solid rgb(255 255 255 / 70%)"),
+                        declaration("background-color", "rgb(255 255 255 / 25%)"),
+                    ],
+                },
+                // Source order decides: `.plain` follows `.frost`, so the
+                // second card keeps every other declaration and only drops to
+                // the lower band.
+                PreparsedRule::Style {
+                    selectors: ".plain".to_owned(),
+                    declarations: vec![declaration("top", "310px")],
+                },
+                PreparsedRule::Style {
+                    selectors: ".label".to_owned(),
+                    declarations: vec![
+                        declaration("font-size", "22px"),
+                        declaration("color", "#111827"),
+                    ],
+                },
+            ],
+        },
+        393.0,
+        520.0,
+        ViewSources {
+            style_sheets: vec!["app:///author.css".to_owned()],
+            fonts: vec![FontBlob::from_static(ROBOTO)],
+            default_font_family: Some("Roboto".to_owned()),
+            ..ViewSources::new(SCRIPT_URL)
+        },
+    )
+    .await;
+
+    let shot = painter.capture().expect("capture the blur-view page");
+    let image = Image::from_rgba8(shot.size.width, shot.size.height, shot.pixels)
+        .expect("captured RGBA image");
+    screenshots().assert_matches(&["blur-view-card"], &image);
+}

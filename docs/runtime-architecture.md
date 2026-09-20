@@ -881,9 +881,10 @@ embedder-thread `bobcat_core::Painter` that composes a published frame.
 In Bobcat the payload is `()` and the core adds
 the permanent `page` root plus Lynx UA defaults from `PageConfig`.
 
-It also defines the two components the engine owns, `raw-text` and `image`,
-each in its own module (`tree::raw_text` and `tree::image`, which own the
-component, its UA rules, and its tests together). Lynx writes a
+It also defines the three components the engine owns — `raw-text`, `image` and
+the blur view — each in its own module (`tree::raw_text`, `tree::image` and
+`tree::blur_view`, which own the component, its UA rules, and its tests
+together). Lynx writes a
 text run as an attribute (`__CreateRawText(value)` sets `text` on a `raw-text`
 element) while everything downstream — Parley shaping, line breaking, the
 glyph painter — speaks the W3C text node, so the component observes `text` and
@@ -904,6 +905,18 @@ platform layout node unless it carries `auto-size`, leaving starlight to
 measure it as a childless leaf that is zero on every non-definite axis, and
 web-core buys the same from the browser with `contain: strict` on `x-image`;
 the replaced-content path would otherwise size it like an `<img>`.
+
+The blur view is the third join, and the shallowest: `blur-radius` becomes a
+`backdrop-filter: blur(…)` presentational hint, so a property the cascade, the
+stacking pass and the painter's backdrop bake already implement does all the
+work. One component is installed under both tag names — native registers
+`blur-view`, web-core registers `x-blur-view` and a compiled `.web.bundle`
+writes that one verbatim — and the radius enters the cascade as a CSS length
+rather than through web-core's `parseFloat`, so `rpx`, `em` and `vw` resolve
+where web-core would have dropped them (a user ruling, recorded in
+`docs/tracking/deviations.md`). The tag has no UA rules of its own: both names
+are in the shared container list and in the `defaultOverflowVisible` rule,
+because native's `LynxUIBlurView` extends `LynxUIView`.
 
 ```text
 private Document<()>

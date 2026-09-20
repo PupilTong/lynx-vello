@@ -4,13 +4,16 @@
 //! Each tag's own policy lives with that tag — [`super::scroll_container`],
 //! [`super::text`], [`super::raw_text`], [`super::image`] — and this module
 //! only decides what they all agree on and what order they land in.
+//! [`super::blur_view`] is the one tag module with no rules of its own: a
+//! blur view is a container and nothing more, so everything it needs is here.
 //!
 //! Order is mostly documentation, with one exception that is mechanism:
-//! [`super::image`]'s child suppression ties on specificity with `view`'s,
-//! `scroll-view`'s, `list`'s and `wrapper`'s own `display` rules, so it wins
-//! only by being assembled last. That module's
+//! [`super::image`]'s child suppression ties on specificity with the `display`
+//! rules `view`, `scroll-view`, `list`, `blur-view`, `x-blur-view` and
+//! `wrapper` carry, so it wins only by being assembled last. That module's
 //! `nothing_inside_an_image_generates_a_box` is the tripwire for it.
 
+use super::blur_view::{BLUR_VIEW_TAG, X_BLUR_VIEW_TAG};
 use super::{image, raw_text, scroll_container, text};
 
 /// Page configuration for the Lynx runtime and UA cascade.
@@ -43,15 +46,26 @@ impl Default for PageConfig {
 
 /// The Lynx UA stylesheet: embedder cascade policy `dom` must not know.
 ///
-/// The container tags — `page`, `view`, `scroll-view`, `list` — share
+/// The container tags — `page`, `view`, `scroll-view`, `list`, `blur-view` and
+/// `x-blur-view` — share
 /// `web-elements`' common block: a border box, and the display mode
 /// `defaultDisplayLinear` picks — a per-tag exception to that switch would
 /// have to be `!important`, so it is a recorded deviation instead
 /// (`docs/tracking/deviations.md`). `text` is a text block whatever the switch
 /// says, and `wrapper` generates no box — both from `web-elements`' own sheet,
 /// where the linear toggle covers container tags only.
-/// `defaultOverflowVisible` reaches `page` and `view` alone, the way web-core
-/// spends it on `x-view` alone; a scroller carries its own axes regardless.
+/// `defaultOverflowVisible` reaches the non-scrolling containers — `page`,
+/// `view` and the two blur-view tags — the way web-core spends it on `x-view`
+/// alone; a scroller carries its own axes regardless.
+///
+/// The blur-view tags are here because native's `LynxUIBlurView` extends
+/// `LynxUIView`: a blur view is a view in everything layout can see, and its
+/// `blur-radius` is the only thing that makes it different
+/// ([`super::blur_view`]). web-core is narrower — `x-blur-view` is in
+/// `linear.css`'s common block but in neither the `--lynx-display-toggle` list
+/// nor the `[lynx-default-overflow-visible=true] x-view` escape, so a browser
+/// gives it a row flex box that always clips — which is the divergence
+/// `scroll-view` and `list` already record.
 ///
 /// Almost nothing here is `!important`. web-elements' defaults are author
 /// origin in the browser and several of them lean on `!important`; ours are
@@ -81,12 +95,13 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
         ""
     };
     let overflow = if config.default_overflow_visible {
-        ""
+        String::new()
     } else {
-        "page, view { overflow: hidden; }\n"
+        format!("page, view, {BLUR_VIEW_TAG}, {X_BLUR_VIEW_TAG} {{ overflow: hidden; }}\n")
     };
     format!(
-        "page, view, scroll-view, list {{ box-sizing: border-box; {display} }}\n\
+        "page, view, scroll-view, list, {BLUR_VIEW_TAG}, {X_BLUR_VIEW_TAG} \
+         {{ box-sizing: border-box; {display} }}\n\
          {overflow}\
          page {{ width: 100%; height: 100%; font-family: sans-serif; }}\n\
          wrapper {{ display: contents; }}\n\
@@ -109,10 +124,17 @@ mod tests {
 
     use super::super::LynxDocument;
     use super::super::test_support::{child, document, overflow, style_of, with_config};
-    use super::{PageConfig, ua_stylesheet};
+    use super::{BLUR_VIEW_TAG, PageConfig, X_BLUR_VIEW_TAG, ua_stylesheet};
 
     /// The tags that get `web-elements`' common container block.
-    const CONTAINER_TAGS: [&str; 4] = ["page", "view", "scroll-view", "list"];
+    const CONTAINER_TAGS: [&str; 6] = [
+        "page",
+        "view",
+        "scroll-view",
+        "list",
+        BLUR_VIEW_TAG,
+        X_BLUR_VIEW_TAG,
+    ];
 
     /// Attaches one of each container tag, answering with the page itself for
     /// `page` — it is minted with the document and cannot be created again.
@@ -187,19 +209,34 @@ mod tests {
         }
     }
 
+    /// The switch reaches the containers that are not scrollers: `page`,
+    /// `view` and the two blur-view tags, which native treats as views
+    /// (`LynxUIBlurView` extends `LynxUIView`).
     #[test]
-    fn the_overflow_page_config_switch_reaches_page_and_view_alone() {
+    fn the_overflow_page_config_switch_skips_the_scrollers() {
         for (visible, expected) in [(true, Overflow::Visible), (false, Overflow::Hidden)] {
             let mut document = with_config(PageConfig {
                 default_overflow_visible: visible,
                 ..PageConfig::default()
             });
-            let view = child(&mut document, "view", "");
+            let views = ["view", BLUR_VIEW_TAG, X_BLUR_VIEW_TAG]
+                .map(|tag| (tag, child(&mut document, tag, "")));
             let scroller = child(&mut document, "scroll-view", "");
             let list = child(&mut document, "list", "");
             document.layout();
 
-            assert_eq!(overflow(&document, view), (expected, expected), "{visible}");
+            assert_eq!(
+                overflow(&document, document.document_element().id()),
+                (expected, expected),
+                "{visible}"
+            );
+            for (tag, view) in views {
+                assert_eq!(
+                    overflow(&document, view),
+                    (expected, expected),
+                    "{tag}: {visible}"
+                );
+            }
             for scroller in [scroller, list] {
                 assert_eq!(
                     overflow(&document, scroller),
@@ -210,6 +247,9 @@ mod tests {
         }
     }
 
+    /// The whole rule `defaultOverflowVisible` gates, spelled out once.
+    const OVERFLOW_RULE: &str = "page, view, blur-view, x-blur-view { overflow: hidden; }";
+
     #[test]
     fn default_config_is_linear_and_overflow_visible() {
         let config = PageConfig::default();
@@ -218,7 +258,7 @@ mod tests {
 
         let sheet = ua_stylesheet(config);
         assert!(sheet.contains("display: linear;"));
-        assert!(!sheet.contains("page, view { overflow: hidden; }"));
+        assert!(!sheet.contains(OVERFLOW_RULE));
         assert!(sheet.contains("box-sizing: border-box;"));
     }
 
@@ -231,7 +271,7 @@ mod tests {
             enable_js_data_processor: false,
         });
         assert!(!sheet.contains("display: linear;"));
-        assert!(sheet.contains("page, view { overflow: hidden; }"));
+        assert!(sheet.contains(OVERFLOW_RULE));
     }
 
     /// The sheet's important declarations are exactly the text-block ones.

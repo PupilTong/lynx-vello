@@ -1002,16 +1002,21 @@ per tag, each owning that tag's UA rules and its tests: `tree::raw_text`
 (generated-content CSS and the rules that dissolve a carrier into the `text` it
 is written inside), `tree::text` (the paragraph attribute limits and what may
 generate a box inside a run), `tree::image` (the `src`-to-replaced-content
-reflection and its UA box), and `tree::scroll_container` (`scroll-view` and
+reflection and its UA box), `tree::scroll_container` (`scroll-view` and
 `list` as scroll containers — which axis scrolls, which one clips, and which
 way the subtree stacks, from `web-elements`' own `scroll-view.css` and
 `x-list.css`; `enable-scroll="false"` leaves the box a scroll container only
-script can move). `tree::ua_sheet` owns what those tags agree on, the order
+script can move), and `tree::blur_view` (`blur-radius` reflected into a
+`backdrop-filter: blur()` presentational hint, under both the native tag
+`blur-view` and web-core's `x-blur-view`, as a CSS length rather than
+web-core's `parseFloat` — the one tag module with no UA rules of its own,
+since a blur view is a container and nothing else). `tree::ua_sheet` owns what
+those tags agree on, the order
 they cascade in, and `PageConfig`; `tree/lib.rs` only mints the document they
 describe. That order is mostly documentation, with one exception that is
-mechanism: `image`'s child suppression ties on specificity with `view`'s,
-`scroll-view`'s, `list`'s and `wrapper`'s own `display` rules, so it wins only
-by being assembled last.
+mechanism: `image`'s child suppression ties on specificity with the `display`
+rules `view`, `scroll-view`, `list`, `blur-view`, `x-blur-view` and `wrapper`
+carry, so it wins only by being assembled last.
 
 The native host-module functions call `dom::Document` directly. Element
 identity is the DOM `NodeId`, which is also the element's Lynx `unique_id` —
