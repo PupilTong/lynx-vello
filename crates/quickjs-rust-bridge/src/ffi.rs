@@ -52,6 +52,29 @@ pub(crate) type ModuleNormalize = unsafe extern "C" fn(
     error: *mut c_int,
 ) -> *const c_char;
 
+pub(crate) const REQUIRED_COMMONJS: i32 = 0;
+pub(crate) const REQUIRED_JSON: i32 = 1;
+
+/// One synchronous `require` load, as the shim reads it back.
+///
+/// The host writes either the three source fields or `error`, and keeps
+/// owning both buffers: the shim borrows them only until it enters the
+/// callback again, which a `require` inside the module body does.
+#[repr(C)]
+pub(crate) struct QjsRequiredSource {
+    pub(crate) url: *const c_char,
+    pub(crate) text: *const u8,
+    pub(crate) text_length: usize,
+    pub(crate) kind: i32,
+    pub(crate) error: *const c_char,
+}
+
+pub(crate) type RequireLoad = unsafe extern "C" fn(
+    opaque: *mut c_void,
+    url: *const c_char,
+    source: *mut QjsRequiredSource,
+) -> c_int;
+
 #[repr(C)]
 pub(crate) struct QjsRuntime {
     _private: [u8; 0],
@@ -108,6 +131,13 @@ unsafe extern "C" {
         name: *const c_char,
         export_name: *const c_char,
         value: *const QjsValue,
+    ) -> c_int;
+    pub(crate) fn qjs_context_register_create_require(
+        context: *mut QjsContext,
+        name: *const c_char,
+        export_name: *const c_char,
+        load: RequireLoad,
+        opaque: *mut c_void,
     ) -> c_int;
     pub(crate) fn qjs_module_namespace(
         context: *mut QjsContext,

@@ -410,6 +410,29 @@ impl ScriptEngine {
             .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterHostModuleFunction))
     }
 
+    /// Installs Node's `createRequire` as a named export of a native ESM
+    /// module, backed by a loader that answers one URL at a time.
+    ///
+    /// Requires [`Self::enable_module_loading`]: a `require` resolves its
+    /// specifiers through the same normalizer an `import` does. The runtime is
+    /// taken for the same reason [`Self::register_host_module_function`] takes
+    /// it.
+    pub(crate) fn register_create_require<F>(
+        &mut self,
+        _runtime: &mut ScriptRuntime,
+        module_specifier: &str,
+        export_name: &str,
+        load: F,
+    ) -> Result<(), ScriptError>
+    where
+        F: FnMut(&str) -> Result<quickjs::RequiredSource, String> + 'static,
+    {
+        self.take_deferred_checkpoint_error()?;
+        self.realm
+            .register_create_require(module_specifier, export_name, load)
+            .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterHostModuleFunction))
+    }
+
     /// Evaluates classic source, which the runtime never does: every entry and
     /// every built-in is a module. It survives so this module's own tests can
     /// state a realm invariant in a snippet and let a throw fail the test.

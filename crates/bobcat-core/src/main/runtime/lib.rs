@@ -451,8 +451,8 @@ impl MainThreadRuntime {
         ingredients: DocumentIngredients,
         outbox: ViewOutbox,
         workers: &super::workers::WorkerFactory,
-        // What `adoptStyleSheet` parks on: the engine thread this realm's
-        // entries are jobs of.
+        // What `adoptStyleSheet` and a `require` park on: the engine thread
+        // this realm's entries are jobs of.
         thread: crate::jobs::JsThreadHandle,
         startup: &mut RealmStartup,
     ) -> Result<
@@ -482,7 +482,14 @@ impl MainThreadRuntime {
             outbox.clone(),
             &timers,
         )?;
-        style_sheets::install_styles(&mut engine, js_runtime, &slot, &outbox, thread)?;
+        style_sheets::install_styles(&mut engine, js_runtime, &slot, &outbox, thread.clone())?;
+        crate::require::install(
+            &mut engine,
+            js_runtime,
+            outbox.host_outbox(outbox.token().clone()),
+            thread,
+        )
+        .map_err(|error| MainThreadError::from_engine("installing require", error))?;
         install_startup_strings(&mut engine, js_runtime, startup)?;
         let (workers, incoming) = workers
             .install(

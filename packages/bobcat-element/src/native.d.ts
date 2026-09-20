@@ -236,6 +236,44 @@ declare module "bobcat-internal:host" {
   export const nativeModuleTable: BobcatNative["nativeModuleTable"];
 }
 
+/** One CommonJS or JSON module, as `require.cache` holds it. */
+interface RequiredModule {
+  /** The URL that was required, which is this entry's key in the cache. */
+  readonly id: string;
+  /** The same URL: what the module is named by, not where it answered from. */
+  readonly filename: string;
+  /** What the body left here, or assigned over. JSON is the parsed value. */
+  exports: unknown;
+  /** True once the body has returned; a body that threw is never cached. */
+  readonly loaded: boolean;
+}
+
+/**
+ * Node's `require`, over the engine's own resource protocol. Loading is
+ * synchronous: the call returns with the module evaluated, and no JavaScript
+ * runs until the host answers — not this realm's promise jobs, and not a
+ * realm sharing its thread.
+ */
+interface Require {
+  (specifier: string): unknown;
+  /** The URL `specifier` names — the cache key. Loads nothing. */
+  resolve(specifier: string): string;
+  /**
+   * The realm's CommonJS cache, shared by every `require` in it. Deleting a
+   * key makes the next `require` load and evaluate that URL again.
+   */
+  readonly cache: Record<string, RequiredModule | undefined>;
+}
+
+declare module "bobcat:module" {
+  /**
+   * A `require` that resolves specifiers against `url`, the way an `import`
+   * in a module at that URL would. The URL is read at the first resolution,
+   * not here.
+   */
+  export function createRequire(url: string): Require;
+}
+
 declare module "bobcat-internal:worker" {
   export const postWorkerMessage: BobcatWorkerNative["postWorkerMessage"];
   export const closeWorker: BobcatWorkerNative["closeWorker"];

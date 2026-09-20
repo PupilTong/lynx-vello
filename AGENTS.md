@@ -238,8 +238,8 @@ lifecycle signal, a spawn — and touch no realm, no document and not the shared
 `ScriptRuntime`; what a task does with what it read is queue a job and await it.
 Jobs are the only place JavaScript runs, and they run outside every `block_on`,
 which is what lets one park: `JsThread::wait` is a fresh `block_on` of the same
-`LocalSet`, so during a synchronous stylesheet adoption every task on the thread
-goes on running while no other job does. Queued jobs run in FIFO order once the
+`LocalSet`, so during a synchronous stylesheet adoption or a `require` every
+task on the thread goes on running while no other job does. Queued jobs run in FIFO order once the
 waiting one returns, so an entry may hold the shared runtime and its realm
 across its own wait.
 
@@ -477,6 +477,28 @@ source-evaluation entry points stay private. The bridge owns the generic
 source/native-module loader, deferred import continuations, loaded-module
 namespace access and settled Promise inspection; Bobcat's specifiers, entry
 transform, graph membership and boot policy stay in the core adapter.
+
+**`bobcat:module` is the synchronous way into a source.**
+`import { createRequire } from "bobcat:module"` is available in a view's MTS
+realm and in every Worker realm, the BTS included; it is an explicit import,
+and neither entry preamble carries it. `createRequire(base)` answers Node's
+`require`, which resolves a specifier through the normalizer `import` uses —
+so both name a module by the same URL — asks the host for it through the same
+`SourceRequest::Module`, and parks the job it runs in on the answer exactly as
+stylesheet adoption does: the engine thread's tasks go on running, no other job
+does, and so no promise job and no sibling realm's entry runs while it waits.
+The other arm of that wait is the requesting realm's cancellation token: a
+view's is written by the embedder's release, from the embedder's own thread; a
+Worker's by the in-band `Terminate` its message consumer — a task, still
+running during the wait — reads, which ends the worker and the load with it. A response URL whose path ends in
+`.json` is parsed as JSON and anything else is compiled as CommonJS, so
+requiring ESM text is a `SyntaxError`. The CommonJS cache is the realm's own,
+reachable as `require.cache` and separate from the ESM module map: a URL both
+imported and required is two instances. A nested `require` resolves against the
+*response* URL, `require.resolve` answers the cache key without loading, and a
+load, compile, parse or body that fails leaves nothing cached. Every source
+module carries `import.meta.url` — the response URL for a fetched one, the name
+it was registered under for a built-in.
 
 #### Realm, document and boot
 
@@ -1071,6 +1093,11 @@ It owns the QuickJS C build and the narrow unsafe FFI shim, realm/value
 lifetime and affinity checks, exact ECMAScript string conversion, exception
 sanitization, pending-job pump, synchronous preloaded source/native-module
 loader, loaded-module namespace access, and module-evaluation Promise state.
+Node's `createRequire` is one of those loaders: `register_create_require`
+backs a realm's `require` with a host `FnMut` that answers one URL
+synchronously, and the bridge stays ignorant of URLs and media types — which
+of CommonJS and JSON a source is read as is the host's answer, beside the
+response URL and the text.
 Every heap allocation made by the C shim or the five compiled QuickJS C
 translation units is redirected through a private C ABI into Rust's global
 allocator; a fixed aligned prefix supplies the size required for matching
