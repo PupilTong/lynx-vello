@@ -249,7 +249,9 @@ fn settle_images(
 /// Stronger than [`settle_images`], and the wait every `<image>` case below
 /// needs: which bitmaps a frame drew is the whole subject of those pictures,
 /// and a source held pending or failed by the store is one the retain log
-/// must never name.
+/// must never name. It is also what makes the capture land after the page
+/// epilogue that dispatched a `load` — the mutation a listener makes rides
+/// the same commit as the frame that first draws the bitmap it announced.
 fn settle_drawing(
     view: &mut LynxView<Rc<FetcherDouble>>,
     painter: &mut Painter,
@@ -553,13 +555,13 @@ async fn a_preparsed_author_sheet_paints() {
     screenshots().assert_matches(&["preparsed-author-sheet"], &captured(&mut painter));
 }
 
-// The Lynx `<image>` surface in pixels: `mode`, `placeholder` and
-// `auto-size`, each written the only way a card can write them —
-// `__CreateImage` and `__SetAttribute` — and read back off the committed
-// frame. `crates/bobcat-core/src/main/tree/image.rs` carries the model these
-// pictures are of; `blur-radius` is deliberately absent: it paints as a
-// whole-element `filter: blur()` today, ruled an interim state until a
-// bitmap-only blur lands, and a golden would pin the interim.
+// The Lynx `<image>` surface in pixels: `mode`, `placeholder`, `auto-size`
+// and the `load`/`error` events, each written the only way a card can write
+// them — `__CreateImage`, `__SetAttribute`, `__AddEvent` — and read back off
+// the committed frame. `crates/bobcat-core/src/main/tree/image.rs` carries the
+// model these pictures are of; `blur-radius` is deliberately absent: it
+// paints as a whole-element `filter: blur()` today, ruled an interim state
+// until a bitmap-only blur lands, and a golden would pin the interim.
 
 /// The sources the `<image>` pages below name, in the three states a host can
 /// leave one in: settled with pixels, settled as a failure, and never
@@ -853,19 +855,19 @@ globalThis.renderPage = function renderPage() {
 /// has none and shows its own background. Neither shows the landscape, which
 /// is the whole point: the source it drew is gone.
 ///
-/// The rewrite is driven from outside, by a data update taken once the
-/// committed frame proves the landscape has pixels. Nothing inside the card
-/// can know that yet — the element's own `load` is not dispatched here.
+/// The rewrite rides the element's own `load`, which is the one moment at
+/// which the first source is known to have pixels — and, by the epilogue's
+/// order, one that still commits inside the turn that settled it.
 #[tokio::test]
 async fn rewriting_src_to_a_pending_source_shows_the_placeholder_again() {
     const BODY: &str = r"
-globalThis.pictures = [];
 globalThis.renderPage = function renderPage() {
   const page = __CreatePage('card', 0);
   __SetInlineStyles(
     page,
     'background-color:#e5e7eb;padding:10px;display:flex;flex-direction:row',
   );
+  globalThis.runWorklet = (value, params) => value.body(params[0]);
   function picture(placeholder) {
     const image = __CreateImage(0);
     __SetInlineStyles(
@@ -875,22 +877,18 @@ globalThis.renderPage = function renderPage() {
     );
     if (placeholder) __SetAttribute(image, 'placeholder', placeholder);
     __SetAttribute(image, 'src', LANDSCAPE);
+    __AddEvent(image, 'bindEvent', 'load', {
+      type: 'worklet',
+      value: { body: () => __SetAttribute(image, 'src', PENDING) },
+    });
     __AppendElement(page, image);
-    pictures.push(image);
   }
   picture(HOLDING);
   picture('');
 };
-globalThis.updatePage = function updatePage() {
-  for (const image of pictures) __SetAttribute(image, 'src', PENDING);
-};
 ";
     let images = picture_store();
     let (mut view, mut painter) = booted_with_images(image_page(BODY), &images, 190.0, 80.0).await;
-    settle_drawing(&mut view, &mut painter, &images, &[LANDSCAPE_SOURCE]);
-
-    view.update_data("{}".to_owned(), String::new())
-        .expect("the update reaches the booted card");
     settle_drawing(&mut view, &mut painter, &images, &[HOLDING_SOURCE]);
 
     screenshots().assert_matches(&["image-src-swap"], &captured(&mut painter));
@@ -1065,6 +1063,97 @@ globalThis.renderPage = function renderPage() {
         &["image-auto-size-placeholder-after"],
         &captured(&mut painter),
     );
+}
+
+/// Requirement: `load` and `error` reach a card's own handlers, carry
+/// web-core's details, fire for the element's own `src` alone, and do not
+/// bubble — all of it read off the pixels the handlers painted.
+///
+/// The top row is the two images: a `src` that loads, and a `src` that fails
+/// behind a placeholder that loads. The bottom row is five markers, grey
+/// until a handler repaints one, left to right:
+///
+/// 1. the image's own `bindEvent` `load` — green, and **40x20 rather than the 20x20 it started
+///    at**, because the handler sized it from `event.detail.width` and `event.detail.height`.
+/// 2. a `bindEvent` `load` on the page — still grey: `load` does not bubble, so the bind pass runs
+///    on the target alone.
+/// 3. a `capture-bind` `load` on the images' own parent view — blue: a non-bubbling event still
+///    captures down the whole path.
+/// 4. the failing image's `bindEvent` `error` — red.
+/// 5. a `bindEvent` `load` on that same failing image — still grey. Its placeholder loaded, and a
+///    placeholder's own ending is nobody's event.
+///
+/// The two path registrations are on different elements on purpose: within
+/// one kind, `__AddEvent` keys on the event name alone, so a `capture-bind`
+/// filed over a `bindEvent` of the same name on one node would replace it and
+/// the grey marker would prove nothing.
+#[tokio::test]
+async fn image_load_and_error_reach_their_handlers_without_bubbling() {
+    const BODY: &str = r"
+globalThis.renderPage = function renderPage() {
+  const page = __CreatePage('card', 0);
+  __SetInlineStyles(page, 'background-color:#e5e7eb;padding:10px');
+  globalThis.runWorklet = (value, params) => value.body(params[0]);
+  const worklet = (body) => ({ type: 'worklet', value: { body } });
+  const pictures = __CreateView(0);
+  __SetInlineStyles(pictures, 'display:flex;flex-direction:row');
+  __AppendElement(page, pictures);
+  const markers = __CreateView(0);
+  __SetInlineStyles(
+    markers,
+    'display:flex;flex-direction:row;align-items:flex-start;margin-top:10px',
+  );
+  __AppendElement(page, markers);
+  function marker() {
+    const view = __CreateView(0);
+    __SetInlineStyles(view, 'width:20px;height:20px;margin-right:10px;background-color:#9ca3af');
+    __AppendElement(markers, view);
+    return view;
+  }
+  function paint(view, width, height, color) {
+    __SetInlineStyles(
+      view,
+      'width:' + width + 'px;height:' + height + 'px;margin-right:10px;background-color:' + color,
+    );
+  }
+  function picture(src, placeholder) {
+    const image = __CreateImage(0);
+    __SetInlineStyles(
+      image,
+      'width:80px;height:60px;margin-right:10px;background-color:#334155;'
+        + 'image-rendering:pixelated',
+    );
+    if (placeholder) __SetAttribute(image, 'placeholder', placeholder);
+    __SetAttribute(image, 'src', src);
+    __AppendElement(pictures, image);
+    return image;
+  }
+  const loaded = marker();
+  const bubbled = marker();
+  const captured = marker();
+  const failed = marker();
+  const placeheld = marker();
+  const first = picture(LANDSCAPE, '');
+  const second = picture(BROKEN, HOLDING);
+  __AddEvent(first, 'bindEvent', 'load', worklet((event) => {
+    paint(loaded, event.detail.width, event.detail.height, '#16a34a');
+  }));
+  __AddEvent(page, 'bindEvent', 'load', worklet(() => paint(bubbled, 20, 20, '#16a34a')));
+  __AddEvent(pictures, 'capture-bind', 'load', worklet(() => paint(captured, 20, 20, '#2563eb')));
+  __AddEvent(second, 'bindEvent', 'error', worklet(() => paint(failed, 20, 20, '#dc2626')));
+  __AddEvent(second, 'bindEvent', 'load', worklet(() => paint(placeheld, 20, 20, '#16a34a')));
+};
+";
+    let images = picture_store();
+    let (mut view, mut painter) = booted_with_images(image_page(BODY), &images, 190.0, 110.0).await;
+    settle_drawing(
+        &mut view,
+        &mut painter,
+        &images,
+        &[LANDSCAPE_SOURCE, HOLDING_SOURCE],
+    );
+
+    screenshots().assert_matches(&["image-events"], &captured(&mut painter));
 }
 
 /// A card built the only way script can: two `.card` views, each holding a
