@@ -710,25 +710,21 @@ impl<T> Document<T> {
     /// Applies the host's image reports: records completed loads with their
     /// intrinsic dimensions, and marks failures.
     ///
-    /// A load that lands on replaced nodes sets their natural size in the
-    /// same call, so the element resizes in the commit that first draws it.
+    /// A report that lands on replaced nodes recomputes their natural size in
+    /// the same call, so an element resizes in the commit that first draws
+    /// what it reports on.
     pub fn apply_image_events(&mut self, events: &[ImageEvent]) {
-        let mut changed = false;
         for event in events {
             // `None` is a source reported twice, which one URL with one
             // content makes a no-op: nothing moved, so nothing is dirtied.
             let Some(nodes) = self.images.apply(event) else {
                 continue;
             };
-            changed = true;
-            if let ImageEvent::Loaded { width, height, .. } = event {
-                let natural = crate::layout::natural_size(*width, *height);
-                for node in nodes {
-                    self.set_natural_size(node, natural);
-                }
+            for (node, _role) in nodes {
+                // Which bitmap the node draws may have changed, and with it
+                // the natural size that bitmap is fitted against.
+                self.refresh_natural_size(node);
             }
-        }
-        if changed {
             self.note_visual_mutation();
         }
     }

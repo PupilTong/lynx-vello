@@ -59,11 +59,12 @@ has. Native's bitmap-size cache — a second mount of a known URL publishing its
 natural size in the commit that creates the node — is now the store's to
 provide, since only the store knows what it has already decoded.
 
-The Lynx `<image>` element surface — `mode`, `auto-size`, `placeholder`, the
-src/placeholder race, `cap-insets`, `blur-radius`, the `load`/`error` events —
-remains above this layer and unimplemented. What exists today is the `src` half
-(`bobcat_core`'s `tree::image`, landed 2026-09-06) over the W3C `<img>` paint
-path: natural size into layout,
+The Lynx `<image>` element surface is implemented in `bobcat_core`'s
+`tree::image` as far as `src`, `placeholder`, `mode`, `auto-size` and
+`blur-radius` (2026-09-06 and 2026-09-17); the `load`/`error` events,
+`cap-insets` and the animated-image events remain above this layer and
+unimplemented. It runs over the W3C `<img>` paint path: natural size into
+layout,
 `object-fit`/`object-position`/`image-rendering` at paint. The natural size
 must not be encoded as `contain-intrinsic-size`, because natural replaced size
 is content data rather than CSS size containment — note that `tree::image`'s
@@ -95,6 +96,48 @@ suppresses the natural aspect ratio under size containment (it otherwise fills
 a missing axis before containment is consulted), and `dom`'s `free_node`
 unbinds a freed node from the image registry — without which a load completing
 after its element was dropped reached `set_natural_size`'s stale-id panic.
+
+Implementation note (2026-09-17): `dom` now carries the second source a
+placeholder needs, under the native race-and-lock model this table's
+`src/placeholder concurrency model` row records and the user ruled for on
+2026-09-17 (over web-core's error-fallback model).
+`Document::set_image_source` takes an `ImageRole` naming which of the two it
+writes — one setter, not a pair — and both roles bind on write, which is what
+asks the host for them, so the two requests are concurrent and neither is
+sequenced behind the other's failure. What the
+element draws is its own source while that is loaded, the placeholder
+otherwise, and its natural size always names that same bitmap — so a loaded
+`src` permanently suppresses the placeholder (iOS `LynxImageManager.mm:79-82`),
+a failed `src` leaves the placeholder showing, and swapping `src` blanks the
+element until the new URL reports, as native does. Binding is also where a URL
+this document has already seen settle is answered — the case no report will
+ever repeat, which is this engine's answer to native's bitmap-size cache.
+
+Implementation note (2026-09-17, the attribute half): `tree::image` now
+observes `src`, `placeholder` and `blur-radius`, and matches `mode` and
+`auto-size` as UA attribute selectors. `placeholder` is relayed exactly as
+`src` is — same "an empty value names nothing" rule, nothing trimmed or
+resolved — because in the native model it is a second concurrent request
+rather than a fallback. `mode`'s three non-`fill` literals become
+`object-fit: contain`/`cover`/`none`, case-sensitively, which is how web-core
+writes them. `auto-size` is
+`image[auto-size]:not([auto-size="false"]) { contain: none; max-width: 100%;
+max-height: 100%; }`: the `:not()` covers `__SetAttribute`'s stringified
+JavaScript `false` (`packages/bobcat-element/src/element-papi.ts:1377-1385`),
+and the two maxima are what keeps a ratio-transferred main size inside the
+parent. `blur-radius` is a `filter: blur(…)` presentational hint over the raw
+attribute value, removed before each write because
+`Document::set_presentational_hint` treats an unparsable value as a no-op and
+would otherwise keep the previous radius. Since PR #273 that filter paints as
+an offscreen bake of the whole element — background and border included, ink
+overflowing the box — where both references blur the bitmap alone; ruled
+2026-09-20 to stay so until a bitmap-only blur lands separately.
+Every native-vs-web-core conflict the surface raised is recorded in
+[deviations.md](deviations.md) under Components. The `auto-size` rule depends
+on `hughie`'s `determine_flex_base_sizes` handing a stretched item's cross size
+to the measurement that produces its flex base size (css-flexbox-1 §9.8 with
+§9.2 step B, PR #287), without which an `auto-size` image in a parent that
+stretches it reported its own pixels' main size.
 
 `mode` (object-fit) is a direct, already-standards-aligned mapping in all three implementations: Android `ScalingUtils.ScaleType` (`FIT_XY`/`FIT_CENTER`/`CENTER_CROP`/`CENTER`, `lynx/platform/android/.../image/ScalingUtils.java`), iOS `UIViewContentMode` (`ScaleToFill`/`ScaleAspectFit`/`ScaleAspectFill`/`Center`, `LynxConverter (UIViewContentMode)` in `lynx/platform/darwin/ios/lynx/ui/image/LynxUIImage.mm:2063-2081`), and web-platform literally emits CSS `object-fit: fill/contain/cover` plus a `position:absolute` no-scale rule for `center` (`lynx-stack/packages/web-platform/web-elements/src/elements/XImage/x-image.css:38-53`). There is no Lynx equivalent of CSS `object-fit: scale-down` or `none` (as distinct from `center`) in any of the three stacks — a small, low-risk feature gap, not a divergence.
 

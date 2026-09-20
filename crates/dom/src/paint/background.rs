@@ -24,6 +24,7 @@
 //!   backgrounds); layers are always origin-box anchored.
 
 use std::f64::consts::{FRAC_PI_2, PI, SQRT_2, TAU};
+use std::sync::Arc;
 
 use stylo::computed_values::background_origin::single_value::T as BackgroundOrigin;
 use stylo::computed_values::object_fit::T as ObjectFit;
@@ -252,18 +253,19 @@ fn open_text_clip_ops(
     true
 }
 
+/// Draws the bitmap `image` names into the element's content box.
+///
+/// Which of a replaced element's two sources that is, is the registry's
+/// choice — see `ImageRegistry::resolve_presented` — and `natural` is the
+/// dimensions of that same bitmap.
 pub(crate) fn paint_replaced_content(
     sink: &mut WalkSink<'_>,
     chain: ComposeChain,
     style: &ComputedValues,
     fragment: &BoxFragment,
-    images: &ImageRegistry,
-    source: &str,
+    image: Arc<str>,
     natural: NaturalSize,
 ) {
-    let Some((image, _)) = images.resolve(source) else {
-        return;
-    };
     let content = fragment.content_box;
     if content.width() <= 0.0 || content.height() <= 0.0 {
         return;
