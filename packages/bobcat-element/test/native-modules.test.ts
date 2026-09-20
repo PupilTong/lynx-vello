@@ -37,6 +37,10 @@ rstest.mockRequire("bobcat-internal:host", () => ({
   initData: () => undefined,
   globalProps: () => undefined,
   nativeModuleTable: () => "",
+  // The modules table imports both; every suite below serves registered
+  // sources, so nothing here reaches an external load.
+  resolveModuleUrl: () => { throw new Error("no module resolution in this suite"); },
+  loadModuleSync: () => { throw new Error("no module load in this suite"); },
 }));
 
 /** What the host hands `invokeNativeModule`, in argument order. */

@@ -49,7 +49,8 @@ and `bobcat-workers` (every Worker realm, including the BTS).
   `worker-runtime.ts`, `background-thread-runtime.ts` (`bobcat:bts-runtime`),
   `cross-thread-context.ts`, `event-target.ts`, `timers.ts`, `module.ts`
   (`bobcat:module` — Node's `require` algorithm), `selector-query.ts`,
-  `global-event-emitter.ts`, `lynx-modules.ts` (the compiler factory ABI), and
+  `global-event-emitter.ts`, `lynx-modules.ts` (the compiler factory ABI,
+  `lynx.requireModule` and `nativeApp.loadScript` over `loadModuleSync`), and
   `native.d.ts`, the host-member contract.
 
 Landed and not to be regressed:
