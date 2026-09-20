@@ -749,18 +749,28 @@ are outside this JavaScript-module path.
 
 `bobcat:module` is the synchronous one. Both realm kinds can
 `import { createRequire } from "bobcat:module"` and call
-`createRequire(import.meta.url)` for Node's `require`. It resolves through the
-same normalizer, requests the same `SourceRequest::Module`, and parks the job
-it runs in on the answer the way stylesheet adoption does: the engine thread's
-tasks keep running, no other job does, and no promise job runs. The wait's
-other arm is the requesting realm's cancellation token: a view's is written by
-the embedder's release from the embedder's own thread, a worker's by the
-in-band `Terminate` its message consumer reads while the job is parked. A response
-URL whose path ends in `.json` is parsed as JSON; everything else is compiled
-as CommonJS in Node's wrapper, named by the response URL. The CommonJS cache is
-per realm and is not the ESM module map. Every source module also carries
-`import.meta.url`: the response URL where the realm fetched one, the registered
-name for a built-in, and the source name for a module evaluated directly.
+`createRequire(import.meta.url)` for Node's `require`. It is a source module in
+`packages/bobcat-element`, and the algorithm — cache, `module` object, cycles,
+eviction, `require.resolve` — is JavaScript in it. Two host members on
+`bobcat-internal:host` carry what is not: `resolveModuleUrl(base, specifier)`,
+the same normalizer an `import` resolves through, and
+`loadModuleSync(url, parameters)`, which requests the same
+`SourceRequest::Module` and answers the source compiled — the wrapper function
+of a CommonJS file, or the parsed value of a JSON one — so source text never
+becomes a value in the realm. That load parks the job it runs in on the answer
+the way stylesheet adoption does: the engine thread's tasks keep running, no
+other job does, and no promise job runs. The wait's other arm is the requesting
+realm's cancellation token: a view's is written by the embedder's release from
+the embedder's own thread, a worker's by the in-band `Terminate` its message
+consumer reads while the job is parked. A response URL whose path ends in
+`.json` is parsed as JSON; everything else is compiled as CommonJS in Node's
+wrapper, named by the response URL. The compile happens before the compiled
+script is evaluated, which is what keeps the borrowed source buffers safe from
+a file whose text closes the wrapper early and loads again from there. The
+CommonJS cache is per realm and is not the ESM module map. Every source module
+also carries `import.meta.url`: the response URL where the realm fetched one,
+the registered name for a built-in, and the source name for a module evaluated
+directly.
 
 The bridge keeps built-in sources on the shared runtime and entry/imported
 sources on each realm. A missing module creates one `SourceRequest::Module` per

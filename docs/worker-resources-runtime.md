@@ -82,11 +82,15 @@ the answer — the engine thread's tasks keep running, and no other job does. It
 reads a source as CommonJS or JSON and keeps a CommonJS cache per realm.
 `lynx.requireModule`, `lynx.loadScript`, the Lynx wrapper's parameter list and
 lynx-core's own module caches are still not implemented and are a layer over
-it, not the same thing: a bundle section is not a file at a URL.
+it, not the same thing: a bundle section is not a file at a URL. The wrapper's
+parameter list is the one thing of theirs that is already reachable: the host
+member underneath, `loadModuleSync(url, parameters)`, compiles a CommonJS
+source inside the wrapper parameter list it is handed, and `bobcat:module`
+passes Node's five.
 
 There is no `ScriptLoad` queue, `SourceRequest::Script` variant, synchronous
 `readScript` binding, or JS source-callback registry, and no API that hands a
-source's text to JavaScript: `require` compiles or parses it inside the engine
-and answers with exports. Tests should exercise the existing
+source's text to JavaScript: the host compiles or parses it inside the engine
+and answers with a function or a parsed value. Tests should exercise the existing
 ESM/require/readiness/cancellation path and, when implemented, the actual
 ReactLynx caller contracts rather than reintroducing a private text-read API.

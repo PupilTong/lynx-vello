@@ -467,8 +467,8 @@ mod implementation {
         ))
     }
 
-    /// What the shim answers a native-module registration with. The last two
-    /// are `createRequire`'s alone, which is registered the same way.
+    /// What the shim answers a native-module registration with, whichever of
+    /// the two kinds of export it was.
     fn host_module_status(status: c_int) -> Result<(), Error> {
         let (kind, message) = match status {
             0 => return Ok(()),
@@ -485,13 +485,9 @@ mod implementation {
                 "native module export name is already registered",
             ),
             -4 => (ErrorKind::InvalidInput, "native module was already loaded"),
-            -5 => (
-                ErrorKind::InvalidInput,
-                "require resolves through the module normalizer, which this realm has none of",
-            ),
             -6 => (
                 ErrorKind::InvalidInput,
-                "this realm already has a createRequire",
+                "a synchronous loader is already registered",
             ),
             _ => (
                 ErrorKind::Engine,
@@ -1218,7 +1214,7 @@ mod implementation {
     /// Synchronous name resolution; source retrieval remains asynchronous.
     pub type ModuleNormalizer = fn(base: &str, specifier: &str) -> Result<String, String>;
 
-    /// Which of the two shapes a `require`d source is read as.
+    /// Which of the two shapes a synchronously loaded source is read as.
     ///
     /// The host decides: this bridge knows nothing about URLs, file
     /// extensions or media types.
@@ -1237,13 +1233,13 @@ mod implementation {
         }
     }
 
-    /// One source a synchronous `require` load produced: the URL it answered
-    /// from, its text, and how to read it.
+    /// One source a synchronous load produced: the URL it answered from, its
+    /// text, and how to read it.
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct RequiredSource {
-        /// The response URL. It names the compiled source, is the base a
-        /// nested `require` resolves against, and is `__filename`; the URL
-        /// that was asked for stays the cache key.
+        /// The response URL. It names the compiled source and is what the
+        /// answer reports back, so a caller that resolves against it resolves
+        /// against where the source came from rather than where it asked.
         pub url: String,
         pub text: String,
         pub kind: RequiredKind,
@@ -1251,12 +1247,11 @@ mod implementation {
 
     type RequireLoader = dyn FnMut(&str) -> Result<RequiredSource, String>;
 
-    /// What the last `require` load produced, kept alive for the shim to read
-    /// out of.
+    /// What the last load produced, kept alive for the shim to read out of.
     ///
-    /// One load at a time: the shim compiles or copies both buffers before it
-    /// runs any of the file's code — evaluating the compiled script as well
-    /// as calling the body — since either can start another.
+    /// One load at a time: the shim copies the URL and compiles or parses the
+    /// text before it evaluates the compiled script, which is the first thing
+    /// that can start another load.
     #[derive(Default)]
     struct ParkedRequire {
         url: CString,
@@ -1530,23 +1525,38 @@ mod implementation {
             host_module_status(status)
         }
 
-        /// Registers `export_name` on the native module `module_name` as
-        /// Node's `createRequire`, backed by `load`.
+        /// Registers `export_name` on the native module `module_name` as a
+        /// synchronous source loader, backed by `load`.
         ///
-        /// `createRequire(base)` answers a synchronous `require` that
-        /// resolves specifiers through this realm's module normalizer, so a
-        /// `require` and an `import` name the same module by the same URL —
-        /// and asks `load` for the source of every URL that is not already in
-        /// the realm's `require` cache. That cache is the realm's own, shared
-        /// by every `require` it makes and reachable as `require.cache`; it is
-        /// not the ESM module map, so a URL both imported and required is two
-        /// instances.
+        /// The export it installs is
         ///
-        /// [`Self::enable_module_loading`] must have run first, and a realm
-        /// registers one `createRequire`. `load` is entered only from a
-        /// `require` call, is never borrowed while JavaScript runs, and must
-        /// not enter JavaScript itself.
-        pub fn register_create_require<F>(
+        /// ```ts
+        /// loadModuleSync(url: string, parameters: string):
+        ///     { url: string; kind: "commonjs" | "json"; value: unknown }
+        /// ```
+        ///
+        /// `url` is asked of `load` as it stands: this entry resolves
+        /// nothing, caches nothing and builds no module object, so a realm's
+        /// `require` algorithm is JavaScript written over it. `parameters` is
+        /// the parameter list of the wrapper a `CommonJs` source is compiled
+        /// inside, verbatim — `"exports, require, module"` answers a function
+        /// of those three, whose body starts on line 1 of the file so its line
+        /// numbers are the file's own. A `Json` source is parsed instead, and
+        /// `parameters` is unread. Either way the source text never becomes a
+        /// JavaScript value, and the compile or parse names
+        /// [`RequiredSource::url`] — the URL the load answered from — so a
+        /// `SyntaxError` and every frame beneath it name the file.
+        ///
+        /// A `load` that fails throws `Error("cannot load '<url>': <reason>")`.
+        ///
+        /// `load` is entered only from this export, is never borrowed while
+        /// JavaScript runs, and must not enter JavaScript itself. A realm has
+        /// one loader, and a second registration is refused whatever name it
+        /// asks for — the export is what carries the loader, so a second one
+        /// would answer the first export from the second `load`. The same name
+        /// on the same module is refused before that, as any other duplicate
+        /// export is.
+        pub fn register_synchronous_loader<F>(
             &mut self,
             module_name: &str,
             export_name: &str,
@@ -1560,7 +1570,7 @@ mod implementation {
             // SAFETY: the stable allocation outlives its C context; the shim
             // clears the context opaque before releasing any surviving jobs.
             let status = unsafe {
-                ffi::qjs_context_register_create_require(
+                ffi::qjs_context_register_synchronous_loader(
                     self.raw().as_ptr(),
                     module_name.as_ptr(),
                     export_name.as_ptr(),
@@ -2837,25 +2847,13 @@ mod implementation {
             );
         }
 
-        /// The specifier these tests register `createRequire` under.
+        /// The specifier these tests register the synchronous loader under.
+        /// Only a name here: what Bobcat puts behind it is a source module of
+        /// its own, and this crate knows nothing about it.
         const REQUIRE_MODULE: &str = "bobcat:module";
 
-        /// URL-shaped enough for a test: `./name` against the base's
-        /// directory, anything else taken as it stands. A base with no
-        /// directory at all is what a bad `createRequire` argument looks
-        /// like by the time the first specifier resolves.
-        fn resolve_relative(base: &str, specifier: &str) -> Result<String, String> {
-            let Some(rest) = specifier.strip_prefix("./") else {
-                return Ok(specifier.to_owned());
-            };
-            let (directory, _) = base
-                .rsplit_once('/')
-                .ok_or_else(|| format!("cannot resolve '{specifier}' against '{base}'"))?;
-            Ok(format!("{directory}/{rest}"))
-        }
-
-        /// The host half of `require`: what each URL answers with, and the
-        /// log of every URL the realm asked for.
+        /// The host half of one load: what each URL answers with, and the log
+        /// of every URL the realm asked for.
         #[derive(Default)]
         struct RequireHost {
             files: HashMap<String, RequiredSource>,
@@ -2911,21 +2909,22 @@ mod implementation {
             }
         }
 
-        fn install_require(realm: &mut Context, host: &Rc<RefCell<RequireHost>>) {
+        fn install_loader(realm: &mut Context, host: &Rc<RefCell<RequireHost>>) {
             let host = Rc::clone(host);
             realm
-                .register_create_require(REQUIRE_MODULE, "createRequire", move |url| {
+                .register_synchronous_loader(REQUIRE_MODULE, "loadModuleSync", move |url| {
                     host.borrow_mut().load(url)
                 })
-                .expect("the realm takes createRequire");
+                .expect("the realm takes the loader");
         }
 
-        fn require_realm(host: RequireHost) -> (Runtime, Context, Rc<RefCell<RequireHost>>) {
+        /// A realm with a loader and *no* module normalizer: this entry
+        /// resolves nothing, so it needs none.
+        fn loader_realm(host: RequireHost) -> (Runtime, Context, Rc<RefCell<RequireHost>>) {
             let runtime = Runtime::new().unwrap();
             let mut realm = runtime.create_context().unwrap();
             let host = Rc::new(RefCell::new(host));
-            realm.enable_module_loading(resolve_relative);
-            install_require(&mut realm, &host);
+            install_loader(&mut realm, &host);
             (runtime, realm, host)
         }
 
@@ -2964,246 +2963,94 @@ mod implementation {
             }
         }
 
-        /// The same, for a body that is only about what `require` does: the
-        /// import and the `createRequire` call are prepended.
-        fn run_require(
+        /// The same, for a body that is only about what the loader answers:
+        /// the import is prepended.
+        fn run_loader(
             runtime: &mut Runtime,
             realm: &mut Context,
             name: &str,
             body: &str,
         ) -> Result<(), Error> {
             let source = format!(
-                "import {{ createRequire }} from '{REQUIRE_MODULE}';\n\
-                 const require = createRequire('app:///entry.js');\n\
+                "import {{ loadModuleSync }} from '{REQUIRE_MODULE}';\n\
                  {body}"
             );
             run_module(runtime, realm, name, &source)
         }
 
         #[test]
-        fn require_answers_exports_and_runs_the_body_with_this_bound_to_them() {
-            let (mut runtime, mut realm, host) = require_realm(
-                RequireHost::default()
-                    .commonjs(
-                        "app:///a.cjs",
-                        "if (this !== exports) throw Error('this is not exports');\n\
-                         if (typeof require !== 'function') throw Error('no require');\n\
-                         exports.answer = 42;",
-                    )
-                    .commonjs(
-                        "app:///reassign.cjs",
-                        "module.exports = function () { return 7; };",
-                    ),
-            );
-            run_require(
-                &mut runtime,
-                &mut realm,
-                "entry",
-                "if (require('./a.cjs').answer !== 42) throw Error('exports');\n\
-                 if (require('./reassign.cjs')() !== 7) throw Error('module.exports');",
-            )
-            .unwrap();
-            assert_eq!(host.borrow().loads.len(), 2);
-        }
-
-        #[test]
-        fn a_nested_require_resolves_against_the_response_url() {
-            let (mut runtime, mut realm, host) = require_realm(
-                RequireHost::default()
-                    .redirected(
-                        "app:///alias",
-                        "app:///deep/nested.cjs",
-                        "exports.value = require('./sibling.cjs').value;\n\
-                         exports.filename = __filename;\n\
-                         exports.dirname = __dirname;\n\
-                         exports.id = module.id;",
-                    )
-                    .commonjs("app:///deep/sibling.cjs", "exports.value = 42;"),
-            );
-            run_require(
-                &mut runtime,
-                &mut realm,
-                "entry",
-                "const nested = require('./alias');\n\
-                 if (nested.value !== 42) throw Error('nested ' + nested.value);\n\
-                 if (nested.filename !== 'app:///deep/nested.cjs')\n\
-                   throw Error('__filename ' + nested.filename);\n\
-                 if (nested.dirname !== 'app:///deep/') throw Error('__dirname ' + nested.dirname);\n\
-                 if (nested.id !== 'app:///alias') throw Error('id ' + nested.id);",
-            )
-            .unwrap();
-            assert_eq!(
-                host.borrow().loads,
-                ["app:///alias", "app:///deep/sibling.cjs"]
-            );
-        }
-
-        #[test]
-        fn a_url_is_loaded_and_evaluated_once_however_often_it_is_required() {
-            let (mut runtime, mut realm, host) = require_realm(RequireHost::default().commonjs(
-                "app:///counter.cjs",
-                "globalThis.runs = (globalThis.runs ?? 0) + 1; exports.runs = runs;",
+        fn a_commonjs_load_answers_a_function_of_the_parameters_it_was_given() {
+            let (mut runtime, mut realm, host) = loader_realm(RequireHost::default().commonjs(
+                "app:///a.cjs",
+                "return [this.tag, first, second, third].join(':');",
             ));
-            run_require(
+            run_loader(
                 &mut runtime,
                 &mut realm,
                 "entry",
-                "const first = require('./counter.cjs');\n\
-                 const again = createRequire('app:///other.js')('./counter.cjs');\n\
-                 if (first !== again) throw Error('two instances');\n\
-                 if (globalThis.runs !== 1) throw Error('ran ' + globalThis.runs + ' times');",
+                "const loaded = loadModuleSync('app:///a.cjs', 'first, second, third');\n\
+                 if (loaded.kind !== 'commonjs') throw Error('kind ' + loaded.kind);\n\
+                 if (loaded.url !== 'app:///a.cjs') throw Error('url ' + loaded.url);\n\
+                 if (typeof loaded.value !== 'function') throw Error('not a function');\n\
+                 if (loaded.value.length !== 3) throw Error('length ' + loaded.value.length);\n\
+                 const answer = loaded.value.call({ tag: 'receiver' }, 1, 2, 3);\n\
+                 if (answer !== 'receiver:1:2:3') throw Error('answer ' + answer);",
             )
             .unwrap();
-            assert_eq!(host.borrow().loads, ["app:///counter.cjs"]);
+            assert_eq!(host.borrow().loads, ["app:///a.cjs"]);
         }
 
         #[test]
-        fn a_cycle_sees_the_exports_the_other_module_has_so_far() {
-            let (mut runtime, mut realm, _host) = require_realm(
-                RequireHost::default()
-                    .commonjs(
-                        "app:///a.cjs",
-                        "exports.name = 'a';\n\
-                         exports.fromB = require('./b.cjs').name;\n\
-                         exports.late = 'late';",
-                    )
-                    .commonjs(
-                        "app:///b.cjs",
-                        "exports.name = 'b';\n\
-                         const a = require('./a.cjs');\n\
-                         exports.sawName = a.name;\n\
-                         exports.sawLate = a.late;",
-                    ),
-            );
-            run_require(
-                &mut runtime,
-                &mut realm,
-                "entry",
-                "const a = require('./a.cjs');\n\
-                 const b = require('./b.cjs');\n\
-                 if (a.fromB !== 'b') throw Error('a did not see b');\n\
-                 if (b.sawName !== 'a') throw Error('b did not see a');\n\
-                 if (b.sawLate !== undefined) throw Error('b saw a finished');",
-            )
-            .unwrap();
-        }
-
-        #[test]
-        fn a_body_that_throws_is_evicted_and_runs_again_on_the_next_require() {
-            let (mut runtime, mut realm, host) = require_realm(RequireHost::default().commonjs(
-                "app:///bad.cjs",
-                "globalThis.attempts = (globalThis.attempts ?? 0) + 1;\n\
-                 throw globalThis.boom;",
+        fn the_answer_reports_the_url_the_load_came_from() {
+            let (mut runtime, mut realm, _host) = loader_realm(RequireHost::default().redirected(
+                "app:///alias",
+                "https://cdn.test/deep/real.cjs",
+                "return value;",
             ));
-            run_require(
+            run_loader(
                 &mut runtime,
                 &mut realm,
                 "entry",
-                "globalThis.boom = { kind: 'boom' };\n\
-                 let first, second;\n\
-                 try { require('./bad.cjs'); } catch (error) { first = error; }\n\
-                 if (require.cache['app:///bad.cjs'] !== undefined) throw Error('cached');\n\
-                 try { require('./bad.cjs'); } catch (error) { second = error; }\n\
-                 if (first !== boom || second !== boom) throw Error('not the thrown value');\n\
-                 if (attempts !== 2) throw Error('ran ' + attempts + ' times');",
+                "const loaded = loadModuleSync('app:///alias', 'value');\n\
+                 if (loaded.url !== 'https://cdn.test/deep/real.cjs')\n\
+                   throw Error('url ' + loaded.url);\n\
+                 if (loaded.value('answer') !== 'answer') throw Error('value');",
             )
             .unwrap();
-            assert_eq!(host.borrow().loads.len(), 2);
         }
 
-        /// Pins the use-after-free a compile that also evaluated would open:
-        /// this file's text closes the wrapper early, so the statements after
-        /// it are the enclosing script's and run where author code could not
-        /// otherwise reach, which is while the load's own buffers are still
-        /// to be read.
         #[test]
-        fn a_file_that_closes_the_wrapper_early_runs_after_its_load_is_read() {
-            let (mut runtime, mut realm, host) = require_realm(
+        fn a_json_load_answers_the_parsed_value() {
+            let (mut runtime, mut realm, _host) = loader_realm(
                 RequireHost::default()
-                    .redirected(
-                        "app:///early.cjs",
-                        "https://cdn.test/early.cjs",
-                        "}); globalThis.outer('./other.cjs');\n\
-                         (function (exports, require, module, __filename, __dirname) {\n\
-                         exports.filename = __filename; exports.dir = __dirname;",
-                    )
-                    .commonjs("app:///other.cjs", "exports.tag = 'other';")
-                    .commonjs("app:///after.cjs", "exports.tag = 'after';"),
+                    .json("app:///config.json", r#"{"answer": 42, "list": [1, 2]}"#)
+                    .json("app:///broken.json", "{"),
             );
-            run_require(
+            run_loader(
                 &mut runtime,
                 &mut realm,
                 "entry",
-                "globalThis.outer = require;\n\
-                 const early = require('./early.cjs');\n\
-                 if (require.cache['app:///other.cjs'] === undefined)\n\
-                   throw Error('the escaped require did not run');\n\
-                 if (early.filename !== 'https://cdn.test/early.cjs')\n\
-                   throw Error('__filename ' + early.filename);\n\
-                 if (early.dir !== 'https://cdn.test/') throw Error('__dirname ' + early.dir);\n\
-                 if (require('./after.cjs').tag !== 'after') throw Error('the realm is broken');",
+                "const loaded = loadModuleSync('app:///config.json', 'unread');\n\
+                 if (loaded.kind !== 'json') throw Error('kind ' + loaded.kind);\n\
+                 if (loaded.url !== 'app:///config.json') throw Error('url ' + loaded.url);\n\
+                 if (loaded.value.answer !== 42 || loaded.value.list[1] !== 2)\n\
+                   throw Error('parsed');\n\
+                 let name;\n\
+                 try { loadModuleSync('app:///broken.json', 'unread'); }\n\
+                 catch (error) { name = error.name; }\n\
+                 if (name !== 'SyntaxError') throw Error('threw ' + name);",
             )
             .unwrap();
-            assert_eq!(
-                host.borrow().loads,
-                ["app:///early.cjs", "app:///other.cjs", "app:///after.cjs"],
-                "the escaped require is served like any other"
-            );
-        }
-
-        /// Pins the same hazard at the other door: a `module` is built from
-        /// defined own properties, so an accessor an author left on
-        /// `Object.prototype` runs no code of theirs between the load and the
-        /// reads that still borrow its buffers.
-        #[test]
-        fn a_prototype_accessor_is_never_consulted_while_a_module_is_built() {
-            let (mut runtime, mut realm, host) = require_realm(
-                RequireHost::default()
-                    .commonjs("app:///plain.cjs", "exports.tag = 'plain';")
-                    .commonjs("app:///other.cjs", "exports.tag = 'other';"),
-            );
-            run_require(
-                &mut runtime,
-                &mut realm,
-                "entry",
-                "globalThis.outer = require;\n\
-                 globalThis.intercepted = [];\n\
-                 const fields = ['exports', 'id', 'filename', 'loaded'];\n\
-                 for (const field of fields) {\n\
-                   Object.defineProperty(Object.prototype, field, {\n\
-                     configurable: true,\n\
-                     get() { return undefined; },\n\
-                     set() { intercepted.push(field); outer('./other.cjs'); },\n\
-                   });\n\
-                 }\n\
-                 const plain = require('./plain.cjs');\n\
-                 for (const field of fields) delete Object.prototype[field];\n\
-                 if (intercepted.length) throw Error('intercepted ' + intercepted.join(','));\n\
-                 if (plain.tag !== 'plain') throw Error('exports');\n\
-                 const entry = require.cache['app:///plain.cjs'];\n\
-                 for (const field of fields) {\n\
-                   if (!Object.getOwnPropertyDescriptor(entry, field))\n\
-                     throw Error(field + ' is not an own property');\n\
-                 }\n\
-                 if (entry.loaded !== true || entry.id !== 'app:///plain.cjs')\n\
-                   throw Error('module fields');",
-            )
-            .unwrap();
-            assert_eq!(
-                host.borrow().loads,
-                ["app:///plain.cjs"],
-                "nothing the accessors would have run reached the loader"
-            );
         }
 
         #[test]
         fn a_load_failure_is_an_error_naming_the_url() {
-            let (mut runtime, mut realm, _host) = require_realm(RequireHost::default());
-            let error = run_require(
+            let (mut runtime, mut realm, _host) = loader_realm(RequireHost::default());
+            let error = run_loader(
                 &mut runtime,
                 &mut realm,
                 "entry",
-                "require('./missing.cjs');",
+                "loadModuleSync('app:///missing.cjs', 'exports');",
             )
             .expect_err("a file the host does not serve");
             assert_eq!(error.name.as_deref(), Some("Error"));
@@ -3216,70 +3063,19 @@ mod implementation {
         }
 
         #[test]
-        fn a_json_file_parses_into_module_exports() {
-            let (mut runtime, mut realm, _host) = require_realm(
-                RequireHost::default()
-                    .json("app:///config.json", r#"{"answer": 42, "list": [1, 2]}"#)
-                    .json("app:///broken.json", "{"),
-            );
-            run_require(
-                &mut runtime,
-                &mut realm,
-                "entry",
-                "const config = require('./config.json');\n\
-                 if (config.answer !== 42 || config.list[1] !== 2) throw Error('parsed');\n\
-                 let name;\n\
-                 try { require('./broken.json'); } catch (error) { name = error.name; }\n\
-                 if (name !== 'SyntaxError') throw Error('threw ' + name);\n\
-                 if (require.cache['app:///broken.json'] !== undefined) throw Error('cached');",
-            )
-            .unwrap();
-        }
-
-        #[test]
-        fn require_resolve_answers_the_cache_key_without_loading() {
-            let (mut runtime, mut realm, host) = require_realm(RequireHost::default());
-            run_require(
-                &mut runtime,
-                &mut realm,
-                "entry",
-                "const url = require.resolve('./a.cjs');\n\
-                 if (url !== 'app:///a.cjs') throw Error('resolved ' + url);\n\
-                 if (Object.getPrototypeOf(require.cache) !== null)\n\
-                   throw Error('the cache has a prototype');",
-            )
-            .unwrap();
-            assert!(host.borrow().loads.is_empty());
-        }
-
-        #[test]
-        fn deleting_a_cache_entry_loads_and_evaluates_the_file_again() {
-            let (mut runtime, mut realm, host) = require_realm(RequireHost::default().commonjs(
-                "app:///counter.cjs",
-                "globalThis.runs = (globalThis.runs ?? 0) + 1;",
-            ));
-            run_require(
-                &mut runtime,
-                &mut realm,
-                "entry",
-                "require('./counter.cjs');\n\
-                 delete require.cache['app:///counter.cjs'];\n\
-                 require('./counter.cjs');\n\
-                 if (globalThis.runs !== 2) throw Error('ran ' + globalThis.runs + ' times');",
-            )
-            .unwrap();
-            assert_eq!(host.borrow().loads.len(), 2);
-        }
-
-        #[test]
         fn a_syntax_error_names_the_response_url_and_the_line_in_the_file() {
-            let (mut runtime, mut realm, _host) = require_realm(RequireHost::default().redirected(
+            let (mut runtime, mut realm, _host) = loader_realm(RequireHost::default().redirected(
                 "app:///alias",
                 "app:///broken.cjs",
-                "exports.fine = 1;\n\nfunction ( {",
+                "const fine = 1;\n\nfunction ( {",
             ));
-            let error = run_require(&mut runtime, &mut realm, "entry", "require('./alias');")
-                .expect_err("a file that does not parse");
+            let error = run_loader(
+                &mut runtime,
+                &mut realm,
+                "entry",
+                "loadModuleSync('app:///alias', 'exports');",
+            )
+            .expect_err("a file that does not parse");
             assert_eq!(error.name.as_deref(), Some("SyntaxError"));
             let location = error.location.expect("a parse failure has a location");
             assert_eq!(location.source.as_deref(), Some("app:///broken.cjs"));
@@ -3288,14 +3084,14 @@ mod implementation {
 
         #[test]
         fn a_throw_reports_the_line_it_is_on_in_the_file() {
-            let (mut runtime, mut realm, _host) = require_realm(
+            let (mut runtime, mut realm, _host) = loader_realm(
                 RequireHost::default().commonjs("app:///throws.cjs", "\n\n\nthrow Error('deep');"),
             );
-            let error = run_require(
+            let error = run_loader(
                 &mut runtime,
                 &mut realm,
                 "entry",
-                "require('./throws.cjs');",
+                "loadModuleSync('app:///throws.cjs', 'exports').value();",
             )
             .expect_err("a body that throws");
             assert_eq!(error.message, "deep");
@@ -3304,64 +3100,58 @@ mod implementation {
             assert_eq!(location.line, Some(4));
         }
 
+        /// Pins the use-after-free a compile that also evaluated would open:
+        /// this file's text closes the wrapper early, so the statements after
+        /// it are the enclosing script's and run inside `JS_EvalFunction` —
+        /// where author code could not otherwise reach, and where a load of
+        /// its own replaces the buffers the outer load lent. The outer answer
+        /// is still the first file's, which is what says the URL was copied
+        /// and the text compiled before any of that ran.
         #[test]
-        fn create_require_takes_a_string_base_and_reads_it_only_when_resolving() {
-            let (mut runtime, mut realm, _host) = require_realm(RequireHost::default());
-            let refused = run_module(
+        fn a_file_that_closes_the_wrapper_early_runs_after_its_load_is_read() {
+            let (mut runtime, mut realm, host) = loader_realm(
+                RequireHost::default()
+                    .redirected(
+                        "app:///early.cjs",
+                        "https://cdn.test/early.cjs",
+                        "}); globalThis.inner = globalThis.nested('app:///other.cjs');\n\
+                         (function (a, b) { return a + b;",
+                    )
+                    .commonjs("app:///other.cjs", "return 'other';")
+                    .commonjs("app:///after.cjs", "return 'after';"),
+            );
+            run_loader(
                 &mut runtime,
                 &mut realm,
                 "entry",
-                &format!(
-                    "import {{ createRequire }} from '{REQUIRE_MODULE}';\n\
-                     createRequire(42);"
-                ),
+                "globalThis.nested = url => loadModuleSync(url, 'exports');\n\
+                 const outer = loadModuleSync('app:///early.cjs', 'a, b');\n\
+                 if (globalThis.inner === undefined)\n\
+                   throw Error('the escaped statement did not run');\n\
+                 if (globalThis.inner.url !== 'app:///other.cjs')\n\
+                   throw Error('nested url ' + globalThis.inner.url);\n\
+                 if (outer.url !== 'https://cdn.test/early.cjs')\n\
+                   throw Error('outer url ' + outer.url);\n\
+                 if (outer.value(2, 3) !== 5) throw Error('outer value');\n\
+                 if (loadModuleSync('app:///after.cjs', 'exports').value() !== 'after')\n\
+                   throw Error('the realm is broken');",
             )
-            .expect_err("a base that is not a string");
-            assert_eq!(refused.name.as_deref(), Some("TypeError"));
-
-            let late = run_module(
-                &mut runtime,
-                &mut realm,
-                "late",
-                &format!(
-                    "import {{ createRequire }} from '{REQUIRE_MODULE}';\n\
-                     createRequire('nowhere')('./a.cjs');"
-                ),
-            )
-            .expect_err("a base nothing resolves against");
-            assert_eq!(late.name.as_deref(), Some("TypeError"));
-            assert!(late.message.contains("nowhere"), "{}", late.message);
-        }
-
-        #[test]
-        fn two_realms_of_one_runtime_keep_separate_caches() {
-            let (mut runtime, mut first, host) = require_realm(RequireHost::default().commonjs(
-                "app:///counter.cjs",
-                "globalThis.runs = (globalThis.runs ?? 0) + 1; exports.runs = globalThis.runs;",
-            ));
-            let mut second = runtime.create_context().unwrap();
-            second.enable_module_loading(resolve_relative);
-            install_require(&mut second, &host);
-
-            let body = "const first = require('./counter.cjs');\n\
-                        if (first.runs !== 1) throw Error('ran ' + first.runs + ' times');\n\
-                        if (require('./counter.cjs') !== first) throw Error('two instances');";
-            run_require(&mut runtime, &mut first, "first", body).unwrap();
-            run_require(&mut runtime, &mut second, "second", body).unwrap();
+            .unwrap();
             assert_eq!(
                 host.borrow().loads,
-                ["app:///counter.cjs", "app:///counter.cjs"],
-                "each realm loads the file its own cache is missing"
+                ["app:///early.cjs", "app:///other.cjs", "app:///after.cjs"],
+                "the escaped load is served like any other"
             );
         }
 
+        /// The shim retains the trampoline and the context's own allocation
+        /// rather than the closure, so what a loaded file left in the realm
+        /// keeps neither the loader nor its host alive past the realm.
         #[test]
-        fn a_realm_whose_cache_holds_a_cycle_releases_its_loader() {
+        fn a_realm_releases_its_loader_when_it_is_dropped() {
             let live = Rc::new(());
-            let (mut runtime, mut realm, host) = require_realm(RequireHost::default().commonjs(
-                "app:///self.cjs",
-                "exports.require = require; exports.module = module;",
-            ));
+            let (mut runtime, mut realm, host) =
+                loader_realm(RequireHost::default().commonjs("app:///held.cjs", "return 42;"));
             let held = Rc::clone(&live);
             realm
                 .register_host_module_function(REQUIRE_MODULE, "held", 0, move |_| {
@@ -3369,12 +3159,12 @@ mod implementation {
                     Ok(HostValue::Undefined)
                 })
                 .unwrap();
-            run_require(
+            run_loader(
                 &mut runtime,
                 &mut realm,
                 "entry",
-                "const self = require('./self.cjs');\n\
-                 if (self.require.cache['app:///self.cjs'] !== self.module) throw Error('cycle');",
+                "globalThis.kept = loadModuleSync('app:///held.cjs', 'exports');\n\
+                 if (globalThis.kept.value() !== 42) throw Error('value');",
             )
             .unwrap();
             drop(realm);
@@ -3383,37 +3173,26 @@ mod implementation {
             assert_eq!(Rc::strong_count(&host), 1);
         }
 
+        /// The export is what carries the loader, so a realm takes exactly
+        /// one: a second registration is refused whatever name it asks for,
+        /// and the export already installed goes on answering from the host
+        /// that came with it.
         #[test]
-        fn create_require_needs_a_module_normalizer_and_registers_once() {
-            let mut runtime = Runtime::new().unwrap();
-            let mut realm = runtime.create_context().unwrap();
-            let no_loader = realm
-                .register_create_require(REQUIRE_MODULE, "createRequire", |_| {
-                    unreachable!("nothing can call this")
+        fn a_realm_takes_one_synchronous_loader() {
+            let (mut runtime, mut realm, host) =
+                loader_realm(RequireHost::default().commonjs("app:///a.cjs", "return 42;"));
+            let refused = realm
+                .register_synchronous_loader(REQUIRE_MODULE, "loadAgainSync", |_| {
+                    Err("the second host answers nothing".to_owned())
                 })
-                .expect_err("require resolves through the module normalizer");
-            assert_eq!(no_loader.kind, ErrorKind::InvalidInput);
-            assert_eq!(no_loader.phase, ErrorPhase::RegisterModule);
-
-            realm.enable_module_loading(resolve_relative);
-            let host = Rc::new(RefCell::new(
-                RequireHost::default().commonjs("app:///a.cjs", "exports.answer = 42;"),
-            ));
-            install_require(&mut realm, &host);
-            let second = Rc::clone(&host);
-            let twice = realm
-                .register_create_require("other:module", "createRequire", move |url| {
-                    second.borrow_mut().load(url)
-                })
-                .expect_err("a realm has one createRequire");
-            assert_eq!(twice.kind, ErrorKind::InvalidInput);
-
-            // The refusal left the loader the first registration installed.
-            run_require(
+                .expect_err("a realm takes one loader");
+            assert_eq!(refused.kind, ErrorKind::InvalidInput);
+            run_loader(
                 &mut runtime,
                 &mut realm,
                 "entry",
-                "if (require('./a.cjs').answer !== 42) throw Error('the loader is gone');",
+                "if (loadModuleSync('app:///a.cjs', 'exports').value() !== 42)\n\
+                   throw Error('the first export lost its host');",
             )
             .unwrap();
             assert_eq!(host.borrow().loads, ["app:///a.cjs"]);

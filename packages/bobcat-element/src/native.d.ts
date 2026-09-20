@@ -234,6 +234,56 @@ declare module "bobcat-internal:host" {
   export const initData: BobcatNative["initData"];
   export const globalProps: BobcatNative["globalProps"];
   export const nativeModuleTable: BobcatNative["nativeModuleTable"];
+  /**
+   * The URL a module at `base` names by `specifier` — the same resolution an
+   * `import` there gets, so a `require` and an `import` name one module by one
+   * URL. Absolute and relative URLs resolve; a bare name other than a built-in
+   * throws, as does a `base` that is not a URL.
+   *
+   * Loads nothing. `resolveModuleUrl(url, "./")` is that URL's directory, with
+   * its trailing slash.
+   */
+  export function resolveModuleUrl(base: string, specifier: string): string;
+  /**
+   * Loads the source at `url` and compiles it, before returning.
+   *
+   * Resolution, caching and the `module` object are none of its business: it
+   * takes an already-resolved URL and answers the compiled source, and
+   * `bobcat:module` is Node's algorithm written over it. The source text never
+   * becomes a value in this realm.
+   *
+   * `parameters` is the parameter list the wrapper of a CommonJS file is
+   * compiled with, verbatim; a JSON file is parsed instead and `parameters` is
+   * unread. Either way the compile or parse is named by the URL the load
+   * answered from, so a `SyntaxError` and every frame beneath it name the
+   * file, and a line in the body is the line it sits on in it.
+   *
+   * The call parks the job it runs in until the host answers: the engine
+   * thread's tasks keep running, and no other job does — not this realm's
+   * promise jobs, and not a realm sharing its thread. A load the host cannot
+   * answer throws.
+   */
+  export function loadModuleSync(
+    url: string,
+    parameters: string,
+  ): LoadedModuleSource;
+}
+
+/** What one synchronous load answers with. */
+interface LoadedModuleSource {
+  /**
+   * The URL the load answered from, which a redirect makes different from the
+   * URL that was asked for. It is what the source was compiled under, the base
+   * a nested `require` resolves against, and `__filename`.
+   */
+  readonly url: string;
+  readonly kind: "commonjs" | "json";
+  /**
+   * For `"commonjs"`, the wrapper function: one parameter per name in the
+   * `parameters` list, and the file's own body. For `"json"`, the parsed
+   * value.
+   */
+  readonly value: unknown;
 }
 
 /** One CommonJS or JSON module, as `require.cache` holds it. */
@@ -244,7 +294,11 @@ interface RequiredModule {
   readonly filename: string;
   /** What the body left here, or assigned over. JSON is the parsed value. */
   exports: unknown;
-  /** True once the body has returned; a body that threw is never cached. */
+  /**
+   * True once the body has returned — from the start for JSON, which has no
+   * body. A body that threw leaves no entry behind at all, so no cached
+   * module is ever `false` once its `require` has returned.
+   */
   readonly loaded: boolean;
 }
 
@@ -255,23 +309,23 @@ interface RequiredModule {
  * realm sharing its thread.
  */
 interface Require {
+  /**
+   * The exports of the module `specifier` names, evaluated here if this realm
+   * has not evaluated it already. A specifier this engine cannot resolve —
+   * a bare name, or anything the normalizer refuses — is a `TypeError`
+   * carrying its message, where Node reports `MODULE_NOT_FOUND`.
+   */
   (specifier: string): unknown;
-  /** The URL `specifier` names — the cache key. Loads nothing. */
+  /**
+   * The URL `specifier` names — the cache key. Loads nothing, and refuses
+   * what a `require` of the same specifier would, with the same `TypeError`.
+   */
   resolve(specifier: string): string;
   /**
    * The realm's CommonJS cache, shared by every `require` in it. Deleting a
    * key makes the next `require` load and evaluate that URL again.
    */
   readonly cache: Record<string, RequiredModule | undefined>;
-}
-
-declare module "bobcat:module" {
-  /**
-   * A `require` that resolves specifiers against `url`, the way an `import`
-   * in a module at that URL would. The URL is read at the first resolution,
-   * not here.
-   */
-  export function createRequire(url: string): Require;
 }
 
 declare module "bobcat-internal:worker" {

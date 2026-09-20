@@ -15,6 +15,7 @@
       "bobcat:element": ["./element-papi.ts"],
       "bobcat:runtime": ["./main-thread-runtime.ts"],
       "bobcat:timers": ["./timers.ts"],
+      "bobcat:module": ["./module.ts"],
       "bobcat:event-target": ["./event-target.ts"],
       "bobcat:cross-thread-context": ["./cross-thread-context.ts"],
       "bobcat-internal": ["./worker.ts"],
