@@ -77,7 +77,7 @@
 //! lives in [`Scratch`], which never leaves the painter. A point outside the
 //! viewport still answers with the element drawn there.
 
-use euclid::default::Vector2D;
+use euclid::default::{Size2D, Vector2D};
 
 use crate::Document;
 use crate::paint::compose::{CapturedShape, ComposeAssembly, ComposeChain, ComposeOp, FilterGroup};
@@ -89,7 +89,9 @@ use crate::render::image::ImageRegistry;
 use crate::vello::Scene;
 use crate::vello::kurbo::{Affine, Point, Rect};
 use crate::vello::peniko::{BlendMode, Compose, Fill, Mix};
-use crate::visual::{ClipNode, PaintItem, PaintItemKind, PaintOrder, RenderLayer, ScrollSlot};
+use crate::visual::{
+    AutoBox, ClipNode, PaintItem, PaintItemKind, PaintOrder, RenderLayer, ScrollSlot,
+};
 
 /// Where one walk's output goes.
 ///
@@ -303,23 +305,38 @@ pub(crate) struct Scratch {
     /// every layer with no `blur()`. Index-parallel with
     /// [`PaintOrder::layers`].
     layer_sigma: Vec<f64>,
-    /// Per entry of `open_layers`, the running sum of 3-sigma inflations of
-    /// that layer and every filtered layer outside it. Content inside a
-    /// filtered group can put ink 3-sigma past its own box, so the cull test
-    /// has to admit everything within that reach of the admitted region —
-    /// summed, because the reaches of nested blurs compose.
-    open_inflate: Vec<f64>,
-    /// Per clip node, the region its whole chain admits, in viewport CSS px,
-    /// already intersected with the frame's cull rect. `None` means the chain
-    /// admits nothing: it leaves the cull rect, or one of its links has a
-    /// non-invertible transform, which [`push_clip`] encodes as an empty clip.
-    /// Index-parallel with [`PaintOrder::clips`].
-    clip_bounds: Vec<Option<Rect>>,
     /// Per item, the item-local to viewport-CSS-px map [`paint_item`] paints
     /// with, or `None` when the item encodes nothing — a non-invertible
     /// transform, or no reachable ink. Index-parallel with
     /// [`PaintOrder::items`].
     item_plan: Vec<Option<Affine>>,
+    /// The per-frame cull geometry, shared with the relevance pass.
+    plan: CullPlan,
+    paths: PathScratch,
+}
+
+/// The frame-wide geometry the cull test is decided against: the region every
+/// clip chain admits, how far every scroll slot's committed encode window
+/// reaches, and which animation chains a sampled delta can move.
+///
+/// It is a type of its own, and `pub(crate)`, because two consumers must
+/// agree exactly: [`plan_frame`], which decides what the paint walk encodes,
+/// and [`crate::visual::relevance`], which decides which
+/// `content-visibility: auto` boxes are relevant. Relevance is defined *as*
+/// the admitted region, so deriving it a second way would make "an element is
+/// relevant wherever its contents could paint" an invariant to be tested
+/// rather than one that holds by construction.
+#[derive(Debug, Default)]
+pub(crate) struct CullPlan {
+    /// The admitted base region: the viewport plus its slack, or `None` with
+    /// culling switched off entirely.
+    cull: Option<Rect>,
+    /// Per clip node, the region its whole chain admits, in viewport CSS px,
+    /// already intersected with `cull`. `None` means the chain admits
+    /// nothing: it leaves the cull rect, or one of its links has a
+    /// non-invertible transform, which [`push_clip`] encodes as an empty clip.
+    /// Index-parallel with [`PaintOrder::clips`].
+    clip_bounds: Vec<Option<Rect>>,
     /// Per scroll slot, the committed encode window `(low, high)` — the
     /// offset range the culled encode must stay valid for. Index-parallel
     /// with [`PaintOrder::slots`].
@@ -329,7 +346,132 @@ pub(crate) struct Scratch {
     /// culled and its enclosing groups keep unclipped bounds: the sampled
     /// delta can carry it anywhere.
     animation_moves: Vec<bool>,
-    paths: PathScratch,
+    /// Per group layer, the summed 3-sigma ink reach of that layer and every
+    /// filtered layer outside it. Content inside a filtered group can put ink
+    /// that far past its own box, so the region admitted for it grows by the
+    /// sum — the reaches of nested blurs compose. Index-parallel with
+    /// [`PaintOrder::layers`], resolved by one forward pass because a layer's
+    /// parent is always an earlier entry.
+    layer_inflate: Vec<f64>,
+}
+
+impl CullPlan {
+    /// Resolves the whole plan for one frame against an admitted region, in
+    /// viewport CSS px, or `None` to admit everything.
+    fn resolve<T>(&mut self, document: &Document<T>, frame: &PaintOrder, cull: Option<Rect>) {
+        self.cull = cull;
+        self.slot_windows.clear();
+        self.slot_windows.extend(
+            frame
+                .slots()
+                .iter()
+                .map(crate::visual::ScrollSlot::encode_window),
+        );
+        self.animation_moves.clear();
+        for slot in frame.animations() {
+            let own = slot
+                .curve
+                .as_ref()
+                .is_some_and(|curve| curve.transform.is_some());
+            let inherited = slot
+                .parent
+                .is_some_and(|parent| self.animation_moves[parent as usize]);
+            self.animation_moves.push(own || inherited);
+        }
+        self.layer_inflate.clear();
+        for (index, layer) in frame.layers().iter().enumerate() {
+            debug_assert!(
+                layer.parent.is_none_or(|parent| parent < index),
+                "a group layer nests inside an earlier group layer",
+            );
+            let outer = layer
+                .parent
+                .map_or(0.0, |parent| self.layer_inflate[parent]);
+            self.layer_inflate
+                .push(outer + BLUR_INK_SIGMAS * layer_blur_sigma(document, layer));
+        }
+        plan_clips(self, frame, cull);
+    }
+
+    /// The same plan, resolved from a document's own device metrics — the
+    /// cull rect the production walk uses.
+    pub(crate) fn resolve_for<T>(&mut self, document: &Document<T>, frame: &PaintOrder) {
+        let device = document.device();
+        let ratio = f64::from(device.device_pixel_ratio().get());
+        self.resolve(
+            document,
+            frame,
+            Some(cull_rect(device.viewport_size(), ratio)),
+        );
+    }
+
+    /// The region this frame's culling admits for content on `chain` inside
+    /// `clip` and inside group `layer`.
+    fn admitted_for(
+        &self,
+        frame: &PaintOrder,
+        clip: Option<usize>,
+        chain: Option<u32>,
+        animation: Option<u32>,
+        layer: Option<usize>,
+    ) -> Admitted {
+        if animation.is_some_and(|slot| self.animation_moves[slot as usize]) {
+            return Admitted::Everything;
+        }
+        let Some(cull) = self.cull else {
+            return Admitted::Everything;
+        };
+        // Every enclosing blur carries this content's ink 3 sigma further
+        // out, so the region it may reach grows by their sum. That
+        // over-admits a little near an inner clip, which is the safe
+        // direction: culling needs a proof, uncertainty paints.
+        let inflate = layer.map_or(0.0, |layer| self.layer_inflate[layer]);
+        admitted_region(self, frame, cull, chain, clip).map_or(Admitted::Nothing, |region| {
+            Admitted::Region(inflate_rect(region, inflate))
+        })
+    }
+
+    /// Whether this `content-visibility: auto` box can put ink in that
+    /// region — the whole of the relevance test.
+    ///
+    /// It is [`plan_frame`]'s own first cull test, reached through the same
+    /// [`Self::admitted_for`] and the same [`box_bounds`]: the one that lets
+    /// a box already reaching the admitted region paint without computing any
+    /// fragment reach. Everything uncertain (a singular transform, a
+    /// non-finite bound, a moving animation chain, culling switched off)
+    /// answers `true`, because a cull needs a proof and relevance needs none.
+    pub(crate) fn admits_auto_box(&self, frame: &PaintOrder, auto: &AutoBox) -> bool {
+        let Some(local) = convert::item_affine(&auto.transform, auto.size) else {
+            return true;
+        };
+        self.admitted_for(frame, auto.clip, auto.chain, auto.animation, auto.layer)
+            .reached_by(box_bounds(local, auto.size, 0.0))
+    }
+}
+
+/// What a frame's culling admits for one piece of content, in viewport CSS px.
+#[derive(Clone, Copy, Debug)]
+enum Admitted {
+    /// No proof is possible at all: culling is switched off, or a sampled
+    /// animation delta can carry the content anywhere. Everything paints.
+    Everything,
+    /// The region content on this chain may put ink in.
+    Region(Rect),
+    /// The clip chain admits nothing whatever.
+    Nothing,
+}
+
+impl Admitted {
+    /// Whether `bounds` reaches it. Undecidable bounds reach everything but
+    /// [`Self::Nothing`]; see [`can_reach`], which this defers to so the
+    /// non-finite rule has one definition.
+    fn reached_by(self, bounds: Rect) -> bool {
+        match self {
+            Self::Everything => true,
+            Self::Region(region) => can_reach(bounds, Some(region)),
+            Self::Nothing => can_reach(bounds, None),
+        }
+    }
 }
 
 /// Device pixels of slack around the viewport before an item may be culled.
@@ -478,26 +620,8 @@ fn walk_within<T>(
     scratch.clip_stack.clear();
     scratch.chain.clear();
     scratch.scopes.clear();
-    scratch.slot_windows.clear();
-    scratch.slot_windows.extend(
-        frame
-            .slots()
-            .iter()
-            .map(crate::visual::ScrollSlot::encode_window),
-    );
-    scratch.animation_moves.clear();
-    for slot in frame.animations() {
-        let own = slot
-            .curve
-            .as_ref()
-            .is_some_and(|curve| curve.transform.is_some());
-        let inherited = slot
-            .parent
-            .is_some_and(|parent| scratch.animation_moves[parent as usize]);
-        scratch.animation_moves.push(own || inherited);
-    }
-    plan_clips(scratch, frame, cull);
-    plan_frame(scratch, document, frame, cull);
+    scratch.plan.resolve(document, frame, cull);
+    plan_frame(scratch, document, frame);
 
     let painting = Painting {
         document,
@@ -562,8 +686,8 @@ fn cull_rect(viewport: euclid::Size2D<f32, stylo_traits::CSSPixel>, ratio: f64) 
 /// One forward pass suffices because a clip node's parent is always an earlier
 /// entry: [`crate::visual`]'s builder pushes a clip only after the clip it
 /// nests inside.
-fn plan_clips(scratch: &mut Scratch, frame: &PaintOrder, cull: Option<Rect>) {
-    scratch.clip_bounds.clear();
+fn plan_clips(plan: &mut CullPlan, frame: &PaintOrder, cull: Option<Rect>) {
+    plan.clip_bounds.clear();
     let Some(cull) = cull else {
         return;
     };
@@ -576,7 +700,7 @@ fn plan_clips(scratch: &mut Scratch, frame: &PaintOrder, cull: Option<Rect>) {
         // coordinates: everything here is baked unscrolled, so a region on
         // an outer chain admits content on an inner one anywhere the inner
         // slots' encode windows can carry it.
-        let inherited = admitted_region(scratch, frame, cull, clip.slot, clip.parent);
+        let inherited = admitted_region(plan, frame, cull, clip.slot, clip.parent);
         let resolved = inherited.and_then(|inherited| {
             // `push_clip` pushes an empty clip for a singular transform, so
             // nothing under this chain reaches the scene at all.
@@ -587,7 +711,7 @@ fn plan_clips(scratch: &mut Scratch, frame: &PaintOrder, cull: Option<Rect>) {
             let both = own.intersect(inherited);
             (both.width() > 0.0 && both.height() > 0.0).then_some(both)
         });
-        scratch.clip_bounds.push(resolved);
+        plan.clip_bounds.push(resolved);
     }
 }
 
@@ -1331,17 +1455,15 @@ fn pop_clips_to(sink: &mut WalkSink<'_>, scratch: &mut Scratch, len: usize) {
 
 /// Per-frame prepass: the bounds every group's effect layer is pushed with,
 /// and one plan entry per item saying whether it paints and with what matrix.
-fn plan_frame<T>(
-    scratch: &mut Scratch,
-    document: &Document<T>,
-    frame: &PaintOrder,
-    cull: Option<Rect>,
-) {
+///
+/// The admitted region every item is tested against comes from `scratch.plan`,
+/// which [`CullPlan::resolve`] filled — including whether culling is on at
+/// all.
+fn plan_frame<T>(scratch: &mut Scratch, document: &Document<T>, frame: &PaintOrder) {
     let layers = frame.layers();
     let items = frame.items();
     scratch.layer_bounds.clear();
     scratch.open_layers.clear();
-    scratch.open_inflate.clear();
     scratch.item_plan.clear();
     scratch.item_plan.resize(items.len(), None);
     scratch.layer_bounds.resize(layers.len(), Rect::ZERO);
@@ -1374,10 +1496,6 @@ fn plan_frame<T>(
         }
         while next_open < layers.len() && layers[next_open].items.start == index {
             scratch.bounds_acc[next_open] = layer_root_rect(&layers[next_open]);
-            let outer = scratch.open_inflate.last().copied().unwrap_or(0.0);
-            scratch
-                .open_inflate
-                .push(outer + BLUR_INK_SIGMAS * scratch.layer_sigma[next_open]);
             scratch.open_layers.push(next_open);
             next_open += 1;
         }
@@ -1390,31 +1508,18 @@ fn plan_frame<T>(
         };
         let top = scratch.open_layers.last().copied();
         let content_chain = frame.item_translation_chain(item);
-        let moving = item
-            .animation
-            .is_some_and(|slot| scratch.animation_moves[slot as usize]);
-        let admitted = if moving {
-            // A sampled delta can move the item anywhere; it always paints.
-            None
-        } else {
-            // Every enclosing blur carries this item's ink 3 sigma further
-            // out, so the region it may reach grows by their sum. That
-            // over-admits a little near an inner clip, which is the safe
-            // direction: culling needs a proof, uncertainty paints.
-            let inflate = scratch.open_inflate.last().copied().unwrap_or(0.0);
-            cull.map(|cull| {
-                admitted_region(scratch, frame, cull, content_chain, item.clip)
-                    .map(|region| inflate_rect(region, inflate))
-            })
-        };
+        let admitted =
+            scratch
+                .plan
+                .admitted_for(frame, item.clip, content_chain, item.animation, top);
 
         // An item whose plain border box already reaches the admitted region
         // paints whatever its fragments reach, because every reach only grows
         // that box. Items inside a group are excluded: their reach is needed
         // for the group's bounds regardless of what the cull test decides.
-        if top.is_none()
-            && admitted.is_none_or(|admitted| can_reach(item_bounds(item, local, 0.0), admitted))
-        {
+        // This test is exactly `CullPlan::admits_auto_box`'s, which is what
+        // the `content-visibility: auto` relevance pass asks with.
+        if top.is_none() && admitted.reached_by(box_bounds(local, item.size, 0.0)) {
             scratch.item_plan[index] = Some(local);
             continue;
         }
@@ -1424,7 +1529,7 @@ fn plan_frame<T>(
         if let Some(top) = top {
             let (low, high) = relative_offset_range(
                 slots,
-                &scratch.slot_windows,
+                &scratch.plan.slot_windows,
                 content_chain,
                 layers[top].slot,
             );
@@ -1432,20 +1537,21 @@ fn plan_frame<T>(
             scratch.bounds_acc[top] =
                 Some(scratch.bounds_acc[top].map_or(bounds, |united| united.union(bounds)));
         }
-        let reachable = admitted.is_none_or(|admitted| {
-            if reach.cull.is_finite() {
+        let reachable = match admitted {
+            Admitted::Everything => true,
+            _ if reach.cull.is_finite() => {
                 let inflated = if reach.cull > reach.layer {
                     item_bounds(item, local, reach.cull)
                 } else {
                     bounds
                 };
-                can_reach(inflated, admitted)
-            } else {
-                // An unbounded reach can only be discarded by a clip chain
-                // that admits nothing at all.
-                admitted.is_some()
+                admitted.reached_by(inflated)
             }
-        });
+            // An unbounded reach can only be discarded by a clip chain that
+            // admits nothing at all.
+            Admitted::Region(_) => true,
+            Admitted::Nothing => false,
+        };
         if reachable {
             scratch.item_plan[index] = Some(local);
         }
@@ -1470,10 +1576,9 @@ fn close_layer(
         .open_layers
         .pop()
         .expect("close is only called with an open layer");
-    scratch.open_inflate.pop();
     let moving = layers[closed]
         .animation
-        .is_some_and(|slot| scratch.animation_moves[slot as usize]);
+        .is_some_and(|slot| scratch.plan.animation_moves[slot as usize]);
     // A blur puts ink 3 sigma past the group's own content, so the group's
     // pushed rect — which is also the bake's rect — has to carry that margin.
     // Inflating *before* the viewport intersection is what makes the margin
@@ -1489,14 +1594,14 @@ fn close_layer(
             return rect;
         }
         let (low, high) =
-            relative_offset_range(slots, &scratch.slot_windows, layers[closed].slot, None);
+            relative_offset_range(slots, &scratch.plan.slot_windows, layers[closed].slot, None);
         rect.intersect(inflate_rect(expand_region(viewport, low, high), reach))
     });
     if let (Some(bounds), Some(&parent)) = (scratch.bounds_acc[closed], scratch.open_layers.last())
     {
         let (low, high) = relative_offset_range(
             slots,
-            &scratch.slot_windows,
+            &scratch.plan.slot_windows,
             layers[closed].slot,
             layers[parent].slot,
         );
@@ -1568,17 +1673,17 @@ fn inflate_rect(rect: Rect, reach: f64) -> Rect {
 /// encode windows between them can carry content. `None` means the clip
 /// chain admits nothing at all.
 fn admitted_region(
-    scratch: &Scratch,
+    plan: &CullPlan,
     frame: &PaintOrder,
     region: Rect,
     chain: Option<u32>,
     clip: Option<usize>,
 ) -> Option<Rect> {
     let (base, outer) = match clip {
-        Some(clip) => (scratch.clip_bounds[clip]?, frame.clips()[clip].slot),
+        Some(clip) => (plan.clip_bounds[clip]?, frame.clips()[clip].slot),
         None => (region, None),
     };
-    let (low, high) = relative_offset_range(frame.slots(), &scratch.slot_windows, chain, outer);
+    let (low, high) = relative_offset_range(frame.slots(), &plan.slot_windows, chain, outer);
     Some(expand_region(base, low, high))
 }
 
@@ -1633,13 +1738,20 @@ fn extents<T>(document: &Document<T>, item: &PaintItem) -> Extents {
 /// rotation, skew, and the perspective corner fit are all handled by
 /// construction rather than approximated again here.
 fn item_bounds(item: &PaintItem, affine: Affine, extent: f64) -> Rect {
+    box_bounds(affine, item.size, extent)
+}
+
+/// [`item_bounds`] for a box that is not an item — the
+/// `content-visibility: auto` relevance test's, so that the two ask about a
+/// border box the same way.
+fn box_bounds(affine: Affine, size: Size2D<f32>, extent: f64) -> Rect {
     affine_rect(
         affine,
         Rect::new(
             -extent,
             -extent,
-            item.size.width as f64 + extent,
-            item.size.height as f64 + extent,
+            size.width as f64 + extent,
+            size.height as f64 + extent,
         ),
     )
 }

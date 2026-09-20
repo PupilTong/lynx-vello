@@ -1468,10 +1468,24 @@ fn content_visibility_auto_establishes_the_fixed_containing_block() {
     let plain_fixed = h.doc.el(plain, ".fixed");
     let cv = h.doc.el(root, ".host.cv");
     let cv_fixed = h.doc.el(cv, ".fixed");
-    h.layout();
+    // A render, not a bare layout: `content-visibility: auto` relevance is
+    // determined by the rendering update, and an `auto` box no rendering
+    // update has reached skips its contents — so the fixed descendant this
+    // test is about only exists once the box is known to be on screen.
+    assert!(h.doc.dom.render(), "the first render commits a frame");
 
     assert_eq!(h.rect(plain_fixed), (-90.0, -30.0, 30.0, 40.0));
     assert_eq!(h.rect(cv_fixed), (10.0, 20.0, 30.0, 40.0));
+
+    // The same fixed containing block while the box is skipping: its own
+    // geometry never depended on its contents being laid out.
+    h.doc.dom.set_viewport(800.0, 40.0);
+    assert!(h.doc.dom.render(), "the resize commits another frame");
+    assert_eq!(
+        h.rect(cv_fixed),
+        (0.0, 0.0, 0.0, 0.0),
+        "a skipped box lays out no descendant, hoisted or not",
+    );
 }
 
 #[test]

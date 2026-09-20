@@ -434,6 +434,20 @@ impl CommittedFrame {
             .map(|index| u32::try_from(index).expect("a frame cannot hold 2^32 scroll containers"))
     }
 
+    /// Whether this frame can still be composed at `offset` for the scroll
+    /// container `node`: it carries the container as a slot, and `offset` is
+    /// inside that slot's [`ScrollSlot::encode_window`].
+    ///
+    /// `false` for a container this frame does not know, which is the case
+    /// the caller has to rebuild for anyway.
+    #[must_use]
+    pub fn covers_scroll_offset(&self, node: NodeId, offset: Vector2D<f32>) -> bool {
+        self.slot_of(node).is_some_and(|index| {
+            let (low, high) = self.order.slots()[index as usize].encode_window();
+            offset.x >= low.x && offset.x <= high.x && offset.y >= low.y && offset.y <= high.y
+        })
+    }
+
     /// The topmost hit-testable element at `point`, with its scroll slot.
     ///
     /// The frame is baked unscrolled; `offset_of` supplies each slot's

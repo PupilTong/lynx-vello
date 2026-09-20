@@ -64,8 +64,27 @@ pub(crate) fn generates_no_box(style: &ComputedValues) -> bool {
     style.clone_display().is_contents()
 }
 
-pub(crate) fn skips_contents(style: &ComputedValues) -> bool {
-    !generates_no_box(style) && style.clone_content_visibility() == ContentVisibility::Hidden
+/// css-contain-2 §4: whether this element skips its contents.
+///
+/// `hidden` always does. `auto` does whenever the element is not *relevant to
+/// the user* — the per-element bit
+/// [`crate::layout::relevance`] owns, which the rendering update determines
+/// against the region the paint walk's encode window admits. An `auto`
+/// element no rendering update has reached yet reads as skipped, matching the
+/// spec's "determined in the next rendering update".
+///
+/// A `display: contents` element generates no box, so it is never contained,
+/// never skipped, and never a relayout boundary, whatever its
+/// `content-visibility` computes to.
+pub(crate) fn skips_contents<T>(node: &Node<T>, style: &ComputedValues) -> bool {
+    if generates_no_box(style) {
+        return false;
+    }
+    match style.clone_content_visibility() {
+        ContentVisibility::Visible => false,
+        ContentVisibility::Hidden => true,
+        ContentVisibility::Auto => node.arenas().relevance(node.id()).skips(),
+    }
 }
 
 pub(crate) fn establishes_fixed_containing_block<T>(
@@ -99,7 +118,7 @@ pub(crate) fn establishes_fixed_containing_block<T>(
         || effective_containment(
             style.clone_contain(),
             style.clone_content_visibility(),
-            skips_contents(style),
+            skips_contents(node, style),
         )
         .intersects(Contain::LAYOUT | Contain::PAINT)
         || (filters && !is_root_element(node))
@@ -208,6 +227,19 @@ impl<T> CoreStyle for StyleView<'_, T> {
 
     fn position(&self) -> PositionProperty {
         resolve_position(self.node, self.values())
+    }
+
+    /// The host-owned half of css-contain-2 §4: hughie reads
+    /// `content-visibility: hidden` off computed style on its own, but
+    /// `auto`'s relevance is a fact only a rendering update can establish, so
+    /// it comes from this document's own per-element bit.
+    ///
+    /// [`CoreStyle::containment`] needs no override beside this one: its
+    /// default already folds `self.skips_contents()` through
+    /// `effective_containment`, which is where the `SIZE` bit a skipped
+    /// `auto` box gains comes from.
+    fn skips_contents(&self) -> bool {
+        skips_contents(self.node, self.values())
     }
 }
 

@@ -224,6 +224,14 @@ const LIST_CSS: &str = "page { display: flex; position: relative; width: 800px; 
          .cell { display: flex; width: 120px; height: 40px;
                  background-color: #ccd4dd; border-radius: 6px; }";
 
+/// The one rule that separates the `auto` list from the plain one. The
+/// intrinsic height is the row's own outer box — `height: 60px` plus the 1px
+/// `border-bottom`, under the initial `content-box` sizing — so a skipped row
+/// takes exactly the room a laid-out one takes and the scroll range does not
+/// move when rows reveal.
+const AUTO_ROW_CSS: &str = "
+         .row { content-visibility: auto; contain-intrinsic-size: 800px 61px; }";
+
 /// A tall scrolling list, scrolled to its midpoint so most rows sit outside the
 /// scrollport.
 ///
@@ -242,6 +250,13 @@ struct ListPage {
     /// The offset the list rests at. Both scroll phases are within a pixel of
     /// it and neither clamps.
     resting_offset: f32,
+    /// An offset more than one whole encode window past
+    /// [`Self::resting_offset`], so a frame committed at either cannot
+    /// compose the other: the scroll between them is what a compositor
+    /// answers with a refill commit, and what re-determines every
+    /// `content-visibility: auto` row. Clear of every row edge on both its
+    /// scrollport edges, exactly like the resting offset.
+    refill_offset: f32,
 }
 
 impl std::fmt::Debug for ListPage {
@@ -250,9 +265,22 @@ impl std::fmt::Debug for ListPage {
     }
 }
 
-fn list_page(rows: usize) -> ListPage {
+/// The list page before any layout: the tree an embedder hands the engine for
+/// its first frame, which is what the cold benchmarks must be given.
+///
+/// `skip_offscreen` adds `content-visibility: auto` to every row, with a
+/// `contain-intrinsic-size` matching the row's own outer box, so a skipped
+/// row occupies exactly the space a laid-out one does and the scroll range is
+/// the same either way. Every other property of the page is identical, so the
+/// pair of benchmarks over the two differs by the skipping and nothing else.
+fn cold_list_page(rows: usize, skip_offscreen: bool) -> (Document<()>, NodeId, Vec<NodeId>) {
     assert!(rows >= 32, "a list benchmark needs more rows than it shows");
-    let mut dom = page_document(LIST_CSS);
+    let sheet = if skip_offscreen {
+        format!("{LIST_CSS}{AUTO_ROW_CSS}")
+    } else {
+        LIST_CSS.to_owned()
+    };
+    let mut dom = page_document(&sheet);
     let root = dom.document_element().id();
     let list = dom.create_element("view", ());
     dom.add_class(list, "list");
@@ -268,6 +296,19 @@ fn list_page(rows: usize) -> ListPage {
         dom.append_child(row, cell);
         row_ids.push(row);
     }
+    (dom, list, row_ids)
+}
+
+fn list_page(rows: usize) -> ListPage {
+    list_page_with(rows, false)
+}
+
+fn auto_list_page(rows: usize) -> ListPage {
+    list_page_with(rows, true)
+}
+
+fn list_page_with(rows: usize, skip_offscreen: bool) -> ListPage {
+    let (mut dom, list, row_ids) = cold_list_page(rows, skip_offscreen);
 
     dom.layout();
     let scroll_box = dom
@@ -319,6 +360,25 @@ fn list_page(rows: usize) -> ListPage {
         resting_offset < last_candidate && resting_offset + 1.0 <= max,
         "no offset near the list's midpoint keeps both scroll phases showing the same rows"
     );
+    // A second resting place one whole encode window past the first. The
+    // window is one scrollport in each direction, so a gap of a scrollport
+    // plus `MARGIN` puts each offset outside the other's committed window on
+    // both legs of the round trip.
+    let mut refill_offset = resting_offset + scrollport + MARGIN;
+    let last_refill_candidate = refill_offset + CANDIDATE_OFFSETS;
+    while refill_offset < last_refill_candidate
+        && !(clear_of_a_row_edge(refill_offset) && clear_of_a_row_edge(refill_offset + scrollport))
+    {
+        refill_offset += 1.0;
+    }
+    assert!(
+        refill_offset < last_refill_candidate && refill_offset <= max,
+        "no offset one window past the resting offset keeps the scrollport clear of every row edge"
+    );
+    assert!(
+        refill_offset - resting_offset > scrollport,
+        "the refill offset must leave the resting offset's encode window"
+    );
     dom.scroll_to(list, Vector2D::new(0.0, resting_offset));
 
     let row_extent = |dom: &Document<()>, row: NodeId| {
@@ -347,6 +407,7 @@ fn list_page(rows: usize) -> ListPage {
         visible_row,
         offscreen_row,
         resting_offset,
+        refill_offset,
     }
 }
 
@@ -555,6 +616,39 @@ fn render_document(bencher: divan::Bencher<'_, '_>, cards: usize) {
         });
 }
 
+/// The first render of a list page, with and without
+/// `content-visibility: auto` on its rows.
+///
+/// Cold on purpose: the page has never been laid out, so one iteration pays
+/// the first style flush, the first layout, the first paint-order build and
+/// the first encode — which is where skipping is supposed to pay, because the
+/// rows outside the first frame's encode window never measure anything. The
+/// `auto` arm costs one extra paint-order build for the pass that reveals the
+/// rows inside the window; the pair says whether skipping the rest is worth
+/// it, and at which row count.
+#[divan::bench(args = ROW_ARGS)]
+fn render_list_document(bencher: divan::Bencher<'_, '_>, rows: usize) {
+    bencher
+        .with_inputs(|| cold_list_page(rows, false).0)
+        .bench_local_values(|mut dom| {
+            divan::black_box(dom.render());
+            divan::black_box(dom.scene(&dom::NoImages).encoding().draw_tags.len());
+            dom
+        });
+}
+
+/// [`render_list_document`] with every row `content-visibility: auto`.
+#[divan::bench(args = ROW_ARGS)]
+fn render_auto_list_document(bencher: divan::Bencher<'_, '_>, rows: usize) {
+    bencher
+        .with_inputs(|| cold_list_page(rows, true).0)
+        .bench_local_values(|mut dom| {
+            divan::black_box(dom.render());
+            divan::black_box(dom.scene(&dom::NoImages).encoding().draw_tags.len());
+            dom
+        });
+}
+
 // ---------------------------------------------------------------------------
 // Single-element frames on the card page
 // ---------------------------------------------------------------------------
@@ -676,6 +770,38 @@ fn frame_visible_row_flip(bencher: divan::Bencher<'_, '_>, rows: usize) {
     let row = page.visible_row;
     bench_frames(bencher, page.dom, Staleness::Repaints, move |dom, phase| {
         dom.set_inline_style_property(row, "background-color", flip_color(phase));
+    });
+}
+
+/// One refill frame: a scroll far enough to leave the committed encode
+/// window, which is the one scroll the compositor cannot answer on its own.
+///
+/// Unlike [`frame_scroll_tick`] this really does rebuild — that is the point.
+/// The two offsets are more than a window apart in both directions, so each
+/// phase's render starts from a frame that cannot compose the offset it is
+/// moving to.
+#[divan::bench(args = ROW_ARGS)]
+fn frame_scroll_refill(bencher: divan::Bencher<'_, '_>, rows: usize) {
+    let page = list_page(rows);
+    let (list, near, far) = (page.list, page.resting_offset, page.refill_offset);
+    bench_frames(bencher, page.dom, Staleness::Repaints, move |dom, phase| {
+        dom.scroll_to(list, Vector2D::new(0.0, if phase { far } else { near }));
+    });
+}
+
+/// [`frame_scroll_refill`] with every row `content-visibility: auto`.
+///
+/// This is the frame the whole feature is priced by: the refill commit
+/// re-determines every `auto` row, reveals the ones entering the new window,
+/// re-skips the ones leaving it, and builds the paint order twice to do it.
+/// Against its plain pair it says whether laying out two scrollports of rows
+/// instead of all of them pays for the second build.
+#[divan::bench(args = ROW_ARGS)]
+fn frame_auto_scroll_refill(bencher: divan::Bencher<'_, '_>, rows: usize) {
+    let page = auto_list_page(rows);
+    let (list, near, far) = (page.list, page.resting_offset, page.refill_offset);
+    bench_frames(bencher, page.dom, Staleness::Repaints, move |dom, phase| {
+        dom.scroll_to(list, Vector2D::new(0.0, if phase { far } else { near }));
     });
 }
 
