@@ -1,10 +1,16 @@
 //! One view on `bobcat-main`: the page every task of that view acts on, and
 //! the one boundary each of them enters JavaScript through.
 //!
+//! # Tasks wait; jobs run JavaScript
+//!
+//! `bobcat-main` is one engine thread of [`crate::jobs`], whose module doc is
+//! the model: nothing here runs JavaScript, touches this view's document or
+//! borrows the group's `ScriptRuntime` from inside a task.
+//!
 //! # One task per wait
 //!
 //! A view is not one task with a wait for everything. It is a set of tasks on
-//! the group's `LocalSet`, one per thing that can be waited for, and tokio is
+//! the thread's `LocalSet`, one per thing that can be waited for, and tokio is
 //! what polls, parks and wakes them:
 //!
 //! - the owner, [`serve_view`], which builds the page, spawns the rest, and then has exactly one
@@ -25,22 +31,30 @@
 //! # One boundary into JavaScript
 //!
 //! Every one of those tasks reaches the realm through [`Page::enter`], which
-//! runs one synchronous operation and then settles what that operation left
-//! owing: due timers, the commit, the boot report, the `BeginFrame`
-//! acknowledgement, the module requests the entry produced, the next timer
-//! deadline. [`Page::settle`] is the epilogue alone, for a wake that carries
-//! no operation of its own. [`Page::open_realm`] is the one documented
-//! exception, because the realm it would enter does not exist until it
-//! returns; it runs under the same guard and reports the same way.
+//! queues one job and answers with what it returned. The job runs one
+//! synchronous operation and then settles what that operation left owing: due
+//! timers, the commit, the boot report, the `BeginFrame` acknowledgement, the
+//! module requests the entry produced, the next timer deadline.
+//! [`Settles::settle`] is the epilogue alone, for a wake that carries no
+//! operation of its own. [`Page::open_realm`] is a job too, and the only one
+//! that does not go through `enter`, because the realm it would enter does not
+//! exist until it returns; the disposal exchange in [`Page::run_owner`] is the
+//! other exception, running after the view has ended and so past the latch and
+//! the epilogue.
+//!
+//! What is *not* a job is what a page that is still loading does with a burst:
+//! its ingredients are a field of their own, never borrowed across a wait, so
+//! [`Page::stage`] and [`Page::stage_sheet`] answer on the task. That is what
+//! keeps a loading page's `BeginFrame` acknowledgement from queueing behind a
+//! sibling view's synchronous load.
 //!
 //! # Ordering
 //!
-//! The `LocalSet` is one thread and every entry is synchronous inside
-//! [`Page::enter`], so entries never interleave: each stream is consumed in
-//! order by its one consumer, and a burst of commands is one entry, one
-//! commit and one acknowledgement. Module completions, timer wakes and a
-//! sibling's checkpoint are independent tasks and may run between any two
-//! bursts.
+//! Jobs are one FIFO for the whole thread and each of them is synchronous, so
+//! entries never interleave: each stream is consumed in order by its one
+//! consumer, and a burst of commands is one entry, one commit and one
+//! acknowledgement. Module completions, timer wakes and a sibling's checkpoint
+//! are independent tasks and may queue an entry between any two bursts.
 //!
 //! # The end
 //!
@@ -53,26 +67,33 @@
 //! what the embedder was told is whatever was reported before the end, and a
 //! release is the token having been cancelled from outside.
 //!
-//! Between an embedder-side cancel and the owner's turn a task may still run
+//! Between an embedder-side cancel and the owner's turn a task may still queue
 //! one entry, because only this thread writes the latch. A command queued
 //! behind a release lands in exactly that window — its wake is served before
 //! the owner's — so the discard cannot rest on the owner running first:
-//! [`consume_commands`] reads the token itself, once per burst, at the wake
-//! boundary. A burst already inside [`Page::apply`] when the cancel lands
-//! finishes, the way synchronous JavaScript already executing does.
+//! [`consume_commands`] reads the token at the wake boundary, and the burst's
+//! own job reads it again as it starts, because the top loop runs queued jobs
+//! back to back and the owner may not have mirrored the cancel yet. A burst
+//! already inside its entry when the cancel lands finishes, the way
+//! synchronous JavaScript already executing does.
 //!
 //! # Borrows
 //!
-//! No `RefCell` borrow and no borrow of the shared script runtime is ever
-//! held across an `.await`. Every borrow is taken inside a synchronous method
-//! and released before it returns, which is why [`Page`] is reachable from
-//! every task of its view at once.
+//! No `RefCell` borrow and no borrow of the shared script runtime is ever held
+//! across an `.await`, and none is ever taken by a task. A job holds the
+//! shared runtime and this page's realm for its whole length, its own
+//! synchronous wait included; [`crate::jobs`] is what makes that safe. The
+//! page's ingredients are the exception in the other direction: they belong to
+//! the loading tasks, so no job holds them across a wait.
 //!
 //! # Waits
 //!
-//! After this module every `select!` in this crate is one of four kinds, and
+//! After this module every `select!` in this crate is one of five kinds, and
 //! each is a wait rather than a dispatcher:
 //!
+//! - **the top loop's turn** — one per engine thread, inside
+//!   [`JsThread::run`](crate::jobs::JsThread), waiting on its `main` task finishing versus a job
+//!   having been pushed;
 //! - **thread lifetime** — `group_task` and `serve_workers`, each waiting on attach versus join;
 //! - **an object's lifetime** — one [`Lifetime::serve`] per view and per worker, waiting on the end
 //!   versus the next task of that object to finish;
@@ -82,12 +103,13 @@
 //!   cancellation.
 //!
 //! How many there are is the group's shape rather than a constant: one of the
-//! first kind per engine thread, one of the second per live view and per live
-//! worker, one of the third per live realm, one of the fourth per worker that
-//! has not booted yet. `link.rs`'s `block_on_deadline` is a hand-rolled poll
-//! loop rather than a select. Synchronous stylesheet adoption uses `link::block_on`
-//! to wait only for its preload response or cancellation; it does not drive this
-//! thread's tasks or JavaScript jobs while waiting.
+//! first two kinds per engine thread, one of the third per live view and per
+//! live worker, one of the fourth per live realm, one of the fifth per worker
+//! that has not booted yet. `link.rs`'s `block_on_deadline` is a hand-rolled poll
+//! loop rather than a select, and the only one left. Synchronous stylesheet
+//! adoption is a fifth wait of its own shape — this view's token against the
+//! response — parked on inside a job through
+//! [`JsThread::wait`](crate::jobs::JsThread).
 
 use std::cell::{Cell, RefCell};
 use std::future::{Future, poll_fn};
@@ -103,29 +125,11 @@ use super::{AttachedView, GroupContext};
 use crate::background::WorkerEvent;
 #[cfg(test)]
 use crate::clock::ClockInstant;
-use crate::lifetime::{EndOnUnwind, Lifetime, Settles, serve_clock};
+use crate::lifetime::{EndOnUnwind, Lifetime, Settles, run_job, serve_clock};
 use crate::link::{SourceAnswer, ToMain, ViewOutbox};
 use crate::resource::{LoadedSource, SourceRequest, unanswered_source};
 use crate::threads::panicked;
 use crate::view::{EngineEvent, LynxViewError, ViewSources, Viewport};
-
-/// What the page is, which is the only thing that decides what a command can
-/// do to it.
-///
-/// Both live states are boxed: this enum is one field of a page that every
-/// task of a view holds, and a page is in each of them for exactly one phase
-/// of its life, so carrying the larger of the two inline would cost every
-/// page the whole of the other.
-enum Realm {
-    /// No realm and no document yet: the boot module has not run, so the two
-    /// commands that describe a document write into the ingredients it will
-    /// be built from and the rest have nowhere to go.
-    Loading(Box<DocumentIngredients>),
-    Live(Box<MainThreadRuntime>),
-    /// The realm could not be opened, or the view is over and the owner has
-    /// reclaimed it. A terminal state, so every entry point is total.
-    Gone,
-}
 
 /// One view's page: what every task of that view acts on.
 ///
@@ -138,7 +142,28 @@ pub(super) struct Page {
     /// pool, the wakeup, and the factory that names workers.
     context: Rc<GroupContext>,
     outbox: ViewOutbox,
-    realm: RefCell<Realm>,
+    /// This view's realm, once the boot module has opened one: `None` before
+    /// that, and again once the realm could not be opened or the owner has
+    /// released it. It is the only thing that decides what a command can do to
+    /// this page.
+    ///
+    /// Read and written only inside a job, which holds this borrow for its
+    /// whole length, its own synchronous wait included. What a *task* asks
+    /// instead is [`Page::is_loading`], over the ingredients.
+    ///
+    /// Boxed because this is one field of a page every task of the view holds,
+    /// and a page is live for exactly one phase of its life.
+    realm: RefCell<Option<Box<MainThreadRuntime>>>,
+    /// What the realm's document will be built from, until [`Page::open_realm`]
+    /// spends it.
+    ///
+    /// A field of its own rather than a part of [`Self::realm`], because this
+    /// is the one thing a *task* of a loading view writes: the sheets boot
+    /// staged, a resize, the image reports that arrived first. No job holds
+    /// this borrow across a wait, so a burst for a page that is still loading
+    /// — and the `BeginFrame` acknowledgement an offscreen host is blocked on
+    /// — is served at once, whatever a sibling view's job is parked on.
+    ingredients: RefCell<Option<Box<DocumentIngredients>>>,
     /// The same inbox serves ordinary events and the final JS disposal RPC.
     /// The owner takes it only after the ordinary consumer has been reaped.
     worker_events: RefCell<Option<mpsc::UnboundedReceiver<WorkerEvent>>>,
@@ -192,14 +217,16 @@ impl Page {
         ingredients: DocumentIngredients,
         token: CancellationToken,
     ) -> Rc<Self> {
+        let lifetime = Lifetime::new(token, context.thread.clone());
         Rc::new(Self {
             context,
             outbox,
-            realm: RefCell::new(Realm::Loading(Box::new(ingredients))),
+            realm: RefCell::new(None),
+            ingredients: RefCell::new(Some(Box::new(ingredients))),
             worker_events: RefCell::new(None),
             pending_begin_frame: Cell::new(None),
             boot_reported: Cell::new(false),
-            lifetime: Lifetime::new(token),
+            lifetime,
             reported: Cell::new(false),
             #[cfg(test)]
             epilogues: Cell::new(0),
@@ -260,51 +287,51 @@ impl Page {
         self.end();
     }
 
-    fn is_live(&self) -> bool {
-        matches!(&*self.realm.borrow(), Realm::Live(_))
+    /// Whether the realm's ingredients are still staged, which is the one
+    /// question about a page's phase a *task* may ask: the answer is a borrow
+    /// no job holds across a wait.
+    fn is_loading(&self) -> bool {
+        self.ingredients.borrow().is_some()
     }
 
-    /// Runs one synchronous operation against the live realm and settles what
-    /// it owes.
+    /// Queues one synchronous operation against the live realm, which settles
+    /// what it owes, and answers with what it returned.
     ///
     /// This is the one way into JavaScript. `None` is a realm that is not
-    /// live — still loading, or gone — or a view that has ended; either way
-    /// the operation never ran.
+    /// live — still loading, or gone — a view that has ended, an operation
+    /// that trapped, or a thread that is over; either way nothing of the
+    /// operation is observable here.
     ///
-    /// The operation *and* the whole epilogue run under one `catch_unwind`,
-    /// because the bridge erases a panic into "the host function panicked"
-    /// and a panic on this thread is the view's failure rather than the
-    /// group's.
-    fn enter<T>(
+    /// The operation *and* the whole epilogue run under one `catch_unwind`
+    /// inside [`run_job`], because the bridge erases a panic into "the host
+    /// function panicked", a panic on this thread is the view's failure rather
+    /// than the group's, and a job runs in the thread's top loop rather than
+    /// inside a task that could catch it.
+    fn enter<T, O>(self: &Rc<Self>, operation: O) -> impl Future<Output = Option<T>> + use<T, O>
+    where
+        T: 'static,
+        O: FnOnce(&mut MainThreadRuntime, &mut ScriptRuntime) -> T + 'static,
+    {
+        run_job(self, move |page| page.enter_now(operation))
+    }
+
+    /// The body of one entry, as the job runs it.
+    fn enter_now<T>(
         self: &Rc<Self>,
         operation: impl FnOnce(&mut MainThreadRuntime, &mut ScriptRuntime) -> T,
     ) -> Option<T> {
         if self.ended() {
             return None;
         }
-        let entered = catch_unwind(AssertUnwindSafe(|| {
-            let js = &mut *self.context.js.borrow_mut();
-            let mut realm = self.realm.borrow_mut();
-            let Realm::Live(runtime) = &mut *realm else {
-                return None;
-            };
-            let value = operation(runtime, js);
-            self.epilogue(runtime, js);
-            Some(value)
-        }));
-        match entered {
-            Ok(value) => value,
-            Err(payload) => {
-                self.trapped(payload.as_ref());
-                None
-            }
-        }
-    }
-
-    /// The epilogue alone, for a wake that carries no operation of its own —
-    /// a timer deadline, or a sibling's checkpoint.
-    fn settle(self: &Rc<Self>) {
-        self.enter(|_, _| ());
+        // Both borrows are held for the whole entry, a synchronous wait inside
+        // the operation included. Nothing else can want them: only a job takes
+        // either, and no other job runs until this one returns.
+        let js = &mut *self.context.js.borrow_mut();
+        let mut realm = self.realm.borrow_mut();
+        let runtime = realm.as_deref_mut()?;
+        let value = operation(runtime, js);
+        self.epilogue(runtime, js);
+        Some(value)
     }
 
     /// Everything one entry into this realm leaves owing.
@@ -389,37 +416,49 @@ impl Page {
     /// acknowledgement.
     ///
     /// Total over every state a page can be in. A live page takes the whole
-    /// burst inside one [`Self::enter`]; a loading one writes what it can
-    /// into the ingredients its document will be built from; a page that has
-    /// ended drops the burst, `BeginFrame` included, because the end has
-    /// already acknowledged the pending one.
+    /// burst inside one [`Self::enter`]; a loading one writes what it can into
+    /// the ingredients its document will be built from, here on the task
+    /// rather than in a job, so it is not queued behind a sibling's
+    /// synchronous load; a page that has ended drops the burst, `BeginFrame`
+    /// included, because the end has already acknowledged the pending one.
     ///
-    /// The burst loop checks the latch before each command. It cannot be
-    /// truncated from another thread — only this thread writes that latch — so
-    /// one entry is still one commit; what it stops is the rest of a burst
-    /// behind a command that ended the view.
-    fn apply(self: &Rc<Self>, commands: impl Iterator<Item = ToMain>) {
+    /// The burst's job reads the view's token as it starts. The token is what
+    /// the *embedder* cancelled, and a job start is a wake boundary rather
+    /// than the middle of an entry — which matters because the top loop runs
+    /// queued jobs back to back, so the owner may not have mirrored a release
+    /// onto the latch yet.
+    ///
+    /// The loop inside the entry checks the latch before each command. It
+    /// cannot be truncated from another thread, so one entry is still one
+    /// commit; what it stops is the rest of a burst behind a command that
+    /// ended the view.
+    async fn apply(self: &Rc<Self>, commands: Vec<ToMain>) {
         if self.ended() {
             return;
         }
-        // Taken before the entry below, and eagerly, because an iterator
-        // adapter would run it inside that entry: what the seam spawns has to
-        // trap the way any other task of this view does, rather than into the
-        // `catch_unwind` a live entry runs under.
+        // Taken here rather than in the job, because what the seam spawns has
+        // to trap the way any other task of this view does, rather than into
+        // the `catch_unwind` an entry runs under.
         #[cfg(test)]
         let commands = self.take_test_seams(commands);
-        if self.is_live() {
-            self.enter(|runtime, js| {
-                for command in commands {
-                    if self.ended() {
-                        break;
-                    }
-                    self.apply_command(runtime, js, command);
-                }
-            });
+        if self.is_loading() {
+            self.stage(commands);
             return;
         }
-        self.stage(commands);
+        let page = Rc::clone(self);
+        self.enter(move |runtime, js| {
+            if page.outbox.is_cancelled() {
+                page.end();
+                return;
+            }
+            for command in commands {
+                if page.ended() {
+                    break;
+                }
+                page.apply_command(runtime, js, command);
+            }
+        })
+        .await;
     }
 
     /// Applies one command to a view whose realm exists, including during boot.
@@ -478,17 +517,22 @@ impl Page {
 
     /// Serves a burst that arrived before the boot module created a document.
     ///
+    /// Runs on the task that read the burst rather than in a job, which is
+    /// what keeps it immediate: the ingredients are this view's own field and
+    /// nothing holds them across a wait, so a sibling view parked on a
+    /// synchronous stylesheet cannot delay it.
+    ///
     /// What a command can do here is narrow: the two that describe the
     /// document write into the ingredients it will be built from, a
     /// `BeginFrame` is acknowledged at once so an offscreen host is never
     /// blocked by a load, and nothing else has anywhere to go. Dropping a
     /// `Probe` drops the sender it captured, which answers the probing test
     /// `None` rather than leaving it to wait out its deadline.
-    fn stage(&self, commands: impl Iterator<Item = ToMain>) {
+    fn stage(&self, commands: Vec<ToMain>) {
         let mut acknowledged: Option<u64> = None;
         {
-            let mut realm = self.realm.borrow_mut();
-            let Realm::Loading(ingredients) = &mut *realm else {
+            let mut staged = self.ingredients.borrow_mut();
+            let Some(ingredients) = staged.as_mut() else {
                 return;
             };
             for command in commands {
@@ -523,11 +567,13 @@ impl Page {
         }
     }
 
-    /// Stages one author sheet, in cascade order. `false` is a page that is
-    /// no longer loading, which has already ended.
+    /// Stages one author sheet, in cascade order. `false` is a page whose
+    /// ingredients are spent, which has already ended.
+    ///
+    /// Task-side, for the reason [`Self::stage`] is.
     fn stage_sheet(&self, sheet: crate::resource::StyleSheetSource) -> bool {
-        let mut realm = self.realm.borrow_mut();
-        let Realm::Loading(ingredients) = &mut *realm else {
+        let mut staged = self.ingredients.borrow_mut();
+        let Some(ingredients) = staged.as_mut() else {
             return false;
         };
         ingredients.sheets.push(sheet);
@@ -537,13 +583,18 @@ impl Page {
     /// Opens this view's realm and runs its entry, then starts the waits that
     /// only a live realm has.
     ///
-    /// The one entry into JavaScript that is not [`Self::enter`], because the
-    /// realm it would enter does not exist until this returns. Everything up
-    /// to and including the entry is one synchronous stretch under both
-    /// borrows, so the shared runtime is borrowed for exactly this and
-    /// released again; the checkpoint receiver is created while that borrow
-    /// is still held, so no sibling's bump between boot and the clock task's
-    /// first poll can be lost.
+    /// A job like every other entry, and the one that does not go through
+    /// [`Self::enter`], because the realm it would enter does not exist until
+    /// it returns; [`boot_page`] is what queues it. It holds the shared runtime
+    /// for the whole stretch, as an entry does — the entry module may adopt a
+    /// stylesheet and wait — but takes and stores `realm` under short borrows
+    /// either side of it, since what it is building is a local until the last
+    /// of them. The checkpoint receiver is created while the runtime borrow is
+    /// still held, so no sibling's bump between boot and the clock task's first
+    /// poll can be lost.
+    ///
+    /// It ends by running the first epilogue inline rather than queueing one,
+    /// so a boot that finished synchronously is reported in this same stretch.
     ///
     /// The [`RealmStartup`] is everything that realm is opened with, and
     /// opening spends it: `MainThreadRuntime::new` takes the strings it
@@ -553,47 +604,18 @@ impl Page {
         // its tasks are about to be reclaimed, and the ingredients go with the
         // page rather than into a document nobody will ever see.
         if self.ended() {
-            *self.realm.borrow_mut() = Realm::Gone;
+            self.ingredients.borrow_mut().take();
             return;
         }
-        let opened = catch_unwind(AssertUnwindSafe(|| {
+        let opened = {
             let js = &mut *self.context.js.borrow_mut();
-            let mut realm = self.realm.borrow_mut();
-            // Out of `Loading` before any failure path can report: the
-            // ingredients are spent either way, and a page whose realm could
-            // not be opened is over.
-            let Realm::Loading(ingredients) = std::mem::replace(&mut *realm, Realm::Gone) else {
-                return None;
-            };
-            let (mut runtime, worker_events) = match MainThreadRuntime::new(
-                js,
-                *ingredients,
-                self.outbox.clone(),
-                &self.context.workers,
-                &mut startup,
-            ) {
-                Ok(opened) => opened,
-                Err(error) => return Some(Err(error.into_script_error().into())),
-            };
-            // The flag is written from the embedder's own thread, so it can
-            // change between two statements of this stretch.
-            if self.outbox.is_cancelled() {
-                return None;
+            // Spent before any failure path can report: a page whose realm
+            // could not be opened is over, and nothing re-stages what was
+            // taken.
+            match self.ingredients.borrow_mut().take() {
+                None => None,
+                Some(ingredients) => self.build_realm(js, *ingredients, &mut startup),
             }
-            if let Err(error) = runtime.run_main_thread_script(js, &startup.source, &startup.url) {
-                if self.outbox.is_cancelled() {
-                    return None;
-                }
-                return Some(Err(error.into_script_error().into()));
-            }
-            let checkpoints = js.checkpoints();
-            self.lifetime.record_checkpoint(js.checkpoint_generation());
-            *realm = Realm::Live(Box::new(runtime));
-            Some(Ok((worker_events, checkpoints)))
-        }));
-        let opened = match opened {
-            Ok(opened) => opened,
-            Err(payload) => return self.trapped(payload.as_ref()),
         };
         match opened {
             // Nobody is listening for this view any more, so there is nobody
@@ -602,6 +624,14 @@ impl Page {
                 self.end();
             }
             Some(Err(error)) => self.fail(EngineEvent::StartupFailed(error)),
+            // The latch can have flipped while the entry was inside a
+            // synchronous wait: a task ran during it and ended the view, and
+            // the owner may already be past its reap and have taken the worker
+            // inbox. Tasks spawned behind that reap would never be joined, so
+            // none is started and the inbox is left where it is. The realm
+            // stays where it is for the owner's release job, which is FIFO
+            // behind this one.
+            Some(Ok(_)) if self.ended() => {}
             Some(Ok((worker_events, checkpoints))) => {
                 *self.worker_events.borrow_mut() = Some(worker_events);
                 self.spawn(consume_worker_events(Rc::clone(self)));
@@ -610,14 +640,64 @@ impl Page {
                     self.lifetime.deadlines(),
                     checkpoints,
                 ));
-                // A boot that finished synchronously reports here, and the
-                // module requests its entry left are spawned here.
-                self.settle();
+                // The first epilogue, inline: this is already job context and
+                // the borrows the stretch above held are released, so a boot
+                // that finished synchronously reports in this same stretch
+                // rather than a queue trip later. It is what publishes the
+                // boot's `ScriptFinished` and spawns the module requests its
+                // entry left.
+                let _ = self.enter_now(|_, _| ());
             }
         }
     }
 
-    /// This view's whole tail: wait, end, reclaim, release the realm.
+    /// Furnishes the realm and evaluates the entry in it, leaving it live.
+    ///
+    /// `None` is a view released while this ran — the flag is written from the
+    /// embedder's own thread, so it can change between two statements here,
+    /// and the entry's own synchronous waits are where it usually does.
+    #[expect(clippy::type_complexity, reason = "one call site, spelled once")]
+    fn build_realm(
+        self: &Rc<Self>,
+        js: &mut ScriptRuntime,
+        ingredients: DocumentIngredients,
+        startup: &mut RealmStartup,
+    ) -> Option<
+        Result<
+            (
+                mpsc::UnboundedReceiver<WorkerEvent>,
+                tokio::sync::watch::Receiver<u64>,
+            ),
+            LynxViewError,
+        >,
+    > {
+        let (mut runtime, worker_events) = match MainThreadRuntime::new(
+            js,
+            ingredients,
+            self.outbox.clone(),
+            &self.context.workers,
+            self.lifetime.thread().clone(),
+            startup,
+        ) {
+            Ok(opened) => opened,
+            Err(error) => return Some(Err(error.into_script_error().into())),
+        };
+        if self.outbox.is_cancelled() {
+            return None;
+        }
+        if let Err(error) = runtime.run_main_thread_script(js, &startup.source, &startup.url) {
+            if self.outbox.is_cancelled() {
+                return None;
+            }
+            return Some(Err(error.into_script_error().into()));
+        }
+        let checkpoints = js.checkpoints();
+        self.lifetime.record_checkpoint(js.checkpoint_generation());
+        *self.realm.borrow_mut() = Some(Box::new(runtime));
+        Some(Ok((worker_events, checkpoints)))
+    }
+
+    /// This view's whole tail: wait, end, reclaim, dispose, release the realm.
     ///
     /// The wait is the lifetime's — the end, or the next task of the view to
     /// finish. [`Self::end`] after it is what mirrors a cancellation that came
@@ -625,6 +705,12 @@ impl Page {
     /// pending `BeginFrame` so a blocked painter is released. The reap is what
     /// makes this the last owner of the page: a task holds an `Rc` of it until
     /// its future is dropped.
+    ///
+    /// What follows is jobs, every one of them awaited. That is what keeps the
+    /// release from landing on a realm that is under a live JavaScript stack:
+    /// a job of this view's that is parked on a synchronous wait is ahead of
+    /// the release in the one FIFO, so the release cannot begin until it has
+    /// returned.
     async fn run_owner(self: &Rc<Self>) {
         self.lifetime
             .serve(&mut |payload| self.trapped(payload.as_ref()))
@@ -633,39 +719,92 @@ impl Page {
         self.lifetime
             .reap(&mut |payload| self.trapped(payload.as_ref()))
             .await;
-        let realm = self.realm.replace(Realm::Gone);
+        // The view has ended, but its MTS realm remains alive to exchange
+        // disposal messages. No view token cancels its Workers first.
         let events = self.worker_events.borrow_mut().take();
-        if let Realm::Live(mut runtime) = realm
-            && let Some(mut events) = events
+        if let Some(mut events) = events
+            && let Err(error) = self.dispose(&mut events).await
         {
-            // The view has ended, but its MTS realm remains alive to exchange
-            // disposal messages. No view token cancels its Workers first.
-            let started = runtime.begin_dispose(&mut self.context.js.borrow_mut());
-            let disposed = async {
-                started?;
-                while !runtime.disposal_finished()? {
-                    let Some(WorkerEvent { key, payload }) = events.recv().await else {
-                        break;
-                    };
-                    if let Err(error) = runtime.dispatch_worker_event(
-                        &mut self.context.js.borrow_mut(),
-                        key,
-                        payload,
-                    ) {
-                        self.outbox
-                            .engine_event(EngineEvent::ListenerFailed(error.into_script_error()));
-                    }
-                }
-                Ok::<_, super::runtime::MainThreadError>(())
-            }
-            .await;
-            if let Err(error) = disposed {
+            self.outbox
+                .engine_event(EngineEvent::ListenerFailed(error.into_script_error()));
+        }
+        // The realm owns the remaining Worker handles. Releasing it drops
+        // their channels naturally; there is no Rust termination sweep.
+        self.after_end(|realm, _| *realm = None).await;
+    }
+
+    /// The JavaScript disposal exchange, as a run of jobs the owner awaits.
+    ///
+    /// Two jobs per event rather than three: the first starts the disposal and
+    /// answers whether it has already finished, and each delivery answers the
+    /// same question about the state it left behind, so the question never
+    /// costs a queue trip of its own.
+    ///
+    /// `Ok(())` is a disposal that finished, one that was never started
+    /// because the realm was not live, or a BTS that stopped answering.
+    async fn dispose(
+        self: &Rc<Self>,
+        events: &mut mpsc::UnboundedReceiver<WorkerEvent>,
+    ) -> Result<(), super::runtime::MainThreadError> {
+        let Some(started) = self
+            .after_end(|realm, js| {
+                let runtime = realm.as_deref_mut()?;
+                Some(
+                    runtime
+                        .begin_dispose(js)
+                        .and_then(|()| runtime.disposal_finished()),
+                )
+            })
+            .await
+            .flatten()
+        else {
+            return Ok(());
+        };
+        if started? {
+            return Ok(());
+        }
+        loop {
+            let Some(WorkerEvent { key, payload }) = events.recv().await else {
+                return Ok(());
+            };
+            let Some((delivered, finished)) = self
+                .after_end(move |realm, js| {
+                    let runtime = realm.as_deref_mut()?;
+                    let delivered = runtime.dispatch_worker_event(js, key, payload);
+                    Some((delivered, runtime.disposal_finished()))
+                })
+                .await
+                .flatten()
+            else {
+                return Ok(());
+            };
+            if let Err(error) = delivered {
                 self.outbox
                     .engine_event(EngineEvent::ListenerFailed(error.into_script_error()));
             }
-            // The realm owns the remaining Worker handles. Its release drops
-            // their channels naturally; there is no Rust termination sweep.
+            if finished? {
+                return Ok(());
+            }
         }
+    }
+
+    /// One job against this view's realm after the view has ended: no latch,
+    /// and no epilogue.
+    ///
+    /// The view is over by the time any of these runs — there is nothing left
+    /// to commit, report or re-arm — so it is the disposal exchange and the
+    /// release that use it, and nothing else. The realm is still in
+    /// [`Self::realm`] throughout, which is what puts the release behind
+    /// whatever job is holding it.
+    fn after_end<T, O>(self: &Rc<Self>, operation: O) -> impl Future<Output = Option<T>> + use<T, O>
+    where
+        T: 'static,
+        O: FnOnce(&mut Option<Box<MainThreadRuntime>>, &mut ScriptRuntime) -> T + 'static,
+    {
+        run_job(self, move |page| {
+            let js = &mut *page.context.js.borrow_mut();
+            Some(operation(&mut page.realm.borrow_mut(), js))
+        })
     }
 
     /// Takes the one command that is not the realm's out of a burst.
@@ -675,10 +814,7 @@ impl Page {
     /// next polled — which is the only way a test can watch a panic reach a
     /// sibling before it reaches the owner.
     #[cfg(test)]
-    fn take_test_seams(
-        self: &Rc<Self>,
-        commands: impl Iterator<Item = ToMain>,
-    ) -> std::vec::IntoIter<ToMain> {
+    fn take_test_seams(self: &Rc<Self>, commands: Vec<ToMain>) -> Vec<ToMain> {
         let mut rest = Vec::new();
         for command in commands {
             let ToMain::Trap(recorder) = command else {
@@ -691,7 +827,7 @@ impl Page {
                 let _ = recorder.send(page.ended());
             });
         }
-        rest.into_iter()
+        rest
     }
 
     /// How many tasks this view still has, for a test that pins an end
@@ -722,18 +858,25 @@ impl Page {
     }
 }
 
-/// What this view's clock task and its unwind guard reach it through.
+/// What this view's clock task, its unwind guard and its jobs reach it
+/// through.
 impl Settles for Page {
     fn lifetime(&self) -> &Lifetime {
         &self.lifetime
     }
 
-    fn settle(owner: &Rc<Self>) {
-        owner.settle();
+    /// The epilogue alone, for a wake that carries no operation of its own —
+    /// a timer deadline, or a sibling's checkpoint.
+    fn settle(owner: &Rc<Self>) -> impl Future<Output = Option<()>> {
+        owner.enter(|_, _| ())
     }
 
     fn end(owner: &Rc<Self>) {
         owner.end();
+    }
+
+    fn trapped(owner: &Rc<Self>, payload: &(dyn std::any::Any + Send)) {
+        owner.trapped(payload);
     }
 }
 
@@ -837,7 +980,13 @@ async fn consume_commands(page: Rc<Page>, mut commands: mpsc::UnboundedReceiver<
         }
         let queued = commands.len();
         let rest = std::iter::from_fn(|| commands.try_recv().ok()).take(queued);
-        page.apply(std::iter::once(first).chain(rest));
+        // Collected rather than handed over as an iterator, because a job owns
+        // what it runs on: one allocation per burst, not per command.
+        let burst: Vec<ToMain> = std::iter::once(first).chain(rest).collect();
+        // Awaited, so the next burst is read only once this one has been
+        // applied — which is what makes what arrives meanwhile one later
+        // burst rather than a queue of entries.
+        page.apply(burst).await;
     }
     // The embedder released this view. Everything it owns goes with the
     // tasks the owner is about to reclaim.
@@ -921,7 +1070,7 @@ async fn boot_page(page: Rc<Page>, sources: BootSources) {
         page.end();
         return;
     }
-    page.open_realm(RealmStartup {
+    let startup = RealmStartup {
         source,
         url,
         background_entry,
@@ -929,7 +1078,12 @@ async fn boot_page(page: Rc<Page>, sources: BootSources) {
         init_data,
         global_props,
         native_modules,
-    });
+    };
+    run_job(&page, move |page| {
+        page.open_realm(startup);
+        Some(())
+    })
+    .await;
 }
 
 /// One resource load an import produced.
@@ -941,16 +1095,18 @@ async fn load_module(page: Rc<Page>, url: String, answer: SourceAnswer) {
     let source = answer
         .await
         .unwrap_or_else(|_| Err(unanswered_source().into()));
-    page.enter(|runtime, js| {
+    let completing = Rc::clone(&page);
+    page.enter(move |runtime, js| {
         if let Err(error) = runtime.complete_module(js, &url, source) {
             let error = error.into_script_error();
-            page.fail(if page.boot_reported.get() {
+            completing.fail(if completing.boot_reported.get() {
                 EngineEvent::ScriptRunError(error)
             } else {
                 EngineEvent::StartupFailed(error.into())
             });
         }
-    });
+    })
+    .await;
 }
 
 /// One `@font-face` rule's sources, tried in author order until one loads.
@@ -968,6 +1124,7 @@ async fn load_module(page: Rc<Page>, url: String, answer: SourceAnswer) {
 /// Harmony loader refuses it too.
 async fn load_font_face(page: Rc<Page>, request: dom::FontFaceRequest) {
     let dom::FontFaceRequest { family, sources } = request;
+    let mut loaded = None;
     for source in sources {
         let dom::FontFaceSource::Url(url) = source else {
             continue;
@@ -980,12 +1137,17 @@ async fn load_font_face(page: Rc<Page>, request: dom::FontFaceRequest) {
         if let Ok(LoadedSource::Font(blob)) =
             request_source(&page.outbox, SourceRequest::Font { url }).await
         {
-            // The entry's own epilogue commits: registering a face
-            // invalidates the layout of every run that names it.
-            page.enter(|runtime, _| runtime.register_font_face(&family, blob));
-            return;
+            loaded = Some(blob);
+            break;
         }
     }
+    let Some(blob) = loaded else {
+        return;
+    };
+    // The entry's own epilogue commits: registering a face invalidates the
+    // layout of every run that names it.
+    page.enter(move |runtime, _| runtime.register_font_face(&family, blob))
+        .await;
 }
 
 /// The one ordered consumer of everything this view's workers say.
@@ -1009,7 +1171,9 @@ async fn consume_worker_events(page: Rc<Page>) {
         let Some(WorkerEvent { key, payload }) = event else {
             return;
         };
-        let delivered = page.enter(|runtime, js| runtime.dispatch_worker_event(js, key, payload));
+        let delivered = page
+            .enter(move |runtime, js| runtime.dispatch_worker_event(js, key, payload))
+            .await;
         // A configured BTS entry can reject the boot promise in this checkpoint.
         // The epilogue reports that as StartupFailed and ends the view; only an
         // error that leaves the view running is a listener failure.

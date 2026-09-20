@@ -10,9 +10,18 @@
 //! differing only in what they were named after. What is left of that here is
 //! one [`Lifetime`]: a [`JoinSet`] the owner consumes continuously, a
 //! [`CancellationToken`] every thread can read, the latch that says whether
-//! *this* thread has ended the object, and the two numbers its clock task
-//! reads — the deadline this realm armed and the generation its own last entry
-//! ran the shared job queue up to.
+//! *this* thread has ended the object, the two numbers its clock task reads —
+//! the deadline this realm armed and the generation its own last entry ran the
+//! shared job queue up to — and the handle on the engine thread its tasks are
+//! spawned onto and its entries are queued on.
+//!
+//! # Tasks and entries
+//!
+//! An *entry* into the object's realm is a job on the engine thread
+//! [`crate::jobs`] describes, queued by whichever task decided one was owed and
+//! awaited by it: [`run_job`] is the one way one is queued, and
+//! [`Settles::settle`] the epilogue-only entry a wake that carries no operation
+//! runs.
 //!
 //! # The token
 //!
@@ -33,10 +42,17 @@
 //! `token.is_cancelled()` is a mutex read, and it can flip between two
 //! statements of one synchronous entry, because another thread is what writes
 //! it. So it is never what an entry checks. [`Lifetime::ended`] is a plain
-//! `Cell` written only on this thread: it is stable for the length of an entry
-//! and costs a load. Cancellation arriving from elsewhere does not touch it —
-//! the owner mirrors it by calling [`Lifetime::end`] itself when it wakes,
-//! which is the window a task has to run one more entry after a release.
+//! `Cell` written only on this thread: it costs a load, and nothing but this
+//! thread writes it.
+//!
+//! It is stable for the length of an entry with one exception, which is the
+//! point of [`crate::jobs`]: a job that parks on a synchronous wait lets this
+//! thread's *tasks* run, and one of them may call [`Lifetime::end`]. So the
+//! latch can flip at a wait point inside an entry, and only there. The
+//! epilogue that follows the wait sees the end and does nothing, exactly as it
+//! already does for an operation that reported a failure of its own. `end`,
+//! `fail` and their callers touch no realm borrow, which is what keeps them
+//! callable from a task at any time.
 //!
 //! # What ended the object
 //!
@@ -60,6 +76,7 @@
 use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::future::{Future, poll_fn};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::pin;
 use std::rc::Rc;
 
@@ -68,6 +85,7 @@ use tokio::task::{JoinError, JoinSet};
 use tokio_util::sync::CancellationToken;
 
 use crate::clock::ClockInstant;
+use crate::jobs::JsThreadHandle;
 
 /// The tasks that act on one realm-owning object, the one signal that ends
 /// them, and the latch that says whether this thread has ended it.
@@ -99,10 +117,12 @@ pub(crate) struct Lifetime {
     /// The runtime-wide checkpoint generation as of this object's own last
     /// entry, which is what lets [`serve_clock`] ignore its own bumps.
     own_checkpoint: Cell<u64>,
+    /// The engine thread this object's tasks run on and its jobs queue on.
+    thread: JsThreadHandle,
 }
 
 impl Lifetime {
-    pub(crate) fn new(token: CancellationToken) -> Self {
+    pub(crate) fn new(token: CancellationToken, thread: JsThreadHandle) -> Self {
         Self {
             tasks: RefCell::new(JoinSet::new()),
             token,
@@ -110,7 +130,14 @@ impl Lifetime {
             panic_reported: Cell::new(false),
             deadline: watch::channel(None).0,
             own_checkpoint: Cell::new(0),
+            thread,
         }
+    }
+
+    /// The engine thread this object belongs to, which is what its entries are
+    /// queued on and what a synchronous host member parks on.
+    pub(crate) const fn thread(&self) -> &JsThreadHandle {
+        &self.thread
     }
 
     /// Starts one more task of this object.
@@ -121,8 +148,12 @@ impl Lifetime {
     /// owner's own `spawn` wraps the future in: it holds the object, where
     /// anything stored here would be an `Rc` cycle through the object that
     /// holds this.
+    ///
+    /// The set is named explicitly rather than read out of the ambient
+    /// context, because this is also called from an epilogue — which is job
+    /// context, where `JoinSet::spawn_local` would panic.
     pub(crate) fn spawn(&self, future: impl Future<Output = ()> + 'static) {
-        self.tasks.borrow_mut().spawn_local(future);
+        self.thread.spawn_into(&mut self.tasks.borrow_mut(), future);
     }
 
     /// Ends the object, once. `true` for the call that did it.
@@ -240,23 +271,58 @@ impl Lifetime {
     }
 }
 
-/// What [`serve_clock`] and [`EndOnUnwind`] need of the object they serve: its
-/// [`Lifetime`], the epilogue a wake that carries no operation runs, and the
-/// end.
+/// What [`serve_clock`], [`EndOnUnwind`] and [`run_job`] need of the object
+/// they serve: its [`Lifetime`], the epilogue a wake that carries no operation
+/// runs, the end, and how a panic in one of its jobs is reported.
 ///
 /// Implemented by the view's `Page` and the worker's `Worker`, which is every
-/// realm-owning object there is. [`Self::settle`] and [`Self::end`] are
-/// associated functions over an `Rc` rather than methods, so an implementor can
-/// keep inherent ones of the same names: those are what its own tasks call, and
-/// these are what the two generic helpers here call.
+/// realm-owning object there is. All four are associated functions over an `Rc`
+/// rather than methods, so an implementor can keep inherent ones of the same
+/// names: those are what its own tasks call, and these are what the generic
+/// helpers here call.
 pub(crate) trait Settles: Sized + 'static {
     fn lifetime(&self) -> &Lifetime;
 
-    /// Runs the epilogue alone, for a wake that carries no operation of its own.
-    fn settle(owner: &Rc<Self>);
+    /// Runs the epilogue alone, for a wake that carries no operation of its
+    /// own. A job, so the caller waits for it: see [`serve_clock`]. `None` is
+    /// an epilogue that never ran, which the one caller has nothing to do
+    /// about.
+    fn settle(owner: &Rc<Self>) -> impl Future<Output = Option<()>>;
 
     /// Ends the object and everything that end owes.
     fn end(owner: &Rc<Self>);
+
+    /// Reports a panic as this object's, and ends it.
+    fn trapped(owner: &Rc<Self>, payload: &(dyn Any + Send));
+}
+
+/// Queues one job of `owner`'s and answers with what it returned.
+///
+/// The whole body runs under one `catch_unwind`, because a job runs in the
+/// engine thread's top loop rather than inside a task: an escaping panic would
+/// unwind the thread instead of the one object it belongs to. `None` is a job
+/// that trapped, or one that never ran because the thread was already over.
+pub(crate) fn run_job<S, T, B>(
+    owner: &Rc<S>,
+    body: B,
+) -> impl Future<Output = Option<T>> + use<S, T, B>
+where
+    S: Settles,
+    T: 'static,
+    B: FnOnce(&Rc<S>) -> Option<T> + 'static,
+{
+    let thread = owner.lifetime().thread().clone();
+    let owner = Rc::clone(owner);
+    let answer = thread.run(
+        move || match catch_unwind(AssertUnwindSafe(|| body(&owner))) {
+            Ok(value) => value,
+            Err(payload) => {
+                S::trapped(&owner, payload.as_ref());
+                None
+            }
+        },
+    );
+    async move { answer.await.flatten() }
 }
 
 /// One realm's whole wait on its clock: the deadline it armed, and a sibling's
@@ -273,6 +339,12 @@ pub(crate) trait Settles: Sized + 'static {
 /// and what that continuation arms is a deadline only this owner's epilogue
 /// publishes. Equality with the generation [`Lifetime::record_checkpoint`]
 /// recorded is what keeps this object's own bumps from waking it.
+///
+/// Each settle is *awaited*, which is what keeps this a wait rather than a
+/// producer: the deadline a settle's epilogue republishes is not visible until
+/// its job has run, so a turn that looped without waiting would re-read the
+/// deadline it just passed, re-arm an already-expired sleep, and queue settles
+/// without bound for as long as another job held the thread.
 ///
 /// Returning is this object having ended, or either watch having been closed.
 pub(crate) async fn serve_clock<S: Settles>(
@@ -300,7 +372,7 @@ pub(crate) async fn serve_clock<S: Settles>(
                 // Consumed: the next turn arms a wait of its own rather than
                 // polling this one again.
                 armed = None;
-                S::settle(&owner);
+                let _ = S::settle(&owner).await;
             }
             changed = deadlines.changed() => if changed.is_err() { return },
             changed = checkpoints.changed() => {
@@ -310,7 +382,7 @@ pub(crate) async fn serve_clock<S: Settles>(
                 if *checkpoints.borrow_and_update() == owner.lifetime().own_checkpoint.get() {
                     continue;
                 }
-                S::settle(&owner);
+                let _ = S::settle(&owner).await;
             }
         }
     }

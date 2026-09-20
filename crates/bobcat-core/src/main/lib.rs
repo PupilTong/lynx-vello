@@ -18,6 +18,11 @@
 //! because the promise-job queue is the runtime's — one checkpoint generation,
 //! which is how a view learns that a sibling's entry into JavaScript may have
 //! finished its own imports.
+//!
+//! This thread is one engine thread of [`crate::jobs`], and [`group_task`] is
+//! the `main` future of its loop — a task like any other, so a view can attach
+//! and a finished one be joined while a sibling view's job is parked on a
+//! synchronous stylesheet.
 
 mod page;
 pub(crate) mod quickjs;
@@ -39,7 +44,7 @@ use std::thread::Builder as ThreadBuilder;
 use dom::StylePool;
 use rustc_hash::FxHashMap;
 use tokio::sync::{mpsc, oneshot};
-use tokio::task::{self, JoinError, JoinSet, LocalSet};
+use tokio::task::{self, JoinError, JoinSet};
 use tokio_util::sync::CancellationToken;
 #[cfg(target_arch = "wasm32")]
 use wasm_thread::Builder as ThreadBuilder;
@@ -48,6 +53,7 @@ use self::quickjs::ScriptRuntime;
 use self::runtime::install_shared_modules;
 pub(crate) use self::workers::WorkerFactory;
 use crate::background::WorkerCommand;
+use crate::jobs::{JsThread, JsThreadHandle};
 use crate::link::{ToMain, ViewOutbox};
 use crate::threads::{self, ThreadJoin};
 use crate::view::{
@@ -71,13 +77,18 @@ pub(crate) struct GroupLink {
 
 /// What every view on this thread shares.
 struct GroupContext {
-    /// Shared rather than owned by the group task: each view task enters it
-    /// synchronously, inside one poll, and never holds the borrow across an
-    /// await.
+    /// Shared rather than owned by the group task, and borrowed only inside a
+    /// job: an entry holds it for its whole length, a synchronous wait
+    /// included, which is safe because no other job runs until that one
+    /// returns and no task ever takes it.
     js: Rc<RefCell<ScriptRuntime>>,
     style_pool: Option<Rc<StylePool>>,
     requester: Arc<dyn EventRequester>,
     workers: WorkerFactory,
+    /// The thread itself: where a view's tasks are spawned, and where every
+    /// entry into a realm is queued. A `Weak`, because the thread's own top
+    /// loop owns everything this is reachable from.
+    thread: JsThreadHandle,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -201,28 +212,22 @@ fn run_group(style_threads: StyleThreads, link: GroupLink) {
         return;
     }
 
+    // The thread this group's views run on: a tokio scheduler for their waits,
+    // and the FIFO of jobs every entry into a realm is queued on. `run` below
+    // is its whole body.
+    let thread = JsThread::new();
     let context = Rc::new(GroupContext {
         js: Rc::new(RefCell::new(js_runtime)),
         style_pool,
         requester,
         workers: WorkerFactory::new(workers),
+        thread: thread.handle(),
     });
-    let mut builder = tokio::runtime::Builder::new_current_thread();
-    // Natively the engine waits out its own realms' timers on tokio's timer.
-    // On wasm32 that timer reads `std::time::Instant`, which panics there, so
-    // `crate::clock::sleep_until` serves the same waits through a thread of
-    // this crate's own instead.
-    #[cfg(not(target_arch = "wasm32"))]
-    builder.enable_time();
-    let runtime = builder
-        .build()
-        .expect("a current-thread runtime asks the platform for nothing");
-    let local = LocalSet::new();
     // By value: the context — and with it this thread's one sender to
-    // `bobcat-workers` — is dropped with the loop.
-    local.block_on(&runtime, group_task(context, attach));
-    drop(local);
-    drop(runtime);
+    // `bobcat-workers` — is dropped with the loop, which drops the queue, then
+    // the tasks, then the runtime.
+    thread.run(group_task(context, attach));
+    drop(thread);
 }
 
 /// Serves one group: adopts each view onto its own task, and reports a task
@@ -296,7 +301,11 @@ fn finish_view(
             error.into_panic().as_ref(),
         )));
     }
-    context.js.borrow().mark_checkpoint();
+    // A job rather than a call: this runs in `group_task`, which is a task,
+    // and the shared runtime belongs to whichever job holds it. Nothing waits
+    // for the bump, so the answer is dropped.
+    let js = Rc::clone(&context.js);
+    drop(context.thread.run(move || js.borrow().mark_checkpoint()));
 }
 
 /// One view, minus the ends its outbox already took.
