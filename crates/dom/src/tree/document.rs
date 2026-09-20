@@ -838,8 +838,16 @@ impl<T> Document<T> {
         // guarded, and it is also what keeps `Entry::nodes` from growing with
         // element churn: a recycled list binding one URL across its cells
         // scans that vector on every rebind.
-        if let Some(source) = node.image_source() {
-            self.images.unbind_node(source, id);
+        //
+        // Both sources: a placeholder outliving its element holds the same
+        // stale id its own load would reach.
+        for role in [
+            crate::render::image::ImageRole::Source,
+            crate::render::image::ImageRole::Placeholder,
+        ] {
+            if let Some(source) = node.image_source(role) {
+                self.images.unbind_node(source, id, role);
+            }
         }
         let slot = id;
         debug_assert_eq!(

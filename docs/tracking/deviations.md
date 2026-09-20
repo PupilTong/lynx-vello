@@ -682,8 +682,8 @@ consequential choice about whether to follow the spec or the quirk.
   size containment so a single authored axis cannot derive the other.
   Two consequences worth knowing: `contain` is a property Lynx has no
   equivalent of at all, so an author's `contain: none` can switch this off in
-  a way no Lynx target permits (accepted — it is also exactly how the deferred
-  `image[auto-size]` will be written, which is why the UA declaration is not
+  a way no Lynx target permits (accepted — it is also exactly how
+  `image[auto-size]` is written, which is why the UA declaration is not
   `!important`); and the same rule applies to an `<image>` written inside a
   `<text>`, which follows native (an inline image is sized from its own style)
   rather than web-core, which erases the host with `display: contents
@@ -729,6 +729,68 @@ consequential choice about whether to follow the spec or the quirk.
   `!important` in the UA sheet and the second argument
   [docs/style-assumptions.md](../style-assumptions.md) §D.15 admits;
   `the_ua_sheet_is_important_free_apart_from_the_text_block` pins the set.
+- **`<image auto-size>` is sized the way both references size it.** The
+  attribute lifts the rule above — `image[auto-size]:not([auto-size="false"])
+  { contain: none; max-width: 100%; max-height: 100%; }` — and the box is then
+  an ordinary replaced flex item. Read alone, native's measure functions look
+  as if they disagree with web-core: Android's `AutoSizeImage.measure`
+  (`platform/android/.../image/AutoSizeImage.java:105-156`) and iOS's
+  `measureNode:` (`LynxUIImage.mm:1992-2043`) take the natural size whenever
+  neither axis is exact, and never grow a bitmap on an at-most axis. But
+  starlight hands a stretched item an *exact* cross constraint before it
+  measures it: in a `nowrap` flex container with a definite cross size, an
+  `align-self: stretch` item with an auto cross size and no auto cross margins
+  is measured with `OneSideConstraint::Definite`
+  (`core/renderer/starlight/layout/flex_layout_algorithm.cc:132-146` for the
+  flex base size, `:335-345` for the hypothetical cross size), and linear
+  layout does the same (`linear_layout_algorithm.cc:182-185`). Both measure
+  functions then take the exact axis as given and derive the other through the
+  bitmap's ratio, capped by the at-most constraint on it. That is
+  css-flexbox-1 §9.8 followed by the ratio transfer and `max-*: 100%`, which
+  is what web-core's shadow `<img>` gets from the browser
+  (`x-image.css:55-81`). Walking the six parents of
+  `auto_size_sizes_the_box_from_its_bitmap` through native's code gives the
+  same six sizes Chrome renders for web-core, so no conflict is recorded here.
+  Derived by reading `lynx/`, not by running a native build.
+  Two smaller records under the same attribute. web-core makes `mode` and
+  `blur-radius` inert under `auto-size` (a side effect of the `::part(img)`
+  rules its `display: contents` leaves unmatched, not a decision); native keeps
+  them live and so does this engine, since nothing couples them. And a
+  `placeholder` can size an `auto-size` box here, because `dom` takes the
+  natural size from whichever bitmap is drawn — iOS and web-core do the same,
+  Android sizes from `src` alone.
+- **`<image mode>` loses to author CSS here and wins in web-core.** The three
+  modes that are not `fill` are UA attribute rules
+  (`image[mode="aspectFit"] { object-fit: contain; }` and its two siblings),
+  so a page's own `object-fit` outranks them — the standing PR #261 gave the
+  `text-overflow` attribute. web-core's `x-image[mode=…]` is (0,1,1) in an
+  *author*-level sheet, so there it beats a page's class rule. Accepted.
+  `scaleToFill`, an unknown value and no attribute at all are the initial
+  `fill`, which is Android's (`LynxImageManager.getMode`) and Harmony's
+  (`ui_new_image.cc:220-231`) fallback; iOS's converter falls back to
+  `aspectFill` instead (`LynxUIImage.mm:2063-2081`), a native-internal
+  disagreement this engine resolves toward Android/Harmony and web-core.
+  `center` is `object-fit: none` with the initial `object-position: 50% 50%`,
+  which is Harmony's `ARKUI_OBJECT_FIT_NONE` exactly and web-core's centred,
+  unscaled, host-clipped `<img>` exactly; one source pixel becomes one CSS
+  pixel, which is web-core's basis — Android maps a source pixel to a dip and
+  iOS to a point.
+- **`<image blur-radius>` blurs the whole element, and a unitless value is
+  dropped.** The attribute becomes a `filter: blur(…)` presentational hint over
+  the raw attribute value, which is web-core's grammar (it writes the value
+  into `--blur-radius` and lets `blur(var(--blur-radius))` judge it). So a
+  unitless `blur-radius="10"` is invalid CSS and blurs nothing, while Android
+  reads it as physical pixels (`UnitUtils.toPxWithDisplayMetrics`'s final
+  `Float.parseFloat`) and blurs — **following web-core**. Since PR #273 a
+  `filter: blur()` paints as an offscreen bake of the whole element, so this
+  hint blurs the element's background and border along with its bitmap, and
+  its ink overflows the box by 3σ, where both references blur the bitmap alone
+  and keep it inside the box (web-core's filter sits on the shadow `<img>`
+  under the host's `overflow: clip`; native post-processes the bitmap).
+  **Decision (user, 2026-09-20): keep the host-level hint in this change**;
+  bitmap-only blur is a follow-up — an engine-internal declaration the
+  reflection writes instead of `filter`, and a paint walk that opens the blur
+  bracket around the replaced draw alone, clipped to the box.
 - **`<blur-view>`'s `blur-radius` is a CSS length here, where web-core and iOS
   read a number and throw the unit away.** The attribute is the whole of the
   component: it is reflected into a `backdrop-filter: blur(…)` presentational

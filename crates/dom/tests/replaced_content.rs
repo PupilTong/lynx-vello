@@ -12,6 +12,7 @@ mod paint_common;
 
 use std::rc::Rc;
 
+use dom::ImageRole;
 use dom::layout::{NaturalSize, Size};
 use flashbulb::TestImages;
 use paint_common::Doc;
@@ -71,8 +72,13 @@ impl Harness {
         let source = format!("app:///{}.png", node.to_bits());
         self.images
             .insert_rgba8(&source, info.width, info.height, rgba);
+        // The source first: for an element that has one, the document owns the
+        // natural size and recomputes it from whichever bitmap the element
+        // draws, so a hand-written size only survives after the source.
+        self.doc
+            .dom
+            .set_image_source(node, ImageRole::Source, Some(&source));
         self.doc.dom.set_natural_size(node, natural);
-        self.doc.dom.set_image_source(node, Some(&source));
         node
     }
 
@@ -143,6 +149,45 @@ fn a_node_with_no_registered_pixels_paints_nothing_but_still_lays_out() {
     assert_eq!((layout.size.width, layout.size.height), (40.0, 20.0));
 }
 
+/// Which of an element's two sources a frame draws: its own while that has
+/// pixels, its placeholder until then — and the drawn source is the one the
+/// frame reads, which is what the store sees.
+#[test]
+fn a_frame_draws_the_placeholder_until_the_source_has_pixels() {
+    const SRC: &str = "app:///src.png";
+    const PLACEHOLDER: &str = "app:///placeholder.png";
+
+    let mut h = Harness::new("");
+    let root = h.doc.root;
+    let node = h.doc.el_tag(root, "img", "box");
+    h.doc
+        .dom
+        .set_image_source(node, ImageRole::Source, Some(SRC));
+    h.doc
+        .dom
+        .set_image_source(node, ImageRole::Placeholder, Some(PLACEHOLDER));
+    h.images.insert_rgba8(PLACEHOLDER, 1, 1, vec![0; 4]);
+
+    let _ = h.stats();
+    assert!(
+        h.images.was_asked_for(SRC),
+        "both sources are requested, and the placeholder is no fallback"
+    );
+    let sources = |h: &Harness| -> Vec<String> {
+        h.images
+            .reads()
+            .into_iter()
+            .map(|(source, _)| source)
+            .collect()
+    };
+    assert_eq!(sources(&h), vec![PLACEHOLDER.to_owned()]);
+
+    // The element's own source arriving takes the frame over for good.
+    h.images.insert_rgba8(SRC, 2, 2, vec![0; 16]);
+    let _ = h.stats();
+    assert_eq!(sources(&h).last().map(String::as_str), Some(SRC));
+}
+
 #[test]
 fn every_object_fit_value_paints_without_unbalancing_layers() {
     for fit in ["fill", "contain", "cover", "none", "scale-down"] {
@@ -205,7 +250,9 @@ fn freeing_a_node_mid_load_leaves_no_stale_binding() {
     let mut h = Harness::new("");
     let root = h.doc.root;
     let node = h.doc.el_tag(root, "img", "box");
-    h.doc.dom.set_image_source(node, Some("app:///pending.png"));
+    h.doc
+        .dom
+        .set_image_source(node, ImageRole::Source, Some("app:///pending.png"));
     assert_eq!(
         h.doc.dom.take_wanted_images(),
         vec![std::sync::Arc::<str>::from("app:///pending.png")],
@@ -230,8 +277,12 @@ fn freeing_one_node_leaves_a_sibling_on_the_same_source_bound() {
     let root = h.doc.root;
     let leaving = h.doc.el_tag(root, "img", "");
     let staying = h.doc.el_tag(root, "img", "");
-    h.doc.dom.set_image_source(leaving, Some(SHARED));
-    h.doc.dom.set_image_source(staying, Some(SHARED));
+    h.doc
+        .dom
+        .set_image_source(leaving, ImageRole::Source, Some(SHARED));
+    h.doc
+        .dom
+        .set_image_source(staying, ImageRole::Source, Some(SHARED));
 
     h.doc.dom.drop_element(leaving);
     h.doc.dom.apply_image_events(&[dom::ImageEvent::Loaded {

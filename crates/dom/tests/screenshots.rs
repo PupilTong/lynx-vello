@@ -103,7 +103,8 @@ fn object_fit_matrix_matches_reference() {
         let node = doc.el_tag(root, "img", class);
         let source = format!("app:///{}.png", node.to_bits());
         images.insert_rgba8(&source, *width, *height, rgba.clone());
-        doc.dom.set_image_source(node, Some(&source));
+        doc.dom
+            .set_image_source(node, dom::ImageRole::Source, Some(&source));
     }
 
     // The natural size now arrives from the store's own load report, through

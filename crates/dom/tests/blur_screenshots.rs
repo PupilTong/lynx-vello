@@ -371,7 +371,8 @@ fn blur_edges_and_replaced_content_matches_reference() {
         let source = format!("app:///{}.png", node.to_bits());
         let (width, height, rgba) = checker(8, 8);
         images.insert_rgba8(&source, width, height, rgba);
-        doc.dom.set_image_source(node, Some(&source));
+        doc.dom
+            .set_image_source(node, dom::ImageRole::Source, Some(&source));
     }
 
     for class in [
