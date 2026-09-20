@@ -44,7 +44,7 @@ read-only `lynx-stack` checkout at `f47d3e6a56200bf07d58fc1656712878ea851a3d`.
 
 | Required API | Actual caller and observable result |
 | --- | --- |
-| `lynx.requireModule(path, bundleName)` | Generated entry loads an embedded module and synchronously receives its exports. `packages/webpack/template-webpack-plugin/src/LynxEncodePlugin.ts`. |
+| `lynx.requireModule(path, bundleName)` | Generated entry loads an embedded module and synchronously receives its exports. `packages/webpack/template-webpack-plugin/src/LynxEncodePlugin.ts`. **Implemented**, for a registered manifest path and for one no manifest carries. |
 | `lynx.requireModuleAsync(url, callback)` | Dynamic JS imports and generated JS chunk loading receive `(error, exports)`. `packages/react/runtime/src/core/lynx/dynamic-import.ts` and `packages/webpack/chunk-loading-webpack-plugin/src/runtime/javascript/chunk-loading.js`. |
 | `lynx.fetchBundle(url, {})` | Default asynchronous lazy loading calls the returned handler's `.then(callback)` and reads `code` and `url`. `packages/react/runtime/src/core/lynx/lazy-bundle.ts`. |
 | `fetchBundle(...).wait(5)` | Only a lazy import explicitly using `mode: 'sync'` takes this path. Ordinary asynchronous lazy loading does not wait synchronously. Same lazy-bundle source. |
@@ -66,7 +66,7 @@ That caller does not require a separate raw JSON text API.
 
 ## Implementation boundary
 
-The compiled-module and lazy-bundle execution APIs above remain unimplemented;
+The asynchronous and lazy-bundle execution APIs above remain unimplemented;
 `callLepusMethod` already supplies the message boundary. They should reuse the
 existing resource transport while providing execution results, exports,
 caching, and errors at the required API boundary. Lynx module factories and
@@ -74,19 +74,48 @@ section evaluation have different semantics from ESM; reusing transport does
 not make an ordinary `import()` a complete implementation of `requireModule` or
 `loadScript`.
 
-The *synchronous* primitive those callers need does exist now, as
-`bobcat:module`: `createRequire(import.meta.url)` answers Node's `require`,
-which resolves through the normalizer imports use, requests
-`SourceRequest::Module` on this same channel, and parks the job it runs in on
-the answer — the engine thread's tasks keep running, and no other job does. It
-reads a source as CommonJS or JSON and keeps a CommonJS cache per realm.
-`lynx.requireModule`, `lynx.loadScript`, the Lynx wrapper's parameter list and
-lynx-core's own module caches are still not implemented and are a layer over
-it, not the same thing: a bundle section is not a file at a URL. The wrapper's
-parameter list is the one thing of theirs that is already reachable: the host
-member underneath, `loadModuleSync(url, parameters)`, compiles a CommonJS
-source inside the wrapper parameter list it is handed, and `bobcat:module`
-passes Node's five.
+The *synchronous* primitive those callers need exists as `bobcat:module`:
+`createRequire(import.meta.url)` answers Node's `require`, which resolves
+through the normalizer imports use, requests `SourceRequest::Module` on this
+same channel, and parks the job it runs in on the answer — the engine thread's
+tasks keep running, and no other job does. It reads a source as CommonJS or
+JSON and keeps a CommonJS cache per realm.
+
+`lynx.requireModule(path, entryName?, options?)` is the compiled-bundle layer
+over the same primitive, in `bobcat:lynx-modules`. A registered manifest path is
+evaluated from the source the boot script carried, as before. A path no
+manifest carries is *loaded*: the path is rooted the way native roots it
+(`js_app.cc` `App::LoadScript`), taken as a reference beside the template URL
+the entry's `__BobcatRegisterBundle` was given — the page's own input URL, so
+`/chunk.js` under `https://cdn.test/app/x.web.bundle` is
+`https://cdn.test/app/chunk.js` — and handed to `loadModuleSync` in web-core's
+own wrapper parameter list (`createChunkLoading.ts`
+`createBundleInitReturnObj`). A Lynx-target chunk answers through
+`globalThis.__bundle__holder`, which is where the
+`RuntimeWrapperWebpackPlugin` banner stores its `{init}` while
+`bundleSupportLoadScript` is set; a raw CommonJS body answers through
+`module.exports`; a `.json` response is the value the host parsed. Nothing is
+cached until the load, the compile and the body have all returned, and the key
+is the bare path, as in lynx-core. With no template URL registered only an
+absolute path resolves, and a bundle path is a `TypeError` carrying the
+normalizer's message.
+
+`nativeApp.loadScript(sourceURL, entryName?)` on `lynx.getNativeApp()` is the
+same code path, answering the `{init}` object web-core's
+`createBundleInitReturnObj` answers with. It consults the registered sources
+first and writes neither of `requireModule`'s caches, as lynx-core's
+`loadScript` writes neither, so a `requireModule` of that path afterwards loads
+it again.
+
+Three choices there are this engine's, not native's: there is no fetch timeout
+(native defaults to 5 s and `requireModule`'s `options` never reaches it
+anyway, its `loadScript` binding reading a timeout only from a *number* third
+argument), a load the host cannot answer carries this engine's own
+`cannot load '<url>'` text, and `Card`/`Component` are always among the
+wrapper's parameters where web-core omits the pair for a React card.
+`lynx.requireModuleAsync`, `nativeApp.loadScriptAsync`, `nativeApp.readScript`,
+`lynx.fetchBundle` and the lazy-bundle `lynx.loadScript` for an unregistered
+bundle are still absent.
 
 There is no `ScriptLoad` queue, `SourceRequest::Script` variant, synchronous
 `readScript` binding, or JS source-callback registry, and no API that hands a

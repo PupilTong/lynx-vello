@@ -593,6 +593,33 @@ fn a_worker_requires_commonjs_and_json_against_its_own_response_url() {
     );
 }
 
+/// The compiled-bundle loader over the same synchronous load: a path the
+/// manifest does not carry is asked for beside the template URL the bundle was
+/// registered with, and the exports of its body are what `requireModule`
+/// answers.
+#[test]
+fn a_bts_bundle_requires_an_unregistered_chunk_beside_its_template_url() {
+    let mut group = Group::new();
+    group.start(
+        r"
+        import { lynx, __BobcatRegisterBundle } from 'bobcat:bts-runtime';
+        __BobcatRegisterBundle({}, false, {}, undefined, 'https://cdn.test/app/x.web.bundle');
+        postMessage(JSON.stringify(lynx.requireModule('/chunk.js')));
+    ",
+    );
+    let (url, completion) = group.views[0].source();
+    assert_eq!(url, "https://cdn.test/app/chunk.js");
+    completion.complete(Ok(LoadedSource::Entry {
+        source: "module.exports = { answer: 42 };".to_owned(),
+        url,
+    }));
+    assert_eq!(
+        group.message(0),
+        wire(r#"{"answer":42}"#),
+        "a bundle path resolves against its template URL and answers its exports"
+    );
+}
+
 #[test]
 fn a_require_nobody_answers_throws_in_the_worker_and_leaves_it_usable() {
     let mut group = Group::new();

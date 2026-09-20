@@ -148,6 +148,19 @@ const sendQuery: SendQuery = (operation, token, params, callback) => {
 
 const nativeApp = {
   nativeModuleProxy: nativeModules,
+  /**
+   * One bundle script, loaded through the registered sources or through the
+   * host, as the `{init}` object web-core's `createBundleInitReturnObj`
+   * answers with: `init` answers the module's exports. It writes neither of
+   * `requireModule`'s caches, as lynx-core's own `loadScript` writes neither.
+   *
+   * `loadScriptAsync` and `readScript` are deliberately absent: the second
+   * would hand a source's text to JavaScript, which nothing in this engine
+   * does.
+   */
+  loadScript(sourceURL: string, entryName?: string) {
+    return modules.loadScriptInit(sourceURL, entryName);
+  },
   createJSObjectDestructionObserver(callback: () => unknown): object {
     const observer = {};
     destructionRegistry.register(observer, callback);
@@ -399,7 +412,11 @@ export const lynx = {
   getNativeApp() {
     return nativeApp;
   },
-  requireModule(path: string, entry?: string) { return modules.requireModule(path, entry); },
+  // `options` reaches the modules table and is ignored there; see
+  // `requireModule` in `bobcat:lynx-modules` for why native ignores it too.
+  requireModule(path: string, entry?: string, options?: {timeout?: number}) {
+    return modules.requireModule(path, entry, options);
+  },
   loadScript(key: string, options: {bundleName?: string}) { return modules.loadScript(key, options); },
   getCoreContext() {
     return coreContext;
@@ -415,10 +432,16 @@ export const lynxCoreInject = {tt: app};
 export const globDynamicComponentEntry = "__Card__";
 Object.assign(scope, {globDynamicComponentEntry});
 
+/**
+ * The bundle one entry was decoded from: its module sources, its named
+ * sections, and the URL its template answered from, which is the base a path
+ * no manifest carries is resolved against. No URL means no base.
+ */
 export function __BobcatRegisterBundle(manifest: Record<string, string>, wrapped: boolean,
-  sections: Record<string, string> = {}, entry?: string) {
+  sections: Record<string, string> = {}, entry?: string, templateUrl?: string) {
   modules.register(manifest, wrapped, entry);
   modules.registerSections(sections, entry);
+  modules.registerTemplateUrl(templateUrl, entry);
 }
 
 interface BackgroundData {

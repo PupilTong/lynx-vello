@@ -509,6 +509,19 @@ compile, parse or body that fails leaves nothing cached. Every source module
 carries `import.meta.url` — the response URL for a fetched one, the name it was
 registered under for a built-in.
 
+`lynx.requireModule` and `nativeApp.loadScript` are the compiled-bundle layer
+over the same two members, in `bobcat:lynx-modules` and so in worker realms
+only. A registered manifest path is evaluated from the source the BTS boot
+script carried; a path no manifest carries is rooted the way native roots it,
+resolved as a reference beside the template URL `__BobcatRegisterBundle` was
+given — the page's own input URL — and compiled in web-core's wrapper parameter
+list rather than Node's five. A Lynx-target chunk answers through
+`globalThis.__bundle__holder`, a raw body through `module.exports`, a `.json`
+response through the value the host parsed. Their caches are their own, not
+`require.cache`: keyed by the bare path, written only after the body returns,
+and `loadScript` writes neither. `requireModuleAsync`, `loadScriptAsync`,
+`readScript`, `fetchBundle` and lazy bundles do not exist.
+
 #### Realm, document and boot
 
 The crate-private `quickjs::ScriptEngine` is the whole script surface: it
@@ -846,9 +859,10 @@ top of that transport; a value it refuses throws at the call. A worker's own
 task queues what is posted until its bootstrap has evaluated, and BTS JS waits
 on the application import before delivering later messages, so application
 listeners exist before first delivery. Raw XML adapters supply the optional
-entry; compiled bundle manifests still need the Lynx Core module/init shell and
-remain pending. Each view costs one additional realm on the group's worker
-runtime.
+entry; a compiled bundle's manifest, custom sections and input URL are
+registered in the BTS module table, whose `requireModule` evaluates a
+registered path and loads one no manifest carries. Each view costs one
+additional realm on the group's worker runtime.
 
 MTS boot does not await BTS: `ScriptFinished` means MTS boot finished — the
 entry module evaluated, its top-level await settled, and its first flush
@@ -1905,8 +1919,8 @@ would host it:
   frame only, with no `region-to-decode` and no `blur-radius`
   post-processing.
 - **Import maps, import attributes, JSON modules and Lynx component-bundle
-  imports**, and the Lynx Core module/init shell compiled bundle manifests
-  still need.
+  imports**, and the asynchronous half of the compiled-bundle loader:
+  `requireModuleAsync`, `loadScriptAsync`, `fetchBundle` and lazy bundles.
 
 See `docs/tracking/` for the behavior surface each of these is scoped against,
 and `.claude/agents/` for the subsystem-scoped agent personas set up for this

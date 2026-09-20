@@ -10,10 +10,19 @@ See
 [BTS Context MVP](web-core-runtime.md#bobcat-bts-context-mvp-2026-09-09) for
 the web-core/native distinction, startup queues and remaining scope.
 
-Compiled BTS pages now register their manifest and custom-section source in the
-JS module runtime before executing `/app-service.js`. `define`/`require` expose
-the compiler factory ABI; `requireModule` and `loadScript` consume registered
-source only. External bundle loading remains separate work.
+Compiled BTS pages now register their manifest, their custom-section source and
+the page's own URL in the JS module runtime before executing
+`/app-service.js`. `define`/`require` expose the compiler factory ABI.
+`requireModule` serves a registered manifest path from that source and *loads* a
+path no manifest carries, through the same synchronous `loadModuleSync` a
+`require` uses: the path rooted as native roots it, resolved as a reference
+beside the registered template URL, compiled in web-core's wrapper parameter
+list, and answered through `globalThis.__bundle__holder` for a Lynx-target
+chunk or `module.exports` for a raw body. `nativeApp.loadScript` is that same
+path as web-core's `{init}` object. `lynx.loadScript` still consumes registered
+custom sections only, and the asynchronous half — `requireModuleAsync`,
+`loadScriptAsync`, `fetchBundle` and lazy bundles — is still absent. See
+[worker resources](../worker-resources-runtime.md).
 
 `lynx.requestAnimationFrame` and `cancelAnimationFrame` use each realm's own JS
 callback map. A pending callback requests vsync from the painter, whose
@@ -66,7 +75,7 @@ Lynx runs compiled ReactLynx output on **two logical JS contexts that share one 
 | `lynx.registerModule(name, module)` | Register an ad-hoc JS "module" object at runtime (not a NativeModule) | Rare | N/A | | lynx-stack/.../types/background-thread/lynx.d.ts |
 | `lynx.reload(value, callback)` | JS-triggered app reload with new init data | Core | N/A | | lynx-stack/.../types/background-thread/lynx.d.ts; lynx/core/runtime/js/bindings/lynx.cc:167-208 (`ReloadFromJS`); lynx-stack/packages/react/runtime/src/snapshot/lifecycle/reload.ts |
 | `lynx.requestResourcePrefetch` / `cancelResourcePrefetch` | Prefetch/cancel image/video resources | Extended | No | Non-standard; closest W3C analog is `<link rel=preload>`/Resource Hints, but Lynx's is imperative+typed (image/video, priority, cacheTarget) | lynx-stack/.../types/background-thread/lynx.d.ts |
-| `lynx.requireModuleAsync(path, cb)` / `requireModule(path, entryName?, options?)` | Synchronous/async CommonJS-style module loading from bundle | Core | N/A (not a web platform concept) | | lynx-stack/.../types/background-thread/lynx.d.ts |
+| `lynx.requireModuleAsync(path, cb)` / `requireModule(path, entryName?, options?)` | Synchronous/async CommonJS-style module loading from bundle | Core | N/A (not a web platform concept) | `requireModule` **implemented** in `bobcat:lynx-modules`: a registered manifest path from the boot script's source, any other path loaded through `loadModuleSync` beside the registered template URL in web-core's wrapper parameter list, cached per realm under the bare path and only after the body returns. `options` is accepted and ignored — web-core has no fetch timeout, and native's own `loadScript` binding reads one only from a *number* third argument it is never given (`js_app.cc:197-199`). `requireModuleAsync` stays `undefined` | lynx-stack/.../types/background-thread/lynx.d.ts |
 | `lynx.setObserverFrameRate(options?)` | Tune polling rate for page-rect/exposure observers | Rare | N/A | | lynx-stack/.../types/background-thread/lynx.d.ts |
 | `lynx.EventSource` | SSE client constructor, subset of `EventSource` | Extended | Partial | Explicitly modeled on W3C EventSource per its own doc comment (`@since 3.5`); implement to spec where feasible | lynx-stack/.../types/background-thread/lynx.d.ts:143 |
 | `lynx.fetch(input, init?)` | Subset of Fetch API | Core | Partial | Doc comment says "subset of Fetch API"; implement against `fetch()`/`Request`/`Response` semantics as far as the subset goes | lynx-stack/.../types/background-thread/lynx.d.ts:150; lynx-stack/.../types/background-thread/fetch.d.ts |
@@ -109,7 +118,7 @@ These are not on `lynx` but are the full enumerated property list of the HostObj
 | Item | Description | Tier | W3C-compliant? | Deviation & what we should do instead | Source refs |
 |---|---|---|---|---|---|
 | `id`, `__pageUrl` | App GUID / page URL | Core | N/A | | lynx/core/runtime/js/bindings/js_app.cc:158-170 |
-| `loadScript`, `readScript`, `readDynamicComponentScripts` (deprecated no-op) | Load/read additional JS bundle scripts by URL/entry name | Core | N/A | | lynx/core/runtime/js/bindings/js_app.cc:171-262 |
+| `loadScript`, `readScript`, `readDynamicComponentScripts` (deprecated no-op) | Load/read additional JS bundle scripts by URL/entry name | Core | N/A | `loadScript` **implemented** on `lynx.getNativeApp()`, as the `{init}` object web-core's `createBundleInitReturnObj` answers with, over the same loader `requireModule` uses and writing neither of its caches. `readScript` is deliberately absent: it would hand a source's text to JavaScript, which nothing in this engine does. `loadScriptAsync` is absent with the rest of the asynchronous half | lynx/core/runtime/js/bindings/js_app.cc:171-262 |
 | `updateData`, `batchedUpdateData`, `setCard` | Push data updates from BTS to drive MTS re-render | Core | N/A | | lynx/core/runtime/js/bindings/js_app.cc:263+ ; lynx/core/runtime/js/bindings/js_app.h:171-173 |
 | `setTimeout`, `setInterval`, `clearTimeout`, `clearInterval` | Timer primitives (backing the bare-global forms) | Core | Partial | See rAF/timer note above. **Implemented 2026-09-02** — `packages/bobcat-element/src/timers.ts` (`bobcat:timers`, imported for its effect by `bobcat:boot`) installs the four globals and keeps the callbacks; `crates/bobcat-core/src/timers.rs` keeps the schedule, which the first step of the epilogue after every entry into a realm runs. **The engine waits out its own deadlines; there is no host-facing timer protocol at all.** Each realm — a view's and a worker's, on the same machinery — has a waiter task of its own holding one pinned sleep on that realm's next deadline, re-armed only when the deadline moves and fed by a watch the epilogue publishes; when it fires it runs that realm's epilogue, which fires the timers that are due and commits, which wakes the host like any other publication. That sleep is `crate::clock::sleep_until`: tokio's own time driver natively, and on wasm32 the `bobcat-alarm` thread of `src/alarm.rs`, because tokio's driver reads `std::time::Instant` and would panic there. A deadline already past is fired by the very epilogue that armed it, so a due timer never waits for anything else to happen. Deliberately **W3C, not Lynx**, per the standards policy: extra arguments are forwarded (Lynx's `App::SetTimeout` calls with none), `setTimeout`/`setInterval` share one id space starting at 1, a negative or non-finite delay is zero, and HTML's nesting clamp (4ms past five nested levels) applies — which is what keeps a self-re-arming `setTimeout(f, 0)` from spinning `bobcat-main`. A callback that throws is reported as `EngineEvent::TimerFailed` and neither disarms its interval nor stops the timers behind it. A non-callable handler throws where it fires rather than being compiled as a script: this realm has no `eval` | lynx/core/runtime/js/bindings/js_app.h:181-183; getPropertyNames at js_app.cc:1790-1793 |
 | `nativeModuleProxy` | Handle to the `NativeModules` binding object | Core | N/A | | lynx/core/runtime/js/bindings/js_app.h:184,303,312,358 |

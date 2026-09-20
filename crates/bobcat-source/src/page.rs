@@ -311,13 +311,19 @@ impl PageSource {
             })
             .to_string();
             let tables = serde_json::to_string(&tables).expect("JSON text is a JavaScript string");
+            // The input's own URL, as the base a path this manifest does not
+            // carry is resolved against. The entry argument stays `undefined`:
+            // this bundle registers under the default entry either way.
+            let template_url =
+                serde_json::to_string(input.as_str()).expect("a URL is a JavaScript string");
             let mut source = format!(
                 "import {{lynx, __BobcatRegisterBundle}} from 'bobcat:bts-runtime';\n\
                  const page = JSON.parse({tables});\n\
                  const sections = Object.fromEntries(Object.entries(page.sections ?? {{}})\n\
                    .filter(([, section]) => typeof section?.content === 'string')\n\
                    .map(([name, section]) => [name, section.content]));\n\
-                 __BobcatRegisterBundle(page.manifest, {wrapped}, sections);\n"
+                 __BobcatRegisterBundle(page.manifest, {wrapped}, sections, undefined, \
+                 {template_url});\n"
             );
             if template.manifest.contains_key("/app-service.js") {
                 source.push_str("lynx.requireModule('/app-service.js');\n");
@@ -700,6 +706,31 @@ mod tests {
         let resources = resources();
         page.register_with(&resources);
         assert!(resources.unregister(&sources.entry));
+    }
+
+    #[test]
+    fn the_bts_boot_script_registers_the_bundle_under_the_inputs_own_url() {
+        let input = Url::parse("https://cdn.example/app/card.web.bundle").expect("test URL");
+        let mut template = crate::web::decode(&web_bundle(Some("export {};"))).unwrap();
+        template
+            .manifest
+            .insert("/app-service.js".into(), "module.exports = {};".into());
+        let page = PageSource::from_template_with_background(&input, template, false)
+            .expect("a manifest page");
+
+        let (_, source) = page.background_script.as_ref().expect("a BTS boot script");
+        let registration = format!(
+            "__BobcatRegisterBundle(page.manifest, false, sections, undefined, {:?});",
+            input.as_str()
+        );
+        assert!(
+            source.contains(&registration),
+            "the boot script names the input URL as the bundle's base: {source}"
+        );
+        assert!(
+            source.ends_with("lynx.requireModule('/app-service.js');\n"),
+            "{source}"
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]

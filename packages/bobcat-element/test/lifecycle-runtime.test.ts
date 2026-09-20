@@ -5,8 +5,12 @@ import type * as btsRuntime from "../src/background-thread-runtime.ts";
 import type * as mtsRuntime from "../src/main-thread-runtime.ts";
 import type { Worker } from "../src/worker.ts";
 import * as selectorQuery from "../src/selector-query.ts";
-import * as lynxModules from "../src/lynx-modules.ts";
-rstest.mockRequire("bobcat:lynx-modules", () => lynxModules);
+import type * as lynxModules from "../src/lynx-modules.ts";
+// Answered lazily, as `bobcat:worker` is in native-modules.test.ts: the modules
+// table imports `bobcat-internal:host`, whose replacement below is built out of
+// this file's own bindings, so it may not be required above them.
+let moduleTable: typeof lynxModules;
+rstest.mockRequire("bobcat:lynx-modules", () => moduleTable);
 import * as globalEventEmitter from "../src/global-event-emitter.ts";
 rstest.mockRequire("bobcat:global-event-emitter", () => globalEventEmitter);
 rstest.mockRequire("bobcat:selector-query", () => selectorQuery);
@@ -35,6 +39,10 @@ rstest.mockRequire("bobcat-internal:host", () => ({
   initData: () => undefined,
   globalProps: () => undefined,
   nativeModuleTable: () => "",
+  // The modules table imports both; every suite below serves registered
+  // sources, so nothing here reaches an external load.
+  resolveModuleUrl: () => { throw new Error("no module resolution in this suite"); },
+  loadModuleSync: () => { throw new Error("no module load in this suite"); },
 }));
 
 /**
@@ -78,6 +86,7 @@ const originalPostMessage = scope.postMessage;
 const originalAddEventListener = scope.addEventListener;
 let mts: typeof mtsRuntime;
 let bts: typeof btsRuntime.lynx;
+let registerBundle: typeof btsRuntime.__BobcatRegisterBundle;
 let receiveInBackground: (event: { data: unknown }) => void | Promise<void>;
 const toBackground: Recorded[] = [];
 const toMain: unknown[] = [];
@@ -90,6 +99,7 @@ const worker = Object.assign(new eventTarget.EventTarget(), {
 });
 
 beforeAll(async () => {
+  moduleTable = await import("../src/lynx-modules.ts");
   mts = await import("../src/main-thread-runtime.ts");
   mts.__BobcatInitEntry("https://example.test/page/main.js?version=2#entry");
   scope.emptyLepusMethod = () => undefined;
@@ -99,7 +109,9 @@ beforeAll(async () => {
   scope.addEventListener = (name: string, callback) => {
     if (name === "message") receiveInBackground = callback;
   };
-  ({ lynx: bts } = await import("../src/background-thread-runtime.ts"));
+  const background = await import("../src/background-thread-runtime.ts");
+  bts = background.lynx;
+  registerBundle = background.__BobcatRegisterBundle;
 });
 
 afterAll(() => {
@@ -120,6 +132,14 @@ async function deliverToMain() {
 }
 
 describe("MTS/BTS lifecycle runtime", () => {
+  it("answers nativeApp.loadScript from the bundle the BTS registered", () => {
+    registerBundle({"/section.js": "({init({tt}){return {app:tt}}})"}, true);
+
+    const loaded = bts.getNativeApp().loadScript("/section.js");
+    expect(loaded.init({tt: bts.getApp()}).app).toBe(bts.getApp());
+    expect(bts.requireModule("/section.js").app).toBe(bts.getApp());
+  });
+
   it("resolves the card alias to stylesheet URLs and keeps opaque handles", () => {
     expect(mts.__Card__).toBe("https://example.test/page/main.js?version=2#entry");
     const first = mts.__LoadStyleSheet('CSS', '__Card__');
