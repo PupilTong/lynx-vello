@@ -1,4 +1,12 @@
 //! CSS Grid Layout (Level 2 wording, excluding `subgrid`).
+//!
+//! §6.2's item sizing lives in [`normal_self_alignment_is_start`]: `normal`
+//! stretches an item only when it has no preferred aspect ratio and is not a
+//! replaced box with a natural size in that axis, which is why an image with
+//! default alignment stays at its own pixels while an `aspect-ratio` box still
+//! fills its column. What a stretched — or authored, or natural — size in one
+//! axis then transfers into the other axis's track contribution is §11.5, in
+//! `sizing::raw_content_size`.
 
 #![allow(clippy::cast_precision_loss)]
 
@@ -47,6 +55,7 @@ struct ItemDefaults {
     align_items: AlignFlags,
     align_items_normal: bool,
     justify_items: AlignFlags,
+    justify_items_normal: bool,
     rtl: bool,
 }
 
@@ -126,6 +135,38 @@ where
     })
 }
 
+/// css-grid-1 §6.2: whether `normal` self-alignment sizes this item as `start`
+/// rather than as `stretch`, per axis.
+///
+/// `normal` is `stretch` only for an item with no preferred aspect ratio that
+/// is not a replaced box with a natural size in that axis. Everything else is
+/// sized by CSS 2 § 10's block-level rules for the axis, which this models as
+/// `start` plus the ratio transfer [`item_area_geometry`] already applies:
+///
+/// * inline axis, non-replaced (CSS 2 § 10.3.3): the stretch-fit size — a box whose only ratio is
+///   the `aspect-ratio` property still fills its column and derives its row size from that width,
+///   so `normal` stays `stretch`;
+/// * inline axis, replaced (CSS 2 § 10.3.4): the natural or ratio-transferred size, never the
+///   column's;
+/// * block axis (CSS 2 § 10.6.2): likewise the natural or transferred size.
+///
+/// hughie learns that an item is replaced only from the natural size its host
+/// reports for it, so a replaced box that reports none is aligned as a
+/// non-replaced one — which is what § 6.2 asks for anyway once no ratio is
+/// left to preserve. Size containment deliberately does *not* suppress the
+/// natural size here: it changes what the box measures to, not whether it is
+/// replaced, so a `contain: size` image is start-aligned at its substituted
+/// (by default zero) size rather than stretched.
+fn normal_self_alignment_is_start(
+    natural_size: Size<Option<f32>>,
+    aspect_ratio: Option<f32>,
+) -> Size<bool> {
+    Size::new(
+        natural_size.width.is_some(),
+        natural_size.height.is_some() || aspect_ratio.is_some(),
+    )
+}
+
 fn resolve_grid_item<N, S>(
     style: &S,
     key: ItemKey<N>,
@@ -159,21 +200,29 @@ where
                 | StyleSize::WebkitFillAvailable
         )
     };
+    // A `normal` used value is the one §6.2 rules on; anything the author (or
+    // the container's `*-items`) names outright is taken as written.
+    let normal_is_start =
+        normal_self_alignment_is_start(style.natural_size(), geometry.aspect_ratio);
+    let used_align = if defaults.align_items_normal && normal_is_start.height {
+        AlignFlags::START
+    } else {
+        defaults.align_items
+    };
+    let used_justify = if defaults.justify_items_normal && normal_is_start.width {
+        AlignFlags::START
+    } else {
+        defaults.justify_items
+    };
     GridItem {
         geometry,
         key,
         area,
         position: style.position(),
         align_self: normalize_item_alignment(style.align_self().0, false, defaults.rtl)
-            .unwrap_or_else(|| {
-                if defaults.align_items_normal && geometry.aspect_ratio.is_some() {
-                    AlignFlags::START
-                } else {
-                    defaults.align_items
-                }
-            }),
+            .unwrap_or(used_align),
         justify_self: normalize_item_alignment(style.justify_self().0, true, defaults.rtl)
-            .unwrap_or(defaults.justify_items),
+            .unwrap_or(used_justify),
         direction: style.direction(),
         preferred_behaves_auto_or_depends: Size::new(
             behaves_auto_or_depends(raw_size.width),
@@ -1266,11 +1315,12 @@ where
     let justify_content = normalize_content_alignment(style.justify_content().primary(), true, rtl)
         .unwrap_or(AlignFlags::STRETCH);
     let align_items = normalize_item_alignment(style.align_items().0, false, rtl);
+    let justify_items = normalize_item_alignment(style.justify_items().computed.0.0, true, rtl);
     let item_defaults = ItemDefaults {
         align_items: align_items.unwrap_or(AlignFlags::STRETCH),
         align_items_normal: align_items.is_none(),
-        justify_items: normalize_item_alignment(style.justify_items().computed.0.0, true, rtl)
-            .unwrap_or(AlignFlags::STRETCH),
+        justify_items: justify_items.unwrap_or(AlignFlags::STRETCH),
+        justify_items_normal: justify_items.is_none(),
         rtl,
     };
     let ContainerPrologue {

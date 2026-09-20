@@ -2,6 +2,7 @@
 //! to hughie without cloning its `Arc` or re-entering Stylo's runtime
 //! borrow checker.
 
+use hughie::geometry::Size;
 use hughie::style::containment::effective_containment;
 use hughie::style::{
     Contain, ContentVisibility, CoreStyle, Display, FlexboxStyle, GridLanesStyle, GridStyle,
@@ -240,6 +241,14 @@ impl<T> CoreStyle for StyleView<'_, T> {
     /// `auto` box gains comes from.
     fn skips_contents(&self) -> bool {
         skips_contents(self.node, self.values())
+    }
+
+    /// The decoded dimensions of replaced content, the same ones
+    /// `compute_leaf_layout` is handed below. A container reads them to settle
+    /// css-grid-1 §6.2 `normal` self-alignment, which it has to do before it
+    /// measures the item. A non-replaced node carries `NaturalSize::NONE`.
+    fn natural_size(&self) -> Size<Option<f32>> {
+        self.node.natural_size().dimensions()
     }
 }
 
