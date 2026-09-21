@@ -1148,7 +1148,14 @@ web-core's `parseFloat` — the one tag module with no UA rules of its own,
 since a blur view is a container and nothing else). `tree::ua_sheet` owns what
 those tags agree on, the order
 they cascade in, and `PageConfig`; `tree/lib.rs` only mints the document they
-describe. That order is mostly documentation, with one exception that is
+describe. **A tag's attribute-to-CSS mapping belongs to that tag's own
+`dom::CustomElement`, never to a shared name-keyed dispatcher** (user ruling,
+2026-09-21): `text`'s paragraph limits, `list`'s lane count and sticky offset,
+`list-item`'s size estimate, `image`'s `src` and `blur-view`'s `blur-radius`
+are each reflected by the component `tree/lib.rs` defines for that tag, in the
+`attribute_changed_callback` the `__SetAttribute` write itself raises, so the
+runtime's attribute members perform the DOM mutation and nothing more. That
+order is mostly documentation, with one exception that is
 mechanism: `image`'s child suppression ties on specificity with the `display`
 rules `view`, `scroll-view`, `list`, `blur-view`, `x-blur-view` and `wrapper`
 carry, so it wins only by being assembled last.
@@ -2024,14 +2031,17 @@ would host it:
   `StyleInfo` fragment mounts globally; the encoding lands with the ingestion
   side that reads it, together with the parent-component css-id inheritance
   that feeds it.
-- **The list surface.** `crates/bobcat-core/src/main/tree/scroll_container.rs`
-  carries only what a UA sheet can say about `scroll-view` and `list`; there
-  is no cell recycling, no scroll-to-index and no threshold events. What is
-  built is the data protocol underneath all of it:
-  `__SetAttribute(element, "update-list-info", …)` delivers a compiled
+- **The list surface.** `crates/bobcat-core/src/main/tree/list.rs` carries
+  what a UA sheet can say about `list` and `list-item`: the scroll axis, the
+  `list-type` layout modes (`flow` = grid, `waterfall` = `grid-lanes`), cells
+  virtualized by `content-visibility: auto` with a `100cqh` estimate fallback,
+  and the `span-count`/`column-count`/`sticky-offset`/
+  `estimated-main-axis-size-px` hints. Underneath it, the data protocol —
+  `__SetAttribute(element, "update-list-info", …)` — delivers a compiled
   `<list>`'s cells as real element children, which is the only path one
-  receives children on, so list content no longer waits on it under any
-  layout mode (`docs/tracking/deviations.md`).
+  receives children on. `<list>` is not a `dom::CustomElement`: there is no
+  cell recycling, no scroll-to-index, no threshold or scroll events, no list
+  UI method, and no sticky or snap rules (`docs/tracking/deviations.md`).
 - **Gesture detectors and the arena.** `crates/bobcat-core/src/paint/gesture.rs`
   has no fling or velocity, no `:active` driving, no `consume-slide-event`, no
   per-element `GestureDetector`/arena relations and no `click`; `tapSlop` is
@@ -2047,9 +2057,9 @@ would host it:
 - **The text `layout` event.** The per-line ranges `hughie`'s
   `text/block/content.rs` computes have no delivery path.
 - **`rpx`-aware view/device policy**, sticky lowering (it parses and paints as
-  normal flow but never pins), and the `<list>` component surface over
-  `display: grid-lanes` (attribute→CSS mapping, the gap properties,
-  virtualization).
+  normal flow but never pins), and the `<list>` *component* (its UI methods,
+  scroll and threshold events, sticky cells and snapping; the layout mapping
+  and virtualization are UA rules already).
 - **Animated image playback.** `bobcat-resources` decodes an image's first
   frame only, with no `region-to-decode` and no `blur-radius`
   post-processing.

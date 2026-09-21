@@ -260,10 +260,14 @@ outer box, so the dots take the block's style unless `="false"` selects a
 separate measured path (`XTextTruncation.ts:88-104`, `x-text.css:200-241`). That
 is deliberately not replicated; see [conflict 3](#3-tail-color-convert-default).
 
-The wiring: `apply_attribute_style` reflects the attribute into the registered
-`--lynx-tail-color-convert` integer, set only by the literal `true` that
-ReactLynx's `tail-color-convert={true}` reaches the DOM as
-(`crates/bobcat-core/src/main/tree/text.rs:26-41`, `:123`);
+The wiring: the `text` tag's own component reflects the attribute into the
+registered `--lynx-tail-color-convert` integer, set only by the literal `true`
+that ReactLynx's `tail-color-convert={true}` reaches the DOM as — an
+attribute-to-CSS mapping lives in its own tag's `CustomElement`, never in a
+shared name-keyed dispatcher (user ruling, 2026-09-21), so the reflection is a
+`attribute_changed_callback` reaction raised by the `__SetAttribute` write
+itself (`crates/bobcat-core/src/main/tree/text.rs`, the `Text` component and
+`UA_RULES`);
 `TextContainerStyle::tail_color_convert` reads it back
 (`crates/hughie/src/style/text.rs:56`); `SourceItem::Ellipsis` names the content
 run the dots were shaped in (`crates/hughie/src/text/block/mod.rs:65`), so the
@@ -288,7 +292,7 @@ and reversible.
 
 | # | Gap | Cause |
 | --- | --- | --- |
-| A4 | `ellipsize-mode` is inert | `crates/bobcat-core/src/main/tree/text.rs:14-43` — `apply_attribute_style` matches `text-maxline`, `text-maxlength` and `tail-color-convert`, and nothing else. Carried by no test of its own. |
+| A4 | `ellipsize-mode` is inert | `crates/bobcat-core/src/main/tree/text.rs` — the `Text` component observes `text-maxline`, `text-maxlength` and `tail-color-convert`, and nothing else; `a_text_observes_its_three_limit_attributes_and_nothing_else` pins that list. Carried by no test of its own. |
 
 **A2 — the overflow-driven ellipsis path — is closed.** A `white-space: nowrap`
 line wider than its measure is cut at the clip edge under

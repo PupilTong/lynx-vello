@@ -1,15 +1,18 @@
-//! The `scroll-view` and `list` tags as main-thread scroll containers.
+//! The `scroll-view` tag as a main-thread scroll container.
 //!
-//! Neither tag is a [`dom::CustomElement`] yet — there is no cell recycling,
-//! no scroll-to-index, no threshold events. What is here is the part a UA
-//! sheet can carry alone: which axis scrolls, which one clips, and which way
-//! the subtree stacks. Their shared container defaults (border box, the
-//! configured display mode) ride the same rule as `view`'s, in
-//! [`super::ua_sheet`]. What neither the sheet nor this module covers yet is
-//! recorded in `docs/tracking/deviations.md`.
+//! It is not a [`dom::CustomElement`] yet — there is no scroll-to-index and
+//! there are no threshold events. What is here is the part a UA sheet can
+//! carry alone: which axis scrolls, which one clips, and which way the
+//! subtree stacks. Its container defaults (border box, the configured display
+//! mode) ride the same rule as `view`'s, in [`super::ua_sheet`]. What neither
+//! the sheet nor this module covers yet is recorded in
+//! `docs/tracking/deviations.md`.
+//!
+//! `list` is the other Lynx scroller and carries the same axis rules, written
+//! against its own attribute spellings. They live with the rest of that tag's
+//! policy in [`super::list`], one module per tag.
 
-/// Where a scroller scrolls, from `web-elements`' `scroll-view.css` and
-/// `x-list.css`.
+/// Where a scroller scrolls, from `web-elements`' `scroll-view.css`.
 ///
 /// A Lynx scroller scrolls one axis and clips the other, and stacks its
 /// children along the axis it scrolls — which takes two declarations, because
@@ -26,21 +29,18 @@
 /// clip. That is what a browser makes of the same declaration in
 /// `scroll-view.css`, so it is parity rather than a shortcut.
 pub(super) const UA_RULES: &str = r#"
-scroll-view, scroll-view[scroll-y], scroll-view[scroll-orientation="vertical"], list {
+scroll-view, scroll-view[scroll-y], scroll-view[scroll-orientation="vertical"] {
   overflow-x: clip; overflow-y: scroll;
   flex-direction: column; linear-direction: column;
 }
-scroll-view[scroll-x], scroll-view[scroll-orientation="horizontal"],
-list[scroll-orientation="horizontal"] {
+scroll-view[scroll-x], scroll-view[scroll-orientation="horizontal"] {
   overflow-x: scroll; overflow-y: clip;
   flex-direction: row; linear-direction: row;
 }
 scroll-view[scroll-y][enable-scroll="false"],
-scroll-view[scroll-orientation="vertical"][enable-scroll="false"],
-list[enable-scroll="false"] { overflow-y: hidden; }
+scroll-view[scroll-orientation="vertical"][enable-scroll="false"] { overflow-y: hidden; }
 scroll-view[scroll-x][enable-scroll="false"],
-scroll-view[scroll-orientation="horizontal"][enable-scroll="false"],
-list[scroll-orientation="horizontal"][enable-scroll="false"] { overflow-x: hidden; }
+scroll-view[scroll-orientation="horizontal"][enable-scroll="false"] { overflow-x: hidden; }
 "#;
 
 #[cfg(test)]
@@ -55,12 +55,13 @@ mod tests {
         let mut document = document();
         let vertical = [
             child(&mut document, "scroll-view", ""),
-            child(&mut document, "list", ""),
+            child(&mut document, "scroll-view", ""),
         ];
         let horizontal = [
             child(&mut document, "scroll-view", ""),
-            child(&mut document, "list", ""),
+            child(&mut document, "scroll-view", ""),
         ];
+        document.set_attribute(vertical[1], "scroll-orientation", "vertical");
         document.set_attribute(horizontal[0], "scroll-x", "");
         document.set_attribute(horizontal[1], "scroll-orientation", "horizontal");
         document.layout();
@@ -89,8 +90,9 @@ mod tests {
     #[test]
     fn enable_scroll_false_leaves_a_scroller_only_script_can_move() {
         let mut document = document();
-        let vertical = child(&mut document, "list", "");
+        let vertical = child(&mut document, "scroll-view", "");
         let horizontal = child(&mut document, "scroll-view", "");
+        document.set_attribute(vertical, "scroll-y", "");
         document.set_attribute(vertical, "enable-scroll", "false");
         document.set_attribute(horizontal, "scroll-x", "");
         document.set_attribute(horizontal, "enable-scroll", "false");
@@ -105,16 +107,20 @@ mod tests {
         }
     }
 
-    /// The layout half of the UA gap: before these rules existed both tags fell
+    /// The layout half of the UA gap: before these rules existed the tag fell
     /// to the bare Lynx initial values, so the subtree stacked on the wrong axis
     /// inside a content box.
     #[test]
     fn a_scroller_lays_its_subtree_out_along_the_axis_it_scrolls() {
         for (tag, attribute, horizontal) in [
             ("scroll-view", None, false),
-            ("list", None, false),
+            ("scroll-view", Some(("scroll-y", "")), false),
             ("scroll-view", Some(("scroll-x", "")), true),
-            ("list", Some(("scroll-orientation", "horizontal")), true),
+            (
+                "scroll-view",
+                Some(("scroll-orientation", "horizontal")),
+                true,
+            ),
         ] {
             let mut document = document();
             let scroller = child(

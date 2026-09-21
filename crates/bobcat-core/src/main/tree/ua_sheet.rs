@@ -2,19 +2,21 @@
 //! defaults every container tag shares, and the assembly of the one sheet.
 //!
 //! Each tag's own policy lives with that tag — [`super::scroll_container`],
-//! [`super::text`], [`super::raw_text`], [`super::image`] — and this module
-//! only decides what they all agree on and what order they land in.
+//! [`super::list`], [`super::text`], [`super::raw_text`], [`super::image`] —
+//! and this module only decides what they all agree on and what order they
+//! land in.
 //! [`super::blur_view`] is the one tag module with no rules of its own: a
 //! blur view is a container and nothing more, so everything it needs is here.
 //!
 //! Order is mostly documentation, with one exception that is mechanism:
 //! [`super::image`]'s child suppression ties on specificity with the `display`
-//! rules `view`, `scroll-view`, `list`, `blur-view`, `x-blur-view` and
-//! `wrapper` carry, so it wins only by being assembled last. That module's
-//! `nothing_inside_an_image_generates_a_box` is the tripwire for it.
+//! rules `view`, `scroll-view`, `list`, `list-item`, `blur-view`,
+//! `x-blur-view` and `wrapper` carry, so it wins only by being assembled last.
+//! That module's `nothing_inside_an_image_generates_a_box` is the tripwire for
+//! it.
 
 use super::blur_view::{BLUR_VIEW_TAG, X_BLUR_VIEW_TAG};
-use super::{image, raw_text, scroll_container, text};
+use super::{image, list, raw_text, scroll_container, text};
 
 /// Page configuration for the Lynx runtime and UA cascade.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,8 +48,8 @@ impl Default for PageConfig {
 
 /// The Lynx UA stylesheet: embedder cascade policy `dom` must not know.
 ///
-/// The container tags — `page`, `view`, `scroll-view`, `list`, `blur-view` and
-/// `x-blur-view` — share
+/// The container tags — `page`, `view`, `scroll-view`, `list`, `list-item`,
+/// `blur-view` and `x-blur-view` — share
 /// `web-elements`' common block: a border box, and the display mode
 /// `defaultDisplayLinear` picks — a per-tag exception to that switch would
 /// have to be `!important`, so it is a recorded deviation instead
@@ -56,7 +58,9 @@ impl Default for PageConfig {
 /// where the linear toggle covers container tags only.
 /// `defaultOverflowVisible` reaches the non-scrolling containers — `page`,
 /// `view` and the two blur-view tags — the way web-core spends it on `x-view`
-/// alone; a scroller carries its own axes regardless.
+/// alone; a scroller carries its own axes regardless, and a `list-item` is
+/// clipped by the paint containment [`super::list`] gives it rather than by
+/// any `overflow` this sheet writes.
 ///
 /// The blur-view tags are here because native's `LynxUIBlurView` extends
 /// `LynxUIView`: a blur view is a view in everything layout can see, and its
@@ -100,16 +104,18 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
         format!("page, view, {BLUR_VIEW_TAG}, {X_BLUR_VIEW_TAG} {{ overflow: hidden; }}\n")
     };
     format!(
-        "page, view, scroll-view, list, {BLUR_VIEW_TAG}, {X_BLUR_VIEW_TAG} \
+        "page, view, scroll-view, list, list-item, {BLUR_VIEW_TAG}, {X_BLUR_VIEW_TAG} \
          {{ box-sizing: border-box; {display} }}\n\
          {overflow}\
          page {{ width: 100%; height: 100%; font-family: sans-serif; }}\n\
          wrapper {{ display: contents; }}\n\
          {scrollers}\
+         {lists}\
          {text}\
          {carriers}\
          {images}",
         scrollers = scroll_container::UA_RULES,
+        lists = list::UA_RULES,
         text = text::UA_RULES,
         carriers = raw_text::UA_RULES,
         images = image::UA_RULES,
@@ -127,11 +133,12 @@ mod tests {
     use super::{BLUR_VIEW_TAG, PageConfig, X_BLUR_VIEW_TAG, ua_stylesheet};
 
     /// The tags that get `web-elements`' common container block.
-    const CONTAINER_TAGS: [&str; 6] = [
+    const CONTAINER_TAGS: [&str; 7] = [
         "page",
         "view",
         "scroll-view",
         "list",
+        "list-item",
         BLUR_VIEW_TAG,
         X_BLUR_VIEW_TAG,
     ];

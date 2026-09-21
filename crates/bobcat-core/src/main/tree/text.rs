@@ -5,41 +5,102 @@
 //! lays out — is [`super::raw_text`], which owns the `raw-text` generated-content rule and
 //! the rules that dissolve a carrier into the `text` it is written inside.
 
-use dom::NodeId;
+use dom::{CustomElement, NodeId};
 
-use super::LynxDocument;
+use super::{LynxDocument, parse_count};
 
-/// Reflects paragraph attributes into CSS presentational hints. Author
-/// declarations can override them without replacing the attribute's value.
-pub(crate) fn apply_attribute_style(
-    document: &mut LynxDocument,
-    element: NodeId,
-    name: &str,
-    value: Option<&str>,
-) {
-    let (property, css) = match name {
-        "text-maxline" => (
-            "--lynx-text-maxline",
-            count_css(parse_count(value).filter(|count| *count > 0.0 && count.fract() == 0.0)),
-        ),
-        "text-maxlength" => ("--lynx-text-maxlength", count_css(parse_count(value))),
-        // Native reads this one as a BOOL rather than a number
-        // (`LynxTextRenderer.m overrideTruncatedAttrIfNeed`, Android
-        // `TextRenderer.convertTailColor`), and its default is off, so only
-        // the literal `true` turns it on — which is what ReactLynx's
-        // `tail-color-convert={true}` reaches the DOM as. Any other value,
-        // including a removal, writes the empty string and resets the hint.
-        "tail-color-convert" => (
-            "--lynx-tail-color-convert",
-            if value == Some("true") {
-                "1".to_owned()
-            } else {
-                String::new()
-            },
-        ),
-        _ => return,
-    };
-    document.set_presentational_hint(element, property, &css);
+/// The tag a paragraph limit can be written on, and the only one.
+///
+/// web-core mixes `XTextTruncation` — the sole reader of these three
+/// attributes — into `x-text` alone (`XText.ts:16-24`); `inline-text` and
+/// `inline-truncation` are declared without it
+/// (`XText/InlineText.ts:12`, `XText/InlineTruncation.ts`), and this engine
+/// agrees for a reason of its own: a limit is a property of the block that
+/// establishes the paragraph, so a nested run's limit is ignored whatever
+/// tag the run is written as
+/// (`a_maxline_on_a_nested_inline_run_neither_clips_nor_re_boxes_it`, in
+/// `web_text_replication.rs`).
+const TEXT_TAG: &str = "text";
+
+const MAX_LINE_ATTRIBUTE: &str = "text-maxline";
+const MAX_LENGTH_ATTRIBUTE: &str = "text-maxlength";
+const TAIL_COLOR_CONVERT_ATTRIBUTE: &str = "tail-color-convert";
+
+const MAX_LINE_PROPERTY: &str = "--lynx-text-maxline";
+const MAX_LENGTH_PROPERTY: &str = "--lynx-text-maxlength";
+const TAIL_COLOR_CONVERT_PROPERTY: &str = "--lynx-tail-color-convert";
+
+/// Installs the component. Must run before any element could carry the tag,
+/// which is [`Document::define`](dom::Document::define)'s own precondition.
+pub(super) fn define(document: &mut LynxDocument) {
+    document.define(TEXT_TAG, Box::new(Text));
+}
+
+/// Reflects a paragraph's three limit attributes into the registered custom
+/// properties [`UA_RULES`] declares and the text block reads.
+///
+/// `attribute_changed_callback` is the whole component, for the same reason it
+/// is the whole of [`super::image`]'s and [`super::blur_view`]'s:
+/// `__CreateElement` mints the element before `__SetAttribute` writes on it,
+/// so `constructed` could observe nothing, and a removal frees nothing a
+/// disconnect would have to undo.
+///
+/// A hint lands at `CascadeOrigin::PresHints`, below author CSS and above
+/// [`UA_RULES`], so an author declaration overrides the attribute without
+/// replacing the attribute's own value.
+struct Text;
+
+impl CustomElement<()> for Text {
+    fn observed_attributes(&self) -> Vec<String> {
+        vec![
+            MAX_LINE_ATTRIBUTE.to_owned(),
+            MAX_LENGTH_ATTRIBUTE.to_owned(),
+            TAIL_COLOR_CONVERT_ATTRIBUTE.to_owned(),
+        ]
+    }
+
+    fn attribute_changed_callback(
+        &self,
+        document: &mut LynxDocument,
+        element: NodeId,
+        name: &str,
+        _old: Option<&str>,
+        new: Option<&str>,
+    ) {
+        // Every arm names a value, and the empty string is how one says "no
+        // usable value": `set_presentational_hint` has `setProperty`
+        // semantics, so it clears the hint rather than leaving a stale one
+        // behind. No arm can produce a declaration the cascade rejects — the
+        // two counts reflect as bare integers and the boolean as `1` — so
+        // none of them needs [`super::blur_view`]'s clear-then-set.
+        let (property, css) = match name {
+            MAX_LINE_ATTRIBUTE => (
+                MAX_LINE_PROPERTY,
+                count_css(parse_count(new).filter(|count| *count > 0.0 && count.fract() == 0.0)),
+            ),
+            MAX_LENGTH_ATTRIBUTE => (MAX_LENGTH_PROPERTY, count_css(parse_count(new))),
+            // Native reads this one as a BOOL rather than a number
+            // (`LynxTextRenderer.m overrideTruncatedAttrIfNeed`, Android
+            // `TextRenderer.convertTailColor`), and its default is off, so
+            // only the literal `true` turns it on — which is what ReactLynx's
+            // `tail-color-convert={true}` reaches the DOM as. Any other value,
+            // including a removal, writes the empty string and resets the
+            // hint.
+            TAIL_COLOR_CONVERT_ATTRIBUTE => (
+                TAIL_COLOR_CONVERT_PROPERTY,
+                if new == Some("true") {
+                    "1".to_owned()
+                } else {
+                    String::new()
+                },
+            ),
+            other => {
+                debug_assert!(false, "`text` does not observe `{other}`");
+                return;
+            }
+        };
+        document.set_presentational_hint(element, property, &css);
+    }
 }
 
 /// The canonical integer a parsed count reflects as; an absent count resets
@@ -51,40 +112,6 @@ pub(crate) fn apply_attribute_style(
 )]
 fn count_css(count: Option<f64>) -> String {
     count.map_or_else(String::new, |count| (count as u32).to_string())
-}
-
-/// `XTextTruncation` reads both attributes with JavaScript `parseFloat`:
-/// decimal prefixes and exponents work, empty/negative values do not. Counts
-/// beyond the paragraph's u32 source space are effectively unlimited.
-fn parse_count(value: Option<&str>) -> Option<f64> {
-    let value = value?
-        .trim_start_matches(|c: char| (c.is_whitespace() && c != '\u{85}') || c == '\u{feff}');
-    let bytes = value.as_bytes();
-    let mut end = usize::from(matches!(bytes.first(), Some(b'+' | b'-')));
-    while bytes.get(end).is_some_and(u8::is_ascii_digit) {
-        end += 1;
-    }
-    if bytes.get(end) == Some(&b'.') {
-        end += 1;
-        while bytes.get(end).is_some_and(u8::is_ascii_digit) {
-            end += 1;
-        }
-    }
-    if matches!(bytes.get(end), Some(b'e' | b'E')) {
-        let mut exponent = end + 1;
-        exponent += usize::from(matches!(bytes.get(exponent), Some(b'+' | b'-')));
-        let digits = exponent;
-        while bytes.get(exponent).is_some_and(u8::is_ascii_digit) {
-            exponent += 1;
-        }
-        if exponent > digits {
-            end = exponent;
-        }
-    }
-    value[..end]
-        .parse::<f64>()
-        .ok()
-        .filter(|count| (0.0..=f64::from(u32::MAX)).contains(count))
 }
 
 /// `text`'s own defaults, from `web-elements`' `x-text.css`.
@@ -189,17 +216,22 @@ text > image, text > wrapper > image, inline-text > image, inline-text > wrapper
 mod tests {
     #![allow(clippy::float_cmp)] // Ahem and explicit line heights have exact metrics.
 
+    use dom::CustomElement;
     use dom::stylo::color::AbsoluteColor;
     use dom::stylo::values::computed::{ColorPropertyValue, Display};
 
     use super::super::LynxDocument;
     use super::super::test_support::{child, display, document, element_under, style_of};
+    use super::Text;
 
     const MAX_LINES: &str = "text-maxline";
     const MAX_CHARS: &str = "text-maxlength";
     const TAIL_COLOR_CONVERT: &str = "tail-color-convert";
     const TEXT_OVERFLOW: &str = "text-overflow";
 
+    /// Writes or removes an attribute the way the runtime does — the DOM
+    /// mutation and nothing else. An observed name raises the component's
+    /// reaction from inside the mutation, which is what writes the hint.
     fn set_limit(
         document: &mut LynxDocument,
         element: dom::NodeId,
@@ -211,7 +243,6 @@ mod tests {
         } else {
             document.remove_attribute(element, name);
         }
-        super::apply_attribute_style(document, element, name, value);
     }
 
     fn append_run(document: &mut LynxDocument, parent: dom::NodeId, content: &str) {
@@ -330,6 +361,11 @@ mod tests {
         assert_height(&mut document, text, 42.0);
     }
 
+    /// Two independent reasons a limit written above a paragraph leaves it
+    /// alone: the attribute reaches no component on a tag that is not a
+    /// `text`, and the property it *would* have written is registered
+    /// `inherits: false`, so even a declared one stops at the element that
+    /// declared it.
     #[test]
     fn registered_text_limits_do_not_inherit_from_the_parent() {
         let (mut document, text) = paragraph("abc def");
@@ -338,6 +374,66 @@ mod tests {
         set_limit(&mut document, page, MAX_CHARS, Some("0"));
         assert_height(&mut document, text, 42.0);
         assert_eq!(document.text_block_size(text).unwrap().width, 60.0);
+        assert_eq!(
+            hint(&document, page, "lynx-text-maxline", "0"),
+            "0",
+            "`page` is not a `text`, so the attribute names no hint at all",
+        );
+
+        document.set_inline_style_property(page, "--lynx-text-maxline", "1");
+        document.set_inline_style_property(page, "--lynx-text-maxlength", "0");
+        assert_height(&mut document, text, 42.0);
+        assert_eq!(
+            document.text_block_size(text).unwrap().width,
+            60.0,
+            "and a declared limit is non-inheriting, so it stops at the page",
+        );
+    }
+
+    /// The component's contract, which the tests above exercise through
+    /// layout: these three names and no others, on this tag and no other.
+    #[test]
+    fn a_text_observes_its_three_limit_attributes_and_nothing_else() {
+        let mut document = document();
+        let text = child(&mut document, "text", "");
+        assert_eq!(
+            CustomElement::<()>::observed_attributes(&Text),
+            vec![
+                MAX_LINES.to_owned(),
+                MAX_CHARS.to_owned(),
+                TAIL_COLOR_CONVERT.to_owned(),
+            ],
+        );
+
+        // `text-overflow` is a UA selector rule rather than a hint, and
+        // `ellipsize-mode` is inert: neither may reach a declaration.
+        for name in [TEXT_OVERFLOW, "ellipsize-mode", "text-maxline-x"] {
+            set_limit(&mut document, text, name, Some("1"));
+        }
+        // And the same three names on a tag that does not observe them.
+        let view = child(&mut document, "view", "");
+        for name in [MAX_LINES, MAX_CHARS, TAIL_COLOR_CONVERT] {
+            set_limit(&mut document, view, name, Some("1"));
+        }
+        document.layout();
+
+        for (property, initial) in [
+            ("lynx-text-maxline", "0"),
+            ("lynx-text-maxlength", "-1"),
+            ("lynx-tail-color-convert", "0"),
+        ] {
+            assert_eq!(
+                hint(&document, text, property, initial),
+                initial,
+                "an unobserved attribute writes no hint: {property}",
+            );
+            assert_eq!(
+                hint(&document, view, property, initial),
+                initial,
+                "a paragraph limit means nothing on a tag that is not a \
+                 `text`: {property}",
+            );
+        }
     }
 
     #[test]

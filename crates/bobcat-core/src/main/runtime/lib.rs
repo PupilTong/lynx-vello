@@ -43,9 +43,7 @@ use crate::esm::{
     REQUIRE_MODULE_SPECIFIER, TIMER_MODULE_SOURCE, TIMER_MODULE_SPECIFIER,
 };
 use crate::link::{InputEventPayload, ViewNotice, ViewOutbox};
-use crate::main::tree::{
-    ImageOutcomes, LynxDocument, PageConfig, apply_attribute_style, new_document,
-};
+use crate::main::tree::{ImageOutcomes, LynxDocument, PageConfig, new_document};
 use crate::resource::StyleSheetSource;
 use crate::script::ScriptError;
 use crate::timers::{TimerState, install_timer_members, run_due_timers};
@@ -1671,6 +1669,12 @@ fn install_readback_members(
 /// whole-block replacement and building it from empty is what the setter
 /// means. Nothing in the realm — the Element PAPI included — receives a
 /// document handle.
+///
+/// An attribute a tag reflects into CSS — `text-maxline`, `span-count`,
+/// `src` — is reflected by that tag's own component, in the
+/// `attribute_changed_callback` [`LynxDocument`] raises and drains inside the
+/// write below. This layer only performs the DOM mutation: it neither knows
+/// which names mean something nor which tag they mean it on.
 fn install_attribute_members(
     engine: &mut ScriptEngine,
     js_runtime: &mut ScriptRuntime,
@@ -1684,7 +1688,6 @@ fn install_attribute_members(
         ) |document| {
             validate_live_element(document, NAME, node)?;
             document.set_attribute(node, name, value);
-            apply_attribute_style(document, node, name, Some(value));
             Ok(HostValue::Undefined)
         }
         // Deliberately name-based: this PAPI receives record keys, custom
@@ -1737,7 +1740,6 @@ fn install_attribute_members(
         fn removeAttribute(node: node_id_argument, name: string_argument) |document| {
             validate_live_element(document, NAME, node)?;
             document.remove_attribute(node, name);
-            apply_attribute_style(document, node, name, None);
             Ok(HostValue::Undefined)
         }
         fn getAttribute(node: node_id_argument, name: string_argument) |document| {
