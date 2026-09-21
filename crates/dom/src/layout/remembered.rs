@@ -244,14 +244,26 @@ pub(crate) fn record<T>(
         return;
     }
 
-    if view.containment().contains(Contain::SIZE) {
-        // "but does not have size containment". A size-contained box was laid
-        // out as if it had no contents, so this run's inner dimensions are the
-        // substituted estimate rather than anything its contents produced —
-        // recording it would overwrite the measurement with the guess. Every
-        // *skipping* box is in here too (skipping turns `SIZE` on), which is
-        // exactly what lets a remembered size survive for as long as the box
-        // goes on skipping.
+    // "but does not have size containment". A size-contained box was laid out
+    // as if it had no contents, so this run's inner dimensions are the
+    // substituted estimate rather than anything its contents produced —
+    // recording it would overwrite the measurement with the guess. Every
+    // *skipping* box is in here too (skipping turns `SIZE` on), which is
+    // exactly what lets a remembered size survive for as long as the box goes
+    // on skipping.
+    //
+    // Containment is per axis, so this is too: under `contain: inline-size`
+    // (and under `container-type: inline-size`, which implies it) the height
+    // this run produced *is* the contents' own, and only the width is the
+    // estimate. The spec's sentence names whole-box size containment, but
+    // applying it per axis is what keeps its reason intact — an axis records
+    // what its contents made, or keeps what it last remembered.
+    let containment = view.containment();
+    let contained = Size::new(
+        containment.contains(Contain::INLINE_SIZE),
+        containment.contains(Contain::BLOCK_SIZE),
+    );
+    if contained.width && contained.height {
         return;
     }
 
@@ -265,11 +277,24 @@ pub(crate) fn record<T>(
         (size.width - padding.horizontal_sum() - border.horizontal_sum()).max(0.0),
         (size.height - padding.vertical_sum() - border.vertical_sum()).max(0.0),
     );
+    // Only a contained axis has anything to look up — it keeps what it last
+    // remembered — so the ordinary box never reads the table to write it.
+    let previous = if contained.width || contained.height {
+        tree.remembered_size(id)
+    } else {
+        RememberedSize::default()
+    };
+    let axis = |auto: bool, contained: bool, previous: Option<f32>, inner: f32| {
+        if !auto {
+            return None;
+        }
+        if contained { previous } else { Some(inner) }
+    };
     tree.record_remembered_size(
         id,
         RememberedSize {
-            width: auto.width.then_some(inner.width),
-            height: auto.height.then_some(inner.height),
+            width: axis(auto.width, contained.width, previous.width, inner.width),
+            height: axis(auto.height, contained.height, previous.height, inner.height),
         },
     );
 }

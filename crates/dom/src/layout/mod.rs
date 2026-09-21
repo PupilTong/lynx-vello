@@ -1,5 +1,6 @@
 //! Box layout over the document tree — the concrete [`hughie`] host.
 
+pub(crate) mod container;
 mod host;
 pub(crate) mod relevance;
 pub(crate) mod remembered;
@@ -39,7 +40,29 @@ pub(crate) static ANONYMOUS_STYLE: LazyLock<Arc<ComputedValues>> = LazyLock::new
 });
 
 impl<T: Sync> Document<T> {
+    /// Flushes style and lays the document out — up to
+    /// [`CONTAINER_PASSES`](container::CONTAINER_PASSES) times, because a
+    /// css-contain-3 size query container's size is a *cascade* input that
+    /// only layout can produce.
+    ///
+    /// Gecko does the same thing after its reflow, in
+    /// `UpdateContainerQueryStyles`. A pass that moved no query container's
+    /// content box — every pass of every page that has none — is the whole
+    /// call, so the loop costs a page that does not use the feature one
+    /// `is_empty` test.
     pub fn layout(&mut self) {
+        let mut resized = Vec::new();
+        for _ in 0..container::CONTAINER_PASSES {
+            self.layout_pass(&mut resized);
+            if !self.recascade_resized_containers(&mut resized) {
+                break;
+            }
+        }
+    }
+
+    /// One flush and one layout, publishing the query-container sizes the
+    /// pass committed into `resized`.
+    fn layout_pass(&mut self, resized: &mut Vec<crate::NodeId>) {
         self.flush_styles_with_damage_sink(&mut |_, _| {});
 
         let viewport_size = self.device().viewport_size();
@@ -55,8 +78,42 @@ impl<T: Sync> Document<T> {
         let bound = self.arenas().slot_bound();
         self.layout_state_mut().ensure_covers(bound);
         host::run_layout(self, viewport, scale, full, rescale);
+        // Publishing is what makes the pass's sizes readable by the style
+        // traversal, which is parallel; see [`crate::layout::container`].
+        self.arenas_mut().apply_container_sizes(resized);
         self.clear_relayout_roots();
         self.mark_layout_complete(viewport, scale);
+    }
+
+    /// Marks the descendants of every query container the pass resized, and
+    /// answers whether another pass is owed.
+    ///
+    /// Two gates, either of which ends the call. The list is empty unless a
+    /// size query container's content box actually moved, and the flag is
+    /// false unless some style this document ever cascaded resolved a
+    /// `cqw`/`cqh` — a page with query containers and no container units has
+    /// nothing to re-resolve when one of them resizes.
+    ///
+    /// On the last permitted pass the marks are still made and simply not
+    /// laid out here: they are ordinary restyle hints, so the next flush
+    /// resolves them and the document is one commit behind at worst.
+    fn recascade_resized_containers(&mut self, resized: &mut Vec<crate::NodeId>) -> bool {
+        if resized.is_empty() {
+            return false;
+        }
+        if !self.arenas().uses_container_units() {
+            resized.clear();
+            return false;
+        }
+        let mut marked = false;
+        for id in resized.drain(..) {
+            // A container freed since the run that measured it resolves to
+            // nothing: `NodeId` carries the generation its key was at.
+            if self.get(id).is_some_and(crate::Node::is_element) {
+                marked |= self.mark_descendants_recascade(id);
+            }
+        }
+        marked
     }
 }
 
@@ -702,6 +759,73 @@ mod tests {
             current,
             (if cfg!(debug_assertions) { 232 } else { 224 }, 336, 352),
             "Node, LayoutSlot and NodeLayoutState sizes changed",
+        );
+    }
+
+    /// A document with one size query container holding one child, and
+    /// whatever `item` declaration the case wants on it.
+    fn query_container_document(item: &str) -> (Document<()>, crate::NodeId) {
+        let mut document: Document<()> =
+            Document::new(crate::tree::document::tests::device(), "page", ());
+        document.add_stylesheet(
+            &format!(
+                "page {{ display: flex; align-items: flex-start;
+                         width: 400px; height: 300px; }}
+                 .query {{ display: flex; container-type: size;
+                           width: 200px; height: 100px; }}
+                 .item {{ display: flex; {item} }}"
+            ),
+            StylesheetOrigin::Author,
+        );
+        let root = document.document_element().id();
+        let query = document.create_element("view", ());
+        document.add_class(query, "query");
+        document.append_child(root, query);
+        let item = document.create_element("view", ());
+        document.add_class(item, "item");
+        document.append_child(query, item);
+        (document, item)
+    }
+
+    /// The loop's first gate: a page whose styles never resolved a `cqw` or a
+    /// `cqh` has nothing to re-resolve when a query container's size moves,
+    /// so the container's *first* recorded size — which is always a move,
+    /// from nothing to something — costs it no second pass and leaves no
+    /// restyle behind.
+    #[test]
+    #[expect(clippy::float_cmp, reason = "rounded boxes have exact pixel geometry")]
+    fn a_query_container_without_container_units_never_recascades() {
+        let (mut document, item) = query_container_document("width: 10px; height: 10px;");
+        document.layout();
+
+        assert!(!document.arenas().uses_container_units());
+        assert!(
+            !document.document_element().needs_style_flush(),
+            "nothing under the container reads its size"
+        );
+        assert_eq!(document.rounded_layout(item).unwrap().size.width, 10.0);
+    }
+
+    /// The second gate: once the units are in play the first pass does
+    /// recascade, and the pass after it settles — the container's size did
+    /// not move again, so the changed list is empty and the call ends.
+    #[test]
+    #[expect(clippy::float_cmp, reason = "rounded boxes have exact pixel geometry")]
+    fn a_settled_query_container_leaves_no_pass_owing() {
+        let (mut document, item) = query_container_document("width: 25cqw; height: 50cqh;");
+        document.layout();
+
+        assert!(document.arenas().uses_container_units());
+        assert_eq!(document.rounded_layout(item).unwrap().size.width, 50.0);
+        assert_eq!(document.rounded_layout(item).unwrap().size.height, 50.0);
+        assert!(
+            !document.document_element().needs_style_flush(),
+            "the loop ran to a fixed point inside the one call"
+        );
+        assert_eq!(
+            document.layout_cache_is_empty(item),
+            Some(false),
+            "and left the boxes it laid out valid"
         );
     }
 

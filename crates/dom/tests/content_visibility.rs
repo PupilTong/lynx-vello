@@ -1328,6 +1328,10 @@ fn height(doc: &Doc, id: NodeId) -> f32 {
     rect(&doc.dom, id).3
 }
 
+fn width(doc: &Doc, id: NodeId) -> f32 {
+    rect(&doc.dom, id).2
+}
+
 /// `content-visibility: hidden` reads the remembered size exactly as `auto`
 /// does — and a box no rendering update ever laid out has none to read.
 #[test]
@@ -1431,6 +1435,43 @@ fn a_size_contained_box_that_is_not_skipping_uses_the_length() {
         height(&doc, boxed),
         TALL,
         "the measurement from before size containment, not the estimate",
+    );
+}
+
+/// Containment is per axis, and so is the recording rule it gates: under
+/// `contain: inline-size` the height this run produced *is* the contents'
+/// own and is recorded, while the width — the substituted estimate — leaves
+/// what the box last measured alone.
+#[test]
+fn inline_size_containment_only_stops_the_width_from_being_recorded() {
+    let mut doc = flat_doc();
+    let content_sized = "width: auto; contain-intrinsic-width: auto 10px;";
+    let (boxed, _) = tall_box(&mut doc, content_sized);
+    assert!(doc.dom.render());
+    assert_eq!(
+        (width(&doc, boxed), height(&doc, boxed)),
+        (TALL, TALL),
+        "both axes come from the one Ahem glyph, and both are recorded",
+    );
+
+    doc.set_inline(boxed, &format!("{content_sized} contain: inline-size"));
+    assert!(doc.dom.render(), "a contain change relayouts");
+    assert_eq!(
+        (width(&doc, boxed), height(&doc, boxed)),
+        (ESTIMATE, TALL),
+        "the width is the estimate; the height is still the contents'",
+    );
+
+    doc.set_inline(
+        boxed,
+        &format!("{content_sized} contain: inline-size; content-visibility: hidden"),
+    );
+    assert!(doc.dom.render());
+    assert_eq!(
+        (width(&doc, boxed), height(&doc, boxed)),
+        (TALL, TALL),
+        "and the run above recorded neither the estimate over the width it \
+         had measured, nor anything but the contents for the height",
     );
 }
 

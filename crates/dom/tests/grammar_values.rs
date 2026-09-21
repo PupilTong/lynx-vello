@@ -54,6 +54,54 @@ fn length_grammar() {
     }
 }
 
+/// [css-contain-3 §2](https://drafts.csswg.org/css-contain-3/#container-queries):
+/// the `container-type` keywords `cqw`/`cqh` resolve against, the name
+/// nothing consumes yet, and the shorthand that is **name-first**.
+#[test]
+fn container_query_grammar() {
+    for value in ["normal", "size", "inline-size"] {
+        assert_eq!(
+            specified("container-type", value).as_deref(),
+            Some(value),
+            "`container-type: {value}`"
+        );
+    }
+    for invalid in ["block-size", "scroll-state", "size inline-size", "auto"] {
+        assert!(
+            !parses("container-type", invalid),
+            "`container-type: {invalid}` must be rejected"
+        );
+    }
+
+    // `container-name` cascades; no `@container` rule matches on it, because
+    // the rule stays gecko-only in the fork.
+    assert_eq!(specified("container-name", "none").as_deref(), Some("none"));
+    assert_eq!(
+        specified("container-name", "card sidebar").as_deref(),
+        Some("card sidebar"),
+    );
+    for invalid in ["default", "and", "none card"] {
+        assert!(
+            !parses("container-name", invalid),
+            "`container-name: {invalid}` must be rejected"
+        );
+    }
+
+    // The shorthand is `<container-name> [ / <container-type> ]?`, so a bare
+    // `container: size` names the container "size" and makes it no query
+    // container at all — csswg-drafts#7180. The name is not optional, so
+    // there is no type-only spelling of the shorthand: write `container-type`.
+    assert_eq!(
+        specified("container", "foo / size").as_deref(),
+        Some("foo / size"),
+    );
+    assert_eq!(specified("container", "size").as_deref(), Some("size"));
+    assert_eq!(specified("container", "none").as_deref(), Some("none"));
+    for invalid in ["/ size", "size / foo"] {
+        assert!(!parses("container", invalid), "`container: {invalid}`");
+    }
+}
+
 #[test]
 fn opacity_numbers() {
     assert_eq!(specified("opacity", "0.85").as_deref(), Some("0.85"));

@@ -43,7 +43,7 @@ use super::util::{
 };
 use super::{compute_absolute_layout, hide_subtree};
 use crate::geometry::{Edges, Line, Point, Size};
-use crate::style::containment::size_containment;
+use crate::style::containment::contained_axes;
 use crate::style::{Contain, CoreStyle, Display, GridStyle, Overflow};
 use crate::tree::{
     AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutOutput, LayoutTree, RequestedAxis,
@@ -1304,7 +1304,7 @@ where
     T::Style<'tree>: GridStyle,
 {
     let style = tree.style(node);
-    let size_containment = size_containment(&style);
+    let contained_size = contained_axes(&style);
     let layout_contained = style.containment().contains(Contain::LAYOUT);
     let gap_value = style.gap();
     let auto_flow = style.grid_auto_flow();
@@ -1441,13 +1441,16 @@ where
         &mut intrinsic_scratch,
     );
     let provisional_track_size = Size::new(columns.used_size(), rows.used_size());
-    let container_track_size = match size_containment {
-        Some(intrinsic) => Size::new(
-            intrinsic.width.unwrap_or(0.0),
-            intrinsic.height.unwrap_or(0.0),
-        ),
-        None => provisional_track_size,
-    };
+    // A contained axis reports the substituted extent instead of the tracks
+    // it just sized; an uncontained one reports the tracks.
+    let container_track_size = Size::new(
+        contained_size
+            .width()
+            .unwrap_or(provisional_track_size.width),
+        contained_size
+            .height()
+            .unwrap_or(provisional_track_size.height),
+    );
     let outer_size = final_outer_size(&metrics, container_track_size);
     let final_inner = Size::new(
         (outer_size.width - metrics.box_inset.width).max(0.0),

@@ -78,6 +78,38 @@ impl<T> Document<T> {
         self.mark_ancestors_dirty_descendants(id);
     }
 
+    /// Marks an element's **descendants** to be cascaded again, leaving the
+    /// element itself alone.
+    ///
+    /// The css-contain-3 half of [`Self::mark_subtree_recascade`]: a size
+    /// query container whose content box moved changes what every `cqw`/`cqh`
+    /// under it resolves to, and changes nothing about its own style — its
+    /// own container-relative units answer to *its* nearest container, which
+    /// is an ancestor.
+    ///
+    /// `RECASCADE_DESCENDANTS` alone is enough and is hint-safe. Stylo
+    /// traverses an element with a non-empty hint, propagates that bit to
+    /// each child as `recascade_subtree()`, and never recomputes the marked
+    /// element's own style from it. Unlike the `RECASCADE_SELF` half that
+    /// [`Self::mark_subtree_recascade`] has to spell as `RESTYLE_SELF`, it is
+    /// outside `RestyleHint::remove_animation_hints`'s mask, so an animation
+    /// tick between this mark and the flush that should read it leaves it
+    /// standing.
+    ///
+    /// Answers whether anything was marked: a childless container has no
+    /// descendant to re-resolve, and marking it would ask for a flush that
+    /// finds nothing to do.
+    pub(crate) fn mark_descendants_recascade(&mut self, id: NodeId) -> bool {
+        let node = self.live_element(id);
+        if node.flat_children().is_empty() {
+            return false;
+        }
+        node.set_dirty_descendants_bit(true);
+        self.add_restyle_hint(id, RestyleHint::RECASCADE_DESCENDANTS);
+        self.mark_ancestors_dirty_descendants(id);
+        true
+    }
+
     pub(crate) fn live(&self, id: NodeId) -> &Node<T> {
         self.get(id)
             .expect("stale NodeId passed to a Document method")

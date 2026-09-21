@@ -1001,11 +1001,11 @@ fn viewport_percentages_resolve_against_the_engine_viewport() {
     assert_eq!(h.rect(h.doc.root), (0.0, 0.0, 400.0, 150.0));
 }
 
-/// `cqw`/`cqh` are the query container's width/height divided by 100. Nothing
-/// in this engine can be a query container (`container-type` is not part of
-/// the author surface), so css-contain-3's fallback applies: they resolve
-/// against the viewport, which makes them the same lengths as `vw`/`vh`. They
-/// are flagged as viewport-dependent, so a resize re-cascades them.
+/// `cqw`/`cqh` are the query container's width/height divided by 100. With no
+/// ancestor whose `container-type` is a size container type, css-contain-3's
+/// fallback applies: they resolve against the small viewport, which makes them
+/// the same lengths as `vw`/`vh`. Resolving that way flags the style
+/// `USES_VIEWPORT_UNITS`, so a resize re-cascades them.
 #[test]
 fn container_units_resolve_against_the_viewport_and_follow_resizes() {
     let mut h = Harness::with_device(
@@ -1019,6 +1019,218 @@ fn container_units_resolve_against_the_viewport_and_follow_resizes() {
     h.layout();
 
     assert_eq!(h.rect(h.doc.root), (0.0, 0.0, 20.0, 30.0));
+}
+
+/// [css-contain-3 §2.1](https://drafts.csswg.org/css-contain-3/#container-type):
+/// `container-type: inline-size` "applies layout containment, style
+/// containment, and inline-size containment to the principal box", and `size`
+/// the same with size containment. A size query container is therefore a
+/// *contained* box with no `contain` declaration of its own —
+/// `effective_containment` folds the one property into the other's bits.
+#[test]
+fn a_size_query_container_is_contained_by_its_container_type() {
+    let mut h = Harness::new(
+        "page { display: flex; align-items: flex-start;
+                width: 400px; height: 300px; }
+         .query { display: flex; contain-intrinsic-width: 50px;
+                  contain-intrinsic-height: 20px; }
+         .item { display: flex; width: 120px; height: 30px; flex-shrink: 0; }",
+    );
+    let root = h.doc.root;
+    let query = h.doc.el(root, "view.query");
+    h.doc.el(query, "view.item");
+    h.layout();
+    assert_eq!(
+        h.rect(query),
+        (0.0, 0.0, 120.0, 30.0),
+        "`container-type: normal`: both axes come from the child",
+    );
+
+    h.doc.set_inline(query, "container-type: inline-size");
+    h.layout();
+    assert_eq!(
+        h.rect(query),
+        (0.0, 0.0, 50.0, 30.0),
+        "the width is sized as if the box were empty; the height is the child's",
+    );
+
+    h.doc.set_inline(query, "container-type: size");
+    h.layout();
+    assert_eq!(
+        h.rect(query),
+        (0.0, 0.0, 50.0, 20.0),
+        "`size` contains both axes, exactly as `contain: size` does",
+    );
+
+    h.doc.set_inline(query, "contain: size");
+    h.layout();
+    assert_eq!(h.rect(query), (0.0, 0.0, 50.0, 20.0));
+}
+
+/// The 400x600 device every container-query test below resolves its viewport
+/// fallback against.
+fn query_harness(css: &str) -> Harness {
+    Harness::with_device(
+        css,
+        device_with(400.0, 600.0, 1.0, PrefersColorScheme::Light),
+    )
+}
+
+/// [css-contain-3 §2.1](https://drafts.csswg.org/css-contain-3/#container-type):
+/// `cqw` and `cqh` are 1% of the nearest ancestor size query container's
+/// content box. One `layout()` call is enough — the container's size is a
+/// cascade input only layout can produce, so the call lays out, re-cascades
+/// what the sizes moved, and lays out again.
+#[test]
+fn container_units_resolve_against_the_nearest_size_query_container() {
+    let mut h = query_harness(
+        "page { display: flex; align-items: flex-start; width: 400px; height: 600px; }
+         .query { display: flex; container-type: size; width: 200px; height: 100px; }
+         .item { display: flex; width: 50cqw; height: 50cqh; }",
+    );
+    let root = h.doc.root;
+    let query = h.doc.el(root, "view.query");
+    let item = h.doc.el(query, "view.item");
+    h.layout();
+
+    assert_eq!(h.rect(item), (0.0, 0.0, 100.0, 50.0));
+}
+
+/// `container-type: inline-size` supplies the inline axis alone. The engine is
+/// horizontal-writing-mode only, so that is the width; the block axis falls
+/// through the rest of the ancestor chain and, finding no `size` container,
+/// lands on the viewport.
+#[test]
+fn an_inline_size_container_leaves_the_block_axis_to_the_viewport() {
+    let mut h = query_harness(
+        "page { display: flex; align-items: flex-start; width: 400px; height: 600px; }
+         .query { display: flex; container-type: inline-size;
+                  width: 200px; height: 100px; }
+         .item { display: flex; width: 50cqw; height: 50cqh; }",
+    );
+    let root = h.doc.root;
+    let query = h.doc.el(root, "view.query");
+    let item = h.doc.el(query, "view.item");
+    h.layout();
+
+    assert_eq!(
+        h.rect(item),
+        (0.0, 0.0, 100.0, 300.0),
+        "50cqw is half the container's 200px; 50cqh is half the 600px viewport",
+    );
+
+    // The fallback resolves through the viewport, which flags the style
+    // `USES_VIEWPORT_UNITS`, so the existing resize re-cascade covers it.
+    h.doc.dom.set_viewport(400.0, 300.0);
+    h.layout();
+
+    assert_eq!(
+        h.rect(item),
+        (0.0, 0.0, 100.0, 150.0),
+        "the contained axis is unmoved; the fallback axis follows the viewport",
+    );
+}
+
+/// Resizing the container re-resolves every unit under it, which is the whole
+/// reason the recascade loop exists: nothing about the child's own style
+/// changed.
+#[test]
+fn resizing_a_query_container_re_resolves_the_units_under_it() {
+    let mut h = query_harness(
+        "page { display: flex; align-items: flex-start; width: 400px; height: 600px; }
+         .query { display: flex; container-type: size; width: 200px; height: 100px; }
+         .item { display: flex; width: 50cqw; height: 50cqh; }",
+    );
+    let root = h.doc.root;
+    let query = h.doc.el(root, "view.query");
+    let item = h.doc.el(query, "view.item");
+    h.layout();
+    assert_eq!(h.rect(item), (0.0, 0.0, 100.0, 50.0));
+
+    h.doc.set_inline(query, "width: 100px");
+    h.layout();
+
+    assert_eq!(h.rect(item), (0.0, 0.0, 50.0, 50.0));
+}
+
+/// Nearest wins per axis, and an incomplete answer merges upwards: the inner
+/// `inline-size` container supplies the width, and the block axis keeps
+/// walking until the outer `size` container answers it.
+#[test]
+fn a_nested_container_supplies_only_the_axis_it_contains() {
+    let mut h = query_harness(
+        "page { display: flex; align-items: flex-start; width: 400px; height: 600px; }
+         .outer { display: flex; align-items: flex-start;
+                  container-type: size; width: 400px; height: 200px; }
+         .inner { display: flex; container-type: inline-size; width: 200px; }
+         .item { display: flex; width: 10cqw; height: 10cqh; }",
+    );
+    let root = h.doc.root;
+    let outer = h.doc.el(root, "view.outer");
+    let inner = h.doc.el(outer, "view.inner");
+    let item = h.doc.el(inner, "view.item");
+    h.layout();
+
+    assert_eq!(
+        h.rect(item),
+        (0.0, 0.0, 20.0, 20.0),
+        "10cqw is 1/10 of the inner container's 200px width; 10cqh is 1/10 of \
+         the outer container's 200px height",
+    );
+}
+
+/// "The query container's content box": padding and borders are not part of
+/// it. The container below is `box-sizing: content-box`, so its authored
+/// `width` *is* its content width and its border box is 30px wider.
+#[test]
+fn the_container_size_is_its_content_box() {
+    let mut h = query_harness(
+        "page { display: flex; align-items: flex-start; width: 400px; height: 600px; }
+         .query { display: flex; container-type: size; box-sizing: content-box;
+                  width: 200px; height: 100px;
+                  padding: 10px; border: 5px solid black; }
+         .item { display: flex; width: 100cqw; height: 100cqh; }",
+    );
+    let root = h.doc.root;
+    let query = h.doc.el(root, "view.query");
+    let item = h.doc.el(query, "view.item");
+    h.layout();
+
+    assert_eq!(
+        h.rect(query),
+        (0.0, 0.0, 230.0, 130.0),
+        "the border box carries the padding and the borders",
+    );
+    assert_eq!(
+        h.rect(item),
+        (15.0, 15.0, 200.0, 100.0),
+        "and the units resolve against the content box inside them",
+    );
+}
+
+/// A container that stops being one takes the query with it: the walk finds no
+/// size container above and falls back to the viewport.
+#[test]
+fn losing_container_type_falls_the_units_back_to_the_viewport() {
+    let mut h = query_harness(
+        "page { display: flex; align-items: flex-start; width: 400px; height: 600px; }
+         .query { display: flex; container-type: size; width: 200px; height: 100px; }
+         .item { display: flex; width: 50cqw; height: 50cqh; }",
+    );
+    let root = h.doc.root;
+    let query = h.doc.el(root, "view.query");
+    let item = h.doc.el(query, "view.item");
+    h.layout();
+    assert_eq!(h.rect(item), (0.0, 0.0, 100.0, 50.0));
+
+    h.doc.set_inline(query, "container-type: normal");
+    h.layout();
+
+    assert_eq!(
+        h.rect(item),
+        (0.0, 0.0, 200.0, 300.0),
+        "half the 400x600 viewport in each axis",
+    );
 }
 
 #[test]

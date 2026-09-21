@@ -16,6 +16,7 @@ use hughie::text::TextContext;
 use hughie::tree::LayoutSlot;
 use slab::Slab;
 
+use crate::layout::container::{ContainerSize, ContainerSizeTable};
 use crate::layout::relevance::{Relevance, RelevanceTable};
 use crate::layout::remembered::{RememberedSize, RememberedSizeTable};
 use crate::layout::text_block::TextBlockStore;
@@ -158,6 +159,12 @@ pub(crate) struct TreeArenas<T> {
     /// `contain-intrinsic-*` and can reach nothing but these arenas. See
     /// [`crate::layout::remembered`].
     remembered: RememberedSizeTable,
+    /// The css-contain-3 size query container sizes `cqw`/`cqh` resolve
+    /// against. Here because the reader is
+    /// [`TElement::query_container_size`](stylo::dom::TElement::query_container_size)
+    /// on `&Node`, which can reach nothing else. See
+    /// [`crate::layout::container`].
+    container_sizes: ContainerSizeTable,
 }
 
 impl<T> TreeArenas<T> {
@@ -168,6 +175,7 @@ impl<T> TreeArenas<T> {
             generations: Vec::with_capacity(INITIAL_NODE_CAPACITY),
             relevance: RelevanceTable::default(),
             remembered: RememberedSizeTable::default(),
+            container_sizes: ContainerSizeTable::default(),
         }
     }
 
@@ -209,6 +217,43 @@ impl<T> TreeArenas<T> {
     #[inline]
     pub(crate) fn record_remembered_size(&self, slot: NodeId, size: RememberedSize) {
         self.remembered.record(slot.arena_key(), size);
+    }
+
+    /// One element's size as a css-contain-3 size query container.
+    #[inline]
+    pub(crate) fn container_size(&self, slot: NodeId) -> ContainerSize {
+        self.container_sizes.get(slot.arena_key())
+    }
+
+    /// Records one box's query-container size for the layout pass in flight.
+    ///
+    /// Shared for the reason [`Self::record_remembered_size`] is, and staged
+    /// rather than published for one more: the style traversal reads the
+    /// published table from several threads at once, so only
+    /// [`Self::apply_container_sizes`] — which takes `&mut self` — may write
+    /// it.
+    #[inline]
+    pub(crate) fn note_container_size(&self, slot: NodeId, size: ContainerSize) {
+        self.container_sizes.note(slot, size);
+    }
+
+    /// Publishes the layout pass's query-container sizes, appending every
+    /// container whose size moved to `resized`.
+    #[inline]
+    pub(crate) fn apply_container_sizes(&mut self, resized: &mut Vec<NodeId>) {
+        self.container_sizes.apply(resized);
+    }
+
+    /// Whether any style this document ever cascaded resolved a `cqw`/`cqh`.
+    #[inline]
+    pub(crate) fn uses_container_units(&self) -> bool {
+        self.container_sizes.uses_container_units()
+    }
+
+    /// The flag the style traversal sets when it cascades one.
+    #[inline]
+    pub(crate) fn container_units_flag(&self) -> &std::sync::atomic::AtomicBool {
+        self.container_sizes.units_flag()
     }
 
     /// Takes arena key zero out of circulation, before any node is filed.
@@ -405,6 +450,10 @@ impl<T> TreeArenas<T> {
         // reason: css-sizing-4 attaches it to the element, so the key's next
         // occupant is a different element and remembers nothing.
         self.remembered.reset(id.arena_key());
+        // And so does its query-container size: the next occupant of the key
+        // is a different element, and no element is a query container until
+        // its own `container-type` says so.
+        self.container_sizes.reset(id.arena_key());
         (node, payload)
     }
 }

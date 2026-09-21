@@ -12,6 +12,7 @@ use hughie::compute::{
     compute_relative_layout, compute_skipped_contents_size, hide_skipped_contents, hide_subtree,
 };
 use hughie::prelude::*;
+use hughie::style::containment::effective_containment;
 use style_traits::values::specified::AllowedNumericType;
 use stylo::computed_values::{
     box_sizing, direction, flex_direction, flex_wrap, linear_direction, relative_center,
@@ -22,11 +23,11 @@ use stylo::values::computed::length::NonNegativeLengthPercentageOrNormal;
 use stylo::values::computed::length_percentage::{CalcNode, CalcPercentageLeaf, ComputedLeaf};
 use stylo::values::computed::lynx_layout::{RelativeAlign, RelativeReference};
 use stylo::values::computed::{
-    AspectRatio, Au, BorderSideWidth, Contain, ContainIntrinsicSize, ContentDistribution, Display,
-    FlexBasis, FlowTolerance, GridAutoFlow, GridLine, GridTemplateComponent, ImplicitGridTracks,
-    Inset, ItemPlacement, JustifyItems, Length, LengthPercentage, Margin, MaxSize,
-    NonNegativeLengthPercentage, NonNegativeNumber, Overflow, Percentage, PositionProperty, Ratio,
-    SelfAlignment, Size as StyleSize,
+    AspectRatio, Au, BorderSideWidth, Contain, ContainIntrinsicSize, ContainerType,
+    ContentDistribution, ContentVisibility, Display, FlexBasis, FlowTolerance, GridAutoFlow,
+    GridLine, GridTemplateComponent, ImplicitGridTracks, Inset, ItemPlacement, JustifyItems,
+    Length, LengthPercentage, Margin, MaxSize, NonNegativeLengthPercentage, NonNegativeNumber,
+    Overflow, Percentage, PositionProperty, Ratio, SelfAlignment, Size as StyleSize,
 };
 use stylo::values::generics::position::PreferredRatio;
 use stylo::values::generics::{NonNegative, Optional, grid as generic_grid};
@@ -443,6 +444,7 @@ pub(super) struct TestStyle {
     pub(super) relative_adjacent: Edges<RelativeReference>,
     pub(super) relative_center: relative_center::T,
     pub(super) containment: Contain,
+    pub(super) container_type: ContainerType,
     pub(super) contain_intrinsic_width: ContainIntrinsicSize,
     pub(super) contain_intrinsic_height: ContainIntrinsicSize,
     pub(super) skips_contents: bool,
@@ -496,6 +498,7 @@ impl Default for TestStyle {
             relative_adjacent: Edges::uniform(RELATIVE_NONE),
             relative_center: relative_center::T::None,
             containment: Contain::empty(),
+            container_type: ContainerType::NORMAL,
             contain_intrinsic_width: ContainIntrinsicSize::None,
             contain_intrinsic_height: ContainIntrinsicSize::None,
             skips_contents: false,
@@ -560,8 +563,22 @@ impl CoreStyle for TestStyle {
         self.direction
     }
 
+    fn container_type(&self) -> ContainerType {
+        self.container_type
+    }
+
+    /// The same fold [`CoreStyle::containment`]'s own default performs: this
+    /// style carries `contain` and `container-type` separately, and every
+    /// algorithm reads only what the fold produces. `content-visibility` is
+    /// not modelled here — the harness sets `skips_contents` directly — so the
+    /// fold sees `visible`, which leaves the authored bits alone.
     fn containment(&self) -> Contain {
-        self.containment
+        effective_containment(
+            self.containment,
+            ContentVisibility::Visible,
+            self.skips_contents,
+            self.container_type,
+        )
     }
 
     fn contain_intrinsic_width(&self) -> ContainIntrinsicSize {

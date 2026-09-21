@@ -122,6 +122,7 @@ pub(crate) fn establishes_fixed_containing_block<T>(
             style.clone_contain(),
             style.clone_content_visibility(),
             skips_contents(node, style),
+            style.clone_container_type(),
         )
         .intersects(Contain::LAYOUT | Contain::PAINT)
         || (filters && !is_root_element(node))

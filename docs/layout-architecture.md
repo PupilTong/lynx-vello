@@ -23,9 +23,12 @@ Level 3 `display: grid-lanes`, Starlight
 Relative Layout Level 1, Starlight Linear algorithms, and the
 Parley text measurement core are implemented and conformance-tested against
 plain tree/state mock hosts. **CSS containment (css-contain-2)** is landed on
-the layout side: size/layout containment, `content-visibility` skipped
+the layout side: size containment per axis (both axes, or the inline axis
+alone), layout containment, `content-visibility` skipped
 contents, the relayout-boundary predicate, and containment-bounded cache
-invalidation (`invalidate_for_relayout`) — its `dom` damage producer,
+invalidation (`invalidate_for_relayout`) — plus css-contain-3's
+`container-type` fold, which is how a size query container becomes a contained
+box — its `dom` damage producer,
 containment folding, and the damage→layout seam all ship alongside: every
 style flush consumes harvested relayout-class `StyleDamage` into
 the crate-private `Document::invalidate_layout` funnel automatically,
@@ -151,7 +154,8 @@ the independent state:
 | --- | --- | --- |
 | `LayoutTree` | associated `NodeId`, mutable `State`, borrowed `Style<'tree>`, and `ChildIter<'tree>`; topology/style reads — `children` (source children) and the provided `flattened_children` (the same children with `display: contents` subtrees spliced in place, each paired with the style the walk read; `size_hint` promises nothing, `capacity_hint` sizes buffers); **`compute_layout(&self, &mut State, NodeId, input)`** as the host display/algorithm dispatch point; immutable/mutable access to each state-owned `LayoutSlot`; required cache clearing | everything |
 | `LayoutSlot` | one node's measurement cache, committed input, static position, unrounded layout, and rounded layout | shared cache/position/rounding machinery and host queries |
-| `CoreStyle` | one `computed_values()` source plus the defaulted box model (`size`/`min_size`/`max_size`/`aspect_ratio`/`margin`/`padding`/`border`/`box_sizing`/`inset`/`overflow`), `display`, `position`, `direction`, the containment triple, `skips_contents`, the alignment accessors (`gap`, `align_content`, `align_items`, `justify_content`, `align_self`) and `order`; sequence and geometry values remain borrowed | every algorithm, the leaf, the absolute pass, the root, rounding and invalidation |
+| `CoreStyle` | one `computed_values()` source plus the defaulted box model (`size`/`min_size`/`max_size`/`aspect_ratio`/`margin`/`padding`/`border`/`box_sizing`/`inset`/`overflow`), `display`, `position`, `direction`, the containment group (`containment`,
+`container_type`, `contain_intrinsic_{width,height}`), `skips_contents`, the alignment accessors (`gap`, `align_content`, `align_items`, `justify_content`, `align_self`) and `order`; sequence and geometry values remain borrowed | every algorithm, the leaf, the absolute pass, the root, rounding and invalidation |
 | `FlexboxStyle: CoreStyle` | `flex_direction`, `flex_wrap`, `flex_basis`, `flex_grow`, `flex_shrink` | demanded by `compute_flexbox_layout` |
 | `GridStyle: CoreStyle` | `grid_template_rows`/`_columns`, `grid_auto_rows`/`_columns`, `grid_auto_flow`, `justify_items`, `grid_row_start`/`_end`, `grid_column_start`/`_end`, `justify_self` | demanded by `compute_grid_layout` |
 | `GridLanesStyle: GridStyle` | `flow_tolerance` plus the element's computed `font_size`, which is what `flow-tolerance: normal`'s `1em` resolves against | demanded by `compute_grid_lanes_layout` |
@@ -590,24 +594,48 @@ disagree about order-modified document order.
 `contain` / `content-visibility` are a deliberate user-directed extension
 beyond Lynx parity (Lynx has no such property — see
 `docs/style-assumptions.md`). The engine reads containment through
-`CoreStyle::{containment, contain_intrinsic_width, contain_intrinsic_height,
-skips_contents}`, which speak stylo's own computed types directly — the
-`Contain` bit set (`SIZE`/`LAYOUT`/`PAINT`/`STYLE` effect bits) and
-`ContainIntrinsicSize` (both re-exported from `crate::style`). The host
-derives these from computed style, folding `content-visibility` into
-`containment()` exactly as stylo's gecko-mode effective-containment mapping
-does — `crate::style::effective_containment` mirrors `dom`'s own
-`effective_containment` copy (each crate keeps its own; no dependency between
-them). Only `SIZE` and `LAYOUT` have v1 box-layout effects:
+`CoreStyle::{containment, container_type, contain_intrinsic_width,
+contain_intrinsic_height, skips_contents}`, which speak stylo's own computed
+types directly — the `Contain` bit set
+(`INLINE_SIZE`/`BLOCK_SIZE`/`SIZE`/`LAYOUT`/`PAINT`/`STYLE` effect bits),
+`ContainerType` and `ContainIntrinsicSize` (all re-exported from
+`crate::style`). The host derives these from computed style, and
+`containment()`'s own default folds `content-visibility` and `container-type`
+into the `contain` bits exactly as stylo's gecko-mode effective-containment
+mapping does — `crate::style::effective_containment` is the one copy of that
+fold, which `dom` calls for its own non-layout containment questions (paint
+clipping, stacking contexts, containing blocks).
+[css-contain-3 §2.1](https://drafts.csswg.org/css-contain-3/#container-type):
+`container-type: inline-size` applies layout, style and inline-size
+containment, `size` applies layout, style and size containment, so a size
+query container is contained *because* it is a query container, with no
+`contain` declaration of its own. (Gecko's `adjust_for_contain` omits `LAYOUT`
+there and reaches layout containment another way; this engine has only the one
+bit and inserts what the spec text says.) Only the size and `LAYOUT` bits have
+v1 box-layout effects:
 
-- **Size containment** (`containment().contains(SIZE)`) — every content-derived automatic size
+- **Size containment** — **per axis**. The width is contained when
+  `containment().contains(INLINE_SIZE)` and the height when it contains
+  `BLOCK_SIZE`; `contain: size` (and `container-type: size`, and a skipping box)
+  sets both, while `contain: inline-size` (and `container-type: inline-size`)
+  sets the width alone. This engine is horizontal-writing-mode only, so inline
+  is the width and block is the height, and no keyword sets the block axis by
+  itself. In a **contained** axis every content-derived automatic size
   (`auto`, `min-/max-/fit-content`, and the Flexbox §4.5 automatic minimum) resolves **as if the box
-  were empty**, substituting `contain-intrinsic-{width,height}` (both physical axes; single-axis
-  `inline-size` is ignored). Children are **still laid out** for Commit and still contribute
+  were empty**, substituting that axis's `contain-intrinsic-*` (or zero). An
+  **uncontained** axis measures its contents the ordinary way — under
+  `contain: inline-size` a box takes its substituted width and then its real
+  contents' height, laid out into that width. The engine projects this through
+  `style::containment::contained_axes`, which answers a per-axis
+  `ContainedAxes`. Children are **still laid out** for Commit and still contribute
   scrollable overflow — only the box's *own* content-based sizing ignores them, so a parent probing
   a size-contained child already sees the substituted answer (enforced at the child's own sizing
-  layer, not in parents). A size-contained leaf skips its measurer entirely. The skipped-contents
-  path shares this sizing.
+  layer, not in parents). A leaf contained in **both** axes skips its measurer entirely; contained
+  in one, it still measures — into the contained axis's substituted size — and the substitute then
+  replaces what the measurement said about that axis. A natural aspect ratio is dropped as soon as
+  *either* axis is contained: a ratio couples the axes, so from either end it is the bitmap sizing
+  the contained one. An authored `aspect-ratio` is style rather than contents and survives. The
+  skipped-contents path shares this sizing.
 - **Layout containment** (`containment().contains(LAYOUT)`) — the box exports **no** baseline
   (`LayoutOutput::first_baselines = NONE` at each algorithm's output construction; Relative already
   exports none), and it **changes scrollable overflow**: with `overflow: visible`, a layout-contained
@@ -694,11 +722,36 @@ is worded. The recording side is the host's too, and it lives in the same
 place the algorithms do: after a **committing** run of `compute_layout`, on a
 cache miss, for a box that has the keyword and does *not* have size
 containment, `dom` records that run's own content box (`size − padding −
-border`, unrounded) into a slot-keyed side table on its tree arenas. The engine
+border`, unrounded) into a slot-keyed side table on its tree arenas. That
+exclusion is **per axis**, because containment is: under `contain: inline-size`
+the height this run produced is the contents' own and is recorded, while the
+width — the substituted estimate — leaves what the box last measured alone. The engine
 neither stores nor knows about it; from here it is one more style answer that
 happens to change between commits, and the relevance flip that starts a box
 skipping is the same invalidation that stops the old cached size from being
 served.
+
+**A size query container's size is recorded at the same moment, for the
+cascade rather than for layout** (`crates/dom/src/layout/container.rs`).
+`cqw`/`cqh` are 1% of the nearest ancestor size query container's content box
+([css-contain-3 §2.1](https://drafts.csswg.org/css-contain-3/#container-type)),
+which makes a *layout output* a *cascade input*. So the same committing run
+that records a last remembered size also records the content box of every box
+whose `container_type()` is a size container type — both axes for `size`, the
+inline one for `inline-size`, which is all Stylo ever reads of an inline-size
+container — into a second slot-keyed side table, and `TElement::query_container_size`
+answers from it. The recording is staged and published by `Document::layout`
+under its exclusive borrow, because unlike the other two tables this one is
+read by the *style* traversal, which is parallel.
+
+`Document::layout` then closes the loop, the way Gecko's
+`UpdateContainerQueryStyles` does after its reflow: a pass whose recorded sizes
+moved marks each moved container's **descendants** for recascade and lays out
+again, up to `CONTAINER_PASSES` (4) times. The loop converges because the axes
+a container supplies are contained — its size cannot answer to its own
+contents — and it is gated twice, on the changed list being non-empty and on
+the document having cascaded a style that actually resolved a container unit,
+so a page with no query container pays one enum test per committing box.
 
 **Box-less elements** (`display: contents`): the element generates no box
 while its children keep generating theirs, in the nearest box ancestor's
@@ -758,7 +811,10 @@ same input, not re-synthesized from `available_space`. **Critical
 caveat — layout alone is not a boundary:** `contain: layout` (or `content`)
 *without* size still lets the container's intrinsic size depend on its
 contents, so an internal change can resize the container and reflow ancestors.
-Only `+size` closes the upward path. (A definite outer size can also close it,
+Only `+size` closes the upward path — and only *both* axes of it, so
+`contain: inline-size` and `container-type: inline-size` are **not** boundaries
+however much layout containment they carry: their block size still answers to
+their contents. (A definite outer size can also close it,
 but that is a per-`LayoutInput` property, not a style property, so the
 predicate keys off style containment only.)
 

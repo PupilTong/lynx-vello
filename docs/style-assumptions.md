@@ -361,23 +361,71 @@ and §D.16 with what the wire format actually permits.)*
     [tracking/components.md](tracking/components.md)) — off-screen / recycled
     rows are the archetypal `content-visibility` + intrinsic-size case.
 
-    **v1 scope (css-contain-2 only):**
-    - **No container queries (contain-3).** `container-type` / `container-name` stay disabled.
-      Single-axis `inline-size` containment parses if the grammar allows but is **ignored by
-      layout** — never treated as size containment, never a relayout boundary. Size containment
-      always covers both physical axes.
-      - **The `cqw`/`cqh` units do parse and resolve** *(2026-09-21)*. They are plain W3C
-        units — the query container's width and height divided by 100 — that an author
-        targeting the web can write, because the browser supplies them there; native Lynx has
-        no such token. The `lynx` grammar used to reject them, which dropped the whole
-        declaration. Since no element here can be a query container, the size query is always
-        empty and css-contain-3's fallback applies: both resolve against the small viewport,
-        which is the view, so they are the same lengths as `vw`/`vh`. Resolving that way also
-        flags the style `USES_VIEWPORT_UNITS`, so the existing resize re-cascade already covers
-        them; no container-type support and no `query_container_size` host hook was added.
-        `cqi`/`cqb`/`cqmin`/`cqmax` stay unparsed. One comparison with web-core: there `cqw` is
-        1% of the `lynx-view` width and `cqh` follows the browser window unless the host sets
-        `transform-vh`, while here `cqh` is always 1% of the view height.
+    **v1 scope (css-contain-2, plus css-contain-3's `container-type`):**
+    - **The `@container` rule is out of scope; `container-type` is not.** The rule stays
+      gecko-only in the fork, so `container-name` cascades and nothing matches on it. But
+      `container-type` is exposed, because `cqw`/`cqh` are a *standard* implementation rather
+      than viewport aliases, and css-contain-3 §2.1 makes a size query container a contained
+      box: `inline-size` applies layout, style and inline-size containment, `size` applies
+      layout, style and size containment. `hughie::style::containment::effective_containment`
+      folds it in beside `content-visibility`.
+    - **Single-axis `inline-size` containment is real in layout** *(2026-09-21 user ruling,
+      for standard `container-type` support; it replaces the v1 rule that layout ignored the
+      keyword).* A box with `contain: inline-size` — or with `container-type: inline-size`,
+      which implies it — takes its **width** as if it had no contents
+      (`contain-intrinsic-width`, or zero), while its **height** still comes from them, laid
+      out into that width. Size containment is per axis throughout: `contain: size`,
+      `container-type: size` and a skipping box cover both physical axes exactly as before,
+      and no keyword contains the block axis alone (the engine is horizontal-writing-mode
+      only). It is still **never a relayout boundary** — that stays whole-box `SIZE | LAYOUT`,
+      because a box whose block size answers to its contents cannot stop an internal change
+      from resizing it and reflowing its ancestors. The last-remembered-size recording rule
+      became per axis with it: an `inline-size`-contained box records the height its contents
+      produced and leaves the width it last measured alone.
+      - **The `cqw`/`cqh` units parse and resolve the standard way** *(2026-09-21)*. They are
+        1% of the **nearest ancestor size query container's content box**: an ancestor with
+        `container-type: size` supplies both axes, one with `container-type: inline-size`
+        supplies the inline axis only (this engine is horizontal-writing-mode only, so that is
+        the width), an axis no container supplies falls back to the **small viewport**, and so
+        does everything on a page with no query container at all. That last case is also the
+        one native Lynx has no token for; an author targeting the web can write these because
+        the browser supplies them there, and the `lynx` grammar used to reject them, which
+        dropped the whole declaration.
+
+        The container's size comes from the **last committed layout**, because it is a cascade
+        input only layout can produce. `dom` records every size query container's content box
+        (`size − padding − border`, unrounded CSS px) at the committing layout run that
+        produced it — the same moment the last remembered size is recorded — into a slot-keyed
+        side table on the tree arenas, and answers Stylo's `TElement::query_container_size`
+        from it. A container that has never been laid out, or that has just stopped being one,
+        answers `None` and its descendants fall back to the viewport.
+
+        **The post-layout recascade loop** is `Document::layout`, which is Gecko's
+        `UpdateContainerQueryStyles` in this engine's shape: a pass whose recorded sizes moved
+        marks each moved container's **descendants** (`RECASCADE_DESCENDANTS` — a container's
+        own `cqw` answers to *its* nearest container, an ancestor) and lays out again. It is
+        capped at `CONTAINER_PASSES = 4`; a container's supplied axes are contained, so its
+        size cannot answer to its own contents and the loop converges in the nesting depth of
+        containers that move together. Past the cap the last layout stands and the marks it
+        left are resolved by the next flush — one commit behind at worst.
+
+        Two gates keep this free for everyone else. The changed list is empty unless a
+        container's content box actually moved, and the document only recascades at all once
+        some style it cascaded carried `ComputedValueFlags::USES_CONTAINER_UNITS` — a page with
+        query containers and no `cqw`/`cqh` has nothing to re-resolve. A page with neither pays
+        one enum test per committing box and one `is_empty` test per layout.
+
+        **The `@container` at-rule is still out**: it is gecko-only in the fork, so nothing
+        matches a size or style query. `container-name` parses and cascades and nothing
+        consumes it. The `container` shorthand is **name-first**
+        ([csswg-drafts#7180](https://github.com/w3c/csswg-drafts/issues/7180), pinned by a fork
+        test): `container: foo / size` is a named size container, while `container: size` names
+        the container "size" and makes it no query container at all. The name is not optional
+        in the fork's grammar (`container: / size` is rejected), so `container-type` is the
+        only way to write a type without a name. `cqi`/`cqb`/`cqmin`/`cqmax` stay unparsed.
+        One comparison with web-core: there `cqw` is 1% of the `lynx-view` width and `cqh`
+        follows the browser window unless the host sets `transform-vh`, while here both follow
+        the standard container lookup and fall back to the view.
       - **The engine's length units, stated once**, none of which takes an embedder-supplied
         base: `vw`/`vh` are the viewport width/height divided by 100; `rpx` is the screen width
         divided by 750 (a fixed divisor), and the only screen this engine has is the view, so

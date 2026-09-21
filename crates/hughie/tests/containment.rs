@@ -5,7 +5,7 @@
 mod support;
 
 use hughie::prelude::*;
-use hughie::style::{Contain, Overflow};
+use hughie::style::{Contain, ContainerType, Overflow};
 use stylo::computed_values::relative_layout_once;
 use support::*;
 
@@ -24,6 +24,26 @@ fn size_contained(mut style: TestStyle, width: f32, height: f32) -> TestStyle {
     style.containment = Contain::SIZE;
     style.contain_intrinsic_width = contain_intrinsic_px(width);
     style.contain_intrinsic_height = contain_intrinsic_px(height);
+    style
+}
+
+/// `contain: inline-size` — single-axis size containment, which in this
+/// horizontal-writing-mode engine is the width.
+fn inline_size_contained(mut style: TestStyle, width: Option<f32>) -> TestStyle {
+    style.containment = Contain::INLINE_SIZE;
+    if let Some(width) = width {
+        style.contain_intrinsic_width = contain_intrinsic_px(width);
+    }
+    // Deliberately set: an uncontained axis must not read it.
+    style.contain_intrinsic_height = contain_intrinsic_px(7.0);
+    style
+}
+
+/// The same containment reached through css-contain-3 instead: a size query
+/// container is contained because it is a query container, with no `contain`
+/// of its own.
+fn query_container(mut style: TestStyle, container_type: ContainerType) -> TestStyle {
+    style.container_type = container_type;
     style
 }
 
@@ -487,4 +507,171 @@ fn a_cache_served_skipped_box_still_hides_a_child_added_under_it() {
         Size::ZERO,
         "the hide sweep runs outside the cache the size came back from",
     );
+}
+
+#[test]
+fn flex_inline_size_containment_substitutes_only_the_width() {
+    let mut tree = TestTree::default();
+    let child = rigid_leaf(&mut tree, 200.0, 100.0);
+    let container = flex_container(
+        &mut tree,
+        inline_size_contained(TestStyle::default(), Some(50.0)),
+        &[child],
+    );
+
+    let output = perform_layout(&tree, container, Size::NONE, Size::MAX_CONTENT);
+
+    // The width is the substitute; the height is still the children's.
+    assert_size(output.size, Size::new(50.0, 100.0));
+    assert_size(tree.layout(child).size, Size::new(200.0, 100.0));
+}
+
+#[test]
+fn flex_inline_size_containment_without_an_intrinsic_width_is_zero_wide() {
+    let mut tree = TestTree::default();
+    let child = rigid_leaf(&mut tree, 200.0, 100.0);
+    let container = flex_container(
+        &mut tree,
+        TestStyle {
+            containment: Contain::INLINE_SIZE,
+            ..TestStyle::default()
+        },
+        &[child],
+    );
+
+    let output = perform_layout(&tree, container, Size::NONE, Size::MAX_CONTENT);
+
+    // "as if it had no contents", and no `contain-intrinsic-width` to stand in
+    // for them.
+    assert_size(output.size, Size::new(0.0, 100.0));
+    assert_size(tree.layout(child).size, Size::new(200.0, 100.0));
+}
+
+#[test]
+fn a_size_query_container_is_contained_by_its_container_type_alone() {
+    fn build(style: TestStyle) -> (TestTree, TestId) {
+        let mut tree = TestTree::default();
+        let child = rigid_leaf(&mut tree, 200.0, 100.0);
+        let container = flex_container(&mut tree, style, &[child]);
+        (tree, container)
+    }
+
+    let intrinsic = TestStyle {
+        contain_intrinsic_width: contain_intrinsic_px(50.0),
+        contain_intrinsic_height: contain_intrinsic_px(30.0),
+        ..TestStyle::default()
+    };
+
+    // `container-type: inline-size` contains the width and nothing else.
+    let (tree, container) = build(query_container(
+        intrinsic.clone(),
+        ContainerType::INLINE_SIZE,
+    ));
+    let output = perform_layout(&tree, container, Size::NONE, Size::MAX_CONTENT);
+    assert_size(output.size, Size::new(50.0, 100.0));
+
+    // `container-type: size` is `contain: size`.
+    let (tree, container) = build(query_container(intrinsic.clone(), ContainerType::SIZE));
+    let by_container_type = perform_layout(&tree, container, Size::NONE, Size::MAX_CONTENT);
+    let (tree, container) = build(size_contained(TestStyle::default(), 50.0, 30.0));
+    let by_contain = perform_layout(&tree, container, Size::NONE, Size::MAX_CONTENT);
+    assert_size(by_container_type.size, Size::new(50.0, 30.0));
+    assert_size(by_container_type.size, by_contain.size);
+
+    // `container-type: normal` contains nothing: the children size the box.
+    let (tree, container) = build(query_container(intrinsic, ContainerType::NORMAL));
+    let output = perform_layout(&tree, container, Size::NONE, Size::MAX_CONTENT);
+    assert_size(output.size, Size::new(200.0, 100.0));
+}
+
+#[test]
+fn linear_inline_size_containment_substitutes_only_the_width() {
+    let mut tree = TestTree::default();
+    let child = rigid_leaf(&mut tree, 70.0, 45.0);
+    let container = linear_container(
+        &mut tree,
+        inline_size_contained(TestStyle::default(), Some(50.0)),
+        &[child],
+    );
+
+    let output = perform_layout(&tree, container, Size::NONE, Size::MAX_CONTENT);
+
+    assert_size(output.size, Size::new(50.0, 45.0));
+    assert_size(tree.layout(child).size, Size::new(70.0, 45.0));
+}
+
+#[test]
+fn grid_inline_size_containment_substitutes_only_the_width() {
+    let mut tree = TestTree::default();
+    let child = rigid_leaf(&mut tree, 60.0, 40.0);
+    let container = tree.push_grid(
+        inline_size_contained(TestStyle::default(), Some(50.0)),
+        vec![child],
+    );
+
+    let output = perform_layout(&tree, container, Size::NONE, Size::MAX_CONTENT);
+
+    assert_size(output.size, Size::new(50.0, 40.0));
+}
+
+#[test]
+fn relative_inline_size_containment_substitutes_only_the_width() {
+    for once in [
+        relative_layout_once::T::True,
+        relative_layout_once::T::False,
+    ] {
+        let mut tree = TestTree::default();
+        let child = rigid_leaf(&mut tree, 80.0, 55.0);
+        let mut style = inline_size_contained(TestStyle::default(), Some(50.0));
+        style.relative_layout_once = once;
+        let container = relative_container(&mut tree, style, &[child]);
+
+        let output = perform_layout(&tree, container, Size::NONE, Size::MAX_CONTENT);
+
+        assert_size(output.size, Size::new(50.0, 55.0));
+        assert_size(tree.layout(child).size, Size::new(80.0, 55.0));
+    }
+}
+
+#[test]
+fn leaf_inline_size_containment_measures_the_contents_into_the_contained_width() {
+    let mut tree = TestTree::default();
+    let leaf = tree.push_measured_leaf(
+        inline_size_contained(TestStyle::default(), Some(50.0)),
+        |input| {
+            // The contents lay out into the substituted width, and what they
+            // make of it is the height.
+            LeafMetrics::new(Size::new(
+                999.0,
+                input.known_dimensions.width.unwrap() * 2.0,
+            ))
+        },
+    );
+
+    let output = perform_layout(&tree, leaf, Size::NONE, Size::MAX_CONTENT);
+
+    assert_size(output.size, Size::new(50.0, 100.0));
+    assert_eq!(tree.leaf_measure_calls.get(), 1);
+}
+
+#[test]
+fn leaf_block_size_containment_substitutes_the_height_and_drops_the_baseline() {
+    let mut tree = TestTree::default();
+    // `block-size` is internal to the fork's grammar — no keyword produces it
+    // on its own — but the bit is per-axis, so the engine answers it the same
+    // way it answers `inline-size` with the axes exchanged.
+    let style = TestStyle {
+        containment: Contain::BLOCK_SIZE,
+        contain_intrinsic_height: contain_intrinsic_px(30.0),
+        ..TestStyle::default()
+    };
+    let leaf = tree.push_measured_leaf(style, |_input| {
+        LeafMetrics::new(Size::new(120.0, 999.0)).with_first_baselines(Point::new(None, Some(12.0)))
+    });
+
+    let output = perform_layout(&tree, leaf, Size::NONE, Size::MAX_CONTENT);
+
+    assert_size(output.size, Size::new(120.0, 30.0));
+    assert_eq!(output.first_baselines, Point::NONE);
+    assert_eq!(tree.leaf_measure_calls.get(), 1);
 }

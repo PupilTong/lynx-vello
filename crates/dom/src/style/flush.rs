@@ -1,5 +1,6 @@
 //! The stylo-traversal-driven style flush.
 
+use stylo::computed_value_flags::ComputedValueFlags;
 use stylo::context::{
     RegisteredSpeculativePainter, RegisteredSpeculativePainters, SharedStyleContext, StyleContext,
     StyleSystemOptions,
@@ -56,11 +57,26 @@ impl Drop for LayoutThreadStateGuard {
 /// The restyle-only traversal: recalculate styles preorder, no postorder pass.
 pub(super) struct RecalcStyle<'a> {
     shared: SharedStyleContext<'a>,
+    /// The document's sticky "some style here resolved a `cqw`/`cqh`" flag,
+    /// which this traversal is the only writer of. See
+    /// [`crate::layout::container`]: it is what gates the post-layout
+    /// recascade a resized query container would otherwise cost every page
+    /// that has one.
+    ///
+    /// Shared because the traversal is parallel. Relaxed on both ends: the
+    /// reader is `Document::layout`, after the traversal has been joined.
+    container_units: &'a std::sync::atomic::AtomicBool,
 }
 
 impl<'a> RecalcStyle<'a> {
-    pub(super) const fn new(shared: SharedStyleContext<'a>) -> Self {
-        Self { shared }
+    pub(super) const fn new(
+        shared: SharedStyleContext<'a>,
+        container_units: &'a std::sync::atomic::AtomicBool,
+    ) -> Self {
+        Self {
+            shared,
+            container_units,
+        }
     }
 
     pub(super) const fn shared(&self) -> &SharedStyleContext<'a> {
@@ -94,6 +110,16 @@ impl<'a, T: Sync> DomTraversal<&'a Node<T>> for RecalcStyle<'a> {
         // exactly once.
         let mut data = unsafe { element.ensure_data() };
         recalc_style_at(self, context, element, &mut data, note_child);
+        // One flag test per element, and a store only for the elements that
+        // actually wrote a container-relative unit.
+        if data.styles.get_primary().is_some_and(|style| {
+            style
+                .flags
+                .contains(ComputedValueFlags::USES_CONTAINER_UNITS)
+        }) {
+            self.container_units
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     fn process_postorder(&self, _: &mut StyleContext<&'a Node<T>>, _: &'a Node<T>) {
@@ -137,7 +163,7 @@ impl<T: Sync> Document<T> {
                 animations: self.animations().context_handle(),
                 registered_speculative_painters: &NO_PAINTERS,
             };
-            let traversal = RecalcStyle { shared };
+            let traversal = RecalcStyle::new(shared, self.arenas().container_units_flag());
             let token = <RecalcStyle<'_> as DomTraversal<&Node<T>>>::pre_traverse(
                 root_ref,
                 &traversal.shared,

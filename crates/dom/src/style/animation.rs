@@ -872,7 +872,7 @@ impl<T: Sync> Document<T> {
                 animations,
                 registered_speculative_painters: &NO_PAINTERS,
             };
-            let traversal = RecalcStyle::new(shared);
+            let traversal = RecalcStyle::new(shared, self.arenas().container_units_flag());
             let token = <RecalcStyle<'_> as stylo::traversal::DomTraversal<&Node<T>>>::pre_traverse(
                 root_ref,
                 traversal.shared(),

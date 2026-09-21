@@ -23,7 +23,7 @@ use super::util::{
 };
 use super::{compute_absolute_layout_with_static_position, measure_absolute_layout};
 use crate::geometry::{Edges, Point, Size};
-use crate::style::containment::size_containment;
+use crate::style::containment::contained_axes;
 use crate::style::{Contain, CoreStyle, LinearStyle};
 use crate::tree::{
     AvailableSpace, Layout, LayoutInput, LayoutOutput, LayoutTree, RequestedAxis, SizingMode,
@@ -1336,7 +1336,7 @@ where
     T::Style<'tree>: LinearStyle,
 {
     let style = tree.style(node);
-    let size_containment = size_containment(&style);
+    let contained = contained_axes(&style);
     let layout_contained = style.containment().contains(Contain::LAYOUT);
     let axes = linear_axes(style.linear_direction(), style.direction());
     let align_items = style.align_items();
@@ -1395,17 +1395,21 @@ where
             ));
         }
     }
+    // Every axis is settled without the children — each one either definite
+    // or contained — so a measurement can answer from the box alone.
+    let settled_without_children = Size::new(
+        outer_size.width.is_some() || contained.width().is_some(),
+        outer_size.height.is_some() || contained.height().is_some(),
+    );
     if !commits_layout
         && layout_contained
-        && (size_containment.is_some()
-            || (outer_size.width.is_some() && outer_size.height.is_some()))
+        && settled_without_children.width
+        && settled_without_children.height
     {
-        let natural = size_containment.map_or(Size::ZERO, |intrinsic| {
-            Size::new(
-                intrinsic.width.unwrap_or(0.0),
-                intrinsic.height.unwrap_or(0.0),
-            )
-        });
+        let natural = Size::new(
+            contained.width().unwrap_or(0.0),
+            contained.height().unwrap_or(0.0),
+        );
         let final_outer_size =
             completed_outer_size(outer_size, natural, container_inset, min_size, max_size);
         return LayoutOutput::new(final_outer_size, final_outer_size);
@@ -1519,13 +1523,10 @@ where
         container_independent,
     );
     let (natural, used_main) = natural_content_size(&items, axes);
-    let container_natural = match size_containment {
-        Some(intrinsic) => Size::new(
-            intrinsic.width.unwrap_or(0.0),
-            intrinsic.height.unwrap_or(0.0),
-        ),
-        None => natural,
-    };
+    let container_natural = Size::new(
+        contained.width().unwrap_or(natural.width),
+        contained.height().unwrap_or(natural.height),
+    );
     let final_outer_size = completed_outer_size(
         outer_size,
         container_natural,
@@ -1539,11 +1540,18 @@ where
     );
 
     if !outer_definite.width && has_box_basis_dependency {
-        let contained_basis = if size_containment.is_some() {
-            final_inner_size
-        } else {
-            natural
-        };
+        let contained_basis = Size::new(
+            if contained.width().is_some() {
+                final_inner_size.width
+            } else {
+                natural.width
+            },
+            if contained.height().is_some() {
+                final_inner_size.height
+            } else {
+                natural.height
+            },
+        );
         percentage_basis = Size::new(
             inner_size.width.unwrap_or(contained_basis.width),
             inner_size.height.unwrap_or(contained_basis.height),
