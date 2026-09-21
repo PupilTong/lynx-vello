@@ -94,11 +94,11 @@ fn image(document: &mut LynxDocument, parent: NodeId, style: &str) -> NodeId {
     element
 }
 
-/// Writes a paragraph-limit attribute the way the runtime does: the attribute
-/// itself, then the presentational hint it reflects into.
+/// Writes a paragraph-limit attribute the way the runtime does: the DOM write
+/// alone, which is what raises the `text` component's reaction and with it the
+/// presentational hint the attribute reflects into.
 fn set_limit(document: &mut LynxDocument, element: NodeId, name: &str, value: &str) {
     document.set_attribute(element, name, value);
-    super::apply_attribute_style(document, element, name, Some(value));
 }
 
 /// The measured size of the paragraph `id` establishes — the block's ink, not

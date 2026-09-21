@@ -617,6 +617,46 @@ and §D.16 with what the wire format actually permits.)*
     theorem) live in [layout-architecture.md](layout-architecture.md); the
     tracking rows are in [tracking/css-layout.md](tracking/css-layout.md).
 
+    **The `<list>` UA rules, the first consumer of all of it** *(2026-09-21;
+    the four decisions below were ruled by the user the same day)*. The
+    motivating case is now written down, in
+    `crates/bobcat-core/src/main/tree/list.rs`, translated from web-elements'
+    `x-list.css`. Four decisions in it are this
+    engine's rather than the reference's:
+    - **A `list` is `container-type: size`**, as `x-list.css:9` is. That is
+      what gives `contain-intrinsic-size: none auto
+      var(--estimated-main-axis-size-px, 100cqh)` a container to resolve
+      against, so a cell with no supplied estimate is one scrollport tall.
+      The consequence is the one a browser has too: a size query container is
+      a contained box, so a list's own size never answers to its cells and a
+      list with no declared size is a zero-height scroller.
+    - **Per-attribute UA `display` rules select the layout mode.**
+      `list[list-type="flow"] { display: grid }` and
+      `list[list-type="waterfall"] { display: grid-lanes }` are plain
+      declarations, so an author `display` on the list overrides them — the
+      sheet may not use `!important` (§D.15). This resolves the second of the
+      two decisions left open by the grid-lanes path assessment in
+      [tracking/deviations.md](tracking/deviations.md); a list with no
+      `list-type` still takes its display from `defaultDisplayLinear` like
+      every other container, so the 2026-08-21 "one rule, one switch"
+      decision is untouched for the case it was made about.
+    - **The span count defaults to `1`, not web-core's `0`**, because
+      `repeat(0, 1fr)` is an invalid track list and would drop the
+      declaration outright. `span-count`/`column-count` reflect only positive
+      integers; anything else clears the hint and leaves the default. The
+      reflection is the `list` tag's own `CustomElement`, with the cell's
+      `estimated-main-axis-size-px` on a second one for `list-item`: an
+      attribute-to-CSS mapping lives in its own tag's component, never in a
+      shared name-keyed dispatcher (user ruling, 2026-09-21).
+    - **`wrapper` is exempt from the non-cell suppression.**
+      `list > *:not(list-item):not(wrapper) { display: none }` names the tag
+      explicitly, because this engine's `wrapper { display: contents }` is in
+      the same origin and would lose on specificity, and ReactLynx routinely
+      wraps a list's children.
+
+    Not written, and deliberately: no `position: sticky` rules (sticky does
+    not stick in this engine yet) and no scroll-snap rules.
+
 24. **CSS Grid Level 3 grid lanes (`display: grid-lanes` +
     `flow-tolerance`): enabled as a user-directed extension beyond Lynx
     parity.** *(Recorded 2026-09-18.)* Native Lynx's `display` has no such

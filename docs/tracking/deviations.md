@@ -945,20 +945,36 @@ consequential choice about whether to follow the spec or the quirk.
   `linear-weight`/`linear-weight-sum` against
   `flex-grow`/`flex-shrink`/`flex-basis` — and that a linear container never
   wraps.
-- **A `scroll-view`/`list` is a scroll container and an axis, and nothing
-  else** — the UA sheet gives both tags the container block (border box,
-  configured display), the scrolling axis with its clipped cross axis, the
-  matching main axis in both display modes, and `enable-scroll="false"`. The
-  rest of what `scroll-view.css` and `x-list.css` carry is absent: fading
-  edges, scrollbar visibility (`enable-scrollbar`/`scroll-bar-enable`), scroll
-  snapping (`item-snap`/`paging-enabled`), `sticky-top`/`sticky-bottom`,
-  the threshold-observer parts behind `scrolltoupper`/`scrolltolower`,
-  `list-type="flow"`/`"waterfall"`, and `list-item` itself — which has no rule
-  at all, so a cell is an ordinary flex box rather than the
-  `content-visibility`-virtualized, `contain: layout paint` one web-elements
-  builds. Several of those are shadow-part or virtualization machinery that a
-  UA sheet cannot express alone; they belong with the component work, not with
-  the tag defaults.
+- **A `scroll-view` is a scroll container and an axis, and nothing else** —
+  the UA sheet gives the tag the container block (border box, configured
+  display), the scrolling axis with its clipped cross axis, the matching main
+  axis in both display modes, and `enable-scroll="false"`. The rest of what
+  `scroll-view.css` carries is absent: fading edges, scrollbar visibility
+  (`enable-scrollbar`/`scroll-bar-enable`), scroll snapping
+  (`item-snap`/`paging-enabled`), and the threshold-observer parts behind
+  `scrolltoupper`/`scrolltolower`. Several of those are shadow-part machinery
+  that a UA sheet cannot express alone; they belong with the component work,
+  not with the tag defaults.
+- **A `list` is that plus virtualized, placed cells — and nothing else yet**
+  *(2026-09-21)*. `crates/bobcat-core/src/main/tree/list.rs` carries the same
+  axis rules written against `scroll-orientation`, and on top of them
+  `x-list.css`'s three real mechanisms: `container-type: size` makes the list
+  a size query container, `list-item` is
+  `content-visibility: auto; contain: layout paint` with
+  `contain-intrinsic-size: none auto var(--estimated-main-axis-size-px, 100cqh)`
+  (the horizontal variant swapping the axes and the unit),
+  `recyclable="false"` opts a cell out, and `list-type` selects `display: grid`
+  or `display: grid-lanes` over `repeat(var(--list-item-span-count), …)` with
+  `full-span` as a placement rule. `span-count`/`column-count`,
+  `sticky-offset` and a cell's `estimated-main-axis-size-px` reach the cascade
+  as presentational hints. Still absent from the sheet:
+  `sticky-top`/`sticky-bottom` (`position: sticky` does not stick in this
+  engine yet, so there is nothing for a sticky rule to do), `item-snap` /
+  `paging-enabled` scroll snapping, the scrollbar rules, the threshold
+  observers, `initial-scroll-index`, every list event and every list UI
+  method — and cell recycling, which this engine does not do at all: a
+  virtualized cell keeps its element and skips its contents, which is
+  web-core's model too (`components.md` row 23).
 - **List waterfall over `display: grid-lanes` — path assessment
   (2026-09-18).** The layout mode landed
   ([style-assumptions.md](../style-assumptions.md) §24); this records how far
@@ -1032,39 +1048,66 @@ consequential choice about whether to follow the spec or the quirk.
     CSS boxes. A `<list>` UA rule here would have to supply the stretch the
     same way `x-list.css` does. See "Items with an intrinsic aspect ratio" in
     [css-layout.md](css-layout.md).
-  **Mechanisms the path would use, none of them built**: web-core carries the
+  **Mechanisms the path uses, built 2026-09-21**: web-core carries the
   column count as the custom property `--list-item-span-count`, set from
   `span-count`/`column-count`
   (`.../XList/XListAttributes.ts:33-39`), and writes `list-type="flow"` as
   real CSS Grid `repeat(var(--list-item-span-count), 1fr)`
-  (`x-list.css:210-240`); here a presentational hint would set the same
-  property and a UA rule read it — `apply_attribute_style`
-  (`crates/bobcat-core/src/main/tree/text.rs`) is the existing hook and is
-  keyed on the attribute name alone. `full-span` must be matched as a value
-  (`[full-span="true"]`, or web-core's `[full-span]:not([full-span="false"])`
-  at `x-list.css:294`) and never as a presence test, because
-  `__SetAttribute` stringifies every value, so `full-span={false}` arrives as
-  `"false"`. A horizontal list maps to `grid-template-rows`.
+  (`x-list.css:210-240`); here a presentational hint sets the same
+  property and a UA rule reads it. The hook is the `list` tag's own
+  `CustomElement` (`crates/bobcat-core/src/main/tree/list.rs`), with the
+  cell's `estimated-main-axis-size-px` on a second component for
+  `list-item`, exactly as web-core mixes `XListAttributes` into `x-list` and
+  `ListItemAttributes` into `x-list-item`: **an attribute-to-CSS mapping
+  lives in its own tag's component, never in a shared name-keyed
+  dispatcher** (user ruling, 2026-09-21), so a name means what the tag it
+  was written on says it means and nothing else has to be consulted.
+  `full-span` is matched as a value, web-core's
+  `[full-span]:not([full-span="false"])` (`x-list.css:294`), never as a
+  presence test, because `__SetAttribute` stringifies every value, so
+  `full-span={false}` arrives as `"false"`. A horizontal list maps to
+  `grid-template-rows` **and resets `grid-template-columns: none`**, which
+  `x-list.css:221-229` does not (and `:262-264`, the horizontal waterfall,
+  only swaps a `flex-direction`, since web-core's waterfall is never a grid):
+  grid-lanes reads the absence of a
+  column template as the statement that the block axis carries the tracks
+  (`crates/hughie/src/compute/grid/lanes.rs:535-547`), so leaving the column
+  template standing would stack a horizontal waterfall downwards.
   `list-main-axis-gap`/`list-cross-axis-gap` do not exist here
   (`list_main_axis_gap_is_absent`, `crates/dom/tests/grammar_layout.rs`) and do
   not exist as properties in web-core either — its style transformer renames
   both to custom properties
-  (`.../web-core/src/style_transformer/rules.rs:20-21`). The scroll extent
+  (`.../web-core/src/style_transformer/rules.rs:20-21`); an author writes
+  `row-gap`/`column-gap`. The scroll extent
   needs nothing new: `crates/dom/src/scroll/mod.rs` derives it from the layout
   algorithm's `content_size`.
+  One further span-count divergence: the UA default here is **1**, where
+  `x-list.css:11` writes `0`. `repeat(0, 1fr)` is an invalid track list, so
+  web-core's default would drop the whole declaration; web-core survives it
+  because its own JavaScript rewrites the property, and its changelog records
+  the same symptom from the other end ("list may only render only one column
+  in ReactLynx", `web-elements/CHANGELOG.md:376-378`, lynx-stack PR #1280).
   **Decisions:**
   1. *The tie-break* — **decided (user, 2026-09-18): accept the W3C cursor.**
      A list waterfall laid out by `display: grid-lanes` places a tied item
      where css-grid-3 §4.4 places it, not where Lynx does; the difference in
      (b) above is a recorded deviation, and no engine-internal switch is added.
      `display: grid-lanes` stays W3C-correct for authors.
-  2. *How the UA sheet would select it* — **OPEN, deferred with the list
-     work** (the grid-lanes change ships without any `<list>` support).
-     `list[list-type="waterfall"] { display: grid-lanes }` is a per-attribute
-     exception to the 2026-08-21 decision in the entry above ("one rule, one
-     switch, and no per-tag exception"), and because the UA sheet may not use
-     `!important` ([style-assumptions.md](../style-assumptions.md) §D.15) an
-     author `display` on a list would override it.
+  2. *How the UA sheet selects it* — **decided (user, 2026-09-21):
+     per-attribute UA `display` rules.** `list[list-type="waterfall"] { display: grid-lanes }` and
+     `list[list-type="flow"] { display: grid }` are written as ordinary
+     declarations in `crates/bobcat-core/src/main/tree/list.rs`, so an author
+     `display` on the list overrides them — the UA sheet may not use
+     `!important` ([style-assumptions.md](../style-assumptions.md) §D.15),
+     and the one recorded exception to that was granted for a structural
+     invariant rather than for a default. It *is* a per-attribute exception to
+     the 2026-08-21 decision in the entry above, and deliberately so: that
+     decision is about which of `linear`/`flex` a container gets from
+     `defaultDisplayLinear`, and a `list-type` is the author naming a layout
+     mode outright, the way `x-list.css:210-264` does. A list with no
+     `list-type` still takes the page-config display like every other
+     container. Recorded in
+     [style-assumptions.md](../style-assumptions.md) §19.
 
 ## JS runtime & APIs (see [js-runtime.md](js-runtime.md), [accessibility.md](accessibility.md))
 
