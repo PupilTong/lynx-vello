@@ -1,35 +1,24 @@
 import { loadModuleSync, resolveModuleUrl } from "bobcat-internal:host";
 
-// The compiler factory ABI over the sources `PageSource` registered, and the
-// synchronous loader for a path no registration carries. Lazy containers —
-// `requireModuleAsync`, `fetchBundle` and the lazy-bundle `loadScript` — are
-// handled separately from this table and are not here.
+// The compiler factory ABI, and the one way a bundle path becomes a value.
+//
+// One mechanism, and it is the mechanism MTS's `__LoadLepusChunk` uses: a path
+// is a URL this realm builds, and `loadModuleSync` is what loads it, before the
+// call returns. There is no table of bodies and no boot-time import loop —
+// `requireModule`, `loadScript` and `loadScriptInit` all go through `loadBody`,
+// which is what lets them stay synchronous without any source text reaching
+// this realm.
+//
+// What is at that URL is `bobcat-source`'s business. A body a container
+// carried is an ES module it registered beside the input URL — the compiler's
+// `{init}` expression as a default export, a `CommonJS` file's
+// `module.exports` as one, a `.json` body as the value it is — so a `require`
+// of it answers that default export. A path no container carried is whatever
+// the host serves, normally a plain `CommonJS` file.
+//
+// Lazy containers — `requireModuleAsync`, `fetchBundle` and the lazy-bundle
+// `loadScript` — are handled separately and are not here.
 const DEFAULT_ENTRY = "__Card__";
-const FACTORY_ARGUMENTS = [
-  "require", "module", "exports", "Card", "setTimeout", "setInterval",
-  "clearInterval", "clearTimeout", "NativeModules", "tt", "console",
-  "Component", "ReactLynx", "nativeAppId", "Behavior", "LynxJSBI", "lynx",
-  "window", "document", "frames", "self", "location", "navigator",
-  "localStorage", "history", "Caches", "screen", "alert", "confirm", "prompt",
-  "fetch", "XMLHttpRequest", "__WebSocket__", "webkit", "Reporter", "print",
-  "global", "requestAnimationFrame", "cancelAnimationFrame",
-];
-
-// The parameter list an externally loaded chunk is compiled in: web-core's,
-// from `createBundleInitReturnObj`
-// (web-core/ts/client/background/background-apis/createChunkLoading.ts).
-// `Card` and `Component` are always among them, where web-core drops the pair
-// for a React card: a chunk that does not name them is unaffected either way,
-// and the registered-source path passes `app.Card`/`app.Component` already.
-const LYNX_PARAMETERS = [
-  "postMessage", "module", "exports", "lynxCoreInject", "Card", "setTimeout",
-  "setInterval", "clearInterval", "clearTimeout", "NativeModules", "console",
-  "Component", "ReactLynx", "nativeAppId", "Behavior", "LynxJSBI", "lynx",
-  "window", "document", "frames", "location", "navigator", "localStorage",
-  "history", "Caches", "screen", "alert", "confirm", "prompt", "webkit",
-  "Reporter", "print", "global", "requestAnimationFrame",
-  "cancelAnimationFrame",
-].join(", ");
 
 /** A specifier that carries its own scheme, and so needs no base at all. */
 const ABSOLUTE_URL = /^[A-Za-z][A-Za-z\d+\-.]*:/;
@@ -38,18 +27,17 @@ const ABSOLUTE_URL = /^[A-Za-z][A-Za-z\d+\-.]*:/;
 // This boundary deliberately carries those JS values without a runtime schema.
 type ModuleValue = any;
 interface Definition { factory: Function; hasRun: boolean; exports?: ModuleValue }
-interface Source { source: string; wrapped: boolean }
 
 export function createLynxModules(app: ModuleValue, lynx: ModuleValue, console: ModuleValue) {
   const globals = globalThis as unknown as {
     bundleSupportLoadScript: boolean;
     globDynamicComponentEntry?: string;
-    __bundle__holder: {init?: unknown} | undefined;
   };
+  // Read by a `RuntimeWrapperWebpackPlugin` banner as it evaluates: with it
+  // set the banner *answers* with its `{init}` object rather than initializing
+  // the card itself, which is the value the banner's module then exports.
   globals.bundleSupportLoadScript = true;
   const definitions = new Map<string, Map<string, Definition>>();
-  const sources = new Map<string, Map<string, Source>>();
-  const sections = new Map<string, Record<string, string>>();
   const cache = new Map<string, ModuleValue>();
   const factories = new Map<string, () => ModuleValue>();
   const sectionExports = new Map<string, ModuleValue>();
@@ -63,10 +51,6 @@ export function createLynxModules(app: ModuleValue, lynx: ModuleValue, console: 
   }
   function define(path: string, factory: Function, entry = DEFAULT_ENTRY) {
     table(definitions, entry || DEFAULT_ENTRY).set(path, { factory, hasRun: false });
-  }
-  function findSource(path: string, entry: string): Source | undefined {
-    const source = table(sources, entry);
-    return source.get(path) ?? source.get(path.startsWith("/") ? path : `/${path}`);
   }
   function relativeRequireFor(path: string) {
     return (requested: string): ModuleValue => {
@@ -93,16 +77,10 @@ export function createLynxModules(app: ModuleValue, lynx: ModuleValue, console: 
   function require(path: string, params?: ModuleValue): ModuleValue {
     const entry: string = params?.dynamicComponentEntry || DEFAULT_ENTRY;
     const modules = table(definitions, entry);
-    let record = modules.get(path);
-    if (!record) {
-      const source = findSource(path, entry);
-      if (!source) throw new Error(`module ${path} in ${entry} is not registered`);
-      const evaluate = new Function("lynx", "SystemInfo", "console", "source",
-        '"use strict"; const tt=this; return eval(source);');
-      evaluate.call(app, lynx, lynx.SystemInfo, console, source.source);
-      record = modules.get(path);
-      if (!record) throw new Error(`module ${path} in ${entry} is not defined`);
-    }
+    // Only what a chunk's own body has defined: a bundle path is a *load* now,
+    // and the body that ran is what calls `tt.define`.
+    const record = modules.get(path);
+    if (!record) throw new Error(`module ${path} in ${entry} is not defined`);
     if (!record.hasRun) {
       const module = {exports: {}};
       record.hasRun = true;
@@ -114,9 +92,10 @@ export function createLynxModules(app: ModuleValue, lynx: ModuleValue, console: 
   }
 
   /**
-   * The URL an unregistered `path` names: the path as a reference beside the
-   * template the bundle came in, resolved by the normalizer an `import` there
-   * resolves through.
+   * The URL `path` names: the path as a reference beside the template the
+   * bundle came in, resolved by the normalizer an `import` there resolves
+   * through — as `__LoadLepusChunk` builds a chunk's URL beside the root
+   * script's.
    *
    * The rooting is native's (`js_app.cc` `App::LoadScript`): a path that is
    * neither an absolute URL nor rooted is rooted, so `chunk.js` and
@@ -124,12 +103,16 @@ export function createLynxModules(app: ModuleValue, lynx: ModuleValue, console: 
    * it resolves beside its template rather than at that template's origin.
    * With no template URL registered the reference is its own base, which
    * resolves an absolute URL and refuses everything else — there is nothing
-   * for a bundle path to be a path inside.
+   * for a bundle path to be a path inside. An entry that is itself an
+   * absolute URL, as a lazy bundle's `bundleName` is, resolves beside itself.
    */
-  function externalUrl(path: string, entry: string): string {
+  function bodyUrl(path: string, entry: string): string {
     const specifier = ABSOLUTE_URL.test(path)
       ? path : `.${path.startsWith("/") ? path : `/${path}`}`;
-    const base = templateUrls.get(entry) ?? templateUrls.get(DEFAULT_ENTRY) ?? specifier;
+    const base = templateUrls.get(entry)
+      ?? (ABSOLUTE_URL.test(entry) ? entry : undefined)
+      ?? templateUrls.get(DEFAULT_ENTRY)
+      ?? specifier;
     try {
       return resolveModuleUrl(base, specifier);
     } catch (error) {
@@ -140,97 +123,74 @@ export function createLynxModules(app: ModuleValue, lynx: ModuleValue, console: 
     }
   }
   /**
-   * One value per name in `LYNX_PARAMETERS`, in that order.
+   * What one loaded body answers with, as a factory.
    *
-   * `postMessage`, `ReactLynx` and the whole BOM block are `undefined`: this
-   * realm has no value for them, and a chunk that reads one gets `undefined`
-   * rather than whatever the global scope happens to carry.
+   * A body that handed an `{init}` object over — a `.lynx.bundle`'s
+   * `/app-service.js`, or a `RuntimeWrapperWebpackPlugin` banner — is
+   * initialized by calling it with this realm's app object, which is
+   * lynx-core's own `_$executeInit` (`app.ts`). Anything else *is* the answer:
+   * a raw `CommonJS` body's `module.exports`, or a `.json` file's parsed
+   * value.
+   *
+   * `globalThis.globDynamicComponentEntry` is published for the length of the
+   * `init` call and restored after it, because a banner reads it there.
    */
-  function chunkArgumentsFor(module: {exports: ModuleValue}) {
-    return [undefined, module, module.exports, {tt: app}, app.Card,
-      lynx.setTimeout, lynx.setInterval, lynx.clearInterval, lynx.clearTimeout,
-      app.NativeModules, console, app.Component, undefined, app.nativeAppId,
-      app.Behavior, app.LynxJSBI, lynx, ...Array(16).fill(undefined),
-      lynx.requestAnimationFrame, lynx.cancelAnimationFrame];
-  }
-  /** Whatever a chunk left in the holder, and the holder left clear. */
-  function takeHolder(): {init?: unknown} | undefined {
-    const holder = globals.__bundle__holder;
-    globals.__bundle__holder = undefined;
-    return holder;
+  function factoryOf(value: ModuleValue, entry: string): () => ModuleValue {
+    const init: unknown = value?.init;
+    if (typeof init !== "function") return () => value;
+    return () => {
+      const previousEntry = globals.globDynamicComponentEntry;
+      globals.globDynamicComponentEntry = entry;
+      try {
+        return init.call(value, {tt: app});
+      } finally {
+        if (previousEntry === undefined) delete globals.globDynamicComponentEntry;
+        else globals.globDynamicComponentEntry = previousEntry;
+      }
+    };
   }
   /**
-   * One path no registration carries, loaded and run, as the factory of its
-   * exports.
+   * One bundle path, loaded and run, as the factory of what it answers.
    *
-   * The load is synchronous and parks the job this call runs in;
-   * `loadModuleSync` compiles the source in `LYNX_PARAMETERS` — the text
-   * never becomes a value here — or parses it as JSON, which the *response*
-   * URL's own extension decides.
+   * The load is the synchronous one a `require` is written over, of the URL
+   * the path names. How the source is read is Node's rule, the *response*
+   * URL's own extension first and the engine's syntax detection where that
+   * says nothing, so three shapes come back:
+   *
+   * - an **ES module**, which is what a body this container carried is: `PageSource` wrote it,
+   *   and its default export is the value native's host would have kept as that script's
+   *   completion value — the compiler's `{init}` object for a `.lynx.bundle` body,
+   *   `module.exports` for a `.web.bundle` one, the parsed value for a `.json` one. A
+   *   hand-written module with no `default` export answers its namespace instead.
+   * - **JSON**, the value the host parsed.
+   * - a **`CommonJS` file**, which is what a path no container carried normally is: compiled in
+   *   `module, exports` alone and called with `this` undefined, so none of the Lynx names
+   *   `BTS_CHUNK_PREAMBLE` gives a registered body is in scope. It answers `module.exports`.
+   *
+   * The load parks the job this call runs in. The text never becomes a value
+   * here, and a URL is evaluated once per realm however often it is asked for.
    */
-  function loadExternal(path: string, entry: string): () => ModuleValue {
-    const loaded = loadModuleSync(externalUrl(path, entry), LYNX_PARAMETERS);
-    if (loaded.kind === "json") {
-      const parsed = loaded.value;
-      return () => parsed;
+  function loadBody(path: string, entry: string): () => ModuleValue {
+    const loaded = loadModuleSync(bodyUrl(path, entry), "module, exports");
+    if (loaded.kind === "json") return factoryOf(loaded.value, entry);
+    if (loaded.kind === "module") {
+      const namespace = loaded.value as {default?: ModuleValue};
+      return factoryOf(
+        Object.hasOwn(namespace, "default") ? namespace.default : namespace, entry);
     }
     const module = {exports: {} as ModuleValue};
-    const previousEntry = globals.globDynamicComponentEntry;
-    globals.globDynamicComponentEntry = entry;
-    // A Lynx-target chunk answers through `globalThis.__bundle__holder`: its
-    // banner stores `{init}` there because `bundleSupportLoadScript` is set, a
-    // wrapper function having no reachable completion value
-    // (`RuntimeWrapperWebpackPlugin`'s `loadScriptFooter`). A raw CommonJS body
-    // leaves the holder alone and answers through `module.exports`.
-    globals.__bundle__holder = undefined;
-    let holder: {init?: unknown} | undefined;
-    try {
-      (loaded.value as Function).apply(undefined, chunkArgumentsFor(module));
-    } finally {
-      holder = takeHolder();
-      if (previousEntry === undefined) delete globals.globDynamicComponentEntry;
-      else globals.globDynamicComponentEntry = previousEntry;
-    }
-    const init = holder?.init;
-    if (typeof init === "function") return () => init.call(holder, {tt: app});
-    const value = module.exports;
-    return () => value;
-  }
-  /** One registered source, evaluated, as the factory of its exports. */
-  function registeredFactory(path: string, resource: Source, entry: string): () => ModuleValue {
-    if (path.split("?")[0]?.endsWith(".json")) {
-      const value: unknown = JSON.parse(resource.source);
-      return () => value;
-    }
-    const previousEntry = globals.globDynamicComponentEntry;
-    globals.globDynamicComponentEntry = entry;
-    try {
-      // Direct eval gives each compiler Script its own lexical scope and
-      // retains its completion value without changing the native evaluator.
-      const evaluate = new Function(...FACTORY_ARGUMENTS,
-        "lynxCoreInject", "SystemInfo", "globDynamicComponentEntry", "source", "return eval(source);");
-      const module = {exports: {}};
-      const bundle = evaluate.apply(app, [...argumentsFor(path, module),
-        {tt: app}, lynx.SystemInfo, entry, resource.source]);
-      if (resource.wrapped || typeof bundle?.init === "function") {
-        if (typeof bundle?.init !== "function") throw new Error(`bundle ${path} has no init factory`);
-        return () => bundle.init({tt: app});
-      }
-      const value = module.exports || bundle;
-      return () => value;
-    } finally {
-      if (previousEntry === undefined) delete globals.globDynamicComponentEntry;
-      else globals.globDynamicComponentEntry = previousEntry;
-    }
+    (loaded.value as Function).call(undefined, module, module.exports);
+    return factoryOf(module.exports, entry);
   }
   /**
-   * `lynx.requireModule`: the exports of one bundle path, from the registered
-   * sources or from a load, evaluated once per realm.
+   * `lynx.requireModule`: the exports of one bundle path, initialized once per
+   * realm.
    *
    * The key of both tables is the bare `path`, the entry no part of it, as in
-   * lynx-core (`app.ts` `_$factoryCache`). Nothing is cached until the load,
-   * the compile and the body have all returned, so a path that threw is loaded
-   * again by the next call.
+   * lynx-core (`app.ts` `_$factoryCache`). Nothing is cached until the factory
+   * has returned, so a path whose `init` threw is loaded and initialized again
+   * by the next call — the load answering from the module this realm already
+   * evaluated.
    *
    * `options` is accepted and ignored. web-core has no fetch timeout at all,
    * and native's is unreachable from here: its `loadScript` binding reads a
@@ -242,15 +202,11 @@ export function createLynxModules(app: ModuleValue, lynx: ModuleValue, console: 
     _options?: {timeout?: number}): ModuleValue {
     const cached = cache.get(path);
     if (cached) return cached;
-    let factory = factories.get(path);
-    if (!factory) {
-      const resource = findSource(path, entry);
-      factory = resource ? registeredFactory(path, resource, entry) : loadExternal(path, entry);
-    }
-    // Both tables are written after the body returned, as lynx-core writes
+    const factory = factories.get(path) ?? loadBody(path, entry);
+    // Both tables are written after the factory returned, as lynx-core writes
     // `_$factoryCache` only there (`app.ts` `loadScript`): a factory whose
     // `init` threw is not retained either, so the next call runs the whole
-    // path — load, compile, body — again.
+    // path again.
     const value = factory();
     factories.set(path, factory);
     cache.set(path, value);
@@ -259,48 +215,57 @@ export function createLynxModules(app: ModuleValue, lynx: ModuleValue, console: 
   /**
    * `nativeApp.loadScript(sourceURL, entryName)`: the `{init}` object web-core
    * answers with (`createChunkLoading.ts` `createBundleInitReturnObj`), whose
-   * `init` answers the module's exports — the chunk's own `init({tt})` for a
-   * Lynx-target file, `module.exports` for a raw body, the parsed value for
-   * JSON.
+   * `init` answers the module's exports — the chunk's own `init({tt})` where
+   * its body handed one over, `module.exports` for a raw body, the parsed
+   * value for JSON.
    *
-   * The registered sources first, then a load, and neither of
-   * `requireModule`'s two tables is written: lynx-core's `loadScript` feeds
-   * neither either, so a `requireModule` of the same path afterwards loads it
-   * again.
+   * Neither of `requireModule`'s two tables is written: lynx-core's
+   * `loadScript` feeds neither either, so a `requireModule` of the same path
+   * afterwards asks for it again — which is another load, answered from the
+   * module this realm already has.
    *
-   * `init` ignores the injection it is handed. This realm has one app object,
-   * it is the one every factory here is given, and a raw body has already run
-   * with it by the time `init` is callable.
+   * The load itself is this call's, not `init`'s, as web-core's is: a raw
+   * body has therefore already run by the time `init` is callable. `init`
+   * ignores the injection it is handed, this realm having one app object,
+   * which is the one every factory here is given.
    */
   function loadScriptInit(sourceURL: string, entry = DEFAULT_ENTRY) {
-    const resource = findSource(sourceURL, entry);
-    const factory = resource ? registeredFactory(sourceURL, resource, entry)
-      : loadExternal(sourceURL, entry);
+    const factory = loadBody(sourceURL, entry);
     return {init: (_inject?: ModuleValue): ModuleValue => factory()};
   }
+  /**
+   * `lynx.loadScript(key, {bundleName})`: one named custom section, answered
+   * once per entry.
+   *
+   * A section is loaded like any other body of its container and answers what
+   * any other one does — the module's default export, initialized when that
+   * carries an `init` — which
+   * is web-core's `createBundleInitReturnObj` result rather than native's
+   * Script completion value. Where the two disagree this engine takes
+   * web-core's, so a `.web.bundle` section is written `module.exports = …`
+   * while a `.lynx.bundle` section, whose bodies are expressions, is the
+   * expression itself.
+   */
   function loadScript(key: string, options: {bundleName?: string}): ModuleValue {
     const entry = options.bundleName ?? DEFAULT_ENTRY;
     const cacheKey = `${entry}:${key}`;
     if (sectionExports.has(cacheKey)) return sectionExports.get(cacheKey);
-    const source = sections.get(entry)?.[key];
-    if (source === undefined) throw new Error(`bundle section ${key} in ${entry} is not registered`);
-    const evaluate = new Function("lynx", "lynxCoreInject", "SystemInfo", "console", "source", "return eval(source);");
-    const factory = evaluate.call(globalThis, lynx, {tt: app}, lynx.SystemInfo, console, source);
-    const result = typeof factory?.init === "function" ? factory.init({tt: app}) : factory;
-    sectionExports.set(cacheKey, result);
-    return result;
+    const value = loadBody(key, entry)();
+    sectionExports.set(cacheKey, value);
+    return value;
   }
-  function register(manifest: Record<string, string>, wrapped: boolean, entry = DEFAULT_ENTRY) {
-    const target = table(sources, entry);
-    for (const [path, source] of Object.entries(manifest)) target.set(path, {source, wrapped});
-  }
-  function registerSections(values: Record<string, string>, entry = DEFAULT_ENTRY) {
-    sections.set(entry, values);
-  }
-  /** No URL is no base: an entry registered without one resolves nothing. */
+  /**
+   * One entry's template URL: where its container answered from, and so the
+   * base every bundle path of that entry resolves against.
+   *
+   * That is all a bundle is here — its bodies are registered resources the
+   * boot script never touches, each loaded by the `requireModule`,
+   * `loadScript` or `loadScriptInit` that asks for it. No URL is no base: an
+   * entry registered without one resolves nothing but an absolute path.
+   */
   function registerTemplateUrl(url: string | undefined, entry = DEFAULT_ENTRY) {
     if (url !== undefined) templateUrls.set(entry, url);
   }
-  return {define, require, requireModule, loadScript, loadScriptInit, register,
-    registerSections, registerTemplateUrl};
+  return {define, require, requireModule, loadScript, loadScriptInit,
+    registerTemplateUrl};
 }

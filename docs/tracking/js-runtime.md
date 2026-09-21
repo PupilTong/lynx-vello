@@ -10,17 +10,29 @@ See
 [BTS Context MVP](web-core-runtime.md#bobcat-bts-context-mvp-2026-09-09) for
 the web-core/native distinction, startup queues and remaining scope.
 
-Compiled BTS pages now register their manifest, their custom-section source and
-the page's own URL in the JS module runtime before executing
-`/app-service.js`. `define`/`require` expose the compiler factory ABI.
-`requireModule` serves a registered manifest path from that source and *loads* a
-path no manifest carries, through the same synchronous `loadModuleSync` a
-`require` uses: the path rooted as native roots it, resolved as a reference
-beside the registered template URL, compiled in web-core's wrapper parameter
-list, and answered through `globalThis.__bundle__holder` for a Lynx-target
-chunk or `module.exports` for a raw body. `nativeApp.loadScript` is that same
-path as web-core's `{init}` object. `lynx.loadScript` still consumes registered
-custom sections only, and the asynchronous half — `requireModuleAsync`,
+A compiled BTS page carries no source table and no source text. `PageSource`
+turns each of its bodies — its manifest paths and its string custom sections —
+into an **ES module** and registers it with the embedder's resource system
+beside the page's own input URL; the BTS boot script calls
+`__BobcatRegisterBundle(templateUrl)` and then `lynx.requireModule('/app-service.js')`,
+and carries nothing of the container's bodies. `define`/`require` expose the
+compiler factory ABI over what a body defined.
+
+`requireModule`, `nativeApp.loadScript` and `lynx.loadScript` are therefore
+**one synchronous load each**, over the `loadModuleSync` a `require` is written
+over and beside the registered template URL, exactly as MTS's
+`__LoadLepusChunk` builds a chunk URL and loads it. The path is rooted first,
+so either spelling of a name is one URL. A registered body answers through its
+module's `default` export — a namespace with no `default` answers itself, JSON
+is the parsed value, and a path no container carried is normally a plain
+CommonJS file compiled in `module, exports` alone. A value carrying an `init`
+function is then initialized as `init.call(value, {tt})`, lynx-core's
+`_$executeInit`, with `globalThis.globDynamicComponentEntry` published for the
+call; anything else is the answer as it stands. A `.lynx.bundle`'s body reaches
+the first case because its module is `export default <the compiler's own
+IIFE>`, where native's host would have kept the script's completion value; a
+`.web.bundle`'s body is a CommonJS file whose module exports its
+`module.exports`. The asynchronous half — `requireModuleAsync`,
 `loadScriptAsync`, `fetchBundle` and lazy bundles — is still absent. See
 [worker resources](../worker-resources-runtime.md).
 
@@ -75,7 +87,7 @@ Lynx runs compiled ReactLynx output on **two logical JS contexts that share one 
 | `lynx.registerModule(name, module)` | Register an ad-hoc JS "module" object at runtime (not a NativeModule) | Rare | N/A | | lynx-stack/.../types/background-thread/lynx.d.ts |
 | `lynx.reload(value, callback)` | JS-triggered app reload with new init data | Core | N/A | | lynx-stack/.../types/background-thread/lynx.d.ts; lynx/core/runtime/js/bindings/lynx.cc:167-208 (`ReloadFromJS`); lynx-stack/packages/react/runtime/src/snapshot/lifecycle/reload.ts |
 | `lynx.requestResourcePrefetch` / `cancelResourcePrefetch` | Prefetch/cancel image/video resources | Extended | No | Non-standard; closest W3C analog is `<link rel=preload>`/Resource Hints, but Lynx's is imperative+typed (image/video, priority, cacheTarget) | lynx-stack/.../types/background-thread/lynx.d.ts |
-| `lynx.requireModuleAsync(path, cb)` / `requireModule(path, entryName?, options?)` | Synchronous/async CommonJS-style module loading from bundle | Core | N/A (not a web platform concept) | `requireModule` **implemented** in `bobcat:lynx-modules`: a registered manifest path from the boot script's source, any other path loaded through `loadModuleSync` beside the registered template URL in web-core's wrapper parameter list, cached per realm under the bare path and only after the body returns. `options` is accepted and ignored — web-core has no fetch timeout, and native's own `loadScript` binding reads one only from a *number* third argument it is never given (`js_app.cc:197-199`). `requireModuleAsync` stays `undefined` | lynx-stack/.../types/background-thread/lynx.d.ts |
+| `lynx.requireModuleAsync(path, cb)` / `requireModule(path, entryName?, options?)` | Synchronous/async CommonJS-style module loading from bundle | Core | N/A (not a web platform concept) | `requireModule` **implemented** in `bobcat:lynx-modules`: one synchronous `loadModuleSync` of the URL the path names beside the registered template URL, as MTS's `__LoadLepusChunk` loads a chunk. A body the container carried is an ES module `PageSource` wrote — a `.lynx.bundle`'s exporting the expression native would have kept as its script's completion value — so the answer is its `default` export; a path no container carried is normally a plain CommonJS file. Either is initialized through its `init({tt})` where it carries one, and cached per realm under the bare path only after that returned. `options` is accepted and ignored — web-core has no fetch timeout, and native's own `loadScript` binding reads one only from a *number* third argument it is never given (`js_app.cc:197-199`). `requireModuleAsync` stays `undefined` | lynx-stack/.../types/background-thread/lynx.d.ts |
 | `lynx.setObserverFrameRate(options?)` | Tune polling rate for page-rect/exposure observers | Rare | N/A | | lynx-stack/.../types/background-thread/lynx.d.ts |
 | `lynx.EventSource` | SSE client constructor, subset of `EventSource` | Extended | Partial | Explicitly modeled on W3C EventSource per its own doc comment (`@since 3.5`); implement to spec where feasible | lynx-stack/.../types/background-thread/lynx.d.ts:143 |
 | `lynx.fetch(input, init?)` | Subset of Fetch API | Core | Partial | Doc comment says "subset of Fetch API"; implement against `fetch()`/`Request`/`Response` semantics as far as the subset goes | lynx-stack/.../types/background-thread/lynx.d.ts:150; lynx-stack/.../types/background-thread/fetch.d.ts |

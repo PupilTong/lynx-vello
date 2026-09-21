@@ -1129,7 +1129,7 @@ consequential choice about whether to follow the spec or the quirk.
   Android implementation is documented as a "shared, polluted, process-global"
   value not maintained per-view — worth a cleaner per-view accessor in
   lynx-vello rather than copying that specific bug.
-- **`lynx.requireModule`'s load of a path no manifest carries** — three
+- **`lynx.requireModule`'s load of a path no bundle carries** — three
   choices in one API, all resolved toward web-core. There is **no fetch
   timeout**: web-core has none, and native's 5 s default is unreachable from
   `requireModule` anyway, its `loadScript` binding reading a timeout only from a
@@ -1138,9 +1138,25 @@ consequential choice about whether to follow the spec or the quirk.
   cannot answer carries **this engine's own `cannot load '<url>'` text**, not
   lynx-core's `load failed. path:…,entryName:…` (`app.ts` `_$executeInit`),
   because the host member underneath is where the failure is known. And **`Card`/`Component` are always
-  among the wrapper's parameters**, where web-core omits the pair for a React
-  card (`createChunkLoading.ts`): a chunk that does not name them is unaffected,
-  and the registered-source path passes both already.
+  in scope for a body the container carried**, where web-core omits the pair
+  for a React card (`createChunkLoading.ts`): a body that does not name them is
+  unaffected either way.
+- **A compiled bundle's bodies evaluate once per realm; native re-evaluates
+  per call** — every body a *BTS* container carries beyond its entry script is
+  an ES module here (`PageSource`), and `lynx.requireModule`,
+  `lynx.loadScript` and `nativeApp.loadScript` each `require` it by URL,
+  synchronously, at the call that first asks for it. A URL is one module per
+  realm, so a second call for the same path is answered from the evaluation
+  the first one ran and only the `init` runs again. Native's
+  `App::LoadScript` re-reads and re-runs a script per call (`js_app.cc`).
+  **Decision: once per realm**, which is the ESM module map's own rule and the
+  rule `lynx.requireModule`'s cache already followed. Observable where a body's
+  top-level code has side effects it expects to repeat; the compiler's own
+  chunks define and export, and are unaffected. A body that throws while
+  evaluating is reported at the `requireModule` that reached it, which is where
+  native reports it too. This covers bundle bodies only: a **named Lepus
+  chunk** is not a module, and `__LoadLepusChunk` loads and runs it again on
+  every call, as native does.
 - **`NativeModules.<name>` for a module the host does not have** — native's
   `LynxJSIModuleBinding::get` answers `null`
   (`lynx_jsi_module_binding.cc:23`), while web-core builds a plain object out

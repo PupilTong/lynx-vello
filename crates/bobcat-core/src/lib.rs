@@ -71,6 +71,7 @@ pub use dom::{
     FontBlob, FrameImages, ImageEvent, ImageInbox, ImageReports, ImageSizeHint,
     MAX_RENDERABLE_DIMENSION, MAX_STYLE_THREADS, NoImages, is_renderable, vello,
 };
+pub use esm::BTS_CHUNK_PREAMBLE;
 pub use main::tree::PageConfig;
 pub use native_module::{ModuleCall, ModuleCallback, NativeModule};
 pub use paint::Painter;

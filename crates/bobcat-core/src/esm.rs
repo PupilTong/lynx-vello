@@ -51,6 +51,30 @@ pub(crate) const BTS_RUNTIME_MODULE_SOURCE: &str = runtime_source!("background-t
 /// bootstrap uses the same import to initialize the Context before the app.
 pub(crate) const BTS_ENTRY_PREAMBLE: &str = "import { lynx } from \"bobcat:bts-runtime\";\n";
 
+/// Named imports prepended to one *bundle body* before it is registered as a
+/// module: every name web-core's `createBundleInitReturnObj` puts in a chunk
+/// wrapper's parameter list (`createChunkLoading.ts`), the ones this realm has
+/// a value for as imports of [`BTS_RUNTIME_MODULE_SPECIFIER`] and the rest as
+/// `undefined`, exactly as web-core supplies them. `module` and `exports` are
+/// not here: a `CommonJS` body needs its own pair, and the adapter that writes
+/// one declares them beside this.
+///
+/// One physical line, deliberately: the body follows it on the same line, so
+/// every line of the body keeps the number it had in the container.
+///
+/// `bobcat-source`'s `PageSource` is what prepends it, as a page's bodies are
+/// its to register; it lives here because the names are this realm's.
+pub const BTS_CHUNK_PREAMBLE: &str = concat!(
+    "import { lynx, lynxCoreInject, NativeModules, console, SystemInfo, Card, Component, ",
+    "nativeAppId, Behavior, LynxJSBI, setTimeout, setInterval, clearTimeout, clearInterval, ",
+    "requestAnimationFrame, cancelAnimationFrame } from \"bobcat:bts-runtime\"; ",
+    "const postMessage = undefined, ReactLynx = undefined, window = undefined, ",
+    "document = undefined, frames = undefined, location = undefined, navigator = undefined, ",
+    "localStorage = undefined, history = undefined, Caches = undefined, screen = undefined, ",
+    "alert = undefined, confirm = undefined, prompt = undefined, webkit = undefined, ",
+    "Reporter = undefined, print = undefined, global = undefined; ",
+);
+
 /// BTS query builders carry selection tokens across Worker messages.
 pub(crate) const SELECTOR_QUERY_SPECIFIER: &str = "bobcat:selector-query";
 pub(crate) const SELECTOR_QUERY_SOURCE: &str = runtime_source!("selector-query");

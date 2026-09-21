@@ -43,23 +43,53 @@ Neither boot scheduling nor local chunk loading changes that boundary.
 
 ## Named Lepus chunks
 
-`PageSource` preserves non-entry Lepus source chunks. It registers their source
-map with `__BobcatRegisterLepusChunks` and supplies `source => eval(source)`
-inside the selected entry module. That direct-eval closure retains the entry's
-runtime/PAPI imports and lexical scope, without a global binding installer.
+`PageSource` registers every non-entry Lepus chunk with the embedder's
+resource system, **verbatim**, at a resource URL of its own —
+`<entry URL path>/<name>.js`, the chunk name percent-encoded the way a named
+stylesheet section's is (`named_chunk_url`), any `?`/`#` suffix of the entry
+URL kept. Nothing is prepended to it and nothing imports it. The root MTS
+script is the container's own text: no import prefix, no registration call, no
+table.
 
-`__LoadLepusChunk` executes only a matching local card chunk, on demand and
-again on each call. It returns false for an absent chunk or a different
-component entry. Finding a chunk returns true even if its evaluation reports
-an exception. Queued jobs remain the enclosing checkpoint's work. These lookup
-and evaluation rules follow `core/runtime/lepus/bindings/renderer_functions.cc`
-and `core/renderer/template_entry.cc` in the read-only native Lynx checkout.
+`__LoadLepusChunk(path, options)` does the rest, in JavaScript
+(`main-thread-runtime.ts`):
 
-The retained entry scope lets a chunk access the module's own variables;
-it does not provide arbitrary global Script declarations shared between
-separate evaluations. ReactLynx's `__LoadLepusChunk('worklet-runtime', ...)`
-caller is in `packages/react/runtime/src/worklet-runtime/bindings/loadRuntime.ts`
-of the read-only `lynx-stack` checkout. Public `lynx.loadScript`/`fetchBundle`,
+- a different component entry: `false`, as in native, without asking for
+  anything;
+- otherwise the chunk's URL is built here — `chunkURL`, the same string
+  `named_chunk_url` writes — and loaded through `loadModuleSync`, the **same
+  synchronous host loader a `require` uses**;
+- a load the host cannot answer is a chunk this page does not carry: `false`;
+- a load that answers a `SyntaxError` is a chunk that exists but does not
+  compile: reported through `_ReportError`, and `true`;
+- otherwise the body runs, an exception in it is reported and nothing more,
+  and the answer is `true`.
+
+The load parks the job the call runs in until the host answers: `bobcat-main`'s
+tasks keep running, and no other job does — not this realm's promise jobs, and
+not a sibling realm's. **A chunk is evaluated again on every call**, as
+native's `TemplateEntry` does (`core/renderer/template_entry.cc`,
+`core/runtime/lepus/bindings/renderer_functions.cc`): there is no chunk cache,
+and the ESM module map never sees a chunk, because a chunk is not a module.
+
+A chunk does not share the entry module's lexical scope. The host compiles it
+as a **function body**, whose parameters are the bindings the entry preamble
+gives the entry — every `bobcat:element` export, and the `bobcat:runtime`
+names `__Card__`, `lynx`, `console`, `SystemInfo`, `__globalProps`,
+`NativeModules`, `_AddEventListener`, `_ReportError`, `_SetSourceMapRelease`,
+`__OnLifecycleEvent`, `__LoadLepusChunk`, `__LoadStyleSheet` and
+`__AdoptStyleSheet` — read at the call, so `__Card__`, `SystemInfo` and
+`__globalProps` are the values the realm holds now. Plus this realm's
+`globalThis`, which is how a chunk and the entry exchange anything. That is
+what native does, where a chunk is a separate script evaluated in the same
+context. A `var` at a chunk's top level is local to that call and declares no
+global, and an `import` could not appear in a function body at all.
+
+Queued jobs remain the enclosing checkpoint's work: a job a chunk queues runs
+at the checkpoint the entry is already inside, not inside the load. ReactLynx's
+`__LoadLepusChunk('worklet-runtime', ...)` caller is in
+`packages/react/runtime/src/worklet-runtime/bindings/loadRuntime.ts` of the
+read-only `lynx-stack` checkout. Public `lynx.loadScript`/`fetchBundle`,
 complete lazy-container loading and data/update/reload policy remain separate.
 
 ## Validation coverage
@@ -70,8 +100,13 @@ render job's width is committed while the nested job's later style mutation
 remains dirty. Further tests cover processor/render errors and per-listener
 error reporting without interrupting delivery or running jobs between listeners.
 
-Chunk tests verify retained entry imports, absence of duplicate global bindings,
-repeat evaluation and deferred jobs. A source-container integration test
-exercises selected entry/chunk registration through the shipped resource host.
-JavaScript tests cover local/missing chunk lookup and repeated failed evaluation.
-No compiled fixture artifacts are added.
+Chunk tests verify that a chunk is loaded and run once per call — two calls,
+two host requests, two evaluations — that it was given the same runtime and
+PAPI bindings as the entry, the absence of duplicate global bindings, that its
+`var` does not leak, a chunk this page does not carry (its request refused), a
+foreign component entry (no request at all), and deferred jobs. A
+source-container integration test exercises selected entry/chunk registration
+and on-demand evaluation through the shipped resource host. JavaScript tests
+cover the URL built, the parameter list, the bindings the body receives, a load
+failure, a body that throws, a body that does not compile, and the argument
+checks. No compiled fixture artifacts are added.

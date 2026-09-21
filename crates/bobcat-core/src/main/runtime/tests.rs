@@ -135,40 +135,77 @@ fn a_throwing_processor_reports_and_still_runs_render_and_flush() {
     assert!(reports[0].contains("processor failed"));
 }
 
+/// A named Lepus chunk is a script resource of its own, loaded through the
+/// same synchronous host loader a `require` uses and run again on every
+/// `__LoadLepusChunk` call, as native's `TemplateEntry` does.
+///
+/// What a chunk shares with the root is the bindings the entry preamble gives
+/// the entry — the realm hands them to the chunk as the parameters of the
+/// function body it was compiled as — and this realm's `globalThis`. Not the
+/// root's lexical scope, and not the root's `var`s: a `var` at a chunk's top
+/// level is local to that call.
+//
+// A plain test rather than a `tokio::test`, for the reason the `require`
+// tests spell out: the load's wait is a `block_on` of the realm's engine
+// thread, which tokio refuses from inside a runtime.
 #[test]
-fn lepus_chunks_keep_entry_scope_and_defer_jobs_to_the_enclosing_checkpoint() {
-    let (mut js, mut runtime, _elements, mut far) = runtime_over_watching_names(ingredients());
+fn lepus_chunks_load_per_call_and_defer_jobs_to_the_checkpoint() {
+    let (mut js, mut runtime, _elements, far) = runtime_over_watching_names(ingredients());
+    let mut notices = far.0.notices;
+    let host = std::thread::spawn(move || {
+        // Two calls, two requests, two evaluations: nothing caches a chunk.
+        for call in 1..=2 {
+            let (url, completion) = requested_module(&mut notices);
+            assert_eq!(url, "app:///chunks.js/worklet.js", "call {call}");
+            completion.complete(Ok(module_source(
+                r"
+                globalThis.executions = (globalThis.executions ?? 0) + 1;
+                var chunkLocal = true;
+                globalThis.chunkRuntime = lynx;
+                globalThis.chunkPAPI = __CreateView;
+                Promise.resolve().then(() => { globalThis.chunkJob = true; });
+                ",
+                "app:///chunks.js/worklet.js",
+            )));
+        }
+        // A chunk this page does not carry is a load the host refuses.
+        let (url, completion) = requested_module(&mut notices);
+        assert_eq!(url, "app:///chunks.js/missing.js");
+        completion.complete(Err(crate::resource::unanswered_source().into()));
+        notices
+    });
     runtime
         .run_main_thread_script(
             &mut js,
             r"
-        import {__BobcatRegisterLepusChunks as register} from 'bobcat:runtime';
         if ((0, eval)('typeof lynx') !== 'undefined'
             || (0, eval)('typeof __CreateView') !== 'undefined')
             throw Error('runtime/PAPI imports were also installed as global bindings');
-        let executions = 0;
-        const chunk = `
-            executions++;
-            var chunkLocal = true;
-            if (lynx !== runtimeIdentity || __CreateView !== papiIdentity)
-                throw Error('chunk lost entry scope');
-            Promise.resolve().then(() => globalThis.chunkJob = true);
-        `;
-        const runtimeIdentity = lynx;
-        const papiIdentity = __CreateView;
-        register({worklet: chunk}, source => eval(source));
+        if (globalThis.executions !== undefined)
+            throw Error('a chunk ran before it was asked for');
         if (!__LoadLepusChunk('worklet', {}) || !__LoadLepusChunk('worklet', {}))
             throw Error('chunk not found');
-        if (executions !== 2 || typeof chunkLocal !== 'undefined' || globalThis.chunkJob)
-            throw Error('chunk scope, repeat evaluation or job boundary');
+        if (globalThis.executions !== 2)
+            throw Error('a chunk runs on every call: ' + globalThis.executions);
+        if (globalThis.chunkRuntime !== lynx || globalThis.chunkPAPI !== __CreateView)
+            throw Error('the chunk was given other bindings than the entry');
+        if (typeof chunkLocal !== 'undefined' || 'chunkLocal' in globalThis)
+            throw Error('a chunk var leaked out of its own call');
+        if (globalThis.chunkJob)
+            throw Error('a job ran while the load had this job parked');
+        if (__LoadLepusChunk('missing', {}))
+            throw Error('a chunk this page does not carry was found');
+        if (__LoadLepusChunk('worklet', {dynamicComponentEntry: 'app:///other.js'}))
+            throw Error('a foreign entry was answered, or asked for');
         globalThis.renderPage = () => {
             if (!globalThis.chunkJob) throw Error('enclosing checkpoint lost chunk jobs');
         };
-    ",
+        ",
             "app:///chunks.js",
         )
         .unwrap();
-    while let Ok(notice) = far.0.notices.try_recv() {
+    let mut notices = host.join().unwrap();
+    while let Ok(notice) = notices.try_recv() {
         assert!(
             !matches!(
                 notice,

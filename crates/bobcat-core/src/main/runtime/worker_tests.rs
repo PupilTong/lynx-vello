@@ -195,6 +195,34 @@ impl Pair {
         )
     }
 
+    /// Answers the next module one of this view's realms asks for, spinning
+    /// the way an embedder's own turn does. A compiled BTS bundle reaches its
+    /// manifest paths through the host now, and the load parks the worker's
+    /// job until this answers it.
+    fn serve_module(&mut self, url: &str, source: &str) {
+        let deadline = ClockInstant::now() + PATIENCE;
+        loop {
+            self.pump_host();
+            let waiting = self.deferred_notices.iter().position(|notice| {
+                matches!(notice, ViewNotice::RequestSource {
+                    request: SourceRequest::Module(requested), ..
+                } if requested == url)
+            });
+            if let Some(position) = waiting
+                && let Some(ViewNotice::RequestSource { completion, .. }) =
+                    self.deferred_notices.remove(position)
+            {
+                completion.complete(Ok(LoadedSource::Entry {
+                    source: source.to_owned(),
+                    url: url.to_owned(),
+                }));
+                return;
+            }
+            assert!(ClockInstant::now() < deadline, "the realm asked for {url}");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
     /// The next source request the realm made, which for these tests is
     /// always a worker script.
     fn source(&mut self) -> SourceCompletion {
@@ -2504,18 +2532,44 @@ fn releasing_a_development_view_unmounts_the_current_react_tree() {
     verify_react_teardown(true, true);
 }
 
+/// Answers one manifest path of a native bundle, at the URL `PageSource`
+/// registers it under — beside the bundle's own URL — with the body served
+/// through the same adaptation `PageSource` applies at registration.
+///
+/// The card asks for each of them itself: `lynx.requireModule` builds this
+/// URL and loads it synchronously, so a load is a worker job parked on this
+/// answer, in the order the card asks, not a boot-time import of every path.
+fn serve_bundle_path(pair: &mut Pair, template: &bobcat_source::web::WebTemplate, path: &str) {
+    pair.serve_module(
+        &format!("app:///nested{path}"),
+        &bobcat_source::bts_module_source(
+            bobcat_source::BundleTarget::Lynx,
+            &template.manifest[path],
+        ),
+    );
+}
+
 fn verify_react_teardown(reload: bool, development: bool) {
+    const BUNDLE_URL: &str = "app:///nested/card.lynx.bundle";
+
     let bytes: &[u8] = if development {
         fixtures::fixture("react-reload-development").page
     } else {
         fixtures::fixture("react-reload").page
     };
     let template = bobcat_source::native::decode(bytes).unwrap();
+    // What `PageSource` writes for a source-based native bundle: the bundle's
+    // own URL as the base every path of it resolves against, then the
+    // `requireModule` that loads and starts the card. Nothing of the
+    // container's bodies is in it.
+    //
+    // `lynx` is the test entry preamble's own import; only the registration
+    // is named here, as `PageSource`'s own boot script names it.
     let background = format!(
         "import {{__BobcatRegisterBundle}} from 'bobcat:bts-runtime';\n\
-         __BobcatRegisterBundle({}, true, {});\nlynx.requireModule('/app-service.js');",
-        serde_json::to_string(&template.manifest).unwrap(),
-        "{}",
+         __BobcatRegisterBundle({url});\n\
+         lynx.requireModule('/app-service.js');",
+        url = serde_json::to_string(BUNDLE_URL).unwrap(),
     );
     let mut pair = Pair::unbooted_with_data(
         Some(&background),
@@ -2527,6 +2581,15 @@ fn verify_react_teardown(reload: bool, development: bool) {
 
     pair.boot(&template.lepus_code["react-reload__main-thread"])
         .unwrap();
+    // In the order the card asks for them, which is its own: the entry, then
+    // the chunk its `init` reaches for. Each is a job of the worker parked on
+    // this answer — nothing imported either ahead of time.
+    serve_bundle_path(&mut pair, &template, "/app-service.js");
+    for path in template.manifest.keys() {
+        if path != "/app-service.js" {
+            serve_bundle_path(&mut pair, &template, path);
+        }
+    }
     let mut missing_websocket_warnings = 0;
     for seed in if reload { &[0, 2][..] } else { &[0][..] } {
         if *seed == 2 {

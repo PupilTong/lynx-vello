@@ -2,16 +2,19 @@
 
 Named CSS uses the same resource loader as startup stylesheets. The embedder
 resolves a URL and returns `StyleSheetSource::Text` or
-`StyleSheetSource::Preparsed`; JavaScript receives an opaque handle in either
-case. Core carries no decoded bundle metadata in its view configuration.
+`StyleSheetSource::Preparsed`; JavaScript receives a handle naming the URL in
+either case. Core carries no decoded bundle metadata in its view configuration.
 
 ## Entry identity and URL mapping
 
 Boot passes its entry response URL to `__BobcatInitEntry` before importing the
 application entry. The `__Card__` import in MTS reads that JS binding from
 `bobcat:runtime`; there is no native URL getter. The string `"__Card__"` remains
-an accepted alias, replaced by JavaScript. Local Lepus chunk lookup accepts
-either the alias or the same entry URL.
+an accepted alias, replaced by JavaScript. A local Lepus chunk load accepts
+either the alias or the same entry URL, and its resource URL is built the same
+way and in the same place: `chunkURL` beside `styleSheetURL`, appending
+`/<encoded-name>.js` with the suffixes preserved. `PageSource` registers the
+chunk under exactly that string (`named_chunk_url`).
 
 `__LoadStyleSheet('CSS', bundleName)` appends `/index.css` to the entry or
 bundle URL's path. Other section names use `/<encoded-name>/index.css`.
@@ -30,13 +33,16 @@ script loader remains separate work.
 
 ## Preload and adopt
 
-`__LoadStyleSheet` returns a fresh opaque JS object whose only associated data
-is the CSS URL. It sends a `ResourceFetcher::preload_source` hint; core retains
-no response, native handle or loading state. A fetcher may ignore the hint.
+`__LoadStyleSheet` returns a plain `{url}` object, whose only content is the
+CSS URL. No realm state survives the call either: there is no table behind the
+handle, so a handle is exactly as good as the URL it names and one built by
+hand works. It sends a `ResourceFetcher::preload_source` hint; core retains no
+response, native handle or loading state. A fetcher may ignore the hint.
 Preloading neither mounts styles nor waits for IO, and unused preloads produce
 no script errors.
 
-Each `__AdoptStyleSheet(handle)` reads the URL in JS and makes an ordinary
+Each `__AdoptStyleSheet(handle)` reads `handle.url` in JS — anything else is a
+`TypeError` — and makes an ordinary
 `SourceRequest::StyleSheet` through the same loader used for startup styles.
 It synchronously mounts the response and returns null. Only that call holds a
 response receiver. If the response has not arrived, the adoption parks the job
@@ -68,11 +74,11 @@ CSS specificity and importance. Every call requests its URL again; core does
 not cache the response behind the JS handle. The ordinary element-tree
 flush/commit publishes the resulting styles.
 
-Collecting a JS handle releases only its URL association. It sends no native
-release or cancellation; preload lifetime belongs to the resource scope.
-Mounted styles belong to the document and survive handle collection. View
-release wakes a blocked adoption even if the host retains its completion;
-late responses are discarded by the existing resource protocol.
+Collecting a handle releases nothing but the object: it sends no native release
+or cancellation, and preload lifetime belongs to the resource scope. Mounted
+styles belong to the document. View release wakes a blocked adoption even if
+the host retains its completion; late responses are discarded by the existing
+resource protocol.
 
 ## Source ownership and validation
 

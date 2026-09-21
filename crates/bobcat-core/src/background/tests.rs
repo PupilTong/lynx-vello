@@ -593,17 +593,18 @@ fn a_worker_requires_commonjs_and_json_against_its_own_response_url() {
     );
 }
 
-/// The compiled-bundle loader over the same synchronous load: a path the
-/// manifest does not carry is asked for beside the template URL the bundle was
-/// registered with, and the exports of its body are what `requireModule`
-/// answers.
+/// The compiled-bundle loader over the same synchronous load: a bundle path is
+/// asked for beside the template URL the bundle was registered with, and the
+/// exports of its body are what `requireModule` answers. Nothing is registered
+/// with the realm but that URL, so a path a container carried and one it did
+/// not are one mechanism.
 #[test]
-fn a_bts_bundle_requires_an_unregistered_chunk_beside_its_template_url() {
+fn a_bts_bundle_requires_a_chunk_beside_its_template_url() {
     let mut group = Group::new();
     group.start(
         r"
         import { lynx, __BobcatRegisterBundle } from 'bobcat:bts-runtime';
-        __BobcatRegisterBundle({}, false, {}, undefined, 'https://cdn.test/app/x.web.bundle');
+        __BobcatRegisterBundle('https://cdn.test/app/x.web.bundle');
         postMessage(JSON.stringify(lynx.requireModule('/chunk.js')));
     ",
     );
@@ -617,6 +618,44 @@ fn a_bts_bundle_requires_an_unregistered_chunk_beside_its_template_url() {
         group.message(0),
         wire(r#"{"answer":42}"#),
         "a bundle path resolves against its template URL and answers its exports"
+    );
+}
+
+/// A body `PageSource` registered is an **ES module**, and the same
+/// `requireModule` loads it: `require(esm)` compiles it, links its
+/// `BTS_CHUNK_PREAMBLE` import of this realm's own runtime, evaluates it and
+/// answers its namespace, whose default export is what native's host would
+/// have kept as that script's completion value. An `{init}` there is what
+/// starts the card, with the entry published for the call.
+///
+/// The `require` runs from inside the entry module's own evaluation, which is
+/// where a page's boot script calls it from, and the body's import of
+/// `bobcat:bts-runtime` links to the instance this realm already has.
+#[test]
+fn a_registered_bundle_body_answers_through_its_modules_default_export() {
+    let mut group = Group::new();
+    group.start(
+        r"
+        import { lynx, __BobcatRegisterBundle } from 'bobcat:bts-runtime';
+        __BobcatRegisterBundle('https://cdn.test/app/x.web.bundle');
+        postMessage(JSON.stringify(lynx.requireModule('/app-service.js')));
+    ",
+    );
+    let (url, completion) = group.views[0].source();
+    assert_eq!(url, "https://cdn.test/app/app-service.js");
+    completion.complete(Ok(LoadedSource::Entry {
+        source: format!(
+            "{}export default {{init: ({{tt}}) => ({{\
+             card: typeof tt.define, entry: globalThis.globDynamicComponentEntry, \
+             runtime: typeof lynx.getNativeApp}})}};",
+            crate::esm::BTS_CHUNK_PREAMBLE
+        ),
+        url,
+    }));
+    assert_eq!(
+        group.message(0),
+        wire(r#"{"card":"function","entry":"__Card__","runtime":"function"}"#),
+        "the body's module default-exported the object the card starts from"
     );
 }
 

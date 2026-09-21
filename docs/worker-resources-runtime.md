@@ -44,7 +44,7 @@ read-only `lynx-stack` checkout at `f47d3e6a56200bf07d58fc1656712878ea851a3d`.
 
 | Required API | Actual caller and observable result |
 | --- | --- |
-| `lynx.requireModule(path, bundleName)` | Generated entry loads an embedded module and synchronously receives its exports. `packages/webpack/template-webpack-plugin/src/LynxEncodePlugin.ts`. **Implemented**, for a registered manifest path and for one no manifest carries. |
+| `lynx.requireModule(path, bundleName)` | Generated entry loads an embedded module and synchronously receives its exports. `packages/webpack/template-webpack-plugin/src/LynxEncodePlugin.ts`. **Implemented**: one synchronous load of the URL the path names beside the registered template URL, whether or not the container carried it. |
 | `lynx.requireModuleAsync(url, callback)` | Dynamic JS imports and generated JS chunk loading receive `(error, exports)`. `packages/react/runtime/src/core/lynx/dynamic-import.ts` and `packages/webpack/chunk-loading-webpack-plugin/src/runtime/javascript/chunk-loading.js`. |
 | `lynx.fetchBundle(url, {})` | Default asynchronous lazy loading calls the returned handler's `.then(callback)` and reads `code` and `url`. `packages/react/runtime/src/core/lynx/lazy-bundle.ts`. |
 | `fetchBundle(...).wait(5)` | Only a lazy import explicitly using `mode: 'sync'` takes this path. Ordinary asynchronous lazy loading does not wait synchronously. Same lazy-bundle source. |
@@ -69,15 +69,15 @@ That caller does not require a separate raw JSON text API.
 The asynchronous and lazy-bundle execution APIs above remain unimplemented;
 `callLepusMethod` already supplies the message boundary. They should reuse the
 existing resource transport while providing execution results, exports,
-caching, and errors at the required API boundary. Lynx module factories and
-section evaluation have different semantics from ESM; reusing transport does
-not make an ordinary `import()` a complete implementation of `requireModule` or
-`loadScript`.
+caching, and errors at the required API boundary. An `import()` is the loading
+half and not the API: a Lynx module factory is initialized through its own
+`init({tt})` and cached under the bare path, and a section is answered once per
+entry, none of which the module map does by itself.
 
-The *synchronous* primitive those callers need exists as `bobcat:module`:
-`createRequire(import.meta.url)` answers Node's `require`, which resolves
-through the normalizer imports use, requests `SourceRequest::Module` on this
-same channel, and parks the job it runs in on the answer — the engine thread's
+Node's `require` is the *synchronous* primitive beside it, as `bobcat:module`:
+`createRequire(import.meta.url)` resolves through the normalizer imports use,
+requests `SourceRequest::Module` on this same channel, and parks the job it
+runs in on the answer — the engine thread's
 tasks keep running, and no other job does. It keeps one cache per realm, and
 reads a source as CommonJS, JSON or an ES module, by Node 24's rules for which:
 
@@ -107,41 +107,112 @@ refused even when its own body has already finished. A `require` reached from
 anywhere no module body is running — a host call, a listener, a timer, a plain
 script — answers from the instance as usual.
 
-`lynx.requireModule(path, entryName?, options?)` is the compiled-bundle layer
-over the same primitive, in `bobcat:lynx-modules`. A registered manifest path is
-evaluated from the source the boot script carried, as before. A path no
-manifest carries is *loaded*: the path is rooted the way native roots it
-(`js_app.cc` `App::LoadScript`), taken as a reference beside the template URL
-the entry's `__BobcatRegisterBundle` was given — the page's own input URL, so
+`lynx.requireModule(path, entryName?, options?)` is the compiled-bundle layer,
+in `bobcat:lynx-modules`, and it is **that same synchronous load**, one
+mechanism with MTS's `__LoadLepusChunk`: the realm builds the URL the path
+names and loads it, before the call returns. There is no table of bodies and no
+boot-time import. Nothing is registered as source text, and nothing hands a
+body to JavaScript.
+
+`PageSource` turns every body of a container — its manifest paths and its
+string custom sections — into an **ES module** and registers each with the
+embedder's resource system, beside the page's own input URL. The BTS boot
+script it writes registers that URL and starts the card, and carries nothing of
+the container's bodies — no name, no URL, no text:
+
+```js
+import {lynx, __BobcatRegisterBundle} from 'bobcat:bts-runtime';
+__BobcatRegisterBundle("<template url>");
+lynx.requireModule('/app-service.js');
+```
+
+That `requireModule` runs inside this module's own evaluation, and the load it
+makes is a `require(esm)` of a module nothing has reached yet, so the
+still-evaluating refusal above does not apply: a bundle body is never
+`import`ed, only `require`d, and is therefore either compiled by the `require`
+that asked for it or answered from the evaluation an earlier one already ran.
+The body's own `BTS_CHUNK_PREAMBLE` import of `bobcat:bts-runtime` links to
+the instance the realm already has, and a chunk a card's `init` reaches for is
+another such load. A native container's main-thread sections are not among the
+bodies, being Lepus chunks — a chunk is a plain script resource the MTS realm
+loads on demand, not a module anything imports.
+
+**What a body becomes.** One physical line of preamble, so the body keeps its
+own line numbering. The preamble is `BTS_CHUNK_PREAMBLE`
+(`crates/bobcat-core/src/esm.rs`): every name web-core's chunk wrapper would
+have had as a parameter (`createChunkLoading.ts`
+`createBundleInitReturnObj`) — the ones this realm has a value for imported
+from `bobcat:bts-runtime`, the rest `undefined`. Then, by container:
+
+- a `.lynx.bundle`'s body is one expression statement — the Lynx compiler's
+  `(function(){…})()`, or a `RuntimeWrapperWebpackPlugin` banner — so it
+  becomes `export default <body>`. What native's host would have kept as that
+  script's completion value is the module's default export instead. A trailing
+  `;` and a `//# sourceMappingURL=` line are both fine after
+  `export default <expr>`.
+- a `.web.bundle`'s body is a CommonJS file, so it gets a `module` object and
+  an `exports` alias of its own and `export default module.exports` after it.
+  Its leading `"use strict"` stops being a directive prologue; a module is
+  strict anyway.
+- a `.json` body is a value rather than a file, and is registered **verbatim**:
+  the loader reads a `.json` response as JSON by its own path, so there is
+  nothing a module wrapper around it could be compiled as.
+
+**What a load answers.** The path is rooted first — native's own rooting
+(`js_app.cc` `App::LoadScript`), so a manifest path (`/app-service.js`) and a
+section name (`background`) are each reachable by either spelling, both naming
+one URL — and taken as a reference beside the registered template URL, so
 `/chunk.js` under `https://cdn.test/app/x.web.bundle` is
-`https://cdn.test/app/chunk.js` — and handed to `loadModuleSync` in web-core's
-own wrapper parameter list (`createChunkLoading.ts`
-`createBundleInitReturnObj`). A Lynx-target chunk answers through
-`globalThis.__bundle__holder`, which is where the
-`RuntimeWrapperWebpackPlugin` banner stores its `{init}` while
-`bundleSupportLoadScript` is set; a raw CommonJS body answers through
-`module.exports`; a `.json` response is the value the host parsed. Nothing is
-cached until the load, the compile and the body have all returned, and the key
-is the bare path, as in lynx-core. With no template URL registered only an
-absolute path resolves, and a bundle path is a `TypeError` carrying the
-normalizer's message.
+`https://cdn.test/app/chunk.js`. Then, by what came back:
+
+- a **module**, which is what a registered body is: its `default` export, or the namespace itself
+  when it has no `default` own property, which only a hand-written module has.
+- **JSON**: the value the host parsed.
+- **CommonJS**, which is what a path no container carried normally is: compiled in `module,
+  exports` and nothing else, with `this` undefined — such a file gets none of the Lynx names a
+  registered body has — and answering `module.exports`.
+
+That value is then the answer, except that a value carrying an `init` function
+is *initialized*: `init.call(value, {tt: app})`, lynx-core's `_$executeInit`
+(`app.ts`), with `globalThis.globDynamicComponentEntry` published for the
+length of that call because a banner reads it there. That is how a compiled
+card starts.
+
+Nothing is cached until the factory has returned, and the key is the bare
+path, as in lynx-core: a value whose `init` threw is loaded and initialized
+again by the next call — the load answering from the module the realm has
+already evaluated, since a URL is one module per realm.
+
+An entry that is itself an absolute URL, as a lazy bundle's `bundleName` is,
+resolves beside itself. With no template URL registered only an absolute path
+resolves, and a bundle path is a `TypeError` carrying the normalizer's message.
 
 `nativeApp.loadScript(sourceURL, entryName?)` on `lynx.getNativeApp()` is the
-same code path, answering the `{init}` object web-core's
-`createBundleInitReturnObj` answers with. It consults the registered sources
-first and writes neither of `requireModule`'s caches, as lynx-core's
-`loadScript` writes neither, so a `requireModule` of that path afterwards loads
-it again.
+same load, answering the `{init}` object web-core's
+`createBundleInitReturnObj` answers with — the load is that call's, not
+`init`'s. It writes neither of `requireModule`'s caches, as lynx-core's
+`loadScript` writes neither.
 
-Three choices there are this engine's, not native's: there is no fetch timeout
+`lynx.loadScript(key, {bundleName})` is the named custom sections, the same
+load, cached once per entry and key. A section's value is what its own body
+evaluated to, which is web-core's `createBundleInitReturnObj` result rather
+than native's Script completion value: where the two disagree this project
+takes web-core's, so a `.web.bundle` section is written
+`module.exports = 21 * 2` while a `.lynx.bundle` section, whose bodies are
+expressions, is `21 * 2`.
+
+Choices here that are this engine's, not native's: there is no fetch timeout
 (native defaults to 5 s and `requireModule`'s `options` never reaches it
 anyway, its `loadScript` binding reading a timeout only from a *number* third
 argument), a load the host cannot answer carries this engine's own
-`cannot load '<url>'` text, and `Card`/`Component` are always among the
-wrapper's parameters where web-core omits the pair for a React card.
-`lynx.requireModuleAsync`, `nativeApp.loadScriptAsync`, `nativeApp.readScript`,
-`lynx.fetchBundle` and the lazy-bundle `lynx.loadScript` for an unregistered
-bundle are still absent.
+`cannot load '<url>'` text, `Card`/`Component` are always in scope for a
+registered body where web-core omits the pair for a React card, and **a body
+evaluates exactly once per realm**, at the first call that asks for it, where
+native re-evaluates per call — see `docs/tracking/deviations.md`. `lynx.requireModuleAsync`,
+`nativeApp.loadScriptAsync`, `nativeApp.readScript` and `lynx.fetchBundle` are
+still absent, and with them the lazy-bundle path that would register a second
+entry: a `bundleName` naming a bundle no `__BobcatRegisterBundle` has been
+given resolves beside itself, and its bodies are whatever the host serves.
 
 There is no `ScriptLoad` queue, `SourceRequest::Script` variant, synchronous
 `readScript` binding, or JS source-callback registry, and no API that hands a

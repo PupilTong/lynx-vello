@@ -36,6 +36,16 @@ const nativeModules: Record<string, object> = {};
 const app: {
   NativeModules: object;
   _apiList: object;
+  // Four names web-core's chunk preamble binds off the app object
+  // (`createBundleInitReturnObj`). Nothing in this realm ever sets one — a
+  // card's `Card`/`Component` come from lynx-core, which this engine does not
+  // run — so each stays `undefined`, which is what the old wrapper's
+  // arguments carried too.
+  Card?: unknown;
+  Component?: unknown;
+  nativeAppId?: unknown;
+  Behavior?: unknown;
+  LynxJSBI?: unknown;
   define?: Function;
   require?: Function;
   _nativeApp?: object;
@@ -149,10 +159,10 @@ const sendQuery: SendQuery = (operation, token, params, callback) => {
 const nativeApp = {
   nativeModuleProxy: nativeModules,
   /**
-   * One bundle script, loaded through the registered sources or through the
-   * host, as the `{init}` object web-core's `createBundleInitReturnObj`
-   * answers with: `init` answers the module's exports. It writes neither of
-   * `requireModule`'s caches, as lynx-core's own `loadScript` writes neither.
+   * One bundle script, loaded through the host, as the `{init}` object
+   * web-core's `createBundleInitReturnObj` answers with: `init` answers the
+   * module's exports. It writes neither of `requireModule`'s caches, as
+   * lynx-core's own `loadScript` writes neither.
    *
    * `loadScriptAsync` and `readScript` are deliberately absent: the second
    * would hand a source's text to JavaScript, which nothing in this engine
@@ -352,7 +362,7 @@ export const console = Object.fromEntries(
   ]),
 );
 
-// Compiler modules are registered before the app-service entry executes.
+// The bundle's base URL is registered before the app-service entry loads.
 export const lynx = {
   setTimeout: timers.setTimeout,
   setInterval: timers.setInterval,
@@ -432,15 +442,34 @@ export const lynxCoreInject = {tt: app};
 export const globDynamicComponentEntry = "__Card__";
 Object.assign(scope, {globDynamicComponentEntry});
 
+// The rest of web-core's chunk parameter list, as module exports: `PageSource`
+// prepends `BTS_CHUNK_PREAMBLE` to every bundle body it registers, and that
+// preamble imports these names from here. Each is the value the old wrapper's
+// argument list carried, so a body sees exactly what it saw before.
+export const NativeModules = nativeModules;
+export const Card = app.Card;
+export const Component = app.Component;
+export const nativeAppId = app.nativeAppId;
+export const Behavior = app.Behavior;
+export const LynxJSBI = app.LynxJSBI;
+export const setTimeout = lynx.setTimeout;
+export const setInterval = lynx.setInterval;
+export const clearTimeout = lynx.clearTimeout;
+export const clearInterval = lynx.clearInterval;
+export const requestAnimationFrame = lynx.requestAnimationFrame;
+export const cancelAnimationFrame = lynx.cancelAnimationFrame;
+
 /**
- * The bundle one entry was decoded from: its module sources, its named
- * sections, and the URL its template answered from, which is the base a path
- * no manifest carries is resolved against. No URL means no base.
+ * One entry's bundle: the URL its template answered from, and nothing else.
+ *
+ * Every body the container carried is a registered resource of its own, beside
+ * that URL, and nothing is loaded here — `lynx.requireModule`,
+ * `lynx.loadScript` and `nativeApp.loadScript` each build the URL their path
+ * names and load it synchronously, as MTS's `__LoadLepusChunk` does. The
+ * template URL is the base they resolve against: no URL means no base, and
+ * then only an absolute path resolves.
  */
-export function __BobcatRegisterBundle(manifest: Record<string, string>, wrapped: boolean,
-  sections: Record<string, string> = {}, entry?: string, templateUrl?: string) {
-  modules.register(manifest, wrapped, entry);
-  modules.registerSections(sections, entry);
+export function __BobcatRegisterBundle(templateUrl?: string, entry?: string) {
   modules.registerTemplateUrl(templateUrl, entry);
 }
 
