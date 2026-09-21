@@ -60,6 +60,31 @@
 //! [`Document::layout`](crate::Document::layout) is this engine's version of
 //! that, driven by the ids [`CommittedBoxTable::apply`] collects.
 //!
+//! # The interleave, and why the container half rarely waits for that loop
+//!
+//! A `container-type: size` box is the one recording that does not have to
+//! wait for its own contents, because css-contain-3 §2.1 gives it `contain:
+//! size`: *both* of its axes are laid out as if it had no contents, so its
+//! content box is a function of its own style and its layout input alone.
+//! [`container_estimate`] is that function, and the layout host calls it at
+//! the **entry** of such a box's committing run, before one child style has
+//! been read. When it disagrees with what is published, the run records the
+//! new size and lays no contents out
+//! ([`DeferredContainer`](crate::tree::document::DeferredContainer)):
+//! `layout::host::run_layout` publishes it, restyles the `cqw`/`cqh` readers
+//! under the box, and relays the subtree once, at the size it will keep. What
+//! the post-layout loop existed to fix — a whole document laid out at a
+//! container size that was about to change — therefore does not happen for
+//! that shape at all.
+//!
+//! The loop is still there, and still owns everything the estimate cannot
+//! predict: a `container-type: inline-size` box, whose block axis really is
+//! its contents' (there is nothing to publish before them), and a
+//! `display: -lynx-text` one, whose algorithm implements no size containment.
+//! A prediction that disagreed with its algorithm would land there too, which
+//! is what makes it a `debug_assert` rather than a correctness question — see
+//! [`debug_assert_estimate_agrees`].
+//!
 //! # Publication, and why staging both halves is sound
 //!
 //! The published half is a plain `Vec` that only an exclusively borrowed
@@ -89,6 +114,15 @@
 //!   last record replayed still decides what is published, exactly as it would have with an
 //!   immediate write.
 //!
+//! The interleave adds one publication *inside* a run, which neither argument
+//! covers and neither needs to: the records it publishes are its own deferrals
+//! — whose remembered half is carried across unchanged, by
+//! [`note_container_estimate`] — plus whatever the boxes laid out before them
+//! staged. Both of those are records a later read in the same run could
+//! already have observed under the rules above, and both of the reads above
+//! are reads a *skipping* box makes of a frozen record, which no branch in a
+//! run can change.
+//!
 //! Across passes there is nothing to prove: `apply` runs after every
 //! `run_layout`, so pass *n + 1* reads what pass *n* recorded.
 //!
@@ -104,32 +138,35 @@
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use hughie::compute::{used_border, used_padding};
+use hughie::compute::{compute_skipped_contents_size, used_border, used_padding};
 use hughie::geometry::Size;
 use hughie::style::{Contain, ContainIntrinsicSize, ContainerType, ContentVisibility, CoreStyle};
-use hughie::tree::LayoutInput;
+use hughie::tree::{LayoutInput, LayoutOutput};
 use stylo::properties::ComputedValues;
 use stylo::values::computed::Length;
 use stylo::values::generics::NonNegative;
 
-use super::style::{StyleView, skips_contents};
+use super::style::{DisplayMode, StyleView, display_mode, skips_contents};
 use crate::tree::document::{NodeId, NodeSlot, TreeArenas};
 use crate::tree::node::Node;
 
 /// How many times one [`Document::layout`](crate::Document::layout) call may
-/// lay the document out.
+/// lay the document out — and, inside one run, how many nesting levels of
+/// deferred query containers it may settle.
 ///
 /// A size query container's own size never answers to its contents —
 /// css-contain-3 §2.1 contains the axes it supplies, so the contents cannot
-/// feed back into them — which is what makes the loop converge rather than
-/// oscillate. What it converges in is the depth of the deepest chain of
+/// feed back into them — which is what makes both loops converge rather than
+/// oscillate. What they converge in is the depth of the deepest chain of
 /// containers that all move at once, because a container's size can still
 /// depend on its *ancestors'*: the outer one settles first, its descendants
 /// re-resolve, and only then can an inner one's `cqw`-derived size be final.
 /// Four covers every page anyone has, and the cap makes termination a
 /// property of the code rather than of the content: past it the last layout
 /// stands and the marks it left are resolved by the next flush, one commit
-/// behind at worst.
+/// behind at worst. The interleave's own last iteration reaches the cap
+/// differently — it closes the interleave instead of capping it, so a relay
+/// that may not defer lays every remaining subtree out for real.
 pub(crate) const CONTAINER_PASSES: u32 = 4;
 
 /// One element's content box, per physical axis, in unrounded CSS px, each
@@ -428,16 +465,8 @@ pub(crate) fn record<T>(
         return;
     }
 
-    // "the current inner dimensions of its principal box" and "the query
-    // container's content box" are the same box, resolved the way the
-    // algorithms themselves resolve it — percentages against the containing
-    // block's inline size, `none`/`hidden` border sides reading zero.
-    let padding = used_padding(view, input.parent_size.width);
-    let border = used_border(view);
-    let inner = Size::new(
-        (size.width - padding.horizontal_sum() - border.horizontal_sum()).max(0.0),
-        (size.height - padding.vertical_sum() - border.vertical_sum()).max(0.0),
-    );
+    let inner = content_box(view, input, size);
+    debug_assert_estimate_agrees(view, input, is_container, inner);
 
     // A contained axis keeps what it last remembered; an axis without the
     // keyword remembers nothing; the rest record what they just measured.
@@ -472,16 +501,149 @@ pub(crate) fn record<T>(
         CommittedBox {
             remembered,
             container: if is_container {
-                ContainerSize {
-                    width: Some(inner.width),
-                    height: container_type
-                        .intersects(ContainerType::SIZE)
-                        .then_some(inner.height),
-                }
+                container_size(container_type, inner)
             } else {
                 ContainerSize::default()
             },
         },
+    );
+}
+
+/// The content box a run's border-box output leaves behind — "the current
+/// inner dimensions of its principal box" and "the query container's content
+/// box" are the same box, resolved the way the algorithms themselves resolve
+/// it: percentages against the containing block's inline size, `none`/`hidden`
+/// border sides reading zero.
+fn content_box<T>(view: &StyleView<'_, T>, input: LayoutInput, size: Size<f32>) -> Size<f32> {
+    let padding = used_padding(view, input.parent_size.width);
+    let border = used_border(view);
+    Size::new(
+        (size.width - padding.horizontal_sum() - border.horizontal_sum()).max(0.0),
+        (size.height - padding.vertical_sum() - border.vertical_sum()).max(0.0),
+    )
+}
+
+/// The axes a query container of this type supplies, out of the content box
+/// it was laid out at.
+fn container_size(container_type: ContainerType, inner: Size<f32>) -> ContainerSize {
+    ContainerSize {
+        width: Some(inner.width),
+        height: container_type
+            .intersects(ContainerType::SIZE)
+            .then_some(inner.height),
+    }
+}
+
+/// What a `container-type: size` box will come out at, computed at the entry
+/// of its own committing run — before one child style has been read.
+pub(crate) struct ContainerEstimate {
+    /// The box's own output, which is final: every axis is size-contained.
+    pub(crate) output: LayoutOutput,
+    /// The content box descendants' `cqw`/`cqh` resolve against.
+    pub(crate) container: ContainerSize,
+}
+
+/// The size a query container will supply, from its own style and its layout
+/// input alone.
+///
+/// **`container-type: size` only**, and that is the whole reason the
+/// interleave exists in the shape it does. css-contain-3 §2.1 gives such a box
+/// `contain: size`, so *both* of its axes are laid out as if it had no
+/// contents — which is exactly [`compute_skipped_contents_size`]'s job, and
+/// exactly the branch every algorithm takes for a contained axis
+/// (`contained_axes` + the same `clamp_axis(extent + inset, …)`). Its output
+/// is therefore not an estimate of the box's size so much as the same
+/// computation the algorithm is about to do, done one step earlier, and the
+/// box's contents cannot move it.
+///
+/// A `container-type: inline-size` box contains only its inline axis: its
+/// block size *is* a function of the contents, so there is no answer to give
+/// here before laying them out, and such a container goes on being settled by
+/// the loop in [`Document::layout`](crate::Document::layout).
+///
+/// `None` for anything that is not a size query container, and for a box whose
+/// effective containment does not (yet) contain both axes — a state
+/// `container-type: size` cannot be in, checked because the cost is one bit
+/// test and the consequence of being wrong is laying a subtree out at a size
+/// its own contents moved.
+pub(crate) fn container_estimate<T>(
+    view: &StyleView<'_, T>,
+    input: LayoutInput,
+) -> Option<ContainerEstimate> {
+    let container_type = view.container_type();
+    if !container_type.intersects(ContainerType::SIZE)
+        || !view.containment().contains(Contain::SIZE)
+    {
+        return None;
+    }
+    let output = compute_skipped_contents_size(view, input);
+    Some(ContainerEstimate {
+        container: container_size(container_type, content_box(view, input, output.size)),
+        output,
+    })
+}
+
+/// Stages an estimate as `id`'s container half, leaving what it last
+/// remembered alone.
+///
+/// The deferral's counterpart to [`record`]: the run that produced this
+/// estimate laid no contents out, so it has nothing to say about the
+/// css-sizing-4 half — that half answers for what the element last *rendered*
+/// at, and this run has not rendered it yet.
+pub(crate) fn note_container_estimate<T>(
+    tree: &TreeArenas<T>,
+    id: NodeId,
+    container: ContainerSize,
+) {
+    tree.note_committed_box(
+        id,
+        CommittedBox {
+            remembered: tree.committed_box(id).remembered,
+            container,
+        },
+    );
+}
+
+/// The interleave's invariant, checked where the algorithm's own answer is:
+/// for a `container-type: size` box, what [`container_estimate`] said at the
+/// run's entry is what the run came out at.
+///
+/// A violation is not a correctness bug — the record below publishes the
+/// algorithm's size, and the loop in [`Document::layout`](crate::Document::layout)
+/// re-cascades from it, which is the pre-interleave behaviour — so this is a
+/// `debug_assert`: it costs a release build nothing and tells a debug one that
+/// a page just paid the extra pass.
+///
+/// `display: -lynx-text` is exempt: the text block algorithm
+/// ([`crate::layout::text_block`]) implements no size containment at all, so a
+/// text element that is also a size query container really does answer to its
+/// contents. [`container_estimate`] never fires for one either — the host
+/// leaves that display mode out — and both halves of that pair are the same
+/// recorded deviation.
+fn debug_assert_estimate_agrees<T>(
+    view: &StyleView<'_, T>,
+    input: LayoutInput,
+    is_container: bool,
+    inner: Size<f32>,
+) {
+    if !cfg!(debug_assertions) || !is_container || display_mode(view.display()) == DisplayMode::Text
+    {
+        return;
+    }
+    let Some(estimate) = container_estimate(view, input) else {
+        return;
+    };
+    let recorded = container_size(view.container_type(), inner);
+    let agrees = |estimated: Option<f32>, recorded: Option<f32>| match (estimated, recorded) {
+        (Some(estimated), Some(recorded)) => (estimated - recorded).abs() < 1e-3,
+        (left, right) => left == right,
+    };
+    debug_assert!(
+        agrees(estimate.container.width, recorded.width)
+            && agrees(estimate.container.height, recorded.height),
+        "a size query container came out at {recorded:?}, not at the {:?} its own style and \
+         layout input predicted before its contents were read",
+        estimate.container,
     );
 }
 

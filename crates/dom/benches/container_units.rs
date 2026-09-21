@@ -2,13 +2,17 @@
 //! `container-type` query container cost inside one `Document::layout` call.
 //!
 //! A query container's content box is a cascade input that only layout can
-//! produce, so `Document::layout` runs a loop: lay out, mark for recascade
-//! the elements that resolved such a unit under every size container whose
-//! recorded content box moved, and lay out again, up to `CONTAINER_PASSES`
-//! times. The loop is gated on a
-//! sticky document bit set when a cascaded style resolved a container-relative
-//! unit, so a page with query containers and no `cqw`/`cqh` pays one
-//! emptiness test for it.
+//! produce. For a `container-type: size` box the layout run settles that
+//! itself — its size is contained in both axes, so the host computes it at the
+//! entry of the box's own committing run, publishes it, recascades the
+//! `cqw`/`cqh` readers under it and lays the subtree out once, at the size it
+//! keeps. `Document::layout`'s loop — lay out, mark the readers under every
+//! container whose recorded box moved, lay out again, up to
+//! `CONTAINER_PASSES` times — is the fallback for what that cannot predict
+//! (`inline-size` containers and `display: -lynx-text` ones). Both are gated
+//! on a sticky document bit set when a cascaded style resolved a
+//! container-relative unit, so a page with query containers and no `cqw`/`cqh`
+//! pays one emptiness test and one bit test for them.
 //!
 //! Every case lays out the same page shape — `GROUPS` groups of
 //! `LEAVES_PER_GROUP` leaves, sized by constants — so an `args` value names
@@ -18,25 +22,25 @@
 //!
 //! - **`first_layout`** — one `layout()` on a document whose styles were never flushed.
 //!   `px_leaves_in_containers` is the baseline: the containers are there, nothing resolves a
-//!   container unit, the gate stays shut and the call is one pass. `cqw_leaves_in_containers` is
-//!   the full loop: the first pass resolves every leaf against the viewport fallback, the
-//!   containers come out narrower than the viewport, so the second pass both re-cascades and
-//!   re-lays-out every leaf. `cqw_leaves_root_container` makes the page itself the only container,
-//!   whose content box equals the viewport, so the second pass re-cascades every leaf and produces
-//!   the same styles — the recascade half of the loop with the relayout half removed.
-//!   `mixed_leaves_in_containers` is the same page with one `cqw` leaf per group among 99 px ones:
-//!   the container moves and 1 % of its subtree reads it, which is what separates re-cascading a
-//!   resized container's whole subtree from re-cascading the elements that resolved a unit.
-//!   `vw_leaves` is the ordinary viewport-unit path for reference: the same 40px leaf width reached
-//!   without any container machinery. It carries no containers at all, so it is not a unit-for-unit
-//!   comparison against `px_leaves_in_containers` — a group that is not a size container sizes to
-//!   its contents instead of sizing as if empty — and only the `cqw` and `mixed` cases are read
-//!   against that baseline.
+//!   container unit, the gate stays shut and the call defers nothing. `cqw_leaves_in_containers` is
+//!   the interleave in full: the flush resolves every leaf against the viewport fallback, each
+//!   container then publishes a width narrower than the viewport at the entry of its own run, and
+//!   every leaf under it is re-cascaded and laid out once — at 30px, rather than at 40px and then
+//!   at 30px. `cqw_leaves_root_container` makes the page itself the only container, whose content
+//!   box equals the viewport, so the recascade produces the styles the leaves already had — the
+//!   recascade half with the relayout half removed. `mixed_leaves_in_containers` is the same page
+//!   with one `cqw` leaf per group among 99 px ones: the container moves and 1 % of its subtree
+//!   reads it, which is what separates re-cascading a resized container's whole subtree from
+//!   re-cascading the elements that resolved a unit. `vw_leaves` is the ordinary viewport-unit path
+//!   for reference: the same 40px leaf width reached without any container machinery. It carries no
+//!   containers at all, so it is not a unit-for-unit comparison against `px_leaves_in_containers` —
+//!   a group that is not a size container sizes to its contents instead of sizing as if empty — and
+//!   only the `cqw` and `mixed` cases are read against that baseline.
 //! - **`container_resize`** — every group's width is set through an inline style on a laid-out
 //!   document, then `layout()` once. `px_leaves` resizes the same containers with the gate shut, so
-//!   it is the one-pass cost of the resize itself; `cqw_leaves` is that plus the recascade of every
-//!   leaf under a moved container and the relayout the new widths force; `mixed_leaves` is the same
-//!   resize where one leaf per container reads it.
+//!   it is the cost of the resize itself; `cqw_leaves` is that plus the recascade of every leaf
+//!   under a moved container and the relayout the new widths force, both of which now happen inside
+//!   the one run; `mixed_leaves` is the same resize where one leaf per container reads it.
 //! - **`viewport_resize`** — `set_viewport` then `layout()` on a laid-out document. The groups are
 //!   a fixed `300px` wide, so no container moves and the loop never runs a second pass in either
 //!   shape. What is left is what a container unit costs a whole-document recascade that would have
@@ -50,11 +54,13 @@
 //! container is a reader there, so the targeted walk marks exactly the set
 //! the subtree mark did, and what those cases report is what finding them
 //! costs — one subtree walk, and a selector rematch per reader in place of a
-//! bare recascade. Interleaving the recascade into layout, so a container's
-//! contents are styled once its own size is final rather than after a whole
-//! pass, is the follow-up left, measured by what is left of the gap between
+//! bare recascade. The interleave is what the gap between
 //! `first_layout/cqw_leaves_in_containers` and
-//! `first_layout/px_leaves_in_containers`.
+//! `first_layout/px_leaves_in_containers` measures, and it roughly halves it
+//! (1.54 ms of container term to 0.86 ms, paired on one machine). What is left
+//! of that gap is the cascade a reader pays twice — once in the pass's own
+//! flush, against the viewport fallback, and once against its container — which
+//! only leaving a container's subtree out of that first flush could remove.
 
 use divan::black_box;
 use divan::counter::ItemsCount;

@@ -748,19 +748,39 @@ because a box only ever reads back a size published by an earlier pass (a
 skipping box is size-contained in both axes, so the run that reads its
 remembered size can never be a run that records one).
 
-`Document::layout` then closes the loop, the way Gecko's
-`UpdateContainerQueryStyles` does after its reflow: a pass whose recorded sizes
-moved marks, under each moved container, the **elements whose style resolved a
+**The run settles a `container-type: size` container inside itself**, so the
+contents of one are never laid out at a size that is about to change. Both of
+such a box's axes are contained, which means its content box is a function of
+its own style and its layout input and of nothing below it — the same function
+`compute_skipped_contents_size` is, and the same one each algorithm takes for a
+contained axis. `run_layout` therefore has three phases rather than one: the box
+phase stops at a container whose computed size disagrees with what is published
+(`committed_box::container_estimate` at the entry of its committing run,
+recording the size and laying no contents out); the restyle phase, between the
+two shared borrows of the tree, publishes those sizes and marks and flushes the
+readers under them; the relay phase lays the deferred subtrees out, before
+anything is rounded. Nesting costs one iteration of that settling loop per
+level, and its last iteration closes the interleave instead of capping it, so no
+subtree is ever left unlaid.
+
+`Document::layout`'s loop is what is left over, and it is still Gecko's
+`UpdateContainerQueryStyles` after its reflow: a pass whose recorded sizes moved
+marks, under each moved container, the **elements whose style resolved a
 container unit** (`ComputedValueFlags::USES_CONTAINER_UNITS`; inherited
 consequences ride Stylo's child cascade requirement) and lays out again, up to
-`CONTAINER_PASSES` (4) times. Those in-loop marks are `RECASCADE_SELF`, read by
-the next pass's flush in the same call; only the cap iteration, whose marks wait
-for a later flush and can meet an animation tick, falls back to the
-whole-subtree `RESTYLE_SELF | RECASCADE_DESCENDANTS`. The loop converges because the axes
-a container supplies are contained — its size cannot answer to its own
-contents — and it is gated twice, on the changed list being non-empty and on
-the document having cascaded a style that actually resolved a container unit,
-so a page with no query container pays one enum test per committing box.
+`CONTAINER_PASSES` (4) times. Those marks are `RECASCADE_SELF`, read by the next
+flush in the same call; only the cap iteration, whose marks wait for a later
+flush and can meet an animation tick, falls back to the whole-subtree
+`RESTYLE_SELF | RECASCADE_DESCENDANTS`. What reaches it is what the interleave
+declines to predict: a `container-type: inline-size` box, whose block axis
+answers to its contents, and a `display: -lynx-text` one, whose algorithm
+implements no size containment — plus, as a safety net, a prediction that
+disagreed with its algorithm (a `debug_assert`, because the record after the
+algorithm is what is published). Both loops converge because the axes a
+container supplies are contained — its size cannot answer to its own
+contents — and both are gated on the document having cascaded a style that
+actually resolved a container unit, so a page with no query container pays one
+enum test and one bit test per committing box.
 
 **Box-less elements** (`display: contents`): the element generates no box
 while its children keep generating theirs, in the nearest box ancestor's
