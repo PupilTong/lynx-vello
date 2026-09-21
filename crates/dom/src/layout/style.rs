@@ -5,13 +5,15 @@
 use hughie::geometry::Size;
 use hughie::style::containment::effective_containment;
 use hughie::style::{
-    Contain, ContentVisibility, CoreStyle, Display, FlexboxStyle, GridLanesStyle, GridStyle,
-    LinearStyle, PositionProperty, RelativeStyle, TextContainerStyle, TextRunStyle,
+    Contain, ContainIntrinsicSize, ContentVisibility, CoreStyle, Display, FlexboxStyle,
+    GridLanesStyle, GridStyle, LinearStyle, PositionProperty, RelativeStyle, TextContainerStyle,
+    TextRunStyle,
 };
 use stylo::properties::ComputedValues;
 use stylo::values::computed::motion::OffsetPath;
 use stylo::values::specified::box_::WillChangeBits;
 
+use super::remembered;
 use crate::tree::node::Node;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -249,6 +251,21 @@ impl<T> CoreStyle for StyleView<'_, T> {
     /// measures the item. A non-replaced node carries `NaturalSize::NONE`.
     fn natural_size(&self) -> Size<Option<f32>> {
         self.node.natural_size().dimensions()
+    }
+
+    /// css-sizing-4 §5.2.1 plus csswg-drafts#8407, which are both host-side
+    /// for the same reason `skips_contents` is: the effective value depends on
+    /// `content-visibility` and on a per-element size only a rendering update
+    /// can have recorded. `hughie` reads whatever comes back exactly as it
+    /// reads a computed value — `AutoLength(l)` as `l`, `AutoNone` as no
+    /// explicit size — so the substitution needs no engine vocabulary of its
+    /// own. See [`crate::layout::remembered`].
+    fn contain_intrinsic_width(&self) -> ContainIntrinsicSize {
+        remembered::contain_intrinsic_width(self.node, self.values())
+    }
+
+    fn contain_intrinsic_height(&self) -> ContainIntrinsicSize {
+        remembered::contain_intrinsic_height(self.node, self.values())
     }
 }
 

@@ -1141,3 +1141,400 @@ fn a_handler_that_mutates_the_tree_is_drained_before_the_next_step() {
         "and nothing about that commit changed a skipping state",
     );
 }
+
+// The last remembered size
+// ([css-sizing-4 §5.2.1](https://drafts.csswg.org/css-sizing-4/#last-remembered)),
+// plus csswg-drafts#8407: `content-visibility: auto` makes `contain-intrinsic-*`
+// behave as if `auto` were specified.
+//
+// The recording moment here is the commit's own layout run — this engine has no
+// ResizeObserver — so every case below goes through `render()`, and every
+// assertion is on a box's used height: the estimate before anything is
+// remembered, the real content box afterwards.
+// ---------------------------------------------------------------------------
+
+/// The real content height of a `.target`/`.box`, well past its estimate.
+const TALL: f32 = 50.0;
+/// What `contain-intrinsic-size` carries before anything is remembered.
+const ESTIMATE: f32 = 10.0;
+/// A fixed block above the target, tall enough that the target starts outside
+/// the encode window and one scroll to the end is enough to reach it.
+const SPACER: f32 = 400.0;
+
+/// One `content-visibility: auto` target at the bottom of a scroller, so the
+/// skip/reveal/skip cycle is driven by scrolling rather than by style.
+struct Remembered {
+    doc: Doc,
+    scroller: NodeId,
+    target: NodeId,
+    label: NodeId,
+}
+
+impl Remembered {
+    /// `containment` is the target's own `contain-intrinsic-*` declarations.
+    fn new(containment: &str) -> Self {
+        let mut doc = Doc::with_device(device(200.0, VIEWPORT_HEIGHT));
+        doc.add_css(&format!(
+            "page {{ display: flex; width: 200px; height: 100vh;
+                     align-items: flex-start; font-family: Ahem; }}
+             .scroller {{ display: flex; flex-direction: column; overflow: hidden;
+                          width: 200px; height: 100vh; align-items: flex-start; }}
+             .spacer {{ display: flex; width: 200px; height: {SPACER}px;
+                        flex-shrink: 0; }}
+             .target {{ display: flex; width: 200px; flex-shrink: 0;
+                        content-visibility: auto; {containment} }}
+             .tall {{ display: -lynx-text; font-size: {TALL}px; }}"
+        ));
+        assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
+        let root = doc.root;
+        let scroller = doc.el(root, "view.scroller");
+        doc.el(scroller, "view.spacer");
+        let target = doc.el(scroller, "view.target");
+        let label = doc.el(target, "text.tall");
+        let run = doc.dom.create_text_node("x", ());
+        doc.dom.append_child(label, run);
+        Self {
+            doc,
+            scroller,
+            target,
+            label,
+        }
+    }
+
+    fn target_height(&self) -> f32 {
+        rect(&self.doc.dom, self.target).3
+    }
+
+    fn scroll_range(&self) -> f32 {
+        self.doc
+            .dom
+            .rounded_layout(self.scroller)
+            .expect("node id is live")
+            .content_size
+            .height
+    }
+
+    fn skipping(&self) -> bool {
+        self.doc.dom.text_block_size(self.label).is_none()
+    }
+
+    fn scroll_to(&mut self, offset: f32) -> f32 {
+        self.doc
+            .dom
+            .scroll_to(self.scroller, Vector2D::new(0.0, offset))
+            .y
+    }
+}
+
+/// The whole cycle: skip at the estimate, reveal and record, skip again at
+/// what was recorded.
+#[test]
+fn a_revealed_box_is_remembered_and_re_used_the_next_time_it_skips() {
+    let mut page =
+        Remembered::new("contain-intrinsic-width: 200px; contain-intrinsic-height: auto 10px;");
+    assert!(page.doc.dom.render());
+    assert!(
+        page.skipping(),
+        "the target starts well outside the encode window",
+    );
+    assert_eq!(
+        page.target_height(),
+        ESTIMATE,
+        "with nothing remembered, `auto <length>` is the <length>",
+    );
+    assert_eq!(page.scroll_range(), SPACER + ESTIMATE);
+
+    // Scrolling to the end brings it inside the window: it is revealed and laid
+    // out from its real contents, which is the moment its inner size is
+    // recorded.
+    assert_eq!(page.scroll_to(1000.0), SPACER + ESTIMATE - VIEWPORT_HEIGHT);
+    assert!(page.doc.dom.render());
+    assert!(!page.skipping(), "the scroll revealed it");
+    assert_eq!(page.target_height(), TALL, "at its real content height");
+    assert_eq!(page.scroll_range(), SPACER + TALL);
+
+    // And back out: it skips again, now from what it last rendered at.
+    assert_eq!(page.scroll_to(0.0), 0.0);
+    assert!(page.doc.dom.render());
+    assert!(page.skipping(), "outside the window again");
+    assert_eq!(
+        page.target_height(),
+        TALL,
+        "the last remembered size, not the 10px estimate",
+    );
+    assert_eq!(
+        page.scroll_range(),
+        SPACER + TALL,
+        "so the scroll range stays where the reveal put it",
+    );
+}
+
+/// csswg-drafts#8407: the same cycle for a box whose `contain-intrinsic-size`
+/// carries no `auto` keyword at all. `content-visibility: auto` supplies it.
+#[test]
+fn content_visibility_auto_makes_a_plain_length_behave_as_auto() {
+    let mut page =
+        Remembered::new("contain-intrinsic-width: 200px; contain-intrinsic-height: 10px;");
+    assert!(page.doc.dom.render());
+    assert!(page.skipping());
+    assert_eq!(page.target_height(), ESTIMATE);
+
+    assert_eq!(page.scroll_to(1000.0), SPACER + ESTIMATE - VIEWPORT_HEIGHT);
+    assert!(page.doc.dom.render());
+    assert_eq!(page.target_height(), TALL);
+
+    assert_eq!(page.scroll_to(0.0), 0.0);
+    assert!(page.doc.dom.render());
+    assert!(page.skipping());
+    assert_eq!(
+        page.target_height(),
+        TALL,
+        "#8407: `10px` behaved as `auto 10px`, so the box remembered its size",
+    );
+}
+
+/// A plain document with no scroller: `content-visibility` is set by inline
+/// style, so these cases are about the remembered size itself rather than about
+/// relevance.
+fn flat_doc() -> Doc {
+    let mut doc = Doc::with_device(device(200.0, 400.0));
+    doc.add_css(&format!(
+        "page {{ display: flex; flex-direction: column; align-items: flex-start;
+                 width: 200px; height: 400px; font-family: Ahem; }}
+         .box {{ display: flex; width: 200px; flex-shrink: 0;
+                 contain-intrinsic-width: 200px;
+                 contain-intrinsic-height: auto {ESTIMATE}px; }}
+         .tall {{ display: -lynx-text; font-size: {TALL}px; }}"
+    ));
+    assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
+    doc
+}
+
+/// Appends a `.box` whose real content is [`TALL`] high, with `inline` as its
+/// inline style.
+fn tall_box(doc: &mut Doc, inline: &str) -> (NodeId, NodeId) {
+    let root = doc.root;
+    let boxed = doc.el(root, "view.box");
+    if !inline.is_empty() {
+        doc.set_inline(boxed, inline);
+    }
+    let label = doc.el(boxed, "text.tall");
+    let run = doc.dom.create_text_node("x", ());
+    doc.dom.append_child(label, run);
+    (boxed, label)
+}
+
+fn height(doc: &Doc, id: NodeId) -> f32 {
+    rect(&doc.dom, id).3
+}
+
+/// `content-visibility: hidden` reads the remembered size exactly as `auto`
+/// does — and a box no rendering update ever laid out has none to read.
+#[test]
+fn a_box_that_was_rendered_keeps_its_size_when_it_starts_skipping() {
+    let mut doc = flat_doc();
+    let (rendered, rendered_label) = tall_box(&mut doc, "");
+    let (never, never_label) = tall_box(&mut doc, "content-visibility: hidden");
+
+    assert!(doc.dom.render());
+    assert_eq!(height(&doc, rendered), TALL, "laid out from its contents");
+    assert!(doc.dom.text_block_size(rendered_label).is_some());
+    assert_eq!(
+        height(&doc, never),
+        ESTIMATE,
+        "a box that never rendered has nothing to remember",
+    );
+    assert!(doc.dom.text_block_size(never_label).is_none());
+
+    doc.set_inline(rendered, "content-visibility: hidden");
+    assert!(doc.dom.render(), "a content-visibility change relayouts");
+    assert!(
+        doc.dom.text_block_size(rendered_label).is_none(),
+        "it skips its contents now",
+    );
+    assert_eq!(
+        height(&doc, rendered),
+        TALL,
+        "at the size it last rendered at, not at its 10px estimate",
+    );
+    assert_eq!(
+        height(&doc, never),
+        ESTIMATE,
+        "while the box beside it still has nothing remembered",
+    );
+}
+
+/// `auto none` is "no explicit intrinsic inner size" until there is a
+/// remembered one, and the remembered one once there is.
+#[test]
+fn auto_none_lays_out_as_if_empty_until_something_is_remembered() {
+    let mut doc = flat_doc();
+    let (empty, _) = tall_box(
+        &mut doc,
+        "contain-intrinsic-height: auto none; content-visibility: hidden",
+    );
+    let (measured, _) = tall_box(&mut doc, "contain-intrinsic-height: auto none");
+
+    assert!(doc.dom.render());
+    assert_eq!(
+        height(&doc, empty),
+        0.0,
+        "`auto none` with nothing remembered is no explicit size at all",
+    );
+    assert_eq!(height(&doc, measured), TALL);
+
+    doc.set_inline(
+        measured,
+        "contain-intrinsic-height: auto none; content-visibility: hidden",
+    );
+    assert!(doc.dom.render());
+    assert_eq!(
+        height(&doc, measured),
+        TALL,
+        "and the remembered size once there is one",
+    );
+    assert_eq!(height(&doc, empty), 0.0, "the other still has none");
+}
+
+/// The `auto` clause is conditioned on "is currently skipping its contents":
+/// size containment on its own never reads a remembered size.
+#[test]
+fn a_size_contained_box_that_is_not_skipping_uses_the_length() {
+    let mut doc = flat_doc();
+    let (boxed, label) = tall_box(&mut doc, "");
+    assert!(doc.dom.render());
+    assert_eq!(
+        height(&doc, boxed),
+        TALL,
+        "recorded while it had no size containment",
+    );
+
+    doc.set_inline(boxed, "contain: size");
+    assert!(doc.dom.render(), "a contain change relayouts");
+    assert!(
+        doc.dom.text_block_size(label).is_some(),
+        "`contain: size` still lays its contents out; it just does not size from them",
+    );
+    assert_eq!(
+        height(&doc, boxed),
+        ESTIMATE,
+        "and it is not skipping, so the <length> stands",
+    );
+
+    // Nor did that pass overwrite what the box remembers: a size-contained box
+    // was laid out as if it had no contents, so its inner size is the estimate
+    // rather than anything its contents produced. Skipping proves it — the
+    // real measurement is still there.
+    doc.set_inline(boxed, "contain: size; content-visibility: hidden");
+    assert!(doc.dom.render());
+    assert_eq!(
+        height(&doc, boxed),
+        TALL,
+        "the measurement from before size containment, not the estimate",
+    );
+}
+
+/// "if an element has a last remembered size but does not have auto keyword in
+/// contain-intrinsic-size property, remove its last remembered size."
+#[test]
+fn removing_the_auto_keyword_removes_the_remembered_size() {
+    let mut doc = flat_doc();
+    let (dropped, _) = tall_box(&mut doc, "");
+    let (kept, _) = tall_box(&mut doc, "");
+    assert!(doc.dom.render());
+    assert_eq!(height(&doc, dropped), TALL);
+    assert_eq!(height(&doc, kept), TALL);
+
+    // Stylo gives a `contain-intrinsic-size` change box-rebuilding damage, so
+    // the box reaches a committing run and the removal happens in it.
+    doc.set_inline(dropped, "contain-intrinsic-height: 10px");
+    assert!(
+        doc.dom.render(),
+        "dropping the auto keyword relayouts the box",
+    );
+    assert_eq!(
+        height(&doc, dropped),
+        TALL,
+        "still rendered, so still sized by its contents",
+    );
+
+    doc.set_inline(
+        dropped,
+        "contain-intrinsic-height: auto 10px; content-visibility: hidden",
+    );
+    doc.set_inline(kept, "content-visibility: hidden");
+    assert!(doc.dom.render());
+    assert_eq!(
+        height(&doc, dropped),
+        ESTIMATE,
+        "re-adding auto starts from the <length> again",
+    );
+    assert_eq!(
+        height(&doc, kept),
+        TALL,
+        "while the box that never lost auto still has what it remembered",
+    );
+}
+
+/// The last remembered size is state attached to the *element*, so a freed
+/// arena key must not hand it to the key's next occupant.
+#[test]
+fn a_freed_node_takes_its_remembered_size_with_it() {
+    let mut doc = flat_doc();
+    // One node, so the key this frees is the key the next element takes: the
+    // slab hands back the most recently freed key first.
+    let root = doc.root;
+    let recorder = doc.el(root, "view.box");
+    doc.set_inline(recorder, "height: 50px");
+    assert!(doc.dom.render());
+    assert_eq!(height(&doc, recorder), TALL, "its recorded inner height");
+
+    doc.dom.remove_element(recorder);
+    doc.dom.drop_subtree(recorder);
+
+    let recycled = doc.el(root, "view.box");
+    doc.set_inline(recycled, "content-visibility: hidden");
+    assert!(doc.dom.render());
+    assert_eq!(
+        height(&doc, recycled),
+        ESTIMATE,
+        "a recycled slot remembers nothing",
+    );
+}
+
+/// The removal rule has no "is rendered" condition, so it has to reach a box
+/// that is already skipping — where the run that serves its own size is the
+/// only run it gets.
+#[test]
+fn a_box_that_loses_the_auto_keyword_while_it_skips_forgets_too() {
+    let mut doc = flat_doc();
+    let (boxed, _) = tall_box(&mut doc, "");
+    assert!(doc.dom.render());
+    assert_eq!(height(&doc, boxed), TALL);
+
+    doc.set_inline(boxed, "content-visibility: hidden");
+    assert!(doc.dom.render());
+    assert_eq!(height(&doc, boxed), TALL, "skipping at what it remembered");
+
+    doc.set_inline(
+        boxed,
+        "content-visibility: hidden; contain-intrinsic-height: 10px",
+    );
+    assert!(doc.dom.render());
+    assert_eq!(
+        height(&doc, boxed),
+        ESTIMATE,
+        "no auto keyword, so the length"
+    );
+
+    doc.set_inline(
+        boxed,
+        "content-visibility: hidden; contain-intrinsic-height: auto 10px",
+    );
+    assert!(doc.dom.render());
+    assert_eq!(
+        height(&doc, boxed),
+        ESTIMATE,
+        "and the earlier removal means re-adding auto starts from the length",
+    );
+}

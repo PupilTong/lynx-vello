@@ -678,6 +678,28 @@ an ordinary invalidation of the flipped node — which clears the cached skipped
 size along with everything else, so a revealed box is re-run rather than
 re-served.
 
+**What that box is sized from is also the host's answer.** `contain-intrinsic-*`
+reaches the engine only through `CoreStyle::{contain_intrinsic_width,
+contain_intrinsic_height}`, and `contain_intrinsic_length` reads
+`AutoLength(l)` as `l` and `AutoNone` as no explicit size — so the whole of
+css-sizing-4 §5.2.1's **last remembered size** fits inside those two accessors,
+and the engine needs no vocabulary for it. `dom` overrides them
+(`crates/dom/src/layout/remembered.rs`): it folds in
+[csswg-drafts#8407](https://github.com/w3c/csswg-drafts/issues/8407)
+(`content-visibility: auto` behaves as if `auto` were specified), and where the
+result carries `auto` **and the box is currently skipping its contents** it
+answers `Length(remembered)` instead. A `contain: size` box that is not
+skipping therefore keeps its `<length>`, exactly as the spec's `auto` clause
+is worded. The recording side is the host's too, and it lives in the same
+place the algorithms do: after a **committing** run of `compute_layout`, on a
+cache miss, for a box that has the keyword and does *not* have size
+containment, `dom` records that run's own content box (`size − padding −
+border`, unrounded) into a slot-keyed side table on its tree arenas. The engine
+neither stores nor knows about it; from here it is one more style answer that
+happens to change between commits, and the relevance flip that starts a box
+skipping is the same invalidation that stops the old cached size from being
+served.
+
 **Box-less elements** (`display: contents`): the element generates no box
 while its children keep generating theirs, in the nearest box ancestor's
 formatting context ([CSS Display 3

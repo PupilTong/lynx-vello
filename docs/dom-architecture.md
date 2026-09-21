@@ -34,11 +34,16 @@ path). The primary slab selects each raw-`usize` ID; the payload slab allocates
 and removes in lockstep and asserts the same key (reserving a payload-less
 sentinel at document slot zero), while the layout vector resets a freed key's
 entry so the next occupant starts clean (ONE TREE policy: nodes are created and
-mutated only through `Document` methods). One more slot-keyed side table lives
-on `TreeArenas` itself rather than beside it: `content-visibility: auto`
-relevance (`layout/relevance.rs`), because a `StyleView` is built from these
-arenas alone and the layout state is a separately borrowed parameter it cannot
-reach. It resets on free like the layout vector does. The **document element is permanent
+mutated only through `Document` methods). Two more slot-keyed side tables live
+on `TreeArenas` itself rather than beside it — `content-visibility: auto`
+relevance (`layout/relevance.rs`) and the css-sizing-4 last remembered size
+(`layout/remembered.rs`) — because a `StyleView` is built from these arenas
+alone and the layout state is a separately borrowed parameter it cannot reach.
+Both are lazily sized, so a page that uses neither feature allocates neither,
+and both reset on free like the layout vector does. The remembered-size table
+is the one the layout pass *writes*, and `LayoutTree::compute_layout` holds the
+arenas shared, so that table carries its own `RefCell`; every borrow is one
+statement long and no engine code runs under one. The **document element is permanent
 and pre-created**: `Document::new(device, root_tag, root_payload)` builds it at
 slot one (tag injected — the core owns no tag vocabulary), `document_element()`
 returns it non-optionally, and it can never be detached or removed, so the
@@ -324,7 +329,13 @@ itself is layout-side per-element state in a slot-keyed side table on
 restyle trigger — read through `StyleView`'s `CoreStyle::skips_contents`
 override, which is the single answer the layout host, the relayout
 invalidation walk, the paint-order build and the stacking predicate all take.
-A page with no `auto` element pays one `is_empty` test per render.
+A page with no `auto` element pays one `is_empty` test per render. Its
+counterpart is the **last remembered size** (`layout/remembered.rs`), which
+decides what a box that skips is sized *from*: the layout host records a box's
+content box after every committing run in which it had no size containment,
+and `StyleView` substitutes it into `contain-intrinsic-*` once the box starts
+skipping, so a revealed row that goes back off screen keeps the height it
+rendered at instead of collapsing to its estimate.
 
 `Document<T>` owns one private concrete `Painter`
 (`crates/dom/src/paint/painter.rs`), including its reusable walk scratch, its
