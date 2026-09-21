@@ -9,7 +9,7 @@ export default defineConfig(({ env }) => {
   const mode = env === 'development' ? 'development' : 'production';
   const fixtures = mode === 'development'
     ? ['react-reload', 'react-global-props', 'react-lazy-nested']
-    : ['react-native', 'react-lazy', 'react-lazy-sync', 'react-lazy-nested', 'react-reload', 'react-data-processor', 'react-global-props'];
+    : ['react-native', 'react-lazy', 'react-lazy-sync', 'react-lazy-nested', 'react-reload', 'react-data-processor', 'react-global-props', 'react-list'];
 
   return {
     plugins: [pluginReactLynx({ engineVersion }), pluginSourceBundles(mode, engineVersion)],
