@@ -253,10 +253,18 @@ declare module "bobcat-internal:host" {
    * becomes a value in this realm.
    *
    * `parameters` is the parameter list the wrapper of a CommonJS file is
-   * compiled with, verbatim; a JSON file is parsed instead and `parameters` is
-   * unread. Either way the compile or parse is named by the URL the load
-   * answered from, so a `SyntaxError` and every frame beneath it name the
-   * file, and a line in the body is the line it sits on in it.
+   * compiled with, verbatim; a JSON file is parsed instead, an ES module is
+   * linked and evaluated instead, and `parameters` is unread by both. Either
+   * way the compile or parse is named by the URL the load answered from, so a
+   * `SyntaxError` and every frame beneath it name the file, and a line in the
+   * body is the line it sits on in it.
+   *
+   * An ES module is linked inline: every `import` in it, and in what it
+   * imports, is loaded through this same member while it is being compiled,
+   * before any body runs. Its evaluation runs no promise jobs, so a graph
+   * that awaits at its top level throws, as does a module of a graph that is
+   * still evaluating. A module this realm already has — from an `import`, or
+   * from an earlier load — is answered from it and evaluated at most once.
    *
    * The call parks the job it runs in until the host answers: the engine
    * thread's tasks keep running, and no other job does — not this realm's
@@ -277,27 +285,32 @@ interface LoadedModuleSource {
    * a nested `require` resolves against, and `__filename`.
    */
   readonly url: string;
-  readonly kind: "commonjs" | "json";
+  readonly kind: "commonjs" | "json" | "module";
   /**
    * For `"commonjs"`, the wrapper function: one parameter per name in the
    * `parameters` list, and the file's own body. For `"json"`, the parsed
-   * value.
+   * value. For `"module"`, the namespace object of the evaluated module.
    */
   readonly value: unknown;
 }
 
-/** One CommonJS or JSON module, as `require.cache` holds it. */
+/** One CommonJS, JSON or ES module, as `require.cache` holds it. */
 interface RequiredModule {
   /** The URL that was required, which is this entry's key in the cache. */
   readonly id: string;
   /** The same URL: what the module is named by, not where it answered from. */
   readonly filename: string;
-  /** What the body left here, or assigned over. JSON is the parsed value. */
+  /**
+   * What the body left here, or assigned over. JSON is the parsed value, and
+   * an ES module is its namespace object — or, when it exports that name,
+   * whatever `module.exports` is bound to.
+   */
   exports: unknown;
   /**
-   * True once the body has returned — from the start for JSON, which has no
-   * body. A body that threw leaves no entry behind at all, so no cached
-   * module is ever `false` once its `require` has returned.
+   * True once the body has returned — from the start for JSON and for an ES
+   * module, which was evaluated by the load that answered it. A body that
+   * threw leaves no entry behind at all, so no cached module is ever `false`
+   * once its `require` has returned.
    */
   readonly loaded: boolean;
 }

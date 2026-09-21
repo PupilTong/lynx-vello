@@ -15,10 +15,27 @@ import { loadModuleSync, resolveModuleUrl } from "bobcat-internal:host";
 // normalizer an `import` resolves through, so a `require` and an `import` name
 // the same module by the same URL. `loadModuleSync` asks for one URL and
 // answers with the source already compiled: the wrapper function of a
-// CommonJS file, or the parsed value of a JSON one. Source text never becomes
+// CommonJS file, the parsed value of a JSON one, or the namespace object of
+// an ES module — linked and evaluated by that one call, with every `import`
+// in its graph loaded through the same host member. Source text never becomes
 // a value here, the compile is named by the URL the load answered from, and
 // the load parks the job this call runs in — no promise job of this realm's
 // runs while it waits.
+//
+// # ES modules, as Node 24 requires them
+//
+// What a `require` of a module answers is its namespace object, except when
+// that namespace has an export named `module.exports`, which is the value
+// answered instead: the rule Node added so a file can be written once and
+// read either way. Which of the three shapes a source is read as is the
+// response URL's own path extension — `.json`, `.mjs`, `.cjs` — and, for
+// anything else, what the engine detects the text to be.
+//
+// Two things a module cannot be required through, both of them the engine's
+// refusal rather than this file's: a graph that awaits at its top level,
+// which only the job queue could settle (Node's `ERR_REQUIRE_ASYNC_MODULE`),
+// and a module of a graph that is still evaluating (Node's
+// `ERR_REQUIRE_CYCLE_MODULE`).
 //
 // # Deviations from Node
 //
@@ -27,10 +44,12 @@ import { loadModuleSync, resolveModuleUrl } from "bobcat-internal:host";
 // `node_modules`, no `package.json` `exports`, no extension search and no
 // directory index. A specifier that cannot be resolved is a `TypeError`
 // carrying the normalizer's message, where Node reports an `Error` with
-// `code: "MODULE_NOT_FOUND"`. Which of CommonJS and JSON a source is read as
-// is the response URL's own path extension. `require.main`,
-// `require.extensions` and `module.parent` are absent, and a `require` of ESM
-// text is a `SyntaxError` rather than Node's own diagnostic.
+// `code: "MODULE_NOT_FOUND"`. The shape of a source is decided without the
+// nearest `package.json` `"type"`, which there is none of, so a `.js` file is
+// read as whichever its own text says. `require.main`, `require.extensions`
+// and `module.parent` are absent, an ES module's cache entry holds its
+// namespace rather than a `module` object the file could have assigned over,
+// and the two refusals above are plain `Error`s without Node's `code`.
 
 /** The parameter list every CommonJS wrapper is compiled with. */
 const WRAPPER_PARAMETERS = "exports, require, module, __filename, __dirname";
@@ -110,6 +129,23 @@ function load(url: string): unknown {
   // `__filename` is, and what `__dirname` is one resolution away from: a
   // redirect moves the file, not the name it was required by.
   const loaded = loadModuleSync(url, WRAPPER_PARAMETERS);
+  if (loaded.kind === "module") {
+    // Linked and evaluated before it was answered, and its exports are live
+    // bindings of the namespace: the entry is complete the moment it is made,
+    // as a JSON file's is. Node reads an export literally named
+    // `module.exports` as the whole of them.
+    const namespace = loaded.value as Record<string, unknown>;
+    const entry: ModuleEntry = {
+      id: url,
+      filename: url,
+      exports: Object.hasOwn(namespace, "module.exports")
+        ? namespace["module.exports"]
+        : namespace,
+      loaded: true,
+    };
+    cache[url] = entry;
+    return entry.exports;
+  }
   if (loaded.kind === "json") {
     // Parsed before it was answered, and there is no body to run: the entry
     // is complete the moment it is made.

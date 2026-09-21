@@ -489,19 +489,31 @@ kinds have: `resolveModuleUrl(base, specifier)`, the normalizer `import`
 resolves through, so a `require` and an `import` name a module by the same URL;
 and `loadModuleSync(url, parameters)`, which asks the host for that URL through
 the same `SourceRequest::Module` and answers the source *compiled* — the
-wrapper function of a CommonJS file, or the parsed value of a JSON one — so
-source text never becomes a JavaScript value. That load parks the job it runs
+wrapper function of a CommonJS file, the parsed value of a JSON one, or the
+namespace object of an ES module, linked and evaluated — so source text never
+becomes a JavaScript value. That load parks the job it runs
 in on the answer exactly as stylesheet adoption does: the engine thread's tasks
 go on running, no other job does, and so no promise job and no sibling realm's
 entry runs while it waits. The other arm of that wait is the requesting realm's
 cancellation token: a view's is written by the embedder's release, from the
 embedder's own thread; a Worker's by the in-band `Terminate` its message
 consumer — a task, still running during the wait — reads, which ends the worker
-and the load with it. A response URL whose path ends in `.json` is parsed as
-JSON and anything else is compiled as CommonJS, so requiring ESM text is a
-`SyntaxError`. The CommonJS cache is the realm's own, reachable as
-`require.cache` and separate from the ESM module map: a URL both imported and
-required is two instances. `module.id` and `module.filename` are the URL that
+and the load with it. Which of the three a source is read as is Node 24's rule
+with the one input it has that a URL does not: the response URL's path decides
+(`.json`, `.mjs`, `.cjs`), there is no `package.json` `"type"`, and anything
+else — a plain `.js` — is what QuickJS's own syntax detection reads the text
+as, in the bridge, where the text is. An ES module is **linked inline**: every
+`import` in its graph is loaded through the same member during the compile,
+recursively, before any body runs, and a `bobcat:*` specifier links to that
+native module instead. Its evaluation runs no promise jobs, so two things
+throw instead of waiting, as they do in Node: a graph that awaits at its top
+level (`ERR_REQUIRE_ASYNC_MODULE`) and a module of a graph that is still
+evaluating (`ERR_REQUIRE_CYCLE_MODULE` — and, since `JSModuleDef` keeps its
+status private, also a module of that graph whose own body has finished). What
+`require` answers is the namespace, or an export literally named
+`module.exports` where there is one. The cache is the realm's own, reachable as
+`require.cache`; a URL is one module in it, and an ES module an `import`
+already brought in is answered from that instance rather than loaded again. `module.id` and `module.filename` are the URL that
 was required, and the URL the load answered from is `__filename`, the base a
 nested `require` resolves against and what `__dirname` is one resolution away
 from. `require.resolve` answers the cache key without loading, and a load,
@@ -1144,12 +1156,17 @@ It also owns one synchronous load-and-compile entry, which is what a realm's
 `loadModuleSync(url, parameters)` on a native module, backed by a host `FnMut`
 that answers one URL at a time. The bridge holds only the mechanism — it
 resolves nothing, caches nothing, and stays ignorant of URLs and media types,
-which of CommonJS and JSON a source is read as being the host's answer beside
-the response URL and the text. What it does own is the order: the response URL
-is copied and the text compiled (under that URL, in a wrapper of the caller's
-parameter list) or JSON-parsed *before* the compiled script is evaluated, which
-is the first point author code can run and so the first point another load can
-replace the buffers the host lent.
+which of CommonJS, JSON and an ES module a source is read as being the host's
+answer beside the response URL and the text, or, where the host declines to
+say, QuickJS's own syntax detection over that text. What it does own is the
+order: the response URL is copied and the text compiled (under that URL, in a
+wrapper of the caller's parameter list), JSON-parsed, or copied into the
+realm's own source table and compiled as a module *before* anything of the
+file is evaluated, which is the first point author code can run and so the
+first point another load can replace the buffers the host lent. A module is
+linked during that compile, so the imports it pulls in are loaded — each
+through the same borrowed-until-the-next-load host callback — before its own
+evaluation starts.
 Every heap allocation made by the C shim or the five compiled QuickJS C
 translation units is redirected through a private C ABI into Rust's global
 allocator; a fixed aligned prefix supplies the size required for matching

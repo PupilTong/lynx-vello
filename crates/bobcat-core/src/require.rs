@@ -13,8 +13,16 @@
 //! - `resolveModuleUrl(base, specifier)`, the normalizer an `import` resolves through, so a
 //!   `require` and an `import` name the same module by the same URL.
 //! - `loadModuleSync(url, parameters)`, which asks the host for that URL and answers with the
-//!   source compiled — as the wrapper function of a `CommonJS` file or the parsed value of a JSON
-//!   one. The text never becomes a JavaScript value, and the compile names the response URL.
+//!   source compiled — as the wrapper function of a `CommonJS` file, the parsed value of a JSON
+//!   one, or the namespace of an ES module, linked and evaluated. The text never becomes a
+//!   JavaScript value, and the compile names the response URL.
+//!
+//! An ES module is linked *inline*: every `import` in it, and in what it
+//! imports, reaches this same closure as a [`SourceRequest::Module`] of its
+//! own and parks its own job, recursively, while the module that imports it
+//! is being compiled. Nothing is nested in the thread's sense — each load has
+//! returned before the compile that starts the next one — so the waits are
+//! one after another, and what a job of this thread sees is one long one.
 //!
 //! The wait is `adoptStyleSheet`'s, and so is what it costs: it parks the
 //! *job* this `require` runs in. Every task of this engine thread goes on
@@ -105,16 +113,31 @@ fn string_argument<'a>(
     }
 }
 
-/// JSON exactly when the *response* URL's path says so. The path alone, so a
-/// query or a fragment is no part of the answer.
+/// How the *response* URL's path says the source is to be read, which is
+/// Node 24's rule with the one thing it has that a URL does not — the nearest
+/// `package.json` `"type"` — missing: `.json` is JSON, `.mjs` is an ES
+/// module, `.cjs` is `CommonJS`, and everything else is the engine's to detect
+/// from the text.
+///
+/// The path alone, so a query or a fragment is no part of the answer, and a
+/// URL that does not parse has no path to read: it is detected too.
 #[expect(
     clippy::case_sensitive_file_extension_comparisons,
     reason = "a URL path is case-sensitive, as is Node's own extension match"
 )]
 fn kind_of(url: &str) -> RequiredKind {
-    match url::Url::parse(url) {
-        Ok(url) if url.path().ends_with(".json") => RequiredKind::Json,
-        _ => RequiredKind::CommonJs,
+    let Ok(parsed) = url::Url::parse(url) else {
+        return RequiredKind::Detect;
+    };
+    let path = parsed.path();
+    if path.ends_with(".json") {
+        RequiredKind::Json
+    } else if path.ends_with(".mjs") {
+        RequiredKind::Module
+    } else if path.ends_with(".cjs") {
+        RequiredKind::CommonJs
+    } else {
+        RequiredKind::Detect
     }
 }
 
@@ -123,13 +146,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn json_is_the_response_paths_extension_and_nothing_else() {
+    fn the_response_paths_extension_is_what_names_the_shape() {
         assert_eq!(kind_of("app:///config.json"), RequiredKind::Json);
+        assert_eq!(kind_of("app:///module.mjs"), RequiredKind::Module);
+        assert_eq!(kind_of("app:///script.cjs"), RequiredKind::CommonJs);
+        assert_eq!(kind_of("app:///either.js"), RequiredKind::Detect);
+        assert_eq!(kind_of("app:///no-extension"), RequiredKind::Detect);
+    }
+
+    #[test]
+    fn a_query_or_a_fragment_is_no_part_of_the_path() {
         assert_eq!(kind_of("app:///config.json?v=2#top"), RequiredKind::Json);
+        assert_eq!(kind_of("app:///module.mjs?v=2"), RequiredKind::Module);
         assert_eq!(
             kind_of("app:///main.cjs?fallback=.json"),
             RequiredKind::CommonJs
         );
-        assert_eq!(kind_of("not a url"), RequiredKind::CommonJs);
+        assert_eq!(kind_of("app:///main.js#.mjs"), RequiredKind::Detect);
+    }
+
+    #[test]
+    fn what_is_not_a_url_has_no_path_to_read() {
+        assert_eq!(kind_of("not a url"), RequiredKind::Detect);
     }
 }
