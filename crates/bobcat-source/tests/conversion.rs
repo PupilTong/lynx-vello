@@ -605,8 +605,11 @@ fn legacy_lepus_is_rejected_as_bytecode() {
     ));
 }
 
+/// A named Lepus chunk is a script resource of its own, registered verbatim
+/// and loaded on demand through the host, and `__LoadLepusChunk` runs it
+/// again on every call.
 #[tokio::test]
-async fn named_lepus_chunks_load_on_demand_in_the_selected_entry_scope() {
+async fn named_lepus_chunks_load_and_run_on_every_call() {
     use std::sync::{Arc, mpsc};
     use std::time::Duration;
 
@@ -616,27 +619,36 @@ async fn named_lepus_chunks_load_on_demand_in_the_selected_entry_scope() {
             let _ = self.0.send(());
         }
     }
+    // A chunk shares `globalThis` and the entry preamble's own runtime and
+    // PAPI bindings with the entry — as the parameters of the function body
+    // the host compiled it as — but not the entry's lexical scope, and not
+    // its own `var`s, which are local to each call.
     let native = native_bundle(vec![custom_section(vec![
         CustomSection::source(
             "entry__main-thread",
             r"
-            let count = 0;
-            const identity = lynx;
-            if (count !== 0 || !__LoadLepusChunk('chunk__main-thread', {}))
-                throw Error('chunk missing or eagerly evaluated');
-            if (!__LoadLepusChunk('chunk__main-thread', {}) || count !== 2)
-                throw Error('chunk did not re-evaluate in entry scope');
+            if (globalThis.count !== undefined)
+                throw Error('a chunk ran before it was asked for');
+            if (!__LoadLepusChunk('chunk__main-thread', {})
+                || !__LoadLepusChunk('chunk__main-thread', {}))
+                throw Error('chunk missing');
+            if (globalThis.count !== 2)
+                throw Error('a chunk runs on every call: ' + globalThis.count);
+            if (globalThis.runtimeIdentity !== lynx || globalThis.papiIdentity !== __CreateView)
+                throw Error('entry runtime/PAPI bindings lost');
             if (__LoadLepusChunk('missing', {}) || typeof chunkLocal !== 'undefined')
                 throw Error('chunk lookup or scope');
+            if (__LoadLepusChunk('chunk__main-thread', {dynamicComponentEntry: 'other'}))
+                throw Error('a foreign entry was answered');
         ",
         ),
         CustomSection::source(
             "chunk__main-thread",
             r"
-            count++;
+            globalThis.count = (globalThis.count ?? 0) + 1;
             var chunkLocal = true;
-            if (lynx !== identity || typeof __CreateView !== 'function')
-                throw Error('entry runtime/PAPI bindings lost');
+            globalThis.runtimeIdentity = lynx;
+            globalThis.papiIdentity = __CreateView;
         ",
         ),
     ])]);

@@ -1,10 +1,16 @@
-// The compiled BTS module ABI: the registered-source tables, and the loader a
-// path no manifest carries goes through.
+// The compiled BTS module ABI: the factory ABI a bundle body defines modules
+// through, and the one load every bundle path goes through.
 //
-// The two host members the loader is written over are stood in for here, as in
-// module.test.ts: the mock resolves with Node's own `URL`, refusing what the
-// engine's normalizer refuses, and compiles with `new Function`. The real
-// boundary runs in crates/bobcat-core/src/background/tests.rs.
+// There is no table and no boot-time import here any more: `requireModule`,
+// `loadScript` and `loadScriptInit` each build the URL their path names and
+// load it synchronously, as `__LoadLepusChunk` does on MTS. What is stood in
+// for is that one pair of host members, as in module.test.ts: the mock
+// resolves with Node's own `URL`, refusing what the engine's normalizer
+// refuses, and answers a body `PageSource` registered as the `"module"` it is
+// — a namespace object — and a file nothing wrote into a bundle as the
+// `"commonjs"` wrapper `new Function` builds. The real boundary, where the
+// engine itself compiles and evaluates the module, runs in
+// crates/bobcat-core/src/background/tests.rs.
 
 import { beforeEach, describe, expect, it, rstest } from "@rstest/core";
 import { createLynxModules } from "../src/lynx-modules.ts";
@@ -19,49 +25,47 @@ rstest.mockRequire("bobcat-internal:host", () => ({
     loadModuleSync(url, parameters),
 }));
 
-/** The parameter list web-core compiles an external chunk in. */
-const LYNX_PARAMETERS =
-  "postMessage, module, exports, lynxCoreInject, Card, setTimeout, setInterval, "
-  + "clearInterval, clearTimeout, NativeModules, console, Component, ReactLynx, "
-  + "nativeAppId, Behavior, LynxJSBI, lynx, window, document, frames, location, "
-  + "navigator, localStorage, history, Caches, screen, alert, confirm, prompt, "
-  + "webkit, Reporter, print, global, requestAnimationFrame, cancelAnimationFrame";
-
-/** A Lynx-target chunk, as `RuntimeWrapperWebpackPlugin` banners one. */
-const LYNX_TARGET_CHUNK = `(function(){'use strict';var g=globalThis;
-  function __init_card_bundle__(lynxCoreInject){ var tt=lynxCoreInject.tt;
-    tt.define("/a.js", function(require,module){ module.exports={api:tt}; });
-    return tt.require("/a.js"); }
-  if (g.bundleSupportLoadScript){ var res={init:__init_card_bundle__};
-    g.__bundle__holder=res; return res; }
-  __init_card_bundle__({tt:tt}); })();`;
-
 /**
- * A Lynx-target chunk whose module body throws the first time it runs and
- * answers the second, counting its runs where only `globalThis` can carry a
- * value a compiled chunk reaches.
+ * The whole parameter list a bundle path is asked for in. It is read only
+ * where the response is a plain CommonJS file, which is what a path no
+ * container carried normally is: none of the Lynx names a registered body
+ * gets from its module's preamble is in scope there.
  */
-const FAILING_LYNX_CHUNK = `(function(){'use strict';var g=globalThis;
-  function __init_card_bundle__(lynxCoreInject){ var tt=lynxCoreInject.tt;
-    tt.define("/failing.js", function(require,module){
-      if (g.__initRuns__++ === 0) throw new Error("the first init failed");
-      module.exports={runs:g.__initRuns__}; });
-    return tt.require("/failing.js"); }
-  if (g.bundleSupportLoadScript){ var res={init:__init_card_bundle__};
-    g.__bundle__holder=res; return res; }
-  __init_card_bundle__({tt:tt}); })();`;
+const EXTERNAL_PARAMETERS = "module, exports";
 
-/** One file the mock host serves. */
-interface HostFile {
-  text: string;
-  kind?: "commonjs" | "json";
-}
+/** One file the mock host serves, as one of the three shapes a load answers. */
+type HostFile =
+  | { kind: "commonjs"; text: string }
+  | { kind: "json"; value: unknown }
+  | { kind: "module"; namespace: object };
 
 const files: Map<string, HostFile> = new Map();
 /** Every URL a load was asked for, in order. */
 const loads: string[] = [];
 /** The `parameters` argument of every load, in order. */
 const parameterLists: string[] = [];
+
+/** A file nothing wrote into a bundle: plain CommonJS text. */
+function commonjs(text: string): HostFile {
+  return { kind: "commonjs", text };
+}
+/** A `.json` response, which the host parses rather than compiling. */
+function json(value: unknown): HostFile {
+  return { kind: "json", value };
+}
+/**
+ * One body as `PageSource` registered it: an ES module whose **default
+ * export** is what native's host would have kept as that script's completion
+ * value — the compiler's `{init}` object, a CommonJS body's `module.exports`,
+ * a JSON body's value.
+ */
+function body(value: unknown): HostFile {
+  return { kind: "module", namespace: { default: value } };
+}
+/** A hand-written ES module, which need not export a `default` at all. */
+function esModule(namespace: object): HostFile {
+  return { kind: "module", namespace };
+}
 
 /** As strict as the engine's normalizer, and as plain in how it says so. */
 function resolveModuleUrl(base: string, specifier: string): string {
@@ -89,6 +93,12 @@ function parsed(specifier: string, base?: string): URL | undefined {
   }
 }
 
+/**
+ * The three shapes the engine answers a synchronous load with: the wrapper
+ * function of a CommonJS file, whose `module.exports` is what it answers; the
+ * parsed value of a JSON one; the namespace object of an ES module, which the
+ * engine compiled, linked and evaluated before answering.
+ */
 function loadModuleSync(url: string, parameters: string): LoadedModuleSource {
   loads.push(url);
   parameterLists.push(parameters);
@@ -96,8 +106,9 @@ function loadModuleSync(url: string, parameters: string): LoadedModuleSource {
   if (file === undefined) {
     throw new Error(`cannot load '${url}': no such file: ${url}`);
   }
-  if (file.kind === "json") {
-    return { url, kind: "json", value: JSON.parse(file.text) };
+  if (file.kind === "json") return { url, kind: "json", value: file.value };
+  if (file.kind === "module") {
+    return { url, kind: "module", value: file.namespace };
   }
   return {
     url,
@@ -105,6 +116,8 @@ function loadModuleSync(url: string, parameters: string): LoadedModuleSource {
     value: new Function(...parameters.split(", "), file.text),
   };
 }
+
+type Values = Record<string, unknown>;
 
 function environment(templateUrl?: string) {
   const app = { _apiList: { native: true } };
@@ -115,211 +128,260 @@ function environment(templateUrl?: string) {
   return { app, modules };
 }
 
-/** What a chunk left in the holder, which only `globalThis` can carry. */
-function holder(): unknown {
-  return Reflect.get(globalThis, "__bundle__holder");
+/** The entry name a body's `{init}` is initialized under. */
+function entryWhileInitializing(): unknown {
+  return Reflect.get(globalThis, "globDynamicComponentEntry");
 }
 
-describe("compiled BTS module ABI", () => {
-  it("gives definitions an app scope and factories the compiler API arguments", () => {
-    const { app, modules } = environment();
-    modules.register({ '/late.js': `
-      const owner=tt, helper=41;
-      tt.define('late.js',function(require,module,exports,Card,setTimeout,setInterval,clearInterval,clearTimeout,NativeModules,tt){
-        module.exports={owner,receiver:this,api:tt,value:helper+1,strict:(function(){return this})()===undefined};
-      });
-      ({init(){throw Error('tt.require must ignore Script completion');}})
-    ` }, true);
-    const result = modules.require('late.js');
-    expect(result).toEqual({owner:app,receiver:app,api:app._apiList,value:42,strict:true});
-    expect(modules.require('late.js')).toBe(result);
-  });
-
-  it("evaluates native init wrappers and converted web copies with the same app", () => {
-    const source = `(function(){return {init:function({tt}){
-      tt.define('/entry.js',function(require,module,exports,Card,setTimeout,setInterval,clearInterval,clearTimeout,NativeModules,tt,console,Component,ReactLynx,nativeAppId,Behavior,LynxJSBI,lynx){
-        module.exports={argc:arguments.length,api:tt,platform:lynx.SystemInfo.platform,receiver:this};
-      });
-      return tt.require('/entry.js');
-    }}})()`;
-    for (const wrapped of [true, false]) {
-      const {app, modules} = environment();
-      modules.register({'/entry.js': source}, wrapped);
-      const result = modules.requireModule('/entry.js');
-      expect(result).toEqual({argc:39,api:app._apiList,platform:"headless",receiver:app});
-      expect(modules.requireModule('/entry.js')).toBe(result);
-    }
-  });
-
-  it("allows lexical minifier names in web Scripts without leaking bindings", () => {
-    const {modules} = environment();
-    modules.register({'/web.js': '"use strict"; let tt=42; module.exports={tt,platform:lynx.SystemInfo.platform,scope:lynxCoreInject.tt._apiList.native};'}, false);
-    expect(modules.requireModule('/web.js')).toEqual({tt:42,platform:"headless",scope:true});
-    expect(Object.hasOwn(globalThis, 'lynxCoreInject')).toBe(false);
-  });
-
-  it("publishes partial CommonJS exports for cycles and resolves relative names", () => {
-    const {modules} = environment();
-    modules.register({
-      '/dir/a.js': `tt.define('dir/a.js',function(require,module){
-        module.exports.a=1; module.exports.fromB=require('./b').fromA;
-      });`,
-      '/dir/b.js': `tt.define('dir/b.js',function(require,module){
-        module.exports.fromA=require('../dir/a').a;
-      });`,
-    }, false);
-    expect(modules.require('dir/a.js')).toEqual({a:1,fromB:1});
-  });
-
-  it("loads registered JSON and named sections and rejects absent sources", () => {
-    const {app, modules} = environment();
-    modules.register({'/data.json':'{"value":7}'}, false);
-    expect(modules.requireModule('/data.json')).toEqual({value:7});
-    modules.registerSections({background:'({init({tt}){return {app:tt}}})'});
-    const result = modules.loadScript('background', {});
-    expect(result).toEqual({app});
-    expect(modules.loadScript('background', {})).toBe(result);
-    expect(() => modules.loadScript('absent', {})).toThrow('not registered');
-  });
-});
-
-describe("requireModule over the synchronous host loader", () => {
+describe("one load per bundle path, and the factory ABI over it", () => {
   beforeEach(() => {
     files.clear();
     loads.length = 0;
     parameterLists.length = 0;
-    Reflect.set(globalThis, "__bundle__holder", undefined);
   });
 
-  it("resolves an unregistered path against the template URL and runs its body once", () => {
+  it("initializes a body's {init} default export with this realm's app object", () => {
+    let seenEntry: unknown;
+    const value = {
+      init(this: unknown, inject: {tt: {define: Function; require: Function}}) {
+        seenEntry = entryWhileInitializing();
+        const owner = inject.tt;
+        owner.define("late.js", function (
+          this: unknown, _require: unknown, module: {exports: unknown},
+          _exports: unknown, _Card: unknown, _setTimeout: unknown,
+          _setInterval: unknown, _clearInterval: unknown, _clearTimeout: unknown,
+          _NativeModules: unknown, api: unknown,
+        ) {
+          module.exports = {owner, receiver: this, api, holder: value};
+        });
+        return owner.require("late.js");
+      },
+    };
     const {app, modules} = environment("https://cdn.test/app/x.web.bundle");
-    files.set("https://cdn.test/app/chunk.js", {text:
+    // A `.lynx.bundle` body: `PageSource` wrote `export default <the
+    // compiler's own IIFE>`, so its default export is the `{init}` object.
+    files.set("https://cdn.test/app/late.js", body(value));
+
+    const result = modules.requireModule("/late.js");
+    // lynx-core's `_$executeInit`: `init` is called on the object that carries
+    // it, with this realm's one app object as `{tt}`.
+    expect(result).toEqual({
+      owner: app, receiver: app, api: app._apiList, holder: value,
+    });
+    expect(seenEntry).toBe("__Card__");
+    expect(loads).toEqual(["https://cdn.test/app/late.js"]);
+    // Published for the init alone.
+    expect(Object.hasOwn(globalThis, "globDynamicComponentEntry")).toBe(false);
+    // Cached under the bare path, as in lynx-core, so nothing is loaded
+    // again, and the module the body defined is `require`able afterwards.
+    expect(modules.requireModule("/late.js")).toBe(result);
+    expect(loads).toEqual(["https://cdn.test/app/late.js"]);
+    expect(modules.require("late.js")).toBe(result);
+    expect(() => modules.require("absent.js")).toThrow("is not defined");
+  });
+
+  it("answers a body whose default export carries no init as it stands", () => {
+    const exports = {answer: 42};
+    const {modules} = environment("https://cdn.test/app/x.web.bundle");
+    // A `.web.bundle` body: its module exported the `module.exports` its
+    // CommonJS text left behind.
+    files.set("https://cdn.test/app/raw.js", body(exports));
+    files.set("https://cdn.test/app/data.json", json({message: "parsed by the host"}));
+    files.set("https://cdn.test/app/nothing.js", body(undefined));
+
+    expect(modules.requireModule("/raw.js")).toBe(exports);
+    expect(modules.requireModule("/data.json")).toEqual({message: "parsed by the host"});
+    // A body whose value is `undefined` answers that, and is asked for again
+    // because nothing cacheable came back.
+    expect(modules.requireModule("/nothing.js")).toBeUndefined();
+    expect(loads).toEqual([
+      "https://cdn.test/app/raw.js",
+      "https://cdn.test/app/data.json",
+      "https://cdn.test/app/nothing.js",
+    ]);
+    // Every load asks in the one parameter list, which only a CommonJS
+    // response is compiled in.
+    expect(parameterLists).toEqual(Array(3).fill(EXTERNAL_PARAMETERS));
+  });
+
+  it("answers an ES module with no default export with its namespace", () => {
+    const {modules} = environment("https://cdn.test/app/x.web.bundle");
+    files.set("https://cdn.test/app/hand-written.js",
+      esModule({answer: 42, other: "kept"}));
+
+    expect(modules.requireModule("/hand-written.js")).toEqual(
+      {answer: 42, other: "kept"});
+    expect(loads).toEqual(["https://cdn.test/app/hand-written.js"]);
+  });
+
+  it("roots a name before it resolves it, so either spelling is one URL", () => {
+    const {modules} = environment("https://cdn.test/app/x.web.bundle");
+    // A manifest path is written rooted and a section name is not, while a
+    // caller may write either — native roots every path before it looks one
+    // up (`js_app.cc` `App::LoadScript`), and `lynx.loadScript` is called
+    // with bare section names.
+    files.set("https://cdn.test/app/app-service.js", body({rooted: true}));
+    files.set("https://cdn.test/app/background", body({section: true}));
+
+    expect(modules.requireModule("/app-service.js")).toEqual({rooted: true});
+    expect(modules.requireModule("app-service.js")).toEqual({rooted: true});
+    expect(modules.loadScript("background", {})).toEqual({section: true});
+    expect(modules.loadScript("/background", {})).toEqual({section: true});
+    expect(loads).toEqual([
+      "https://cdn.test/app/app-service.js",
+      "https://cdn.test/app/app-service.js",
+      "https://cdn.test/app/background",
+      "https://cdn.test/app/background",
+    ]);
+  });
+
+  it("answers a named section once per entry and per key", () => {
+    const {app, modules} = environment("https://cdn.test/app/x.web.bundle");
+    files.set("https://cdn.test/app/background",
+      body({init: ({tt}: {tt: unknown}) => ({app: tt})}));
+
+    const result = modules.loadScript("background", {});
+    expect(result).toEqual({app});
+    expect(modules.loadScript("background", {})).toBe(result);
+    expect(loads).toEqual(["https://cdn.test/app/background"]);
+    // A section is no part of `requireModule`'s own cache.
+    expect(modules.requireModule("background")).not.toBe(result);
+    // And a `bundleName` is an entry of its own, so its sections are too.
+    files.set("https://lazy.test/bundle/background", body({lazy: true}));
+    expect(modules.loadScript("background", {bundleName: "https://lazy.test/bundle/lazy.bundle"}))
+      .toEqual({lazy: true});
+    expect(modules.loadScript("background", {})).toBe(result);
+  });
+
+  it("loads a path no bundle carries as a plain CommonJS file", () => {
+    const {modules} = environment("https://cdn.test/app/x.web.bundle");
+    files.set("https://cdn.test/app/chunk.js", commonjs(
       "'use strict'; module.exports = {receiver: this, count: arguments.length,"
-      + " api: lynxCoreInject.tt, entry: globalThis.globDynamicComponentEntry,"
-      + " bom: typeof window, raf: requestAnimationFrame};"});
+      + " lynx: typeof lynx, exportsAlias: exports};"));
 
-    const result = modules.requireModule('/chunk.js');
+    const result = modules.requireModule("/chunk.js");
     expect(loads).toEqual(["https://cdn.test/app/chunk.js"]);
-    expect(parameterLists).toEqual([LYNX_PARAMETERS]);
+    expect(parameterLists).toEqual([EXTERNAL_PARAMETERS]);
     expect(result.receiver).toBeUndefined();
-    expect(result.count).toBe(35);
-    expect(result.api).toBe(app);
-    expect(result.entry).toBe("__Card__");
-    expect(result.bom).toBe("undefined");
-    expect(result.raf).toBeUndefined();
-    // The entry is published for the body alone, and the holder is left clear.
-    expect(Object.hasOwn(globalThis, 'globDynamicComponentEntry')).toBe(false);
-    expect(holder()).toBeUndefined();
+    expect(result.count).toBe(2);
+    // None of the Lynx names a registered body gets is in scope here: nothing
+    // outside this engine wrote this file into a bundle.
+    expect(result.lynx).toBe("undefined");
 
-    expect(modules.requireModule('/chunk.js')).toBe(result);
+    expect(modules.requireModule("/chunk.js")).toBe(result);
     expect(loads).toEqual(["https://cdn.test/app/chunk.js"]);
   });
 
-  it("roots a bare path before it resolves it", () => {
+  it("resolves an entry that is itself an absolute URL beside itself", () => {
     const {modules} = environment("https://cdn.test/app/x.web.bundle");
-    files.set("https://cdn.test/app/chunk.js", {text: "exports.rooted = true;"});
+    files.set("https://lazy.test/bundle/chunk.js", commonjs("exports.lazy = true;"));
 
-    expect(modules.requireModule('chunk.js')).toEqual({rooted: true});
-    expect(loads).toEqual(["https://cdn.test/app/chunk.js"]);
+    expect(modules.requireModule("/chunk.js", "https://lazy.test/bundle/lazy.bundle"))
+      .toEqual({lazy: true});
+    expect(loads).toEqual(["https://lazy.test/bundle/chunk.js"]);
   });
 
   it("asks for an absolute path as it is, whatever the template URL", () => {
     const {modules} = environment("https://cdn.test/app/x.web.bundle");
-    files.set("https://other.test/a.js", {text: "exports.absolute = true;"});
+    files.set("https://other.test/a.js", commonjs("exports.absolute = true;"));
 
-    expect(modules.requireModule('https://other.test/a.js')).toEqual({absolute: true});
+    expect(modules.requireModule("https://other.test/a.js")).toEqual({absolute: true});
     expect(loads).toEqual(["https://other.test/a.js"]);
-  });
-
-  it("takes a Lynx-target chunk's factory out of the bundle holder", () => {
-    const {app, modules} = environment("https://cdn.test/app/x.web.bundle");
-    files.set("https://cdn.test/app/lynx.js", {text: LYNX_TARGET_CHUNK});
-
-    expect(modules.requireModule('/lynx.js').api).toBe(app);
-    expect(holder()).toBeUndefined();
   });
 
   it("answers a JSON response with the value the host parsed", () => {
     const {modules} = environment("https://cdn.test/app/x.web.bundle");
-    files.set("https://cdn.test/app/data.json", {text: '{"value": 7}', kind: "json"});
+    files.set("https://cdn.test/app/data.json", json({value: 7}));
 
-    expect(modules.requireModule('/data.json')).toEqual({value: 7});
+    expect(modules.requireModule("/data.json")).toEqual({value: 7});
     expect(loads).toEqual(["https://cdn.test/app/data.json"]);
+  });
+
+  it("publishes partial CommonJS exports for cycles and resolves relative names", () => {
+    const {modules} = environment("https://cdn.test/app/x.web.bundle");
+    files.set("https://cdn.test/app/dir.js", body({
+      init({tt}: {tt: {define: Function}}) {
+        tt.define("dir/a.js", function (require: Function, module: {exports: Values}) {
+          module.exports["a"] = 1;
+          module.exports["fromB"] = (require("./b") as Values)["fromA"];
+        });
+        tt.define("dir/b.js", function (require: Function, module: {exports: Values}) {
+          module.exports["fromA"] = (require("../dir/a") as Values)["a"];
+        });
+      },
+    }));
+
+    modules.requireModule("/dir.js");
+    expect(modules.require("dir/a.js")).toEqual({a: 1, fromB: 1});
   });
 
   it("throws a refused load through and caches nothing", () => {
     const {modules} = environment("https://cdn.test/app/x.web.bundle");
 
-    expect(() => modules.requireModule('/absent.js')).toThrow(
+    expect(() => modules.requireModule("/absent.js")).toThrow(
       "cannot load 'https://cdn.test/app/absent.js'");
-    files.set("https://cdn.test/app/absent.js", {text: "exports.late = true;"});
-    expect(modules.requireModule('/absent.js')).toEqual({late: true});
+    files.set("https://cdn.test/app/absent.js", commonjs("exports.late = true;"));
+    expect(modules.requireModule("/absent.js")).toEqual({late: true});
     expect(loads).toEqual([
       "https://cdn.test/app/absent.js", "https://cdn.test/app/absent.js"]);
   });
 
-  it("retains no factory for a chunk whose init threw and loads the file again", () => {
+  it("retains no factory for a body whose init threw", () => {
+    let runs = 0;
     const {modules} = environment("https://cdn.test/app/x.web.bundle");
-    Reflect.set(globalThis, "__initRuns__", 0);
-    files.set("https://cdn.test/app/failing.js", {text: FAILING_LYNX_CHUNK});
+    files.set("https://cdn.test/app/failing.js", body({
+      init() {
+        if (runs++ === 0) throw new Error("the first init failed");
+        return {runs};
+      },
+    }));
 
-    expect(() => modules.requireModule('/failing.js')).toThrow("the first init failed");
-    expect(modules.requireModule('/failing.js')).toEqual({runs: 2});
+    // Neither table is written until the factory has returned, so the next
+    // call runs the whole path again — a second load, answered in the engine
+    // from the module the realm has already evaluated.
+    expect(() => modules.requireModule("/failing.js")).toThrow("the first init failed");
+    expect(modules.requireModule("/failing.js")).toEqual({runs: 2});
     expect(loads).toEqual([
       "https://cdn.test/app/failing.js", "https://cdn.test/app/failing.js"]);
+    expect(entryWhileInitializing()).toBeUndefined();
   });
 
   it("refuses a relative path with no template URL and still loads an absolute one", () => {
     const {modules} = environment();
 
-    expect(() => modules.requireModule('/chunk.js')).toThrow(TypeError);
-    expect(() => modules.requireModule('/chunk.js')).toThrow(
+    expect(() => modules.requireModule("/chunk.js")).toThrow(TypeError);
+    expect(() => modules.requireModule("/chunk.js")).toThrow(
       "cannot resolve module './chunk.js'");
     expect(loads).toEqual([]);
 
-    files.set("https://other.test/a.js", {text: "exports.absolute = true;"});
-    expect(modules.requireModule('https://other.test/a.js')).toEqual({absolute: true});
-  });
-
-  it("never reaches the loader for a registered path", () => {
-    const {modules} = environment("https://cdn.test/app/x.web.bundle");
-    modules.register({'/entry.js': 'module.exports = {registered: true};'}, false);
-    files.set("https://cdn.test/app/entry.js", {text: "exports.loaded = true;"});
-
-    expect(modules.requireModule('/entry.js')).toEqual({registered: true});
-    expect(loads).toEqual([]);
+    files.set("https://other.test/a.js", commonjs("exports.absolute = true;"));
+    expect(modules.requireModule("https://other.test/a.js")).toEqual({absolute: true});
   });
 
   it("answers nativeApp.loadScript with an init that feeds no requireModule cache", () => {
     const {app, modules} = environment("https://cdn.test/app/x.web.bundle");
-    files.set("https://cdn.test/app/lynx.js", {text: LYNX_TARGET_CHUNK});
-    files.set("https://cdn.test/app/raw.js", {text: "exports.raw = true;"});
-    files.set("https://cdn.test/app/data.json", {text: '{"value": 7}', kind: "json"});
+    files.set("https://cdn.test/app/lynx.js",
+      body({init: ({tt}: {tt: unknown}) => ({api: tt})}));
+    files.set("https://cdn.test/app/raw.js", commonjs("exports.raw = true;"));
+    files.set("https://cdn.test/app/data.json", json({value: 7}));
 
-    expect(modules.loadScriptInit('/lynx.js').init({tt: app}).api).toBe(app);
-    expect(modules.loadScriptInit('/raw.js').init({tt: app})).toEqual({raw: true});
-    expect(modules.loadScriptInit('/data.json').init({tt: app})).toEqual({value: 7});
+    // The load is `loadScript`'s own, not `init`'s, as web-core's is.
+    expect(modules.loadScriptInit("/lynx.js").init({tt: app}).api).toBe(app);
+    expect(modules.loadScriptInit("/raw.js").init({tt: app})).toEqual({raw: true});
+    expect(modules.loadScriptInit("/data.json").init({tt: app})).toEqual({value: 7});
     expect(loads).toEqual([
       "https://cdn.test/app/lynx.js",
       "https://cdn.test/app/raw.js",
       "https://cdn.test/app/data.json",
     ]);
 
-    // Nothing of that reached `requireModule`'s tables, so this loads again.
-    expect(modules.requireModule('/raw.js')).toEqual({raw: true});
+    // Nothing of that reached `requireModule`'s tables, so this asks again.
+    expect(modules.requireModule("/raw.js")).toEqual({raw: true});
     expect(loads).toEqual([
       "https://cdn.test/app/lynx.js",
       "https://cdn.test/app/raw.js",
       "https://cdn.test/app/data.json",
       "https://cdn.test/app/raw.js",
     ]);
-  });
-
-  it("serves a registered source from nativeApp.loadScript too", () => {
-    const {app, modules} = environment("https://cdn.test/app/x.web.bundle");
-    modules.register({'/entry.js': '({init({tt}){return {app:tt}}})'}, true);
-
-    expect(modules.loadScriptInit('/entry.js').init({tt: app})).toEqual({app});
-    expect(loads).toEqual([]);
   });
 });

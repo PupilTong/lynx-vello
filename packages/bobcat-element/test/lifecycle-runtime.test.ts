@@ -39,11 +39,41 @@ rstest.mockRequire("bobcat-internal:host", () => ({
   initData: () => undefined,
   globalProps: () => undefined,
   nativeModuleTable: () => "",
-  // The modules table imports both; every suite below serves registered
-  // sources, so nothing here reaches an external load.
-  resolveModuleUrl: () => { throw new Error("no module resolution in this suite"); },
-  loadModuleSync: () => { throw new Error("no module load in this suite"); },
+  // The two members every synchronous load is written over, stood in for as
+  // in lynx-modules.test.ts: Node's own `URL`, and `new Function` for the
+  // wrapper the engine compiles a body in.
+  resolveModuleUrl: (base: string, specifier: string): string =>
+    new URL(specifier, base).href,
+  loadModuleSync: (url: string, parameters: string) =>
+    loadModuleSync(url, parameters),
 }));
+
+/** What the mock host serves a load from, by the URL it is asked for. */
+const hostFiles = new Map<string, string>();
+/** The bodies among them, as the namespace of the module each one is. */
+const hostModules = new Map<string, object>();
+/** Every load, as the URL and the parameter list it was asked for. */
+const moduleLoads: [string, string][] = [];
+
+function loadModuleSync(url: string, parameters: string) {
+  moduleLoads.push([url, parameters]);
+  // A body `PageSource` registered: an ES module the engine compiled, linked
+  // and evaluated, answered as its namespace object.
+  const namespace = hostModules.get(url);
+  if (namespace !== undefined) {
+    return { url, kind: "module" as const, value: namespace };
+  }
+  const text = hostFiles.get(url);
+  if (text === undefined) throw new Error(`cannot load '${url}'`);
+  if (url.split(/[?#]/)[0]!.endsWith(".json")) {
+    return { url, kind: "json" as const, value: JSON.parse(text) };
+  }
+  return {
+    url,
+    kind: "commonjs" as const,
+    value: new Function(...parameters.split(", "), text),
+  };
+}
 
 /**
  * The members of the realm global the two runtimes reach, as this suite
@@ -58,6 +88,8 @@ interface TestScope {
   updateGlobalProps: unknown;
   /** Absent in Node; the worker realm installs it, and the BTS test stands in. */
   reportError?: (error: unknown) => void;
+  /** What a loaded Lepus chunk calls with the bindings it was given. */
+  __bobcatChunkRan?: (...bindings: unknown[]) => void;
   postMessage(message: unknown): void;
   addEventListener(
     name: string,
@@ -132,12 +164,28 @@ async function deliverToMain() {
 }
 
 describe("MTS/BTS lifecycle runtime", () => {
-  it("answers nativeApp.loadScript from the bundle the BTS registered", () => {
-    registerBundle({"/section.js": "({init({tt}){return {app:tt}}})"}, true);
+  it("answers nativeApp.loadScript out of the body it loads beside the bundle", () => {
+    // All the boot script registers is where the container answered from.
+    // Every path of it is a load beside that URL: a body `PageSource`
+    // registered, whose module default-exported the `{init}` object a
+    // `.lynx.bundle`'s expression evaluated to…
+    registerBundle("https://cdn.test/app/x.web.bundle");
+    hostModules.set("https://cdn.test/app/section.js",
+      {default: {init: ({tt}: {tt: unknown}) => ({app: tt})}});
+    // …or a path no container carried, which is a plain CommonJS file.
+    hostFiles.set("https://cdn.test/app/external.js", "module.exports = {external: true};");
 
     const loaded = bts.getNativeApp().loadScript("/section.js");
     expect(loaded.init({tt: bts.getApp()}).app).toBe(bts.getApp());
     expect(bts.requireModule("/section.js").app).toBe(bts.getApp());
+    expect(bts.requireModule("/external.js")).toEqual({external: true});
+    // `loadScript` feeds no `requireModule` cache, so the body is asked for
+    // twice — one URL, one module in the realm, evaluated once.
+    expect(moduleLoads).toEqual([
+      ["https://cdn.test/app/section.js", "module, exports"],
+      ["https://cdn.test/app/section.js", "module, exports"],
+      ["https://cdn.test/app/external.js", "module, exports"],
+    ]);
   });
 
   it("resolves the card alias to stylesheet URLs and keeps opaque handles", () => {
@@ -155,7 +203,11 @@ describe("MTS/BTS lifecycle runtime", () => {
       ['https://example.test/page/main.js/index.css?version=2#entry'],
       ['https://example.test/page/main.js/index.css?version=2#entry'],
     ]);
-    expect(() => mts.__AdoptStyleSheet({})).toThrow();
+    // The handle is only as good as the URL it names: no realm state stands
+    // behind it any more.
+    expect(first).toEqual({url: 'https://example.test/page/main.js/index.css?version=2#entry'});
+    expect(() => mts.__AdoptStyleSheet({} as {url: string})).toThrow();
+    expect(() => Reflect.apply(mts.__AdoptStyleSheet, undefined, [null])).toThrow();
     expect(() => Reflect.apply(mts.__LoadStyleSheet, undefined, ['CSS'])).toThrow();
   });
 
@@ -175,22 +227,79 @@ describe("MTS/BTS lifecycle runtime", () => {
     expect(() => mts.__AdoptStyleSheet(handle)).toThrow('CSS unavailable');
   });
 
-  it("loads only a named local MTS chunk and re-evaluates it on every request", () => {
-    const evaluate = rstest.fn(source => {
-      if (source === "throw") throw Error("chunk failure");
-    });
-    mts.__BobcatRegisterLepusChunks({worklet: "worklet bytes", bad: "throw"}, evaluate);
-    expect(mts.__LoadLepusChunk("missing", {})).toBe(false);
-    expect(mts.__LoadLepusChunk("worklet", {dynamicComponentEntry: "absent"})).toBe(false);
-    expect(evaluate).not.toHaveBeenCalled();
+  it("loads a named Lepus chunk through the host and runs it on every call", () => {
+    moduleLoads.length = 0;
+    reportedErrors.mockClear();
+    // The chunk URL is `PageSource`'s own `named_chunk_url`: the entry path,
+    // the percent-encoded name as a `.js` file, the `?#` suffix kept.
+    const worklet = "https://example.test/page/main.js/worklet.js?version=2#entry";
+    const escaped =
+      "https://example.test/page/main.js/A%20%26%2F%E4%B8%AD.js?version=2#entry";
+    const ran: unknown[][] = [];
+    scope.__bobcatChunkRan = (...bindings: unknown[]) => { ran.push(bindings); };
+    // A chunk's bindings are the parameters of the body the host compiled,
+    // and its `var` is local to the call.
+    hostFiles.set(worklet,
+      "__bobcatChunkRan(__Card__, lynx, __LoadStyleSheet, __BobcatQueryNodes);"
+      + " var chunkLocal = 1;");
+    hostFiles.set(escaped, "__bobcatChunkRan();");
+
     expect(mts.__LoadLepusChunk("worklet", {})).toBe(true);
     expect(mts.__LoadLepusChunk("worklet", {dynamicComponentEntry: "__Card__"})).toBe(true);
-    expect(mts.__LoadLepusChunk("worklet", {dynamicComponentEntry: mts.__Card__})).toBe(true);
-    expect(evaluate.mock.calls).toEqual([["worklet bytes"], ["worklet bytes"], ["worklet bytes"]]);
-    expect(mts.__LoadLepusChunk("bad", {})).toBe(true);
-    expect(reportedErrors).toHaveBeenLastCalledWith("error", expect.stringContaining("chunk failure"));
+    expect(mts.__LoadLepusChunk("A &/中", {dynamicComponentEntry: mts.__Card__})).toBe(true);
+    // One load and one run per call: nothing caches a chunk.
+    expect(moduleLoads.map(([url]) => url)).toEqual([worklet, worklet, escaped]);
+    expect(ran).toHaveLength(3);
+    expect(ran[0]).toEqual([mts.__Card__, mts.lynx, mts.__LoadStyleSheet, queryNodes]);
+    expect("chunkLocal" in scope).toBe(false);
+    // Every binding the entry preamble imports is a parameter, PAPI included.
+    const parameters = moduleLoads[0]![1].split(", ");
+    expect(parameters).toEqual(expect.arrayContaining([
+      "__BobcatQueryNodes", "__Card__", "lynx", "console", "SystemInfo",
+      "__globalProps", "NativeModules", "_AddEventListener", "_ReportError",
+      "_SetSourceMapRelease", "__OnLifecycleEvent", "__LoadLepusChunk",
+      "__LoadStyleSheet", "__AdoptStyleSheet",
+    ]));
+    expect(new Set(parameters).size).toBe(parameters.length);
+    expect(reportedErrors).not.toHaveBeenCalled();
+
+    // A chunk of another component is neither loaded nor run.
+    moduleLoads.length = 0;
+    expect(mts.__LoadLepusChunk("worklet", {dynamicComponentEntry: "absent"})).toBe(false);
+    expect(moduleLoads).toEqual([]);
   });
 
+  it("answers a chunk the host cannot load with false, and a chunk that fails with true", () => {
+    moduleLoads.length = 0;
+    reportedErrors.mockClear();
+    // No such chunk: the load throws an ordinary Error, and nothing is
+    // reported — this page simply does not carry that name.
+    expect(mts.__LoadLepusChunk("missing", {})).toBe(false);
+    expect(moduleLoads.map(([url]) => url))
+      .toEqual(["https://example.test/page/main.js/missing.js?version=2#entry"]);
+    expect(reportedErrors).not.toHaveBeenCalled();
+
+    // Found, and its body threw: native answers true for a chunk it found,
+    // and the exception is reported.
+    hostFiles.set("https://example.test/page/main.js/throws.js?version=2#entry",
+      "throw Error('chunk failed');");
+    expect(mts.__LoadLepusChunk("throws", {})).toBe(true);
+    expect(reportedErrors).toHaveBeenCalledTimes(1);
+    expect(reportedErrors.mock.calls[0]![1]).toContain("chunk failed");
+
+    // Found, and it does not compile: the host answers a SyntaxError, which
+    // is a chunk that exists too.
+    reportedErrors.mockClear();
+    hostFiles.set("https://example.test/page/main.js/broken.js?version=2#entry", "(");
+    expect(mts.__LoadLepusChunk("broken", {})).toBe(true);
+    expect(reportedErrors).toHaveBeenCalledTimes(1);
+    expect(reportedErrors.mock.calls[0]![0]).toBe("error");
+
+    expect(() => Reflect.apply(mts.__LoadLepusChunk, undefined, ["worklet"])).toThrow(TypeError);
+    expect(() => Reflect.apply(mts.__LoadLepusChunk, undefined, ["worklet", null]))
+      .toThrow(TypeError);
+    expect(() => Reflect.apply(mts.__LoadLepusChunk, undefined, [1, {}])).toThrow(TypeError);
+  });
 
   it("reports a microtask throw before the next job and ignores callback return values", async () => {
     const then = rstest.fn();

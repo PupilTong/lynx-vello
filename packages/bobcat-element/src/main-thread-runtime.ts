@@ -32,10 +32,14 @@ import {
   createCrossThreadContext,
 } from "bobcat:cross-thread-context";
 import { __BobcatQueryNodes } from "bobcat:element";
+// The whole PAPI as one namespace, for the binding list a named Lepus
+// chunk is called with: the export names are this module's only source of
+// truth for what the entry preamble imports.
+import * as elementPAPI from "bobcat:element";
 import type { NodeQueryRequest } from "bobcat:selector-query";
 import "bobcat:timers";
 import { requestScriptFrame } from "bobcat-internal:host";
-import { initialProcessor as getInitialProcessor, globalProps, initData, nativeModuleTable, reportScriptError, logScriptMessage, preloadStyleSheet, adoptStyleSheet } from "bobcat-internal:host";
+import { initialProcessor as getInitialProcessor, globalProps, initData, loadModuleSync, nativeModuleTable, reportScriptError, logScriptMessage, preloadStyleSheet, adoptStyleSheet } from "bobcat-internal:host";
 import type { Worker } from "bobcat-internal";
 import type { TimerGlobals } from "bobcat:timers";
 
@@ -113,16 +117,42 @@ function cardURL(bundleName: string): string {
   return bundleName === "__Card__" ? __Card__ : bundleName;
 }
 
-function styleSheetURL(key: string, bundleName: string): string {
+/**
+ * One section name as `PageSource` percent-encodes it: `form_urlencoded`'s
+ * byte serializer, which escapes `!~'()` where `encodeURIComponent` leaves
+ * them, and writes a space as `%20` rather than `+`.
+ */
+function encodedSection(key: string): string {
+  return encodeURIComponent(key).replace(/[!~'()]/g,
+    character => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
+}
+
+/** The bundle URL's path and its `?#` suffix, which a section URL goes between. */
+function cardParts(bundleName: string): [string, string] {
   const base = cardURL(bundleName);
   const suffixAt = base.search(/[?#]/);
-  const path = suffixAt < 0 ? base : base.slice(0, suffixAt);
-  const suffix = suffixAt < 0 ? "" : base.slice(suffixAt);
-  const name = encodeURIComponent(key).replace(/[!~'()]/g,
-    character => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
-  const section = key === "CSS" ? "" : `${name}/`;
+  return suffixAt < 0
+    ? [base, ""]
+    : [base.slice(0, suffixAt), base.slice(suffixAt)];
+}
+
+function styleSheetURL(key: string, bundleName: string): string {
+  const [path, suffix] = cardParts(bundleName);
+  const section = key === "CSS" ? "" : `${encodedSection(key)}/`;
   return `${path.replace(/\/$/, "")}/${section}index.css${suffix}`;
 }
+
+/**
+ * The resource URL one named Lepus chunk lives at: the entry URL's path, then
+ * the encoded chunk name as a `.js` file, the `?#` suffix kept where a
+ * stylesheet section's is. `PageSource` registers it under exactly this
+ * string (`named_chunk_url` in `crates/bobcat-source/src/page.rs`).
+ */
+function chunkURL(name: string, bundleName: string): string {
+  const [path, suffix] = cardParts(bundleName);
+  return `${path.replace(/\/$/, "")}/${encodedSection(name)}.js${suffix}`;
+}
+
 // Set once, at connection, and never cleared: a Worker that has ended is still
 // the Worker this view posts to, and the host is what drops those posts.
 let backgroundWorker: Worker | undefined;
@@ -533,46 +563,105 @@ export function __OnLifecycleEvent(data: unknown) {
   jsContext.dispatchEvent({ type: "__OnLifecycleEvent", data });
 }
 
-let lepusChunks: Record<string, string> = {};
-let evaluateLepusChunk: ((source: string) => unknown) | undefined;
+/**
+ * What a named Lepus chunk is called with: every binding the entry preamble
+ * gives the entry, as a parameter of its own.
+ *
+ * Ordered, because the parameter list the chunk is compiled with and the
+ * arguments it is applied to are both this list. Each value is read at the
+ * call, not here: `__Card__` is a live `let`, and `SystemInfo` and
+ * `__globalProps` are replaced outright by the host calls that update them.
+ * The PAPI half is the `bobcat:element` namespace's own export names, so a
+ * PAPI member added there reaches a chunk without a second list to update.
+ */
+const CHUNK_BINDINGS: [string, () => unknown][] = [
+  ...Object.keys(elementPAPI).map((name): [string, () => unknown] =>
+    [name, () => (elementPAPI as Record<string, unknown>)[name]]),
+  ["__Card__", () => __Card__],
+  ["lynx", () => lynx],
+  ["console", () => console],
+  ["SystemInfo", () => SystemInfo],
+  ["__globalProps", () => __globalProps],
+  ["NativeModules", () => NativeModules],
+  ["_AddEventListener", () => _AddEventListener],
+  ["_ReportError", () => _ReportError],
+  ["_SetSourceMapRelease", () => _SetSourceMapRelease],
+  ["__OnLifecycleEvent", () => __OnLifecycleEvent],
+  ["__LoadLepusChunk", () => __LoadLepusChunk],
+  ["__LoadStyleSheet", () => __LoadStyleSheet],
+  ["__AdoptStyleSheet", () => __AdoptStyleSheet],
+];
 
-export function __BobcatRegisterLepusChunks(chunks: Record<string, string>, evaluate: (source: string) => unknown) {
-  lepusChunks = chunks;
-  evaluateLepusChunk = evaluate;
+/** The parameter list the host compiles a chunk's body inside. */
+const CHUNK_PARAMETERS = CHUNK_BINDINGS.map(([name]) => name).join(", ");
+
+/** The values those parameters take, as of this call. */
+function chunkArguments(): unknown[] {
+  return CHUNK_BINDINGS.map(([, read]) => read());
 }
 
+/** A chunk body, as the host compiled it: one parameter per binding. */
+type ChunkBody = (...bindings: unknown[]) => unknown;
+
+/**
+ * `__LoadLepusChunk`: load this page's chunk of that name and run it.
+ *
+ * The chunk is a script resource of its own, at the URL `chunkURL` builds and
+ * `PageSource` registered it under, and it is loaded through the same
+ * synchronous host loader a `require` uses — so the job this call runs in
+ * parks until the host answers, and no other job of this realm runs meanwhile.
+ * **Evaluated again on every call**, as native's `TemplateEntry` does: there
+ * is no chunk cache here.
+ *
+ * A chunk does not share the entry's lexical scope. What it has is this
+ * realm's `globalThis` and `CHUNK_BINDINGS` — the same values the entry
+ * preamble imports — as the parameters of the function body it was compiled
+ * as. A `var` at its top level is therefore local to that call.
+ *
+ * The answer is native's: `false` for a chunk this page does not carry and for
+ * a different component entry, and `true` for a chunk that was found — even
+ * when running it threw, which is reported and nothing more. A chunk that
+ * does not *compile* was found too: the host answers a `SyntaxError`, where a
+ * chunk it could not load at all is an ordinary `Error`.
+ */
 export function __LoadLepusChunk(path: string, options: {dynamicComponentEntry?: string; chunkType?: number}) {
   if (arguments.length < 2 || typeof path !== "string" || options === null || typeof options !== "object") {
     throw new TypeError("__LoadLepusChunk requires a string path and options object");
   }
   const entry = options.dynamicComponentEntry;
   if (typeof entry === "string" && cardURL(entry) !== __Card__) return false;
-  if (!Object.hasOwn(lepusChunks, path) || !evaluateLepusChunk) return false;
-  // Native TemplateEntry evaluates again on every call. Finding the chunk
-  // returns true even when its evaluation reports a script exception.
-  try { evaluateLepusChunk(lepusChunks[path]!); }
+  let loaded;
+  try {
+    loaded = loadModuleSync(chunkURL(path, "__Card__"), CHUNK_PARAMETERS);
+  } catch (error) {
+    if (!(error instanceof SyntaxError)) return false;
+    _ReportError(error);
+    return true;
+  }
+  try { (loaded.value as ChunkBody).apply(undefined, chunkArguments()); }
   catch (error) { _ReportError(error); }
   return true;
 }
 
 export const NativeModules = undefined;
 
-const styleURLs = new WeakMap<object, string>();
-
-export function __LoadStyleSheet(key: string, bundleName: string): object {
+/**
+ * The handle `__AdoptStyleSheet` takes: the URL the section was resolved to,
+ * and nothing else. No realm state survives the call, so a handle is only
+ * ever as good as the URL it names.
+ */
+export function __LoadStyleSheet(key: string, bundleName: string): {url: string} {
   if (arguments.length < 2 || typeof key !== "string" || typeof bundleName !== "string") {
     throw new TypeError("__LoadStyleSheet requires a section key and bundle name");
   }
   const url = styleSheetURL(key, bundleName);
   preloadStyleSheet(url);
-  const handle: object = Object.freeze(Object.create(null));
-  styleURLs.set(handle, url);
-  return handle;
+  return {url};
 }
 
-export function __AdoptStyleSheet(handle: object) {
-  const url = styleURLs.get(handle);
-  if (url === undefined) throw new TypeError("__AdoptStyleSheet requires a stylesheet handle");
+export function __AdoptStyleSheet(handle: {url: string}) {
+  const url = (handle as {url?: unknown} | null | undefined)?.url;
+  if (typeof url !== "string") throw new TypeError("__AdoptStyleSheet requires a stylesheet handle");
   adoptStyleSheet(url);
   return null;
 }

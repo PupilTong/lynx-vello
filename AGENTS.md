@@ -438,8 +438,10 @@ is never assembled at all, which leaves its functions released. No built-in modu
 supplies the entry response URL to the JS runtime before importing the entry,
 whose `__Card__` import reads that value; JS replaces the `"__Card__"` alias
 and maps the compiler's `CSS` section to `<entry-url>/index.css`.
-`__LoadStyleSheet` returns a fresh opaque JS handle associated only with that
-URL and sends a `ResourceFetcher::preload_source` hint a fetcher may ignore.
+`__LoadStyleSheet` returns a plain `{url}` object and sends a
+`ResourceFetcher::preload_source` hint a fetcher may ignore; no realm state
+survives that call, and `__AdoptStyleSheet` reads the URL off the handle it is
+given.
 Every `__AdoptStyleSheet` requests the URL through `SourceRequest::StyleSheet`,
 synchronously obtains its response and mounts it before returning, repeated
 adoption included. The fetcher owns pending loads, cached responses and
@@ -451,9 +453,9 @@ the adoption is running in until the response arrives or the view is cancelled:
 no JavaScript job runs meanwhile, this realm's or a sibling's, while
 `bobcat-main`'s tasks — including the ones that route that very response —
 carry on. Errors throw at adoption; an unused preload changes no styles.
-Collection releases only the JS handle's URL association; resource lifetime
-belongs to the fetcher, adopted rules to the document. No native stylesheet
-handles, load state or adoption queue live in `MainThreadRuntime`. See
+Resource lifetime belongs to the fetcher, adopted rules to the document. No
+native stylesheet handles, load state or adoption queue live in
+`MainThreadRuntime`. See
 `docs/named-styles-runtime.md` for URL mapping and load timing. Per-component
 css-id scoping is **not** implemented: every fragment mounts globally, which is
 what web-core emits for an `enableRemoveCSSScope = true` bundle (see
@@ -521,18 +523,39 @@ compile, parse or body that fails leaves nothing cached. Every source module
 carries `import.meta.url` — the response URL for a fetched one, the name it was
 registered under for a built-in.
 
-`lynx.requireModule` and `nativeApp.loadScript` are the compiled-bundle layer
-over the same two members, in `bobcat:lynx-modules` and so in worker realms
-only. A registered manifest path is evaluated from the source the BTS boot
-script carried; a path no manifest carries is rooted the way native roots it,
-resolved as a reference beside the template URL `__BobcatRegisterBundle` was
-given — the page's own input URL — and compiled in web-core's wrapper parameter
-list rather than Node's five. A Lynx-target chunk answers through
-`globalThis.__bundle__holder`, a raw body through `module.exports`, a `.json`
-response through the value the host parsed. Their caches are their own, not
-`require.cache`: keyed by the bare path, written only after the body returns,
-and `loadScript` writes neither. `requireModuleAsync`, `loadScriptAsync`,
-`readScript`, `fetchBundle` and lazy bundles do not exist.
+`lynx.requireModule`, `nativeApp.loadScript` and `lynx.loadScript` are the
+compiled-bundle layer, in `bobcat:lynx-modules` and so in worker realms only,
+and each is **one synchronous load** over that same member — the mechanism
+MTS's `__LoadLepusChunk` uses: the realm builds the URL the path names beside
+the registered template URL and loads it, before the call returns. There is no
+table of bodies and no boot-time import loop. **No source table and no source
+text reaches a realm**: `PageSource` turns each of a container's bodies — its
+manifest paths and its string custom sections — into an **ES module** and
+registers it with the embedder's resource system beside the page's own input
+URL, and the BTS boot script it writes is
+`__BobcatRegisterBundle(templateUrl)` and the `lynx.requireModule` that starts
+the card, nothing else. A `.lynx.bundle`'s body is one expression statement, so
+its module is `export default <body>` — what native's host would have kept as
+that script's completion value is the default export instead; a
+`.web.bundle`'s is a CommonJS file, so its module supplies a `module` object
+and exports `module.exports`; a `.json` body is registered verbatim, its own
+URL being what tells the loader to parse it. Each module carries
+`BTS_CHUNK_PREAMBLE` (`crates/bobcat-core/src/esm.rs`) on one physical line, so
+the body keeps its own line numbering and has every name web-core's chunk
+wrapper would have passed as a parameter. A path is rooted before it is
+resolved, so either spelling of a name is one URL; what comes back answers
+through the module's `default` export (a namespace with no `default` answers
+itself), through the parsed value for JSON, or through `module.exports` for a
+CommonJS file compiled in `module, exports` alone; and a value carrying an
+`init` function is *initialized* — `init.call(value, {tt})`, lynx-core's
+`_$executeInit`, with `globalThis.globDynamicComponentEntry` published for the
+call. Their caches are their own, not `require.cache`: keyed by the bare path,
+written only after the factory returns, and `loadScript` writes neither. A body
+is never `import`ed, only `require`d, so the still-evaluating refusal never
+reaches one: it is compiled by the `require` that asked for it, or answered
+from the evaluation an earlier one ran. An entry that is itself an absolute URL
+resolves beside itself. `requireModuleAsync`, `loadScriptAsync`, `readScript`,
+`fetchBundle` and lazy bundles do not exist.
 
 #### Realm, document and boot
 
@@ -622,10 +645,14 @@ prepended ESM imports; global props updates replace the live module binding,
 and there is no native evaluator or separate Script lexical environment.
 
 Runtime JS reads ReactLynx's hooks directly from `globalThis`, while runtime
-and PAPI identifiers remain module imports; named Lepus chunks execute through
-a direct-eval closure in the selected entry's scope. Named calls and replies
-belong to the two JS Worker message handlers; Rust transports opaque messages
-and performs no Lepus-specific dispatch or reply flush. Boot's deferred flush
+and PAPI identifiers remain module imports; a named Lepus chunk is a plain
+script resource `PageSource` registers verbatim, which `__LoadLepusChunk`
+builds the URL of, loads through the same synchronous host loader a `require`
+uses, and runs — again on every call, as native does — as a function body
+whose parameters are the bindings the entry preamble gives the entry. Named
+calls and replies belong to the two JS Worker message handlers; Rust
+transports opaque messages and performs no Lepus-specific dispatch or reply
+flush. Boot's deferred flush
 uses ordinary Promise scheduling and the existing outer checkpoint, with its
 rejection attribution and generation notification. See
 `docs/mts-execution-runtime.md` for the boot and chunk execution boundaries.
@@ -871,10 +898,12 @@ top of that transport; a value it refuses throws at the call. A worker's own
 task queues what is posted until its bootstrap has evaluated, and BTS JS waits
 on the application import before delivering later messages, so application
 listeners exist before first delivery. Raw XML adapters supply the optional
-entry; a compiled bundle's manifest, custom sections and input URL are
-registered in the BTS module table, whose `requireModule` evaluates a
-registered path and loads one no manifest carries. Each view costs one
-additional realm on the group's worker runtime.
+entry; a compiled bundle's manifest paths and string custom sections are each
+registered with the host as an ES module beside the page's input URL, and the
+BTS boot script hands that URL alone to the modules layer, which is the base
+every `requireModule` of a bundle path resolves against before loading it
+synchronously. Each view costs one additional realm on the group's
+worker runtime.
 
 MTS boot does not await BTS: `ScriptFinished` means MTS boot finished — the
 entry module evaluated, its top-level await settled, and its first flush
@@ -1710,8 +1739,9 @@ resolves to `undefined`, which the private native boundary rejects as a
 JavaScript error before entering `dom`. Native access is limited to named
 imports from the native `bobcat-internal:host` ESM; the realm has no
 `globalThis.bobcat`, no `console`, and no DOM. Named exports are the only
-Element-PAPI surface for transformed MTS entries; local named Lepus chunks
-retain those imports through an entry-scope direct-eval closure. Rstest imports
+Element-PAPI surface for transformed MTS entries; a local named Lepus chunk
+receives the same names as the parameters of the body it is compiled as.
+Rstest imports
 the TypeScript directly, and TypeScript 7 checks the sources as a program with
 `lib: es2023` and no ambient types, resolving each `bobcat:*` specifier to its
 file through `paths` and declaring the two native modules' contracts in a

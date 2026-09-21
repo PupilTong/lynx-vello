@@ -36,12 +36,13 @@ pub(super) fn install_styles(
         // This receiver lives only for this call. Cache lookup and sharing an
         // in-flight preload belong to the resource fetcher on the host thread.
         let answer = sources.request(SourceRequest::StyleSheet(url.clone()));
-        // The one synchronous wait a realm can make. It is inside a job, so
-        // what it drives is this engine thread's tasks — channel reads,
-        // lifecycle signals, acknowledgements, the routing that answers this
-        // very request — and none of its jobs: no JavaScript of this realm's
-        // or any sibling's runs before this returns. The view's own token is
-        // first, so a release ends the wait rather than the response doing it.
+        // The same synchronous wait a `require` makes (see `crate::require`).
+        // It is inside a job, so what it drives is this engine thread's tasks
+        // — channel reads, lifecycle signals, acknowledgements, the routing
+        // that answers this very request — and none of its jobs: no JavaScript
+        // of this realm's or any sibling's runs before this returns. The
+        // view's own token is first, so a release ends the wait rather than
+        // the response doing it.
         let source = thread
             .wait(async {
                 tokio::select! {
