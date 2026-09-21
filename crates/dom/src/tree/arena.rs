@@ -13,7 +13,7 @@ use std::hint::likely;
 use std::num::{NonZeroU32, NonZeroU64};
 
 use hughie::text::TextContext;
-use hughie::tree::LayoutSlot;
+use hughie::tree::{LayoutInput, LayoutSlot};
 use slab::Slab;
 
 use crate::layout::committed_box::{CommittedBox, CommittedBoxTable};
@@ -458,6 +458,26 @@ pub(crate) struct DocumentLayoutState {
     /// a restore before anything outside it (painting, hit testing) reads a
     /// committed layout; see [`Self::restore_probed_text`].
     probed_text: Vec<NodeId>,
+    /// Whether the run in flight may defer a size query container's contents;
+    /// see [`crate::layout::committed_box`] and `layout::host::run_layout`.
+    interleaves_containers: bool,
+    /// The size query containers this run deferred, in the order it reached
+    /// them. Empty for every page that has none, which is why the interleave
+    /// costs one `is_empty` test to a page that does not use the feature.
+    container_deferrals: Vec<DeferredContainer>,
+}
+
+/// A `container-type: size` box whose committing run laid no contents out.
+///
+/// The interleave found that the size the box is about to take is not the one
+/// its descendants' `cqw`/`cqh` were last cascaded against, so the run
+/// recorded the new size and stopped: laying the subtree out there would lay
+/// it out at a size about to be restyled away. The host relays it once the
+/// restyle has happened, from the input kept here.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DeferredContainer {
+    pub(crate) node: NodeSlot,
+    pub(crate) input: LayoutInput,
 }
 
 impl DocumentLayoutState {
@@ -466,7 +486,33 @@ impl DocumentLayoutState {
             nodes: Vec::new(),
             text_context: None,
             probed_text: Vec::new(),
+            interleaves_containers: false,
+            container_deferrals: Vec::new(),
         }
+    }
+
+    /// Opens (or closes) the interleave for one run and clears whatever the
+    /// last one left.
+    pub(crate) fn begin_container_interleave(&mut self, enabled: bool) {
+        self.interleaves_containers = enabled;
+        self.container_deferrals.clear();
+    }
+
+    #[inline]
+    pub(crate) const fn interleaves_containers(&self) -> bool {
+        self.interleaves_containers
+    }
+
+    pub(crate) fn defer_container(&mut self, node: NodeSlot, input: LayoutInput) {
+        self.container_deferrals
+            .push(DeferredContainer { node, input });
+    }
+
+    /// Moves this run's deferrals into `sink`, keeping the allocation: a page
+    /// whose container animates defers into the same one forever.
+    pub(crate) fn take_container_deferrals(&mut self, sink: &mut Vec<DeferredContainer>) {
+        sink.clear();
+        sink.append(&mut self.container_deferrals);
     }
 
     /// Sizes the slot-aligned state to cover every key below `slots`.
@@ -520,6 +566,8 @@ impl DocumentLayoutState {
             nodes,
             text_context,
             probed_text: _,
+            interleaves_containers: _,
+            container_deferrals: _,
         } = self;
         let context = text_context
             .get_or_insert_with(|| Box::new(TextContext::new()))
@@ -560,6 +608,8 @@ impl DocumentLayoutState {
             nodes,
             text_context,
             probed_text: _,
+            interleaves_containers: _,
+            container_deferrals: _,
         } = self;
         // Unlike the path this replaces, restoring can re-enter the shaper —
         // a truncating block rebuilds its display layout — so the context is

@@ -30,7 +30,8 @@ use super::style::{
 };
 use super::text_block::compute_text_block_layout;
 use crate::tree::document::{
-    Document, DocumentLayoutState, NodeId, NodeSlot, PendingRelayout, RelayoutKind, TreeArenas,
+    DeferredContainer, Document, DocumentLayoutState, NodeId, NodeSlot, PendingRelayout,
+    RelayoutKind, TreeArenas,
 };
 use crate::tree::node::Node;
 
@@ -126,6 +127,35 @@ impl<T> LayoutTree for TreeArenas<T> {
         };
 
         compute_cached_layout(self, state, node, input, move |tree, state, node, input| {
+            // The css-contain-3 §2.1 **interleave**: this run is about to read
+            // every child style under a box whose own size those styles may be
+            // resolved against, and `committed_box::container_estimate` can
+            // say what that size will be from this box's style and this input
+            // alone. When it disagrees with what is published — what the
+            // subtree was last cascaded against — laying the contents out here
+            // would lay them out at a size that is about to be restyled away.
+            // So the run records the new size and stops: `run_layout` publishes
+            // it, restyles the `cqw`/`cqh` readers under this box, and relays
+            // the subtree once, at the size it will keep.
+            //
+            // The box's own output is not deferred with it. Both of its axes
+            // are size-contained, so this *is* the size the algorithm would
+            // have produced, and its ancestors are laid out against the final
+            // number rather than against a guess.
+            if input.goal.commits()
+                && state.interleaves_containers()
+                && display != DisplayMode::Text
+            {
+                let view = tree.style(node);
+                let id = tree.at(node).id();
+                if let Some(estimate) = committed_box::container_estimate(&view, input)
+                    && estimate.container != tree.committed_box(id).container
+                {
+                    committed_box::note_container_estimate(tree, id, estimate.container);
+                    state.defer_container(node, input);
+                    return estimate.output;
+                }
+            }
             let output = match display {
                 DisplayMode::None | DisplayMode::Contents => {
                     unreachable!("a box-less element has no box to lay out")
@@ -217,72 +247,219 @@ pub(super) fn skipped_size_resolutions_during(pass: impl FnOnce()) -> usize {
     SKIPPED_SIZE_RESOLUTIONS.with(std::cell::Cell::get)
 }
 
+#[cfg(test)]
+std::thread_local! {
+    /// How many box layouts have run on this thread — one per [`run_layout`],
+    /// whatever it settled inside itself.
+    ///
+    /// Test-only, and the number the query-container interleave exists to hold
+    /// at one: a page whose containers resize used to cost a whole second run
+    /// of the document, and now costs the deferred subtrees alone.
+    static LAYOUT_RUNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Runs `pass` and answers how many times the document was laid out in it.
+#[cfg(test)]
+pub(super) fn layout_runs_during(pass: impl FnOnce()) -> usize {
+    LAYOUT_RUNS.with(|count| count.set(0));
+    pass();
+    LAYOUT_RUNS.with(std::cell::Cell::get)
+}
+
+/// One layout run: the boxes, the query-container interleave the boxes owe,
+/// and the rounding tail.
+///
+/// Three phases, and the middle one is why this takes the whole document
+/// rather than the split parts. Laying out is a shared read of the tree, but
+/// a size query container whose size moved has to be *restyled under* before
+/// its contents are worth laying out, and a restyle publishes computed styles
+/// — `&mut Document` work. So the box phase stops at such a container
+/// ([`DocumentLayoutState::defer_container`]), the restyle phase runs between
+/// the two shared borrows, and the relay phase finishes the deferred subtrees
+/// before anything is rounded.
 pub(super) fn run_layout<T: Sync>(
     document: &mut Document<T>,
     viewport: Size<f32>,
     scale: f32,
     full: bool,
     rescale: bool,
+    resized: &mut Vec<NodeId>,
 ) {
-    let root = document.document_element().id();
-    let parked = collect_parked_boundaries(document);
-    let (tree, state, parked_ids) = document.layout_parts();
-    let root = tree.live_slot(root);
+    #[cfg(test)]
+    LAYOUT_RUNS.with(|count| count.set(count.get() + 1));
+    let root_id = document.document_element().id();
+    let mut parked = collect_parked_boundaries(document);
+    // The interleave's gate is the recascade loop's: a page whose styles never
+    // resolved a `cqw`/`cqh` has nothing to restyle when a container's size
+    // moves, so deferring its contents would buy a page with query containers
+    // and no container units nothing at all.
+    let interleave = document.arenas().uses_container_units();
+    let mut deferred = Vec::new();
     let mut escalated = false;
-    if !full {
-        for &(_, pending) in &parked {
-            let Some(slot) = tree.slot(pending.node_id) else {
-                continue;
-            };
-            if !tree.at(slot).is_element() {
-                continue;
-            }
-            match pending.kind {
-                RelayoutKind::Boundary => {
-                    if is_relayout_boundary(&StyleView::of(tree.at(slot))) {
-                        let output = compute_boundary_relayout(tree, state, slot, pending.input);
-                        tree.layout_mut(state, slot)
-                            .set_unrounded_content_size(output.content_size);
-                    }
+    {
+        let (tree, state, _) = document.layout_parts();
+        let root = tree.live_slot(root_id);
+        state.begin_container_interleave(interleave);
+        if !full {
+            for &(_, pending) in &parked {
+                let Some(slot) = tree.slot(pending.node_id) else {
+                    continue;
+                };
+                if !tree.at(slot).is_element() {
+                    continue;
                 }
-                RelayoutKind::InPlace { previous } => {
-                    let output = tree.compute_layout(state, slot, pending.input);
-                    // A reproduced output proves nothing above this node can
-                    // observe the change; anything else falls back to the
-                    // whole-tree pass, which reuses the caches just filled.
-                    if output != previous {
-                        escalated = true;
-                        let mut current = tree.at(slot).flat_parent_slot();
-                        while let Some(ancestor) = current {
-                            state.clear_layout_cache(ancestor);
-                            current = tree.at(ancestor).flat_parent_slot();
+                match pending.kind {
+                    RelayoutKind::Boundary => {
+                        if is_relayout_boundary(&StyleView::of(tree.at(slot))) {
+                            let output =
+                                compute_boundary_relayout(tree, state, slot, pending.input);
+                            tree.layout_mut(state, slot)
+                                .set_unrounded_content_size(output.content_size);
+                        }
+                    }
+                    RelayoutKind::InPlace { previous } => {
+                        let output = tree.compute_layout(state, slot, pending.input);
+                        // A reproduced output proves nothing above this node
+                        // can observe the change; anything else falls back to
+                        // the whole-tree pass, which reuses the caches just
+                        // filled.
+                        if output != previous {
+                            escalated = true;
+                            let mut current = tree.at(slot).flat_parent_slot();
+                            while let Some(ancestor) = current {
+                                state.clear_layout_cache(ancestor);
+                                current = tree.at(ancestor).flat_parent_slot();
+                            }
                         }
                     }
                 }
             }
         }
+        compute_root_layout(
+            tree,
+            state,
+            root,
+            Size::new(
+                AvailableSpace::Definite(viewport.width),
+                AvailableSpace::Definite(viewport.height),
+            ),
+        );
+        state.take_container_deferrals(&mut deferred);
     }
     let full = full || escalated;
-    compute_root_layout(
-        tree,
-        state,
-        root,
-        Size::new(
-            AvailableSpace::Definite(viewport.width),
-            AvailableSpace::Definite(viewport.height),
-        ),
-    );
-    if full {
-        let position = |tree: &TreeArenas<T>, state: &mut DocumentLayoutState, node| {
-            pre_position(tree, state, node, viewport)
-        };
-        round_with(tree, state, root, scale, Point::ZERO, rescale, position);
+    let settled = settle_deferred_containers(document, resized, &mut deferred);
+    // A deferred container is a relayout boundary, so its own box did not move
+    // and nothing above it has to be laid out again — but its subtree was
+    // finished after the boundaries the pass had parked, so the incremental
+    // rounding tail has to be told about it.
+    let parked_ids = if settled.is_empty() {
+        None
     } else {
-        position_and_round_parked_boundaries(tree, state, parked_ids, &parked, viewport, scale);
+        let mut ids: FxHashSet<NodeId> = parked.iter().map(|&(_, p)| p.node_id).collect();
+        for &pending in &settled {
+            if ids.insert(pending.node_id) {
+                parked.push((boundary_depth(document, pending.node_id), pending));
+            }
+        }
+        Some(ids)
+    };
+    {
+        let (tree, state, live_parked_ids) = document.layout_parts();
+        let root = tree.live_slot(root_id);
+        state.begin_container_interleave(false);
+        if full {
+            let position = |tree: &TreeArenas<T>, state: &mut DocumentLayoutState, node| {
+                pre_position(tree, state, node, viewport)
+            };
+            round_with(tree, state, root, scale, Point::ZERO, rescale, position);
+        } else {
+            position_and_round_parked_boundaries(
+                tree,
+                state,
+                parked_ids.as_ref().unwrap_or(live_parked_ids),
+                &parked,
+                viewport,
+                scale,
+            );
+        }
+        // Every text node this pass measured but did not commit still holds
+        // the probe's line break; painting reads the committed one.
+        state.restore_probed_text();
     }
-    // Every text node this pass measured but did not commit still holds the
-    // probe's line break; painting reads the committed one.
-    state.restore_probed_text();
+}
+
+/// Publishes what the deferred containers measured, restyles the container-unit
+/// readers under them, and lays their subtrees out — until nothing is left
+/// deferred.
+///
+/// The loop is the nesting depth of size query containers that all moved at
+/// once, not the number of containers: one iteration settles every container
+/// at one level, and the only thing a relay can discover is a container *under*
+/// one just settled. It is bounded the way
+/// [`Document::layout`](crate::Document::layout)'s is, and its last iteration
+/// closes the interleave rather than capping it — a relay that may not defer
+/// lays every subtree out for real, so this never returns with a subtree
+/// nobody laid out.
+///
+/// Returns every container it settled, for the rounding tail.
+fn settle_deferred_containers<T: Sync>(
+    document: &mut Document<T>,
+    resized: &mut Vec<NodeId>,
+    deferred: &mut Vec<DeferredContainer>,
+) -> Vec<PendingRelayout> {
+    let mut settled = Vec::new();
+    for pass in 0..committed_box::CONTAINER_PASSES {
+        if deferred.is_empty() {
+            break;
+        }
+        // What the deferred runs recorded becomes readable here — by the style
+        // traversal below, which is what the whole deferral was for.
+        document.arenas_mut().publish_committed_boxes(resized);
+        let mut marked = false;
+        for &DeferredContainer { node, input } in deferred.iter() {
+            settled.push(PendingRelayout {
+                node_id: node,
+                input,
+                kind: RelayoutKind::Boundary,
+            });
+            if document.get(node).is_some_and(Node::is_element) {
+                marked |= document.mark_container_units_users(node);
+            }
+        }
+        // Every container this call is settling has had its readers marked, so
+        // its report is spent; one it is *not* settling — an
+        // `inline-size` container, whose block axis answers to its contents and
+        // so has no size to publish before them — stays in the list for
+        // `Document::layout`'s loop to recascade after the pass.
+        let deferred_ids: FxHashSet<NodeId> = deferred.iter().map(|entry| entry.node).collect();
+        resized.retain(|id| !deferred_ids.contains(id));
+        if marked {
+            document.flush_styles_with_damage_sink(&mut |_, _| {});
+        }
+        let last = pass + 1 == committed_box::CONTAINER_PASSES;
+        let (tree, state, _) = document.layout_parts();
+        state.begin_container_interleave(!last);
+        for &DeferredContainer { node, input } in deferred.iter() {
+            let Some(slot) = tree.slot(node) else {
+                continue;
+            };
+            if !tree.at(slot).is_element() || !is_relayout_boundary(&StyleView::of(tree.at(slot))) {
+                continue;
+            }
+            // The deferred run cached the size it published; the relay is the
+            // run that lays the contents out under it.
+            state.clear_layout_cache(slot);
+            let output = compute_boundary_relayout(tree, state, slot, input);
+            tree.layout_mut(state, slot)
+                .set_unrounded_content_size(output.content_size);
+        }
+        state.take_container_deferrals(deferred);
+    }
+    debug_assert!(
+        deferred.is_empty(),
+        "the last relay may not defer, so every deferred subtree has been laid out"
+    );
+    settled
 }
 
 fn collect_parked_boundaries<T>(document: &Document<T>) -> Vec<(usize, PendingRelayout)> {

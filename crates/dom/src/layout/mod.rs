@@ -50,6 +50,18 @@ impl<T: Sync> Document<T> {
     /// call, so the loop costs a page that does not use the feature one
     /// `is_empty` test.
     ///
+    /// **The loop is the fallback, not the path.** A `container-type: size`
+    /// box's size is contained in both axes, so the layout run settles it
+    /// inside itself: it publishes the size at the entry of that box's own
+    /// committing run and restyles the readers under it before laying its
+    /// contents out at all (`layout::host::run_layout`, and
+    /// [`crate::layout::committed_box`] for why the size is knowable there).
+    /// What reaches this loop is what that cannot predict — an
+    /// `inline-size` container, whose block axis answers to its contents, and
+    /// a `display: -lynx-text` one, whose algorithm implements no size
+    /// containment — plus the safety net of a prediction that disagreed with
+    /// its algorithm.
+    ///
     /// Which iteration this is decides how the marks are spelled, so the loop
     /// counts. A mark made *inside* the loop is read by the very next
     /// `layout_pass`'s flush, in this call, with nothing in between — so it
@@ -86,10 +98,12 @@ impl<T: Sync> Document<T> {
         let rescale = self.layout_inputs_changed(viewport, scale);
         let bound = self.arenas().slot_bound();
         self.layout_state_mut().ensure_covers(bound);
-        host::run_layout(self, viewport, scale, full, rescale);
+        host::run_layout(self, viewport, scale, full, rescale, resized);
         // Publishing is what makes the pass's sizes readable by the style
         // traversal, which is parallel, and by the pass after this one; see
-        // [`crate::layout::committed_box`].
+        // [`crate::layout::committed_box`]. The run publishes on its own
+        // whenever it interleaved a restyle into itself, so what is left here
+        // is what the *last* boxes it laid out recorded.
         self.arenas_mut().publish_committed_boxes(resized);
         self.clear_relayout_roots();
         self.mark_layout_complete(viewport, scale);
@@ -881,17 +895,319 @@ mod tests {
         );
     }
 
+    /// One document per shape: `page > .query > .item`, with the case's own
+    /// rules for the two.
+    fn query_document(rules: &str) -> (Document<()>, crate::NodeId, crate::NodeId) {
+        let mut document: Document<()> =
+            Document::new(crate::tree::document::tests::device(), "page", ());
+        document.add_stylesheet(
+            &format!(
+                "page {{ display: flex; align-items: flex-start;
+                         width: 400px; height: 300px; }}
+                 .item {{ display: flex; flex-shrink: 0; }}
+                 {rules}"
+            ),
+            StylesheetOrigin::Author,
+        );
+        let root = document.document_element().id();
+        let query = document.create_element("view", ());
+        document.add_class(query, "query");
+        document.append_child(root, query);
+        let item = document.create_element("view", ());
+        document.add_class(item, "item");
+        document.append_child(query, item);
+        (document, query, item)
+    }
+
+    fn laid_out_size(document: &Document<()>, id: crate::NodeId) -> (f32, f32) {
+        let size = document
+            .rounded_layout(id)
+            .expect("the box was laid out")
+            .size;
+        (size.width, size.height)
+    }
+
+    /// The interleave, shape by shape: a `container-type: size` box publishes
+    /// the size it is about to take *before* its contents are laid out, so one
+    /// layout run settles the page — the units resolve against the container
+    /// on the only pass there is.
+    ///
+    /// The `inline-size` shape is the one the interleave declines, and it is
+    /// here to show what declining costs: its block axis answers to its
+    /// contents, so there is nothing to publish before them and the loop in
+    /// [`Document::layout`] settles it in a second run, exactly as it did
+    /// before the interleave existed.
+    #[test]
+    fn one_run_settles_a_size_query_container() {
+        for (case, rules, size, runs) in [
+            (
+                "the nearest size query container",
+                ".query { display: flex; container-type: size;
+                          width: 200px; height: 100px; }
+                 .item { width: 50cqw; height: 50cqh; }",
+                (100.0, 50.0),
+                1,
+            ),
+            (
+                "the container's content box, padding and borders excluded",
+                ".query { display: flex; container-type: size; box-sizing: content-box;
+                          width: 200px; height: 100px;
+                          padding: 10px; border: 5px solid black; }
+                 .item { width: 100cqw; height: 100cqh; }",
+                (200.0, 100.0),
+                1,
+            ),
+            (
+                "an inline-size container, which the interleave declines",
+                ".query { display: flex; container-type: inline-size;
+                          width: 200px; height: 100px; }
+                 .item { width: 50cqw; height: 50cqh; }",
+                (100.0, 300.0),
+                2,
+            ),
+        ] {
+            let (mut document, _query, item) = query_document(rules);
+            assert_eq!(
+                host::layout_runs_during(|| document.layout()),
+                runs,
+                "{case}: layout runs",
+            );
+            assert_eq!(laid_out_size(&document, item), size, "{case}: the reader");
+            assert!(
+                !document.document_element().needs_style_flush(),
+                "{case}: and nothing is left owing",
+            );
+        }
+    }
+
+    /// A container that moves on a settled page settles in one run too —
+    /// including the move that stops it being a container at all, which the
+    /// interleave never sees: losing `container-type` is a change to the
+    /// *container's own* style, so Stylo's own invalidation has already put
+    /// the units back on the viewport fallback in the flush that precedes the
+    /// run.
+    #[test]
+    fn a_container_that_moves_settles_in_one_run() {
+        let (mut document, query, item) = query_document(
+            ".query { display: flex; container-type: size; width: 200px; height: 100px; }
+             .item { width: 50cqw; height: 50cqh; }",
+        );
+        document.layout();
+        assert_eq!(laid_out_size(&document, item), (100.0, 50.0));
+
+        document.set_inline_style(query, "width: 100px");
+        assert_eq!(host::layout_runs_during(|| document.layout()), 1);
+        assert_eq!(laid_out_size(&document, item), (50.0, 50.0));
+
+        document.set_inline_style(query, "container-type: normal");
+        assert_eq!(host::layout_runs_during(|| document.layout()), 1);
+        assert_eq!(
+            laid_out_size(&document, item),
+            (400.0, 300.0),
+            "half the 800x600 viewport in each axis",
+        );
+    }
+
+    /// Nested containers settle in one run as well, one nesting level per
+    /// iteration of the run's own settling loop: the outer container's
+    /// contents — the inner container among them — are laid out only once the
+    /// outer's size is published, and the inner's only once its own is.
+    #[test]
+    fn nested_containers_settle_in_one_run() {
+        let mut document: Document<()> =
+            Document::new(crate::tree::document::tests::device(), "page", ());
+        document.add_stylesheet(
+            "page { display: flex; align-items: flex-start;
+                    width: 400px; height: 300px; }
+             .outer { display: flex; container-type: size;
+                      width: 400px; height: 200px; }
+             .inner { display: flex; container-type: size;
+                      width: 50cqw; height: 50cqh; }
+             .item { display: flex; width: 50cqw; height: 50cqh; }",
+            StylesheetOrigin::Author,
+        );
+        let root = document.document_element().id();
+        let outer = document.create_element("view", ());
+        document.add_class(outer, "outer");
+        document.append_child(root, outer);
+        let inner = document.create_element("view", ());
+        document.add_class(inner, "inner");
+        document.append_child(outer, inner);
+        let item = document.create_element("view", ());
+        document.add_class(item, "item");
+        document.append_child(inner, item);
+
+        assert_eq!(host::layout_runs_during(|| document.layout()), 1);
+        assert_eq!(
+            laid_out_size(&document, inner),
+            (200.0, 100.0),
+            "half the outer container in each axis",
+        );
+        assert_eq!(
+            laid_out_size(&document, item),
+            (100.0, 50.0),
+            "and half the inner one",
+        );
+        assert!(!document.document_element().needs_style_flush());
+    }
+
+    /// The interleave is a prediction, and the record the algorithm leaves
+    /// behind is what is believed. A published size no run ever produced —
+    /// staged here behind the run's back, which is what a prediction that
+    /// disagreed with its algorithm would amount to — is therefore not
+    /// durable: the next committing run of that container finds it, publishes
+    /// what the box actually takes, and the readers re-resolve from that.
+    #[test]
+    fn a_published_size_no_run_produced_is_corrected_by_the_next_one() {
+        use committed_box::{CommittedBox, ContainerSize, RememberedSize};
+
+        let (mut document, query, item) = query_document(
+            ".query { display: flex; container-type: size; width: 200px; height: 100px; }
+             .item { width: 50cqw; height: 50cqh; }",
+        );
+        document.layout();
+        assert_eq!(laid_out_size(&document, item), (100.0, 50.0));
+
+        document.arenas().note_committed_box(
+            query,
+            CommittedBox {
+                remembered: RememberedSize::default(),
+                container: ContainerSize {
+                    width: Some(50.0),
+                    height: Some(50.0),
+                },
+            },
+        );
+        let mut resized = Vec::new();
+        document.arenas_mut().publish_committed_boxes(&mut resized);
+        assert_eq!(resized, vec![query], "the staged size is a move");
+        assert!(document.recascade_resized_containers(&mut resized, false));
+        assert_eq!(laid_out_size(&document, item), (100.0, 50.0));
+
+        assert_eq!(host::layout_runs_during(|| document.layout()), 1);
+        assert_eq!(
+            laid_out_size(&document, item),
+            (100.0, 50.0),
+            "the reader is back on the container's real content box",
+        );
+        assert!(!document.document_element().needs_style_flush());
+    }
+
+    /// The Ahem face every text measurement here is deterministic because of:
+    /// one em per glyph, so a run's width is its length times its font size.
+    const AHEM: &[u8] = include_bytes!("../../../hughie/tests/fixtures/Ahem.ttf");
+
+    /// A paragraph whose *font size* is a container unit is the case the
+    /// interleave has to reach past style into the text pipeline for: the
+    /// shaped run is an artifact of the style, not of the geometry, and a
+    /// paragraph shaped against the viewport fallback would have to be thrown
+    /// away and shaped again.
+    ///
+    /// One run, one shaping. The restyle the run interleaves into itself goes
+    /// through the same damage harvest a flush does, so the text artifact is
+    /// evicted before the paragraph is ever built — rather than after it was
+    /// built at the wrong size.
+    #[test]
+    fn a_text_reader_under_a_container_is_shaped_once_at_the_container_size() {
+        let mut document: Document<()> =
+            Document::new(crate::tree::document::tests::device(), "page", ());
+        document.add_stylesheet(
+            "page { display: flex; align-items: flex-start;
+                    width: 400px; height: 300px; font-family: Ahem; }
+             .query { display: flex; container-type: size;
+                      width: 200px; height: 100px; }
+             .label { display: -lynx-text; font-size: 10cqw; }",
+            StylesheetOrigin::Author,
+        );
+        assert_eq!(document.register_fonts(FontBlob::from_static(AHEM)), 1);
+        let root = document.document_element().id();
+        let query = document.create_element("view", ());
+        document.add_class(query, "query");
+        document.append_child(root, query);
+        let label = document.create_element("text", ());
+        document.add_class(label, "label");
+        document.append_child(query, label);
+        let run = document.create_text_node("hello", ());
+        document.append_child(label, run);
+
+        assert_eq!(host::layout_runs_during(|| document.layout()), 1);
+        assert_eq!(
+            document
+                .text_block_size(label)
+                .expect("a committed paragraph"),
+            Size::new(100.0, 20.0),
+            "10cqw of the 200px container is a 20px font, and Ahem is one em \
+             per glyph",
+        );
+        assert_eq!(
+            document.text_block_rebuilds(label),
+            Some(1),
+            "the paragraph was never shaped at the viewport fallback",
+        );
+    }
+
+    /// The loop is still the fallback, and a `display: -lynx-text` query
+    /// container is what still needs it: the text block algorithm implements
+    /// no size containment, so its content box is not a function of its own
+    /// style and the interleave declines to predict one. The container's size
+    /// is published after the run that laid it out, and the units under it
+    /// re-resolve in the run after that — the pre-interleave path, intact.
+    #[test]
+    #[expect(clippy::float_cmp, reason = "Ahem runs have exact pixel geometry")]
+    fn a_text_query_container_is_settled_by_the_loop() {
+        let mut document: Document<()> =
+            Document::new(crate::tree::document::tests::device(), "page", ());
+        document.add_stylesheet(
+            "page { display: flex; align-items: flex-start;
+                    width: 400px; height: 300px; font-family: Ahem; font-size: 16px; }
+             .query { display: -lynx-text; container-type: size;
+                      width: 200px; line-height: 20px; }
+             .item { display: flex; width: 50cqw; height: 5px; }",
+            StylesheetOrigin::Author,
+        );
+        assert_eq!(document.register_fonts(FontBlob::from_static(AHEM)), 1);
+        let root = document.document_element().id();
+        let query = document.create_element("text", ());
+        document.add_class(query, "query");
+        document.append_child(root, query);
+        let run = document.create_text_node("hi", ());
+        document.append_child(query, run);
+        let item = document.create_element("view", ());
+        document.add_class(item, "item");
+        document.append_child(query, item);
+
+        assert_eq!(
+            host::layout_runs_during(|| document.layout()),
+            2,
+            "the first run publishes the paragraph's content box, the second \
+             lays out what re-resolved against it",
+        );
+        assert_eq!(
+            document
+                .rounded_layout(item)
+                .expect("an atomic inline")
+                .size
+                .width,
+            100.0,
+            "50cqw of the container's 200px content box",
+        );
+        assert!(!document.document_element().needs_style_flush());
+    }
+
     /// Plain leaves per container in [`mixed_container_document`] — enough
     /// that marking them would be visible, few enough to name each in a
     /// failure.
     const PLAIN_LEAVES: usize = 8;
 
-    /// Two size query containers on one page: the first holds one `cqw` leaf
-    /// among [`PLAIN_LEAVES`] px ones, the second holds px leaves only.
+    /// Two query containers of `container_type` on one page: the first holds
+    /// one `cqw` leaf among [`PLAIN_LEAVES`] px ones, the second holds px
+    /// leaves only.
     ///
     /// Both containers record a size on the first pass, so both reach the
     /// recascade — the second is the container that must mark nothing.
-    fn mixed_container_document() -> (
+    fn mixed_container_document(
+        container_type: &str,
+    ) -> (
         Document<()>,
         [crate::NodeId; 2],
         crate::NodeId,
@@ -900,12 +1216,14 @@ mod tests {
         let mut document: Document<()> =
             Document::new(crate::tree::document::tests::device(), "page", ());
         document.add_stylesheet(
-            "page { display: flex; flex-direction: column;
-                    width: 400px; height: 300px; }
-             .query { display: flex; container-type: size;
-                      width: 200px; height: 100px; }
-             .plain { display: flex; width: 10px; height: 2px; }
-             .reader { display: flex; width: 25cqw; height: 2px; }",
+            &format!(
+                "page {{ display: flex; flex-direction: column;
+                         width: 400px; height: 300px; }}
+                 .query {{ display: flex; container-type: {container_type};
+                           width: 200px; height: 100px; }}
+                 .plain {{ display: flex; width: 10px; height: 2px; }}
+                 .reader {{ display: flex; width: 25cqw; height: 2px; }}"
+            ),
             StylesheetOrigin::Author,
         );
         let root = document.document_element().id();
@@ -946,26 +1264,35 @@ mod tests {
             .hint
     }
 
-    /// What the second pass costs: one mark per element that actually
-    /// resolved a container unit, and nothing for the rest of the subtree.
+    /// What a resized container's restyle costs: one mark per element that
+    /// actually resolved a container unit, and nothing for the rest of the
+    /// subtree.
     ///
-    /// The two halves of the loop are driven apart here — `layout_pass` then
-    /// `recascade_resized_containers` — because a whole `layout()` consumes
-    /// the marks it makes in the pass that follows them, leaving nothing to
-    /// read.
+    /// The mark is made *inside* the layout run now, which consumes it before
+    /// it returns, so it is replayed here on the settled document — the same
+    /// call the run makes, against a page whose readers are already at their
+    /// final size.
     #[test]
     #[expect(clippy::float_cmp, reason = "rounded boxes have exact pixel geometry")]
     fn a_resized_container_marks_only_its_container_unit_readers() {
-        let (mut document, [reading, plain_only], reader, plain) = mixed_container_document();
+        let (mut document, [reading, plain_only], reader, plain) = mixed_container_document("size");
 
-        let mut resized = Vec::new();
-        document.layout_pass(&mut resized);
-        assert_eq!(resized.len(), 2, "both containers recorded a first size");
+        assert_eq!(
+            host::layout_runs_during(|| document.layout()),
+            1,
+            "both containers were settled inside the one run",
+        );
+        assert_eq!(document.rounded_layout(reader).unwrap().size.width, 50.0);
+        assert_eq!(document.rounded_layout(plain[0]).unwrap().size.width, 10.0);
         assert!(
-            document.recascade_resized_containers(&mut resized, false),
-            "the page has a container-unit reader under a resized container"
+            !document.document_element().needs_style_flush(),
+            "and the run left no restyle owing"
         );
 
+        assert!(
+            document.mark_container_units_users(reading),
+            "the page has a container-unit reader under this container"
+        );
         assert_eq!(
             restyle_hint(&document, reader).bits(),
             RestyleHint::RECASCADE_SELF.bits(),
@@ -993,14 +1320,6 @@ mod tests {
             !document.mark_container_units_users(plain_only),
             "a subtree with no reader marks nothing, so it owes no pass"
         );
-
-        document.layout();
-        assert_eq!(document.rounded_layout(reader).unwrap().size.width, 50.0);
-        assert_eq!(document.rounded_layout(plain[0]).unwrap().size.width, 10.0);
-        assert!(
-            !document.document_element().needs_style_flush(),
-            "the loop still ran to a fixed point"
-        );
     }
 
     /// The cap iteration spells its marks differently, because they are the
@@ -1014,7 +1333,11 @@ mod tests {
     /// container gets the whole-subtree spelling that survives that tick.
     #[test]
     fn the_cap_iteration_leaves_a_mark_an_animation_tick_cannot_erase() {
-        let (mut document, [reading, _], reader, _) = mixed_container_document();
+        // An `inline-size` container is the shape the interleave declines —
+        // its block axis answers to its contents, so there is no size to
+        // publish before them — which is what leaves the loop to settle it and
+        // makes the two halves drivable apart here.
+        let (mut document, [reading, _], reader, _) = mixed_container_document("inline-size");
 
         let mut resized = Vec::new();
         document.layout_pass(&mut resized);

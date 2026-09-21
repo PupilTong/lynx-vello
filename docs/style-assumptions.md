@@ -401,10 +401,32 @@ and §D.16 with what the wire format actually permits.)*
         Stylo's `TElement::query_container_size` from it. A container that has never been laid out, or that has just stopped being one,
         answers `None` and its descendants fall back to the viewport.
 
-        **The post-layout recascade loop** is `Document::layout`, which is Gecko's
-        `UpdateContainerQueryStyles` in this engine's shape: a pass whose recorded sizes moved
-        marks, under each moved container, the elements that actually resolved a container unit,
-        and lays out again. The search starts at the container's flat children — a container's
+        **The interleave is the primary path** *(2026-09-21)*. A `container-type: size` box is
+        contained in *both* axes, so its content box is a function of its own style and its
+        layout input — not of its contents — and the layout host computes it at the **entry** of
+        that box's own committing run, before one child style has been read
+        (`committed_box::container_estimate`, which is `compute_skipped_contents_size`: the same
+        formula every algorithm takes for a contained axis). When it disagrees with what is
+        published, the run records the new size and lays **no contents out**; `run_layout` then
+        publishes it, runs the same targeted mark + flush described below, and relays that one
+        subtree — inside the same layout run, before anything is rounded. The subtree is
+        therefore laid out once, at the size it keeps, and a text reader is shaped once, at the
+        font size the container gives it. Nesting settles one level per iteration of that
+        settling loop, capped the same way, except that its last iteration *closes* the
+        interleave rather than capping it, so every deferred subtree is always laid out.
+
+        Two shapes are deliberately left out, because for them the estimate is not the
+        algorithm's answer: **`container-type: inline-size`**, whose block axis really does
+        answer to its contents (there is nothing to publish before them), and **`display:
+        -lynx-text`**, whose block algorithm implements no size containment at all (a recorded
+        deviation of the text block, not of this feature). Both fall to the loop below, as does
+        a prediction that ever disagreed with its algorithm — which is a `debug_assert` and not
+        a correctness question, because the record after the algorithm is what is published.
+
+        **The post-layout recascade loop** is the fallback for those, and is `Document::layout`,
+        which is Gecko's `UpdateContainerQueryStyles` in this engine's shape: a pass whose
+        recorded sizes moved marks, under each moved container, the elements that actually
+        resolved a container unit, and lays out again. The search starts at the container's flat children — a container's
         own `cqw` answers to *its* nearest container, an ancestor — and the elements it marks are
         the ones whose primary style carries `ComputedValueFlags::USES_CONTAINER_UNITS`, which
         Stylo sets on every cascade that resolved a `cqw`/`cqh`, including one that fell back to
@@ -415,8 +437,9 @@ and §D.16 with what the wire format actually permits.)*
         `inline-size` container supplies no block axis and a `cqh` under it still answers to the
         outer one; the extra element that marks re-cascades to the value it already had. Each
         mark is `RestyleHint::RECASCADE_SELF` — cascade again, do not match again — which is
-        sound *because* it is made inside the loop: the very next `layout_pass` flushes it, in
-        the same `layout()` call, with no animation tick reachable in between.
+        sound *because* it is made inside the loop — or inside the run, for the interleave:
+        the very next flush reads it, in the same `layout()` call, with no animation tick
+        reachable in between.
         `remove_animation_hints` deletes `RECASCADE_SELF` outright, so that spelling is only
         safe for a mark nothing can outlive. The loop is capped at `CONTAINER_PASSES = 4`; a
         container's supplied axes are contained, so its size cannot answer to its own contents
@@ -432,8 +455,11 @@ and §D.16 with what the wire format actually permits.)*
         container's content box actually moved, the document only recascades at all once some
         style it cascaded carried `USES_CONTAINER_UNITS` — a page with query containers and no
         `cqw`/`cqh` has nothing to re-resolve — and a moved container with no user under it
-        marks nothing and owes no pass. A page with neither feature pays one enum test per
-        committing box and one `is_empty` test per layout.
+        marks nothing and owes no pass. The interleave shares the middle gate exactly: a run
+        defers nothing at all until that flag is set, so a page with query containers and no
+        container units lays out precisely as it did before. A page with neither feature pays
+        one enum test per committing box, one bit test per committing box, and one `is_empty`
+        test per layout.
 
         **The `@container` at-rule is still out**: it is gecko-only in the fork, so nothing
         matches a size or style query. `container-name` parses and cascades and nothing
