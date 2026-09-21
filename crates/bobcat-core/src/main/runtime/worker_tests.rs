@@ -2532,6 +2532,137 @@ fn releasing_a_development_view_unmounts_the_current_react_tree() {
     verify_react_teardown(true, true);
 }
 
+/// A compiled `ReactLynx` `<list>`, end to end over both realms.
+///
+/// A card never builds a list's children: the framework records them as index
+/// operations, writes them with `__SetAttribute(list, 'update-list-info', …)`
+/// and files the `componentAtIndex`/`enqueueComponent` pair that builds and
+/// retires them. What this pins is that the cells arrive as real element
+/// children of the list element, in `item-key` order, each carrying its own
+/// `<text>` — and that a tap whose handler lives on the *background* thread
+/// produces a second batch whose removals and insertion land in the same
+/// tree, through the same pair.
+#[test]
+fn a_compiled_react_list_receives_its_cells_and_a_tap_edits_them() {
+    const BUNDLE_URL: &str = "app:///nested/card.lynx.bundle";
+
+    let bytes = fixtures::fixture("react-list").page;
+    let template = bobcat_source::native::decode(bytes).unwrap();
+    let background = format!(
+        "import {{__BobcatRegisterBundle}} from 'bobcat:bts-runtime';\n\
+         __BobcatRegisterBundle({url});\n\
+         lynx.requireModule('/app-service.js');",
+        url = serde_json::to_string(BUNDLE_URL).unwrap(),
+    );
+    let mut pair = Pair::unbooted_with_data(Some(&background), RealmStartup::default());
+    pair.boot(&template.lepus_code["react-list__main-thread"])
+        .unwrap();
+
+    // The first screen is the main thread's own render, and it ends in the
+    // checkpoint that drains the protocol's microtask: the forty cells are
+    // there before the background thread has been asked for anything.
+    let first_screen = pair.runtime.as_mut().unwrap().with_document(list_cells);
+    assert_eq!(first_screen.len(), 40, "{first_screen:?}");
+    assert_eq!(
+        first_screen,
+        (0..40)
+            .map(|row| format!("cell-{row}=row {row}"))
+            .collect::<Vec<_>>(),
+    );
+
+    // In the order the card asks for them, each a worker job parked on this
+    // answer.
+    serve_bundle_path(&mut pair, &template, "/app-service.js");
+    for path in template.manifest.keys() {
+        if path != "/app-service.js" {
+            serve_bundle_path(&mut pair, &template, path);
+        }
+    }
+
+    // The tap's handler is a background-thread one, so the edit is a round
+    // trip: publish, re-render there, hydrate here. The three dropped rows
+    // become a `removeAction` of ascending *old* indices and the appended
+    // row an `insertAction`; both are one batch.
+    let header = pair.runtime.as_mut().unwrap().with_document(|document| {
+        document
+            .query_selector(document.document_element().id(), "#header")
+            .expect("a valid selector")
+            .expect("the card's header")
+    });
+    let edited: Vec<String> = [1, 3, 5]
+        .iter()
+        .fold(
+            (0..40).map(|row| format!("cell-{row}=row {row}")).collect(),
+            |rows: Vec<String>, dropped| {
+                rows.into_iter()
+                    .filter(|row| !row.starts_with(&format!("cell-{dropped}=")))
+                    .collect()
+            },
+        )
+        .into_iter()
+        .chain(std::iter::once("cell-40=row 40".to_owned()))
+        .collect();
+    pair.runtime
+        .as_mut()
+        .unwrap()
+        .dispatch_for_test(&mut pair.js, header, "tap", dom::Point2D::new(4.0, 4.0))
+        .expect("the tap is delivered");
+    let deadline = ClockInstant::now() + PATIENCE;
+    loop {
+        assert!(
+            ClockInstant::now() < deadline,
+            "the background thread's edit reached the list"
+        );
+        pair.deliver();
+        assert!(worker_failures(pair.notices()).is_empty());
+        if pair.runtime.as_mut().unwrap().with_document(list_cells) == edited {
+            break;
+        }
+    }
+}
+
+/// Every element child of the card's list, as `<item-key>=<its text>`.
+///
+/// Asserting the shape here rather than in the test body keeps the two
+/// call sites reading as the orders they are about.
+fn list_cells(document: &mut LynxDocument) -> Vec<String> {
+    let list = document
+        .query_selector(document.document_element().id(), "#cells")
+        .expect("a valid selector")
+        .expect("the card's list element");
+    let list = document.get(list).expect("a queried node is live");
+    assert_eq!(list.tag_name(), Some("list"));
+    list.children()
+        .map(|cell| {
+            assert_eq!(cell.tag_name(), Some("list-item"));
+            let text = cell.children().next().expect("the cell's own text");
+            assert_eq!(text.tag_name(), Some("text"));
+            format!(
+                "{}={}",
+                cell.attribute("item-key").expect("every cell is keyed"),
+                generated_text(text),
+            )
+        })
+        .collect()
+}
+
+/// The text a `<text>` renders, wherever the framework put it: a `raw-text`
+/// element's `text` attribute for generated content, a host text node's data
+/// otherwise.
+fn generated_text(node: &dom::Node<()>) -> String {
+    let mut text = String::new();
+    for child in node.children() {
+        if let Some(data) = child.text() {
+            text.push_str(data);
+        } else if let Some(attribute) = child.attribute("text") {
+            text.push_str(attribute);
+        } else {
+            text.push_str(&generated_text(child));
+        }
+    }
+    text
+}
+
 /// Answers one manifest path of a native bundle, at the URL `PageSource`
 /// registers it under — beside the bundle's own URL — with the body served
 /// through the same adaptation `PageSource` applies at registration.

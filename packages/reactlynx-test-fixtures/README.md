@@ -19,7 +19,7 @@ imports an internal Rspeedy entry point.
 Both commands set `NODE_ENV` explicitly: Rspeedy reads the config function's
 `env` before applying `--mode`, and the fixture matrix must match that mode.
 
-The default build produces seven native production pages, three native development
+The default build produces eight native production pages, three native development
 variants and six web pages. Each native environment has its own
 compilation, so its lazy chunks cannot be shared with another test page.
 
@@ -31,6 +31,7 @@ compilation, so its lazy chunks cannot be shared with another test page.
 | `lynx-react-reload` | State, effect cleanup, host/BTS reload and entry counter |
 | `lynx-react-data-processor` | Synchronous default/named processors and data updates |
 | `lynx-react-global-props` | Reactive global props, initial state and clicks |
+| `lynx-react-list` | A forty-cell `<list>`, and a tap that removes three cells and appends one |
 | `lynx-react-native`, `web-react-bts-query` | Ref fields, typed dataset, scoped query and native props |
 | `web-basic-bindtap` | Event delivery and state updates |
 | `web-basic-class-selector`, `web-basic-performance-large-css` | CSS decoding and rendered cards |

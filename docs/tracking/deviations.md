@@ -963,22 +963,21 @@ consequential choice about whether to follow the spec or the quirk.
   (2026-09-18).** The layout mode landed
   ([style-assumptions.md](../style-assumptions.md) §24); this records how far
   it can carry `<list list-type="waterfall">` and where it would not match.
-  **Blocking prerequisite, unrelated to layout**: a compiled ReactLynx
-  `<list>` receives its children only through
-  `__SetAttribute(list, "update-list-info", {insertAction, removeAction,
-  updateAction})`
+  **The cell-delivery path is no longer a prerequisite**: a compiled ReactLynx
+  `<list>` receives its children only through `__SetAttribute(list,
+  "update-list-info", {insertAction, removeAction, updateAction})`
   (`lynx-stack/packages/react/runtime/src/snapshot/list/listUpdateInfo.ts:112`),
   which makes the host call the `componentAtIndex` filed by `__CreateList`
   (`.../snapshot/snapshot/list.ts:11-40`) and append the cell
-  (`.../snapshot/list/list.ts:200-205`). web-core implements the consumer and
-  materialises every `insertAction` as a real DOM child inside a microtask,
-  removing each `removeAction` child after handing it to `enqueueComponent`
-  (`.../web-core/ts/client/mainthread/elementAPIs/createElementAPI.ts:460-498`);
-  it keeps no virtualization of its own. This engine throws for that attribute
-  name (`packages/bobcat-element/src/element-papi.ts`), and its stated reason —
-  no indexed child access — no longer holds, since the `childElementIds` host
-  member exists (`crates/bobcat-core/src/main/runtime/lib.rs`). Until that is
-  implemented a list shows no item under any layout mode.
+  (`.../snapshot/list/list.ts:202`). web-core materialises every `insertAction`
+  as a real DOM child inside a microtask, removing each `removeAction` child
+  after handing it to `enqueueComponent`
+  (`.../web-core/ts/client/mainthread/elementAPIs/createElementAPI.ts:461-499`);
+  it keeps no virtualization of its own. This engine now implements that same
+  algorithm over the `childElementIds`, `insertBefore` and `removeElement` host
+  members (`packages/bobcat-element/src/element-papi.ts`, `updateListInfo`), so
+  a list's cells are real element children under every layout mode and what is
+  left here is layout and placement alone.
   **The placement rule native and web-core agree on**: shortest lane, exact
   float comparison, lowest lane index on a tie; a full-span item goes at the
   maximum of every lane and resets them all to that maximum plus its own

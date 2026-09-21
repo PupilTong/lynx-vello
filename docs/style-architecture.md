@@ -248,10 +248,12 @@ What that covers, and what it does not:
   indexed, because the host walks the event path and has no global pass. A
   callable is ignored outright, as web-core ignores it, even though native
   Lynx would file it as a Lepus handler. There is no gesture arena either;
-- list cell recycling. `__CreateList` and `__UpdateListCallbacks` file the
-  callbacks; their consumer, `__SetAttribute(…, "update-list-info", …)`,
-  throws, because reproducing it needs the child at an index and the native
-  boundary answers only `parentNode`;
+- list cell *recycling*. The data protocol itself is implemented:
+  `__CreateList`/`__UpdateListCallbacks` file the callbacks and
+  `__SetAttribute(…, "update-list-info", …)` services a batch in a microtask
+  over `childElementIds`/`insertBefore`/`removeElement`, web-core's algorithm.
+  What is absent is the pool and window above it, and the
+  `componentAtIndexes` batch callback, filed and never called;
 - the remaining PAPI members (`__AddClass`, `__AddInlineStyle`, the dataset,
   component-info, config, template-part, animation, and selector-query
   members) have no adapter;

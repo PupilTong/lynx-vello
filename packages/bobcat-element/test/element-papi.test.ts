@@ -1194,16 +1194,21 @@ describe("__SetAttribute", () => {
     ]);
   });
 
-  it("refuses update-list-info rather than writing a command object", () => {
+  it("routes update-list-info to the list protocol instead of the element", async () => {
     const list = __CreateList(0, () => {}, () => {});
     mock.calls.length = 0;
 
-    expect(() =>
+    // Not an attribute at all: nothing is written onto the element, and an
+    // empty batch reaches the host with nothing to do.
+    expect(
       __SetAttribute(list, "update-list-info", {
         insertAction: [],
         removeAction: [],
-      })
-    ).toThrow("update-list-info");
+      }),
+    ).toBe(undefined);
+    expect(mock.calls).toEqual([]);
+
+    await drain();
     expect(mock.calls).toEqual([]);
   });
 });
@@ -2890,21 +2895,318 @@ describe("list callbacks", () => {
     );
     expect(__UpdateListCallbacks(list, null, null, null)).toBe(undefined);
 
-    // Storage only: their consumer needs the child at an index, which the
-    // native boundary cannot answer.
+    // Storage only: filing a callback is not itself a host call. What reads
+    // them is `__SetAttribute(list, "update-list-info", …)`, below.
     expect(mock.calls).toEqual([]);
   });
+});
 
-  it("still refuses update-list-info, naming what is missing", () => {
-    const list = __CreateList(0, () => 0, () => {});
-    __UpdateListCallbacks(list, () => 0, () => {}, () => []);
+/**
+ * A list, the cells a `componentAtIndex` will hand it, and the recorder the
+ * assertions read.
+ *
+ * `componentAtIndex` stands in for ReactLynx's: it appends the cell for an
+ * index before answering its sign, which is what makes the "already in
+ * place" check below a real case rather than a hypothetical one.
+ */
+function listFixture(cellCount: number) {
+  const list = __CreateList(0, null, null) as object;
+  const cells = Array.from({ length: cellCount }, () => __CreateView(0));
+  const calls: unknown[][] = [];
+  const componentAtIndex = (
+    ...args: unknown[]
+  ): number => {
+    calls.push(["componentAtIndex", ...args.slice(1)]);
+    const cell = cells[args[2] as number]!;
+    __AppendElement(list, cell);
+    return __GetElementUniqueID(cell);
+  };
+  const enqueueComponent = (...args: unknown[]): undefined => {
+    calls.push(["enqueueComponent", ...args.slice(1)]);
+    return undefined;
+  };
+  return { list, cells, calls, componentAtIndex, enqueueComponent };
+}
 
-    expect(() =>
-      __SetAttribute(list, "update-list-info", {
-        insertAction: [],
-        removeAction: [],
-      })
-    ).toThrow("indexed child access");
+/** The node ids of a list's element children, in tree order. */
+function childIds(list: object): number[] {
+  return __GetChildren(list).map((child) => __GetElementUniqueID(child));
+}
+
+/**
+ * Lets the update-list-info microtask run.
+ *
+ * The runtime schedules it with `Promise.resolve().then`, because the MTS
+ * realm has no `queueMicrotask`; awaiting one promise tick is therefore
+ * exactly one drain of the job it queued.
+ */
+function drain(): Promise<void> {
+  return Promise.resolve();
+}
+
+/**
+ * The rejections `run` leaves behind.
+ *
+ * The microtask is fire-and-forget, so a throw inside it becomes an
+ * unhandled rejection rather than something a caller can catch — which is
+ * exactly what the realm's rejection tracker reports it as. The runner's own
+ * listener is stood down for the duration and put back afterwards, because
+ * an expected rejection is not a failed test file; the timer is the turn
+ * Node reports rejections on, which is after the microtask queue drains.
+ */
+async function collectRejections(
+  run: () => Promise<void>,
+): Promise<unknown[]> {
+  const failures: unknown[] = [];
+  const record = (error: unknown) => failures.push(error);
+  const runners = process.listeners("unhandledRejection");
+  process.removeAllListeners("unhandledRejection");
+  process.on("unhandledRejection", record);
+  try {
+    await run();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  } finally {
+    process.off("unhandledRejection", record);
+    for (const listener of runners) {
+      process.on("unhandledRejection", listener);
+    }
+  }
+  return failures;
+}
+
+describe("update-list-info", () => {
+  it("inserts the cells componentAtIndex builds, in position order", async () => {
+    const { list, cells, calls, componentAtIndex, enqueueComponent } =
+      listFixture(3);
+    __SetAttribute(list, "update-list-info", {
+      insertAction: [{ position: 0 }, { position: 1 }, { position: 2 }],
+      removeAction: [],
+      updateAction: [],
+    });
+    __UpdateListCallbacks(list, componentAtIndex, enqueueComponent, () => []);
+
+    // Nothing before the microtask: the callbacks are filed after the write.
+    expect(calls).toEqual([]);
+    expect(childIds(list)).toEqual([]);
+
+    await drain();
+    expect(calls).toEqual([
+      ["componentAtIndex", __GetElementUniqueID(list), 0, 0, false],
+      ["componentAtIndex", __GetElementUniqueID(list), 1, 0, false],
+      ["componentAtIndex", __GetElementUniqueID(list), 2, 0, false],
+    ]);
+    expect(childIds(list)).toEqual(cells.map(__GetElementUniqueID));
+  });
+
+  it("reads the callbacks the flush filed after the write, not the ones before it", async () => {
+    const { list, cells, calls, componentAtIndex, enqueueComponent } =
+      listFixture(1);
+    const stale = () => {
+      throw new Error("the stale componentAtIndex ran");
+    };
+    __UpdateListCallbacks(list, stale, stale, null);
+
+    __SetAttribute(list, "update-list-info", {
+      insertAction: [{ position: 0 }],
+      removeAction: [],
+    });
+    // ReactLynx's `flush()` order: the operations, then the pair that serves
+    // them. The microtask is what makes the two one operation.
+    __UpdateListCallbacks(list, componentAtIndex, enqueueComponent, () => []);
+
+    await drain();
+    expect(calls).toEqual([
+      ["componentAtIndex", __GetElementUniqueID(list), 0, 0, false],
+    ]);
+    expect(childIds(list)).toEqual([__GetElementUniqueID(cells[0]!)]);
+  });
+
+  it("does not move a cell componentAtIndex already appended in place", async () => {
+    const { list, componentAtIndex, enqueueComponent } = listFixture(2);
+    __SetAttribute(list, "update-list-info", {
+      insertAction: [{ position: 0 }, { position: 1 }],
+      removeAction: [],
+    });
+    __UpdateListCallbacks(list, componentAtIndex, enqueueComponent, null);
+    await drain();
+
+    // Every append landed at its own position, so the protocol made no tree
+    // call of its own: only the two `insertBefore`s the appends were.
+    expect(mock.named("insertBefore")).toHaveLength(2);
+    expect(mock.named("insertBefore").map((call) => call[3])).toEqual([
+      null,
+      null,
+    ]);
+  });
+
+  it("moves a cell appended past its position back to it", async () => {
+    const { list, cells, componentAtIndex, enqueueComponent } = listFixture(2);
+    // The list already holds the second cell, so building the first appends
+    // it *after* that one and it has to be moved before it.
+    __AppendElement(list, cells[1]!);
+    __SetAttribute(list, "update-list-info", {
+      insertAction: [{ position: 0 }],
+      removeAction: [],
+    });
+    __UpdateListCallbacks(list, componentAtIndex, enqueueComponent, null);
+    await drain();
+
+    expect(childIds(list)).toEqual([
+      __GetElementUniqueID(cells[0]!),
+      __GetElementUniqueID(cells[1]!),
+    ]);
+  });
+
+  it("shifts each removal by the removals before it", async () => {
+    const { list, cells, calls, componentAtIndex, enqueueComponent } =
+      listFixture(5);
+    for (const cell of cells) {
+      __AppendElement(list, cell);
+    }
+    const listId = __GetElementUniqueID(list);
+
+    // Old indices 1 and 3, ascending: after the first removal the child at
+    // old index 3 sits at current index 2, which is `position - i`.
+    __SetAttribute(list, "update-list-info", {
+      insertAction: [],
+      removeAction: [1, 3],
+    });
+    __UpdateListCallbacks(list, componentAtIndex, enqueueComponent, null);
+    await drain();
+
+    expect(calls).toEqual([
+      ["enqueueComponent", listId, __GetElementUniqueID(cells[1]!)],
+      ["enqueueComponent", listId, __GetElementUniqueID(cells[3]!)],
+    ]);
+    expect(childIds(list)).toEqual([
+      __GetElementUniqueID(cells[0]!),
+      __GetElementUniqueID(cells[2]!),
+      __GetElementUniqueID(cells[4]!),
+    ]);
+  });
+
+  it("removes before it inserts, and skips a removal past the end", async () => {
+    const { list, cells, calls, componentAtIndex, enqueueComponent } =
+      listFixture(3);
+    __AppendElement(list, cells[2]!);
+    __SetAttribute(list, "update-list-info", {
+      insertAction: [{ position: 0 }],
+      // Index 1 does not exist: web-core's `if (removedEle)` skips it.
+      removeAction: [0, 1],
+    });
+    __UpdateListCallbacks(list, componentAtIndex, enqueueComponent, null);
+    await drain();
+
+    expect(calls).toEqual([
+      [
+        "enqueueComponent",
+        __GetElementUniqueID(list),
+        __GetElementUniqueID(cells[2]!),
+      ],
+      ["componentAtIndex", __GetElementUniqueID(list), 0, 0, false],
+    ]);
+    expect(childIds(list)).toEqual([__GetElementUniqueID(cells[0]!)]);
+  });
+
+  it("ignores updateAction", async () => {
+    const { list, calls, componentAtIndex, enqueueComponent } = listFixture(1);
+    __SetAttribute(list, "update-list-info", {
+      insertAction: [],
+      removeAction: [],
+      updateAction: [{ from: 0, to: 0, type: "x", flush: false }],
+    });
+    __UpdateListCallbacks(list, componentAtIndex, enqueueComponent, null);
+    await drain();
+
+    expect(calls).toEqual([]);
+    expect(childIds(list)).toEqual([]);
+  });
+
+  it("never calls the componentAtIndexes batch callback", async () => {
+    const { list, componentAtIndex, enqueueComponent } = listFixture(1);
+    const batch = () => {
+      throw new Error("componentAtIndexes ran");
+    };
+    __SetAttribute(list, "update-list-info", {
+      insertAction: [{ position: 0 }],
+      removeAction: [],
+    });
+    __UpdateListCallbacks(list, componentAtIndex, enqueueComponent, batch);
+    await drain();
+
+    expect(childIds(list)).toHaveLength(1);
+  });
+
+  it("inserts nothing once the callbacks are cleared", async () => {
+    const { list, componentAtIndex, enqueueComponent } = listFixture(1);
+    __UpdateListCallbacks(list, componentAtIndex, enqueueComponent, null);
+    __SetAttribute(list, "update-list-info", {
+      insertAction: [{ position: 0 }],
+      removeAction: [],
+    });
+    // ReactLynx clears all three when it tears a list down.
+    __UpdateListCallbacks(list, null, null, null);
+    mock.calls.length = 0;
+    await drain();
+
+    // No `componentAtIndex` is no sign, so nothing is built and nothing is
+    // moved — web-core's `componentAtIndex?.(…)` answering undefined.
+    expect(childIds(list)).toEqual([]);
+    expect(mock.named("insertBefore")).toEqual([]);
+  });
+
+  it("still removes with a cleared enqueueComponent, as web-core's ?. does", async () => {
+    const { list, cells } = listFixture(1);
+    __AppendElement(list, cells[0]!);
+    __SetAttribute(list, "update-list-info", {
+      insertAction: [],
+      removeAction: [0],
+    });
+    __UpdateListCallbacks(list, null, null, null);
+    await drain();
+
+    // web-core reaches the callback through `?.` and removes the child
+    // either way; only the notification is optional.
+    expect(childIds(list)).toEqual([]);
+  });
+
+  it("is a no-op for a payload that is not an object", async () => {
+    const { list, cells } = listFixture(1);
+    __AppendElement(list, cells[0]!);
+    mock.calls.length = 0;
+
+    // web-core destructures the value at the call and throws a TypeError
+    // naming neither the list nor the member; this is the recorded
+    // deviation.
+    expect(__SetAttribute(list, "update-list-info", null)).toBe(undefined);
+    expect(__SetAttribute(list, "update-list-info", "x")).toBe(undefined);
+    await drain();
+
+    expect(mock.calls).toEqual([]);
+    expect(childIds(list)).toHaveLength(1);
+  });
+
+  it("refuses a sign no live handle names, and stops the batch", async () => {
+    const { list, cells, enqueueComponent } = listFixture(1);
+    // 4242 is no element of this document: the ownership graph and the tree
+    // would disagree about a cell this very call built. web-core skips such
+    // a sign; this throws, which is the recorded deviation.
+    const signs = [4242, __GetElementUniqueID(cells[0]!)];
+    __SetAttribute(list, "update-list-info", {
+      insertAction: [{ position: 0 }, { position: 1 }],
+      removeAction: [],
+    });
+    __UpdateListCallbacks(list, () => signs.shift(), enqueueComponent, null);
+
+    const failures = await collectRejections(async () => {
+      await drain();
+    });
+
+    expect(String(failures[0])).toContain("4242");
+    expect(String(failures[0])).toContain("no live handle names");
+    // The throw ended the microtask, so the second insertion never ran.
+    expect(signs).toEqual([__GetElementUniqueID(cells[0]!)]);
+    expect(childIds(list)).toEqual([]);
   });
 });
 

@@ -3594,23 +3594,115 @@ fn an_event_target_no_handle_names_is_an_error_not_a_silent_drop() {
     assert!(error.to_string().contains("ownership graph"), "{error}");
 }
 
+/// `__SetAttribute(list, "update-list-info", …)` against the real document,
+/// which is where the protocol's two primitives actually live: the child at
+/// an index (`childElementIds`) and the tree edits decided from it.
+///
+/// The batch is serviced in a microtask, so the callbacks a card files
+/// *after* writing the operations are the ones that serve it — which is the
+/// order `ReactLynx`'s own `ListUpdateInfoRecording.flush` writes in. Boot ends
+/// in a checkpoint, so by the time this returns the queue has drained; what
+/// the microtasks found is written back onto the list as attributes, since
+/// the document is the only thing this test can read.
 #[test]
-fn update_list_info_is_refused_instead_of_becoming_an_attribute() {
-    let (mut js_runtime, mut runtime, _elements) = runtime();
-    let error = runtime
+fn update_list_info_builds_and_retires_cells_through_the_filed_callbacks() {
+    let (mut js_runtime, mut runtime, elements) = runtime();
+    runtime
         .run_main_thread_script(
             &mut js_runtime,
             r"
-                const page = __CreatePage('card', 0);
-                const list = __CreateList(0, function () {}, function () {});
-                __AppendElement(page, list);
-                __SetAttribute(list, 'update-list-info', { insertAction: [], removeAction: [] });
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const list = __CreateList(0, null, null);
+                  __SetID(list, 'cells');
+                  __AppendElement(page, list);
+                  const listId = __GetElementUniqueID(list);
+                  const keys = new Map();
+                  const cells = [0, 1, 2, 3].map(index => {
+                    const cell = __CreateElement('list-item', 0);
+                    __SetAttribute(cell, 'item-key', 'cell-' + index);
+                    keys.set(__GetElementUniqueID(cell), 'cell-' + index);
+                    return cell;
+                  });
+                  const retired = [];
+                  const retire = (element, id, sign) =>
+                    retired.push(element === list && id === listId
+                      ? keys.get(sign) ?? sign
+                      : 'wrong-list');
+
+                  // First batch: four cells, appended in position order.
+                  __SetAttribute(list, 'update-list-info', {
+                    insertAction: [0, 1, 2, 3].map(position => ({ position })),
+                    removeAction: [],
+                    // Ignored, as web-core's accepted payload ignores it.
+                    updateAction: [{ from: 0, to: 0, type: 'x', flush: false }],
+                  });
+                  // Filed after the write, exactly as the framework files
+                  // them: a synchronous service would have missed them.
+                  __UpdateListCallbacks(
+                    list,
+                    (element, id, index, operationID, reuse) => {
+                      if (element !== list || id !== listId || operationID !== 0 || reuse !== false)
+                        return undefined;
+                      __AppendElement(element, cells[index]);
+                      return __GetElementUniqueID(cells[index]);
+                    },
+                    retire,
+                    () => { throw Error('componentAtIndexes is never called'); },
+                  );
+                  if (__GetChildren(list).length !== 0)
+                    throw Error('the protocol ran before its microtask');
+
+                  // Second batch, behind the first: old indices 1 and 3 go,
+                  // and the cell that was at 2 is left between them.
+                  Promise.resolve().then(() => {
+                    __SetAttribute(list, 'data-first-batch',
+                      __GetChildren(list).map(__GetElementUniqueID).length);
+                    __SetAttribute(list, 'update-list-info', {
+                      insertAction: [],
+                      removeAction: [1, 3],
+                    });
+                    __UpdateListCallbacks(list, null, retire, null);
+                    // Queued after the batch's own microtask, so it reads
+                    // what the removals left.
+                    Promise.resolve().then(() => {
+                      __SetAttribute(list, 'data-retired', retired.join(','));
+                    });
+                  });
+                };
                 ",
             "app:///list.js",
         )
-        .expect_err("the unimplemented list surface");
+        .expect("the list protocol");
 
-    assert!(error.to_string().contains("update-list-info"), "{error}");
+    let tree = elements.tree();
+    let list = tree
+        .document_element()
+        .children()
+        .find(|node| node.attribute("id") == Some("cells"))
+        .expect("the list element");
+    assert_eq!(
+        list.attribute("data-first-batch"),
+        Some("4"),
+        "every insertAction position built its cell"
+    );
+    assert_eq!(
+        list.attribute("data-retired"),
+        Some("cell-1,cell-3"),
+        "enqueueComponent is told the list and the sign of each cell removed"
+    );
+    let keys: Vec<_> = list
+        .children()
+        .map(|cell| (cell.tag_name(), cell.attribute("item-key")))
+        .collect();
+    assert_eq!(
+        keys,
+        vec![
+            (Some("list-item"), Some("cell-0")),
+            (Some("list-item"), Some("cell-2")),
+        ],
+        "the i-th removal takes the child at `position - i`"
+    );
 }
 
 /// The realm's timers, from the four globals a card calls to the schedule a

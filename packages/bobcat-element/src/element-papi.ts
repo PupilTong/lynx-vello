@@ -67,7 +67,7 @@ import { __BobcatPublishEvent } from "bobcat:runtime";
 // | `__AddInlineStyle(element, property, value)` | native `setInlineStyleProperty`; CSS names, not numeric native IDs |
 // | `__SetDataset` / `__GetDataset` / `__AddDataset` | typed per-element values in this realm |
 // | `__SetCSSId(elements, cssId, entryName?)` | nothing — accepted and ignored |
-// | `__SetAttribute(element, name, value)` | native `setAttribute` / `removeAttribute` exports |
+// | `__SetAttribute(element, name, value)` | native `setAttribute` / `removeAttribute` exports; `update-list-info` instead drives the list callbacks over `childElementIds` / `insertBefore` / `removeElement` |
 // | `__UpdateListCallbacks(list, ...)` | this runtime's own store |
 // | `__AddEvent(element, type, name, handler)` | this runtime's own store |
 // | `__GetEvent(element, name, type)` | this runtime's own store |
@@ -244,10 +244,14 @@ import { __BobcatPublishEvent } from "bobcat:runtime";
 // `closure_type` selecting a background handler string, and `bind_type`
 // selecting Lynx's `catch` forms. A card that wants either has `__AddEvent`.
 //
-// List cell recycling. `__CreateList` and `__UpdateListCallbacks` file the
-// callbacks; their consumer, `__SetAttribute(element, "update-list-info", …)`,
-// throws, because reproducing it needs the child at an index and the native
-// boundary answers only `parentNode`.
+// List cell *recycling*. The data protocol itself is here:
+// `__CreateList`/`__UpdateListCallbacks` file the callbacks and
+// `__SetAttribute(element, "update-list-info", …)` services them in a
+// microtask over the host's `childElementIds`, `insertBefore` and
+// `removeElement` (see [`updateListInfo`]). What is absent is the layer
+// above it — a recycling pool, a virtualization window, and the
+// `componentAtIndexes` batch callback, which is filed and never called, as
+// in web-core.
 //
 // There is no `preventDefault` and no `cancelable`: Lynx dispatches no
 // cancelable event, and suppressing a built-in behavior goes through gesture
@@ -474,12 +478,18 @@ const globalNodes: Map<string, Set<number>> = new Map();
 /**
  * The list callbacks `__CreateList` and `__UpdateListCallbacks` file.
  *
- * Nothing reads them yet. Their consumer is
- * `__SetAttribute(element, "update-list-info", …)`, which needs one
- * primitive the native boundary does not have: the child at an index. They
- * are retained rather than dropped because a callback dropped at
- * `__CreateList` time cannot be recovered later — the card hands each over
+ * Their consumer is `__SetAttribute(element, "update-list-info", …)`, which
+ * reads them out of the handle it is given — see [`updateListInfo`]. They
+ * live on the handle because the list element is what a card names them for,
+ * and they are retained rather than dropped because a callback dropped at
+ * `__CreateList` time cannot be recovered later: the card hands each over
  * exactly once.
+ *
+ * **Read at service time, not at the call.** ReactLynx's
+ * `ListUpdateInfoRecording.flush` writes the operations first and files the
+ * callbacks immediately after, so the pair a given batch runs against is the
+ * one in place when the microtask drains, never the one in place when the
+ * attribute was written.
  */
 const listCallbacksSymbol = Symbol("listCallbacks");
 interface ListCallbacks {
@@ -826,8 +836,7 @@ export function __CreateRawText(text: unknown): object {
 
 /**
  * List construction files the recycling callbacks the same way
- * `__UpdateListCallbacks` does; nothing reads them yet (see
- * [`listCallbacks`]).
+ * `__UpdateListCallbacks` does; [`updateListInfo`] is what reads them.
  *
  * The rest parameter is what native declares as arguments 4 and 5: an
  * unused options object and the `componentAtIndexes` callback, which
@@ -1383,6 +1392,162 @@ export function __SetCSSId(
 }
 
 /**
+ * One callback slot as it is called: web-core reaches both through `?.`, so
+ * a nullish slot is a call that does not happen rather than a refusal.
+ */
+type ListCallback = ((...args: unknown[]) => unknown) | null | undefined;
+
+/**
+ * A list's element children right now, by node id.
+ *
+ * Read fresh at every step of the two loops in [`updateListInfo`] and never
+ * cached, because both mutate the tree as they go and web-core reads
+ * `element.children` — a *live* `HTMLCollection` — the same way. It matters
+ * twice over: `removeAction` positions are indices into the pre-removal
+ * child list, which is why the i-th removal looks at `position - i`; and
+ * `componentAtIndex` appends the cell it built (ReactLynx's
+ * `snapshot/list/list.ts:202`, `__AppendElement(list, root)`) before it
+ * answers, so a snapshot taken before an insertion step is already stale by
+ * the time the step needs it.
+ */
+function listChildren(listNodeId: number): number[] {
+  const record = childElementIds(listNodeId);
+  return record === "" ? [] : record.split(",").map(Number);
+}
+
+/**
+ * The one live handle for a list child, which a list child always has.
+ *
+ * `__GetChildren`'s invariant, in the other place that depends on it: a
+ * connected element's handle is held by its parent's, up to the permanent
+ * page handle, and these children were appended by a `componentAtIndex` the
+ * card is still holding. Undefined therefore means the ownership graph and
+ * the tree disagree, and minting a second handle for a node whose first has
+ * died would leave the host holding a node no handle names.
+ */
+function listChildHandle(nodeId: number, what: string): Handle {
+  const handle = handleOf(nodeId);
+  if (handle === undefined) {
+    throw new Error(
+      `__SetAttribute(update-list-info): ${what} ${nodeId}, which no live handle names`,
+    );
+  }
+  return handle;
+}
+
+/**
+ * `__SetAttribute(list, "update-list-info", operations)` — the list data
+ * protocol, which is how a compiled ReactLynx `<list>` gets its cells.
+ *
+ * The card never builds a list's children itself. It records a batch of
+ * insertions and removals against *indices*, writes the batch here, and
+ * files a fresh `componentAtIndex`/`enqueueComponent` pair immediately
+ * afterwards (`ListUpdateInfoRecording.flush`, ReactLynx's
+ * `snapshot/list/listUpdateInfo.ts`). This member replays the batch through
+ * that pair: `componentAtIndex` builds and appends the cell for an index and
+ * answers its `unique_id`, `enqueueComponent` is told which cell is going
+ * away, and the tree edits in between are ordinary `insertBefore` and
+ * `removeElement` calls. web-core's
+ * `client/mainthread/elementAPIs/createElementAPI.ts:461-499` is the
+ * algorithm being matched, step for step.
+ *
+ * **It runs in a microtask, and that is load-bearing.** `flush()` writes the
+ * operations *before* it files the callbacks, so a batch serviced
+ * synchronously would run against the previous render's pair — or, for a
+ * list's first batch, against no pair at all. Deferring to the end of the
+ * current task is what makes the two calls one operation. The payload is
+ * still read synchronously, as web-core's destructuring is; only the
+ * callbacks are read late.
+ *
+ * `queueMicrotask` is a WHATWG global QuickJS does not have and no module
+ * installs in the MTS realm (the BTS runtime's own `lynx.queueMicrotask` is
+ * written over `Promise.resolve().then`), so that is what this uses. The
+ * scheduling is the same — a promise job is a microtask — and the checkpoint
+ * ending the entry drains it. The one difference is where a throw lands: a
+ * `queueMicrotask` callback throws to the global error handler, a promise
+ * job leaves an unhandled rejection, which the realm reports through the
+ * runtime's rejection tracker.
+ *
+ * Two deliberate deviations from web-core:
+ *
+ * - A `null` or non-object payload is a no-op. web-core destructures the
+ *   value at the call and so throws a `TypeError` naming neither the list
+ *   nor the member; nothing a card does reaches that, and failing a whole
+ *   render for it buys nothing.
+ * - A sign `componentAtIndex` answers that no live handle names is a throw.
+ *   web-core skips it (`if (childElement)`), because its handle index is a
+ *   `WeakRef` table it treats as best-effort. Here it is the ownership graph
+ *   and the tree disagreeing about an element this very call just built, and
+ *   nothing after it in the batch can be trusted.
+ *
+ * `updateAction` is ignored: web-core's accepted payload type has only
+ * `insertAction` and `removeAction`, and what an update carries is the
+ * platform info of a cell that stayed where it was.
+ */
+function updateListInfo(list: unknown, operations: unknown): undefined {
+  const handle = list as Handle;
+  const listNodeId = nodeIdOf(handle);
+  if (typeof operations !== "object" || operations === null) {
+    return undefined;
+  }
+  const { insertAction, removeAction } = operations as {
+    insertAction?: unknown;
+    removeAction?: unknown;
+  };
+  void Promise.resolve().then(() => {
+    const callbacks = handle[listCallbacksSymbol];
+    const componentAtIndex = callbacks?.componentAtIndex as ListCallback;
+    const enqueueComponent = callbacks?.enqueueComponent as ListCallback;
+    if (Array.isArray(removeAction)) {
+      // Ascending old indices, so the i-th removal has shifted i places.
+      removeAction.forEach((position: unknown, removed: number) => {
+        const childNodeId =
+          listChildren(listNodeId)[Number(position) - removed];
+        if (childNodeId === undefined) {
+          return;
+        }
+        const child = listChildHandle(childNodeId, "the list holds child");
+        enqueueComponent?.(handle, listNodeId, childNodeId);
+        removeElement(childNodeId);
+        disown(child);
+      });
+    }
+    if (!Array.isArray(insertAction)) {
+      return;
+    }
+    // Ascending positions, so each one is an index into the list as the
+    // insertions before it have already left it.
+    for (const action of insertAction) {
+      const position = Number((action as { position?: unknown })?.position);
+      const sign = componentAtIndex?.(
+        handle,
+        listNodeId,
+        position,
+        // The operation id, which no readback here consumes, and
+        // `enableReuseNotification`, which needs the recycling pool this
+        // engine does not have. web-core passes the same two constants.
+        0,
+        false,
+      );
+      if (typeof sign !== "number") {
+        continue;
+      }
+      const child = listChildHandle(sign, "componentAtIndex answered");
+      const reference = listChildren(listNodeId)[position];
+      // `componentAtIndex` appended the cell, so it may already *be* the
+      // child at that index — for an append-only batch it always is, and
+      // moving it would be a host call that changed nothing.
+      if (reference === sign) {
+        continue;
+      }
+      insertBefore(listNodeId, sign, reference ?? null);
+      adopt(handle, child);
+    }
+  });
+  return undefined;
+}
+
+/**
  * `null`/`undefined` removes; anything else is stringified, which is what
  * web-core's `setElementPropertyOrAttribute` does for every name that is not
  * a live property of its HTML stand-in element. `id`, `class`, and `style`
@@ -1390,11 +1555,9 @@ export function __SetCSSId(
  * A separate typed copy serves the Lynx fields() API. Functions remain local;
  * cross-thread readback uses the Worker transport's structured-clone semantics.
  *
- * `update-list-info` is the one name that is not an attribute at all: it
- * drives list cell insertion and removal, and throws here rather than
- * writing a stringified command object onto the element. The callbacks it
- * would drive are filed (see [`listCallbacks`]); what is missing is the
- * child at an index, which the native boundary cannot answer.
+ * `update-list-info` is the one name that is not an attribute at all: it is
+ * the list data protocol's one command, and it goes to [`updateListInfo`]
+ * instead of being stringified onto the element.
  */
 export function __SetAttribute(
   element: unknown,
@@ -1402,9 +1565,7 @@ export function __SetAttribute(
   value: unknown,
 ): undefined {
   if (name === "update-list-info") {
-    throw new Error(
-      "__SetAttribute(update-list-info) needs indexed child access, which the native boundary does not have",
-    );
+    return updateListInfo(element, value);
   }
   const nodeId = nodeIdOf(element);
   const values = valuesOf(element, attributeValuesSymbol);
@@ -2039,7 +2200,9 @@ export function __SetEvents(element: unknown, events: unknown): undefined {
  * `__CreateList` or an earlier call left. ReactLynx passes null for all
  * three when it tears a list down.
  *
- * Storage only: see [`listCallbacks`] for why nothing reads them yet.
+ * Storage only; [`updateListInfo`] is the reader, and it reads the handle
+ * fresh in its microtask, so a call landing after the operations were
+ * written is the one that serves them.
  */
 export function __UpdateListCallbacks(
   list: unknown,

@@ -1009,9 +1009,18 @@ subset of CSSOM `style.setProperty` (no priority argument, so an embedded
 `__AddInlineStyle` updates one named property in the existing block and removes
 it for empty/nullish values, and numeric Lynx CSS property IDs remain
 unsupported on both surfaces. `__CreateList` consumes only its numeric
-parent-component argument for now; cell recycling remains part of the
-unimplemented list surface, and `__SetAttribute` throws for `update-list-info`,
-the one name that is a list command rather than an attribute.
+parent-component argument; the callbacks it and `__UpdateListCallbacks` file
+are read by `__SetAttribute(list, "update-list-info", …)`, the one name that is
+a list command rather than an attribute. That member is the list *data*
+protocol and it is web-core's, step for step: the batch is serviced in a
+microtask — the callbacks a card files immediately after writing the
+operations are therefore the ones that serve it — every `insertAction`
+position is built by `componentAtIndex` and inserted at that index unless it
+is already there, and every `removeAction` child is handed to
+`enqueueComponent` and removed, the i-th removal taking the child at
+`position - i`. `updateAction` is ignored and `componentAtIndexes` is filed
+and never called, as in web-core. Cell *recycling* — a pool, a window,
+`enableReuseNotification` — remains part of the unimplemented list surface.
 
 An element handle is an `EventTarget`, and the registration half lives in
 `packages/bobcat-element`: listener closures live only in the realm and nothing
@@ -1995,12 +2004,12 @@ would host it:
   that feeds it.
 - **The list surface.** `crates/bobcat-core/src/main/tree/scroll_container.rs`
   carries only what a UA sheet can say about `scroll-view` and `list`; there
-  is no cell recycling, no scroll-to-index and no threshold events, and
-  `__SetAttribute(element, "update-list-info", …)` throws rather than
-  pretending. That consumer is the prerequisite for *any* list content — it is
-  the only path a compiled `<list>` receives children on — so it blocks the
-  surface regardless of layout mode, now that `display: grid-lanes` gives
-  `list-type="waterfall"` one (`docs/tracking/deviations.md`).
+  is no cell recycling, no scroll-to-index and no threshold events. What is
+  built is the data protocol underneath all of it:
+  `__SetAttribute(element, "update-list-info", …)` delivers a compiled
+  `<list>`'s cells as real element children, which is the only path one
+  receives children on, so list content no longer waits on it under any
+  layout mode (`docs/tracking/deviations.md`).
 - **Gesture detectors and the arena.** `crates/bobcat-core/src/paint/gesture.rs`
   has no fling or velocity, no `:active` driving, no `consume-slide-event`, no
   per-element `GestureDetector`/arena relations and no `click`; `tapSlop` is
