@@ -19,6 +19,8 @@ fn length_grammar() {
         ("0.7rpx", "0.7rpx"),
         ("0.7vw", "0.7vw"),
         ("0.7vh", "0.7vh"),
+        ("0.7cqw", "0.7cqw"),
+        ("0.7cqh", "0.7cqh"),
         ("10%", "10%"),
         ("0.1px", "0.1px"),
         (".1px", "0.1px"),
@@ -37,7 +39,16 @@ fn length_grammar() {
         );
     }
     assert!(parses("width", "calc(2px + 3rpx)"), "rpx joins calc");
+    assert!(parses("width", "calc(2px + 3cqw)"), "cqw joins calc");
     assert!(parses("width", "0"), "unitless zero is a length");
+    // Only the two physical container units are admitted; the logical family
+    // is not — see `docs/style-assumptions.md`.
+    for logical in ["1cqi", "1cqb", "1cqmin", "1cqmax"] {
+        assert!(
+            !parses("width", logical),
+            "`{logical}` is not a supported container unit"
+        );
+    }
     for invalid in ["abcd", "100 px", "1.px"] {
         assert!(!parses("width", invalid), "`{invalid}` must be rejected");
     }

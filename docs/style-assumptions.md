@@ -17,7 +17,10 @@ the semantics are stylo's.** Everything below refines that sentence.
 - stylo is the cascade engine, layered `future runtime adapter → dom →
   vendor/stylo` (fork with the `lynx` feature; Lynx-only properties and
   `rpx`/`ppx`/`sp` units are first-class grammar in the fork, no side-channel
-  tricks). The runtime-adapter layer is not currently implemented.
+  tricks — and since 2026-09-21 the fork's `lynx` length surface also admits
+  the W3C `cqw`/`cqh` container units, see the containment scope note below
+  for what every unit resolves against). The runtime-adapter layer is not
+  currently implemented.
 - Compat target is **web-core / `.web.bundle`** behavior, not native
   `.lynx.bundle`.
 - W3C-correct semantics for real spec features; faithful cloning for
@@ -363,6 +366,24 @@ and §D.16 with what the wire format actually permits.)*
       Single-axis `inline-size` containment parses if the grammar allows but is **ignored by
       layout** — never treated as size containment, never a relayout boundary. Size containment
       always covers both physical axes.
+      - **The `cqw`/`cqh` units do parse and resolve** *(2026-09-21)*. They are plain W3C
+        units — the query container's width and height divided by 100 — that an author
+        targeting the web can write, because the browser supplies them there; native Lynx has
+        no such token. The `lynx` grammar used to reject them, which dropped the whole
+        declaration. Since no element here can be a query container, the size query is always
+        empty and css-contain-3's fallback applies: both resolve against the small viewport,
+        which is the view, so they are the same lengths as `vw`/`vh`. Resolving that way also
+        flags the style `USES_VIEWPORT_UNITS`, so the existing resize re-cascade already covers
+        them; no container-type support and no `query_container_size` host hook was added.
+        `cqi`/`cqb`/`cqmin`/`cqmax` stay unparsed. One comparison with web-core: there `cqw` is
+        1% of the `lynx-view` width and `cqh` follows the browser window unless the host sets
+        `transform-vh`, while here `cqh` is always 1% of the view height.
+      - **The engine's length units, stated once**, none of which takes an embedder-supplied
+        base: `vw`/`vh` are the viewport width/height divided by 100; `rpx` is the screen width
+        divided by 750 (a fixed divisor), and the only screen this engine has is the view, so
+        `N rpx == N/7.5 vw` (implemented in the fork's `rpx_to_computed_value`); `cqw`/`cqh` are
+        the query container's width/height divided by 100, which with no query container means
+        `vw`/`vh` as above. `px`, `em`/`rem` and `%` are the standard ones.
     - **`content-visibility: auto` relevance is implemented** *(2026-09-20; it was deferred to a
       host-pushed "always relevant" signal until then)*. `auto` still computes its always-on
       `layout | paint | style` containment, and on top of that `dom` determines *relevance to the

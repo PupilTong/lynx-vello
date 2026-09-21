@@ -1001,6 +1001,26 @@ fn viewport_percentages_resolve_against_the_engine_viewport() {
     assert_eq!(h.rect(h.doc.root), (0.0, 0.0, 400.0, 150.0));
 }
 
+/// `cqw`/`cqh` are the query container's width/height divided by 100. Nothing
+/// in this engine can be a query container (`container-type` is not part of
+/// the author surface), so css-contain-3's fallback applies: they resolve
+/// against the viewport, which makes them the same lengths as `vw`/`vh`. They
+/// are flagged as viewport-dependent, so a resize re-cascades them.
+#[test]
+fn container_units_resolve_against_the_viewport_and_follow_resizes() {
+    let mut h = Harness::with_device(
+        "page { display: flex; width: 10cqw; height: 10cqh; }",
+        device_with(400.0, 600.0, 1.0, PrefersColorScheme::Light),
+    );
+    h.layout();
+    assert_eq!(h.rect(h.doc.root), (0.0, 0.0, 40.0, 60.0));
+
+    h.doc.dom.set_viewport(200.0, 300.0);
+    h.layout();
+
+    assert_eq!(h.rect(h.doc.root), (0.0, 0.0, 20.0, 30.0));
+}
+
 #[test]
 fn layout_flushes_pending_styles_itself() {
     let mut h = Harness::new("page { display: flex; width: 200px; height: 50px; }");
