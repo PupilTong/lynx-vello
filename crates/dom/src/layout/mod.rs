@@ -49,11 +49,21 @@ impl<T: Sync> Document<T> {
     /// content box — every pass of every page that has none — is the whole
     /// call, so the loop costs a page that does not use the feature one
     /// `is_empty` test.
+    ///
+    /// Which iteration this is decides how the marks are spelled, so the loop
+    /// counts. A mark made *inside* the loop is read by the very next
+    /// `layout_pass`'s flush, in this call, with nothing in between — so it
+    /// can use the cheap `RECASCADE_SELF`, which no animation tick is there to
+    /// strip. A mark made on the last permitted iteration is laid out by
+    /// nobody here: it waits for whatever flush comes next, which an animation
+    /// tick can precede, so that one is spelled the way
+    /// [`Document::mark_subtree_recascade`] spells it.
     pub fn layout(&mut self) {
         let mut resized = Vec::new();
-        for _ in 0..committed_box::CONTAINER_PASSES {
+        for pass in 0..committed_box::CONTAINER_PASSES {
             self.layout_pass(&mut resized);
-            if !self.recascade_resized_containers(&mut resized) {
+            let cap = pass + 1 == committed_box::CONTAINER_PASSES;
+            if !self.recascade_resized_containers(&mut resized, cap) {
                 break;
             }
         }
@@ -85,19 +95,38 @@ impl<T: Sync> Document<T> {
         self.mark_layout_complete(viewport, scale);
     }
 
-    /// Marks the descendants of every query container the pass resized, and
-    /// answers whether another pass is owed.
+    /// Marks the container-unit users under every query container the pass
+    /// resized, and answers whether another pass is owed.
     ///
-    /// Two gates, either of which ends the call. The list is empty unless a
-    /// size query container's content box actually moved, and the flag is
-    /// false unless some style this document ever cascaded resolved a
-    /// `cqw`/`cqh` — a page with query containers and no container units has
-    /// nothing to re-resolve when one of them resizes.
+    /// Two gates, either of which ends the call, and a third inside the mark.
+    /// The list is empty unless a size query container's content box actually
+    /// moved, and the flag is false unless some style this document ever
+    /// cascaded resolved a `cqw`/`cqh` — a page with query containers and no
+    /// container units has nothing to re-resolve when one of them resizes.
+    /// Then `mark_container_units_users` visits a resized container's subtree
+    /// and marks only the elements whose own style resolved one, so a
+    /// container that moved with no such element under it owes no pass
+    /// either.
     ///
-    /// On the last permitted pass the marks are still made and simply not
-    /// laid out here: they are ordinary restyle hints, so the next flush
-    /// resolves them and the document is one commit behind at worst.
-    fn recascade_resized_containers(&mut self, resized: &mut Vec<crate::NodeId>) -> bool {
+    /// `cap` says this is the last permitted iteration, and it changes the
+    /// mark rather than suppressing it. Everywhere else the mark is consumed
+    /// by the next `layout_pass`'s flush, inside the same `layout()` call and
+    /// with no animation tick reachable in between, which is what licenses the
+    /// rematch-free `RECASCADE_SELF` the targeted walk writes. Here the marks
+    /// are made and simply not laid out: they wait for whatever flush comes
+    /// next, and `RestyleHint::remove_animation_hints` deletes
+    /// `RECASCADE_SELF` outright, so an animation tick in the gap would erase
+    /// them. `mark_subtree_recascade`'s `RESTYLE_SELF | RECASCADE_DESCENDANTS`
+    /// survives one, at the cost of being the coarse whole-subtree mark and of
+    /// recascading the container itself, both of which this path accepts: it
+    /// is reached only by a page whose containers are still moving after
+    /// `CONTAINER_PASSES` layouts, and the document is one commit behind at
+    /// worst either way.
+    fn recascade_resized_containers(
+        &mut self,
+        resized: &mut Vec<crate::NodeId>,
+        cap: bool,
+    ) -> bool {
         if resized.is_empty() {
             return false;
         }
@@ -110,7 +139,12 @@ impl<T: Sync> Document<T> {
             // A container freed since the run that measured it resolves to
             // nothing: `NodeId` carries the generation its key was at.
             if self.get(id).is_some_and(crate::Node::is_element) {
-                marked |= self.mark_descendants_recascade(id);
+                if cap {
+                    self.mark_subtree_recascade(id);
+                    marked = true;
+                } else {
+                    marked |= self.mark_container_units_users(id);
+                }
             }
         }
         marked
@@ -741,6 +775,7 @@ mod tests {
     use std::mem::size_of;
 
     use hughie::tree::{LayoutInput, LayoutOutput, LayoutSlot};
+    use stylo::invalidation::element::restyle_hints::RestyleHint;
 
     use super::*;
     use crate::StylesheetOrigin;
@@ -844,6 +879,225 @@ mod tests {
             Some(false),
             "and left the boxes it laid out valid"
         );
+    }
+
+    /// Plain leaves per container in [`mixed_container_document`] — enough
+    /// that marking them would be visible, few enough to name each in a
+    /// failure.
+    const PLAIN_LEAVES: usize = 8;
+
+    /// Two size query containers on one page: the first holds one `cqw` leaf
+    /// among [`PLAIN_LEAVES`] px ones, the second holds px leaves only.
+    ///
+    /// Both containers record a size on the first pass, so both reach the
+    /// recascade — the second is the container that must mark nothing.
+    fn mixed_container_document() -> (
+        Document<()>,
+        [crate::NodeId; 2],
+        crate::NodeId,
+        Vec<crate::NodeId>,
+    ) {
+        let mut document: Document<()> =
+            Document::new(crate::tree::document::tests::device(), "page", ());
+        document.add_stylesheet(
+            "page { display: flex; flex-direction: column;
+                    width: 400px; height: 300px; }
+             .query { display: flex; container-type: size;
+                      width: 200px; height: 100px; }
+             .plain { display: flex; width: 10px; height: 2px; }
+             .reader { display: flex; width: 25cqw; height: 2px; }",
+            StylesheetOrigin::Author,
+        );
+        let root = document.document_element().id();
+        let mut containers = Vec::with_capacity(2);
+        let mut plain = Vec::with_capacity(2 * PLAIN_LEAVES);
+        let mut reader = None;
+        for index in 0..2 {
+            let query = document.create_element("view", ());
+            document.add_class(query, "query");
+            document.append_child(root, query);
+            if index == 0 {
+                let leaf = document.create_element("view", ());
+                document.add_class(leaf, "reader");
+                document.append_child(query, leaf);
+                reader = Some(leaf);
+            }
+            for _ in 0..PLAIN_LEAVES {
+                let leaf = document.create_element("view", ());
+                document.add_class(leaf, "plain");
+                document.append_child(query, leaf);
+                plain.push(leaf);
+            }
+            containers.push(query);
+        }
+        (
+            document,
+            [containers[0], containers[1]],
+            reader.expect("the first container holds the reader"),
+            plain,
+        )
+    }
+
+    fn restyle_hint(document: &Document<()>, id: crate::NodeId) -> RestyleHint {
+        document
+            .live(id)
+            .borrow_computed_style()
+            .expect("the flush styled every element on the page")
+            .hint
+    }
+
+    /// What the second pass costs: one mark per element that actually
+    /// resolved a container unit, and nothing for the rest of the subtree.
+    ///
+    /// The two halves of the loop are driven apart here — `layout_pass` then
+    /// `recascade_resized_containers` — because a whole `layout()` consumes
+    /// the marks it makes in the pass that follows them, leaving nothing to
+    /// read.
+    #[test]
+    #[expect(clippy::float_cmp, reason = "rounded boxes have exact pixel geometry")]
+    fn a_resized_container_marks_only_its_container_unit_readers() {
+        let (mut document, [reading, plain_only], reader, plain) = mixed_container_document();
+
+        let mut resized = Vec::new();
+        document.layout_pass(&mut resized);
+        assert_eq!(resized.len(), 2, "both containers recorded a first size");
+        assert!(
+            document.recascade_resized_containers(&mut resized, false),
+            "the page has a container-unit reader under a resized container"
+        );
+
+        assert_eq!(
+            restyle_hint(&document, reader).bits(),
+            RestyleHint::RECASCADE_SELF.bits(),
+            "the reader cascades again and is not matched again",
+        );
+        for (index, &leaf) in plain.iter().enumerate() {
+            assert!(
+                restyle_hint(&document, leaf).is_empty(),
+                "plain leaf {index} reads nothing of its container",
+            );
+            assert!(
+                !document.live(leaf).has_dirty_descendants(),
+                "plain leaf {index} has no marked descendant either",
+            );
+        }
+        assert!(
+            document.live(reading).has_dirty_descendants(),
+            "the traversal descends into the container that holds the reader"
+        );
+        assert!(
+            !document.live(plain_only).has_dirty_descendants(),
+            "and not into the one that holds none"
+        );
+        assert!(
+            !document.mark_container_units_users(plain_only),
+            "a subtree with no reader marks nothing, so it owes no pass"
+        );
+
+        document.layout();
+        assert_eq!(document.rounded_layout(reader).unwrap().size.width, 50.0);
+        assert_eq!(document.rounded_layout(plain[0]).unwrap().size.width, 10.0);
+        assert!(
+            !document.document_element().needs_style_flush(),
+            "the loop still ran to a fixed point"
+        );
+    }
+
+    /// The cap iteration spells its marks differently, because they are the
+    /// only ones that outlive the `layout()` call that made them.
+    ///
+    /// Everywhere else in the loop the next `layout_pass` flushes immediately,
+    /// so a bare `RECASCADE_SELF` is safe and cheap — and, as the second half
+    /// of this test shows by running Stylo's own eraser over it, it is exactly
+    /// what an animation tick would take away if one could run first. On the
+    /// last permitted iteration the marks wait for a later flush, so the
+    /// container gets the whole-subtree spelling that survives that tick.
+    #[test]
+    fn the_cap_iteration_leaves_a_mark_an_animation_tick_cannot_erase() {
+        let (mut document, [reading, _], reader, _) = mixed_container_document();
+
+        let mut resized = Vec::new();
+        document.layout_pass(&mut resized);
+        assert!(
+            document.recascade_resized_containers(&mut resized, true),
+            "a resized container still owes a recascade at the cap"
+        );
+
+        let mut container_hint = restyle_hint(&document, reading);
+        assert_eq!(
+            container_hint.bits(),
+            (RestyleHint::RESTYLE_SELF | RestyleHint::RECASCADE_DESCENDANTS).bits(),
+            "the cap marks the container's whole subtree, not the readers under it",
+        );
+        assert!(
+            restyle_hint(&document, reader).is_empty(),
+            "which is why the reader itself is left unmarked here"
+        );
+        container_hint.remove_animation_hints();
+        assert!(
+            !container_hint.is_empty(),
+            "and the mark is one an animation-only traversal leaves standing"
+        );
+
+        let mut in_loop = RestyleHint::RECASCADE_SELF;
+        in_loop.remove_animation_hints();
+        assert!(
+            in_loop.is_empty(),
+            "while the in-loop spelling is not — it is read before any tick can run"
+        );
+    }
+
+    /// The marks stop at the elements that resolved a unit because Stylo
+    /// carries the rest: a `font-size: 10cqw` child is the only element under
+    /// the container whose style carries `USES_CONTAINER_UNITS`, and its own
+    /// grandchild's `2em` width follows the container anyway — the child
+    /// cascade requirement propagates `RECASCADE_SELF` down when an inherited
+    /// value moves.
+    #[test]
+    #[expect(clippy::float_cmp, reason = "rounded boxes have exact pixel geometry")]
+    fn an_inherited_container_unit_reaches_an_unmarked_grandchild() {
+        let mut document: Document<()> =
+            Document::new(crate::tree::document::tests::device(), "page", ());
+        document.add_stylesheet(
+            "page { display: flex; align-items: flex-start;
+                    width: 400px; height: 300px; }
+             .query { display: flex; container-type: size;
+                      width: 200px; height: 100px; }
+             .mid { display: flex; font-size: 10cqw; }
+             .leaf { display: flex; width: 2em; height: 2px; }",
+            StylesheetOrigin::Author,
+        );
+        let root = document.document_element().id();
+        let query = document.create_element("view", ());
+        document.add_class(query, "query");
+        document.append_child(root, query);
+        let mid = document.create_element("view", ());
+        document.add_class(mid, "mid");
+        document.append_child(query, mid);
+        let leaf = document.create_element("view", ());
+        document.add_class(leaf, "leaf");
+        document.append_child(mid, leaf);
+
+        document.layout();
+
+        // 10cqw of the 200px container is a 20px font, and the leaf is 2em of
+        // that — reached in the one call, from a first pass that resolved the
+        // font against the 800px viewport fallback.
+        assert_eq!(document.rounded_layout(leaf).unwrap().size.width, 40.0);
+        assert!(
+            !document
+                .live(leaf)
+                .computed_style()
+                .expect("the leaf is styled")
+                .flags
+                .contains(stylo::computed_value_flags::ComputedValueFlags::USES_CONTAINER_UNITS),
+            "the leaf resolves no container unit of its own, so nothing marks it"
+        );
+
+        document.set_inline_style(query, "width: 300px");
+        document.layout();
+
+        assert_eq!(document.rounded_layout(leaf).unwrap().size.width, 60.0);
     }
 
     /// Builds the shape a Lynx label actually has: an auto-sized `text`

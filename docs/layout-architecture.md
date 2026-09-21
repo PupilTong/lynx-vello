@@ -750,8 +750,13 @@ remembered size can never be a run that records one).
 
 `Document::layout` then closes the loop, the way Gecko's
 `UpdateContainerQueryStyles` does after its reflow: a pass whose recorded sizes
-moved marks each moved container's **descendants** for recascade and lays out
-again, up to `CONTAINER_PASSES` (4) times. The loop converges because the axes
+moved marks, under each moved container, the **elements whose style resolved a
+container unit** (`ComputedValueFlags::USES_CONTAINER_UNITS`; inherited
+consequences ride Stylo's child cascade requirement) and lays out again, up to
+`CONTAINER_PASSES` (4) times. Those in-loop marks are `RECASCADE_SELF`, read by
+the next pass's flush in the same call; only the cap iteration, whose marks wait
+for a later flush and can meet an animation tick, falls back to the
+whole-subtree `RESTYLE_SELF | RECASCADE_DESCENDANTS`. The loop converges because the axes
 a container supplies are contained — its size cannot answer to its own
 contents — and it is gated twice, on the changed list being non-empty and on
 the document having cascaded a style that actually resolved a container unit,

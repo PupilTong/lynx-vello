@@ -6,6 +6,7 @@ use std::sync::LazyLock;
 use selectors::matching::ElementSelectorFlags;
 use stylo::LocalName;
 use stylo::attr::{AttrIdentifier, AttrValue};
+use stylo::computed_value_flags::ComputedValueFlags;
 use stylo::context::QuirksMode;
 use stylo::dom::OpaqueNode;
 use stylo::invalidation::element::restyle_hints::RestyleHint;
@@ -78,36 +79,97 @@ impl<T> Document<T> {
         self.mark_ancestors_dirty_descendants(id);
     }
 
-    /// Marks an element's **descendants** to be cascaded again, leaving the
-    /// element itself alone.
+    /// Marks the elements under a resized size query container that actually
+    /// read its size, and answers whether there were any.
     ///
-    /// The css-contain-3 half of [`Self::mark_subtree_recascade`]: a size
-    /// query container whose content box moved changes what every `cqw`/`cqh`
-    /// under it resolves to, and changes nothing about its own style — its
-    /// own container-relative units answer to *its* nearest container, which
-    /// is an ancestor.
+    /// The css-contain-3 counterpart of [`Self::mark_subtree_recascade`]: a
+    /// size query container whose content box moved changes what every
+    /// `cqw`/`cqh` **under** it resolves to, and changes nothing about its own
+    /// style — its own container-relative units answer to *its* nearest
+    /// container, which is an ancestor. So the walk starts at the container's
+    /// flat children.
     ///
-    /// `RECASCADE_DESCENDANTS` alone is enough and is hint-safe. Stylo
-    /// traverses an element with a non-empty hint, propagates that bit to
-    /// each child as `recascade_subtree()`, and never recomputes the marked
-    /// element's own style from it. Unlike the `RECASCADE_SELF` half that
-    /// [`Self::mark_subtree_recascade`] has to spell as `RESTYLE_SELF`, it is
-    /// outside `RestyleHint::remove_animation_hints`'s mask, so an animation
-    /// tick between this mark and the flush that should read it leaves it
-    /// standing.
+    /// The set marked is exactly the elements whose last cascade resolved a
+    /// container-relative unit, which Stylo records per element as
+    /// `ComputedValueFlags::USES_CONTAINER_UNITS`
+    /// (`container_relative_to_computed_value`, set even when the unit fell
+    /// back to the viewport because the container had no size yet — which is
+    /// what makes the *first* pass's users findable by the second). Everything
+    /// else under the container computes the same style against the new size
+    /// and does not need visiting.
     ///
-    /// Answers whether anything was marked: a childless container has no
-    /// descendant to re-resolve, and marking it would ask for a flush that
-    /// finds nothing to do.
-    pub(crate) fn mark_descendants_recascade(&mut self, id: NodeId) -> bool {
-        let node = self.live_element(id);
-        if node.flat_children().is_empty() {
+    /// Inherited consequences are Stylo's, not ours: after recascading an
+    /// element whose inherited values moved — `font-size: 10cqw`, say — the
+    /// child cascade requirement propagates `RECASCADE_SELF` to its children
+    /// (`matching.rs`'s `accumulate_damage_for`), so a grandchild's `2em`
+    /// follows without being marked here.
+    ///
+    /// Nested containers do not stop the walk. An `inline-size` container
+    /// inside a `size` one supplies the inline axis only, so a `cqh` under it
+    /// still answers to the outer container; marking an element the inner
+    /// container does answer for costs one recascade to the same value.
+    ///
+    /// Each user's share is `RECASCADE_SELF` — cascade again, do not match
+    /// again, which is all a moved container asks for. That is the spelling
+    /// [`Self::mark_subtree_recascade`] cannot use, because
+    /// `RestyleHint::remove_animation_hints` deletes `RECASCADE_SELF` outright
+    /// and a mark that waits for a later flush can lose it to an animation
+    /// tick. This marker is only ever called from inside `Document::layout`'s
+    /// container loop on an iteration that is followed by another
+    /// `layout_pass` in the same call, so the flush that reads these marks is
+    /// the next thing that happens and no tick can run between. The cap
+    /// iteration, whose marks do wait, is the caller's job and uses
+    /// [`Self::mark_subtree_recascade`] instead.
+    ///
+    /// The dirty-descendants bits come with it: the traversal descends into a
+    /// child only from a parent that carries one, so every node between a
+    /// marked element and the container — and the container's own ancestors —
+    /// needs it. The upward walk stops at the first node that already has the
+    /// bit, so a branch with many users pays for its path once.
+    pub(crate) fn mark_container_units_users(&mut self, container: NodeId) -> bool {
+        let mut users = Vec::new();
+        {
+            let tree = self.arenas();
+            let mut stack: Vec<NodeId> = tree
+                .get(container)
+                .map(|node| node.flat_children().to_vec())
+                .unwrap_or_default();
+            while let Some(id) = stack.pop() {
+                let Some(node) = tree.get(id) else { continue };
+                stack.extend_from_slice(node.flat_children());
+                if reads_container_units(node) {
+                    users.push(id);
+                }
+            }
+        }
+        if users.is_empty() {
             return false;
         }
-        node.set_dirty_descendants_bit(true);
-        self.add_restyle_hint(id, RestyleHint::RECASCADE_DESCENDANTS);
-        self.mark_ancestors_dirty_descendants(id);
+        for id in users {
+            self.add_restyle_hint(id, RestyleHint::RECASCADE_SELF);
+            self.mark_dirty_descendants_below(id, container);
+        }
+        self.mark_ancestors_dirty_descendants(container);
         true
+    }
+
+    /// Sets the dirty-descendants bit from `id`'s flat parent up to and
+    /// including `container`, stopping early at a node that already carries
+    /// it — everything above such a node was marked when its own bit was set.
+    fn mark_dirty_descendants_below(&mut self, id: NodeId, container: NodeId) {
+        let tree = self.arenas();
+        let mut next = tree.get(id).and_then(Node::flat_parent_id);
+        while let Some(pid) = next {
+            let Some(node) = tree.get(pid) else { break };
+            if node.has_dirty_descendants() {
+                break;
+            }
+            node.set_dirty_descendants_bit(true);
+            if pid == container {
+                break;
+            }
+            next = node.flat_parent_id();
+        }
     }
 
     pub(crate) fn live(&self, id: NodeId) -> &Node<T> {
@@ -821,6 +883,23 @@ impl<T> Document<T> {
             }
         }
     }
+}
+
+/// Whether this node's last cascade resolved a `cqw`/`cqh`.
+///
+/// Only the primary style is asked, which is the whole answer here: nothing in
+/// this engine cascades a pseudo-element style, and a `RESTYLE_SELF` on the
+/// element would carry its pseudos anyway. A node with no style data — a text
+/// node, an element never styled, anything under `display: none` — reads as
+/// false and is styled from nothing when it next appears.
+fn reads_container_units<T>(node: &Node<T>) -> bool {
+    node.borrow_computed_style().is_some_and(|data| {
+        data.styles.primary.as_ref().is_some_and(|style| {
+            style
+                .flags
+                .contains(ComputedValueFlags::USES_CONTAINER_UNITS)
+        })
+    })
 }
 
 fn insert_restyle_hint<T>(node: &mut Node<T>, hint: RestyleHint) {

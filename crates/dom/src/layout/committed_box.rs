@@ -243,8 +243,8 @@ impl CommittedBoxTable {
     /// replayed, so a box that committed twice in one pass and ended where it
     /// started lands in `resized` all the same. That is not a correctness
     /// question: what is published is the last record, and `resized` only
-    /// decides *whose* descendants are marked for recascade — a mark
-    /// `Document::mark_descendants_recascade` is idempotent in. The
+    /// decides *whose* subtree is searched for container-unit users — a
+    /// search `Document::mark_container_units_users` is idempotent in. The
     /// remembered half needs no such report: nothing but layout reads it.
     pub(crate) fn apply(&mut self, resized: &mut Vec<NodeId>) {
         // Taken out and handed back so the buffer keeps its capacity: a page
