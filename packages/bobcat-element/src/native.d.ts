@@ -275,6 +275,35 @@ declare module "bobcat-internal:host" {
     url: string,
     parameters: string,
   ): LoadedModuleSource;
+  /**
+   * Waits for the future `id` names, for at most `timeoutMs` milliseconds.
+   *
+   * True is the future having settled, and `takeFuture` is what reads what it
+   * settled to. False is the deadline having passed, which cancels nothing:
+   * the operation goes on and this future can be waited on or settled again.
+   * A non-finite `timeoutMs` names no deadline at all, and a negative one has
+   * already passed.
+   *
+   * The call parks the job it runs in: the engine thread's tasks keep
+   * running, and no other job does — not this realm's promise jobs, and not a
+   * realm sharing its thread. The realm ending under the wait throws, and so
+   * does a future that is not pending — one already settled and untaken, or
+   * one handed to `settleFuture`.
+   */
+  export function waitFuture(id: number, timeoutMs: number): boolean;
+  /**
+   * What the future `id` names settled to, removing it.
+   *
+   * A rejection throws the host's own reason. A future that has not settled —
+   * one never waited to completion, or one already taken — throws too.
+   */
+  export function takeFuture(id: number): unknown;
+  /**
+   * Asks the host to settle the future `id` names asynchronously: it is
+   * awaited on a task of the realm's owner, and delivered by a later call
+   * into `bobcat:future`. A future that is not pending throws.
+   */
+  export function settleFuture(id: number): void;
 }
 
 /** What one synchronous load answers with. */

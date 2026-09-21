@@ -40,6 +40,7 @@ mod background;
 pub mod bench_support;
 mod clock;
 mod esm;
+mod future;
 mod jobs;
 mod lifetime;
 mod link;

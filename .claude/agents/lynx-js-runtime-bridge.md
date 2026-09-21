@@ -42,7 +42,8 @@ and `bobcat-workers` (every Worker realm, including the BTS).
   realm scopes. `view/` holds `LynxGroup`, `LynxView`, `ViewSources` and
   `create_lynx_view`; `paint/` the `Painter`; `link.rs` the per-view channels;
   `lifetime.rs` the `CancellationToken`, `serve_clock` and `run_job`;
-  `timers.rs`, `clock.rs`/`alarm.rs`, `esm.rs`, `require.rs`
+  `timers.rs`, `clock.rs`/`alarm.rs`, `future.rs` (the per-realm `FutureTable`
+  and `waitFuture`/`takeFuture`/`settleFuture`), `esm.rs`, `require.rs`
   (`resolveModuleUrl` and `loadModuleSync`, the two members `bobcat:module` is
   written over), `script.rs`, `resource.rs`, `style.rs`.
 - `packages/bobcat-element/src/` — `element-papi.ts` (`bobcat:element`; its
@@ -51,7 +52,8 @@ and `bobcat-workers` (every Worker realm, including the BTS).
   `__FlushElementTree`, and `__SetCSSId`, accepted and ignored),
   `main-thread-runtime.ts` (`bobcat:runtime`), `worker.ts` (the W3C `Worker`),
   `worker-runtime.ts`, `background-thread-runtime.ts` (`bobcat:bts-runtime`),
-  `cross-thread-context.ts`, `event-target.ts`, `timers.ts`, `module.ts`
+  `cross-thread-context.ts`, `event-target.ts`, `timers.ts`, `future.ts`
+  (`bobcat:future` — the `Future` class), `module.ts`
   (`bobcat:module` — Node's `require` algorithm), `selector-query.ts`,
   `global-event-emitter.ts`, `lynx-modules.ts` (the compiler factory ABI,
   `lynx.requireModule` and `nativeApp.loadScript` over `loadModuleSync`), and
@@ -95,6 +97,12 @@ Landed and not to be regressed:
   by the response URL) or JSON-parses it **before** evaluating the compiled
   script. Do not move the cache, the `module` object or resolution back into
   the shim, and do not hand source text to JavaScript.
+- `bobcat:future`'s `Future` is one host-backed operation, read either way and
+  only one: `wait(timeout?)` parks the job — the realm's token is the biased
+  first arm, the deadline sits behind it, and a timeout **cancels nothing** —
+  while `then` converts it to one Promise, delivered by the owner's epilogue,
+  after which a `wait` is a `TypeError`. What a future settles to is a
+  `HostValue`, never a realm value. Nothing in production registers one yet.
 - A checkpoint drains the promise-job queue until empty, as a browser's
   microtask checkpoint does: no per-checkpoint job budget, no incomplete
   checkpoint for a later entry to resume. Readiness is MTS-only.

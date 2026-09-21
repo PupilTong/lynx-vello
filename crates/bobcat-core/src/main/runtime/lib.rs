@@ -38,8 +38,9 @@ use super::quickjs::{ScriptEngine, ScriptRuntime};
 use crate::clock::ClockInstant;
 use crate::esm::{
     BTS_MODULE_SPECIFIER, CONTEXT_MODULE_SOURCE, CONTEXT_MODULE_SPECIFIER,
-    EVENT_TARGET_MODULE_SPECIFIER, EVENT_TARGET_SOURCE, HOST_MODULE_SPECIFIER,
-    REQUIRE_MODULE_SOURCE, REQUIRE_MODULE_SPECIFIER, TIMER_MODULE_SOURCE, TIMER_MODULE_SPECIFIER,
+    EVENT_TARGET_MODULE_SPECIFIER, EVENT_TARGET_SOURCE, FUTURE_MODULE_SOURCE,
+    FUTURE_MODULE_SPECIFIER, HOST_MODULE_SPECIFIER, REQUIRE_MODULE_SOURCE,
+    REQUIRE_MODULE_SPECIFIER, TIMER_MODULE_SOURCE, TIMER_MODULE_SPECIFIER,
 };
 use crate::link::{InputEventPayload, ViewNotice, ViewOutbox};
 use crate::main::tree::{
@@ -514,6 +515,8 @@ pub(crate) struct MainThreadRuntime {
     workers: Rc<super::workers::WorkerOwner>,
     slot: Rc<RefCell<DocumentSlot>>,
     timers: Rc<TimerState>,
+    /// Every host-backed operation this realm holds a `Future` for.
+    futures: Rc<crate::future::FutureTable>,
     /// The newest reading of the view's timeline this side has been handed —
     /// a `BeginFrame`'s `now` or a vsync's, both in milliseconds off the same
     /// epoch, the view's construction.
@@ -555,8 +558,8 @@ impl MainThreadRuntime {
         ingredients: DocumentIngredients,
         outbox: ViewOutbox,
         workers: &super::workers::WorkerFactory,
-        // What `adoptStyleSheet` and a `require` park on: the engine thread
-        // this realm's entries are jobs of.
+        // What `adoptStyleSheet`, a `Future.wait` and a `require` park on: the
+        // engine thread this realm's entries are jobs of.
         thread: crate::jobs::JsThreadHandle,
         startup: &mut RealmStartup,
     ) -> Result<
@@ -587,6 +590,15 @@ impl MainThreadRuntime {
             &timers,
         )?;
         style_sheets::install_styles(&mut engine, js_runtime, &slot, &outbox, thread.clone())?;
+        let futures = Rc::new(crate::future::FutureTable::new());
+        crate::future::install(
+            &mut engine,
+            js_runtime,
+            &futures,
+            outbox.token().clone(),
+            thread.clone(),
+        )
+        .map_err(|error| MainThreadError::from_engine("installing Future", error))?;
         crate::require::install(
             &mut engine,
             js_runtime,
@@ -610,6 +622,7 @@ impl MainThreadRuntime {
                 workers,
                 slot,
                 timers,
+                futures,
                 timeline_milliseconds: 0.0,
             },
             incoming,
@@ -1142,6 +1155,23 @@ await Promise.resolve().then(() => __FlushElementTree());
         self.engine.take_module_request()
     }
 
+    /// The futures this realm asked to settle asynchronously — a `.then` on a
+    /// `Future` — since the last entry. Each is a task for the view's owner.
+    pub(crate) fn take_future_settles(&mut self) -> Vec<(u32, crate::future::HostFuture)> {
+        self.futures.take_settle_requests()
+    }
+
+    /// Hands one settled future back to the realm that asked for it.
+    pub(crate) fn deliver_future(
+        &mut self,
+        js_runtime: &mut ScriptRuntime,
+        id: u32,
+        outcome: crate::future::Outcome,
+    ) -> Result<(), MainThreadError> {
+        crate::future::deliver(&mut self.engine, js_runtime, id, outcome)
+            .map_err(|error| MainThreadError::from_engine("settling a future", error))
+    }
+
     /// The `@font-face` rules the sheets mounted so far declared and this
     /// realm has not reported before. Empty until a sheet arrives.
     pub(crate) fn take_font_face_requests(&mut self) -> Vec<dom::FontFaceRequest> {
@@ -1281,6 +1311,9 @@ pub(crate) fn install_shared_modules(
     js_runtime
         .register_module_source(TIMER_MODULE_SPECIFIER, TIMER_MODULE_SOURCE)
         .map_err(|error| MainThreadError::from_engine("registering the timer module", error))?;
+    js_runtime
+        .register_module_source(FUTURE_MODULE_SPECIFIER, FUTURE_MODULE_SOURCE)
+        .map_err(|error| MainThreadError::from_engine("registering the Future module", error))?;
     js_runtime
         .register_module_source(REQUIRE_MODULE_SPECIFIER, REQUIRE_MODULE_SOURCE)
         .map_err(|error| MainThreadError::from_engine("registering the require module", error))

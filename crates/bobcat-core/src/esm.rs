@@ -22,6 +22,13 @@ pub(crate) const HOST_MODULE_SPECIFIER: &str = "bobcat-internal:host";
 pub(crate) const TIMER_MODULE_SPECIFIER: &str = "bobcat:timers";
 pub(crate) const TIMER_MODULE_SOURCE: &str = runtime_source!("timers");
 
+/// The `Future` class: one host-backed operation, usable synchronously
+/// through `wait` and as a `PromiseLike` through `then`. The class is
+/// JavaScript like every other built-in; the table behind it and the three
+/// members it speaks to are [`crate::future`].
+pub(crate) const FUTURE_MODULE_SPECIFIER: &str = "bobcat:future";
+pub(crate) const FUTURE_MODULE_SOURCE: &str = runtime_source!("future");
+
 /// Node's `createRequire`, the one synchronous way into a source a realm has
 /// not imported. The algorithm is JavaScript like every other built-in; what
 /// it is written over is the two host members [`crate::require`] installs.

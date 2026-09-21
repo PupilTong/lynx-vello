@@ -4243,3 +4243,78 @@ fn collecting_a_js_style_handle_sends_no_native_release_or_load_request() {
         ));
     }
 }
+
+/// One `Future` in a view's MTS realm, read both ways over the real
+/// boundary: a real page, its own token, and the settle task its epilogue
+/// spawns.
+///
+/// Nothing in production registers a future yet, so the operation is the
+/// host's test-only producer — `testFuture(delayMs, value, rejects)`, which
+/// is why this test is in the crate rather than beside it. `wait(20)` runs
+/// out its deadline against a 200 ms operation, and the `await` that follows
+/// is the *same* Future, which is what says the timeout cancelled nothing.
+/// Past that conversion the Future is a Promise, and a third read of it is
+/// refused.
+#[test]
+fn one_mts_future_times_out_then_settles_as_a_promise_and_refuses_a_later_wait() {
+    let mut view = crate::test_support::TestViewSpec::new(
+        r"
+        import { Future } from 'bobcat:future';
+        import { testFuture } from 'bobcat-internal:host';
+
+        const slow = new Future(testFuture(200, 'late', false));
+        try {
+          slow.wait(20);
+          console.log('mts the wait answered');
+        } catch (error) {
+          console.log('mts wait ' + error.name);
+        }
+        console.log('mts then ' + await slow);
+        try {
+          slow.wait();
+          console.log('mts the third read answered');
+        } catch (error) {
+          console.log('mts after ' + error.name);
+        }
+        try {
+          await new Future(testFuture(1, 'why', true));
+          console.log('mts the rejection resolved');
+        } catch (error) {
+          console.log('mts catch ' + (error instanceof Error) + ' ' + error.message);
+        }
+        console.log('mts now ' + new Future(testFuture(1, 'now', false)).wait());
+        __CreatePage();
+    ",
+    )
+    .create_view(Arc::new(NoWakeup));
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut logged = Vec::new();
+    while logged.len() < 5 {
+        for event in view.pump() {
+            match event {
+                crate::EngineEvent::ConsoleMessage { message, .. } => logged.push(message),
+                crate::EngineEvent::StartupFailed(error) => panic!("boot failed: {error}"),
+                crate::EngineEvent::ScriptRunError(error) => {
+                    panic!("the realm failed: {}", error.message)
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the realm read its Future both ways: {logged:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert_eq!(
+        logged,
+        [
+            "mts wait TimeoutError",
+            "mts then late",
+            "mts after TypeError",
+            "mts catch true why",
+            "mts now now",
+        ]
+    );
+}
