@@ -177,8 +177,9 @@ What that covers, and what it does not:
 
 **Landed**
 
-- Lynx page defaults (`display: linear`, border-box, hidden overflow) are
-  installed as a UA stylesheet, under the `defaultDisplayLinear` and
+- Lynx page defaults (`display: linear`, border-box, clipped overflow,
+  `position: relative`, a zero-width solid border, zero `min-width` /
+  `min-height`) are installed as a UA stylesheet, under the `defaultDisplayLinear` and
   `defaultOverflowVisible` page-config switches; `page` supplies the inherited
   `font-family: sans-serif` default at UA origin;
 - view metrics and touch-first device construction (`Viewport::device`);

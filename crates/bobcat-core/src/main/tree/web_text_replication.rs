@@ -1682,12 +1682,14 @@ fn a_one_line_clamp_fills_the_available_width_instead_of_breaking_at_a_word() {
 /// row holding two 310px groups. Resolving that by CSS flexbox 9.7:
 ///
 /// - The outer row is 393 and its two groups have equal 310px shrink factors, so each loses half
-///   the 227px deficit: 196.5, above both their 190px min-content floors.
-/// - Inside the attribute group, `hello world` (220) and `111` (90) shrink in proportion; `111`
-///   hits its 90px min-content floor, freezes there, and the rest goes to `hello world`: 106.5,
-///   which this engine rounds to 107.
-/// - `hello world` at 106.5 keeps `hello` on line one and `world` on line two, so its paragraph ink
-///   is 100 wide and two 20px lines tall. `111` still fits one line.
+///   the 227px deficit: 196.5.
+/// - Inside the attribute group, `hello world` (220) and `111` (90) shrink in proportion to their
+///   bases, and neither has a floor to freeze at: `web-elements`' common block gives `x-text`
+///   `min-width: 0` (`common-css/linear.css`), and so does this UA sheet. `hello world` loses 113.5
+///   x 220/310 and lands at 139.45, which this engine rounds to 139; `111` lands at 57.05.
+/// - `hello world` at 139.45 keeps `hello` on line one and `world` on line two, so its paragraph
+///   ink is 100 wide and two 20px lines tall. `111` at 57.05 fits one 30px glyph per line, so it
+///   breaks into three lines: ink 30 x 90.
 /// - The inline group is 196.5 too, and its paragraph's two runs are written back to back with no
 ///   whitespace, so `world111` is one unbreakable 190px unit: `hello` on line one, `world111` on
 ///   line two, ink 190 x (20 + 30).
@@ -1720,16 +1722,16 @@ fn the_compiled_baseline_card_rows_its_blocks_and_shares_one_run_baseline() {
 
     assert_eq!(
         (ink(&document, small), ink(&document, large)),
-        ((5.0 * 20.0, 2.0 * 20.0), (3.0 * 30.0, 30.0)),
+        ((5.0 * 20.0, 2.0 * 20.0), (30.0, 3.0 * 30.0)),
         "each sibling block measures the run its attribute carries, at the \
-         width the row's shrink leaves it"
+         width the row's shrink leaves it — `111` below its min-content"
     );
     assert_eq!(
         (frame(&document, small).0, frame(&document, large).0),
-        (0.0, 107.0),
+        (0.0, 139.0),
         "and the row places them side by side, not stacked: the container is a \
-         flex row, and `111` froze at its 90px min-content floor so the rest \
-         of the group's 196.5 went to `hello world`"
+         flex row, and with `min-width: 0` both items shrink in proportion to \
+         their bases"
     );
     assert_eq!(
         ink(&document, paragraph),

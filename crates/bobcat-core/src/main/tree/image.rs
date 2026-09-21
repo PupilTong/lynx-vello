@@ -190,12 +190,10 @@ const FILTER_PROPERTY: &str = "filter";
 /// What shape an `image` draws into, from `web-elements`' own sheet and from
 /// native's layout defaults.
 ///
-/// `box-sizing: border-box` closes a real gap: `x-image` sits in the common
-/// block `web-elements` opens with `display: flex; box-sizing: border-box`
-/// (`common-css/linear.css`), and native defaults every element to a border
-/// box, while this sheet hands border-box to the container tags and `text`
-/// alone. `display: flex` computes nothing today — the fork's initial `display`
-/// is already `flex` — and is written to pin the fact that `web-elements`
+/// The border box and the rest of `web-elements`' common block
+/// (`common-css/linear.css`) come from [`super::ua_sheet`], which hands them to
+/// `image` beside the container tags and `text`. `display: flex` computes nothing today — the
+/// fork's initial `display` is already `flex` — and is written to pin the fact that `web-elements`
 /// deliberately keeps `x-image` out of the `--lynx-display-toggle` list that
 /// `defaultDisplayLinear` drives, a parity native does not share (its display
 /// is tag-independent) and that no childless leaf can observe either way.
@@ -248,7 +246,7 @@ const FILTER_PROPERTY: &str = "filter";
 /// a bool. Matching the string covers the first and is vacuous for the second.
 ///
 /// Nothing pairs `mode` or `blur-radius` with `auto-size`: see the module docs.
-pub(super) const UA_RULES: &str = r#"image { box-sizing: border-box; display: flex; contain: size; }
+pub(super) const UA_RULES: &str = r#"image { display: flex; contain: size; }
 image[mode="aspectFit"] { object-fit: contain; }
 image[mode="aspectFill"] { object-fit: cover; }
 image[mode="center"] { object-fit: none; }

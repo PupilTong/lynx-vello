@@ -198,7 +198,7 @@ pub(super) const UA_RULES: &str = r#"
 @property --lynx-text-maxlength { syntax: "<integer>"; inherits: false; initial-value: -1; }
 @property --lynx-tail-color-convert { syntax: "<integer>"; inherits: false; initial-value: 0; }
 @property --lynx-inline-truncation { syntax: "<integer>"; inherits: false; initial-value: 0; }
-text { box-sizing: border-box; display: -lynx-text !important; color: initial; }
+text { display: -lynx-text !important; color: initial; }
 text[text] { content: attr(text); }
 text[text-overflow="ellipsis"] { text-overflow: ellipsis; }
 text[text-overflow="clip"] { text-overflow: clip; }

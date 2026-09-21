@@ -82,7 +82,7 @@ re-exports `stylo` as the CSS vocabulary door for the layers above (strict
 linear chain: cli → resources → core → element → dom).
 
 It must not contain Lynx runtime-element vocabulary or Lynx device/unit policy
-— Lynx computed defaults (border-box, `overflow: hidden`, `display: linear` on
+— Lynx computed defaults (border-box, `overflow: clip`, `display: linear` on
 every element, …) stay embedder cascade policy (UA sheet).
 
 ## Shadow DOM and custom elements

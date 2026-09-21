@@ -56,11 +56,18 @@ impl Default for PageConfig {
 /// (`docs/tracking/deviations.md`). `text` is a text block whatever the switch
 /// says, and `wrapper` generates no box — both from `web-elements`' own sheet,
 /// where the linear toggle covers container tags only.
-/// `defaultOverflowVisible` reaches the non-scrolling containers — `page`,
-/// `view` and the two blur-view tags — the way web-core spends it on `x-view`
-/// alone; a scroller carries its own axes regardless, and a `list-item` is
-/// clipped by the paint containment [`super::list`] gives it rather than by
-/// any `overflow` this sheet writes.
+/// Every tag that generates a box of its own — the containers, `text` and
+/// `image` — also gets the rest of that common block: `border-width: 0` with
+/// `border-style: solid`, `position: relative`, `min-width: 0` and
+/// `min-height: 0`, and `overflow: clip`. `clip` is not a scroll container,
+/// so a clipped box neither scrolls nor gets its automatic minimum size
+/// zeroed by the overflow — the explicit `min-width`/`min-height` are what do
+/// that. `defaultOverflowVisible` releases the non-scrolling containers —
+/// `page`, `view` and the two blur-view tags — back to `visible`, the way
+/// web-core's `[lynx-default-overflow-visible=true] x-view` releases `x-view`
+/// alone; a scroller carries its own axes regardless, and a `list-item` stays
+/// clipped — by this `clip` and by the paint containment [`super::list`]
+/// gives it.
 ///
 /// The blur-view tags are here because native's `LynxUIBlurView` extends
 /// `LynxUIView`: a blur view is a view in everything layout can see, and its
@@ -94,18 +101,23 @@ impl Default for PageConfig {
 #[must_use]
 pub(super) fn ua_stylesheet(config: PageConfig) -> String {
     let display = if config.default_display_linear {
-        "display: linear;"
+        format!(
+            "page, view, scroll-view, list, list-item, {BLUR_VIEW_TAG}, {X_BLUR_VIEW_TAG} \
+             {{ display: linear; }}\n"
+        )
     } else {
-        ""
+        String::new()
     };
     let overflow = if config.default_overflow_visible {
-        String::new()
+        format!("page, view, {BLUR_VIEW_TAG}, {X_BLUR_VIEW_TAG} {{ overflow: visible; }}\n")
     } else {
-        format!("page, view, {BLUR_VIEW_TAG}, {X_BLUR_VIEW_TAG} {{ overflow: hidden; }}\n")
+        String::new()
     };
     format!(
-        "page, view, scroll-view, list, list-item, {BLUR_VIEW_TAG}, {X_BLUR_VIEW_TAG} \
-         {{ box-sizing: border-box; {display} }}\n\
+        "page, view, scroll-view, list, list-item, {BLUR_VIEW_TAG}, {X_BLUR_VIEW_TAG}, text, image \
+         {{ box-sizing: border-box; border-width: 0; border-style: solid; \
+         position: relative; overflow: clip; min-width: 0; min-height: 0; }}\n\
+         {display}\
          {overflow}\
          page {{ width: 100%; height: 100%; font-family: sans-serif; }}\n\
          wrapper {{ display: contents; }}\n\
@@ -124,9 +136,9 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
 
 #[cfg(test)]
 mod tests {
-    use dom::stylo::computed_values::box_sizing;
+    use dom::stylo::computed_values::{box_sizing, position};
     use dom::stylo::values::computed::font::{FontFamily, GenericFontFamily};
-    use dom::stylo::values::computed::{Display, Overflow};
+    use dom::stylo::values::computed::{BorderStyle, CSSPixelLength, Display, Overflow, Size};
 
     use super::super::LynxDocument;
     use super::super::test_support::{child, document, overflow, style_of, with_config};
@@ -169,6 +181,84 @@ mod tests {
             assert_eq!(style.clone_box_sizing(), box_sizing::T::BorderBox, "{tag}");
             assert_eq!(style.clone_display(), Display::Linear, "{tag}");
         }
+    }
+
+    /// A definite `min-width`/`min-height` in pixels, `None` for anything else.
+    fn px(size: &Size) -> Option<f32> {
+        match size {
+            Size::LengthPercentage(length) => length.0.to_length().map(CSSPixelLength::px),
+            _ => None,
+        }
+    }
+
+    /// `web-elements`' common block beyond `display`, on every tag that
+    /// generates a box of its own (`common-css/linear.css`).
+    #[test]
+    fn every_box_tag_gets_the_web_elements_common_block() {
+        let mut document = with_config(PageConfig {
+            default_overflow_visible: false,
+            ..PageConfig::default()
+        });
+        let mut boxes = containers(&mut document);
+        boxes.push(child(&mut document, "text", ""));
+        boxes.push(child(&mut document, "image", ""));
+        document.layout();
+
+        for (tag, element) in CONTAINER_TAGS.iter().chain(&["text", "image"]).zip(boxes) {
+            let style = style_of(&document, element);
+            assert_eq!(style.clone_box_sizing(), box_sizing::T::BorderBox, "{tag}");
+            let border = style.get_border();
+            for (side_style, side_width) in [
+                (
+                    border.clone_border_top_style(),
+                    border.clone_border_top_width(),
+                ),
+                (
+                    border.clone_border_right_style(),
+                    border.clone_border_right_width(),
+                ),
+                (
+                    border.clone_border_bottom_style(),
+                    border.clone_border_bottom_width(),
+                ),
+                (
+                    border.clone_border_left_style(),
+                    border.clone_border_left_width(),
+                ),
+            ] {
+                assert_eq!(side_style, BorderStyle::Solid, "{tag}");
+                assert_eq!(side_width.0.to_px(), 0, "{tag}");
+            }
+            assert_eq!(style.clone_position(), position::T::Relative, "{tag}");
+            assert_eq!(px(&style.clone_min_width()), Some(0.0), "{tag}");
+            assert_eq!(px(&style.clone_min_height()), Some(0.0), "{tag}");
+        }
+    }
+
+    /// `solid` is only the style a page's `border-width` reaches; the page can
+    /// still restyle, reposition and re-floor every box.
+    #[test]
+    fn the_common_block_is_author_overridable() {
+        let mut document = document();
+        let view = child(
+            &mut document,
+            "view",
+            "border-width: 2px; position: absolute; min-width: 10px; overflow: hidden",
+        );
+        document.layout();
+
+        let style = style_of(&document, view);
+        assert_eq!(
+            style.get_border().clone_border_top_style(),
+            BorderStyle::Solid
+        );
+        assert_eq!(style.get_border().clone_border_top_width().0.to_px(), 2);
+        assert_eq!(style.clone_position(), position::T::Absolute);
+        assert_eq!(px(&style.clone_min_width()), Some(10.0));
+        assert_eq!(
+            overflow(&document, view),
+            (Overflow::Hidden, Overflow::Hidden)
+        );
     }
 
     #[test]
@@ -216,12 +306,13 @@ mod tests {
         }
     }
 
-    /// The switch reaches the containers that are not scrollers: `page`,
+    /// Every box clips by default (`overflow: clip`, not a scroll container);
+    /// the switch releases the containers that are not scrollers — `page`,
     /// `view` and the two blur-view tags, which native treats as views
-    /// (`LynxUIBlurView` extends `LynxUIView`).
+    /// (`LynxUIBlurView` extends `LynxUIView`) — and nothing else.
     #[test]
     fn the_overflow_page_config_switch_skips_the_scrollers() {
-        for (visible, expected) in [(true, Overflow::Visible), (false, Overflow::Hidden)] {
+        for (visible, expected) in [(true, Overflow::Visible), (false, Overflow::Clip)] {
             let mut document = with_config(PageConfig {
                 default_overflow_visible: visible,
                 ..PageConfig::default()
@@ -230,6 +321,7 @@ mod tests {
                 .map(|tag| (tag, child(&mut document, tag, "")));
             let scroller = child(&mut document, "scroll-view", "");
             let list = child(&mut document, "list", "");
+            let leaves = ["text", "image"].map(|tag| (tag, child(&mut document, tag, "")));
             document.layout();
 
             assert_eq!(
@@ -244,6 +336,13 @@ mod tests {
                     "{tag}: {visible}"
                 );
             }
+            for (tag, leaf) in leaves {
+                assert_eq!(
+                    overflow(&document, leaf),
+                    (Overflow::Clip, Overflow::Clip),
+                    "{tag} clips whatever the switch says: {visible}"
+                );
+            }
             for scroller in [scroller, list] {
                 assert_eq!(
                     overflow(&document, scroller),
@@ -255,7 +354,7 @@ mod tests {
     }
 
     /// The whole rule `defaultOverflowVisible` gates, spelled out once.
-    const OVERFLOW_RULE: &str = "page, view, blur-view, x-blur-view { overflow: hidden; }";
+    const OVERFLOW_RULE: &str = "page, view, blur-view, x-blur-view { overflow: visible; }";
 
     #[test]
     fn default_config_is_linear_and_overflow_visible() {
@@ -265,7 +364,7 @@ mod tests {
 
         let sheet = ua_stylesheet(config);
         assert!(sheet.contains("display: linear;"));
-        assert!(!sheet.contains(OVERFLOW_RULE));
+        assert!(sheet.contains(OVERFLOW_RULE));
         assert!(sheet.contains("box-sizing: border-box;"));
     }
 
@@ -278,7 +377,7 @@ mod tests {
             enable_js_data_processor: false,
         });
         assert!(!sheet.contains("display: linear;"));
-        assert!(sheet.contains(OVERFLOW_RULE));
+        assert!(!sheet.contains(OVERFLOW_RULE));
     }
 
     /// The sheet's important declarations are exactly the text-block ones.
@@ -311,7 +410,7 @@ mod tests {
     #[test]
     fn the_ua_sheet_is_important_free_apart_from_the_text_block() {
         const ALLOWED: [&str; 4] = [
-            "text { box-sizing: border-box; display: -lynx-text !important; color: initial; }",
+            "text { display: -lynx-text !important; color: initial; }",
             "inline-text { display: -lynx-text !important; }",
             "text > inline-truncation { display: -lynx-text !important; \
              --lynx-inline-truncation: 1; }",
