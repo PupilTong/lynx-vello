@@ -59,7 +59,7 @@ pub(super) struct RecalcStyle<'a> {
     shared: SharedStyleContext<'a>,
     /// The document's sticky "some style here resolved a `cqw`/`cqh`" flag,
     /// which this traversal is the only writer of. See
-    /// [`crate::layout::container`]: it is what gates the post-layout
+    /// [`crate::layout::committed_box`]: it is what gates the post-layout
     /// recascade a resized query container would otherwise cost every page
     /// that has one.
     ///

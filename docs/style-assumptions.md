@@ -395,9 +395,10 @@ and §D.16 with what the wire format actually permits.)*
         The container's size comes from the **last committed layout**, because it is a cascade
         input only layout can produce. `dom` records every size query container's content box
         (`size − padding − border`, unrounded CSS px) at the committing layout run that
-        produced it — the same moment the last remembered size is recorded — into a slot-keyed
-        side table on the tree arenas, and answers Stylo's `TElement::query_container_size`
-        from it. A container that has never been laid out, or that has just stopped being one,
+        produced it — the same moment, and the same call, that records the last remembered
+        size, since both are that run's content box — into the slot-keyed last-committed-box
+        table on the tree arenas (`crates/dom/src/layout/committed_box.rs`), and answers
+        Stylo's `TElement::query_container_size` from it. A container that has never been laid out, or that has just stopped being one,
         answers `None` and its descendants fall back to the viewport.
 
         **The post-layout recascade loop** is `Document::layout`, which is Gecko's
@@ -519,7 +520,7 @@ and §D.16 with what the wire format actually permits.)*
       a last remembered size and is currently skipping its contents, its explicit intrinsic inner
       size in the corresponding axis is the last remembered size in that axis"
       ([css-sizing-4 §5.2](https://drafts.csswg.org/css-sizing-4/#intrinsic-size-override)). The
-      three parts are all `dom`'s (`crates/dom/src/layout/remembered.rs`); `hughie` is unchanged,
+      three parts are all `dom`'s (`crates/dom/src/layout/committed_box.rs`); `hughie` is unchanged,
       because it already reads `AutoLength(l)` as `l` and `AutoNone` as no explicit size and the
       substituted answer arrives as a plain `Length`.
       - **The recording moment is the commit's own layout run.** css-sizing-4 §5.2.1 records "at
@@ -542,8 +543,13 @@ and §D.16 with what the wire format actually permits.)*
         table and for the same structural reason: a `StyleView` is built from the tree arenas
         alone. It is not in `LayoutSlot` and not in `NodeLayoutState`, it resets on free (the
         remembered size belongs to the element, so a recycled key must remember nothing), and it
-        allocates nothing for a page that never uses the `auto` keyword. Writing it from a pass
-        that holds the arenas shared is what the table's own `RefCell` is for.
+        allocates nothing for a page that never uses the `auto` keyword. It is the *same* table
+        that holds the css-contain-3 query container size — one entry per element, two fields,
+        one `record` call per committing run — so writing it from a pass that holds the arenas
+        shared goes through that table's staged `RefCell`, published once per layout pass under
+        the exclusive borrow. A box never reads back a size recorded in the pass it is reading
+        in: a skipping box is size-contained in both axes, so the only write its own run can
+        make is the removal, and a box without the keyword never performs the lookup.
       - **`content-visibility: auto` implies the keyword**
         ([csswg-drafts#8407](https://github.com/w3c/csswg-drafts/issues/8407)): `Length(l)` behaves
         as `AutoLength(l)` and `None` as `AutoNone`. The fork carries the mapping

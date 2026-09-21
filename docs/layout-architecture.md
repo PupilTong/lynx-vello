@@ -712,7 +712,7 @@ contain_intrinsic_height}`, and `contain_intrinsic_length` reads
 `AutoLength(l)` as `l` and `AutoNone` as no explicit size — so the whole of
 css-sizing-4 §5.2.1's **last remembered size** fits inside those two accessors,
 and the engine needs no vocabulary for it. `dom` overrides them
-(`crates/dom/src/layout/remembered.rs`): it folds in
+(`crates/dom/src/layout/committed_box.rs`): it folds in
 [csswg-drafts#8407](https://github.com/w3c/csswg-drafts/issues/8407)
 (`content-visibility: auto` behaves as if `auto` were specified), and where the
 result carries `auto` **and the box is currently skipping its contents** it
@@ -731,18 +731,22 @@ happens to change between commits, and the relevance flip that starts a box
 skipping is the same invalidation that stops the old cached size from being
 served.
 
-**A size query container's size is recorded at the same moment, for the
-cascade rather than for layout** (`crates/dom/src/layout/container.rs`).
-`cqw`/`cqh` are 1% of the nearest ancestor size query container's content box
+**A size query container's size is recorded at the same moment, by the same
+call, for the cascade rather than for layout.** `cqw`/`cqh` are 1% of the
+nearest ancestor size query container's content box
 ([css-contain-3 §2.1](https://drafts.csswg.org/css-contain-3/#container-type)),
-which makes a *layout output* a *cascade input*. So the same committing run
-that records a last remembered size also records the content box of every box
-whose `container_type()` is a size container type — both axes for `size`, the
-inline one for `inline-size`, which is all Stylo ever reads of an inline-size
-container — into a second slot-keyed side table, and `TElement::query_container_size`
-answers from it. The recording is staged and published by `Document::layout`
-under its exclusive borrow, because unlike the other two tables this one is
-read by the *style* traversal, which is parallel.
+which makes a *layout output* a *cascade input*. So one `committed_box::record`
+per committing run computes that run's content box once and fills both halves
+of one table entry: the remembered size above, and — for a box whose
+`container_type()` is a size container type — both axes for `size`, the inline
+one for `inline-size`, which is all Stylo ever reads of an inline-size
+container. `TElement::query_container_size` answers from the second half. Every
+record is staged and published by `Document::layout` under its exclusive
+borrow, because unlike the relevance table this one is read by the *style*
+traversal, which is parallel; the remembered half rides along, which is sound
+because a box only ever reads back a size published by an earlier pass (a
+skipping box is size-contained in both axes, so the run that reads its
+remembered size can never be a run that records one).
 
 `Document::layout` then closes the loop, the way Gecko's
 `UpdateContainerQueryStyles` does after its reflow: a pass whose recorded sizes

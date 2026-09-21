@@ -488,9 +488,9 @@ impl<'a, T: Sync> TElement for &'a Node<T> {
     ///
     /// `display` is Gecko's, for the table parts whose principal box is not
     /// the box that was laid out. This engine has no table box tree: the
-    /// element's own box is the one [`crate::layout::container`] recorded.
+    /// element's own box is the one [`crate::layout::committed_box`] recorded.
     fn query_container_size(&self, _display: &Display) -> Size2D<Option<Au>> {
-        let size = Node::arenas(self).container_size(Node::id(self));
+        let size = Node::arenas(self).committed_box(Node::id(self)).container;
         Size2D::new(
             size.width.map(Au::from_f32_px),
             size.height.map(Au::from_f32_px),

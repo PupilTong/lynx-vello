@@ -1,9 +1,8 @@
 //! Box layout over the document tree — the concrete [`hughie`] host.
 
-pub(crate) mod container;
+pub(crate) mod committed_box;
 mod host;
 pub(crate) mod relevance;
-pub(crate) mod remembered;
 mod style;
 pub(crate) mod text_block;
 
@@ -41,7 +40,7 @@ pub(crate) static ANONYMOUS_STYLE: LazyLock<Arc<ComputedValues>> = LazyLock::new
 
 impl<T: Sync> Document<T> {
     /// Flushes style and lays the document out — up to
-    /// [`CONTAINER_PASSES`](container::CONTAINER_PASSES) times, because a
+    /// [`CONTAINER_PASSES`](committed_box::CONTAINER_PASSES) times, because a
     /// css-contain-3 size query container's size is a *cascade* input that
     /// only layout can produce.
     ///
@@ -52,7 +51,7 @@ impl<T: Sync> Document<T> {
     /// `is_empty` test.
     pub fn layout(&mut self) {
         let mut resized = Vec::new();
-        for _ in 0..container::CONTAINER_PASSES {
+        for _ in 0..committed_box::CONTAINER_PASSES {
             self.layout_pass(&mut resized);
             if !self.recascade_resized_containers(&mut resized) {
                 break;
@@ -79,8 +78,9 @@ impl<T: Sync> Document<T> {
         self.layout_state_mut().ensure_covers(bound);
         host::run_layout(self, viewport, scale, full, rescale);
         // Publishing is what makes the pass's sizes readable by the style
-        // traversal, which is parallel; see [`crate::layout::container`].
-        self.arenas_mut().apply_container_sizes(resized);
+        // traversal, which is parallel, and by the pass after this one; see
+        // [`crate::layout::committed_box`].
+        self.arenas_mut().publish_committed_boxes(resized);
         self.clear_relayout_roots();
         self.mark_layout_complete(viewport, scale);
     }

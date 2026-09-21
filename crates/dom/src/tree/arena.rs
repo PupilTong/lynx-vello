@@ -16,9 +16,8 @@ use hughie::text::TextContext;
 use hughie::tree::LayoutSlot;
 use slab::Slab;
 
-use crate::layout::container::{ContainerSize, ContainerSizeTable};
+use crate::layout::committed_box::{CommittedBox, CommittedBoxTable};
 use crate::layout::relevance::{Relevance, RelevanceTable};
-use crate::layout::remembered::{RememberedSize, RememberedSizeTable};
 use crate::layout::text_block::TextBlockStore;
 use crate::tree::node::Node;
 
@@ -153,18 +152,15 @@ pub(crate) struct TreeArenas<T> {
     /// alone and has to be able to read it; see
     /// [`crate::layout::relevance`].
     relevance: RelevanceTable,
-    /// The css-sizing-4 last remembered size, keyed by arena key, here for
-    /// the same reason the relevance table is: a
-    /// [`StyleView`](crate::layout::StyleView) substitutes it into
-    /// `contain-intrinsic-*` and can reach nothing but these arenas. See
-    /// [`crate::layout::remembered`].
-    remembered: RememberedSizeTable,
-    /// The css-contain-3 size query container sizes `cqw`/`cqh` resolve
-    /// against. Here because the reader is
+    /// Each element's last committed content box, keyed by arena key, here
+    /// for the same reason the relevance table is: its two readers are a
+    /// [`StyleView`](crate::layout::StyleView), which substitutes the
+    /// css-sizing-4 half into `contain-intrinsic-*`, and
     /// [`TElement::query_container_size`](stylo::dom::TElement::query_container_size)
-    /// on `&Node`, which can reach nothing else. See
-    /// [`crate::layout::container`].
-    container_sizes: ContainerSizeTable,
+    /// on `&Node`, which answers `cqw`/`cqh` from the css-contain-3 half.
+    /// Neither can reach anything but these arenas. See
+    /// [`crate::layout::committed_box`].
+    committed_boxes: CommittedBoxTable,
 }
 
 impl<T> TreeArenas<T> {
@@ -174,8 +170,7 @@ impl<T> TreeArenas<T> {
             payloads: Slab::with_capacity(INITIAL_NODE_CAPACITY),
             generations: Vec::with_capacity(INITIAL_NODE_CAPACITY),
             relevance: RelevanceTable::default(),
-            remembered: RememberedSizeTable::default(),
-            container_sizes: ContainerSizeTable::default(),
+            committed_boxes: CommittedBoxTable::default(),
         }
     }
 
@@ -202,58 +197,43 @@ impl<T> TreeArenas<T> {
         self.relevance.settle();
     }
 
-    /// One element's last remembered size (css-sizing-4 §5.2.1).
+    /// One element's last committed content box: its css-sizing-4 §5.2.1
+    /// last remembered size and its css-contain-3 §2.1 query container size.
     #[inline]
-    pub(crate) fn remembered_size(&self, slot: NodeId) -> RememberedSize {
-        self.remembered.get(slot.arena_key())
+    pub(crate) fn committed_box(&self, slot: NodeId) -> CommittedBox {
+        self.committed_boxes.get(slot.arena_key())
     }
 
-    /// Records one element's last remembered size, an empty one being the
-    /// spec's removal.
+    /// Records one box's content box for the layout pass in flight.
     ///
     /// Shared rather than exclusive, because the recording moment is inside
     /// the layout pass and `LayoutTree::compute_layout` holds these arenas
-    /// shared; the table carries the interior mutability for it.
+    /// shared; staged rather than published, because the style traversal
+    /// reads the published table from several threads at once, so only
+    /// [`Self::publish_committed_boxes`] — which takes `&mut self` — may
+    /// write it.
     #[inline]
-    pub(crate) fn record_remembered_size(&self, slot: NodeId, size: RememberedSize) {
-        self.remembered.record(slot.arena_key(), size);
+    pub(crate) fn note_committed_box(&self, slot: NodeId, committed: CommittedBox) {
+        self.committed_boxes.note(slot, committed);
     }
 
-    /// One element's size as a css-contain-3 size query container.
+    /// Publishes the layout pass's records, appending every query container
+    /// whose size moved to `resized`.
     #[inline]
-    pub(crate) fn container_size(&self, slot: NodeId) -> ContainerSize {
-        self.container_sizes.get(slot.arena_key())
-    }
-
-    /// Records one box's query-container size for the layout pass in flight.
-    ///
-    /// Shared for the reason [`Self::record_remembered_size`] is, and staged
-    /// rather than published for one more: the style traversal reads the
-    /// published table from several threads at once, so only
-    /// [`Self::apply_container_sizes`] — which takes `&mut self` — may write
-    /// it.
-    #[inline]
-    pub(crate) fn note_container_size(&self, slot: NodeId, size: ContainerSize) {
-        self.container_sizes.note(slot, size);
-    }
-
-    /// Publishes the layout pass's query-container sizes, appending every
-    /// container whose size moved to `resized`.
-    #[inline]
-    pub(crate) fn apply_container_sizes(&mut self, resized: &mut Vec<NodeId>) {
-        self.container_sizes.apply(resized);
+    pub(crate) fn publish_committed_boxes(&mut self, resized: &mut Vec<NodeId>) {
+        self.committed_boxes.apply(resized);
     }
 
     /// Whether any style this document ever cascaded resolved a `cqw`/`cqh`.
     #[inline]
     pub(crate) fn uses_container_units(&self) -> bool {
-        self.container_sizes.uses_container_units()
+        self.committed_boxes.uses_container_units()
     }
 
     /// The flag the style traversal sets when it cascades one.
     #[inline]
     pub(crate) fn container_units_flag(&self) -> &std::sync::atomic::AtomicBool {
-        self.container_sizes.units_flag()
+        self.committed_boxes.units_flag()
     }
 
     /// Takes arena key zero out of circulation, before any node is filed.
@@ -446,14 +426,11 @@ impl<T> TreeArenas<T> {
         // and its next occupant must start undetermined rather than inherit
         // a stranger's answer.
         self.relevance.reset(id.arena_key());
-        // Its last remembered size goes the same way, and for the same
-        // reason: css-sizing-4 attaches it to the element, so the key's next
-        // occupant is a different element and remembers nothing.
-        self.remembered.reset(id.arena_key());
-        // And so does its query-container size: the next occupant of the key
-        // is a different element, and no element is a query container until
-        // its own `container-type` says so.
-        self.container_sizes.reset(id.arena_key());
+        // Its last committed content box goes the same way, and for the same
+        // reason: css-sizing-4 attaches the remembered size to the element,
+        // and no element is a query container until its own `container-type`
+        // says so, so the key's next occupant starts with neither.
+        self.committed_boxes.reset(id.arena_key());
         (node, payload)
     }
 }

@@ -23,12 +23,12 @@ use hughie::style::{CoreStyle, PositionProperty};
 use hughie::tree::{AvailableSpace, Layout, LayoutInput, LayoutOutput, LayoutSlot, LayoutTree};
 use rustc_hash::FxHashSet;
 
+use super::committed_box;
 use super::style::{
     DisplayMode, StyleView, box_parent, display_mode, establishes_absolute_containing_block,
     establishes_fixed_containing_block, resolve_position,
 };
 use super::text_block::compute_text_block_layout;
-use super::{container, remembered};
 use crate::tree::document::{
     Document, DocumentLayoutState, NodeId, NodeSlot, PendingRelayout, RelayoutKind, TreeArenas,
 };
@@ -108,12 +108,11 @@ impl<T> LayoutTree for TreeArenas<T> {
                             // can only ever *remove* a last remembered size —
                             // the half of css-sizing-4 §5.2.1 that fires when
                             // the `auto` keyword goes away while the box goes
-                            // on skipping.
-                            remembered::record(tree, node, &view, input, output.size);
-                            // A skipped box still has a box, so a query
-                            // container that is also skipping supplies the
-                            // substituted size it was laid out at.
-                            container::record(tree, node, &view, input, output.size);
+                            // on skipping. A skipped box still has a box,
+                            // though, so a query container that is also
+                            // skipping supplies the substituted size it was
+                            // laid out at.
+                            committed_box::record(tree, node, &view, input, output.size);
                         }
                         output
                     },
@@ -169,19 +168,17 @@ impl<T> LayoutTree for TreeArenas<T> {
                     output
                 }
             };
-            // The recording moment (css-sizing-4 §5.2.1): this run laid the
-            // box out with its real contents, so its content box is what the
-            // element last rendered at. Only a *committing* run establishes
-            // one, and only a cache miss reaches here — a box served from the
-            // cache produced the same size it already recorded under the same
-            // input.
+            // The recording moment (css-sizing-4 §5.2.1 and css-contain-3
+            // §2.1, which is the same one): this run laid the box out with
+            // its real contents, so its content box is both what the element
+            // last rendered at and what a descendant's `cqw` and `cqh`
+            // resolve against until the next commit moves it. Only a
+            // *committing* run establishes one, and only a cache miss reaches
+            // here — a box served from the cache produced the same size it
+            // already recorded under the same input.
             if input.goal.commits() && tree.at(node).is_element() {
                 let view = tree.style(node);
-                remembered::record(tree, node, &view, input, output.size);
-                // And the css-contain-3 recording moment, which is the same
-                // one: this run's content box is what a descendant's `cqw`
-                // and `cqh` resolve against until the next commit moves it.
-                container::record(tree, node, &view, input, output.size);
+                committed_box::record(tree, node, &view, input, output.size);
             }
             output
         })
