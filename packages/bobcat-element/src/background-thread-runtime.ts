@@ -7,6 +7,7 @@ import {
 } from "bobcat:cross-thread-context";
 import { SelectorQuery, type SendQuery } from "bobcat:selector-query";
 import { createLynxModules } from "bobcat:lynx-modules";
+import { type BundleHandle, createBundleFetches } from "bobcat:bundle-fetch";
 import { GlobalEventEmitter } from "bobcat:global-event-emitter";
 import type { TimerGlobals } from "bobcat:timers";
 
@@ -428,10 +429,27 @@ export const lynx = {
     return modules.requireModule(path, entry, options);
   },
   loadScript(key: string, options: {bundleName?: string}) { return modules.loadScript(key, options); },
+  // `options` is accepted and ignored, as native ignores it.
+  fetchBundle(url: string, _options?: unknown): BundleHandle {
+    return bundleFetches.fetchBundle(url, _options);
+  },
   getCoreContext() {
     return coreContext;
   },
 };
+
+/**
+ * This realm's `lynx.fetchBundle`.
+ *
+ * `later` is a **posted task**, not an inline call: on the background thread
+ * native hands a settled fetch to its own mediator, so a callback registered
+ * on a handle that has already settled runs after the current task rather
+ * than inside it. MTS is the other way round; see `bundle-fetch.ts`.
+ */
+const bundleFetches = createBundleFetches({
+  report: error => { lynx.reportError(error); },
+  later: run => { lynx.setTimeout(run, 0); },
+});
 
 const modules = createLynxModules(app, lynx, console);
 app.define = modules.define;

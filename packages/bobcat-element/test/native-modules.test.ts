@@ -16,6 +16,9 @@ rstest.mockRequire("bobcat-internal:worker", () => ({
   invokeNativeModule,
 }));
 rstest.mockRequire("bobcat:lynx-modules", () => lynxModules);
+import * as sectionUrl from "../src/section-url.ts";
+import * as future from "../src/future.ts";
+import * as bundleFetch from "../src/bundle-fetch.ts";
 rstest.mockRequire("bobcat:global-event-emitter", () => globalEventEmitter);
 rstest.mockRequire("bobcat:selector-query", () => selectorQuery);
 rstest.mockRequire("bobcat:event-target", () => eventTarget);
@@ -27,6 +30,9 @@ rstest.mockRequire("bobcat:element", () => ({ __BobcatQueryNodes: rstest.fn() })
 // mock registrations are hoisted above this file's own bindings, and both
 // runtimes are imported from `beforeAll` once those exist.
 rstest.mockRequire("bobcat:worker", () => worker);
+rstest.mockRequire("bobcat:section-url", () => sectionUrl);
+rstest.mockRequire("bobcat:future", () => future);
+rstest.mockRequire("bobcat:bundle-fetch", () => bundleFetch);
 rstest.mockRequire("bobcat-internal:host", () => ({
   requestScriptFrame: rstest.fn(),
   reportScriptError: rstest.fn(),
@@ -41,6 +47,13 @@ rstest.mockRequire("bobcat-internal:host", () => ({
   // sources, so nothing here reaches an external load.
   resolveModuleUrl: () => { throw new Error("no module resolution in this suite"); },
   loadModuleSync: () => { throw new Error("no module load in this suite"); },
+  // No suite here fetches anything, and so registers no future; the runtime
+  // only needs these to exist, because `lynx.fetchBundle` and the `Future`
+  // class close over them as it evaluates.
+  fetchResource: () => { throw new Error("no fetch in this suite"); },
+  waitFuture: () => { throw new Error("no future in this suite"); },
+  takeFuture: () => { throw new Error("no future in this suite"); },
+  settleFuture: () => { throw new Error("no future in this suite"); },
 }));
 
 /** What the host hands `invokeNativeModule`, in argument order. */

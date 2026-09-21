@@ -41,7 +41,11 @@ and `bobcat-workers` (every Worker realm, including the BTS).
   `timers.rs`, `clock.rs`/`alarm.rs`, `future.rs` (the per-realm `FutureTable`
   and `waitFuture`/`takeFuture`/`settleFuture`), `esm.rs`, `require.rs`
   (`resolveModuleUrl` and `loadModuleSync`, the two members `bobcat:module` is
-  written over), `script.rs`, `resource.rs`, `style.rs`.
+  written over), `fetch.rs` (`fetchResource`, the one member a realm fetches a
+  URL through — a plain fetch registered as a `Future`, or `true` at once when
+  `ResourceFetcher::fetch_probe` says this view already fetched the URL, with
+  nothing bundle-specific anywhere in core), `script.rs`, `resource.rs`,
+  `style.rs`.
 - `packages/bobcat-element/src/` — `element-papi.ts` (`bobcat:element`; its
   header table is the authoritative PAPI list: `__AddEvent`, `__GetEvent`,
   `__GetEvents`, `__SetEvents`, `__AddEventListener`, `__QuerySelector`(`All`),
@@ -52,7 +56,13 @@ and `bobcat-workers` (every Worker realm, including the BTS).
   (`bobcat:future` — the `Future` class), `module.ts`
   (`bobcat:module` — Node's `require` algorithm), `selector-query.ts`,
   `global-event-emitter.ts`, `lynx-modules.ts` (the compiler factory ABI,
-  `lynx.requireModule` and `nativeApp.loadScript` over `loadModuleSync`), and
+  `lynx.requireModule` and `nativeApp.loadScript` over `loadModuleSync`),
+  `bundle-fetch.ts` (`bobcat:bundle-fetch` — native's `{wait, then}` handle and
+  the `{url, code, error_msg}` record, over one `bobcat:future` `Future` per
+  fetch; a `true` from the host is a settled handle, so MTS's repeat `.then`
+  runs inline), `section-url.ts`
+  (`bobcat:section-url` — the one rule a container's section and stylesheet
+  URLs are written by, shared with `bobcat-source`'s `named_chunk_url`), and
   `native.d.ts`, the host-member contract.
 
 Landed and not to be regressed:

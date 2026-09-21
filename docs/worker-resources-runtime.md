@@ -46,9 +46,9 @@ read-only `lynx-stack` checkout at `f47d3e6a56200bf07d58fc1656712878ea851a3d`.
 | --- | --- |
 | `lynx.requireModule(path, bundleName)` | Generated entry loads an embedded module and synchronously receives its exports. `packages/webpack/template-webpack-plugin/src/LynxEncodePlugin.ts`. **Implemented**: one synchronous load of the URL the path names beside the registered template URL, whether or not the container carried it. |
 | `lynx.requireModuleAsync(url, callback)` | Dynamic JS imports and generated JS chunk loading receive `(error, exports)`. `packages/react/runtime/src/core/lynx/dynamic-import.ts` and `packages/webpack/chunk-loading-webpack-plugin/src/runtime/javascript/chunk-loading.js`. |
-| `lynx.fetchBundle(url, {})` | Default asynchronous lazy loading calls the returned handler's `.then(callback)` and reads `code` and `url`. `packages/react/runtime/src/core/lynx/lazy-bundle.ts`. |
-| `fetchBundle(...).wait(5)` | Only a lazy import explicitly using `mode: 'sync'` takes this path. Ordinary asynchronous lazy loading does not wait synchronously. Same lazy-bundle source. |
-| `lynx.loadScript('background', { bundleName })` | Executes the loaded bundle's BTS section and synchronously returns its result. Same lazy-bundle source. |
+| `lynx.fetchBundle(url, {})` | Default asynchronous lazy loading calls the returned handler's `.then(callback)` and reads `code` and `url`. `packages/react/runtime/src/core/lynx/lazy-bundle.ts`. **Implemented**: one `SourceRequest::Fetch` — a plain fetch, which the fetcher may make a container of; the handle is native's `{wait, then}` object over one `bobcat:future` `Future`, not a Promise, and a URL the fetcher's `fetch_probe` already holds settles at once. |
+| `fetchBundle(...).wait(5)` | Only a lazy import explicitly using `mode: 'sync'` takes this path. Ordinary asynchronous lazy loading does not wait synchronously. Same lazy-bundle source. **Implemented**: a number of *seconds*, over `bobcat:future`'s `Future.wait`, which parks the job the way a `require` does. |
+| `lynx.loadScript('background', { bundleName })` | Executes the loaded bundle's BTS section and synchronously returns its result. Same lazy-bundle source. **Implemented** on both threads: one synchronous load of the section URL that `bundleName` names. |
 | `lynx.getNativeApp().callLepusMethod(...)` | Requests `rLynxPrepareLazyBundleMTS`; asynchronous lazy loading resolves after the callback confirms MTS preparation. Same lazy-bundle source. |
 | `tt.define(...)` and `tt.require(...)` | The generated wrapper receives `tt` through `init({tt})`, registers a module factory, then obtains its exports. `packages/webpack/runtime-wrapper-webpack-plugin/src/RuntimeWrapperWebpackPlugin.ts`. |
 
@@ -66,7 +66,8 @@ That caller does not require a separate raw JSON text API.
 
 ## Implementation boundary
 
-The asynchronous and lazy-bundle execution APIs above remain unimplemented;
+The asynchronous APIs above remain unimplemented; the lazy-bundle ones do
+not — see "Lazy containers" below.
 `callLepusMethod` already supplies the message boundary. They should reuse the
 existing resource transport while providing execution results, exports,
 caching, and errors at the required API boundary. An `import()` is the loading
@@ -183,9 +184,11 @@ path, as in lynx-core: a value whose `init` threw is loaded and initialized
 again by the next call — the load answering from the module the realm has
 already evaluated, since a URL is one module per realm.
 
-An entry that is itself an absolute URL, as a lazy bundle's `bundleName` is,
-resolves beside itself. With no template URL registered only an absolute path
-resolves, and a bundle path is a `TypeError` carrying the normalizer's message.
+With no template URL registered only an absolute path resolves, and a bundle
+path is a `TypeError` carrying the normalizer's message. An entry no
+`__BobcatRegisterBundle` named at all is a *lazy container's* `bundleName`,
+and its sections are named by the rule below rather than resolved beside
+anything.
 
 `nativeApp.loadScript(sourceURL, entryName?)` on `lynx.getNativeApp()` is the
 same load, answering the `{init}` object web-core's
@@ -208,11 +211,91 @@ argument), a load the host cannot answer carries this engine's own
 `cannot load '<url>'` text, `Card`/`Component` are always in scope for a
 registered body where web-core omits the pair for a React card, and **a body
 evaluates exactly once per realm**, at the first call that asks for it, where
-native re-evaluates per call — see `docs/tracking/deviations.md`. `lynx.requireModuleAsync`,
-`nativeApp.loadScriptAsync`, `nativeApp.readScript` and `lynx.fetchBundle` are
-still absent, and with them the lazy-bundle path that would register a second
-entry: a `bundleName` naming a bundle no `__BobcatRegisterBundle` has been
-given resolves beside itself, and its bodies are whatever the host serves.
+native re-evaluates per call — see `docs/tracking/deviations.md`.
+`lynx.requireModuleAsync`, `nativeApp.loadScriptAsync` and
+`nativeApp.readScript` are still absent.
+
+## Lazy containers
+
+`lynx.fetchBundle(url, options?)` is **a plain fetch** — apart from being
+waitable, it does what `fetch(image_url)` does — and nothing about a Lynx
+container is `bobcat-core`'s business. It exists in both realm kinds, because
+either thread's half of a ReactLynx `lazy()` may be the one that asks.
+
+**The request.** `SourceRequest::Fetch { url }` carries the string the card
+passed; resolution is the fetcher's, as it is for every request. A host
+answers `LoadedSource::Fetched` — which carries nothing — once the fetch is
+over, or fails the request. Core never learns what came back, and there is no
+`Bundle` request, no installed set and no record JSON anywhere in it: the one
+member is `fetchResource(url)`, which answers the id of the `bobcat:future`
+`Future` that fetch settles, or `true` for a URL the fetcher says this view
+already has (`crates/bobcat-core/src/fetch.rs`).
+
+**The decode is the fetcher's.** Whether those bytes were a Lynx container
+whose sections should be registered is decided in
+`bobcat_resources::ContainerInstaller`, whose one implementation is
+`bobcat_source::LazyBundleInstaller`. It **sniffs first** — a native or a web
+container's magic — and answers `Ok(false)` for anything else, which leaves
+the fetch a plain fetch that completed. A host that configures no installer
+still fetches; only a container that will not decode fails the request.
+
+**The section URL rule.** One rule, shared by the installer and both realms:
+a container at `<url>` answers its section `<name>` at
+`<url path>/<encoded name>.js`, keeping the container URL's `?#` suffix, and
+its named stylesheet `CSS` at `<url path>/index.css`. That is
+`named_chunk_url`/`named_style_url` in `crates/bobcat-source/src/page.rs` and
+`packages/bobcat-element/src/section-url.ts` on the realm side, which MTS's
+`chunkURL`/`styleSheetURL` and BTS's `bodyUrl` both go through. One leading
+`/` is stripped first, so either spelling of a name is one URL. A
+`main-thread` section becomes an MTS module — `MTS_CHUNK_PREAMBLE`, the entry's
+own binding list, then `export default <the body>` — and everything else the
+BTS module `bts_module_source` already wrote. The container's *own* StyleInfo
+is not registered: native applies a lazy bundle's CSS only through
+`__LoadStyleSheet('CSS')`.
+
+**What has been fetched is the fetcher's, and it answers through a probe.**
+Core remembers nothing. `ResourceFetcher::fetch_probe()` hands the realms one
+`Send + Sync` function — the only part of a host's resource system that leaves
+the embedder's thread — and `fetchResource` asks it before requesting
+anything: a URL this view already fetched answers `true` **in the same call**,
+with no request at all. That is this engine's
+`TemplateAssembler::FindTemplateBundle`, and it is load-bearing rather than an
+optimisation: a repeat `fetchBundle`'s handle is settled from the start, so
+MTS runs its `.then` inline, which is what `rLynxPrepareLazyBundleMTS` needs
+(`crates/bobcat-source/tests/lazy_bundle.rs` is the end-to-end proof, over the
+real compiled `react-lazy` fixture). The reference fetcher's set is written
+only when a `Fetch` load **completed successfully**, after the installer ran;
+a failed fetch and a failed install are not remembered, as native remembers no
+failure, and a host that offers no probe simply never answers `true`.
+
+**The handle** is native's host object and not a Promise: exactly `wait` and
+`then`, `.then` answers `undefined`, and there is no chaining. `options` is
+accepted and ignored. A fetch that had to be made is one **`bobcat:future`
+`Future`** — the host member answers its id — and both members are that
+Future's, so neither the wait nor the asynchronous settle is machinery of this
+feature's own; a fetch the probe answered `true` for needs no Future at all
+and its handle is settled from the start. The `{url, code, error_msg}` record
+is built in `bundle-fetch.ts`, out of that outcome and the URL the caller
+passed.
+
+- `wait(seconds)` is `Future.wait(seconds * 1000)`: it parks the *job* it runs in — the park a `require` makes, so this engine thread's tasks go on running and no other job does — until the fetch settles, the realm ends, or the deadline passes. The `TimeoutError` that last one throws becomes `{url, code: -2, error_msg: "ResponsePromise wait timeout after <t> seconds for url: <url>"}`, and **cancels nothing**: the Future goes back into the host's table, so a later `wait` or `then` still sees the result. `Infinity` seconds is `Infinity` milliseconds, which is the Future's own "no deadline at all".
+- `then(callback)` runs the callback when the fetch settles. **Settled means this realm holds the outcome**, whichever way it arrived — the probe's `true` at the `fetchBundle`, a `wait` that returned, or the Future's Promise — and not a delivery having happened: `h.wait(5); h.then(cb)` runs `cb` at the `then`, because the `wait` is what brought the outcome in. That is native's `LynxActor::Act`, which acts on the value being there, and for that case the timing still differs by thread as native's does: **MTS runs it inline** and **BTS posts it** (`bts_runtime_mediator`). A callback registered while the fetch was still outstanding runs as a reaction of the Future's Promise instead, each in its own try/catch: one that throws is reported and the next still runs, and none of them can become an unhandled rejection.
+- The first such callback is what converts the Future, once. That conversion is one-way, so a `wait` **after** a `then` on the same handle throws a `TypeError` — `bobcat:future`'s structural refusal, since the delivery is a job and a job cannot run inside another job's wait. Native's `shared_future` allows the pair; see `docs/tracking/deviations.md`.
+
+A settled record is `{url, code, error_msg}`: `code` `0` fetched, `-1` the
+fetch failed (carrying the host's reason), `-2` a `wait` timeout. `url` is
+**the string the caller passed**, echoed, because ReactLynx uses it as the
+`bundleName` of every later `loadScript` and `__LoadStyleSheet` and keys its
+own cache by it.
+
+Delivery is `bobcat:future`'s: the `.then` hands the load to the realm's owner
+through `settleFuture`, the owner's epilogue — `Page`'s on `bobcat-main`,
+`Worker`'s on `bobcat-workers` — spawns one task that awaits it, and that task
+*enters the realm* to resolve the Promise. The callbacks are that Promise's
+reactions, so a callback that builds elements or adopts a stylesheet runs
+inside an entry and gets the epilogue it owes. Native's BTS posts a task and
+its MTS posts to the Lepus thread; both are asynchronous, which is the same
+shape.
 
 There is no `ScriptLoad` queue, `SourceRequest::Script` variant, synchronous
 `readScript` binding, or JS source-callback registry, and no API that hands a

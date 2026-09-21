@@ -32,8 +32,10 @@ call; anything else is the answer as it stands. A `.lynx.bundle`'s body reaches
 the first case because its module is `export default <the compiler's own
 IIFE>`, where native's host would have kept the script's completion value; a
 `.web.bundle`'s body is a CommonJS file whose module exports its
-`module.exports`. The asynchronous half — `requireModuleAsync`,
-`loadScriptAsync`, `fetchBundle` and lazy bundles — is still absent. See
+`module.exports`. Lazy containers are implemented over the same loader:
+`lynx.fetchBundle` installs one and `lynx.loadScript(section, {bundleName})`
+loads its sections, on both threads. The asynchronous half —
+`requireModuleAsync` and `loadScriptAsync` — is still absent. See
 [worker resources](../worker-resources-runtime.md).
 
 `lynx.requestAnimationFrame` and `cancelAnimationFrame` use each realm's own JS
@@ -64,7 +66,7 @@ Lynx runs compiled ReactLynx output on **two logical JS contexts that share one 
 | `lynx.reportError(error, options?)` | Proactively report a JS error/warning to native error pipeline | Core | N/A (no W3C analog) | | lynx-stack/node_modules/.pnpm/@lynx-js+types@3.7.0/.../types/common/lynx.d.ts; lynx/core/runtime/js/bindings/lynx.cc (via App::ReportException) |
 | `lynx.getTextInfo(text, info)` | Synchronous text-measurement (font/maxWidth/maxLine) → `{width, content}` | Extended | No (no sync DOM text-measure API) | Nearest W3C analog is `TextMetrics` from Canvas `measureText`, which is async-free but requires a canvas context; document as Lynx-specific sync text shaping call, back with parley in-process | lynx-stack/.../types/common/lynx.d.ts; lynx/core/runtime/js/bindings/lynx.cc (`tasm::kGetTextInfo` prop) |
 | `lynx.getDevtool()` / `getCoreContext()` / `getJSContext()` / `getUIContext()` / `getNative()` / `getEngine()` | Return a `ContextProxy` (postMessage/addEventListener/dispatchEvent) for the named internal context | Core | N/A (Lynx-internal IPC, no DOM analog) | | lynx-stack/.../types/common/lynx.d.ts; lynx/core/runtime/js/bindings/lynx.cc:335-377; lynx/core/runtime/common/bindings/event/context_proxy.h; lynx/core/runtime/common/bindings/event/runtime_constants.h |
-| `lynx.fetchBundle(url, options?)` | Fetch a lazy bundle, returns `{wait(timeout), then(info)}` | Extended | No | Non-standard resource-loading primitive; keep as native async fetch, no W3C mapping needed | lynx-stack/.../types/common/lynx.d.ts; lynx/core/runtime/js/bindings/lynx.cc (`FetchBundle`) |
+| `lynx.fetchBundle(url, options?)` | Fetch a lazy bundle, returns `{wait(timeout), then(info)}` | Extended | No | **Implemented** on both threads (`crates/bobcat-core/src/fetch.rs`, `packages/bobcat-element/src/bundle-fetch.ts`): core's one member is `fetchResource(url)`, **a plain fetch** (`SourceRequest::Fetch`) that knows nothing of containers and answers the id of the `bobcat:future` `Future` it settles — or `true` at once for a URL the fetcher's `fetch_probe` says this view already fetched, which is what makes MTS's repeat `.then` run inline. Decoding and registering a container's sections is the fetcher's (`bobcat_resources::ContainerInstaller`). The handle is native's `{wait, then}` rather than a Promise, both members being that `Future`, so `wait(seconds)` is `Future.wait` parking the job the way a `require` does and `.then` is its one Promise conversion. `options` ignored, as native ignores it. Both compiled lazy paths run end to end (`react-lazy` and `react-lazy-sync`). Deviations — the repeat fetch, `.then` timing, `error_msg`, the handle's shape, a container's own StyleInfo — are in `docs/tracking/deviations.md`; see `docs/worker-resources-runtime.md` "Lazy containers" | lynx-stack/.../types/common/lynx.d.ts; lynx/core/runtime/js/bindings/lynx.cc (`FetchBundle`) |
 | `lynx.stopExposure(options?)` / `resumeExposure()` | Pause/resume "element exposure" (impression) tracking | Extended | N/A | | lynx-stack/.../types/common/lynx.d.ts |
 | `lynx.targetSdkVersion` | String, project's configured target SDK version | Rare | N/A | | lynx-stack/.../types/common/lynx.d.ts |
 

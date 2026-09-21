@@ -13,6 +13,8 @@
 // crates/bobcat-core/src/background/tests.rs.
 
 import { beforeEach, describe, expect, it, rstest } from "@rstest/core";
+import * as sectionUrl from "../src/section-url.ts";
+rstest.mockRequire("bobcat:section-url", () => sectionUrl);
 import { createLynxModules } from "../src/lynx-modules.ts";
 
 // Only the functions this returns read the tables below, and they run when
@@ -246,8 +248,11 @@ describe("one load per bundle path, and the factory ABI over it", () => {
     expect(loads).toEqual(["https://cdn.test/app/background"]);
     // A section is no part of `requireModule`'s own cache.
     expect(modules.requireModule("background")).not.toBe(result);
-    // And a `bundleName` is an entry of its own, so its sections are too.
-    files.set("https://lazy.test/bundle/background", body({lazy: true}));
+    // A `bundleName` no template URL was registered for is a *lazy
+    // container*, so its sections hang under that URL rather than beside it —
+    // the string `named_chunk_url` registered them at — and it is an entry of
+    // its own, so its sections are cached separately.
+    files.set("https://lazy.test/bundle/lazy.bundle/background.js", body({lazy: true}));
     expect(modules.loadScript("background", {bundleName: "https://lazy.test/bundle/lazy.bundle"}))
       .toEqual({lazy: true});
     expect(modules.loadScript("background", {})).toBe(result);
@@ -272,13 +277,41 @@ describe("one load per bundle path, and the factory ABI over it", () => {
     expect(loads).toEqual(["https://cdn.test/app/chunk.js"]);
   });
 
-  it("resolves an entry that is itself an absolute URL beside itself", () => {
+  it("hangs a lazy container's sections under its bundleName", () => {
     const {modules} = environment("https://cdn.test/app/x.web.bundle");
-    files.set("https://lazy.test/bundle/chunk.js", commonjs("exports.lazy = true;"));
+    // `.js.js`, and deliberately: `named_chunk_url` writes `<name>.js` for
+    // whatever name a container carries, and a manifest path is one of those
+    // names — so `/chunk.js` is the section `chunk.js`, registered at
+    // `chunk.js.js`. The two sides agree because both are this one rule.
+    files.set("https://lazy.test/bundle/lazy.bundle/chunk.js.js",
+      commonjs("exports.lazy = true;"));
 
+    // An entry no `__BobcatRegisterBundle` named is a lazy container's
+    // `bundleName`, the string `lynx.fetchBundle` was given: nothing is
+    // resolved, and the section hangs under that URL's path.
     expect(modules.requireModule("/chunk.js", "https://lazy.test/bundle/lazy.bundle"))
       .toEqual({lazy: true});
-    expect(loads).toEqual(["https://lazy.test/bundle/chunk.js"]);
+    expect(loads).toEqual(["https://lazy.test/bundle/lazy.bundle/chunk.js.js"]);
+  });
+
+  it("keeps a lazy bundleName's own query suffix after the section", () => {
+    const {modules} = environment("https://cdn.test/app/x.web.bundle");
+    files.set("https://lazy.test/lazy.bundle/main-thread.js?v=1", body({mts: true}));
+
+    expect(modules.loadScript("main-thread", {bundleName: "https://lazy.test/lazy.bundle?v=1"}))
+      .toEqual({mts: true});
+    expect(loads).toEqual(["https://lazy.test/lazy.bundle/main-thread.js?v=1"]);
+  });
+
+  it("leaves a rooted lazy bundleName rooted, for the fetcher to resolve", () => {
+    const {modules} = environment("https://cdn.test/app/x.web.bundle");
+    files.set("/lazy-bundle/child.bundle/background.js", body({lazy: true}));
+
+    // The container itself was fetched from this very string, so its sections
+    // are named from it unchanged and the fetcher resolves them the same way.
+    expect(modules.loadScript("background", {bundleName: "/lazy-bundle/child.bundle"}))
+      .toEqual({lazy: true});
+    expect(loads).toEqual(["/lazy-bundle/child.bundle/background.js"]);
   });
 
   it("asks for an absolute path as it is, whatever the template URL", () => {

@@ -35,7 +35,7 @@ use crate::clock::ClockInstant;
 #[cfg(test)]
 use crate::main::tree::LynxDocument;
 use crate::paint::RouterHost;
-use crate::resource::{LoadedSource, SourceCompletion, SourceRequest};
+use crate::resource::{FetchProbe, LoadedSource, SourceCompletion, SourceRequest};
 use crate::view::{EngineEvent, EventRequester, LynxViewError};
 
 /// The answer to one source request, as the side that awaits it sees it.
@@ -49,6 +49,11 @@ pub(crate) struct HostOutbox {
     notices: mpsc::UnboundedSender<ViewNotice>,
     requester: Arc<dyn EventRequester>,
     token: CancellationToken,
+    /// The view fetcher's own answer to "has this been fetched already?",
+    /// which is the one thing a realm asks the host *without* a message. It
+    /// rides here because a Worker realm needs it too, and it is `Send +
+    /// Sync` for the same reason.
+    probe: Option<FetchProbe>,
 }
 
 impl HostOutbox {
@@ -56,12 +61,20 @@ impl HostOutbox {
         notices: mpsc::UnboundedSender<ViewNotice>,
         requester: Arc<dyn EventRequester>,
         token: CancellationToken,
+        probe: Option<FetchProbe>,
     ) -> Self {
         Self {
             notices,
             requester,
             token,
+            probe,
         }
+    }
+
+    /// Whether this view's fetcher can answer "already fetched" at all, and
+    /// how. `None` is a host that gave no probe: every fetch is a request.
+    pub(crate) const fn fetch_probe(&self) -> Option<&FetchProbe> {
+        self.probe.as_ref()
     }
 
     /// The end signal of whatever holds this outbox: the view's for MTS, the
@@ -407,6 +420,9 @@ pub(crate) struct ViewOutbox {
     /// carries a clone, which is what lets a host read cancellation without
     /// waiting for a turn.
     token: CancellationToken,
+    /// This view's fetcher's `fetch_probe`, taken on the embedder's thread at
+    /// construction and handed to every realm of the view.
+    probe: Option<FetchProbe>,
 }
 
 impl ViewOutbox {
@@ -415,12 +431,14 @@ impl ViewOutbox {
         frames: watch::Sender<Published>,
         requester: Arc<dyn EventRequester>,
         token: CancellationToken,
+        probe: Option<FetchProbe>,
     ) -> Self {
         Self {
             notices,
             frames: Rc::new(frames),
             requester,
             token,
+            probe,
         }
     }
 
@@ -430,7 +448,12 @@ impl ViewOutbox {
     }
 
     pub(crate) fn host_outbox(&self, token: CancellationToken) -> HostOutbox {
-        HostOutbox::new(self.notices.clone(), Arc::clone(&self.requester), token)
+        HostOutbox::new(
+            self.notices.clone(),
+            Arc::clone(&self.requester),
+            token,
+            self.probe.clone(),
+        )
     }
 
     /// Announces one notice, then wakes the thread that paints.
@@ -596,7 +619,9 @@ pub(crate) fn detached_outbox(requester: Arc<dyn EventRequester>) -> (ViewOutbox
     let (notices, notice_receiver) = mpsc::unbounded_channel();
     let (frames, frame_receiver) = watch::channel(Published::default());
     (
-        ViewOutbox::new(notices, frames, requester, token.clone()),
+        // No probe: a detached view has no fetcher, so every fetch is a
+        // request and none settles synchronously.
+        ViewOutbox::new(notices, frames, requester, token.clone(), None),
         DetachedView {
             notices: notice_receiver,
             published: ViewObserver {

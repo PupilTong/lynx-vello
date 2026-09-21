@@ -92,6 +92,7 @@ pub(crate) fn install(
             }),
             LoadedSource::StyleSheet(_) => Err("the fetcher returned a stylesheet".to_owned()),
             LoadedSource::Font(_) => Err("the fetcher returned a font".to_owned()),
+            LoadedSource::Fetched => Err("the fetcher returned a plain fetch".to_owned()),
         }
     })
 }

@@ -203,3 +203,303 @@ async fn replacement_scope_and_registration_ignore_retired_load_results() {
     );
     assert_eq!(text(cached_style(&resources, url)).await, ".new {}");
 }
+
+/// A container installer that writes one script beside the URL it was given,
+/// out of the bytes it was handed, and records the URL it was based on.
+///
+/// It stands in for the three answers the hook has: bytes it does not
+/// recognize are `Ok(false)` and change nothing, bytes it cannot decode are
+/// an error that fails the fetch, and anything else is installed.
+#[derive(Debug)]
+struct ScriptInstaller {
+    installed: Mutex<Vec<Url>>,
+}
+
+impl crate::ContainerInstaller for ScriptInstaller {
+    fn install(
+        &self,
+        url: &Url,
+        bytes: &[u8],
+        registrar: &crate::Registrar,
+    ) -> Result<bool, String> {
+        self.installed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(url.clone());
+        if bytes == b"not a container" {
+            return Err("these bytes are not a container".to_owned());
+        }
+        if bytes == b"an ordinary file" {
+            return Ok(false);
+        }
+        registrar
+            .register(
+                &format!("{url}/x.js"),
+                bytes.to_vec(),
+                Some("text/javascript"),
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(true)
+    }
+}
+
+fn installing(installer: Arc<ScriptInstaller>) -> Resources {
+    Resources::new(
+        ResourcesConfig {
+            base_url: Some(Url::parse("app:///page/main.js").unwrap()),
+            log_to_stderr: false,
+            container_installer: Some(installer),
+            ..ResourcesConfig::default()
+        },
+        || panic!("container loads do not wake the image host"),
+    )
+}
+
+/// A host that installs nothing still *fetches*: the request is a plain
+/// fetch, as an image's is, and having nothing to make of the bytes is not a
+/// failure.
+#[tokio::test]
+async fn a_fetch_completes_where_the_host_installs_no_containers() {
+    let resources = resources();
+    resources
+        .register("app:///page/lazy.bundle", b"payload".to_vec(), None)
+        .unwrap();
+
+    assert!(matches!(
+        result(load(
+            &resources,
+            "app:///page/lazy.bundle",
+            SourceKind::Fetch
+        ))
+        .await,
+        Ok(LoadedSource::Fetched)
+    ));
+}
+
+/// An installer that does not recognize the bytes leaves the fetch alone:
+/// completed, with nothing registered.
+#[tokio::test]
+async fn an_unrecognized_body_completes_the_fetch_and_registers_nothing() {
+    let installer = Arc::new(ScriptInstaller {
+        installed: Mutex::new(Vec::new()),
+    });
+    let resources = installing(Arc::clone(&installer));
+    resources
+        .register("app:///page/photo.png", b"an ordinary file".to_vec(), None)
+        .unwrap();
+
+    assert!(matches!(
+        result(load(&resources, "app:///page/photo.png", SourceKind::Fetch)).await,
+        Ok(LoadedSource::Fetched)
+    ));
+    // Offered the bytes, and wrote nothing: the section URL a container would
+    // have answered at is still nothing.
+    assert_eq!(installer.installed.lock().unwrap().len(), 1);
+    assert!(
+        result(load(
+            &resources,
+            "app:///page/photo.png/x.js",
+            SourceKind::Script
+        ))
+        .await
+        .is_err()
+    );
+}
+
+/// The whole point of installing: the URLs the container's sections answer at
+/// become ordinary source requests afterwards.
+#[tokio::test]
+async fn an_installed_container_answers_the_module_requests_it_registered() {
+    let installer = Arc::new(ScriptInstaller {
+        installed: Mutex::new(Vec::new()),
+    });
+    let resources = installing(Arc::clone(&installer));
+    resources
+        .register(
+            "app:///lazy-bundle/child.bundle",
+            b"export default 1;".to_vec(),
+            None,
+        )
+        .unwrap();
+
+    assert!(matches!(
+        result(load(
+            &resources,
+            "app:///lazy-bundle/child.bundle",
+            SourceKind::Fetch
+        ))
+        .await,
+        Ok(LoadedSource::Fetched)
+    ));
+
+    let Ok(LoadedSource::Entry { source, url }) = result(load(
+        &resources,
+        "app:///lazy-bundle/child.bundle/x.js",
+        SourceKind::Script,
+    ))
+    .await
+    else {
+        panic!("the section the installer registered answers a module request");
+    };
+    assert_eq!(source, "export default 1;");
+    assert_eq!(url, "app:///lazy-bundle/child.bundle/x.js");
+    // The resolved *request* URL, which is what the realm derives its section
+    // URLs from — a rooted specifier resolving at the page's origin root.
+    assert_eq!(
+        installer
+            .installed
+            .lock()
+            .unwrap()
+            .iter()
+            .map(Url::to_string)
+            .collect::<Vec<_>>(),
+        ["app:///lazy-bundle/child.bundle"]
+    );
+}
+
+/// A rooted specifier is what a compiled card writes (webpack's `publicPath`
+/// is `/`), and what the installer is based on is where that resolved to —
+/// the page's origin root, not the directory the page sits in.
+///
+/// `request` maps a `Fetch` through the scope's own base URL, exactly as it
+/// maps an entry or a font, so what that mapping produces is this
+/// resolution.
+#[test]
+fn a_rooted_container_specifier_resolves_at_the_pages_origin_root() {
+    let resources = resources();
+    // Registered so a scheme no transport serves still resolves, which is
+    // how a container reaches a test at all.
+    resources
+        .register("app:///lazy-bundle/child.bundle", b"body".to_vec(), None)
+        .unwrap();
+
+    let resolved = resources
+        .shared
+        .transports
+        .resolve("/lazy-bundle/child.bundle", resources.base_url().as_ref())
+        .expect("a rooted specifier resolves against the page");
+
+    assert_eq!(resolved.as_str(), "app:///lazy-bundle/child.bundle");
+}
+
+/// An installer that cannot decode what it recognized fails the fetch, and
+/// its message is what the realm reports.
+#[tokio::test]
+async fn an_installer_that_refuses_the_bytes_reports_its_own_message() {
+    let installer = Arc::new(ScriptInstaller {
+        installed: Mutex::new(Vec::new()),
+    });
+    let resources = installing(installer);
+    resources
+        .register("app:///page/bad.bundle", b"not a container".to_vec(), None)
+        .unwrap();
+
+    let Err(LynxViewError::Resource(error)) = result(load(
+        &resources,
+        "app:///page/bad.bundle",
+        SourceKind::Fetch,
+    ))
+    .await
+    else {
+        panic!("the installer's refusal fails the request");
+    };
+
+    assert_eq!(error.kind, ResourceErrorKind::ResponseBody);
+    assert!(error.message.contains("not a container"));
+}
+
+/// The probe's whole contract: a plain fetch that **completed** is `true`
+/// afterwards, by the specifier the realm holds as well as by its resolved
+/// form, and nothing else is.
+#[tokio::test]
+async fn a_completed_fetch_is_what_the_probe_answers_true_for() {
+    let installer = Arc::new(ScriptInstaller {
+        installed: Mutex::new(Vec::new()),
+    });
+    let resources = installing(Arc::clone(&installer));
+    resources
+        .register(
+            "app:///lazy-bundle/child.bundle",
+            b"export default 1;".to_vec(),
+            None,
+        )
+        .unwrap();
+    let (reports, _inbox) = bobcat_core::ImageInbox::new();
+    let probe = bobcat_core::resource::ResourceFetcher::fetch_probe(&resources.for_view(reports))
+        .expect("the reference fetcher always offers a probe");
+
+    // Nothing has been fetched yet, whatever else is registered.
+    assert!(!probe("app:///lazy-bundle/child.bundle"));
+
+    assert!(matches!(
+        result(load(
+            &resources,
+            "app:///lazy-bundle/child.bundle",
+            SourceKind::Fetch
+        ))
+        .await,
+        Ok(LoadedSource::Fetched)
+    ));
+
+    // The URL the realm passed, and the rooted spelling of it a compiled card
+    // writes: both resolve to the one URL the fetch completed for.
+    assert!(probe("app:///lazy-bundle/child.bundle"));
+    assert!(probe("/lazy-bundle/child.bundle"));
+    // A URL nothing fetched, and one that resolves to nothing at all.
+    assert!(!probe("app:///lazy-bundle/other.bundle"));
+    assert!(!probe("::not a url::"));
+}
+
+/// A fetch that failed is not remembered, as native remembers no failure, and
+/// a load of another kind never populates the set at all.
+#[tokio::test]
+async fn a_failed_fetch_and_every_other_kind_leave_the_probe_false() {
+    let resources = resources();
+    resources
+        .register("app:///page/sheet.css", b".a {}".to_vec(), Some("text/css"))
+        .unwrap();
+    resources
+        .register(
+            "app:///page/module.js",
+            b"export default 1;".to_vec(),
+            Some("text/javascript"),
+        )
+        .unwrap();
+    let (reports, _inbox) = bobcat_core::ImageInbox::new();
+    let probe = bobcat_core::resource::ResourceFetcher::fetch_probe(&resources.for_view(reports))
+        .expect("the reference fetcher always offers a probe");
+
+    // Nothing is registered under this URL, so the fetch fails.
+    assert!(
+        result(load(
+            &resources,
+            "app:///page/gone.bundle",
+            SourceKind::Fetch
+        ))
+        .await
+        .is_err()
+    );
+    assert!(!probe("app:///page/gone.bundle"));
+
+    // A stylesheet and a module complete, and neither is a fetch.
+    assert!(
+        result(load(
+            &resources,
+            "app:///page/sheet.css",
+            SourceKind::StyleSheet
+        ))
+        .await
+        .is_ok()
+    );
+    assert!(
+        result(load(
+            &resources,
+            "app:///page/module.js",
+            SourceKind::Script
+        ))
+        .await
+        .is_ok()
+    );
+    assert!(!probe("app:///page/sheet.css"));
+    assert!(!probe("app:///page/module.js"));
+}

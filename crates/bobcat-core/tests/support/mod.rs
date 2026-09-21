@@ -236,6 +236,17 @@ impl FetcherDouble {
                 }
                 .into());
             }
+            // Nor a plain fetch: this double has nothing to fetch from.
+            SourceRequest::Fetch { url } => {
+                return Err(ResourceError {
+                    kind: ResourceErrorKind::NotFound,
+                    phase: ResourceErrorPhase::Resolve,
+                    locator: Some(Arc::from(url.as_str())),
+                    message: "this double serves no plain fetch".into(),
+                    retry: RetryAdvice::Never,
+                }
+                .into());
+            }
             SourceRequest::Worker {
                 specifier,
                 base_url,

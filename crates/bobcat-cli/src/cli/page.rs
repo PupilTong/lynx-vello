@@ -65,6 +65,9 @@ impl Program {
             ResourcesConfig {
                 base_url: Some(self.source.input_url().clone()),
                 disk_cache,
+                // Lazy bundles: a `lynx.fetchBundle` installs its sections
+                // through this, and without one every fetch fails.
+                container_installer: Some(std::sync::Arc::new(bobcat_source::LazyBundleInstaller)),
                 ..ResourcesConfig::default()
             },
             wakeup,

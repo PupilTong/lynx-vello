@@ -17,6 +17,8 @@
       "bobcat:timers": ["./timers.ts"],
       "bobcat:future": ["./future.ts"],
       "bobcat:module": ["./module.ts"],
+      "bobcat:section-url": ["./section-url.ts"],
+      "bobcat:bundle-fetch": ["./bundle-fetch.ts"],
       "bobcat:event-target": ["./event-target.ts"],
       "bobcat:cross-thread-context": ["./cross-thread-context.ts"],
       "bobcat-internal": ["./worker.ts"],

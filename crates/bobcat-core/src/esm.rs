@@ -50,6 +50,44 @@ pub(crate) const CONTEXT_MODULE_SOURCE: &str = runtime_source!("cross-thread-con
 /// The built-in BTS bootstrap, loaded like any other Worker script.
 pub(crate) const BTS_MODULE_SPECIFIER: &str = "bobcat:bts";
 
+/// The literal [`MTS_CHUNK_PREAMBLE`] is, as a macro, so that
+/// `main::runtime`'s `ENTRY_PREAMBLE` can `concat!` the entry marker onto it:
+/// `concat!` takes literals and a `const` is not one.
+macro_rules! mts_chunk_preamble {
+    () => {
+        concat!(
+            "import { __Card__, lynx, console, SystemInfo, __globalProps, NativeModules, ",
+            "_AddEventListener, _ReportError, _SetSourceMapRelease, __OnLifecycleEvent, ",
+            "__LoadLepusChunk, __LoadStyleSheet, __AdoptStyleSheet } from \"bobcat:runtime\"; ",
+            "import { __CreatePage, __CreateElement, __CreateWrapperElement, __CreateText, ",
+            "__CreateImage, __CreateView, __CreateScrollView, __CreateRawText, __CreateList, ",
+            "__AppendElement, __InsertElementBefore, __RemoveElement, __ReplaceElement, ",
+            "__ReplaceElements, __SwapElement, __SetClasses, __SetID, __GetID, __GetTag, ",
+            "__GetChildren, __GetAttributeByName, __GetAttributeNames, __GetElementUniqueID, ",
+            "__SetDataset, __GetDataset, __AddDataset, __SetInlineStyles, __AddInlineStyle, ",
+            "__SetCSSId, __SetAttribute, __UpdateListCallbacks, __AddEvent, __GetEvent, ",
+            "__GetEvents, __SetEvents, __AddEventListener, __RemoveEventListener, ",
+            "__StopPropagation, __StopImmediatePropagation, __GetPageElement, __QuerySelector, ",
+            "__QuerySelectorAll, __InvokeUIMethod, __GetComputedStyleByKey, __FlushElementTree ",
+            "} from \"bobcat:element\"; ",
+        )
+    };
+}
+pub(crate) use mts_chunk_preamble;
+
+/// Named imports prepended to one *MTS chunk body* before it is registered as
+/// a module: every binding `main::runtime`'s `ENTRY_PREAMBLE` gives a card's
+/// entry, which is what a lazy container's `main-thread` section expects to
+/// find in scope.
+///
+/// One physical line, deliberately: the body follows it on the same line, so
+/// every line of the body keeps the number it had in the container. The entry
+/// preamble is built from the same literal, so the two lists cannot drift.
+///
+/// `bobcat-source`'s lazy-container installer is what prepends it; it lives
+/// here because the names are this realm's.
+pub const MTS_CHUNK_PREAMBLE: &str = mts_chunk_preamble!();
+
 /// BTS bindings live separately from the bootstrap that awaits the app entry.
 pub(crate) const BTS_RUNTIME_MODULE_SPECIFIER: &str = "bobcat:bts-runtime";
 pub(crate) const BTS_RUNTIME_MODULE_SOURCE: &str = runtime_source!("background-thread-runtime");
@@ -81,6 +119,21 @@ pub const BTS_CHUNK_PREAMBLE: &str = concat!(
     "alert = undefined, confirm = undefined, prompt = undefined, webkit = undefined, ",
     "Reporter = undefined, print = undefined, global = undefined; ",
 );
+
+/// The URL rule both realms write a container's section and stylesheet URLs
+/// with — one module so the two cannot drift, and so `bobcat-source` has one
+/// rule to register under.
+pub(crate) const SECTION_URL_MODULE_SPECIFIER: &str = "bobcat:section-url";
+pub(crate) const SECTION_URL_MODULE_SOURCE: &str = runtime_source!("section-url");
+
+/// `lynx.fetchBundle`'s handle: the `{wait, then}` object and the callback
+/// list, over the [`Future`] a `fetchResource` ([`crate::fetch`]) answers
+/// with. Both realm kinds import it, because either thread's card may ask
+/// for a lazy container.
+///
+/// [`Future`]: crate::future
+pub(crate) const BUNDLE_FETCH_MODULE_SPECIFIER: &str = "bobcat:bundle-fetch";
+pub(crate) const BUNDLE_FETCH_MODULE_SOURCE: &str = runtime_source!("bundle-fetch");
 
 /// BTS query builders carry selection tokens across Worker messages.
 pub(crate) const SELECTOR_QUERY_SPECIFIER: &str = "bobcat:selector-query";

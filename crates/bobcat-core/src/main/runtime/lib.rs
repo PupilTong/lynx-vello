@@ -37,10 +37,11 @@ use smallvec::SmallVec;
 use super::quickjs::{ScriptEngine, ScriptRuntime};
 use crate::clock::ClockInstant;
 use crate::esm::{
-    BTS_MODULE_SPECIFIER, CONTEXT_MODULE_SOURCE, CONTEXT_MODULE_SPECIFIER,
-    EVENT_TARGET_MODULE_SPECIFIER, EVENT_TARGET_SOURCE, FUTURE_MODULE_SOURCE,
-    FUTURE_MODULE_SPECIFIER, HOST_MODULE_SPECIFIER, REQUIRE_MODULE_SOURCE,
-    REQUIRE_MODULE_SPECIFIER, TIMER_MODULE_SOURCE, TIMER_MODULE_SPECIFIER,
+    BTS_MODULE_SPECIFIER, BUNDLE_FETCH_MODULE_SOURCE, BUNDLE_FETCH_MODULE_SPECIFIER,
+    CONTEXT_MODULE_SOURCE, CONTEXT_MODULE_SPECIFIER, EVENT_TARGET_MODULE_SPECIFIER,
+    EVENT_TARGET_SOURCE, FUTURE_MODULE_SOURCE, FUTURE_MODULE_SPECIFIER, HOST_MODULE_SPECIFIER,
+    REQUIRE_MODULE_SOURCE, REQUIRE_MODULE_SPECIFIER, SECTION_URL_MODULE_SOURCE,
+    SECTION_URL_MODULE_SPECIFIER, TIMER_MODULE_SOURCE, TIMER_MODULE_SPECIFIER,
 };
 use crate::link::{InputEventPayload, ViewNotice, ViewOutbox};
 use crate::main::tree::{ImageOutcomes, LynxDocument, PageConfig, new_document};
@@ -136,70 +137,14 @@ const RUNTIME_MODULE_SOURCE: &str = crate::esm::runtime_source!("main-thread-run
 
 mod style_sheets;
 
-const ENTRY_PREAMBLE: &str = r#"import {
-  __Card__,
-  lynx,
-  console,
-  SystemInfo,
-  __globalProps,
-  NativeModules,
-  _AddEventListener,
-  _ReportError,
-  _SetSourceMapRelease,
-  __OnLifecycleEvent,
-  __LoadLepusChunk,
-  __LoadStyleSheet,
-  __AdoptStyleSheet,
-} from "bobcat:runtime";
-import {
-  __CreatePage,
-  __CreateElement,
-  __CreateWrapperElement,
-  __CreateText,
-  __CreateImage,
-  __CreateView,
-  __CreateScrollView,
-  __CreateRawText,
-  __CreateList,
-  __AppendElement,
-  __InsertElementBefore,
-  __RemoveElement,
-  __ReplaceElement,
-  __ReplaceElements,
-  __SwapElement,
-  __SetClasses,
-  __SetID,
-  __GetID,
-  __GetTag,
-  __GetChildren,
-  __GetAttributeByName,
-  __GetAttributeNames,
-  __GetElementUniqueID,
-  __SetDataset,
-  __GetDataset,
-  __AddDataset,
-  __SetInlineStyles,
-  __AddInlineStyle,
-  __SetCSSId,
-  __SetAttribute,
-  __UpdateListCallbacks,
-  __AddEvent,
-  __GetEvent,
-  __GetEvents,
-  __SetEvents,
-  __AddEventListener,
-  __RemoveEventListener,
-  __StopPropagation,
-  __StopImmediatePropagation,
-  __GetPageElement,
-  __QuerySelector,
-  __QuerySelectorAll,
-  __InvokeUIMethod,
-  __GetComputedStyleByKey,
-  __FlushElementTree,
-} from "bobcat:element";
-//# allFunctionsCalledOnLoad
-"#;
+/// What the MTS entry is given, which is [`crate::esm::MTS_CHUNK_PREAMBLE`] — the same
+/// list a lazy container's `main-thread` body is compiled against — plus the
+/// marker the compiler's own wrapper looks for. Built from it rather than
+/// written twice, so the two lists cannot drift.
+const ENTRY_PREAMBLE: &str = concat!(
+    crate::esm::mts_chunk_preamble!(),
+    "\n//# allFunctionsCalledOnLoad\n"
+);
 
 pub(crate) fn entry_module_source(source: &str) -> String {
     let mut module = String::with_capacity(ENTRY_PREAMBLE.len() + source.len());
@@ -513,7 +458,8 @@ pub(crate) struct MainThreadRuntime {
     workers: Rc<super::workers::WorkerOwner>,
     slot: Rc<RefCell<DocumentSlot>>,
     timers: Rc<TimerState>,
-    /// Every host-backed operation this realm holds a `Future` for.
+    /// Every host-backed operation this realm holds a `Future` for, every
+    /// `fetchResource` included.
     futures: Rc<crate::future::FutureTable>,
     /// The newest reading of the view's timeline this side has been handed —
     /// a `BeginFrame`'s `now` or a vsync's, both in milliseconds off the same
@@ -597,6 +543,15 @@ impl MainThreadRuntime {
             thread.clone(),
         )
         .map_err(|error| MainThreadError::from_engine("installing Future", error))?;
+        // Beside the table rather than over a wait of its own: what a fetch
+        // hands JavaScript is a future id.
+        crate::fetch::install(
+            &mut engine,
+            js_runtime,
+            &outbox.host_outbox(outbox.token().clone()),
+            &futures,
+        )
+        .map_err(|error| MainThreadError::from_engine("installing fetchResource", error))?;
         crate::require::install(
             &mut engine,
             js_runtime,
@@ -1224,6 +1179,7 @@ await Promise.resolve().then(() => __FlushElementTree());
                 Err("a module request returned a stylesheet".to_owned())
             }
             Ok(LoadedSource::Font(_)) => Err("a module request returned a font".to_owned()),
+            Ok(LoadedSource::Fetched) => Err("a module request returned a plain fetch".to_owned()),
             Err(error) => Err(format!("module '{name}': {error}").replace('\0', "\u{fffd}")),
         };
         self.engine
@@ -1312,6 +1268,16 @@ pub(crate) fn install_shared_modules(
     js_runtime
         .register_module_source(FUTURE_MODULE_SPECIFIER, FUTURE_MODULE_SOURCE)
         .map_err(|error| MainThreadError::from_engine("registering the Future module", error))?;
+    js_runtime
+        .register_module_source(SECTION_URL_MODULE_SPECIFIER, SECTION_URL_MODULE_SOURCE)
+        .map_err(|error| {
+            MainThreadError::from_engine("registering the section URL module", error)
+        })?;
+    js_runtime
+        .register_module_source(BUNDLE_FETCH_MODULE_SPECIFIER, BUNDLE_FETCH_MODULE_SOURCE)
+        .map_err(|error| {
+            MainThreadError::from_engine("registering the bundle fetch module", error)
+        })?;
     js_runtime
         .register_module_source(REQUIRE_MODULE_SPECIFIER, REQUIRE_MODULE_SOURCE)
         .map_err(|error| MainThreadError::from_engine("registering the require module", error))

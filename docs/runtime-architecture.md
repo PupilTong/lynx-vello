@@ -796,9 +796,12 @@ rejecting with an `Error` carrying the host's reason. A `wait` after that
 conversion is a `TypeError`, because the delivery is a job and a job cannot run
 inside another job's wait. The class is the `packages/bobcat-element` source
 module `future.ts`, over three host members — `waitFuture(id, timeoutMs)`,
-`takeFuture(id)` and `settleFuture(id)`. Both realm kinds have all three. No
-production operation registers a future yet; the table is what
-`lynx.fetchBundle` will be written over.
+`takeFuture(id)` and `settleFuture(id)`. Both realm kinds have all three. The
+production operation registered in it is `fetchResource(url)`'s plain host
+fetch — the member `lynx.fetchBundle`'s `{wait, then}` handle is written over,
+one Future per fetch, except for a URL the fetcher's `fetch_probe` says this
+view already fetched, which answers `true` and registers nothing; a test-only
+`testFuture` producer exercises the table itself.
 
 The bridge keeps built-in sources on the shared runtime and entry/imported
 sources on each realm. A missing module creates one `SourceRequest::Module` per
