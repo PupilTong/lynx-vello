@@ -403,18 +403,37 @@ and §D.16 with what the wire format actually permits.)*
 
         **The post-layout recascade loop** is `Document::layout`, which is Gecko's
         `UpdateContainerQueryStyles` in this engine's shape: a pass whose recorded sizes moved
-        marks each moved container's **descendants** (`RECASCADE_DESCENDANTS` — a container's
-        own `cqw` answers to *its* nearest container, an ancestor) and lays out again. It is
-        capped at `CONTAINER_PASSES = 4`; a container's supplied axes are contained, so its
-        size cannot answer to its own contents and the loop converges in the nesting depth of
-        containers that move together. Past the cap the last layout stands and the marks it
-        left are resolved by the next flush — one commit behind at worst.
+        marks, under each moved container, the elements that actually resolved a container unit,
+        and lays out again. The search starts at the container's flat children — a container's
+        own `cqw` answers to *its* nearest container, an ancestor — and the elements it marks are
+        the ones whose primary style carries `ComputedValueFlags::USES_CONTAINER_UNITS`, which
+        Stylo sets on every cascade that resolved a `cqw`/`cqh`, including one that fell back to
+        the viewport because the container had no size yet. **Inherited effects are Stylo's**: a
+        marked `font-size: 10cqw` element whose inherited values move propagates `RECASCADE_SELF`
+        to its children through the child cascade requirement, so a grandchild's `2em` follows
+        without being marked here. A nested container does not stop the search, because an
+        `inline-size` container supplies no block axis and a `cqh` under it still answers to the
+        outer one; the extra element that marks re-cascades to the value it already had. Each
+        mark is `RestyleHint::RECASCADE_SELF` — cascade again, do not match again — which is
+        sound *because* it is made inside the loop: the very next `layout_pass` flushes it, in
+        the same `layout()` call, with no animation tick reachable in between.
+        `remove_animation_hints` deletes `RECASCADE_SELF` outright, so that spelling is only
+        safe for a mark nothing can outlive. The loop is capped at `CONTAINER_PASSES = 4`; a
+        container's supplied axes are contained, so its size cannot answer to its own contents
+        and the loop converges in the nesting depth of containers that move together. **The cap
+        iteration is the exception**: its marks are laid out by nobody here and wait for
+        whatever flush comes next, which an animation tick can precede, so that iteration falls
+        back to `Document::mark_subtree_recascade`'s tick-surviving `RESTYLE_SELF |
+        RECASCADE_DESCENDANTS` on each moved container — the coarse whole-subtree mark, which
+        also recascades the container itself. Either way the last layout stands and the document
+        is one commit behind at worst.
 
-        Two gates keep this free for everyone else. The changed list is empty unless a
-        container's content box actually moved, and the document only recascades at all once
-        some style it cascaded carried `ComputedValueFlags::USES_CONTAINER_UNITS` — a page with
-        query containers and no `cqw`/`cqh` has nothing to re-resolve. A page with neither pays
-        one enum test per committing box and one `is_empty` test per layout.
+        Three gates keep this free for everyone else. The changed list is empty unless a
+        container's content box actually moved, the document only recascades at all once some
+        style it cascaded carried `USES_CONTAINER_UNITS` — a page with query containers and no
+        `cqw`/`cqh` has nothing to re-resolve — and a moved container with no user under it
+        marks nothing and owes no pass. A page with neither feature pays one enum test per
+        committing box and one `is_empty` test per layout.
 
         **The `@container` at-rule is still out**: it is gecko-only in the fork, so nothing
         matches a size or style query. `container-name` parses and cascades and nothing

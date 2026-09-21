@@ -2,9 +2,10 @@
 //! `container-type` query container cost inside one `Document::layout` call.
 //!
 //! A query container's content box is a cascade input that only layout can
-//! produce, so `Document::layout` runs a loop: lay out, mark the descendants
-//! of every size container whose recorded content box moved for recascade,
-//! and lay out again, up to `CONTAINER_PASSES` times. The loop is gated on a
+//! produce, so `Document::layout` runs a loop: lay out, mark for recascade
+//! the elements that resolved such a unit under every size container whose
+//! recorded content box moved, and lay out again, up to `CONTAINER_PASSES`
+//! times. The loop is gated on a
 //! sticky document bit set when a cascaded style resolved a container-relative
 //! unit, so a page with query containers and no `cqw`/`cqh` pays one
 //! emptiness test for it.
@@ -22,29 +23,37 @@
 //!   containers come out narrower than the viewport, so the second pass both re-cascades and
 //!   re-lays-out every leaf. `cqw_leaves_root_container` makes the page itself the only container,
 //!   whose content box equals the viewport, so the second pass re-cascades every leaf and produces
-//!   the same styles — the recascade half of the loop with the relayout half removed. `vw_leaves`
-//!   is the ordinary viewport-unit path for reference: the same 40px leaf width reached without any
-//!   container machinery. It carries no containers at all, so it is not a unit-for-unit comparison
-//!   against `px_leaves_in_containers` — a group that is not a size container sizes to its contents
-//!   instead of sizing as if empty — and only the two `cqw` cases are read against that baseline.
+//!   the same styles — the recascade half of the loop with the relayout half removed.
+//!   `mixed_leaves_in_containers` is the same page with one `cqw` leaf per group among 99 px ones:
+//!   the container moves and 1 % of its subtree reads it, which is what separates re-cascading a
+//!   resized container's whole subtree from re-cascading the elements that resolved a unit.
+//!   `vw_leaves` is the ordinary viewport-unit path for reference: the same 40px leaf width reached
+//!   without any container machinery. It carries no containers at all, so it is not a unit-for-unit
+//!   comparison against `px_leaves_in_containers` — a group that is not a size container sizes to
+//!   its contents instead of sizing as if empty — and only the `cqw` and `mixed` cases are read
+//!   against that baseline.
 //! - **`container_resize`** — every group's width is set through an inline style on a laid-out
 //!   document, then `layout()` once. `px_leaves` resizes the same containers with the gate shut, so
 //!   it is the one-pass cost of the resize itself; `cqw_leaves` is that plus the recascade of every
-//!   leaf under a moved container and the relayout the new widths force.
+//!   leaf under a moved container and the relayout the new widths force; `mixed_leaves` is the same
+//!   resize where one leaf per container reads it.
 //! - **`viewport_resize`** — `set_viewport` then `layout()` on a laid-out document. The groups are
 //!   a fixed `300px` wide, so no container moves and the loop never runs a second pass in either
 //!   shape. What is left is what a container unit costs a whole-document recascade that would have
 //!   happened anyway: the walk up the ancestor chain per resolution, and the style-sharing cache
 //!   refusing to share a `USES_CONTAINER_UNITS` style across two different parents.
 //!
-//! Two follow-ups are expected to move specific numbers here. Re-cascading
-//! only the elements that actually resolved a container unit, rather than a
-//! resized container's whole subtree, is measured by
-//! `first_layout/cqw_leaves_root_container` and `container_resize/cqw_leaves`
-//! — the cases whose second pass is dominated by the recascade. Interleaving
-//! the recascade into layout, so a container's contents are styled once its
-//! own size is final rather than after a whole pass, is measured by what is
-//! left of the gap between `first_layout/cqw_leaves_in_containers` and
+//! Re-cascading only the elements whose style carries
+//! `USES_CONTAINER_UNITS`, rather than a resized container's whole subtree,
+//! is measured by the two `mixed` cases against their `px` baselines. It is
+//! *not* measurable in the all-`cqw` shapes: every element under the
+//! container is a reader there, so the targeted walk marks exactly the set
+//! the subtree mark did, and what those cases report is what finding them
+//! costs — one subtree walk, and a selector rematch per reader in place of a
+//! bare recascade. Interleaving the recascade into layout, so a container's
+//! contents are styled once its own size is final rather than after a whole
+//! pass, is the follow-up left, measured by what is left of the gap between
+//! `first_layout/cqw_leaves_in_containers` and
 //! `first_layout/px_leaves_in_containers`.
 
 use divan::black_box;
@@ -155,6 +164,18 @@ page { display: flex; flex-direction: column; container-type: size;
 .leaf { display: flex; height: 2px; width: 10cqw; }
 ";
 
+/// The same containers with one `10cqw` leaf per group among 99 px ones —
+/// the shape a page that uses the feature sparingly has, and the one the
+/// targeted recascade is for. Every element under the container reads it in
+/// the two all-`cqw` shapes above, so no marking rule can visit fewer of
+/// them; here 1 % of the subtree does.
+const MIXED_LEAVES_IN_CONTAINERS: &str = "
+page { display: flex; flex-direction: column; width: 400px; height: 600px; }
+.group { display: flex; flex-direction: column; container-type: size; width: 300px; }
+.leaf { display: flex; height: 2px; width: 10px; }
+.reader { display: flex; height: 2px; width: 10cqw; }
+";
+
 /// No containers at all, and leaves 10% of the viewport wide — the same 40px
 /// by the path that has always existed.
 const VW_LEAVES: &str = "
@@ -163,25 +184,34 @@ page { display: flex; flex-direction: column; width: 400px; height: 600px; }
 .leaf { display: flex; height: 2px; width: 10vw; }
 ";
 
-/// The four shapes `first_layout` compares.
-const FIRST_LAYOUT_SHAPES: [&str; 4] = [
+/// The five shapes `first_layout` compares.
+const FIRST_LAYOUT_SHAPES: [&str; 5] = [
     "px_leaves_in_containers",
     "cqw_leaves_in_containers",
+    "mixed_leaves_in_containers",
     "cqw_leaves_root_container",
     "vw_leaves",
 ];
 
-/// The two a resize compares: the same page, the leaf unit apart.
-const RESIZE_SHAPES: [&str; 2] = ["px_leaves", "cqw_leaves"];
+/// The three a resize compares: the same page, the leaf unit apart.
+const RESIZE_SHAPES: [&str; 3] = ["px_leaves", "cqw_leaves", "mixed_leaves"];
 
 fn shape_css(shape: &str) -> &'static str {
     match shape {
         "px_leaves_in_containers" | "px_leaves" => PX_LEAVES_IN_CONTAINERS,
         "cqw_leaves_in_containers" | "cqw_leaves" => CQW_LEAVES_IN_CONTAINERS,
+        "mixed_leaves_in_containers" | "mixed_leaves" => MIXED_LEAVES_IN_CONTAINERS,
         "cqw_leaves_root_container" => CQW_LEAVES_ROOT_CONTAINER,
         "vw_leaves" => VW_LEAVES,
         other => panic!("no page shape named {other}"),
     }
+}
+
+/// Whether the shape gives each group's last leaf the class that reads the
+/// container. The settled-width check runs on that leaf, so a mixed shape is
+/// checked against the reader's value rather than a px one.
+fn has_reader_leaf(shape: &str) -> bool {
+    shape.starts_with("mixed")
 }
 
 /// The width a leaf must end one settled `layout()` at — what makes each
@@ -191,7 +221,10 @@ fn settled_leaf_width(shape: &str) -> f32 {
         "px_leaves_in_containers" | "px_leaves" => 10.0,
         // 10cqw of the 300px container, after the pass that resolved it
         // against the 400px viewport fallback.
-        "cqw_leaves_in_containers" | "cqw_leaves" => 30.0,
+        "cqw_leaves_in_containers"
+        | "cqw_leaves"
+        | "mixed_leaves_in_containers"
+        | "mixed_leaves" => 30.0,
         // 10cqw of a container whose content box is the viewport, and 10vw of
         // the same viewport.
         "cqw_leaves_root_container" | "vw_leaves" => 40.0,
@@ -218,9 +251,12 @@ fn page(shape: &str) -> Page {
         let group = doc.create_element("view", ());
         doc.add_class(group, "group");
         doc.append_child(root, group);
-        for _ in 0..LEAVES_PER_GROUP {
+        for index in 0..LEAVES_PER_GROUP {
             let leaf = doc.create_element("view", ());
             doc.add_class(leaf, "leaf");
+            if has_reader_leaf(shape) && index + 1 == LEAVES_PER_GROUP {
+                doc.add_class(leaf, "reader");
+            }
             doc.append_child(group, leaf);
             last_leaf = Some(leaf);
         }
