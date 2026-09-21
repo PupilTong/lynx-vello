@@ -70,6 +70,34 @@ fn booted() -> TestEngine {
         .boot()
 }
 
+/// The same square, inside a box that skips its contents.
+const SKIPPED_SLIDER_SCRIPT: &str = r"
+    globalThis.renderPage = function renderPage() {
+      const page = __CreatePage('card', 0);
+      const skipper = __CreateView(0);
+      __SetClasses(skipper, 'skipper');
+      const slider = __CreateView(0);
+      __SetClasses(slider, 'slider');
+      __AppendElement(skipper, slider);
+      __AppendElement(page, skipper);
+      __FlushElementTree();
+    };
+";
+
+/// [`slider_sheet`] plus the `content-visibility: hidden` box that wraps it.
+fn skipping_sheet() -> PreparsedStyleSheet {
+    let mut sheet = slider_sheet();
+    sheet.rules.push(PreparsedRule::Style {
+        selectors: ".skipper".to_owned(),
+        declarations: vec![
+            declaration("width", "16px"),
+            declaration("height", "16px"),
+            declaration("content-visibility", "hidden"),
+        ],
+    });
+    sheet
+}
+
 /// The x of the leftmost red pixel in the committed frame.
 fn red_left_edge(engine: &mut TestEngine) -> usize {
     let shot = engine.capture().expect("capture the committed frame");
@@ -163,5 +191,38 @@ fn one_reading_places_every_animation_in_a_frame() {
         red_left_edge(&mut engine),
         held,
         "and time passing between frames cannot move it inside one"
+    );
+}
+
+/// css-contain-2 §4: an animation whose element is in a skipped subtree does
+/// not advance, so it is not something the engine owes a frame for. The same
+/// infinite animation that keeps
+/// [`a_keyframes_animation_moves_the_committed_frame_on_the_frame_clock`]
+/// asking forever leaves the host idle from here, which is what a host reads
+/// off `Painter::is_animating` (and, on a window, `owes_frame`).
+#[test]
+fn an_animation_inside_a_skipped_subtree_leaves_the_painter_idle() {
+    let mut engine = TestViewSpec::new(SKIPPED_SLIDER_SCRIPT)
+        .with_preparsed_style_sheet(skipping_sheet())
+        .offscreen(32.0, 24.0)
+        .boot();
+
+    engine.painter.clock.pin(0.0);
+    engine.tick(true).expect("render the first frame");
+
+    assert!(
+        !engine
+            .published_frame()
+            .expect("boot committed a frame")
+            .animations_active(),
+        "the commit reports the timeline idle: its only animation is frozen"
+    );
+    assert!(
+        !engine.is_animating(),
+        "so the host is never asked for the next frame"
+    );
+    assert!(
+        !engine.painter.owes_frame(),
+        "and neither is a windowed one"
     );
 }

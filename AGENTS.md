@@ -1790,6 +1790,14 @@ Rulings and limits to know before touching it:
   as `CoreStyle::skips_contents`. A relevance flip reveals inside the same
   commit (`crates/dom/src/visual/relevance.rs`, at most four build passes
   under one commit id), so no frame is published with a reveal pending.
+- Animations and transitions inside **skipped contents** are frozen
+  (css-contain-2 §4): the driver carries their start times by each tick's
+  interval rather than stepping them, the skipping element's own animations are
+  untouched, and a frozen set counts as idle for `has_active_animations`, the
+  frame's animation flags and so `Painter::owes_frame`. The one deviation —
+  style is not skipped, so an animation that *starts* while skipped is created
+  and frozen at its start rather than not created — is in
+  `docs/style-assumptions.md` §19.
 - The crate dispatches no events and has no `preventDefault` and no gesture
   recognizer; `InputEvent::default_prevented` is the embedder's seam.
 - Custom elements are user-agent components only, `define` must precede any

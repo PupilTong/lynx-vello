@@ -516,7 +516,13 @@ impl<T: Sync> Document<T> {
         self.layout();
         let _ = self.next_commit_id();
         let frame = self.build_frame_with_relevance();
-        let animations_active = self.animations().is_active();
+        // Asked again now the frame is final: the relevance pass inside the
+        // build reveals and skips subtrees with no style change to notice it,
+        // and css-contain-2 §4 freezes the animations inside a skipped one.
+        // So the flag this frame carries is decided after the last pass, and
+        // a reveal starts its animations in the very commit that revealed
+        // them.
+        let animations_active = self.refresh_animation_activity();
         let needs_main_ticks = animations_active && self.animation_needs_main_ticks(&frame);
         let viewport = self.viewport_size();
         let device_pixel_ratio = self.device_pixel_ratio();

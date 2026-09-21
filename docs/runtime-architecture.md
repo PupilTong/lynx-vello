@@ -1284,7 +1284,18 @@ compositor animates alone.
 committed frame reports `needs_main_ticks` — something animating that could
 not export — and once when a finite curve runs past its end, so the main
 thread runs the finish restyle and commits the end state. An infinite
-exported animation involves the main thread zero times per frame. The
+exported animation involves the main thread zero times per frame. An animation
+**frozen** by css-contain-2 §4 narrows it all the way to nothing: an element in
+a skipped subtree (`content-visibility: hidden`, or a non-relevant
+`content-visibility: auto` box) does not advance its timeline, so the commit
+reports neither `animations_active` nor `needs_main_ticks` for it and
+`owes_frame`/`is_animating` stay false — a page whose only animations are
+frozen is idle, and the host stops reading its display clock for it entirely.
+The reveal — a style change, or the relevance flip the commit itself makes —
+reactivates it in that same commit, and the first `BeginFrame` after it is
+where the animation resumes, from exactly the progress the freeze found (the
+driver carries its start times by every interval it slept through; see
+`crates/dom/src/style/animation.rs`). The
 sampling mirrors stylo's own progress computation exactly, so the values
 composition shows between commits are the values any commit's restyle
 lands on at the same instant — handoffs are seamless in both directions.
