@@ -42,7 +42,9 @@ use crate::esm::{
     REQUIRE_MODULE_SOURCE, REQUIRE_MODULE_SPECIFIER, TIMER_MODULE_SOURCE, TIMER_MODULE_SPECIFIER,
 };
 use crate::link::{InputEventPayload, ViewNotice, ViewOutbox};
-use crate::main::tree::{LynxDocument, PageConfig, apply_attribute_style, new_document};
+use crate::main::tree::{
+    ImageOutcomes, LynxDocument, PageConfig, apply_attribute_style, new_document,
+};
 use crate::resource::StyleSheetSource;
 use crate::script::ScriptError;
 use crate::timers::{TimerState, install_timer_members, run_due_timers};
@@ -52,6 +54,79 @@ const BOOT_MODULE_SPECIFIER: &str = "bobcat:boot";
 const ELEMENT_MODULE_SPECIFIER: &str = "bobcat:element";
 const RUNTIME_MODULE_SPECIFIER: &str = "bobcat:runtime";
 const EVENT_DISPATCH_EXPORT: &str = "__BobcatDispatchEvent";
+
+/// What an element's own image source settling is called. Both are web-core's
+/// names, which are the browser's (`XImage/ImageEvents.ts`), and both are
+/// non-bubbling.
+const LOAD_EVENT: &str = "load";
+const ERROR_EVENT: &str = "error";
+
+/// What one dispatch's `detail` is made of, as it crosses the boundary: a
+/// discriminator and the numbers that kind spends. The object itself is built
+/// in the realm, because its shape is JavaScript's.
+///
+/// One kind per detail *shape* rather than per event name. The realm reads the
+/// discriminator alone — nothing there branches on which event is being
+/// delivered — which is what keeps the one dispatch export general.
+enum EventDetail<'a> {
+    /// Every routed input event: the device position, the wheel delta an event
+    /// may not have, and the four numbers per point the touch events carry.
+    Input(&'a InputEventPayload),
+    /// An `<image>`'s `load`: the bitmap's intrinsic size, in px.
+    Size { width: f64, height: f64 },
+    /// An `<image>`'s `error`: the realm's `{}`, and no numbers at all.
+    Empty,
+}
+
+/// The discriminators [`EventDetail`] crosses as. Mirrored by the realm's own
+/// `DETAIL_*` constants in `element-papi.ts`.
+const DETAIL_INPUT: f64 = 0.0;
+const DETAIL_SIZE: f64 = 1.0;
+const DETAIL_EMPTY: f64 = 2.0;
+
+impl EventDetail<'_> {
+    const fn kind(&self) -> f64 {
+        match self {
+            Self::Input(_) => DETAIL_INPUT,
+            Self::Size { .. } => DETAIL_SIZE,
+            Self::Empty => DETAIL_EMPTY,
+        }
+    }
+
+    /// Appends the numbers this kind spends, in the order the realm reads
+    /// them.
+    fn push_numbers<'a>(&'a self, arguments: &mut SmallVec<[HostArgument<'a>; 10]>) {
+        match *self {
+            Self::Input(payload) => {
+                arguments.push(HostArgument::Number(f64::from(payload.position.x)));
+                arguments.push(HostArgument::Number(f64::from(payload.position.y)));
+                // `undefined` rather than a number for every event without a
+                // wheel delta, which is what makes the two `detail` keys
+                // absent there rather than `NaN`.
+                for delta in [
+                    payload.wheel.map(|delta| delta.x),
+                    payload.wheel.map(|delta| delta.y),
+                ] {
+                    arguments.push(match delta {
+                        Some(value) => HostArgument::Number(f64::from(value)),
+                        None => HostArgument::Undefined,
+                    });
+                }
+                for point in &payload.touches {
+                    arguments.push(HostArgument::Number(f64::from(point.identifier)));
+                    arguments.push(HostArgument::Number(f64::from(point.position.x)));
+                    arguments.push(HostArgument::Number(f64::from(point.position.y)));
+                    arguments.push(HostArgument::Number(f64::from(point.flags)));
+                }
+            }
+            Self::Size { width, height } => {
+                arguments.push(HostArgument::Number(width));
+                arguments.push(HostArgument::Number(height));
+            }
+            Self::Empty => {}
+        }
+    }
+}
 
 /// Declarations one `__SetInlineStyles` record carries without touching the
 /// heap. Compiled `ReactLynx` records are a handful of properties.
@@ -263,6 +338,13 @@ struct DocumentSlot {
     /// What a `createDocument` builds from, taken by the first one that runs.
     ingredients: Option<DocumentIngredients>,
     document: Option<LynxDocument>,
+    /// The `load`s and `error`s the document's images owe, from both
+    /// producers: the `image` component, which settles a `src` inside the
+    /// `__SetAttribute` that wrote it, and [`MainThreadRuntime::apply_image_events`],
+    /// which settles one from the painting side's report. Held here rather
+    /// than inside the document because the component is the far end of it and
+    /// reaches nothing else; the runtime drains it once per entry.
+    image_outcomes: ImageOutcomes,
     /// Removals since the last collection; see [`REMOVALS_PER_COLLECTION`].
     removals: u32,
     /// Where committed frames leave for the painting side.
@@ -307,8 +389,9 @@ impl DocumentSlot {
             style_pool,
             pending_image_events,
         } = ingredients;
+        let outcomes = self.image_outcomes.clone();
         let mut document = construction_phase("building the page", || {
-            let mut document = new_document(viewport, config);
+            let mut document = new_document(viewport, config, outcomes);
             if let Some(pool) = style_pool {
                 document.set_style_pool(pool);
             }
@@ -330,7 +413,16 @@ impl DocumentSlot {
             }
         })?;
         construction_phase("replaying the image reports that arrived first", || {
-            document.apply_image_events(&pending_image_events);
+            // No element exists yet — the boot module's first statement is
+            // this construction — so no report can name one, and the outcomes
+            // are empty rather than dropped. What these reports do is settle
+            // the registry, so the card's first `src` naming one of them
+            // settles at its bind instead.
+            let outcomes = document.apply_image_events(&pending_image_events);
+            debug_assert!(
+                outcomes.is_empty(),
+                "a document with no elements cannot owe an image event"
+            );
         })?;
         self.document = Some(document);
         Ok(())
@@ -422,6 +514,18 @@ pub(crate) struct MainThreadRuntime {
     workers: Rc<super::workers::WorkerOwner>,
     slot: Rc<RefCell<DocumentSlot>>,
     timers: Rc<TimerState>,
+    /// The newest reading of the view's timeline this side has been handed —
+    /// a `BeginFrame`'s `now` or a vsync's, both in milliseconds off the same
+    /// epoch, the view's construction.
+    ///
+    /// The timeline is read on the painting side, where the frame clock is, so
+    /// a routed event arrives carrying its own reading and this is never used
+    /// for one. What it stamps is an event this side originates — an image's
+    /// `load` or `error`, which settles between frames — with the last moment
+    /// the two sides agreed on, and with the time origin before the first
+    /// frame. One clock, one epoch; nothing here takes a second reading of its
+    /// own.
+    timeline_milliseconds: f64,
 }
 
 impl fmt::Debug for MainThreadRuntime {
@@ -506,6 +610,7 @@ impl MainThreadRuntime {
                 workers,
                 slot,
                 timers,
+                timeline_milliseconds: 0.0,
             },
             incoming,
         ))
@@ -623,6 +728,9 @@ impl MainThreadRuntime {
     /// Advances the animation timeline to the painting side's clock
     /// reading. Whether anything changed is the next commit's business.
     pub(crate) fn begin_frame(&mut self, now: f64) {
+        // Seconds here, as the animation timeline wants them; milliseconds is
+        // what an event's `timestamp` is in.
+        self.timeline_milliseconds = now * 1000.0;
         let _ = self
             .slot
             .borrow_mut()
@@ -635,6 +743,7 @@ impl MainThreadRuntime {
         js: &mut ScriptRuntime,
         milliseconds: f64,
     ) -> Result<(), MainThreadError> {
+        self.timeline_milliseconds = milliseconds;
         self.engine
             .call_module_export(
                 js,
@@ -679,11 +788,76 @@ impl MainThreadRuntime {
         }
     }
 
+    /// Applies the painting side's image reports, queueing the `load`s and
+    /// `error`s they settle for this entry's epilogue to dispatch.
+    ///
+    /// Queued rather than dispatched here for one reason only — so that both
+    /// producers answer the same way. The other one is the `image` component,
+    /// which settles a `src` from inside the `__SetAttribute` that wrote it
+    /// and may not re-enter the realm at all.
     pub(crate) fn apply_image_events(&mut self, events: &[dom::ImageEvent]) {
-        self.slot
-            .borrow_mut()
-            .document_mut()
-            .apply_image_events(events);
+        let mut slot = self.slot.borrow_mut();
+        let outcomes = slot.document_mut().apply_image_events(events);
+        slot.image_outcomes.extend(outcomes);
+    }
+
+    /// Whether either producer has left an image event owing — the queue
+    /// [`Self::dispatch_image_outcomes`] drains, asked once per entry.
+    ///
+    /// One `is_empty`, because nearly every entry's answer is no: an entry
+    /// during which no source settled posts nothing. A `load` handler that
+    /// writes a `src` this document has already seen settle gets its outcome
+    /// at the bind, so a delivery entry can leave the queue non-empty for an
+    /// entry of its own.
+    pub(crate) fn has_image_outcomes(&self) -> bool {
+        !self.slot.borrow().image_outcomes.is_empty()
+    }
+
+    /// Dispatches everything [`Self::apply_image_events`] and the `image`
+    /// component have queued, in the order they settled.
+    ///
+    /// Called by the entry the page posts for the batch and by nothing else:
+    /// the events are tasks, not part of the entry that settled the source.
+    /// Each is one non-bubbling dispatch at the element whose own `src`
+    /// settled, which is web-core's shape for both events
+    /// (`commonEventInitConfiguration.ts`: `bubbles: false`). An element freed
+    /// between the outcome forming and this call resolves to nothing, exactly
+    /// as a routed input event at a freed target does.
+    ///
+    /// Returns what the listeners threw. A `load` handler that throws is
+    /// nonfatal, the standing every event listener has here.
+    pub(crate) fn dispatch_image_outcomes(
+        &mut self,
+        js_runtime: &mut ScriptRuntime,
+    ) -> Vec<MainThreadError> {
+        let outcomes = self.slot.borrow().image_outcomes.take();
+        let timestamp = self.timeline_milliseconds;
+        let mut failures = Vec::new();
+        for outcome in outcomes {
+            // [`EventDetail::Empty`] is the realm's `{}`, which is web-core's
+            // `error` detail exactly; a `load` carries the bitmap's
+            // *intrinsic* size, web-core's `naturalWidth`/`naturalHeight`,
+            // not the box it drew into.
+            let (target, name, detail) = match outcome {
+                dom::ImageOutcome::Loaded {
+                    node,
+                    width,
+                    height,
+                } => (
+                    node,
+                    LOAD_EVENT,
+                    EventDetail::Size {
+                        width: f64::from(width),
+                        height: f64::from(height),
+                    },
+                ),
+                dom::ImageOutcome::Failed { node } => (node, ERROR_EVENT, EventDetail::Empty),
+            };
+            if let Err(error) = self.dispatch(js_runtime, target, name, false, timestamp, &detail) {
+                failures.push(error);
+            }
+        }
+        failures
     }
 
     /// Runs `probe` against the realm's document — the observation seam for
@@ -697,27 +871,58 @@ impl MainThreadRuntime {
     /// the target crossed as plain data; the propagation path is computed
     /// here, where the document is, and the dispatch over it is the realm's.
     ///
-    /// A target freed since the decision formed resolves to nothing rather
-    /// than a path — a `NodeId` names one node for the life of the document,
-    /// so the check is one lookup and can never hit a stranger.
+    /// Every routed input event bubbles — the painting side routes what a
+    /// gesture produced, and Lynx has no non-bubbling input event — so this
+    /// is [`Self::dispatch`] with the flag set and the payload's numbers for
+    /// a detail. The events that do not bubble are an `<image>`'s `load` and
+    /// `error`, which [`Self::dispatch_image_outcomes`] delivers.
+    pub(crate) fn dispatch_input_event(
+        &mut self,
+        js_runtime: &mut ScriptRuntime,
+        target: dom::NodeId,
+        name: &str,
+        payload: &InputEventPayload,
+    ) -> Result<bool, MainThreadError> {
+        self.dispatch(
+            js_runtime,
+            target,
+            name,
+            true,
+            payload.timestamp,
+            &EventDetail::Input(payload),
+        )
+    }
+
+    /// One whole dispatch, whatever produced it: one call into the realm,
+    /// carrying the path, the flag that shapes the walk, the timestamp and
+    /// the numbers the `detail` is made of.
     ///
-    /// The path crosses as the standard's event path — the bubble steps, in
+    /// A target freed since the event formed resolves to nothing rather than
+    /// a path — a `NodeId` names one node for the life of the document, so
+    /// the check is one lookup and can never hit a stranger.
+    ///
+    /// The path crosses as the standard's event path — every step, in
     /// target-first, root-last order, each with its shadow-retargeted target
     /// — encoded as two comma-joined decimal id strings, which is how
     /// `childElementIds` carries a list already: the boundary takes
     /// primitives and structured clones only, a clone can be minted by the
     /// realm alone, and a decimal id cannot contain the separator. One call
     /// carries the whole dispatch, and what the realm then runs over it —
-    /// the two passes, the `global-bindEvent` pass after them, whether any
-    /// listener exists at all — is the realm's business, because every
-    /// registration lives there.
+    /// the passes, whether any listener exists at all — is the realm's
+    /// business, because every registration lives there.
+    ///
+    /// `bubbles` crosses as itself rather than as a shortened path, because
+    /// the passes narrow differently: a non-bubbling event still captures down
+    /// the whole path, binds on its at-target steps alone, and runs no
+    /// `global-bindEvent` pass at all — web-core's `common_event_handler`
+    /// (`web-core/src/main_thread/client/element_apis/event_apis.rs:413-432`),
+    /// which is handed the same one flag off the DOM event
+    /// (`WASMJSBinding.ts:254-258`). Sending a narrowed path instead would
+    /// lose the capture pass.
     ///
     /// Everything else crosses as numbers, and the realm builds the objects:
-    /// the `timestamp`, the position the `detail` reports, the wheel delta
-    /// (`undefined` for every event that has none, which is what makes the
-    /// two `detail` keys absent rather than `NaN`), and then four numbers per
-    /// touch point — `identifier`, `x`, `y`, flags — which the four touch
-    /// events alone carry. No JSON is formatted here and none is parsed
+    /// the `timestamp`, then [`EventDetail`]'s discriminator and whatever
+    /// numbers that kind spends. No JSON is formatted here and none is parsed
     /// there.
     ///
     /// The document is released before the call, which is what lets a
@@ -725,12 +930,14 @@ impl MainThreadRuntime {
     ///
     /// Returns whether the realm published the export, which is all the host
     /// can know: nothing here says whether anything ran.
-    pub(crate) fn dispatch_input_event(
+    fn dispatch(
         &mut self,
         js_runtime: &mut ScriptRuntime,
         target: dom::NodeId,
         name: &str,
-        payload: &InputEventPayload,
+        bubbles: bool,
+        timestamp: f64,
+        detail: &EventDetail<'_>,
     ) -> Result<bool, MainThreadError> {
         let steps = {
             let mut slot = self.slot.borrow_mut();
@@ -751,30 +958,17 @@ impl MainThreadRuntime {
             write!(targets, "{}", packed_node_id(step.target)).expect("writing to a String");
         }
 
-        // Inline for the eight an event without touches has; a touch event
-        // spills once, and its points are the only thing that ever grows this.
-        let mut arguments: SmallVec<[HostArgument<'_>; 8]> = SmallVec::from_buf([
-            HostArgument::String(&nodes),
-            HostArgument::String(&targets),
-            HostArgument::String(name),
-            HostArgument::Number(payload.timestamp),
-            HostArgument::Number(f64::from(payload.position.x)),
-            HostArgument::Number(f64::from(payload.position.y)),
-            match payload.wheel {
-                Some(delta) => HostArgument::Number(f64::from(delta.x)),
-                None => HostArgument::Undefined,
-            },
-            match payload.wheel {
-                Some(delta) => HostArgument::Number(f64::from(delta.y)),
-                None => HostArgument::Undefined,
-            },
-        ]);
-        for point in &payload.touches {
-            arguments.push(HostArgument::Number(f64::from(point.identifier)));
-            arguments.push(HostArgument::Number(f64::from(point.position.x)));
-            arguments.push(HostArgument::Number(f64::from(point.position.y)));
-            arguments.push(HostArgument::Number(f64::from(point.flags)));
-        }
+        // Inline for the ten an input event without touch points spends: six
+        // of header, then its four detail numbers. A touch event spills once,
+        // and its points are the only thing that ever grows this.
+        let mut arguments: SmallVec<[HostArgument<'_>; 10]> = SmallVec::new();
+        arguments.push(HostArgument::String(&nodes));
+        arguments.push(HostArgument::String(&targets));
+        arguments.push(HostArgument::String(name));
+        arguments.push(HostArgument::Boolean(bubbles));
+        arguments.push(HostArgument::Number(timestamp));
+        arguments.push(HostArgument::Number(detail.kind()));
+        detail.push_numbers(&mut arguments);
 
         let called = self
             .engine
@@ -1116,6 +1310,7 @@ fn install_bobcat(
     let handle = Rc::new(RefCell::new(DocumentSlot {
         ingredients: Some(ingredients),
         document: None,
+        image_outcomes: ImageOutcomes::default(),
         removals: 0,
         outbox,
     }));

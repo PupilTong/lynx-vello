@@ -116,7 +116,7 @@ use euclid::default::{Point2D, Rect, Size2D, Transform3D};
 pub(crate) use self::build::BuildScratch;
 pub use self::frame::{AnimationSlot, CommittedFrame, HitTarget, ScrollSlot};
 pub use self::relevance::ContentVisibilityChange;
-use crate::render::image::ImageEvent;
+use crate::render::image::{ImageEvent, ImageOutcome, ImageRole};
 use crate::tree::document::Document;
 use crate::{FrameImages, NodeId};
 
@@ -720,20 +720,37 @@ impl<T> Document<T> {
     /// A report that lands on replaced nodes recomputes their natural size in
     /// the same call, so an element resizes in the commit that first draws
     /// what it reports on.
-    pub fn apply_image_events(&mut self, events: &[ImageEvent]) {
+    ///
+    /// The [`ImageOutcome`]s are the elements whose *own* source settled, for
+    /// the embedder to turn into `load` and `error` events. A placeholder is
+    /// nobody's event, and a source reported twice is nobody's either: one URL
+    /// has one content, so only the report that moves it is carried.
+    pub fn apply_image_events(&mut self, events: &[ImageEvent]) -> Vec<ImageOutcome> {
+        let mut outcomes = Vec::new();
         for event in events {
             // `None` is a source reported twice, which one URL with one
             // content makes a no-op: nothing moved, so nothing is dirtied.
-            let Some(nodes) = self.images.apply(event) else {
+            let Some(applied) = self.images.apply(event) else {
                 continue;
             };
-            for (node, _role) in nodes {
+            for (node, role) in applied.nodes {
+                if role == ImageRole::Source {
+                    outcomes.push(match applied.loaded {
+                        Some((width, height)) => ImageOutcome::Loaded {
+                            node,
+                            width,
+                            height,
+                        },
+                        None => ImageOutcome::Failed { node },
+                    });
+                }
                 // Which bitmap the node draws may have changed, and with it
                 // the natural size that bitmap is fitted against.
                 self.refresh_natural_size(node);
             }
             self.note_visual_mutation();
         }
+        outcomes
     }
 
     /// Invalidates the retained frame because composition has moved a scroll

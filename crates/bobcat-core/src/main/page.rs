@@ -184,6 +184,13 @@ pub(super) struct Page {
     /// the two would post one of its own and each would find the batch
     /// already gone. One post per batch.
     content_visibility_posted: Cell<bool>,
+    /// Whether an entry that will deliver the `<image>` `load`s and `error`s
+    /// the runtime has queued is already queued and has not run yet.
+    ///
+    /// The same latch as [`Self::content_visibility_posted`], for the same
+    /// reason: the drain belongs to the delivery entry, so every entry that
+    /// runs between the post and it would otherwise post one more.
+    image_outcomes_posted: Cell<bool>,
     /// Every task of this view, the token that ends them, the latch this thread
     /// reads, and the two numbers this realm's clock task waits on — the
     /// deadline it armed and the generation its own last entry recorded.
@@ -237,6 +244,7 @@ impl Page {
             pending_begin_frame: Cell::new(None),
             boot_reported: Cell::new(false),
             content_visibility_posted: Cell::new(false),
+            image_outcomes_posted: Cell::new(false),
             lifetime,
             reported: Cell::new(false),
             #[cfg(test)]
@@ -356,12 +364,14 @@ impl Page {
     ///    discovered.
     /// 3. **The `contentvisibilityautostatechange` deliveries** that commit decided — posted as an
     ///    entry of their own, never run here: see [`Self::post_content_visibility_changes`].
-    /// 4. **The boot report**, once, so the frame exists before the event that implies it.
-    /// 5. **The `BeginFrame` acknowledgement**, for the same reason: a host blocked on the sequence
+    /// 4. **The `<image>` `load`s and `error`s** this entry settled — posted as an entry of their
+    ///    own too: see [`Self::post_image_outcomes`].
+    /// 5. **The boot report**, once, so the frame exists before the event that implies it.
+    /// 6. **The `BeginFrame` acknowledgement**, for the same reason: a host blocked on the sequence
     ///    number is blocked on that frame.
-    /// 6. **The module requests** this entry produced, each spawned as a load of its own.
-    /// 7. **The next timer deadline**, republished only when it moved.
-    /// 8. **The checkpoint generation**, so the clock task can tell this page's own bumps from a
+    /// 7. **The module requests** this entry produced, each spawned as a load of its own.
+    /// 8. **The next timer deadline**, republished only when it moved.
+    /// 9. **The checkpoint generation**, so the clock task can tell this page's own bumps from a
     ///    sibling's.
     fn epilogue(self: &Rc<Self>, runtime: &mut MainThreadRuntime, js: &mut ScriptRuntime) {
         if self.ended() {
@@ -377,6 +387,9 @@ impl Page {
             && !self.content_visibility_posted.replace(true)
         {
             self.post_content_visibility_changes();
+        }
+        if runtime.has_image_outcomes() && !self.image_outcomes_posted.replace(true) {
+            self.post_image_outcomes();
         }
         if !self.boot_reported.get() {
             // MTS boot alone: the entry module evaluated and its first flush
@@ -455,6 +468,48 @@ impl Page {
             // of its own, and it owes an entry of its own too.
             page.content_visibility_posted.set(false);
             runtime.dispatch_content_visibility_changes();
+        }));
+    }
+
+    /// Queues the entry that delivers one batch of `<image>` `load` and
+    /// `error` events, and waits for nothing.
+    ///
+    /// The same post as [`Self::post_content_visibility_changes`], because
+    /// these events have the same standing: a browser fires an `<img>`'s
+    /// `load` from a task, even for a URL the cache already holds, so a
+    /// listener never runs inside the entry that bound the `src` and what it
+    /// mutates is committed by this entry's own epilogue rather than by that
+    /// one's. Posting is also what makes the two producers answerable the
+    /// same way at all: the `image` component settles a source from inside
+    /// the `__SetAttribute` that wrote it, and dispatching from there would
+    /// re-enter the realm in the middle of a host call.
+    ///
+    /// The epilogue asks after its commit, beside the content-visibility
+    /// check, rather than before it. Nothing a commit does settles an image
+    /// source — the queue is filled by a bind or by the painting side's
+    /// report, both of which happen in the entry's body — so the position
+    /// cannot change what is posted; it sits with the other posted delivery
+    /// so that "what this entry owes an entry of its own" is one block.
+    ///
+    /// Unlike that one, this delivery **does** enter JavaScript: `load` and
+    /// `error` are script events, and the dispatch is the realm's
+    /// `__BobcatDispatchEvent` walk like every other one. A listener that
+    /// throws is nonfatal — [`EngineEvent::ListenerFailed`], the standing
+    /// every listener here has — and the rest of the batch is still
+    /// delivered.
+    ///
+    /// The latch is cleared at the start of the entry, before the drain: a
+    /// handler that writes a `src` this document has already seen settle gets
+    /// its outcome at the bind, which queues a new batch that owes an entry
+    /// of its own.
+    fn post_image_outcomes(self: &Rc<Self>) {
+        let page = Rc::clone(self);
+        drop(self.enter(move |runtime, js| {
+            page.image_outcomes_posted.set(false);
+            for failure in runtime.dispatch_image_outcomes(js) {
+                page.outbox
+                    .engine_event(EngineEvent::ListenerFailed(failure.into_script_error()));
+            }
         }));
     }
 

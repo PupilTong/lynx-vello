@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 use super::*;
 use crate::background::{WorkerCommand, WorkerMessage, WorkerStart};
 use crate::jobs::{JsThread, JsThreadHandle};
-use crate::link::{DetachedView, InputEventPayload, ViewNotice, detached_outbox};
+use crate::link::{DetachedView, InputEventPayload, PageUpdate, ViewNotice, detached_outbox};
 use crate::main::WorkerFactory;
 use crate::main::runtime::install_shared_modules;
 use crate::main::tree::PageConfig;
@@ -748,6 +748,204 @@ fn data_updates_are_visible_to_the_next_command_and_commit_without_an_explicit_f
             .await;
         assert_eq!(owned.view.published.commit(), Some(booted + 1));
         assert!(!owned.page.ended());
+    });
+}
+
+/// One image with a `bindload` that records what it was handed, and an
+/// `updatePage` that writes whichever source the host names.
+///
+/// The handler is a worklet because that is the only `__AddEvent` kind this
+/// realm runs — a string handler is published to the background thread, which
+/// no test here has.
+const LOADING_IMAGE: &str = r"
+globalThis.runWorklet = (value, params) => value.body(params[0]);
+globalThis.renderPage = function () {
+  const page = __CreatePage('card', 0);
+  const image = __CreateImage(0);
+  __AppendElement(page, image);
+  globalThis.image = image;
+  globalThis.loads = 0;
+  __AddEvent(image, 'bindEvent', 'load', {
+    type: 'worklet',
+    value: {
+      body: (event) => {
+        globalThis.loads += 1;
+        __SetAttribute(image, 'data-loaded', event.detail.width + 'x' + event.detail.height);
+        __SetAttribute(image, 'data-loads', String(globalThis.loads));
+      },
+    },
+  });
+};
+globalThis.updatePage = data => __SetAttribute(image, 'src', String(data.src));
+";
+
+/// The image's own attributes, read off the document.
+///
+/// A probe is an entry of the page's own, so this is what every other
+/// observation here is: one command, applied and awaited.
+async fn image_attributes(page: &Rc<Page>, name: &'static str) -> Option<String> {
+    let (answer, read) = std::sync::mpsc::channel();
+    page.apply(vec![ToMain::Probe(Box::new(move |document| {
+        let root = document.document_element().id();
+        let image = document.get(root).expect("the page is live").child_ids()[0];
+        let _ = answer.send(
+            document
+                .get(image)
+                .and_then(|node| node.attribute(name))
+                .map(str::to_owned),
+        );
+    }))])
+    .await;
+    read.try_recv().expect("the probe ran")
+}
+
+/// Both producers of an image event, end to end through the real page: a
+/// report from the painting side, and a `src` that settles at the bind
+/// because this document has already seen that URL.
+///
+/// Either way the delivery is an entry of its own, the way a browser fires an
+/// `<img>`'s `load` from a task even for a cached URL, so the epilogue count
+/// moves twice for one report: the entry that settled the source, and the
+/// entry that delivered what it settled.
+#[test]
+fn an_image_load_reaches_its_listener_in_an_entry_of_its_own() {
+    on_a_js_thread(|thread| async move {
+        let (context, _workers) = group(&thread);
+        let mut owned = OwnedPage::new(context);
+        let booted = owned.boot(LOADING_IMAGE).await;
+
+        // Neither source is on the element yet, so the second report settles
+        // the registry alone — nothing owes an event for it, and the entry
+        // that applied it posts none.
+        let settled = owned.page.epilogue_count();
+        owned
+            .page
+            .apply(vec![ToMain::ImageEvents(vec![dom::ImageEvent::Loaded {
+                source: Arc::from("app:///b.png"),
+                width: 10,
+                height: 5,
+            }])])
+            .await;
+        assert_eq!(owned.page.epilogue_count(), settled + 1);
+        assert_eq!(image_attributes(&owned.page, "data-loads").await, None);
+
+        // A source that has not loaded, then the report that settles it.
+        owned
+            .page
+            .apply(vec![ToMain::PageUpdate(PageUpdate::Data {
+                data: r#"{"src":"app:///a.png"}"#.into(),
+                processor_name: String::new(),
+                reset: false,
+            })])
+            .await;
+        assert_eq!(image_attributes(&owned.page, "data-loads").await, None);
+        let settled = owned.page.epilogue_count();
+        owned
+            .page
+            .apply(vec![ToMain::ImageEvents(vec![dom::ImageEvent::Loaded {
+                source: Arc::from("app:///a.png"),
+                width: 40,
+                height: 20,
+            }])])
+            .await;
+        assert_eq!(
+            owned.page.epilogue_count(),
+            settled + 2,
+            "the report was one entry, and the `load` it settled was another",
+        );
+        assert_eq!(
+            image_attributes(&owned.page, "data-loaded").await,
+            Some("40x20".to_owned())
+        );
+
+        // The other producer: binding a URL this document has already settled
+        // answers at the bind, inside the `__SetAttribute` that wrote it, and
+        // is delivered by an entry of its own rather than from inside it.
+        let settled = owned.page.epilogue_count();
+        owned
+            .page
+            .apply(vec![ToMain::PageUpdate(PageUpdate::Data {
+                data: r#"{"src":"app:///b.png"}"#.into(),
+                processor_name: String::new(),
+                reset: false,
+            })])
+            .await;
+        assert_eq!(
+            owned.page.epilogue_count(),
+            settled + 2,
+            "the `__SetAttribute` was one entry, and its own answer another",
+        );
+        assert_eq!(
+            image_attributes(&owned.page, "data-loaded").await,
+            Some("10x5".to_owned()),
+        );
+        assert_eq!(
+            image_attributes(&owned.page, "data-loads").await,
+            Some("2".to_owned()),
+            "one event per source that settled, and no repeat of the first",
+        );
+        assert!(owned.view.published.commit() > Some(booted));
+    });
+}
+
+/// An event a listener queues during the drain is a batch of its own, and
+/// owes an entry of its own: the latch is cleared before the walk, so the
+/// delivery entry's epilogue posts one more for what its own handler bound.
+#[test]
+fn an_image_event_queued_by_a_listener_is_delivered_by_an_entry_of_its_own() {
+    on_a_js_thread(|thread| async move {
+        let (context, _workers) = group(&thread);
+        let mut owned = OwnedPage::new(context);
+        // The handler writes the *other* settled source, so delivering the
+        // first load queues a second one from inside the drain.
+        owned
+            .boot(&LOADING_IMAGE.replace(
+                "__SetAttribute(image, 'data-loads', String(globalThis.loads));",
+                "__SetAttribute(image, 'data-loads', String(globalThis.loads));
+        if (globalThis.loads === 1) __SetAttribute(image, 'src', 'app:///b.png');",
+            ))
+            .await;
+        owned
+            .page
+            .apply(vec![ToMain::ImageEvents(vec![dom::ImageEvent::Loaded {
+                source: Arc::from("app:///b.png"),
+                width: 10,
+                height: 5,
+            }])])
+            .await;
+
+        owned
+            .page
+            .apply(vec![ToMain::PageUpdate(PageUpdate::Data {
+                data: r#"{"src":"app:///a.png"}"#.into(),
+                processor_name: String::new(),
+                reset: false,
+            })])
+            .await;
+        let settled = owned.page.epilogue_count();
+        owned
+            .page
+            .apply(vec![ToMain::ImageEvents(vec![dom::ImageEvent::Loaded {
+                source: Arc::from("app:///a.png"),
+                width: 40,
+                height: 20,
+            }])])
+            .await;
+        assert_eq!(
+            owned.page.epilogue_count(),
+            settled + 3,
+            "the report, the `load` it settled, and the `load` that \
+             delivery's own handler bound",
+        );
+        assert_eq!(
+            image_attributes(&owned.page, "data-loads").await,
+            Some("2".to_owned()),
+        );
+        assert_eq!(
+            image_attributes(&owned.page, "data-loaded").await,
+            Some("10x5".to_owned()),
+            "the entry that followed delivered what the listener queued",
+        );
     });
 }
 

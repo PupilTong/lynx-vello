@@ -60,8 +60,8 @@ natural size in the commit that creates the node — is now the store's to
 provide, since only the store knows what it has already decoded.
 
 The Lynx `<image>` element surface is implemented in `bobcat_core`'s
-`tree::image` as far as `src`, `placeholder`, `mode`, `auto-size` and
-`blur-radius` (2026-09-06 and 2026-09-17); the `load`/`error` events,
+`tree::image` as far as `src`, `placeholder`, `mode`, `auto-size`,
+`blur-radius` and the `load`/`error` events (2026-09-06 and 2026-09-17);
 `cap-insets` and the animated-image events remain above this layer and
 unimplemented. It runs over the W3C `<img>` paint path: natural size into
 layout,
@@ -109,9 +109,43 @@ element draws is its own source while that is loaded, the placeholder
 otherwise, and its natural size always names that same bitmap — so a loaded
 `src` permanently suppresses the placeholder (iOS `LynxImageManager.mm:79-82`),
 a failed `src` leaves the placeholder showing, and swapping `src` blanks the
-element until the new URL reports, as native does. Binding is also where a URL
-this document has already seen settle is answered — the case no report will
-ever repeat, which is this engine's answer to native's bitmap-size cache.
+element until the new URL reports, as native does. `dom` also produces what a
+`load`/`error` needs: `Document::apply_image_events` returns an `ImageOutcome`
+per element whose *own* source settled, and `Document::set_image_source`
+returns one when it binds a URL this document had already settled — the case
+no report will ever repeat, which is this engine's answer to native's
+bitmap-size cache. A placeholder produces no outcome.
+
+Implementation note (2026-09-17, the events): the dispatch is wired, following
+web-core per the 2026-09-17 ruling. Both outcomes are queued rather than
+dispatched where they form — one of the two producers is the `image`
+component's own reaction, which runs inside the `__SetAttribute` that wrote
+the `src` — and the batch is delivered by an entry of its own, posted the way
+`contentvisibilityautostatechange` is: `Page`'s epilogue asks
+`has_image_outcomes()` after its commit and queues one fresh `Page::enter`,
+behind every job already queued, with an epilogue of its own. A listener
+therefore never runs inside the entry that bound the source, and what it
+mutates is committed by the delivery entry — which is what a browser does,
+since an `<img>`'s `load` is a task even for a URL the cache already holds. A
+one-bit latch on the page keeps that one entry per batch; it is cleared before
+the drain, so an event a listener queues (a `load` handler writing a `src`
+this document has already settled) is a batch of its own and gets an entry of
+its own. `load` carries
+`{width, height}` — the *intrinsic* pixel size, web-core's
+`naturalWidth`/`naturalHeight` (`XImage/ImageEvents.ts:44-58`) — and `error`
+carries `{}`. Both are non-bubbling, as web-core mints them
+(`web-elements/src/elements/common/commonEventInitConfiguration.ts`), which
+the `bubbles` flag every dispatch now carries into the realm expresses
+generally. Neither detail is JSON: a `load` crosses as the `DETAIL_SIZE` kind
+and two numbers, an `error` as `DETAIL_EMPTY` and none, on the same one
+`__BobcatDispatchEvent` export a routed input event uses; see
+[dom-events.md](dom-events.md). Their `timestamp` is the newest reading of the
+view's timeline the main thread has been handed — a `BeginFrame`'s `now` or a
+vsync's — because the timeline is read on the painting side, where the frame
+clock is, and a source settles between frames. Same clock, same epoch, one
+frame of staleness at most; before the first frame it is the time origin. Events fire for
+`src` alone, which follows from the placeholder model above; the differences
+from web-core that leaves are in [deviations.md](deviations.md).
 
 Implementation note (2026-09-17, the attribute half): `tree::image` now
 observes `src`, `placeholder` and `blur-radius`, and matches `mode` and
@@ -171,7 +205,7 @@ Prefetch (`lynx.prefetchImage`/priority+cache-target API) exists only on Android
 | `region-to-decode` | Decode only a sub-rect of the source image (perf optimization) | Rare | N/A (no W3C image-decode-region concept) | Implement as an optional decode-time crop parameter in lynx-vello's decoder if perf profiling shows need; otherwise skip for v1 | `lynx/platform/android/lynx_android/.../image/LynxImageManager.java:1073-1075, 1562-1567`; iOS `regionToDecode`/`LynxImageRegionToDecode`, `LynxUIImage.mm:268, 920-922` |
 | Down-sampling / resize-to-view-size | Default: image is decoded downsampled to view size (`ResizeOptions`) unless `disable-default-resize`/`auto-size`/`enable-resource-hint` is set | Core | N/A (perf optimization, no W3C parallel — browsers do their own internal downsampling opaquely) | Decode-time downsample to display size by default in lynx-vello too (perf-critical for memory), with an escape hatch matching `disable-default-resize` | `lynx/platform/android/lynx_android/.../image/LynxImageManager.java:1040, 948-952` |
 | Animated image loop-count & play events | `loop-count`, `pauseAnimation`/`resumeAnimation`/`stopAnimation`/`startAnimate` UI methods; `startplay`/`currentloopcomplete`/`finalloopcomplete` custom events | Extended | N/A (native-only extension; browsers auto-loop GIF/APNG with no scripting hooks) | lynx-vello needs its own animated-codec (GIF/WebP/APNG) + frame-timer loop to support this; not derivable from any browser primitive | `lynx/platform/android/lynx_android/.../image/LynxImageManager.java:78-79, 439-461, 773-803`; `lynx/platform/darwin/ios/lynx/ui/image/LynxUIImage.mm` (`loopCount`, `handleAnimatedImage`) |
-| `load`/`error` event names & payload | Event names are literally `"load"`/`"error"` on all platforms; `load` detail = `{width, height}`; native `error` detail additionally has `error_code`/`lynx_categorized_code` (web-platform's is empty `{}`) | Core | Yes (mirrors DOM `<img>` `load`/`error` events) | Emit `{}`-only error detail by default (web-compat baseline), add categorized error code as additive superset field for native parity | `lynx/platform/android/lynx_android/.../image/LynxImageManager.java:229-231, 1405-1428`; `lynx/platform/darwin/ios/lynx/ui/image/LynxImageManager.mm:12-13, 91-111`; `lynx-stack/.../XImage/ImageEvents.ts:21-62` |
+| `load`/`error` event names & payload | Event names are literally `"load"`/`"error"` on all platforms; `load` detail = `{width, height}`; native `error` detail additionally has `error_code`/`lynx_categorized_code` (web-platform's is empty `{}`) | Core | Yes (mirrors DOM `<img>` `load`/`error` events) | **Implemented 2026-09-17** as web-core's shape: `load` detail `{width, height}` from the intrinsic size, `error` detail `{}`, both non-bubbling, both for `src` alone. Categorized native error codes stay unimplemented — nothing below this layer produces one, since a failure reaches the engine as `ImageReports::failed` with no reason at all | `lynx/platform/android/lynx_android/.../image/LynxImageManager.java:229-231, 1405-1428`; `lynx/platform/darwin/ios/lynx/ui/image/LynxImageManager.mm:12-13, 91-111`; `lynx-stack/.../XImage/ImageEvents.ts:21-62` |
 | Error categorization | Errors bucketed into `USER_OR_DESIGN`(1000s)/`NET`(1100s)/`PIC_SOURCE`(1200s) ranges for telemetry | Extended | N/A | Adopt similar buckets (network/decode/user-config) for lynx-vello's own error reporting/telemetry hooks | `lynx/platform/android/lynx_android/.../image/ImageErrorCodeUtils.java:20-116` |
 | Relative URL resolution | `./relative.png` resolved against the template's own bundle URL (not app/document URL) | Core | Yes (matches relative-URL-against-base-URL semantics, just using the template as "document") | — | `lynx/platform/android/lynx_android/.../image/ImageUrlRedirectUtils.java:89-131` |
 | URL redirect/interception hook | Embedder-registrable `ImageInterceptor`/`LynxMediaResourceFetcher.shouldRedirectUrl` to rewrite `src`/`placeholder` before fetch (e.g. CDN rewriting, `res:///name` → `res:///id` resolution) | Extended | N/A | Provide an equivalent pre-fetch URL-rewrite hook in lynx-vello's resource-loader trait | `lynx/platform/android/lynx_android/.../image/ImageUrlRedirectUtils.java:19-49`; `LynxImageMediaFetcherProxy.java:35-46` |

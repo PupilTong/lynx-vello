@@ -791,6 +791,49 @@ consequential choice about whether to follow the spec or the quirk.
   bitmap-only blur is a follow-up — an engine-internal declaration the
   reflection writes instead of `filter`, and a paint walk that opens the blur
   bracket around the replaced draw alone, clipped to the box.
+- **`<image>`'s `load` and `error` fire for `src` alone.** Both are web-core's
+  events — `load` detail `{width, height}` from the intrinsic pixel size,
+  `error` detail `{}`, both non-bubbling (`XImage/ImageEvents.ts:44-72` over
+  `commonEventInitConfiguration.ts`) — dispatched per the 2026-09-17 ruling.
+  What differs is what a *placeholder* does. web-core has one inner `<img>`
+  and uses the placeholder as both its initial `src` and its error fallback
+  (`XImage/ImageSrc.ts:28-31, 54-60`), so a placeholder that loads fires the
+  host's `load`; here the two sources are concurrent requests under the native
+  model the same ruling chose, and
+  `dom` has no variant naming a placeholder's outcome, so neither its load nor
+  its failure is an event. Native agrees with this engine: Android's
+  `mPlaceHolderListener` (`platform/android/.../image/LynxImageManager.java:416-437`)
+  sets the drawable on success and does nothing at all on failure, while only
+  the source's listener reaches `onImageLoadSuccess`/`onImageLoadError`.
+- **`error` carries `{}`, where native carries a reason.** Native's detail is
+  `{errMsg, error_code, lynx_categorized_code}`
+  (`ImageErrorCodeUtils.checkImageExceptionCategory`, buckets 1000s/1100s/
+  1200s); web-core's is the empty object a browser's `error` event leaves it,
+  and that is what this engine emits. It is not only a compatibility choice:
+  nothing below this layer produces a reason at all, since a failure reaches
+  the engine as `ImageReports::failed(source)` with no category, message or
+  code. Adding the native fields would mean inventing them here.
+- **A request is issued even for a 0x0 box, so a `load` fires where native
+  fires none.** Binding a `src` is what asks the host for it, whatever the
+  element measures — and `<image>`'s own rule is that an unsized box is 0x0
+  (the first entry in this section). Android refuses the fetch outright in
+  that state: `LynxImageManager.updateImageSource`
+  (`platform/android/.../image/LynxImageManager.java:886-913`) leaves
+  `needRequest` false when the view has no size, no pre-fetch size and no
+  `auto-size`, so an unsized `<image src>` there never loads and never
+  reports. web-core's inner `<img>` carries the `src` whatever the host
+  measures and fires `load` as this engine does. **Following web-core**, which
+  is also the cheaper contract to state: whether an element asks for its
+  source does not depend on layout.
+- **A `load` that settles while the element is detached is still delivered.**
+  web-core buffers it and replays it from `connectedCallback`
+  (`XImage/ImageEvents.ts:44-63`), which is a workaround for its host and its
+  inner `<img>` being two objects. Here an event path is computed for a
+  detached target exactly as the DOM standard specifies — it ends at the
+  topmost ancestor — so the handler on the element itself runs whether or not
+  it is connected. Accepted: a compiled ReactLynx card writes `src` and
+  appends in the same render, so the two differ only for a card that holds an
+  element out of the tree across a turn.
 - **`<blur-view>`'s `blur-radius` is a CSS length here, where web-core and iOS
   read a number and throw the unit away.** The attribute is the whole of the
   component: it is reflected into a `backdrop-filter: blur(…)` presentational

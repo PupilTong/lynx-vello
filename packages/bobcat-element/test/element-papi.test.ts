@@ -511,9 +511,9 @@ describe("installation", () => {
         "Document",
       ].sort(),
     );
-    // The eight every event carries; the touch numbers are a rest parameter,
+    // The six every event carries; the detail numbers are a rest parameter,
     // which `length` does not count.
-    expect(elementModule.__BobcatDispatchEvent).toHaveLength(8);
+    expect(elementModule.__BobcatDispatchEvent).toHaveLength(6);
   });
 
   it("creates the realm's document once, with no arguments", () => {
@@ -1237,19 +1237,16 @@ function tree() {
  * entry, the node the event happened at. The payload defaults to the origin
  * with no wheel delta and no touch points, which is what a test that is not
  * about the payload wants.
+ *
+ * `bubbles` is the event's own, and the default is what every routed Lynx
+ * event is: the two that are not are an `<image>`'s `load` and `error`.
  */
 function dispatch(
   path: object[],
   name: string,
-  payload: {
-    x?: number;
-    y?: number;
-    deltaX?: number;
-    deltaY?: number;
-    touchNumbers?: number[];
-    timestamp?: number;
-  } = {},
+  payload: DispatchPayload = {},
   targets?: object[],
+  bubbles: boolean = true,
 ) {
   const nodes = path.map((handle) => __GetElementUniqueID(handle));
   const targeted = targets === undefined
@@ -1259,13 +1256,57 @@ function dispatch(
     nodes.join(","),
     targeted.join(","),
     name,
+    bubbles,
     payload.timestamp ?? 0,
+    ...detailArguments(payload),
+  );
+}
+
+/** The host's detail kinds, mirrored from `main/runtime/lib.rs`. */
+const DETAIL_POSITION = 0;
+const DETAIL_SIZE = 1;
+const DETAIL_EMPTY = 2;
+
+/**
+ * What a test asks one dispatch's `detail` to be made of.
+ *
+ * A position detail unless it names otherwise, because that is what every
+ * routed input event carries and what a test that is not about the detail
+ * wants.
+ */
+interface DispatchPayload {
+  x?: number;
+  y?: number;
+  deltaX?: number;
+  deltaY?: number;
+  touchNumbers?: number[];
+  timestamp?: number;
+  /** An image `load`'s intrinsic size: the `DETAIL_SIZE` kind. */
+  width?: number;
+  height?: number;
+  /** An image `error`: the `DETAIL_EMPTY` kind, which spends no numbers. */
+  empty?: boolean;
+}
+
+/**
+ * The kind and the numbers behind it, as the host sends them. A tuple, so the
+ * spread at the call site still fills the `detailKind` parameter.
+ */
+function detailArguments(payload: DispatchPayload): [number, ...unknown[]] {
+  if (payload.empty === true) {
+    return [DETAIL_EMPTY];
+  }
+  if (payload.width !== undefined) {
+    return [DETAIL_SIZE, payload.width, payload.height];
+  }
+  return [
+    DETAIL_POSITION,
     payload.x ?? 0,
     payload.y ?? 0,
     payload.deltaX,
     payload.deltaY,
     ...(payload.touchNumbers ?? []),
-  );
+  ];
 }
 
 /** The standard's `Event.eventPhase` values. */
@@ -1482,7 +1523,9 @@ describe("event listeners", () => {
       }`,
       new Array(4).fill(__GetElementUniqueID(inner)).join(","),
       "tap",
+      true,
       0,
+      DETAIL_POSITION,
       0,
       0,
       undefined,
@@ -1569,7 +1612,9 @@ describe("event listeners", () => {
         String(uid),
         "999",
         "tap",
+        true,
         0,
+        DETAIL_POSITION,
         0,
         0,
         undefined,
@@ -1724,6 +1769,86 @@ describe("event listeners", () => {
     expect(runs).toBe(0);
     dispatch([inner, outer], "tap");
     expect(runs).toBe(1);
+  });
+
+  // web-core's `common_event_handler` (event_apis.rs:413-432) narrows exactly
+  // two of the three passes for a non-bubbling event: the capture pass runs
+  // over the whole path either way, the bind pass over the target alone, and
+  // the `global-bindEvent` pass not at all. An `<image>`'s `load` and `error`
+  // are the events that arrive this way — web-core mints both with
+  // `bubbles: false` (`commonEventInitConfiguration.ts`).
+  it("captures down the whole path for a non-bubbling event", () => {
+    const { page, outer, inner } = tree();
+    const order: string[] = [];
+    for (const [label, handle] of [
+      ["page", page],
+      ["outer", outer],
+      ["inner", inner],
+    ] as const) {
+      __AddEventListener(handle, "load", () => order.push(label), {
+        capture: true,
+      });
+    }
+
+    const size = { width: 40, height: 20 };
+    dispatch([inner, outer, page], "load", size, undefined, false);
+
+    expect(order).toEqual(["page", "outer", "inner"]);
+  });
+
+  it("binds on the target alone for a non-bubbling event", () => {
+    const { page, outer, inner } = tree();
+    const order: string[] = [];
+    for (const [label, handle] of [
+      ["inner", inner],
+      ["outer", outer],
+      ["page", page],
+    ] as const) {
+      __AddEventListener(handle, "load", () => order.push(label), {});
+      // The other registration form files on the same pass, and narrows with
+      // it: a ReactLynx `bindload` is one of these, not a closure.
+      __AddEvent(handle, "bindEvent", "load", `${label}:load`);
+    }
+
+    const size = { width: 40, height: 20 };
+    dispatch([inner, outer, page], "load", size, undefined, false);
+
+    expect(order).toEqual(["inner"]);
+    expect(mock.named("publishEvent").map((call) => call[2])).toEqual([
+      "inner:load",
+    ]);
+  });
+
+  it("runs no global-bindEvent pass for a non-bubbling event", () => {
+    const { page, outer, inner } = tree();
+    __AddEvent(outer, "global-bindEvent", "load", "outer:global");
+
+    const size = { width: 40, height: 20 };
+    dispatch([inner, outer, page], "load", size, undefined, false);
+    expect(mock.named("publishEvent")).toEqual([]);
+
+    // The same registration reached by a bubbling event of the same name:
+    // what the flag suppresses is the pass, not the registration.
+    dispatch([inner, outer, page], "load");
+    expect(mock.named("publishEvent").map((call) => call[2])).toEqual([
+      "outer:global",
+    ]);
+  });
+
+  it("keeps a retargeted at-target step in a non-bubbling bind pass", () => {
+    const { page, outer, inner } = tree();
+    const order: string[] = [];
+    __AddEventListener(inner, "load", () => order.push("inner"), {});
+    __AddEventListener(outer, "load", () => order.push("outer"), {});
+    __AddEventListener(page, "load", () => order.push("page"), {});
+
+    // `outer` stands in for `inner` above a shadow boundary: its step is its
+    // own target, which is what makes it at-target in both passes. `page`
+    // sees `outer` and is not.
+    const size = { width: 40, height: 20 };
+    dispatch([inner, outer, page], "load", size, [inner, outer, outer], false);
+
+    expect(order).toEqual(["inner", "outer"]);
   });
 
   it("closes the names a collected handle held, and prunes its global registration", async () => {
@@ -2379,6 +2504,26 @@ describe("the event detail", () => {
 
     expect(detail).toEqual({ x: 5, y: 6, deltaX: 0, deltaY: 30 });
     expect(Object.keys(detail)).toEqual(["x", "y", "deltaX", "deltaY"]);
+  });
+
+  // The host names a detail *kind*, not an event: the numbers behind
+  // `DETAIL_SIZE` make an `<image>` `load`'s `{width, height}`, web-core's
+  // `naturalWidth`/`naturalHeight` and not the box the bitmap drew into.
+  it("builds a size detail out of the kind the host named", () => {
+    const { inner } = tree();
+
+    const detail = detailOf(inner, "load", { width: 40, height: 20 });
+
+    expect(detail).toEqual({ width: 40, height: 20 });
+    expect(Object.keys(detail)).toEqual(["width", "height"]);
+  });
+
+  // web-core's `error` detail exactly: no keys, and no numbers spent to say
+  // so.
+  it("builds an empty detail out of the kind that spends no numbers", () => {
+    const { inner } = tree();
+
+    expect(detailOf(inner, "error", { empty: true })).toEqual({});
   });
 });
 
