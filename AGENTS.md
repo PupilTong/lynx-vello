@@ -1828,7 +1828,7 @@ Generic W3C-DOM-subset document tree and standards-oriented CSS computation
 core, on stylo's cascade. `docs/dom-public-api.md` is the authoritative
 normal-build versus test-feature API boundary. It must not contain Lynx
 runtime-element vocabulary or Lynx device/unit policy: Lynx computed defaults
-(border-box, `overflow: hidden`, `display: linear` on every element, …) stay
+(border-box, `overflow: clip`, `display: linear` on every element, …) stay
 embedder cascade policy in the UA sheet.
 
 Subsystems:
