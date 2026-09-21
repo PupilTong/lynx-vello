@@ -20,9 +20,9 @@
 //! # A synchronous wait
 //!
 //! [`JsThread::wait`] is what a host member that must answer synchronously —
-//! `__AdoptStyleSheet` today — parks on. It is a fresh `block_on` over the
-//! same `LocalSet`, which is legal precisely because a job runs outside one.
-//! While it waits:
+//! `waitFuture` and `adoptStyleSheet` today — parks on. It is a fresh
+//! `block_on` over the same `LocalSet`, which is legal precisely because a job
+//! runs outside one. While it waits:
 //!
 //! - every task on this thread keeps running: channel reads, lifecycle signals, acknowledgements,
 //!   resource routing, the timers of other realms;

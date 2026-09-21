@@ -778,6 +778,28 @@ also carries `import.meta.url`: the response URL where the realm fetched one,
 the registered name for a built-in, and the source name for a module evaluated
 directly.
 
+`bobcat:future` is one host-backed operation a realm can read either way. A
+`Future` is a number — the id the host's per-realm table registered a Rust
+future under — because only primitives and structured clones cross the
+boundary. `wait(timeout?)` is the one synchronous park beside stylesheet
+adoption: it parks the job it runs in, so the engine thread's tasks keep
+running, no other job does, and no promise job runs. The wait's first and
+biased arm is the requesting realm's cancellation token — a view's written by
+the embedder's release from the embedder's own thread, a worker's by the
+in-band `Terminate` its message consumer reads while the job is parked — and
+the optional deadline is behind it. A deadline that passes throws a
+`TimeoutError` and cancels nothing: the operation goes on, and the same Future
+still answers a later read. `then` is the asynchronous way: it converts the
+Future into one Promise, the owner's epilogue spawns a task that awaits the
+operation, and that task enters the realm to deliver what it settled to,
+rejecting with an `Error` carrying the host's reason. A `wait` after that
+conversion is a `TypeError`, because the delivery is a job and a job cannot run
+inside another job's wait. The class is the `packages/bobcat-element` source
+module `future.ts`, over three host members — `waitFuture(id, timeoutMs)`,
+`takeFuture(id)` and `settleFuture(id)`. Both realm kinds have all three. No
+production operation registers a future yet; the table is what
+`lynx.fetchBundle` will be written over.
+
 The bridge keeps built-in sources on the shared runtime and entry/imported
 sources on each realm. A missing module creates one `SourceRequest::Module` per
 normalized URL in that realm. The boundary's epilogue spawns one task per

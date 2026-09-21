@@ -20,6 +20,7 @@
 //! - [`boot_page`], the page's boot future: the sheets in cascade order, the entry, and then the
 //!   realm;
 //! - one [`load_module`] future per resource load an import produced;
+//! - one [`settle_future`] per host-backed `Future` a `.then` asked this realm to settle;
 //! - [`consume_worker_events`], the one ordered consumer of this view's workers;
 //! - [`serve_clock`], which owns this realm's one pinned sleep and watches the runtime-wide
 //!   checkpoint generation for a sibling's entry into JavaScript.
@@ -106,10 +107,12 @@
 //! first two kinds per engine thread, one of the third per live view and per
 //! live worker, one of the fourth per live realm, one of the fifth per worker
 //! that has not booted yet. `link.rs`'s `block_on_deadline` is a hand-rolled poll
-//! loop rather than a select, and the only one left. Synchronous stylesheet
-//! adoption is a fifth wait of its own shape — this view's token against the
-//! response — parked on inside a job through
-//! [`JsThread::wait`](crate::jobs::JsThread).
+//! loop rather than a select, and the only one left. The two synchronous
+//! host members are a fifth wait of their own shape — this view's token
+//! against the answer — parked on inside a job through
+//! [`JsThread::wait`](crate::jobs::JsThread): stylesheet adoption, and
+//! [`crate::future`]'s `waitFuture`, which adds an optional deadline behind
+//! the token.
 
 use std::cell::{Cell, RefCell};
 use std::future::{Future, poll_fn};
@@ -369,7 +372,9 @@ impl Page {
     /// 5. **The boot report**, once, so the frame exists before the event that implies it.
     /// 6. **The `BeginFrame` acknowledgement**, for the same reason: a host blocked on the sequence
     ///    number is blocked on that frame.
-    /// 7. **The module requests** this entry produced, each spawned as a load of its own.
+    /// 7. **The module requests** this entry produced, each spawned as a load of its own, and
+    ///    beside them the futures a `.then` asked this realm to settle asynchronously, each spawned
+    ///    as a wait of its own.
     /// 8. **The next timer deadline**, republished only when it moved.
     /// 9. **The checkpoint generation**, so the clock task can tell this page's own bumps from a
     ///    sibling's.
@@ -414,6 +419,9 @@ impl Page {
                 .outbox
                 .request_source(SourceRequest::Module(url.clone()));
             self.spawn(load_module(Rc::clone(self), url, answer));
+        }
+        for (id, future) in runtime.take_future_settles() {
+            self.spawn(settle_future(Rc::clone(self), id, future));
         }
         // Every path that mounts author CSS — the staged sheets
         // `createDocument` mounts, `adoptStyleSheet`, and any rules a card
@@ -1218,6 +1226,30 @@ async fn load_module(page: Rc<Page>, url: String, answer: SourceAnswer) {
         if let Err(error) = runtime.complete_module(js, &url, source) {
             let error = error.into_script_error();
             completing.fail(if completing.boot_reported.get() {
+                EngineEvent::ScriptRunError(error)
+            } else {
+                EngineEvent::StartupFailed(error.into())
+            });
+        }
+    })
+    .await;
+}
+
+/// One future a `.then` asked this realm to settle.
+///
+/// Its shape is [`load_module`]'s, and so is what a failure costs: nothing in
+/// the realm is waiting for a settle that cannot be delivered, but the failure
+/// is the realm refusing a call rather than the operation failing — which is
+/// fatal to whatever the Promise was holding up. Reported as a startup failure
+/// while boot is still outstanding, and as a run failure once it has been
+/// reported.
+async fn settle_future(page: Rc<Page>, id: u32, future: crate::future::HostFuture) {
+    let outcome = future.await;
+    let settling = Rc::clone(&page);
+    page.enter(move |runtime, js| {
+        if let Err(error) = runtime.deliver_future(js, id, outcome) {
+            let error = error.into_script_error();
+            settling.fail(if settling.boot_reported.get() {
                 EngineEvent::ScriptRunError(error)
             } else {
                 EngineEvent::StartupFailed(error.into())

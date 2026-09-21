@@ -12,8 +12,9 @@ use crate::background::WorkerKey;
 use crate::esm::{
     BTS_RUNTIME_MODULE_SOURCE, BTS_RUNTIME_MODULE_SPECIFIER, CONTEXT_MODULE_SOURCE,
     CONTEXT_MODULE_SPECIFIER, EVENT_TARGET_MODULE_SPECIFIER, EVENT_TARGET_SOURCE,
-    GLOBAL_EVENT_MODULE_SOURCE, GLOBAL_EVENT_MODULE_SPECIFIER, REQUIRE_MODULE_SOURCE,
-    REQUIRE_MODULE_SPECIFIER, TIMER_MODULE_SOURCE, TIMER_MODULE_SPECIFIER,
+    FUTURE_MODULE_SOURCE, FUTURE_MODULE_SPECIFIER, GLOBAL_EVENT_MODULE_SOURCE,
+    GLOBAL_EVENT_MODULE_SPECIFIER, REQUIRE_MODULE_SOURCE, REQUIRE_MODULE_SPECIFIER,
+    TIMER_MODULE_SOURCE, TIMER_MODULE_SPECIFIER,
 };
 use crate::link::{HostOutbox, ViewNotice};
 use crate::main::quickjs::{ScriptEngine, ScriptRuntime};
@@ -35,9 +36,9 @@ const WORKER_MODULE_SOURCE: &str = crate::esm::runtime_source!("worker-runtime")
 /// Registers the source modules every worker realm on the group's *worker*
 /// runtime shares.
 ///
-/// The worker runtime carries its global scope, timers, `require`, shared
-/// event machinery and the BTS runtime module. Each script chooses its own
-/// imports.
+/// The worker runtime carries its global scope, timers, `Future`, `require`,
+/// shared event machinery and the BTS runtime module. Each script chooses its
+/// own imports.
 /// `bobcat:element` and `bobcat:runtime` are absent because a worker has no
 /// document to reach and no page to be the main thread of, and registering
 /// them would make an import that must fail merely fail late.
@@ -56,6 +57,7 @@ pub(super) fn install_worker_modules(js_runtime: &mut ScriptRuntime) -> Result<(
     js_runtime.register_module_source(CONTEXT_MODULE_SPECIFIER, CONTEXT_MODULE_SOURCE)?;
     js_runtime.register_module_source(BTS_RUNTIME_MODULE_SPECIFIER, BTS_RUNTIME_MODULE_SOURCE)?;
     js_runtime.register_module_source(TIMER_MODULE_SPECIFIER, TIMER_MODULE_SOURCE)?;
+    js_runtime.register_module_source(FUTURE_MODULE_SPECIFIER, FUTURE_MODULE_SOURCE)?;
     js_runtime.register_module_source(REQUIRE_MODULE_SPECIFIER, REQUIRE_MODULE_SOURCE)
 }
 

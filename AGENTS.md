@@ -208,7 +208,8 @@ router, `images.rs` image protocol and `graphics.rs` GPU target. `link.rs` is
 the one channel set a view spans its two threads with, `jobs.rs` the engine
 thread itself — its scheduler and its job queue — `lifetime.rs` the view's
 task set, `timers.rs` and `clock.rs`/`alarm.rs` the timer machinery both realm
-kinds share, `esm.rs` the preloaded module specifiers, `script.rs` the
+kinds share, `future.rs` the per-realm table the `Future` class is written
+over, `esm.rs` the preloaded module specifiers, `script.rs` the
 sanitized error a failure is reported with, `style.rs` the
 `PreparsedStyleSheet` vocabulary, `resource.rs` the host protocol, and
 `threads.rs` the two engine threads.
@@ -522,6 +523,27 @@ from. `require.resolve` answers the cache key without loading, and a load,
 compile, parse or body that fails leaves nothing cached. Every source module
 carries `import.meta.url` — the response URL for a fetched one, the name it was
 registered under for a built-in.
+
+**`bobcat:future` is one host-backed operation, read either way.**
+`import { Future } from "bobcat:future"` is available in a view's MTS realm and
+in every Worker realm; the class is the `packages/bobcat-element` source module
+`future.ts` and the per-realm table behind it is `crate::future`. A `Future` is
+a number and nothing else — the id that table registered a Rust future under —
+because only primitives and structured clones cross the boundary. `wait(timeout?)`
+parks the *job* it runs in, exactly as stylesheet adoption and a `require` do:
+the engine thread's tasks go on running, no other job does, and no promise job
+runs. Its first and biased arm is the requesting realm's cancellation token,
+and an optional deadline sits behind it; a deadline that passes throws a
+`TimeoutError` and **cancels nothing**, so the operation goes on and the same
+Future answers a later read. `then` is the other way and converts the Future
+into one Promise, once: the owner's epilogue spawns a task that awaits the
+operation and then enters the realm to deliver it, rejecting with an `Error`
+carrying the host's reason. A `wait` after that conversion is a `TypeError`,
+because the delivery is a job and a job cannot run inside another job's wait.
+Three host members carry it — `waitFuture(id, timeoutMs)`, `takeFuture(id)` and
+`settleFuture(id)` — and both realm kinds have all three. Nothing in production
+registers a future yet: the table is infrastructure, exercised by a test-only
+`testFuture` producer, and `lynx.fetchBundle` is what will be written over it.
 
 `lynx.requireModule`, `nativeApp.loadScript` and `lynx.loadScript` are the
 compiled-bundle layer, in `bobcat:lynx-modules` and so in worker realms only,

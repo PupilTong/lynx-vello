@@ -741,3 +741,56 @@ fn a_rejected_worker_tla_is_reported_and_leaves_the_message_queue_usable() {
     }
     group.quiet();
 }
+
+/// One `Future` in a worker realm, read both ways over the real boundary:
+/// this worker's own token, its own job queue, and the settle task its own
+/// epilogue spawns rather than a view's.
+///
+/// Nothing in production registers a future yet, so the operation is the
+/// host's test-only producer — `testFuture(delayMs, value, rejects)`, which
+/// is why this test is in the crate rather than beside it. `wait(20)` runs
+/// out its deadline against a 200 ms operation, and the `await` that follows
+/// is the *same* Future, which is what says the timeout cancelled nothing.
+/// Past that conversion the Future is a Promise, and a third read of it is
+/// refused.
+#[test]
+fn one_worker_future_times_out_then_settles_as_a_promise_and_refuses_a_later_wait() {
+    let mut group = Group::new();
+    group.start(
+        r"
+        import { Future } from 'bobcat:future';
+        import { testFuture } from 'bobcat-internal:host';
+
+        const slow = new Future(testFuture(200, 'late', false));
+        try {
+          slow.wait(20);
+          postMessage('the wait answered');
+        } catch (error) {
+          postMessage('wait ' + error.name);
+        }
+        postMessage('then ' + await slow);
+        try {
+          slow.wait();
+          postMessage('the third read answered');
+        } catch (error) {
+          postMessage('after ' + error.name);
+        }
+        try {
+          await new Future(testFuture(1, 'why', true));
+          postMessage('the rejection resolved');
+        } catch (error) {
+          postMessage('catch ' + (error instanceof Error) + ' ' + error.message);
+        }
+        postMessage('now ' + new Future(testFuture(1, 'now', false)).wait());
+    ",
+    );
+    for expected in [
+        "wait TimeoutError",
+        "then late",
+        "after TypeError",
+        "catch true why",
+        "now now",
+    ] {
+        assert_eq!(group.message(0), wire(expected));
+    }
+}

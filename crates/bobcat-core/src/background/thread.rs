@@ -159,6 +159,8 @@ fn report_trap(
 struct WorkerRealm {
     engine: ScriptEngine,
     timers: Rc<TimerState>,
+    /// Every host-backed operation this realm holds a `Future` for.
+    futures: Rc<crate::future::FutureTable>,
     /// Set by the native `closeWorker` export. A flag rather than a direct
     /// teardown because it is written from inside the realm it would tear
     /// down: the task reads it once the call that set it has returned.
@@ -329,8 +331,9 @@ impl Worker {
 
     /// Everything one entry into this realm leaves owing: the timers that
     /// have come due, a `close()` whatever just ran may have called, entry
-    /// completion, module requests, the next timer deadline, and
-    /// the checkpoint generation as of this entry.
+    /// completion, module requests, the futures a `.then` asked to settle,
+    /// the next timer deadline, and the checkpoint generation as of this
+    /// entry.
     fn epilogue(self: &Rc<Self>, realm: &mut WorkerRealm, js: &mut ScriptRuntime) {
         if self.ended() {
             return;
@@ -365,6 +368,9 @@ impl Worker {
         while let Some(url) = realm.engine.take_module_request() {
             let answer = self.sources.request(SourceRequest::Module(url.clone()));
             self.spawn(load_module(Rc::clone(self), url, answer));
+        }
+        for (id, future) in realm.futures.take_settle_requests() {
+            self.spawn(settle_future(Rc::clone(self), id, future));
         }
         self.lifetime.arm_deadline(realm.timers.next_deadline());
         // Last, so it names the generation this entry ran up rather than the
@@ -751,6 +757,28 @@ async fn load_module(worker: Rc<Worker>, url: String, answer: SourceAnswer) {
         .await;
 }
 
+/// One future a `.then` asked this realm to settle.
+///
+/// Its shape is [`load_module`]'s, and so is its error policy: a realm that
+/// refuses the delivery is reported and goes on running, like a script that
+/// threw or a timer callback that did.
+async fn settle_future(worker: Rc<Worker>, id: u32, future: crate::future::HostFuture) {
+    let outcome = future.await;
+    let settling = Rc::clone(&worker);
+    worker
+        .enter(move |realm, js| {
+            if let Err(error) = crate::future::deliver(&mut realm.engine, js, id, outcome) {
+                report(
+                    &settling.events,
+                    settling.key,
+                    "settling a worker's future",
+                    error,
+                );
+            }
+        })
+        .await;
+}
+
 /// The script and the URL it is named by, or why there is neither.
 fn worker_script(
     answer: Result<
@@ -787,10 +815,19 @@ fn open_realm(
             pending,
         });
     })?;
-    // This worker's own outbox, so what a `require` asks for is cancelled with
-    // the worker rather than with the view: a `Terminate` read while the job
-    // is parked ends the load, because the token this outbox carries is the
-    // one [`Worker::end`] cancels.
+    // This worker's own token, so what a `Future.wait` parks on is cancelled
+    // with the worker rather than with the view: a `Terminate` read while the
+    // job is parked ends the wait, because the token this outbox carries is
+    // the one [`Worker::end`] cancels. The same holds for the load a `require`
+    // asks for, over the same outbox.
+    let futures = Rc::new(crate::future::FutureTable::new());
+    crate::future::install(
+        &mut engine,
+        js_runtime,
+        &futures,
+        host.token().clone(),
+        thread.clone(),
+    )?;
     crate::require::install(&mut engine, js_runtime, host.clone(), thread)?;
     let timers = Rc::new(TimerState::new());
     let closing = Rc::new(Cell::new(false));
@@ -811,6 +848,7 @@ fn open_realm(
     Ok(WorkerRealm {
         engine,
         timers,
+        futures,
         closing,
     })
 }
