@@ -82,7 +82,8 @@ impl ResourceFetcher for InlineFetcher {
                 || Err(missing(&url)),
                 |blob| Ok(LoadedSource::Font(blob.clone())),
             ),
-            SourceRequest::Module(url) => Err(missing(&url)),
+            // This double serves no plain fetch either.
+            SourceRequest::Module(url) | SourceRequest::Fetch { url } => Err(missing(&url)),
             SourceRequest::Worker { specifier, .. } => Err(missing(&specifier)),
         };
         completion.complete(answer);

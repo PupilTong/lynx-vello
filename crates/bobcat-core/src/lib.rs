@@ -40,6 +40,7 @@ mod background;
 pub mod bench_support;
 mod clock;
 mod esm;
+mod fetch;
 mod future;
 mod jobs;
 mod lifetime;
@@ -72,7 +73,7 @@ pub use dom::{
     FontBlob, FrameImages, ImageEvent, ImageInbox, ImageReports, ImageSizeHint,
     MAX_RENDERABLE_DIMENSION, MAX_STYLE_THREADS, NoImages, is_renderable, vello,
 };
-pub use esm::BTS_CHUNK_PREAMBLE;
+pub use esm::{BTS_CHUNK_PREAMBLE, MTS_CHUNK_PREAMBLE};
 pub use main::tree::PageConfig;
 pub use native_module::{ModuleCall, ModuleCallback, NativeModule};
 pub use paint::Painter;

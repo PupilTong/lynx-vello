@@ -1161,6 +1161,13 @@ async fn boot_page(page: Rc<Page>, sources: BootSources) {
                 )));
                 return;
             }
+            Ok(LoadedSource::Fetched) => {
+                page.fail(EngineEvent::StartupFailed(mismatched_source(
+                    "a stylesheet request",
+                    "a plain fetch",
+                )));
+                return;
+            }
             Err(error) => {
                 page.fail(EngineEvent::StartupFailed(error));
                 return;
@@ -1184,6 +1191,13 @@ async fn boot_page(page: Rc<Page>, sources: BootSources) {
             page.fail(EngineEvent::StartupFailed(mismatched_source(
                 "an entry request",
                 "a stylesheet",
+            )));
+            return;
+        }
+        Ok(LoadedSource::Fetched) => {
+            page.fail(EngineEvent::StartupFailed(mismatched_source(
+                "an entry request",
+                "a plain fetch",
             )));
             return;
         }

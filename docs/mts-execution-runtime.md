@@ -89,8 +89,19 @@ Queued jobs remain the enclosing checkpoint's work: a job a chunk queues runs
 at the checkpoint the entry is already inside, not inside the load. ReactLynx's
 `__LoadLepusChunk('worklet-runtime', ...)` caller is in
 `packages/react/runtime/src/worklet-runtime/bindings/loadRuntime.ts` of the
-read-only `lynx-stack` checkout. Public `lynx.loadScript`/`fetchBundle`,
-complete lazy-container loading and data/update/reload policy remain separate.
+read-only `lynx-stack` checkout.
+
+`lynx.loadScript(key, {bundleName})` in this realm is the *same* synchronous
+load with a different answer: a named custom section of whichever container
+`bundleName` names, answered as its value — the module's default export, a
+JSON body's parsed value, a `CommonJS` body's `module.exports` — rather than
+run as a function body. A lazy container's `main-thread` section is one
+expression, so what comes back is the function ReactLynx calls
+(`lynx.loadScript('main-thread', {bundleName})(entry)`), and unlike a chunk it
+is evaluated **once per realm**, because a URL is one module per realm.
+`lynx.fetchBundle` is what installed that container; see
+`docs/worker-resources-runtime.md` "Lazy containers". Data/update/reload
+policy remains separate.
 
 ## Validation coverage
 

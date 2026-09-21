@@ -159,7 +159,8 @@ fn report_trap(
 struct WorkerRealm {
     engine: ScriptEngine,
     timers: Rc<TimerState>,
-    /// Every host-backed operation this realm holds a `Future` for.
+    /// Every host-backed operation this realm holds a `Future` for, every
+    /// `fetchResource` included.
     futures: Rc<crate::future::FutureTable>,
     /// Set by the native `closeWorker` export. A flag rather than a direct
     /// teardown because it is written from inside the realm it would tear
@@ -792,6 +793,9 @@ fn worker_script(
             Err("the fetcher returned a stylesheet for a worker".to_owned())
         }
         Ok(Ok(LoadedSource::Font(_))) => Err("the fetcher returned a font for a worker".to_owned()),
+        Ok(Ok(LoadedSource::Fetched)) => {
+            Err("the fetcher returned a plain fetch for a worker".to_owned())
+        }
         Ok(Err(error)) => Err(error.to_string()),
         Err(_) => Err("the fetcher dropped the request".to_owned()),
     }
@@ -828,6 +832,9 @@ fn open_realm(
         host.token().clone(),
         thread.clone(),
     )?;
+    // Both realm kinds get `fetchResource`, over the table above: what a
+    // fetch answers is a future of this realm's.
+    crate::fetch::install(&mut engine, js_runtime, host, &futures)?;
     crate::require::install(&mut engine, js_runtime, host.clone(), thread)?;
     let timers = Rc::new(TimerState::new());
     let closing = Rc::new(Cell::new(false));
@@ -995,7 +1002,7 @@ mod tests {
             WorkerKey::new(key),
             events,
             token.clone(),
-            HostOutbox::new(sources, std::sync::Arc::new(crate::NoWakeup), token),
+            HostOutbox::new(sources, std::sync::Arc::new(crate::NoWakeup), token, None),
             thread.clone(),
         );
         worker.spawn(boot_worker(

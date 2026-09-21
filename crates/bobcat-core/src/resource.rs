@@ -76,7 +76,34 @@ pub trait ResourceFetcher: dom::FrameImages {
     /// host's, through the wakeup it gave the view. A host that reports
     /// inline has nothing to do, and the default does nothing.
     fn service_images(&self) {}
+
+    /// A thread-safe answer to whether a [`SourceRequest::Fetch`] of `url`
+    /// has already completed for this view, asked from a realm's own thread
+    /// with the URL string the realm holds — which the probe resolves the way
+    /// the fetcher resolves a request.
+    ///
+    /// A fetch it answers `true` for is **not made again**: the realm's
+    /// `fetchResource` settles at once, which is what a cached fetch looks
+    /// like from JavaScript. That is the whole reason it exists — a Promise
+    /// resolved in a later job is not what a repeat fetch is to a card, and
+    /// both native (`TemplateAssembler::FindTemplateBundle`) and web-core (a
+    /// promise cache) settle one inside the same task.
+    ///
+    /// It is called from `bobcat-main` and from `bobcat-workers`, never from
+    /// the view's own thread, which is why it is a `Send + Sync` function
+    /// rather than a method: nothing else on this trait leaves the embedder's
+    /// thread. It must not block and must not start a load.
+    ///
+    /// The default is no probe: every `fetchResource` is a request, and none
+    /// settles synchronously.
+    fn fetch_probe(&self) -> Option<FetchProbe> {
+        None
+    }
 }
+
+/// What a fetcher answers [`ResourceFetcher::fetch_probe`] with: "has this
+/// view already fetched `url`?", callable from either engine thread.
+pub type FetchProbe = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
 /// A shared handle serves whatever it points at.
 ///
@@ -108,6 +135,10 @@ impl<T: ResourceFetcher + ?Sized> ResourceFetcher for Rc<T> {
     fn service_images(&self) {
         (**self).service_images();
     }
+
+    fn fetch_probe(&self) -> Option<FetchProbe> {
+        (**self).fetch_probe()
+    }
 }
 
 /// One source requested by the document owner. Resolution belongs to the fetcher.
@@ -123,6 +154,18 @@ pub enum SourceRequest {
     },
     /// A normalized module URL, loaded after an import discovers it.
     Module(String),
+    /// Fetch `url` and keep it, the way an image source is fetched,
+    /// answering only that the fetch is over.
+    ///
+    /// What the fetcher makes of the bytes is its own — the reference
+    /// fetcher, given a container installer, registers a Lynx container's
+    /// sections beside it — and nothing about them comes back. Resolution is
+    /// the fetcher's, as for every request.
+    ///
+    /// Complete with [`LoadedSource::Fetched`].
+    Fetch {
+        url: String,
+    },
     /// One `src: url(...)` of an `@font-face` rule, already resolved against
     /// the document's base URL. Complete with [`LoadedSource::Font`]; the
     /// bytes are registered under the rule's declared family. A fetcher that
@@ -154,6 +197,10 @@ pub enum LoadedSource {
     /// so nothing here decodes or transcodes it. The font backend is what
     /// rejects bytes that are not a face.
     Font(dom::FontBlob),
+    /// A [`SourceRequest::Fetch`] that is over. It carries nothing: the
+    /// bytes stayed with the fetcher, and whatever it made of them is
+    /// reachable only as the source requests it now answers.
+    Fetched,
 }
 
 /// The concrete, transferable right to answer one source request.

@@ -30,6 +30,11 @@ enum SourceKind {
     /// An `@font-face` source. Font files are binary, so the bytes are handed
     /// over as they arrived — no charset decode, no UTF-8 check.
     Font,
+    /// A plain fetch, the way an image source is fetched: the bytes are
+    /// offered to the [`ContainerInstaller`](crate::ContainerInstaller) if
+    /// this host has one and go nowhere else, so nothing is decoded as text
+    /// and nothing comes back but the fact that the fetch is over.
+    Fetch,
 }
 
 enum Destination {
@@ -112,6 +117,7 @@ pub(crate) fn request(resources: &Resources, request: SourceRequest, completion:
             (url, SourceKind::Script, resources.base_url())
         }
         SourceRequest::Font { url } => (url, SourceKind::Font, resources.base_url()),
+        SourceRequest::Fetch { url } => (url, SourceKind::Fetch, resources.base_url()),
         SourceRequest::Worker {
             specifier,
             base_url,
@@ -211,7 +217,8 @@ fn spawn(resources: &Resources, url: Url, kind: SourceKind, completion: Destinat
         }
         let prepared = crate::executor::blocking(&handle, "source load", {
             let url = url.clone();
-            move || prepare(fetched, &url, kind)
+            let shared = SharedHandle::clone(&shared);
+            move || prepare(fetched, &url, kind, &shared)
         })
         .await;
         completion.complete(match prepared {
@@ -245,7 +252,7 @@ async fn run(shared: SharedHandle, url: Url, kind: SourceKind, completion: Desti
     if completion.is_cancelled() {
         return;
     }
-    completion.complete(prepare(fetched, &url, kind));
+    completion.complete(prepare(fetched, &url, kind, &shared));
 }
 
 /// The CPU half of a source load: preprocessing and the UTF-8 check the
@@ -258,7 +265,44 @@ fn prepare(
     fetched: Result<crate::Fetched, error::Failure>,
     url: &Url,
     kind: SourceKind,
+    shared: &SharedHandle,
 ) -> Result<LoadedSource, LynxViewError> {
+    // A plain fetch takes neither preprocessing nor a UTF-8 check: the bytes
+    // are whatever they are. The only thing done with them is the offer to
+    // the container installer, and the URL an install is based on is the
+    // **resolved request URL** rather than the response's: a realm builds a
+    // container's section URLs from the string it passed, which this fetcher
+    // resolves the same way, so a redirect — the transport's business — must
+    // not move where the sections were registered.
+    if kind == SourceKind::Fetch {
+        let bytes = fetched
+            .map_err(|failure| {
+                LynxViewError::from(failure.into_error(Some(Arc::from(url.as_str()))))
+            })?
+            .bytes;
+        return shared
+            .install_container(url, &bytes)
+            // Registered or not, the fetch is over; only a container that
+            // would not decode fails it.
+            .map(|_installed| {
+                // Remembered only now, after the installer ran: a repeat
+                // fetch of this URL answers `true` through the probe, and so
+                // settles in the realm's own job — which is what a cached
+                // fetch is to a card. A failed fetch or a failed install
+                // never reaches here and so is never remembered.
+                shared.fetches.remember(url);
+                LoadedSource::Fetched
+            })
+            .map_err(|message| {
+                error::Failure::new(
+                    ResourceErrorKind::ResponseBody,
+                    ResourceErrorPhase::ReadBody,
+                    message,
+                )
+                .into_error(Some(Arc::from(url.as_str())))
+                .into()
+            });
+    }
     fetched
         .and_then(|fetched| preprocess_fetched(fetched, url))
         .map_err(|failure| LynxViewError::from(failure.into_error(Some(Arc::from(url.as_str())))))

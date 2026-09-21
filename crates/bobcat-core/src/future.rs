@@ -105,10 +105,9 @@ impl FutureTable {
     }
 
     /// Files one operation and answers with the id the realm names it by.
-    #[allow(
-        dead_code,
-        reason = "no production future is registered yet; the test producer below and the coming lynx.fetchBundle are its callers"
-    )]
+    ///
+    /// `fetchResource` is what registers one in production
+    /// ([`crate::fetch`]); the test producer below is the other caller.
     pub(crate) fn register(&self, future: impl Future<Output = Outcome> + 'static) -> u32 {
         let id = self.allocate_id();
         self.pending.borrow_mut().insert(id, Box::pin(future));
@@ -228,12 +227,13 @@ pub(crate) fn install(
         Ok(HostValue::Undefined)
     })?;
 
-    // The one thing that registers a future today. Nothing in production does
-    // yet — the table is infrastructure, and `lynx.fetchBundle` is what will
-    // fill it — so the end-to-end tests of both realm kinds bring a producer
-    // of their own: `testFuture(delayMs, value, rejects)` files an operation
-    // that settles to that string, or rejects with it, once the delay has
-    // passed, and answers with its id.
+    // What registers a future in production is `fetchResource`
+    // (`crate::fetch`), whose operation is a host fetch — nothing a test of
+    // this table can start on its own. So the end-to-end tests of both realm
+    // kinds bring a producer of their own:
+    // `testFuture(delayMs, value, rejects)` files an operation that settles
+    // to that string, or rejects with it, once the delay has passed, and
+    // answers with its id.
     #[cfg(test)]
     {
         let futures = Rc::clone(table);

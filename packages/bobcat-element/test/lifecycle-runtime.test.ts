@@ -24,6 +24,18 @@ rstest.mockRequire("bobcat:cross-thread-context", () => crossThreadContext);
 // close over.
 rstest.mockRequire("bobcat:worker", () => ({ callNativeModule: rstest.fn() }));
 rstest.mockRequire("bobcat:timers", () => ({}));
+import type * as sectionUrl from "../src/section-url.ts";
+import type * as bundleFetch from "../src/bundle-fetch.ts";
+import type * as future from "../src/future.ts";
+// Answered lazily for the reason `bobcat:lynx-modules` is: all three import
+// `bobcat-internal:host`, whose replacement below is built out of this file's
+// own bindings.
+let sectionUrls: typeof sectionUrl;
+let bundleFetches: typeof bundleFetch;
+let futures: typeof future;
+rstest.mockRequire("bobcat:section-url", () => sectionUrls);
+rstest.mockRequire("bobcat:bundle-fetch", () => bundleFetches);
+rstest.mockRequire("bobcat:future", () => futures);
 const requestScriptFrame = rstest.fn();
 const preloadStyleSheet = rstest.fn();
 const adoptStyleSheet = rstest.fn();
@@ -46,6 +58,13 @@ rstest.mockRequire("bobcat-internal:host", () => ({
     new URL(specifier, base).href,
   loadModuleSync: (url: string, parameters: string) =>
     loadModuleSync(url, parameters),
+  // No suite here fetches anything, and so registers no future; the
+  // runtimes only need these to exist, because `lynx.fetchBundle` and the
+  // `Future` class close over them as each evaluates.
+  fetchResource: () => { throw new Error("no fetch in this suite"); },
+  waitFuture: () => { throw new Error("no future in this suite"); },
+  takeFuture: () => { throw new Error("no future in this suite"); },
+  settleFuture: () => { throw new Error("no future in this suite"); },
 }));
 
 /** What the mock host serves a load from, by the URL it is asked for. */
@@ -131,6 +150,9 @@ const worker = Object.assign(new eventTarget.EventTarget(), {
 });
 
 beforeAll(async () => {
+  sectionUrls = await import("../src/section-url.ts");
+  futures = await import("../src/future.ts");
+  bundleFetches = await import("../src/bundle-fetch.ts");
   moduleTable = await import("../src/lynx-modules.ts");
   mts = await import("../src/main-thread-runtime.ts");
   mts.__BobcatInitEntry("https://example.test/page/main.js?version=2#entry");

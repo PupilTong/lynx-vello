@@ -1,4 +1,5 @@
 import { loadModuleSync, resolveModuleUrl } from "bobcat-internal:host";
+import { sectionURL } from "bobcat:section-url";
 
 // The compiler factory ABI, and the one way a bundle path becomes a value.
 //
@@ -16,8 +17,12 @@ import { loadModuleSync, resolveModuleUrl } from "bobcat-internal:host";
 // of it answers that default export. A path no container carried is whatever
 // the host serves, normally a plain `CommonJS` file.
 //
-// Lazy containers — `requireModuleAsync`, `fetchBundle` and the lazy-bundle
-// `loadScript` — are handled separately and are not here.
+// A **lazy container** is the one other case, and it is the same mechanism
+// with a different URL rule: its `bundleName` is the string `lynx.fetchBundle`
+// was given, and its sections live *under* that URL rather than beside it —
+// the same rule `__LoadLepusChunk` and `__LoadStyleSheet` write on MTS. The
+// container itself is installed by `fetchBundle`; nothing here fetches one.
+// `requireModuleAsync` is still absent.
 const DEFAULT_ENTRY = "__Card__";
 
 /** A specifier that carries its own scheme, and so needs no base at all. */
@@ -92,27 +97,36 @@ export function createLynxModules(app: ModuleValue, lynx: ModuleValue, console: 
   }
 
   /**
-   * The URL `path` names: the path as a reference beside the template the
-   * bundle came in, resolved by the normalizer an `import` there resolves
-   * through — as `__LoadLepusChunk` builds a chunk's URL beside the root
-   * script's.
+   * The URL `path` names, which depends on *which container* `entry` is.
    *
-   * The rooting is native's (`js_app.cc` `App::LoadScript`): a path that is
-   * neither an absolute URL nor rooted is rooted, so `chunk.js` and
-   * `/chunk.js` name one file. A rooted path is a path *inside* a bundle, so
-   * it resolves beside its template rather than at that template's origin.
-   * With no template URL registered the reference is its own base, which
-   * resolves an absolute URL and refuses everything else — there is nothing
-   * for a bundle path to be a path inside. An entry that is itself an
-   * absolute URL, as a lazy bundle's `bundleName` is, resolves beside itself.
+   * **A registered entry** — this page's own, or any other container whose
+   * template URL `__BobcatRegisterBundle` named — carries its bodies beside
+   * that template URL: `path` is a reference there, resolved by the
+   * normalizer an `import` resolves through, as `__LoadLepusChunk` builds a
+   * chunk's URL beside the root script's. The rooting is native's (`js_app.cc`
+   * `App::LoadScript`): a path that is neither an absolute URL nor rooted is
+   * rooted, so `chunk.js` and `/chunk.js` name one file, and a rooted path is
+   * a path *inside* a bundle rather than one at its origin. With no template
+   * URL registered at all the reference is its own base, which resolves an
+   * absolute URL and refuses everything else.
+   *
+   * **Any other entry is a lazy container's `bundleName`** — the string
+   * `lynx.fetchBundle` was given and echoed back — and its sections live
+   * *under* that URL: `sectionURL` writes exactly the string the installer
+   * registered them at (`named_chunk_url` in
+   * `crates/bobcat-source/src/page.rs`), which is also what MTS's `chunkURL`
+   * writes for the same container. Nothing is resolved: the string stays as
+   * it is, rooted or relative, because the fetcher resolved the container's
+   * own request from the same string and will resolve these the same way.
    */
   function bodyUrl(path: string, entry: string): string {
+    const template = templateUrls.get(entry);
+    if (template === undefined && entry !== DEFAULT_ENTRY) {
+      return sectionURL(path, entry);
+    }
     const specifier = ABSOLUTE_URL.test(path)
       ? path : `.${path.startsWith("/") ? path : `/${path}`}`;
-    const base = templateUrls.get(entry)
-      ?? (ABSOLUTE_URL.test(entry) ? entry : undefined)
-      ?? templateUrls.get(DEFAULT_ENTRY)
-      ?? specifier;
+    const base = template ?? templateUrls.get(DEFAULT_ENTRY) ?? specifier;
     try {
       return resolveModuleUrl(base, specifier);
     } catch (error) {

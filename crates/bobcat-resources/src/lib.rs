@@ -55,6 +55,7 @@ use bobcat_core::resource::ResourceFetcher;
 use bobcat_core::vello::peniko::ImageData;
 use bobcat_core::{FrameImages, ImageReports, ImageSizeHint, PreparsedStyleSheet};
 use bytes::Bytes;
+use rustc_hash::FxHashSet;
 use url::Url;
 
 pub mod cache;
@@ -157,6 +158,16 @@ pub struct ResourcesConfig {
     pub decode_parallelism: Option<usize>,
     /// Whether image failures are also printed to standard error, natively.
     pub log_to_stderr: bool,
+    /// What a plain
+    /// [`SourceRequest::Fetch`](bobcat_core::resource::SourceRequest::Fetch)
+    /// offers its bytes to before answering: the hook that makes a fetched
+    /// Lynx container's sections loadable afterwards.
+    ///
+    /// `None`, the default, changes nothing about the fetch — it still
+    /// completes, exactly as an image fetch does. A host that wants
+    /// `lynx.fetchBundle` to install lazy bundles passes
+    /// `bobcat_source::LazyBundleInstaller`.
+    pub container_installer: Option<Arc<dyn ContainerInstaller>>,
     /// This Worker's end of the channel whose other end the host's
     /// main-thread image decoder listens on (`js/image-decoder.ts` in the
     /// `bobcat-wasm` package), in the browser. Without it no image decodes.
@@ -180,9 +191,172 @@ impl Default for ResourcesConfig {
                 .map_or(2, |count| count.get().clamp(1, 4)),
             decode_parallelism: None,
             log_to_stderr: cfg!(not(target_arch = "wasm32")),
+            container_installer: None,
             #[cfg(target_arch = "wasm32")]
             image_port: None,
         }
+    }
+}
+
+/// The hook that makes a fetched Lynx container's sections loadable.
+///
+/// A [`SourceRequest::Fetch`](bobcat_core::resource::SourceRequest::Fetch) is
+/// a plain fetch: core asks for a URL and learns only that the fetch is over.
+/// What the bytes *were* is this crate's and its host's business, and this is
+/// where that decision is made — if they are a Lynx container, its bodies and
+/// stylesheets are registered so that the source requests a realm makes for
+/// them by URL answer. Deciding *what* the bytes are is `bobcat-source`'s, so
+/// what is here is the fetch, the URL an install is based on, and the
+/// registry it writes.
+///
+/// A host without one still fetches; nothing about the completion changes.
+///
+/// It runs on whichever thread the load finished on — a blocking-pool thread
+/// natively — which is why it is `Send + Sync`, and why what it writes
+/// through is a [`Registrar`] rather than a [`Resources`].
+pub trait ContainerInstaller: fmt::Debug + Send + Sync + 'static {
+    /// Offers the bytes fetched from `url`. `url` is the **resolved request
+    /// URL**, which is what a realm derives its section URLs from; a redirect
+    /// is the transport's business and no part of it.
+    ///
+    /// `Ok(false)` is "these are not a container I recognize": the fetch
+    /// completes and nothing was registered, which is what an image or a
+    /// script fetched this way leaves. `Ok(true)` is installed. An error is a
+    /// container that would not decode, which **fails the fetch** with that
+    /// message.
+    fn install(&self, url: &Url, bytes: &[u8], registrar: &Registrar) -> Result<bool, String>;
+}
+
+/// What a [`ContainerInstaller`] registers through: the registry alone,
+/// reachable from the thread the load finished on.
+///
+/// It is [`Resources::register`] and [`Resources::register_style_sheet`]
+/// minus the per-scope stylesheet-cache invalidation, which is thread-bound
+/// and has nothing to invalidate here: a container's section URLs were never
+/// asked for before the container existed, so no cached response for one can
+/// be standing.
+pub struct Registrar {
+    shared: SharedHandle,
+}
+
+impl fmt::Debug for Registrar {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("Registrar").finish_non_exhaustive()
+    }
+}
+
+impl Registrar {
+    /// Registers `bytes` under `url`, replacing any earlier registration.
+    /// Returns the normalized URL they answer to.
+    ///
+    /// # Errors
+    ///
+    /// [`RegisterError::InvalidUrl`] for a URL that does not parse.
+    pub fn register(
+        &self,
+        url: &str,
+        bytes: impl Into<Bytes>,
+        media_type: Option<&str>,
+    ) -> Result<Url, RegisterError> {
+        let url = parse_registration_url(url)?;
+        self.shared.transports.registry.insert(
+            &url,
+            Registered::Bytes {
+                bytes: bytes.into(),
+                media_type: media_type.and_then(mime::MediaType::parse),
+            },
+        );
+        Ok(url)
+    }
+
+    /// Registers a stylesheet the installer already parsed. It answers a
+    /// stylesheet source request pre-parsed, and no other request at all.
+    ///
+    /// # Errors
+    ///
+    /// [`RegisterError::InvalidUrl`] for a URL that does not parse.
+    pub fn register_style_sheet(
+        &self,
+        url: &str,
+        sheet: Arc<PreparsedStyleSheet>,
+    ) -> Result<Url, RegisterError> {
+        let url = parse_registration_url(url)?;
+        self.shared
+            .transports
+            .registry
+            .insert(&url, Registered::StyleSheet(sheet));
+        Ok(url)
+    }
+}
+
+/// What a [`ResourceFetcher::fetch_probe`] reads, and the base every
+/// specifier resolves against.
+///
+/// Its own `Arc` rather than a field of [`Shared`] for one reason: the probe
+/// is called from `bobcat-main` and `bobcat-workers` while the fetcher itself
+/// never leaves the embedder's thread, so what crosses has to be `Send +
+/// Sync` on every target — and on wasm32 a `SharedHandle` is an `Rc`. Two
+/// mutexes and a set of URLs are.
+#[derive(Debug, Default)]
+pub(crate) struct FetchIndex {
+    base_url: Mutex<Option<Url>>,
+    /// Every URL a [`SourceKind::Fetch`](sources::SourceKind) load completed
+    /// successfully for. Written after the container installer ran, so a
+    /// fetch whose install failed is not in it; a failed fetch is never
+    /// remembered either, as native remembers no failure.
+    fetched: Mutex<FxHashSet<Url>>,
+}
+
+impl FetchIndex {
+    fn with_base(base_url: Option<Url>) -> Self {
+        Self {
+            base_url: Mutex::new(base_url),
+            fetched: Mutex::default(),
+        }
+    }
+
+    fn base_url(&self) -> Option<Url> {
+        self.base_url
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn set_base_url(&self, base_url: Option<Url>) {
+        *self
+            .base_url
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = base_url;
+    }
+
+    /// Remembers one completed fetch, by its **resolved request URL** — the
+    /// same URL `sources::request` resolved the specifier to.
+    pub(crate) fn remember(&self, url: &Url) {
+        self.fetched
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(url.clone());
+    }
+
+    /// Whether a fetch of `specifier` has already completed, resolving it the
+    /// way a request would: an absolute URL as itself, anything else against
+    /// the current base. A specifier that resolves to nothing was never
+    /// fetched, so it is simply `false`.
+    ///
+    /// The base is read here rather than captured once, because
+    /// [`Resources::set_base_url`] can move it.
+    fn contains(&self, specifier: &str) -> bool {
+        let base = self.base_url();
+        let Ok(url) = Url::parse(specifier).or_else(|_| {
+            base.ok_or(url::ParseError::RelativeUrlWithoutBase)
+                .and_then(|base| base.join(specifier))
+        }) else {
+            return false;
+        };
+        self.fetched
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&url)
     }
 }
 
@@ -199,7 +373,11 @@ pub(crate) type SharedHandle = Rc<Shared>;
 /// [`executor::Executor`], so no job can keep the fetcher's runtime alive.
 pub(crate) struct Shared {
     transports: Transports,
-    base_url: Mutex<Option<Url>>,
+    /// The base every specifier resolves against, and the URLs a plain fetch
+    /// has completed for. Behind an `Arc` of its own because
+    /// [`ResourceFetcher::fetch_probe`] hands a reader of it to the engine
+    /// threads, while everything else in [`Shared`] stays where it is.
+    fetches: Arc<FetchIndex>,
     initial_decode_bound: u32,
     downsample_ratio: f32,
     #[cfg(target_arch = "wasm32")]
@@ -207,6 +385,7 @@ pub(crate) struct Shared {
     completions: tokio::sync::mpsc::UnboundedSender<Completion>,
     wakeup: Wakeup,
     log_to_stderr: bool,
+    container_installer: Option<Arc<dyn ContainerInstaller>>,
     notes: Mutex<Vec<String>>,
     /// A test's seam into a background job's transport read, called on the
     /// blocking thread that runs it, so a test can hold a job in flight or
@@ -238,6 +417,27 @@ pub(crate) type DecodeHook = Arc<
 >;
 
 impl Shared {
+    /// Offers one fetch's bytes to the container installer, if this host has
+    /// one, and says whether anything was registered.
+    ///
+    /// No installer is not a failure: a plain fetch with nothing to make of
+    /// its bytes is still a fetch that completed.
+    ///
+    /// The registrar is built here rather than handed in, because what it
+    /// writes through is this very [`Shared`].
+    fn install_container(self: &SharedHandle, url: &Url, bytes: &[u8]) -> Result<bool, String> {
+        let Some(installer) = self.container_installer.as_ref() else {
+            return Ok(false);
+        };
+        installer.install(
+            url,
+            bytes,
+            &Registrar {
+                shared: SharedHandle::clone(self),
+            },
+        )
+    }
+
     fn complete(&self, completion: Completion) {
         let _ = self.completions.send(completion);
         (self.wakeup)();
@@ -457,7 +657,7 @@ impl Resources {
                 #[cfg(not(target_arch = "wasm32"))]
                 disk,
             },
-            base_url: Mutex::new(config.base_url.clone()),
+            fetches: Arc::new(FetchIndex::with_base(config.base_url.clone())),
             initial_decode_bound: config.initial_decode_bound.max(1),
             downsample_ratio: config.downsample_ratio.max(1.0),
             #[cfg(target_arch = "wasm32")]
@@ -465,6 +665,7 @@ impl Resources {
             completions,
             wakeup: Arc::new(wakeup),
             log_to_stderr: config.log_to_stderr,
+            container_installer: config.container_installer.clone(),
             notes: Mutex::new(notes),
             #[cfg(all(test, not(target_arch = "wasm32")))]
             fetch_hook: Mutex::new(None),
@@ -505,7 +706,9 @@ impl Resources {
                     #[cfg(not(target_arch = "wasm32"))]
                     disk: self.shared.transports.disk.clone(),
                 },
-                base_url: Mutex::new(None),
+                // A fresh index, like the fresh registry beside it: a new
+                // scope has fetched nothing and has no base yet.
+                fetches: Arc::new(FetchIndex::default()),
                 initial_decode_bound: self.shared.initial_decode_bound,
                 downsample_ratio: self.shared.downsample_ratio,
                 #[cfg(target_arch = "wasm32")]
@@ -513,6 +716,7 @@ impl Resources {
                 completions,
                 wakeup: self.shared.wakeup.clone(),
                 log_to_stderr: self.shared.log_to_stderr,
+                container_installer: self.shared.container_installer.clone(),
                 notes: Mutex::new(Vec::new()),
                 #[cfg(all(test, not(target_arch = "wasm32")))]
                 fetch_hook: Mutex::new(None),
@@ -593,19 +797,11 @@ impl Resources {
     /// What relative specifiers resolve against.
     #[must_use]
     pub fn base_url(&self) -> Option<Url> {
-        self.shared
-            .base_url
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+        self.shared.fetches.base_url()
     }
 
     pub fn set_base_url(&self, base_url: Option<Url>) {
-        *self
-            .shared
-            .base_url
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = base_url;
+        self.shared.fetches.set_base_url(base_url);
     }
 
     /// Bytes the memory tier holds: decoded bitmaps, plus the encoded
@@ -748,6 +944,15 @@ impl ResourceFetcher for ViewResources {
 
     fn service_images(&self) {
         images::service(&self.resources);
+    }
+
+    /// This view's answer to "already fetched?", read from either engine
+    /// thread. It resolves the specifier the way a request would and looks it
+    /// up in the set a completed [`SourceRequest::Fetch`] writes; nothing
+    /// else about the load is reachable through it, and it starts nothing.
+    fn fetch_probe(&self) -> Option<bobcat_core::resource::FetchProbe> {
+        let index = Arc::clone(&self.resources.shared.fetches);
+        Some(Arc::new(move |specifier: &str| index.contains(specifier)))
     }
 }
 

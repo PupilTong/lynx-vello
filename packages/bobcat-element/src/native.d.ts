@@ -235,6 +235,21 @@ declare module "bobcat-internal:host" {
   export const globalProps: BobcatNative["globalProps"];
   export const nativeModuleTable: BobcatNative["nativeModuleTable"];
   /**
+   * Fetches `url` the way an image is fetched and answers the id of a
+   * `bobcat:future` that settles when the fetch is over: fulfilled with
+   * `undefined`, rejected with the host's reason. The realm ending under a
+   * wait throws.
+   *
+   * `true` instead of an id means **already fetched by this view**: nothing
+   * was requested and the outcome is known in this very job, which is what a
+   * cached fetch looks like from here.
+   *
+   * Nothing about the bytes comes back and nothing is evaluated. What the
+   * host made of them is its own — a fetched Lynx container's sections answer
+   * the later loads `lynx.loadScript` and `__AdoptStyleSheet` make by URL.
+   */
+  export function fetchResource(url: string): number | true;
+  /**
    * The URL a module at `base` names by `specifier` — the same resolution an
    * `import` there gets, so a `require` and an `import` name one module by one
    * URL. Absolute and relative URLs resolve; a bare name other than a built-in

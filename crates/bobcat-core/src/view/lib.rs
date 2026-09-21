@@ -595,6 +595,20 @@ impl LynxGroup {
         let (commands, command_receiver) = mpsc::unbounded_channel();
         let (notices, notice_receiver) = mpsc::unbounded_channel();
         let (frames, frame_receiver) = watch::channel(Published::default());
+        // The sink comes first and the store is built *from* it, so a store
+        // without its report channel is unrepresentable and the two are paired
+        // by construction. That pairing is per view: a host whose registry
+        // outlives the view returns a per-view value holding a shared handle
+        // on it, and that value — not the registry — is what carries the sink.
+        // A load in flight when a view is replaced therefore reports to the
+        // queue it was started for, which teardown has already detached,
+        // rather than into its successor's document.
+        //
+        // Built before the attachment goes out, because the attachment
+        // carries one thing out of it: the fetcher's `fetch_probe`, the only
+        // part of a host's resource system that crosses to an engine thread.
+        let (reports, inbox) = ImageInbox::new();
+        let fetcher = Rc::new(resources(reports));
         self.inner
             .attach
             .send(GroupCommand::Attach(Box::new(ViewAttachment {
@@ -606,21 +620,12 @@ impl LynxGroup {
                 notices,
                 frames,
                 cancel: cancel.clone(),
+                fetch_probe: fetcher.fetch_probe(),
             })))
             .map_err(|_| EngineError::Thread {
                 name: "script",
                 message: "the group's Lynx main thread is gone".to_owned(),
             })?;
-        // The sink comes first and the store is built *from* it, so a store
-        // without its report channel is unrepresentable and the two are paired
-        // by construction. That pairing is per view: a host whose registry
-        // outlives the view returns a per-view value holding a shared handle
-        // on it, and that value — not the registry — is what carries the sink.
-        // A load in flight when a view is replaced therefore reports to the
-        // queue it was started for, which teardown has already detached,
-        // rather than into its successor's document.
-        let (reports, inbox) = ImageInbox::new();
-        let fetcher = Rc::new(resources(reports));
         Ok(LynxView {
             cancel,
             // The seat a painter observes this view through: both halves of it
@@ -1085,6 +1090,11 @@ pub(crate) struct ViewAttachment {
     /// The view's end signal, minted on the embedder's thread. The task that
     /// serves this view ends on it, and cancels it again on every exit.
     pub(crate) cancel: CancellationToken,
+    /// The one part of the host's resource system that leaves the embedder's
+    /// thread: the fetcher's answer to "already fetched?", which every realm
+    /// of this view asks before making a fetch. `None` for a host that gave
+    /// none.
+    pub(crate) fetch_probe: Option<crate::resource::FetchProbe>,
 }
 
 #[cfg(test)]

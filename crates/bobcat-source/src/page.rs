@@ -172,6 +172,8 @@ pub enum SourceError {
         "native bundle `{input}` has no main-thread module `{entry}`; select an external module explicitly"
     )]
     MissingNativeEntry { input: String, entry: String },
+    #[error("`{0}` is a Lynx page rather than a container of sections")]
+    NotAContainer(String),
 }
 
 /// Explicit name for [`SourceError`] at APIs that carry several error types.
@@ -651,7 +653,7 @@ fn bundle_source_url(input: &Url, path: &str) -> Option<Url> {
 /// The resource URL `__LoadLepusChunk` names one non-root Lepus chunk by: the
 /// root script's own path, then the encoded chunk name as a `.js` file. The
 /// realm writes the same string in `main-thread-runtime.ts`'s `chunkURL`.
-fn named_chunk_url(entry: &Url, name: &str) -> Url {
+pub(crate) fn named_chunk_url(entry: &Url, name: &str) -> Url {
     let mut url = entry.clone();
     let encoded: String = url::form_urlencoded::byte_serialize(name.as_bytes()).collect();
     url.set_path(&format!(
@@ -664,7 +666,7 @@ fn named_chunk_url(entry: &Url, name: &str) -> Url {
 
 /// The resource URL used by the JS stylesheet wrapper: the compiler's `CSS`
 /// section is `index.css`; other named sections each have their own directory.
-fn named_style_url(entry: &Url, key: &str) -> Url {
+pub(crate) fn named_style_url(entry: &Url, key: &str) -> Url {
     let mut url = entry.clone();
     let section = if key == "CSS" {
         String::new()
@@ -779,7 +781,7 @@ fn diagnostic_url(input: &Url) -> String {
     bounded_diagnostic(redacted.to_string())
 }
 
-fn bounded_diagnostic(mut value: String) -> String {
+pub(crate) fn bounded_diagnostic(mut value: String) -> String {
     const MAX_BYTES: usize = 256;
     if value.len() <= MAX_BYTES {
         return value;
@@ -795,7 +797,7 @@ fn bounded_diagnostic(mut value: String) -> String {
 
 /// Recognizes native magics before the input can fall through to web decoding.
 /// The native decoder validates the leading total size and section structure.
-fn looks_like_native_bundle(bytes: &[u8]) -> bool {
+pub(crate) fn looks_like_native_bundle(bytes: &[u8]) -> bool {
     let Some(header) = bytes.get(..8) else {
         return false;
     };
@@ -803,10 +805,25 @@ fn looks_like_native_bundle(bytes: &[u8]) -> bool {
     matches!(magic, 0x0024_1922 | 0xdd73_7199)
 }
 
+/// Whether these bytes open with the `SDRA WROF` pair [`crate::web::decode`]
+/// checks — the two little-endian magics a `.web.bundle` starts with.
+///
+/// Sniffing, not validation: a file that starts this way is a web container
+/// as far as anything here can tell, and the decoder is what says whether it
+/// really is one.
+pub(crate) fn looks_like_web_bundle(bytes: &[u8]) -> bool {
+    let Some(header) = bytes.get(..8) else {
+        return false;
+    };
+    let magic0 = u32::from_le_bytes(header[..4].try_into().expect("four-byte web magic"));
+    let magic1 = u32::from_le_bytes(header[4..].try_into().expect("four-byte web magic"));
+    magic0 == crate::web::MAGIC_0 && magic1 == crate::web::MAGIC_1
+}
+
 /// Mirrors web-core's raw-input classification: any run of ASCII whitespace
 /// and UTF-8 BOMs is ignored for sniffing, while the XML parser itself remains
 /// responsible for enforcing its stricter single-leading-BOM grammar.
-fn looks_like_lynx_xml(mut bytes: &[u8]) -> bool {
+pub(crate) fn looks_like_lynx_xml(mut bytes: &[u8]) -> bool {
     const UTF8_BOM: &[u8] = b"\xef\xbb\xbf";
 
     loop {

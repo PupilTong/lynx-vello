@@ -365,6 +365,10 @@ impl BobcatRenderer {
             let resources = Resources::new(
                 ResourcesConfig {
                     image_port: Some(image_port),
+                    // Lazy bundles: a `lynx.fetchBundle` installs its
+                    // sections through this, and without one every fetch
+                    // fails.
+                    container_installer: Some(Arc::new(bobcat_source::LazyBundleInstaller)),
                     ..ResourcesConfig::default()
                 },
                 {

@@ -40,6 +40,8 @@ import type { NodeQueryRequest } from "bobcat:selector-query";
 import "bobcat:timers";
 import { requestScriptFrame } from "bobcat-internal:host";
 import { initialProcessor as getInitialProcessor, globalProps, initData, loadModuleSync, nativeModuleTable, reportScriptError, logScriptMessage, preloadStyleSheet, adoptStyleSheet } from "bobcat-internal:host";
+import { sectionURL, styleSheetURL as sectionStyleSheetURL } from "bobcat:section-url";
+import { type BundleHandle, createBundleFetches } from "bobcat:bundle-fetch";
 import type { Worker } from "bobcat-internal";
 import type { TimerGlobals } from "bobcat:timers";
 
@@ -118,39 +120,21 @@ function cardURL(bundleName: string): string {
 }
 
 /**
- * One section name as `PageSource` percent-encodes it: `form_urlencoded`'s
- * byte serializer, which escapes `!~'()` where `encodeURIComponent` leaves
- * them, and writes a space as `%20` rather than `+`.
+ * The resource URL one named stylesheet of that container lives at, which is
+ * the string `named_style_url` writes in `crates/bobcat-source/src/page.rs`.
+ * `__Card__` names this page's own container.
  */
-function encodedSection(key: string): string {
-  return encodeURIComponent(key).replace(/[!~'()]/g,
-    character => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
-}
-
-/** The bundle URL's path and its `?#` suffix, which a section URL goes between. */
-function cardParts(bundleName: string): [string, string] {
-  const base = cardURL(bundleName);
-  const suffixAt = base.search(/[?#]/);
-  return suffixAt < 0
-    ? [base, ""]
-    : [base.slice(0, suffixAt), base.slice(suffixAt)];
-}
-
 function styleSheetURL(key: string, bundleName: string): string {
-  const [path, suffix] = cardParts(bundleName);
-  const section = key === "CSS" ? "" : `${encodedSection(key)}/`;
-  return `${path.replace(/\/$/, "")}/${section}index.css${suffix}`;
+  return sectionStyleSheetURL(key, cardURL(bundleName));
 }
 
 /**
- * The resource URL one named Lepus chunk lives at: the entry URL's path, then
- * the encoded chunk name as a `.js` file, the `?#` suffix kept where a
- * stylesheet section's is. `PageSource` registers it under exactly this
- * string (`named_chunk_url` in `crates/bobcat-source/src/page.rs`).
+ * The resource URL one named Lepus chunk or custom section of that container
+ * lives at, which is the string `named_chunk_url` writes in
+ * `crates/bobcat-source/src/page.rs`.
  */
 function chunkURL(name: string, bundleName: string): string {
-  const [path, suffix] = cardParts(bundleName);
-  return `${path.replace(/\/$/, "")}/${encodedSection(name)}.js${suffix}`;
+  return sectionURL(name, cardURL(bundleName));
 }
 
 // Set once, at connection, and never cleared: a Worker that has ended is still
@@ -666,6 +650,53 @@ export function __AdoptStyleSheet(handle: {url: string}) {
   return null;
 }
 
+/**
+ * This realm's `lynx.fetchBundle`.
+ *
+ * `later` is **inline**: on the main thread native runs a callback registered
+ * on a handle whose value is already there then and there
+ * (`LynxActor::Act`), which is what ReactLynx's `rLynxPrepareLazyBundleMTS`
+ * depends on — its `loadScript('main-thread')` and `__LoadStyleSheet('CSS')`
+ * have to run before the `callLepusMethod` reply reaches BTS.
+ */
+const bundleFetches = createBundleFetches({
+  report: error => { _ReportError(error); },
+  later: run => { run(); },
+});
+
+/**
+ * `lynx.loadScript(key, {bundleName})`: one named custom section of a
+ * container this realm has, evaluated once per realm.
+ *
+ * The load is the synchronous one a `require` is written over, of the URL the
+ * section name builds beside the container's — the string `bobcat-source`
+ * registered it under. The three shapes it can answer are `bobcat:module`'s
+ * own: an **ES module**, which is what a body a container carried is, whose
+ * default export is what native's host would have kept as that script's
+ * completion value; **JSON**, the parsed value; and a plain **`CommonJS`**
+ * file, compiled in `module, exports` alone, which answers `module.exports`.
+ *
+ * Unlike BTS's, this answers the value itself rather than an `{init}` object:
+ * ReactLynx calls what it gets (`lynx.loadScript('main-thread', …)(entry)`),
+ * and a `.lynx.bundle`'s `main-thread` body is the function expression it
+ * calls.
+ */
+function loadScript(key: string, options: {bundleName?: string}): unknown {
+  if (typeof key !== "string" || options === null || typeof options !== "object") {
+    throw new TypeError("loadScript requires a section key and an options object");
+  }
+  const loaded = loadModuleSync(chunkURL(key, options.bundleName ?? "__Card__"), "module, exports");
+  if (loaded.kind === "json") return loaded.value;
+  if (loaded.kind === "module") {
+    const namespace = loaded.value as {default?: unknown};
+    return Object.hasOwn(namespace, "default") ? namespace.default : namespace;
+  }
+  const module = {exports: {} as unknown};
+  (loaded.value as (module: unknown, exports: unknown) => void)
+    .call(undefined, module, module.exports);
+  return module.exports;
+}
+
 export const lynx = {
   setTimeout: timers.setTimeout,
   setInterval: timers.setInterval,
@@ -703,5 +734,10 @@ export const lynx = {
   },
   registerDataProcessors: noop,
   reportError: _ReportError,
+  // `options` is accepted and ignored, as native ignores it.
+  fetchBundle(url: string, _options?: unknown): BundleHandle {
+    return bundleFetches.fetchBundle(url, _options);
+  },
+  loadScript,
   triggerGlobalEventFromLepus: noop,
 };

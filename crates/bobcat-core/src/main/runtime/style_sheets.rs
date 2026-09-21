@@ -68,6 +68,9 @@ pub(super) fn install_styles(
             LoadedSource::Font(_) => {
                 return Err(format!("stylesheet {url} returned a font"));
             }
+            LoadedSource::Fetched => {
+                return Err(format!("stylesheet {url} returned a plain fetch"));
+            }
         }
         Ok(HostValue::Undefined)
     })

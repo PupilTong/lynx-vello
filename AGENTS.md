@@ -209,7 +209,8 @@ the one channel set a view spans its two threads with, `jobs.rs` the engine
 thread itself — its scheduler and its job queue — `lifetime.rs` the view's
 task set, `timers.rs` and `clock.rs`/`alarm.rs` the timer machinery both realm
 kinds share, `future.rs` the per-realm table the `Future` class is written
-over, `esm.rs` the preloaded module specifiers, `script.rs` the
+over, `fetch.rs` the one member a realm fetches a URL through, `esm.rs` the
+preloaded module specifiers, `script.rs` the
 sanitized error a failure is reported with, `style.rs` the
 `PreparsedStyleSheet` vocabulary, `resource.rs` the host protocol, and
 `threads.rs` the two engine threads.
@@ -401,7 +402,14 @@ specifier; the fetcher supplies the base URL and transport policy. The protocol
 also offers the optional `preload_source` hint,
 `request_image`/`service_images` and the `FrameImages` supertrait: every method
 is synchronous, so no resource future crosses it, and core names none of a
-fetcher's own transport API. It carries no response-size limit either; each
+fetcher's own transport API. **One optional member leaves the embedder's
+thread**: `fetch_probe()` hands back a `Send + Sync` `FetchProbe`
+(`Arc<dyn Fn(&str) -> bool + …>`) that a realm — MTS's or a worker's — asks
+whether a `SourceRequest::Fetch` of a URL has already completed for this view,
+resolving the specifier the way a request would. A hit means no request is
+made and the realm's `fetchResource` settles in that same call, which is the
+only synchronous answer this protocol has; the default is no probe, and a
+probe must neither block nor start a load. It carries no response-size limit either; each
 fetcher owns the memory bound for the response it materializes. The resource
 module must not decode images, fonts or templates, upload render resources, or
 own cache/retry policy.
@@ -541,13 +549,15 @@ operation and then enters the realm to deliver it, rejecting with an `Error`
 carrying the host's reason. A `wait` after that conversion is a `TypeError`,
 because the delivery is a job and a job cannot run inside another job's wait.
 Three host members carry it — `waitFuture(id, timeoutMs)`, `takeFuture(id)` and
-`settleFuture(id)` — and both realm kinds have all three. Nothing in production
-registers a future yet: the table is infrastructure, exercised by a test-only
-`testFuture` producer, and `lynx.fetchBundle` is what will be written over it.
+`settleFuture(id)` — and both realm kinds have all three. What registers one
+in production is `fetchResource` (`crate::fetch`), the member
+`lynx.fetchBundle` is written over; a test-only `testFuture` producer
+exercises the table itself.
 
 `lynx.requireModule`, `nativeApp.loadScript` and `lynx.loadScript` are the
-compiled-bundle layer, in `bobcat:lynx-modules` and so in worker realms only,
-and each is **one synchronous load** over that same member — the mechanism
+compiled-bundle layer — the first two in `bobcat:lynx-modules` and so in
+worker realms only, `lynx.loadScript` on both threads — and each is **one
+synchronous load** over that same member — the mechanism
 MTS's `__LoadLepusChunk` uses: the realm builds the URL the path names beside
 the registered template URL and loads it, before the call returns. There is no
 table of bodies and no boot-time import loop. **No source table and no source
@@ -575,9 +585,40 @@ call. Their caches are their own, not `require.cache`: keyed by the bare path,
 written only after the factory returns, and `loadScript` writes neither. A body
 is never `import`ed, only `require`d, so the still-evaluating refusal never
 reaches one: it is compiled by the `require` that asked for it, or answered
-from the evaluation an earlier one ran. An entry that is itself an absolute URL
-resolves beside itself. `requireModuleAsync`, `loadScriptAsync`, `readScript`,
-`fetchBundle` and lazy bundles do not exist.
+from the evaluation an earlier one ran. An entry no `__BobcatRegisterBundle`
+named is a **lazy container's** `bundleName` instead, and its sections are
+named *under* that URL rather than beside it — `<bundleName path>/<encoded
+section>.js`, one rule shared with MTS's `chunkURL` and with
+`bobcat-source`'s `named_chunk_url`.
+
+**`lynx.fetchBundle(url, options?)` is a plain fetch**, in both realm kinds:
+apart from being waitable it does what `fetch(image_url)` does. Core's whole
+half is `fetchResource(url)` — one `SourceRequest::Fetch`, which answers
+`LoadedSource::Fetched` and carries nothing back — so **`bobcat-core` holds no
+bundle-specific code at all**: no installed set, no record JSON, and no
+knowledge of what the bytes were. Whether they were a Lynx container whose
+sections get registered at the URLs a later
+`lynx.loadScript(section, {bundleName})` or `__LoadStyleSheet('CSS', url)`
+names is the **fetcher's**, through `bobcat_resources::ContainerInstaller` and
+`bobcat_source::LazyBundleInstaller`, which sniffs the two container magics
+and leaves every other fetch alone. Nothing is evaluated by any of it. The
+handle is native's `{wait, then}` host object rather than a Promise, built in
+`bundle-fetch.ts` over the **`bobcat:future`** `Future` the member answers
+with: `wait(seconds)` is `Future.wait` in milliseconds, so it parks the job
+the way a `require` does and a deadline that passes answers `code: -2` and
+cancels nothing; `.then` converts that Future once and runs its callbacks as
+reactions of the Promise the owner's epilogue settles, running one registered
+on a handle this realm already holds the outcome for inline on MTS and posted
+on BTS, as native's mediators do. A fetch never rejects past the handle: a
+failure is a settled record with `code: -1` carrying the host's reason.
+**What has already been fetched is the fetcher's knowledge**, not core's:
+`fetchResource` asks `ResourceFetcher::fetch_probe()` first, and a URL this
+view already fetched answers `true` with no request, so that handle is
+settled from the start and MTS runs its `.then` inline — this engine's
+`FindTemplateBundle`, and what `rLynxPrepareLazyBundleMTS` needs to have run
+its `loadScript('main-thread')` before the `callLepusMethod` reply reaches
+BTS. `requireModuleAsync`, `loadScriptAsync` and `readScript` do not exist.
+See `crates/bobcat-core/src/fetch.rs` and `docs/worker-resources-runtime.md`.
 
 #### Realm, document and boot
 
@@ -1288,15 +1329,27 @@ nothing about Lynx.
 The cross-platform reference resource system: one `ResourceFetcher` for macOS,
 Linux and the browser, which every shipped embedder uses. It is the worked
 example of what the protocol expects, not part of the protocol, and core stays
-free of resources. Four things live here and nowhere else in the workspace.
+free of resources. Five things live here and nowhere else in the workspace.
 
 **Transports**: contents the embedder registers under any URL
-(`Resources::register` and `register_style_sheet` — a decoded bundle's scripts
+(`Resources::register` and `register_style_sheet`, or a `ContainerInstaller`'s
+own `Registrar` for the sections of a lazy container it recognized in a plain
+`SourceRequest::Fetch`'s bytes — a decoded bundle's scripts
 and `StyleInfo` sheet, a browser-fetched script's bytes, a test's PNG), `data:`
 URLs, `file:` URLs natively, and `http(s)` through the platform's own client:
 libcurl loaded at runtime with `libloading` on macOS and Linux (no build-time
 link, no bundled HTTP or TLS stack; a host without it gets a precise
 `Unavailable`), and the Render Worker's `fetch` in the browser.
+
+**The `FetchIndex`**: the base URL every specifier resolves against, and the
+set of URLs a plain `SourceRequest::Fetch` has **completed successfully** for,
+written after the container installer ran. It is behind an `Arc` of its own
+rather than inside the shared state, because `ViewResources::fetch_probe()`
+hands a reader of it to `bobcat-main` and `bobcat-workers` while everything
+else here stays on the embedder's thread — on wasm32 the shared handle is an
+`Rc`, and two mutexes and a set of URLs are `Send + Sync` on every target. A
+new scope gets a fresh one, like the fresh registry beside it; a failed fetch
+and a failed install are never in it.
 
 **A MIME-keyed preprocessing pipeline**: every payload is sniffed (image magic
 beats the label, a label beats a byte scan, a BOM names a charset), classified,
@@ -1689,7 +1742,10 @@ its QuickJS realms, one file per module. The main-thread runtime gets
 `src/global-event-emitter.ts` as `bobcat:global-event-emitter`,
 `src/lynx-modules.ts` as `bobcat:lynx-modules`, `src/selector-query.ts` as
 `bobcat:selector-query`, plus `bobcat:event-target`,
-`bobcat:cross-thread-context`, `bobcat:timers` and `bobcat:module` again —
+`bobcat:cross-thread-context`, `bobcat:timers`, `bobcat:module`,
+`src/section-url.ts` as `bobcat:section-url` and `src/bundle-fetch.ts` as
+`bobcat:bundle-fetch` again — the last two being on both runtimes because a
+container's section URLs and `lynx.fetchBundle`'s handle are both realms' —
 registered per runtime, because a source is runtime-wide and no value crosses
 between two runtimes. `src/native.d.ts` declares the two native modules' contracts and is
 the authoritative list of what `bobcat-internal:host` and
@@ -2063,9 +2119,11 @@ would host it:
 - **Animated image playback.** `bobcat-resources` decodes an image's first
   frame only, with no `region-to-decode` and no `blur-radius`
   post-processing.
-- **Import maps, import attributes, JSON modules and Lynx component-bundle
+- **Import maps, import attributes, JSON *ESM* modules and Lynx component-bundle
   imports**, and the asynchronous half of the compiled-bundle loader:
-  `requireModuleAsync`, `loadScriptAsync`, `fetchBundle` and lazy bundles.
+  `requireModuleAsync` and `loadScriptAsync`. Lazy containers themselves are
+  implemented — `lynx.fetchBundle` plus `lynx.loadScript` on both threads —
+  and so is `require`'s own `.json` parse.
 
 See `docs/tracking/` for the behavior surface each of these is scoped against,
 and `.claude/agents/` for the subsystem-scoped agent personas set up for this

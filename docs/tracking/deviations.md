@@ -1198,7 +1198,100 @@ consequential choice about whether to follow the spec or the quirk.
   evaluating is reported at the `requireModule` that reached it, which is where
   native reports it too. This covers bundle bodies only: a **named Lepus
   chunk** is not a module, and `__LoadLepusChunk` loads and runs it again on
-  every call, as native does.
+  every call, as native does. **A lazy container's section is a body too**, so
+  MTS's `lynx.loadScript(key, {bundleName})` evaluates it once per realm on
+  that thread as well.
+- **`lynx.fetchBundle` answers native's `{wait, then}` object, not web-core's
+  Promise** — native's `ResponsePromise` (`lynx.cc` `FetchBundle`) is a host
+  object with exactly `wait(seconds)` and `then(callback)`; `.then` returns
+  `undefined`, so there is no chaining and no `catch`, and `options` is
+  ignored. web-core's `fetchBundle` is a real Promise with no `wait` at all
+  (`createMainThreadGlobalAPIs.ts`). **Decision: native**, because the
+  compiled ReactLynx caller is written to it — `lazy-bundle.ts` calls
+  `.wait(5)` for a `mode: 'sync'` import, and wraps the asynchronous path in a
+  `new Promise` of its own rather than chaining — so a Promise here would
+  break the synchronous shape outright.
+- **`.then` on an already-settled fetch: inline on MTS, posted on BTS;
+  web-core's is a microtask on both** — native's `LynxActor::Act` acts on the
+  value being there, which on the main thread means running the callback then
+  and there and on the background thread posting a task
+  (`bts_runtime_mediator`). "Settled" is this realm holding the outcome,
+  however it arrived: a `wait` that returned, or the Promise of the
+  `bobcat:future` `Future` the fetch is — so `h.wait(5); h.then(cb)` runs
+  `cb` at the `then` rather than through a delivery behind it. A callback
+  registered while the fetch is still outstanding runs as a reaction of that
+  Promise, which the realm owner's epilogue settles on a task of its own;
+  native's BTS posts a task and its MTS posts to the Lepus thread, so that
+  half is asynchronous on both. **Decision: native**, for the case this
+  engine can still reach — but see the entry below: the case
+  `rLynxPrepareLazyBundleMTS` actually depends on is a *repeat* fetch, which
+  this engine no longer answers synchronously at all.
+- **A repeat `lynx.fetchBundle` of a URL this view already fetched settles in
+  the same job, through the fetcher's probe** — native answers one at once out
+  of `TemplateAssembler::FindTemplateBundle`, so MTS's `.then` runs **inline**;
+  web-core resolves from its own promise cache, so its `.then` is a microtask.
+  **Decision: native**, and it is load-bearing rather than a nicety.
+  `lynx.fetchBundle` is *a plain fetch* — a user ruling: apart from being
+  waitable it behaves like `fetch(image_url)`, and `bobcat-core` contains no
+  bundle-specific code at all — so nothing in the engine remembers a URL.
+  What does is the **fetcher**: `ResourceFetcher::fetch_probe()` hands the
+  realms a `Send + Sync` reader of what it has fetched, `fetchResource`
+  consults it before requesting anything, and a hit answers `true` with no
+  request, which makes the handle settled from the start.
+  What a *microtask* answer would cost was measured before the probe existed,
+  and is why it exists: `prepareLazyBundleMTS` is written to the inline answer
+  ("`.then` will be a sync function since the bundle has been loaded in BTS"),
+  so with an asynchronous one it returns having loaded nothing, the
+  `callLepusMethod` reply resolves BTS's lazy import, BTS renders and sends
+  `rLynxChange`, and MTS applies a patch naming a snapshot its own
+  `main-thread` section has not registered yet —
+  `Error: Snapshot not found: __snapshot_…`, which rides the reply back and
+  ends the BTS Worker, 5 runs out of 5. With the probe, `react-lazy` and
+  `react-lazy-sync` both pass 5 of 5
+  (`crates/bobcat-source/tests/lazy_bundle.rs`). Only a *completed* fetch is
+  remembered; a failure is not, as native caches none.
+- **A failed `fetchBundle` carries the failure's text in `error_msg`; native
+  leaves it empty** — native's failure path fills `code` and leaves
+  `error_msg` empty (`lynx.cc`), and web-core names the key `errorMsg`
+  instead. **Decision: native's key, this engine's value** — `error_msg`, so
+  the compiled caller's `JSON.stringify(info)` diagnostic reads the same, but
+  carrying the resource failure's own message, because an empty string makes
+  every lazy-bundle failure indistinguishable and this engine has the text
+  right there. `code` is native's: `0` fetched, `-1` the fetch failed, `-2` a
+  `wait` timeout, with native's exact timeout message. `-1` is what the
+  rejected `Future` becomes; the fetch itself never rejects past the handle.
+- **`fetchBundle(...).wait(t)` takes a number of *seconds*, and refuses
+  anything else** — native's JSI binding reads a number and throws otherwise;
+  web-core has no `wait` at all. **Decision: native**, including the timeout
+  record's exact text
+  (`ResponsePromise wait timeout after <t> seconds for url: <url>`) and the
+  fact that a timeout **cancels nothing**: the fetch goes on, and a later
+  `wait` or `then` still sees its result. The seconds become milliseconds at
+  the boundary, because the wait itself is `bobcat:future`'s `Future.wait`;
+  `Infinity` seconds is that Future's "no deadline at all", and a number
+  `Future.wait` refuses — `NaN`, or anything else that is not a number —
+  throws there rather than answering a timeout record.
+- **A `wait` *after* a `then` on one `fetchBundle` handle throws a
+  `TypeError`; native allows the pair** — native's `ResponsePromise` holds a
+  `std::shared_future`, so a handle can be waited on after a callback was
+  registered on it. Here both members are one `bobcat:future` `Future`, and a
+  `then` converts it into a Promise the realm's owner settles with a *job*;
+  a job cannot run inside another job's wait, so a `wait` on a converted
+  Future could only ever time out or hang and is refused outright.
+  **Decision: this engine's structure**, because the refusal is what makes the
+  two ways out exclusive rather than deadlock-prone — and no compiled
+  ReactLynx path does both on one handle: `lazy-bundle.ts` picks `wait` for a
+  `mode: 'sync'` import and `then` for the asynchronous one.
+- **A lazy container's own `StyleInfo` is not applied at fetch** — native
+  installs a lazy bundle's CSS only when the card asks for it, through
+  `__LoadStyleSheet('CSS', bundleName)` and `__AdoptStyleSheet`, where
+  web-core pushes the container's StyleInfo unscoped during
+  `loadExternalBundle`. (Here the decision is the *installer's*, in
+  `bobcat-source`: `bobcat-core` never sees the container at all.) **Decision: native**, because the compiled card
+  already makes that call and web-core's extra push would mount the same rules
+  twice — and unscoped, where per-component css-id scoping is not implemented
+  at all here. A container's `config` is ignored too: page policy is the
+  page's.
 - **`NativeModules.<name>` for a module the host does not have** — native's
   `LynxJSIModuleBinding::get` answers `null`
   (`lynx_jsi_module_binding.cc:23`), while web-core builds a plain object out
