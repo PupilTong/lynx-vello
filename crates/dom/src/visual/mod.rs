@@ -115,6 +115,7 @@ use euclid::default::{Point2D, Rect, Size2D, Transform3D};
 
 pub(crate) use self::build::BuildScratch;
 pub use self::frame::{AnimationSlot, CommittedFrame, HitTarget, ScrollSlot};
+pub use self::relevance::ContentVisibilityChange;
 use crate::render::image::ImageEvent;
 use crate::tree::document::Document;
 use crate::{FrameImages, NodeId};

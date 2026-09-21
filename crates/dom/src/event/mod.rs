@@ -1,11 +1,12 @@
-//! DOM event paths: the ordered set of node visits one event resolves to.
+//! DOM event paths: the ordered set of node visits one event resolves to,
+//! and the one dispatch over them this crate runs itself.
 //!
-//! This crate does not dispatch. It cannot: a listener is a JavaScript value
-//! in a realm this crate knows nothing about, and reaching one means leaving
-//! the thread that owns the document. What it can do is the half that needs
-//! the tree, and that no caller could do correctly from outside — work out
-//! *which* nodes an event visits, in which order, and which target each of
-//! them is allowed to see.
+//! This crate does not dispatch to *script*. It cannot: a listener there is a
+//! JavaScript value in a realm this crate knows nothing about, and reaching
+//! one means leaving the thread that owns the document. What it can do is the
+//! half that needs the tree, and that no caller could do correctly from
+//! outside — work out *which* nodes an event visits, in which order, and
+//! which target each of them is allowed to see.
 //!
 //! [`Document::event_steps`] returns exactly that: the capture pass
 //! root-inward followed by the bubble pass target-outward, one [`EventStep`]
@@ -24,6 +25,17 @@
 //! }
 //! # }
 //! ```
+//!
+//! # The engine's own listeners
+//!
+//! An engine component is the other case: a
+//! [`CustomElement`](crate::CustomElement) handler is Rust owned by this
+//! document, so for an event *the engine itself decides* there is nothing to
+//! hand up. [`Document::dispatch_element_event`] walks the same path and
+//! calls [`CustomElement::handle_event`](crate::CustomElement::handle_event)
+//! on every defined element along it; [`ElementEvent`] is what such a handler
+//! is given, and nothing on that path reaches a realm — an `addEventListener`
+//! registration is in another layer and is not consulted for it.
 //!
 //! # Shadow trees
 //!
@@ -49,16 +61,22 @@
 //!   optional.
 //! - **No `relatedTarget`, and no touch target lists.** Both exist for event interfaces this crate
 //!   does not model; their retargeting steps are absent with them.
-//! - **No event object, no listener registry, no `preventDefault`.** The event's name, its payload,
-//!   and whether anything cancels are all above this boundary. Lynx dispatches no cancelable event
-//!   in any case, and suppressing a user-agent default action arrives on
-//!   [`InputEvent::default_prevented`](crate::input::InputEvent::default_prevented) instead.
+//! - **No *script* event object, no listener registry, no `preventDefault`.** For an event whose
+//!   listeners are script's, the name, the payload, and whether anything cancels are all above this
+//!   boundary. Lynx dispatches no cancelable event in any case, and suppressing a user-agent
+//!   default action arrives on
+//!   [`InputEvent::default_prevented`](crate::input::InputEvent::default_prevented) instead. The
+//!   engine-component path has an event object of its own ([`ElementEvent`]) because there is no
+//!   layer above it to build one; it is not cancelable either.
 //! - **The path ends at the node with no event parent** — the document node for a connected target,
 //!   the topmost ancestor for a detached one. A detached target still produces a path, exactly as
 //!   the standard specifies.
 
+mod element;
+
 use smallvec::SmallVec;
 
+pub use self::element::{ElementEvent, ElementEventKind, EventPhase};
 use crate::tree::document::{Document, NodeId};
 use crate::tree::node::Node;
 

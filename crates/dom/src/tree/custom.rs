@@ -105,6 +105,7 @@ use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use stylo::LocalName;
 
+use crate::event::ElementEvent;
 use crate::tree::document::{DOCUMENT_ELEMENT_NODE_ID, Document, NodeId, NodeSlot};
 
 const MAX_REACTION_DEPTH: usize = 64;
@@ -145,6 +146,33 @@ pub trait CustomElement<T> {
         new: Option<&str>,
     ) {
         let _ = (document, element, name, old, new);
+    }
+
+    /// One engine event reaching this element, on the standard's path.
+    ///
+    /// Not a lifecycle callback: it is called by
+    /// [`Document::dispatch_element_event`], which walks the capture and
+    /// bubble passes of [`Document::event_steps`] and delivers to every
+    /// defined element on them — so `element` is the event's
+    /// `currentTarget`, and [`ElementEvent::target`] is what the event was
+    /// fired at. A component hears events aimed at its descendants exactly
+    /// as a bubble-phase listener would.
+    ///
+    /// **This path never reaches script.** It is how the engine's own
+    /// components — `<image>` today, `<list>` when it exists — observe
+    /// something the engine decided, such as a `content-visibility: auto`
+    /// element starting or stopping to skip its contents. An
+    /// `addEventListener` registration in a realm is unrelated state, in
+    /// another layer, and is not consulted here.
+    ///
+    /// Called *inline*, unlike a reaction: the walk has no queue of its own,
+    /// because it is not inside a tree mutation that a callback could
+    /// observe half-finished. What it does share is the drain boundary —
+    /// each call is its own `[CEReactions]` scope, so the reactions this
+    /// handler's mutations raise run before the next node on the path is
+    /// visited.
+    fn handle_event(&self, document: &mut Document<T>, element: NodeId, event: &mut ElementEvent) {
+        let _ = (document, element, event);
     }
 }
 
@@ -450,6 +478,33 @@ impl<T> Document<T> {
                 );
             }
         }
+    }
+
+    /// Whether this document defines any component at all.
+    ///
+    /// The one check an event dispatch costs a document that cannot listen:
+    /// see [`Document::dispatch_element_event`].
+    pub(crate) fn has_custom_definitions(&self) -> bool {
+        !self.custom_elements.is_empty()
+    }
+
+    /// The handler of a node that is a *constructed* custom element, for a
+    /// caller that reaches one outside the reaction queue.
+    ///
+    /// `Constructing` is excluded along with `Uncustomized`: an element whose
+    /// constructor has not returned is not an instance yet, which is the same
+    /// line [`Document::observes_attribute`] draws. A freed node answers
+    /// `None`, which is how an event path that outlived one of its steps
+    /// delivers nothing there rather than somewhere else.
+    pub(crate) fn custom_element_handler(
+        &self,
+        element: NodeId,
+    ) -> Option<Arc<dyn CustomElement<T>>> {
+        let node = self.get(element)?;
+        if node.custom_state != CustomElementState::Custom {
+            return None;
+        }
+        self.dispatch_target(element)
     }
 
     fn dispatch_target(&self, element: NodeId) -> Option<Arc<dyn CustomElement<T>>> {

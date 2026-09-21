@@ -813,6 +813,45 @@ impl MainThreadRuntime {
         )
     }
 
+    /// Whether the commits since the last delivery left any
+    /// `content-visibility: auto` skipping change owing — css-contain-2
+    /// §4.4's queue, asked once per entry.
+    ///
+    /// One `is_empty` on a `Vec`, because nearly every entry's answer is no:
+    /// a page whose `auto` boxes did not change state posts nothing.
+    pub(crate) fn has_pending_content_visibility_changes(&self) -> bool {
+        self.slot
+            .borrow()
+            .document
+            .as_ref()
+            .is_some_and(LynxDocument::has_pending_content_visibility_changes)
+    }
+
+    /// Fires one `contentvisibilityautostatechange`
+    /// ([css-contain-2 §4.4](https://drafts.csswg.org/css-contain-2/#content-visibility-auto-state-change-event))
+    /// per queued change, in frame order.
+    ///
+    /// The whole dispatch is `dom`'s: it owns the path, the walk and the
+    /// listeners, because the listeners are the engine's own components
+    /// (`dom::CustomElement` definitions — `<image>` today, `<list>` when it
+    /// exists) rather than anything in a realm. **No realm is entered**,
+    /// which is why this takes no `ScriptRuntime`: the event has no script
+    /// form, no Lynx event name, and nothing about it is published to the
+    /// painting or the background side. What this method adds is *when*: the
+    /// spec dispatches the event "by posting a task at the time when the
+    /// state change occurs", and the entry the page posts for it is that
+    /// task.
+    ///
+    /// A handler may mutate the tree — the changes are taken before the walk
+    /// starts, each step re-checks its node, and whatever a handler wrote is
+    /// committed by this entry's own epilogue.
+    pub(crate) fn dispatch_content_visibility_changes(&mut self) {
+        self.slot
+            .borrow_mut()
+            .document_mut()
+            .dispatch_content_visibility_changes();
+    }
+
     /// When the earliest armed timer comes due, if one is armed.
     pub(crate) fn next_timer_deadline(&mut self) -> Option<ClockInstant> {
         self.timers.next_deadline()

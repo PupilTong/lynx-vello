@@ -70,6 +70,11 @@ pub struct Document<T> {
     /// a page whose images have not loaded paints without them rather than
     /// failing.
     pub(crate) images: crate::render::image::ImageRegistry,
+    /// The `content-visibility: auto` skipping changes committed renders have
+    /// produced and no one has drained yet, in frame order — css-contain-2
+    /// §4.4's event queue, as [`crate::visual::relevance`] fills it and
+    /// [`Document::dispatch_content_visibility_changes`] empties it.
+    pub(crate) content_visibility_changes: Vec<crate::visual::ContentVisibilityChange>,
     pending_snapshots: SnapshotMap,
     relayout_roots: Vec<PendingRelayout>,
     relayout_root_ids: FxHashSet<NodeId>,
@@ -122,6 +127,7 @@ impl<T> Document<T> {
             layout,
             painter: RefCell::new(crate::paint::painter::Painter::default()),
             images: crate::render::image::ImageRegistry::default(),
+            content_visibility_changes: Vec::new(),
             pending_snapshots: SnapshotMap::new(),
             relayout_roots: Vec::new(),
             relayout_root_ids: FxHashSet::default(),
