@@ -17,7 +17,10 @@ the semantics are stylo's.** Everything below refines that sentence.
 - stylo is the cascade engine, layered `future runtime adapter → dom →
   vendor/stylo` (fork with the `lynx` feature; Lynx-only properties and
   `rpx`/`ppx`/`sp` units are first-class grammar in the fork, no side-channel
-  tricks). The runtime-adapter layer is not currently implemented.
+  tricks — and since 2026-09-21 the fork's `lynx` length surface also admits
+  the W3C `cqw`/`cqh` container units, see the containment scope note below
+  for what every unit resolves against). The runtime-adapter layer is not
+  currently implemented.
 - Compat target is **web-core / `.web.bundle`** behavior, not native
   `.lynx.bundle`.
 - W3C-correct semantics for real spec features; faithful cloning for
@@ -358,11 +361,78 @@ and §D.16 with what the wire format actually permits.)*
     [tracking/components.md](tracking/components.md)) — off-screen / recycled
     rows are the archetypal `content-visibility` + intrinsic-size case.
 
-    **v1 scope (css-contain-2 only):**
-    - **No container queries (contain-3).** `container-type` / `container-name` stay disabled.
-      Single-axis `inline-size` containment parses if the grammar allows but is **ignored by
-      layout** — never treated as size containment, never a relayout boundary. Size containment
-      always covers both physical axes.
+    **v1 scope (css-contain-2, plus css-contain-3's `container-type`):**
+    - **The `@container` rule is out of scope; `container-type` is not.** The rule stays
+      gecko-only in the fork, so `container-name` cascades and nothing matches on it. But
+      `container-type` is exposed, because `cqw`/`cqh` are a *standard* implementation rather
+      than viewport aliases, and css-contain-3 §2.1 makes a size query container a contained
+      box: `inline-size` applies layout, style and inline-size containment, `size` applies
+      layout, style and size containment. `hughie::style::containment::effective_containment`
+      folds it in beside `content-visibility`.
+    - **Single-axis `inline-size` containment is real in layout** *(2026-09-21 user ruling,
+      for standard `container-type` support; it replaces the v1 rule that layout ignored the
+      keyword).* A box with `contain: inline-size` — or with `container-type: inline-size`,
+      which implies it — takes its **width** as if it had no contents
+      (`contain-intrinsic-width`, or zero), while its **height** still comes from them, laid
+      out into that width. Size containment is per axis throughout: `contain: size`,
+      `container-type: size` and a skipping box cover both physical axes exactly as before,
+      and no keyword contains the block axis alone (the engine is horizontal-writing-mode
+      only). It is still **never a relayout boundary** — that stays whole-box `SIZE | LAYOUT`,
+      because a box whose block size answers to its contents cannot stop an internal change
+      from resizing it and reflowing its ancestors. The last-remembered-size recording rule
+      became per axis with it: an `inline-size`-contained box records the height its contents
+      produced and leaves the width it last measured alone.
+      - **The `cqw`/`cqh` units parse and resolve the standard way** *(2026-09-21)*. They are
+        1% of the **nearest ancestor size query container's content box**: an ancestor with
+        `container-type: size` supplies both axes, one with `container-type: inline-size`
+        supplies the inline axis only (this engine is horizontal-writing-mode only, so that is
+        the width), an axis no container supplies falls back to the **small viewport**, and so
+        does everything on a page with no query container at all. That last case is also the
+        one native Lynx has no token for; an author targeting the web can write these because
+        the browser supplies them there, and the `lynx` grammar used to reject them, which
+        dropped the whole declaration.
+
+        The container's size comes from the **last committed layout**, because it is a cascade
+        input only layout can produce. `dom` records every size query container's content box
+        (`size − padding − border`, unrounded CSS px) at the committing layout run that
+        produced it — the same moment, and the same call, that records the last remembered
+        size, since both are that run's content box — into the slot-keyed last-committed-box
+        table on the tree arenas (`crates/dom/src/layout/committed_box.rs`), and answers
+        Stylo's `TElement::query_container_size` from it. A container that has never been laid out, or that has just stopped being one,
+        answers `None` and its descendants fall back to the viewport.
+
+        **The post-layout recascade loop** is `Document::layout`, which is Gecko's
+        `UpdateContainerQueryStyles` in this engine's shape: a pass whose recorded sizes moved
+        marks each moved container's **descendants** (`RECASCADE_DESCENDANTS` — a container's
+        own `cqw` answers to *its* nearest container, an ancestor) and lays out again. It is
+        capped at `CONTAINER_PASSES = 4`; a container's supplied axes are contained, so its
+        size cannot answer to its own contents and the loop converges in the nesting depth of
+        containers that move together. Past the cap the last layout stands and the marks it
+        left are resolved by the next flush — one commit behind at worst.
+
+        Two gates keep this free for everyone else. The changed list is empty unless a
+        container's content box actually moved, and the document only recascades at all once
+        some style it cascaded carried `ComputedValueFlags::USES_CONTAINER_UNITS` — a page with
+        query containers and no `cqw`/`cqh` has nothing to re-resolve. A page with neither pays
+        one enum test per committing box and one `is_empty` test per layout.
+
+        **The `@container` at-rule is still out**: it is gecko-only in the fork, so nothing
+        matches a size or style query. `container-name` parses and cascades and nothing
+        consumes it. The `container` shorthand is **name-first**
+        ([csswg-drafts#7180](https://github.com/w3c/csswg-drafts/issues/7180), pinned by a fork
+        test): `container: foo / size` is a named size container, while `container: size` names
+        the container "size" and makes it no query container at all. The name is not optional
+        in the fork's grammar (`container: / size` is rejected), so `container-type` is the
+        only way to write a type without a name. `cqi`/`cqb`/`cqmin`/`cqmax` stay unparsed.
+        One comparison with web-core: there `cqw` is 1% of the `lynx-view` width and `cqh`
+        follows the browser window unless the host sets `transform-vh`, while here both follow
+        the standard container lookup and fall back to the view.
+      - **The engine's length units, stated once**, none of which takes an embedder-supplied
+        base: `vw`/`vh` are the viewport width/height divided by 100; `rpx` is the screen width
+        divided by 750 (a fixed divisor), and the only screen this engine has is the view, so
+        `N rpx == N/7.5 vw` (implemented in the fork's `rpx_to_computed_value`); `cqw`/`cqh` are
+        the query container's width/height divided by 100, which with no query container means
+        `vw`/`vh` as above. `px`, `em`/`rem` and `%` are the standard ones.
     - **`content-visibility: auto` relevance is implemented** *(2026-09-20; it was deferred to a
       host-pushed "always relevant" signal until then)*. `auto` still computes its always-on
       `layout | paint | style` containment, and on top of that `dom` determines *relevance to the
@@ -450,7 +520,7 @@ and §D.16 with what the wire format actually permits.)*
       a last remembered size and is currently skipping its contents, its explicit intrinsic inner
       size in the corresponding axis is the last remembered size in that axis"
       ([css-sizing-4 §5.2](https://drafts.csswg.org/css-sizing-4/#intrinsic-size-override)). The
-      three parts are all `dom`'s (`crates/dom/src/layout/remembered.rs`); `hughie` is unchanged,
+      three parts are all `dom`'s (`crates/dom/src/layout/committed_box.rs`); `hughie` is unchanged,
       because it already reads `AutoLength(l)` as `l` and `AutoNone` as no explicit size and the
       substituted answer arrives as a plain `Length`.
       - **The recording moment is the commit's own layout run.** css-sizing-4 §5.2.1 records "at
@@ -473,8 +543,13 @@ and §D.16 with what the wire format actually permits.)*
         table and for the same structural reason: a `StyleView` is built from the tree arenas
         alone. It is not in `LayoutSlot` and not in `NodeLayoutState`, it resets on free (the
         remembered size belongs to the element, so a recycled key must remember nothing), and it
-        allocates nothing for a page that never uses the `auto` keyword. Writing it from a pass
-        that holds the arenas shared is what the table's own `RefCell` is for.
+        allocates nothing for a page that never uses the `auto` keyword. It is the *same* table
+        that holds the css-contain-3 query container size — one entry per element, two fields,
+        one `record` call per committing run — so writing it from a pass that holds the arenas
+        shared goes through that table's staged `RefCell`, published once per layout pass under
+        the exclusive borrow. A box never reads back a size recorded in the pass it is reading
+        in: a skipping box is size-contained in both axes, so the only write its own run can
+        make is the removal, and a box without the keyword never performs the lookup.
       - **`content-visibility: auto` implies the keyword**
         ([csswg-drafts#8407](https://github.com/w3c/csswg-drafts/issues/8407)): `Length(l)` behaves
         as `AutoLength(l)` and `None` as `AutoNone`. The fork carries the mapping

@@ -13,7 +13,7 @@ use stylo::properties::ComputedValues;
 use stylo::values::computed::motion::OffsetPath;
 use stylo::values::specified::box_::WillChangeBits;
 
-use super::remembered;
+use super::committed_box;
 use crate::tree::node::Node;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,6 +122,7 @@ pub(crate) fn establishes_fixed_containing_block<T>(
             style.clone_contain(),
             style.clone_content_visibility(),
             skips_contents(node, style),
+            style.clone_container_type(),
         )
         .intersects(Contain::LAYOUT | Contain::PAINT)
         || (filters && !is_root_element(node))
@@ -259,13 +260,13 @@ impl<T> CoreStyle for StyleView<'_, T> {
     /// can have recorded. `hughie` reads whatever comes back exactly as it
     /// reads a computed value — `AutoLength(l)` as `l`, `AutoNone` as no
     /// explicit size — so the substitution needs no engine vocabulary of its
-    /// own. See [`crate::layout::remembered`].
+    /// own. See [`crate::layout::committed_box`].
     fn contain_intrinsic_width(&self) -> ContainIntrinsicSize {
-        remembered::contain_intrinsic_width(self.node, self.values())
+        committed_box::contain_intrinsic_width(self.node, self.values())
     }
 
     fn contain_intrinsic_height(&self) -> ContainIntrinsicSize {
-        remembered::contain_intrinsic_height(self.node, self.values())
+        committed_box::contain_intrinsic_height(self.node, self.values())
     }
 }
 

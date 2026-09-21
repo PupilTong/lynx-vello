@@ -13,7 +13,7 @@ use super::util::{
     store_committed_child, subtract_available_space,
 };
 use crate::geometry::{Edges, Line, Point, Size};
-use crate::style::containment::size_containment;
+use crate::style::containment::{ContainedAxes, contained_axes};
 use crate::style::{CoreStyle, RELATIVE_REFERENCE_NONE, RELATIVE_REFERENCE_PARENT, RelativeStyle};
 use crate::tree::{
     AvailableSpace, LayoutGoal, LayoutInput, LayoutOutput, LayoutTree, RequestedAxis, SizingMode,
@@ -1097,11 +1097,6 @@ fn refresh_item_bases<'tree, T>(
 }
 
 #[inline]
-fn contained_extent(size_containment: Option<Size<Option<f32>>>, axis: Axis) -> Option<f32> {
-    size_containment.map(|intrinsic| axis.size(intrinsic).unwrap_or(0.0))
-}
-
-#[inline]
 fn final_outer_axis(
     initial_outer: Option<f32>,
     caller_known: Option<f32>,
@@ -1132,7 +1127,7 @@ fn two_pass_layout<'tree, T>(
     box_inset: Size<f32>,
     min_size: Size<Option<f32>>,
     max_size: Size<Option<f32>>,
-    size_containment: Option<Size<Option<f32>>>,
+    contained: ContainedAxes,
     container_independent: Option<Size<bool>>,
 ) -> Size<f32>
 where
@@ -1177,7 +1172,8 @@ where
     let outer_width = final_outer_axis(
         initial_outer.width,
         caller_known.width,
-        contained_extent(size_containment, Axis::Horizontal)
+        contained
+            .width()
             .unwrap_or_else(|| horizontal_bounds.extent()),
         box_inset.width,
         min_size.width,
@@ -1226,7 +1222,8 @@ where
     let outer_height = final_outer_axis(
         initial_outer.height,
         caller_known.height,
-        contained_extent(size_containment, Axis::Vertical)
+        contained
+            .height()
             .unwrap_or_else(|| vertical_bounds.extent()),
         box_inset.height,
         min_size.height,
@@ -1358,7 +1355,7 @@ where
     T::Style<'tree>: RelativeStyle,
 {
     let style = tree.style(node);
-    let size_containment = size_containment(&style);
+    let contained = contained_axes(&style);
     let layout_once = style.relative_layout_once() == relative_layout_once::T::True;
     let ResolvedContainerBox {
         preferred_definite: style_definite,
@@ -1378,15 +1375,21 @@ where
     );
     let container_independent = container_content_independence(input, style_definite);
 
+    // Every axis is settled without the children — each one either definite
+    // or contained — so a measurement can answer from the box alone.
+    let settled_without_children = Size::new(
+        initial_outer.width.is_some() || contained.width().is_some(),
+        initial_outer.height.is_some() || contained.height().is_some(),
+    );
     if matches!(input.goal, LayoutGoal::Measure(_))
-        && (size_containment.is_some()
-            || (initial_outer.width.is_some() && initial_outer.height.is_some()))
+        && settled_without_children.width
+        && settled_without_children.height
     {
         let outer_size = Size::new(
             final_outer_axis(
                 initial_outer.width,
                 input.known_dimensions.width,
-                contained_extent(size_containment, Axis::Horizontal).unwrap_or(0.0),
+                contained.width().unwrap_or(0.0),
                 box_inset.width,
                 min_size.width,
                 max_size.width,
@@ -1394,7 +1397,7 @@ where
             final_outer_axis(
                 initial_outer.height,
                 input.known_dimensions.height,
-                contained_extent(size_containment, Axis::Vertical).unwrap_or(0.0),
+                contained.height().unwrap_or(0.0),
                 box_inset.height,
                 min_size.height,
                 max_size.height,
@@ -1490,8 +1493,7 @@ where
             final_outer_axis(
                 initial_outer.width,
                 input.known_dimensions.width,
-                contained_extent(size_containment, Axis::Horizontal)
-                    .unwrap_or_else(|| bounds.width.extent()),
+                contained.width().unwrap_or_else(|| bounds.width.extent()),
                 box_inset.width,
                 min_size.width,
                 max_size.width,
@@ -1499,8 +1501,7 @@ where
             final_outer_axis(
                 initial_outer.height,
                 input.known_dimensions.height,
-                contained_extent(size_containment, Axis::Vertical)
-                    .unwrap_or_else(|| bounds.height.extent()),
+                contained.height().unwrap_or_else(|| bounds.height.extent()),
                 box_inset.height,
                 min_size.height,
                 max_size.height,
@@ -1523,7 +1524,7 @@ where
             box_inset,
             min_size,
             max_size,
-            size_containment,
+            contained,
             container_independent,
         )
     };

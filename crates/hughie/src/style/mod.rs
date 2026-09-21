@@ -53,12 +53,13 @@ pub use stylo::computed_values::{
 pub use stylo::values::computed::length::NonNegativeLengthPercentageOrNormal;
 pub use stylo::values::computed::lynx_layout::{RelativeAlign, RelativeReference};
 pub use stylo::values::computed::{
-    AspectRatio, Au, BorderSideWidth, Contain, ContainIntrinsicSize, ContentDistribution,
-    ContentVisibility, Display, FlexBasis, FlowTolerance, FontFamily, FontFeatureSettings,
-    FontStyle, FontVariationSettings, FontWeight, GridAutoFlow, GridLine, GridTemplateComponent,
-    ImplicitGridTracks, Inset, ItemPlacement, JustifyItems, LengthPercentage, LetterSpacing,
-    LineHeight, Margin, MaxSize, NonNegativeLengthPercentage, NonNegativeNumber, Overflow,
-    PositionProperty, SelfAlignment, Size as StyleSize, TextAlign, TextIndent, WordBreak,
+    AspectRatio, Au, BorderSideWidth, Contain, ContainIntrinsicSize, ContainerType,
+    ContentDistribution, ContentVisibility, Display, FlexBasis, FlowTolerance, FontFamily,
+    FontFeatureSettings, FontStyle, FontVariationSettings, FontWeight, GridAutoFlow, GridLine,
+    GridTemplateComponent, ImplicitGridTracks, Inset, ItemPlacement, JustifyItems,
+    LengthPercentage, LetterSpacing, LineHeight, Margin, MaxSize, NonNegativeLengthPercentage,
+    NonNegativeNumber, Overflow, PositionProperty, SelfAlignment, Size as StyleSize, TextAlign,
+    TextIndent, WordBreak,
 };
 pub use stylo::values::specified::align::AlignFlags;
 pub use text::{TextBrush, TextContainerStyle, TextRun, TextRunStyle};
@@ -161,10 +162,17 @@ style_protocol! {
             ),
             box_sizing -> box_sizing::T = style.computed_values().clone_box_sizing(),
             direction -> direction::T = style.inherited_values().clone_direction(),
+            // css-contain-3 §2.1: a size query container is a contained
+            // box, so the `container-type` fold lives with the rest of
+            // containment rather than beside the units that read it.
+            container_type -> ContainerType =
+                style.computed_values().get_box().clone_container_type(),
             containment -> Contain = {
                 let box_style = style.computed_values().get_box();
+                let container_type = style.container_type();
                 let uses_containment_defaults = box_style.contain.is_empty()
-                    && box_style.content_visibility == ContentVisibility::Visible;
+                    && box_style.content_visibility == ContentVisibility::Visible
+                    && container_type.is_normal();
                 if uses_containment_defaults || style.display().is_contents() {
                     Contain::empty()
                 } else {
@@ -172,6 +180,7 @@ style_protocol! {
                         box_style.contain,
                         box_style.content_visibility,
                         style.skips_contents(),
+                        container_type,
                     )
                 }
             },
@@ -260,6 +269,7 @@ mod tests {
         assert_eq!(style.box_sizing(), box_sizing::T::ContentBox);
         assert_eq!(style.direction(), direction::T::Ltr);
         assert_eq!(style.containment(), Contain::empty());
+        assert!(style.container_type().is_normal());
         assert_eq!(style.contain_intrinsic_width(), ContainIntrinsicSize::None);
         assert_eq!(style.contain_intrinsic_height(), ContainIntrinsicSize::None);
         assert!(!style.skips_contents());
@@ -309,6 +319,24 @@ mod tests {
             });
             &CONTAINED
         }
+    }
+
+    #[derive(Debug)]
+    struct SizeQueryContainer;
+
+    impl CoreStyle for SizeQueryContainer {
+        fn container_type(&self) -> ContainerType {
+            ContainerType::INLINE_SIZE
+        }
+    }
+
+    #[test]
+    fn a_size_query_container_is_contained_without_an_authored_contain() {
+        let style = SizeQueryContainer;
+        assert_eq!(
+            style.containment(),
+            Contain::LAYOUT | Contain::STYLE | Contain::INLINE_SIZE
+        );
     }
 
     #[test]

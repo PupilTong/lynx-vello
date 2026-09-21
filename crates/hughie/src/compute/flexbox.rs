@@ -31,7 +31,7 @@ use super::util::{
     style_size_depends_on_basis,
 };
 use crate::geometry::{Edges, Point, Size};
-use crate::style::containment::size_containment;
+use crate::style::containment::contained_axes;
 use crate::style::{Contain, CoreStyle, FlexboxStyle};
 use crate::tree::{
     AvailableSpace, LayoutGoal, LayoutInput, LayoutOutput, LayoutTree, RequestedAxis, SizingMode,
@@ -1732,7 +1732,7 @@ where
     T::Style<'tree>: FlexboxStyle,
 {
     let style = tree.style(node);
-    let size_containment = size_containment(&style);
+    let contained = contained_axes(&style);
     let layout_contained = style.containment().contains(Contain::LAYOUT);
     let flex_wrap = style.flex_wrap();
     let axes = flex_axes(style.flex_direction(), flex_wrap, style.direction());
@@ -1804,7 +1804,7 @@ where
             .then(|| axes.main.size(inner_size))
             .flatten(),
         !main_percentage_basis_was_indefinite,
-        axes.main.size(outer_size).is_none() && size_containment.is_none(),
+        axes.main.size(outer_size).is_none() && axes.main.size(contained.extents()).is_none(),
         flex_wrap == flex_wrap::T::NOWRAP,
         container_independent,
     );
@@ -1817,9 +1817,9 @@ where
     let mut lines = collect_flex_lines(&items, flex_wrap, line_available_main, main_gap, axes);
 
     let contained_outer = |axis: Axis, inset: f32| {
-        size_containment.map(|intrinsic| {
+        axis.size(contained.extents()).map(|extent| {
             clamp_axis(
-                axis.size(intrinsic).unwrap_or(0.0) + inset,
+                extent + inset,
                 axis.size(min_size),
                 axis.size(max_size),
                 inset,

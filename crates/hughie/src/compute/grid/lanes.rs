@@ -51,7 +51,7 @@ use crate::compute::util::{
     sort_and_assign_layout_order,
 };
 use crate::geometry::{Point, Size};
-use crate::style::containment::size_containment;
+use crate::style::containment::contained_axes;
 use crate::style::{Contain, CoreStyle, FlowTolerance, GridLanesStyle, GridStyle, Overflow};
 use crate::tree::{
     AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutOutput, LayoutTree, RequestedAxis,
@@ -530,7 +530,7 @@ where
     T::Style<'tree>: GridLanesStyle,
 {
     let style = tree.style(node);
-    let size_containment = size_containment(&style);
+    let contained = contained_axes(&style);
     let layout_contained = style.containment().contains(Contain::LAYOUT);
     let gap_value = style.gap();
     let rtl = style.direction() == direction::T::Rtl;
@@ -716,10 +716,9 @@ where
         grid_alignment,
         &mut scratch,
     );
-    let grid_content = match size_containment {
-        Some(intrinsic) => grid_axis.size(intrinsic).unwrap_or(0.0),
-        None => tracks.used_size(),
-    };
+    let grid_content = grid_axis
+        .size(contained.extents())
+        .unwrap_or_else(|| tracks.used_size());
     let grid_outer = final_outer_axis(&metrics, grid_axis, grid_content);
     let grid_inner = (grid_outer - grid_axis.size(metrics.box_inset)).max(0.0);
     let grid_gap = resolve_gap_axis(grid_axis.size(gap_value), Some(grid_inner));
@@ -773,10 +772,7 @@ where
         goal: container_goal,
         all_tracks_fixed,
     };
-    let stacking_content = |range: f32| match size_containment {
-        Some(intrinsic) => stacking_axis.size(intrinsic).unwrap_or(0.0),
-        None => range,
-    };
+    let stacking_content = |range: f32| stacking_axis.size(contained.extents()).unwrap_or(range);
     // A percentage stacking gutter against an indefinite stacking size is
     // cyclic: it resolves to zero here, and the size that produces is what the
     // real gutter then resolves against. The first pass therefore only

@@ -1222,6 +1222,7 @@ fn clipped_axes<T>(node: &Node<T>, style: &ComputedValues) -> ScrollAxes {
         style.clone_contain(),
         style.clone_content_visibility(),
         skips_contents(node, style),
+        style.clone_container_type(),
     )
     .intersects(Contain::PAINT)
     {

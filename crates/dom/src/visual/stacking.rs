@@ -86,6 +86,7 @@ pub(crate) fn establishes_stacking_context<T>(
         style.clone_contain(),
         style.clone_content_visibility(),
         skips_contents(node, style),
+        style.clone_container_type(),
     )
     .intersects(Contain::LAYOUT | Contain::PAINT)
 }

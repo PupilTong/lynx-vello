@@ -9,6 +9,7 @@ use super::util::{
 };
 use crate::geometry::{Edges, Point, Size};
 use crate::style::CoreStyle;
+use crate::style::containment::contained_axes;
 use crate::tree::{
     AvailableSpace, LayoutGoal, LayoutInput, LayoutOutput, RequestedAxis, SizingMode,
 };
@@ -25,7 +26,13 @@ pub fn compute_leaf_layout<Style: CoreStyle>(
     // a second road: `resolve_leaf_sizing` fills a missing axis from it before
     // containment is ever consulted, so a contained image with one authored
     // axis would still derive the other from its pixels.
-    let natural_aspect_ratio = if crate::style::containment::size_containment(style).is_some() {
+    //
+    // One contained axis is enough to drop it: a ratio is a *coupling*, so
+    // whichever end it is read from, the bitmap is what sizes the box. Under
+    // `contain: inline-size` a natural ratio would carry an authored height
+    // straight into the width the containment exists to keep contents out of.
+    // An authored `aspect-ratio` is style rather than contents and survives.
+    let natural_aspect_ratio = if contained_axes(style).any() {
         None
     } else {
         natural_size.aspect_ratio()
@@ -74,9 +81,9 @@ where
         padding_border_size,
     );
 
-    let contained_intrinsic = crate::style::containment::size_containment(style);
+    let contained = contained_axes(style);
     if (measurement_axis.is_some_and(|axis| axis != RequestedAxis::Both)
-        || (!requires_known_measurement && contained_intrinsic.is_none()))
+        || (!requires_known_measurement && !contained.any()))
         && node_size.width.is_some()
         && node_size.height.is_some()
     {
@@ -90,7 +97,7 @@ where
         return LayoutOutput::new(size, size.zip_map(padding_border_size, f32::max));
     }
 
-    let measure_known_dimensions = Size::new(
+    let mut measure_known_dimensions = Size::new(
         node_size
             .width
             .map(|width| (width - padding_border_size.width).max(0.0)),
@@ -98,6 +105,18 @@ where
             .height
             .map(|height| (height - padding_border_size.height).max(0.0)),
     );
+    // css-contain-2 §3.1.3: a contained axis is sized as if the box had no
+    // contents, and the contents then lay out *into* the size that produces —
+    // under `contain: inline-size` a text leaf wraps at the substituted width
+    // rather than at the width it would have asked for. An axis that already
+    // has a size keeps it; the substitute only stands in for the measurement
+    // that would otherwise have settled the axis.
+    if let Some(width) = contained.width() {
+        measure_known_dimensions.width.get_or_insert(width);
+    }
+    if let Some(height) = contained.height() {
+        measure_known_dimensions.height.get_or_insert(height);
+    }
     let available_space = Size::new(
         measurement_available_space(
             measure_known_dimensions.width,
@@ -117,20 +136,31 @@ where
         ),
     );
 
-    let measurement = if let Some(intrinsic) = contained_intrinsic {
+    let measurement = if let Some(contents) = contained.all() {
+        // Both axes contained: nothing the contents could say is ever read,
+        // so they are never measured at all.
         LeafMetrics {
-            size: Size::new(
-                intrinsic.width.unwrap_or(0.0),
-                intrinsic.height.unwrap_or(0.0),
-            ),
+            size: contents,
             first_baselines: Point::NONE,
         }
     } else {
-        measure(LeafMeasureInput::new(
+        let mut measurement = measure(LeafMeasureInput::new(
             measure_known_dimensions,
             available_space,
             input.goal,
-        ))
+        ));
+        // One axis contained: the contents did run — the other axis needs
+        // them — but they may not speak for this one.
+        if let Some(width) = contained.width() {
+            measurement.size.width = width;
+        }
+        if let Some(height) = contained.height() {
+            // A first baseline is the block axis speaking for the box, which
+            // block-size containment is exactly what forbids.
+            measurement.size.height = height;
+            measurement.first_baselines = Point::NONE;
+        }
+        measurement
     };
     let measured_content = measurement.size;
     debug_assert!(

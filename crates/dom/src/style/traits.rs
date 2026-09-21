@@ -475,8 +475,26 @@ impl<'a, T: Sync> TElement for &'a Node<T> {
         empty_namespace()
     }
 
+    /// The content box this element last committed as a size query
+    /// container — what `cqw` and `cqh` resolve against
+    /// ([css-contain-3 §2.1](https://drafts.csswg.org/css-contain-3/#container-type)).
+    ///
+    /// Stylo asks only elements whose `container-type` is a size container
+    /// type, and picks the axes itself: both for `size`, the inline one for
+    /// `inline-size`. An axis this document has not recorded reads `None`,
+    /// which Stylo merges with the next container up and finally falls back
+    /// to the small viewport for — so an element that no layout has committed
+    /// resolves against the viewport rather than against zero.
+    ///
+    /// `display` is Gecko's, for the table parts whose principal box is not
+    /// the box that was laid out. This engine has no table box tree: the
+    /// element's own box is the one [`crate::layout::committed_box`] recorded.
     fn query_container_size(&self, _display: &Display) -> Size2D<Option<Au>> {
-        Size2D::new(None, None)
+        let size = Node::arenas(self).committed_box(Node::id(self)).container;
+        Size2D::new(
+            size.width.map(Au::from_f32_px),
+            size.height.map(Au::from_f32_px),
+        )
     }
 
     fn has_selector_flags(&self, flags: ElementSelectorFlags) -> bool {

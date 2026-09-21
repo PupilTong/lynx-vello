@@ -14,6 +14,8 @@ use hughie::compute::{
 };
 use hughie::invalidate::{invalidate_for_relayout, is_relayout_boundary};
 use hughie::prelude::*;
+use hughie::style::containment::effective_containment;
+use hughie::style::{ContainerType, ContentVisibility};
 use style_traits::values::specified::AllowedNumericType;
 use stylo::Zero;
 use stylo::computed_values::{relative_center, relative_layout_once};
@@ -887,6 +889,25 @@ fn relayout_boundary_requires_both_layout_and_size() {
     assert!(!is_relayout_boundary(&contained_style(
         Contain::INLINE_SIZE | Contain::LAYOUT
     )));
+
+    // Reached through css-contain-3 instead: a `container-type: inline-size`
+    // query container is layout- and inline-size-contained, and single-axis
+    // containment is still not a boundary — its block size answers to its
+    // contents. `size` is.
+    let query_container = |container_type| {
+        effective_containment(
+            Contain::empty(),
+            ContentVisibility::Visible,
+            false,
+            container_type,
+        )
+    };
+    assert!(!is_relayout_boundary(&contained_style(query_container(
+        ContainerType::INLINE_SIZE
+    ))));
+    assert!(is_relayout_boundary(&contained_style(query_container(
+        ContainerType::SIZE
+    ))));
 }
 
 #[test]
