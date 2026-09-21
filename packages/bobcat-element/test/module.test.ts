@@ -29,7 +29,13 @@ interface HostFile {
   text: string;
   /** Where it answers from, when that differs from where it was asked for. */
   response?: string;
-  kind?: "commonjs" | "json";
+  kind?: "commonjs" | "json" | "module";
+  /**
+   * The namespace an ES module evaluated to. The engine links and evaluates
+   * it inside the load; here it is stated, since nothing in this file is a
+   * module realm.
+   */
+  namespace?: Record<string, unknown>;
 }
 
 const files: Map<string, HostFile> = new Map();
@@ -70,6 +76,9 @@ function loadModuleSync(url: string, parameters: string): LoadedModuleSource {
     throw new Error(`cannot load '${url}': no such file: ${url}`);
   }
   const response = file.response ?? url;
+  if (file.kind === "module") {
+    return { url: response, kind: "module", value: file.namespace };
+  }
   if (file.kind === "json") {
     return { url: response, kind: "json", value: JSON.parse(file.text) };
   }
@@ -86,6 +95,20 @@ function file(url: string, text: string, response?: string): void {
 
 function json(url: string, text: string): void {
   files.set(url, { text, kind: "json" });
+}
+
+/** One ES module, answered as the engine answers one: its namespace. */
+function esm(
+  url: string,
+  namespace: Record<string, unknown>,
+  response?: string,
+): void {
+  files.set(
+    url,
+    response === undefined
+      ? { text: "", kind: "module", namespace }
+      : { text: "", kind: "module", namespace, response },
+  );
 }
 
 /** A counter a file's own body keeps, which only `globalThis` can carry. */
@@ -244,6 +267,67 @@ describe("Node's require over one synchronous host load", () => {
     expect(config).toEqual({ answer: 42, list: [1, 2] });
     expect(require.cache["app:///config.json"]?.exports).toBe(config);
     expect(require.cache["app:///config.json"]?.loaded).toBe(true);
+  });
+
+  it("answers an ES module with its namespace, loaded", () => {
+    esm("app:///a.mjs", { answer: 42, default: "default" });
+    const require = createRequire("app:///entry.js");
+
+    const namespace = require("./a.mjs") as Record<string, unknown>;
+    expect(namespace["answer"]).toBe(42);
+    expect(namespace["default"]).toBe("default");
+    expect(require.cache["app:///a.mjs"]?.exports).toBe(namespace);
+    expect(require.cache["app:///a.mjs"]?.loaded).toBe(true);
+    expect(parameterLists).toEqual([
+      "exports, require, module, __filename, __dirname",
+    ]);
+  });
+
+  it("answers a `module.exports` export instead of the namespace", () => {
+    const exported = (): number => 7;
+    esm("app:///dual.mjs", { "module.exports": exported, answer: 42 });
+    const require = createRequire("app:///entry.js");
+
+    expect(require("./dual.mjs")).toBe(exported);
+    expect(require.cache["app:///dual.mjs"]?.exports).toBe(exported);
+  });
+
+  it("reads `module.exports` as an own export and not an inherited name", () => {
+    const namespace = Object.create({ "module.exports": "inherited" }) as Record<
+      string,
+      unknown
+    >;
+    namespace["answer"] = 42;
+    esm("app:///inherited.mjs", namespace);
+
+    expect(createRequire("app:///entry.js")("./inherited.mjs")).toBe(namespace);
+  });
+
+  it("loads an ES module once however often it is required", () => {
+    esm("app:///shared.mjs", { answer: 42 });
+    const first = createRequire("app:///entry.js")("./shared.mjs");
+    const again = createRequire("app:///other/entry.js")("app:///shared.mjs");
+
+    expect(again).toBe(first);
+    expect(loads).toEqual(["app:///shared.mjs"]);
+  });
+
+  it("names the request URL as an ES module's cache key, whatever it answered from", () => {
+    esm("app:///alias", { answer: 42 }, "https://cdn.test/real.mjs");
+    const require = createRequire("app:///entry.js");
+
+    expect(require("./alias")).toEqual({ answer: 42 });
+    expect(require.cache["app:///alias"]?.filename).toBe("app:///alias");
+    expect(require.cache["https://cdn.test/real.mjs"]).toBeUndefined();
+  });
+
+  it("throws a refused ES module load through and caches nothing", () => {
+    const require = createRequire("app:///entry.js");
+
+    expect(() => require("./missing.mjs")).toThrow(
+      "cannot load 'app:///missing.mjs'",
+    );
+    expect(require.cache["app:///missing.mjs"]).toBeUndefined();
   });
 
   it("resolves without loading, into a cache with no prototype", () => {

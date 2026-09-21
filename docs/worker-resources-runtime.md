@@ -78,8 +78,34 @@ The *synchronous* primitive those callers need exists as `bobcat:module`:
 `createRequire(import.meta.url)` answers Node's `require`, which resolves
 through the normalizer imports use, requests `SourceRequest::Module` on this
 same channel, and parks the job it runs in on the answer — the engine thread's
-tasks keep running, and no other job does. It reads a source as CommonJS or
-JSON and keeps a CommonJS cache per realm.
+tasks keep running, and no other job does. It keeps one cache per realm, and
+reads a source as CommonJS, JSON or an ES module, by Node 24's rules for which:
+
+- the *response* URL's path extension decides, as `crates/bobcat-core/src/require.rs` `kind_of`:
+  `.json` is JSON, `.mjs` is a module, `.cjs` is CommonJS. There is no `package.json` `"type"` to
+  consult, so anything else — a plain `.js` — is decided by QuickJS's own syntax detection over the
+  text, in the bridge, where the text is.
+- an ES module is **linked inline**: every `import` in it, and in what it imports, is loaded through
+  the same host member during its compile, recursively, each parking its own job, before any body
+  runs. An `import` of a built-in (`bobcat:*`) links to that native module instead of being fetched.
+- evaluation is synchronous and runs no promise jobs. A graph that awaits at its top level is
+  therefore refused — `cannot require '<url>': it uses top-level await …`, Node's
+  `ERR_REQUIRE_ASYNC_MODULE` — rather than waited for, and the module is left suspended for the
+  realm's own jobs to settle.
+- what `require` answers is the namespace object, or, when the namespace has an export literally
+  named `module.exports`, that export's value.
+- one URL is one module: a URL an `import` already brought into the realm is answered from that
+  instance rather than loaded and evaluated again.
+
+A `require` of a module belonging to a graph that is **still evaluating** is
+refused for the same reason a cycle is (Node's `ERR_REQUIRE_CYCLE_MODULE`):
+re-entering a body that is part-way through would corrupt the evaluation
+running it. QuickJS keeps `JSModuleDef`'s status private, so the realm refuses
+the whole graph rather than only the cycle — a module the realm reached by an
+`import`, asked for by a `require` from inside another module's body, is
+refused even when its own body has already finished. A `require` reached from
+anywhere no module body is running — a host call, a listener, a timer, a plain
+script — answers from the instance as usual.
 
 `lynx.requireModule(path, entryName?, options?)` is the compiled-bundle layer
 over the same primitive, in `bobcat:lynx-modules`. A registered manifest path is

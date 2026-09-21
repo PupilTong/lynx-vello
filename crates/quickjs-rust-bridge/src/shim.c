@@ -55,6 +55,17 @@ typedef struct QjsModuleSource {
 typedef struct QjsModuleInstance {
     const QjsModuleSource *source;
     JSModuleDef *definition;
+    /* Rising per realm, in creation order, so the list is ordered by it: a
+       comparison against `QjsContext.link_mark` is what says whether the
+       compile now in progress is what made this instance, and so whether it
+       is one no body has started running in yet. */
+    uint64_t serial;
+    /* Set once this realm has seen this module's own evaluation promise,
+       which only a synchronous `require` of it produces. Both states that
+       leaves it in — evaluated, or suspended on its own top-level await —
+       are answered from rather than re-entered, and a module leaves neither
+       of them, so this is the one thing about its status that stays true. */
+    int evaluated;
     struct QjsModuleInstance *next;
 } QjsModuleInstance;
 
@@ -135,6 +146,11 @@ typedef struct QjsRuntime {
     JSClassID host_owner_class_id;
     QjsModuleSource *module_sources;
     QjsHostModuleName *host_module_names;
+    /* How many module-graph evaluations are on the C stack: an entry that
+       can run a module body raises it for as long as it might be doing so.
+       At zero no body of any realm on this runtime is part-way through, and
+       a module this runtime has is therefore safe to link or evaluate. */
+    int evaluation_depth;
 } QjsRuntime;
 
 
@@ -153,9 +169,14 @@ typedef struct QjsDeferredImport {
     struct QjsDeferredImport *next;
 } QjsDeferredImport;
 
+/* How a synchronously loaded source is read. The host answers one of these
+   beside the text; `QJS_REQUIRED_DETECT` is it declining to, which only C
+   can settle, since only C has the text and QuickJS's own detector. */
 enum QjsRequiredKind {
     QJS_REQUIRED_COMMONJS = 0,
     QJS_REQUIRED_JSON = 1,
+    QJS_REQUIRED_MODULE = 2,
+    QJS_REQUIRED_DETECT = 3,
 };
 
 /* One synchronous source load. The host fills either the three source fields
@@ -185,6 +206,23 @@ struct QjsContext {
     void *normalize_opaque;
     QjsRequireLoad *require_load;
     void *require_opaque;
+    /* Inline linking: while it is raised, an import this realm meets is
+       resolved through the synchronous loader instead of being deferred to
+       the host's own fetch. A `require` inside a required module's body
+       raises it again, so it counts rather than flags. */
+    int synchronous_link;
+    /* The compile half of that: raised only while source text is being
+       compiled, which is where the instances that no body has run in yet
+       are made. `JS_EvalFunction` is outside it. */
+    int synchronous_compile;
+    /* The serial the next module instance of this realm takes, and the
+       highest one that could already have been evaluated. QuickJS keeps a
+       module's evaluation status private, so these two, with the runtime's
+       evaluation depth, are how a realm answers the only question it needs
+       of that status: may this module be linked or evaluated now, without
+       re-entering a body that is already running? */
+    uint64_t instance_serial;
+    uint64_t link_mark;
 };
 
 
@@ -240,6 +278,10 @@ _Static_assert(QJS_REQUIRED_COMMONJS == 0,
                "Rust QJS_REQUIRED_COMMONJS must match shim.c");
 _Static_assert(QJS_REQUIRED_JSON == 1,
                "Rust QJS_REQUIRED_JSON must match shim.c");
+_Static_assert(QJS_REQUIRED_MODULE == 2,
+               "Rust QJS_REQUIRED_MODULE must match shim.c");
+_Static_assert(QJS_REQUIRED_DETECT == 3,
+               "Rust QJS_REQUIRED_DETECT must match shim.c");
 
 enum QjsRejectionStatus {
     QJS_REJECTION_NONE = 0,
@@ -553,6 +595,143 @@ static int qjs_set_import_meta_url(JSContext *raw, JSModuleDef *definition,
     return status;
 }
 
+/* Compiles one source this realm has into a module of it, and remembers the
+   instance.
+
+   `linked` resolves every import during the compile, through this same
+   loader, which is what an inline link — a `require` — needs and what an
+   asynchronous import must not do: there, an import is answered with NULL
+   and deferred until the host has fetched its source.
+
+   The module is named by the name the source is known by rather than by the
+   URL it answered from, because that name is what an import of it normalizes
+   to: QuickJS registers the module under it before parsing the body, so an
+   import that comes back around to this very module while it is still being
+   compiled resolves from `JSContext.loaded_modules` instead of reaching this
+   loader again. `import.meta.url` is the response URL either way. */
+static JSModuleDef *qjs_compile_module_source(QjsContext *context,
+                                              const QjsModuleSource *source,
+                                              int linked) {
+    JSContext *raw_context = context->raw;
+    QjsModuleInstance *instance = calloc(1, sizeof(*instance));
+    JSValue compiled;
+    JSModuleDef *definition;
+
+    if (instance == NULL) {
+        JS_ThrowOutOfMemory(raw_context);
+        return NULL;
+    }
+    compiled = JS_Eval(raw_context, (const char *)source->source,
+                       source->source_length, source->name,
+                       JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY |
+                       (linked ? 0 : JS_EVAL_FLAG_COMPILE_UNLINKED));
+    if (JS_IsException(compiled)) {
+        free(instance);
+        return NULL;
+    }
+    definition = JS_VALUE_GET_PTR(compiled);
+    JS_FreeValue(raw_context, compiled);
+    /* A realm-local module knows the URL it answered from; a source the
+       runtime carries is known by the name it was registered under. */
+    if (qjs_set_import_meta_url(
+            raw_context, definition,
+            source->url != NULL ? source->url : source->name) < 0) {
+        free(instance);
+        return NULL;
+    }
+    instance->source = source;
+    instance->definition = definition;
+    instance->serial = ++context->instance_serial;
+    /* Only a compile a `require` drives makes an instance nothing can have
+       evaluated yet. One made anywhere else is linked into a graph this
+       realm is about to evaluate on its own, so it goes on the far side of
+       the mark: what is known about it from here on is only what was seen. */
+    if (context->synchronous_compile == 0) {
+        context->link_mark = context->instance_serial;
+    }
+    instance->next = context->module_instances;
+    context->module_instances = instance;
+    return definition;
+}
+
+/* May this module be linked into another, or evaluated, without re-entering
+   a body that is already running?
+
+   QuickJS keeps `JSModuleDef`'s status private, and re-entering a module
+   that is part-way through its body corrupts the evaluation that is running
+   it, so a realm answers from the three things it can know for itself:
+
+   - a module this realm has already put through `JS_EvalFunction` is evaluated, suspended on its
+     own top-level await, or back to unlinked because linking is what failed, and QuickJS answers
+     from each of the three rather than re-entering a body;
+   - a module the compile now in progress made has had no body start in it at all;
+   - with no module-graph evaluation anywhere on the stack, no body of any module is part-way
+     through.
+
+   Anything else is refused. That is narrower than Node, which reads the
+   status and refuses only a true cycle: a module this realm reached by an
+   `import` and is asked for by a `require` from inside another module's body
+   is refused here even when its body has already finished. */
+static int qjs_module_is_quiet(const QjsContext *context,
+                               const QjsModuleInstance *instance) {
+    return instance->evaluated || instance->serial > context->link_mark ||
+           context->runtime->evaluation_depth == 0;
+}
+
+/* Throws what a `require` cannot do, as the `Error` the caller reads. */
+static JSValue qjs_throw_require_error(JSContext *raw, const char *url,
+                                       const char *reason);
+
+/* The realm-local source table, which an inline link fills as the host's own
+   asynchronous completion does. Declared here because the loader reaches it
+   and the ABI entry it belongs to is further down. */
+int qjs_context_complete_module(QjsContext *context, const char *name,
+                                const char *url, const uint8_t *text,
+                                size_t length, const char *error);
+
+/* Loads one import's source through the host's synchronous loader and copies
+   it into this realm.
+
+   The copy is the point: the host lends its buffers only until the next
+   load, and compiling this source is what starts the next one. */
+static int qjs_require_module_source(QjsContext *context, const char *name) {
+    QjsRequiredSource loaded;
+    QjsModuleSource *source;
+    int status;
+
+    loaded.url = NULL;
+    loaded.text = NULL;
+    loaded.text_length = 0;
+    loaded.kind = QJS_REQUIRED_COMMONJS;
+    loaded.error = NULL;
+    if (context->require_load(context->require_opaque, name, &loaded) != 0) {
+        /* An import whose source cannot be had is unresolvable, which is
+           what a `ReferenceError` says here and in QuickJS's own loader. */
+        JS_ThrowReferenceError(context->raw, "%s", loaded.error);
+        return -1;
+    }
+    /* -5 is this name having been answered already, which is the host's own
+       fetch of it having landed first: its source is this source. */
+    status = qjs_context_complete_module(context, name, loaded.url,
+                                         loaded.text, loaded.text_length,
+                                         NULL);
+    if (status != 0 && status != -5) {
+        if (!JS_HasException(context->raw)) {
+            JS_ThrowInternalError(context->raw,
+                                  "module '%s' could not be completed", name);
+        }
+        return -1;
+    }
+    source = qjs_find_local_source(context, name);
+    if (source == NULL) {
+        JS_ThrowInternalError(context->raw, "module '%s' was not stored", name);
+        return -1;
+    }
+    /* The host has answered it: nothing is left for its own fetch to take. */
+    source->requested = 1;
+    return 0;
+}
+
 static JSModuleDef *qjs_module_loader(JSContext *raw_context,
                                       const char *module_name, void *opaque,
                                       JSValueConst attributes) {
@@ -562,7 +741,6 @@ static JSModuleDef *qjs_module_loader(JSContext *raw_context,
     QjsModuleInstance *instance;
     QjsHostModule *host_module;
     QjsHostModuleExport *exported;
-    JSValue compiled;
     JSModuleDef *definition;
     (void)attributes;
 
@@ -577,44 +755,51 @@ static JSModuleDef *qjs_module_loader(JSContext *raw_context,
         JS_ThrowTypeError(raw_context, "%s", source->error);
         return NULL;
     }
-    if (source != NULL && source->source == NULL)
-        return NULL;
+    if (source != NULL && source->source == NULL) {
+        /* A source the host has yet to answer. An import being linked inline
+           cannot wait for that fetch, so it asks the same synchronous loader
+           the `require` underneath it came through; the answer completes the
+           request the host already took, which its own answer then finds
+           already made. */
+        if (context->synchronous_link == 0) {
+            return NULL;
+        }
+        if (qjs_require_module_source(context, module_name) < 0) {
+            return NULL;
+        }
+        source = qjs_find_local_source(context, module_name);
+    }
     if (source != NULL) {
         instance = qjs_find_module_instance(context, source);
         if (instance != NULL) {
+            if (context->synchronous_link > 0 &&
+                !qjs_module_is_quiet(context, instance)) {
+                qjs_throw_require_error(
+                    raw_context,
+                    source->url != NULL ? source->url : source->name,
+                    "it is part of a module graph that is still evaluating");
+                return NULL;
+            }
             return instance->definition;
         }
-        instance = calloc(1, sizeof(*instance));
-        if (instance == NULL) {
-            JS_ThrowOutOfMemory(raw_context);
-            return NULL;
-        }
-        compiled = JS_Eval(raw_context, (const char *)source->source,
-                           source->source_length, source->name,
-                           JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY |
-                           JS_EVAL_FLAG_COMPILE_UNLINKED);
-        if (JS_IsException(compiled)) {
-            free(instance);
-            return NULL;
-        }
-        definition = JS_VALUE_GET_PTR(compiled);
-        JS_FreeValue(raw_context, compiled);
-        /* A realm-local module knows the URL it answered from; a source the
-           runtime carries is known by the name it was registered under. */
-        if (qjs_set_import_meta_url(
-                raw_context, definition,
-                source->url != NULL ? source->url : source->name) < 0) {
-            free(instance);
-            return NULL;
-        }
-        instance->source = source;
-        instance->definition = definition;
-        instance->next = context->module_instances;
-        context->module_instances = instance;
-        return definition;
+        return qjs_compile_module_source(context, source,
+                                         context->synchronous_link > 0);
     }
 
     host_module = qjs_find_host_module(context, module_name);
+    if (host_module == NULL && context->synchronous_link > 0 &&
+        context->require_load != NULL) {
+        if (qjs_require_module_source(context, module_name) < 0) {
+            return NULL;
+        }
+        source = qjs_find_local_source(context, module_name);
+        if (source == NULL) {
+            JS_ThrowInternalError(raw_context, "module '%s' was not stored",
+                                  module_name);
+            return NULL;
+        }
+        return qjs_compile_module_source(context, source, 1);
+    }
     if (host_module == NULL && context->normalize != NULL) {
         source = calloc(1, sizeof(*source));
         if (source == NULL) {
@@ -990,9 +1175,10 @@ static const char QJS_WRAPPER_PROLOGUE[] = "(function (";
 static const char QJS_WRAPPER_INFIX[] = ") {";
 static const char QJS_WRAPPER_EPILOGUE[] = "\n})";
 
-/* The two shapes a loaded source is read as, as the answer names them. */
+/* The three shapes a loaded source is read as, as the answer names them. */
 static const char QJS_KIND_COMMONJS[] = "commonjs";
 static const char QJS_KIND_JSON[] = "json";
+static const char QJS_KIND_MODULE[] = "module";
 
 /* Throws what a failed load reports, as the `Error` the host worded. */
 static JSValue qjs_require_throw_load(JSContext *raw, const char *reason) {
@@ -1011,6 +1197,40 @@ static JSValue qjs_require_throw_load(JSContext *raw, const char *reason) {
         return JS_EXCEPTION;
     }
     return JS_Throw(raw, error);
+}
+
+/* Throws `Error("cannot require '<url>': <reason>")`, the shape a failed
+   load already has, for the two things a synchronous `require` of an ES
+   module cannot do at all. A URL is of no bounded length, so the message is
+   built rather than formatted into a buffer. */
+static JSValue qjs_throw_require_error(JSContext *raw, const char *url,
+                                       const char *reason) {
+    static const char PROLOGUE[] = "cannot require '";
+    static const char INFIX[] = "': ";
+    size_t url_length = strlen(url);
+    size_t reason_length = strlen(reason);
+    size_t fixed = sizeof(PROLOGUE) - 1 + sizeof(INFIX) - 1;
+    size_t offset;
+    char *message;
+    JSValue thrown;
+
+    if (url_length > SIZE_MAX - fixed - reason_length - 1) {
+        return JS_ThrowOutOfMemory(raw);
+    }
+    message = malloc(fixed + url_length + reason_length + 1);
+    if (message == NULL) {
+        return JS_ThrowOutOfMemory(raw);
+    }
+    memcpy(message, PROLOGUE, sizeof(PROLOGUE) - 1);
+    offset = sizeof(PROLOGUE) - 1;
+    memcpy(message + offset, url, url_length);
+    offset += url_length;
+    memcpy(message + offset, INFIX, sizeof(INFIX) - 1);
+    offset += sizeof(INFIX) - 1;
+    memcpy(message + offset, reason, reason_length + 1);
+    thrown = qjs_require_throw_load(raw, message);
+    free(message);
+    return thrown;
 }
 
 /* Parses the wrapped body under the response URL, so a `SyntaxError` and
@@ -1079,103 +1299,36 @@ static JSValue qjs_require_parse_json(JSContext *raw, const char *url,
     return parsed;
 }
 
-/* `loadModuleSync(url, parameters)`: one synchronous load, compiled.
-   Answers `{ url, kind, value }` — the URL the host answered from, which of
-   the two shapes it was read as, and either the wrapper function of a
-   CommonJS file or the parsed value of a JSON one. No resolution, no cache,
-   no module object: `bobcat:module` is where Node's algorithm lives, and this
-   is the one step of it that needs the engine.
+/* Builds one load's answer: `{ url, kind, value }`, on an object of this
+   call's own. It consumes `response` and `value` whether or not it succeeds,
+   as each define does.
 
-   The order of what it does is the whole remaining lifetime invariant. The
-   host keeps owning the buffers it filled in, and lends them only until the
-   next load: so the response URL is copied into a string and the text is
-   compiled or parsed *before* `JS_EvalFunction`, which is the first point
-   author code can run at all — a file whose text closes the wrapper early
-   leaves statements in the enclosing script, and a load from there replaces
-   those buffers. Nothing borrowed is read past that point. */
-static JSValue qjs_load_module_sync(JSContext *raw, JSValueConst this_value,
-                                    int argc, JSValueConst *argv) {
-    QjsContext *context = JS_GetContextOpaque(raw);
-    QjsRequiredSource loaded;
-    const char *url;
-    const char *parameters;
-    JSValue response = JS_UNDEFINED;
-    JSValue value = JS_UNDEFINED;
+   `response` is a string rather than the host's own buffer because a
+   CommonJS file's answer is built after its body has run, and a load from
+   that body is what replaces the buffer: the URL is copied into this realm
+   before anything of the file runs. */
+static JSValue qjs_require_answer(JSContext *raw, JSValue response,
+                                  const char *kind_name, JSValue value) {
     JSValue kind = JS_UNDEFINED;
     JSValue result = JS_UNDEFINED;
-    int is_json;
-    int failed;
 
-    (void)this_value;
-    if (context == NULL) {
-        return JS_ThrowInternalError(raw, "this realm is being released");
-    }
-    /* Both are required to be strings rather than converted: a conversion
-       would run author code, and this entry's caller is a built-in. */
-    if (argc < 2 || !JS_IsString(argv[0]) || !JS_IsString(argv[1])) {
-        return JS_ThrowTypeError(
-            raw, "loadModuleSync expects a URL and a parameter list");
-    }
-    url = JS_ToCString(raw, argv[0]);
-    if (url == NULL) {
-        return JS_EXCEPTION;
-    }
-    parameters = JS_ToCString(raw, argv[1]);
-    if (parameters == NULL) {
-        JS_FreeCString(raw, url);
-        return JS_EXCEPTION;
-    }
-    loaded.url = NULL;
-    loaded.text = NULL;
-    loaded.text_length = 0;
-    loaded.kind = QJS_REQUIRED_COMMONJS;
-    loaded.error = NULL;
-    failed = context->require_load(context->require_opaque, url, &loaded) != 0;
-    JS_FreeCString(raw, url);
-    if (failed) {
-        JS_FreeCString(raw, parameters);
-        return qjs_require_throw_load(raw, loaded.error);
-    }
-    is_json = loaded.kind == QJS_REQUIRED_JSON;
-    response = JS_NewString(raw, loaded.url);
     if (JS_IsException(response)) {
-        JS_FreeCString(raw, parameters);
+        JS_FreeValue(raw, value);
         return JS_EXCEPTION;
     }
-    value = is_json ? qjs_require_parse_json(raw, loaded.url, loaded.text,
-                                             loaded.text_length)
-                    : qjs_require_compile(raw, loaded.url, parameters,
-                                          loaded.text, loaded.text_length);
-    JS_FreeCString(raw, parameters);
-    if (JS_IsException(value)) {
+    kind = JS_NewString(raw, kind_name);
+    if (JS_IsException(kind)) {
         JS_FreeValue(raw, response);
+        JS_FreeValue(raw, value);
         return JS_EXCEPTION;
-    }
-
-    /* Nothing the host lent is read past here. */
-    if (!is_json) {
-        value = JS_EvalFunction(raw, value);
-        if (JS_IsException(value)) {
-            JS_FreeValue(raw, response);
-            return JS_EXCEPTION;
-        }
     }
     result = JS_NewObject(raw);
     if (JS_IsException(result)) {
         JS_FreeValue(raw, response);
+        JS_FreeValue(raw, kind);
         JS_FreeValue(raw, value);
         return JS_EXCEPTION;
     }
-    kind = JS_NewString(raw, is_json ? QJS_KIND_JSON : QJS_KIND_COMMONJS);
-    if (JS_IsException(kind)) {
-        JS_FreeValue(raw, response);
-        JS_FreeValue(raw, value);
-        JS_FreeValue(raw, result);
-        return JS_EXCEPTION;
-    }
-    /* The three fields are *defined* on an object of this call's own, and
-       each define consumes the value it was given whether or not it
-       succeeds. */
     if (JS_DefinePropertyValueStr(raw, result, "url", response,
                                   JS_PROP_C_W_E) < 0) {
         JS_FreeValue(raw, kind);
@@ -1195,6 +1348,311 @@ static JSValue qjs_load_module_sync(JSContext *raw, JSValueConst this_value,
         return JS_EXCEPTION;
     }
     return result;
+}
+
+/* Evaluates one module for a `require` and answers its namespace.
+   `JS_EvalFunction` links the graph and runs it, and hands back the
+   evaluation promise, which is already settled unless something in the graph
+   awaited at its top level. The three states are the three answers:
+
+   - fulfilled: the namespace object, which is what `require` returns;
+   - rejected: whatever the body threw, thrown again here, so a `require` fails the way the module
+     did. The rejection is marked handled first: the realm has been told about it by the throw, and
+     a promise nothing else holds would otherwise be reported a second time as an unhandled
+     rejection;
+   - pending: refused. Settling it means running promise jobs, and a `require` is a call inside
+     whatever job is already running: it cannot run the queue it is itself part of. Node refuses
+     the same thing as `ERR_REQUIRE_ASYNC_MODULE`.
+
+   A module that got as far as being evaluated is remembered as evaluated
+   whichever of the three it was: QuickJS answers a second evaluation of it
+   from the first one's outcome rather than running the body again. */
+static JSValue qjs_require_evaluate(QjsContext *context,
+                                    QjsModuleInstance *instance,
+                                    const char *url) {
+    JSContext *raw = context->raw;
+    JSValue promise;
+    JSValue reason;
+    int state;
+
+    context->runtime->evaluation_depth += 1;
+    promise = JS_EvalFunction(
+        raw, JS_DupValue(raw, JS_MKPTR(JS_TAG_MODULE, instance->definition)));
+    context->runtime->evaluation_depth -= 1;
+    /* Whatever came of it, this module is past re-entry: evaluated, awaiting
+       its own top-level await, or — if linking is what failed — back to
+       unlinked. None of the three is a body part-way through. */
+    instance->evaluated = 1;
+    if (JS_IsException(promise)) {
+        return JS_EXCEPTION;
+    }
+    state = JS_PromiseState(raw, promise);
+    if (state == JS_PROMISE_REJECTED) {
+        reason = JS_PromiseResult(raw, promise);
+        qjs_promise_rejection_tracker(raw, promise, JS_UNDEFINED, 1,
+                                      context->runtime);
+        JS_FreeValue(raw, promise);
+        return JS_Throw(raw, reason);
+    }
+    if (state != JS_PROMISE_FULFILLED) {
+        JS_FreeValue(raw, promise);
+        if (state == JS_PROMISE_PENDING) {
+            return qjs_throw_require_error(
+                raw, url,
+                "it uses top-level await, which a synchronous require cannot "
+                "wait for");
+        }
+        return JS_ThrowInternalError(raw,
+                                     "module evaluation did not answer with a "
+                                     "promise");
+    }
+    JS_FreeValue(raw, promise);
+    return JS_GetModuleNamespace(raw, instance->definition);
+}
+
+/* Answers a `require` from a module this realm already has, whichever of an
+   import and an earlier `require` brought it in. It is evaluated at most
+   once: QuickJS answers a second evaluation from the first one's outcome. */
+static JSValue qjs_require_instance(QjsContext *context,
+                                    QjsModuleInstance *instance) {
+    const QjsModuleSource *source = instance->source;
+    const char *url = source->url != NULL ? source->url : source->name;
+    JSValue namespace;
+
+    if (!qjs_module_is_quiet(context, instance)) {
+        /* Node calls the case it can tell apart `ERR_REQUIRE_CYCLE_MODULE`;
+           this realm cannot read a module's status, so it refuses every
+           module of a graph that is still evaluating, not only the cycle. */
+        return qjs_throw_require_error(
+            context->raw, url,
+            "it is part of a module graph that is still evaluating");
+    }
+    namespace = qjs_require_evaluate(context, instance, url);
+    if (JS_IsException(namespace)) {
+        return JS_EXCEPTION;
+    }
+    return qjs_require_answer(context->raw, JS_NewString(context->raw, url),
+                              QJS_KIND_MODULE, namespace);
+}
+
+/* Compiles one loaded source as an ES module, links it inline and evaluates
+   it, for a `require` that has just had its text.
+
+   Everything the host lent is copied or compiled before any body runs: the
+   text and the response URL go into this realm's own source table first, and
+   the compile — linked, so every import in the graph is resolved through the
+   same synchronous loader, recursively — is finished before `JS_EvalFunction`
+   starts the first body. */
+static JSValue qjs_require_module(QjsContext *context, const char *requested,
+                                  const QjsRequiredSource *loaded) {
+    JSContext *raw = context->raw;
+    QjsModuleSource *source;
+    QjsModuleInstance *instance;
+    QjsModuleInstance *walk;
+    uint64_t made_after = context->instance_serial;
+    JSValue result;
+    int status;
+
+    /* -5 is this URL having been answered already, by the host's own fetch
+       of an import of it: that source is this source, and it stands. */
+    status = qjs_context_complete_module(context, requested, loaded->url,
+                                         loaded->text, loaded->text_length,
+                                         NULL);
+    if (status != 0 && status != -5) {
+        if (!JS_HasException(raw)) {
+            JS_ThrowInternalError(raw, "module '%s' could not be completed",
+                                  requested);
+        }
+        return JS_EXCEPTION;
+    }
+    source = qjs_find_local_source(context, requested);
+    if (source == NULL) {
+        return JS_ThrowInternalError(raw, "module '%s' was not stored",
+                                     requested);
+    }
+    if (source->source == NULL) {
+        /* This URL is already recorded as a load that failed — an import of
+           it the host refused — and a source table entry is not replaced.
+           The `require` fails the way that import did. */
+        return qjs_require_throw_load(raw, source->error != NULL
+                                               ? source->error
+                                               : "the module has no source");
+    }
+    source->requested = 1;
+
+    context->synchronous_link += 1;
+    context->synchronous_compile += 1;
+    context->link_mark = context->instance_serial;
+    if (qjs_compile_module_source(context, source, 1) == NULL) {
+        result = JS_EXCEPTION;
+    } else {
+        instance = qjs_find_module_instance(context, source);
+        /* The compile is over: what it made is about to be evaluated, so
+           nothing of it is a module nothing has run in any more. */
+        context->synchronous_compile -= 1;
+        context->link_mark = context->instance_serial;
+        result = instance == NULL
+                     ? JS_ThrowInternalError(raw, "module '%s' was not compiled",
+                                             requested)
+                     : qjs_require_evaluate(context, instance, source->url);
+        context->synchronous_compile += 1;
+        if (!JS_IsException(result)) {
+            /* The whole graph ran, so every module this link compiled is
+               evaluated, not only the one that was asked for. */
+            for (walk = context->module_instances;
+                 walk != NULL && walk->serial > made_after; walk = walk->next) {
+                walk->evaluated = 1;
+            }
+            result = qjs_require_answer(raw, JS_NewString(raw, source->url),
+                                        QJS_KIND_MODULE, result);
+        }
+    }
+    context->synchronous_compile -= 1;
+    context->synchronous_link -= 1;
+    /* The mark never goes back: every instance this link made has been
+       through an evaluation, so none of them is one nothing has run in. */
+    context->link_mark = context->instance_serial;
+    return result;
+}
+
+/* `loadModuleSync(url, parameters)`: one synchronous load, compiled.
+   Answers `{ url, kind, value }` — the URL the host answered from, which of
+   the three shapes it was read as, and the wrapper function of a CommonJS
+   file, the parsed value of a JSON one, or the namespace object of an ES
+   module. No resolution, no cache, no module object: `bobcat:module` is
+   where Node's algorithm lives, and this is the one step of it that needs
+   the engine.
+
+   The order of what it does is the whole remaining lifetime invariant. The
+   host keeps owning the buffers it filled in, and lends them only until the
+   next load: so the response URL is copied into a string and the text is
+   compiled, parsed or copied into this realm's source table *before*
+   anything of the file runs — for a CommonJS file that is `JS_EvalFunction`,
+   since text closing the wrapper early leaves statements in the enclosing
+   script, and for a module it is the same call, after a compile that has
+   already loaded every import in the graph. Nothing borrowed is read past
+   that point. */
+static JSValue qjs_load_module_sync(JSContext *raw, JSValueConst this_value,
+                                    int argc, JSValueConst *argv) {
+    QjsContext *context = JS_GetContextOpaque(raw);
+    QjsRequiredSource loaded;
+    const QjsModuleSource *source;
+    QjsModuleInstance *instance;
+    const char *url;
+    const char *parameters;
+    char *terminated = NULL;
+    JSValue response = JS_UNDEFINED;
+    JSValue value = JS_UNDEFINED;
+    JSValue result = JS_UNDEFINED;
+    int kind;
+    int failed;
+
+    (void)this_value;
+    if (context == NULL) {
+        return JS_ThrowInternalError(raw, "this realm is being released");
+    }
+    /* Both are required to be strings rather than converted: a conversion
+       would run author code, and this entry's caller is a built-in. */
+    if (argc < 2 || !JS_IsString(argv[0]) || !JS_IsString(argv[1])) {
+        return JS_ThrowTypeError(
+            raw, "loadModuleSync expects a URL and a parameter list");
+    }
+    url = JS_ToCString(raw, argv[0]);
+    if (url == NULL) {
+        return JS_EXCEPTION;
+    }
+    /* A module this realm already has is answered from its instance rather
+       than loaded again: one URL is one module, whichever of an import and a
+       `require` reached it first, and it runs once. */
+    source = qjs_find_local_source(context, url);
+    if (source == NULL) {
+        source = qjs_find_module_source(context->runtime, url);
+    }
+    instance = source == NULL ? NULL
+                              : qjs_find_module_instance(context, source);
+    if (instance != NULL) {
+        JS_FreeCString(raw, url);
+        return qjs_require_instance(context, instance);
+    }
+    parameters = JS_ToCString(raw, argv[1]);
+    if (parameters == NULL) {
+        JS_FreeCString(raw, url);
+        return JS_EXCEPTION;
+    }
+    loaded.url = NULL;
+    loaded.text = NULL;
+    loaded.text_length = 0;
+    loaded.kind = QJS_REQUIRED_COMMONJS;
+    loaded.error = NULL;
+    failed = context->require_load(context->require_opaque, url, &loaded) != 0;
+    if (failed) {
+        JS_FreeCString(raw, url);
+        JS_FreeCString(raw, parameters);
+        return qjs_require_throw_load(raw, loaded.error);
+    }
+    kind = loaded.kind;
+    if (kind == QJS_REQUIRED_DETECT) {
+        /* The host has no text, so it cannot decide; QuickJS's detector
+           wants a terminated buffer, and the text the host lends is not one.
+           The copy it needs is the copy the load needs anyway. */
+        if (loaded.text_length == SIZE_MAX) {
+            JS_FreeCString(raw, url);
+            JS_FreeCString(raw, parameters);
+            return JS_ThrowOutOfMemory(raw);
+        }
+        terminated = malloc(loaded.text_length + 1);
+        if (terminated == NULL) {
+            JS_FreeCString(raw, url);
+            JS_FreeCString(raw, parameters);
+            return JS_ThrowOutOfMemory(raw);
+        }
+        memcpy(terminated, loaded.text, loaded.text_length);
+        terminated[loaded.text_length] = '\0';
+        kind = JS_DetectModule(terminated, loaded.text_length)
+                   ? QJS_REQUIRED_MODULE
+                   : QJS_REQUIRED_COMMONJS;
+        loaded.text = (const uint8_t *)terminated;
+    }
+    if (kind == QJS_REQUIRED_MODULE) {
+        /* `parameters` is a CommonJS wrapper's, and a module has none. The
+           URL asked for is what the module is stored under, because that is
+           the name an import of it resolves to. */
+        JS_FreeCString(raw, parameters);
+        result = qjs_require_module(context, url, &loaded);
+        JS_FreeCString(raw, url);
+        free(terminated);
+        return result;
+    }
+    JS_FreeCString(raw, url);
+    response = JS_NewString(raw, loaded.url);
+    if (JS_IsException(response)) {
+        JS_FreeCString(raw, parameters);
+        free(terminated);
+        return JS_EXCEPTION;
+    }
+    value = kind == QJS_REQUIRED_JSON
+                ? qjs_require_parse_json(raw, loaded.url, loaded.text,
+                                         loaded.text_length)
+                : qjs_require_compile(raw, loaded.url, parameters, loaded.text,
+                                      loaded.text_length);
+    JS_FreeCString(raw, parameters);
+    free(terminated);
+    if (JS_IsException(value)) {
+        JS_FreeValue(raw, response);
+        return JS_EXCEPTION;
+    }
+    if (kind != QJS_REQUIRED_JSON) {
+        /* Nothing the host lent is read past here. */
+        value = JS_EvalFunction(raw, value);
+        if (JS_IsException(value)) {
+            JS_FreeValue(raw, response);
+            return JS_EXCEPTION;
+        }
+    }
+    return qjs_require_answer(raw, response,
+                              kind == QJS_REQUIRED_JSON ? QJS_KIND_JSON
+                                                        : QJS_KIND_COMMONJS,
+                              value);
 }
 
 /* A realm takes one loader, and the export is what carries it: a second
@@ -1244,8 +1702,12 @@ int qjs_context_complete_module(QjsContext *context, const char *name,
     if (qjs_find_module_source(context->runtime, name) != NULL ||
         qjs_find_host_module_name(context->runtime, name) != NULL)
         return -2;
+    /* Already answered. A `require` linking this name inline answers it from
+       the same host, out of band of the request the host took, so the fetch
+       that was already running finds the source it was going to supply
+       standing: nothing is replaced, and nothing is wrong. */
     if (source != NULL && (source->source != NULL || source->error != NULL))
-        return -2;
+        return -5;
     if (source == NULL) {
         source = calloc(1, sizeof(*source));
         if (source == NULL)
@@ -1287,6 +1749,10 @@ int qjs_context_complete_module(QjsContext *context, const char *name,
 void qjs_context_resume_module_loads(QjsContext *context) {
     QjsDeferredImport *pending = context->deferred_imports;
     context->deferred_imports = NULL;
+    /* A resumed import links and evaluates its graph, so module bodies run
+       under this call: what they can reach is what `qjs_module_is_quiet`
+       refuses to evaluate a second time. */
+    context->runtime->evaluation_depth += 1;
     while (pending != NULL) {
         QjsDeferredImport *next = pending->next;
         JS_ResumeModuleLoad(context->raw, pending->base, pending->name,
@@ -1294,6 +1760,7 @@ void qjs_context_resume_module_loads(QjsContext *context) {
         qjs_deferred_import_free(context->raw, pending);
         pending = next;
     }
+    context->runtime->evaluation_depth -= 1;
 }
 
 void qjs_runtime_run_gc(QjsRuntime *runtime) {
@@ -1470,6 +1937,7 @@ QjsValue *qjs_eval(QjsContext *context, const uint8_t *source,
                    int *failure_stage) {
     JSValue compiled;
     JSValue result;
+    int is_module = (flags & JS_EVAL_TYPE_MASK) == JS_EVAL_TYPE_MODULE;
 
     *failure_stage = QJS_EVAL_FAILURE_NONE;
     compiled = JS_Eval(context->raw, (const char *)source, source_length,
@@ -1480,13 +1948,17 @@ QjsValue *qjs_eval(QjsContext *context, const uint8_t *source,
     }
     /* A module evaluated directly is known by the source name it was given,
        which is the only name this realm has for it. */
-    if ((flags & JS_EVAL_TYPE_MASK) == JS_EVAL_TYPE_MODULE &&
+    if (is_module &&
         qjs_set_import_meta_url(context->raw, JS_VALUE_GET_PTR(compiled),
                                 source_name) < 0) {
         JS_FreeValue(context->raw, compiled);
         return NULL;
     }
+    /* Evaluating a module runs its graph's bodies; a plain script's own
+       statements cannot start one, since an `import()` in it defers. */
+    context->runtime->evaluation_depth += is_module;
     result = JS_EvalFunction(context->raw, compiled);
+    context->runtime->evaluation_depth -= is_module;
     if (JS_IsException(result)) {
         *failure_stage = QJS_EVAL_FAILURE_EXECUTE;
     }
@@ -1528,8 +2000,13 @@ QjsValue *qjs_call(QjsContext *context, const QjsValue *callable,
    thing keeping a released context alive. */
 int qjs_execute_pending_job(QjsRuntime *runtime, QjsContext **context) {
     JSContext *raw_context = NULL;
-    int status = JS_ExecutePendingJob(runtime->raw, &raw_context);
+    int status;
 
+    /* A job may be what a module's top-level await was suspended on, which
+       runs the rest of that module's body and of the graph waiting on it. */
+    runtime->evaluation_depth += 1;
+    status = JS_ExecutePendingJob(runtime->raw, &raw_context);
+    runtime->evaluation_depth -= 1;
     *context = raw_context == NULL ? NULL : JS_GetContextOpaque(raw_context);
     return status;
 }

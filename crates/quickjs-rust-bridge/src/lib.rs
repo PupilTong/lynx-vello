@@ -1214,14 +1214,22 @@ mod implementation {
     /// Synchronous name resolution; source retrieval remains asynchronous.
     pub type ModuleNormalizer = fn(base: &str, specifier: &str) -> Result<String, String>;
 
-    /// Which of the two shapes a synchronously loaded source is read as.
+    /// How a synchronously loaded source is read.
     ///
     /// The host decides: this bridge knows nothing about URLs, file
-    /// extensions or media types.
+    /// extensions or media types. [`Detect`](RequiredKind::Detect) is the
+    /// host declining to, which only the engine can settle — `QuickJS`'s own
+    /// syntax heuristic over the text, which never becomes a value and which
+    /// the host, having only lent its bytes, cannot run.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub enum RequiredKind {
         CommonJs,
         Json,
+        /// An ES module: linked and evaluated by the load, answered with its
+        /// namespace object.
+        Module,
+        /// `CommonJs` or `Module`, whichever the text reads as.
+        Detect,
     }
 
     impl RequiredKind {
@@ -1229,6 +1237,8 @@ mod implementation {
             match self {
                 Self::CommonJs => ffi::REQUIRED_COMMONJS,
                 Self::Json => ffi::REQUIRED_JSON,
+                Self::Module => ffi::REQUIRED_MODULE,
+                Self::Detect => ffi::REQUIRED_DETECT,
             }
         }
     }
@@ -1461,7 +1471,12 @@ mod implementation {
                 )
             };
             match status {
-                0 => Ok(()),
+                // -5 is this name having been answered already, which a
+                // synchronous `require` linking an import of it inline does
+                // out of band of the request this completion answers. The
+                // source is the same file from the same host, so the load
+                // that was in flight has nothing left to supply.
+                0 | -5 => Ok(()),
                 -2 => Err(Error::bridge(
                     ErrorKind::InvalidInput,
                     ErrorPhase::RegisterModule,
@@ -1532,30 +1547,56 @@ mod implementation {
         ///
         /// ```ts
         /// loadModuleSync(url: string, parameters: string):
-        ///     { url: string; kind: "commonjs" | "json"; value: unknown }
+        ///     { url: string; kind: "commonjs" | "json" | "module"; value: unknown }
         /// ```
         ///
         /// `url` is asked of `load` as it stands: this entry resolves
         /// nothing, caches nothing and builds no module object, so a realm's
-        /// `require` algorithm is JavaScript written over it. `parameters` is
-        /// the parameter list of the wrapper a `CommonJs` source is compiled
-        /// inside, verbatim — `"exports, require, module"` answers a function
-        /// of those three, whose body starts on line 1 of the file so its line
-        /// numbers are the file's own. A `Json` source is parsed instead, and
-        /// `parameters` is unread. Either way the source text never becomes a
-        /// JavaScript value, and the compile or parse names
-        /// [`RequiredSource::url`] — the URL the load answered from — so a
-        /// `SyntaxError` and every frame beneath it name the file.
+        /// `require` algorithm is JavaScript written over it. The four kinds
+        /// a `load` may answer with are three answers:
+        ///
+        /// - [`CommonJs`](RequiredKind::CommonJs): the wrapper function, compiled inside the
+        ///   parameter list `parameters` names, verbatim — `"exports, require, module"` answers a
+        ///   function of those three, whose body starts on line 1 of the file so its line numbers
+        ///   are the file's own. `kind` is `"commonjs"`.
+        /// - [`Json`](RequiredKind::Json): the parsed value. `parameters` is unread. `kind` is
+        ///   `"json"`.
+        /// - [`Module`](RequiredKind::Module): the namespace object of the ES module, linked and
+        ///   evaluated. `parameters` is unread, and `kind` is `"module"`.
+        /// - [`Detect`](RequiredKind::Detect): whichever of the first and the third `QuickJS`'s
+        ///   syntax heuristic reads the text as, answered as that one.
+        ///
+        /// Either way the source text never becomes a JavaScript value, and
+        /// the compile or parse names [`RequiredSource::url`] — the URL the
+        /// load answered from — so a `SyntaxError` and every frame beneath it
+        /// name the file.
+        ///
+        /// A module is **linked inline**: every `import` in it, and in what
+        /// it imports, is resolved during its compile by asking `load` for
+        /// that URL too, recursively, before any body runs. A specifier that
+        /// names a native module of this realm links to it instead, and one
+        /// whose source `load` refuses is a `ReferenceError`. Evaluation is
+        /// synchronous and runs no promise jobs, so two things a `require`
+        /// cannot do throw `Error("cannot require '<url>': …")`: a graph that
+        /// awaits at its top level, which only the job queue could settle
+        /// (Node's `ERR_REQUIRE_ASYNC_MODULE`), and a module of a graph that
+        /// is still evaluating (Node's `ERR_REQUIRE_CYCLE_MODULE`, and,
+        /// because `JSModuleDef` keeps its status private, also a module of
+        /// that graph whose own body has already finished). A module this
+        /// realm already has — from an earlier `require`, or from an
+        /// `import` — is answered from it, evaluated at most once.
         ///
         /// A `load` that fails throws `Error("cannot load '<url>': <reason>")`.
         ///
-        /// `load` is entered only from this export, is never borrowed while
-        /// JavaScript runs, and must not enter JavaScript itself. A realm has
-        /// one loader, and a second registration is refused whatever name it
-        /// asks for — the export is what carries the loader, so a second one
-        /// would answer the first export from the second `load`. The same name
-        /// on the same module is refused before that, as any other duplicate
-        /// export is.
+        /// `load` is entered only from this export and from an import being
+        /// linked inline for it, is never borrowed while JavaScript runs, and
+        /// must not enter JavaScript itself. It is re-entrant in the sense
+        /// that matters: each call returns before the compile that starts the
+        /// next one. A realm has one loader, and a second registration is
+        /// refused whatever name it asks for — the export is what carries the
+        /// loader, so a second one would answer the first export from the
+        /// second `load`. The same name on the same module is refused before
+        /// that, as any other duplicate export is.
         pub fn register_synchronous_loader<F>(
             &mut self,
             module_name: &str,
@@ -2900,6 +2941,45 @@ mod implementation {
                 self
             }
 
+            /// One ES module, answered from the URL it was asked for.
+            fn module(mut self, url: &str, text: &str) -> Self {
+                self.files.insert(
+                    url.to_owned(),
+                    RequiredSource {
+                        url: url.to_owned(),
+                        text: text.to_owned(),
+                        kind: RequiredKind::Module,
+                    },
+                );
+                self
+            }
+
+            /// The same, answered from somewhere else.
+            fn redirected_module(mut self, url: &str, response: &str, text: &str) -> Self {
+                self.files.insert(
+                    url.to_owned(),
+                    RequiredSource {
+                        url: response.to_owned(),
+                        text: text.to_owned(),
+                        kind: RequiredKind::Module,
+                    },
+                );
+                self
+            }
+
+            /// One file the host will not say the shape of: the text decides.
+            fn detected(mut self, url: &str, text: &str) -> Self {
+                self.files.insert(
+                    url.to_owned(),
+                    RequiredSource {
+                        url: url.to_owned(),
+                        text: text.to_owned(),
+                        kind: RequiredKind::Detect,
+                    },
+                );
+                self
+            }
+
             fn load(&mut self, url: &str) -> Result<RequiredSource, String> {
                 self.loads.push(url.to_owned());
                 self.files
@@ -2976,6 +3056,27 @@ mod implementation {
                  {body}"
             );
             run_module(runtime, realm, name, &source)
+        }
+
+        /// The same body, run as a plain script instead of a module body.
+        ///
+        /// What that changes is the one thing a realm can tell about a
+        /// module's evaluation status: with no module body on the stack,
+        /// every module this realm has is one a `require` may answer from.
+        /// The export is reached through the global the module entry left.
+        fn run_script(runtime: &mut Runtime, realm: &mut Context, body: &str) -> Result<(), Error> {
+            run_module(
+                runtime,
+                realm,
+                "install",
+                &format!(
+                    "import {{ loadModuleSync }} from '{REQUIRE_MODULE}';\n\
+                     globalThis.loadModuleSync = loadModuleSync;"
+                ),
+            )?;
+            realm
+                .evaluate(EvalSource::new(body), EvalOptions::default())
+                .map(|_| ())
         }
 
         #[test]
@@ -3196,6 +3297,594 @@ mod implementation {
             )
             .unwrap();
             assert_eq!(host.borrow().loads, ["app:///a.cjs"]);
+        }
+
+        #[test]
+        fn a_module_load_answers_the_namespace_it_evaluated_to() {
+            let (mut runtime, mut realm, host) = loader_realm(RequireHost::default().module(
+                "app:///a.mjs",
+                "export const answer = 42;\nexport default 'default';",
+            ));
+            run_loader(
+                &mut runtime,
+                &mut realm,
+                "entry",
+                "const loaded = loadModuleSync('app:///a.mjs', 'unread');\n\
+                 if (loaded.kind !== 'module') throw Error('kind ' + loaded.kind);\n\
+                 if (loaded.url !== 'app:///a.mjs') throw Error('url ' + loaded.url);\n\
+                 if (loaded.value.answer !== 42) throw Error('answer');\n\
+                 if (loaded.value.default !== 'default') throw Error('default');",
+            )
+            .unwrap();
+            assert_eq!(host.borrow().loads, ["app:///a.mjs"]);
+        }
+
+        /// The parameter list is a `CommonJS` wrapper's, and a module has no
+        /// wrapper: a list that would not even parse as one is unread.
+        #[test]
+        fn a_module_load_reads_no_parameter_list() {
+            let (mut runtime, mut realm, _host) = loader_realm(
+                RequireHost::default().module("app:///a.mjs", "export const answer = 42;"),
+            );
+            run_loader(
+                &mut runtime,
+                &mut realm,
+                "entry",
+                "const loaded = loadModuleSync('app:///a.mjs', '!!! not a parameter list');\n\
+                 if (loaded.value.answer !== 42) throw Error('answer');",
+            )
+            .unwrap();
+        }
+
+        /// Every import in the graph is resolved during the compile of the
+        /// module that asked for it, through the same loader, before any body
+        /// runs: the load order is the order the imports were met in, each
+        /// URL once, and the deepest body runs first.
+        #[test]
+        fn an_import_chain_loads_each_module_once_through_the_loader() {
+            let (mut runtime, mut realm, host) = loader_realm(
+                RequireHost::default()
+                    .module(
+                        "app:///a.mjs",
+                        "import { b } from './b.mjs';\n\
+                         globalThis.order = (globalThis.order ?? '') + 'a';\n\
+                         export const a = b + 1;",
+                    )
+                    .module(
+                        "app:///b.mjs",
+                        "import { c } from './c.mjs';\n\
+                         import { c as again } from './c.mjs';\n\
+                         globalThis.order = (globalThis.order ?? '') + 'b';\n\
+                         export const b = c + again;",
+                    )
+                    .module(
+                        "app:///c.mjs",
+                        "globalThis.order = (globalThis.order ?? '') + 'c';\n\
+                         export const c = 20;",
+                    ),
+            );
+            run_loader(
+                &mut runtime,
+                &mut realm,
+                "entry",
+                "const loaded = loadModuleSync('app:///a.mjs', 'unread');\n\
+                 if (loaded.value.a !== 41) throw Error('a ' + loaded.value.a);\n\
+                 if (globalThis.order !== 'cba') throw Error('order ' + globalThis.order);",
+            )
+            .unwrap();
+            assert_eq!(
+                host.borrow().loads,
+                ["app:///a.mjs", "app:///b.mjs", "app:///c.mjs"],
+                "each module is asked for once, as its importer is compiled"
+            );
+        }
+
+        /// The loader is entered again for an import, from inside the
+        /// compile of the module that imports it, and its own state is
+        /// there: each call returns before the compile that starts the next
+        /// one, so nothing of the host's is borrowed across a nested load.
+        #[test]
+        fn a_loader_is_entered_again_while_the_module_it_answered_compiles() {
+            let runtime = Runtime::new().unwrap();
+            let mut realm = runtime.create_context().unwrap();
+            let mut runtime = runtime;
+            let mut entered = 0usize;
+            realm
+                .register_synchronous_loader(REQUIRE_MODULE, "loadModuleSync", move |url| {
+                    entered += 1;
+                    let text = match url {
+                        "app:///a.mjs" => "import './b.mjs';\nexport const a = 1;",
+                        "app:///b.mjs" => "export const b = 2;",
+                        _ => return Err(format!("no such file: {url}")),
+                    };
+                    Ok(RequiredSource {
+                        url: url.to_owned(),
+                        text: format!("{text}\nexport const entered = {entered};"),
+                        kind: RequiredKind::Module,
+                    })
+                })
+                .expect("the realm takes the loader");
+            run_loader(
+                &mut runtime,
+                &mut realm,
+                "entry",
+                "const loaded = loadModuleSync('app:///a.mjs', 'unread');\n\
+                 if (loaded.value.entered !== 1) throw Error('outer ' + loaded.value.entered);\n\
+                 const inner = loadModuleSync('app:///b.mjs', 'unread');\n\
+                 if (inner.value.entered !== 2) throw Error('inner ' + inner.value.entered);",
+            )
+            .unwrap();
+        }
+
+        /// A specifier is the host's to resolve, as it is for an import this
+        /// realm defers: the normalizer runs first, and the loader is asked
+        /// for what it answered.
+        #[test]
+        fn an_inline_import_resolves_through_this_realms_normalizer() {
+            let (mut runtime, mut realm, host) = loader_realm(
+                RequireHost::default()
+                    .module("app:///deep/a.mjs", "export { b } from './b.mjs';")
+                    .module("app:///deep/b.mjs", "export const b = 42;"),
+            );
+            // Enough of a resolver to say that one ran: a relative
+            // specifier is taken from the importer's own directory.
+            realm.enable_module_loading(|base, name| match name.strip_prefix("./") {
+                Some(relative) => match base.rfind('/') {
+                    Some(slash) => Ok(format!("{}{relative}", &base[..=slash])),
+                    None => Err(format!("cannot resolve '{name}' from '{base}'")),
+                },
+                None => Ok(name.to_owned()),
+            });
+            run_loader(
+                &mut runtime,
+                &mut realm,
+                "entry",
+                "const loaded = loadModuleSync('app:///deep/a.mjs', 'unread');\n\
+                 if (loaded.value.b !== 42) throw Error('b ' + loaded.value.b);",
+            )
+            .unwrap();
+            assert_eq!(
+                host.borrow().loads,
+                ["app:///deep/a.mjs", "app:///deep/b.mjs"]
+            );
+        }
+
+        /// A native module of this realm is what a specifier naming it links
+        /// to: the loader is not asked for it, and its exports are the ones
+        /// the host registered.
+        #[test]
+        fn a_required_module_links_a_native_module_of_this_realm() {
+            let (mut runtime, mut realm, host) = loader_realm(RequireHost::default().module(
+                "app:///a.mjs",
+                "import { answer } from 'bobcat:native';\nexport const a = answer();",
+            ));
+            realm
+                .register_host_module_function("bobcat:native", "answer", 0, |_| {
+                    Ok(HostValue::Number(42.0))
+                })
+                .unwrap();
+            run_loader(
+                &mut runtime,
+                &mut realm,
+                "entry",
+                "const loaded = loadModuleSync('app:///a.mjs', 'unread');\n\
+                 if (loaded.value.a !== 42) throw Error('a ' + loaded.value.a);",
+            )
+            .unwrap();
+            assert_eq!(host.borrow().loads, ["app:///a.mjs"]);
+        }
+
+        /// An import the host will not answer is unresolvable, which is what
+        /// its reason reaches the `require` as.
+        #[test]
+        fn an_import_the_host_refuses_fails_the_require_that_linked_it() {
+            let (mut runtime, mut realm, _host) = loader_realm(
+                RequireHost::default().module("app:///a.mjs", "import './missing.mjs';"),
+            );
+            let error = run_loader(
+                &mut runtime,
+                &mut realm,
+                "entry",
+                "loadModuleSync('app:///a.mjs', 'unread');",
+            )
+            .expect_err("an import of a file the host does not serve");
+            assert_eq!(error.name.as_deref(), Some("ReferenceError"));
+            assert!(
+                error.message.contains("app:///missing.mjs")
+                    && error.message.contains("no such file"),
+                "{}",
+                error.message
+            );
+        }
+
+        #[test]
+        fn a_modules_import_meta_url_is_the_url_it_answered_from() {
+            let (mut runtime, mut realm, _host) =
+                loader_realm(RequireHost::default().redirected_module(
+                    "app:///alias",
+                    "https://cdn.test/deep/real.mjs",
+                    "export const url = import.meta.url;",
+                ));
+            run_loader(
+                &mut runtime,
+                &mut realm,
+                "entry",
+                "const loaded = loadModuleSync('app:///alias', 'unread');\n\
+                 if (loaded.url !== 'https://cdn.test/deep/real.mjs')\n\
+                   throw Error('url ' + loaded.url);\n\
+                 if (loaded.value.url !== 'https://cdn.test/deep/real.mjs')\n\
+                   throw Error('import.meta.url ' + loaded.value.url);",
+            )
+            .unwrap();
+        }
+
+        /// The host that answers `Detect` has only lent its bytes, so the
+        /// engine reads them: `import` or `export` at the top is a module,
+        /// and anything else is a wrapper.
+        #[test]
+        fn detection_reads_the_text_the_host_would_not_name() {
+            let (mut runtime, mut realm, _host) = loader_realm(
+                RequireHost::default()
+                    .detected("app:///module.js", "export const answer = 42;")
+                    .detected("app:///imports.js", "import './module.js';\nexport {};")
+                    .detected("app:///script.js", "exports.answer = 42;")
+                    .detected(
+                        "app:///dynamic.js",
+                        "exports.later = () => import('./x.js');",
+                    ),
+            );
+            run_loader(
+                &mut runtime,
+                &mut realm,
+                "entry",
+                "const module = loadModuleSync('app:///module.js', 'exports');\n\
+                 if (module.kind !== 'module') throw Error('export ' + module.kind);\n\
+                 if (module.value.answer !== 42) throw Error('answer');\n\
+                 const imports = loadModuleSync('app:///imports.js', 'exports');\n\
+                 if (imports.kind !== 'module') throw Error('import ' + imports.kind);\n\
+                 const script = loadModuleSync('app:///script.js', 'exports');\n\
+                 if (script.kind !== 'commonjs') throw Error('plain ' + script.kind);\n\
+                 if (typeof script.value !== 'function') throw Error('not a wrapper');\n\
+                 const dynamic = loadModuleSync('app:///dynamic.js', 'exports');\n\
+                 if (dynamic.kind !== 'commonjs') throw Error('dynamic ' + dynamic.kind);",
+            )
+            .unwrap();
+        }
+
+        /// Nothing settles a top-level await but the job queue, and a
+        /// `require` is a call inside whatever job is already running.
+        #[test]
+        fn a_module_that_awaits_at_its_top_level_is_refused() {
+            let (mut runtime, mut realm, _host) = loader_realm(
+                RequireHost::default()
+                    .module(
+                        "app:///slow.mjs",
+                        "await Promise.resolve();\nexport const a = 1;",
+                    )
+                    .module(
+                        "app:///deep.mjs",
+                        "await Promise.resolve();\nexport const c = 3;",
+                    )
+                    .module(
+                        "app:///importer.mjs",
+                        "import './deep.mjs';\nexport const b = 2;",
+                    ),
+            );
+            let error = run_loader(
+                &mut runtime,
+                &mut realm,
+                "entry",
+                "loadModuleSync('app:///slow.mjs', 'unread');",
+            )
+            .expect_err("a module that awaits at its top level");
+            assert_eq!(error.name.as_deref(), Some("Error"));
+            assert!(
+                error.message.contains("app:///slow.mjs")
+                    && error.message.contains("top-level await"),
+                "{}",
+                error.message
+            );
+
+            // The same of a graph that awaits one level down. Its own
+            // module is left suspended, which is what `import` is for: the
+            // jobs that would settle it are still the realm's to run.
+            let error = run_loader(
+                &mut runtime,
+                &mut realm,
+                "second",
+                "loadModuleSync('app:///importer.mjs', 'unread');",
+            )
+            .expect_err("a module whose import awaits at its top level");
+            assert!(
+                error.message.contains("top-level await"),
+                "{}",
+                error.message
+            );
+        }
+
+        /// A module that threw is kept as the failure it is: `QuickJS` answers
+        /// a second evaluation from the first one's exception rather than
+        /// running the body again, and the realm hears about it once.
+        #[test]
+        fn a_module_that_throws_rethrows_without_running_again() {
+            let (mut runtime, mut realm, host) = loader_realm(RequireHost::default().module(
+                "app:///boom.mjs",
+                "globalThis.runs = (globalThis.runs ?? 0) + 1;\nthrow Error('boom');",
+            ));
+            let error = run_loader(
+                &mut runtime,
+                &mut realm,
+                "entry",
+                "loadModuleSync('app:///boom.mjs', 'unread');",
+            )
+            .expect_err("a module body that throws");
+            assert_eq!(error.message, "boom");
+            assert_eq!(
+                runtime.take_unhandled_rejection(&realm),
+                None,
+                "the throw is the report: the evaluation promise is not a second one"
+            );
+            let error = run_loader(
+                &mut runtime,
+                &mut realm,
+                "again",
+                "loadModuleSync('app:///boom.mjs', 'unread');",
+            )
+            .expect_err("the same failure");
+            assert_eq!(error.message, "boom");
+            assert_eq!(
+                host.borrow().loads,
+                ["app:///boom.mjs"],
+                "the module this realm has is not loaded again"
+            );
+            let runs = realm
+                .evaluate(EvalSource::new("globalThis.runs"), EvalOptions::default())
+                .unwrap();
+            assert_eq!(runs.as_number(), Some(1.0));
+        }
+
+        /// One URL is one module, whichever of an import and a `require`
+        /// reached it first. The `require` here is a plain script's, because
+        /// a realm cannot tell a module whose body has finished from one
+        /// whose body is still running while any module body is on the
+        /// stack — see the next test.
+        #[test]
+        fn a_module_an_import_already_loaded_is_answered_from_its_instance() {
+            let host = Rc::new(RefCell::new(RequireHost::default()));
+            let runtime = Runtime::new().unwrap();
+            let mut realm = runtime.create_context().unwrap();
+            let mut runtime = runtime;
+            realm.enable_module_loading(|_, name| Ok(name.to_owned()));
+            install_loader(&mut realm, &host);
+            realm
+                .complete_module(
+                    "app:///shared.mjs",
+                    Ok((
+                        "app:///shared.mjs",
+                        "globalThis.runs = (globalThis.runs ?? 0) + 1;\n\
+                         export const answer = 42;",
+                    )),
+                )
+                .unwrap();
+            run_module(
+                &mut runtime,
+                &mut realm,
+                "entry",
+                "import { answer } from 'app:///shared.mjs';\n\
+                 globalThis.imported = answer;",
+            )
+            .unwrap();
+            run_script(
+                &mut runtime,
+                &mut realm,
+                "const loaded = globalThis.loadModuleSync('app:///shared.mjs', 'unread');\n\
+                 if (loaded.kind !== 'module') throw Error('kind ' + loaded.kind);\n\
+                 if (loaded.url !== 'app:///shared.mjs') throw Error('url ' + loaded.url);\n\
+                 if (loaded.value.answer !== 42) throw Error('answer');\n\
+                 if (globalThis.imported !== 42) throw Error('imported');\n\
+                 if (globalThis.runs !== 1) throw Error('runs ' + globalThis.runs);",
+            )
+            .unwrap();
+            assert!(
+                host.borrow().loads.is_empty(),
+                "a module this realm has is not asked of the host again"
+            );
+        }
+
+        /// An import whose source the host is still fetching is answered by
+        /// the link that needs it: an inline link cannot wait for a fetch,
+        /// so it asks the same loader, and the fetch that was already running
+        /// finds its answer standing and resolves to the module that link
+        /// made.
+        #[test]
+        fn an_import_still_being_fetched_is_answered_by_the_link_that_needs_it() {
+            let host = Rc::new(RefCell::new(
+                RequireHost::default()
+                    .module("app:///pending.mjs", "export const answer = 42;")
+                    .module(
+                        "app:///wants.mjs",
+                        "export { answer } from './pending.mjs';",
+                    ),
+            ));
+            let runtime = Runtime::new().unwrap();
+            let mut realm = runtime.create_context().unwrap();
+            let mut runtime = runtime;
+            realm.enable_module_loading(|base, name| match name.strip_prefix("./") {
+                Some(relative) => match base.rfind('/') {
+                    Some(slash) => Ok(format!("{}{relative}", &base[..=slash])),
+                    None => Err(format!("cannot resolve '{name}' from '{base}'")),
+                },
+                None => Ok(name.to_owned()),
+            });
+            install_loader(&mut realm, &host);
+            run_module(
+                &mut runtime,
+                &mut realm,
+                "entry",
+                "import('app:///pending.mjs').then((ns) => {\n\
+                   globalThis.imported = ns.answer;\n\
+                 });",
+            )
+            .unwrap();
+            assert_eq!(
+                realm.take_module_request().as_deref(),
+                Some("app:///pending.mjs"),
+                "the host was asked for it and has not answered yet"
+            );
+
+            run_script(
+                &mut runtime,
+                &mut realm,
+                "const loaded = globalThis.loadModuleSync('app:///wants.mjs', 'unread');\n\
+                 if (loaded.value.answer !== 42) throw Error('answer');",
+            )
+            .unwrap();
+            assert_eq!(
+                host.borrow().loads,
+                ["app:///wants.mjs", "app:///pending.mjs"],
+                "the link asked the same loader for the import it needed"
+            );
+
+            realm
+                .complete_module(
+                    "app:///pending.mjs",
+                    Ok(("app:///pending.mjs", "export const answer = 0;")),
+                )
+                .expect("the fetch that landed second has nothing left to supply");
+            realm.resume_module_loads().unwrap();
+            runtime.drain_pending_jobs(&realm).unwrap();
+            let imported = realm
+                .evaluate(
+                    EvalSource::new("globalThis.imported"),
+                    EvalOptions::default(),
+                )
+                .unwrap();
+            assert_eq!(
+                imported.as_number(),
+                Some(42.0),
+                "the import resolved to the module the link made"
+            );
+        }
+
+        /// A URL an import already failed on is a load this realm recorded,
+        /// and a recorded source is never replaced: the `require` fails the
+        /// way the import did rather than quietly loading the file again.
+        #[test]
+        fn a_url_recorded_as_a_failed_load_fails_the_require_with_it() {
+            let (mut runtime, mut realm, host) = loader_realm(
+                RequireHost::default().module("app:///gone.mjs", "export const a = 1;"),
+            );
+            realm
+                .complete_module("app:///gone.mjs", Err("the page has no such file"))
+                .unwrap();
+            let error = run_loader(
+                &mut runtime,
+                &mut realm,
+                "entry",
+                "loadModuleSync('app:///gone.mjs', 'unread');",
+            )
+            .expect_err("a URL this realm has recorded a failure for");
+            assert!(
+                error.message.contains("the page has no such file"),
+                "{}",
+                error.message
+            );
+            assert_eq!(host.borrow().loads, ["app:///gone.mjs"]);
+        }
+
+        /// Completing a name an inline link has already answered is the
+        /// host's own fetch of it landing second, which is nothing wrong:
+        /// the source it was going to supply is the source that stands.
+        #[test]
+        fn completing_a_name_twice_leaves_the_first_source_standing() {
+            let (_runtime, mut realm, _host) = loader_realm(RequireHost::default());
+            realm
+                .complete_module("app:///a.mjs", Ok(("app:///a.mjs", "export const a = 1;")))
+                .unwrap();
+            realm
+                .complete_module(
+                    "app:///a.mjs",
+                    Ok(("app:///other.mjs", "export const a = 2;")),
+                )
+                .expect("a second answer for one name is not an error");
+            let refused = realm.complete_module("app:///a.mjs", Err("too late")).err();
+            assert!(refused.is_none(), "a late failure is not one either");
+        }
+
+        /// A `require` of a module that is still evaluating is refused: the
+        /// body it would re-enter is the one that asked. Node names the case
+        /// it can tell apart `ERR_REQUIRE_CYCLE_MODULE`; this realm cannot
+        /// read a module's status, so it refuses the whole graph.
+        #[test]
+        fn a_module_that_requires_itself_while_it_evaluates_is_refused() {
+            let (mut runtime, mut realm, _host) = loader_realm(RequireHost::default().module(
+                "app:///cycle.mjs",
+                "import { loadModuleSync } from 'bobcat:module';\n\
+                 loadModuleSync('app:///cycle.mjs', 'unread');\n\
+                 export const a = 1;",
+            ));
+            let error = run_loader(
+                &mut runtime,
+                &mut realm,
+                "entry",
+                "loadModuleSync('app:///cycle.mjs', 'unread');",
+            )
+            .expect_err("a module that requires itself");
+            assert!(
+                error.message.contains("app:///cycle.mjs")
+                    && error.message.contains("still evaluating"),
+                "{}",
+                error.message
+            );
+        }
+
+        /// An import cycle is `QuickJS`'s own business and stays that way: the
+        /// `require` is of one module, and the two link into each other.
+        #[test]
+        fn an_import_cycle_inside_one_require_links_as_it_always_does() {
+            let (mut runtime, mut realm, host) = loader_realm(
+                RequireHost::default()
+                    .module(
+                        "app:///a.mjs",
+                        "import { b } from './b.mjs';\nexport function a() { return 'a' + b(); }",
+                    )
+                    .module(
+                        "app:///b.mjs",
+                        "import { a } from './a.mjs';\n\
+                         export function b() { return 'b'; }\n\
+                         export const sawA = typeof a;",
+                    ),
+            );
+            run_loader(
+                &mut runtime,
+                &mut realm,
+                "entry",
+                "const loaded = loadModuleSync('app:///a.mjs', 'unread');\n\
+                 if (loaded.value.a() !== 'ab') throw Error('a ' + loaded.value.a());",
+            )
+            .unwrap();
+            assert_eq!(host.borrow().loads, ["app:///a.mjs", "app:///b.mjs"]);
+        }
+
+        /// The namespace is answered as it stands, odd export names and all:
+        /// what a `module.exports` export means is Node's rule, and the
+        /// realm's `require` is where that rule lives.
+        #[test]
+        fn a_namespace_carries_an_export_named_module_exports() {
+            let (mut runtime, mut realm, _host) = loader_realm(RequireHost::default().module(
+                "app:///named.mjs",
+                "const value = { answer: 42 };\nexport { value as 'module.exports' };",
+            ));
+            run_loader(
+                &mut runtime,
+                &mut realm,
+                "entry",
+                "const loaded = loadModuleSync('app:///named.mjs', 'unread');\n\
+                 if (!Object.hasOwn(loaded.value, 'module.exports'))\n\
+                   throw Error('no such export');\n\
+                 if (loaded.value['module.exports'].answer !== 42) throw Error('answer');",
+            )
+            .unwrap();
         }
 
         #[test]

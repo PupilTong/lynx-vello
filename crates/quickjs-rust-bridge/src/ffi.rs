@@ -54,12 +54,15 @@ pub(crate) type ModuleNormalize = unsafe extern "C" fn(
 
 pub(crate) const REQUIRED_COMMONJS: i32 = 0;
 pub(crate) const REQUIRED_JSON: i32 = 1;
+pub(crate) const REQUIRED_MODULE: i32 = 2;
+pub(crate) const REQUIRED_DETECT: i32 = 3;
 
 /// One synchronous source load, as the shim reads it back.
 ///
 /// The host writes either the three source fields or `error`, and keeps
 /// owning both buffers: the shim borrows them only until it enters the
-/// callback again, which a load started from a loaded file's own text does.
+/// callback again, which a load started from a loaded file's own text does,
+/// and which an import linked inline during that file's compile does too.
 #[repr(C)]
 pub(crate) struct QjsRequiredSource {
     pub(crate) url: *const c_char,
