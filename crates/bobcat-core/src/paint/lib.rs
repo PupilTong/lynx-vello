@@ -32,13 +32,14 @@ use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::time::Duration;
 
-use dom::input::{InputEvent, InputKind};
+use dom::input::{InputEvent, InputKind, PointerId};
 use dom::render::gpu::Headless;
-use dom::scroll::ScrollAxes;
+use dom::scroll::{ChainLink, ScrollKind, drive_chain, resolve_step, settle_offset};
 use dom::vello::Scene;
 use dom::vello::peniko::{Color, ImageData};
 use dom::{CommittedFrame, HitTarget, NodeId, Vector2D};
 use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 #[cfg(test)]
 use tokio::sync::mpsc;
 use tokio::sync::watch;
@@ -382,6 +383,12 @@ pub(super) struct ScrollIntents {
     pub(super) offsets: FxHashMap<NodeId, Vector2D<f32>>,
     rebased_commit: Option<u64>,
     generation: u64,
+    /// Where each drag found each container it moved: the offset before the
+    /// drag's first step on it, keyed by the pointer and the container. The
+    /// drag's end settles every entry of its pointer onto a snap position
+    /// from there ([`Self::settle`]), and while an entry exists the
+    /// container is held — a commit does not re-snap it under the finger.
+    gesture_origins: FxHashMap<(PointerId, NodeId), Vector2D<f32>>,
 }
 
 impl ScrollIntents {
@@ -401,57 +408,121 @@ impl ScrollIntents {
             );
             *offset != slot.offset
         });
+        self.gesture_origins
+            .retain(|(_, node), _| frame.slot_of(*node).is_some());
+        self.settle_at_rest(frame);
     }
 
-    fn chain(&mut self, frame: &CommittedFrame, from: NodeId, delta: Vector2D<f32>) -> bool {
+    /// css-scroll-snap-1 §6.1: a snapping container must rest on a snap
+    /// position. Every commit publishes fresh positions — the first layout,
+    /// a relayout that moved the areas, a programmatic scroll the document
+    /// applied — so each snapping container no drag is holding settles from
+    /// where it stands, as an intent like any other scroll.
+    fn settle_at_rest(&mut self, frame: &CommittedFrame) {
+        for slot in frame.scroll_slots() {
+            let (snap_x, snap_y) = frame.snap_axes(slot);
+            if snap_x.is_none() && snap_y.is_none() {
+                continue;
+            }
+            if self
+                .gesture_origins
+                .keys()
+                .any(|(_, node)| *node == slot.node)
+            {
+                continue;
+            }
+            let offset = self.offsets.get(&slot.node).copied().unwrap_or(slot.offset);
+            let settled = settle_offset(offset, offset, slot.scrollport, snap_x, snap_y);
+            if settled != offset {
+                self.offsets.insert(slot.node, settled);
+                self.generation += 1;
+            }
+        }
+    }
+
+    /// Settles every container `pointer`'s drag moved onto a snap position,
+    /// from where the drag found it to where it left it, and releases the
+    /// hold on them.
+    fn settle(&mut self, frame: &CommittedFrame, pointer: PointerId) {
         self.rebase(frame);
+        let held: SmallVec<[(NodeId, Vector2D<f32>); 2]> = self
+            .gesture_origins
+            .iter()
+            .filter(|((held_by, _), _)| *held_by == pointer)
+            .map(|((_, node), origin)| (*node, *origin))
+            .collect();
+        for (node, origin) in held {
+            self.gesture_origins.remove(&(pointer, node));
+            let Some(index) = frame.slot_of(node) else {
+                continue;
+            };
+            let slot = &frame.scroll_slots()[index as usize];
+            let (snap_x, snap_y) = frame.snap_axes(slot);
+            let offset = self.offsets.get(&node).copied().unwrap_or(slot.offset);
+            let settled = settle_offset(origin, offset, slot.scrollport, snap_x, snap_y);
+            if settled != offset {
+                self.offsets.insert(node, settled);
+                self.generation += 1;
+            }
+        }
+    }
+
+    /// Drives one scroll decision from the slot `from` names, outward along
+    /// the published chain, and reports whether anything was absorbed.
+    /// Order and reach are `dom`'s [`drive_chain`] over the slots' published
+    /// policy, and each step lands per [`resolve_step`] — the same walk the
+    /// document runs over live geometry. A drag step (`pointer` set) is
+    /// applied raw and records where the drag found each container it
+    /// moved; a wheel step snaps as it lands.
+    fn chain(
+        &mut self,
+        frame: &CommittedFrame,
+        from: NodeId,
+        delta: Vector2D<f32>,
+        pointer: Option<PointerId>,
+    ) -> bool {
+        self.rebase(frame);
+        let kind = match pointer {
+            Some(_) => ScrollKind::Gesture,
+            None => ScrollKind::Directed,
+        };
         let slots = frame.scroll_slots();
         let Some(start) = frame.slot_of(from) else {
             return false;
         };
-        let mut search = Some(start);
-        let mut remaining = delta;
-        let mut consumed = false;
-        loop {
-            let axes = ScrollAxes {
-                x: remaining.x != 0.0,
-                y: remaining.y != 0.0,
-            };
-            let Some(index) = frame.nearest_user_scrollable(search, axes) else {
-                break;
-            };
-            let slot = slots[index as usize];
-            let offset = self.offsets.get(&slot.node).copied().unwrap_or(slot.offset);
-            let admitted = Vector2D::new(
-                if slot.user_scrollable.x {
-                    remaining.x
-                } else {
-                    0.0
-                },
-                if slot.user_scrollable.y {
-                    remaining.y
-                } else {
-                    0.0
-                },
-            );
-            let applied = Vector2D::new(
-                clamp_scroll_axis(offset.x + admitted.x, slot.max_offset.x),
-                clamp_scroll_axis(offset.y + admitted.y, slot.max_offset.y),
-            );
-            let step = applied - offset;
-            if step != Vector2D::zero() {
-                self.offsets.insert(slot.node, applied);
-                remaining -= step;
-                consumed = true;
-            }
-            if remaining == Vector2D::zero() {
-                break;
-            }
-            search = slot.parent;
-            if search.is_none() {
-                break;
-            }
+        let mut indices: SmallVec<[u32; 4]> = SmallVec::new();
+        let mut links: SmallVec<[ChainLink; 4]> = SmallVec::new();
+        let mut current = Some(start);
+        while let Some(index) = current {
+            let slot = &slots[index as usize];
+            indices.push(index);
+            links.push(slot.link());
+            current = slot.parent;
         }
+        let consumed = drive_chain(&links, delta, |link, admitted| {
+            let slot = &slots[indices[link] as usize];
+            let offset = self.offsets.get(&slot.node).copied().unwrap_or(slot.offset);
+            let (snap_x, snap_y) = frame.snap_axes(slot);
+            let (applied, absorbed) = resolve_step(
+                kind,
+                offset,
+                admitted,
+                slot.max_offset,
+                slot.scrollport,
+                snap_x,
+                snap_y,
+            );
+            if applied != offset {
+                if let Some(pointer) = pointer {
+                    self.gesture_origins
+                        .entry((pointer, slot.node))
+                        .or_insert(offset);
+                }
+                self.offsets.insert(slot.node, applied);
+            }
+            absorbed
+        })
+        .is_some();
         if consumed {
             self.generation += 1;
         }
@@ -981,10 +1052,15 @@ impl Painter {
                         from,
                         delta,
                     } => {
-                        let consumed =
-                            published.is_some_and(|frame| scroll_intents.chain(frame, from, delta));
+                        let consumed = published
+                            .is_some_and(|frame| scroll_intents.chain(frame, from, delta, pointer));
                         if consumed && let Some(pointer) = pointer {
                             gesture.note_scroll_consumed(pointer);
+                        }
+                    }
+                    InputDecision::ScrollEnd { pointer } => {
+                        if let Some(frame) = published {
+                            scroll_intents.settle(frame, pointer);
                         }
                     }
                     InputDecision::Emit(event) => dispatches.push(event),

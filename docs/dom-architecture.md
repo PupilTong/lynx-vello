@@ -473,7 +473,18 @@ relayout or a restyle out of scroll-container-hood needs no invalidation hook),
 primitive chaining is built from), and `scroll_chain`. Both the "which box
 scrolls" walk and the chaining advance follow the **containing-block** chain,
 not DOM ancestry, so they agree with what `visual` actually moves: a wheel over
-an `absolute` box anchored above a scroller scrolls nothing. Only
+an `absolute` box anchored above a scroller scrolls nothing. The chain walk
+itself is one function, `drive_chain` over a list of `ChainLink`s, that the
+document runs over live geometry and `bobcat-core`'s painter runs over the
+committed frame's scroll-slot table, so the two agree on order and reach:
+`overscroll-behavior: contain | none` fences everything above a container on
+that axis, and the engine's own `scroll-capture: nearest` (no W3C or Lynx
+counterpart) visits the container above first and this one only once that
+ancestor cannot move. `scroll/snap.rs` is css-scroll-snap-1 without its
+events: a container's snap positions are computed from layout and published
+beside its slot, a drag settles onto the nearest one at release, a wheel tick
+steps to the next one in its direction, and a snapping container is re-snapped
+at rest whenever a commit lands. Only
 `overflow: scroll` is user-scrollable; `hidden` is a scroll container that
 moves only programmatically (load-bearing here, because the Lynx UA cascade
 puts `hidden` on every element) and `clip` is not a scroll container at all —

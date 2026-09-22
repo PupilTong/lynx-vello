@@ -192,7 +192,7 @@ impl Painter {
     /// The spare frame buffers' and the build scratch's capacities, for the
     /// reuse tests.
     #[cfg(test)]
-    pub(crate) fn storage_capacities(&self) -> ([usize; 6], Vec<usize>) {
+    pub(crate) fn storage_capacities(&self) -> ([usize; 7], Vec<usize>) {
         (self.spare.capacities(), self.build_scratch.capacities())
     }
 

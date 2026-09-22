@@ -114,9 +114,12 @@ use std::sync::Arc;
 use euclid::default::{Point2D, Rect, Size2D, Transform3D};
 
 pub(crate) use self::build::BuildScratch;
-pub use self::frame::{AnimationSlot, CommittedFrame, HitTarget, ScrollSlot};
+pub use self::frame::{
+    AnimationSlot, CommittedFrame, HitTarget, ScrollSlot, SnapSlot, SnapSlotAxis,
+};
 pub use self::relevance::ContentVisibilityChange;
 use crate::render::image::{ImageEvent, ImageOutcome, ImageRole};
+use crate::scroll::SnapPoint;
 use crate::tree::document::Document;
 use crate::{FrameImages, NodeId};
 
@@ -131,6 +134,9 @@ pub(crate) struct PaintOrder {
     /// Every `content-visibility: auto` box this build reached, in build
     /// order. See [`AutoBox`].
     auto_boxes: Vec<AutoBox>,
+    /// Every scroll slot's snap positions, in slot order; see
+    /// [`ScrollSlot::snap`].
+    snap_points: Vec<SnapPoint>,
     commit_id: u64,
 }
 
@@ -161,11 +167,12 @@ pub(crate) struct FrameBuffers {
     slots: Vec<ScrollSlot>,
     animations: Vec<AnimationSlot>,
     auto_boxes: Vec<AutoBox>,
+    snap_points: Vec<SnapPoint>,
 }
 
 impl FrameBuffers {
     #[cfg(test)]
-    pub(crate) fn capacities(&self) -> [usize; 6] {
+    pub(crate) fn capacities(&self) -> [usize; 7] {
         [
             self.items.capacity(),
             self.clips.capacity(),
@@ -173,6 +180,7 @@ impl FrameBuffers {
             self.slots.capacity(),
             self.animations.capacity(),
             self.auto_boxes.capacity(),
+            self.snap_points.capacity(),
         ]
     }
 }
@@ -189,6 +197,7 @@ impl PaintOrder {
         self.slots.clear();
         self.animations.clear();
         self.auto_boxes.clear();
+        self.snap_points.clear();
         FrameBuffers {
             items: self.items,
             clips: self.clips,
@@ -196,6 +205,7 @@ impl PaintOrder {
             slots: self.slots,
             animations: self.animations,
             auto_boxes: self.auto_boxes,
+            snap_points: self.snap_points,
         }
     }
 
@@ -210,12 +220,13 @@ impl PaintOrder {
             slots: Vec::new(),
             animations: Vec::new(),
             auto_boxes: Vec::new(),
+            snap_points: Vec::new(),
             commit_id: 0,
         }
     }
 
     #[cfg(test)]
-    fn capacities(&self) -> [usize; 6] {
+    fn capacities(&self) -> [usize; 7] {
         [
             self.items.capacity(),
             self.clips.capacity(),
@@ -223,6 +234,7 @@ impl PaintOrder {
             self.slots.capacity(),
             self.animations.capacity(),
             self.auto_boxes.capacity(),
+            self.snap_points.capacity(),
         ]
     }
 
@@ -244,6 +256,12 @@ impl PaintOrder {
     #[must_use]
     pub(crate) fn slots(&self) -> &[ScrollSlot] {
         &self.slots
+    }
+
+    /// Every slot's snap positions, sliced by [`ScrollSlot::snap`].
+    #[must_use]
+    pub(crate) fn snap_points(&self) -> &[SnapPoint] {
+        &self.snap_points
     }
 
     #[must_use]
@@ -691,7 +709,7 @@ impl<T> Document<T> {
         let painter = self.painter.borrow();
         let mut out = painter
             .frame()
-            .map_or([0, 0, 0, 0, 0, 0], |frame| frame.order.capacities())
+            .map_or([0, 0, 0, 0, 0, 0, 0], |frame| frame.order.capacities())
             .to_vec();
         let (spare, scratch) = painter.storage_capacities();
         out.extend_from_slice(&spare);

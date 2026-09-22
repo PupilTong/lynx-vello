@@ -20,7 +20,7 @@ use euclid::default::{Point2D, Size2D, Vector2D};
 use super::{AnimationSample, PaintOrder};
 use crate::NodeId;
 use crate::paint::compose::{self, ComposeOp, FilterGroup};
-use crate::scroll::ScrollAxes;
+use crate::scroll::{ChainLink, ScrollAxes, ScrollCapture, SnapAxis, SnapPoint, SnapStrictness};
 use crate::vello::Scene;
 use crate::vello::kurbo::Affine;
 use crate::vello::peniko::ImageData;
@@ -44,6 +44,13 @@ pub struct ScrollSlot {
     /// `hidden` container is in the table — it scrolls programmatically and
     /// carries chain structure — with both flags off.
     pub user_scrollable: ScrollAxes,
+    /// The axes a boundary chains past: `overscroll-behavior: auto`.
+    pub chains: ScrollAxes,
+    /// Whether the container above goes first: `scroll-capture`.
+    pub capture: ScrollCapture,
+    /// The axes this container snaps on, each naming its points in the
+    /// frame's [`snap_points`](CommittedFrame::snap_points).
+    pub snap: SnapSlot,
     /// The committed, already-clamped offset.
     pub offset: Vector2D<f32>,
     /// The largest offset the committed geometry admits, per axis.
@@ -53,7 +60,43 @@ pub struct ScrollSlot {
     pub scrollport: Size2D<f32>,
 }
 
+/// One axis of a slot's snapping: its strictness and the `start..end`
+/// range of its points in the frame's snap-point table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SnapSlotAxis {
+    pub strictness: SnapStrictness,
+    pub start: u32,
+    pub end: u32,
+}
+
+/// A slot's snapping, per axis; `None` on an axis it does not snap on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SnapSlot {
+    pub x: Option<SnapSlotAxis>,
+    pub y: Option<SnapSlotAxis>,
+}
+
+impl SnapSlotAxis {
+    fn axis<'frame>(&self, points: &'frame [SnapPoint]) -> SnapAxis<'frame> {
+        SnapAxis {
+            strictness: self.strictness,
+            points: &points[self.start as usize..self.end as usize],
+        }
+    }
+}
+
 impl ScrollSlot {
+    /// This container's part in a chain walk, for
+    /// [`drive_chain`](crate::scroll::drive_chain).
+    #[must_use]
+    pub fn link(&self) -> ChainLink {
+        ChainLink {
+            user_scrollable: self.user_scrollable,
+            chains: self.chains,
+            capture: self.capture,
+        }
+    }
+
     /// The offset range the committed encode covers on each axis — the
     /// window compose may move through without a recommit. Sized in
     /// scrollports around the committed offset, clamped to what the geometry
@@ -416,6 +459,23 @@ impl CommittedFrame {
     #[must_use]
     pub const fn device_pixel_ratio(&self) -> f32 {
         self.device_pixel_ratio
+    }
+
+    /// Every snap position in the frame, sliced per slot and axis by
+    /// [`ScrollSlot::snap`].
+    #[must_use]
+    pub fn snap_points(&self) -> &[SnapPoint] {
+        self.order.snap_points()
+    }
+
+    /// A slot's snapping on each axis, over the frame's points.
+    #[must_use]
+    pub fn snap_axes(&self, slot: &ScrollSlot) -> (Option<SnapAxis<'_>>, Option<SnapAxis<'_>>) {
+        let points = self.snap_points();
+        (
+            slot.snap.x.as_ref().map(|axis| axis.axis(points)),
+            slot.snap.y.as_ref().map(|axis| axis.axis(points)),
+        )
     }
 
     /// The frame's scroll containers, chain-linked; see [`ScrollSlot`].
