@@ -42,7 +42,8 @@ use super::geometry::{inner_radii, resolve_corner_radii};
 use super::transform::{ParentPerspective, stacking_context_matrix};
 use super::{
     AnimationSlot, AutoBox, ClipNode, CornerRadii, FrameBuffers, PaintItem, PaintItemKind,
-    PaintOrder, RenderLayer, ScrollSlot, SnapSlot, SnapSlotAxis, StickySlot, stacking,
+    PaintOrder, RenderLayer, ScrollSlot, SnapSlot, SnapSlotAxis, Space, SpaceKind, StickySlot,
+    stacking,
 };
 use crate::layout::{
     DisplayMode, StyleView, box_parent, display_mode, establishes_absolute_containing_block,
@@ -77,6 +78,7 @@ pub(crate) fn build<T: Sync>(
         slots: buffers.slots,
         animations: buffers.animations,
         stickies: buffers.stickies,
+        spaces: buffers.spaces,
         auto_boxes: buffers.auto_boxes,
         snap_points: buffers.snap_points,
         initial_targets: Vec::new(),
@@ -90,6 +92,7 @@ pub(crate) fn build<T: Sync>(
             && builder.slots.is_empty()
             && builder.animations.is_empty()
             && builder.stickies.is_empty()
+            && builder.spaces.is_empty()
             && builder.auto_boxes.is_empty()
             && builder.snap_points.is_empty(),
         "a recycled frame is emptied before it is handed back to the builder",
@@ -122,6 +125,7 @@ pub(crate) fn build<T: Sync>(
             slots: builder.slots,
             animations: builder.animations,
             stickies: builder.stickies,
+            spaces: builder.spaces,
             auto_boxes: builder.auto_boxes,
             snap_points: builder.snap_points,
             initial_targets: builder.initial_targets,
@@ -276,25 +280,23 @@ impl Collection<'_> {
     }
 }
 
-/// What a box inherits from its containing-block chain: the innermost clip
-/// and the nearest scroll container on that chain as a scroll-slot index.
+/// What a box inherits from its containing-block chain: the innermost clip,
+/// the innermost space, and the nearest scroll container.
 ///
 /// The frame is baked in *unscrolled* coordinates; every consumer — the
-/// composed scene, hit testing, culling — applies the chain's translations
-/// at use time from the slot table. A member keyed `absolute` or `fixed`
-/// swaps in its containing block's context, slot chain included (the
-/// containing-block escape of CSS2 §11.1.1).
+/// composed scene, hit testing, culling — applies the space's map at use
+/// time. A member keyed `absolute` or `fixed` swaps in its containing
+/// block's context, space included (the containing-block escape of CSS2
+/// §11.1.1).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 struct FlowContext {
     clip: Option<usize>,
-    /// The nearest scroll container on this chain, in the frame's slot table.
+    /// The innermost space on this chain, in the frame's space table.
+    space: Option<u32>,
+    /// The nearest scroll container on this chain, in the frame's slot table:
+    /// `space`'s nearest scroll node, carried because every item records it
+    /// as its recognition slot.
     chain: Option<u32>,
-    /// The nearest composite-animated ancestor-or-self, in the frame's
-    /// animation-slot table. Content under it composes through that slot's
-    /// sampled delta.
-    animation: Option<u32>,
-    /// Sticky displacements inherited along this containing-block chain.
-    sticky: Option<u32>,
 }
 
 /// The flow contexts visible at one point of the walk: the in-flow one plus
@@ -319,8 +321,7 @@ struct ItemRecord {
     radii: CornerRadii,
     hit_testable: bool,
     slot: Option<u32>,
-    animation: Option<u32>,
-    sticky: Option<u32>,
+    space: Option<u32>,
 }
 
 /// One member of a stacking context, awaiting the `(level, seq)` sort.
@@ -358,6 +359,7 @@ struct Builder<'doc, T> {
     slots: Vec<ScrollSlot>,
     animations: Vec<AnimationSlot>,
     stickies: Vec<StickySlot>,
+    spaces: Vec<Space>,
     /// Every `content-visibility: auto` box this build reached, in build
     /// order. Independent of `items`: see [`AutoBox`].
     auto_boxes: Vec<AutoBox>,
@@ -377,6 +379,20 @@ impl<'doc, T: Sync> Builder<'doc, T> {
 
     fn rounded(&self, id: NodeId) -> &'doc Layout {
         &self.state.at(self.tree.live_slot(id)).slot.rounded
+    }
+
+    /// Appends a space node inside `parent` and returns it.
+    fn push_space(&mut self, parent: Option<u32>, kind: SpaceKind) -> u32 {
+        self.spaces.push(Space { parent, kind });
+        u32::try_from(self.spaces.len() - 1).expect("a frame cannot hold 2^32 spaces")
+    }
+
+    fn nearest_animation(&self, space: Option<u32>) -> Option<u32> {
+        super::space::nearest_animation(&self.spaces, space)
+    }
+
+    fn nearest_sticky(&self, space: Option<u32>) -> Option<u32> {
+        super::space::nearest_sticky(&self.spaces, space)
     }
 
     /// Records `node` in the frame's scroll-slot table when it is a scroll
@@ -476,7 +492,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
             return None;
         }
         self.stickies.push(StickySlot {
-            parent: flow.sticky,
+            parent: self.nearest_sticky(flow.space),
             scroll,
             scroll_sticky: scroll
                 .map(|index| index.and_then(|index| self.scratch.scroll_stickies[index as usize])),
@@ -485,7 +501,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         });
         // A changing ancestor transform changes the coordinate map the
         // constraints use, so it must rebuild the retained geometry.
-        self.kill_animation_chain(flow.animation);
+        self.kill_animation_chain(self.nearest_animation(flow.space));
         Some(u32::try_from(self.stickies.len() - 1).expect("a frame cannot hold 2^32 sticky boxes"))
     }
 
@@ -628,8 +644,14 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         seed: ClipContexts,
     ) {
         let values = style.values();
+        // Allocation order is space order: the element's own sticky and
+        // animation nodes enclose its box, its own scroll node only its
+        // content.
         let own_sticky = self.allocate_sticky_slot(root, values, seed.current, parent_world);
-        let sticky = own_sticky.or(seed.current.sticky);
+        let mut box_space = seed.current.space;
+        if let Some(index) = own_sticky {
+            box_space = Some(self.push_space(box_space, SpaceKind::Sticky(index)));
+        }
         let size = {
             let layout = self.rounded(root);
             Size2D::new(layout.size.width, layout.size.height)
@@ -642,32 +664,33 @@ impl<'doc, T: Sync> Builder<'doc, T> {
             &world,
             size,
             parent_perspective,
-            seed.current.animation,
+            self.nearest_animation(seed.current.space),
         );
-        let animation = own_animation.or(seed.current.animation);
+        if let Some(index) = own_animation {
+            box_space = Some(self.push_space(box_space, SpaceKind::Animation(index)));
+        }
         let force_group = own_animation.is_some_and(|index| {
             self.animations[index as usize]
                 .curve
                 .as_ref()
                 .is_some_and(|curve| curve.opacity.is_some())
         });
-        let layer = self.open_layer(
+        let layer = self.open_layer(root, values, &world, size, box_space, force_group);
+
+        let own_slot = self.allocate_scroll_slot(
             root,
             values,
-            &world,
-            size,
             seed.current.chain,
-            animation,
-            sticky,
-            force_group,
+            self.nearest_sticky(box_space),
+            &world,
         );
-
-        let own_slot = self.allocate_scroll_slot(root, values, seed.current.chain, sticky, &world);
+        let own_scroll =
+            own_slot.map(|slot| (slot, self.push_space(box_space, SpaceKind::Scroll(slot))));
         if own_slot.is_some() {
             // The animated element is itself a scroll container: its own
             // clip and its content's scroll translation cannot ride a
             // sampled delta.
-            self.kill_animation_chain(animation);
+            self.kill_animation_chain(self.nearest_animation(box_space));
         }
         // Every `content-visibility: auto` box arrives here and nowhere else:
         // `auto` implies `LAYOUT | PAINT` containment, so it is always a
@@ -683,9 +706,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
                 transform: world,
                 size,
                 clip: seed.current.clip,
-                chain: seed.current.chain,
-                animation,
-                sticky,
+                space: box_space,
                 layer: self.current_layer,
             });
         }
@@ -700,8 +721,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
                 radii: resolve_corner_radii(values, size),
                 hit_testable,
                 slot: own_slot.or(seed.current.chain),
-                animation,
-                sticky,
+                space: box_space,
             });
         }
 
@@ -711,8 +731,8 @@ impl<'doc, T: Sync> Builder<'doc, T> {
             return;
         }
         let mut inner_seed = seed;
-        inner_seed.current.sticky = sticky;
-        let ctx = self.enter_element(root, values, &world, inner_seed, own_slot, own_animation);
+        inner_seed.current.space = box_space;
+        let ctx = self.enter_element(root, values, &world, inner_seed, own_scroll);
         if mode == DisplayMode::Text && visible {
             // A text block paints its whole subtree as one paragraph, over its
             // own box and under whatever the collection walk below still finds
@@ -780,20 +800,13 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         self.close_layer(layer);
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "a group captures exactly the element facts the stacking \
-                  walk already holds"
-    )]
     fn open_layer(
         &mut self,
         node: NodeId,
         values: &ComputedValues,
         world: &Transform3D<f32>,
         size: Size2D<f32>,
-        slot: Option<u32>,
-        animation: Option<u32>,
-        sticky: Option<u32>,
+        space: Option<u32>,
         force_group: bool,
     ) -> Option<usize> {
         if !force_group && !stacking::needs_group_rendering(values) {
@@ -806,9 +819,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
             transform: *world,
             size,
             radii: resolve_corner_radii(values, size),
-            slot,
-            animation,
-            sticky,
+            space,
             items: start..start,
         });
         let index = self.layers.len() - 1;
@@ -978,8 +989,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
             radii: CornerRadii::ZERO,
             hit_testable,
             slot: ctx.current.chain,
-            animation: ctx.current.animation,
-            sticky: ctx.current.sticky,
+            space: ctx.current.space,
         });
     }
 
@@ -1068,8 +1078,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
                     outer.current.clip,
                     hit_testable,
                     outer.current.chain,
-                    outer.current.animation,
-                    outer.current.sticky,
+                    outer.current.space,
                 ),
             );
             if child.mode == DisplayMode::Text {
@@ -1097,8 +1106,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
                         radii: CornerRadii::ZERO,
                         hit_testable,
                         slot: outer.current.chain,
-                        animation: outer.current.animation,
-                        sticky: outer.current.sticky,
+                        space: outer.current.space,
                     },
                 );
             }
@@ -1109,7 +1117,6 @@ impl<'doc, T: Sync> Builder<'doc, T> {
                 style,
                 &translated(collection.world, child.offset),
                 outer,
-                None,
                 None,
             );
             self.collect(
@@ -1185,14 +1192,17 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         }
     }
 
+    /// The contexts inside `node`'s box. `ctx.current` is already `node`'s
+    /// box context — its own sticky and animation nodes entered — which is
+    /// where its clip is established; `own_scroll` is its own scroll slot and
+    /// space, which only its content enters.
     fn enter_element(
         &mut self,
         node: NodeId,
         style: &ComputedValues,
         transform: &Transform3D<f32>,
         ctx: ClipContexts,
-        own_slot: Option<u32>,
-        own_animation: Option<u32>,
+        own_scroll: Option<(u32, u32)>,
     ) -> ClipContexts {
         if style.clone_scroll_initial_target() == scroll_initial_target::T::Nearest
             && let Some(chain) = ctx.current.chain
@@ -1230,19 +1240,16 @@ impl<'doc, T: Sync> Builder<'doc, T> {
                 transform: *transform,
                 rect,
                 radii,
-                slot: inner.current.chain,
-                sticky: inner.current.sticky,
+                space: inner.current.space,
             });
             inner.current.clip = Some(self.clips.len() - 1);
             // A clip rect never rides a sampled delta; anything animated
             // around it falls back to main-thread ticks.
-            self.kill_animation_chain(own_animation.or(ctx.current.animation));
+            self.kill_animation_chain(self.nearest_animation(inner.current.space));
         }
-        if own_slot.is_some() {
-            inner.current.chain = own_slot;
-        }
-        if own_animation.is_some() {
-            inner.current.animation = own_animation;
+        if let Some((slot, space)) = own_scroll {
+            inner.current.chain = Some(slot);
+            inner.current.space = Some(space);
         }
         let node_ref = self.node(node);
         if establishes_absolute_containing_block(node_ref, style) {
@@ -1292,8 +1299,7 @@ fn push_record(items: &mut Vec<PaintItem>, record: &ItemRecord, world: &Transfor
         radii: record.radii,
         hit_testable: record.hit_testable,
         slot: record.slot,
-        animation: record.animation,
-        sticky: record.sticky,
+        space: record.space,
     });
 }
 
@@ -1309,8 +1315,7 @@ fn element_record(
     clip: Option<usize>,
     hit_testable: bool,
     slot: Option<u32>,
-    animation: Option<u32>,
-    sticky: Option<u32>,
+    space: Option<u32>,
 ) -> ItemRecord {
     ItemRecord {
         node,
@@ -1321,8 +1326,7 @@ fn element_record(
         radii: resolve_corner_radii(style, size),
         hit_testable,
         slot,
-        animation,
-        sticky,
+        space,
     }
 }
 

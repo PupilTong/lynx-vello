@@ -35,14 +35,14 @@
 //! page that neither blurs nor filters a backdrop. Its cache key is the
 //! commit id, plus two conditional terms:
 //!
-//! - the painter's **scroll generation**, when some entry's range rides a scroll or sticky chain
-//!   the entry itself does not: a blurred scroller's *content* moves under the blur, so its bake
+//! - the painter's **scroll generation**, when some entry's range rides a scroll or sticky node the
+//!   entry's own space does not: a blurred scroller's *content* moves under the blur, so its bake
 //!   depends on the offset, while an ordinary blurred box moves with it and its bake does not. So a
 //!   scroll frame over an ordinary blurred box re-bakes nothing.
-//! - the **timeline reading**, when some backdrop entry's range rides another element's animation
-//!   chain. A `filter: blur()` group can never be in that position — an animated element's whole
-//!   subtree rides its own slot — but a backdrop's range is a *prefix of the frame*, so anything
-//!   animating in front of the Backdrop Root is behind the element.
+//! - the **timeline reading**, when some backdrop entry's range rides an animation node the entry's
+//!   space does not. A `filter: blur()` group can never be in that position — export eligibility
+//!   refuses an animated element inside a composited group — but a backdrop's range is a *prefix of
+//!   the frame*, so anything animating in front of the Backdrop Root is behind the element.
 //!
 //! **That key identifies a commit of *one* document.** Commit ids restart at
 //! one per document, so a consumer pointing this renderer at a second
@@ -54,7 +54,7 @@
 //!
 //! Per entry, in this order:
 //!
-//! 1. **Bake.** The entry's ops replay into a scratch [`vello::Scene`] with the entry's own chain
+//! 1. **Bake.** The entry's ops replay into a scratch [`vello::Scene`] with the entry's own space
 //!    factored out (see [`crate::CommittedFrame::bake_filter`]) and render into a `STORAGE_BINDING`
 //!    target over `Color::TRANSPARENT`.
 //! 2. **Premultiply.** vello writes its target *unpremultiplied*, and filtering unpremultiplied
@@ -919,7 +919,7 @@ impl FilterTextures {
 /// compose-time readings *only* when some entry's pixels actually depend on
 /// it.
 ///
-/// An entry whose range rides an inner scroll or sticky chain bakes different pixels at
+/// An entry whose range rides an inner scroll or sticky node bakes different pixels at
 /// a different offset; every other entry moves *with* its content, so its
 /// bake outlives any number of scroll frames. Likewise for the timeline: only
 /// a backdrop whose prefix holds another element's exported curve re-bakes
@@ -1210,7 +1210,7 @@ mod tests {
             let mut entry = FilterGroup::with_backdrop(
                 1.0,
                 rect,
-                crate::paint::compose::ComposeChain::default(),
+                None,
                 Backdrop {
                     shape: crate::paint::shape::BoxShape::Rect(rect),
                     transform: Affine::IDENTITY,
@@ -1224,11 +1224,7 @@ mod tests {
             entry
         };
 
-        let plain = [FilterGroup::new(
-            1.0,
-            rect,
-            crate::paint::compose::ComposeChain::default(),
-        )];
+        let plain = [FilterGroup::new(1.0, rect, None)];
         assert_eq!(
             cache_key(3, &plain, 9, Some(2.5)),
             cache_key(3, &plain, 400, Some(77.0)),

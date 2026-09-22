@@ -2047,3 +2047,79 @@ fn a_scroll_container_inside_an_animated_subtree_falls_back_to_ticks() {
         "the allocated slot was set back to the committed values"
     );
 }
+
+/// An element's own box and clip ride its box space — inside its own sticky
+/// node, outside its own scroll node — and its content its content space.
+#[test]
+fn a_box_and_its_clip_ride_the_box_space_and_its_content_the_content_space() {
+    use crate::visual::{Space, SpaceKind};
+
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; }
+         .outer { display: flex; flex-direction: column; overflow: scroll;
+                  width: 400px; height: 400px; }
+         .stick { display: flex; flex-shrink: 0; position: sticky; top: 0;
+                  overflow: scroll; width: 200px; height: 200px; }
+         .content { flex-shrink: 0; width: 200px; height: 1000px; }
+         .filler { flex-shrink: 0; width: 10px; height: 1000px; }",
+    );
+    let root = h.root();
+    let outer = h.el(root, "view.outer");
+    let stick = h.el(outer, "view.stick");
+    let content = h.el(stick, "view.content");
+    let filler = h.el(outer, "view.filler");
+    let frame = h.paint();
+
+    assert_eq!(
+        frame.spaces(),
+        [
+            Space {
+                parent: None,
+                kind: SpaceKind::Scroll(0),
+            },
+            Space {
+                parent: Some(0),
+                kind: SpaceKind::Sticky(0),
+            },
+            Space {
+                parent: Some(1),
+                kind: SpaceKind::Scroll(1),
+            },
+        ],
+        "outer's content, then the sticky box inside it, then its own content",
+    );
+    let item = |node| {
+        frame
+            .items()
+            .iter()
+            .find(|item| item.node == node && item.kind == PaintItemKind::ElementBox)
+            .map(|item| (item.space, item.slot))
+            .expect("the node paints a box")
+    };
+    assert_eq!(
+        item(outer),
+        (None, Some(0)),
+        "a scroller's box is outside its scroll node"
+    );
+    assert_eq!(item(filler), (Some(0), Some(0)));
+    assert_eq!(
+        item(stick),
+        (Some(1), Some(1)),
+        "the sticky box moves with its sticky node"
+    );
+    assert_eq!(item(content), (Some(2), Some(1)));
+    let clip = |node| {
+        frame
+            .clips()
+            .iter()
+            .find(|clip| clip.node == node)
+            .map(|clip| clip.space)
+            .expect("the node clips")
+    };
+    assert_eq!(clip(outer), None);
+    assert_eq!(
+        clip(stick),
+        Some(1),
+        "a clip rides its box space, not its own scroll"
+    );
+}

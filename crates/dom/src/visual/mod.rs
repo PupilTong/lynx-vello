@@ -105,6 +105,7 @@ pub(crate) mod geometry;
 mod hit;
 mod motion;
 pub(crate) mod relevance;
+pub(crate) mod space;
 mod stacking;
 pub(crate) mod sticky;
 mod sticky_frame;
@@ -121,6 +122,7 @@ pub use self::frame::{
     AnimationSlot, CommittedFrame, HitTarget, ScrollSlot, SnapSlot, SnapSlotAxis,
 };
 pub use self::relevance::ContentVisibilityChange;
+pub(crate) use self::space::{Space, SpaceKind, SpaceSamples};
 pub(crate) use self::sticky_frame::{StickySample, StickySlot};
 use crate::render::image::{ImageEvent, ImageOutcome, ImageRole};
 use crate::scroll::SnapPoint;
@@ -137,6 +139,9 @@ pub(crate) struct PaintOrder {
     slots: Vec<ScrollSlot>,
     animations: Vec<AnimationSlot>,
     stickies: Vec<StickySlot>,
+    /// The scroll, sticky and animation nodes, in allocation order; see
+    /// [`space`].
+    spaces: Vec<Space>,
     /// Every `content-visibility: auto` box this build reached, in build
     /// order. See [`AutoBox`].
     auto_boxes: Vec<AutoBox>,
@@ -152,11 +157,9 @@ pub(crate) struct PaintOrder {
 
 /// One animation slot's compose-time values, sampled at one instant: the
 /// CSS-px delta from the committed geometry, and the opacity replacing the
-/// committed one on the element's effect layer. `parent` mirrors the slot
-/// table so a chain walk needs only this table.
+/// committed one on the element's effect layer.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct AnimationSample {
-    pub(crate) parent: Option<u32>,
     pub(crate) delta: crate::vello::kurbo::Affine,
     pub(crate) alpha: Option<f32>,
 }
@@ -177,6 +180,7 @@ pub(crate) struct FrameBuffers {
     slots: Vec<ScrollSlot>,
     animations: Vec<AnimationSlot>,
     stickies: Vec<StickySlot>,
+    spaces: Vec<Space>,
     auto_boxes: Vec<AutoBox>,
     snap_points: Vec<SnapPoint>,
 }
@@ -199,8 +203,9 @@ impl FrameBuffers {
 impl PaintOrder {
     /// Empties this frame and hands back its storage with capacity intact.
     ///
-    /// [`PaintItem`], [`ClipNode`], [`RenderLayer`], [`ScrollSlot`] and
-    /// [`AutoBox`] own no heap data, so each clear is a length write.
+    /// [`PaintItem`], [`ClipNode`], [`RenderLayer`], [`ScrollSlot`],
+    /// [`Space`] and [`AutoBox`] own no heap data, so each clear is a length
+    /// write.
     pub(crate) fn into_buffers(mut self) -> FrameBuffers {
         self.items.clear();
         self.clips.clear();
@@ -208,6 +213,7 @@ impl PaintOrder {
         self.slots.clear();
         self.animations.clear();
         self.stickies.clear();
+        self.spaces.clear();
         self.auto_boxes.clear();
         self.snap_points.clear();
         FrameBuffers {
@@ -217,6 +223,7 @@ impl PaintOrder {
             slots: self.slots,
             animations: self.animations,
             stickies: self.stickies,
+            spaces: self.spaces,
             auto_boxes: self.auto_boxes,
             snap_points: self.snap_points,
         }
@@ -233,6 +240,7 @@ impl PaintOrder {
             slots: Vec::new(),
             animations: Vec::new(),
             stickies: Vec::new(),
+            spaces: Vec::new(),
             auto_boxes: Vec::new(),
             snap_points: Vec::new(),
             initial_targets: Vec::new(),
@@ -290,6 +298,12 @@ impl PaintOrder {
         &self.animations
     }
 
+    /// The frame's space tree; see [`space`].
+    #[must_use]
+    pub(crate) fn spaces(&self) -> &[Space] {
+        &self.spaces
+    }
+
     /// Every `content-visibility: auto` box this frame's build reached.
     #[must_use]
     pub(crate) fn auto_boxes(&self) -> &[AutoBox] {
@@ -311,35 +325,21 @@ impl PaintOrder {
         self.commit_id
     }
 
-    /// The chain whose scroll translations move this item — the *content*
-    /// chain, as opposed to [`PaintItem::slot`]'s recognition chain. They
-    /// differ in exactly one case: a scroll container's own box carries its
-    /// own slot for recognition (the box is a scroll target) but is moved
-    /// only by the scrollers around it.
-    /// The full compose chain moving this item's content: the scroll
-    /// translation chain plus the animation chain — an element's own box
-    /// moves with its own animation delta, so the animation side has no
-    /// recognition split.
-    #[must_use]
-    pub(crate) fn item_compose_chain(
-        &self,
-        item: &PaintItem,
-    ) -> crate::paint::compose::ComposeChain {
-        crate::paint::compose::ComposeChain {
-            scroll: self.item_translation_chain(item),
-            animation: item.animation,
-            sticky: item.sticky,
-        }
-    }
-
-    #[must_use]
-    pub(crate) fn item_translation_chain(&self, item: &PaintItem) -> Option<u32> {
-        let slot = item.slot?;
-        let entry = self.slots[slot as usize];
-        if matches!(item.kind, PaintItemKind::ElementBox) && entry.node == item.node {
-            entry.parent
-        } else {
-            Some(slot)
+    /// This frame's space inputs at one instant, over the tables they index.
+    pub(crate) fn space_samples<'a>(
+        &'a self,
+        animations: &'a [AnimationSample],
+        stickies: &'a [StickySample],
+        ratio: f32,
+        offset_of: &'a dyn Fn(&ScrollSlot) -> Option<euclid::default::Vector2D<f32>>,
+    ) -> SpaceSamples<'a> {
+        SpaceSamples {
+            spaces: &self.spaces,
+            slots: &self.slots,
+            animations,
+            stickies,
+            ratio,
+            offset_of,
         }
     }
 }
@@ -363,18 +363,13 @@ pub(crate) struct PaintItem {
     /// The nearest ancestor-or-self scroll container on this item's
     /// containing-block chain, as an index into [`PaintOrder::slots`]. This is
     /// the *recognition* chain: a scroll container's own item names its own
-    /// slot (the box is a scroll target), while the containers that *carry*
-    /// the item — whose content translation is folded into
-    /// [`Self::transform`] — are this slot's parent chain for a container's
-    /// own item and this very chain for everything else.
+    /// slot (the box is a scroll target), while what moves the item is
+    /// [`Self::space`], which for a container's own box stops outside its own
+    /// scroll node.
     pub(crate) slot: Option<u32>,
-    /// The nearest ancestor-or-self animation slot moving this item, as an
-    /// index into [`PaintOrder::animations`]. Unlike the scroll chain, an
-    /// element's own box rides its own slot: the animated transform moves
-    /// the element itself.
-    pub(crate) animation: Option<u32>,
-    /// Nearest sticky ancestor-or-self; its live displacement is composed after layout.
-    pub(crate) sticky: Option<u32>,
+    /// The space this item composes in: the element's box space for its own
+    /// box, its content space for a text run. See [`space`].
+    pub(crate) space: Option<u32>,
 }
 
 /// A stacking context rendered as a composited group.
@@ -390,16 +385,10 @@ pub(crate) struct RenderLayer {
     pub(crate) transform: Transform3D<f32>,
     pub(crate) size: Size2D<f32>,
     pub(crate) radii: CornerRadii,
-    /// The scroll chain this group's own frame rides — the chain of its root
-    /// box, so the group and its clip move with the scrollers *around* the
-    /// root, never with the root's own content.
-    pub(crate) slot: Option<u32>,
-    /// The nearest ancestor-or-self animation slot moving this group's own
-    /// frame — ancestor-or-self, because an animated element's group moves
-    /// with the element.
-    pub(crate) animation: Option<u32>,
-    /// Nearest sticky ancestor-or-self; its live displacement is composed after layout.
-    pub(crate) sticky: Option<u32>,
+    /// The root element's box space: the group moves with the root's own
+    /// sticky and animation nodes and the scrollers *around* it, never with
+    /// the root's own content.
+    pub(crate) space: Option<u32>,
     /// The contiguous run of [`PaintOrder::items`] this group encloses. A
     /// stacking context paints atomically, so its members are always
     /// contiguous; an empty run is not recorded at all (the layer is popped).
@@ -416,11 +405,10 @@ pub(crate) struct ClipNode {
     pub(crate) transform: Transform3D<f32>,
     pub(crate) rect: Rect<f32>,
     pub(crate) radii: CornerRadii,
-    /// The scroll chain the clip's own rect rides: the chain *outside* the
-    /// establishing element, captured before that element's own slot enters
-    /// the flow — a scroller's clip does not move with its own content.
-    pub(crate) slot: Option<u32>,
-    pub(crate) sticky: Option<u32>,
+    /// The establishing element's box space: the clip moves with the
+    /// element's own sticky and animation nodes, never with its own scroll
+    /// node — a scroller's clip does not move with its own content.
+    pub(crate) space: Option<u32>,
 }
 
 /// One `content-visibility: auto` box the build reached, with exactly the
@@ -437,20 +425,14 @@ pub(crate) struct ClipNode {
 /// rather than one over every item, and a page with none pays one `is_empty`
 /// test per render.
 ///
-/// `chain` is the *content* translation chain — what
-/// [`PaintOrder::item_translation_chain`] would answer for this element's own
-/// box, which at record time is simply the chain outside it, since a scroll
-/// container's own box rides the scrollers around it rather than its own.
+/// `space` is the element's box space, the one its own box item composes in.
 #[derive(Debug, Clone)]
 pub(crate) struct AutoBox {
     pub(crate) node: NodeId,
     pub(crate) transform: Transform3D<f32>,
     pub(crate) size: Size2D<f32>,
     pub(crate) clip: Option<usize>,
-    pub(crate) chain: Option<u32>,
-    pub(crate) animation: Option<u32>,
-    /// Nearest sticky ancestor-or-self; its live displacement is composed after layout.
-    pub(crate) sticky: Option<u32>,
+    pub(crate) space: Option<u32>,
     /// The innermost enclosing group layer, including one this element opened
     /// for itself: its blur carries the element's contents' ink outward, so
     /// the region admitted for them grows with it.

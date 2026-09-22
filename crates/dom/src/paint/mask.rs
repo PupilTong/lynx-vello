@@ -20,7 +20,6 @@ use stylo::values::computed::{BackgroundClip, Image};
 
 use crate::paint::BoxFragment;
 use crate::paint::background::{self, BoxLevel, PatternLayer};
-use crate::paint::compose::ComposeChain;
 use crate::paint::walker::WalkSink;
 use crate::render::image::ImageRegistry;
 
@@ -35,7 +34,7 @@ pub(crate) fn has_mask(style: &ComputedValues) -> bool {
 
 pub(crate) fn paint(
     sink: &mut WalkSink<'_>,
-    chain: ComposeChain,
+    space: Option<u32>,
     style: &ComputedValues,
     fragment: &BoxFragment,
     images: &ImageRegistry,
@@ -69,5 +68,5 @@ pub(crate) fn paint(
         origin: background::level_rect(fragment, origin),
         clip: background::level_shape(fragment, clip),
     };
-    background::paint_pattern_layer(sink, chain, style, fragment, images, &layer, None);
+    background::paint_pattern_layer(sink, space, style, fragment, images, &layer, None);
 }

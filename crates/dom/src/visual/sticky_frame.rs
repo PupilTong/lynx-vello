@@ -2,8 +2,10 @@
 //!
 //! Constraints live in untransformed layout space. Their resulting displacement
 //! is mapped through the sticky box's parent transform only after solving them,
-//! exactly like relative positioning. A descendant inherits that displacement;
-//! a fixed descendant escapes it through the builder's containing-block context.
+//! exactly like relative positioning. Each sticky box is one node of the
+//! frame's space tree, applying only its own mapped shift, so a descendant
+//! inherits the displacement through its space path and a fixed descendant
+//! escapes it through the builder's containing-block context.
 
 use euclid::default::{Transform3D, Vector2D};
 use smallvec::SmallVec;
@@ -27,10 +29,12 @@ pub(crate) type StickySamples = SmallVec<[StickySample; 4]>;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct StickySample {
-    /// Cumulative movement before transforms, for nested sticky constraints.
+    /// Cumulative movement before transforms, the input of nested sticky
+    /// constraints.
     layout: Vector2D<f32>,
-    /// Cumulative movement in viewport CSS pixels, for paint and hit testing.
-    pub(crate) translation: Vector2D<f32>,
+    /// This box's own movement mapped through its parent transform, in
+    /// viewport CSS px: its sticky node's shift in the space tree.
+    pub(crate) mapped: Vector2D<f32>,
 }
 
 impl PaintOrder {
@@ -68,7 +72,7 @@ impl PaintOrder {
                 layout: inherited.layout + own,
                 // Insets retain subpixel precision. Only the scroll input
                 // follows the engine's per-scrollport device-grid snapping.
-                translation: inherited.translation + mapped,
+                mapped,
             });
         }
         samples
