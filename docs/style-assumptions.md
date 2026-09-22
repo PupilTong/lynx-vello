@@ -722,10 +722,42 @@ and §D.16 with what the wire format actually permits.)*
     - **`overscroll-behavior: auto | contain | none`** (css-overscroll-1) per
       axis, enabled as a W3C extension beyond Lynx's index the way `contain`
       was. `contain` and `none` fence everything above the container on that
-      axis; `none` equals `contain` here because there is no rubber-band or
-      boundary effect to suppress. It applies to every scroll container,
-      `overflow: hidden` ones included, so a hidden wrapper can fence a
-      chain it cannot itself consume.
+      axis; `none` equals `contain` here because there is no default
+      rubber-band or boundary effect to suppress. It applies to every scroll
+      container, `overflow: hidden` ones included, so a hidden wrapper can
+      fence a chain it cannot itself consume.
+    - **`overscroll-behavior: contain-bounce`** (user-directed 2026-09-22) is
+      the engine's own fourth value, declared under the fork's `lynx` feature
+      only: `contain`'s fence plus the boundary effect. A drag past the edge
+      stretches the container on a rubber band, a fling overshoots it, and
+      it springs back. The curves and constants are lynx-ui's `useBounce`
+      hook, so a page that bounces through the property and one that bounces
+      through the hook's transforms move alike: rubber band
+      `d(x) = (1 − 1/(x·0.55/L + 1))·L` for `x` px of finger travel past the
+      edge and `L` the scrollport extent (never reaching `L`), overshoot
+      decay `0.99` per ms, bounce back `x(t) = (C₁ + 15·C₁·t)·e^(−15t)`
+      (critically damped, no initial velocity). The stretch is the painter's
+      alone — a programmatic scroll clamps, the document never stretches,
+      and a wheel tick on a stretched container first lands it on its edge.
+      All of it lives in the painter (`crates/bobcat-core/src/paint/motion.rs`
+      for the curves, `paint/inertia.rs` for when they start and stop); the
+      document only publishes the `bounce` axes on each scroll slot.
+    - **Inertia** (user-directed 2026-09-22, the same change): a scrolling
+      drag's release carries its velocity over the last 100ms of the finger
+      (Android's `VelocityTracker` horizon), and the fling decays
+      geometrically at `0.998` per ms — UIKit's normal deceleration rate,
+      the one number not from lynx-ui, which leaves the in-range fling to
+      the native scroller. Each frame the fling's distance since the last is
+      one more chain walk from the slot the drag latched, so it hands off to
+      the container above like a drag does, stops dead at a wall, and
+      overshoots a `contain-bounce` edge. On a snapping axis the fling is
+      aimed at the position its whole travel would settle on, so it lands
+      there rather than snapping after it stops. A drag's first step on a
+      moving container stops it and takes over. Rest is one physical pixel.
+      Nothing outside the painter changed for this: the input router and
+      the document's scroll API are as they were, and no event is
+      involved. No `scroll-behavior` still: programmatic scrolls and snaps
+      remain jumps.
     - **`scroll-capture: auto | nearest`** is lynx-vello's own property, with
       no W3C or Lynx counterpart (the fork declares it `lynx_only`). `nearest`
       on a scroll container hands a gesture that starts in it to the nearest

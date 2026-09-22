@@ -410,6 +410,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
             parent,
             user_scrollable: scroll_box.user_scrollable,
             chains: scroll_box.chains,
+            bounce: scroll_box.bounce,
             capture: scroll_box.capture,
             snap,
             offset: scroll_box.offset,

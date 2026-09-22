@@ -46,6 +46,11 @@ pub struct ScrollSlot {
     pub user_scrollable: ScrollAxes,
     /// The axes a boundary chains past: `overscroll-behavior: auto`.
     pub chains: ScrollAxes,
+    /// The axes whose boundary stretches and springs back:
+    /// `overscroll-behavior: contain-bounce`. Policy only: the painter's
+    /// intents may stand outside `0..=max_offset` on such an axis, while the
+    /// committed `offset` never does.
+    pub bounce: ScrollAxes,
     /// Whether the container above goes first: `scroll-capture`.
     pub capture: ScrollCapture,
     /// The axes this container snaps on, each naming its points in the
