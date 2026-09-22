@@ -1,5 +1,9 @@
-//! What a view is on its own: a running page with no painter anywhere near
-//! it, and a goodbye that is the channels themselves.
+//! What a view is, past the document: readiness, its own clock, and a goodbye
+//! that is the channels themselves.
+//!
+//! The painters here are never pumped and draw nowhere. One is attached
+//! wherever a test waits past boot's first `__FlushElementTree`, because that
+//! flush parks until a painter binds the view.
 
 use std::time::{Duration, Instant};
 
@@ -39,12 +43,15 @@ fn dropping_the_view_ends_its_task_and_cancels_its_sources() {
     );
 }
 
-/// A view with no painter is a running view: it boots, its realm's timers
-/// come due on `bobcat-main`, and their commits publish — with no host call
-/// between the boot and the frame beyond the turns the host takes anyway.
+/// A view runs its own clock: once it has booted, its realm's timers come due
+/// on `bobcat-main` and their commits publish — with no host call between the
+/// boot and the frame beyond the turns the host takes anyway.
+///
+/// The painter is here only to bind the view. It is never pumped, so nothing
+/// in the loop below drives the timer.
 #[test]
-fn a_view_with_no_painter_boots_and_runs_its_own_timers() {
-    let mut view = TestViewSpec::new(
+fn a_view_runs_its_own_timers_with_no_host_call_behind_them() {
+    let mut engine = TestViewSpec::new(
         r"
         globalThis.renderPage = function () {
           const page = __CreatePage('card', 0);
@@ -59,12 +66,12 @@ fn a_view_with_no_painter_boots_and_runs_its_own_timers() {
         };
         ",
     )
-    .create_view(Arc::new(NoWakeup));
+    .create(Arc::new(NoWakeup));
 
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut booted = false;
     while !booted {
-        for event in view.pump() {
+        for event in engine.pump() {
             match event {
                 EngineEvent::ScriptFinished => booted = true,
                 EngineEvent::StartupFailed(error) => panic!("the view did not boot: {error}"),
@@ -72,10 +79,10 @@ fn a_view_with_no_painter_boots_and_runs_its_own_timers() {
                 _ => {}
             }
         }
-        assert!(Instant::now() < deadline, "a painterless view never booted");
+        assert!(Instant::now() < deadline, "the view never booted");
         std::thread::yield_now();
     }
-    let booted_commit = view
+    let booted_commit = engine
         .published_frame()
         .expect("boot's flush published a frame")
         .commit_id();
@@ -83,7 +90,7 @@ fn a_view_with_no_painter_boots_and_runs_its_own_timers() {
     // Nothing in this loop drives the timer: `published_frame` reads the
     // watch and sends nothing at all.
     loop {
-        let commit = view
+        let commit = engine
             .published_frame()
             .expect("a frame stays published")
             .commit_id();
@@ -97,14 +104,15 @@ fn a_view_with_no_painter_boots_and_runs_its_own_timers() {
         std::thread::sleep(Duration::from_millis(5));
     }
     assert_eq!(
-        view.probe_document(|tree| {
-            let page = tree.document_element().id();
-            let box_id = tree.get(page).expect("the page is live").child_ids()[0];
-            tree.get(box_id)
-                .and_then(|live| live.attribute("ticked").map(str::to_owned))
-        })
-        .expect("the view's task answers probes")
-        .as_deref(),
+        engine
+            .probe_document(|tree| {
+                let page = tree.document_element().id();
+                let box_id = tree.get(page).expect("the page is live").child_ids()[0];
+                tree.get(box_id)
+                    .and_then(|live| live.attribute("ticked").map(str::to_owned))
+            })
+            .expect("the view's task answers probes")
+            .as_deref(),
         Some("yes"),
         "and the entry the timer ran in committed its mutation"
     );
@@ -112,7 +120,7 @@ fn a_view_with_no_painter_boots_and_runs_its_own_timers() {
 
 #[test]
 fn global_events_require_observed_readiness_and_rejected_events_are_not_replayed() {
-    let mut view = TestViewSpec::new(
+    let mut engine = TestViewSpec::new(
         r"
         import {Worker} from 'bobcat-internal';
         const post = Worker.prototype.postMessage;
@@ -123,16 +131,18 @@ fn global_events_require_observed_readiness_and_rejected_events_are_not_replayed
         __CreatePage();
     ",
     )
-    .create_view(Arc::new(NoWakeup));
-    assert!(!view.is_ready());
+    .create(Arc::new(NoWakeup));
+    assert!(!engine.view.is_ready());
     assert!(matches!(
-        view.send_global_event("event", r#"["early"]"#.into()),
+        engine
+            .view
+            .send_global_event("event", r#"["early"]"#.into()),
         Err(EngineError::NotReady)
     ));
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut messages = Vec::new();
     loop {
-        let events = view.pump();
+        let events = engine.pump();
         for event in &events {
             if let EngineEvent::ConsoleMessage { message, .. } = event {
                 messages.push(message.clone());
@@ -143,12 +153,12 @@ fn global_events_require_observed_readiness_and_rejected_events_are_not_replayed
             .any(|event| matches!(event, EngineEvent::ScriptFinished))
         {
             assert!(
-                view.is_ready(),
+                engine.view.is_ready(),
                 "pump records readiness before returning the event"
             );
             break;
         }
-        assert!(!view.is_ready());
+        assert!(!engine.view.is_ready());
         assert!(
             Instant::now() < deadline,
             "view never became ready: {events:?}"
@@ -159,10 +169,12 @@ fn global_events_require_observed_readiness_and_rejected_events_are_not_replayed
         messages.is_empty(),
         "rejected event was replayed during boot"
     );
-    view.send_global_event("event", r#"["accepted"]"#.into())
+    engine
+        .view
+        .send_global_event("event", r#"["accepted"]"#.into())
         .unwrap();
     while messages.is_empty() {
-        for event in view.pump() {
+        for event in engine.pump() {
             if let EngineEvent::ConsoleMessage { message, .. } = event {
                 messages.push(message);
             }
@@ -174,10 +186,10 @@ fn global_events_require_observed_readiness_and_rejected_events_are_not_replayed
         std::thread::yield_now();
     }
     assert_eq!(messages, [r#"["accepted"]"#]);
-    view.cancel.cancel();
-    assert!(!view.is_ready());
+    engine.view.cancel.cancel();
+    assert!(!engine.view.is_ready());
     assert!(matches!(
-        view.send_global_event("event", "[]".into()),
+        engine.view.send_global_event("event", "[]".into()),
         Err(EngineError::NotReady)
     ));
 }

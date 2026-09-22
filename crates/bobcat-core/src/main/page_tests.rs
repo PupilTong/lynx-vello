@@ -20,7 +20,7 @@ use crate::background::{WorkerCommand, WorkerMessage, WorkerStart};
 use crate::jobs::{JsThread, JsThreadHandle};
 use crate::link::{DetachedView, InputEventPayload, PageUpdate, ViewNotice, detached_outbox};
 use crate::main::WorkerFactory;
-use crate::main::runtime::install_shared_modules;
+use crate::main::runtime::{bound_metrics, install_shared_modules};
 use crate::main::tree::PageConfig;
 use crate::resource::{SourceCompletion, SourceRequest};
 use crate::view::NoWakeup;
@@ -70,8 +70,32 @@ fn group(thread: &JsThreadHandle) -> (Rc<GroupContext>, mpsc::UnboundedReceiver<
     (Rc::new(context), commands)
 }
 
+/// What every page here is created at, and what the painter these tests play
+/// binds it at unless the test says otherwise.
+const CREATE_VIEWPORT: Viewport = Viewport::new(320.0, 240.0);
+
+/// The metrics a published frame was committed at, as bits: these are values
+/// copied across a channel rather than computed, so exact equality is the
+/// question and `to_bits` is how it is asked.
+fn committed_at(frame: &dom::CommittedFrame) -> (u32, u32, u32) {
+    (
+        frame.viewport().width.to_bits(),
+        frame.viewport().height.to_bits(),
+        frame.device_pixel_ratio().to_bits(),
+    )
+}
+
+/// The same three numbers of a viewport, to compare one against.
+fn metrics_of(viewport: Viewport) -> (u32, u32, u32) {
+    (
+        viewport.width.to_bits(),
+        viewport.height.to_bits(),
+        viewport.device_pixel_ratio.to_bits(),
+    )
+}
+
 fn ingredients() -> DocumentIngredients {
-    DocumentIngredients::for_test(Viewport::new(320.0, 240.0), PageConfig::default())
+    DocumentIngredients::for_test(CREATE_VIEWPORT, PageConfig::default())
 }
 
 /// One view served by the real owner, with the test on the host's end of its
@@ -80,6 +104,10 @@ struct Harness {
     workers: mpsc::UnboundedReceiver<WorkerCommand>,
     background: Option<WorkerStart>,
     commands: mpsc::UnboundedSender<ToMain>,
+    /// The painter's end of the view's metrics watch. Bound at
+    /// [`CREATE_VIEWPORT`] unless the test asked for a view nothing has
+    /// bound, which is what [`Harness::unbound`] is for.
+    metrics: watch::Sender<Option<Viewport>>,
     view: DetachedView,
     events: Vec<EngineEvent>,
     sources: Vec<(SourceRequest, SourceCompletion)>,
@@ -92,6 +120,13 @@ struct Harness {
 impl Harness {
     fn new(context: Rc<GroupContext>, workers: mpsc::UnboundedReceiver<WorkerCommand>) -> Self {
         Self::serving(context, workers, ViewSources::new("app:///main.js"))
+    }
+
+    /// A view no painter has bound, which is where its first
+    /// `__FlushElementTree` parks. The test binds it by writing
+    /// [`Harness::metrics`].
+    fn unbound(context: Rc<GroupContext>, workers: mpsc::UnboundedReceiver<WorkerCommand>) -> Self {
+        Self::binding(context, workers, ViewSources::new("app:///main.js"), None)
     }
 
     /// A second view in the same group. The group has one worker channel and
@@ -107,13 +142,27 @@ impl Harness {
         workers: mpsc::UnboundedReceiver<WorkerCommand>,
         sources: ViewSources,
     ) -> Self {
+        Self::binding(context, workers, sources, Some(CREATE_VIEWPORT))
+    }
+
+    /// `bound` is what the view's metrics watch starts at: `Some` for a view
+    /// a painter is already watching — which is what every pin that is not
+    /// about the binding wants — and `None` for one nothing has bound.
+    fn binding(
+        context: Rc<GroupContext>,
+        workers: mpsc::UnboundedReceiver<WorkerCommand>,
+        sources: ViewSources,
+        bound: Option<Viewport>,
+    ) -> Self {
         let (outbox, view) = detached_outbox(Arc::new(NoWakeup));
         let (commands, incoming) = mpsc::unbounded_channel();
+        let (metrics, metric_receiver) = watch::channel(bound);
         let attached = AttachedView {
-            viewport: Viewport::new(320.0, 240.0),
+            viewport: CREATE_VIEWPORT,
             sources,
             native_modules: String::new(),
             commands: incoming,
+            metrics: metric_receiver,
             cancel: view.token.clone(),
         };
         let owner = task::spawn_local(serve_view(context, attached, outbox));
@@ -121,6 +170,7 @@ impl Harness {
             workers,
             background: None,
             commands,
+            metrics,
             view,
             events: Vec::new(),
             sources: Vec::new(),
@@ -311,6 +361,10 @@ struct OwnedPage {
     /// the other end, and dropping this would close the channel and end the
     /// view by a path neither pin here is about.
     _commands: mpsc::UnboundedSender<ToMain>,
+    /// The painter's end of the metrics watch, bound at [`CREATE_VIEWPORT`]
+    /// from the start: none of these pins is about the binding, and an
+    /// unbound page's first flush would park.
+    _metrics: watch::Sender<Option<Viewport>>,
 }
 
 impl OwnedPage {
@@ -318,13 +372,21 @@ impl OwnedPage {
         let (outbox, view) = detached_outbox(Arc::new(NoWakeup));
         let token = view.token.clone();
         let (commands, incoming) = mpsc::unbounded_channel();
-        let page = Page::new(context, outbox, ingredients(), token.clone());
+        let (metrics, metric_receiver) = watch::channel(Some(CREATE_VIEWPORT));
+        let page = Page::new(
+            context,
+            outbox,
+            ingredients(),
+            metric_receiver,
+            token.clone(),
+        );
         page.spawn(consume_commands(Rc::clone(&page), incoming));
         Self {
             page,
             view,
             token,
             _commands: commands,
+            _metrics: metrics,
         }
     }
 
@@ -381,6 +443,30 @@ globalThis.renderPage = function () {
   __AppendElement(page, __CreateView(0));
 };
 ";
+
+/// The same page, with an `updatePage` that writes what the host sent onto
+/// the box, so a `PageUpdate` command genuinely dirties the document.
+const ONE_BOX_WITH_UPDATE: &str = r"
+globalThis.renderPage = function () {
+  const page = __CreatePage('card', 0);
+  const box = __CreateView(0);
+  __AppendElement(page, box);
+  globalThis.box = box;
+};
+globalThis.updatePage = function (data) {
+  __SetAttribute(globalThis.box, 'data-value', String(data.value));
+};
+";
+
+/// One host data update carrying `value`, for the pins that need a command
+/// that genuinely changes the document.
+fn update_command(value: u8) -> ToMain {
+    ToMain::PageUpdate(PageUpdate::Data {
+        data: format!(r#"{{"value":{value}}}"#),
+        processor_name: String::new(),
+        reset: false,
+    })
+}
 
 /// The same page, with a timer far enough out that nothing will ever fire it,
 /// so the deadline a live realm publishes is there to be withdrawn.
@@ -684,24 +770,25 @@ fn page_data_reaches_the_realm_it_was_given_to() {
 
 /// A host's whole round of input is one entry into the realm, so it is one
 /// commit and one acknowledgement — not one of each per command.
+///
+/// The metrics used to be part of such a burst. They are a watch now, so the
+/// burst is made of page updates instead; what a metrics change coalesces
+/// into is pinned by
+/// [`metrics_that_move_before_the_task_wakes_are_one_commit`] below.
 #[test]
 fn a_burst_of_commands_is_one_commit_and_one_acknowledgement() {
     on_a_js_thread(|thread| async move {
         let (context, workers) = group(&thread);
         let mut harness = Harness::new(context, workers);
-        let booted = harness.boot(ONE_BOX).await;
+        let booted = harness.boot(ONE_BOX_WITH_UPDATE).await;
 
         // Every one of these is queued before the consumer wakes, and every
-        // one of them genuinely changes the viewport, so an entry apiece
-        // would be a commit apiece.
+        // one of them genuinely writes a different attribute value, so an
+        // entry apiece would be a commit apiece.
         for step in 0..5u8 {
             harness
                 .commands
-                .send(ToMain::Resize {
-                    width: 320.0 - f32::from(step),
-                    height: 240.0 + f32::from(step),
-                    device_pixel_ratio: 1.0,
-                })
+                .send(update_command(step))
                 .expect("the view is still serving");
         }
         harness
@@ -719,6 +806,183 @@ fn a_burst_of_commands_is_one_commit_and_one_acknowledgement() {
             Some(booted + 1),
             "the whole burst committed once"
         );
+    });
+}
+
+/// Nothing is published and MTS boot does not finish until a painter binds:
+/// boot's own `__FlushElementTree` commits at the create-time viewport, holds
+/// that frame, and parks the job it runs in on the metrics watch.
+///
+/// Binding at the size the view was created at is the cheap path — the held
+/// frame goes out as it is, with no second commit.
+#[test]
+fn an_unbound_view_holds_its_first_frame_and_publishes_it_on_the_binding() {
+    on_a_js_thread(|thread| async move {
+        let (context, workers) = group(&thread);
+        let mut harness = Harness::unbound(context, workers);
+        harness
+            .until("the view never asked for its entry", |harness| {
+                !harness.sources.is_empty()
+            })
+            .await;
+        harness.answer("app:///main.js", ONE_BOX);
+
+        // Every task of the view goes on running while the flush is parked,
+        // so this is as far as an unbound view ever gets.
+        for _ in 0..64 {
+            harness.turn().await;
+        }
+        assert_eq!(
+            harness.view.published.commit(),
+            None,
+            "the frame boot committed is held rather than published"
+        );
+        assert!(!harness.finished(), "and MTS boot has not finished");
+
+        harness.metrics.send_replace(Some(CREATE_VIEWPORT));
+        harness
+            .until("the binding never published the held frame", |harness| {
+                harness.view.published.commit().is_some()
+            })
+            .await;
+        let frame = harness
+            .view
+            .published
+            .frame()
+            .expect("a frame is published");
+        assert_eq!(committed_at(&frame), metrics_of(CREATE_VIEWPORT));
+        harness
+            .until("boot never finished", |harness| harness.finished())
+            .await;
+    });
+}
+
+/// Binding at metrics the view was not created at discards the held frame and
+/// commits again, which is the resize path: the first frame a painter ever
+/// sees is at the painter's own size.
+#[test]
+fn binding_at_other_metrics_recommits_the_held_frame() {
+    on_a_js_thread(|thread| async move {
+        let (context, workers) = group(&thread);
+        let mut harness = Harness::unbound(context, workers);
+        harness
+            .until("the view never asked for its entry", |harness| {
+                !harness.sources.is_empty()
+            })
+            .await;
+        harness.answer("app:///main.js", ONE_BOX);
+        for _ in 0..64 {
+            harness.turn().await;
+        }
+        assert_eq!(harness.view.published.commit(), None);
+
+        let painter = Viewport::new(200.0, 100.0).with_device_pixel_ratio(2.0);
+        harness.metrics.send_replace(Some(painter));
+        harness
+            .until("the binding never published a frame", |harness| {
+                harness.view.published.commit().is_some()
+            })
+            .await;
+
+        let frame = harness
+            .view
+            .published
+            .frame()
+            .expect("a frame is published");
+        assert_eq!(
+            committed_at(&frame),
+            metrics_of(painter),
+            "the held frame was discarded and recomputed at the painter's size"
+        );
+        harness
+            .until("boot never finished", |harness| harness.finished())
+            .await;
+    });
+}
+
+/// The view's own token is the parked flush's biased first arm, so a release
+/// ends the wait: the flush throws, boot fails with it, and the view ends
+/// without ever reporting that it started.
+#[test]
+fn a_view_released_while_its_first_flush_is_parked_never_finishes() {
+    on_a_js_thread(|thread| async move {
+        let (context, workers) = group(&thread);
+        let mut harness = Harness::unbound(context, workers);
+        harness
+            .until("the view never asked for its entry", |harness| {
+                !harness.sources.is_empty()
+            })
+            .await;
+        harness.answer("app:///main.js", ONE_BOX);
+        for _ in 0..64 {
+            harness.turn().await;
+        }
+        // Taken before the release so the disposal exchange has somewhere to
+        // answer; boot creates the BTS Worker well before its flush.
+        harness.background = Some(harness.background_worker());
+        assert!(!harness.finished());
+
+        harness.view.token.cancel();
+        harness
+            .until("the view never ended", |harness| {
+                harness.owner.is_finished()
+            })
+            .await;
+
+        assert_eq!(
+            harness.view.published.commit(),
+            None,
+            "the held frame went with the view"
+        );
+        assert!(
+            !harness.finished(),
+            "and a view that ended mid-flush reports no boot"
+        );
+    });
+}
+
+/// The painter's metrics are a watch, not a command: five moves before the
+/// consuming task wakes are one value and so one commit.
+///
+/// That is the whole of what the new mechanism guarantees here. A watch keeps
+/// the latest rather than a queue, so how many writes a settle stands for is
+/// not something a caller can count on — only that the document ends up at
+/// the last of them, in one commit if nothing else entered the realm between.
+#[test]
+fn metrics_that_move_before_the_task_wakes_are_one_commit() {
+    on_a_js_thread(|thread| async move {
+        let (context, workers) = group(&thread);
+        let mut harness = Harness::new(context, workers);
+        let booted = harness.boot(ONE_BOX).await;
+
+        for step in 0..5u8 {
+            harness.metrics.send_replace(Some(
+                Viewport::new(320.0 - f32::from(step), 240.0 + f32::from(step))
+                    .with_device_pixel_ratio(1.0),
+            ));
+        }
+
+        harness
+            .until("the metrics never reached the document", |harness| {
+                harness.view.published.commit() == Some(booted + 1)
+            })
+            .await;
+        let frame = harness
+            .view
+            .published
+            .frame()
+            .expect("a frame is published");
+        assert_eq!(
+            committed_at(&frame),
+            metrics_of(Viewport::new(316.0, 244.0)),
+            "and it was committed at the last of the five"
+        );
+
+        // Nothing else is owed: a second settle would be a second commit.
+        for _ in 0..8 {
+            harness.turn().await;
+        }
+        assert_eq!(harness.view.published.commit(), Some(booted + 1));
     });
 }
 
@@ -1088,6 +1352,7 @@ fn a_siblings_checkpoint_makes_a_parked_page_settle() {
             Rc::clone(&context),
             outbox,
             ingredients(),
+            bound_metrics(CREATE_VIEWPORT),
             view.token.clone(),
         );
         open_realm(
@@ -1147,6 +1412,7 @@ fn a_pages_own_entries_never_wake_its_clock_task() {
             Rc::clone(&context),
             outbox,
             ingredients(),
+            bound_metrics(CREATE_VIEWPORT),
             view.token.clone(),
         );
         // The listener is what makes the dispatch below a real entry into
@@ -1315,17 +1581,13 @@ fn a_burst_queued_behind_a_release_is_never_applied() {
     on_a_js_thread(|thread| async move {
         let (context, workers) = group(&thread);
         let mut harness = Harness::new(context, workers);
-        let booted = harness.boot(ONE_BOX).await;
+        let booted = harness.boot(ONE_BOX_WITH_UPDATE).await;
 
         // Genuinely dirtying: the same command applied on its own is what the
         // burst pin above counts a commit for.
         harness
             .commands
-            .send(ToMain::Resize {
-                width: 200.0,
-                height: 100.0,
-                device_pixel_ratio: 1.0,
-            })
+            .send(update_command(1))
             .expect("the view is still serving");
         harness.view.token.cancel();
         harness

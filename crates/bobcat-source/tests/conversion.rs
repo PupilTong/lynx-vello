@@ -679,6 +679,13 @@ async fn named_lepus_chunks_load_and_run_on_every_call() {
             page.view_sources(),
         )
         .unwrap();
+    // Boot's first flush waits for a painter to bind the view, and this waits
+    // for `ScriptFinished` past it.
+    let mut painter =
+        bobcat_core::Painter::new(bobcat_core::DrawTarget::Offscreen, 32.0, 24.0, 1.0)
+            .await
+            .unwrap();
+    painter.attach(&view).unwrap();
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     loop {
         events

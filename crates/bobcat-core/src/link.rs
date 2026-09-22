@@ -13,6 +13,12 @@
 //! reason, while the frame, the listener names and the newest serviced
 //! `BeginFrame` are *observed state* — a painter wants the latest and never
 //! the ones it slept through, which is what [`Published`] on a watch is.
+//!
+//! The painter's device metrics are observed state in the other direction,
+//! and [`ViewSeat::metrics`] is the watch that carries them. They are not a
+//! command: a flush before any painter has bound parks the job it runs in,
+//! and no other job runs while one is parked, so a command carrying them
+//! would never be read.
 
 use std::cell::RefCell;
 use std::future::Future;
@@ -36,7 +42,7 @@ use crate::clock::ClockInstant;
 use crate::main::tree::LynxDocument;
 use crate::paint::RouterHost;
 use crate::resource::{FetchProbe, LoadedSource, SourceCompletion, SourceRequest};
-use crate::view::{EngineEvent, EventRequester, LynxViewError};
+use crate::view::{EngineEvent, EventRequester, LynxViewError, Viewport};
 
 /// The answer to one source request, as the side that awaits it sees it.
 pub(crate) type SourceAnswer = oneshot::Receiver<Result<LoadedSource, LynxViewError>>;
@@ -124,11 +130,6 @@ pub(crate) enum ToMain {
         target: NodeId,
         name: &'static str,
         payload: InputEventPayload,
-    },
-    Resize {
-        width: f32,
-        height: f32,
-        device_pixel_ratio: f32,
     },
     Vsync(f64),
     BeginFrame {
@@ -394,6 +395,16 @@ pub(crate) struct ViewSeat {
     /// view's task, which is why the seat dies with the view rather than with
     /// whatever a painter is holding.
     pub(crate) commands: mpsc::UnboundedSender<ToMain>,
+    /// The device metrics an attached painter names, which is the one thing
+    /// that crosses to the view outside the command FIFO.
+    ///
+    /// A watch rather than a command because of what waits on it: a
+    /// `__FlushElementTree` before any painter has bound parks the job it
+    /// runs in, and while a job is parked no other job runs — so a command
+    /// carrying the metrics could never be applied. This is polled by the
+    /// wait itself. `None` is a view no painter has bound yet; every write
+    /// after the first is an ordinary resize.
+    pub(crate) metrics: watch::Sender<Option<Viewport>>,
     /// The host's resource system, as the painter reads a commit's pixels out
     /// of it. A clone of the view's own handle, so the store is released when
     /// the view drops both — seat first, by declaration order there.
@@ -573,6 +584,14 @@ impl ViewObserver {
     pub(crate) fn commit(&mut self) -> Option<u64> {
         self.sync();
         self.published.commit()
+    }
+
+    /// The newest published frame itself, for a test that asserts what it was
+    /// committed at rather than only that it exists.
+    #[cfg(test)]
+    pub(crate) fn frame(&mut self) -> Option<Arc<CommittedFrame>> {
+        self.sync();
+        self.published.frame.clone()
     }
 
     /// The newest `BeginFrame` the view has acknowledged.

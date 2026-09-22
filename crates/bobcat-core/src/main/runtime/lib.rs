@@ -33,6 +33,7 @@ use std::sync::Arc;
 use dom::StylePool;
 use quickjs_rust_bridge::{HostArgument, HostValue};
 use smallvec::SmallVec;
+use tokio::sync::watch;
 
 use super::quickjs::{ScriptEngine, ScriptRuntime};
 use crate::clock::ClockInstant;
@@ -205,8 +206,9 @@ const REMOVALS_PER_COLLECTION: u32 = 32;
 /// fetches sources without a document to mount them on, and stages them here
 /// instead.
 pub(crate) struct DocumentIngredients {
-    /// The metrics the document is created at. A `Resize` that arrives
-    /// before the document does updates this rather than a document.
+    /// The metrics the document is created at, as the embedder named them to
+    /// `create_lynx_view`. They are what it works at until a painter binds;
+    /// a painter that bound first supersedes them at the construction.
     pub(crate) viewport: Viewport,
     pub(crate) config: PageConfig,
     /// The fonts and the default family, already validated against a context
@@ -221,6 +223,18 @@ pub(crate) struct DocumentIngredients {
     /// Image reports that arrived while there was no document to apply them
     /// to, replayed in order once there is one.
     pub(crate) pending_image_events: Vec<dom::ImageEvent>,
+}
+
+/// A metrics watch that already holds `viewport`, so the realm built over it
+/// is bound from the start.
+///
+/// The tests that build a realm in place play the painting side as well as
+/// the view's, and an unbound `__FlushElementTree` would park on the binding
+/// that side never makes. The sender is dropped with the call: a bound slot
+/// only ever reads the value.
+#[cfg(test)]
+pub(crate) fn bound_metrics(viewport: Viewport) -> watch::Receiver<Option<Viewport>> {
+    watch::channel(Some(viewport)).1
 }
 
 #[cfg(test)]
@@ -278,10 +292,36 @@ pub(crate) struct RealmStartup {
 /// of the staged ingredients when the boot module constructs its `Document`.
 /// Nothing empties it again — the slot drops with the view's task, after the
 /// realm that named the document has been freed.
+///
+/// It is also where a view learns its painter's metrics, and so where the
+/// binding is decided: the document is created at the create-time viewport
+/// and works at it until a painter writes the watch, and a flush before that
+/// holds its frame and parks.
 struct DocumentSlot {
     /// What a `createDocument` builds from, taken by the first one that runs.
     ingredients: Option<DocumentIngredients>,
     document: Option<LynxDocument>,
+    /// The device metrics an attached painter names, `None` until one binds.
+    ///
+    /// Read at the start of [`Self::commit_if_dirty`] and [`Self::flush`],
+    /// and polled directly by the wait an unbound flush parks on — never
+    /// routed through a command, because no job runs while one is parked.
+    metrics: watch::Receiver<Option<Viewport>>,
+    /// Whether a painter has ever named its metrics for this view.
+    ///
+    /// Only the first binding is waited for: a painter that detaches leaves
+    /// this set and the last metrics in place, so a later flush publishes
+    /// rather than parking.
+    bound: bool,
+    /// The newest frame committed before the binding, which is not published
+    /// yet.
+    ///
+    /// A frame is held rather than published because a painter composes at
+    /// its own size: it has no way to tell that the frame it adopted was
+    /// committed for the metrics it has just replaced. The binding is what
+    /// releases it — as it is, if the metrics match, or recomputed if they do
+    /// not.
+    held: Option<Arc<dom::CommittedFrame>>,
     /// The `load`s and `error`s the document's images owe, from both
     /// producers: the `image` component, which settles a `src` inside the
     /// `__SetAttribute` that wrote it, and [`MainThreadRuntime::apply_image_events`],
@@ -333,6 +373,16 @@ impl DocumentSlot {
             style_pool,
             pending_image_events,
         } = ingredients;
+        // The create-time viewport is what the document works at until a
+        // painter binds; a painter that bound before the boot module ran its
+        // first statement has already named the real one.
+        let viewport = match *self.metrics.borrow_and_update() {
+            Some(metrics) => {
+                self.bound = true;
+                metrics
+            }
+            None => viewport,
+        };
         let outcomes = self.image_outcomes.clone();
         let mut document = construction_phase("building the page", || {
             let mut document = new_document(viewport, config, outcomes);
@@ -372,27 +422,118 @@ impl DocumentSlot {
         Ok(())
     }
 
-    /// Runs the whole pipeline and publishes the committed frame — the
-    /// native half of `__FlushElementTree`, and the only place frames leave
-    /// this thread.
-    fn flush(&mut self) {
-        let frame = self.document_mut().commit();
-        self.outbox.publish_frame(frame);
-        // The walk that just ran is the one place that knows which image
-        // sources this frame needs; ask the painter to name them. Empty on
-        // every commit that met no new image, which is almost all of them.
-        let wanted = self.document_mut().take_wanted_images();
-        if !wanted.is_empty() {
-            self.outbox.notify(ViewNotice::RequestImages(wanted));
+    /// Adopts whatever metrics an attached painter has named, and records
+    /// that one has.
+    ///
+    /// The first call that finds a value is the binding: from then on this
+    /// document lays out at the painter's size, and a flush publishes rather
+    /// than parking. `borrow_and_update` marks the value seen for this
+    /// receiver alone, which is why the `consume_metrics` task owns a clone
+    /// of its own.
+    fn adopt_metrics(&mut self) {
+        let Some(metrics) = *self.metrics.borrow_and_update() else {
+            return;
+        };
+        self.bound = true;
+        let document = self.document_mut();
+        let viewport = document.viewport_size();
+        if viewport.width.to_bits() != metrics.width.to_bits()
+            || viewport.height.to_bits() != metrics.height.to_bits()
+        {
+            document.set_viewport(metrics.width, metrics.height);
+        }
+        if document.device_pixel_ratio().to_bits() != metrics.device_pixel_ratio.to_bits() {
+            document.set_device_pixel_ratio(metrics.device_pixel_ratio);
         }
     }
 
-    /// Commits and publishes only when something is stale — the epilogue of
-    /// every entry into the realm, which is what makes "we do not guarantee
-    /// the tree is not flushed outside `__FlushElementTree`" true.
-    fn commit_if_dirty(&mut self) {
+    /// Runs the whole pipeline and publishes the committed frame — the
+    /// native half of `__FlushElementTree`.
+    ///
+    /// Before any painter has bound this **parks the job it runs in** on the
+    /// metrics watch, exactly as `adoptStyleSheet` parks on its response: the
+    /// engine thread's tasks go on running, no other job does, and the view's
+    /// own token is the biased first arm so a release ends the wait. The
+    /// frame committed before the wait is held rather than published, because
+    /// a painter composes at its own size and cannot tell that the frame it
+    /// adopted predates the metrics it named. Waking with different metrics
+    /// discards it and commits again, which is the resize path.
+    ///
+    /// Only the first binding is waited for. A painter that detaches leaves
+    /// the last metrics behind, so every flush after it publishes at once.
+    fn flush(&mut self, thread: &crate::jobs::JsThreadHandle) -> Result<(), String> {
+        self.adopt_metrics();
+        let frame = self.document_mut().commit();
+        if self.bound {
+            self.outbox.publish_frame(frame);
+            self.request_wanted_images();
+            return Ok(());
+        }
+        self.held = Some(frame);
+        // Asked for before the wait rather than after it: the view's own
+        // fetcher serves images whether or not a painter is attached, so
+        // their IO overlaps the binding instead of starting behind it.
+        self.request_wanted_images();
+        let mut metrics = self.metrics.clone();
+        let token = self.outbox.token().clone();
+        thread.wait(async move {
+            tokio::select! {
+                biased;
+                () = token.cancelled() => Err("view was released".to_owned()),
+                named = metrics.wait_for(Option::is_some) => named
+                    .map(|_| ())
+                    .map_err(|_| "the view's seat is gone".to_owned()),
+            }
+        })?;
+        self.adopt_metrics();
         if self.document_mut().needs_render() {
-            self.flush();
+            self.held = Some(self.document_mut().commit());
+        }
+        if let Some(frame) = self.held.take() {
+            self.outbox.publish_frame(frame);
+        }
+        self.request_wanted_images();
+        Ok(())
+    }
+
+    /// Commits when anything is stale, and publishes it if a painter has
+    /// bound — the epilogue of every entry into the realm, which is what
+    /// makes "we do not guarantee the tree is not flushed outside
+    /// `__FlushElementTree`" true.
+    ///
+    /// It never waits: the epilogue runs on every entry, and parking here
+    /// would stop the group on any of them. What it commits before the
+    /// binding is held for whichever flush or binding publishes next.
+    fn commit_if_dirty(&mut self) {
+        self.adopt_metrics();
+        if self.document_mut().needs_render() {
+            let frame = self.document_mut().commit();
+            if self.bound {
+                self.outbox.publish_frame(frame);
+            } else {
+                self.held = Some(frame);
+            }
+            // The walk asked for its images either way: the view's own
+            // fetcher serves them whether or not a painter is attached.
+            self.request_wanted_images();
+        } else if self.bound
+            && let Some(frame) = self.held.take()
+        {
+            // Bound at the metrics this frame was already committed for, so
+            // there is nothing to recompute and it goes out as it is.
+            self.outbox.publish_frame(frame);
+        }
+    }
+
+    /// Asks the host for the image sources the last walk discovered.
+    ///
+    /// The walk that just ran is the one place that knows which sources a
+    /// frame needs. Empty on every commit that met no new image, which is
+    /// almost all of them.
+    fn request_wanted_images(&mut self) {
+        let wanted = self.document_mut().take_wanted_images();
+        if !wanted.is_empty() {
+            self.outbox.notify(ViewNotice::RequestImages(wanted));
         }
     }
 
@@ -500,10 +641,16 @@ impl MainThreadRuntime {
     pub(crate) fn new(
         js_runtime: &mut ScriptRuntime,
         ingredients: DocumentIngredients,
+        // The painter's metrics, as the view's seat publishes them. Link
+        // state rather than a document input: it outlives the one
+        // construction the ingredients are for, and an unbound flush parks on
+        // it.
+        metrics: watch::Receiver<Option<Viewport>>,
         outbox: ViewOutbox,
         workers: &super::workers::WorkerFactory,
-        // What `adoptStyleSheet`, a `Future.wait` and a `require` park on: the
-        // engine thread this realm's entries are jobs of.
+        // What `adoptStyleSheet`, a `Future.wait`, a `require` and an unbound
+        // `__FlushElementTree` park on: the engine thread this realm's
+        // entries are jobs of.
         thread: crate::jobs::JsThreadHandle,
         startup: &mut RealmStartup,
     ) -> Result<
@@ -530,8 +677,10 @@ impl MainThreadRuntime {
             &mut engine,
             js_runtime,
             ingredients,
+            metrics,
             outbox.clone(),
             &timers,
+            thread.clone(),
         )?;
         style_sheets::install_styles(&mut engine, js_runtime, &slot, &outbox, thread.clone())?;
         let futures = Rc::new(crate::future::FutureTable::new());
@@ -639,8 +788,9 @@ impl MainThreadRuntime {
         called.map(|_| ()).and(finished)
     }
 
-    /// Commits and publishes when anything is stale. Called by the page's
-    /// epilogue, after every entry into the realm.
+    /// Adopts the painter's metrics, commits when anything is stale, and
+    /// publishes once a painter has bound. Called by the page's epilogue,
+    /// after every entry into the realm, and never waits.
     pub(crate) fn commit_if_dirty(&mut self) {
         self.slot.borrow_mut().commit_if_dirty();
     }
@@ -733,25 +883,6 @@ impl MainThreadRuntime {
             document.scroll_to(*node, *offset);
         }
         document.note_scroll_windows_stale();
-    }
-
-    /// Applies new device metrics.
-    ///
-    /// The document is where they belong once it exists; before that the
-    /// view task holds them in the ingredients instead, so the document is
-    /// created at the size the painter last named.
-    pub(crate) fn apply_resize(&mut self, width: f32, height: f32, device_pixel_ratio: f32) {
-        let mut slot = self.slot.borrow_mut();
-        let document = slot.document_mut();
-        let viewport = document.viewport_size();
-        if viewport.width.to_bits() != width.to_bits()
-            || viewport.height.to_bits() != height.to_bits()
-        {
-            document.set_viewport(width, height);
-        }
-        if document.device_pixel_ratio().to_bits() != device_pixel_ratio.to_bits() {
-            document.set_device_pixel_ratio(device_pixel_ratio);
-        }
     }
 
     /// Applies the painting side's image reports, queueing the `load`s and
@@ -1287,8 +1418,10 @@ fn install_bobcat(
     engine: &mut ScriptEngine,
     js_runtime: &mut ScriptRuntime,
     ingredients: DocumentIngredients,
+    metrics: watch::Receiver<Option<Viewport>>,
     outbox: ViewOutbox,
     timers: &Rc<TimerState>,
+    thread: crate::jobs::JsThreadHandle,
 ) -> Result<Rc<RefCell<DocumentSlot>>, MainThreadError> {
     for (name, is_error) in [("reportScriptError", true), ("logScriptMessage", false)] {
         let reporting = outbox.clone();
@@ -1307,12 +1440,15 @@ fn install_bobcat(
     let handle = Rc::new(RefCell::new(DocumentSlot {
         ingredients: Some(ingredients),
         document: None,
+        metrics,
+        bound: false,
+        held: None,
         image_outcomes: ImageOutcomes::default(),
         removals: 0,
         outbox,
     }));
 
-    install_host_module(engine, js_runtime, &handle)?;
+    install_host_module(engine, js_runtime, &handle, thread)?;
     install_event_members(engine, js_runtime, &events)?;
     install_timer_members(engine, js_runtime, timers)
         .map_err(|error| MainThreadError::from_engine("installing the timer members", error))?;
@@ -1370,6 +1506,8 @@ fn install_host_module(
     engine: &mut ScriptEngine,
     js_runtime: &mut ScriptRuntime,
     handle: &Rc<RefCell<DocumentSlot>>,
+    // `flushElementTree`'s, for the wait it makes before a painter has bound.
+    thread: crate::jobs::JsThreadHandle,
 ) -> Result<(), MainThreadError> {
     tree_members! { engine, js_runtime, handle;
         fn createPage() |document| {
@@ -1471,7 +1609,7 @@ fn install_host_module(
         "flushElementTree",
         0,
         move |_arguments| {
-            borrow_slot("bobcat-internal:host.flushElementTree", &tree)?.flush();
+            borrow_slot("bobcat-internal:host.flushElementTree", &tree)?.flush(&thread)?;
             Ok(HostValue::Undefined)
         },
     )?;

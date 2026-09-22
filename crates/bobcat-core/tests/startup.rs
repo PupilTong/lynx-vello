@@ -469,6 +469,8 @@ async fn a_pending_view_does_not_block_a_sibling_in_the_same_group() {
             dropped: Mutex::new(Some(dropped_sender)),
             pending: Mutex::new(None),
         });
+        // No painter: this view's entry never arrives, so it never reaches
+        // the first flush that would wait for one.
         let mut pending = group
             .create_lynx_view(
                 32.0,
@@ -657,8 +659,17 @@ fn dropping_the_group_joins_both_of_its_threads() {
                             ViewSources::new("main.js"),
                         )
                         .expect("the view is created");
+                    // Boot's first flush waits for a painter to bind the
+                    // view, so this teardown needs one before it can wait for
+                    // the entry.
+                    let mut painter =
+                        bobcat_core::Painter::new(DrawTarget::Offscreen, 32.0, 24.0, 1.0)
+                            .await
+                            .expect("the painter is built");
+                    painter.attach(&view).expect("a fresh view takes a painter");
                     wait_for_script(&mut view).expect("the entry boots");
                     wait_for_worker_error(&mut view, "tick");
+                    drop(painter);
                     drop(view);
                     drop(group);
                 });

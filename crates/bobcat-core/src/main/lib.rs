@@ -43,7 +43,7 @@ use std::thread::Builder as ThreadBuilder;
 
 use dom::StylePool;
 use rustc_hash::FxHashMap;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::{self, JoinError, JoinSet};
 use tokio_util::sync::CancellationToken;
 #[cfg(target_arch = "wasm32")]
@@ -240,8 +240,8 @@ async fn group_task(context: Rc<GroupContext>, mut attach: mpsc::UnboundedReceiv
             command = attach.recv() => match command {
                 Some(GroupCommand::Attach(attachment)) => {
                     let ViewAttachment {
-                        viewport, sources, native_modules, commands, notices, frames, cancel,
-                        fetch_probe,
+                        viewport, sources, native_modules, commands, metrics, notices, frames,
+                        cancel, fetch_probe,
                     } = *attachment;
                     let outbox = ViewOutbox::new(
                         notices,
@@ -257,7 +257,8 @@ async fn group_task(context: Rc<GroupContext>, mut attach: mpsc::UnboundedReceiv
                             outbox.engine_event(EngineEvent::ScriptRunError(error));
                         })
                     });
-                    let view = AttachedView { viewport, sources, native_modules, commands, cancel };
+                    let view =
+                        AttachedView { viewport, sources, native_modules, commands, metrics, cancel };
                     let handle = views.spawn_local(page::serve_view(
                         Rc::clone(&context),
                         view,
@@ -318,6 +319,10 @@ struct AttachedView {
     /// record `create_lynx_view` encoded out of their names and methods.
     native_modules: String,
     commands: mpsc::UnboundedReceiver<ToMain>,
+    /// The metrics an attached painter names, `None` until one binds. Not a
+    /// command: an unbound `__FlushElementTree` parks the job it runs in on
+    /// this, and no other job runs while one is parked.
+    metrics: watch::Receiver<Option<Viewport>>,
     /// This view's end signal, minted on the embedder's thread. It is what the
     /// view's owner waits on, what its own end cancels, and the parent of the
     /// token every worker its realm creates carries.

@@ -34,6 +34,13 @@ async fn boot_registered(sources: bobcat_core::ViewSources, resources: Resources
     let mut view = group
         .create_lynx_view(393.0, 727.0, 1.0, resources.builder(), Vec::new(), sources)
         .unwrap();
+    // Boot's first flush waits for a painter to bind the view, and this waits
+    // for `ScriptFinished` past it.
+    let mut painter =
+        bobcat_core::Painter::new(bobcat_core::DrawTarget::Offscreen, 393.0, 727.0, 1.0)
+            .await
+            .unwrap();
+    painter.attach(&view).unwrap();
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut finished = false;
     // Continue after boot: hydration and the patch acknowledgement are queued

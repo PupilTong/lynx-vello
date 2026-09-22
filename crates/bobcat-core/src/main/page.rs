@@ -17,6 +17,8 @@
 //!   wait of its own — the view's [`Lifetime`], which is the end or the next task of the view to
 //!   finish;
 //! - [`consume_commands`], the one ordered consumer of the command stream;
+//! - [`consume_metrics`], which settles the page once per change of the painter's metrics, so a
+//!   resize with no JavaScript behind it still commits;
 //! - [`boot_page`], the page's boot future: the sheets in cascade order, the entry, and then the
 //!   realm;
 //! - one [`load_module`] future per resource load an import produced;
@@ -101,25 +103,28 @@
 //! - **a realm's clock** — one [`serve_clock`] per live realm, a view's and a worker's alike,
 //!   waiting on its deadline, the re-arm that moves it, and a sibling's checkpoint;
 //! - **the worker's pre-boot wait** — its script versus termination, channel closure, or its own
-//!   cancellation.
+//!   cancellation;
+//! - **the painter's metrics** — one [`consume_metrics`] per view, waiting on the end versus the
+//!   next value the view's seat publishes.
 //!
 //! How many there are is the group's shape rather than a constant: one of the
-//! first two kinds per engine thread, one of the third per live view and per
-//! live worker, one of the fourth per live realm, one of the fifth per worker
-//! that has not booted yet. `link.rs`'s `block_on_deadline` is a hand-rolled poll
-//! loop rather than a select, and the only one left. The two synchronous
-//! host members are a fifth wait of their own shape — this view's token
-//! against the answer — parked on inside a job through
-//! [`JsThread::wait`](crate::jobs::JsThread): stylesheet adoption, and
-//! [`crate::future`]'s `waitFuture`, which adds an optional deadline behind
-//! the token.
+//! first two kinds per engine thread, one of the third and one of the sixth
+//! per live view, one of the third per live worker, one of the fourth per
+//! live realm, one of the fifth per worker that has not booted yet.
+//! `link.rs`'s `block_on_deadline` is a hand-rolled poll loop rather than a
+//! select, and the only one left. The synchronous host members are a wait of
+//! their own shape — this view's token against the answer — parked on inside
+//! a job through [`JsThread::wait`](crate::jobs::JsThread): stylesheet
+//! adoption, [`crate::future`]'s `waitFuture`, which adds an optional
+//! deadline behind the token, and `__FlushElementTree` before a painter has
+//! bound, whose other arm is that same metrics watch.
 
 use std::cell::{Cell, RefCell};
 use std::future::{Future, poll_fn};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 use super::quickjs::ScriptRuntime;
@@ -167,6 +172,14 @@ pub(super) struct Page {
     /// — and the `BeginFrame` acknowledgement an offscreen host is blocked on
     /// — is served at once, whatever a sibling view's job is parked on.
     ingredients: RefCell<Option<Box<DocumentIngredients>>>,
+    /// The painter's metrics, as the view's seat publishes them: `None` until
+    /// one binds.
+    ///
+    /// Held here only to hand a clone to the realm as it opens — the document
+    /// is what reads it, and [`consume_metrics`] owns a clone of its own so
+    /// that marking a value seen on one receiver says nothing about the
+    /// other.
+    metrics: watch::Receiver<Option<Viewport>>,
     /// The same inbox serves ordinary events and the final JS disposal RPC.
     /// The owner takes it only after the ordinary consumer has been reaped.
     worker_events: RefCell<Option<mpsc::UnboundedReceiver<WorkerEvent>>>,
@@ -235,6 +248,7 @@ impl Page {
         context: Rc<GroupContext>,
         outbox: ViewOutbox,
         ingredients: DocumentIngredients,
+        metrics: watch::Receiver<Option<Viewport>>,
         token: CancellationToken,
     ) -> Rc<Self> {
         let lifetime = Lifetime::new(token, context.thread.clone());
@@ -243,6 +257,7 @@ impl Page {
             outbox,
             realm: RefCell::new(None),
             ingredients: RefCell::new(Some(Box::new(ingredients))),
+            metrics,
             worker_events: RefCell::new(None),
             pending_begin_frame: Cell::new(None),
             boot_reported: Cell::new(false),
@@ -617,11 +632,6 @@ impl Page {
                         .engine_event(EngineEvent::ListenerFailed(error.into_script_error()));
                 }
             }
-            ToMain::Resize {
-                width,
-                height,
-                device_pixel_ratio,
-            } => runtime.apply_resize(width, height, device_pixel_ratio),
             ToMain::Vsync(milliseconds) => {
                 if let Err(error) = runtime.vsync(js, milliseconds) {
                     self.fail(EngineEvent::ScriptRunError(error.into_script_error()));
@@ -648,12 +658,14 @@ impl Page {
     /// nothing holds them across a wait, so a sibling view parked on a
     /// synchronous stylesheet cannot delay it.
     ///
-    /// What a command can do here is narrow: the two that describe the
-    /// document write into the ingredients it will be built from, a
+    /// What a command can do here is narrow: the one that describes the
+    /// document writes into the ingredients it will be built from, a
     /// `BeginFrame` is acknowledged at once so an offscreen host is never
-    /// blocked by a load, and nothing else has anywhere to go. Dropping a
-    /// `Probe` drops the sender it captured, which answers the probing test
-    /// `None` rather than leaving it to wait out its deadline.
+    /// blocked by a load, and nothing else has anywhere to go. The painter's
+    /// metrics are not among them at all — they ride a watch the document
+    /// reads for itself. Dropping a `Probe` drops the sender it captured,
+    /// which answers the probing test `None` rather than leaving it to wait
+    /// out its deadline.
     fn stage(&self, commands: Vec<ToMain>) {
         let mut acknowledged: Option<u64> = None;
         {
@@ -665,14 +677,6 @@ impl Page {
                 match command {
                     // LynxView rejects lifecycle commands until MTS boot ends.
                     ToMain::PageUpdate(_) => {}
-                    ToMain::Resize {
-                        width,
-                        height,
-                        device_pixel_ratio,
-                    } => {
-                        ingredients.viewport = Viewport::new(width, height)
-                            .with_device_pixel_ratio(device_pixel_ratio);
-                    }
                     // Kept rather than applied: a report is about a source
                     // some later frame will want, and the document that would
                     // record it does not exist yet.
@@ -800,6 +804,7 @@ impl Page {
         let (mut runtime, worker_events) = match MainThreadRuntime::new(
             js,
             ingredients,
+            self.metrics.clone(),
             self.outbox.clone(),
             &self.context.workers,
             self.lifetime.thread().clone(),
@@ -1017,6 +1022,7 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
         sources,
         native_modules,
         commands,
+        metrics,
         cancel,
     } = view;
     // On every exit path, ordinary or trapped: a host still holding one of
@@ -1051,8 +1057,9 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
         style_pool: context.style_pool.clone(),
         pending_image_events: Vec::new(),
     };
-    let page = Page::new(context, outbox, ingredients, cancel);
+    let page = Page::new(context, outbox, ingredients, metrics.clone(), cancel);
     page.spawn(consume_commands(Rc::clone(&page), commands));
+    page.spawn(consume_metrics(Rc::clone(&page), metrics));
     page.spawn(boot_page(
         Rc::clone(&page),
         BootSources {
@@ -1117,6 +1124,35 @@ async fn consume_commands(page: Rc<Page>, mut commands: mpsc::UnboundedReceiver<
     // The embedder released this view. Everything it owns goes with the
     // tasks the owner is about to reclaim.
     page.end();
+}
+
+/// The one consumer of this view's metrics watch: one settle per change.
+///
+/// A settle rather than an operation, because there is nothing to do in the
+/// realm — the epilogue's `commit_if_dirty` reads the watch itself, adopts
+/// whatever it holds and commits if that moved the viewport. What this task
+/// exists for is the case where nothing else would enter the realm at all: a
+/// painter that resizes while the page is idle.
+///
+/// A receiver of its own, because `borrow_and_update` marks a value seen for
+/// one receiver alone: the document's clone and this one are independent
+/// readers of the same state.
+///
+/// While the page is still loading [`Page::enter`] answers `None` at once and
+/// nothing happens, which is right — a document that does not exist yet reads
+/// the watch when it is created.
+async fn consume_metrics(page: Rc<Page>, mut metrics: watch::Receiver<Option<Viewport>>) {
+    loop {
+        tokio::select! {
+            biased;
+            () = page.lifetime.token().cancelled() => return,
+            changed = metrics.changed() => if changed.is_err() {
+                // The view's seat is gone, so no further metrics can arrive.
+                return;
+            },
+        }
+        <Page as Settles>::settle(&page).await;
+    }
 }
 
 /// The page's boot future: every author sheet in cascade order, then the

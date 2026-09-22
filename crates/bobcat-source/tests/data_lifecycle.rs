@@ -5,7 +5,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bobcat_core::{EngineError, EngineEvent, LynxGroup, LynxView, NoWakeup, StyleThreads};
+use bobcat_core::{
+    DrawTarget, EngineError, EngineEvent, LynxGroup, LynxView, NoWakeup, Painter, StyleThreads,
+};
 use bobcat_resources::{Resources, ResourcesConfig};
 use bobcat_source::PageSource;
 use serde_json::json;
@@ -135,6 +137,12 @@ async fn public_updates_require_mts_boot_then_preserve_order() {
             sources,
         )
         .unwrap();
+    // Boot's first flush waits for a painter to bind the view, and everything
+    // below is past it.
+    let mut painter = Painter::new(DrawTarget::Offscreen, 100.0, 100.0, 1.0)
+        .await
+        .unwrap();
+    painter.attach(&view).unwrap();
     reject_updates(&view);
     let mut seen = Observed::default();
     until(&mut view, &mut seen, "mts render 2").await;

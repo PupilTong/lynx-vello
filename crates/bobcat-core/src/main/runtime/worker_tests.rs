@@ -168,6 +168,7 @@ impl Pair {
         let (runtime, events) = MainThreadRuntime::new(
             &mut js,
             ingredients,
+            crate::main::runtime::bound_metrics(crate::view::Viewport::new(32.0, 24.0)),
             outbox,
             &WorkerFactory::new(home.commands()),
             thread.handle(),

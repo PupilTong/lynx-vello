@@ -350,6 +350,13 @@ async fn xml_background_loads_esm_through_the_view_fetcher() {
         )
         .unwrap();
     assert!(!view.is_ready());
+    // Boot's first flush waits for a painter to bind the view, and readiness
+    // is past it.
+    let mut painter =
+        bobcat_core::Painter::new(bobcat_core::DrawTarget::Offscreen, 32.0, 24.0, 1.0)
+            .await
+            .unwrap();
+    painter.attach(&view).unwrap();
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     let mut script_finished = false;
     let mut received_queued_event = false;

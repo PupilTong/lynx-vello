@@ -14,7 +14,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use dom::event::EventSteps;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use crate::background::{WorkerCommand, WorkerEvent};
 use crate::jobs::JsThread;
@@ -71,8 +71,9 @@ impl ScriptHarness {
     /// only useful response.
     #[must_use]
     pub fn new() -> Self {
+        let viewport = Viewport::new(393.0, 727.0);
         let ingredients = DocumentIngredients {
-            viewport: Viewport::new(393.0, 727.0),
+            viewport,
             config: PageConfig::default(),
             text_context: None,
             sheets: Vec::new(),
@@ -87,6 +88,9 @@ impl ScriptHarness {
         let (runtime, worker_events) = MainThreadRuntime::new(
             &mut js_runtime,
             ingredients,
+            // Bound from the start: a benchmark plays the painter as well as
+            // the view, and an unbound flush would park.
+            watch::channel(Some(viewport)).1,
             outbox,
             &WorkerFactory::new(workers),
             thread.handle(),

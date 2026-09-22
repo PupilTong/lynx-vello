@@ -30,7 +30,10 @@ await Promise.resolve().then(() => __FlushElementTree());
 The flush follows jobs already queued by the hooks. A job may enqueue another
 job behind the flush: `render -> job 1 -> flush -> job 2` is expected. The await
 keeps the flush in the boot completion/failure path; it does not await hook
-results or drain jobs recursively inside a host callback. The existing outer
+results or drain jobs recursively inside a host callback. This being boot's
+last act is also where a view waits for a painter to bind it: before the first
+binding the flush holds its frame and parks the job it runs in, and a release
+while it is parked throws there, which fails the boot. The existing outer
 checkpoint continues to report unhandled rejections and enforce its deadline,
 and runs the runtime's queued jobs until the queue is empty, as a browser's
 microtask checkpoint does: no job budget bounds it, and there is no incomplete

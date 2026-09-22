@@ -135,6 +135,7 @@ fn runtime_over(
     let (runtime, worker_events) = MainThreadRuntime::new(
         &mut js_runtime,
         ingredients,
+        bound_metrics(Viewport::new(393.0, 727.0)),
         outbox,
         &WorkerFactory::new(workers),
         thread.handle(),
@@ -212,6 +213,7 @@ fn background_pair(main: &str, background: &str) -> BackgroundPair {
     let (mut runtime, events) = MainThreadRuntime::new(
         &mut js,
         ingredients,
+        bound_metrics(Viewport::new(393.0, 727.0)),
         outbox,
         &WorkerFactory::new(home.commands()),
         thread.handle(),

@@ -340,9 +340,11 @@ fn runtime_over_watching_names(
     install_shared_modules(&mut js_runtime).expect("the shared modules register");
     let (workers, inbox) = mpsc::unbounded_channel();
     let thread = JsThread::new();
+    let viewport = ingredients.viewport;
     let (runtime, worker_events) = MainThreadRuntime::new(
         &mut js_runtime,
         ingredients,
+        bound_metrics(viewport),
         outbox,
         &WorkerFactory::new(workers),
         thread.handle(),
@@ -400,6 +402,7 @@ fn two_view_group_with(
         let (runtime, worker_events) = MainThreadRuntime::new(
             &mut js_runtime,
             ingredients(),
+            bound_metrics(Viewport::new(393.0, 727.0)),
             outbox,
             &workers,
             thread.handle(),
@@ -4349,7 +4352,7 @@ fn collecting_a_js_style_handle_sends_no_native_release_or_load_request() {
 /// refused.
 #[test]
 fn one_mts_future_times_out_then_settles_as_a_promise_and_refuses_a_later_wait() {
-    let mut view = crate::test_support::TestViewSpec::new(
+    let mut engine = crate::test_support::TestViewSpec::new(
         r"
         import { Future } from 'bobcat:future';
         import { testFuture } from 'bobcat-internal:host';
@@ -4378,12 +4381,12 @@ fn one_mts_future_times_out_then_settles_as_a_promise_and_refuses_a_later_wait()
         __CreatePage();
     ",
     )
-    .create_view(Arc::new(NoWakeup));
+    .create(Arc::new(NoWakeup));
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let mut logged = Vec::new();
     while logged.len() < 5 {
-        for event in view.pump() {
+        for event in engine.pump() {
             match event {
                 crate::EngineEvent::ConsoleMessage { message, .. } => logged.push(message),
                 crate::EngineEvent::StartupFailed(error) => panic!("boot failed: {error}"),
