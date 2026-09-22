@@ -645,6 +645,33 @@ fn a_snapping_container_rests_on_a_position_after_its_first_commit() {
     assert_intent(&engine, 3, 50.0);
 }
 
+/// `scroll-initial-target: nearest` on the third card sets the scroller's
+/// initial position in the document itself, inside the boot's own commit,
+/// so the published frame — and the painter's at-rest rule — start from it.
+#[test]
+fn an_initial_scroll_target_positions_the_container_in_the_boot_commit() {
+    let page = snapping_page("", "", 200, 0).replace(
+        "__SetInlineStyles(card, 'flex-shrink:0;width:200px;height:200px;');",
+        "__SetInlineStyles(card, 'flex-shrink:0;width:200px;height:200px;'
+              + (i === 2 ? 'scroll-initial-target:nearest' : ''));",
+    );
+    let mut engine = booted(&page);
+    assert_eq!(
+        scroll_offset_of(&mut engine, 3),
+        dom::Vector2D::new(0.0, 400.0),
+        "the document rests on the target"
+    );
+    engine.dispatch_input(InputEvent::wheel(
+        Point2D::new(100.0, 100.0),
+        dom::Vector2D::zero(),
+    ));
+    assert_eq!(
+        engine.painter.scroll_intents.offset_for(node_id(3)),
+        None,
+        "nothing for the painter to override"
+    );
+}
+
 /// A wheel over scrollable content scrolls it (the router's decision,
 /// landing in the intents) and dispatches `wheel` with its delta in
 /// the detail — in that order.

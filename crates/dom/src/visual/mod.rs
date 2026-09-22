@@ -120,6 +120,7 @@ pub use self::frame::{
 pub use self::relevance::ContentVisibilityChange;
 use crate::render::image::{ImageEvent, ImageOutcome, ImageRole};
 use crate::scroll::SnapPoint;
+use crate::scroll::initial_target::InitialTarget;
 use crate::tree::document::Document;
 use crate::{FrameImages, NodeId};
 
@@ -137,6 +138,10 @@ pub(crate) struct PaintOrder {
     /// Every scroll slot's snap positions, in slot order; see
     /// [`ScrollSlot::snap`].
     snap_points: Vec<SnapPoint>,
+    /// Every `scroll-initial-target: nearest` element the build reached,
+    /// with its slot; see `scroll::initial_target`. Rarely non-empty, so
+    /// not a recycled buffer.
+    initial_targets: Vec<InitialTarget>,
     commit_id: u64,
 }
 
@@ -221,6 +226,7 @@ impl PaintOrder {
             animations: Vec::new(),
             auto_boxes: Vec::new(),
             snap_points: Vec::new(),
+            initial_targets: Vec::new(),
             commit_id: 0,
         }
     }
@@ -262,6 +268,12 @@ impl PaintOrder {
     #[must_use]
     pub(crate) fn snap_points(&self) -> &[SnapPoint] {
         &self.snap_points
+    }
+
+    /// Every `scroll-initial-target: nearest` element this build reached.
+    #[must_use]
+    pub(crate) fn initial_targets(&self) -> &[InitialTarget] {
+        &self.initial_targets
     }
 
     #[must_use]
@@ -498,6 +510,16 @@ impl<T: Sync> Document<T> {
     fn build_frame_with_relevance(&mut self) -> PaintOrder {
         let mut scratch = self.painter.get_mut().take_relevance_scratch();
         let mut frame = self.build_frame();
+        if self.scroll_to_initial_targets(&frame) {
+            // css-scroll-snap-2's initial scroll position is set from the
+            // built frame and must be in the frame this commit publishes,
+            // so the frame it was decided on is void — same commit, as
+            // below.
+            let stale = std::mem::replace(&mut frame, PaintOrder::empty());
+            self.painter.get_mut().restore_spare_buffers(stale);
+            frame = self.build_frame();
+            self.clear_visual_dirty();
+        }
         let mut pass = 1;
         while pass < relevance::RELEVANCE_PASSES && self.determine_relevance(&mut scratch, &frame) {
             // The frame the flips were decided on is void; its storage is

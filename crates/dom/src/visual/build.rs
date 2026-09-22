@@ -34,6 +34,7 @@ use hughie::style::{
     Contain, ContentVisibility, CoreStyle, Overflow, PositionProperty, visibility,
 };
 use hughie::tree::{Layout, LayoutTree};
+use stylo::computed_values::scroll_initial_target;
 use stylo::properties::ComputedValues;
 use stylo::values::computed::{CSSPixelLength, PointerEvents};
 
@@ -47,6 +48,7 @@ use crate::layout::{
     DisplayMode, StyleView, box_parent, display_mode, establishes_absolute_containing_block,
     establishes_fixed_containing_block, skips_contents,
 };
+use crate::scroll::initial_target::InitialTarget;
 use crate::scroll::{ScrollAxes, SnapAxisPositions, SnapPoint};
 use crate::tree::document::{Document, DocumentLayoutState, NodeSlot, TreeArenas};
 use crate::tree::node::Node;
@@ -76,6 +78,7 @@ pub(crate) fn build<T: Sync>(
         animations: buffers.animations,
         auto_boxes: buffers.auto_boxes,
         snap_points: buffers.snap_points,
+        initial_targets: Vec::new(),
         current_layer: None,
         scratch,
     };
@@ -117,6 +120,7 @@ pub(crate) fn build<T: Sync>(
             animations: builder.animations,
             auto_boxes: builder.auto_boxes,
             snap_points: builder.snap_points,
+            initial_targets: builder.initial_targets,
             commit_id,
         },
         builder.scratch,
@@ -345,6 +349,9 @@ struct Builder<'doc, T> {
     auto_boxes: Vec<AutoBox>,
     /// Every slot's snap positions; see [`ScrollSlot::snap`].
     snap_points: Vec<SnapPoint>,
+    /// Every `scroll-initial-target: nearest` element reached, with the
+    /// slot it lives in.
+    initial_targets: Vec<InitialTarget>,
     current_layer: Option<usize>,
     scratch: BuildScratch,
 }
@@ -1104,6 +1111,11 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         own_slot: Option<u32>,
         own_animation: Option<u32>,
     ) -> ClipContexts {
+        if style.clone_scroll_initial_target() == scroll_initial_target::T::Nearest
+            && let Some(chain) = ctx.current.chain
+        {
+            self.initial_targets.push(InitialTarget { chain, node });
+        }
         let mut inner = ctx;
         let clipped = clipped_axes(self.node(node), style);
         if clipped.x || clipped.y {

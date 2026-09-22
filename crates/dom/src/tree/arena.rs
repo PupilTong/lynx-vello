@@ -465,6 +465,12 @@ pub(crate) struct DocumentLayoutState {
     /// them. Empty for every page that has none, which is why the interleave
     /// costs one `is_empty` test to a page that does not use the feature.
     container_deferrals: Vec<DeferredContainer>,
+    /// Each scroll container that has honoured a `scroll-initial-target`
+    /// element, with that element; see `scroll::initial_target`. A side
+    /// table rather than a per-node field because almost no container ever
+    /// has one: a page without the property keeps it empty and pays
+    /// nothing per node.
+    pub(crate) initial_targets: Vec<(NodeId, NodeId)>,
 }
 
 /// A `container-type: size` box whose committing run laid no contents out.
@@ -488,6 +494,7 @@ impl DocumentLayoutState {
             probed_text: Vec::new(),
             interleaves_containers: false,
             container_deferrals: Vec::new(),
+            initial_targets: Vec::new(),
         }
     }
 
@@ -568,6 +575,7 @@ impl DocumentLayoutState {
             probed_text: _,
             interleaves_containers: _,
             container_deferrals: _,
+            initial_targets: _,
         } = self;
         let context = text_context
             .get_or_insert_with(|| Box::new(TextContext::new()))
@@ -610,6 +618,7 @@ impl DocumentLayoutState {
             probed_text: _,
             interleaves_containers: _,
             container_deferrals: _,
+            initial_targets: _,
         } = self;
         // Unlike the path this replaces, restoring can re-enter the shaper —
         // a truncating block rebuilds its display layout — so the context is

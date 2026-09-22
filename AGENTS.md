@@ -1912,6 +1912,9 @@ Subsystems:
   `scroll-snap-type`/`-align`/`-stop`, `scroll-padding` and `scroll-margin`,
   published per scroll slot, settled on at a drag's end, stepped to by a
   wheel tick, and re-snapped at rest on every commit; no snap events.
+  `scroll/initial_target.rs` is css-scroll-snap-2's `scroll-initial-target`:
+  the build records the `nearest` elements, the render scrolls each
+  container to its first one and rebuilds the frame in the same commit.
 - `input/` and `event/` — the `InputEvent` host seam, `Document::event_steps`,
   which computes a path for a *script* dispatch above, and
   `Document::dispatch_element_event`, which walks that path here for an event

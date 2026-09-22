@@ -366,7 +366,7 @@ fn snap_point(
     }
 }
 
-fn scroll_padding(value: NonNegativeLengthPercentageOrAuto, basis: f32) -> f32 {
+pub(super) fn scroll_padding(value: NonNegativeLengthPercentageOrAuto, basis: f32) -> f32 {
     match value {
         NonNegativeLengthPercentageOrAuto::Auto => 0.0,
         NonNegativeLengthPercentageOrAuto::LengthPercentage(length) => {
@@ -500,7 +500,11 @@ impl<T> Document<T> {
     /// `id`'s border box in `container`'s scrolling coordinates: relative to
     /// the container's padding-box origin, unscrolled. `None` when `id` is
     /// not laid out under `container`.
-    fn rect_in_scroll_container(&self, id: NodeId, container: NodeId) -> Option<Rect<f32>> {
+    pub(super) fn rect_in_scroll_container(
+        &self,
+        id: NodeId,
+        container: NodeId,
+    ) -> Option<Rect<f32>> {
         let layout = self.rounded_layout(id)?;
         let mut origin = Point2D::new(layout.location.x, layout.location.y);
         let mut current = self.get(id)?;

@@ -748,6 +748,14 @@ and §D.16 with what the wire format actually permits.)*
       `scrollsnapchange`/`scrollsnapchanging` events of css-scroll-snap-2.
       **Not implemented**: §7's same-element preference across axes, and
       snap areas escaping from inside a nested scroll container.
+    - **`scroll-initial-target: none | nearest`** (css-scroll-snap-2 §3.1),
+      declared under the `lynx` feature only since gecko has no
+      declaration. The build records the `nearest` elements per scroll slot;
+      the document scrolls each container to its first-in-tree-order target
+      as `scrollIntoView` with `block: start`, `inline: nearest` and rebuilds
+      the frame in the same commit. Each new target is honoured once (first
+      layout, or a later arrival); the "user no longer interested" escape is
+      not modelled, and an unchanged target never re-scrolls.
 
     The one chain walk (`drive_chain`) and the snap rules are shared by the
     document and by `bobcat-core`'s painter over the frame's scroll-slot
