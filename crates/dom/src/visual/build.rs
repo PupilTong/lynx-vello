@@ -42,7 +42,7 @@ use super::geometry::{inner_radii, resolve_corner_radii};
 use super::transform::{ParentPerspective, stacking_context_matrix};
 use super::{
     AnimationSlot, AutoBox, ClipNode, CornerRadii, FrameBuffers, PaintItem, PaintItemKind,
-    PaintOrder, RenderLayer, ScrollSlot, SnapSlot, SnapSlotAxis, stacking,
+    PaintOrder, RenderLayer, ScrollSlot, SnapSlot, SnapSlotAxis, StickySlot, stacking,
 };
 use crate::layout::{
     DisplayMode, StyleView, box_parent, display_mode, establishes_absolute_containing_block,
@@ -76,6 +76,7 @@ pub(crate) fn build<T: Sync>(
         layers: buffers.layers,
         slots: buffers.slots,
         animations: buffers.animations,
+        stickies: buffers.stickies,
         auto_boxes: buffers.auto_boxes,
         snap_points: buffers.snap_points,
         initial_targets: Vec::new(),
@@ -88,6 +89,7 @@ pub(crate) fn build<T: Sync>(
             && builder.layers.is_empty()
             && builder.slots.is_empty()
             && builder.animations.is_empty()
+            && builder.stickies.is_empty()
             && builder.auto_boxes.is_empty()
             && builder.snap_points.is_empty(),
         "a recycled frame is emptied before it is handed back to the builder",
@@ -109,6 +111,7 @@ pub(crate) fn build<T: Sync>(
             ClipContexts::default(),
         );
     }
+    builder.scratch.scroll_stickies.clear();
     builder.scratch.assert_settled();
 
     (
@@ -118,6 +121,7 @@ pub(crate) fn build<T: Sync>(
             layers: builder.layers,
             slots: builder.slots,
             animations: builder.animations,
+            stickies: builder.stickies,
             auto_boxes: builder.auto_boxes,
             snap_points: builder.snap_points,
             initial_targets: builder.initial_targets,
@@ -148,6 +152,8 @@ pub(crate) struct BuildScratch {
     stream: Vec<ItemRecord>,
     pseudo_pool: Vec<Vec<ItemRecord>>,
     pseudo_free: Vec<u32>,
+    /// Sticky chain carrying each scrollport, parallel with the current slot table.
+    scroll_stickies: Vec<Option<u32>>,
 }
 
 impl BuildScratch {
@@ -177,6 +183,10 @@ impl BuildScratch {
             "the child ranking stack is balanced"
         );
         debug_assert!(self.members.is_empty(), "the member stack is balanced");
+        debug_assert!(
+            self.scroll_stickies.is_empty(),
+            "scrollport attachments are frame-local"
+        );
         debug_assert!(
             self.stream.is_empty(),
             "the in-flow stream stack is balanced"
@@ -283,6 +293,8 @@ struct FlowContext {
     /// animation-slot table. Content under it composes through that slot's
     /// sampled delta.
     animation: Option<u32>,
+    /// Sticky displacements inherited along this containing-block chain.
+    sticky: Option<u32>,
 }
 
 /// The flow contexts visible at one point of the walk: the in-flow one plus
@@ -308,6 +320,7 @@ struct ItemRecord {
     hit_testable: bool,
     slot: Option<u32>,
     animation: Option<u32>,
+    sticky: Option<u32>,
 }
 
 /// One member of a stacking context, awaiting the `(level, seq)` sort.
@@ -344,6 +357,7 @@ struct Builder<'doc, T> {
     layers: Vec<RenderLayer>,
     slots: Vec<ScrollSlot>,
     animations: Vec<AnimationSlot>,
+    stickies: Vec<StickySlot>,
     /// Every `content-visibility: auto` box this build reached, in build
     /// order. Independent of `items`: see [`AutoBox`].
     auto_boxes: Vec<AutoBox>,
@@ -378,6 +392,8 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         node: NodeId,
         style: &ComputedValues,
         parent: Option<u32>,
+        sticky: Option<u32>,
+        world: &Transform3D<f32>,
     ) -> Option<u32> {
         let state = self.state.at(self.tree.live_slot(node));
         let scroll_box = scroll::resolve(style, &state.slot.rounded, state.scroll_offset)?;
@@ -388,6 +404,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
                 x: positions.x.map(|axis| self.push_snap_axis(&axis)),
                 y: positions.y.map(|axis| self.push_snap_axis(&axis)),
             });
+        self.scratch.scroll_stickies.push(sticky);
         self.slots.push(ScrollSlot {
             node,
             parent,
@@ -398,6 +415,10 @@ impl<'doc, T: Sync> Builder<'doc, T> {
             offset: scroll_box.offset,
             max_offset: scroll_box.max_offset(),
             scrollport: scroll_box.scrollport,
+            viewport_axes: [
+                euclid::vec2(world.m11, world.m12),
+                euclid::vec2(world.m21, world.m22),
+            ],
         });
         Some(
             u32::try_from(self.slots.len() - 1)
@@ -416,6 +437,55 @@ impl<'doc, T: Sync> Builder<'doc, T> {
             start,
             end: start + u32::try_from(axis.points.len()).expect("bounded by the table"),
         }
+    }
+
+    fn allocate_sticky_slot(
+        &mut self,
+        node: NodeId,
+        style: &ComputedValues,
+        flow: FlowContext,
+        parent_transform: &Transform3D<f32>,
+    ) -> Option<u32> {
+        if style.clone_position() != PositionProperty::Sticky {
+            return None;
+        }
+        let mut scroll = [None; 2];
+        let mut current = flow.chain;
+        while let Some(index) = current {
+            let entry = &self.slots[index as usize];
+            let values = self
+                .document
+                .paint_style(entry.node)
+                .expect("a recorded scroll container keeps its style through the build");
+            if scroll[0].is_none() && values.clone_overflow_x().is_scrollable() {
+                scroll[0] = Some(index);
+            }
+            if scroll[1].is_none() && values.clone_overflow_y().is_scrollable() {
+                scroll[1] = Some(index);
+            }
+            current = entry.parent;
+        }
+        let axes = super::sticky::axes(
+            self.document,
+            node,
+            scroll[0].map(|index| self.slots[index as usize].node),
+            scroll[1].map(|index| self.slots[index as usize].node),
+        );
+        if axes.iter().all(|axis| axis.offset_bounds() == (0.0, 0.0)) {
+            return None;
+        }
+        self.stickies.push(StickySlot {
+            parent: flow.sticky,
+            scroll,
+            scroll_sticky: scroll
+                .map(|index| index.and_then(|index| self.scratch.scroll_stickies[index as usize])),
+            axes,
+            parent_transform: *parent_transform,
+        });
+        // A changing ancestor transform changes the coordinate map the
+        // constraints use, so it must rebuild the retained geometry.
+        self.kill_animation_chain(flow.animation);
+        Some(u32::try_from(self.stickies.len() - 1).expect("a frame cannot hold 2^32 sticky boxes"))
     }
 
     /// Records `node` in the frame's animation-slot table when it carries a
@@ -557,6 +627,8 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         seed: ClipContexts,
     ) {
         let values = style.values();
+        let own_sticky = self.allocate_sticky_slot(root, values, seed.current, parent_world);
+        let sticky = own_sticky.or(seed.current.sticky);
         let size = {
             let layout = self.rounded(root);
             Size2D::new(layout.size.width, layout.size.height)
@@ -585,10 +657,11 @@ impl<'doc, T: Sync> Builder<'doc, T> {
             size,
             seed.current.chain,
             animation,
+            sticky,
             force_group,
         );
 
-        let own_slot = self.allocate_scroll_slot(root, values, seed.current.chain);
+        let own_slot = self.allocate_scroll_slot(root, values, seed.current.chain, sticky, &world);
         if own_slot.is_some() {
             // The animated element is itself a scroll container: its own
             // clip and its content's scroll translation cannot ride a
@@ -611,6 +684,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
                 clip: seed.current.clip,
                 chain: seed.current.chain,
                 animation,
+                sticky,
                 layer: self.current_layer,
             });
         }
@@ -626,6 +700,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
                 hit_testable,
                 slot: own_slot.or(seed.current.chain),
                 animation,
+                sticky,
             });
         }
 
@@ -634,7 +709,9 @@ impl<'doc, T: Sync> Builder<'doc, T> {
             self.close_layer(layer);
             return;
         }
-        let ctx = self.enter_element(root, values, &world, seed, own_slot, own_animation);
+        let mut inner_seed = seed;
+        inner_seed.current.sticky = sticky;
+        let ctx = self.enter_element(root, values, &world, inner_seed, own_slot, own_animation);
         if mode == DisplayMode::Text && visible {
             // A text block paints its whole subtree as one paragraph, over its
             // own box and under whatever the collection walk below still finds
@@ -715,6 +792,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         size: Size2D<f32>,
         slot: Option<u32>,
         animation: Option<u32>,
+        sticky: Option<u32>,
         force_group: bool,
     ) -> Option<usize> {
         if !force_group && !stacking::needs_group_rendering(values) {
@@ -729,6 +807,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
             radii: resolve_corner_radii(values, size),
             slot,
             animation,
+            sticky,
             items: start..start,
         });
         let index = self.layers.len() - 1;
@@ -899,6 +978,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
             hit_testable,
             slot: ctx.current.chain,
             animation: ctx.current.animation,
+            sticky: ctx.current.sticky,
         });
     }
 
@@ -988,6 +1068,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
                     hit_testable,
                     outer.current.chain,
                     outer.current.animation,
+                    outer.current.sticky,
                 ),
             );
             if child.mode == DisplayMode::Text {
@@ -1016,6 +1097,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
                         hit_testable,
                         slot: outer.current.chain,
                         animation: outer.current.animation,
+                        sticky: outer.current.sticky,
                     },
                 );
             }
@@ -1148,6 +1230,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
                 rect,
                 radii,
                 slot: inner.current.chain,
+                sticky: inner.current.sticky,
             });
             inner.current.clip = Some(self.clips.len() - 1);
             // A clip rect never rides a sampled delta; anything animated
@@ -1209,6 +1292,7 @@ fn push_record(items: &mut Vec<PaintItem>, record: &ItemRecord, world: &Transfor
         hit_testable: record.hit_testable,
         slot: record.slot,
         animation: record.animation,
+        sticky: record.sticky,
     });
 }
 
@@ -1225,6 +1309,7 @@ fn element_record(
     hit_testable: bool,
     slot: Option<u32>,
     animation: Option<u32>,
+    sticky: Option<u32>,
 ) -> ItemRecord {
     ItemRecord {
         node,
@@ -1236,6 +1321,7 @@ fn element_record(
         hit_testable,
         slot,
         animation,
+        sticky,
     }
 }
 

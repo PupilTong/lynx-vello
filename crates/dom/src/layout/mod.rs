@@ -455,6 +455,8 @@ impl<T> Document<T> {
     /// with scrollers between it and its containing block, exactly as it
     /// does not in the paint order). The box's own scroll offset never
     /// applies: scrolling a container does not move the container.
+    /// Sticky offsets are sampled from these same live scroll positions,
+    /// including those inherited from sticky containing-block ancestors.
     ///
     /// `None` when the element has no box at all: `display: none` or
     /// `display: contents`, a node that is not a styled element, a node no
@@ -474,6 +476,10 @@ impl<T> Document<T> {
         let layout = self.rounded_layout(id)?;
         let size = Size2D::new(layout.size.width, layout.size.height);
         let mut origin = Point2D::new(layout.location.x, layout.location.y);
+        let mut sticky_offsets = Vec::new();
+        if style.values().clone_position() == PositionProperty::Sticky {
+            origin += crate::visual::sticky::live_offset(self, id, &mut sticky_offsets);
+        }
         // The position the *escaping* box was keyed on, which decides which
         // ancestor is its containing block — and so which scroll offsets
         // move it. It is the computed value, not hughie's parent-lowered
@@ -507,6 +513,10 @@ impl<T> Document<T> {
                 | PositionProperty::Sticky => true,
             };
             if on_chain {
+                if ancestor_style.values().clone_position() == PositionProperty::Sticky {
+                    origin +=
+                        crate::visual::sticky::live_offset(self, ancestor_id, &mut sticky_offsets);
+                }
                 if self.is_scroll_container(ancestor_id) {
                     origin -= self.scroll_offset(ancestor_id);
                 }
@@ -593,6 +603,19 @@ impl<T> Document<T> {
     #[must_use]
     pub(crate) fn paint_style(&self, id: crate::NodeId) -> Option<&ComputedValues> {
         self.get(id)?.layout_computed_style()
+    }
+
+    /// The device-snapped grid area a sticky grid item's insets resolve
+    /// against, in its box parent's border-box coordinates, when the last
+    /// layout recorded one; `None` for every other box.
+    #[must_use]
+    pub(crate) fn sticky_containing_block(&self, id: crate::NodeId) -> Option<Edges<f32>> {
+        let slot = self.slot(id)?;
+        self.layout_state()
+            .sticky_containing_blocks
+            .iter()
+            .find(|entry| entry.node == slot)
+            .and_then(|entry| entry.rounded)
     }
 
     #[must_use]

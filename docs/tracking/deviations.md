@@ -42,14 +42,14 @@ consequential choice about whether to follow the spec or the quirk.
   stays a clip that scrolls only programmatically, which is what keeps the
   `hidden`-on-every-element UA default from making the whole page
   drag-scrollable, and `clip` is not a scroll container at all.
-- **`position: sticky` does not stick (2026-07-30)** — it parses in the
-  fork's grammar and Lynx itself implements scroll-container-relative
-  stickiness, but lynx-vello's paint build treats a sticky box as normal flow,
-  so it scrolls away with its container. **Not a decision — an unimplemented
-  gap**, recorded because interactive scrolling made it observable: before that
-  landed, sticky and `relative` were indistinguishable. What is missing is the
-  css-position-3 §6.3 offset clamp against the scrollport; the box already
-  sits in the right flow and scrolls with the right ancestor.
+- **`position: sticky` gap resolved (2026-09-22)** — sticky boxes keep
+  their normal-flow layout and receive scrollport-relative offsets during
+  composition and hit testing. Insets use the nearest scrollport on each
+  axis, `hidden` counts and `clip` does not, and the containing block limits
+  movement. Grid items use their grid area. The immutable frame carries the
+  constraints, so live scrolling needs no layout or commit while the frame's
+  encode window covers the new offset. List `sticky-top`/`sticky-bottom`
+  attribute rules remain a separate component integration task.
 - **`overflow: auto` omitted** — CSS has it; this engine does not.
   **Decision (user, 2026-07-29): leave it out.** Nothing here paints
   scrollbars, so `auto` ("scrollbars only when needed") would behave exactly
@@ -968,8 +968,8 @@ consequential choice about whether to follow the spec or the quirk.
   `full-span` as a placement rule. `span-count`/`column-count`,
   `sticky-offset` and a cell's `estimated-main-axis-size-px` reach the cascade
   as presentational hints. Still absent from the sheet:
-  `sticky-top`/`sticky-bottom` (`position: sticky` does not stick in this
-  engine yet, so there is nothing for a sticky rule to do), `item-snap` /
+  `sticky-top`/`sticky-bottom` attribute rules (CSS `position: sticky` itself
+  is implemented), `item-snap` /
   `paging-enabled` scroll snapping, the scrollbar rules, the threshold
   observers, `initial-scroll-index`, every list event and every list UI
   method — and cell recycling, which this engine does not do at all: a

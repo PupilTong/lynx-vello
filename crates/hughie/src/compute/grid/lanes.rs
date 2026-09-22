@@ -50,9 +50,11 @@ use crate::compute::util::{
     normalize_item_alignment, own_scrollable_overflow, resolve_gap_axis, resolve_length_percentage,
     sort_and_assign_layout_order,
 };
-use crate::geometry::{Point, Size};
+use crate::geometry::{Edges, Point, Size};
 use crate::style::containment::contained_axes;
-use crate::style::{Contain, CoreStyle, FlowTolerance, GridLanesStyle, GridStyle, Overflow};
+use crate::style::{
+    Contain, CoreStyle, FlowTolerance, GridLanesStyle, GridStyle, Overflow, PositionProperty,
+};
 use crate::tree::{
     AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutOutput, LayoutTree, RequestedAxis,
 };
@@ -277,6 +279,8 @@ struct PlacedItem<N> {
     first_in_track: bool,
     baseline: Option<f32>,
     overflow: Point<Overflow>,
+    /// A sticky item's grid-axis lane span, its containing block there.
+    sticky_area: Option<Edges<f32>>,
 }
 
 /// Everything §4.4's pass reads that is fixed for the whole pass.
@@ -465,6 +469,16 @@ where
         layout.border = item.border;
         layout.padding = item.padding;
         layout.margin = margin;
+        // css-grid-3 §4.4.1: a sticky item's containing block spans its
+        // lanes in the grid axis; the stacking axis is filled in at commit,
+        // once the container's content extent is known.
+        let sticky_area = (item.position == PositionProperty::Sticky).then(|| {
+            let mut containing = Edges::ZERO;
+            let area_start = axis.point(context.content_origin) + grid_start;
+            axis.set_start(&mut containing, area_start);
+            axis.set_end(&mut containing, area_start + track_area);
+            containing
+        });
         axis.set_point(
             &mut layout.location,
             axis.point(context.content_origin)
@@ -476,6 +490,7 @@ where
         placed.push(PlacedItem {
             node: item.key.node,
             layout,
+            sticky_area,
             stacking_start: position,
             stacking_extent,
             stacking_bias: stacking.point(context.content_origin)
@@ -839,7 +854,22 @@ where
     };
     if commits_layout {
         for placed in pass.items {
+            // css-grid-3 §4.4.1: the grid axis uses its area; the stacking
+            // axis uses the container's full content box. A scroll container
+            // extends the latter over its scrolling contents.
+            let start = stacking_axis.start(metrics.border) + stacking_axis.start(metrics.padding);
+            let end = if style.overflow().x.is_scrollable() || style.overflow().y.is_scrollable() {
+                stacking_axis.size(content_size) - stacking_axis.end(metrics.padding)
+            } else {
+                start + stacking_inner
+            };
+            let sticky_area = placed.sticky_area.map(|mut containing| {
+                stacking_axis.set_start(&mut containing, start);
+                stacking_axis.set_end(&mut containing, end);
+                containing
+            });
             tree.set_unrounded_layout(state, placed.node, placed.layout);
+            tree.set_sticky_containing_block(state, placed.node, sticky_area);
         }
         for (document_index, child) in hidden.expect("commit keeps hidden grid-lanes items") {
             hide_subtree(tree, state, child);

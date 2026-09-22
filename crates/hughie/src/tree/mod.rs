@@ -8,7 +8,7 @@ pub use io::{
 use smallvec::SmallVec;
 
 use crate::cache::Cache;
-use crate::geometry::{Point, Size};
+use crate::geometry::{Edges, Point, Size};
 use crate::style::{CoreStyle, Display};
 
 /// Per-node marks that outlive one layout pass: what the rounding tail still
@@ -242,6 +242,45 @@ pub trait LayoutTree {
 
     fn clear_layout_cache(&self, state: &mut Self::State, node: Self::NodeId) {
         self.layout_mut(state, node).clear_layout_cache();
+    }
+
+    /// Records the containing block a `position: sticky` item resolves its
+    /// insets against when that is not its box parent's content box: a grid
+    /// item's grid area (css-position-3 §3.4 over css-grid-1 §9.1), as edges
+    /// in the parent's border-box coordinates, unrounded. `None` retracts an
+    /// earlier record. Committing layouts call this for every grid item;
+    /// the bounds are so rare that the default keeps nothing, and a host
+    /// that pins nothing pays nothing per node — which is why they are not
+    /// a field of [`Layout`].
+    fn set_sticky_containing_block(
+        &self,
+        state: &mut Self::State,
+        node: Self::NodeId,
+        bounds: Option<Edges<f32>>,
+    ) {
+        let _ = (state, node, bounds);
+    }
+
+    /// The unrounded bounds a host recorded through
+    /// [`Self::set_sticky_containing_block`], read back by the rounding pass.
+    fn sticky_containing_block(
+        &self,
+        state: &Self::State,
+        node: Self::NodeId,
+    ) -> Option<Edges<f32>> {
+        let _ = (state, node);
+        None
+    }
+
+    /// The rounding pass's device-snapped copy of the recorded bounds, in
+    /// the same coordinates the rounded [`Layout`] uses.
+    fn set_rounded_sticky_containing_block(
+        &self,
+        state: &mut Self::State,
+        node: Self::NodeId,
+        bounds: Edges<f32>,
+    ) {
+        let _ = (state, node, bounds);
     }
 }
 

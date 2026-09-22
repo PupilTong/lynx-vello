@@ -15,8 +15,10 @@
 //! sandwiches, inset-shadow isolation) are balanced within one item and stay
 //! inside fragments untouched.
 //!
-//! Translation per chain is the sum of the chain's slot offsets, each
-//! snapped to the device pixel grid so composed edges stay crisp.
+//! Scroll translation is the sum of the chain's local slot offsets, each
+//! snapped to the device pixel grid and mapped through the scrollport's
+//! transform. Sticky displacement is sampled from those same offsets and
+//! added to the box, its contents, and its own clips.
 //!
 //! One op pair is not a layer-stack operation: [`ComposeOp::PushFilter`] and
 //! [`ComposeOp::PopFilter`] bracket the ops of a `filter: blur()` group. The
@@ -50,17 +52,19 @@ use crate::vello::kurbo::{Affine, Point, Rect, Size};
 use crate::vello::peniko::{
     BlendMode, BrushRef, Extend, Fill, ImageBrush, ImageData, ImageQuality, ImageSampler,
 };
-use crate::visual::{AnimationSample, ScrollSlot};
+use crate::visual::{AnimationSample, ScrollSlot, StickySample};
 
 /// The compose-time coordinate context one op or fragment rides: the scroll
-/// chain whose translations move it, and the animation chain whose sampled
-/// deltas move it. Scroll translations always apply outside animation deltas
+/// chain whose translations move it, the sticky chain constrained by those
+/// offsets, and the animation chain whose sampled deltas move it.
+/// Scroll and sticky translations always apply outside animation deltas
 /// — export eligibility refuses a scroll container inside an animated
 /// subtree, so the two never interleave.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct ComposeChain {
     pub(crate) scroll: Option<u32>,
     pub(crate) animation: Option<u32>,
+    pub(crate) sticky: Option<u32>,
 }
 
 /// A shape captured at encode time, replayable without the document.
@@ -330,13 +334,13 @@ pub struct FilterGroup {
     /// The device-px region baked, integer-valued.
     pub rect: Rect,
     /// The chain the *texture* composes under. Content inside the range may
-    /// ride inner scroll chains; see [`Self::inner_chains`].
+    /// ride inner scroll or sticky chains; see [`Self::inner_chains`].
     pub(crate) chain: ComposeChain,
     /// For a `filter: blur()` group, the ops strictly between its
     /// `PushFilter` and its `PopFilter`. For a backdrop, the ops from its
     /// Backdrop Root's content start up to the element's own scope open.
     pub(crate) ops: Range<u32>,
-    /// Whether some op in `ops` rides a scroll chain other than `chain` —
+    /// Whether some op in `ops` rides a scroll or sticky chain other than `chain` —
     /// the one condition under which the bake's pixels depend on a scroll
     /// offset, and therefore the one condition under which a scroll
     /// invalidates the bake.
@@ -590,7 +594,7 @@ impl ComposeAssembly {
     }
 
     /// One pass over a backdrop's backward range: whether it holds another
-    /// scroll chain, whether it holds another animation chain, and how many
+    /// scroll or sticky chain, whether it holds another animation chain, and how many
     /// layers it leaves open at its end.
     fn scan_backdrop(&self, ops: &Range<u32>, chain: ComposeChain) -> (bool, bool, u32) {
         let mut scrolls = false;
@@ -603,7 +607,7 @@ impl ComposeAssembly {
                 _ => {}
             }
             if let Some(op) = op.chain(&self.filter_groups) {
-                scrolls |= op.scroll != chain.scroll;
+                scrolls |= op.scroll != chain.scroll || op.sticky != chain.sticky;
                 animations |= op.animation != chain.animation;
             }
         }
@@ -622,7 +626,7 @@ impl ComposeAssembly {
     }
 
     /// Closes the innermost open filter group, completing its op range and
-    /// deciding whether anything inside it rides another scroll chain.
+    /// deciding whether anything inside it rides another scroll or sticky chain.
     pub(crate) fn pop_filter(&mut self) {
         self.seal_fragment();
         let Some(index) = self.open_filter else {
@@ -637,7 +641,7 @@ impl ComposeAssembly {
         };
         let inner = self.program[start as usize..end as usize].iter().any(|op| {
             op.chain(&self.filter_groups)
-                .is_some_and(|op| op.scroll != chain.scroll)
+                .is_some_and(|op| op.scroll != chain.scroll || op.sticky != chain.sticky)
         });
         self.filter_groups[index as usize].inner_chains = inner;
         self.open_filter = parent;
@@ -672,18 +676,25 @@ pub(crate) struct Finished {
 }
 
 /// One chain's full compose transform in CSS px: the animation chain's
-/// sampled deltas (innermost applied first), then the scroll chain's
-/// translation.
+/// sampled deltas (innermost applied first), then the scroll and sticky
+/// translations.
 pub(crate) fn chain_transform(
     slots: &[ScrollSlot],
     samples: &[AnimationSample],
+    stickies: &[StickySample],
     chain: ComposeChain,
     ratio: f32,
     offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
 ) -> Affine {
-    let translation = chain_translation(slots, chain.scroll, ratio, offset_of);
+    let translation = chain_translation(slots, chain.scroll, ratio, offset_of)
+        - sticky_translation(stickies, chain.sticky);
     Affine::translate((-f64::from(translation.x), -f64::from(translation.y)))
         * animation_deltas(samples, chain.animation)
+}
+
+/// Cumulative sticky displacement in viewport CSS pixels.
+pub(crate) fn sticky_translation(samples: &[StickySample], chain: Option<u32>) -> Vector2D<f32> {
+    chain.map_or_else(Vector2D::zero, |index| samples[index as usize].translation)
 }
 
 /// The ordered product of an animation chain's sampled deltas, outermost
@@ -699,8 +710,8 @@ pub(crate) fn animation_deltas(samples: &[AnimationSample], chain: Option<u32>) 
     product
 }
 
-/// One chain's compose translation in CSS px: the sum of its slots' offsets,
-/// each snapped to the device pixel grid.
+/// One chain's compose translation in viewport CSS px: the sum of its local
+/// offsets, each snapped to the device pixel grid and transformed by its slot.
 pub(crate) fn chain_translation(
     slots: &[ScrollSlot],
     chain: Option<u32>,
@@ -712,7 +723,7 @@ pub(crate) fn chain_translation(
     while let Some(index) = current {
         let slot = &slots[index as usize];
         let offset = offset_of(slot).unwrap_or(slot.offset);
-        sum += snap_offset(offset, ratio);
+        sum += slot.viewport_translation(snap_offset(offset, ratio));
         current = slot.parent;
     }
     sum
@@ -755,10 +766,11 @@ pub(crate) fn replay(
     filtered: &[Option<ImageData>],
     slots: &[ScrollSlot],
     samples: &[AnimationSample],
+    stickies: &[StickySample],
     ratio: f32,
     offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
 ) {
-    let transform = device_transform(slots, samples, ratio, offset_of);
+    let transform = device_transform(slots, samples, stickies, ratio, offset_of);
     replay_ops(
         scene,
         Tables {
@@ -780,12 +792,13 @@ pub(crate) fn replay(
 pub(crate) fn device_transform<'a>(
     slots: &'a [ScrollSlot],
     samples: &'a [AnimationSample],
+    stickies: &'a [StickySample],
     ratio: f32,
     offset_of: &'a dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
 ) -> impl Fn(ComposeChain) -> Affine + 'a {
     let scale = f64::from(ratio);
     move |chain| {
-        let css = chain_transform(slots, samples, chain, ratio, offset_of);
+        let css = chain_transform(slots, samples, stickies, chain, ratio, offset_of);
         if scale.is_finite() && scale > 0.0 {
             Affine::scale(scale) * css * Affine::scale(1.0 / scale)
         } else {
@@ -1025,6 +1038,7 @@ mod tests {
         ComposeChain {
             scroll: Some(slot),
             animation: None,
+            sticky: None,
         }
     }
 
@@ -1095,6 +1109,7 @@ mod tests {
         animated.push_op(push(ComposeChain {
             scroll: None,
             animation: Some(0),
+            sticky: None,
         }));
         animated.pop_filter();
         assert!(!animated.finish().filter_groups[0].inner_chains);
@@ -1129,6 +1144,7 @@ mod tests {
             &[],
             groups,
             filtered,
+            &[],
             &[],
             &[],
             1.0,
@@ -1291,6 +1307,7 @@ mod tests {
         let animated = ComposeChain {
             scroll: None,
             animation: Some(0),
+            sticky: None,
         };
         for (chain, op, expected) in [
             (ComposeChain::default(), animated, true),

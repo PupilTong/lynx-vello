@@ -849,6 +849,24 @@ fn rounded_layout(
     (rounded, position)
 }
 
+/// Snaps a sticky item's recorded containing-block edges the way
+/// [`rounded_layout`] snaps the box they bound: in the box parent's
+/// coordinates, through the parent's own snapped position.
+fn rounded_containing_block(
+    bounds: Edges<f32>,
+    scale: f32,
+    parent_position: Point<f32>,
+) -> Edges<f32> {
+    let snap = |value: f32| css_round_to_integer(value * scale) / scale;
+    let snapped_parent = parent_position.map(snap);
+    Edges {
+        left: snap(parent_position.x + bounds.left) - snapped_parent.x,
+        right: snap(parent_position.x + bounds.right) - snapped_parent.x,
+        top: snap(parent_position.y + bounds.top) - snapped_parent.y,
+        bottom: snap(parent_position.y + bounds.bottom) - snapped_parent.y,
+    }
+}
+
 #[allow(
     clippy::fn_params_excessive_bools,
     clippy::too_many_arguments,
@@ -873,6 +891,13 @@ fn round_layout_inner<T: LayoutTree>(
     let visit_pre_node = visit_pre_node && pre_node(tree, state, node);
     let (rounded, position) =
         rounded_layout(&tree.layout(state, node).unrounded, scale, parent_position);
+    if let Some(bounds) = tree.sticky_containing_block(state, node) {
+        tree.set_rounded_sticky_containing_block(
+            state,
+            node,
+            rounded_containing_block(bounds, scale, parent_position),
+        );
+    }
     let slot = tree.layout_mut(state, node);
     // The hook writes the boxes of out-of-flow children here rather than
     // during layout, so read the mark after it has run.
@@ -1184,6 +1209,14 @@ mod tests {
             };
         }
         assert_field_bits!(location, size, content_size, border, padding, margin);
+    }
+
+    #[test]
+    fn grid_containing_block_edges_snap_in_the_box_parents_coordinates() {
+        assert_eq!(
+            rounded_containing_block(edges(1.1, 21.4, 2.1, 17.7), 2.0, Point::new(0.2, 0.3)),
+            edges(1.5, 21.5, 2.0, 17.5)
+        );
     }
 
     #[test]

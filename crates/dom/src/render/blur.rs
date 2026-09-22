@@ -35,10 +35,10 @@
 //! page that neither blurs nor filters a backdrop. Its cache key is the
 //! commit id, plus two conditional terms:
 //!
-//! - the painter's **scroll generation**, when some entry's range rides a scroll chain the entry
-//!   itself does not: a blurred scroller's *content* moves under the blur, so its bake depends on
-//!   the offset, while an ordinary blurred box moves with it and its bake does not. So a scroll
-//!   frame over an ordinary blurred box re-bakes nothing.
+//! - the painter's **scroll generation**, when some entry's range rides a scroll or sticky chain
+//!   the entry itself does not: a blurred scroller's *content* moves under the blur, so its bake
+//!   depends on the offset, while an ordinary blurred box moves with it and its bake does not. So a
+//!   scroll frame over an ordinary blurred box re-bakes nothing.
 //! - the **timeline reading**, when some backdrop entry's range rides another element's animation
 //!   chain. A `filter: blur()` group can never be in that position — an animated element's whole
 //!   subtree rides its own slot — but a backdrop's range is a *prefix of the frame*, so anything
@@ -919,7 +919,7 @@ impl FilterTextures {
 /// compose-time readings *only* when some entry's pixels actually depend on
 /// it.
 ///
-/// An entry whose range rides an inner scroll chain bakes different pixels at
+/// An entry whose range rides an inner scroll or sticky chain bakes different pixels at
 /// a different offset; every other entry moves *with* its content, so its
 /// bake outlives any number of scroll frames. Likewise for the timeline: only
 /// a backdrop whose prefix holds another element's exported curve re-bakes
