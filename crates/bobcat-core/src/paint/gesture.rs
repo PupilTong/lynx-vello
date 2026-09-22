@@ -30,7 +30,9 @@
 //!   delta's axes). Both were `dom`'s default action; the engine now routes with
 //!   `default_prevented` set so `dom` performs none, and this router is the one decision point. The
 //!   scroll *primitives* (`scroll_chain`'s remainder chaining, clamping, the containing-block walk)
-//!   stay in `dom`.
+//!   stay in `dom`. A drag that scrolled ends with a [`InputDecision::ScrollEnd`] at its release or
+//!   cancel, ahead of the release's own events, so the containers it moved settle onto their
+//!   css-scroll-snap-1 positions (the executor's intents own that; the router only marks the end).
 //! - **Gesture synthesis** per the 2026-08-21 ruling (recorded in `docs/tracking/deviations.md`):
 //!   `tap` fires at release, targeted at the down-routed node, unless the sequence travelled past
 //!   the 50px radial [`TAP_SLOP`], the drag recognizer's scroll consumed (reported back by the
@@ -155,6 +157,9 @@ pub(crate) enum InputDecision {
         from: NodeId,
         delta: Vector2D<f32>,
     },
+    /// The drag `pointer` was scrolling has ended (release or cancel): the
+    /// containers it moved settle onto their snap positions.
+    ScrollEnd { pointer: PointerId },
     /// Dispatch one event through the ordinary path.
     Emit(EmitEvent),
 }
@@ -427,7 +432,14 @@ impl GestureRouter {
                 });
             }
             PointerPhase::Up | PointerPhase::Cancel => {
+                let scrolled = self
+                    .drags
+                    .iter()
+                    .any(|drag| drag.pointer == id && drag.scrolling);
                 self.drags.retain(|drag| drag.pointer != id);
+                if scrolled {
+                    out.push(InputDecision::ScrollEnd { pointer: id });
+                }
             }
             _ => {}
         }
@@ -786,6 +798,7 @@ mod tests {
                     InputDecision::Scroll { from, delta, .. } => {
                         format!("scroll@{}:{},{}", from.to_bits(), delta.x, delta.y)
                     }
+                    InputDecision::ScrollEnd { pointer } => format!("scrollend#{pointer}"),
                     InputDecision::Emit(event) => {
                         format!("{}@{}", event.name, event.target.to_bits())
                     }
@@ -799,7 +812,7 @@ mod tests {
                 .iter()
                 .filter_map(|decision| match decision {
                     InputDecision::Emit(event) => Some(event.name),
-                    InputDecision::Scroll { .. } => None,
+                    InputDecision::Scroll { .. } | InputDecision::ScrollEnd { .. } => None,
                 })
                 .collect()
         }
@@ -1020,6 +1033,39 @@ mod tests {
     }
 
     #[test]
+    fn a_scrolling_drag_ends_with_a_scroll_end_ahead_of_its_release_events() {
+        let mut harness = Harness::new();
+        harness.host.scroller = Some(scroller());
+        harness.feed(touch(1, PointerPhase::Down, 10.0, 10.0), 0.0);
+        harness.feed(touch(1, PointerPhase::Move, 10.0, 40.0), 0.05);
+        harness.out.clear();
+        harness.feed(touch(1, PointerPhase::Cancel, 10.0, 40.0), 0.1);
+        assert_eq!(
+            harness.trace(),
+            [
+                "scrollend#1".to_owned(),
+                format!("pointercancel@{}", target().to_bits()),
+                format!("touchcancel@{}", target().to_bits()),
+            ],
+            "the end is decided before the release's own events, on cancel too"
+        );
+
+        // A drag that never crossed its slop scrolled nothing and ends nothing.
+        harness.feed(touch(2, PointerPhase::Down, 10.0, 10.0), 0.2);
+        harness.feed(touch(2, PointerPhase::Move, 12.0, 12.0), 0.25);
+        harness.out.clear();
+        harness.feed(touch(2, PointerPhase::Up, 12.0, 12.0), 0.3);
+        assert!(
+            !harness
+                .trace()
+                .iter()
+                .any(|line| line.starts_with("scrollend")),
+            "got {:?}",
+            harness.trace()
+        );
+    }
+
+    #[test]
     fn an_unconsumed_boundary_drag_keeps_its_tap() {
         let mut harness = Harness::new();
         harness.host.scroller = Some(scroller());
@@ -1055,7 +1101,7 @@ mod tests {
             .iter()
             .filter_map(|decision| match decision {
                 InputDecision::Scroll { delta, .. } => Some(*delta),
-                InputDecision::Emit(_) => None,
+                InputDecision::Emit(_) | InputDecision::ScrollEnd { .. } => None,
             })
             .collect();
         assert_eq!(scrolls.len(), 2);

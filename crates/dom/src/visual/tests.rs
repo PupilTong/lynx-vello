@@ -1762,7 +1762,7 @@ fn a_warm_build_produces_the_paint_order_a_cold_build_produces() {
     assert!(cold.contains("layer"), "the fixture must exercise a group");
     assert!(cold.contains("clip"), "the fixture must exercise a clip");
     assert_eq!(
-        h.doc.dom.paint_storage_capacities()[6],
+        h.doc.dom.paint_storage_capacities()[7],
         0,
         "the first build has nothing to recycle",
     );
@@ -1771,7 +1771,7 @@ fn a_warm_build_produces_the_paint_order_a_cold_build_produces() {
         nudge(&mut h.doc.dom, scroller, true);
         h.doc.dom.render();
         assert!(
-            h.doc.dom.paint_storage_capacities()[6] > 0,
+            h.doc.dom.paint_storage_capacities()[7] > 0,
             "round {round} must have a retired frame to build into",
         );
         nudge(&mut h.doc.dom, scroller, false);
@@ -1799,7 +1799,7 @@ fn a_frame_held_elsewhere_is_reclaimed_one_retirement_late() {
     }
     let _ = published;
     assert!(
-        h.doc.dom.paint_storage_capacities()[6] > 0,
+        h.doc.dom.paint_storage_capacities()[7] > 0,
         "a frame retired while published must still come back as spare storage",
     );
 }
@@ -1845,14 +1845,15 @@ fn the_builder_stops_growing_its_buffers_once_the_page_shape_settles() {
         h.doc.dom.paint_storage_capacities(),
         "a settled page must reuse every buffer instead of growing a new one",
     );
-    // Indices 4 and 10 are the retained and spare animation-slot tables and
-    // 5 and 11 the `content-visibility: auto` ones, which this fixture —
-    // animating nothing and skipping nothing — never fills.
+    // Indices 4 and 11 are the retained and spare animation-slot tables, 5
+    // and 12 the `content-visibility: auto` ones and 6 and 13 the snap-point
+    // ones, which this fixture — animating nothing, skipping nothing and
+    // snapping nothing — never fills.
     assert!(
         settled
             .iter()
             .enumerate()
-            .all(|(index, &capacity)| capacity > 0 || matches!(index, 4 | 5 | 10 | 11)),
+            .all(|(index, &capacity)| capacity > 0 || matches!(index, 4 | 5 | 6 | 11 | 12 | 13)),
         "the fixture must exercise every buffer at least once, got {settled:?}",
     );
     assert!(

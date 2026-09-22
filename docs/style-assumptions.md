@@ -711,6 +711,56 @@ and §D.16 with what the wire format actually permits.)*
     [layout-architecture.md](layout-architecture.md); the tracking rows are
     in [tracking/css-layout.md](tracking/css-layout.md).
 
+25. **Scroll chaining and snapping (user-directed, 2026-09-22):
+    `overscroll-behavior`, `scroll-capture`, and css-scroll-snap-1 without
+    its events.** Lynx has none of these properties — its nested-scroll
+    protocol is attribute-wired (`scroll-forward-mode`, `enable-nested-scroll`;
+    see [tracking/dom-events.md](tracking/dom-events.md)) and web-core sets
+    nothing, relying on the browser's default chaining. This engine drives its
+    own chain, so the standard surface is what an author gets:
+    - **`overscroll-behavior: auto | contain | none`** (css-overscroll-1) per
+      axis, enabled as a W3C extension beyond Lynx's index the way `contain`
+      was. `contain` and `none` fence everything above the container on that
+      axis; `none` equals `contain` here because there is no rubber-band or
+      boundary effect to suppress. It applies to every scroll container,
+      `overflow: hidden` ones included, so a hidden wrapper can fence a
+      chain it cannot itself consume.
+    - **`scroll-capture: auto | nearest`** is lynx-vello's own property, with
+      no W3C or Lynx counterpart (the fork declares it `lynx_only`). `nearest`
+      on a scroll container hands a gesture that starts in it to the nearest
+      scroll container above it first; the container itself moves only once
+      that ancestor cannot. It reorders the chain and nothing else: reach is
+      decided first (so `nearest` beside `contain` stays inside), the walk
+      continues outward past the ancestor, and it nests outward-first.
+    - **Scroll snapping**: `scroll-snap-type`, `scroll-snap-align`,
+      `scroll-snap-stop`, `scroll-padding` and `scroll-margin`, ported to servo
+      in the fork behind the experimental pref like the other gecko-only
+      Lynx-relevant properties, physical sides only. The engine's choices,
+      each recorded in `crates/dom/src/scroll/snap.rs`: the proximity range is
+      a third of the scrollport (Blink's ratio); a wheel tick is a
+      direction-based operation (`mandatory` steps to the next position ahead
+      of it, `proximity` keeps its natural end unless the next position is
+      within range — never a position behind it, so small ticks still make
+      progress); a drag settles on release; a snapping container is
+      re-snapped at rest on every commit, which is also the initial snap;
+      `block`/`inline` are `y`/`x`; axes are chosen independently. Snaps are
+      instantaneous (no `scroll-behavior`). **Out by request**: the
+      `scrollsnapchange`/`scrollsnapchanging` events of css-scroll-snap-2.
+      **Not implemented**: §7's same-element preference across axes, and
+      snap areas escaping from inside a nested scroll container.
+    - **`scroll-initial-target: none | nearest`** (css-scroll-snap-2 §3.1),
+      declared under the `lynx` feature only since gecko has no
+      declaration. The build records the `nearest` elements per scroll slot;
+      the document scrolls each container to its first-in-tree-order target
+      as `scrollIntoView` with `block: start`, `inline: nearest` and rebuilds
+      the frame in the same commit. Each new target is honoured once (first
+      layout, or a later arrival); the "user no longer interested" escape is
+      not modelled, and an unchanged target never re-scrolls.
+
+    The one chain walk (`drive_chain`) and the snap rules are shared by the
+    document and by `bobcat-core`'s painter over the frame's scroll-slot
+    table, which now carries each slot's chaining policy and snap positions.
+
 ## Deliberately still open (known non-decisions)
 
 - The v1 media-feature set `Device` exposes (viewport geometry, orientation,

@@ -1188,7 +1188,15 @@ consumption against the published slot table, keeps the consumed offsets as
 immediately; between refills the intents *are* the offsets, and no per-event
 command exists. When a frame publishes, an intent the frame's own offset
 already equals has served its purpose and drops; the rest re-clamp to the
-new bounds.
+new bounds. The arbitration is `dom`'s own chain walk (`drive_chain`) over
+each slot's published policy — `overscroll-behavior` fences the reach, the
+engine's `scroll-capture: nearest` visits the container above first — and
+each step lands per css-scroll-snap-1 from the slot's published snap
+positions: a wheel tick steps to the next position, a drag is raw until its
+release, when a `ScrollEnd` decision settles every container the drag moved
+from where it found it. A frame's adoption also re-snaps every snapping
+container no drag is holding, which is how the initial layout and a
+relayout come to rest on a position.
 
 The encode is windowed: each slot's fragments cover one scrollport past its
 committed offset per scrollable axis (`ENCODE_WINDOW_SCROLLPORTS`). When an

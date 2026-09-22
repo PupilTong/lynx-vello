@@ -34,6 +34,7 @@ use hughie::style::{
     Contain, ContentVisibility, CoreStyle, Overflow, PositionProperty, visibility,
 };
 use hughie::tree::{Layout, LayoutTree};
+use stylo::computed_values::scroll_initial_target;
 use stylo::properties::ComputedValues;
 use stylo::values::computed::{CSSPixelLength, PointerEvents};
 
@@ -41,13 +42,14 @@ use super::geometry::{inner_radii, resolve_corner_radii};
 use super::transform::{ParentPerspective, stacking_context_matrix};
 use super::{
     AnimationSlot, AutoBox, ClipNode, CornerRadii, FrameBuffers, PaintItem, PaintItemKind,
-    PaintOrder, RenderLayer, ScrollSlot, stacking,
+    PaintOrder, RenderLayer, ScrollSlot, SnapSlot, SnapSlotAxis, stacking,
 };
 use crate::layout::{
     DisplayMode, StyleView, box_parent, display_mode, establishes_absolute_containing_block,
     establishes_fixed_containing_block, skips_contents,
 };
-use crate::scroll::ScrollAxes;
+use crate::scroll::initial_target::InitialTarget;
+use crate::scroll::{ScrollAxes, SnapAxisPositions, SnapPoint};
 use crate::tree::document::{Document, DocumentLayoutState, NodeSlot, TreeArenas};
 use crate::tree::node::Node;
 use crate::vello::kurbo::Affine;
@@ -75,6 +77,8 @@ pub(crate) fn build<T: Sync>(
         slots: buffers.slots,
         animations: buffers.animations,
         auto_boxes: buffers.auto_boxes,
+        snap_points: buffers.snap_points,
+        initial_targets: Vec::new(),
         current_layer: None,
         scratch,
     };
@@ -84,7 +88,8 @@ pub(crate) fn build<T: Sync>(
             && builder.layers.is_empty()
             && builder.slots.is_empty()
             && builder.animations.is_empty()
-            && builder.auto_boxes.is_empty(),
+            && builder.auto_boxes.is_empty()
+            && builder.snap_points.is_empty(),
         "a recycled frame is emptied before it is handed back to the builder",
     );
     builder.scratch.assert_settled();
@@ -114,6 +119,8 @@ pub(crate) fn build<T: Sync>(
             slots: builder.slots,
             animations: builder.animations,
             auto_boxes: builder.auto_boxes,
+            snap_points: builder.snap_points,
+            initial_targets: builder.initial_targets,
             commit_id,
         },
         builder.scratch,
@@ -340,6 +347,11 @@ struct Builder<'doc, T> {
     /// Every `content-visibility: auto` box this build reached, in build
     /// order. Independent of `items`: see [`AutoBox`].
     auto_boxes: Vec<AutoBox>,
+    /// Every slot's snap positions; see [`ScrollSlot::snap`].
+    snap_points: Vec<SnapPoint>,
+    /// Every `scroll-initial-target: nearest` element reached, with the
+    /// slot it lives in.
+    initial_targets: Vec<InitialTarget>,
     current_layer: Option<usize>,
     scratch: BuildScratch,
 }
@@ -369,10 +381,20 @@ impl<'doc, T: Sync> Builder<'doc, T> {
     ) -> Option<u32> {
         let state = self.state.at(self.tree.live_slot(node));
         let scroll_box = scroll::resolve(style, &state.slot.rounded, state.scroll_offset)?;
+        let snap = self
+            .document
+            .snap_positions(node)
+            .map_or_else(SnapSlot::default, |positions| SnapSlot {
+                x: positions.x.map(|axis| self.push_snap_axis(&axis)),
+                y: positions.y.map(|axis| self.push_snap_axis(&axis)),
+            });
         self.slots.push(ScrollSlot {
             node,
             parent,
             user_scrollable: scroll_box.user_scrollable,
+            chains: scroll_box.chains,
+            capture: scroll_box.capture,
+            snap,
             offset: scroll_box.offset,
             max_offset: scroll_box.max_offset(),
             scrollport: scroll_box.scrollport,
@@ -381,6 +403,19 @@ impl<'doc, T: Sync> Builder<'doc, T> {
             u32::try_from(self.slots.len() - 1)
                 .expect("a frame cannot hold 2^32 scroll containers"),
         )
+    }
+
+    /// Appends one axis's snap positions to the frame's table and returns
+    /// the slot-side reference to them.
+    fn push_snap_axis(&mut self, axis: &SnapAxisPositions) -> SnapSlotAxis {
+        let start =
+            u32::try_from(self.snap_points.len()).expect("a frame cannot hold 2^32 snap positions");
+        self.snap_points.extend_from_slice(&axis.points);
+        SnapSlotAxis {
+            strictness: axis.strictness,
+            start,
+            end: start + u32::try_from(axis.points.len()).expect("bounded by the table"),
+        }
     }
 
     /// Records `node` in the frame's animation-slot table when it carries a
@@ -1076,6 +1111,11 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         own_slot: Option<u32>,
         own_animation: Option<u32>,
     ) -> ClipContexts {
+        if style.clone_scroll_initial_target() == scroll_initial_target::T::Nearest
+            && let Some(chain) = ctx.current.chain
+        {
+            self.initial_targets.push(InitialTarget { chain, node });
+        }
         let mut inner = ctx;
         let clipped = clipped_axes(self.node(node), style);
         if clipped.x || clipped.y {

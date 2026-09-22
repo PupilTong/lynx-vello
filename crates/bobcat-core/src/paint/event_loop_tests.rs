@@ -448,6 +448,230 @@ fn a_scroll_consuming_drag_suppresses_the_tap() {
     );
 }
 
+/// An outer column scroller (node 3, max offset 800) whose first child is
+/// an inner scroller (node 4, 200×100, max offset 900) carrying
+/// `inner_css`; the outer's own filler sits below the inner.
+fn nested_scrollers_page(inner_css: &str) -> String {
+    format!(
+        r"
+        globalThis.renderPage = function () {{
+          const page = __CreatePage('card', 0);
+          const outer = __CreateView(0);
+          const inner = __CreateView(0);
+          const filler = __CreateView(0);
+          const spacer = __CreateView(0);
+          __AppendElement(page, outer);
+          __AppendElement(outer, inner);
+          __AppendElement(inner, filler);
+          __AppendElement(outer, spacer);
+          globalThis.held = [page, outer, inner, filler, spacer];
+          __SetInlineStyles(outer, 'display:flex;flex-direction:column;overflow:scroll;width:200px;height:200px');
+          __SetInlineStyles(inner, 'display:flex;flex-shrink:0;overflow:scroll;width:200px;height:100px;{inner_css}');
+          __SetInlineStyles(filler, 'flex-shrink:0;width:200px;height:1000px');
+          __SetInlineStyles(spacer, 'flex-shrink:0;width:200px;height:900px');
+          __FlushElementTree();
+        }};
+        "
+    )
+}
+
+/// A 200px column scroller (node 3) of five `card_height`px cards carrying
+/// `container_css` and `card_css`, behind a `lead`px spacer that snaps to
+/// nothing, for the snapping tests.
+fn snapping_page(container_css: &str, card_css: &str, card_height: u32, lead: u32) -> String {
+    format!(
+        r"
+        globalThis.renderPage = function () {{
+          const page = __CreatePage('card', 0);
+          const scroller = __CreateView(0);
+          __AppendElement(page, scroller);
+          globalThis.held = [page, scroller];
+          __SetInlineStyles(scroller, 'display:flex;flex-direction:column;overflow:scroll;width:200px;height:200px;{container_css}');
+          if ({lead} > 0) {{
+            const spacer = __CreateView(0);
+            __AppendElement(scroller, spacer);
+            held.push(spacer);
+            __SetInlineStyles(spacer, 'flex-shrink:0;width:200px;height:{lead}px');
+          }}
+          for (let i = 0; i < 5; i++) {{
+            const card = __CreateView(0);
+            __AppendElement(scroller, card);
+            held.push(card);
+            __SetInlineStyles(card, 'flex-shrink:0;width:200px;height:{card_height}px;{card_css}');
+          }}
+          __FlushElementTree();
+        }};
+        "
+    )
+}
+
+fn drag(engine: &mut TestEngine, from_y: f32, to_y: f32) {
+    engine.dispatch_input(InputEvent::pointer(
+        Point2D::new(100.0, from_y),
+        1,
+        PointerKind::Touch,
+        PointerPhase::Down,
+    ));
+    engine.dispatch_input(InputEvent::pointer(
+        Point2D::new(100.0, to_y),
+        1,
+        PointerKind::Touch,
+        PointerPhase::Move,
+    ));
+    engine.dispatch_input(InputEvent::pointer(
+        Point2D::new(100.0, to_y),
+        1,
+        PointerKind::Touch,
+        PointerPhase::Up,
+    ));
+}
+
+fn assert_intent(engine: &TestEngine, node: u64, expected: f32) {
+    let offset = engine
+        .painter
+        .scroll_intents
+        .offset_for(node_id(node))
+        .unwrap_or_else(|| panic!("node {node} has a scroll intent"));
+    assert!(
+        (offset.y - expected).abs() < 0.5,
+        "node {node} should sit at {expected}, got {offset:?}"
+    );
+}
+
+/// `scroll-capture: nearest` on the inner scroller: the drag that starts in
+/// it moves the scroller above it, and the inner one stays — the router
+/// latched the inner, the published chain policy reordered the walk.
+#[test]
+fn a_capturing_container_hands_its_drag_to_the_scroller_above() {
+    let mut engine = booted(&nested_scrollers_page("scroll-capture:nearest"));
+    drag(&mut engine, 50.0, 20.0);
+    assert_intent(&engine, 3, 22.0);
+    assert_eq!(
+        engine.painter.scroll_intents.offset_for(node_id(4)),
+        None,
+        "the inner scroller was not moved"
+    );
+}
+
+/// `overscroll-behavior: contain` on the inner scroller: a wheel far past
+/// its end pins it there and hands nothing to the scroller above.
+#[test]
+fn overscroll_contain_keeps_a_wheel_inside_its_container() {
+    let mut engine = booted(&nested_scrollers_page("overscroll-behavior:contain"));
+    engine.dispatch_input(InputEvent::wheel(
+        Point2D::new(100.0, 50.0),
+        dom::Vector2D::new(0.0, 5000.0),
+    ));
+    assert_intent(&engine, 4, 900.0);
+    assert_eq!(
+        engine.painter.scroll_intents.offset_for(node_id(3)),
+        None,
+        "the remainder was fenced off"
+    );
+}
+
+/// A drag on a `mandatory` snapping scroller is raw while it lasts and
+/// settles onto the nearest snap position at its release: 130px of travel
+/// less the 8px slop leaves it at 122, nearer the second card's start (200)
+/// than the first's (0).
+#[test]
+fn a_released_drag_settles_onto_the_nearest_snap_position() {
+    let mut engine = booted(&snapping_page(
+        "scroll-snap-type:y mandatory",
+        "scroll-snap-align:start",
+        200,
+        0,
+    ));
+    engine.dispatch_input(InputEvent::pointer(
+        Point2D::new(100.0, 150.0),
+        1,
+        PointerKind::Touch,
+        PointerPhase::Down,
+    ));
+    engine.dispatch_input(InputEvent::pointer(
+        Point2D::new(100.0, 20.0),
+        1,
+        PointerKind::Touch,
+        PointerPhase::Move,
+    ));
+    assert_intent(&engine, 3, 122.0);
+    engine.dispatch_input(InputEvent::pointer(
+        Point2D::new(100.0, 20.0),
+        1,
+        PointerKind::Touch,
+        PointerPhase::Up,
+    ));
+    assert_intent(&engine, 3, 200.0);
+}
+
+/// A wheel tick on a `mandatory` snapping scroller lands on the next snap
+/// position in its direction, however small the tick.
+#[test]
+fn a_wheel_tick_moves_to_the_next_snap_position() {
+    let mut engine = booted(&snapping_page(
+        "scroll-snap-type:y mandatory",
+        "scroll-snap-align:start",
+        200,
+        0,
+    ));
+    engine.dispatch_input(InputEvent::wheel(
+        Point2D::new(100.0, 100.0),
+        dom::Vector2D::new(0.0, 30.0),
+    ));
+    assert_intent(&engine, 3, 200.0);
+    engine.dispatch_input(InputEvent::wheel(
+        Point2D::new(100.0, 100.0),
+        dom::Vector2D::new(0.0, -30.0),
+    ));
+    assert_intent(&engine, 3, 0.0);
+}
+
+/// A `mandatory` scroller whose initial offset is no snap position (a 50px
+/// spacer ahead of the first card puts the first position at 50) is settled
+/// as soon as its first commit is adopted, with no gesture at all: the
+/// zero-delta wheel here decides nothing, it only lets the painter adopt.
+#[test]
+fn a_snapping_container_rests_on_a_position_after_its_first_commit() {
+    let mut engine = booted(&snapping_page(
+        "scroll-snap-type:y mandatory",
+        "scroll-snap-align:start",
+        200,
+        50,
+    ));
+    engine.dispatch_input(InputEvent::wheel(
+        Point2D::new(100.0, 100.0),
+        dom::Vector2D::zero(),
+    ));
+    assert_intent(&engine, 3, 50.0);
+}
+
+/// `scroll-initial-target: nearest` on the third card sets the scroller's
+/// initial position in the document itself, inside the boot's own commit,
+/// so the published frame — and the painter's at-rest rule — start from it.
+#[test]
+fn an_initial_scroll_target_positions_the_container_in_the_boot_commit() {
+    let page = snapping_page("", "", 200, 0).replace(
+        "__SetInlineStyles(card, 'flex-shrink:0;width:200px;height:200px;');",
+        "__SetInlineStyles(card, 'flex-shrink:0;width:200px;height:200px;'
+              + (i === 2 ? 'scroll-initial-target:nearest' : ''));",
+    );
+    let mut engine = booted(&page);
+    assert_eq!(
+        scroll_offset_of(&mut engine, 3),
+        dom::Vector2D::new(0.0, 400.0),
+        "the document rests on the target"
+    );
+    engine.dispatch_input(InputEvent::wheel(
+        Point2D::new(100.0, 100.0),
+        dom::Vector2D::zero(),
+    ));
+    assert_eq!(
+        engine.painter.scroll_intents.offset_for(node_id(3)),
+        None,
+        "nothing for the painter to override"
+    );
+}
+
 /// A wheel over scrollable content scrolls it (the router's decision,
 /// landing in the intents) and dispatches `wheel` with its delta in
 /// the detail — in that order.
