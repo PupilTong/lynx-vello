@@ -92,17 +92,16 @@ async fn resource_completion_reaches_main_without_another_painter_turn() {
     .await
     .expect("startup completes");
 
-    assert!(
-        records.lock().expect("thread records").is_empty(),
-        "creation performs no fetch"
+    assert_eq!(
+        records.lock().expect("thread records").len(),
+        1,
+        "creation hands the entry to the fetcher, on this thread"
     );
-    awakened
-        .recv_timeout(HANG_BUDGET)
-        .expect("main requests the entry");
     assert!(view.pump().is_empty(), "the IO is still held pending");
     assert!(
         awakened.try_recv().is_err(),
-        "no other main notification can wake the next turn"
+        "and nothing of main's can wake the next turn: the request never \
+         crossed a channel"
     );
     for _ in 0..64 {
         assert!(view.pump().is_empty());
@@ -278,17 +277,12 @@ async fn dropping_loading_view_cancels_resource_and_reaps_main_body() {
     )
     .await
     .expect("creation returns a loading view even when the fetch never answers");
-    assert!(matches!(
-        started.try_recv(),
-        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
-    ));
-    loop {
-        assert!(view.pump().is_empty());
-        if started.try_recv().is_ok() {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
+    // The entry request went out inside `create_lynx_view`, so it is already
+    // held by the time the view exists.
+    started
+        .try_recv()
+        .expect("creation handed the entry to the fetcher");
+    assert!(view.pump().is_empty());
     // Public operations are legal during loading, including offscreen's
     // main-thread acknowledgement, which must not wait for the entry fetch.
     painter
@@ -348,13 +342,10 @@ async fn metrics_that_arrive_before_the_document_are_what_it_is_created_at() {
         )
         .await
         .expect("creation returns a loading view");
-        loop {
-            assert!(view.pump().is_empty());
-            if started.try_recv().is_ok() {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
+        // Held from creation: the entry was requested there, not in a turn.
+        started
+            .try_recv()
+            .expect("creation handed the entry to the fetcher");
 
         // The painter owns device metrics, and this one is resized while the
         // view it is attached to is still loading.
@@ -396,12 +387,15 @@ async fn metrics_that_arrive_before_the_document_are_what_it_is_created_at() {
     .await;
 }
 
-/// Configuration errors are lifecycle events even when no source was requested.
+/// A default family nothing provides is a construction failure, not a
+/// lifecycle event: the check runs inside `create_lynx_view`, ahead of the
+/// startup requests that same call issues, so there is no view and nothing
+/// was asked of the host.
 #[tokio::test]
-async fn an_unknown_font_family_reports_failure_without_fetching() {
+async fn an_unknown_font_family_fails_construction_without_fetching() {
     hang_budget(async {
         let fetcher = Rc::new(FetcherDouble::new(Vec::new()));
-        let (mut view, _painter) = solo_view(
+        let error = solo_view(
             Arc::new(NoWakeup),
             32.0,
             24.0,
@@ -414,17 +408,32 @@ async fn an_unknown_font_family_reports_failure_without_fetching() {
             },
         )
         .await
-        .expect("loading view exists");
-        let error = wait_for_script(&mut view).expect_err("unknown family fails boot");
-        assert!(error.to_string().contains("no-such-family"));
+        .expect_err("an unknown family is refused where the view is built");
+        assert!(
+            matches!(
+                error,
+                bobcat_core::LynxViewError::Engine(
+                    bobcat_core::EngineError::UnknownFontFamily(ref family)
+                ) if family == "no-such-family"
+            ),
+            "{error}"
+        );
+        assert_eq!(fetcher.resolve_count(), 0);
         assert_eq!(fetcher.fetch_count(), 0);
-        assert!(view.pump().is_empty(), "failure is delivered once");
     })
     .await;
 }
 
+/// A resolution failure is one event, and the answers the same call already
+/// asked for are discarded.
+///
+/// All three startup sources — two sheets and the entry — are requested
+/// inside `create_lynx_view`, so the host has resolved all three before the
+/// view's own boot has read any of them. What stops at the first failure is
+/// the *reading*: the remaining answers are dropped where the sheet failed,
+/// and one `StartupFailed` is reported.
 #[tokio::test]
-async fn a_resource_resolution_failure_is_an_event_and_stops_further_sources() {
+async fn a_resolution_failure_is_one_event_and_the_other_answers_are_discarded() {
     let fetcher = Rc::new(FetcherDouble::new(Vec::new()).resolving_to("not a URL"));
     let (mut view, _painter) = solo_view(
         Arc::new(NoWakeup),
@@ -440,18 +449,22 @@ async fn a_resource_resolution_failure_is_an_event_and_stops_further_sources() {
     )
     .await
     .expect("resource failure does not prevent construction");
-    assert_eq!(fetcher.resolve_count(), 0);
+    assert_eq!(
+        fetcher.resolve_count(),
+        3,
+        "creation hands over both sheets and the entry, before any turn"
+    );
     assert!(matches!(
         wait_for_script(&mut view),
         Err(bobcat_core::LynxViewError::Resource(_))
     ));
     assert_eq!(
         fetcher.resolve_count(),
-        1,
-        "main stops requesting sources after failure"
+        3,
+        "and the failure asks for nothing further"
     );
     assert_eq!(fetcher.fetch_count(), 0);
-    assert!(view.pump().is_empty());
+    assert!(view.pump().is_empty(), "failure is delivered once");
 }
 
 #[tokio::test]
@@ -481,13 +494,12 @@ async fn a_pending_view_does_not_block_a_sibling_in_the_same_group() {
                 ViewSources::new("pending.js"),
             )
             .expect("pending view");
-        loop {
-            assert!(pending.pump().is_empty());
-            if started.try_recv().is_ok() {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
+        // Issued inside the construction above, so the fetcher is already
+        // holding it and no turn of this view's is needed to get there.
+        started
+            .try_recv()
+            .expect("creation handed the entry to the fetcher");
+        assert!(pending.pump().is_empty());
         let mut sibling = group
             .create_lynx_view(
                 32.0,

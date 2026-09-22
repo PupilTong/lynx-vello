@@ -319,8 +319,9 @@ bundle factories still need the module/init shell from a later stack layer.
 `LynxGroup::new` awaits the shared script runtime and style pool.
 `create_lynx_view` sends the view's half of its link to the group's thread and
 builds the host's fetcher on the calling thread. It is synchronous — nothing it
-builds can block — and returns a loading view. Only attachment and
-native-module failures are returned by construction.
+builds can block — and returns a loading view. Attachment, native-module and
+font failures are returned by construction; everything else is a lifecycle
+event on the view it returns.
 
 Its `width`, `height` and `device_pixel_ratio` are the **create-time
 viewport**: the metrics this view's document is built at and works at until a
@@ -331,25 +332,40 @@ create-time viewport equal to the painter's is the one that costs nothing —
 see [Document and rendering ownership](#document-and-rendering-ownership) for
 what a mismatch costs.
 
-The view's own task on `bobcat-main` runs boot as a straight-line async
-function. Fonts and the default family come first, validated against a
-`dom::TextContext` of their own: they are a text context's business, no
-document exists yet, and an unknown default family therefore stays a
-zero-fetch `EngineError::UnknownFontFamily`. Then each author stylesheet in
-cascade order, then the entry. Each ask leaves as a `ViewNotice::RequestSource`
-carrying the request and the right to answer it; `LynxView::pump` is what hands
-that to `ResourceFetcher::request_source`.
-The fetcher resolves the URL, fetches bytes and validates UTF-8, or supplies a
-pre-parsed stylesheet. Completion consumes the handle and answers the one-shot
-minted with the request, which wakes whichever task was awaiting that source —
-a stylesheet or entry on `bobcat-main`, a worker script on `bobcat-workers` —
-without a turn anywhere else. The handle contains that sender and a clone of the view's
-`CancellationToken`: no erased callback, retained resource Future, `SourceLoads`
-or `EventWaker` is needed. The
-fetcher itself is owned by value and needs neither `Send`, `Sync` nor `'static`.
-The reference fetcher queues a concrete source job on its native pool, or starts
-a browser task on Wasm. A view's task awaits no IO on any other view's behalf,
-so a sibling can boot or handle events while this view loads.
+**The view's startup sources are requested inside `create_lynx_view`.** Fonts
+and the default family come first, validated against a `dom::TextContext` of
+their own: they are a text context's business, no document exists yet, and an
+unknown default family is therefore a zero-fetch, synchronous
+`EngineError::UnknownFontFamily` rather than a later `StartupFailed`. Then each
+author stylesheet in cascade order, then the entry, handed straight to
+`ResourceFetcher::request_source` on the embedder's own thread — the fetcher
+was built a few statements earlier in this same call — with the answering
+one-shots crossing to `bobcat-main` inside the attachment. That is what makes
+the IO and the view's whole boot overlap the embedder's next act, which in
+every embedder is building this view's painter: the reference fetcher queues
+its job on its own pool (a browser task on Wasm) and needs nothing from the
+view, and `bobcat-main` opens the realm, runs the entry and encodes its first
+frame without a host turn. Every *later* source request rides a
+`ViewNotice::RequestSource` carrying the request and the right to answer it,
+which `LynxView::pump` hands to the fetcher: imports, `adoptStyleSheet`,
+worker scripts, fonts and plain fetches.
+
+Order of completion is the fetcher's; order of use is the view's. The boot task
+reads the sheets in cascade order and then the entry however they were
+answered, because a sheet that mounted after the entry ran would restyle a
+document the card has already built, and drops the answers it never reached
+where one fails.
+
+Either way the fetcher resolves the URL, fetches bytes and validates UTF-8, or
+supplies a pre-parsed stylesheet. Completion consumes the handle and answers
+the one-shot minted with the request, which wakes whichever task was awaiting
+that source — a stylesheet or entry on `bobcat-main`, a worker script on
+`bobcat-workers` — without a turn anywhere else. The handle contains that
+sender and a clone of the view's `CancellationToken`: no erased callback,
+retained resource Future, `SourceLoads` or `EventWaker` is needed. The
+fetcher itself is owned by value and needs neither `Send`, `Sync` nor
+`'static`. A view's task awaits no IO on any other view's behalf, so a sibling
+can boot or handle events while this view loads.
 
 Sheets and the entry are **staged, not mounted**: there is no document to mount
 them on until the realm's boot module creates one. What the task assembles is
@@ -360,7 +376,8 @@ holding them in its `DocumentSlot`.
 
 The response carries a loaded source or error. Main owns the boot outcome:
 `ScriptFinished` reports success; `StartupFailed(LynxViewError)` reports resource,
-encoding, font, realm or boot failure exactly once through `LynxView::pump`.
+encoding, realm or boot failure exactly once through `LynxView::pump` — a font
+failure is not among them, having already refused the construction.
 A failed view asks its host for nothing more, sources and images alike.
 Its resolved entry URL is the module specifier.
 `ScriptRunError` reports fatal runtime failure; listener and timer failures stay
@@ -405,8 +422,9 @@ why an entry may hold both its borrows across its own wait.
 
 A view is a set of tasks on that `LocalSet`, one per thing it can wait for, and
 tokio owns the polling, parking and waking. `serve_view` is the owner and has
-exactly one wait of its own — the view's end; `boot_page` requests the sheets in
-cascade order, then the entry, then opens the realm; `consume_commands` is the
+exactly one wait of its own — the view's end; `boot_page` reads the answers to
+the requests `create_lynx_view` already made, the sheets in cascade order and
+then the entry, and opens the realm; `consume_commands` is the
 one ordered consumer of the command channel; `consume_worker_events` is the one
 ordered consumer of this view's workers; one `load_module` future runs per
 resource load an import produced; `serve_clock` owns the realm's one pinned
@@ -1491,16 +1509,19 @@ create/append/drop/flush DOM API is exposed to JavaScript.
 1. `LynxGroup::new` starts both of the group's threads — `bobcat-workers`
    first, then `bobcat-main`, which is handed one sender on it — and waits for
    `bobcat-main`'s report that the group's QuickJS runtime and Stylo pool are
-   built. `create_lynx_view` validates the metrics, creates the view's link,
-   sends the far half of it to that thread, builds the per-view
-   `ResourceFetcher` on the calling thread, and returns a loading view
-   synchronously. The embedder then builds a `Painter` over the `DrawTarget` it
-   named and attaches it, which imposes the painter's metrics on the view.
-2. The view's task validates the fonts and default family into a
-   `dom::TextContext`, then requests each stylesheet in cascade order and the
-   entry MTS source, staging each answer in `DocumentIngredients`. Ordinary
-   `LynxView::pump` turns hand those requests to the fetcher and its
-   completions answer the tasks awaiting them.
+   built. `create_lynx_view` validates the fonts and default family into a
+   `dom::TextContext`, creates the view's link, builds the per-view
+   `ResourceFetcher` on the calling thread, hands that fetcher each author
+   stylesheet in cascade order and then the entry, sends the far half of the
+   link — the text context and the answers among it — to that thread, and
+   returns a loading view synchronously. The embedder then builds a `Painter`
+   over the `DrawTarget` it named and attaches it, which imposes the painter's
+   metrics on the view and is what releases its first frame.
+2. The view's task reads those answers, in cascade order and then the entry,
+   staging each in `DocumentIngredients` — all of it while the embedder is
+   still building its painter, because none of it needs a host turn. Ordinary
+   `LynxView::pump` turns hand the fetcher every *later* request instead, and
+   its completions answer the tasks awaiting them.
 3. On entry arrival the task opens the realm, installs the host members, and
    evaluates `bobcat:boot`. Boot's first statement constructs the realm's
    `Document`, which is what builds the private document out of the staged

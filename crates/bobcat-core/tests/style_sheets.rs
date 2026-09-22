@@ -179,6 +179,10 @@ async fn a_stylesheet_that_is_not_utf8_is_a_precise_error() {
 /// accumulates sheets rather than collapsing to one. (That the later sheet
 /// wins a cascade tie is asserted where computed style is observable, in
 /// `bobcat_core::style`.)
+///
+/// Both requests are made inside `create_lynx_view`, before the first turn;
+/// what the counts below read is the whole of startup, so the timing does not
+/// change them.
 #[tokio::test]
 async fn every_listed_sheet_issues_its_own_stylesheet_request() {
     let fetcher = Rc::new(

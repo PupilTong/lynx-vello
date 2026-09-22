@@ -159,8 +159,10 @@ primitive-only host callbacks. Raw QuickJS values, realm handles, numeric DOM
 ids, and host callbacks are not surfaced by the npm facade.
 
 Startup is an asynchronous host boundary whose owned work runs on the Lynx
-main Worker. The view's task there validates fonts, requests its sources
-through the view's own channel, and stages what arrives; it then creates a
+main Worker. `create_lynx_view` validates the fonts on the Render Worker and
+hands the view's resource system its author sheets and its entry there, before
+it returns; the view's task on the Lynx main Worker stages the answers as they
+arrive, in cascade order and then the entry. It then creates a
 QuickJS realm, preloads `bobcat:runtime`, `bobcat:element`, the timer and
 event-target modules, and the resolved entry URL, and evaluates
 `bobcat:boot`. That module's first statement constructs its `Document`, which
@@ -176,9 +178,10 @@ promise while the Render Worker goes on pumping the view. A timer deadline is
 not the Worker's to wait out — the view's own task waits it out, through the
 `bobcat-alarm` Worker on this target, and the commit that follows arms the
 engine signal like any other publication. `LynxGroup::create_lynx_view` is
-synchronous and returns a loading view. Normal `LynxView::pump` turns report
-`ScriptFinished`
-after boot succeeds or `StartupFailed` on resource, font, realm, or boot failure;
+synchronous and returns a loading view; an unknown default font family is the
+one startup failure it raises itself, before it has asked for anything. Normal
+`LynxView::pump` turns report `ScriptFinished`
+after boot succeeds or `StartupFailed` on resource, realm, or boot failure;
 the browser load promise waits for that lifecycle outcome. No
 browser microtask checkpoint or timer interception participates in completion;
 the fallback listener is retained inside the preloaded runtime ESM rather than
@@ -194,8 +197,9 @@ There is no browser create/append/drop/flush/direct-stylesheet API. Element
 mutation is reachable only from the fetched entry MTS module through the named
 exports of `bobcat:element`. `registerFonts(bytes)` and
 `setDefaultFontFamily(family)` retain wrapper state: faces are registered, and
-the family checked against them, when a view is built, so both must precede a
-load, and a family nothing provides makes that load reject. Author stylesheets
+the family checked against them, inside the call that builds a view, so both
+must precede a load, and a family nothing provides makes that load reject with
+the construction error rather than through a lifecycle event. Author stylesheets
 reach core the way the entry module does — fetched and registered by the Render
 Worker, named in the load, mounted as author-origin rules in cascade order. The
 stylesheet contract has a second arm for pre-parsed CSS. Raw JavaScript and

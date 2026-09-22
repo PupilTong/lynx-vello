@@ -118,6 +118,55 @@ fn a_view_runs_its_own_timers_with_no_host_call_behind_them() {
     );
 }
 
+/// A view boots, commits and publishes with no host turn behind it, which is
+/// what makes its whole startup overlap the painter the embedder builds next.
+///
+/// Nothing here pumps the view before the assertion, and nothing could: the
+/// author sheets and the entry were handed to the fetcher inside
+/// `create_lynx_view`, and this host answers them in that same call, so the
+/// realm opens, the entry runs and its flush commits on `bobcat-main` alone.
+/// Attaching the painter is not a turn either — it writes the metrics watch,
+/// which is what releases that first flush. The host's first `pump` only
+/// collects what already happened.
+#[test]
+fn a_view_boots_and_publishes_before_the_host_takes_a_turn() {
+    let mut engine = TestViewSpec::new(
+        r"
+        globalThis.renderPage = function () {
+          const page = __CreatePage('card', 0);
+          __AppendElement(page, __CreateView(0));
+        };
+        ",
+    )
+    .create(Arc::new(NoWakeup));
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while engine.published_frame().is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "boot never published a frame without a host turn"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    let mut booted = false;
+    while !booted {
+        for event in engine.pump() {
+            match event {
+                EngineEvent::ScriptFinished => booted = true,
+                EngineEvent::StartupFailed(error) => panic!("the view did not boot: {error}"),
+                EngineEvent::ScriptRunError(error) => panic!("the entry failed: {error}"),
+                _ => {}
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the first turn never reported the boot it found finished"
+        );
+        std::thread::yield_now();
+    }
+}
+
 #[test]
 fn global_events_require_observed_readiness_and_rejected_events_are_not_replayed() {
     let mut engine = TestViewSpec::new(

@@ -16,9 +16,11 @@ use crate::style::PreparsedStyleSheet;
 /// nor `Sync` and to hold `Rc`, `RefCell` or browser objects directly.
 ///
 /// The view services it in [`LynxView::pump`](crate::LynxView::pump) and
-/// nowhere else. A painter observing that view reads pixels out of it through
-/// [`FrameImages`](dom::FrameImages) while it composes, and asks it for
-/// nothing.
+/// nowhere else, past the one call that builds it: that call hands it the
+/// view's startup sources as well, so their IO overlaps everything the
+/// embedder does before its first turn. A painter observing that view reads
+/// pixels out of it through [`FrameImages`](dom::FrameImages) while it
+/// composes, and asks it for nothing.
 ///
 /// Source requests are non-blocking: the fetcher resolves the URL, loads and
 /// validates UTF-8 (or returns a pre-parsed sheet), then consumes the concrete
@@ -30,9 +32,20 @@ use crate::style::PreparsedStyleSheet;
 /// resource future and polls none, and nothing here names a host's transport, caches or
 /// codecs: whatever surface those have belongs to the host's own crate.
 pub trait ResourceFetcher: dom::FrameImages {
-    /// Begins one source load without blocking the view's turn. Main requests each
-    /// stylesheet in cascade order, then the entry, with one outstanding startup
-    /// source. Worker scripts can be requested concurrently after entry begins.
+    /// Begins one source load without blocking its caller.
+    ///
+    /// **A view's startup sources are requested before it runs at all**:
+    /// every author stylesheet in cascade order and then the entry are handed
+    /// over together inside
+    /// [`LynxGroup::create_lynx_view`](crate::LynxGroup::create_lynx_view),
+    /// on the embedder's own thread, before it returns — this fetcher is
+    /// built earlier in that same call, out of the builder the embedder
+    /// passed, so a fetcher must be able to take them there. Order of
+    /// *completion* is this method's own business: the view reads the answers
+    /// in cascade order and then the entry whatever order they arrive in.
+    /// Every later request — an import, an adopted stylesheet, a worker
+    /// script, a font, a plain fetch — is handed over in a
+    /// [`LynxView::pump`](crate::LynxView::pump) turn instead.
     ///
     /// Consume `completion` with the result, or retain it until the load finishes.
     /// Dropping it unanswered reports a failure unless the view has ended.

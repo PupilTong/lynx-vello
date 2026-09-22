@@ -1017,8 +1017,10 @@ impl BobcatRenderer {
         self.page_resources = Some(resources);
         self.boot_urls = boot_urls;
         self.group = Some(group);
-        // Start servicing the loading view, including source requests queued
-        // during target construction. The previous page's waiter may have
+        // Start servicing the loading view. Its startup sources were handed
+        // to the resource system inside `create_lynx_view` and may already be
+        // loading, or answered; what a turn is needed for is everything the
+        // boot asks for after them. The previous page's waiter may have
         // consumed their wakeup before this view was installed.
         self.events.request_event();
         Ok(())

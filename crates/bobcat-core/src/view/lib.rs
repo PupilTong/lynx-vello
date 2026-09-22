@@ -25,14 +25,14 @@ use tokio_util::sync::CancellationToken;
 
 use crate::background::WorkerHome;
 use crate::clock::ClockInstant;
-use crate::link::{Published, ToMain, ViewNotice, ViewSeat};
+use crate::link::{Published, SourceAnswer, ToMain, ViewNotice, ViewSeat};
 #[cfg(target_arch = "wasm32")]
 pub use crate::main::configure_wasm_workers;
 use crate::main::tree::PageConfig;
 use crate::main::{GroupLink, spawn_group};
 use crate::native_module::{NativeModule, NativeModuleTable};
 pub use crate::paint::WindowTarget;
-use crate::resource::ResourceFetcher;
+use crate::resource::{ResourceFetcher, SourceCompletion, SourceRequest};
 use crate::script::ScriptError;
 use crate::threads::ThreadJoin;
 
@@ -232,6 +232,11 @@ pub enum EngineError {
     Render(String),
     #[error("could not start the {name} thread: {message}")]
     Thread { name: &'static str, message: String },
+    /// The default family a view named is one neither its own font
+    /// containers nor the platform provides. A construction failure rather
+    /// than a startup one: [`LynxGroup::create_lynx_view`] validates the
+    /// fonts before it hands the fetcher anything, so a view that fails this
+    /// is never built and never fetches.
     #[error("no registered or system font family is named `{0}`")]
     UnknownFontFamily(String),
     #[error("this painter presents into a window; `tick` advances an offscreen one")]
@@ -251,9 +256,9 @@ pub enum EngineError {
     DuplicateNativeModule(String),
 }
 
-/// A view construction or startup failure. Construction reports target and
-/// attachment errors directly; loading and boot report through
-/// [`EngineEvent::StartupFailed`] on the returned view.
+/// A view construction or startup failure. Construction reports target,
+/// font, native-module and attachment errors directly; loading and boot
+/// report through [`EngineEvent::StartupFailed`] on the returned view.
 #[derive(Clone, Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum LynxViewError {
@@ -279,7 +284,10 @@ pub enum EngineEvent {
     /// `LynxView::pump` records the view as ready before returning this
     /// notification.
     ScriptFinished,
-    /// Source loading, document configuration, or entry boot failed.
+    /// Source loading, document configuration, or entry boot failed. The
+    /// view's fonts are not among them: an unknown default family is refused
+    /// by [`LynxGroup::create_lynx_view`] itself, before any source is
+    /// requested.
     StartupFailed(LynxViewError),
     /// The script runtime failed fatally during owner-thread work after startup.
     /// Boot failures arrive as [`EngineEvent::StartupFailed`].
@@ -404,9 +412,14 @@ impl StyleThreads {
 /// It carries no resource system either, and has no field that could hold
 /// one: the host's fetcher belongs to the view, is passed to
 /// [`LynxGroup::create_lynx_view`] separately, and stays on that thread.
-/// So every field here crosses to `bobcat-main`, and construction sends the
-/// whole value: the view's task there stages the document inputs and requests
-/// the specifiers from the view's resource fetcher as startup proceeds.
+///
+/// Four of these fields are spent where the value is handed over rather than
+/// crossing to `bobcat-main`: [`Self::fonts`] and
+/// [`Self::default_font_family`] become the view's text context, and
+/// [`Self::style_sheets`] and [`Self::entry`] become the requests
+/// `create_lynx_view` hands the fetcher before it returns. What crosses of
+/// them is the built context and the answers. The rest crosses as it stands,
+/// and the view's task on `bobcat-main` stages the document inputs out of it.
 #[derive(Debug)]
 pub struct ViewSources {
     pub config: PageConfig,
@@ -597,12 +610,17 @@ impl LynxGroup {
     /// ever attaches to never reports
     /// [`EngineEvent::ScriptFinished`] and never becomes ready.
     ///
-    /// The view's task requests each stylesheet in cascade order, then the entry
-    /// module. Ordinary [`LynxView::pump`] turns dispatch requests to the fetcher,
-    /// which resolves, loads and decodes them and completes the request it was
-    /// handed, waking whichever task was awaiting that source. Boot
-    /// completion is [`EngineEvent::ScriptFinished`], and loading, configuration,
-    /// or boot failure is [`EngineEvent::StartupFailed`].
+    /// **The view's startup sources are handed to the fetcher here**, on this
+    /// thread and before this returns: each author stylesheet in cascade
+    /// order, then the entry module. The fetcher is built in this same call,
+    /// resolves and loads on whatever executor it owns, and answers the
+    /// one-shot each request was minted with — so its IO and `bobcat-main`'s
+    /// boot run while the embedder builds this view's painter, which is what
+    /// it does next. Every *later* request rides an ordinary
+    /// [`LynxView::pump`] turn instead: imports, adopted stylesheets, worker
+    /// scripts, fonts and plain fetches. Boot completion is
+    /// [`EngineEvent::ScriptFinished`], and loading, configuration, or boot
+    /// failure is [`EngineEvent::StartupFailed`].
     ///
     /// Dropping a loading view cancels this view's own cancellation token,
     /// which marks its source work cancelled and prevents boot from entering
@@ -620,8 +638,12 @@ impl LynxGroup {
     ///
     /// # Errors
     ///
-    /// [`LynxViewError`] if two native modules answer to one name, or if the
-    /// group's main thread cannot accept the attachment.
+    /// [`LynxViewError`] if two native modules answer to one name, if the
+    /// default font family is one neither this view's containers nor the
+    /// platform provides ([`EngineError::UnknownFontFamily`]), or if the
+    /// group's main thread cannot accept the attachment. Both of the first
+    /// two are decided before the fetcher is built and before anything is
+    /// requested, so a view that fails either one fetches nothing.
     pub fn create_lynx_view<F, B>(
         &self,
         width: f32,
@@ -629,7 +651,7 @@ impl LynxGroup {
         device_pixel_ratio: f32,
         resources: B,
         native_modules: Vec<Box<dyn NativeModule>>,
-        sources: ViewSources,
+        mut sources: ViewSources,
     ) -> Result<LynxView<F>, LynxViewError>
     where
         F: ResourceFetcher + 'static,
@@ -645,6 +667,17 @@ impl LynxGroup {
             }
             table.push((name.to_owned(), module.methods()));
         }
+        // The fonts next, and before the fetcher exists: a view whose
+        // containers cannot serve the family it named will never render, and
+        // the requests below go out in this same call, so a check made
+        // anywhere later would already be behind them. It needs no document —
+        // fonts and the default family are a `dom::TextContext`'s business,
+        // and a document only ever adopts a finished one.
+        let default_font_family = sources.default_font_family.take();
+        let text_context = stage_text_context(
+            std::mem::take(&mut sources.fonts),
+            default_font_family.as_deref(),
+        )?;
         let viewport = Viewport::new(width, height).with_device_pixel_ratio(device_pixel_ratio);
         // One view, one set of channels and one end signal: nothing here is
         // shared with a sibling, so nothing has to be addressed or deferred.
@@ -673,12 +706,30 @@ impl LynxGroup {
         // part of a host's resource system that crosses to an engine thread.
         let (reports, inbox) = ImageInbox::new();
         let fetcher = Rc::new(resources(reports));
+        // The startup sources, issued rather than waited for: every author
+        // stylesheet in cascade order, then the entry. Nothing here waits —
+        // the fetcher takes each request and answers the one-shot minted with
+        // it — so the load overlaps whatever this thread does next, which is
+        // building this view's painter. Only the receivers cross; the fetcher
+        // stays on this thread, as it must.
+        let sheets: Vec<SourceAnswer> = std::mem::take(&mut sources.style_sheets)
+            .into_iter()
+            .map(|url| request_startup_source(&*fetcher, &cancel, SourceRequest::StyleSheet(url)))
+            .collect();
+        let entry = request_startup_source(
+            &*fetcher,
+            &cancel,
+            SourceRequest::Entry(std::mem::take(&mut sources.entry)),
+        );
         self.inner
             .attach
             .send(GroupCommand::Attach(Box::new(ViewAttachment {
                 viewport,
-                // Main owns source ordering; the view owns the fetcher.
+                // What is left of the view's sources: the fonts, the sheets
+                // and the entry were spent above.
                 sources,
+                text_context,
+                startup: StartupSources { sheets, entry },
                 native_modules: crate::native_module::encode_table(&table),
                 commands: command_receiver,
                 metrics: metric_receiver,
@@ -933,10 +984,12 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
     /// document asked for, take back what it has finished, and hand back
     /// every lifecycle event the engine has produced since the last call.
     ///
-    /// **This is the only call that advances the resource protocol.** A
-    /// painter observing this view asks the host for nothing — it draws what
-    /// has already been published and reads pixels the fetcher already holds
-    /// — so a host that wants an image to arrive takes this turn.
+    /// **This is the only call that advances the resource protocol**, past
+    /// the startup sources [`LynxGroup::create_lynx_view`] handed the fetcher
+    /// as it built this view. A painter observing this view asks the host for
+    /// nothing — it draws what has already been published and reads pixels
+    /// the fetcher already holds — so a host that wants an image to arrive
+    /// takes this turn.
     #[must_use]
     pub fn pump(&mut self) -> Vec<EngineEvent> {
         let mut events = Vec::new();
@@ -1146,6 +1199,12 @@ pub(crate) enum GroupCommand {
 pub(crate) struct ViewAttachment {
     pub(crate) viewport: Viewport,
     pub(crate) sources: ViewSources,
+    /// This view's fonts and default family, already registered and
+    /// validated on the embedder's thread. `None` is a view that named
+    /// neither, which leaves the document's own lazy context alone.
+    pub(crate) text_context: Option<dom::TextContext>,
+    /// The answers to the requests `create_lynx_view` already made.
+    pub(crate) startup: StartupSources,
     /// The embedder's native modules as the realm hears about them: one
     /// `<utf16Length>:<text>` record of names and comma-joined method lists.
     /// The modules themselves stay on the view, on the embedder's thread.
@@ -1164,6 +1223,67 @@ pub(crate) struct ViewAttachment {
     /// of this view asks before making a fetch. `None` for a host that gave
     /// none.
     pub(crate) fetch_probe: Option<crate::resource::FetchProbe>,
+}
+
+/// The answers to the requests [`LynxGroup::create_lynx_view`] made on the
+/// embedder's thread, in the order the view uses them.
+///
+/// Order of *completion* is the fetcher's business; this is order of *use*. A
+/// sheet that mounted after the entry ran would restyle a document the card
+/// has already built, so the view's task reads these one at a time and in
+/// this order, whatever order they were answered in.
+pub(crate) struct StartupSources {
+    /// One per author stylesheet, in cascade order.
+    pub(crate) sheets: Vec<SourceAnswer>,
+    pub(crate) entry: SourceAnswer,
+}
+
+/// Hands the fetcher one startup request and keeps the answer.
+///
+/// The token is the view's own, minted a few statements above: a host holding
+/// one of these completions reads the embedder's release without waiting for
+/// a turn, exactly as it does for a request that left through
+/// `ViewNotice::RequestSource`.
+fn request_startup_source<F: ResourceFetcher>(
+    fetcher: &F,
+    cancel: &CancellationToken,
+    request: SourceRequest,
+) -> SourceAnswer {
+    let (completion, answer) = SourceCompletion::new(cancel.clone());
+    fetcher.request_source(request, completion);
+    answer
+}
+
+/// Registers a view's fonts and selects its default family, before any
+/// document exists and before anything has been fetched.
+///
+/// Neither needs a document: fonts and the default family are a
+/// [`TextContext`](dom::TextContext)'s business, and a document only ever
+/// adopts a finished one. Running it here, in `create_lynx_view`, is what
+/// keeps a family nothing provides a zero-fetch failure — the startup
+/// requests go out in that same call, so there is no later point at which
+/// this check would still be ahead of them.
+///
+/// `None` is a view that named neither, which leaves the document's own lazy
+/// context alone. `Err` is a default family neither the containers nor the
+/// platform has, which is a failure to build the view rather than to run it.
+fn stage_text_context(
+    fonts: Vec<FontBlob>,
+    default_font_family: Option<&str>,
+) -> Result<Option<dom::TextContext>, LynxViewError> {
+    if fonts.is_empty() && default_font_family.is_none() {
+        return Ok(None);
+    }
+    let mut text = dom::TextContext::new();
+    for font in fonts {
+        text.register_fonts(font);
+    }
+    if let Some(family) = default_font_family
+        && !text.set_default_font_family(family)
+    {
+        return Err(EngineError::UnknownFontFamily(family.to_owned()).into());
+    }
+    Ok(Some(text))
 }
 
 #[cfg(test)]
