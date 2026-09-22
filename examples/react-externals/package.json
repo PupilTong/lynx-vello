@@ -4,13 +4,14 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "pnpm run build:comp-lib && rspeedy build && cross-env REACTLYNX_ASYNC=true pnpm run build:comp-lib && cross-env REACTLYNX_ASYNC=true rspeedy build",
+    "build": "pnpm run build:react && pnpm run build:comp-lib && rsbuild build && cross-env REACTLYNX_ASYNC=true pnpm run build:comp-lib && cross-env REACTLYNX_ASYNC=true rsbuild build",
     "build:comp-lib": "rslib build --config rslib-comp-lib.config.ts",
     "build:comp-lib:dev": "cross-env NODE_ENV=development rslib build --config rslib-comp-lib.config.ts",
-    "dev": "pnpm run build:comp-lib && rspeedy dev",
-    "dev:react-async": "cross-env REACTLYNX_ASYNC=true pnpm run build:comp-lib && cross-env REACTLYNX_ASYNC=true rspeedy dev",
-    "preview": "rspeedy preview",
-    "preview:react-async": "cross-env REACTLYNX_ASYNC=true rspeedy preview"
+    "dev": "pnpm run build:react && pnpm run build:comp-lib:dev && rsbuild dev",
+    "dev:react-async": "pnpm run build:react && cross-env REACTLYNX_ASYNC=true pnpm run build:comp-lib:dev && cross-env REACTLYNX_ASYNC=true rsbuild dev",
+    "preview": "rsbuild preview",
+    "preview:react-async": "cross-env REACTLYNX_ASYNC=true rsbuild preview",
+    "build:react": "cross-env NODE_ENV=production rslib build --config rslib-react.config.ts && cross-env NODE_ENV=development rslib build --config rslib-react.config.ts"
   },
   "dependencies": {
     "@lynx-js/react": "catalog:"
@@ -21,10 +22,11 @@
     "@lynx-js/preact-devtools": "catalog:",
     "@lynx-js/qrcode-rsbuild-plugin": "catalog:",
     "@lynx-js/react-rsbuild-plugin": "catalog:",
-    "@lynx-js/rspeedy": "catalog:",
+    "@lynx-js/react-umd": "catalog:",
     "@lynx-js/types": "catalog:",
+    "@rsbuild/core": "catalog:",
     "@types/react": "18.3.28",
     "cross-env": "^10.1.0",
-    "typescript": "catalog:rspeedy"
+    "typescript": "catalog:"
   }
 }

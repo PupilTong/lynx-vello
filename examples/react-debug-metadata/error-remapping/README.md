@@ -38,7 +38,7 @@ token's start / end / call-expr end / module top.
 ```text
 cases.ts        Every crash button: { name, kind, err, find, token } | { name, kind:'main-thread', marker }
 infer.ts        background frames: locate the token, pick the column by engine + err
-mainThread.ts        main-thread frames: invert bytecode-debug-info → (function_id, pc) → 2-step reverse
+main-thread.ts  main-thread frames: locate source marker → source-map reversal
 remap-lib.ts    reversal lib (colno-1 in / +1 out; ±5 context lines, long lines clipped)
 frames.ts       computeFrame: one case+engine → backend-shaped frame
 runEngine.ts    parameterised run of every case for one engine
@@ -48,22 +48,23 @@ __snapshots__/  golden snapshots, each frame = { code, release, raw, steps[] }
 
 Each step mirrors the backend's `RemapStep`: `kind` / `filename` / `lineno` /
 `colno` / `function_name` / `context_line` / `pre_context` / `post_context`.
-Main-thread frames are engine-independent (PrimJS bytecode) but kept in
-all three files so each covers the page in button order.
+Main-thread tests locate error markers in the emitted source sections and
+reverse their generated line and column through the source map. These synthetic
+positions check source-map coverage, not engine-specific stack coordinates.
+They appear in all three files so each covers the page in button order.
 
-`@rstest/core` is taken from the workspace (hoisted, not declared); `source-map`
-is a devDependency.
+`@rstest/core` and `source-map` are devDependencies.
 
 ## Usage (from this example's dir)
 
 ```bash
-pnpm test:build    # DEBUG build keeps debug-metadata.json (a build intermediate)
+pnpm build         # DEBUG build keeps debug-metadata.json (a build intermediate)
 pnpm test          # assert the three snapshots
 pnpm test:update   # recompute and review diff after a demo/build/reversal change
 ```
 
 `debug-metadata.json` is a build intermediate (normally cleaned), so build with
-DEBUG to keep it: `pnpm test:build` (= `DEBUG='rspeedy,rsbuild' pnpm build`).
+the package’s `pnpm build` script, which sets `DEBUG=lynx,rsbuild`.
 
 ## Add a case
 
@@ -71,6 +72,7 @@ DEBUG to keep it: `pnpm test:build` (= `DEBUG='rspeedy,rsbuild' pnpm build`).
    main-thread `{ name, kind:'main-thread', marker }`. `name` = the button text;
    `find` = a substring unique in the generated bundle containing `token`;
    `token` = the failing identifier; `err` = `call` / `read` / `global`.
-2. `pnpm test:build && pnpm test:update` to generate snapshots.
-3. On a device, tap the button and check the reported `colno` against the
-   matching engine snapshot's `raw`, and the reversal against `steps`.
+2. `pnpm build && pnpm test:update` to generate snapshots.
+3. For background cases, tap the button on a device and check the reported
+   `colno` against the matching engine snapshot’s `raw`, and the reversal
+   against `steps`. Main-thread snapshots use synthetic marker positions.

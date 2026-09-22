@@ -6,11 +6,11 @@
     "types": ["node"],
     "jsx": "react-jsx",
     "jsxImportSource": "@lynx-js/react",
-    // Mirrors `source.alias` in `lynx.config.ts`.
+    // Mirrors `source.alias` in `rsbuild.config.ts`.
     "paths": {
       "@components/*": ["./components/*"],
       "@assets/*": ["./assets/*"],
     },
   },
-  "include": ["index.tsx", "typing.d.ts", "components", "sub-menu", "lynx.config.ts"],
+  "include": ["index.tsx", "typing.d.ts", "components", "sub-menu", "rsbuild.config.ts"],
 }

@@ -173,6 +173,33 @@ fn converts_source_scripts_and_css_to_a_decodable_web_bundle() {
 }
 
 #[test]
+fn independent_named_css_sections_may_reuse_a_local_fragment_id() {
+    let first = css_fragment();
+    let mut second = first.clone();
+    let selector = second.windows(3).position(|bytes| bytes == b"box").unwrap();
+    second[selector..selector + 3].copy_from_slice(b"alt");
+    let native = native_bundle(vec![custom_section(vec![
+        CustomSection::css("first:CSS", &first),
+        CustomSection::css("second:CSS", &second),
+    ])]);
+    for decoded in [
+        bobcat_source::native::decode(&native).unwrap(),
+        bobcat_source::web::decode(&convert(&native).unwrap()).unwrap(),
+    ] {
+        let sections = decoded.custom_sections.unwrap();
+        assert_eq!(
+            sections["first:CSS"]["content"]["ruleList"][0]["selectorText"]["value"],
+            ".box"
+        );
+        assert_eq!(
+            sections["second:CSS"]["content"]["ruleList"][0]["selectorText"]["value"],
+            ".alt"
+        );
+        assert_eq!(decoded.style_info.unwrap().css_id_to_style_sheet.len(), 2);
+    }
+}
+
+#[test]
 fn rejects_a_bytecode_custom_section_as_code_cache() {
     let native = native_bundle_with_selector(
         vec![custom_section(vec![CustomSection::code_cache(

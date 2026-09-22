@@ -5,12 +5,12 @@
   "type": "module",
   "scripts": {
     "build": "pnpm run build:querycomponent && pnpm run build:fetchbundle",
-    "build:fetchbundle": "cross-env LAZY_BUNDLE_FETCHBUNDLE=1 rspeedy build",
-    "build:querycomponent": "rspeedy build",
-    "dev": "rspeedy dev",
-    "dev:fetchbundle": "cross-env LAZY_BUNDLE_FETCHBUNDLE=1 rspeedy dev",
-    "preview": "rspeedy preview",
-    "preview:fetchbundle": "cross-env LAZY_BUNDLE_FETCHBUNDLE=1 rspeedy preview"
+    "build:fetchbundle": "cross-env LAZY_BUNDLE_FETCHBUNDLE=1 rsbuild build",
+    "build:querycomponent": "rsbuild build",
+    "dev": "rsbuild dev",
+    "dev:fetchbundle": "cross-env LAZY_BUNDLE_FETCHBUNDLE=1 rsbuild dev",
+    "preview": "rsbuild preview",
+    "preview:fetchbundle": "cross-env LAZY_BUNDLE_FETCHBUNDLE=1 rsbuild preview"
   },
   "dependencies": {
     "@lynx-js/react": "catalog:"
@@ -19,10 +19,11 @@
     "@lynx-js/preact-devtools": "catalog:",
     "@lynx-js/qrcode-rsbuild-plugin": "catalog:",
     "@lynx-js/react-rsbuild-plugin": "catalog:",
-    "@lynx-js/rspeedy": "catalog:",
+    "@lynx-js/rsbuild-plugin": "catalog:",
     "@lynx-js/types": "catalog:",
+    "@rsbuild/core": "catalog:",
     "@types/react": "18.3.28",
     "cross-env": "^10.1.0",
-    "typescript": "catalog:rspeedy"
+    "typescript": "catalog:"
   }
 }

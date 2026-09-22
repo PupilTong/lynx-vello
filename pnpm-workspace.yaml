@@ -34,12 +34,13 @@ catalog:
   "@lynx-js/react": "0.126.1"
   "@lynx-js/react-rsbuild-plugin": "0.20.2"
   "@lynx-js/react-umd": "0.126.1"
-  "@lynx-js/rspeedy": "0.17.2"
+  "@lynx-js/rsbuild-plugin": "0.1.2"
   "@lynx-js/tailwind-preset": "0.5.1"
   "@lynx-js/template-webpack-plugin": "0.16.1"
   "@lynx-js/types": "4.2.1"
   "@lynx-js/web-core": "0.26.1"
   "@lynx-js/web-elements": "0.12.11"
+  "@rsbuild/core": "2.2.4"
   "@types/node": "24.13.2"
   # The workspace compiler: every program is type-checked, and the bobcat-wasm
   # facade emitted, by TypeScript 7.
@@ -48,13 +49,6 @@ catalog:
 catalogs:
   rspack:
     "@rspack/core": "2.2.4"
-  # `@lynx-js/rspeedy` loads `lynx.config.ts` through a Node module hook that
-  # imports the classic `typescript` compiler API as it loads, and its peer
-  # range stops at 6.0. TypeScript 7 has no such API, so every rspeedy project
-  # installs this compiler for that hook alone; TypeScript 7 at the root is what
-  # checks those projects. Drop this once rspeedy's loader stops importing it.
-  rspeedy:
-    typescript: "5.9.3"
   # The examples the Explorer showcase opens, taken from the pkg.pr.new preview
   # of https://github.com/lynx-family/lynx-examples/pull/440 (web platform
   # bundles in the binary template), pinned to its head commit 74e8136 so the

@@ -9,8 +9,8 @@
   },
   "include": [
     "src",
-    "lynx.config.consumer.ts",
-    "lynx.config.producer.ts",
+    "rsbuild.config.consumer.ts",
+    "rsbuild.config.producer.ts",
     "demo-ports.ts",
     "scripts",
     "test",

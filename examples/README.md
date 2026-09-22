@@ -9,12 +9,9 @@ preserved in this directory.
 
 TypeScript 7.0.2 at the workspace root type-checks every example: each
 example's `tsconfig.json` extends the workspace `tsconfig.base.json`, and
-`pnpm test:type` checks the whole workspace, examples included. Each example
-also installs TypeScript 5.9.3, used only by the Node module hook through which
-`@lynx-js/rspeedy@0.17.2` loads `lynx.config.ts`: the hook imports the classic
-TypeScript compiler API, which TypeScript 7 does not provide, and rspeedy's
-published peer range stops at 6.0. That local 5.9.3 is not the type checker;
-`pnpm --filter <example> exec tsc` would run it instead of 7.0.2.
+`pnpm test:type` checks the whole workspace, examples included. Rsbuild loads
+`rsbuild.config.ts` directly, so the examples use the workspace TypeScript
+version without a separate compiler for the config loader.
 `@lynx-js/react@0.126.1` accepts React 18 type definitions, so the examples
 keep `@types/react` 18.3.28.
 
@@ -32,3 +29,24 @@ To work with a single example:
 pnpm --filter @lynx-js/example-react dev
 pnpm exec tsc -b examples/react
 ```
+
+## Native source bundles
+
+The Rsbuild configurations use `scripts/lynx-bytecode.ts` to emit native
+JavaScript as source custom sections. Pages use the external bundle layout:
+`<entry>__main-thread` holds MTS source, `app-service.js` starts BTS, and named
+CSS sections preserve styles. Load these pages in Bobcat with the named MTS
+entry. FetchBundle chunks keep their `main-thread`, `background` and `CSS`
+section names.
+
+Native external libraries set `enableJsBytecode: false` in their Rslib encoder
+options. The `react-externals` build also rebuilds React UMD from its published
+TypeScript sources in both production and development modes. Its native preset
+copies those local bundles instead of the dependency's precompiled bundles.
+Run that example's package scripts so its external libraries are built first.
+
+Source output does not require `DEBUG`. Web builds keep their `JsBytecode`
+section tags because the web encoder uses them to identify MTS source; it does
+not compile that source to bytecode. The native encoder still writes an inert
+empty root stub required by its external bundle format. Application code lives
+entirely in source sections, and Bobcat's decoder rejects executable bytecode.

@@ -9,6 +9,6 @@
       "@/*": ["./src/*"],
     },
   },
-  "include": ["src", "lynx.config.ts", "test", "tailwind.config.ts"],
+  "include": ["src", "rsbuild.config.ts", "test", "tailwind.config.ts"],
   "exclude": ["dist/"],
 }

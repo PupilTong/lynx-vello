@@ -10,7 +10,8 @@
   "include": [
     "src",
     "external-bundle",
-    "lynx.config.ts",
+    "rsbuild.config.ts",
     "rslib-comp-lib.config.ts",
+    "rslib-react.config.ts",
   ],
 }

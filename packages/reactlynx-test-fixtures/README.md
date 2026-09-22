@@ -11,13 +11,12 @@ pnpm install --frozen-lockfile
 pnpm --filter reactlynx-test-fixtures build
 ```
 
-`lynx.config.js` declares the entries, independent output directories and
+`rsbuild.config.js` declares the entries, independent output directories and
 `pluginReactLynx({ engineVersion: '4.1.0' })`. Other ReactLynx options keep their
-defaults. The package scripts invoke the public `rspeedy build` CLI once in
+defaults. The package scripts invoke the public `rsbuild build` CLI once in
 production mode and once in development mode. No script creates a compiler or
-imports an internal Rspeedy entry point.
-Both commands set `NODE_ENV` explicitly: Rspeedy reads the config function's
-`env` before applying `--mode`, and the fixture matrix must match that mode.
+imports an internal build-tool entry point. Both commands set `NODE_ENV`
+explicitly so the fixture matrix and compiler use the same mode.
 
 The default build produces eight native production pages, three native development
 variants and six web pages. Each native environment has its own
@@ -56,20 +55,20 @@ is consumed.
 
 Outputs live only in ignored `dist/`; compiled bundles and provenance must not
 be committed. Native pages retain `dist/<fixture>/<fixture>.lynx.bundle` and
-`dist/<fixture>/async/*`. Development directory names append `-development`.
-Web pages are `dist/<fixture>/<fixture>.web.bundle`.
+`dist/<fixture>/lazy-bundle/*`. Development directory names append
+`-development`. Web pages are `dist/<fixture>/<fixture>.web-<fixture>.bundle`.
 
-`scripts/source-bundles.ts` registers Rsbuild completion hooks. For native
-pages it reads the compiler input retained by `DEBUG=rspeedy` and repacks the
-original MTS/BTS source into external custom sections using `@lynx-js/tasm`.
-It replaces the page's bytecode container, preserves emitted lazy bundle bytes
-and leaves web output unchanged. `DEBUG=rspeedy` also retains MTS source inside
-lazy bundles; these fixtures exercise source evaluation, not native bytecode.
+The shared `scripts/lynx-bytecode.ts` hook emits native page and lazy-bundle
+JavaScript directly as source custom sections. Pages retain their BTS bootstrap
+and CSS, with `<fixture>__main-thread` as the named MTS entry.
+`scripts/source-bundles.ts` renames the native page and records provenance;
+it does not re-encode bundles. Web output remains unchanged.
 
-The encoder is pinned to `@lynx-js/tasm@0.0.53`. A workspace override keeps the
-compiler and repacker on that same version; the previous encoder cannot target
-engine 4.1.0. The hook still relies on the pinned compiler's debug `tasm.json`
-format, which should be checked when upgrading the toolchain.
+The encoder is pinned to `@lynx-js/tasm@0.0.53` through a workspace override;
+the previous encoder cannot target engine 4.1.0. Source output does not require
+`DEBUG`. The provenance hook uses the compiler's `DEBUG=lynx` `tasm.json` to
+record source hashes and the development public path. Check that debug format
+when upgrading the toolchain.
 
 Each environment writes `dist/<output-directory>.provenance.json` with its actual
 source dependencies, compiler versions and bundle hashes. Native records also
@@ -87,5 +86,5 @@ Run the fixture build before `cargo test`, `cargo clippy --all-targets` or
 benchmark compilation; CI does the same. Generated JS, bundles and the registry
 stay out of version control.
 
-Lazy fixtures remain available as source inputs for later work. Their external
-bundle loading is not part of the current runtime integration suite.
+Native decoder tests verify the source sections and named CSS. Runtime tests
+exercise page startup, updates, reloads and lazy bundle loading.
