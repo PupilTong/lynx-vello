@@ -28,6 +28,16 @@ function normalizeEnvironmentTokens(value: string): string {
 }
 
 function normalizeStepForSnapshot(step: Step): Step {
+  if (step.kind === 'bytecode-debug-info') {
+    return {
+      ...step,
+      lineno: -1,
+      colno: -1,
+      context_line: '<generated>',
+      pre_context: [],
+      post_context: [],
+    };
+  }
   return {
     ...step,
     context_line: step.context_line === undefined

@@ -1,6 +1,6 @@
 import { pluginTailwindCSS } from 'rsbuild-plugin-tailwindcss';
 
-import { disableLynxBytecode } from '../../scripts/lynx-bytecode.ts';
+import { disableLynxBackgroundBytecode } from '../../scripts/lynx-bytecode.ts';
 
 import { pluginLynxConfig } from '@lynx-js/config-rsbuild-plugin';
 import { pluginQRCode } from '@lynx-js/qrcode-rsbuild-plugin';
@@ -8,7 +8,7 @@ import { pluginReactLynx } from '@lynx-js/react-rsbuild-plugin';
 import { defineConfig } from '@rsbuild/core';
 
 export default defineConfig({
-  tools: { bundlerChain: disableLynxBytecode },
+  tools: { bundlerChain: disableLynxBackgroundBytecode },
   source: {
     entry: { main: './src/index.tsx' },
   },

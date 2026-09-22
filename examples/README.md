@@ -30,23 +30,18 @@ pnpm --filter @lynx-js/example-react dev
 pnpm exec tsc -b examples/react
 ```
 
-## Native source bundles
+## Native bytecode options
 
-The Rsbuild configurations use `scripts/lynx-bytecode.ts` to emit native
-JavaScript as source custom sections. Pages use the external bundle layout:
-`<entry>__main-thread` holds MTS source, `app-service.js` starts BTS, and named
-CSS sections preserve styles. Load these pages in Bobcat with the named MTS
-entry. FetchBundle chunks keep their `main-thread`, `background` and `CSS`
-section names.
+The Rsbuild configurations use `scripts/lynx-bytecode.ts` to set
+`compilerOptions.experimental_encodeQuickjsBytecode: false` for native builds.
+This keeps BTS manifests as JavaScript source. The hook preserves the compiler's
+MTS encoding, section names and page type: `lepusCode.root` still compiles to
+PrimJS bytecode. Native pages therefore still require a bytecode-capable runtime;
+Bobcat's source evaluator cannot load those pages directly. Web builds are
+unchanged.
 
 Native external libraries set `enableJsBytecode: false` in their Rslib encoder
 options. The `react-externals` build also rebuilds React UMD from its published
 TypeScript sources in both production and development modes. Its native preset
 copies those local bundles instead of the dependency's precompiled bundles.
 Run that example's package scripts so its external libraries are built first.
-
-Source output does not require `DEBUG`. Web builds keep their `JsBytecode`
-section tags because the web encoder uses them to identify MTS source; it does
-not compile that source to bytecode. The native encoder still writes an inert
-empty root stub required by its external bundle format. Application code lives
-entirely in source sections, and Bobcat's decoder rejects executable bytecode.

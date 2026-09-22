@@ -7,10 +7,10 @@ import { pluginReactLynx } from '@lynx-js/react-rsbuild-plugin';
 import { defineConfig } from '@rsbuild/core';
 import { pluginSass } from '@rsbuild/plugin-sass';
 
-import { disableLynxBytecode } from '../../scripts/lynx-bytecode.ts';
+import { disableLynxBackgroundBytecode } from '../../scripts/lynx-bytecode.ts';
 
 export default defineConfig({
-  tools: { bundlerChain: disableLynxBytecode },
+  tools: { bundlerChain: disableLynxBackgroundBytecode },
   source: {
     entry: {
       main: './index.tsx',

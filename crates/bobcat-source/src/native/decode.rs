@@ -762,28 +762,14 @@ fn decode_custom_content(
                     format!("CSS custom section {:?} is not a byte array", header.name),
                 ));
             };
-            let (mut id, style_sheet) = decode_fragment(&fragment, css_options)?;
-            if styles.contains_key(&id) {
-                // The compiler encodes independent named CSS sections with
-                // local id 0. Give each one its own StyleInfo slot, keeping
-                // its section name as the public identity. Imported fragment
-                // IDs would be ambiguous, so retain rejection in that case.
-                if !style_sheet.imports.is_empty()
-                    || styles.values().any(|sheet| !sheet.imports.is_empty())
-                {
-                    return Err(ConvertError::invalid(
-                        start,
-                        format!("duplicate native CSS fragment id {id} with imports"),
-                    ));
-                }
-                while styles.contains_key(&id) {
-                    id = id.checked_add(1).ok_or_else(|| {
-                        ConvertError::invalid(start, "native CSS fragment id overflow")
-                    })?;
-                }
-            }
+            let (id, style_sheet) = decode_fragment(&fragment, css_options)?;
             named_css.insert(header.name.clone(), id);
-            styles.insert(id, style_sheet);
+            if styles.insert(id, style_sheet).is_some() {
+                return Err(ConvertError::invalid(
+                    start,
+                    format!("duplicate native CSS fragment id {id}"),
+                ));
+            }
         }
         other => {
             return Err(ConvertError::UnsupportedBundle(format!(

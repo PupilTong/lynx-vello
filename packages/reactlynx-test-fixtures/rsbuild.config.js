@@ -1,7 +1,7 @@
 import { pluginReactLynx } from '@lynx-js/react-rsbuild-plugin';
 import { defineConfig } from '@rsbuild/core';
 
-import { disableLynxBytecode } from '../../scripts/lynx-bytecode.ts';
+import { disableLynxBackgroundBytecode } from '../../scripts/lynx-bytecode.ts';
 
 import { pluginSourceBundles } from './scripts/source-bundles.ts';
 
@@ -14,7 +14,7 @@ export default defineConfig(({ env }) => {
     : ['react-native', 'react-lazy', 'react-lazy-sync', 'react-lazy-nested', 'react-reload', 'react-data-processor', 'react-global-props', 'react-list'];
 
   return {
-    tools: { bundlerChain: disableLynxBytecode },
+    tools: { bundlerChain: disableLynxBackgroundBytecode },
     plugins: [pluginReactLynx({ engineVersion }), pluginSourceBundles(mode, engineVersion)],
     source: { entry: {} },
     // Each fixture owns a compilation and output directory, so lazy chunks

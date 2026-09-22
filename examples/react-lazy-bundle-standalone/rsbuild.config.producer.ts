@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { disableLynxBytecode } from '../../scripts/lynx-bytecode.ts';
+import { disableLynxBackgroundBytecode } from '../../scripts/lynx-bytecode.ts';
 
 import { pluginReactLynx } from '@lynx-js/react-rsbuild-plugin';
 import { pluginLynx } from '@lynx-js/rsbuild-plugin';
@@ -15,7 +15,7 @@ const enableFetchBundle = !!process.env['LAZY_BUNDLE_FETCHBUNDLE'];
 const producerPublicPath = `http://${detectLanHost()}:${producerDevPort}/`;
 
 export default defineConfig({
-  tools: { bundlerChain: disableLynxBytecode },
+  tools: { bundlerChain: disableLynxBackgroundBytecode },
   source: {
     entry: {
       LazyComponent: './src/LazyComponent.tsx',

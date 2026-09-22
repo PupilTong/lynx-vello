@@ -1,7 +1,7 @@
 import os from 'node:os';
 import path from 'node:path';
 
-import { disableLynxBytecode } from '../../scripts/lynx-bytecode.ts';
+import { disableLynxBackgroundBytecode } from '../../scripts/lynx-bytecode.ts';
 
 import { pluginExternalBundle } from '@lynx-js/external-bundle-rsbuild-plugin';
 import { pluginQRCode } from '@lynx-js/qrcode-rsbuild-plugin';
@@ -25,7 +25,7 @@ const port = Number(process.env['PORT'] ?? 3000);
 const assetPrefix = `http://${detectLanHost()}:${port}/`;
 
 export default defineConfig({
-  tools: { bundlerChain: disableLynxBytecode },
+  tools: { bundlerChain: disableLynxBackgroundBytecode },
   source: {
     entry: { main: './src/index.tsx' },
   },

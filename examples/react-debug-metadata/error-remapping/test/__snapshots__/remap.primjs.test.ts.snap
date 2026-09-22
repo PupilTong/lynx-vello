@@ -69,6 +69,15 @@ exports[`1 · LazyComponent (dynamic) > L3. main-thread error (dynamic) 1`] = `
   "release": "debugmetadata:<release>",
   "steps": [
     {
+      "colno": -1,
+      "context_line": "<generated>",
+      "filename": "main-thread.js",
+      "kind": "bytecode-debug-info",
+      "lineno": -1,
+      "post_context": [],
+      "pre_context": [],
+    },
+    {
       "colno": 19,
       "context_line": "  throw new Error('boom from LazyComponent main-thread');",
       "filename": "src/LazyComponent.tsx",
@@ -224,6 +233,15 @@ exports[`2 · Host (App.tsx) > H4. main-thread error (host) 1`] = `
   "release": "debugmetadata:<release>",
   "steps": [
     {
+      "colno": -1,
+      "context_line": "<generated>",
+      "filename": "main-thread.js",
+      "kind": "bytecode-debug-info",
+      "lineno": -1,
+      "post_context": [],
+      "pre_context": [],
+    },
+    {
       "colno": 19,
       "context_line": "  throw new Error('boom from App.tsx main-thread (host)');",
       "filename": "src/App.tsx",
@@ -356,6 +374,15 @@ exports[`3 · CrashDemo (host) > 7. main-thread error 1`] = `
   "raw": "at <anonymous> (.lynx/main/main-thread.js:<loc>)",
   "release": "debugmetadata:<release>",
   "steps": [
+    {
+      "colno": -1,
+      "context_line": "<generated>",
+      "filename": "main-thread.js",
+      "kind": "bytecode-debug-info",
+      "lineno": -1,
+      "post_context": [],
+      "pre_context": [],
+    },
     {
       "colno": 19,
       "context_line": "  throw new Error('boom from main-thread');",

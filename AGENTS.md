@@ -1866,9 +1866,9 @@ the opposite of the element path in the same file.
   benches: the emitted `dist/index.rs` registry is what names the bundles, and
   no compiled fixture is versioned. Upstream provenance for the five `basic-*`
   cards is in that package's `NOTICE.lynx-stack`. Native builds use the shared
-  `scripts/lynx-bytecode.ts` hook to emit source sections directly, including
-  page MTS, BTS bootstrap, CSS and lazy chunks. The fixture completion hook
-  only renames pages and records provenance; it does not re-encode bundles.
+  `scripts/lynx-bytecode.ts` hook to disable BTS manifest bytecode. MTS keeps
+  the compiler's default encoding. The fixture-only source repack remains
+  necessary for Bobcat's source evaluator.
 - `packages/explorer-homepage`, `packages/explorer-showcase` and
   `packages/explorer-lib` — the Lynx Explorer home screen and showcase menu in
   ReactLynx, over the navigation, launch-command, history and theme helpers the

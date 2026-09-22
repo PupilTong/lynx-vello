@@ -26,7 +26,7 @@ export async function computeFrame(
     return {
       code: 0,
       release: `debugmetadata:${r.release}`,
-      raw: `at <anonymous> (${r.path}:${r.lineno}:${r.colno})`,
+      raw: `at <anonymous> (${r.path}:${r.functionId}:${r.pc})`,
       steps: r.steps,
     };
   }
