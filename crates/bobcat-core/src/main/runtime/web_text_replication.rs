@@ -109,23 +109,28 @@ fn text_runtime() -> (ScriptRuntime, MainThreadRuntime, DocumentProbe) {
 }
 
 /// The same, plus the card's own stylesheet — the `styleInfo` half of a
-/// bundle, which the Element PAPI never carries. It is staged the way a
-/// view's fetched sheets are, because the document does not exist until the
-/// boot module creates it.
+/// bundle, which the Element PAPI never carries. It is answered the way a
+/// view's fetched sheets are, because `createDocument` is what mounts them.
 fn text_runtime_with_author_css(css: &str) -> (ScriptRuntime, MainThreadRuntime, DocumentProbe) {
     let mut text = dom::TextContext::new();
     assert_eq!(text.register_fonts(dom::FontBlob::from_static(AHEM)), 1);
     let mut ingredients =
         DocumentIngredients::for_test(Viewport::new(393.0, 727.0), PageConfig::default());
     ingredients.text_context = Some(text);
-    if !css.is_empty() {
-        ingredients.sheets.push(StyleSheetSource::Text(css.into()));
-    }
-    runtime_over(ingredients)
+    let sheets = if css.is_empty() {
+        Vec::new()
+    } else {
+        vec![answered_source(
+            "app:///index.css",
+            LoadedSource::StyleSheet(StyleSheetSource::Text(css.into())),
+        )]
+    };
+    runtime_over(ingredients, sheets)
 }
 
 fn runtime_over(
     ingredients: DocumentIngredients,
+    sheets: Vec<crate::view::StartupSource>,
 ) -> (ScriptRuntime, MainThreadRuntime, DocumentProbe) {
     let (outbox, _far_end) = detached_outbox(Arc::new(NoWakeup));
     let mut js_runtime = ScriptRuntime::new().expect("the test runtime starts");
@@ -139,10 +144,11 @@ fn runtime_over(
         outbox,
         &WorkerFactory::new(workers),
         thread.handle(),
-        // The script is evaluated afterwards, so this supplies the base URL
-        // alone.
-        &mut RealmStartup {
-            url: "app:///main.js".to_owned(),
+        RealmStartup {
+            startup: crate::view::StartupSources {
+                sheets,
+                ..crate::view::StartupSources::default()
+            },
             ..RealmStartup::default()
         },
     )
@@ -217,10 +223,9 @@ fn background_pair(main: &str, background: &str) -> BackgroundPair {
         outbox,
         &WorkerFactory::new(home.commands()),
         thread.handle(),
-        // The main script is evaluated below, so this names the BTS entry and
-        // the base URL and nothing else.
-        &mut RealmStartup {
-            url: "app:///main.js".to_owned(),
+        // The main script boots below, which is what answers this realm's
+        // entry request; this names the BTS entry and nothing else.
+        RealmStartup {
             background_entry: Some("test:bts-entry".to_owned()),
             ..RealmStartup::default()
         },

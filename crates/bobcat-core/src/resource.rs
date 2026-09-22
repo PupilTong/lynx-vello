@@ -318,6 +318,43 @@ pub(crate) fn unanswered_source() -> ResourceError {
     }
 }
 
+/// Waits inside a job for one answer the realm is already owed, with that
+/// realm's end as the first arm.
+///
+/// The one wait shape every synchronous host member that reads a source makes:
+/// `adoptStyleSheet`, the `createDocument` that mounts the view's author
+/// sheets, and the `entryUrl` that registers its entry. It parks the *job* it
+/// runs in — every task of the engine thread goes on running, including the
+/// one routing this very answer, and no other job does — so a realm holds its
+/// borrows across it. The token is biased first, so a release ends the wait
+/// rather than the answer doing it.
+///
+/// An answer that is already in hand costs no wait at all, which is what a
+/// startup source the fetcher completed before the realm opened is.
+pub(crate) fn wait_for_source(
+    thread: &crate::jobs::JsThreadHandle,
+    token: &tokio_util::sync::CancellationToken,
+    mut answer: crate::link::SourceAnswer,
+) -> Result<LoadedSource, String> {
+    use tokio::sync::oneshot::error::TryRecvError;
+    let reason = |answered: Result<LoadedSource, crate::view::LynxViewError>| {
+        answered.map_err(|error| error.to_string())
+    };
+    match answer.try_recv() {
+        Ok(answered) => reason(answered),
+        Err(TryRecvError::Closed) => reason(Err(unanswered_source().into())),
+        Err(TryRecvError::Empty) => thread.wait(async {
+            tokio::select! {
+                biased;
+                () = token.cancelled() => Err("view was released".to_owned()),
+                result = answer => reason(
+                    result.unwrap_or_else(|_| Err(unanswered_source().into())),
+                ),
+            }
+        }),
+    }
+}
+
 /// Stable resource failure details shared by every operation.
 #[derive(Clone, Debug, Error)]
 #[error("{kind:?} during {phase:?}: {message}")]

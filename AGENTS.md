@@ -262,11 +262,12 @@ borrows of the shared runtime and the realm and then that operation's epilogue,
 in this order: the timers that came due, the commit, the boot report once, the
 `BeginFrame` acknowledgement, the module requests entry produced, the next timer
 deadline, and the checkpoint generation as of this entry. `Page::settle` is the
-epilogue alone, for a wake carrying no operation. What a *loading* page does
-with a burst is the exception: its document ingredients are a field of their
-own, never held across a wait, so a resize, an image report and the immediate
-`BeginFrame` acknowledgement are served on the task and never queue behind a
-sibling view's load. A `bobcat-workers` consumer never awaits the deliveries it
+epilogue alone, for a wake carrying no operation. **Nothing of a view is
+served outside a job**: opening its realm is the view's first job, queued
+before any of its tasks is spawned, so a burst that arrived before the realm
+did is a job queued behind it and finds a document — and a `BeginFrame` is
+acknowledged by a job like everything else, so while any job of the group is
+parked the acknowledgement waits with it. A `bobcat-workers` consumer never awaits the deliveries it
 queued, because `Terminate` is in band behind them: it queues one job per
 message and ends the worker the moment it reads one, which is what releases a
 job parked on a synchronous wait and discards the posts queued ahead of it.
@@ -309,10 +310,15 @@ document and zero fetches on failure, which is why the check has to be here
 rather than a turn later — and then requests each stylesheet in cascade order
 followed by the entry module, on the embedder's thread, before it returns. Only
 the built text context and the answering one-shots cross to `bobcat-main`,
-where the view's owner reads them in that same order and stages what arrives as
-the `DocumentIngredients` its document is built from. So the fetcher's IO, the
-realm's boot and the first frame's encode all overlap the painter the embedder
-builds next, and `LynxView::pump` services every *later* request — imports,
+where the *realm* reads them in that same order: `createDocument` mounts the
+sheets, parking the job it runs in for whatever part of that IO has not
+finished, and `entryUrl()` names the entry without parking at all — a response
+that has arrived is answered outright, and one that has not becomes a
+`bobcat:future` the boot module awaits, settled on a task of the view's
+owner. The realm itself opens
+immediately, before any answer has arrived, so the fetcher's IO,
+the whole of boot and the first frame's encode all overlap the painter the
+embedder builds next, and `LynxView::pump` services every *later* request — imports,
 `adoptStyleSheet`, worker scripts, fonts, plain fetches — and the view's images
 in ordinary turns. The default family is prepended to the `system-ui`,
 `sans-serif` and `serif` generic maps, so a Wasm embedder can supply its
@@ -651,17 +657,22 @@ document. `LynxDocument`, `Viewport`, `DocumentIngredients`, `DocumentSlot`,
 `Published`) and the concrete QuickJS adapter are crate-private; `Painter` is
 public, and `LynxDocument` is what an embedder cannot name.
 
-**The realm creates its own document, and says so.** The boot module's first
-statement is `export const document = new Document();`; `bobcat:element`'s
-`Document` constructor calls the host member `createDocument`, which builds the
-document from the `DocumentIngredients` the view's task staged before the realm
-opened — viewport, page config, the validated text context, the author sheets
-in cascade order, the group's style pool, and any image reports that arrived
-first — mounting and replaying them in that order. Every phase runs under a
-catch, because the bridge erases a panic into "the host function panicked". A
-second construction is refused whichever module asks: the ingredients are
-spent. The realm holds what it built in the private `DocumentSlot` every tree
-member borrows; that `Rc<RefCell<…>>` exists only so same-thread native QuickJS
+**The realm creates its own document, out of a configuration it holds.** Boot
+reads the view's four page switches as JSON text through the one-shot member
+`pageConfig()`, parses them, and its first statement is
+`export const document = new Document(config);`; `bobcat:element`'s `Document`
+constructor calls `createDocument(JSON.stringify(config))`, which parses those
+four switches back — one of the payloads Rust genuinely needs the fields of —
+and builds the document from them plus the `DocumentIngredients` that never
+reach the realm: the create-time viewport, the validated text context and the
+group's style pool. It then **mounts the view's author sheets**, in cascade
+order, out of the answers `create_lynx_view` already asked for, waiting for
+each that has not arrived the way `adoptStyleSheet` waits. Every phase runs
+under a catch, because the bridge erases a panic into "the host function
+panicked". A sheet that failed to load, a configuration the realm cannot read
+and a second construction all throw, which fails the boot; the second one is
+refused whichever module asks, because the ingredients are spent. The realm
+holds what it built in the private `DocumentSlot` every tree member borrows; that `Rc<RefCell<…>>` exists only so same-thread native QuickJS
 callbacks can reach the owner, not as a cross-thread sharing mechanism.
 
 **The document lives exactly as long as the realm.** The boot module's exported
@@ -675,10 +686,12 @@ and their clones of the slot, then the runtime's own `slot` handle, which is
 when the `LynxDocument` drops. That field order is the whole mechanism; there
 is no `Drop` impl behind it. Every tree and attribute member therefore takes
 the document unconditionally, and the one refusal left here is a second
-`createDocument`. The one window where a document is absent is the load, and
-the task serves through it: image reports are buffered and replayed, a
-`BeginFrame` is still acknowledged so an offscreen host is never blocked by a
-load, and dispatch and refill are dropped.
+`createDocument`. **There is no window in which a view has a task but no
+document**: opening the realm is the first job of the view, queued before any
+of its tasks is spawned and before anything has been fetched, and the boot
+module's first statement is what creates the document — so a command that
+arrived earlier is a job queued behind that one. Nothing is buffered, replayed
+or dropped for want of a document.
 
 **A painter binding the view is what releases its first frame.** The document
 is created at the create-time viewport unless a painter has already written the
@@ -697,10 +710,17 @@ is a flush, so a view no painter ever binds publishes no frame, reports no
 settles the page once per change, which is what commits a resize with no
 JavaScript behind it.
 
-Main opens the realm and evaluates `bobcat:boot`, whose first statement creates
-the document and so mounts the staged sheets, in cascade order, before the
-entry loads. Success is `ScriptFinished`; resource, font, realm, or boot
-failure is `StartupFailed`. That failure stays the failing view's and is
+Main opens the realm and evaluates `bobcat:boot` as the view's first job,
+before anything has been fetched: its first statement creates the document and
+so mounts the view's author sheets, in cascade order, and the statement after
+it names and registers the entry. Both read the answers `create_lynx_view`
+already asked for; the sheets park the job for what has not arrived, and the
+entry becomes a `bobcat:future` boot awaits instead, so boot's remainder — the
+entry import, the BTS Worker, the render and the flush — may run in the job
+the owner's epilogue settles that future in. Success is `ScriptFinished`; a font,
+realm or boot failure is `StartupFailed`, and a stylesheet or entry that
+cannot be loaded is one too — as `LynxViewError::Script`, because the boot
+module is what threw, naming the URL and the host's reason. That failure stays the failing view's and is
 reported once: an entry that throws under boot's top-level `await` rejects
 through the promise-job queue the group's realms share, and what it leaves
 there reaches neither the next view nor the failing realm's own next entry.
@@ -717,8 +737,9 @@ of the page's own last entry keeps a page's own bumps from waking it.
 A `.web.bundle`'s `lepusCode.root` or raw XML main body becomes a real ESM at
 its resolved entry URL: core prepends named imports from both built-ins. The
 `bobcat:boot` ESM imports its lifecycle helpers from `bobcat:runtime`,
-`Document` and `__FlushElementTree` from `bobcat:element`, and `bobcat:timers`
-for its effect. The runtime parses the view's `init_data` and `global_props`
+`Document` and `__FlushElementTree` from `bobcat:element`, `pageConfig` and
+`entryUrl` from `bobcat-internal:host`, `Future` from `bobcat:future`, and
+`bobcat:timers` for its effect. The runtime parses the view's `init_data` and `global_props`
 JSON in MTS; missing values become `{}` and malformed inputs fail boot. Boot
 creates its document, initializes `__Card__` and MTS inputs, retains the host
 render argument, then awaits the entry; it processes that argument and posts
@@ -732,8 +753,8 @@ Lifecycle hooks and engine listeners run synchronously, with no intervening
 Promise-job checkpoint. Boot awaits a `Promise.resolve().then` flush after
 rendering; that flush's commit completes MTS boot, the whole of public
 readiness, and BTS acknowledges nothing. Boot reads
-`PageConfig.enable_js_data_processor` from the staged document ingredients and
-the screen `SystemInfo` reports from `RealmStartup`, where the view's task put
+`enableJSDataProcessor` off the configuration it parsed out of `pageConfig()`,
+and the screen `SystemInfo` reports from `RealmStartup`, where the view's task put
 either `ViewSources::screen` — what the embedder measured: web-core's
 `devicePixelRatio` and available screen size in a browser, the window's monitor
 natively — or, for a host that named none, the create-time viewport in physical
@@ -1890,9 +1911,11 @@ follows every entry into a realm calls the module's `__BobcatRunTimer` back for
 whatever is due — before that entry's commit, so a callback's mutation rides
 the same frame. No deadline crosses the link and no host turn is owed for one.
 
-`src/element-papi.ts` also exports `class Document`, whose constructor calls
-the native `createDocument`. It is on no collection schedule at all, which is
-the opposite of the element path in the same file.
+`src/element-papi.ts` also exports `class Document` and the `PageConfig` its
+constructor takes: the four page switches the boot module read out of
+`pageConfig()`, which the constructor serializes for the native
+`createDocument`. It is on no collection schedule at all, which is the opposite
+of the element path in the same file.
 
 ### Other pnpm packages
 

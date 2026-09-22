@@ -23,7 +23,7 @@ use crate::main::WorkerFactory;
 use crate::main::runtime::{bound_metrics, install_shared_modules};
 use crate::main::tree::PageConfig;
 use crate::resource::{SourceCompletion, SourceRequest};
-use crate::view::NoWakeup;
+use crate::view::{NoWakeup, StartupSource, StartupSources};
 
 /// How many times the harness lets every ready task run before it gives up on
 /// something happening. A hang detector rather than a schedule: everything
@@ -44,14 +44,36 @@ where
     thread.run(body);
 }
 
-/// Opens one page's realm the way [`boot_page`] does: as one job of that
-/// page's, awaited.
-async fn open_realm(page: &Rc<Page>, startup: RealmStartup) {
+/// Opens one page's realm the way [`serve_view`] does: as one job of that
+/// page's, awaited, with its entry already answered.
+async fn open_realm(page: &Rc<Page>, entry: &str, url: &str) {
+    let startup = RealmStartup {
+        startup: answered_startup(entry, url, &page.lifetime.token().clone()),
+        ..RealmStartup::default()
+    };
     crate::lifetime::run_job(page, move |page| {
-        page.open_realm(startup);
+        page.open_realm(ingredients(), startup);
         Some(())
     })
     .await;
+}
+
+/// The startup of a view that lists no stylesheets and whose entry the
+/// fetcher answered before the realm opened, which is what every pin here
+/// that is not about the loading itself wants.
+fn answered_startup(entry: &str, url: &str, token: &CancellationToken) -> StartupSources {
+    let (completion, answer) = SourceCompletion::new(token.clone());
+    completion.complete(Ok(LoadedSource::Entry {
+        source: entry.to_owned(),
+        url: url.to_owned(),
+    }));
+    StartupSources {
+        sheets: Vec::new(),
+        entry: StartupSource {
+            url: url.to_owned(),
+            answer,
+        },
+    }
 }
 
 /// One group's shared runtime, with the test holding the worker thread's end
@@ -169,12 +191,16 @@ impl Harness {
         };
         let sheets = std::mem::take(&mut sources.style_sheets)
             .into_iter()
-            .map(|url| request(SourceRequest::StyleSheet(url), &mut outstanding))
+            .map(|url| StartupSource {
+                answer: request(SourceRequest::StyleSheet(url.clone()), &mut outstanding),
+                url,
+            })
             .collect();
-        let entry = request(
-            SourceRequest::Entry(std::mem::take(&mut sources.entry)),
-            &mut outstanding,
-        );
+        let entry_url = std::mem::take(&mut sources.entry);
+        let entry = StartupSource {
+            answer: request(SourceRequest::Entry(entry_url.clone()), &mut outstanding),
+            url: entry_url,
+        };
         let attached = AttachedView {
             viewport: CREATE_VIEWPORT,
             sources,
@@ -288,6 +314,32 @@ impl Harness {
         completion.complete(Err(unanswered_source().into()));
     }
 
+    /// Fails one outstanding stylesheet request, leaving the entry alone.
+    fn refuse_style_sheet(&mut self) {
+        let position = self
+            .sources
+            .iter()
+            .position(|(request, _)| matches!(request, SourceRequest::StyleSheet(_)))
+            .expect("a stylesheet request is outstanding");
+        let (_, completion) = self.sources.remove(position);
+        completion.complete(Err(unanswered_source().into()));
+    }
+
+    /// Whether the entry request is still unanswered.
+    fn wants_its_entry(&self) -> bool {
+        self.sources
+            .iter()
+            .any(|(request, _)| matches!(request, SourceRequest::Entry(_)))
+    }
+
+    /// The startup failure this view reported, if it has.
+    fn startup_failure(&self) -> Option<String> {
+        self.events.iter().find_map(|event| match event {
+            EngineEvent::StartupFailed(error) => Some(error.to_string()),
+            _ => None,
+        })
+    }
+
     /// Boots the view over `entry` and returns the commit its boot published.
     async fn boot(&mut self, entry: &str) -> u64 {
         self.until("the view never asked for its entry", |harness| {
@@ -393,13 +445,7 @@ impl OwnedPage {
         let token = view.token.clone();
         let (commands, incoming) = mpsc::unbounded_channel();
         let (metrics, metric_receiver) = watch::channel(Some(CREATE_VIEWPORT));
-        let page = Page::new(
-            context,
-            outbox,
-            ingredients(),
-            metric_receiver,
-            token.clone(),
-        );
+        let page = Page::new(context, outbox, metric_receiver, token.clone());
         page.spawn(consume_commands(Rc::clone(&page), incoming));
         Self {
             page,
@@ -413,15 +459,7 @@ impl OwnedPage {
     /// Opens the realm over `entry` and turns until its first frame is
     /// published.
     async fn boot(&mut self, entry: &str) -> u64 {
-        open_realm(
-            &self.page,
-            RealmStartup {
-                source: entry.to_owned(),
-                url: "app:///main.js".to_owned(),
-                ..RealmStartup::default()
-            },
-        )
-        .await;
+        open_realm(&self.page, entry, "app:///main.js").await;
         for _ in 0..TURNS {
             if self.view.published.commit().is_some() {
                 break;
@@ -1371,19 +1409,10 @@ fn a_siblings_checkpoint_makes_a_parked_page_settle() {
         let page = Page::new(
             Rc::clone(&context),
             outbox,
-            ingredients(),
             bound_metrics(CREATE_VIEWPORT),
             view.token.clone(),
         );
-        open_realm(
-            &page,
-            RealmStartup {
-                source: ONE_BOX.to_owned(),
-                url: "app:///main.js".to_owned(),
-                ..RealmStartup::default()
-            },
-        )
-        .await;
+        open_realm(&page, ONE_BOX, "app:///main.js").await;
         for _ in 0..TURNS {
             if view.published.commit().is_some() {
                 break;
@@ -1431,21 +1460,12 @@ fn a_pages_own_entries_never_wake_its_clock_task() {
         let page = Page::new(
             Rc::clone(&context),
             outbox,
-            ingredients(),
             bound_metrics(CREATE_VIEWPORT),
             view.token.clone(),
         );
         // The listener is what makes the dispatch below a real entry into
         // JavaScript rather than a walk that meets nobody.
-        open_realm(
-            &page,
-            RealmStartup {
-                source: LISTENING_BOX.to_owned(),
-                url: "app:///main.js".to_owned(),
-                ..RealmStartup::default()
-            },
-        )
-        .await;
+        open_realm(&page, LISTENING_BOX, "app:///main.js").await;
         for _ in 0..TURNS {
             if view.published.commit().is_some() {
                 break;
@@ -1981,17 +2001,123 @@ fn a_disposal_reply_queued_with_view_release_is_not_discarded() {
     });
 }
 
+/// An entry the fetcher has not answered parks nothing.
+///
+/// `entryUrl()` answers the boot module a `bobcat:future` instead of a URL
+/// where the entry is still outstanding, and boot awaits it: the answer is
+/// read on a task of this view's owner, and the job boot ran in has already
+/// returned. So this view's realm is live with a document in it, its
+/// `BeginFrame` is acknowledged by a job of its own, and the entry arriving
+/// later is what finishes the boot.
+#[test]
+fn an_outstanding_entry_leaves_the_view_serving() {
+    on_a_js_thread(|thread| async move {
+        let (context, workers) = group(&thread);
+        let mut harness = Harness::new(Rc::clone(&context), workers);
+        harness
+            .until("the view never asked for its entry", |h| {
+                !h.sources.is_empty()
+            })
+            .await;
+        harness
+            .commands
+            .send(ToMain::BeginFrame { now: 0.0, seq: 7 })
+            .expect("the view is serving");
+        harness
+            .until(
+                "the acknowledgement never came while the entry was in flight",
+                |h| h.view.published.begin_frame_serviced() == 7,
+            )
+            .await;
+        // The realm is open and holds a document: only a live realm answers a
+        // probe, and only a document answers `document_element`.
+        let (probe, probed) = std::sync::mpsc::channel();
+        harness
+            .commands
+            .send(ToMain::Probe(Box::new(move |document| {
+                let _ = probe.send(document.document_element().id());
+            })))
+            .expect("the view is serving");
+        let mut answered = None;
+        harness
+            .until("the realm never answered a probe", |h| {
+                answered = probed.try_recv().ok();
+                answered.is_some() || h.owner.is_finished()
+            })
+            .await;
+        assert!(
+            answered.is_some(),
+            "the realm's document answered the probe"
+        );
+        assert!(!harness.finished(), "and boot has not finished either");
+
+        harness.answer("app:///main.js", ONE_BOX);
+        harness
+            .until("boot never finished once its entry arrived", |h| {
+                h.finished()
+            })
+            .await;
+        harness.background = Some(harness.background_worker());
+    });
+}
+
+/// The realm opens and the document is created before any source has
+/// arrived: the boot module's first statement is what builds it, and the
+/// sheets it mounts are answers the view was promised rather than answers it
+/// has.
+///
+/// Observed through the one thing visible from outside while the entry is
+/// still outstanding — a stylesheet that fails to load. Mounting is
+/// `createDocument`'s, so a failure that arrives with the entry request still
+/// unanswered says the document was being built before the entry was read.
+/// The message is the whole of what an embedder is told about it, so it has
+/// to name the sheet.
+#[test]
+fn the_document_is_created_before_the_entry_is_read() {
+    on_a_js_thread(|thread| async move {
+        let (context, workers) = group(&thread);
+        let mut harness = Harness::serving(
+            context,
+            workers,
+            ViewSources {
+                style_sheets: vec!["app:///a.css".to_owned()],
+                ..ViewSources::new("app:///main.js")
+            },
+        );
+        harness
+            .until("the view never asked for its stylesheet", |h| {
+                h.wants_a_style_sheet()
+            })
+            .await;
+        harness.refuse_style_sheet();
+        harness
+            .until("the sheet failure never reached the embedder", |h| {
+                h.startup_failure().is_some()
+            })
+            .await;
+        let message = harness.startup_failure().expect("a startup failure");
+        assert!(message.contains("app:///a.css"), "{message}");
+        assert!(
+            harness.wants_its_entry(),
+            "and the entry was never answered, so nothing waited for it first"
+        );
+    });
+}
+
 /// What a synchronous adoption stops and what it does not.
 ///
 /// View A's entry adopts a stylesheet and the test withholds the answer, so
 /// A's job is parked inside [`crate::jobs::JsThread::wait`] for the whole of
 /// this test's middle. While it is:
 ///
-/// - the scheduler keeps running, so a still-loading view B has its source requests answered and
-///   its `BeginFrame` acknowledged — the acknowledgement an offscreen host blocks on is not queued
-///   behind a sibling's load;
-/// - no JavaScript of B's runs, because B's entry is a job and jobs are one FIFO;
-/// - once A's answer arrives the queue drains in order and both views finish boot.
+/// - the scheduler keeps running, so a second view B attaches, its own tasks start and its startup
+///   sources are answered — the routing a load needs is a task's, not a job's;
+/// - nothing of B's reaches its realm: B's own `open_realm` is a job, and jobs are one FIFO, so B
+///   has no document and its `BeginFrame` is not acknowledged either. That is the cost of the
+///   loading phase having gone: an acknowledgement now waits for the queue, and what bounds it is
+///   that the only wait boot itself makes is for sources the view already asked for;
+/// - once A's answer arrives the queue drains in order, B opens its realm, boots, and answers the
+///   `BeginFrame` that was queued behind it.
 #[test]
 fn a_synchronous_adoption_parks_javascript_and_leaves_a_siblings_tasks_running() {
     on_a_js_thread(|thread| async move {
@@ -2014,30 +2140,28 @@ fn a_synchronous_adoption_parks_javascript_and_leaves_a_siblings_tasks_running()
                 ..ViewSources::new("app:///b.js")
             },
         );
+        // Both of B's startup requests are outstanding from its construction,
+        // the way `create_lynx_view` issues them, so both can be answered
+        // while A holds the thread.
         loading
             .until("B never asked for its stylesheet", |h| {
                 h.wants_a_style_sheet()
             })
             .await;
         loading.answer_style_sheet(".box{width:10px}");
-        loading
-            .until("B's boot never went on to its entry", |h| {
-                !h.sources.is_empty()
-            })
-            .await;
         loading.answer("app:///b.js", ONE_BOX);
-
-        // B's next step is a job, which cannot run yet — so B is still loading,
-        // and a loading page answers a `BeginFrame` on its own task.
         loading
             .commands
             .send(ToMain::BeginFrame { now: 0.0, seq: 4 })
             .expect("B is still serving");
-        loading
-            .until("B's BeginFrame was queued behind A's load", |h| {
-                h.view.published.begin_frame_serviced() == 4
-            })
-            .await;
+        for _ in 0..8 {
+            loading.turn().await;
+        }
+        assert_eq!(
+            loading.view.published.begin_frame_serviced(),
+            0,
+            "B's acknowledgement is a job, and A's parked job is ahead of it"
+        );
         assert!(
             !loading.finished() && loading.view.published.commit().is_none(),
             "no JavaScript of B's ran while A's job held the thread"
@@ -2055,6 +2179,11 @@ fn a_synchronous_adoption_parks_javascript_and_leaves_a_siblings_tasks_running()
             .await;
         loading
             .until("B never booted once the queue drained", |h| h.finished())
+            .await;
+        loading
+            .until("B's BeginFrame was never acknowledged", |h| {
+                h.view.published.begin_frame_serviced() == 4
+            })
             .await;
     });
 }

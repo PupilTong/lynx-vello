@@ -161,13 +161,15 @@ ids, and host callbacks are not surfaced by the npm facade.
 Startup is an asynchronous host boundary whose owned work runs on the Lynx
 main Worker. `create_lynx_view` validates the fonts on the Render Worker and
 hands the view's resource system its author sheets and its entry there, before
-it returns; the view's task on the Lynx main Worker stages the answers as they
-arrive, in cascade order and then the entry. It then creates a
-QuickJS realm, preloads `bobcat:runtime`, `bobcat:element`, the timer and
-event-target modules, and the resolved entry URL, and evaluates
-`bobcat:boot`. That module's first statement constructs its `Document`, which
-is what builds the page out of the staged ingredients — the author sheets
-mounted in cascade order among them. It then uses top-level await to import
+it returns; the answers cross to the view's task on the Lynx main Worker, which
+waits for none of them. That task creates a
+QuickJS realm at once, preloads `bobcat:runtime`, `bobcat:element` and the
+timer and event-target modules, and evaluates
+`bobcat:boot`. That module's first statement constructs its `Document` over the
+page configuration it read, which is what builds the page and mounts the author
+sheets in cascade order, waiting on each answer still outstanding; the
+statement after it reads and registers the entry the same way. It then uses
+top-level await to import
 the entry before it
 calls a present `globalThis.renderPage` or dispatches `__RenderPage` on the
 realm-local EventTarget returned by `lynx.getEngine()`, and finally flushes the

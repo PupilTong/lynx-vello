@@ -3,7 +3,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use bobcat_core::resource::ResourceErrorKind;
 use bobcat_core::{
     DrawTarget, EngineEvent, EventRequester, LynxGroup, LynxView, LynxViewError, Painter,
     PreparsedDeclaration, PreparsedRule, PreparsedStyleSheet, StyleThreads, ViewSources,
@@ -125,6 +124,10 @@ async fn text_and_preparsed_sheets_keep_cascade_order_before_entry() {
     assert_eq!(&screenshot.pixels[offset..offset + 4], &[0, 0, 255, 255]);
 }
 
+/// The boot module is what reads both a stylesheet and the entry, so a
+/// decoding failure reaches the embedder as the exception it threw rather
+/// than as the fetcher's own error. What has to survive that is the resolved
+/// URL, which is what a card's author needs to find the file.
 #[tokio::test]
 async fn source_utf8_errors_keep_the_resolved_url() {
     for stylesheet in [false, true] {
@@ -146,17 +149,19 @@ async fn source_utf8_errors_keep_the_resolved_url() {
         };
         let (mut view, _painter) = view(&group, &resources, sources).await;
         let error = boot(&mut view, &receiver).unwrap_err();
-        match (stylesheet, error) {
-            (true, LynxViewError::InvalidStyleSheetEncoding { url, .. })
-            | (false, LynxViewError::InvalidScriptEncoding { url, .. }) => {
-                assert_eq!(url, "app:///invalid.bin");
-            }
-            (_, error) => panic!("unexpected source failure: {error}"),
-        }
+        assert!(matches!(error, LynxViewError::Script(_)), "{error}");
+        let message = error.to_string();
+        assert!(message.contains("app:///invalid.bin"), "{message}");
         assert!(view.pump().is_empty(), "failure arrives once");
     }
 }
 
+/// A view whose entry cannot be loaded fails, and its group goes on serving.
+///
+/// The failing view's boot reads its entry inside its own realm, so the read
+/// is a job of the group's one queue; what keeps a sibling from waiting on it
+/// is that the read *ends* — a resolution failure is an answer, and the
+/// exception it throws finishes the job.
 #[tokio::test]
 async fn missing_source_fails_without_blocking_sibling_startup() {
     let (group, resources, receiver) = setup().await;
@@ -165,8 +170,10 @@ async fn missing_source_fails_without_blocking_sibling_startup() {
     // `app:` is a plausible scheme that nothing registered and no transport
     // serves, so resolution is where the load stops.
     match boot(&mut failed, &receiver) {
-        Err(LynxViewError::Resource(error)) => {
-            assert_eq!(error.kind, ResourceErrorKind::UnsupportedScheme);
+        Err(LynxViewError::Script(error)) => {
+            let message = error.to_string();
+            assert!(message.contains("missing.js"), "{message}");
+            assert!(message.contains("UnsupportedScheme"), "{message}");
         }
         outcome => panic!("unexpected outcome for a missing source: {outcome:?}"),
     }

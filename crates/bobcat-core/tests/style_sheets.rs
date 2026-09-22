@@ -152,6 +152,11 @@ async fn a_byte_order_mark_prefixed_sheet_mounts() {
 }
 
 /// A stylesheet that will not decode reports a precise startup failure.
+///
+/// The sheets are mounted inside `new Document(config)`, so what the embedder
+/// is told is the exception that threw — a `Script` error rather than the
+/// fetcher's own `InvalidStyleSheetEncoding` — and the message is what has to
+/// name the sheet and the reason.
 #[tokio::test]
 async fn a_stylesheet_that_is_not_utf8_is_a_precise_error() {
     let fetcher = Rc::new(
@@ -165,14 +170,11 @@ async fn a_stylesheet_that_is_not_utf8_is_a_precise_error() {
         .expect("loading view");
     let error = wait_for_script(&mut view)
         .expect_err("invalid UTF-8 CSS is rejected, not silently dropped");
+    assert!(matches!(error, LynxViewError::Script(_)), "{error}");
+    let message = error.to_string();
     // The reported URL is the resolved one, as it is for a script.
-    assert!(
-        matches!(
-            error,
-            LynxViewError::InvalidStyleSheetEncoding { ref url, .. } if url == SCRIPT_URL
-        ),
-        "{error}"
-    );
+    assert!(message.contains(SCRIPT_URL), "{message}");
+    assert!(message.contains("UTF-8"), "{message}");
 }
 
 /// Each listed sheet is a separate stylesheet request, so a repeated URL

@@ -73,6 +73,18 @@ rstest.mockRequire("bobcat:runtime", () => ({
 const DOCUMENT_REFUSAL = new Error("the realm already created its document");
 
 /**
+ * The page configuration a boot module reads out of `pageConfig()` and hands
+ * to the constructor. Its four switches are the host's; nothing in this file
+ * reads them, and the constructor's only job is to serialize them.
+ */
+const PAGE_CONFIG: elementPapi.PageConfig = {
+  defaultDisplayLinear: true,
+  defaultOverflowVisible: true,
+  enableCssSelector: true,
+  enableJSDataProcessor: false,
+};
+
+/**
  * Every native member, plus the recorded calls, a filter over them, and the
  * selector answer a test installs.
  *
@@ -420,6 +432,8 @@ function createMockBobcat(issuedIds?: number[]): MockBobcat {
     initData: () => undefined,
     globalProps: () => undefined,
     nativeModuleTable: () => "",
+    pageConfig: () => JSON.stringify(PAGE_CONFIG),
+    entryUrl: () => "app:///main.js",
   };
   return host;
 }
@@ -516,22 +530,24 @@ describe("installation", () => {
     expect(elementModule.__BobcatDispatchEvent).toHaveLength(6);
   });
 
-  it("creates the realm's document once, with no arguments", () => {
-    void new elementModule.Document();
-    expect(mock.named("createDocument")).toEqual([["createDocument"]]);
+  it("creates the realm's document once, over the config it is given", () => {
+    void new elementModule.Document(PAGE_CONFIG);
+    expect(mock.named("createDocument")).toEqual([
+      ["createDocument", JSON.stringify(PAGE_CONFIG)],
+    ]);
   });
 
   it("tags a document the way the standard's own exotic objects are tagged", () => {
-    expect(Object.prototype.toString.call(new elementModule.Document())).toBe(
-      "[object Document]",
-    );
+    expect(
+      Object.prototype.toString.call(new elementModule.Document(PAGE_CONFIG)),
+    ).toBe("[object Document]");
   });
 
   it("lets the host refuse a second document rather than refusing it here", () => {
-    const first = new elementModule.Document();
+    const first = new elementModule.Document(PAGE_CONFIG);
     let thrown: unknown;
     try {
-      void new elementModule.Document();
+      void new elementModule.Document(PAGE_CONFIG);
     } catch (error) {
       thrown = error;
     }

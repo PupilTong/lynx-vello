@@ -311,10 +311,11 @@ async fn dropping_loading_view_cancels_resource_and_reaps_main_body() {
     drop(painter);
 }
 
-/// Metrics that arrive while the entry fetch is outstanding have no document
-/// to write into — the boot module has not created one yet — so the view's
-/// task writes them into the ingredients instead, and the document the boot
-/// module then creates is the resized one.
+/// Metrics that arrive while the entry fetch is outstanding reach the
+/// document through the seat's watch rather than through a command, and the
+/// document the boot module creates is the resized one: `createDocument`
+/// reads that watch, so a painter that bound before the realm's first
+/// statement has already named the metrics.
 ///
 /// Asserted through the pixels, because the document is what an integration
 /// test cannot name: the UA sheet gives `page` `width: 100%; height: 100%`, so
@@ -430,8 +431,11 @@ async fn an_unknown_font_family_fails_construction_without_fetching() {
 /// All three startup sources — two sheets and the entry — are requested
 /// inside `create_lynx_view`, so the host has resolved all three before the
 /// view's own boot has read any of them. What stops at the first failure is
-/// the *reading*: the remaining answers are dropped where the sheet failed,
-/// and one `StartupFailed` is reported.
+/// the *reading*: the boot module is what mounts the sheets, in cascade
+/// order, so the remaining answers are dropped where the first one failed and
+/// one `StartupFailed` is reported — a `Script` error, because what the
+/// embedder is told is the exception `new Document(config)` threw, naming the
+/// sheet and the reason.
 #[tokio::test]
 async fn a_resolution_failure_is_one_event_and_the_other_answers_are_discarded() {
     let fetcher = Rc::new(FetcherDouble::new(Vec::new()).resolving_to("not a URL"));
@@ -454,10 +458,14 @@ async fn a_resolution_failure_is_one_event_and_the_other_answers_are_discarded()
         3,
         "creation hands over both sheets and the entry, before any turn"
     );
-    assert!(matches!(
-        wait_for_script(&mut view),
-        Err(bobcat_core::LynxViewError::Resource(_))
-    ));
+    let error = wait_for_script(&mut view).expect_err("the first sheet cannot be resolved");
+    assert!(
+        matches!(error, bobcat_core::LynxViewError::Script(_)),
+        "{error}"
+    );
+    let message = error.to_string();
+    assert!(message.contains("first.css"), "{message}");
+    assert!(message.contains("relative URL without a base"), "{message}");
     assert_eq!(
         fetcher.resolve_count(),
         3,
@@ -467,6 +475,14 @@ async fn a_resolution_failure_is_one_event_and_the_other_answers_are_discarded()
     assert!(view.pump().is_empty(), "failure is delivered once");
 }
 
+/// A view whose entry is still in flight holds up nothing.
+///
+/// The entry is read inside the realm — `entryUrl()` in the boot module — but
+/// reading it never parks: an answer that has not arrived is a
+/// `bobcat:future` boot awaits, settled on a task of that view's owner. So the
+/// pending view's job has already returned, and a sibling view in the same
+/// group opens its realm, boots and paints while the first view's fetch is
+/// outstanding.
 #[tokio::test]
 async fn a_pending_view_does_not_block_a_sibling_in_the_same_group() {
     hang_budget(async {

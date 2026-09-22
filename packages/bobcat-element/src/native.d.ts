@@ -5,12 +5,18 @@
  */
 interface BobcatNative {
   /**
-   * Builds the realm's one document out of the ingredients the view staged
-   * before the realm opened: its metrics, its fonts, its author sheets in
-   * cascade order, and any image reports that arrived first. Throws when the
-   * realm already has one.
+   * Builds the realm's one document out of `config` — the four page switches
+   * as JSON text — and the view's own resources, which never reach this
+   * realm: its metrics, its fonts, its style pool, and its author stylesheets
+   * in cascade order.
+   *
+   * The sheets were requested when the view was created, and each is mounted
+   * here in cascade order; one that has not arrived yet parks the job this
+   * call runs in until it does, the way `adoptStyleSheet` parks. A sheet that
+   * fails to load, a malformed `config`, and a realm that already has a
+   * document all throw.
    */
-  createDocument(): void;
+  createDocument(config: string): void;
   /** Marks the permanent page live and returns its `NodeId`. */
   createPage(): number;
   /** Creates a detached element and returns its `NodeId`. */
@@ -147,6 +153,24 @@ interface BobcatNative {
    * no modules at all. Answers once, like `initData`.
    */
   nativeModuleTable(): string;
+  /**
+   * The view's page configuration as JSON text — `defaultDisplayLinear`,
+   * `defaultOverflowVisible`, `enableCssSelector` and `enableJSDataProcessor`,
+   * all booleans. Answers once, like `initData`.
+   */
+  pageConfig(): string;
+  /**
+   * The URL of the MTS entry, which the view requested before this realm
+   * opened, and which this call is what registers with the module loader: the
+   * `import()` the boot module makes next finds it already loaded and asks the
+   * host for nothing.
+   *
+   * It parks the job it runs in until the entry arrives, the way
+   * `createDocument` parks on a stylesheet. A load that failed throws, and so
+   * does a second call. It is also what names the base URL a `new Worker`
+   * specifier resolves against, so creating a worker before it is refused.
+   */
+  entryUrl(): string;
 }
 
 /**
@@ -234,6 +258,8 @@ declare module "bobcat-internal:host" {
   export const initData: BobcatNative["initData"];
   export const globalProps: BobcatNative["globalProps"];
   export const nativeModuleTable: BobcatNative["nativeModuleTable"];
+  export const pageConfig: BobcatNative["pageConfig"];
+  export const entryUrl: BobcatNative["entryUrl"];
   /**
    * Fetches `url` the way an image is fetched and answers the id of a
    * `bobcat:future` that settles when the fetch is over: fulfilled with

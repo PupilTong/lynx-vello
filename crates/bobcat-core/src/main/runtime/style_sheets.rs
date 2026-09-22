@@ -8,7 +8,7 @@ use quickjs_rust_bridge::HostValue;
 use super::{DocumentSlot, MainThreadError, ScriptEngine, ScriptRuntime, install};
 use crate::jobs::JsThreadHandle;
 use crate::link::ViewOutbox;
-use crate::resource::{LoadedSource, SourceRequest, StyleSheetSource, unanswered_source};
+use crate::resource::{LoadedSource, SourceRequest, StyleSheetSource, wait_for_source};
 
 pub(super) fn install_styles(
     engine: &mut ScriptEngine,
@@ -36,42 +36,42 @@ pub(super) fn install_styles(
         // This receiver lives only for this call. Cache lookup and sharing an
         // in-flight preload belong to the resource fetcher on the host thread.
         let answer = sources.request(SourceRequest::StyleSheet(url.clone()));
-        // The same synchronous wait a `require` makes (see `crate::require`).
-        // It is inside a job, so what it drives is this engine thread's tasks
-        // — channel reads, lifecycle signals, acknowledgements, the routing
-        // that answers this very request — and none of its jobs: no JavaScript
-        // of this realm's or any sibling's runs before this returns. The
-        // view's own token is first, so a release ends the wait rather than
-        // the response doing it.
-        let source = thread
-            .wait(async {
-                tokio::select! {
-                    biased;
-                    () = token.cancelled() => Err("view was released".to_owned()),
-                    result = answer => result
-                        .unwrap_or_else(|_| Err(unanswered_source().into()))
-                        .map_err(|error| error.to_string()),
-                }
-            })
+        // The synchronous wait every host member that reads a source makes,
+        // and the same one a `require` makes (see `crate::require`). It is
+        // inside a job, so what it drives is this engine thread's tasks —
+        // channel reads, lifecycle signals, acknowledgements, the routing that
+        // answers this very request — and none of its jobs: no JavaScript of
+        // this realm's or any sibling's runs before this returns. The view's
+        // own token is first, so a release ends the wait rather than the
+        // response doing it.
+        let source = wait_for_source(&thread, &token, answer)
             .map_err(|error| format!("loading stylesheet {url}: {error}"))?;
         let mut slot = document.borrow_mut();
-        match source {
-            LoadedSource::StyleSheet(StyleSheetSource::Text(css)) => {
-                crate::style::add_style_sheet_text(slot.document_mut(), &css);
-            }
-            LoadedSource::StyleSheet(StyleSheetSource::Preparsed(sheet)) => {
-                crate::style::add_preparsed_style_sheet(slot.document_mut(), &sheet);
-            }
-            LoadedSource::Entry { .. } => {
-                return Err(format!("stylesheet {url} returned a script"));
-            }
-            LoadedSource::Font(_) => {
-                return Err(format!("stylesheet {url} returned a font"));
-            }
-            LoadedSource::Fetched => {
-                return Err(format!("stylesheet {url} returned a plain fetch"));
-            }
-        }
+        mount_style_sheet(slot.document_mut(), url, source)?;
         Ok(HostValue::Undefined)
     })
+}
+
+/// Mounts one loaded author sheet, whichever form the fetcher answered in.
+///
+/// Shared with the startup sheets `createDocument` mounts, so an answer that
+/// is not a stylesheet reads the same either way.
+pub(super) fn mount_style_sheet(
+    document: &mut crate::main::tree::LynxDocument,
+    url: &str,
+    source: LoadedSource,
+) -> Result<(), String> {
+    match source {
+        LoadedSource::StyleSheet(StyleSheetSource::Text(css)) => {
+            crate::style::add_style_sheet_text(document, &css);
+            Ok(())
+        }
+        LoadedSource::StyleSheet(StyleSheetSource::Preparsed(sheet)) => {
+            crate::style::add_preparsed_style_sheet(document, &sheet);
+            Ok(())
+        }
+        LoadedSource::Entry { .. } => Err(format!("stylesheet {url} returned a script")),
+        LoadedSource::Font(_) => Err(format!("stylesheet {url} returned a font")),
+        LoadedSource::Fetched => Err(format!("stylesheet {url} returned a plain fetch")),
+    }
 }

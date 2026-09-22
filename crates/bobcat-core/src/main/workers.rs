@@ -47,7 +47,11 @@ impl WorkerFactory {
         engine: &mut ScriptEngine,
         runtime: &mut ScriptRuntime,
         outbox: ViewOutbox,
-        base_url: &str,
+        // Where a worker specifier resolves from: the MTS entry's response
+        // URL, which `entryUrl` is what learns. The boot module reads the
+        // entry before it creates its BTS Worker, so a worker asked for
+        // before that is a card reaching `createWorker` out of turn.
+        entry: Rc<super::runtime::EntrySlot>,
         background_entry: Option<String>,
     ) -> Result<(Rc<WorkerOwner>, mpsc::UnboundedReceiver<WorkerEvent>), ScriptError> {
         let (events, incoming) = mpsc::unbounded_channel();
@@ -61,7 +65,6 @@ impl WorkerFactory {
             live: RefCell::default(),
         });
         let creator = Rc::downgrade(&owner);
-        let base_url = base_url.to_owned();
         engine.register_host_module_function(
             runtime,
             HOST_MODULE_SPECIFIER,
@@ -81,11 +84,11 @@ impl WorkerFactory {
                 if specifier == BTS_MODULE_SPECIFIER {
                     let mut source = BTS_ENTRY_PREAMBLE.to_owned();
                     source.push_str("import { __BobcatStartBTS } from \"bobcat:bts-runtime\";\n__BobcatStartBTS(async () => {\n");
-                    if let Some(entry) = &background_entry {
-                        let entry =
-                            serde_json::to_string(entry).expect("a string is JSON serializable");
+                    if let Some(background) = &background_entry {
+                        let background = serde_json::to_string(background)
+                            .expect("a string is JSON serializable");
                         source.push_str("\nawait import(");
-                        source.push_str(&entry);
+                        source.push_str(&background);
                         source.push_str(");\n");
                     }
                     source.push_str("});\n");
@@ -102,10 +105,13 @@ impl WorkerFactory {
                 // here: what the host is handed is the far end of the
                 // one-shot that already rode to `bobcat-workers` with the
                 // `Start` above.
+                let base_url = entry
+                    .base_url()
+                    .ok_or("a worker cannot be created before the entry has resolved")?;
                 creator.outbox.notify(ViewNotice::RequestSource {
                     request: SourceRequest::Worker {
                         specifier,
-                        base_url: base_url.clone(),
+                        base_url,
                     },
                     completion: script,
                 });

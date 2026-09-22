@@ -325,7 +325,8 @@ import { __BobcatPublishEvent } from "bobcat:runtime";
 //   and the call crashes at the native boundary.
 // - **The document is not on this schedule at all.** `class Document`'s
 //   constructor calls the native `createDocument`, which builds the document
-//   out of the ingredients the view staged before the realm opened; a realm
+//   from the configuration it is given plus the view's own resources, which
+//   stay on the host side; a realm
 //   gets exactly one, and a second construction is refused by the host
 //   whichever module asks. The boot module's first statement constructs it and
 //   an exported binding holds it for the realm's life, so nothing here
@@ -643,8 +644,33 @@ const registry = new FinalizationRegistry(
 );
 
 /**
+ * The four Lynx page switches a document is built with, as the boot module
+ * reads them out of `pageConfig()`.
+ *
+ * The realm owns this value: the boot module parses the host's JSON text,
+ * reads `enableJSDataProcessor` out of it for the MTS runtime, and hands the
+ * whole record to the constructor below.
+ */
+export interface PageConfig {
+  /** Whether elements default to `display: linear`. */
+  readonly defaultDisplayLinear: boolean;
+  /** Whether elements default to visible overflow. */
+  readonly defaultOverflowVisible: boolean;
+  /** Whether author CSS selector matching is enabled. */
+  readonly enableCssSelector: boolean;
+  /** Whether page data reaches BTS without the MTS processor running. */
+  readonly enableJSDataProcessor: boolean;
+}
+
+/**
  * The realm's document. Constructing one creates it, and it lives exactly as
  * long as the realm: nothing here releases it, and no registry watches it.
+ *
+ * The configuration is the constructor's one argument, so the realm decides
+ * what the document is built as; the view's own resources — its metrics, its
+ * fonts, its style pool and its author stylesheets — stay on the host side and
+ * never reach this module. A sheet that has not arrived yet parks this call
+ * until it does.
  *
  * The boot module constructs exactly one, before it loads the card's entry,
  * and its exported binding is what holds the object. A card can reach this
@@ -652,8 +678,8 @@ const registry = new FinalizationRegistry(
  * boot fails with the host's message.
  */
 export class Document {
-  constructor() {
-    createDocument();
+  constructor(config: PageConfig) {
+    createDocument(JSON.stringify(config));
   }
 
   get [Symbol.toStringTag](): string {

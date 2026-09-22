@@ -73,11 +73,14 @@ Landed and not to be regressed:
   `ScriptRuntime`. A job may park on `JsThread::wait` — a fresh `block_on` of
   the same `LocalSet` — so a synchronous host member (`adoptStyleSheet`, or a
   `require`) blocks JavaScript alone: tasks keep running, no other job does,
-  and jobs queued meanwhile run in FIFO order afterwards. A loading page's
-  burst and `stage_sheet` stay task-side so a sibling's load cannot delay a
-  `BeginFrame` acknowledgement; `consume_messages` on `bobcat-workers` never
-  awaits the deliveries it queued, because `Terminate` is in band behind
-  them.
+  and jobs queued meanwhile run in FIFO order afterwards. Nothing of a view is
+  served outside a job: opening its realm is the view's first job, so a burst
+  that arrived earlier is queued behind it, and a `BeginFrame` acknowledgement
+  waits out whatever job of the group is parked — boot's own `createDocument`
+  among them, which parks per author sheet. Boot's *entry* never parks: an
+  answer that has not arrived is a `bobcat:future` the boot module awaits.
+  `consume_messages` on `bobcat-workers` never awaits the deliveries it
+  queued, because `Terminate` is in band behind them.
 - The BTS is a `Worker` named `lynx-bg` on the group's `bobcat-workers` runtime.
   A BTS failure is a nonfatal `EngineEvent::WorkerFailed` — never
   `StartupFailed`, never view teardown. `ScriptFinished` means MTS boot settled

@@ -283,17 +283,6 @@ impl ScriptEngine {
         self.realm.enable_module_loading(normalize_module_url);
     }
 
-    pub(crate) fn register_module_source(
-        &mut self,
-        name: &str,
-        url: &str,
-        source: &str,
-    ) -> Result<(), ScriptError> {
-        self.realm
-            .complete_module(name, Ok((url, source)))
-            .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterModule))
-    }
-
     pub(crate) fn take_module_request(&mut self) -> Option<String> {
         self.realm.take_module_request()
     }

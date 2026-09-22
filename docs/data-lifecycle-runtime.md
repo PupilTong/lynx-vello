@@ -34,8 +34,9 @@ carries opaque structured clones, not realm values or DOM handles. BTS receives 
 parsed data before its entry runs:
 `_params.initData` is null, `_params.updateData` and `lynx.__initData` share the
 processed data, and `_params.cacheData` is empty under the default host policy.
-The runtime reads `PageConfig.enable_js_data_processor` and `Viewport` from the
-staged document ingredients. `ViewSources.initial_processor` remains a plain
+The boot module reads `enableJSDataProcessor` off the page configuration it
+parsed out of the one-shot `pageConfig()` member, and the document's viewport
+is the Rust-side ingredient `createDocument` builds it at. `ViewSources.initial_processor` remains a plain
 `String`: it rides the `RealmStartup` the realm is opened with, and the
 existing one-shot startup-data binding hands it directly to JS, without
 serializing it or embedding it in generated source. Nothing in that startup is

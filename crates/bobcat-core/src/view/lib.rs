@@ -259,6 +259,13 @@ pub enum EngineError {
 /// A view construction or startup failure. Construction reports target,
 /// font, native-module and attachment errors directly; loading and boot
 /// report through [`EngineEvent::StartupFailed`] on the returned view.
+///
+/// **A startup source that fails to load reports as `Script`.** The boot
+/// module is what reads a view's stylesheets and its entry, so what reaches
+/// the embedder is the exception that reading threw, carrying the URL and the
+/// host's own reason in its message. The three source variants below are what
+/// a *fetcher* answers a request with, which is where they are produced and
+/// where they read as themselves.
 #[derive(Clone, Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum LynxViewError {
@@ -268,8 +275,12 @@ pub enum LynxViewError {
     Resource(#[from] crate::resource::ResourceError),
     #[error(transparent)]
     Script(#[from] ScriptError),
+    /// What a fetcher answers a source request with when the bytes are not
+    /// UTF-8. A realm reads it as the text of the exception its own read
+    /// threw, never as this variant.
     #[error("script `{url}` is not valid UTF-8: {message}")]
     InvalidScriptEncoding { url: String, message: String },
+    /// The same for a stylesheet.
     #[error("stylesheet `{url}` is not valid UTF-8: {message}")]
     InvalidStyleSheetEncoding { url: String, message: String },
 }
@@ -712,15 +723,26 @@ impl LynxGroup {
         // it — so the load overlaps whatever this thread does next, which is
         // building this view's painter. Only the receivers cross; the fetcher
         // stays on this thread, as it must.
-        let sheets: Vec<SourceAnswer> = std::mem::take(&mut sources.style_sheets)
+        let sheets: Vec<StartupSource> = std::mem::take(&mut sources.style_sheets)
             .into_iter()
-            .map(|url| request_startup_source(&*fetcher, &cancel, SourceRequest::StyleSheet(url)))
+            .map(|url| {
+                let answer = request_startup_source(
+                    &*fetcher,
+                    &cancel,
+                    SourceRequest::StyleSheet(url.clone()),
+                );
+                StartupSource { url, answer }
+            })
             .collect();
-        let entry = request_startup_source(
-            &*fetcher,
-            &cancel,
-            SourceRequest::Entry(std::mem::take(&mut sources.entry)),
-        );
+        let entry_url = std::mem::take(&mut sources.entry);
+        let entry = StartupSource {
+            answer: request_startup_source(
+                &*fetcher,
+                &cancel,
+                SourceRequest::Entry(entry_url.clone()),
+            ),
+            url: entry_url,
+        };
         self.inner
             .attach
             .send(GroupCommand::Attach(Box::new(ViewAttachment {
@@ -1234,8 +1256,38 @@ pub(crate) struct ViewAttachment {
 /// this order, whatever order they were answered in.
 pub(crate) struct StartupSources {
     /// One per author stylesheet, in cascade order.
-    pub(crate) sheets: Vec<SourceAnswer>,
-    pub(crate) entry: SourceAnswer,
+    pub(crate) sheets: Vec<StartupSource>,
+    pub(crate) entry: StartupSource,
+}
+
+/// One startup source: the URL the view named it by, and the answer to the
+/// request [`LynxGroup::create_lynx_view`] already made for it.
+///
+/// The URL travels beside the answer because it is what a failure is named
+/// by. Both of these are read inside the realm — the sheets by
+/// `createDocument`, the entry by `entryUrl` — so a load that failed throws
+/// out of the boot module, and the message is the whole of what the embedder
+/// is told.
+pub(crate) struct StartupSource {
+    pub(crate) url: String,
+    pub(crate) answer: SourceAnswer,
+}
+
+/// A startup nothing was ever requested for: no sheets, and an entry whose
+/// completion is already gone, so reading it is a failed load.
+///
+/// What opens a realm from one is this crate's own tests and benchmarks,
+/// which evaluate their scripts by hand. A view always carries real answers.
+impl Default for StartupSources {
+    fn default() -> Self {
+        Self {
+            sheets: Vec::new(),
+            entry: StartupSource {
+                url: String::new(),
+                answer: tokio::sync::oneshot::channel().1,
+            },
+        }
+    }
 }
 
 /// Hands the fetcher one startup request and keeps the answer.

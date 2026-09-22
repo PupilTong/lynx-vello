@@ -145,10 +145,25 @@ impl Pair {
     }
 
     /// `startup` carries the page data and module table a test wants; this
-    /// fills in the base URL and the BTS entry, and the main script is
-    /// evaluated afterwards by [`Self::boot`].
-    fn unbooted_with_data(background_source: Option<&str>, mut startup: RealmStartup) -> Self {
-        startup.url = "app:///nested/main.js".to_owned();
+    /// fills in the BTS entry, and the main script — which is what answers
+    /// this realm's entry request and so names the base URL a worker
+    /// specifier resolves against — is evaluated afterwards by [`Self::boot`].
+    fn unbooted_with_data(background_source: Option<&str>, startup: RealmStartup) -> Self {
+        Self::unbooted_with_config(
+            background_source,
+            startup,
+            crate::main::tree::PageConfig::default(),
+        )
+    }
+
+    /// The same, over a page configuration of the test's own: the realm reads
+    /// it out of `pageConfig()` as it boots, so it has to be in place before
+    /// the realm is opened.
+    fn unbooted_with_config(
+        background_source: Option<&str>,
+        mut startup: RealmStartup,
+        config: crate::main::tree::PageConfig,
+    ) -> Self {
         startup.background_entry = background_source.map(|_| "test:bts-entry".to_owned());
         let home = match background_source {
             Some(source) => {
@@ -160,10 +175,8 @@ impl Pair {
         let cancel = view.token.clone();
         let mut js = ScriptRuntime::new().unwrap();
         install_shared_modules(&mut js).unwrap();
-        let ingredients = DocumentIngredients::for_test(
-            crate::view::Viewport::new(32.0, 24.0),
-            crate::main::tree::PageConfig::default(),
-        );
+        let ingredients =
+            DocumentIngredients::for_test(crate::view::Viewport::new(32.0, 24.0), config);
         let thread = JsThread::new();
         let (runtime, events) = MainThreadRuntime::new(
             &mut js,
@@ -172,7 +185,7 @@ impl Pair {
             outbox,
             &WorkerFactory::new(home.commands()),
             thread.handle(),
-            &mut startup,
+            startup,
         )
         .unwrap();
         Self {
@@ -672,7 +685,7 @@ fn initial_processor_preserves_its_string_and_reads_the_page_config_switch() {
             "''"
         };
         let expected_value = if enable_js_data_processor { 3 } else { 4 };
-        let mut pair = Pair::unbooted_with_data(
+        let mut pair = Pair::unbooted_with_config(
             Some(&format!(
                 r"
                 const params=lynx.getApp()._params;
@@ -687,17 +700,11 @@ fn initial_processor_preserves_its_string_and_reads_the_page_config_switch() {
                 native_modules: String::new(),
                 ..RealmStartup::default()
             },
+            crate::main::tree::PageConfig {
+                enable_js_data_processor,
+                ..crate::main::tree::PageConfig::default()
+            },
         );
-        pair.runtime
-            .as_ref()
-            .unwrap()
-            .slot
-            .borrow_mut()
-            .ingredients
-            .as_mut()
-            .unwrap()
-            .config
-            .enable_js_data_processor = enable_js_data_processor;
         let render_processor = if enable_js_data_processor {
             expected_processor
         } else {

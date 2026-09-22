@@ -19,8 +19,6 @@
 //! - [`consume_commands`], the one ordered consumer of the command stream;
 //! - [`consume_metrics`], which settles the page once per change of the painter's metrics, so a
 //!   resize with no JavaScript behind it still commits;
-//! - [`boot_page`], the page's boot future: the answers to the requests `create_lynx_view` already
-//!   made — the sheets in cascade order, then the entry — and then the realm;
 //! - one [`load_module`] future per resource load an import produced;
 //! - one [`settle_future`] per host-backed `Future` a `.then` asked this realm to settle;
 //! - [`consume_worker_events`], the one ordered consumer of this view's workers;
@@ -45,11 +43,10 @@
 //! other exception, running after the view has ended and so past the latch and
 //! the epilogue.
 //!
-//! What is *not* a job is what a page that is still loading does with a burst:
-//! its ingredients are a field of their own, never borrowed across a wait, so
-//! [`Page::stage`] and [`Page::stage_sheet`] answer on the task. That is what
-//! keeps a loading page's `BeginFrame` acknowledgement from queueing behind a
-//! sibling view's synchronous load.
+//! Nothing of this view's is served outside a job. [`Page::open_realm`] is the
+//! *first* job of every view, queued before any of those tasks is spawned, so
+//! a command that arrived before the realm existed is a job queued behind it
+//! rather than something a task has to answer on its own.
 //!
 //! # Ordering
 //!
@@ -86,8 +83,8 @@
 //! across an `.await`, and none is ever taken by a task. A job holds the
 //! shared runtime and this page's realm for its whole length, its own
 //! synchronous wait included; [`crate::jobs`] is what makes that safe. The
-//! page's ingredients are the exception in the other direction: they belong to
-//! the loading tasks, so no job holds them across a wait.
+//! document's ingredients are held by the realm from the moment it opens, and
+//! the first job of the view is what spends them.
 //!
 //! # Waits
 //!
@@ -115,7 +112,8 @@
 //! select, and the only one left. The synchronous host members are a wait of
 //! their own shape — this view's token against the answer — parked on inside
 //! a job through [`JsThread::wait`](crate::jobs::JsThread): stylesheet
-//! adoption, [`crate::future`]'s `waitFuture`, which adds an optional
+//! adoption, the `createDocument` boot mounts the view's own sheets through,
+//! [`crate::future`]'s `waitFuture`, which adds an optional
 //! deadline behind the token, and `__FlushElementTree` before a painter has
 //! bound, whose other arm is that same metrics watch.
 
@@ -137,9 +135,7 @@ use crate::lifetime::{EndOnUnwind, Lifetime, Settles, run_job, serve_clock};
 use crate::link::{SourceAnswer, ToMain, ViewOutbox};
 use crate::resource::{LoadedSource, SourceRequest, unanswered_source};
 use crate::threads::panicked;
-use crate::view::{
-    EngineEvent, LynxViewError, ScreenMetrics, StartupSources, ViewSources, Viewport,
-};
+use crate::view::{EngineEvent, LynxViewError, ScreenMetrics, ViewSources, Viewport};
 
 /// One view's page: what every task of that view acts on.
 ///
@@ -152,28 +148,21 @@ pub(super) struct Page {
     /// pool, the wakeup, and the factory that names workers.
     context: Rc<GroupContext>,
     outbox: ViewOutbox,
-    /// This view's realm, once the boot module has opened one: `None` before
-    /// that, and again once the realm could not be opened or the owner has
-    /// released it. It is the only thing that decides what a command can do to
-    /// this page.
+    /// This view's realm, from the moment [`Page::open_realm`] returns: `None`
+    /// only before that first job has run, and again once the realm could not
+    /// be opened or the owner has released it. It is the only thing that
+    /// decides what a command can do to this page.
+    ///
+    /// Because that job is the view's first, nothing else of this view's can
+    /// observe the `None`: a burst that arrived earlier is a job queued behind
+    /// it, and a realm that failed to open has already ended the view.
     ///
     /// Read and written only inside a job, which holds this borrow for its
-    /// whole length, its own synchronous wait included. What a *task* asks
-    /// instead is [`Page::is_loading`], over the ingredients.
+    /// whole length, its own synchronous wait included.
     ///
     /// Boxed because this is one field of a page every task of the view holds,
     /// and a page is live for exactly one phase of its life.
     realm: RefCell<Option<Box<MainThreadRuntime>>>,
-    /// What the realm's document will be built from, until [`Page::open_realm`]
-    /// spends it.
-    ///
-    /// A field of its own rather than a part of [`Self::realm`], because this
-    /// is the one thing a *task* of a loading view writes: the sheets boot
-    /// staged, a resize, the image reports that arrived first. No job holds
-    /// this borrow across a wait, so a burst for a page that is still loading
-    /// — and the `BeginFrame` acknowledgement an offscreen host is blocked on
-    /// — is served at once, whatever a sibling view's job is parked on.
-    ingredients: RefCell<Option<Box<DocumentIngredients>>>,
     /// The painter's metrics, as the view's seat publishes them: `None` until
     /// one binds.
     ///
@@ -225,35 +214,12 @@ pub(super) struct Page {
     epilogues: Cell<u64>,
 }
 
-/// Everything boot still needs once the document's ingredients are staged:
-/// the pre-answer form, mirroring [`ViewSources`], of what becomes one
-/// [`RealmStartup`](super::runtime::RealmStartup) as soon as the entry has
-/// arrived — the outstanding *answers* to the sheets and the entry here, the
-/// entry's own text and resolved URL there.
-struct BootSources {
-    /// The answers to the requests `create_lynx_view` already made: the
-    /// author sheets in cascade order, then the entry.
-    startup: StartupSources,
-    /// The screen `SystemInfo` reports, already resolved: the embedder's own
-    /// metrics, or the ones derived from the create-time viewport for a host
-    /// that named none.
-    screen: ScreenMetrics,
-    background_entry: Option<String>,
-    /// The host's page data, as JSON text only the realm reads.
-    init_data: Option<String>,
-    initial_processor: String,
-    global_props: Option<String>,
-    /// The embedder's native modules, already encoded as the record the MTS
-    /// realm reads their names and methods out of.
-    native_modules: String,
-}
-
 impl Page {
-    /// A loading page, over the token that ends it.
+    /// A page whose realm has not been opened yet, over the token that ends
+    /// it.
     fn new(
         context: Rc<GroupContext>,
         outbox: ViewOutbox,
-        ingredients: DocumentIngredients,
         metrics: watch::Receiver<Option<Viewport>>,
         token: CancellationToken,
     ) -> Rc<Self> {
@@ -262,7 +228,6 @@ impl Page {
             context,
             outbox,
             realm: RefCell::new(None),
-            ingredients: RefCell::new(Some(Box::new(ingredients))),
             metrics,
             worker_events: RefCell::new(None),
             pending_begin_frame: Cell::new(None),
@@ -330,20 +295,15 @@ impl Page {
         self.end();
     }
 
-    /// Whether the realm's ingredients are still staged, which is the one
-    /// question about a page's phase a *task* may ask: the answer is a borrow
-    /// no job holds across a wait.
-    fn is_loading(&self) -> bool {
-        self.ingredients.borrow().is_some()
-    }
-
     /// Queues one synchronous operation against the live realm, which settles
     /// what it owes, and answers with what it returned.
     ///
     /// This is the one way into JavaScript. `None` is a realm that is not
-    /// live — still loading, or gone — a view that has ended, an operation
-    /// that trapped, or a thread that is over; either way nothing of the
-    /// operation is observable here.
+    /// live, a view that has ended, an operation that trapped, or a thread
+    /// that is over; either way nothing of the operation is observable here.
+    /// A realm that is not live is one that could not be opened, and a view
+    /// whose realm could not be opened has already ended: the job that opens
+    /// it is the view's first, so nothing of the view's can run ahead of it.
     ///
     /// The operation *and* the whole epilogue run under one `catch_unwind`
     /// inside [`run_job`], because the bridge erases a panic into "the host
@@ -381,6 +341,10 @@ impl Page {
     ///
     /// The order is the contract:
     ///
+    /// 0. **The entry boot has named and asked for**, where this entry is what resumed boot: the
+    ///    realm holds that source already. It runs first because everything below reports on what
+    ///    the realm has done, and boot's remainder is part of that — see
+    ///    [`MainThreadRuntime::complete_boot_entry`].
     /// 1. **Due timers.** A timer that has come due runs before the commit, so its mutation rides
     ///    the same frame as whatever else this entry changed. A zero-delay timer armed during boot
     ///    therefore fires inside boot's own epilogue and adds no commit of its own.
@@ -405,6 +369,17 @@ impl Page {
         }
         #[cfg(test)]
         self.epilogues.set(self.epilogues.get() + 1);
+        // The entry, where this entry is what resumed boot and boot asked for
+        // it: the realm already holds that source, so it is answered here
+        // rather than sent to the fetcher a second time, and boot's whole
+        // remainder — the BTS Worker, the render and the first flush — runs
+        // inside this call. First, because everything below reports on what
+        // the realm has done: the commit, the boot report and the deadline all
+        // have to see it.
+        if let Err(error) = runtime.complete_boot_entry(js) {
+            self.fail(EngineEvent::StartupFailed(error.into_script_error().into()));
+            return;
+        }
         for failure in runtime.run_due_timers(js) {
             self.outbox.engine_event(EngineEvent::TimerFailed(failure));
         }
@@ -444,7 +419,7 @@ impl Page {
         for (id, future) in runtime.take_future_settles() {
             self.spawn(settle_future(Rc::clone(self), id, future));
         }
-        // Every path that mounts author CSS — the staged sheets
+        // Every path that mounts author CSS — the startup sheets
         // `createDocument` mounts, `adoptStyleSheet`, and any rules a card
         // appends — runs inside an entry, so draining here is what covers
         // them all with one call site rather than one per mount.
@@ -563,11 +538,11 @@ impl Page {
     /// acknowledgement.
     ///
     /// Total over every state a page can be in. A live page takes the whole
-    /// burst inside one [`Self::enter`]; a loading one writes what it can into
-    /// the ingredients its document will be built from, here on the task
-    /// rather than in a job, so it is not queued behind a sibling's
-    /// synchronous load; a page that has ended drops the burst, `BeginFrame`
-    /// included, because the end has already acknowledged the pending one.
+    /// burst inside one [`Self::enter`]; a page that has ended drops the
+    /// burst, `BeginFrame` included, because the end has already acknowledged
+    /// the pending one. There is no third state a task can observe: the job
+    /// that opens the realm is the first of the view, so a burst that arrived
+    /// before it is queued behind it and finds a document.
     ///
     /// The burst's job reads the view's token as it starts. The token is what
     /// the *embedder* cancelled, and a job start is a wake boundary rather
@@ -588,10 +563,6 @@ impl Page {
         // the `catch_unwind` an entry runs under.
         #[cfg(test)]
         let commands = self.take_test_seams(commands);
-        if self.is_loading() {
-            self.stage(commands);
-            return;
-        }
         let page = Rc::clone(self);
         self.enter(move |runtime, js| {
             if page.outbox.is_cancelled() {
@@ -657,72 +628,21 @@ impl Page {
         }
     }
 
-    /// Serves a burst that arrived before the boot module created a document.
-    ///
-    /// Runs on the task that read the burst rather than in a job, which is
-    /// what keeps it immediate: the ingredients are this view's own field and
-    /// nothing holds them across a wait, so a sibling view parked on a
-    /// synchronous stylesheet cannot delay it.
-    ///
-    /// What a command can do here is narrow: the one that describes the
-    /// document writes into the ingredients it will be built from, a
-    /// `BeginFrame` is acknowledged at once so an offscreen host is never
-    /// blocked by a load, and nothing else has anywhere to go. The painter's
-    /// metrics are not among them at all — they ride a watch the document
-    /// reads for itself. Dropping a `Probe` drops the sender it captured,
-    /// which answers the probing test `None` rather than leaving it to wait
-    /// out its deadline.
-    fn stage(&self, commands: Vec<ToMain>) {
-        let mut acknowledged: Option<u64> = None;
-        {
-            let mut staged = self.ingredients.borrow_mut();
-            let Some(ingredients) = staged.as_mut() else {
-                return;
-            };
-            for command in commands {
-                match command {
-                    // LynxView rejects lifecycle commands until MTS boot ends.
-                    ToMain::PageUpdate(_) => {}
-                    // Kept rather than applied: a report is about a source
-                    // some later frame will want, and the document that would
-                    // record it does not exist yet.
-                    ToMain::ImageEvents(events) => ingredients.pending_image_events.extend(events),
-                    ToMain::BeginFrame { seq, .. } => {
-                        acknowledged = Some(seq.max(acknowledged.unwrap_or(0)));
-                    }
-                    ToMain::Vsync(_) | ToMain::DispatchEvent { .. } | ToMain::Refill { .. } => {}
-                    #[cfg(test)]
-                    ToMain::Probe(_) => {}
-                    #[cfg(test)]
-                    ToMain::Trap(_) => unreachable!("the trap seam is taken before the entry"),
-                }
-            }
-        }
-        if let Some(seq) = acknowledged {
-            self.outbox.begin_frame_serviced(seq);
-        }
-    }
-
-    /// Stages one author sheet, in cascade order. `false` is a page whose
-    /// ingredients are spent, which has already ended.
-    ///
-    /// Task-side, for the reason [`Self::stage`] is.
-    fn stage_sheet(&self, sheet: crate::resource::StyleSheetSource) -> bool {
-        let mut staged = self.ingredients.borrow_mut();
-        let Some(ingredients) = staged.as_mut() else {
-            return false;
-        };
-        ingredients.sheets.push(sheet);
-        true
-    }
-
     /// Opens this view's realm and runs its entry, then starts the waits that
     /// only a live realm has.
     ///
+    /// **The first job of every view**, queued by [`serve_view`] before any of
+    /// that view's tasks is spawned and before anything has been fetched: the
+    /// boot module creates the document, mounts the author sheets and imports
+    /// the entry, each through a host member that waits for the answer the
+    /// view was already promised. So a command that arrived before the realm
+    /// existed is a job queued behind this one, and finds a document.
+    ///
     /// A job like every other entry, and the one that does not go through
     /// [`Self::enter`], because the realm it would enter does not exist until
-    /// it returns; [`boot_page`] is what queues it. It holds the shared runtime
-    /// for the whole stretch, as an entry does — the entry module may adopt a
+    /// it returns. It holds the shared runtime
+    /// for the whole stretch, as an entry does — the boot module waits for a
+    /// stylesheet and for its entry, and the entry itself may adopt a
     /// stylesheet and wait — but takes and stores `realm` under short borrows
     /// either side of it, since what it is building is a local until the last
     /// of them. The checkpoint receiver is created while the runtime borrow is
@@ -733,25 +653,17 @@ impl Page {
     /// so a boot that finished synchronously is reported in this same stretch.
     ///
     /// The [`RealmStartup`] is everything that realm is opened with, and
-    /// opening spends it: `MainThreadRuntime::new` takes the strings it
-    /// installs out of it, leaving the entry this then evaluates.
-    fn open_realm(self: &Rc<Self>, mut startup: RealmStartup) {
+    /// opening spends it.
+    fn open_realm(self: &Rc<Self>, ingredients: DocumentIngredients, startup: RealmStartup) {
         // A view that has already ended builds no realm and runs no entry:
         // its tasks are about to be reclaimed, and the ingredients go with the
         // page rather than into a document nobody will ever see.
         if self.ended() {
-            self.ingredients.borrow_mut().take();
             return;
         }
         let opened = {
             let js = &mut *self.context.js.borrow_mut();
-            // Spent before any failure path can report: a page whose realm
-            // could not be opened is over, and nothing re-stages what was
-            // taken.
-            match self.ingredients.borrow_mut().take() {
-                None => None,
-                Some(ingredients) => self.build_realm(js, *ingredients, &mut startup),
-            }
+            self.build_realm(js, ingredients, startup)
         };
         match opened {
             // Nobody is listening for this view any more, so there is nobody
@@ -797,7 +709,7 @@ impl Page {
         self: &Rc<Self>,
         js: &mut ScriptRuntime,
         ingredients: DocumentIngredients,
-        startup: &mut RealmStartup,
+        startup: RealmStartup,
     ) -> Option<
         Result<
             (
@@ -822,7 +734,7 @@ impl Page {
         if self.outbox.is_cancelled() {
             return None;
         }
-        if let Err(error) = runtime.run_main_thread_script(js, &startup.source, &startup.url) {
+        if let Err(error) = runtime.run_boot_module(js) {
             if self.outbox.is_cancelled() {
                 return None;
             }
@@ -1061,25 +973,34 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
         viewport,
         config,
         text_context,
-        sheets: Vec::with_capacity(startup.sheets.len()),
         style_pool: context.style_pool.clone(),
-        pending_image_events: Vec::new(),
     };
-    let page = Page::new(context, outbox, ingredients, metrics.clone(), cancel);
+    let page = Page::new(context, outbox, metrics.clone(), cancel);
+    // Queued before the first task of this view is spawned, so it is the first
+    // job of the view and nothing it owns can be served ahead of it. Nothing
+    // is waited for here: the realm opens now and the boot module is what
+    // reads the sheets and the entry, which is what lets the whole of boot run
+    // while the embedder builds this view's painter. The answer is dropped
+    // because there is nothing to do with it — a job is queued by the call
+    // rather than by the future it hands back, and `run_job` is what reports a
+    // trap inside it.
+    drop(run_job(&page, move |page| {
+        page.open_realm(
+            ingredients,
+            RealmStartup {
+                startup,
+                screen,
+                background_entry,
+                initial_processor,
+                init_data,
+                global_props,
+                native_modules,
+            },
+        );
+        Some(())
+    }));
     page.spawn(consume_commands(Rc::clone(&page), commands));
     page.spawn(consume_metrics(Rc::clone(&page), metrics));
-    page.spawn(boot_page(
-        Rc::clone(&page),
-        BootSources {
-            startup,
-            screen,
-            background_entry,
-            init_data,
-            initial_processor,
-            global_props,
-            native_modules,
-        },
-    ));
     page.run_owner().await;
 }
 
@@ -1161,137 +1082,6 @@ async fn consume_metrics(page: Rc<Page>, mut metrics: watch::Receiver<Option<Vie
         }
         <Page as Settles>::settle(&page).await;
     }
-}
-
-/// Reads this view's author sheets in cascade order and stages each one,
-/// answering whether boot may go on.
-///
-/// The requests are already out: `create_lynx_view` handed the fetcher all of
-/// them, in this order, before the view existed here. What this order decides
-/// is *use* rather than IO — a sheet that arrived after the entry had run
-/// would restyle a document the card has already built — so the answers are
-/// read one at a time and in cascade order whatever order they were completed
-/// in, and the rest are dropped where one fails. They are staged rather than
-/// mounted, because there is no document yet — `createDocument` mounts them in
-/// this order, and it runs before the entry.
-///
-/// `false` is a view that has already reported its failure, or one released
-/// while a sheet was in flight; either way boot is over and the caller
-/// returns.
-async fn stage_sheets(page: &Rc<Page>, sheets: Vec<SourceAnswer>) -> bool {
-    for answer in sheets {
-        if page.outbox.is_cancelled() {
-            page.end();
-            return false;
-        }
-        match await_source(answer).await {
-            Ok(LoadedSource::StyleSheet(sheet)) => {
-                if !page.stage_sheet(sheet) {
-                    return false;
-                }
-            }
-            Ok(LoadedSource::Entry { .. }) => {
-                page.fail(EngineEvent::StartupFailed(mismatched_source(
-                    "a stylesheet request",
-                    "a script",
-                )));
-                return false;
-            }
-            Ok(LoadedSource::Font(_)) => {
-                page.fail(EngineEvent::StartupFailed(mismatched_source(
-                    "a stylesheet request",
-                    "a font",
-                )));
-                return false;
-            }
-            Ok(LoadedSource::Fetched) => {
-                page.fail(EngineEvent::StartupFailed(mismatched_source(
-                    "a stylesheet request",
-                    "a plain fetch",
-                )));
-                return false;
-            }
-            Err(error) => {
-                page.fail(EngineEvent::StartupFailed(error));
-                return false;
-            }
-        }
-    }
-    true
-}
-
-/// The page's boot future: every author sheet in cascade order, then the
-/// entry, then the realm.
-///
-/// It asks for none of the three. All of them were requested on the
-/// embedder's thread, inside `create_lynx_view`, so what is left here is
-/// reading the answers in the order the document needs them — which is what
-/// lets this run while that thread builds the view's painter.
-async fn boot_page(page: Rc<Page>, sources: BootSources) {
-    let BootSources {
-        startup,
-        screen,
-        background_entry,
-        init_data,
-        initial_processor,
-        global_props,
-        native_modules,
-    } = sources;
-    let StartupSources { sheets, entry } = startup;
-    if !stage_sheets(&page, sheets).await {
-        return;
-    }
-    if page.outbox.is_cancelled() {
-        page.end();
-        return;
-    }
-    let (source, url) = match await_source(entry).await {
-        Ok(LoadedSource::Entry { source, url }) => (source, url),
-        Ok(LoadedSource::Font(_)) => {
-            page.fail(EngineEvent::StartupFailed(mismatched_source(
-                "an entry request",
-                "a font",
-            )));
-            return;
-        }
-        Ok(LoadedSource::StyleSheet(_)) => {
-            page.fail(EngineEvent::StartupFailed(mismatched_source(
-                "an entry request",
-                "a stylesheet",
-            )));
-            return;
-        }
-        Ok(LoadedSource::Fetched) => {
-            page.fail(EngineEvent::StartupFailed(mismatched_source(
-                "an entry request",
-                "a plain fetch",
-            )));
-            return;
-        }
-        Err(error) => {
-            page.fail(EngineEvent::StartupFailed(error));
-            return;
-        }
-    };
-    if page.outbox.is_cancelled() {
-        page.end();
-        return;
-    }
-    let startup = RealmStartup {
-        source,
-        url,
-        screen,
-        background_entry,
-        initial_processor,
-        init_data,
-        global_props,
-        native_modules,
-    };
-    run_job(&page, move |page| {
-        page.open_realm(startup);
-        Some(())
-    })
-    .await;
 }
 
 /// One resource load an import produced.
@@ -1432,12 +1222,6 @@ async fn request_source(
     request: SourceRequest,
 ) -> Result<LoadedSource, LynxViewError> {
     await_source(outbox.request_source(request)).await
-}
-
-fn mismatched_source(request: &str, answer: &str) -> LynxViewError {
-    let mut error = unanswered_source();
-    error.message = std::sync::Arc::from(format!("the fetcher answered {request} with {answer}"));
-    error.into()
 }
 
 #[cfg(test)]
