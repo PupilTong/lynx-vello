@@ -363,6 +363,8 @@ async fn capture_page(request: &CaptureRequest) -> Result<Screenshot, CaptureFai
         // Preserve per-capture runtime isolation: the view keeps this
         // job's group alive until capture finishes and the view drops.
         let group = LynxGroup::new(Arc::clone(&wakeup), StyleThreads::Auto).await?;
+        // A capture has no screen, so `ViewSources::screen` stays `None` and
+        // `SystemInfo` reports the requested capture size in physical pixels.
         let view = group.create_lynx_view(
             f32::from(request.width),
             f32::from(request.height),

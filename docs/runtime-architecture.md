@@ -8,8 +8,9 @@ and the commit/publish protocol are implementation state. An embedder supplies
 only capabilities and OS facts:
 
 - a `ViewSources` — page config, owned font bytes, an optional default font
-  family, author stylesheet URLs in cascade order, and the one entry MTS
-  module URL, plus optional `init_data` and `global_props` JSON text — and,
+  family, author stylesheet URLs in cascade order, the one entry MTS
+  module URL, optional `init_data` and `global_props` JSON text, and the
+  optional `screen` metrics `SystemInfo` reports — and,
   as a separate argument, the builder of the view's
   `ResourceFetcher`, which is also its `FrameImages` and owns every byte and
   pixel the view ever loads (`crates/bobcat-resources` is the reference
@@ -82,6 +83,20 @@ module table — into one `RealmStartup` that opens the realm. Everything in it
 is handed over exactly once, as the realm opens; `LynxView::update_data`,
 `update_global_props` and `reload` reach the realm through `ToMain::PageUpdate`
 afterwards and never touch it.
+
+`ViewSources::screen` is the screen `SystemInfo` describes — `pixelRatio`,
+`pixelWidth` and `pixelHeight` — as the embedder measured it: web-core's
+algorithm (`devicePixelRatio`, and `screen.availWidth`/`availHeight`
+multiplied by it) in a browser, the monitor the window is on natively. It is a
+screen rather than a view, so the view's own viewport is not an answer to it;
+a host with no screen to measure, a headless capture among them, leaves it
+unset and the view derives the three numbers from its create-time viewport
+instead (`pixel_ratio` is that viewport's device-pixel ratio, and the two
+sizes are its CSS size multiplied by it). Either way the view's task resolves
+it once, before anything is fetched, and it reaches the boot module as three
+JavaScript number literals; nothing updates it afterwards, so a painter that
+binds at other metrics leaves it alone. The BTS realm reads the same object
+out of the `initialize` message MTS sends its Worker.
 
 `ViewSources::init_data` and `global_props` are optional JSON text, and Rust
 never reads it. `MainThreadRuntime::new` puts each behind a
@@ -847,7 +862,7 @@ entry execution. The generated boot body has this order:
 ```js
 export const document = new Document();
 __BobcatInitEntry(entryMtsUrl);
-__BobcatInitializeMTS({ enableJSDataProcessor, systemInfo: viewportMetrics });
+__BobcatInitializeMTS({ enableJSDataProcessor, systemInfo: screenMetrics });
 let data = lynx.__initData;
 await import(entryMtsUrl);
 const { Worker } = await import("bobcat-internal");

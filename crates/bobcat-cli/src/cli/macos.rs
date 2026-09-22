@@ -30,13 +30,15 @@ use std::sync::Arc;
 
 use bobcat_core::input::{InputEvent, Point2D, PointerKind, PointerPhase};
 use bobcat_core::{
-    DrawTarget, EngineEvent, EventRequester, LynxGroup, LynxView, Painter, StyleThreads,
+    DrawTarget, EngineEvent, EventRequester, LynxGroup, LynxView, Painter, ScreenMetrics,
+    StyleThreads,
 };
 use bobcat_resources::ViewResources;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, Touch, TouchPhase, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
+use winit::monitor::MonitorHandle;
 use winit::platform::macos::MonitorHandleExtMacOS;
 use winit::window::{Window, WindowId};
 
@@ -208,6 +210,17 @@ impl MacApplication {
             input: program.input.clone(),
             source,
         })?;
+        // The screen `SystemInfo` reports is the monitor this window is on,
+        // in physical pixels: `MonitorHandle::size()` is already physical, so
+        // the scale factor multiplies nothing here. A window winit cannot
+        // name a monitor for leaves the view to derive the numbers from its
+        // create-time viewport.
+        let mut sources = program.sources();
+        sources.screen = window
+            .current_monitor()
+            .or_else(|| event_loop.primary_monitor())
+            .as_ref()
+            .map(screen_metrics);
         let view = group
             .create_lynx_view(
                 css_width,
@@ -215,7 +228,7 @@ impl MacApplication {
                 scale_factor,
                 resources.builder(),
                 Vec::new(),
-                program.sources(),
+                sources,
             )
             .map_err(|source| CliError::StartView {
                 input: program.input.clone(),
@@ -577,6 +590,26 @@ fn wheel_delta_css(delta: MouseScrollDelta, scale_factor: f64) -> (f32, f32) {
             -(pixels.y / scale_factor) as f32,
         ),
         MouseScrollDelta::LineDelta(x, y) => (-x * WHEEL_LINE_CSS_PX, -y * WHEEL_LINE_CSS_PX),
+    }
+}
+
+/// The screen `SystemInfo` reports: the monitor this window is on, in the
+/// physical pixels `MonitorHandle::size` already gives, and its scale factor.
+///
+/// A monitor's, not a window's. It is read once, when the window is created,
+/// and a window moved to another display afterwards does not change it — the
+/// standing web-core gives the values it reads at module load.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "stylo and layout use f32 CSS coordinates; winit's finite display scale and the \
+              16384px target cap are far inside f32's useful range"
+)]
+fn screen_metrics(monitor: &MonitorHandle) -> ScreenMetrics {
+    let size = monitor.size();
+    ScreenMetrics {
+        pixel_ratio: monitor.scale_factor() as f32,
+        pixel_width: f64::from(size.width) as f32,
+        pixel_height: f64::from(size.height) as f32,
     }
 }
 

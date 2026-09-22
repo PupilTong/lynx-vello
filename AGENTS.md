@@ -223,8 +223,9 @@ OS-input and lifecycle-wakeup capabilities. The script engine is deliberately
 not one of them: core owns its `QuickJS` realm, and an embedder sees only the
 sanitized `script::ScriptError`. A view is built from one `ViewSources` —
 `PageConfig`, owned font containers, an optional default font family, author
-stylesheet URLs in cascade order, the entry MTS module URL, and optional
-`init_data` and `global_props` JSON text only the realm parses — plus a builder
+stylesheet URLs in cascade order, the entry MTS module URL, optional
+`init_data` and `global_props` JSON text only the realm parses, and the
+optional `screen` metrics `SystemInfo` reports — plus a builder
 turning the view's `ImageReports` into its `ResourceFetcher`; both go to
 `LynxGroup::create_lynx_view` with device metrics.
 
@@ -722,11 +723,16 @@ Lifecycle hooks and engine listeners run synchronously, with no intervening
 Promise-job checkpoint. Boot awaits a `Promise.resolve().then` flush after
 rendering; that flush's commit completes MTS boot, the whole of public
 readiness, and BTS acknowledges nothing. Boot reads
-`PageConfig.enable_js_data_processor` and `Viewport` from the staged document
-ingredients. `ViewSources.initial_processor` is a plain `String`, handed to JS
-by the one-shot startup-data binding without JSON serialization or source
-interpolation. JS constructs SystemInfo from runtime constants and those
-metrics and sends its snapshot to BTS. Entries receive runtime bindings through
+`PageConfig.enable_js_data_processor` from the staged document ingredients and
+the screen `SystemInfo` reports from `RealmStartup`, where the view's task put
+either `ViewSources::screen` — what the embedder measured: web-core's
+`devicePixelRatio` and available screen size in a browser, the window's monitor
+natively — or, for a host that named none, the create-time viewport in physical
+pixels. It is read once and never updated, so a painter binding at other
+metrics leaves it alone. `ViewSources.initial_processor` is a plain `String`,
+handed to JS by the one-shot startup-data binding without JSON serialization or
+source interpolation. JS merges those three numbers over its own runtime
+constants into SystemInfo and sends its snapshot to BTS. Entries receive runtime bindings through
 prepended ESM imports; global props updates replace the live module binding,
 and there is no native evaluator or separate Script lexical environment.
 

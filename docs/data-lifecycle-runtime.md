@@ -41,7 +41,9 @@ existing one-shot startup-data binding hands it directly to JS, without
 serializing it or embedding it in generated source. Nothing in that startup is
 ever updated — the host's update, reset and reload calls below take the
 `PageUpdate` path instead. JS constructs
-SystemInfo from its runtime constants and viewport metrics, then sends it to BTS.
+SystemInfo from its runtime constants and the screen metrics the view resolved —
+`ViewSources.screen` where the embedder measured one, and the create-time
+viewport in physical pixels where it did not — then sends it to BTS.
 Initial global props come solely from `ViewSources.global_props`.
 
 `ViewSources.initial_processor` selects the initial name. Host update/reset/reload

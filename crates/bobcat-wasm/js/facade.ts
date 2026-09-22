@@ -83,6 +83,27 @@ function hardwareConcurrency(): number {
   return Math.max(1, globalThis.navigator?.hardwareConcurrency ?? 1)
 }
 
+/**
+ * The screen `SystemInfo` reports, in physical pixels — web-core's own
+ * algorithm: the available screen size multiplied by `devicePixelRatio`.
+ *
+ * This thread is the page's main thread, the only one `screen` exists on, so
+ * it is measured here and sent to the Render Worker rather than read there.
+ * Read once, like web-core's. A browser that answers for neither gets `NaN`s,
+ * which the engine refuses in favour of each view's own metrics.
+ */
+function screenPixels(): { height: number; width: number } {
+  const screen = globalThis.screen
+  const ratio = globalThis.devicePixelRatio
+  if (!screen || typeof ratio !== 'number') {
+    return { height: Number.NaN, width: Number.NaN }
+  }
+  return {
+    height: screen.availHeight * ratio,
+    width: screen.availWidth * ratio,
+  }
+}
+
 function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error))
 }
@@ -868,6 +889,8 @@ export class BobcatCanvas {
       }
     }
 
+    const screen = screenPixels()
+
     const offscreen = canvas.transferControlToOffscreen()
     // The Render Worker fetches a page's images and this thread decodes
     // them, over a channel of their own.
@@ -891,6 +914,8 @@ export class BobcatCanvas {
           imagePort: images.port2,
           hardwareConcurrency: hardwareConcurrency(),
           nativeModules,
+          screenPixelHeight: screen.height,
+          screenPixelWidth: screen.width,
           workerUrl: THREAD_WORKER_URL,
           width,
         } satisfies InitMessage,

@@ -49,7 +49,7 @@ use crate::main::tree::{ImageOutcomes, LynxDocument, PageConfig, new_document};
 use crate::resource::StyleSheetSource;
 use crate::script::ScriptError;
 use crate::timers::{TimerState, install_timer_members, run_due_timers};
-use crate::view::Viewport;
+use crate::view::{ScreenMetrics, Viewport};
 
 const BOOT_MODULE_SPECIFIER: &str = "bobcat:boot";
 const ELEMENT_MODULE_SPECIFIER: &str = "bobcat:element";
@@ -209,6 +209,10 @@ pub(crate) struct DocumentIngredients {
     /// The metrics the document is created at, as the embedder named them to
     /// `create_lynx_view`. They are what it works at until a painter binds;
     /// a painter that bound first supersedes them at the construction.
+    ///
+    /// A view's metrics and nothing else. What `SystemInfo` reports is the
+    /// screen, which the embedder names separately in
+    /// [`ViewSources::screen`](crate::ViewSources::screen).
     pub(crate) viewport: Viewport,
     pub(crate) config: PageConfig,
     /// The fonts and the default family, already validated against a context
@@ -264,12 +268,15 @@ impl DocumentIngredients {
 /// below become one-shot host members the realm alone reads; `source` and
 /// `url` are what the runtime evaluates; and `background_entry` is spliced
 /// into the BTS Worker's boot script by `WorkerFactory::install`.
-#[derive(Default)]
 pub(crate) struct RealmStartup {
     /// The entry module's text and the resolved URL it is named by, which the
     /// runtime evaluates once this realm is furnished.
     pub(crate) source: String,
     pub(crate) url: String,
+    /// The screen the realm's `SystemInfo` reports, resolved by the view's
+    /// task: the embedder's own metrics where it named them, and the
+    /// create-time viewport in physical pixels where it did not.
+    pub(crate) screen: ScreenMetrics,
     /// The BTS entry `bobcat:bts` imports, if the view named one.
     pub(crate) background_entry: Option<String>,
     /// The host's processor name, page data and global props, as the strings
@@ -283,6 +290,29 @@ pub(crate) struct RealmStartup {
     /// for a view built with none. The realm reads it into the
     /// `{name: methods}` object it sends the BTS Worker.
     pub(crate) native_modules: String,
+}
+
+/// Hand-written rather than derived, because there is no default screen: an
+/// embedder names one or the view derives one from its viewport. What opens a
+/// realm from `RealmStartup::default()` is this crate's own tests and
+/// benchmarks, and none of them reads `SystemInfo`.
+impl Default for RealmStartup {
+    fn default() -> Self {
+        Self {
+            source: String::new(),
+            url: String::new(),
+            screen: ScreenMetrics {
+                pixel_ratio: 1.0,
+                pixel_width: 0.0,
+                pixel_height: 0.0,
+            },
+            background_entry: None,
+            initial_processor: String::new(),
+            init_data: None,
+            global_props: None,
+            native_modules: String::new(),
+        }
+    }
 }
 
 /// The realm's document and the ingredients it is built out of, plus the
@@ -614,6 +644,10 @@ pub(crate) struct MainThreadRuntime {
     /// frame. One clock, one epoch; nothing here takes a second reading of its
     /// own.
     timeline_milliseconds: f64,
+    /// The screen this realm's `SystemInfo` reports, as the view's task
+    /// resolved it. Held from construction because boot writes the three
+    /// numbers into its own module source, which runs after the realm exists.
+    screen: ScreenMetrics,
 }
 
 impl fmt::Debug for MainThreadRuntime {
@@ -726,6 +760,7 @@ impl MainThreadRuntime {
                 timers,
                 futures,
                 timeline_milliseconds: 0.0,
+                screen: startup.screen,
             },
             incoming,
         ))
@@ -1179,22 +1214,23 @@ impl MainThreadRuntime {
             })?;
         let entry_specifier = serde_json::to_string(source_name)
             .expect("serializing a Rust string as a JavaScript string cannot fail");
-        let (viewport, enable_js_data_processor) = {
+        let enable_js_data_processor = {
             let slot = self.slot.borrow();
-            let ingredients = slot
-                .ingredients
+            slot.ingredients
                 .as_ref()
-                .expect("boot creates the document");
-            (
-                ingredients.viewport,
-                ingredients.config.enable_js_data_processor,
-            )
+                .expect("boot creates the document")
+                .config
+                .enable_js_data_processor
         };
-        let Viewport {
-            width,
-            height,
-            device_pixel_ratio,
-        } = viewport;
+        // Three numbers of the embedder's, written as JavaScript number
+        // literals: `SystemInfo` describes the screen the page is shown on,
+        // which this view's viewport is not, and nothing here parses or
+        // models them.
+        let ScreenMetrics {
+            pixel_ratio,
+            pixel_width,
+            pixel_height,
+        } = self.screen;
         let boot = format!(
             r#"import {{ lynx, __BobcatConnectBackground, __BobcatInitializeMTS, __BobcatProcessInitData, __BobcatRenderPage, __BobcatInitEntry }} from "{RUNTIME_MODULE_SPECIFIER}";
 import {{ Document, __FlushElementTree }} from "{ELEMENT_MODULE_SPECIFIER}";
@@ -1210,7 +1246,7 @@ export const document = new Document();
 __BobcatInitEntry({entry_specifier});
 __BobcatInitializeMTS({{
   enableJSDataProcessor: {enable_js_data_processor},
-  systemInfo: {{pixelRatio: {device_pixel_ratio}, pixelWidth: {width} * {device_pixel_ratio}, pixelHeight: {height} * {device_pixel_ratio}}},
+  systemInfo: {{pixelRatio: {pixel_ratio}, pixelWidth: {pixel_width}, pixelHeight: {pixel_height}}},
 }});
 // React's entry clears lynx.__initData during initialization. The host's
 // first-screen argument belongs to boot, independently of that mutable slot.
