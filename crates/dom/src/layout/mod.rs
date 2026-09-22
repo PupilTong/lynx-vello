@@ -605,6 +605,19 @@ impl<T> Document<T> {
         self.get(id)?.layout_computed_style()
     }
 
+    /// The device-snapped grid area a sticky grid item's insets resolve
+    /// against, in its box parent's border-box coordinates, when the last
+    /// layout recorded one; `None` for every other box.
+    #[must_use]
+    pub(crate) fn sticky_containing_block(&self, id: crate::NodeId) -> Option<Edges<f32>> {
+        let slot = self.slot(id)?;
+        self.layout_state()
+            .sticky_containing_blocks
+            .iter()
+            .find(|entry| entry.node == slot)
+            .and_then(|entry| entry.rounded)
+    }
+
     #[must_use]
     #[cfg(test)]
     pub(crate) fn layout_cache_is_empty(&self, id: crate::NodeId) -> Option<bool> {
@@ -814,9 +827,6 @@ mod tests {
         // the store's own size never entered this budget — only the pointer
         // does. The retired measurement path's `TextLayoutStore` used to be
         // measured here beside it, which said nothing the pointer did not.
-        // Sticky grid bounds add a nullable pointer to each of the two
-        // Layout records: 16 pointer bytes plus 8 alignment-padding bytes
-        // grow LayoutSlot 336→360 and NodeLayoutState 352→376.
         let current = (
             size_of::<crate::Node<()>>(),
             size_of::<LayoutSlot>(),
@@ -836,7 +846,7 @@ mod tests {
         #[cfg(target_pointer_width = "64")]
         assert_eq!(
             current,
-            (if cfg!(debug_assertions) { 232 } else { 224 }, 360, 376),
+            (if cfg!(debug_assertions) { 232 } else { 224 }, 336, 352),
             "Node, LayoutSlot and NodeLayoutState sizes changed",
         );
     }

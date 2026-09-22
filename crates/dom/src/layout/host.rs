@@ -17,7 +17,7 @@ use hughie::compute::{
     compute_skipped_contents_size, hide_skipped_contents, hide_subtree,
     round_layout_subtree_with as round_with,
 };
-use hughie::geometry::{Point, Size};
+use hughie::geometry::{Edges, Point, Size};
 use hughie::invalidate::is_relayout_boundary;
 use hughie::style::{CoreStyle, PositionProperty};
 use hughie::tree::{AvailableSpace, Layout, LayoutInput, LayoutOutput, LayoutSlot, LayoutTree};
@@ -31,7 +31,7 @@ use super::style::{
 use super::text_block::compute_text_block_layout;
 use crate::tree::document::{
     DeferredContainer, Document, DocumentLayoutState, NodeId, NodeSlot, PendingRelayout,
-    RelayoutKind, TreeArenas,
+    RelayoutKind, StickyContainingBlock, TreeArenas,
 };
 use crate::tree::node::Node;
 
@@ -65,6 +65,63 @@ impl<T> LayoutTree for TreeArenas<T> {
         node: NodeSlot,
     ) -> &'state mut LayoutSlot {
         &mut state.at_mut(node).slot
+    }
+
+    fn set_sticky_containing_block(
+        &self,
+        state: &mut Self::State,
+        node: NodeSlot,
+        bounds: Option<Edges<f32>>,
+    ) {
+        let table = &mut state.sticky_containing_blocks;
+        let at = table.iter().position(|entry| entry.node == node);
+        match (at, bounds) {
+            (Some(at), Some(unrounded)) => {
+                let entry = &mut table[at];
+                if entry.unrounded != unrounded {
+                    entry.unrounded = unrounded;
+                    entry.rounded = None;
+                }
+            }
+            (Some(at), None) => {
+                table.swap_remove(at);
+            }
+            (None, Some(unrounded)) => {
+                // Entries of nodes released since drop out here, on the rare
+                // push, rather than on every release; a stale entry answers
+                // nothing wrong meanwhile, since a `NodeId` is never reissued.
+                table.retain(|entry| self.contains(entry.node));
+                table.push(StickyContainingBlock {
+                    node,
+                    unrounded,
+                    rounded: None,
+                });
+            }
+            (None, None) => {}
+        }
+    }
+
+    fn sticky_containing_block(&self, state: &Self::State, node: NodeSlot) -> Option<Edges<f32>> {
+        state
+            .sticky_containing_blocks
+            .iter()
+            .find(|entry| entry.node == node)
+            .map(|entry| entry.unrounded)
+    }
+
+    fn set_rounded_sticky_containing_block(
+        &self,
+        state: &mut Self::State,
+        node: NodeSlot,
+        bounds: Edges<f32>,
+    ) {
+        if let Some(entry) = state
+            .sticky_containing_blocks
+            .iter_mut()
+            .find(|entry| entry.node == node)
+        {
+            entry.rounded = Some(bounds);
+        }
     }
 
     fn compute_layout(

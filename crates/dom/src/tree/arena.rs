@@ -12,6 +12,7 @@ use core::fmt;
 use std::hint::likely;
 use std::num::{NonZeroU32, NonZeroU64};
 
+use hughie::geometry::Edges;
 use hughie::text::TextContext;
 use hughie::tree::{LayoutInput, LayoutSlot};
 use slab::Slab;
@@ -471,6 +472,24 @@ pub(crate) struct DocumentLayoutState {
     /// has one: a page without the property keeps it empty and pays
     /// nothing per node.
     pub(crate) initial_targets: Vec<(NodeId, NodeId)>,
+    /// The grid items whose `position: sticky` insets resolve against their
+    /// grid area rather than the grid container: the area's edges in the
+    /// container's border-box coordinates, unrounded as the layout run
+    /// committed them and device-snapped by the rounding tail. A side
+    /// table rather than a field of every `Layout` because only sticky grid
+    /// items have one: a page without them keeps it empty and pays nothing
+    /// per node (`hughie::LayoutTree::set_sticky_containing_block`).
+    pub(crate) sticky_containing_blocks: Vec<StickyContainingBlock>,
+}
+
+/// One entry of [`DocumentLayoutState::sticky_containing_blocks`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct StickyContainingBlock {
+    pub(crate) node: NodeId,
+    pub(crate) unrounded: Edges<f32>,
+    /// Written by the rounding tail after the commit that recorded
+    /// `unrounded`; `None` between the two.
+    pub(crate) rounded: Option<Edges<f32>>,
 }
 
 /// A `container-type: size` box whose committing run laid no contents out.
@@ -495,6 +514,7 @@ impl DocumentLayoutState {
             interleaves_containers: false,
             container_deferrals: Vec::new(),
             initial_targets: Vec::new(),
+            sticky_containing_blocks: Vec::new(),
         }
     }
 
@@ -576,6 +596,7 @@ impl DocumentLayoutState {
             interleaves_containers: _,
             container_deferrals: _,
             initial_targets: _,
+            sticky_containing_blocks: _,
         } = self;
         let context = text_context
             .get_or_insert_with(|| Box::new(TextContext::new()))
@@ -619,6 +640,7 @@ impl DocumentLayoutState {
             interleaves_containers: _,
             container_deferrals: _,
             initial_targets: _,
+            sticky_containing_blocks: _,
         } = self;
         // Unlike the path this replaces, restoring can re-enter the shaper —
         // a truncating block rebuilds its display layout — so the context is

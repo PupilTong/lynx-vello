@@ -307,20 +307,18 @@ Hidden-subtree cleanup is deliberately outside this sizing API.
 `#[non_exhaustive]` so the protocol can grow additively (block-layout margin
 collapsing is the known future widener).
 
-Sticky Grid items also retain their grid area's containing-block edges in
-`Layout::containing_block`; grid-lanes retains its lane span in the grid axis
-and the container's content bounds in the stacking axis (css-grid-3 §4.4.1).
-The edges are parent-border-relative coordinates and the ordinary rounding
-tail snaps them in that coordinate system. The optional bounds are boxed and
-allocated only for sticky items: each 76-byte, alignment-4 `Layout` becomes
-88 bytes at alignment 8 after adding its nullable 8-byte pointer. The two
-records therefore add 16 pointer bytes and 8 padding bytes, growing the 64-bit
-`LayoutSlot` budget from 336 to 360 bytes and `NodeLayoutState` from 352 to
-376 bytes. Each sticky grid/grid-lanes
-item additionally owns two 16-byte edge payloads for unrounded and rounded
-geometry. Non-sticky layout creates no bounds allocations. This retains the
-algorithm's resolved area without making the visual layer reconstruct track
-placement, alignment, or baseline adjustments.
+A sticky Grid item's insets resolve against its grid area, not the grid
+container (css-position-3 §3.4); grid-lanes uses the lane span in the grid
+axis and the container's content bounds in the stacking axis (css-grid-3
+§4.4.1). The committing run hands that area to the host through
+`LayoutTree::set_sticky_containing_block` — edges in the parent's border-box
+coordinates, which the rounding tail reads back and snaps in that coordinate
+system through `set_rounded_sticky_containing_block`. It is a host-side
+record keyed by node (`DocumentLayoutState::sticky_containing_blocks`), not a
+field of `Layout`: only sticky grid items have one, so `LayoutSlot` stays at
+its 336-byte budget and a page without them pays nothing per node. The
+visual layer reads the recorded area rather than reconstructing track
+placement, alignment or baseline adjustments.
 
 **`LayoutInput` stays one type, and the tree stays one trait.** The style
 surface splits per algorithm and the wire struct does not, for a structural

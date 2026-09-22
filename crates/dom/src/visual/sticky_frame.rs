@@ -6,6 +6,7 @@
 //! a fixed descendant escapes it through the builder's containing-block context.
 
 use euclid::default::{Transform3D, Vector2D};
+use smallvec::SmallVec;
 
 use super::sticky::StickyAxis;
 use super::{PaintOrder, ScrollSlot};
@@ -21,6 +22,9 @@ pub(crate) struct StickySlot {
     pub(crate) parent_transform: Transform3D<f32>,
 }
 
+/// The sampled displacements of one frame's sticky slots.
+pub(crate) type StickySamples = SmallVec<[StickySample; 4]>;
+
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct StickySample {
     /// Cumulative movement before transforms, for nested sticky constraints.
@@ -30,12 +34,15 @@ pub(crate) struct StickySample {
 }
 
 impl PaintOrder {
+    /// Every sticky slot's displacement at these offsets, in slot order.
+    /// Inline for the few sticky boxes a page has, so sampling — which
+    /// happens on every compose and every hit test — allocates nothing.
     pub(crate) fn sample_stickies(
         &self,
         ratio: f32,
         offsets: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
-    ) -> Vec<StickySample> {
-        let mut samples: Vec<StickySample> = Vec::with_capacity(self.stickies.len());
+    ) -> StickySamples {
+        let mut samples = StickySamples::with_capacity(self.stickies.len());
         for slot in &self.stickies {
             let inherited = slot
                 .parent

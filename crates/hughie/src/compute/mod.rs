@@ -845,16 +845,26 @@ fn rounded_layout(
     rounded.margin.right = snapped_margin_end.x - snapped_box_end.x;
     rounded.margin.top = snapped_position.y - snapped_margin_start.y;
     rounded.margin.bottom = snapped_margin_end.y - snapped_box_end.y;
-    rounded.containing_block = source.containing_block.as_deref().map(|bounds| {
-        Box::new(crate::geometry::Edges {
-            left: snap(parent_position.x + bounds.left) - snapped_parent_position.x,
-            right: snap(parent_position.x + bounds.right) - snapped_parent_position.x,
-            top: snap(parent_position.y + bounds.top) - snapped_parent_position.y,
-            bottom: snap(parent_position.y + bounds.bottom) - snapped_parent_position.y,
-        })
-    });
 
     (rounded, position)
+}
+
+/// Snaps a sticky item's recorded containing-block edges the way
+/// [`rounded_layout`] snaps the box they bound: in the box parent's
+/// coordinates, through the parent's own snapped position.
+fn rounded_containing_block(
+    bounds: Edges<f32>,
+    scale: f32,
+    parent_position: Point<f32>,
+) -> Edges<f32> {
+    let snap = |value: f32| css_round_to_integer(value * scale) / scale;
+    let snapped_parent = parent_position.map(snap);
+    Edges {
+        left: snap(parent_position.x + bounds.left) - snapped_parent.x,
+        right: snap(parent_position.x + bounds.right) - snapped_parent.x,
+        top: snap(parent_position.y + bounds.top) - snapped_parent.y,
+        bottom: snap(parent_position.y + bounds.bottom) - snapped_parent.y,
+    }
 }
 
 #[allow(
@@ -881,6 +891,13 @@ fn round_layout_inner<T: LayoutTree>(
     let visit_pre_node = visit_pre_node && pre_node(tree, state, node);
     let (rounded, position) =
         rounded_layout(&tree.layout(state, node).unrounded, scale, parent_position);
+    if let Some(bounds) = tree.sticky_containing_block(state, node) {
+        tree.set_rounded_sticky_containing_block(
+            state,
+            node,
+            rounded_containing_block(bounds, scale, parent_position),
+        );
+    }
     let slot = tree.layout_mut(state, node);
     // The hook writes the boxes of out-of-flow children here rather than
     // during layout, so read the mark after it has run.
@@ -1160,7 +1177,6 @@ mod tests {
             border: edges(1.13, 2.27, 0.77, 1.91),
             padding: edges(3.08, 0.66, 2.42, 1.36),
             margin: edges(4.17, -0.83, 1.27, 3.44),
-            containing_block: None,
         };
         let scale = 1.25;
         let parent_position = Point::new(-7.31, 5.19);
@@ -1172,7 +1188,6 @@ mod tests {
             border: edges(1.599_999_9, 2.400_000_6, 0.799_999_7, 1.600_000_4),
             padding: edges(3.199_999_8, 0.800_000_2, 2.4, 1.599_999_4),
             margin: edges(4.0, -0.800_000_2, 1.600_000_1, 3.200_000_8),
-            containing_block: None,
         };
         let tree = RoundingTree;
         let mut state = crate::tree::LayoutSlot::default();
@@ -1198,13 +1213,9 @@ mod tests {
 
     #[test]
     fn grid_containing_block_edges_snap_in_the_box_parents_coordinates() {
-        let mut source = Layout::with_order(0);
-        source.location = Point::new(7.3, 4.8);
-        source.containing_block = Some(Box::new(edges(1.1, 21.4, 2.1, 17.7)));
-        let (rounded, _) = rounded_layout(&source, 2.0, Point::new(0.2, 0.3));
         assert_eq!(
-            rounded.containing_block.as_deref(),
-            Some(&edges(1.5, 21.5, 2.0, 17.5))
+            rounded_containing_block(edges(1.1, 21.4, 2.1, 17.7), 2.0, Point::new(0.2, 0.3)),
+            edges(1.5, 21.5, 2.0, 17.5)
         );
     }
 

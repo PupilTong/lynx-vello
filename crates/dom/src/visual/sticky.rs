@@ -6,7 +6,6 @@
 use euclid::default::Vector2D;
 use hughie::geometry::Edges;
 use hughie::style::PositionProperty;
-use hughie::tree::Layout;
 use stylo::values::computed::{Inset, Length, Margin};
 
 use crate::NodeId;
@@ -126,13 +125,10 @@ fn scrollport_axis<T>(document: &Document<T>, scroller: Option<NodeId>, axis: us
     }
 }
 
-fn containing_block<T>(
-    document: &Document<T>,
-    parent: Option<&Node<T>>,
-    layout: &Layout,
-) -> Edges<f32> {
-    if let Some(bounds) = layout.containing_block.as_deref() {
-        return *bounds;
+fn containing_block<T>(document: &Document<T>, id: NodeId, parent: Option<&Node<T>>) -> Edges<f32> {
+    if let Some(bounds) = document.sticky_containing_block(id) {
+        // A grid item: its area, recorded by the layout run.
+        return bounds;
     }
     let Some((parent, layout)) = parent.and_then(|node| {
         document
@@ -203,7 +199,7 @@ pub(crate) fn axes<T>(
         bottom: used_margin(&margin_style.margin_bottom, layout.margin.bottom),
     };
     let parent = box_parent(node);
-    let containing = containing_block(document, parent, layout);
+    let containing = containing_block(document, id, parent);
     let writing = parent
         .and_then(|parent| parent.layout_computed_style())
         .unwrap_or(style)

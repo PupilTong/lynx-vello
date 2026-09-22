@@ -385,7 +385,13 @@ shared by painting, clipping, hit testing, and the document's bounding-rectangle
 query. Descendants inherit the motion through their containing-block chain,
 so viewport-fixed descendants still escape it. Culling preserves possible
 sticky travel across the frame's encode window, including a header whose
-normal-flow position has scrolled out of view.
+normal-flow position has scrolled out of view. A sticky box inside a
+compositor-exported animation subtree cancels that export
+(`kill_animation_chain`): its constraints are solved in its parent's
+committed coordinates, and an animating ancestor transform would change the
+map they are solved in, so such an animation ticks on the main thread
+instead. Inline sticky atoms inside a paragraph are not pinned: the paragraph
+paints them, and the sampling covers only boxes with items of their own.
 
 `filter: blur()` and `backdrop-filter` add the one conditional step in front of
 that path, and they share it. `CommittedFrame::filter_groups()` — empty unless

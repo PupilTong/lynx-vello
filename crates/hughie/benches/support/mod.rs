@@ -244,9 +244,6 @@ impl LayoutFixture {
         snapshot.padding = layout.padding;
         snapshot.margin = layout.margin;
         snapshot
-            .containing_block
-            .clone_from(&layout.containing_block);
-        snapshot
     }
 
     pub(super) fn invalidate(&mut self, node: NodeId) {

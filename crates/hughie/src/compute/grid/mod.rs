@@ -900,15 +900,15 @@ where
         layout.border = item.border;
         layout.padding = item.padding;
         layout.margin = margin;
-        layout.containing_block = (goal.commits() && item.position == PositionProperty::Sticky)
-            .then(|| {
-                Box::new(Edges {
-                    left: content_origin.x + area_offset.x,
-                    right: content_origin.x + area_offset.x + area_size.width,
-                    top: content_origin.y + area_offset.y,
-                    bottom: content_origin.y + area_offset.y + area_size.height,
-                })
-            });
+        // A sticky item's insets resolve against its grid area, not the
+        // grid container (css-position-3 §3.4): handed to the host as the
+        // rare record it is rather than carried by every `Layout`.
+        let sticky_area = (item.position == PositionProperty::Sticky).then_some(Edges {
+            left: content_origin.x + area_offset.x,
+            right: content_origin.x + area_offset.x + area_size.width,
+            top: content_origin.y + area_offset.y,
+            bottom: content_origin.y + area_offset.y + area_size.height,
+        });
         let item_baseline = output
             .first_baselines
             .y
@@ -937,6 +937,7 @@ where
             );
             if goal.commits() {
                 tree.set_unrounded_layout(state, item.key.node, layout);
+                tree.set_sticky_containing_block(state, item.key.node, sticky_area);
             }
             continue;
         }

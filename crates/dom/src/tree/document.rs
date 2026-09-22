@@ -18,7 +18,7 @@ use crate::style::engine::StyleEngine;
 pub use crate::tree::arena::NodeId;
 pub(crate) use crate::tree::arena::{
     DOCUMENT_ELEMENT_NODE_ID, DOCUMENT_NODE_ID, DeferredContainer, DocumentLayoutState,
-    NodeLayoutState, NodeSlot, PayloadSlot, TreeArenas,
+    NodeLayoutState, NodeSlot, PayloadSlot, StickyContainingBlock, TreeArenas,
 };
 use crate::tree::custom::CustomElementRegistry;
 use crate::tree::node::Node;
