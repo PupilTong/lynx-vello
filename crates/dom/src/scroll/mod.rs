@@ -69,12 +69,6 @@
 //! - `scroll-behavior` and rubber-band overscroll are absent: scrolling is instantaneous and clamps
 //!   hard at the boundary, and a snap is a jump. `overscroll-behavior: none` therefore does exactly
 //!   what `contain` does — there is no boundary effect for it to suppress on top.
-//! - **`position: sticky` does not stick.** It parses in the fork's grammar, but the paint build
-//!   treats it as normal flow, so a sticky box scrolls away with its container instead of pinning
-//!   to the scrollport. Before scrolling existed that was indistinguishable from `relative`; now it
-//!   is observable, which is why it is written down here rather than left implied. Its scroll
-//!   parent is deliberately its box parent (sticky *is* in flow — that part is right); what is
-//!   missing is the offset clamp against the scrollport that css-position-3 §6.3 defines.
 
 use euclid::default::{Size2D, Vector2D};
 use hughie::style::PositionProperty;
@@ -101,6 +95,8 @@ pub struct ScrollAxes {
 mod behavior_tests;
 pub(crate) mod initial_target;
 pub mod snap;
+#[cfg(test)]
+mod sticky_geometry_tests;
 
 pub use snap::{
     PROXIMITY_RATIO, ScrollKind, SnapAxis, SnapAxisPositions, SnapPoint, SnapPositions,
@@ -409,7 +405,7 @@ impl<T> Document<T> {
         scroll_box.offset + delta - applied
     }
 
-    fn scroll_parent(&self, id: NodeId) -> Option<NodeId> {
+    pub(crate) fn scroll_parent(&self, id: NodeId) -> Option<NodeId> {
         let node = self.get(id)?;
         if !node.is_element() {
             return node.flat_parent_id();

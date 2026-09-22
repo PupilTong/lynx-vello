@@ -455,6 +455,8 @@ impl<T> Document<T> {
     /// with scrollers between it and its containing block, exactly as it
     /// does not in the paint order). The box's own scroll offset never
     /// applies: scrolling a container does not move the container.
+    /// Sticky offsets are sampled from these same live scroll positions,
+    /// including those inherited from sticky containing-block ancestors.
     ///
     /// `None` when the element has no box at all: `display: none` or
     /// `display: contents`, a node that is not a styled element, a node no
@@ -474,6 +476,10 @@ impl<T> Document<T> {
         let layout = self.rounded_layout(id)?;
         let size = Size2D::new(layout.size.width, layout.size.height);
         let mut origin = Point2D::new(layout.location.x, layout.location.y);
+        let mut sticky_offsets = Vec::new();
+        if style.values().clone_position() == PositionProperty::Sticky {
+            origin += crate::visual::sticky::live_offset(self, id, &mut sticky_offsets);
+        }
         // The position the *escaping* box was keyed on, which decides which
         // ancestor is its containing block — and so which scroll offsets
         // move it. It is the computed value, not hughie's parent-lowered
@@ -507,6 +513,10 @@ impl<T> Document<T> {
                 | PositionProperty::Sticky => true,
             };
             if on_chain {
+                if ancestor_style.values().clone_position() == PositionProperty::Sticky {
+                    origin +=
+                        crate::visual::sticky::live_offset(self, ancestor_id, &mut sticky_offsets);
+                }
                 if self.is_scroll_container(ancestor_id) {
                     origin -= self.scroll_offset(ancestor_id);
                 }
@@ -804,6 +814,9 @@ mod tests {
         // the store's own size never entered this budget — only the pointer
         // does. The retired measurement path's `TextLayoutStore` used to be
         // measured here beside it, which said nothing the pointer did not.
+        // Sticky grid bounds add a nullable pointer to each of the two
+        // Layout records: 16 pointer bytes plus 8 alignment-padding bytes
+        // grow LayoutSlot 336→360 and NodeLayoutState 352→376.
         let current = (
             size_of::<crate::Node<()>>(),
             size_of::<LayoutSlot>(),
@@ -823,7 +836,7 @@ mod tests {
         #[cfg(target_pointer_width = "64")]
         assert_eq!(
             current,
-            (if cfg!(debug_assertions) { 232 } else { 224 }, 336, 352),
+            (if cfg!(debug_assertions) { 232 } else { 224 }, 360, 376),
             "Node, LayoutSlot and NodeLayoutState sizes changed",
         );
     }

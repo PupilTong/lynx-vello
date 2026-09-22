@@ -845,6 +845,14 @@ fn rounded_layout(
     rounded.margin.right = snapped_margin_end.x - snapped_box_end.x;
     rounded.margin.top = snapped_position.y - snapped_margin_start.y;
     rounded.margin.bottom = snapped_margin_end.y - snapped_box_end.y;
+    rounded.containing_block = source.containing_block.as_deref().map(|bounds| {
+        Box::new(crate::geometry::Edges {
+            left: snap(parent_position.x + bounds.left) - snapped_parent_position.x,
+            right: snap(parent_position.x + bounds.right) - snapped_parent_position.x,
+            top: snap(parent_position.y + bounds.top) - snapped_parent_position.y,
+            bottom: snap(parent_position.y + bounds.bottom) - snapped_parent_position.y,
+        })
+    });
 
     (rounded, position)
 }
@@ -1152,6 +1160,7 @@ mod tests {
             border: edges(1.13, 2.27, 0.77, 1.91),
             padding: edges(3.08, 0.66, 2.42, 1.36),
             margin: edges(4.17, -0.83, 1.27, 3.44),
+            containing_block: None,
         };
         let scale = 1.25;
         let parent_position = Point::new(-7.31, 5.19);
@@ -1163,6 +1172,7 @@ mod tests {
             border: edges(1.599_999_9, 2.400_000_6, 0.799_999_7, 1.600_000_4),
             padding: edges(3.199_999_8, 0.800_000_2, 2.4, 1.599_999_4),
             margin: edges(4.0, -0.800_000_2, 1.600_000_1, 3.200_000_8),
+            containing_block: None,
         };
         let tree = RoundingTree;
         let mut state = crate::tree::LayoutSlot::default();
@@ -1184,6 +1194,18 @@ mod tests {
             };
         }
         assert_field_bits!(location, size, content_size, border, padding, margin);
+    }
+
+    #[test]
+    fn grid_containing_block_edges_snap_in_the_box_parents_coordinates() {
+        let mut source = Layout::with_order(0);
+        source.location = Point::new(7.3, 4.8);
+        source.containing_block = Some(Box::new(edges(1.1, 21.4, 2.1, 17.7)));
+        let (rounded, _) = rounded_layout(&source, 2.0, Point::new(0.2, 0.3));
+        assert_eq!(
+            rounded.containing_block.as_deref(),
+            Some(&edges(1.5, 21.5, 2.0, 17.5))
+        );
     }
 
     #[test]

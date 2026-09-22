@@ -1273,6 +1273,9 @@ pub(super) fn snapshot_layout(layout: &Layout) -> Layout {
     snapshot.padding = layout.padding;
     snapshot.margin = layout.margin;
     snapshot
+        .containing_block
+        .clone_from(&layout.containing_block);
+    snapshot
 }
 
 impl TestTree {

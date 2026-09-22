@@ -15,9 +15,11 @@
 
 use euclid::default::{Point2D, Rect, Vector2D};
 
-use super::{AnimationSample, PaintItem, PaintItemKind, PaintOrder, ScrollSlot, geometry};
+use super::{
+    AnimationSample, PaintItem, PaintItemKind, PaintOrder, ScrollSlot, StickySample, geometry,
+};
 use crate::NodeId;
-use crate::paint::compose::{animation_deltas, chain_translation};
+use crate::paint::compose::{animation_deltas, chain_translation, sticky_translation};
 use crate::tree::document::Document;
 
 /// Where a hit query's scroll offsets come from: `None` falls back to the
@@ -45,8 +47,9 @@ impl PaintOrder {
         ratio: f32,
     ) -> Vec<NodeId> {
         let samples = self.sample_animations(None);
+        let stickies = self.sample_stickies(ratio, offsets);
         let mut elements = Vec::new();
-        for node in self.hits_at(document, point, offsets, &samples, ratio) {
+        for node in self.hits_at(document, point, offsets, &samples, &stickies, ratio) {
             if !elements.contains(&node) {
                 elements.push(node);
             }
@@ -63,7 +66,8 @@ impl PaintOrder {
         ratio: f32,
     ) -> Option<NodeId> {
         let samples = self.sample_animations(None);
-        self.hits_at(document, point, offsets, &samples, ratio)
+        let stickies = self.sample_stickies(ratio, offsets);
+        self.hits_at(document, point, offsets, &samples, &stickies, ratio)
             .next()
     }
 
@@ -76,12 +80,13 @@ impl PaintOrder {
         point: Point2D<f32>,
         offsets: &'frame OffsetSource<'frame>,
         samples: &'frame [AnimationSample],
+        stickies: &'frame [StickySample],
         ratio: f32,
     ) -> impl Iterator<Item = NodeId> + 'frame {
         self.items
             .iter()
             .rev()
-            .filter_map(move |item| self.item_hit(item, point, offsets, samples, ratio))
+            .filter_map(move |item| self.item_hit(item, point, offsets, samples, stickies, ratio))
             .filter(move |&node| document.contains_node(node))
     }
 
@@ -91,6 +96,7 @@ impl PaintOrder {
         point: Point2D<f32>,
         offsets: &OffsetSource<'_>,
         samples: &[AnimationSample],
+        stickies: &[StickySample],
         ratio: f32,
     ) -> Option<NodeId> {
         if !item.hit_testable {
@@ -107,7 +113,7 @@ impl PaintOrder {
             ratio,
             offsets,
         );
-        let mut point = point + translation;
+        let mut point = point + translation - sticky_translation(stickies, item.sticky);
         if item.animation.is_some() {
             let delta = animation_deltas(samples, item.animation);
             if delta.determinant().abs() < f64::EPSILON {
@@ -128,7 +134,7 @@ impl PaintOrder {
         if !geometry::rounded_rect_contains(Rect::from_size(item.size), &item.radii, local) {
             return None;
         }
-        if !self.point_passes_clips(item.clip, screen, offsets, ratio) {
+        if !self.point_passes_clips(item.clip, screen, offsets, stickies, ratio) {
             return None;
         }
         Some(match item.kind {
@@ -142,11 +148,13 @@ impl PaintOrder {
         mut clip: Option<usize>,
         point: Point2D<f32>,
         offsets: &OffsetSource<'_>,
+        stickies: &[StickySample],
         ratio: f32,
     ) -> bool {
         while let Some(index) = clip {
             let node = &self.clips[index];
-            let translated = point + chain_translation(&self.slots, node.slot, ratio, offsets);
+            let translated = point + chain_translation(&self.slots, node.slot, ratio, offsets)
+                - sticky_translation(stickies, node.sticky);
             let Some(local) = node
                 .transform
                 .inverse()

@@ -654,8 +654,9 @@ and §D.16 with what the wire format actually permits.)*
       the same origin and would lose on specificity, and ReactLynx routinely
       wraps a list's children.
 
-    Not written, and deliberately: no `position: sticky` rules (sticky does
-    not stick in this engine yet) and no scroll-snap rules.
+    Still absent from the list UA sheet: `sticky-top`/`sticky-bottom`
+    attribute rules and scroll-snap rules. CSS `position: sticky` itself is
+    implemented (2026-09-22); the component attribute mapping is separate.
 
 24. **CSS Grid Level 3 grid lanes (`display: grid-lanes` +
     `flow-tolerance`): enabled as a user-directed extension beyond Lynx

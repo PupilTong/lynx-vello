@@ -17,7 +17,7 @@
 
 use euclid::default::{Point2D, Size2D, Vector2D};
 
-use super::{AnimationSample, PaintOrder};
+use super::{AnimationSample, PaintOrder, StickySample};
 use crate::NodeId;
 use crate::paint::compose::{self, ComposeOp, FilterGroup};
 use crate::scroll::{ChainLink, ScrollAxes, ScrollCapture, SnapAxis, SnapPoint, SnapStrictness};
@@ -58,6 +58,10 @@ pub struct ScrollSlot {
     /// The scrollport (padding box) size, which is also what the encode
     /// window is sized from.
     pub scrollport: Size2D<f32>,
+    /// Local horizontal and vertical unit vectors in viewport CSS pixels.
+    /// Scroll offsets stay local; composition maps their translations through
+    /// these axes so transformed scroll containers move their content correctly.
+    pub viewport_axes: [Vector2D<f32>; 2],
 }
 
 /// One axis of a slot's snapping: its strictness and the `start..end`
@@ -95,6 +99,10 @@ impl ScrollSlot {
             chains: self.chains,
             capture: self.capture,
         }
+    }
+
+    pub(crate) fn viewport_translation(&self, offset: Vector2D<f32>) -> Vector2D<f32> {
+        self.viewport_axes[0] * offset.x + self.viewport_axes[1] * offset.y
     }
 
     /// The offset range the committed encode covers on each axis — the
@@ -250,6 +258,9 @@ impl CommittedFrame {
         animation_now: Option<f64>,
     ) {
         let samples = self.order.sample_animations(animation_now);
+        let stickies = self
+            .order
+            .sample_stickies(self.device_pixel_ratio, offset_of);
         compose::replay(
             scene,
             &self.presentation.fragments,
@@ -260,6 +271,7 @@ impl CommittedFrame {
             filtered,
             self.order.slots(),
             &samples,
+            &stickies,
             self.device_pixel_ratio,
             offset_of,
         );
@@ -284,7 +296,7 @@ impl CommittedFrame {
     /// scroll container inside an animated subtree and an animated element's
     /// whole subtree rides its own slot, so content inside a group never sits
     /// on a different *animation* chain than the group; only an inner
-    /// *scroll* chain produces a non-identity relative transform, and that is
+    /// *scroll* or *sticky* chain produces a non-identity relative transform, and that is
     /// exactly what `FilterGroup`'s `inner_chains` reports.
     ///
     /// A `backdrop-filter` entry is the opposite case: its range is a prefix
@@ -312,9 +324,13 @@ impl CommittedFrame {
         };
         let backdrop = group.backdrop.as_ref();
         let samples = self.order.sample_animations(backdrop.and(animation_now));
+        let stickies = self
+            .order
+            .sample_stickies(self.device_pixel_ratio, offset_of);
         let chain_transform = compose::device_transform(
             self.order.slots(),
             &samples,
+            &stickies,
             self.device_pixel_ratio,
             offset_of,
         );
@@ -521,8 +537,17 @@ impl CommittedFrame {
         animation_now: Option<f64>,
     ) -> Option<HitTarget> {
         let samples = self.order.sample_animations(animation_now);
+        let stickies = self
+            .order
+            .sample_stickies(self.device_pixel_ratio, offset_of);
         self.order
-            .raw_hits_at(point, offset_of, &samples, self.device_pixel_ratio)
+            .raw_hits_at(
+                point,
+                offset_of,
+                &samples,
+                &stickies,
+                self.device_pixel_ratio,
+            )
             .next()
     }
 
@@ -557,10 +582,11 @@ impl PaintOrder {
         point: Point2D<f32>,
         offset_of: &'frame (dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>> + 'frame),
         samples: &'frame [AnimationSample],
+        stickies: &'frame [StickySample],
         ratio: f32,
     ) -> impl Iterator<Item = HitTarget> + 'frame {
         self.items().iter().rev().filter_map(move |item| {
-            let node = self.item_hit(item, point, offset_of, samples, ratio)?;
+            let node = self.item_hit(item, point, offset_of, samples, stickies, ratio)?;
             Some(HitTarget {
                 node,
                 scroll: item.slot,

@@ -420,6 +420,17 @@ mod tests {
     #[test]
     fn layout_slot_fits_the_split_state_memory_budget() {
         let size = core::mem::size_of::<LayoutSlot>();
-        assert!(size <= 336, "LayoutSlot grew to {size} bytes");
+        // Each formerly 76-byte, align-4 Layout gains one 8-byte pointer and
+        // becomes align-8: 88 bytes, including 4 bytes of alignment padding.
+        // Two records therefore add 24 bytes to the former 336-byte slot.
+        // Their 16-byte bounds payloads exist only on sticky grid/lane items.
+        assert_eq!(
+            (
+                core::mem::size_of::<Layout>(),
+                core::mem::align_of::<Layout>()
+            ),
+            (88, 8)
+        );
+        assert!(size <= 360, "LayoutSlot grew to {size} bytes");
     }
 }

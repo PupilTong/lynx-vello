@@ -1964,6 +1964,9 @@ Rulings and limits to know before touching it:
   #8407 (`content-visibility: auto` implies the `auto` keyword) is folded in
   here because the fork's own adjuster is `#[cfg(feature = "gecko")]`.
   `hughie` is unchanged by either: it reads `AutoLength(l)` as `l` already.
+- `position: sticky` stays in normal flow and resolves its inset/containing-block
+  constraints in the retained frame at live scroll offsets; painting, hit
+  testing and bounding rectangles share the same sticky geometry.
 - The crate dispatches no events and has no `preventDefault` and no gesture
   recognizer; `InputEvent::default_prevented` is the embedder's seam.
 - Custom elements are user-agent components only, `define` must precede any
@@ -2124,8 +2127,7 @@ would host it:
   transforms and never flushes.
 - **The text `layout` event.** The per-line ranges `hughie`'s
   `text/block/content.rs` computes have no delivery path.
-- **`rpx`-aware view/device policy**, sticky lowering (it parses and paints as
-  normal flow but never pins), and the `<list>` *component* (its UI methods,
+- **`rpx`-aware view/device policy** and the `<list>` *component* (its UI methods,
   scroll and threshold events, sticky cells and snapping; the layout mapping
   and virtualization are UA rules already).
 - **Animated image playback.** `bobcat-resources` decodes an image's first

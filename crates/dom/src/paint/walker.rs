@@ -89,9 +89,7 @@ use crate::render::image::ImageRegistry;
 use crate::vello::Scene;
 use crate::vello::kurbo::{Affine, Point, Rect};
 use crate::vello::peniko::{BlendMode, Compose, Fill, Mix};
-use crate::visual::{
-    AutoBox, ClipNode, PaintItem, PaintItemKind, PaintOrder, RenderLayer, ScrollSlot,
-};
+use crate::visual::{AutoBox, ClipNode, PaintItem, PaintItemKind, PaintOrder, RenderLayer};
 
 /// Where one walk's output goes.
 ///
@@ -413,6 +411,7 @@ impl CullPlan {
         clip: Option<usize>,
         chain: Option<u32>,
         animation: Option<u32>,
+        sticky: Option<u32>,
         layer: Option<usize>,
     ) -> Admitted {
         if animation.is_some_and(|slot| self.animation_moves[slot as usize]) {
@@ -426,9 +425,10 @@ impl CullPlan {
         // over-admits a little near an inner clip, which is the safe
         // direction: culling needs a proof, uncertainty paints.
         let inflate = layer.map_or(0.0, |layer| self.layer_inflate[layer]);
-        admitted_region(self, frame, cull, chain, clip).map_or(Admitted::Nothing, |region| {
-            Admitted::Region(inflate_rect(region, inflate))
-        })
+        admitted_region(self, frame, cull, chain, sticky, clip)
+            .map_or(Admitted::Nothing, |region| {
+                Admitted::Region(inflate_rect(region, inflate))
+            })
     }
 
     /// Whether this `content-visibility: auto` box can put ink in that
@@ -444,8 +444,15 @@ impl CullPlan {
         let Some(local) = convert::item_affine(&auto.transform, auto.size) else {
             return true;
         };
-        self.admitted_for(frame, auto.clip, auto.chain, auto.animation, auto.layer)
-            .reached_by(box_bounds(local, auto.size, 0.0))
+        self.admitted_for(
+            frame,
+            auto.clip,
+            auto.chain,
+            auto.animation,
+            auto.sticky,
+            auto.layer,
+        )
+        .reached_by(box_bounds(local, auto.size, 0.0))
     }
 }
 
@@ -700,7 +707,7 @@ fn plan_clips(plan: &mut CullPlan, frame: &PaintOrder, cull: Option<Rect>) {
         // coordinates: everything here is baked unscrolled, so a region on
         // an outer chain admits content on an inner one anywhere the inner
         // slots' encode windows can carry it.
-        let inherited = admitted_region(plan, frame, cull, clip.slot, clip.parent);
+        let inherited = admitted_region(plan, frame, cull, clip.slot, clip.sticky, clip.parent);
         let resolved = inherited.and_then(|inherited| {
             // `push_clip` pushes an empty clip for a singular transform, so
             // nothing under this chain reaches the scene at all.
@@ -790,7 +797,8 @@ fn relative_offset_range(
     let mut chain = content;
     while chain != lca {
         let Some(index) = chain else { break };
-        let (window_low, window_high) = windows[index as usize];
+        let (window_low, window_high) =
+            viewport_window(&slots[index as usize], windows[index as usize]);
         low += window_low;
         high += window_high;
         chain = slots[index as usize].parent;
@@ -798,12 +806,34 @@ fn relative_offset_range(
     let mut chain = frame_of;
     while chain != lca {
         let Some(index) = chain else { break };
-        let (window_low, window_high) = windows[index as usize];
+        let (window_low, window_high) =
+            viewport_window(&slots[index as usize], windows[index as usize]);
         low -= window_high;
         high -= window_low;
         chain = slots[index as usize].parent;
     }
     (low, high)
+}
+
+/// An offset rectangle mapped through a scrollport's linear transform.
+fn viewport_window(
+    slot: &crate::visual::ScrollSlot,
+    (low, high): (Vector2D<f32>, Vector2D<f32>),
+) -> (Vector2D<f32>, Vector2D<f32>) {
+    let x0 = slot.viewport_axes[0] * low.x;
+    let x1 = slot.viewport_axes[0] * high.x;
+    let y0 = slot.viewport_axes[1] * low.y;
+    let y1 = slot.viewport_axes[1] * high.y;
+    (
+        Vector2D::new(
+            x0.x.min(x1.x) + y0.x.min(y1.x),
+            x0.y.min(x1.y) + y0.y.min(y1.y),
+        ),
+        Vector2D::new(
+            x0.x.max(x1.x) + y0.x.max(y1.x),
+            x0.y.max(x1.y) + y0.y.max(y1.y),
+        ),
+    )
 }
 
 /// A region on the frame chain, expanded to admit content whose relative
@@ -847,6 +877,7 @@ fn open_scope<T>(
     let chain = ComposeChain {
         scroll: layer.slot,
         animation: layer.animation,
+        sticky: layer.sticky,
     };
     let base = scratch.scopes.last().map_or(0, |scope| scope.base);
     pop_clips_to(sink, scratch, base);
@@ -1143,6 +1174,7 @@ fn close_scope<T>(sink: &mut WalkSink<'_>, scratch: &mut Scratch, painting: Pain
     let chain = ComposeChain {
         scroll: layer.slot,
         animation: layer.animation,
+        sticky: layer.sticky,
     };
     let bounds = scratch.layer_bounds[scope.layer];
     // The list splits at its first `blur()`: what precedes it composites
@@ -1430,6 +1462,7 @@ fn clip_chain(clip: &ClipNode) -> ComposeChain {
     ComposeChain {
         scroll: clip.slot,
         animation: None,
+        sticky: clip.sticky,
     }
 }
 
@@ -1487,7 +1520,7 @@ fn plan_frame<T>(scratch: &mut Scratch, document: &Document<T>, frame: &PaintOrd
     scratch.bounds_acc.resize(layers.len(), None);
     let slots = frame.slots();
     let mut next_open = 0_usize;
-    let close = |scratch: &mut Scratch| close_layer(scratch, layers, slots, viewport);
+    let close = |scratch: &mut Scratch| close_layer(scratch, frame, viewport);
 
     for (index, item) in items.iter().enumerate() {
         while scratch
@@ -1511,10 +1544,14 @@ fn plan_frame<T>(scratch: &mut Scratch, document: &Document<T>, frame: &PaintOrd
         };
         let top = scratch.open_layers.last().copied();
         let content_chain = frame.item_translation_chain(item);
-        let admitted =
-            scratch
-                .plan
-                .admitted_for(frame, item.clip, content_chain, item.animation, top);
+        let admitted = scratch.plan.admitted_for(
+            frame,
+            item.clip,
+            content_chain,
+            item.animation,
+            item.sticky,
+            top,
+        );
 
         // An item whose plain border box already reaches the admitted region
         // paints whatever its fragments reach, because every reach only grows
@@ -1537,6 +1574,8 @@ fn plan_frame<T>(scratch: &mut Scratch, document: &Document<T>, frame: &PaintOrd
                 layers[top].slot,
             );
             let bounds = expand_cover(bounds, low, high);
+            let (sticky_low, sticky_high) = frame.sticky_range(item.sticky, layers[top].sticky);
+            let bounds = expand_region(bounds, sticky_low, sticky_high);
             scratch.bounds_acc[top] =
                 Some(scratch.bounds_acc[top].map_or(bounds, |united| united.union(bounds)));
         }
@@ -1569,12 +1608,9 @@ fn plan_frame<T>(scratch: &mut Scratch, document: &Document<T>, frame: &PaintOrd
 /// coordinates, since the compose window may carry the layer's content
 /// across it — and fold into the parent layer still open, expanded into
 /// that parent's chain.
-fn close_layer(
-    scratch: &mut Scratch,
-    layers: &[RenderLayer],
-    slots: &[ScrollSlot],
-    viewport: Rect,
-) {
+fn close_layer(scratch: &mut Scratch, frame: &PaintOrder, viewport: Rect) {
+    let layers = frame.layers();
+    let slots = frame.slots();
     let closed = scratch
         .open_layers
         .pop()
@@ -1598,7 +1634,11 @@ fn close_layer(
         }
         let (low, high) =
             relative_offset_range(slots, &scratch.plan.slot_windows, layers[closed].slot, None);
-        rect.intersect(inflate_rect(expand_region(viewport, low, high), reach))
+        let (sticky_low, sticky_high) = frame.sticky_range(layers[closed].sticky, None);
+        rect.intersect(inflate_rect(
+            expand_region(viewport, low - sticky_high, high - sticky_low),
+            reach,
+        ))
     });
     if let (Some(bounds), Some(&parent)) = (scratch.bounds_acc[closed], scratch.open_layers.last())
     {
@@ -1609,6 +1649,9 @@ fn close_layer(
             layers[parent].slot,
         );
         let bounds = expand_cover(inflate_rect(bounds, reach), low, high);
+        let (sticky_low, sticky_high) =
+            frame.sticky_range(layers[closed].sticky, layers[parent].sticky);
+        let bounds = expand_region(bounds, sticky_low, sticky_high);
         scratch.bounds_acc[parent] =
             Some(scratch.bounds_acc[parent].map_or(bounds, |united| united.union(bounds)));
     }
@@ -1680,14 +1723,20 @@ fn admitted_region(
     frame: &PaintOrder,
     region: Rect,
     chain: Option<u32>,
+    sticky: Option<u32>,
     clip: Option<usize>,
 ) -> Option<Rect> {
-    let (base, outer) = match clip {
-        Some(clip) => (plan.clip_bounds[clip]?, frame.clips()[clip].slot),
-        None => (region, None),
+    let (base, outer, outer_sticky) = match clip {
+        Some(clip) => (
+            plan.clip_bounds[clip]?,
+            frame.clips()[clip].slot,
+            frame.clips()[clip].sticky,
+        ),
+        None => (region, None, None),
     };
     let (low, high) = relative_offset_range(frame.slots(), &plan.slot_windows, chain, outer);
-    Some(expand_region(base, low, high))
+    let (sticky_low, sticky_high) = frame.sticky_range(sticky, outer_sticky);
+    Some(expand_region(base, low - sticky_high, high - sticky_low))
 }
 
 fn layer_root_rect(layer: &RenderLayer) -> Option<Rect> {
@@ -1883,6 +1932,7 @@ mod tests {
             hit_testable: true,
             slot: None,
             animation: None,
+            sticky: None,
         }
     }
 

@@ -900,6 +900,15 @@ where
         layout.border = item.border;
         layout.padding = item.padding;
         layout.margin = margin;
+        layout.containing_block = (goal.commits() && item.position == PositionProperty::Sticky)
+            .then(|| {
+                Box::new(Edges {
+                    left: content_origin.x + area_offset.x,
+                    right: content_origin.x + area_offset.x + area_size.width,
+                    top: content_origin.y + area_offset.y,
+                    bottom: content_origin.y + area_offset.y + area_size.height,
+                })
+            });
         let item_baseline = output
             .first_baselines
             .y

@@ -227,6 +227,14 @@ pub struct Layout {
     pub border: Edges<f32>,
     pub padding: Edges<f32>,
     pub margin: Edges<f32>,
+    /// Formatting-context containing block, when it differs from the box
+    /// parent's content box and post-layout positioning needs it. The edges
+    /// are coordinates relative to that parent's border box, not inset
+    /// distances. Grid retains its item area
+    /// here so post-layout positioning can constrain a sticky item to its
+    /// own area rather than the whole grid container.
+    /// Only sticky grid/grid-lanes items allocate these rare bounds.
+    pub containing_block: Option<Box<Edges<f32>>>,
 }
 
 impl Layout {

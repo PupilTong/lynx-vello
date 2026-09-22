@@ -126,7 +126,7 @@ Text behavior is inventoried in
 | `hughie::text` (unconditional) | Parley context/font registration, whitespace processing, shaping, line breaking, intrinsic and height-for-width measurement, baselines, and the single retained `TextLayout` artifact per node — one shaped layout re-broken in place for every constraint, memoising both the constraint its lines currently reflect and the last few constraints it reported on, plus the committed break state a probe must hand back before the pass ends | Text truncation and ellipsis, inline boxes, paint styling, runtime/attribute lowering, resource fetching, or host cache and per-node slot storage |
 | `hughie::text::block` (standalone, unwired) | The Lynx text-block semantics on its own parameter structs: the flattened paragraph with atomic inline boxes (size + baseline + vertical-align, no content), the UTF-16 source map, `text-maxline`/`text-maxlength`/`text-overflow` truncation with inline-truncation content, per-line layout-event data, and the retained-natural-layout / rebuilt-display lifecycle | The box-protocol wire format (`LayoutInput`), the measurement path's `TextLayout` store and probe/commit machinery, host tree walking and the scoped style overlay (host cascade), paint styling, runtime/attribute lowering |
 | `dom::layout` (implemented) | `LayoutTree` on immutable `TreeArenas<T>`, plain `NodeId`s, and separately borrowed mutable `DocumentLayoutState` (one protocol; no view/session/store wrapper layers); post-flush style views lending the `ComputedValues` pointer published from Stylo's still-owning primary `Arc` under the exclusive `Document` phase boundary (no `ElementData` borrow check, `Arc` bump, copy, or translation; public computed-style queries remain guarded); logical `relative-*-inline-*` lowering; the W3C fixed/absolute containing-block rule expressed through `position()`; anonymous box geometry plus inherited parent font/text values for text nodes; display dispatch (flex/grid/linear/relative, `display: none` hiding, `display: contents` box-less handling — never a containing block, never contained, never skipped, never hoisted, and zeroed by the positioned pass — skipped-contents routing — the hide sweep before the cache, the size through it — natural-size leaf, `-lynx-text` paragraph blocks); lazily boxed shared `TextContext` and per-text-block `TextBlockStore` in layout state; a NodeId-aligned `LayoutSlot` containing cache, static position, unrounded layout, and rounded layout; public `rounded_layout` queries with unrounded and cache state kept internal; automatic dirty-path invalidation when content changes; one fused preorder positioned-and-rounding traversal whose pre-node hook keeps hoisted placement cache-proof, prunes positioning at skipped-contents subtrees so a hoisted descendant cannot be revived, and applies the engine's effective-`order`-0 paint rule for out-of-flow children; device-pixel rounding without a whole-`Layout` clone; the effective-containment fold on the style view (feeding both the relayout-boundary predicate and the content-visibility-aware fixed/absolute containing-block predicate); **automatic style-damage consumption** (every harvest boundary-stops the internal `Document::invalidate_layout` funnel per relayout-damaged node during commit; it also invalidates direct text children, which read inherited style from the damaged element but have no Stylo damage record of their own — always their measurement cache, since the funnel walks upward and nothing else clears it, and their retained shaped layout only when a two-level comparison of the element's `Font` and `InheritedText` structs, pointer first and then narrowed to the shaping fields, says Parley would shape the paragraph differently; the animation harvest routes through the same decision; `Document::layout` re-runs each parked `contain: strict`/skipped boundary in place before the root pass, merging the re-run's scrollable `content_size` back into the boundary's stored layout); and public content/child/style mutations that perform their own invalidation (the explicit hook is `layout-test-utils`-only) | A second layout algorithm, generic content-measurement callbacks, engine-side style copies, layout/text runtime borrow wrappers, Lynx runtime-element vocabulary or device-unit policy (`rpx`), Lynx computed defaults (cascade/UA-sheet policy), text shaping algorithms |
-| Future runtime integration | Lynx view metrics and `rpx` policy; Lynx-specific text attributes, element-backed raw text and truncation; the `<list>` component surface over `display: grid-lanes` (attribute→CSS mapping and virtualization; the `update-list-info` consumer that delivers the cells is implemented in `packages/bobcat-element`); sticky lowering | A second Flex/Grid/grid-lanes/Relative/Linear/text-measurement implementation, arbitrary host content, engine-side copies of styles, the style-damage→layout wiring (now engine-internal in `dom`) |
+| Future runtime integration | Lynx view metrics and `rpx` policy; Lynx-specific text attributes, element-backed raw text and truncation; the `<list>` component surface over `display: grid-lanes` (attribute→CSS mapping and virtualization; the `update-list-info` consumer that delivers the cells is implemented in `packages/bobcat-element`) | A second Flex/Grid/grid-lanes/Relative/Linear/text-measurement implementation, arbitrary host content, engine-side copies of styles, the style-damage→layout wiring (now engine-internal in `dom`) |
 
 The engine/host seam keeps the engine storage-free even though its
 vocabulary is stylo's: the Lynx-specific values and algorithms for Relative
@@ -306,6 +306,21 @@ Hidden-subtree cleanup is deliberately outside this sizing API.
 `LayoutInput`/`LayoutOutput`/`Layout` are
 `#[non_exhaustive]` so the protocol can grow additively (block-layout margin
 collapsing is the known future widener).
+
+Sticky Grid items also retain their grid area's containing-block edges in
+`Layout::containing_block`; grid-lanes retains its lane span in the grid axis
+and the container's content bounds in the stacking axis (css-grid-3 §4.4.1).
+The edges are parent-border-relative coordinates and the ordinary rounding
+tail snaps them in that coordinate system. The optional bounds are boxed and
+allocated only for sticky items: each 76-byte, alignment-4 `Layout` becomes
+88 bytes at alignment 8 after adding its nullable 8-byte pointer. The two
+records therefore add 16 pointer bytes and 8 padding bytes, growing the 64-bit
+`LayoutSlot` budget from 336 to 360 bytes and `NodeLayoutState` from 352 to
+376 bytes. Each sticky grid/grid-lanes
+item additionally owns two 16-byte edge payloads for unrounded and rounded
+geometry. Non-sticky layout creates no bounds allocations. This retains the
+algorithm's resolved area without making the visual layer reconstruct track
+placement, alignment, or baseline adjustments.
 
 **`LayoutInput` stays one type, and the tree stays one trait.** The style
 surface splits per algorithm and the wire struct does not, for a structural
@@ -545,8 +560,10 @@ definite-inset visual nudge):
   keeping `Layout::location`'s parent-relative contract intact for rounding
   and painting.
 
-`position: sticky` remains a host post-pass (scroll-time offset clamping),
-as in production engines.
+`position: sticky` is resolved by the `dom` visual host at composition time.
+The retained frame stores scrollport inset and containing-block constraints;
+live scroll offsets determine the visual displacement without changing layout.
+Grid layout preserves each sticky item's grid area as its containing-block bounds.
 
 **Physical axes + `Direction`, no writing modes.** The vendored stylo fork's
 `lynx` feature disables `writing-mode` entirely, so the engine is
@@ -1365,7 +1382,7 @@ fragmentation are out of scope; the grammar side of that list is recorded in
   hughie behavior contracts.
 - **Remaining Lynx integration:** runtime-level view/device policy, the
   `<list>` component surface (nothing of it is built — see
-  [`tracking/components.md`](tracking/components.md)), sticky lowering, and
+  [`tracking/components.md`](tracking/components.md)), and
   mixed-runtime parity remain future work; the integration layer's final
   module or crate placement has not been established.
 
@@ -1410,7 +1427,7 @@ fragmentation are out of scope; the grammar side of that list is recorded in
   includes `LayoutTree` on immutable `TreeArenas`, separate
   `DocumentLayoutState`, NodeId display dispatch, fixed positioning,
   post-flush computed-style views, W3C text style lowering, and lazily boxed
-  document/per-node text state. Remaining L3 work is sticky lowering, legacy Lynx spelling/attribute lowering,
+  document/per-node text state. Remaining L3 work is legacy Lynx spelling/attribute lowering,
   element-backed raw text and truncation, view metrics/`rpx`, and the
   component surfaces — the `<list>` one now has its layout mode in
   `grid-lanes` and needs the host half. No separate text crate is planned.

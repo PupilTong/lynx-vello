@@ -124,8 +124,8 @@ struct Flattened {
 /// to `fixed` and is still out of flow. `relative` and `sticky` are ordinary
 /// inline content: a relative atom advances the line and sits exactly where a
 /// static one would — its insets are ignored, per native Lynx
-/// (`docs/tracking/deviations.md`) — and a sticky one is left unpinned exactly
-/// as it is everywhere else in this engine.
+/// (`docs/tracking/deviations.md`). Sticky displacement is sampled by the
+/// visual layer after layout, so its atom likewise occupies its normal slot.
 const fn out_of_flow(position: PositionProperty) -> bool {
     matches!(
         position,

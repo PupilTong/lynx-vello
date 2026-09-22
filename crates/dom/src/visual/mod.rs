@@ -76,13 +76,14 @@
 //!   other is a pair the style adjuster leaves alone (it only reconciles axes that disagree about
 //!   being *scrollable*, and neither of those is). A one-axis clip is an infinite strip, so it
 //!   carries no corner radii; every other combination clips the padding box as before.
-//! - `position: sticky` establishes a stacking context and paints as normal flow, but does not
-//!   stick: no offset is clamped against the scrollport (css-position-3 §6.3), so a sticky box
-//!   scrolls away with its container. Recorded in `crate::scroll`'s limits and
-//!   `docs/tracking/deviations.md`.
+//! - `position: sticky` establishes a stacking context and retains its normal-flow layout. Private
+//!   sticky constraints clamp its visual offset to the scrollport and containing block at
+//!   composition time; descendants and clips inherit that offset through their containing blocks,
+//!   and hit testing samples the same geometry.
 //! - `transform-style: preserve-3d`, `backface-visibility`, and `perspective-origin` are not
 //!   authorable (the latter two are not even compiled) — everything flattens and perspective
-//!   projects about the border-box center.
+//!   projects about the border-box center. Scroll and sticky displacements use the ancestor's
+//!   affine axes; projective ancestors do not reproject these displacements as the offset changes.
 //! - `content-visibility: auto` relevance is decided against the frame's own culling region, so an
 //!   `auto` box whose estimate (`contain-intrinsic-size`) was wrong may move other boxes into or
 //!   out of that region when it reveals. Those are re-determined by the next commit, not this one:
@@ -105,6 +106,8 @@ mod hit;
 mod motion;
 pub(crate) mod relevance;
 mod stacking;
+pub(crate) mod sticky;
+mod sticky_frame;
 #[cfg(test)]
 mod tests;
 mod transform;
@@ -118,6 +121,7 @@ pub use self::frame::{
     AnimationSlot, CommittedFrame, HitTarget, ScrollSlot, SnapSlot, SnapSlotAxis,
 };
 pub use self::relevance::ContentVisibilityChange;
+pub(crate) use self::sticky_frame::{StickySample, StickySlot};
 use crate::render::image::{ImageEvent, ImageOutcome, ImageRole};
 use crate::scroll::SnapPoint;
 use crate::scroll::initial_target::InitialTarget;
@@ -132,6 +136,7 @@ pub(crate) struct PaintOrder {
     layers: Vec<RenderLayer>,
     slots: Vec<ScrollSlot>,
     animations: Vec<AnimationSlot>,
+    stickies: Vec<StickySlot>,
     /// Every `content-visibility: auto` box this build reached, in build
     /// order. See [`AutoBox`].
     auto_boxes: Vec<AutoBox>,
@@ -171,6 +176,7 @@ pub(crate) struct FrameBuffers {
     layers: Vec<RenderLayer>,
     slots: Vec<ScrollSlot>,
     animations: Vec<AnimationSlot>,
+    stickies: Vec<StickySlot>,
     auto_boxes: Vec<AutoBox>,
     snap_points: Vec<SnapPoint>,
 }
@@ -201,6 +207,7 @@ impl PaintOrder {
         self.layers.clear();
         self.slots.clear();
         self.animations.clear();
+        self.stickies.clear();
         self.auto_boxes.clear();
         self.snap_points.clear();
         FrameBuffers {
@@ -209,6 +216,7 @@ impl PaintOrder {
             layers: self.layers,
             slots: self.slots,
             animations: self.animations,
+            stickies: self.stickies,
             auto_boxes: self.auto_boxes,
             snap_points: self.snap_points,
         }
@@ -224,6 +232,7 @@ impl PaintOrder {
             layers: Vec::new(),
             slots: Vec::new(),
             animations: Vec::new(),
+            stickies: Vec::new(),
             auto_boxes: Vec::new(),
             snap_points: Vec::new(),
             initial_targets: Vec::new(),
@@ -319,6 +328,7 @@ impl PaintOrder {
         crate::paint::compose::ComposeChain {
             scroll: self.item_translation_chain(item),
             animation: item.animation,
+            sticky: item.sticky,
         }
     }
 
@@ -363,6 +373,8 @@ pub(crate) struct PaintItem {
     /// element's own box rides its own slot: the animated transform moves
     /// the element itself.
     pub(crate) animation: Option<u32>,
+    /// Nearest sticky ancestor-or-self; its live displacement is composed after layout.
+    pub(crate) sticky: Option<u32>,
 }
 
 /// A stacking context rendered as a composited group.
@@ -386,6 +398,8 @@ pub(crate) struct RenderLayer {
     /// frame — ancestor-or-self, because an animated element's group moves
     /// with the element.
     pub(crate) animation: Option<u32>,
+    /// Nearest sticky ancestor-or-self; its live displacement is composed after layout.
+    pub(crate) sticky: Option<u32>,
     /// The contiguous run of [`PaintOrder::items`] this group encloses. A
     /// stacking context paints atomically, so its members are always
     /// contiguous; an empty run is not recorded at all (the layer is popped).
@@ -406,6 +420,7 @@ pub(crate) struct ClipNode {
     /// establishing element, captured before that element's own slot enters
     /// the flow — a scroller's clip does not move with its own content.
     pub(crate) slot: Option<u32>,
+    pub(crate) sticky: Option<u32>,
 }
 
 /// One `content-visibility: auto` box the build reached, with exactly the
@@ -434,6 +449,8 @@ pub(crate) struct AutoBox {
     pub(crate) clip: Option<usize>,
     pub(crate) chain: Option<u32>,
     pub(crate) animation: Option<u32>,
+    /// Nearest sticky ancestor-or-self; its live displacement is composed after layout.
+    pub(crate) sticky: Option<u32>,
     /// The innermost enclosing group layer, including one this element opened
     /// for itself: its blur carries the element's contents' ink outward, so
     /// the region admitted for them grows with it.

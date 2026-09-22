@@ -355,7 +355,10 @@ or public paint-order constructor.
 **The frame is baked unscrolled** and carried split — per-chain scene fragments
 plus a compose program — so a consumer composes at its own current offsets per
 `ScrollSlot` and a scroll recomposes instead of recommitting, for as long as
-every offset stays inside its slot's `encode_window`. When one leaves it,
+every offset stays inside its slot's `encode_window`. A slot's
+`viewport_axes` maps its local scroll offsets and encode window through the
+container's transform, so a scaled or rotated scrollport moves content in the
+same coordinate system as its sticky offsets. When one leaves the window,
 `note_scroll_windows_stale` is the consumer's refill request, which the painter
 sends as `ToMain::Refill { offsets }` and the main thread answers with a
 recentered commit. `Document::scroll_to` applies the same rule to its own
@@ -372,6 +375,17 @@ animations ride the same split: an exportable `opacity`/`transform` animation
 publishes an `AnimationSlot` curve the consumer samples at its own timeline
 reading. `docs/dom-public-api.md`'s "Retained visual output" row is the
 authoritative description of the whole surface.
+
+**Sticky positioning also resolves in that compose path.** A private constraint
+table records each sticky box's normal geometry, physical insets, containing
+block, and nearest scrollport per axis. Grid items retain their grid area as
+the containing block; a direct child of a scroller can move through its scroll
+content. Sticky offsets are evaluated from the consumer's live scroll offsets,
+shared by painting, clipping, hit testing, and the document's bounding-rectangle
+query. Descendants inherit the motion through their containing-block chain,
+so viewport-fixed descendants still escape it. Culling preserves possible
+sticky travel across the frame's encode window, including a header whose
+normal-flow position has scrolled out of view.
 
 `filter: blur()` and `backdrop-filter` add the one conditional step in front of
 that path, and they share it. `CommittedFrame::filter_groups()` — empty unless

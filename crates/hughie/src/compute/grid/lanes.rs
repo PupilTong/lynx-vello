@@ -50,9 +50,11 @@ use crate::compute::util::{
     normalize_item_alignment, own_scrollable_overflow, resolve_gap_axis, resolve_length_percentage,
     sort_and_assign_layout_order,
 };
-use crate::geometry::{Point, Size};
+use crate::geometry::{Edges, Point, Size};
 use crate::style::containment::contained_axes;
-use crate::style::{Contain, CoreStyle, FlowTolerance, GridLanesStyle, GridStyle, Overflow};
+use crate::style::{
+    Contain, CoreStyle, FlowTolerance, GridLanesStyle, GridStyle, Overflow, PositionProperty,
+};
 use crate::tree::{
     AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutOutput, LayoutTree, RequestedAxis,
 };
@@ -465,6 +467,13 @@ where
         layout.border = item.border;
         layout.padding = item.padding;
         layout.margin = margin;
+        if context.goal.commits() && item.position == PositionProperty::Sticky {
+            let mut containing = Edges::ZERO;
+            let area_start = axis.point(context.content_origin) + grid_start;
+            axis.set_start(&mut containing, area_start);
+            axis.set_end(&mut containing, area_start + track_area);
+            layout.containing_block = Some(Box::new(containing));
+        }
         axis.set_point(
             &mut layout.location,
             axis.point(context.content_origin)
@@ -838,7 +847,20 @@ where
         Point::new(None, lanes_first_baseline(&pass.items, grid_axis))
     };
     if commits_layout {
-        for placed in pass.items {
+        for mut placed in pass.items {
+            // css-grid-3 §4.4.1: the grid axis uses its area; the stacking
+            // axis uses the container's full content box. A scroll container
+            // extends the latter over its scrolling contents.
+            let start = stacking_axis.start(metrics.border) + stacking_axis.start(metrics.padding);
+            let end = if style.overflow().x.is_scrollable() || style.overflow().y.is_scrollable() {
+                stacking_axis.size(content_size) - stacking_axis.end(metrics.padding)
+            } else {
+                start + stacking_inner
+            };
+            if let Some(containing) = placed.layout.containing_block.as_deref_mut() {
+                stacking_axis.set_start(containing, start);
+                stacking_axis.set_end(containing, end);
+            }
             tree.set_unrounded_layout(state, placed.node, placed.layout);
         }
         for (document_index, child) in hidden.expect("commit keeps hidden grid-lanes items") {
