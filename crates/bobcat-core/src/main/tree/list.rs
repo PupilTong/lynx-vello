@@ -63,9 +63,9 @@
 //!   `packages/bobcat-element/src/element-papi.ts:797-799`), so `wrapper` is named in the `:not()`
 //!   rather than left to lose.
 //!
-//! Not translated at all, and still missing: `sticky-top`/`sticky-bottom`
-//! (`x-list.css:104-135`) — `position: sticky` does not stick in this engine
-//! yet, so a sticky rule would be a lie rather than a partial — `item-snap` /
+//! `sticky-top="true"` sets `position: sticky`; its inset is left to author
+//! styles. The remaining `sticky-top`/`sticky-bottom` rules
+//! (`x-list.css:104-135`) are still missing, along with `item-snap` /
 //! `paging-enabled` scroll snapping (`:137-151`), the scrollbar rules
 //! (`:8,45-61`), and every `::part()` threshold observer behind
 //! `scrolltoupper`/`scrolltolower` (`:153-193`).
@@ -140,6 +140,7 @@ list[scroll-orientation="horizontal"] list-item {
   contain-intrinsic-size: auto var(--estimated-main-axis-size-px, 100cqw) none;
 }
 list-item[recyclable="false"] { content-visibility: visible; contain: none; }
+list-item[sticky-top="true"] { position: sticky; }
 list[list-type="flow"] {
   display: grid;
   grid-template-columns: repeat(var(--list-item-span-count), 1fr);
