@@ -16,6 +16,8 @@
 mod gesture;
 mod graphics;
 pub(crate) mod images;
+mod inertia;
+mod motion;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod animation_tests;
@@ -34,7 +36,7 @@ use std::time::Duration;
 
 use dom::input::{InputEvent, InputKind, PointerId};
 use dom::render::gpu::Headless;
-use dom::scroll::{ChainLink, ScrollKind, drive_chain, resolve_step, settle_offset};
+use dom::scroll::{ChainLink, ScrollAxes, drive_chain, settle_offset};
 use dom::vello::Scene;
 use dom::vello::peniko::{Color, ImageData};
 use dom::{CommittedFrame, HitTarget, NodeId, Vector2D};
@@ -48,6 +50,8 @@ pub(crate) use self::gesture::RouterHost;
 use self::gesture::{GestureRouter, InputDecision, InputDecisions};
 pub use self::graphics::WindowTarget;
 use self::graphics::{FrameAcquisition, WindowGraphics};
+use self::inertia::{Axis, BounceBack, ChainOutcome, DragTrack, Fling};
+use self::motion::{Motion, resolve_elastic_step, stretch_of, unwind_stretch};
 use crate::clock::ClockInstant;
 use crate::link::{InputEventPayload, Published, ToMain, ViewSeat, block_on_deadline};
 use crate::main::tree::Viewport;
@@ -380,6 +384,11 @@ impl std::fmt::Debug for Painter {
 
 #[derive(Debug, Default)]
 pub(super) struct ScrollIntents {
+    /// Each container's live offset where it differs from the committed
+    /// one. In range on every axis, except that a `contain-bounce` axis
+    /// may stand up to one scrollport past either edge while it is
+    /// stretched — a drag past the boundary, a fling's overshoot, or a
+    /// bounce back on its way home.
     pub(super) offsets: FxHashMap<NodeId, Vector2D<f32>>,
     rebased_commit: Option<u64>,
     generation: u64,
@@ -388,7 +397,14 @@ pub(super) struct ScrollIntents {
     /// drag's end settles every entry of its pointer onto a snap position
     /// from there ([`Self::settle`]), and while an entry exists the
     /// container is held — a commit does not re-snap it under the finger.
+    /// A fling keeps its drag's entries until it ends.
     gesture_origins: FxHashMap<(PointerId, NodeId), Vector2D<f32>>,
+    /// The flings in flight; see [`inertia`].
+    flings: SmallVec<[Fling; 1]>,
+    /// The stretched axes springing back; see [`inertia`].
+    bounce_backs: SmallVec<[BounceBack; 2]>,
+    /// The drags in progress, for their release velocity; see [`inertia`].
+    drags: FxHashMap<PointerId, DragTrack>,
 }
 
 impl ScrollIntents {
@@ -403,46 +419,63 @@ impl ScrollIntents {
             };
             let slot = &frame.scroll_slots()[slot as usize];
             *offset = Vector2D::new(
-                clamp_scroll_axis(offset.x, slot.max_offset.x),
-                clamp_scroll_axis(offset.y, slot.max_offset.y),
+                clamp_intent_axis(
+                    offset.x,
+                    slot.max_offset.x,
+                    slot.scrollport.width,
+                    slot.bounce.x,
+                ),
+                clamp_intent_axis(
+                    offset.y,
+                    slot.max_offset.y,
+                    slot.scrollport.height,
+                    slot.bounce.y,
+                ),
             );
             *offset != slot.offset
         });
         self.gesture_origins
             .retain(|(_, node), _| frame.slot_of(*node).is_some());
+        self.retain_motion(frame);
         self.settle_at_rest(frame);
     }
 
     /// css-scroll-snap-1 §6.1: a snapping container must rest on a snap
     /// position. Every commit publishes fresh positions — the first layout,
     /// a relayout that moved the areas, a programmatic scroll the document
-    /// applied — so each snapping container no drag is holding settles from
-    /// where it stands, as an intent like any other scroll.
+    /// applied — so each snapping container no drag is holding, no fling is
+    /// driving and no bounce back is moving settles from where it stands,
+    /// as an intent like any other scroll.
     fn settle_at_rest(&mut self, frame: &CommittedFrame) {
         for slot in frame.scroll_slots() {
-            let (snap_x, snap_y) = frame.snap_axes(slot);
-            if snap_x.is_none() && snap_y.is_none() {
+            if self.is_held(slot.node) || self.is_bouncing(slot.node) {
                 continue;
             }
-            if self
-                .gesture_origins
-                .keys()
-                .any(|(_, node)| *node == slot.node)
-            {
-                continue;
-            }
-            let offset = self.offsets.get(&slot.node).copied().unwrap_or(slot.offset);
-            let settled = settle_offset(offset, offset, slot.scrollport, snap_x, snap_y);
-            if settled != offset {
-                self.offsets.insert(slot.node, settled);
-                self.generation += 1;
-            }
+            self.settle_node_at_rest(frame, slot);
+        }
+    }
+
+    /// The at-rest rule for one container: from where it stands to where it
+    /// stands, so a `mandatory` axis moves to its nearest position and a
+    /// `proximity` one only when within range. A stretched axis is left to
+    /// its bounce back.
+    fn settle_node_at_rest(&mut self, frame: &CommittedFrame, slot: &dom::ScrollSlot) {
+        let (snap_x, snap_y) = frame.snap_axes(slot);
+        if snap_x.is_none() && snap_y.is_none() {
+            return;
+        }
+        let offset = self.offsets.get(&slot.node).copied().unwrap_or(slot.offset);
+        let settled = settle_stretch_aware(offset, offset, slot, snap_x, snap_y);
+        if settled != offset {
+            self.offsets.insert(slot.node, settled);
+            self.generation += 1;
         }
     }
 
     /// Settles every container `pointer`'s drag moved onto a snap position,
     /// from where the drag found it to where it left it, and releases the
-    /// hold on them.
+    /// hold on them. A stretched axis is not settled: it springs back
+    /// first ([`Self::start_bounce_backs`]) and is re-snapped when it lands.
     fn settle(&mut self, frame: &CommittedFrame, pointer: PointerId) {
         self.rebase(frame);
         let held: SmallVec<[(NodeId, Vector2D<f32>); 2]> = self
@@ -459,7 +492,7 @@ impl ScrollIntents {
             let slot = &frame.scroll_slots()[index as usize];
             let (snap_x, snap_y) = frame.snap_axes(slot);
             let offset = self.offsets.get(&node).copied().unwrap_or(slot.offset);
-            let settled = settle_offset(origin, offset, slot.scrollport, snap_x, snap_y);
+            let settled = settle_stretch_aware(origin, offset, slot, snap_x, snap_y);
             if settled != offset {
                 self.offsets.insert(node, settled);
                 self.generation += 1;
@@ -467,28 +500,36 @@ impl ScrollIntents {
         }
     }
 
-    /// Drives one scroll decision from the slot `from` names, outward along
-    /// the published chain, and reports whether anything was absorbed.
-    /// Order and reach are `dom`'s [`drive_chain`] over the slots' published
-    /// policy, and each step lands per [`resolve_step`] — the same walk the
-    /// document runs over live geometry. A drag step (`pointer` set) is
-    /// applied raw and records where the drag found each container it
-    /// moved; a wheel step snaps as it lands.
+    /// Drives one scroll step from the slot `from` names, outward along the
+    /// published chain, and reports per axis what was absorbed and where a
+    /// container is now stretched. Order and reach are `dom`'s
+    /// [`drive_chain`] over the slots' published policy, and each step
+    /// lands per [`resolve_elastic_step`] — [`dom::scroll::resolve_step`]'s
+    /// rule, the same walk the document runs over live geometry, plus the
+    /// `contain-bounce` stretch the document never takes. A drag or fling
+    /// step (`pointer` set) records where it found each container it moved,
+    /// and a drag step feeds its release velocity; a wheel step snaps as it
+    /// lands. Before the walk, a container on the chain already stretched
+    /// on an axis unwinds toward its edge first (Lynx's restore-first rule),
+    /// whatever the walk's order.
     fn chain(
         &mut self,
         frame: &CommittedFrame,
         from: NodeId,
         delta: Vector2D<f32>,
+        motion: Motion,
         pointer: Option<PointerId>,
-    ) -> bool {
+        at: f64,
+    ) -> ChainOutcome {
         self.rebase(frame);
-        let kind = match pointer {
-            Some(_) => ScrollKind::Gesture,
-            None => ScrollKind::Directed,
-        };
+        if motion == Motion::Drag
+            && let Some(pointer) = pointer
+        {
+            self.track_drag(frame, pointer, from, delta, at);
+        }
         let slots = frame.scroll_slots();
         let Some(start) = frame.slot_of(from) else {
-            return false;
+            return ChainOutcome::default();
         };
         let mut indices: SmallVec<[u32; 4]> = SmallVec::new();
         let mut links: SmallVec<[ChainLink; 4]> = SmallVec::new();
@@ -499,34 +540,83 @@ impl ScrollIntents {
             links.push(slot.link());
             current = slot.parent;
         }
-        let consumed = drive_chain(&links, delta, |link, admitted| {
-            let slot = &slots[indices[link] as usize];
-            let offset = self.offsets.get(&slot.node).copied().unwrap_or(slot.offset);
-            let (snap_x, snap_y) = frame.snap_axes(slot);
-            let (applied, absorbed) = resolve_step(
-                kind,
-                offset,
-                admitted,
-                slot.max_offset,
-                slot.scrollport,
-                snap_x,
-                snap_y,
-            );
-            if applied != offset {
+        let mut stretched = ScrollAxes::NONE;
+        let mut unwound = Vector2D::zero();
+        let mut delta = delta;
+        for axis in Axis::BOTH {
+            if axis.of(delta) == 0.0 {
+                continue;
+            }
+            for &index in &indices {
+                let slot = &slots[index as usize];
+                if !axis.flag(slot.bounce) {
+                    continue;
+                }
+                let offset = self.offsets.get(&slot.node).copied().unwrap_or(slot.offset);
+                let (applied, absorbed) = unwind_stretch(
+                    motion,
+                    axis.of(offset),
+                    axis.of(delta),
+                    axis.of(slot.max_offset),
+                    axis.extent(slot.scrollport),
+                );
+                if absorbed == 0.0 {
+                    continue;
+                }
+                let mut moved = offset;
+                axis.set(&mut moved, applied);
                 if let Some(pointer) = pointer {
                     self.gesture_origins
                         .entry((pointer, slot.node))
                         .or_insert(offset);
                 }
-                self.offsets.insert(slot.node, applied);
+                self.offsets.insert(slot.node, moved);
+                if stretch_of(applied, axis.of(slot.max_offset)) != 0.0 {
+                    axis.raise(&mut stretched);
+                }
+                axis.set(&mut unwound, absorbed);
+                let remaining = axis.of(delta) - absorbed;
+                axis.set(&mut delta, remaining);
+                break;
             }
-            absorbed
-        })
-        .is_some();
-        if consumed {
-            self.generation += 1;
         }
-        consumed
+        let consumed = drive_chain(&links, delta, |link, admitted| {
+            let slot = &slots[indices[link] as usize];
+            let offset = self.offsets.get(&slot.node).copied().unwrap_or(slot.offset);
+            let (snap_x, snap_y) = frame.snap_axes(slot);
+            let step = resolve_elastic_step(
+                motion,
+                offset,
+                admitted,
+                slot.max_offset,
+                slot.scrollport,
+                slot.bounce,
+                snap_x,
+                snap_y,
+            );
+            stretched.x |= step.stretched.x;
+            stretched.y |= step.stretched.y;
+            if step.applied != offset {
+                if let Some(pointer) = pointer {
+                    self.gesture_origins
+                        .entry((pointer, slot.node))
+                        .or_insert(offset);
+                }
+                self.offsets.insert(slot.node, step.applied);
+            }
+            step.absorbed
+        });
+        let outcome = ChainOutcome {
+            absorbed: unwound + consumed.map_or_else(Vector2D::zero, |(_, absorbed)| absorbed),
+            stretched,
+        };
+        if outcome.consumed() {
+            self.generation += 1;
+            // A step that landed a container back in range ends the
+            // bounce back that was bringing it there.
+            self.retain_motion(frame);
+        }
+        outcome
     }
 
     pub(super) fn offset_for(&self, node: NodeId) -> Option<Vector2D<f32>> {
@@ -538,8 +628,14 @@ impl ScrollIntents {
             frame.slot_of(*node).is_some_and(|index| {
                 let slot = &frame.scroll_slots()[index as usize];
                 let (low, high) = slot.encode_window();
-                axis_refill_due(offset.x, slot.offset.x, low.x, high.x)
-                    || axis_refill_due(offset.y, slot.offset.y, low.y, high.y)
+                // A stretch is composed from the edge's own content: it
+                // asks for no refill of its own.
+                let pending = Vector2D::new(
+                    clamp_scroll_axis(offset.x, slot.max_offset.x),
+                    clamp_scroll_axis(offset.y, slot.max_offset.y),
+                );
+                axis_refill_due(pending.x, slot.offset.x, low.x, high.x)
+                    || axis_refill_due(pending.y, slot.offset.y, low.y, high.y)
             })
         })
     }
@@ -568,6 +664,51 @@ fn clamp_scroll_axis(value: f32, max: f32) -> f32 {
     } else {
         0.0
     }
+}
+
+/// Where an intent may stand on one axis: in range, or — on a
+/// `contain-bounce` axis — up to one scrollport past either edge.
+fn clamp_intent_axis(value: f32, max: f32, extent: f32, bounces: bool) -> f32 {
+    if !value.is_finite() {
+        return 0.0;
+    }
+    if bounces {
+        value.clamp(-extent, max + extent)
+    } else {
+        value.clamp(0.0, max)
+    }
+}
+
+/// [`settle_offset`] over an intent that may be stretched: a stretched
+/// axis keeps its stretch (its bounce back settles it when it lands), and
+/// the rest settle from an in-range `start`.
+fn settle_stretch_aware(
+    start: Vector2D<f32>,
+    offset: Vector2D<f32>,
+    slot: &dom::ScrollSlot,
+    snap_x: Option<dom::scroll::SnapAxis<'_>>,
+    snap_y: Option<dom::scroll::SnapAxis<'_>>,
+) -> Vector2D<f32> {
+    let start = Vector2D::new(
+        clamp_scroll_axis(start.x, slot.max_offset.x),
+        clamp_scroll_axis(start.y, slot.max_offset.y),
+    );
+    let stretched_x = stretch_of(offset.x, slot.max_offset.x) != 0.0;
+    let stretched_y = stretch_of(offset.y, slot.max_offset.y) != 0.0;
+    let settled = settle_offset(
+        start,
+        Vector2D::new(
+            if stretched_x { start.x } else { offset.x },
+            if stretched_y { start.y } else { offset.y },
+        ),
+        slot.scrollport,
+        snap_x,
+        snap_y,
+    );
+    Vector2D::new(
+        if stretched_x { offset.x } else { settled.x },
+        if stretched_y { offset.y } else { settled.y },
+    )
 }
 
 /// Composes one frame and renders it into `output`, whatever kind of target
@@ -998,7 +1139,8 @@ impl Painter {
                     .seat
                     .upgrade()
                     .is_some_and(|seat| seat.frame_demand.borrow_mut().is_pending())
-                || self.gesture.needs_frame())
+                || self.gesture.needs_frame()
+                || self.scroll_intents.is_animating())
     }
 
     /// Routes one normalized OS input event against the frame this painter
@@ -1073,15 +1215,22 @@ impl Painter {
                         from,
                         delta,
                     } => {
-                        let consumed = published
-                            .is_some_and(|frame| scroll_intents.chain(frame, from, delta, pointer));
+                        let motion = match pointer {
+                            Some(_) => Motion::Drag,
+                            None => Motion::Wheel,
+                        };
+                        let consumed = published.is_some_and(|frame| {
+                            scroll_intents
+                                .chain(frame, from, delta, motion, pointer, at_seconds)
+                                .consumed()
+                        });
                         if consumed && let Some(pointer) = pointer {
                             gesture.note_scroll_consumed(pointer);
                         }
                     }
                     InputDecision::ScrollEnd { pointer } => {
                         if let Some(frame) = published {
-                            scroll_intents.settle(frame, pointer);
+                            scroll_intents.end_drag(frame, pointer, at_seconds);
                         }
                     }
                     InputDecision::Emit(event) => dispatches.push(event),
@@ -1120,6 +1269,11 @@ impl Painter {
         let mut decisions = InputDecisions::new();
         self.gesture.on_tick(now, &self.published, &mut decisions);
         self.execute_decisions(&mut decisions, published.as_deref(), now);
+        // The flings and bounce backs advance on the same clock reading,
+        // after any decision this tick made about them.
+        if let Some(frame) = &published {
+            self.scroll_intents.tick(frame, now);
+        }
     }
 
     /// Applies new device metrics, if they moved at all.

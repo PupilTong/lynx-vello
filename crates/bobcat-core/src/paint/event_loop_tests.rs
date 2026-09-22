@@ -672,6 +672,253 @@ fn an_initial_scroll_target_positions_the_container_in_the_boot_commit() {
     );
 }
 
+/// Pins the painter's clock and feeds one touch at `y`.
+fn touch_at(engine: &mut TestEngine, at: f64, phase: PointerPhase, y: f32) {
+    engine.painter.clock.pin(at);
+    engine.dispatch_input(InputEvent::pointer(
+        Point2D::new(100.0, y),
+        1,
+        PointerKind::Touch,
+        phase,
+    ));
+}
+
+/// Runs the painter's gesture clock at `at`, the way a display frame does.
+fn frame_at(engine: &mut TestEngine, at: f64) {
+    engine.painter.clock.pin(at);
+    engine.painter.service_gesture_clock(at);
+}
+
+fn intent_y(engine: &TestEngine, node: u64) -> f32 {
+    engine
+        .painter
+        .scroll_intents
+        .offset_for(node_id(node))
+        .unwrap_or_else(|| panic!("node {node} has a scroll intent"))
+        .y
+}
+
+/// A flick: 60px of upward finger travel over 20ms, released at speed —
+/// 52px of drag after the slop, then a release velocity of 3 px/ms.
+fn flick(engine: &mut TestEngine, at: f64) {
+    touch_at(engine, at, PointerPhase::Down, 150.0);
+    touch_at(engine, at + 0.01, PointerPhase::Move, 120.0);
+    touch_at(engine, at + 0.02, PointerPhase::Move, 90.0);
+    touch_at(engine, at + 0.02, PointerPhase::Up, 90.0);
+}
+
+/// A flick keeps the scroller moving after the finger lifts: the release
+/// velocity decays per frame along `motion`'s curve, the frames are owed
+/// while it does, and it comes to rest where the curve is spent — the
+/// drag's 52px plus a 3 px/ms fling's whole travel, `−v₀/ln 0.998` ≈
+/// 1498px, clamped here by the 800px maximum.
+#[test]
+fn a_flick_keeps_scrolling_after_its_release_and_comes_to_rest() {
+    let mut engine = booted(&snapping_page("", "", 200, 0));
+    flick(&mut engine, 0.0);
+    assert!((intent_y(&engine, 3) - 52.0).abs() < 0.5);
+    assert!(engine.is_animating(), "a fling owes frames");
+
+    frame_at(&mut engine, 0.1);
+    let early = intent_y(&engine, 3);
+    // 80ms at 3 px/ms decaying at 0.998: 3·(0.998^80 − 1)/ln 0.998 ≈ 222.
+    assert!(
+        (early - (52.0 + 222.0)).abs() < 3.0,
+        "the first frame moved by the curve, got {early}"
+    );
+    frame_at(&mut engine, 0.3);
+    let later = intent_y(&engine, 3);
+    assert!(later > early, "still moving");
+    for at in [1.0, 2.0, 4.0, 8.0] {
+        frame_at(&mut engine, at);
+    }
+    assert!(
+        (intent_y(&engine, 3) - 800.0).abs() < 0.5,
+        "spent against the end, got {}",
+        intent_y(&engine, 3)
+    );
+    assert!(!engine.is_animating(), "at rest, no frame owed");
+}
+
+/// The same flick on a slower start — a 1 px/ms release — travels
+/// `−1/ln 0.998` ≈ 500px and stops short of the end, and a `mandatory`
+/// scroller aims the fling at the snap position that travel settles on:
+/// 52 + 500 = 552 is nearest the fourth card's start at 600, so the fling
+/// lands there exactly rather than snapping after it stops.
+#[test]
+fn a_fling_on_a_snapping_scroller_lands_on_a_snap_position() {
+    let slow_flick = |engine: &mut TestEngine| {
+        touch_at(engine, 0.0, PointerPhase::Down, 150.0);
+        touch_at(engine, 0.02, PointerPhase::Move, 130.0);
+        touch_at(engine, 0.04, PointerPhase::Move, 110.0);
+        touch_at(engine, 0.06, PointerPhase::Move, 90.0);
+        touch_at(engine, 0.06, PointerPhase::Up, 90.0);
+    };
+    let mut engine = booted(&snapping_page("", "", 200, 0));
+    slow_flick(&mut engine);
+    for at in [0.5, 1.0, 2.0, 4.0, 8.0] {
+        frame_at(&mut engine, at);
+    }
+    let unsnapped = intent_y(&engine, 3);
+    assert!(
+        (unsnapped - 551.5).abs() < 2.0,
+        "the curve's whole travel, got {unsnapped}"
+    );
+
+    let mut engine = booted(&snapping_page(
+        "scroll-snap-type:y mandatory",
+        "scroll-snap-align:start",
+        200,
+        0,
+    ));
+    slow_flick(&mut engine);
+    frame_at(&mut engine, 0.5);
+    let mid = intent_y(&engine, 3);
+    assert!(mid > 100.0 && mid < 600.0, "on its way, got {mid}");
+    for at in [1.0, 2.0, 4.0, 8.0] {
+        frame_at(&mut engine, at);
+    }
+    assert!(
+        (intent_y(&engine, 3) - 600.0).abs() < 0.5,
+        "aimed at the position, got {}",
+        intent_y(&engine, 3)
+    );
+    assert!(!engine.is_animating());
+}
+
+/// `overscroll-behavior: contain-bounce`: a drag past the start edge
+/// stretches the scroller by the rubber band — 92px of finger travel past
+/// the edge (100 less the slop) on a 200px scrollport stretches
+/// `(1 − 1/(92·0.55/200 + 1))·200` ≈ 40.4px — and a release from rest
+/// springs it back to the edge on the critically damped curve.
+#[test]
+fn a_drag_past_a_bouncing_edge_stretches_and_springs_back() {
+    let mut engine = booted(&snapping_page(
+        "overscroll-behavior:contain-bounce",
+        "",
+        200,
+        0,
+    ));
+    touch_at(&mut engine, 0.0, PointerPhase::Down, 50.0);
+    touch_at(&mut engine, 0.05, PointerPhase::Move, 150.0);
+    let stretched = intent_y(&engine, 3);
+    assert!((stretched - -40.4).abs() < 0.2, "got {stretched}");
+    assert!(!engine.is_animating(), "under the finger nothing animates");
+    // Held still, then let go: no velocity, so the bounce back starts at
+    // once from the stretch.
+    touch_at(&mut engine, 0.4, PointerPhase::Up, 150.0);
+    assert!(engine.is_animating(), "the bounce back owes frames");
+    frame_at(&mut engine, 0.41);
+    let first = intent_y(&engine, 3);
+    assert!(
+        first < 0.0 && first > stretched,
+        "barely moved yet, got {first}"
+    );
+    frame_at(&mut engine, 0.6);
+    let later = intent_y(&engine, 3);
+    assert!(later > first && later < 0.0, "on its way home, got {later}");
+    frame_at(&mut engine, 1.5);
+    assert!(
+        intent_y(&engine, 3).abs() < f32::EPSILON,
+        "home on the edge, got {}",
+        intent_y(&engine, 3)
+    );
+    assert!(!engine.is_animating());
+}
+
+/// A fling into a bouncing end edge overshoots past it — raw, at the
+/// overshoot decay — and springs back to rest on the edge.
+#[test]
+fn a_fling_into_a_bouncing_edge_overshoots_and_springs_back() {
+    let mut engine = booted(&snapping_page(
+        "overscroll-behavior:contain-bounce",
+        "",
+        200,
+        0,
+    ));
+    engine.dispatch_input(InputEvent::wheel(
+        Point2D::new(100.0, 100.0),
+        dom::Vector2D::new(0.0, 700.0),
+    ));
+    assert_intent(&engine, 3, 700.0);
+    flick(&mut engine, 0.0);
+    let mut furthest = intent_y(&engine, 3);
+    for at in [0.05, 0.1, 0.15, 0.2, 0.25, 0.3] {
+        frame_at(&mut engine, at);
+        furthest = furthest.max(intent_y(&engine, 3));
+    }
+    assert!(
+        furthest > 800.0 && furthest <= 1000.0,
+        "past the end and inside a scrollport of it, got {furthest}"
+    );
+    for at in [1.0, 2.0, 3.0] {
+        frame_at(&mut engine, at);
+    }
+    assert!(
+        (intent_y(&engine, 3) - 800.0).abs() < f32::EPSILON,
+        "back on the edge, got {}",
+        intent_y(&engine, 3)
+    );
+    assert!(!engine.is_animating());
+}
+
+/// Without `contain-bounce` the same fling stops dead at the edge: the
+/// boundary is a wall, and nothing chains past a lone scroller.
+#[test]
+fn a_fling_into_a_plain_edge_stops_there() {
+    let mut engine = booted(&snapping_page("", "", 200, 0));
+    engine.dispatch_input(InputEvent::wheel(
+        Point2D::new(100.0, 100.0),
+        dom::Vector2D::new(0.0, 700.0),
+    ));
+    flick(&mut engine, 0.0);
+    for at in [0.05, 0.1, 0.2] {
+        frame_at(&mut engine, at);
+        assert!(intent_y(&engine, 3) <= 800.0);
+    }
+    assert!((intent_y(&engine, 3) - 800.0).abs() < 0.5);
+    assert!(!engine.is_animating(), "spent against the wall");
+}
+
+/// A drag landing on a flinging scroller takes it over: a finger's down
+/// alone stops nothing (the router decides nothing before the slop), the
+/// drag's first step stops the fling where it finds the container, and a
+/// quiet release settles there. Its tap was suppressed by the consumed
+/// scroll as any drag's is, which the fence tap pins.
+#[test]
+fn a_drag_on_a_flinging_scroller_takes_it_over() {
+    let mut engine = booted(SCROLLING_GESTURE_PAGE);
+    flick(&mut engine, 0.0);
+    frame_at(&mut engine, 0.1);
+    let moving = intent_y(&engine, 3);
+    assert!(moving > 52.0 && engine.is_animating());
+
+    touch_at(&mut engine, 0.15, PointerPhase::Down, 100.0);
+    frame_at(&mut engine, 0.2);
+    assert!(engine.is_animating(), "a down alone decides nothing");
+    let found = intent_y(&engine, 3);
+    assert!(found > moving);
+    // 10px of travel: the 8px slop, then a 2px step that takes over.
+    touch_at(&mut engine, 0.25, PointerPhase::Move, 90.0);
+    assert!(!engine.is_animating(), "the drag stopped the fling");
+    let held = intent_y(&engine, 3);
+    assert!(
+        (held - (found + 2.0)).abs() < 0.5,
+        "got {held} after {found}"
+    );
+    frame_at(&mut engine, 0.5);
+    assert!((intent_y(&engine, 3) - held).abs() < f32::EPSILON);
+    touch_at(&mut engine, 0.6, PointerPhase::Up, 90.0);
+    frame_at(&mut engine, 1.0);
+    assert!((intent_y(&engine, 3) - held).abs() < f32::EPSILON);
+    assert!(!engine.is_animating());
+
+    engine.painter.clock.pin(2.0);
+    engine.dispatch_input(touch(1, PointerPhase::Down, 150.0));
+    engine.dispatch_input(touch(1, PointerPhase::Up, 150.0));
+    wait_for_log(&mut engine, "tap:150");
+}
+
 /// A wheel over scrollable content scrolls it (the router's decision,
 /// landing in the intents) and dispatches `wheel` with its delta in
 /// the detail — in that order.

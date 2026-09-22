@@ -1262,6 +1262,21 @@ from where it found it. A frame's adoption also re-snaps every snapping
 container no drag is holding, which is how the initial layout and a
 relayout come to rest on a position.
 
+Inertia is the same walk on the painter's clock (`paint/inertia.rs`): the
+intents measure a drag's release velocity from the drag's own steps, and
+each display frame the fling's distance since the last is chained from the
+slot the drag latched as a fling step, decaying on `paint/motion.rs`'s curve
+until what is left is under a physical pixel — aimed, on a snapping axis, at
+the position its whole travel would settle on. A slot published with
+`overscroll-behavior: contain-bounce` lets the intents stand past its edge:
+a drag stretches it on the rubber band, a fling overshoots at the overshoot
+decay, and once nothing holds it a bounce back per frame brings it home on
+the critically damped spring. A drag's first step stops whatever is moving
+on its chain and takes over. None of this leaves the painter: the router
+decides what it always did, no event is involved, nothing recommits — a
+stretch composes the edge's own content, asks for no refill, and the
+writeback the next refill carries is clamped by the document.
+
 The encode is windowed: each slot's fragments cover one scrollport past its
 committed offset per scrollable axis (`ENCODE_WINDOW_SCROLLPORTS`). When an
 intent moves past half its remaining window headroom, the engine sends one

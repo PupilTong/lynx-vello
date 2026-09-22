@@ -204,7 +204,9 @@ realm entry point, `quickjs.rs`'s script engine, `runtime/` for realm
 integration, `workers.rs` for the `Worker` class, `tree/` for Lynx page policy.
 `background/` is the `bobcat-workers` thread and its worker realms. `view/` is
 the public view facade, `paint/` the `Painter` with its `gesture.rs` input
-router, `images.rs` image protocol and `graphics.rs` GPU target. `link.rs` is
+router, `motion.rs` scroll kinematics (lynx-ui's rubber band, fling decay
+and bounce back) with `inertia.rs` running them over the scroll intents,
+`images.rs` image protocol and `graphics.rs` GPU target. `link.rs` is
 the one channel set a view spans its two threads with, `jobs.rs` the engine
 thread itself — its scheduler and its job queue — `lifetime.rs` the view's
 task set, `timers.rs` and `clock.rs`/`alarm.rs` the timer machinery both realm

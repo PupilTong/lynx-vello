@@ -40,7 +40,10 @@
 //!   boundary hand the remainder outward; `contain` and `none` stop the chain at that container:
 //!   nothing above it receives that axis's delta, whether the container itself could move or not —
 //!   a `hidden` container with `contain` blocks the chain through it just as a `scroll` one does,
-//!   because both are scroll containers and the property applies to scroll containers.
+//!   because both are scroll containers and the property applies to scroll containers. The engine's
+//!   own fourth value, **`contain-bounce`**, fences the same way and is published as the
+//!   [`ScrollBox::bounce`] axes: the runtime's painter reads them off the committed frame and
+//!   stretches the boundary there. Nothing in this crate stretches — a programmatic scroll clamps.
 //! - **`scroll-capture`** is this engine's own, with no W3C or Lynx counterpart, and it changes the
 //!   *order*, not the reach. `nearest` on a container hands a gesture that starts in it to the
 //!   nearest scroll container above it first; this container moves only once that ancestor cannot
@@ -66,9 +69,10 @@
 //! - The scrolling area does not extend past the last box by the scroll container's own end-side
 //!   padding (css-overflow-3 §2.2). That end padding is missing from the layout engine's
 //!   accumulated content size, not discarded here.
-//! - `scroll-behavior` and rubber-band overscroll are absent: scrolling is instantaneous and clamps
-//!   hard at the boundary, and a snap is a jump. `overscroll-behavior: none` therefore does exactly
-//!   what `contain` does — there is no boundary effect for it to suppress on top.
+//! - `scroll-behavior` is absent: a programmatic scroll is instantaneous and clamps hard at the
+//!   boundary, and a snap is a jump. Inertia and the `contain-bounce` stretch exist only on the
+//!   painter's side, over the committed frame; `overscroll-behavior: none` therefore does exactly
+//!   what `contain` does here — there is no document-side boundary effect for it to suppress.
 
 use euclid::default::{Size2D, Vector2D};
 use hughie::style::PositionProperty;
@@ -234,6 +238,10 @@ pub struct ScrollBox {
     pub user_scrollable: ScrollAxes,
     /// The axes a boundary chains past (`overscroll-behavior: auto`).
     pub chains: ScrollAxes,
+    /// The axes whose boundary stretches and springs back
+    /// (`overscroll-behavior: contain-bounce`). Published for the runtime's
+    /// painter, which owns the stretch; the document itself always clamps.
+    pub bounce: ScrollAxes,
     /// Whether the container above goes first (`scroll-capture`).
     pub capture: ScrollCapture,
 }
@@ -282,6 +290,14 @@ fn chaining_axes(style: &ComputedValues) -> ScrollAxes {
 }
 
 #[must_use]
+fn bouncing_axes(style: &ComputedValues) -> ScrollAxes {
+    ScrollAxes {
+        x: style.clone_overscroll_behavior_x() == OverscrollBehavior::ContainBounce,
+        y: style.clone_overscroll_behavior_y() == OverscrollBehavior::ContainBounce,
+    }
+}
+
+#[must_use]
 fn scroll_capture(style: &ComputedValues) -> ScrollCapture {
     match style.clone_scroll_capture() {
         scroll_capture::T::Auto => ScrollCapture::Auto,
@@ -323,6 +339,7 @@ pub(crate) fn resolve(
         offset: Vector2D::zero(),
         user_scrollable: user_scrollable_axes(style),
         chains: chaining_axes(style),
+        bounce: bouncing_axes(style),
         capture: scroll_capture(style),
     };
     scroll_box.offset = clamp_to(stored, scroll_box.max_offset());
@@ -846,6 +863,29 @@ mod tests {
             document.scroll_offset(outer),
             Vector2D::new(50.0, 0.0),
             "x chains out, y is fenced",
+        );
+    }
+
+    /// `contain-bounce` is `contain`'s fence in the document: the chain
+    /// stops, and a programmatic scroll still clamps — the stretch is the
+    /// painter's. What the document publishes is the `bounce` axis flag.
+    #[test]
+    fn contain_bounce_fences_like_contain_and_publishes_its_axes() {
+        let (mut document, outer, inner) = nested_scrollers_with(
+            ".inner { overscroll-behavior-y: contain-bounce; flex-shrink: 0; } .tall { width: 500px; }",
+        );
+        let scroll_box = document.scroll_box(inner).expect("inner is a scroll box");
+        assert_eq!(scroll_box.bounce, ScrollAxes { x: false, y: true });
+        assert_eq!(scroll_box.chains, ScrollAxes { x: true, y: false });
+        assert_eq!(
+            document.scroll_chain(inner, Vector2D::new(250.0, 400.0)),
+            Some((inner, Vector2D::new(250.0, 300.0))),
+        );
+        assert_eq!(document.scroll_offset(inner), Vector2D::new(200.0, 300.0));
+        assert_eq!(
+            document.scroll_offset(outer),
+            Vector2D::new(50.0, 0.0),
+            "x chains out, y is fenced and clamped",
         );
     }
 
