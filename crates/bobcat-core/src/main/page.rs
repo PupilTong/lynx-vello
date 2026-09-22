@@ -137,7 +137,7 @@ use crate::lifetime::{EndOnUnwind, Lifetime, Settles, run_job, serve_clock};
 use crate::link::{SourceAnswer, ToMain, ViewOutbox};
 use crate::resource::{LoadedSource, SourceRequest, unanswered_source};
 use crate::threads::panicked;
-use crate::view::{EngineEvent, LynxViewError, ViewSources, Viewport};
+use crate::view::{EngineEvent, LynxViewError, ScreenMetrics, ViewSources, Viewport};
 
 /// One view's page: what every task of that view acts on.
 ///
@@ -232,6 +232,10 @@ pub(super) struct Page {
 struct BootSources {
     style_sheets: Vec<String>,
     entry: String,
+    /// The screen `SystemInfo` reports, already resolved: the embedder's own
+    /// metrics, or the ones derived from the create-time viewport for a host
+    /// that named none.
+    screen: ScreenMetrics,
     background_entry: Option<String>,
     /// The host's page data, as JSON text only the realm reads.
     init_data: Option<String>,
@@ -1039,7 +1043,13 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
         init_data,
         initial_processor,
         global_props,
+        screen,
     } = sources;
+    // The screen the view reports, decided before anything is fetched: the
+    // embedder's measurement where it made one, and the create-time viewport
+    // in physical pixels where it did not. Nothing updates it afterwards, so
+    // a painter binding at other metrics leaves it alone.
+    let screen = screen.unwrap_or_else(|| ScreenMetrics::for_viewport(viewport));
     // The fonts first, because a view whose containers cannot serve the family
     // it named will never render and there is nothing worth fetching for it.
     let text_context = match super::stage_text_context(fonts, default_font_family.as_deref()) {
@@ -1065,6 +1075,7 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
         BootSources {
             style_sheets,
             entry,
+            screen,
             background_entry,
             init_data,
             initial_processor,
@@ -1155,32 +1166,27 @@ async fn consume_metrics(page: Rc<Page>, mut metrics: watch::Receiver<Option<Vie
     }
 }
 
-/// The page's boot future: every author sheet in cascade order, then the
-/// entry, then the realm.
+/// Requests this view's author sheets in cascade order and stages each one,
+/// answering whether boot may go on.
 ///
 /// A sheet that arrives after the entry has run would restyle a document the
 /// card has already built, so they are requested one at a time and in order.
 /// They are staged rather than mounted, because there is no document yet —
 /// `createDocument` mounts them in this order, and it runs before the entry.
-async fn boot_page(page: Rc<Page>, sources: BootSources) {
-    let BootSources {
-        style_sheets,
-        entry,
-        background_entry,
-        init_data,
-        initial_processor,
-        global_props,
-        native_modules,
-    } = sources;
+///
+/// `false` is a view that has already reported its failure, or one released
+/// while a sheet was in flight; either way boot is over and the caller
+/// returns.
+async fn stage_sheets(page: &Rc<Page>, style_sheets: Vec<String>) -> bool {
     for url in style_sheets {
         if page.outbox.is_cancelled() {
             page.end();
-            return;
+            return false;
         }
         match request_source(&page.outbox, SourceRequest::StyleSheet(url)).await {
             Ok(LoadedSource::StyleSheet(sheet)) => {
                 if !page.stage_sheet(sheet) {
-                    return;
+                    return false;
                 }
             }
             Ok(LoadedSource::Entry { .. }) => {
@@ -1188,27 +1194,46 @@ async fn boot_page(page: Rc<Page>, sources: BootSources) {
                     "a stylesheet request",
                     "a script",
                 )));
-                return;
+                return false;
             }
             Ok(LoadedSource::Font(_)) => {
                 page.fail(EngineEvent::StartupFailed(mismatched_source(
                     "a stylesheet request",
                     "a font",
                 )));
-                return;
+                return false;
             }
             Ok(LoadedSource::Fetched) => {
                 page.fail(EngineEvent::StartupFailed(mismatched_source(
                     "a stylesheet request",
                     "a plain fetch",
                 )));
-                return;
+                return false;
             }
             Err(error) => {
                 page.fail(EngineEvent::StartupFailed(error));
-                return;
+                return false;
             }
         }
+    }
+    true
+}
+
+/// The page's boot future: every author sheet in cascade order, then the
+/// entry, then the realm.
+async fn boot_page(page: Rc<Page>, sources: BootSources) {
+    let BootSources {
+        style_sheets,
+        entry,
+        screen,
+        background_entry,
+        init_data,
+        initial_processor,
+        global_props,
+        native_modules,
+    } = sources;
+    if !stage_sheets(&page, style_sheets).await {
+        return;
     }
     if page.outbox.is_cancelled() {
         page.end();
@@ -1249,6 +1274,7 @@ async fn boot_page(page: Rc<Page>, sources: BootSources) {
     let startup = RealmStartup {
         source,
         url,
+        screen,
         background_entry,
         initial_processor,
         init_data,

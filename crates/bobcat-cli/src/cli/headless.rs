@@ -58,6 +58,8 @@ pub(crate) fn run(program: &Program, options: &Options) -> Result<(), CliError> 
     )?;
     // Two constructions: the view, which is the page and its resources, and
     // the painter over the windowless GPU target it renders into.
+    // No screen to measure here, so `ViewSources::screen` stays `None` and
+    // `SystemInfo` reports this view's own metrics in physical pixels.
     let mut view = group
         .create_lynx_view(
             options.viewport_width,

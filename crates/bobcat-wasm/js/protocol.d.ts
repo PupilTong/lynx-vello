@@ -64,6 +64,15 @@ export interface InitMessage {
    * like the fonts.
    */
   nativeModules: Record<string, string[]>
+  /**
+   * The screen `SystemInfo` reports, in physical pixels: `screen.availWidth`
+   * and `screen.availHeight` multiplied by `devicePixelRatio`, which is
+   * web-core's own algorithm. Measured on the page's main thread, the one
+   * thread `screen` exists on, and `NaN` where it does not — the engine then
+   * derives each view's numbers from its own metrics instead.
+   */
+  screenPixelWidth: number
+  screenPixelHeight: number
   workerUrl: string
   width: number
 }

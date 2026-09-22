@@ -82,5 +82,5 @@ pub use style::{PreparsedDeclaration, PreparsedKeyframe, PreparsedRule, Preparse
 pub use view::configure_wasm_workers;
 pub use view::{
     DrawTarget, EngineError, EngineEvent, EventRequester, FrameSize, LynxGroup, LynxView,
-    LynxViewError, NoWakeup, Screenshot, StyleThreads, ViewSources, WindowTarget,
+    LynxViewError, NoWakeup, ScreenMetrics, Screenshot, StyleThreads, ViewSources, WindowTarget,
 };

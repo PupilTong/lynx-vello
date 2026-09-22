@@ -137,9 +137,9 @@ inputs, so each call builds a fresh view and drops the one before it rather
 than mutating a running page. Every source is fetched and registered before
 that replacement, so a load that cannot fetch leaves the running page and its
 cascade untouched. The outer Worker, OffscreenCanvas, Wasm module, page
-configuration, latest device metrics, resource provider, font containers, and
-default font family are the renderer's own and are reapplied to each view it
-builds; the view, Lynx-main Worker, VM, and document are replaced. The
+configuration, latest device metrics, screen metrics, resource provider, font
+containers, and default font family are the renderer's own and are reapplied to
+each view it builds; the view, Lynx-main Worker, VM, and document are replaced. The
 provider releases the current page's registered scripts and styles after its
 startup outcome arrives, so repeated Blob-URL submissions do not accumulate
 stale sources. Other page assets remain available until that page is retired.
@@ -211,6 +211,15 @@ resource scope: boot scripts and styles remain registered until its startup
 outcome arrives; ZIP images and other assets remain available for later frames.
 Sources staged for the next page belong to a separate scope and are not cleared
 when the current page completes.
+
+The screen metrics a page reports as `SystemInfo` are measured by the facade,
+on the page's own main thread: `devicePixelRatio`, and `screen.availWidth` and
+`screen.availHeight` multiplied by it — web-core's own algorithm. They cross
+the Worker boundary once, as `InitMessage.screenPixelWidth`/`screenPixelHeight`
+and then two `f32`s to `BobcatRenderer::create`, and every view the renderer
+builds reports them. They describe the screen rather than the canvas, so
+resizing the canvas does not change them, and a host that can read neither
+leaves each view deriving the three numbers from its own metrics.
 
 ## Host native modules and page data
 

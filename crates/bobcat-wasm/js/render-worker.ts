@@ -139,6 +139,8 @@ async function initialize(message: InitMessage): Promise<void> {
     message.width,
     message.height,
     message.devicePixelRatio,
+    message.screenPixelWidth,
+    message.screenPixelHeight,
     message.workerUrl,
     message.imagePort,
     message.hardwareConcurrency,

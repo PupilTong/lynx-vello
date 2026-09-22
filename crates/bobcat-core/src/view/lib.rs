@@ -70,6 +70,44 @@ impl Viewport {
     }
 }
 
+/// The screen metrics `SystemInfo` reports: `pixelRatio`, `pixelWidth`,
+/// `pixelHeight`.
+///
+/// A screen, not a view. What Lynx calls `SystemInfo` describes the display
+/// the page is shown on — natively the process-wide physical screen size,
+/// and in web-core `devicePixelRatio` with `screen.availWidth`/`availHeight`
+/// multiplied by it — so a view's own viewport is not an answer to it. The
+/// embedder measures it and names it in
+/// [`ViewSources::screen`](ViewSources::screen).
+///
+/// Read once, as the realm opens, and never updated afterwards — the same
+/// standing web-core gives the values it reads at module load. A view resized
+/// later, or a painter that binds at other metrics, changes nothing here.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScreenMetrics {
+    /// Physical pixels per CSS pixel, reported as `pixelRatio`.
+    pub pixel_ratio: f32,
+    /// The screen's width in physical pixels, reported as `pixelWidth`.
+    pub pixel_width: f32,
+    /// The screen's height in physical pixels, reported as `pixelHeight`.
+    pub pixel_height: f32,
+}
+
+impl ScreenMetrics {
+    /// The metrics a view with no stated screen reports: its create-time
+    /// viewport, in physical pixels.
+    ///
+    /// Not a screen, and not meant to be one — it is what a host that has no
+    /// display to measure, a headless capture among them, reports instead.
+    pub(crate) const fn for_viewport(viewport: Viewport) -> Self {
+        Self {
+            pixel_ratio: viewport.device_pixel_ratio,
+            pixel_width: viewport.width * viewport.device_pixel_ratio,
+            pixel_height: viewport.height * viewport.device_pixel_ratio,
+        }
+    }
+}
+
 /// The physical pixel size of the render target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FrameSize {
@@ -397,6 +435,16 @@ pub struct ViewSources {
     pub global_props: Option<String>,
     /// Processor selected for initial data; empty selects the default.
     pub initial_processor: String,
+    /// The screen this view's `SystemInfo` describes, as the embedder
+    /// measured it: the web-core algorithm in a browser, the monitor the
+    /// window is on natively.
+    ///
+    /// `None` derives the three numbers from the create-time viewport
+    /// instead — `pixel_ratio` is its device-pixel ratio and the two sizes
+    /// are its CSS size multiplied by that ratio — which is what a host with
+    /// no screen to measure, a headless capture among them, reports. Read
+    /// once as the realm opens and never updated, whichever it is.
+    pub screen: Option<ScreenMetrics>,
 }
 
 impl ViewSources {
@@ -412,6 +460,7 @@ impl ViewSources {
             init_data: None,
             global_props: None,
             initial_processor: String::new(),
+            screen: None,
         }
     }
 }
