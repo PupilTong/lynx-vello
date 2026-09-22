@@ -11,13 +11,13 @@ pnpm install --frozen-lockfile
 pnpm --filter reactlynx-test-fixtures build
 ```
 
-`lynx.config.js` declares the entries, independent output directories and
+`rsbuild.config.js` declares the entries, independent output directories and
 `pluginReactLynx({ engineVersion: '4.1.0' })`. Other ReactLynx options keep their
-defaults. The package scripts invoke the public `rspeedy build` CLI once in
+defaults. The package scripts invoke the public `rsbuild build` CLI once in
 production mode and once in development mode. No script creates a compiler or
-imports an internal Rspeedy entry point.
-Both commands set `NODE_ENV` explicitly: Rspeedy reads the config function's
-`env` before applying `--mode`, and the fixture matrix must match that mode.
+imports an internal build-tool entry point.
+Both commands set `NODE_ENV` explicitly so the fixture matrix and compiler
+use the same mode.
 
 The default build produces eight native production pages, three native development
 variants and six web pages. Each native environment has its own
@@ -57,13 +57,15 @@ is consumed.
 Outputs live only in ignored `dist/`; compiled bundles and provenance must not
 be committed. Native pages retain `dist/<fixture>/<fixture>.lynx.bundle` and
 `dist/<fixture>/async/*`. Development directory names append `-development`.
-Web pages are `dist/<fixture>/<fixture>.web.bundle`.
+Web pages are `dist/<fixture>/<fixture>.web-<fixture>.bundle`.
 
+The shared `scripts/lynx-bytecode.ts` hook disables BTS manifest bytecode without
+changing the native page layout. The existing fixture-only adapter in
 `scripts/source-bundles.ts` registers Rsbuild completion hooks. For native
-pages it reads the compiler input retained by `DEBUG=rspeedy` and repacks the
+pages it reads the compiler input retained by `DEBUG=lynx` and repacks the
 original MTS/BTS source into external custom sections using `@lynx-js/tasm`.
 It replaces the page's bytecode container, preserves emitted lazy bundle bytes
-and leaves web output unchanged. `DEBUG=rspeedy` also retains MTS source inside
+and leaves web output unchanged. `DEBUG=lynx` also retains MTS source inside
 lazy bundles; these fixtures exercise source evaluation, not native bytecode.
 
 The encoder is pinned to `@lynx-js/tasm@0.0.53`. A workspace override keeps the

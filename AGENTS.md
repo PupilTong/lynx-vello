@@ -1858,14 +1858,17 @@ the opposite of the element path in the same file.
 
 - `packages/reactlynx-test-fixtures` — the JSX/CSS/JS sources of the compiled
   ReactLynx cards the integration tests, decoder tests and benchmarks run.
-  `lynx.config.js` declares the entries and their independent output
-  directories, and the package scripts invoke the public `rspeedy build` CLI
+  `rsbuild.config.js` declares the entries and their independent output
+  directories, and the package scripts invoke the public `rsbuild build` CLI
   once in production and once in development mode; no script creates a compiler
-  or imports an internal Rspeedy entry point. Run
+  or imports an internal build-tool entry point. Run
   `pnpm --filter reactlynx-test-fixtures build` before Rust tests, clippy or
   benches: the emitted `dist/index.rs` registry is what names the bundles, and
   no compiled fixture is versioned. Upstream provenance for the five `basic-*`
-  cards is in that package's `NOTICE.lynx-stack`.
+  cards is in that package's `NOTICE.lynx-stack`. Native builds use the shared
+  `scripts/lynx-bytecode.ts` hook to disable BTS manifest bytecode. MTS keeps
+  the compiler's default encoding. The fixture-only source repack remains
+  necessary for Bobcat's source evaluator.
 - `packages/explorer-homepage`, `packages/explorer-showcase` and
   `packages/explorer-lib` — the Lynx Explorer home screen and showcase menu in
   ReactLynx, over the navigation, launch-command, history and theme helpers the
@@ -2426,9 +2429,9 @@ TypeScript 7.0.2 — `tsc -b` over the root `tsconfig.json`, each program
 extending the strict options in `tsconfig.base.json` — except the bobcat-wasm
 Workers, which are typed against the glue a `wasm-pack` build generates and are
 checked by `pnpm --filter bobcat-wasm build` once it exists. Node runs the
-workspace's `.ts` scripts directly by type stripping. Each rspeedy example also
-installs TypeScript 5.9.3, used by nothing but rspeedy's `lynx.config.ts`
-loader (see the `rspeedy` catalog in `pnpm-workspace.yaml`).
+workspace's `.ts` scripts directly by type stripping. Rsbuild loads the
+ReactLynx configurations directly; examples use the workspace TypeScript version
+without a separate config-loader compiler.
 
 **Screenshot tests** live in `crates/*/tests/screenshots.rs` — plus per-topic
 siblings (`dom` also has `text_screenshots.rs`, `web_text_screenshots.rs`,

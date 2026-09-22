@@ -5,18 +5,18 @@
   "type": "module",
   "scripts": {
     "build": "pnpm run build:querycomponent && pnpm run build:fetchbundle",
-    "build:consumer": "rspeedy build --config lynx.config.consumer.ts",
+    "build:consumer": "rsbuild build --config rsbuild.config.consumer.ts",
     "build:fetchbundle": "cross-env LAZY_BUNDLE_FETCHBUNDLE=1 pnpm run build:querycomponent",
-    "build:producer": "rspeedy build --config lynx.config.producer.ts",
+    "build:producer": "rsbuild build --config rsbuild.config.producer.ts",
     "build:querycomponent": "pnpm run --parallel \"/^build:(producer|consumer)$/\"",
     "dev": "node scripts/serve.ts dev",
-    "dev:consumer": "rspeedy dev --config lynx.config.consumer.ts",
+    "dev:consumer": "rsbuild dev --config rsbuild.config.consumer.ts",
     "dev:fetchbundle": "cross-env LAZY_BUNDLE_FETCHBUNDLE=1 node scripts/serve.ts dev",
-    "dev:producer": "rspeedy dev --config lynx.config.producer.ts",
+    "dev:producer": "rsbuild dev --config rsbuild.config.producer.ts",
     "preview": "node scripts/serve.ts preview",
-    "preview:consumer": "rspeedy preview --config lynx.config.consumer.ts",
+    "preview:consumer": "rsbuild preview --config rsbuild.config.consumer.ts",
     "preview:fetchbundle": "cross-env LAZY_BUNDLE_FETCHBUNDLE=1 node scripts/serve.ts preview",
-    "preview:producer": "rspeedy preview --config lynx.config.producer.ts"
+    "preview:producer": "rsbuild preview --config rsbuild.config.producer.ts"
   },
   "dependencies": {
     "@lynx-js/react": "catalog:"
@@ -25,10 +25,11 @@
     "@lynx-js/preact-devtools": "catalog:",
     "@lynx-js/qrcode-rsbuild-plugin": "catalog:",
     "@lynx-js/react-rsbuild-plugin": "catalog:",
-    "@lynx-js/rspeedy": "catalog:",
+    "@lynx-js/rsbuild-plugin": "catalog:",
     "@lynx-js/types": "catalog:",
+    "@rsbuild/core": "catalog:",
     "@types/react": "18.3.28",
     "cross-env": "^10.1.0",
-    "typescript": "catalog:rspeedy"
+    "typescript": "catalog:"
   }
 }

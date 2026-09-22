@@ -27,4 +27,6 @@ export default defineExternalBundleRslibConfig({
     }),
     globalObject: 'globalThis',
   },
+}, {
+  enableJsBytecode: false,
 });

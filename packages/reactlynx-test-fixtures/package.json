@@ -6,8 +6,8 @@
   "description": "ReactLynx source fixtures and bundle generators for Bobcat integration tests.",
   "scripts": {
     "build": "pnpm build:production && pnpm build:development",
-    "build:production": "NODE_ENV=production DEBUG=rspeedy rspeedy build --no-env --mode production",
-    "build:development": "NODE_ENV=development DEBUG=rspeedy rspeedy build --no-env --mode development",
+    "build:production": "NODE_ENV=production DEBUG=lynx rsbuild build --no-env --mode production",
+    "build:development": "NODE_ENV=development DEBUG=lynx rsbuild build --no-env --mode development",
     "test:type": "tsc -p tsconfig.json"
   },
   "dependencies": {
@@ -15,9 +15,9 @@
   },
   "devDependencies": {
     "@lynx-js/react-rsbuild-plugin": "catalog:",
-    "@lynx-js/rspeedy": "catalog:",
     "@lynx-js/tasm": "0.0.53",
     "@lynx-js/types": "catalog:",
+    "@rsbuild/core": "catalog:",
     "@types/react": "18.3.28"
   }
 }

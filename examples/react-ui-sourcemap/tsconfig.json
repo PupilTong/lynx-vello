@@ -7,5 +7,5 @@
     "jsx": "react-jsx",
     "jsxImportSource": "@lynx-js/react",
   },
-  "include": ["src", "lynx.config.ts"],
+  "include": ["src", "rsbuild.config.ts"],
 }

@@ -12,7 +12,7 @@ const packageDirectory = path.resolve(
 const showcaseDirectory = path.resolve(pagesDirectory, '../explorer-showcase');
 
 // The showcase menus the Explorer homepage navigates to, one bundle per
-// `rspeedy` entry, published as `showcase/menu/<name>.web.bundle`.
+// ReactLynx entry, published as `showcase/menu/<name>.web.bundle`.
 const showcaseMenus = path.join(showcaseDirectory, 'dist');
 
 // The demo categories, taken from the showcase's own `@lynx-example`

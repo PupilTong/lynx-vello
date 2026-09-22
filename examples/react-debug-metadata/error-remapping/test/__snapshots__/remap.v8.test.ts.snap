@@ -3,7 +3,7 @@
 exports[`1 · LazyComponent (dynamic) > L1. nested deep stack (dynamic, background) 1`] = `
 {
   "code": 0,
-  "raw": "@.rspeedy/LazyComponent/background.<hash>.js:<loc>",
+  "raw": "@.lynx/LazyComponent/background.<hash>.js:<loc>",
   "release": "debugmetadata:<release>",
   "steps": [
     {
@@ -32,7 +32,7 @@ exports[`1 · LazyComponent (dynamic) > L1. nested deep stack (dynamic, backgrou
 exports[`1 · LazyComponent (dynamic) > L2. TypeError (dynamic, background) 1`] = `
 {
   "code": 0,
-  "raw": "@.rspeedy/LazyComponent/background.<hash>.js:<loc>",
+  "raw": "@.lynx/LazyComponent/background.<hash>.js:<loc>",
   "release": "debugmetadata:<release>",
   "steps": [
     {
@@ -63,7 +63,7 @@ exports[`1 · LazyComponent (dynamic) > L2. TypeError (dynamic, background) 1`] 
 exports[`1 · LazyComponent (dynamic) > L3. main-thread error (dynamic) 1`] = `
 {
   "code": 0,
-  "raw": "at <anonymous> (.rspeedy/LazyComponent/main-thread.js:<loc>)",
+  "raw": "at <anonymous> (.lynx/LazyComponent/main-thread.js:<loc>)",
   "release": "debugmetadata:<release>",
   "steps": [
     {
@@ -103,7 +103,7 @@ exports[`1 · LazyComponent (dynamic) > L3. main-thread error (dynamic) 1`] = `
 exports[`1 · LazyComponent (dynamic) > L4. read .x of undefined (dynamic, background) 1`] = `
 {
   "code": 0,
-  "raw": "@.rspeedy/LazyComponent/background.<hash>.js:<loc>",
+  "raw": "@.lynx/LazyComponent/background.<hash>.js:<loc>",
   "release": "debugmetadata:<release>",
   "steps": [
     {
@@ -134,7 +134,7 @@ exports[`1 · LazyComponent (dynamic) > L4. read .x of undefined (dynamic, backg
 exports[`2 · Host (App.tsx) > H1. throw new Error (host, background) 1`] = `
 {
   "code": 0,
-  "raw": "@.rspeedy/main/background.<hash>.js:<loc>",
+  "raw": "@.lynx/main/background.<hash>.js:<loc>",
   "release": "debugmetadata:<release>",
   "steps": [
     {
@@ -165,7 +165,7 @@ exports[`2 · Host (App.tsx) > H1. throw new Error (host, background) 1`] = `
 exports[`2 · Host (App.tsx) > H2. TypeError (host, background) 1`] = `
 {
   "code": 0,
-  "raw": "@.rspeedy/main/background.<hash>.js:<loc>",
+  "raw": "@.lynx/main/background.<hash>.js:<loc>",
   "release": "debugmetadata:<release>",
   "steps": [
     {
@@ -196,7 +196,7 @@ exports[`2 · Host (App.tsx) > H2. TypeError (host, background) 1`] = `
 exports[`2 · Host (App.tsx) > H3. nested deep stack (host, background) 1`] = `
 {
   "code": 0,
-  "raw": "@.rspeedy/main/background.<hash>.js:<loc>",
+  "raw": "@.lynx/main/background.<hash>.js:<loc>",
   "release": "debugmetadata:<release>",
   "steps": [
     {
@@ -227,7 +227,7 @@ exports[`2 · Host (App.tsx) > H3. nested deep stack (host, background) 1`] = `
 exports[`2 · Host (App.tsx) > H4. main-thread error (host) 1`] = `
 {
   "code": 0,
-  "raw": "at <anonymous> (.rspeedy/main/main-thread.js:<loc>)",
+  "raw": "at <anonymous> (.lynx/main/main-thread.js:<loc>)",
   "release": "debugmetadata:<release>",
   "steps": [
     {
@@ -267,7 +267,7 @@ exports[`2 · Host (App.tsx) > H4. main-thread error (host) 1`] = `
 exports[`3 · CrashDemo (host) > 1. TypeError (call undefined, background) 1`] = `
 {
   "code": 0,
-  "raw": "@.rspeedy/main/background.<hash>.js:<loc>",
+  "raw": "@.lynx/main/background.<hash>.js:<loc>",
   "release": "debugmetadata:<release>",
   "steps": [
     {
@@ -298,7 +298,7 @@ exports[`3 · CrashDemo (host) > 1. TypeError (call undefined, background) 1`] =
 exports[`3 · CrashDemo (host) > 2. ReferenceError (background) 1`] = `
 {
   "code": 0,
-  "raw": "@.rspeedy/main/background.<hash>.js:<loc>",
+  "raw": "@.lynx/main/background.<hash>.js:<loc>",
   "release": "debugmetadata:<release>",
   "steps": [
     {
@@ -330,7 +330,7 @@ exports[`3 · CrashDemo (host) > 2. ReferenceError (background) 1`] = `
 exports[`3 · CrashDemo (host) > 3. throw new Error (background) 1`] = `
 {
   "code": 0,
-  "raw": "@.rspeedy/main/background.<hash>.js:<loc>",
+  "raw": "@.lynx/main/background.<hash>.js:<loc>",
   "release": "debugmetadata:<release>",
   "steps": [
     {
@@ -361,7 +361,7 @@ exports[`3 · CrashDemo (host) > 3. throw new Error (background) 1`] = `
 exports[`3 · CrashDemo (host) > 4. nested deep stack (background) 1`] = `
 {
   "code": 0,
-  "raw": "@.rspeedy/main/background.<hash>.js:<loc>",
+  "raw": "@.lynx/main/background.<hash>.js:<loc>",
   "release": "debugmetadata:<release>",
   "steps": [
     {
@@ -390,7 +390,7 @@ exports[`3 · CrashDemo (host) > 4. nested deep stack (background) 1`] = `
 exports[`3 · CrashDemo (host) > 7. main-thread error 1`] = `
 {
   "code": 0,
-  "raw": "at <anonymous> (.rspeedy/main/main-thread.js:<loc>)",
+  "raw": "at <anonymous> (.lynx/main/main-thread.js:<loc>)",
   "release": "debugmetadata:<release>",
   "steps": [
     {

@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "rspeedy build",
-    "dev": "rspeedy dev"
+    "build": "rsbuild build",
+    "dev": "rsbuild dev"
   },
   "dependencies": {
     "@lynx-js/react": "catalog:",
@@ -14,11 +14,12 @@
   "devDependencies": {
     "@lynx-js/qrcode-rsbuild-plugin": "catalog:",
     "@lynx-js/react-rsbuild-plugin": "catalog:",
-    "@lynx-js/rspeedy": "catalog:",
+    "@lynx-js/rsbuild-plugin": "catalog:",
     "@lynx-js/types": "catalog:",
+    "@rsbuild/core": "catalog:",
     "@rsbuild/plugin-babel": "1.1.2",
     "@types/react": "18.3.28",
     "babel-plugin-react-compiler": "1.0.0",
-    "typescript": "catalog:rspeedy"
+    "typescript": "catalog:"
   }
 }

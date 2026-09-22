@@ -4,7 +4,7 @@ import { createRequire } from 'node:module';
 import { basename, dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import type { RsbuildPlugin } from '@lynx-js/rspeedy';
+import type { RsbuildPlugin } from '@rsbuild/core';
 import { encode } from '@lynx-js/tasm';
 
 const require = createRequire(import.meta.url);
@@ -19,7 +19,7 @@ interface CompilerSources {
   manifest: Record<string, string>;
 }
 
-// Rspeedy owns compilation. This hook only adapts emitted native pages for
+// Rsbuild owns compilation. This hook only adapts emitted native pages for
 // Bobcat's source evaluator and records what each selected environment built.
 export function pluginSourceBundles(mode: string, engineVersion: string): RsbuildPlugin {
   return {
@@ -34,7 +34,7 @@ export function pluginSourceBundles(mode: string, engineVersion: string): Rsbuil
           const metadata: { bundles: Record<string, string>; publicPath?: string | null } =
             JSON.parse(await readFile(join(output, file), 'utf8'));
           // The page is the one bundle at the top of the output directory; lazy
-          // bundles live in a subdirectory whose name Rspeedy owns.
+          // bundles live in a subdirectory whose name Rsbuild owns.
           const page = Object.keys(metadata.bundles).find(path => !path.includes('/'));
           if (!page) throw new Error(`No page bundle for ${name}`);
           const chunks = Object.keys(metadata.bundles).filter(path => path.includes('/')).sort();
@@ -65,7 +65,7 @@ ${entries.join('\n')}
         let publicPath: string | null = null;
         let scripts: Record<string, string> | undefined;
         if (native) {
-          // DEBUG=rspeedy retains both this page's compiler input and the
+          // DEBUG=lynx retains both this page's compiler input and the
           // original MTS source inside lazy bundles. Lazy bytes stay unchanged.
           const options: CompilerSources = JSON.parse(await readFile(join(output, `.lynx/${fixture}/tasm.json`), 'utf8'));
           const publicPathMatch = options.lepusCode.root.match(/__webpack_require__\.p\s*=\s*("(?:[^"\\]|\\.)*")/);
@@ -101,7 +101,7 @@ ${entries.join('\n')}
           description: native ? 'Page repacked from original compiler sources; lazy bundles unchanged.' : 'Unmodified web compiler output.',
           publicPath, nativePageSha256, scripts, bundles,
           encoder: `@lynx-js/tasm@${version('@lynx-js/tasm')}`,
-          react: version('@lynx-js/react'), rspeedy: version('@lynx-js/rspeedy'),
+          react: version('@lynx-js/react'), rsbuild: version('@rsbuild/core'),
           reactPlugin: version('@lynx-js/react-rsbuild-plugin'),
         }, null, 2) + '\n');
       });

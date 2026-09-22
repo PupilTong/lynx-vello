@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "pnpm run build:comp-lib && cross-env REACT_DEVTOOL=1 rspeedy build",
+    "build": "pnpm run build:comp-lib && cross-env REACT_DEVTOOL=1 rsbuild build --config rsbuild.lynx.config.ts",
     "build:comp-lib": "cross-env REACT_DEVTOOL=1 rslib build --config rslib-comp-lib.config.ts",
     "dev": "pnpm run build && rsbuild dev --open",
     "preview": "rsbuild dev"
@@ -19,13 +19,12 @@
     "@lynx-js/preact-devtools": "catalog:",
     "@lynx-js/react-rsbuild-plugin": "catalog:",
     "@lynx-js/react-umd": "catalog:",
-    "@lynx-js/rspeedy": "catalog:",
     "@lynx-js/types": "catalog:",
     "@lynx-js/web-core": "catalog:",
     "@lynx-js/web-elements": "catalog:",
-    "@rsbuild/core": "2.1.4",
+    "@rsbuild/core": "catalog:",
     "@types/react": "18.3.28",
     "cross-env": "^10.1.0",
-    "typescript": "catalog:rspeedy"
+    "typescript": "catalog:"
   }
 }
