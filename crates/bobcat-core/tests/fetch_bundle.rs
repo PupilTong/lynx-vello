@@ -20,7 +20,9 @@ use bobcat_core::resource::{
     LoadedSource, ResourceError, ResourceErrorKind, ResourceErrorPhase, ResourceFetcher,
     RetryAdvice, SourceCompletion, SourceRequest, StyleSheetSource,
 };
-use bobcat_core::{EngineEvent, LynxGroup, NoWakeup, StyleThreads, ViewSources};
+use bobcat_core::{
+    DrawTarget, EngineEvent, LynxGroup, NoWakeup, Painter, StyleThreads, ViewSources,
+};
 
 const MAIN_URL: &str = "app:///main.js";
 const BACKGROUND_URL: &str = "app:///background.js";
@@ -260,6 +262,12 @@ async fn logs_of(wanted: usize) -> (Vec<String>, usize) {
             sources,
         )
         .expect("the view is built");
+    // Boot's first flush waits for a painter to bind the view, and this waits
+    // for MTS boot to finish.
+    let mut painter = Painter::new(DrawTarget::Offscreen, 32.0, 24.0, 1.0)
+        .await
+        .expect("the painter is built");
+    painter.attach(&view).expect("a fresh view takes a painter");
 
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut logged = Vec::new();

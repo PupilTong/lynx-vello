@@ -278,21 +278,27 @@ not. `ToMain` carries a `PageUpdate` (the data, global-prop, global-event and
 reload commands a host accepted after observing MTS boot, in host FIFO order),
 a `DispatchEvent` (one event's type and target, plus the payload the router
 decided as values: the position, the wheel delta, the timestamp and — for the
-four touch events — its touch points), a `Resize` (the
-painter's metrics), a `Vsync` (the display-frame reading a realm that called
+four touch events — its touch points), a `Vsync` (the display-frame reading a realm that called
 `requestScriptFrame` asked for), a `BeginFrame` (a timeline reading plus the
 sequence number the acknowledgement reports), a `Refill` (the scroll offsets
 the painter moved past a slot's encode window, written back), and `ImageEvents`
 (completed or failed host loads — no variant can carry pixels, which makes
-"`ImageData` never crosses a channel" a property of the type).
+"`ImageData` never crosses a channel" a property of the type). The painter's
+device metrics are **not** a command: they ride a
+`watch<Option<Viewport>>` on the view's seat, `None` until a painter attaches,
+because an unbound `__FlushElementTree` parks the job it runs in on that very
+watch and no other job would run to read a command.
 
-`create_lynx_view` validates the metrics, sends the far half of that link to
-the group's thread, and builds the fetcher in place on the calling thread. It
-is **synchronous and takes no draw target**. The view's `F` parameter is that
+`create_lynx_view` sends the far half of that link to the group's thread and
+builds the fetcher in place on the calling thread. It is **synchronous and
+takes no draw target**. Its `width`, `height` and `device_pixel_ratio` are the
+create-time viewport the document is built at and works at until a painter
+binds; they are not validated, because no target is built from them, and an
+attached painter's metrics supersede them. The view's `F` parameter is that
 view-owned fetcher; the wakeup is a separate group constructor generic held by
 `bobcat-main`. Construction returns a loading view at once, whose boot outcome
-arrives through `pump`; constructor errors cover metrics, attachment, and two
-native modules claiming one name.
+arrives through `pump`; constructor errors cover attachment and two native
+modules claiming one name.
 
 The view's owner validates the fonts and default family first — a
 `dom::TextContext`'s business, with no document and zero fetches on failure —
@@ -660,9 +666,26 @@ when the `LynxDocument` drops. That field order is the whole mechanism; there
 is no `Drop` impl behind it. Every tree and attribute member therefore takes
 the document unconditionally, and the one refusal left here is a second
 `createDocument`. The one window where a document is absent is the load, and
-the task serves through it: a `Resize` writes the ingredients, image reports
-are buffered and replayed, a `BeginFrame` is still acknowledged so an offscreen
-host is never blocked by a load, and dispatch and refill are dropped.
+the task serves through it: image reports are buffered and replayed, a
+`BeginFrame` is still acknowledged so an offscreen host is never blocked by a
+load, and dispatch and refill are dropped.
+
+**A painter binding the view is what releases its first frame.** The document
+is created at the create-time viewport unless a painter has already written the
+seat's metrics watch, and every epilogue adopts whatever that watch holds. A
+commit made before the first write is *held* rather than published — a painter
+composes at its own size and cannot tell that the frame it adopted predates the
+metrics it just named — and `__FlushElementTree` commits, holds, and then parks
+the job it runs in on that watch, the way `adoptStyleSheet` parks on a
+response, with the view's token as the biased first arm. Waking bound, it
+adopts the painter's metrics and, if they moved the viewport, discards the held
+frame and commits again; either way what goes out is at the painter's size.
+Only the first binding is waited for: `detach` leaves the last metrics behind,
+so a view moved to the background never parks its group again. Boot's last act
+is a flush, so a view no painter ever binds publishes no frame, reports no
+`ScriptFinished` and never becomes ready. One task of the view, `consume_metrics`,
+settles the page once per change, which is what commits a resize with no
+JavaScript behind it.
 
 Main opens the realm and evaluates `bobcat:boot`, whose first statement creates
 the document and so mounts the staged sheets, in cascade order, before the
@@ -773,10 +796,11 @@ seat whose view is gone needs no `detach`. Attaching drops everything derived
 from the previous view — adopted snapshot, scroll intents, gesture arena,
 resolved pixels, the target's compose key, since commit ids restart at one
 per document — rebases the frame clock onto the view's timeline
-epoch, seeds the `BeginFrame` sequence past what has been serviced, and sends
-its metrics as a `Resize`: **the painter owns device metrics**. Detaching
-resets the same minus the target, so the last frame stays up and capturable
-while the next page loads.
+epoch, seeds the `BeginFrame` sequence past what has been serviced, and writes
+its metrics into the seat's watch: **the painter owns device metrics**, and
+that write is also what binds the view. Detaching resets the same minus the
+target and leaves the watch alone, so the last frame stays up and capturable
+while the next page loads and no later flush parks.
 
 Every entry point first polls the link, adopting the newest `Published` with
 the pixels it draws before noticing a view that has gone, so a commit published

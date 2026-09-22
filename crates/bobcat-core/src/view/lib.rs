@@ -532,6 +532,22 @@ impl LynxGroup {
     /// answered by attaching a [`Painter`](crate::Painter) to it — which may
     /// be before boot, after it, or never.
     ///
+    /// `width`, `height` and `device_pixel_ratio` are the **create-time
+    /// viewport**: the metrics this view's document is built at and works at
+    /// — styling, layout and the encoding of its first frame — until a
+    /// painter binds to it. They are not validated here, because no draw
+    /// target is built from them; an attached painter's metrics, which
+    /// [`Painter::new`](crate::Painter::new) and
+    /// [`Painter::resize`](crate::Painter::resize) do validate, supersede
+    /// them. If the two differ, the first frame is discarded and recomputed
+    /// at the painter's size, so a create-time viewport equal to the
+    /// painter's is the one that costs nothing.
+    ///
+    /// **No frame is published before a painter binds**, and the first
+    /// `__FlushElementTree` waits for that binding — so a view no painter
+    /// ever attaches to never reports
+    /// [`EngineEvent::ScriptFinished`] and never becomes ready.
+    ///
     /// The view's task requests each stylesheet in cascade order, then the entry
     /// module. Ordinary [`LynxView::pump`] turns dispatch requests to the fetcher,
     /// which resolves, loads and decodes them and completes the request it was
@@ -555,9 +571,8 @@ impl LynxGroup {
     ///
     /// # Errors
     ///
-    /// [`LynxViewError`] if the metrics are invalid, if two native modules
-    /// answer to one name, or if the group's main thread cannot accept the
-    /// attachment.
+    /// [`LynxViewError`] if two native modules answer to one name, or if the
+    /// group's main thread cannot accept the attachment.
     pub fn create_lynx_view<F, B>(
         &self,
         width: f32,
@@ -571,10 +586,6 @@ impl LynxGroup {
         F: ResourceFetcher + 'static,
         B: FnOnce(dom::ImageReports) -> F,
     {
-        // Validated here even though no target is built from it: these are the
-        // metrics the document lays out against, and a painter that later
-        // attaches imposes its own.
-        FrameSize::for_viewport(width, height, device_pixel_ratio)?;
         // Read once, before anything is sent: the table is what crosses, and
         // the modules themselves stay here.
         let mut table = NativeModuleTable::with_capacity(native_modules.len());
@@ -595,6 +606,10 @@ impl LynxGroup {
         let (commands, command_receiver) = mpsc::unbounded_channel();
         let (notices, notice_receiver) = mpsc::unbounded_channel();
         let (frames, frame_receiver) = watch::channel(Published::default());
+        // `None` until a painter attaches, which is what "no painter has bound
+        // this view yet" is: the document works at the create-time viewport
+        // until then, and its first `__FlushElementTree` parks on this.
+        let (metrics, metric_receiver) = watch::channel(None);
         // The sink comes first and the store is built *from* it, so a store
         // without its report channel is unrepresentable and the two are paired
         // by construction. That pairing is per view: a host whose registry
@@ -617,6 +632,7 @@ impl LynxGroup {
                 sources,
                 native_modules: crate::native_module::encode_table(&table),
                 commands: command_receiver,
+                metrics: metric_receiver,
                 notices,
                 frames,
                 cancel: cancel.clone(),
@@ -634,6 +650,7 @@ impl LynxGroup {
             seat: Rc::new(ViewSeat {
                 frame_demand: RefCell::default(),
                 commands,
+                metrics,
                 images: Rc::clone(&fetcher) as Rc<dyn FrameImages>,
             }),
             notices: notice_receiver,
@@ -1085,6 +1102,9 @@ pub(crate) struct ViewAttachment {
     /// The modules themselves stay on the view, on the embedder's thread.
     pub(crate) native_modules: String,
     pub(crate) commands: mpsc::UnboundedReceiver<ToMain>,
+    /// The reading end of the seat's metrics watch: what an attached painter
+    /// names, `None` until one does.
+    pub(crate) metrics: watch::Receiver<Option<Viewport>>,
     pub(crate) notices: mpsc::UnboundedSender<ViewNotice>,
     pub(crate) frames: watch::Sender<Published>,
     /// The view's end signal, minted on the embedder's thread. The task that

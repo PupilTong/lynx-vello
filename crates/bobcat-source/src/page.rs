@@ -1151,6 +1151,17 @@ mod tests {
         );
     }
 
+    /// An offscreen painter at the size the boot tests here use.
+    ///
+    /// Nothing draws through it: boot's first `__FlushElementTree` waits for a
+    /// painter to bind the view, and binding it is all this is for.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn binding_painter() -> bobcat_core::Painter {
+        bobcat_core::Painter::new(bobcat_core::DrawTarget::Offscreen, 32.0, 24.0, 1.0)
+            .await
+            .unwrap()
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn registered_compiler_sources_boot_bts_for_web_and_native_wrappers() {
@@ -1267,6 +1278,9 @@ mod tests {
                     page.view_sources(),
                 )
                 .unwrap();
+            // Boot's first flush waits for a painter to bind the view.
+            let mut painter = binding_painter().await;
+            painter.attach(&view).unwrap();
             let deadline = Instant::now() + Duration::from_secs(20);
             let mut reported = false;
             while !view.is_ready() || !reported {

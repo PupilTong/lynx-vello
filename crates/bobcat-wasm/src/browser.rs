@@ -986,10 +986,14 @@ impl BobcatRenderer {
         let view = built.map_err(js_error)?;
         if let Some(painter) = self.painter.as_mut() {
             // Attaching imposes the painter's metrics on the view, so a page
-            // built at the wrapper's size lays out at the canvas's. The canvas
-            // itself is not resized here: it already carries that resolution,
-            // and setting a canvas's size clears its bitmap — which would
-            // blank the previous page's last frame while this one loads.
+            // built at the wrapper's size lays out at the canvas's. It is
+            // also what *binds* the view: its boot waits here, publishes no
+            // frame before this, and would never finish without it — which is
+            // why the block above makes sure there is a painter to attach.
+            // The canvas itself is not resized here: it already carries that
+            // resolution, and setting a canvas's size clears its bitmap —
+            // which would blank the previous page's last frame while this one
+            // loads.
             painter.attach(&view).map_err(js_error)?;
         }
         self.view = Some(view);

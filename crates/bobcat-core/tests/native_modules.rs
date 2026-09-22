@@ -12,8 +12,8 @@ use bobcat_core::resource::{
     RetryAdvice, SourceCompletion, SourceRequest,
 };
 use bobcat_core::{
-    EngineError, EngineEvent, LynxGroup, LynxViewError, ModuleCall, ModuleCallback, NativeModule,
-    NoWakeup, StyleThreads, ViewSources,
+    DrawTarget, EngineError, EngineEvent, LynxGroup, LynxViewError, ModuleCall, ModuleCallback,
+    NativeModule, NoWakeup, Painter, StyleThreads, ViewSources,
 };
 
 const MAIN_URL: &str = "app:///main.js";
@@ -200,6 +200,12 @@ async fn an_injected_module_answers_a_background_call_on_the_embedders_own_threa
             sources(),
         )
         .expect("the view is built");
+    // The BTS `console` this waits for is forwarded through MTS, whose boot
+    // flush waits for a painter to bind the view.
+    let mut painter = Painter::new(DrawTarget::Offscreen, 32.0, 24.0, 1.0)
+        .await
+        .expect("the painter is built");
+    painter.attach(&view).expect("a fresh view takes a painter");
 
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut echoed = None;

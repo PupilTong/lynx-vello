@@ -302,10 +302,19 @@ entry's is not. Compiled
 bundle factories still need the module/init shell from a later stack layer.
 
 `LynxGroup::new` awaits the shared script runtime and style pool.
-`create_lynx_view` validates metrics, sends the view's half of its link to the
-group's thread, and builds the host's fetcher on the calling thread. It is
-synchronous — nothing it builds can block — and returns a loading view. Only
-metrics and attachment failures are returned by construction.
+`create_lynx_view` sends the view's half of its link to the group's thread and
+builds the host's fetcher on the calling thread. It is synchronous — nothing it
+builds can block — and returns a loading view. Only attachment and
+native-module failures are returned by construction.
+
+Its `width`, `height` and `device_pixel_ratio` are the **create-time
+viewport**: the metrics this view's document is built at and works at until a
+painter binds to it. They are not validated, because no draw target is built
+from them; the painter's own metrics are, by `Painter::new` and
+`Painter::resize`, and they supersede these the moment one attaches. A
+create-time viewport equal to the painter's is the one that costs nothing —
+see [Document and rendering ownership](#document-and-rendering-ownership) for
+what a mismatch costs.
 
 The view's own task on `bobcat-main` runs boot as a straight-line async
 function. Fonts and the default family come first, validated against a
@@ -414,9 +423,8 @@ reading the channel again, so what arrives meanwhile is one later burst.
 
 A page that has not opened its realm yet answers a burst on the task instead.
 Its `DocumentIngredients` are a field of their own and nothing holds them across
-a wait, so a resize, an image report and the `BeginFrame` acknowledgement an
-offscreen host blocks on are served at once, whatever a sibling view's job is
-parked on. `Page::stage_sheet` is task-side for the same reason.
+a wait, so an image report and the `BeginFrame` acknowledgement an offscreen
+host blocks on are served at once, whatever a sibling view's job is parked on. `Page::stage_sheet` is task-side for the same reason.
 
 That checkpoint watch is a runtime-wide `u64` bumped inside
 `ScriptEngine::checkpoint`. The promise-job queue belongs to the runtime rather
@@ -924,12 +932,46 @@ and the frames watch closes with the same return; an attached painter keeps
 showing the last frame it drew.
 
 There is one window where a view has no document, and the task serves through
-it: the load, before the boot module constructs its `Document`. In it, `Resize`
-writes the staged viewport; `ImageEvents` are buffered and replayed once there
-is a document; `BeginFrame` is still acknowledged, so an offscreen host is
-never blocked by a load; `DispatchEvent` and `Refill` are dropped, because
-there is no committed tree to route them against and nothing arriving now would
-still be true by the time there was.
+it: the load, before the boot module constructs its `Document`. In it,
+`ImageEvents` are buffered and replayed once there is a document; `BeginFrame`
+is still acknowledged, so an offscreen host is never blocked by a load;
+`DispatchEvent` and `Refill` are dropped, because there is no committed tree to
+route them against and nothing arriving now would still be true by the time
+there was. The painter's metrics are not among them at all: they are observed
+state on a watch the document reads for itself, so a `Document` created during
+that window is already at the painter's size if one has attached.
+
+**The painter's metrics bind the view, and a flush waits for the binding.**
+`ViewSeat` carries a `watch<Option<Viewport>>`, `None` until a painter writes
+it; `Painter::attach` writes it, an attached `Painter::resize` writes it again,
+and `Painter::detach` leaves it alone. It is a watch rather than a command for
+a structural reason: an unbound `__FlushElementTree` parks the *job* it runs
+in, and while a job is parked no other job runs — so a command carrying the
+metrics could never be applied, and the wait polls the watch directly instead.
+
+Until the first write the document works at the create-time viewport:
+`createDocument` reads the watch and builds at whichever of the two it finds,
+every epilogue's `commit_if_dirty` reads it again and adopts it, and readbacks
+before the binding answer at the create-time size. What a commit made before
+the binding does **not** do is publish: the frame is held in the realm's
+`DocumentSlot`, newest only, because a painter composes at its own size and has
+no way to tell that the frame it adopted predates the metrics it just named.
+
+`__FlushElementTree` therefore commits, and then either publishes — if a
+painter has bound — or holds that frame and parks on the watch, exactly as
+`adoptStyleSheet` parks on its response: the engine thread's tasks go on
+running, no other job does, and the view's own cancellation token is the biased
+first arm, so a release ends the wait with a throw rather than a frame. Waking
+bound, it adopts the painter's metrics; if they moved the viewport the held
+frame is discarded and the document is committed again, which is the resize
+path, and the frame that goes out is at the painter's size either way. Only the
+*first* binding is waited for — a painter that detaches leaves the last metrics
+behind, so a view moved to the background never parks its group again.
+
+Because boot's last act is a flush, **a view no painter ever binds publishes no
+frame and reports no `ScriptFinished`**, and so never becomes ready. One more
+task of the view consumes the watch, `consume_metrics`, and settles the page
+once per change: that is what commits a resize with no JavaScript behind it.
 
 `dom::Document<T>` privately owns its style/layout state, retained commit
 builder and Vello scene; that DOM-side painter is distinct from the
@@ -1048,11 +1090,15 @@ and two receiving ends, and the task serving that view holds the others. A
 sibling's traffic is not on this path at all, so no message names its view and
 no receiver has to defer one.
 
-- `ToMain`, an mpsc FIFO in: `DispatchEvent`, `Resize`, `BeginFrame { now, seq }`,
+- `ToMain`, an mpsc FIFO in: `DispatchEvent`, `BeginFrame { now, seq }`,
   `Refill { offsets }`, `ImageEvents`. A FIFO because the order two commands
   arrive in is what they mean. `LynxView` holds the one strong sender, inside
   the seat an attached `Painter` holds only a `Weak` of, so a painter can never
   keep a released view's task alive.
+- `watch<Option<Viewport>>` on the same seat, written by the attached painter:
+  the device metrics, which are observed state rather than history and are
+  deliberately not a command — an unbound flush parks the job it runs in on
+  this very watch, and no other job would run to read one.
 - `ViewNotice`, an mpsc FIFO back, drained by `LynxView::pump`: `Engine(event)`,
   `RequestImages(sources)`, and `RequestSource { request, completion }`. Only
   what a host must *act* on rides here.
@@ -1103,19 +1149,20 @@ the thread that created the LynxGroup (AppKit main, or a Render Worker)
   Painter — attached to that view; everything below runs inside the
   embedder's own calls:
     input routing + gesture recognition (against the adopted frame)
-    scroll/dispatch/resize/BeginFrame
+    scroll/dispatch/BeginFrame
     compose: upload scene, acquire, present
     capture, offscreen ticks
   ── ToMain mpsc ──▶                  ◀── ViewNotice mpsc ──
-                                      ◀── watch<Published> ──
-                                          (frame, listener names,
-                                           newest serviced BeginFrame)
+  ── watch<Option<Viewport>> ──▶      ◀── watch<Published> ──
+      (the painter's metrics;               (frame, listener names,
+       the first write binds)                newest serviced BeginFrame)
                                       ◀── EventRequester wakeup ──
       Lynx main thread — the group's, shared by every view in it
                     (one task per wait; one runtime, one style pool)
                     the realm owns its document
                     PAPI mutations: plain &mut
-                    __FlushElementTree: commit
+                    __FlushElementTree: commit, then publish — or, before
+                      the first binding, hold the frame and park
                       style → layout → build → encode
 ```
 
@@ -1123,9 +1170,11 @@ The surface is built on that thread and stays there:
 `create_surface` from a window handle panics off the macOS main thread, and
 the same thread is the one that will acquire, render and present into it. That
 is why the target is an argument to `Painter::new` rather than something
-attached later, and why a `Painter` is `!Send`. A view may run with no painter
-at all — it commits, and nothing draws — and a painter may outlive the view it
-was watching, going on showing and capturing the last frame it drew. A frame's
+attached later, and why a `Painter` is `!Send`. A view whose painter has
+*detached* goes on running — it commits and publishes, and nothing draws — and
+a painter may outlive the view it was watching, going on showing and capturing
+the last frame it drew. A view no painter has bound **yet** is the other case:
+it stops at its first flush until one does. A frame's
 vsync wait lands inside the embedder's own turn, which is why the
 embedder draws where a wait for the display is acceptable rather than inside
 every input relay. Nothing about this differs by platform any more: the
@@ -1161,9 +1210,9 @@ the painter notices a view that has gone on its next poll and detaches itself.
 The view's own goodbye is its command channel closing, which is what its
 command consumer ends the view on.
 
-Every entry into a realm — input dispatches, scrolls, resizes, resource
-updates, `BeginFrame` ticks, a module completion, a timer coming due, a
-sibling's checkpoint — ends with a commit when anything went stale, which is
+Every entry into a realm — input dispatches, scrolls, resource updates,
+`BeginFrame` ticks, a module completion, a timer coming due, a metrics change,
+a sibling's checkpoint — ends with a commit when anything went stale, which is
 what makes the recorded contract true: script must flush after mutating, and
 nothing guarantees the tree is *not* flushed at other times. A half-applied
 JavaScript turn is still unobservable, because the epilogue runs after the

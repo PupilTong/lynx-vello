@@ -714,9 +714,14 @@ impl Painter {
     /// A painter attached to a view nobody serves, so a test can play that
     /// view's whole side of the link by hand.
     ///
-    /// Built rather than attached, deliberately: `attach` sends a resize, and
-    /// these tests read the command channel, where a metrics command nobody
-    /// asked for would be the first thing on it.
+    /// Built rather than attached, deliberately: `attach` drops everything
+    /// derived from a previous view and rebases the frame clock, and these
+    /// tests want the painter exactly as it was constructed.
+    ///
+    /// The seat is bound from the start — its metrics watch already holds
+    /// this painter's viewport — because the view these tests play is one a
+    /// painter is already watching, and an unbound one would park its first
+    /// flush.
     #[cfg(test)]
     pub(super) fn detached(
         width: f32,
@@ -726,9 +731,11 @@ impl Painter {
         let (commands, command_receiver) = mpsc::unbounded_channel();
         let (notices, notice_receiver) = mpsc::unbounded_channel();
         let (frames, frame_receiver) = watch::channel(Published::default());
+        let viewport = Viewport::new(width, height);
         let seat = Rc::new(ViewSeat {
             frame_demand: RefCell::default(),
             commands,
+            metrics: watch::channel(Some(viewport)).0,
             images: Rc::new(dom::NoImages),
         });
         let mut painter = Self::without_output(width, height, 1.0);
@@ -763,9 +770,13 @@ impl Painter {
     /// at one per document, so a key kept across the change would make the new
     /// page's first frame look already drawn.
     ///
-    /// The painter's metrics win: attaching sends them to the view, so a view
-    /// built at one size and shown at another is resized rather than showing
-    /// a frame the target cannot present.
+    /// The painter's metrics win: attaching writes them into the view's seat,
+    /// so a view built at one size and shown at another is resized rather
+    /// than showing a frame the target cannot present. That write is also the
+    /// **binding**: a view publishes no frame and reports no
+    /// [`EngineEvent::ScriptFinished`](crate::EngineEvent::ScriptFinished)
+    /// before it, and its first `__FlushElementTree` parks until it happens.
+    /// Detaching does not undo it — only the first binding is waited for.
     ///
     /// # Errors
     ///
@@ -812,13 +823,23 @@ impl Painter {
         self.forget_view();
         self.forget_target();
         self.clock.rebase(view.timeline_epoch());
-        self.send(ToMain::Resize {
-            width: self.viewport.width,
-            height: self.viewport.height,
-            device_pixel_ratio: self.viewport.device_pixel_ratio,
-        });
+        self.bind_metrics();
         self.refresh();
         Ok(())
+    }
+
+    /// Writes this painter's metrics into the attached view's watch, which is
+    /// what binds the view.
+    ///
+    /// The first write is the binding: it releases a `__FlushElementTree`
+    /// parked on it, and the document lays out at these metrics from then on.
+    /// Every later write is an ordinary resize. [`Self::detach`] deliberately
+    /// writes nothing — only the first binding is waited for, so a view whose
+    /// painter went keeps the last metrics and never parks again.
+    fn bind_metrics(&self) {
+        if let Some(seat) = self.seat.upgrade() {
+            seat.metrics.send_replace(Some(self.viewport));
+        }
     }
 
     /// Stops observing the view, if it was observing one.
@@ -1128,11 +1149,9 @@ impl Painter {
         }
         self.viewport = Viewport::new(width, height).with_device_pixel_ratio(device_pixel_ratio);
         self.frame_size = next_size;
-        self.send(ToMain::Resize {
-            width,
-            height,
-            device_pixel_ratio,
-        });
+        // A detached painter has no seat to write, so it only records the new
+        // metrics and imposes them on whichever view it attaches to next.
+        self.bind_metrics();
         self.refresh();
         Ok(())
     }

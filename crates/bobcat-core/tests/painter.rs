@@ -603,3 +603,74 @@ async fn a_backdrop_filtered_box_reaches_the_embedder_painter() {
         luma(34, 8),
     );
 }
+
+/// A page that flushes and says so whenever the host updates its data, which
+/// is how a test watches a flush return.
+fn flushing_page() -> Vec<u8> {
+    br"
+globalThis.renderPage = function renderPage() {
+  const page = __CreatePage('card', 0);
+  const box = __CreateView(0);
+  __AppendElement(page, box);
+  globalThis.box = box;
+};
+globalThis.updatePage = function updatePage(data) {
+  __SetAttribute(globalThis.box, 'data-value', String(data.value));
+  __FlushElementTree();
+  console.log('flushed ' + data.value);
+};
+"
+    .to_vec()
+}
+
+/// Only the *first* binding is waited for: once a painter has named this
+/// view's metrics, detaching it does not make a later `__FlushElementTree`
+/// park again.
+///
+/// Without that rule a view moved to the background would stop on its next
+/// flush and, because a parked job holds the whole engine thread's queue,
+/// take every other view in its group with it.
+#[tokio::test]
+async fn a_flush_after_the_painter_detached_does_not_park() {
+    let group = group().await;
+    let mut view = group
+        .create_lynx_view(
+            32.0,
+            24.0,
+            1.0,
+            |_reports| Rc::new(FetcherDouble::new(flushing_page()).resolving_to(SCRIPT_URL)),
+            Vec::new(),
+            ViewSources::new(SCRIPT_URL),
+        )
+        .expect("the view is built");
+    let mut painter = offscreen_painter().await;
+    painter.attach(&view).expect("a fresh view takes a painter");
+    wait_for_script(&mut view).expect("the entry module boots");
+
+    painter.detach();
+    assert!(!painter.is_attached());
+    view.update_data(r#"{"value":7}"#.to_owned(), String::new())
+        .expect("a booted view accepts a data update");
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut flushed = None;
+    while flushed.is_none() {
+        for event in view.pump() {
+            match event {
+                bobcat_core::EngineEvent::ConsoleMessage { message, .. } => {
+                    flushed = Some(message);
+                }
+                bobcat_core::EngineEvent::ScriptRunError(error) => {
+                    panic!("the update failed: {}", error.message)
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the flush after the detach never returned"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(flushed.as_deref(), Some("flushed 7"));
+}

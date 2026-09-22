@@ -62,10 +62,16 @@ is false. No pre-update cache, processor coalescing or path-based merge is added
 
 MTS render/flush completes without waiting for BTS. Public readiness is MTS boot
 finishing: the entry module evaluated, its top-level await settled, and its first
-flush committed. `LynxView::pump` records it
+flush committed and published. `LynxView::pump` records it
 before returning `ScriptFinished`; `is_ready()` exposes the same state. The BTS
 Worker's state plays no part, so a BTS entry whose top-level await never settles
 does not keep the view from becoming ready.
+
+That first flush waits for a painter to bind the view — the metrics an
+attached `Painter` writes into the view's seat, see
+[runtime-architecture.md](runtime-architecture.md) "Document and rendering
+ownership". A view no painter ever attaches to therefore never becomes ready,
+and every host lifecycle operation on it keeps answering `NotReady`.
 
 Every host lifecycle operation (`update_data`, `reset_data`, `update_global_props`,
 `reload`, and `send_global_event`) returns `EngineError::NotReady` until that MTS
