@@ -961,15 +961,17 @@ consequential choice about whether to follow the spec or the quirk.
   `x-list.css`'s three real mechanisms: `container-type: size` makes the list
   a size query container, `list-item` is
   `content-visibility: auto; contain: layout paint` with
-  `contain-intrinsic-size: none auto var(--estimated-main-axis-size-px, 100cqh)`
+  `contain-intrinsic-size: none auto
+  attr(estimated-main-axis-size-px px, 100cqh)`
   (the horizontal variant swapping the axes and the unit),
   `recyclable="false"` opts a cell out, and `list-type` selects `display: grid`
   or `display: grid-lanes` over `repeat(var(--list-item-span-count), …)` with
   `full-span` as a placement rule. `span-count`/`column-count`,
   `sticky-offset` and a cell's `estimated-main-axis-size-px` reach the cascade
-  as presentational hints. Still absent from the sheet:
-  `sticky-top`/`sticky-bottom` attribute rules (CSS `position: sticky` itself
-  is implemented), `item-snap` /
+  through UA `attr()` declarations (2026-09-23); cell estimates require
+  nonnegative numbers and their CSS fallback is the scrollport size. `sticky-top="true"` supplies sticky positioning, the
+  nonnegative inherited offset and `z-index: 1`. Still absent from the sheet:
+  horizontal sticky insets and `sticky-bottom`, `item-snap` /
   `paging-enabled` scroll snapping, the scrollbar rules, the threshold
   observers, `initial-scroll-index`, every list event and every list UI
   method — and cell recycling, which this engine does not do at all: a
@@ -1053,15 +1055,12 @@ consequential choice about whether to follow the spec or the quirk.
   `span-count`/`column-count`
   (`.../XList/XListAttributes.ts:33-39`), and writes `list-type="flow"` as
   real CSS Grid `repeat(var(--list-item-span-count), 1fr)`
-  (`x-list.css:210-240`); here a presentational hint sets the same
-  property and a UA rule reads it. The hook is the `list` tag's own
-  `CustomElement` (`crates/bobcat-core/src/main/tree/list.rs`), with the
-  cell's `estimated-main-axis-size-px` on a second component for
-  `list-item`, exactly as web-core mixes `XListAttributes` into `x-list` and
-  `ListItemAttributes` into `x-list-item`: **an attribute-to-CSS mapping
-  lives in its own tag's component, never in a shared name-keyed
-  dispatcher** (user ruling, 2026-09-21), so a name means what the tag it
-  was written on says it means and nothing else has to be consulted.
+  (`x-list.css:210-240`); here tag-scoped UA `attr()` rules set the registered
+  property, with `span-count` taking precedence over `column-count`. The
+  registration defaults to one, and the track count is clamped to at least
+  one. Numeric attributes require their declared grammar: the former
+  `parseFloat` prefix acceptance is deliberately removed (2026-09-23 user
+  ruling). No `list` or `list-item` reflection component is needed.
   `full-span` is matched as a value, web-core's
   `[full-span]:not([full-span="false"])` (`x-list.css:294`), never as a
   presence test, because `__SetAttribute` stringifies every value, so
