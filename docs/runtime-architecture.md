@@ -247,17 +247,20 @@ and samples immediately.
 the instant, not the document.
 
 Advancing an animation runs where the document is — the Lynx main thread,
-its only home. The painter sends one `BeginFrame { now, seq }` command per
-frame while the latest committed frame reports an active animation, and the
-view's command consumer advances the timeline — a Stylo animation-only
-traversal of just the animating elements, no JavaScript involved — and
-commits what changed. The `seq` is what an offscreen `tick` waits on: the
+its only home. A window painter's draw sends one `BeginFrame { now, seq }`
+command per frame while the latest committed frame reports an animation it
+cannot compose alone (see "Composite animations compose; the rest tick");
+an offscreen `tick` sends one on every call. The view's command consumer
+advances the timeline — a Stylo animation-only traversal of just the
+animating elements, no JavaScript involved — and commits what changed. The
+`seq` is what an offscreen `tick` waits on: the
 epilogue publishes the newest serviced sequence number on the view's watch
 after the commit it implies, so a host blocked on that number is woken by the
 frame rather than by the acknowledgement. The published frame's
 `animations_active` flag is what keeps the loop sustained: `owes_frame` keeps
 answering yes, the embedder keeps taking a turn per display frame, and each
-one sends `BeginFrame` until a commit reports the timeline idle. Starting and cancelling animations belong to the style
+one that owes the main thread a tick sends `BeginFrame`, until a commit reports
+the timeline idle. Starting and cancelling animations belong to the style
 flush the main thread already runs at `__FlushElementTree`.
 
 Because that is the whole supply of timeline readings, an idle page's timeline
@@ -1147,7 +1150,7 @@ private Document<()>
   ├── ImageRegistry          (source names and load states; no pixels)
   └── private dom paint::Painter (main-thread commit builder)
         ├── retained Arc<CommittedFrame>   (paint tables + scroll-slot table +
-        │                                   the split scene: per-chain fragments
+        │                                   the split scene: per-space fragments
         │                                   and the compose program over them;
         │                                   the publish unit)
         └── reusable walk/build scratch
@@ -1351,8 +1354,9 @@ the view's task has gone.
 ## Scroll composes; a refill recommits
 
 The frame is baked *unscrolled*: the walker's layer-stack pushes become a
-compose program tagged with the scroll chain each shape rides, the content
-between them lands in per-chain scene fragments, and replaying the program
+compose program tagged with the compose space each shape rides — its path of
+scroll, sticky and animation nodes in the frame's one space tree — the content
+between them lands in per-space scene fragments, and replaying the program
 with a set of per-slot offsets reproduces exactly what a monolithic encode at
 those offsets would have produced. A user scroll therefore never waits for a
 commit — or the main thread at all. The painting side arbitrates
@@ -1402,7 +1406,7 @@ channel.
 
 There is one path from a committed frame to pixels. Every presented frame is
 one flat vello scene: `compose_into` replays the commit's compose program —
-pre-encoded per-chain fragments plus the push/pop ops over them — with each
+pre-encoded per-space fragments plus the push/pop ops over them — with each
 scroll slot translated by the offset the painter holds for it. Nothing is
 retained per scroller, and a scroll frame's cost is bounded by the commit's
 encode windows, which already discarded everything no clip chain admits.
@@ -1451,15 +1455,18 @@ and the sampler is `MirrorRepeat`, which reflects the backdrop back in at that
 crop rather than smearing an edge row or darkening toward a transparent
 border. The range points **backwards**: from the content start of the
 element's nearest Backdrop Root ancestor (`filter`, `opacity < 1`, `mask`,
-`clip-path`, `mix-blend-mode`, `backdrop-filter`, an exported opacity curve at
-any reading, or the root) to the element's own scope open — exactly what was
-painted before it inside that root. A `will-change` naming one of those properties is a Backdrop Root per
-the spec and is deliberately not one here, since no group layer is opened per
-`will-change` element (recorded in `docs/tracking/deviations.md`). Its one op, `PushBackdrop`, has no matching pop; it sits innermost in
-the element's own layers and before any of its items, so the element's
-`opacity`, `clip-path`, `mask-image` and `filter` apply to the backdrop and to
-the element together, and an element carrying both properties has its filtered
-backdrop baked *inside* its own blur group.
+`clip-path`, `mix-blend-mode`, `backdrop-filter`, a current `opacity` animation
+at any reading, exported or not, or the root) to the element's own scope open —
+exactly what was painted before it inside that root. A `will-change` naming one
+of those properties is a Backdrop Root per the spec and is deliberately not one
+here, since no group layer is opened per `will-change` element (recorded in
+`docs/tracking/deviations.md`); the current `opacity` animation, which Web
+Animations treats as `will-change: opacity`, already paints a group. Its one
+op, `PushBackdrop`, has no matching pop; it sits innermost in the element's own
+layers and before any of its items, so the element's `opacity`, `clip-path`,
+`mask-image` and `filter` apply to the backdrop and to the element together,
+and an element carrying both properties has its filtered backdrop baked
+*inside* its own blur group.
 
 Neither op encodes anything without a texture, which is what lets one program
 serve both jobs: with a texture the bracket is one `draw_image` and the range
@@ -1472,19 +1479,24 @@ no GPU take that fallback by construction.
 The device side is `dom::render::blur::FilterTextures`, one per
 `vello::Renderer`, owned beside that renderer's `AtlasResidency` by `Headless`
 and by the painter's `WindowGraphics`. Its cache holds one commit's bakes, and
-each entry re-bakes on its own two conditional readings: the painter's scroll
-generation, only when the entry's range rides a scroll or sticky node the
-entry itself does not — a blurred scroller's content slides under the blur, an
-ordinary blurred box moves with it — and the timeline reading, only when the
-entry's range rides an animation node the entry itself does not. For a
-backdrop that is another element's curve in its prefix. For a blur group it is
-a curve on its own content, or, on a moving element, an ancestor's clip its
-range re-pushes, which stays still while the group moves. An entry whose range
-draws a backdrop's texture also takes on that backdrop's two conditions: an
-element with both properties draws its backdrop inside its own blur group, and
-a child's backdrop range opens with its root's. So scrolling past an ordinary
-blurred box, and ticking an animation nothing is moving behind or inside, both
-re-bake nothing, and a tick re-bakes only the entries that read it. Commit ids
+each entry re-bakes on its own two conditional readings. The painter's scroll
+generation counts when some op in the entry's range and the entry's own space
+differ in their innermost scroll or sticky node, a node on one path and not
+the other. A blurred scroller's content slides under the blur, and a blurred
+box inside a scroller slides across the scroller's clip, which the box's range
+re-pushes and which stays still. Every Lynx scroll container clips, so a
+blurred box inside one re-bakes on every scroll frame; only an entry that no
+scroll or sticky node moves relative to anything in its range re-bakes nothing.
+The timeline reading counts when a curve moves or fades some op in the range
+relative to the entry. For a backdrop that is another element's curve in its
+prefix, or its own element's transform curve. For a blur group it is a curve on
+its own content, or its element's transform curve, which moves the group
+across the ancestors' clips its range re-pushes; the element's own
+opacity-only curve changes no baked pixel. An entry whose range draws a
+backdrop's texture also takes on that backdrop's two conditions: an element
+with both properties draws its backdrop inside its own blur group, and a
+child's backdrop range opens with its root's. So a tick re-bakes only the
+entries that read it. Commit ids
 restart per document, so a target pointed at a second document must `forget`
 the cache, the same obligation it already has for its own compose key. Bakes
 happen in increasing order of range end, so every texture an entry's own range
@@ -1507,22 +1519,48 @@ recommits and re-bakes every tick.
 
 The same compose machinery carries animations. At commit, an element whose
 one running animation moves only `opacity`/`transform` — and whose keyframes
-and structure the exporter can re-express exactly (see
-`docs/tracking/css-animation.md`) — publishes an `AnimationSlot` curve on
-the frame: timing from stylo's public `Animation` fields, per-property
-tracks re-read from the stylist's `@keyframes` steps. The element is forced
-to paint as a stacking context with a composited group, its subtree's
-fragments and layer pushes are tagged with its animation chain, and each
-presented frame samples the curve at the frame clock: the group's alpha is
-replaced, and the transform delta against the committed bake multiplies
-into the tagged fragments, pushes, and hit tests. Between commits the
-compositor animates alone.
+the exporter can re-express exactly (see `docs/tracking/css-animation.md`) —
+publishes an `AnimationSlot` curve on the frame: timing from stylo's public
+`Animation` fields, per-property tracks re-read from the stylist's
+`@keyframes` steps. The curve is one animation node in the frame's compose
+space tree, between the scroll and sticky nodes around and inside the
+element, so clips, scroll containers and sticky boxes in the animated subtree
+compose at their place on the path and refuse nothing. Each presented frame
+samples the curve at the frame clock: the element's group alpha is replaced,
+and the transform delta against the committed bake is the node's map, applied
+to everything whose path passes through it — fragments, layer pushes, clips,
+image draws, filter bakes, and hit tests. Between commits the compositor
+animates alone. A curve with a transform track stays on the main thread,
+its opacity track included, when its element's extent exceeds three viewport
+areas, and when an enclosing composited group cannot bound it — only a scale
+through 0 on the group's side.
 
-`BeginFrame` narrows accordingly: it is sent per frame only while the
-committed frame reports `needs_main_ticks` — something animating that could
-not export — and once when a finite curve runs past its end, so the main
-thread runs the finish restyle and commits the end state. An infinite
-exported animation involves the main thread zero times per frame. An animation
+The encode stays screen-bounded while content moves. Each transform track
+carries its reach — per op, the range its parameters take over the curve's
+whole domain — and culling pulls the viewport back through it, so a list of
+rows each running its own animation encodes the rows that can reach the list's
+window, and the clips and encode windows inside a moving subtree bound as
+usual. Composition samples only the curves and sticky boxes the program
+references. `has_live_curves` says the program references a curve, which is
+what makes the painter recompose every frame; `has_exported_curves` says any
+curve exported, which is what makes an input's hit test sample at the input's
+instant.
+
+The side effects Web Animations gives an in-effect `opacity`/`transform`
+animation are keyed on the animation, not on its export: a stacking context
+for either, a composited group and a Backdrop Root for `opacity`, and the
+containing block of absolute and fixed descendants for `transform`. The
+driver keeps them as two node bits and relayouts positioned descendants only
+when the transform bit flips, so paint order and containment are the same on
+both sides of a hand-over between the compositor and the main thread.
+
+A window painter's `BeginFrame` narrows accordingly: it is sent per frame
+only while the committed frame reports `needs_main_ticks` — something
+animating that could not export — and, once a finite curve runs past its end,
+per frame until the commit of its finish restyle is adopted. There an
+infinite exported animation involves the main thread zero times per frame.
+An offscreen `tick` does not narrow: it sends `BeginFrame` and waits on it
+every call, so a headless host ticks the main thread each frame. An animation
 **frozen** by css-contain-2 §4 narrows it all the way to nothing: an element in
 a skipped subtree (`content-visibility: hidden`, or a non-relevant
 `content-visibility: auto` box) does not advance its timeline, so the commit
@@ -1534,9 +1572,19 @@ reactivates it in that same commit, and the first `BeginFrame` after it is
 where the animation resumes, from exactly the progress the freeze found (the
 driver carries its start times by every interval it slept through; see
 `crates/dom/src/style/animation.rs`). The
-sampling mirrors stylo's own progress computation exactly, so the values
-composition shows between commits are the values any commit's restyle
-lands on at the same instant — handoffs are seamless in both directions.
+sampling mirrors stylo's own progress computation exactly, so while a curve
+is inside its domain the values composition shows between commits are the
+values any commit's restyle lands on at the same instant. Past a finite
+curve's end they need not be: the compositor holds the curve's end value,
+whatever the fill mode, until the commit of the finish restyle is adopted —
+at least one frame, since that commit follows an asynchronous `BeginFrame`.
+With a `forwards` fill the restyle lands on that same value; without one it
+returns to the base value, and those frames show the end value instead. A
+second gap is value-level, open until the export takes more than one
+animation: a finished animation that fills does not export, so where a
+filling animation later in the `animation` list covers a running one, the
+compositor samples the running curve while the main thread shows the fill
+(`docs/tracking/css-animation.md`).
 
 ## Native and Wasm spawning
 
@@ -1659,8 +1707,8 @@ create/append/drop/flush DOM API is exposed to JavaScript.
    `FrameClock` is sampled once, gesture deadlines resolve against it, the
    adopted scene is uploaded if it is new, and the frame
    presents. `LynxView::pump` then services the host's resource system and
-   hands back the lifecycle events. While the latest frame reports an active
-   animation each painter turn
+   hands back the lifecycle events. While the latest frame reports an
+   animation it cannot compose alone, each painter turn
    sends the main thread one `BeginFrame` carrying that reading, and the loop
    sustains without any JavaScript and without waking anyone: `owes_frame`
    answers yes, and the embedder takes the next turn at its own display frame

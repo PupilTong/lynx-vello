@@ -51,8 +51,8 @@ use crate::vello::kurbo::{Affine, Point, Rect, Size};
 use crate::vello::peniko::{
     BlendMode, BrushRef, Extend, Fill, ImageBrush, ImageData, ImageQuality, ImageSampler,
 };
-use crate::visual::AnimationSamples;
 use crate::visual::space::{self, Space, SpaceSamples};
+use crate::visual::{AnimationSamples, AnimationSlot};
 
 /// A shape captured at encode time, replayable without the document.
 #[derive(Debug)]
@@ -270,8 +270,8 @@ impl ComposeOp {
 }
 
 /// Whether the paths of `a` and `b` differ in the innermost node `pick`
-/// selects — equivalently, whether the nodes on one path and not the other
-/// include one of that kind.
+/// selects — equivalently, whether the nodes on one path and not the other,
+/// on either side, include one of that kind.
 fn differs(
     spaces: &[Space],
     a: Option<u32>,
@@ -331,26 +331,30 @@ pub struct FilterGroup {
     pub sigma: f32,
     /// The device-px region baked, integer-valued.
     pub rect: Rect,
-    /// The space the *texture* composes in. Content inside the range may
-    /// ride inner scroll or sticky nodes; see [`Self::inner_chains`].
+    /// The space the *texture* composes in. Ops inside the range may ride
+    /// other nodes; see [`Self::inner_chains`].
     pub(crate) space: Option<u32>,
     /// For a `filter: blur()` group, the ops strictly between its
     /// `PushFilter` and its `PopFilter`. For a backdrop, the ops from its
     /// Backdrop Root's content start up to the element's own scope open.
     pub(crate) ops: Range<u32>,
-    /// Whether some op in `ops` rides a scroll or sticky node `space` does
-    /// not, or draws a backdrop whose own flag is set — the one condition
-    /// under which the bake's pixels depend on a scroll offset, and
-    /// therefore the one condition under which a scroll invalidates the
-    /// bake.
+    /// Whether some op in `ops` and `space` differ in their innermost
+    /// scroll or sticky node — a node on one path and not the other — or an
+    /// op draws a backdrop whose own flag is set: the one condition under
+    /// which the bake's pixels depend on a scroll offset, and therefore the
+    /// one condition under which a scroll invalidates the bake. A blurred
+    /// scroller's content is on a scroll node the group is not; a blurred
+    /// box inside a scroller is on a scroll node the scroller's own clip,
+    /// which the box's range re-pushes, is not.
     pub(crate) inner_chains: bool,
-    /// Whether some op in `ops` rides an animation node `space` does not,
-    /// or draws a backdrop whose own flag is set — the one condition under
-    /// which the bake's pixels depend on the timeline reading. For a
-    /// backdrop that is another element's curve in its prefix; for a
-    /// `filter: blur()` group, a curve on its own content, or, on a moving
-    /// element, an ancestor's clip its range re-pushes, which the group
-    /// moves across.
+    /// Whether `space::sampled_against` holds for some op in `ops` against
+    /// `space`, or an op draws a backdrop whose own flag is set — the one
+    /// condition under which the bake's pixels depend on the timeline
+    /// reading. For a backdrop that is another element's curve in its
+    /// prefix, or its own element's transform curve; for a `filter: blur()`
+    /// group, a curve on its own content, or its element's transform curve,
+    /// which moves the group across the ancestors' clips its range
+    /// re-pushes.
     pub(crate) inner_animations: bool,
     /// The group this one nests inside, so the assembly needs no open-filter
     /// stack of its own.
@@ -395,9 +399,10 @@ impl FilterGroup {
         self.backdrop.is_some()
     }
 
-    /// Whether this entry's baked pixels depend on the timeline reading:
-    /// some op in its range rides an animation node the entry does not, or
-    /// its range draws a backdrop whose own bake samples the timeline.
+    /// Whether this entry's baked pixels depend on the timeline reading: a
+    /// curve moves or fades some op in its range relative to the entry, or
+    /// its range draws a backdrop whose own bake samples the timeline. An
+    /// opacity-only curve on the entry's own element changes no baked pixel.
     #[must_use]
     pub fn samples_animations(&self) -> bool {
         self.inner_animations
@@ -569,7 +574,7 @@ impl ComposeAssembly {
 
     /// Records a `backdrop-filter` entry over the already-emitted `ops`,
     /// answering whether one was recorded. `spaces` is the frame's space
-    /// tree the ops' spaces index.
+    /// tree the ops' spaces index, and `slots` its animation slots.
     ///
     /// An empty range records nothing and answers `false`: there is nothing
     /// behind the element to filter, so the op would bake a transparent
@@ -579,6 +584,7 @@ impl ComposeAssembly {
         mut entry: FilterGroup,
         ops: Range<u32>,
         spaces: &[Space],
+        slots: &[AnimationSlot],
     ) -> bool {
         self.seal_fragment();
         if ops.start >= ops.end {
@@ -589,7 +595,7 @@ impl ComposeAssembly {
             "a backdrop's range ends at or before the op that draws it",
         );
         let (inner_chains, inner_animations, open_pushes) =
-            self.scan_range(&ops, entry.space, spaces);
+            self.scan_range(&ops, entry.space, spaces, slots);
         let index =
             u32::try_from(self.filter_groups.len()).expect("a frame cannot hold 2^32 filters");
         entry.parent = self.open_filter;
@@ -607,8 +613,8 @@ impl ComposeAssembly {
     }
 
     /// One pass over an entry's range: whether it holds an op on another
-    /// scroll or sticky node, whether it holds one on another animation
-    /// node, and how many layers it leaves open at its end.
+    /// scroll or sticky node, whether it holds one a curve moves or fades
+    /// relative to the entry, and how many layers it leaves open at its end.
     ///
     /// A `PushBackdrop` op also carries its entry's two conditions: the
     /// texture is re-baked on them, so a bake drawing it is stale after them
@@ -622,6 +628,7 @@ impl ComposeAssembly {
         ops: &Range<u32>,
         own: Option<u32>,
         spaces: &[Space],
+        slots: &[AnimationSlot],
     ) -> (bool, bool, u32) {
         let mut scrolls = false;
         let mut animations = false;
@@ -641,7 +648,7 @@ impl ComposeAssembly {
             if let Some(op) = op.space(&self.filter_groups) {
                 scrolls |= differs(spaces, op, own, space::nearest_scroll)
                     || differs(spaces, op, own, space::nearest_sticky);
-                animations |= differs(spaces, op, own, space::nearest_animation);
+                animations |= space::sampled_against(spaces, slots, op, own);
             }
         }
         // The range starts and ends with an empty clip stack (every group
@@ -656,15 +663,16 @@ impl ComposeAssembly {
     }
 
     /// Closes the innermost open filter group, completing its op range and
-    /// deciding whether anything inside it rides another scroll, sticky or
-    /// animation node of `spaces`.
+    /// deciding whether anything inside it rides another scroll or sticky
+    /// node of `spaces`, or moves or fades relative to it by a curve of
+    /// `slots`.
     ///
-    /// Content a curve moves inside the group rides that curve's node, so
-    /// the bake samples the instant. So does a group on a moving element:
-    /// every group scope re-pushes its content's whole clip chain, which
-    /// holds its ancestors' clips in their own, still spaces, or those clips
-    /// would move with the texture.
-    pub(crate) fn pop_filter(&mut self, spaces: &[Space]) {
+    /// Content a curve moves or fades inside the group rides that curve's
+    /// node, so the bake samples the instant. So does a group on an element
+    /// its transform curve moves: every group scope re-pushes its content's
+    /// whole clip chain, which holds its ancestors' clips in their own,
+    /// still spaces, or those clips would move with the texture.
+    pub(crate) fn pop_filter(&mut self, spaces: &[Space], slots: &[AnimationSlot]) {
         self.seal_fragment();
         let Some(index) = self.open_filter else {
             debug_assert!(false, "pop_filter is only called with an open filter group");
@@ -676,7 +684,8 @@ impl ComposeAssembly {
             group.ops.end = end;
             (group.space, group.parent, group.ops.start)
         };
-        let (inner_chains, inner_animations, _) = self.scan_range(&(start..end), own, spaces);
+        let (inner_chains, inner_animations, _) =
+            self.scan_range(&(start..end), own, spaces, slots);
         let group = &mut self.filter_groups[index as usize];
         group.inner_chains = inner_chains;
         group.inner_animations = inner_animations;
@@ -1013,6 +1022,53 @@ mod tests {
     const SCROLLED: Option<u32> = Some(0);
     const ANIMATED: Option<u32> = Some(1);
 
+    /// The animation slot table [`SPACES`] indexes: slot 0 slides when
+    /// `moves`, and only fades otherwise.
+    fn slots(moves: bool) -> Vec<AnimationSlot> {
+        use crate::visual::curves::{
+            CompositeCurve, DirectionState, Easing, Iterations, Track, TrackPoint, TransformOp,
+            TransformTrack,
+        };
+        fn track<V>(from: V, to: V) -> Track<V> {
+            let point = |percentage, value| TrackPoint {
+                percentage,
+                value,
+                easing: Easing::Linear,
+            };
+            Track {
+                points: vec![point(0.0, from), point(1.0, to)],
+            }
+        }
+        let direction = DirectionState {
+            reversed: false,
+            alternates: false,
+        };
+        let transform = moves.then(|| {
+            TransformTrack::new(
+                track(
+                    vec![TransformOp::TranslateX(0.0)],
+                    vec![TransformOp::TranslateX(8.0)],
+                ),
+                direction,
+                Affine::IDENTITY,
+                Affine::IDENTITY,
+            )
+            .expect("matched lists")
+        });
+        vec![AnimationSlot {
+            node: crate::NodeId::from_bits(1).expect("a handle's bits"),
+            curve: CompositeCurve {
+                started_at: 0.0,
+                duration: 1.0,
+                iterations: Iterations::Infinite,
+                direction,
+                expires_at: None,
+                opacity: (!moves).then(|| track(1.0, 0.5)),
+                transform,
+            },
+        }]
+    }
+
     /// Nested brackets pair up, and each group's range is exactly the ops
     /// strictly between its own pair.
     #[test]
@@ -1022,8 +1078,8 @@ mod tests {
         assembly.push_op(push(None));
         let inner = assembly.push_filter(group(None));
         assembly.push_op(push(None));
-        assembly.pop_filter(&SPACES);
-        assembly.pop_filter(&SPACES);
+        assembly.pop_filter(&SPACES, &slots(true));
+        assembly.pop_filter(&SPACES, &slots(true));
         let finished = assembly.finish();
 
         assert_eq!((outer, inner), (0, 1), "groups are numbered in push order");
@@ -1052,9 +1108,10 @@ mod tests {
         );
     }
 
-    /// `inner_chains` is exactly "some op in the range rides another scroll
-    /// chain" — the one condition that makes a bake depend on a scroll
-    /// offset.
+    /// Over plain ops, `inner_chains` is exactly "some op in the range and
+    /// the group's space differ in their innermost scroll or sticky node",
+    /// on either side — the one condition that makes a bake depend on a
+    /// scroll offset.
     #[test]
     fn inner_chains_reports_only_a_differing_scroll_chain() {
         // Content on the group's own chain: the group and its content move
@@ -1062,7 +1119,7 @@ mod tests {
         let mut same = assembly();
         same.push_filter(group(SCROLLED));
         same.push_op(push(SCROLLED));
-        same.pop_filter(&SPACES);
+        same.pop_filter(&SPACES, &slots(true));
         assert!(!same.finish().filter_groups[0].inner_chains);
 
         // Content on a chain the group is not on: the content slides under
@@ -1070,15 +1127,24 @@ mod tests {
         let mut differing = assembly();
         differing.push_filter(group(None));
         differing.push_op(push(SCROLLED));
-        differing.pop_filter(&SPACES);
+        differing.pop_filter(&SPACES, &slots(true));
         assert!(differing.finish().filter_groups[0].inner_chains);
 
-        // An animation chain is not a scroll chain: it makes the bake depend
+        // The group on a chain an op is not on: a blurred box inside a
+        // scroller re-pushes the scroller's still clip, which the scroll
+        // moves the box across.
+        let mut reverse = assembly();
+        reverse.push_filter(group(SCROLLED));
+        reverse.push_op(push(None));
+        reverse.pop_filter(&SPACES, &slots(true));
+        assert!(reverse.finish().filter_groups[0].inner_chains);
+
+        // An animation node is not a scroll node: it makes the bake depend
         // on the instant, not on an offset.
         let mut animated = assembly();
         animated.push_filter(group(None));
         animated.push_op(push(ANIMATED));
-        animated.pop_filter(&SPACES);
+        animated.pop_filter(&SPACES, &slots(true));
         assert!(!animated.finish().filter_groups[0].inner_chains);
     }
 
@@ -1237,7 +1303,7 @@ mod tests {
         assembly.push_op(ComposeOp::Pop);
         let end = assembly.content_boundary();
         assert!(
-            assembly.push_backdrop(backdrop_entry(None), root_start..end, &SPACES),
+            assembly.push_backdrop(backdrop_entry(None), root_start..end, &SPACES, &slots(true)),
             "a non-empty range records an entry",
         );
         let finished = assembly.finish();
@@ -1251,7 +1317,7 @@ mod tests {
         );
         assert!(
             !entry.samples_animations(),
-            "and none on another animation chain",
+            "and none on another animation node",
         );
         let backdrop = entry.backdrop.as_ref().expect("a backdrop entry");
         assert_eq!(
@@ -1269,39 +1335,43 @@ mod tests {
         );
     }
 
-    /// An animation chain the entry is not on is what makes a bake depend on
-    /// the timeline reading — and the only thing that does. The same holds
-    /// for a `filter: blur()` group, whose range re-pushes its ancestors'
-    /// clips in their own spaces: a group on a moving element moves across
-    /// them.
+    /// Over plain ops, a curve that moves or fades an op relative to the
+    /// entry is what makes a bake depend on the timeline reading, and the
+    /// only thing that does. A curve on the op's side does either; one on
+    /// the entry's side only if it moves the entry — a `filter: blur()`
+    /// group's range re-pushes its ancestors' clips in their own spaces, and
+    /// its element's fade leaves the bake as it is.
     #[test]
-    fn inner_animations_reports_only_a_differing_animation_chain() {
-        for (space, op, expected) in [
-            (None, ANIMATED, true),
-            (ANIMATED, ANIMATED, false),
-            (None, SCROLLED, false),
-            (ANIMATED, None, true),
-        ] {
-            let mut backdrop = assembly();
-            backdrop.push_op(push(op));
-            let end = backdrop.content_boundary();
-            backdrop.push_backdrop(backdrop_entry(space), 0..end, &SPACES);
-            assert_eq!(
-                backdrop.finish().filter_groups[0].samples_animations(),
-                expected,
-                "backdrop in {space:?} over an op in {op:?}",
-            );
+    fn inner_animations_reports_only_a_curve_between_op_and_entry() {
+        for moves in [true, false] {
+            let slots = slots(moves);
+            for (space, op, expected) in [
+                (None, ANIMATED, true),
+                (ANIMATED, ANIMATED, false),
+                (None, SCROLLED, false),
+                (ANIMATED, None, moves),
+            ] {
+                let mut backdrop = assembly();
+                backdrop.push_op(push(op));
+                let end = backdrop.content_boundary();
+                backdrop.push_backdrop(backdrop_entry(space), 0..end, &SPACES, &slots);
+                assert_eq!(
+                    backdrop.finish().filter_groups[0].samples_animations(),
+                    expected,
+                    "backdrop in {space:?} over an op in {op:?}, moving: {moves}",
+                );
 
-            let mut blur = assembly();
-            blur.push_filter(FilterGroup::new(2.0, Rect::new(0.0, 0.0, 8.0, 8.0), space));
-            blur.push_op(push(op));
-            blur.push_op(ComposeOp::Pop);
-            blur.pop_filter(&SPACES);
-            assert_eq!(
-                blur.finish().filter_groups[0].samples_animations(),
-                expected,
-                "blur group in {space:?} over an op in {op:?}",
-            );
+                let mut blur = assembly();
+                blur.push_filter(FilterGroup::new(2.0, Rect::new(0.0, 0.0, 8.0, 8.0), space));
+                blur.push_op(push(op));
+                blur.push_op(ComposeOp::Pop);
+                blur.pop_filter(&SPACES, &slots);
+                assert_eq!(
+                    blur.finish().filter_groups[0].samples_animations(),
+                    expected,
+                    "blur group in {space:?} over an op in {op:?}, moving: {moves}",
+                );
+            }
         }
     }
 
@@ -1312,7 +1382,7 @@ mod tests {
     fn an_empty_range_records_no_backdrop_at_all() {
         let mut assembly = assembly();
         let start = assembly.content_boundary();
-        assert!(!assembly.push_backdrop(backdrop_entry(None), start..start, &SPACES));
+        assert!(!assembly.push_backdrop(backdrop_entry(None), start..start, &SPACES, &slots(true)));
         let finished = assembly.finish();
         assert!(finished.filter_groups.is_empty());
         assert!(finished.program.is_empty());
@@ -1406,8 +1476,8 @@ mod tests {
         let mut assembly = assembly();
         assembly.push_filter(group(None));
         assembly.push_filter(group(SCROLLED));
-        assembly.pop_filter(&SPACES);
-        assembly.pop_filter(&SPACES);
+        assembly.pop_filter(&SPACES, &slots(true));
+        assembly.pop_filter(&SPACES, &slots(true));
         let finished = assembly.finish();
         assert!(
             finished.filter_groups[0].inner_chains,
@@ -1427,10 +1497,10 @@ mod tests {
             assembly.push_op(ComposeOp::Pop);
             let end = assembly.content_boundary();
             assembly.push_filter(group(None));
-            assert!(assembly.push_backdrop(backdrop_entry(None), 0..end, &SPACES));
+            assert!(assembly.push_backdrop(backdrop_entry(None), 0..end, &SPACES, &slots(true)));
             assembly.push_op(push(None));
             assembly.push_op(ComposeOp::Pop);
-            assembly.pop_filter(&SPACES);
+            assembly.pop_filter(&SPACES, &slots(true));
             let finished = assembly.finish();
             let [blur, backdrop] = &finished.filter_groups[..] else {
                 panic!("a blur group and a backdrop");
@@ -1457,11 +1527,16 @@ mod tests {
         assembly.push_op(ComposeOp::Pop);
         let end = assembly.content_boundary();
         let root_content = assembly.content_boundary();
-        assert!(assembly.push_backdrop(backdrop_entry(None), 0..end, &SPACES));
+        assert!(assembly.push_backdrop(backdrop_entry(None), 0..end, &SPACES, &slots(true)));
         assembly.push_op(push(None));
         assembly.push_op(ComposeOp::Pop);
         let child_end = assembly.content_boundary();
-        assert!(assembly.push_backdrop(backdrop_entry(None), root_content..child_end, &SPACES));
+        assert!(assembly.push_backdrop(
+            backdrop_entry(None),
+            root_content..child_end,
+            &SPACES,
+            &slots(true)
+        ));
         let finished = assembly.finish();
         let [root, child] = &finished.filter_groups[..] else {
             panic!("two backdrops");

@@ -107,6 +107,24 @@ pub(crate) fn curves_within<'a>(
     })
 }
 
+/// Whether what a record in `record` draws into a bake in `bake` changes
+/// with the timeline reading: a curve on `record`'s path below the two
+/// spaces' common ancestor moves or fades it, and a transform curve on
+/// `bake`'s moves the bake across it. An opacity-only curve on `bake`'s
+/// side changes neither, since its alpha applies where the bake is drawn.
+pub(crate) fn sampled_against(
+    spaces: &[Space],
+    animations: &[AnimationSlot],
+    record: Option<u32>,
+    bake: Option<u32>,
+) -> bool {
+    let common = common_ancestor(spaces, record, bake);
+    path_below(spaces, record, common).any(|node| matches!(node.kind, SpaceKind::Animation(_)))
+        || curves_within(spaces, animations, bake, record)
+            .next()
+            .is_some()
+}
+
 /// The innermost clip on `clip`'s chain that no transform curve moves
 /// relative to `group`. A curve carrying content around inside a group
 /// cannot carry it out of this clip.

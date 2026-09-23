@@ -158,15 +158,18 @@ the semantics are stylo's.** Everything below refines that sentence.
     runs on the document's owner thread (the Lynx main thread, on a
     `BeginFrame` tick with no JavaScript involved), as a stylo animation-only
     traversal over just the animating elements, with no selector matching and
-    no layout for properties that cannot move a box. **The open gap is layerization, and it is also why this
-    engine does not throttle.** A browser can skip the per-frame restyle
-    because a compositor is interpolating instead; here the animation-only
-    traversal is the only thing that produces the animated value, and with no
-    compose-time layers the whole retained scene is rebuilt every animated
-    frame anyway. So what a frame saves today is the cascade over the elements
-    that are *not* animating, and the layout pass — not the restyle a browser
-    throttles, nor the rasterization a compositor skips. Both of those follow
-    from layers, not from a second animation path.
+    no layout for properties that cannot move a box. **Throttling follows
+    composite export.** A browser can skip the per-frame restyle because a
+    compositor is interpolating instead. Here an `opacity`/`transform`
+    animation the commit exports as a composite curve is the same: the painter
+    samples the curve and composes the retained frame, and a window painter
+    does not tick the main thread for it until the curve ends (an offscreen
+    `tick` ticks it every call). Everything else — a property the
+    exporter does not carry, a value it cannot re-express — still restyles
+    through the animation-only traversal and rebuilds the retained scene every
+    frame; what that frame saves is the cascade over the elements that are
+    *not* animating, and the layout pass (`docs/tracking/css-animation.md`
+    records what exports).
 
     *Structural side effects are per-animation constants.* A transform/filter
     also creates a containing block for positioned descendants and a stacking
@@ -176,17 +179,28 @@ the semantics are stylo's.** Everything below refines that sentence.
     **running** animation or transition of `transform`/`filter`/`opacity`
     establishes its containing block / stacking context **for the entire
     duration**, even across `none` keyframes — flipped once at start and once
-    at end, so layout never needs per-frame animation state.
+    at end, so layout never needs per-frame animation state. Implemented for
+    `opacity` and `transform` as two node bits the animation driver keeps
+    (`animates_opacity`, `animates_transform`): an animation counts while
+    pending (its delay included), running or paused, or finished with a
+    `forwards`/`both` fill, a transition while pending or running. Either bit
+    makes a stacking context, the opacity bit a composited group, and the
+    transform bit a containing block for absolute and fixed descendants. Not
+    yet implemented for `filter`: an animation from `filter: none` has no
+    stacking context or containing block while the value reads `none`.
 
-12. **No animation staleness seam.** Superseded by 11: the cascade output *is*
-    the animated value, so computed style is correct mid-animation and a style
-    query, a transition starting *from* an animating value, and invalidation
-    all read the same one truth with nothing to sample back. The earlier
-    query-time overlay existed only to reconcile a render-private value with
-    computed style, and there is no render-private value. If layerization later
-    introduces one, this item returns with it — and browsers already say what
-    it must do then: keep the cascade authoritative and re-sample on demand
-    rather than let the two diverge.
+12. **The animation staleness seam is back for exported curves — a known
+    gap.** For an animation that ticks on the main thread the cascade output
+    *is* the animated value, so a style query, a transition starting *from* an
+    animating value, and invalidation all read one truth. An exported curve
+    (11) is a render-private value: the painter samples it per frame, and
+    nothing on the main thread advances the timeline for it, so its cascade
+    value holds at the last tick or commit until something ticks or commits
+    again. `getComputedStyle` on an element fading by an exported curve
+    therefore reads the opacity of the last main-thread reading while the
+    screen shows the sampled one. Browsers say what closing it takes: keep the
+    cascade authoritative and re-sample on demand rather than let the two
+    diverge. Not built.
 
 13. **Dynamic pseudo-classes deferred past v1.** `:hover`/`:active`/`:focus`
     simply don't match until the event system lands. The reserved

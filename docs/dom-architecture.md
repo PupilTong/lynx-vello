@@ -320,7 +320,7 @@ reaches the region *that frame's culling* admits — the walker's own
 the same resolved clip chains, `ScrollSlot::encode_window`s and group blur
 reaches, so "relevant wherever its contents could paint" holds by
 construction. The build records an `AutoBox` (node, world transform, size,
-clip, chain, animation, enclosing group layer) for every `auto` element it
+clip, compose space, enclosing group layer) for every `auto` element it
 reaches, independently of the item list: a `visibility: hidden` element emits
 no item and still has to be determined, or its `visibility: visible` contents
 would never lay out. A flip invalidates layout through the ordinary relayout
@@ -352,7 +352,7 @@ and `scene` lends a guarded shared borrow. There is no renderer type parameter,
 `DocumentRenderer` trait, `with_renderer`, public Painter, public visual epoch,
 or public paint-order constructor.
 
-**The frame is baked unscrolled** and carried split — per-chain scene fragments
+**The frame is baked unscrolled** and carried split — per-space scene fragments
 plus a compose program — so a consumer composes at its own current offsets per
 `ScrollSlot` and a scroll recomposes instead of recommitting, for as long as
 every offset stays inside its slot's `encode_window`. A slot's
@@ -373,7 +373,17 @@ container is no stacking context by itself, as on the web (see
 `runtime-architecture.md`). Composite
 animations ride the same split: an exportable `opacity`/`transform` animation
 publishes an `AnimationSlot` curve the consumer samples at its own timeline
-reading. `docs/dom-public-api.md`'s "Retained visual output" row is the
+reading. What moves at composition is recorded as one compose space tree
+(`visual/space.rs`): scroll, sticky and animation nodes in containing-block
+order, each applying one affine, with every fragment, push, image draw, item,
+clip and filter entry naming its innermost node. An element's own box, clip and
+effect layer take its *box space* — inside its own sticky and animation nodes,
+outside its own scroll node — and its content the *content space* inside that
+scroll node. A record's map is the product of its path's node affines, root
+first, formed in one place (`SpaceSamples::css`) that composition, filter bakes
+and hit testing (inverting it) all read, so a scroll container, a sticky box or
+a clip inside an animated subtree moves exactly as a fresh commit would place
+it. `docs/dom-public-api.md`'s "Retained visual output" row is the
 authoritative description of the whole surface.
 
 **Sticky positioning also resolves in that compose path.** A private constraint
@@ -385,13 +395,15 @@ shared by painting, clipping, hit testing, and the document's bounding-rectangle
 query. Descendants inherit the motion through their containing-block chain,
 so viewport-fixed descendants still escape it. Culling preserves possible
 sticky travel across the frame's encode window, including a header whose
-normal-flow position has scrolled out of view. A sticky box inside a
-compositor-exported animation subtree cancels that export
-(`kill_animation_chain`): its constraints are solved in its parent's
-committed coordinates, and an animating ancestor transform would change the
-map they are solved in, so such an animation ticks on the main thread
-instead. Inline sticky atoms inside a paragraph are not pinned: the paragraph
-paints them, and the sampling covers only boxes with items of their own.
+normal-flow position has scrolled out of view. A sticky box inside or around
+a compositor-exported animation keeps it exported. Its constraints are solved
+in layout space from scroll offsets, which no transform changes; the solved
+shift is mapped through the committed parent transform and applied by the
+box's own sticky node at its place on the space path, so an enclosing
+animation's delta maps the shifted box, and the shift carries an animated
+descendant along with its delta. Inline sticky atoms inside a paragraph are
+not pinned: the paragraph paints them, and the sampling covers only boxes with
+items of their own.
 
 `filter: blur()` and `backdrop-filter` add the one conditional step in front of
 that path, and they share it. `CommittedFrame::filter_groups()` — empty unless
@@ -419,7 +431,7 @@ rounded border box; where none does, a group replays its range raw and a
 backdrop draws nothing, which are the documented *unfiltered* fallbacks a
 GPU-less consumer, `Document::scene()`, and an entry past the memory budget all
 take. `CommittedFrame::bake_filter` replays one entry's range into an offscreen
-scene with the entry's own chain factored out, since that chain is applied when
+scene with the entry's own space divided out, since that space is applied when
 the texture is drawn; for a backdrop it then pops the layers the backward range
 left open and draws the list's pre-blur passes over the whole bake rect. The
 whole commit stays device-free and recyclable: the entry table is reclaimed
@@ -432,15 +444,18 @@ enclosing filtered layer. `backdrop-filter` inflates nothing. Either way σ is
 scaled into viewport pixels by the arithmetic mean of the two singular values
 of the element's local-to-viewport linear map (read off
 `Affine::nuclear_norm_squared`) — exact under rotation and uniform scale, one
-isotropic number under a non-uniform scale or a skew (recorded limit).
+isotropic number under a non-uniform scale or a skew (recorded limit). A group
+scope opens outside its ancestors' clips and its content re-pushes them inside
+it, so a blurred group's content is cut by an ancestor's `overflow` clip before
+the blur but its 3σ ink is not cut after it (recorded deviation).
 
 The Backdrop Root set is filter-effects-2's list — `filter`, `opacity < 1`,
 `mask`, `clip-path`, `mix-blend-mode`, `backdrop-filter`, and the root element —
-plus an element exporting an opacity curve, at every reading: Web Animations
-makes a running `opacity` animation act as `will-change: opacity`, and the
-range a commit fixes is composed at every instant of the curve. It is a
-separate predicate (`walker::is_backdrop_root`) rather than
-`stacking::needs_group_rendering` because that one also answers `true` for
+plus an element with a current `opacity` animation, exported or not, at every
+reading: Web Animations makes it act as `will-change: opacity`, and a
+descendant's backdrop range fixed at commit is composed at every instant of an
+exported curve. It is a separate predicate (`walker::is_backdrop_root`) rather
+than `stacking::needs_group_rendering` because that one also answers `true` for
 `isolation: isolate`, which the spec's list does not contain. `will-change`
 roots are **not** honored, which is the one observable gap: `will-change` is in
 the fork's author grammar, so a `backdrop-filter` element inside a

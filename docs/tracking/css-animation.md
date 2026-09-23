@@ -87,13 +87,16 @@ concretely, so the tables above are read as "the target" and this section as
 - **Where the frame work happens.** `Document::advance_animations(now)` runs on
   the document's owner thread — the Lynx main thread once the script starts —
   driven by `BeginFrame` commands that carry the presenting side's clock
-  reading; no JavaScript is involved. An animation the commit exported as a
-  composite curve (below) receives no per-frame `BeginFrame` at all: the
-  compositor samples the curve itself, and the main thread hears about the
-  animation again only when a finite curve runs out (one boundary
-  `BeginFrame` for the finish restyle) or something else commits. It is a Stylo
-  animation-only traversal, which does no selector matching and reads no
-  snapshots, over just the animating elements and whatever inherits from them.
+  reading; no JavaScript is involved. For an animation the commit exported as
+  a composite curve (below), a window painter sends no per-frame `BeginFrame`
+  at all: the compositor samples the curve itself, and the main thread hears
+  about the animation again only when a finite curve runs out (a `BeginFrame`
+  per frame from its end until the finish restyle's commit is adopted) or
+  something else commits. An offscreen `Painter::tick` sends a `BeginFrame`
+  on every call whatever the frame reports, so a headless host still ticks
+  the main thread each frame. It is a Stylo animation-only traversal, which
+  does no selector matching and reads no snapshots, over just the animating
+  elements and whatever inherits from them.
   A property that cannot move a box never reaches layout, because the damage
   harvest only invalidates layout for damage that says relayout.
 - **When an animation starts.** The flush arms it; the first `BeginFrame` after
@@ -133,32 +136,97 @@ concretely, so the tables above are read as "the target" and this section as
   element and **642 µs** with all 120; the animation half of that is 5.2 µs and
   380 µs, so the tick is O(animating) at roughly 3.2 µs per element. A `width`
   animation, which does reach layout, costs 24 µs more at one element and 69 µs
-  more at 120 — that is the reflow the paint-only path avoids.
+  more at 120 — that is the reflow the paint-only path avoids. These `frame_*`
+  and `tick_*` arms time the main-thread path. `frame_card_text_*` and
+  `frame_shimmer_rows` time the frame the painter runs instead — a main-thread
+  tick only when the committed frame asks for one, then the composition — over
+  cards holding a `<text>` and over a list of 200 shimmering rows.
 - **Composite curve export** (`dom::style::curve_export` +
   `dom::visual::curves`) closes §11's gap for the common case: at commit, an
   element whose one running animation moves only `opacity`/`transform` — with
   context-free keyframe values (numbers, absolute lengths, angles),
   `linear`/`cubic-bezier` easing, matched transform lists, both track ends
-  declared, no transitions, and, for a `transform` track, nothing structural
-  in the way (an enclosing composited group bounds the element wherever its
-  curve carries it, by a still clip or the viewport; the element's extent fits
-  three viewports; no individual transforms/motion path/perspective; a 2D
-  invertible world) — is re-expressed as an `AnimationSlot` curve on the
-  committed frame. Clips, scroll containers and sticky boxes inside or around
-  the animated subtree do not refuse it. Sampling mirrors stylo's `get_property_declaration_at_time` exactly
-  (interval pick, FROM-keyframe timing function, `1/(200×segment)` bezier
-  tolerance, iteration/direction emulation), so the compositor's frames and
-  the next commit's restyle land on the same values. Composition retargets
-  the element's group alpha and multiplies the transform delta
-  `pre·L(t)·Lc⁻¹·pre⁻¹` into its subtree's fragments, pushes, and hit
-  tests. Anything the exporter refuses simply keeps the per-frame
-  `BeginFrame` path — a refusal is never wrong.
+  declared, no transitions — is re-expressed as an `AnimationSlot` curve on
+  the committed frame. Sampling mirrors stylo's
+  `get_property_declaration_at_time` exactly (interval pick, FROM-keyframe
+  timing function, `1/(200×segment)` bezier tolerance, iteration/direction
+  emulation), so while the curve is inside its domain the compositor's frames
+  and the next commit's restyle land on the same values. Anything the
+  exporter refuses simply keeps the per-frame `BeginFrame` path — a refusal
+  is never wrong — and a refusal allocates no slot, so every slot carries a
+  live curve.
+- **Where the two sides differ.** Past a finite curve's end the compositor
+  holds the curve's end value, whatever the fill mode, until the commit of
+  the finish restyle is adopted — at least one frame. With a `forwards` fill
+  the restyle lands on that value; without one it returns to the base value
+  and those frames show the end value instead. And a finished animation that
+  fills does not export: in `animation: pulse 1s infinite, fade .3s forwards`
+  with both animating `opacity`, once `fade` finishes the compositor samples
+  `pulse` while the main thread shows `fade`'s fill. That one is value-level,
+  open until the export takes more than one animation. The cascade value of an exported animation is
+  stale between main-thread readings (`docs/style-assumptions.md` §12).
+- **Structure refuses only a curve with a `transform` track, and only where
+  its motion cannot be re-expressed or bounded** — and a refusal takes the
+  whole curve, its opacity track included, to main-thread ticks: individual
+  transforms, a motion path or an inherited perspective in the way; a world
+  matrix that is not 2D invertible; an element whose extent, `max(size, content_size)`, exceeds
+  `MAX_MOVING_EXTENT_VIEWPORTS` (three viewport areas; Firefox caps composited
+  transforms the same way); and an enclosing composited group that neither a
+  still clip nor the viewport bounds the element in, which only a scale range
+  through 0 on the group's side produces (`visual::space::movers_bounded`).
+  Clips (a `<text>`'s UA `overflow: clip` included), scroll containers (every
+  `overflow: hidden` card included), sticky boxes and enclosing groups, inside
+  or around the animated subtree, do not refuse it. The committed frame
+  records one compose space tree (`visual::space`) of scroll, sticky and
+  animation nodes in containing-block order; the curve's delta
+  `pre·L(t)·Lc⁻¹·pre⁻¹` is its animation node's map, so it applies at that
+  node's place on every path through it — fragments, layer pushes, clips,
+  image draws, filter bakes and hit tests alike — and composition retargets
+  the element's group alpha.
+- **Moving content is culled through the curve's reach.** Each exported
+  transform track carries, per op, the range its parameters take over the
+  whole curve domain (the cubic-bezier control-point hull covers overshoot).
+  The viewport pulls back through those ranges, so one encode serves every
+  instant: 200 list rows each running a shimmer encode only the rows that can
+  meet the list's window. Clips and scroll encode windows inside the moving
+  subtree bound as usual, and `content-visibility: auto` relevance follows.
+  A scale range reaching 0 bounds nothing; there the extent cap is what bounds
+  the encode. A composited group whose content moves inside it takes its rect
+  from that content carried through the same ranges, cut to its clips and to
+  the viewport pulled back into the group's space.
+- **Per-frame work is bounded by what the program draws.** Composition
+  samples only the curves and sticky boxes the compose program references;
+  the earliest curve end is a commit-time value. `has_live_curves` is true
+  when the program references a curve — the compositor then recomposes each
+  frame — so a frame whose curves are all culled composes once.
+  `has_exported_curves` is true when any curve exported: input hit tests then
+  sample at the input's instant, since a curve moves its element's hit area
+  even where nothing of it is drawn. A `filter: blur()` group whose content
+  carries a curve, or whose element's transform curve moves it across an
+  ancestor's clip, bakes at the frame's instant; its element's own
+  opacity-only curve does not make it, and each filter entry re-bakes on its
+  own readings.
+- **Side effects follow the animation, not its export** (web-animations-1:
+  an in-effect `opacity`/`transform` animation acts as `will-change` naming
+  it). The driver keeps two node bits, `animates_opacity` and
+  `animates_transform`, recomputed in `sync_animation_state`: an animation
+  counts while pending (its delay included), running or paused, or finished
+  with a `forwards`/`both` fill; a transition while pending or running.
+  Either bit makes the element a stacking context; the opacity bit also
+  forces its composited group and makes it a Backdrop Root at every reading;
+  the transform bit makes it the containing block of its absolute and fixed
+  descendants whatever its committed value, and relayouts them only when the
+  bit flips, at the animation's start and end. Paint order and containment
+  therefore do not change when an animation is refused, delayed, or handed
+  between the compositor and the main thread. Native Lynx always gives a
+  fixed box the page root; web-core leaves these side effects to the
+  browser, and this follows web-core.
 - **The scene rebuild was the dominant term.** Before the export, every
   frame carried a constant ~248 µs of scene rebuild: at one animating
   element that is 98% of the frame. An exported animation now rebuilds
   nothing per frame — composition replays the committed fragments with a
-  new sampled delta/alpha — and the numbers above apply only to the
-  fallback path.
+  new sampled delta/alpha — and the `frame_*` numbers above apply only to
+  the fallback path.
 - **Wiring the driver costs non-animating documents nothing**: `initial_commit`,
   `media_viewport_flip`, `var_chain_cascade`, and `noop_commit` in the `css`
   bench all sit within noise of their pre-driver medians. Reaching that required
@@ -174,10 +242,12 @@ concretely, so the tables above are read as "the target" and this section as
   important author and normal author declarations — and what all three engines
   do; what they move off the main thread is per-frame interpolation and
   rasterization, and what they throttle is the per-frame restyle, never the
-  cascade. Consequence: §12's query-time staleness seam is gone, because the
-  cascade output *is* the animated value and `Node::computed_style` is correct
-  mid-animation with no sync surface at all. The remaining gap versus a browser
-  is layerization, not the cascade.
+  cascade. For an animation that ticks on the main thread the cascade output
+  *is* the animated value, so `Node::computed_style` is correct mid-animation.
+  An exported curve is a render-private value: the main thread's cascade value
+  for it holds at its last tick or commit until something ticks or commits
+  again, so §12's query-time staleness seam is back for exported animations —
+  a known gap, not built.
 - **Two Stylo behaviors the driver has to correct**, both from the same area and
   both fixed without patching the fork. `process_animations_for_style` retains
   only unfinished animations, which would drop an

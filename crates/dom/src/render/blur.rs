@@ -35,15 +35,19 @@
 //! page that neither blurs nor filters a backdrop. Its cache is keyed on the
 //! commit id, and each entry re-bakes on its own two conditional readings:
 //!
-//! - the painter's **scroll generation**, when the entry's range rides a scroll or sticky node the
-//!   entry's own space does not: a blurred scroller's *content* moves under the blur, so its bake
-//!   depends on the offset, while an ordinary blurred box moves with it and its bake does not. So a
-//!   scroll frame over an ordinary blurred box re-bakes nothing.
-//! - the **timeline reading**, when the entry's range rides an animation node the entry's space
-//!   does not. A backdrop's range is a *prefix of the frame*, so anything animating in front of the
-//!   Backdrop Root is behind the element; a `filter: blur()` group holds content its own curves
-//!   move inside it, and on a moving element re-pushes its ancestors' clips, which stay where they
-//!   are while the group moves.
+//! - the painter's **scroll generation**, when some op in the entry's range and the entry's own
+//!   space differ in their innermost scroll or sticky node — a node on one path and not the other.
+//!   A blurred scroller's *content* moves under the blur; a blurred box inside a scroller moves
+//!   across the scroller's clip, which its range re-pushes and which stays still. Every Lynx scroll
+//!   container clips, so a blurred box inside one re-bakes on every scroll frame; only an entry no
+//!   scroll or sticky node moves relative to anything in its range re-bakes nothing.
+//! - the **timeline reading**, when a curve moves or fades some op in the range relative to the
+//!   entry ([`crate::FilterGroup::samples_animations`]). A backdrop's range is a *prefix of the
+//!   frame*, so anything animating in front of the Backdrop Root is behind the element, and the
+//!   element's own transform curve moves it over that prefix; a `filter: blur()` group holds
+//!   content its own curves move or fade inside it, and its element's transform curve moves it
+//!   across the ancestors' clips its range re-pushes, which stay where they are. The element's own
+//!   opacity-only curve changes no baked pixel.
 //!
 //! An entry whose range holds a `PushBackdrop` takes on that backdrop's two
 //! conditions when the commit records it. Scanning the range's ops alone
@@ -1253,9 +1257,9 @@ mod tests {
     /// An entry's two readings are independent, and each stays zero unless
     /// its own pixels depend on it.
     ///
-    /// This is what keeps a scroll frame over an ordinary blurred box, and an
-    /// animation tick over a backdrop nothing is moving behind, from
-    /// re-baking it.
+    /// This is what keeps a scroll frame over a blurred box no scroll node
+    /// moves relative to its range, and an animation tick over a backdrop
+    /// nothing is moving behind, from re-baking it.
     #[test]
     fn an_entry_reads_only_what_its_pixels_depend_on() {
         use crate::paint::compose::{Backdrop, FilterGroup};

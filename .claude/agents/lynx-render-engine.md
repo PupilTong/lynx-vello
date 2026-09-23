@@ -37,8 +37,10 @@ vello is the only wgpu dependency in this workspace, so it pins wgpu's major
 
 - `visual/`: `stacking.rs` (real recursive CSS stacking contexts),
   `build.rs`, `frame.rs` (`CommittedFrame`, `compose_into`), `hit.rs` (hit
-  testing is a pure read of the retained frame), `transform.rs`, `geometry.rs`,
-  `motion.rs`, `curves.rs`.
+  testing is a pure read of the retained frame), `space.rs` (the compose space
+  tree: scroll, sticky and animation nodes every record's map is formed
+  from), `reach.rs` (a transform curve's reach, which culls moving content),
+  `transform.rs`, `geometry.rs`, `motion.rs`, `curves.rs`.
 - `paint/`: `walker.rs` (viewport + clip culling, zero-alloc paint-order build),
   `painter.rs`, `background.rs`, `border.rs`, `shadow.rs`, `filters.rs`,
   `mask.rs`, `shape.rs`, `text.rs`, `compose.rs`, `convert.rs`,
@@ -69,7 +71,10 @@ vello is the only wgpu dependency in this workspace, so it pins wgpu's major
   ops encode anything without a texture.
 - Animations: stylo's animation engine plus an engine-owned timeline;
   `Document::advance_animations`; composite `opacity`/`transform` curves are
-  exported as `AnimationSlot`. The `has_animations` node bit is load-bearing.
+  exported as `AnimationSlot`. The `has_animations` node bit is load-bearing,
+  and so are `animates_opacity`/`animates_transform`: the web-animations side
+  effects (stacking context, group, Backdrop Root, containing block) key on
+  them, never on whether a curve exported.
 - Embedder side: `crates/bobcat-core/src/paint/` — `Painter` facade,
   `gesture.rs` (input routing and recognition; `dom` has no default-action
   machinery), `images.rs`, `graphics.rs`. The painter keeps a lock-free replica
