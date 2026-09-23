@@ -94,16 +94,20 @@ pub struct ScreenMetrics {
 }
 
 impl ScreenMetrics {
-    /// The metrics a view with no stated screen reports: its create-time
-    /// viewport, in physical pixels.
+    /// The metrics of a viewport `width`×`height` CSS pixels at
+    /// `device_pixel_ratio`, in physical pixels: `pixel_ratio` is the ratio
+    /// and the two sizes are the CSS size multiplied by it.
     ///
-    /// Not a screen, and not meant to be one — it is what a host that has no
-    /// display to measure, a headless capture among them, reports instead.
-    pub(crate) const fn for_viewport(viewport: Viewport) -> Self {
+    /// Not a screen, and not meant to be one. It is what a host that has no
+    /// screen to measure — a headless or offscreen capture — reports, named
+    /// explicitly at the call that builds its [`ViewSources`]: nothing in the
+    /// engine derives a screen on a host's behalf.
+    #[must_use]
+    pub const fn for_viewport(width: f32, height: f32, device_pixel_ratio: f32) -> Self {
         Self {
-            pixel_ratio: viewport.device_pixel_ratio,
-            pixel_width: viewport.width * viewport.device_pixel_ratio,
-            pixel_height: viewport.height * viewport.device_pixel_ratio,
+            pixel_ratio: device_pixel_ratio,
+            pixel_width: width * device_pixel_ratio,
+            pixel_height: height * device_pixel_ratio,
         }
     }
 }
@@ -463,17 +467,18 @@ pub struct ViewSources {
     /// measured it: the web-core algorithm in a browser, the monitor the
     /// window is on natively.
     ///
-    /// `None` derives the three numbers from the create-time viewport
-    /// instead — `pixel_ratio` is its device-pixel ratio and the two sizes
-    /// are its CSS size multiplied by that ratio — which is what a host with
-    /// no screen to measure, a headless capture among them, reports. Read
-    /// once as the realm opens and never updated, whichever it is.
-    pub screen: Option<ScreenMetrics>,
+    /// Required: every host names one. A host with no screen to measure — a
+    /// headless or offscreen capture — names
+    /// [`ScreenMetrics::for_viewport`] of its capture size. Read once as the
+    /// realm opens and never updated.
+    pub screen: ScreenMetrics,
 }
 
 impl ViewSources {
+    /// The sources of a view over `entry`, reporting `screen` as its
+    /// `SystemInfo`, with every other field at its default.
     #[must_use]
-    pub fn new(entry: impl Into<String>) -> Self {
+    pub fn new(entry: impl Into<String>, screen: ScreenMetrics) -> Self {
         Self {
             config: PageConfig::default(),
             fonts: Vec::new(),
@@ -484,7 +489,7 @@ impl ViewSources {
             init_data: None,
             global_props: None,
             initial_processor: String::new(),
-            screen: None,
+            screen,
         }
     }
 }
@@ -718,7 +723,7 @@ impl LynxGroup {
         let (reports, inbox) = ImageInbox::new();
         let fetcher = Rc::new(resources(reports));
         // The startup sources, issued rather than waited for: every author
-        // stylesheet in cascade order, then the entry. Nothing here waits —
+        // stylesheet in the order the view listed them, then the entry. Nothing here waits —
         // the fetcher takes each request and answers the one-shot minted with
         // it — so the load overlaps whatever this thread does next, which is
         // building this view's painter. Only the receivers cross; the fetcher
@@ -1248,14 +1253,15 @@ pub(crate) struct ViewAttachment {
 }
 
 /// The answers to the requests [`LynxGroup::create_lynx_view`] made on the
-/// embedder's thread, in the order the view uses them.
+/// embedder's thread.
 ///
-/// Order of *completion* is the fetcher's business; this is order of *use*. A
-/// sheet that mounted after the entry ran would restyle a document the card
-/// has already built, so the view's task reads these one at a time and in
-/// this order, whatever order they were answered in.
+/// Each is read by a task of its own on the view's owner, as it arrives: a
+/// sheet is mounted on the live document when its answer comes, and the entry
+/// completes the `bobcat:entry` module boot imports. Nothing orders the sheets
+/// against one another or against the entry, so the cascade order between
+/// several sheets is the order the fetcher answered them in.
 pub(crate) struct StartupSources {
-    /// One per author stylesheet, in cascade order.
+    /// One per author stylesheet, in the order the view listed them.
     pub(crate) sheets: Vec<StartupSource>,
     pub(crate) entry: StartupSource,
 }
@@ -1264,30 +1270,12 @@ pub(crate) struct StartupSources {
 /// request [`LynxGroup::create_lynx_view`] already made for it.
 ///
 /// The URL travels beside the answer because it is what a failure is named
-/// by. Both of these are read inside the realm — the sheets by
-/// `createDocument`, the entry by `entryUrl` — so a load that failed throws
-/// out of the boot module, and the message is the whole of what the embedder
-/// is told.
+/// by: a sheet whose load failed ends the view with that sheet's error, and
+/// an entry whose load failed rejects boot's `import` with a message naming
+/// the URL.
 pub(crate) struct StartupSource {
     pub(crate) url: String,
     pub(crate) answer: SourceAnswer,
-}
-
-/// A startup nothing was ever requested for: no sheets, and an entry whose
-/// completion is already gone, so reading it is a failed load.
-///
-/// What opens a realm from one is this crate's own tests and benchmarks,
-/// which evaluate their scripts by hand. A view always carries real answers.
-impl Default for StartupSources {
-    fn default() -> Self {
-        Self {
-            sheets: Vec::new(),
-            entry: StartupSource {
-                url: String::new(),
-                answer: tokio::sync::oneshot::channel().1,
-            },
-        }
-    }
 }
 
 /// Hands the fetcher one startup request and keeps the answer.

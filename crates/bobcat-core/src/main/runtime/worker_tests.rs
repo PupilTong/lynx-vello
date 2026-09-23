@@ -156,9 +156,9 @@ impl Pair {
         )
     }
 
-    /// The same, over a page configuration of the test's own: the realm reads
-    /// it out of `pageConfig()` as it boots, so it has to be in place before
-    /// the realm is opened.
+    /// The same, over a page configuration of the test's own: the boot module
+    /// is written with it, so it has to be in place before the realm is
+    /// opened.
     fn unbooted_with_config(
         background_source: Option<&str>,
         mut startup: RealmStartup,

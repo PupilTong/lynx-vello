@@ -13,7 +13,8 @@ use std::num::NonZeroU32;
 use std::time::{Duration, Instant};
 
 use bobcat_core::{
-    DrawTarget, EngineEvent, EventRequester, LynxGroup, LynxView, Painter, StyleThreads,
+    DrawTarget, EngineEvent, EventRequester, LynxGroup, LynxView, Painter, ScreenMetrics,
+    StyleThreads,
 };
 use bobcat_resources::ViewResources;
 use flume::RecvTimeoutError;
@@ -58,27 +59,29 @@ pub(crate) fn run(program: &Program, options: &Options) -> Result<(), CliError> 
     )?;
     // Two constructions: the view, which is the page and its resources, and
     // the painter over the windowless GPU target it renders into.
-    // No screen to measure here, so `ViewSources::screen` stays `None` and
-    // `SystemInfo` reports this view's own metrics in physical pixels.
+    // No screen to measure here, so `SystemInfo` reports this view's own
+    // metrics in physical pixels, named as such.
+    let (width, height, ratio) = (
+        options.viewport_width,
+        options.viewport_height,
+        options.device_pixel_ratio,
+    );
+    let sources = program.sources(ScreenMetrics::for_viewport(width, height, ratio));
     let mut view = group
         .create_lynx_view(
-            options.viewport_width,
-            options.viewport_height,
-            options.device_pixel_ratio,
+            width,
+            height,
+            ratio,
             resources.builder(),
             Vec::new(),
-            program.sources(),
+            sources,
         )
         .map_err(|source| CliError::StartView {
             input: program.input.clone(),
             source,
         })?;
-    let mut painter = pollster::block_on(Painter::new(
-        DrawTarget::Offscreen,
-        options.viewport_width,
-        options.viewport_height,
-        options.device_pixel_ratio,
-    ))?;
+    let mut painter =
+        pollster::block_on(Painter::new(DrawTarget::Offscreen, width, height, ratio))?;
     painter.attach(&view)?;
 
     painter.tick(true)?;

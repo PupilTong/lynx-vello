@@ -16,6 +16,11 @@ use bobcat_resources::{Resources, ResourcesConfig};
 use bobcat_source::{LazyBundleInstaller, PageSource};
 use url::Url;
 
+/// The screen these tests' views report, as a host with no screen to measure
+/// names it. None of them reads `SystemInfo`.
+const SCREEN: bobcat_core::ScreenMetrics =
+    bobcat_core::ScreenMetrics::for_viewport(393.0, 727.0, 1.0);
+
 /// Where the fixtures are served from. The compiled card asks for its lazy
 /// container by a **rooted** path (webpack's `publicPath` is `/`), so each
 /// chunk is registered at this origin's root rather than beside the page.
@@ -46,7 +51,7 @@ fn registered(name: &str) -> (bobcat_core::ViewSources, Resources) {
             .register(&format!("{ORIGIN}/{chunk}"), *bytes, None)
             .expect("a chunk URL is a URL");
     }
-    (page.view_sources(), resources)
+    (page.view_sources(SCREEN), resources)
 }
 
 /// Boots one fixture and runs it until `expected` has been logged, painting

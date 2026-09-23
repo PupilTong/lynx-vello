@@ -19,6 +19,8 @@
 //! - [`consume_commands`], the one ordered consumer of the command stream;
 //! - [`consume_metrics`], which settles the page once per change of the painter's metrics, so a
 //!   resize with no JavaScript behind it still commits;
+//! - one [`load_style_sheet`] per author stylesheet the view listed, and one [`load_entry`] for its
+//!   MTS entry, each entering the realm when its answer arrives;
 //! - one [`load_module`] future per resource load an import produced;
 //! - one [`settle_future`] per host-backed `Future` a `.then` asked this realm to settle;
 //! - [`consume_worker_events`], the one ordered consumer of this view's workers;
@@ -112,8 +114,7 @@
 //! select, and the only one left. The synchronous host members are a wait of
 //! their own shape — this view's token against the answer — parked on inside
 //! a job through [`JsThread::wait`](crate::jobs::JsThread): stylesheet
-//! adoption, the `createDocument` boot mounts the view's own sheets through,
-//! [`crate::future`]'s `waitFuture`, which adds an optional
+//! adoption, [`crate::future`]'s `waitFuture`, which adds an optional
 //! deadline behind the token, and `__FlushElementTree` before a painter has
 //! bound, whose other arm is that same metrics watch.
 
@@ -131,11 +132,14 @@ use super::{AttachedView, GroupContext};
 use crate::background::WorkerEvent;
 #[cfg(test)]
 use crate::clock::ClockInstant;
+use crate::esm::ENTRY_MODULE_SPECIFIER;
 use crate::lifetime::{EndOnUnwind, Lifetime, Settles, run_job, serve_clock};
 use crate::link::{SourceAnswer, ToMain, ViewOutbox};
 use crate::resource::{LoadedSource, SourceRequest, unanswered_source};
-use crate::threads::panicked;
-use crate::view::{EngineEvent, LynxViewError, ScreenMetrics, ViewSources, Viewport};
+use crate::threads::{panicked, platform_script_error};
+use crate::view::{
+    EngineEvent, LynxViewError, StartupSource, StartupSources, ViewSources, Viewport,
+};
 
 /// One view's page: what every task of that view acts on.
 ///
@@ -341,10 +345,6 @@ impl Page {
     ///
     /// The order is the contract:
     ///
-    /// 0. **The entry boot has named and asked for**, where this entry is what resumed boot: the
-    ///    realm holds that source already. It runs first because everything below reports on what
-    ///    the realm has done, and boot's remainder is part of that — see
-    ///    [`MainThreadRuntime::complete_boot_entry`].
     /// 1. **Due timers.** A timer that has come due runs before the commit, so its mutation rides
     ///    the same frame as whatever else this entry changed. A zero-delay timer armed during boot
     ///    therefore fires inside boot's own epilogue and adds no commit of its own.
@@ -369,17 +369,6 @@ impl Page {
         }
         #[cfg(test)]
         self.epilogues.set(self.epilogues.get() + 1);
-        // The entry, where this entry is what resumed boot and boot asked for
-        // it: the realm already holds that source, so it is answered here
-        // rather than sent to the fetcher a second time, and boot's whole
-        // remainder — the BTS Worker, the render and the first flush — runs
-        // inside this call. First, because everything below reports on what
-        // the realm has done: the commit, the boot report and the deadline all
-        // have to see it.
-        if let Err(error) = runtime.complete_boot_entry(js) {
-            self.fail(EngineEvent::StartupFailed(error.into_script_error().into()));
-            return;
-        }
         for failure in runtime.run_due_timers(js) {
             self.outbox.engine_event(EngineEvent::TimerFailed(failure));
         }
@@ -411,6 +400,13 @@ impl Page {
             self.outbox.begin_frame_serviced(seq);
         }
         while let Some(url) = runtime.take_module_request() {
+            // Boot's entry is never the fetcher's to answer: `load_entry`, a
+            // task of this view since it was served, completes that module
+            // from the answer `create_lynx_view` already asked for, and
+            // completing it is what resumes the import this request stands for.
+            if url == ENTRY_MODULE_SPECIFIER {
+                continue;
+            }
             let answer = self
                 .outbox
                 .request_source(SourceRequest::Module(url.clone()));
@@ -420,7 +416,7 @@ impl Page {
             self.spawn(settle_future(Rc::clone(self), id, future));
         }
         // Every path that mounts author CSS — the startup sheets
-        // `createDocument` mounts, `adoptStyleSheet`, and any rules a card
+        // `load_style_sheet` mounts, `adoptStyleSheet`, and any rules a card
         // appends — runs inside an entry, so draining here is what covers
         // them all with one call site rather than one per mount.
         for request in runtime.take_font_face_requests() {
@@ -633,17 +629,18 @@ impl Page {
     ///
     /// **The first job of every view**, queued by [`serve_view`] before any of
     /// that view's tasks is spawned and before anything has been fetched: the
-    /// boot module creates the document, mounts the author sheets and imports
-    /// the entry, each through a host member that waits for the answer the
-    /// view was already promised. So a command that arrived before the realm
-    /// existed is a job queued behind this one, and finds a document.
+    /// boot module creates the document as its first statement and imports
+    /// the entry, which [`load_entry`] completes when its answer arrives, as
+    /// [`load_style_sheet`] mounts each author sheet. So a command, a sheet or
+    /// the entry that arrived before the realm existed is a job queued behind
+    /// this one, and finds a document.
     ///
     /// A job like every other entry, and the one that does not go through
     /// [`Self::enter`], because the realm it would enter does not exist until
     /// it returns. It holds the shared runtime
-    /// for the whole stretch, as an entry does — the boot module waits for a
-    /// stylesheet and for its entry, and the entry itself may adopt a
-    /// stylesheet and wait — but takes and stores `realm` under short borrows
+    /// for the whole stretch, as an entry does — an entry already completed
+    /// runs inside it, and may adopt a stylesheet and wait — but takes and
+    /// stores `realm` under short borrows
     /// either side of it, since what it is building is a local until the last
     /// of them. The checkpoint receiver is created while the runtime borrow is
     /// still held, so no sibling's bump between boot and the clock task's first
@@ -964,11 +961,6 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
         global_props,
         screen,
     } = sources;
-    // The screen the view reports, decided before anything is fetched: the
-    // embedder's measurement where it made one, and the create-time viewport
-    // in physical pixels where it did not. Nothing updates it afterwards, so
-    // a painter binding at other metrics leaves it alone.
-    let screen = screen.unwrap_or_else(|| ScreenMetrics::for_viewport(viewport));
     let ingredients = DocumentIngredients {
         viewport,
         config,
@@ -978,17 +970,15 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
     let page = Page::new(context, outbox, metrics.clone(), cancel);
     // Queued before the first task of this view is spawned, so it is the first
     // job of the view and nothing it owns can be served ahead of it. Nothing
-    // is waited for here: the realm opens now and the boot module is what
-    // reads the sheets and the entry, which is what lets the whole of boot run
-    // while the embedder builds this view's painter. The answer is dropped
-    // because there is nothing to do with it — a job is queued by the call
-    // rather than by the future it hands back, and `run_job` is what reports a
-    // trap inside it.
+    // is waited for here: the realm opens now and boot creates the document
+    // at once, which is what lets the whole of boot run while the embedder
+    // builds this view's painter. The answer is dropped because there is
+    // nothing to do with it — a job is queued by the call rather than by the
+    // future it hands back, and `run_job` is what reports a trap inside it.
     drop(run_job(&page, move |page| {
         page.open_realm(
             ingredients,
             RealmStartup {
-                startup,
                 screen,
                 background_entry,
                 initial_processor,
@@ -999,6 +989,16 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
         );
         Some(())
     }));
+    // One task per startup source, each entering the realm as its answer
+    // arrives and therefore behind `open_realm`. Nothing orders them against
+    // one another: a sheet mounts when it arrives, before or after the entry
+    // has evaluated, and several sheets mount in the order the fetcher
+    // answered them.
+    let StartupSources { sheets, entry } = startup;
+    for sheet in sheets {
+        page.spawn(load_style_sheet(Rc::clone(&page), sheet));
+    }
+    page.spawn(load_entry(Rc::clone(&page), entry));
     page.spawn(consume_commands(Rc::clone(&page), commands));
     page.spawn(consume_metrics(Rc::clone(&page), metrics));
     page.run_owner().await;
@@ -1082,6 +1082,76 @@ async fn consume_metrics(page: Rc<Page>, mut metrics: watch::Receiver<Option<Vie
         }
         <Page as Settles>::settle(&page).await;
     }
+}
+
+/// The view's MTS entry: the answer to the request `create_lynx_view` made,
+/// completed into the realm as `bobcat:entry`.
+///
+/// A task like [`load_module`], and for the same reason: the answer may take
+/// as long as the fetcher likes, and waiting for it on a task parks nothing —
+/// no job of this view's, no job of a sibling's. Its entry into the realm is
+/// queued behind `open_realm`, the view's first job, so the realm it completes
+/// the module in always exists. Boot's `import("bobcat:entry")` may have been
+/// made already, in which case this is what resumes it, or not yet, in which
+/// case the import finds the module in the registry.
+///
+/// What fails here fails the boot: a load the fetcher could not make is
+/// completed as an error naming the URL, which rejects boot's import, and a
+/// realm that refuses the completion is reported the way [`load_module`]
+/// reports one.
+///
+/// Except where the embedder released the view meanwhile. Completing the entry
+/// evaluates it, and an entry that adopts a stylesheet parks inside that
+/// evaluation on a wait whose first arm is the view's token, so a release
+/// makes the evaluation throw. That is the end of a view nobody is watching
+/// rather than a failure of it, and is not reported.
+async fn load_entry(page: Rc<Page>, entry: StartupSource) {
+    let StartupSource { url, answer } = entry;
+    let answered = await_source(answer).await;
+    let completing = Rc::clone(&page);
+    page.enter(move |runtime, js| {
+        if let Err(error) = runtime.complete_entry(js, &url, answered) {
+            if completing.outbox.is_cancelled() {
+                completing.end();
+                return;
+            }
+            completing.fail(EngineEvent::StartupFailed(error.into_script_error().into()));
+        }
+    })
+    .await;
+}
+
+/// One author stylesheet the view listed: the answer to the request
+/// `create_lynx_view` made, mounted on the live document when it arrives.
+///
+/// A task like [`load_entry`], queued behind `open_realm` for the same reason,
+/// so the document exists by the time this enters the realm: boot's first
+/// statement creates it. Nothing waits for it — not boot, not the entry, and
+/// not another sheet — so a sheet that arrives after the entry evaluated
+/// restyles a document the entry already built, and the cascade order between
+/// several sheets is the order they arrived in. The epilogue of the entry that
+/// mounts it commits the restyle, and asks for any faces the sheet declared.
+///
+/// A load that failed, or an answer that is not a stylesheet, ends the view the
+/// way [`load_module`]'s failures do: a startup failure carrying the resource
+/// error while boot is still outstanding, and a run failure once it has been
+/// reported.
+async fn load_style_sheet(page: Rc<Page>, sheet: StartupSource) {
+    let StartupSource { url, answer } = sheet;
+    let answered = await_source(answer).await;
+    let mounting = Rc::clone(&page);
+    page.enter(move |runtime, _| {
+        if let Err(error) = runtime.mount_startup_sheet(&url, answered) {
+            mounting.fail(if mounting.boot_reported.get() {
+                EngineEvent::ScriptRunError(platform_script_error(format!(
+                    "loading stylesheet {url}: {error}"
+                )))
+            } else {
+                EngineEvent::StartupFailed(error)
+            });
+        }
+    })
+    .await;
 }
 
 /// One resource load an import produced.

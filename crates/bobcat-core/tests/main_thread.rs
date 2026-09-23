@@ -6,6 +6,11 @@ use std::sync::Arc;
 use bobcat_core::{DrawTarget, LynxView, LynxViewError, NoWakeup, ViewSources};
 use support::{FetcherDouble, solo_view, wait_for_script};
 
+/// The screen these tests' views report, as a host with no screen to measure
+/// names it. None of them reads `SystemInfo`.
+const SCREEN: bobcat_core::ScreenMetrics =
+    bobcat_core::ScreenMetrics::for_viewport(32.0, 24.0, 1.0);
+
 /// Builds a loading view; callers drive boot through normal pump turns.
 async fn view(
     source: &[u8],
@@ -19,7 +24,7 @@ async fn view(
         1.0,
         DrawTarget::Offscreen,
         |_reports| fetcher,
-        ViewSources::new("main.js"),
+        ViewSources::new("main.js", SCREEN),
     )
     .await
 }

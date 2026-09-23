@@ -23,7 +23,7 @@ use crate::main::WorkerFactory;
 use crate::main::runtime::{bound_metrics, install_shared_modules};
 use crate::main::tree::PageConfig;
 use crate::resource::{SourceCompletion, SourceRequest};
-use crate::view::{NoWakeup, StartupSource, StartupSources};
+use crate::view::{NoWakeup, ScreenMetrics, StartupSource, StartupSources};
 
 /// How many times the harness lets every ready task run before it gives up on
 /// something happening. A hang detector rather than a schedule: everything
@@ -44,35 +44,33 @@ where
     thread.run(body);
 }
 
-/// Opens one page's realm the way [`serve_view`] does: as one job of that
-/// page's, awaited, with its entry already answered.
+/// Opens one page's realm the way [`serve_view`] does — as one job of that
+/// page's, awaited — and then completes its entry the way [`load_entry`] does,
+/// from an answer the fetcher has already given.
 async fn open_realm(page: &Rc<Page>, entry: &str, url: &str) {
-    let startup = RealmStartup {
-        startup: answered_startup(entry, url, &page.lifetime.token().clone()),
-        ..RealmStartup::default()
-    };
     crate::lifetime::run_job(page, move |page| {
-        page.open_realm(ingredients(), startup);
+        page.open_realm(ingredients(), RealmStartup::default());
         Some(())
     })
     .await;
+    load_entry(
+        Rc::clone(page),
+        answered_entry(entry, url, &page.lifetime.token().clone()),
+    )
+    .await;
 }
 
-/// The startup of a view that lists no stylesheets and whose entry the
-/// fetcher answered before the realm opened, which is what every pin here
-/// that is not about the loading itself wants.
-fn answered_startup(entry: &str, url: &str, token: &CancellationToken) -> StartupSources {
+/// An entry the fetcher answered before the realm opened, which is what every
+/// pin here that is not about the loading itself wants.
+fn answered_entry(entry: &str, url: &str, token: &CancellationToken) -> StartupSource {
     let (completion, answer) = SourceCompletion::new(token.clone());
     completion.complete(Ok(LoadedSource::Entry {
         source: entry.to_owned(),
         url: url.to_owned(),
     }));
-    StartupSources {
-        sheets: Vec::new(),
-        entry: StartupSource {
-            url: url.to_owned(),
-            answer,
-        },
+    StartupSource {
+        url: url.to_owned(),
+        answer,
     }
 }
 
@@ -116,6 +114,11 @@ fn metrics_of(viewport: Viewport) -> (u32, u32, u32) {
     )
 }
 
+/// The screen every view here reports: its own create-time viewport, as a
+/// host with no screen to measure names it. Nothing here reads `SystemInfo`.
+const SCREEN: ScreenMetrics =
+    ScreenMetrics::for_viewport(CREATE_VIEWPORT.width, CREATE_VIEWPORT.height, 1.0);
+
 fn ingredients() -> DocumentIngredients {
     DocumentIngredients::for_test(CREATE_VIEWPORT, PageConfig::default())
 }
@@ -141,14 +144,19 @@ struct Harness {
 
 impl Harness {
     fn new(context: Rc<GroupContext>, workers: mpsc::UnboundedReceiver<WorkerCommand>) -> Self {
-        Self::serving(context, workers, ViewSources::new("app:///main.js"))
+        Self::serving(context, workers, ViewSources::new("app:///main.js", SCREEN))
     }
 
     /// A view no painter has bound, which is where its first
     /// `__FlushElementTree` parks. The test binds it by writing
     /// [`Harness::metrics`].
     fn unbound(context: Rc<GroupContext>, workers: mpsc::UnboundedReceiver<WorkerCommand>) -> Self {
-        Self::binding(context, workers, ViewSources::new("app:///main.js"), None)
+        Self::binding(
+            context,
+            workers,
+            ViewSources::new("app:///main.js", SCREEN),
+            None,
+        )
     }
 
     /// A second view in the same group. The group has one worker channel and
@@ -280,6 +288,22 @@ impl Harness {
             source: source.to_owned(),
             url: url.to_owned(),
         }));
+    }
+
+    /// Answers the outstanding request for the stylesheet at `url` with
+    /// author CSS, whatever else is outstanding.
+    fn answer_style_sheet_at(&mut self, url: &str, css: &str) {
+        let position = self
+            .sources
+            .iter()
+            .position(
+                |(request, _)| matches!(request, SourceRequest::StyleSheet(named) if named == url),
+            )
+            .expect("that stylesheet request is outstanding");
+        let (_, completion) = self.sources.remove(position);
+        completion.complete(Ok(LoadedSource::StyleSheet(
+            crate::resource::StyleSheetSource::Text(css.to_owned()),
+        )));
     }
 
     /// Answers one outstanding stylesheet request with author CSS.
@@ -809,7 +833,7 @@ fn page_data_reaches_the_realm_it_was_given_to() {
             ViewSources {
                 init_data: Some(r#"{"boxes": 2}"#.to_owned()),
                 global_props: Some(r#"{"theme": "dark"}"#.to_owned()),
-                ..ViewSources::new("app:///main.js")
+                ..ViewSources::new("app:///main.js", SCREEN)
             },
         );
         harness
@@ -863,6 +887,62 @@ fn a_burst_of_commands_is_one_commit_and_one_acknowledgement() {
             harness.view.published.commit(),
             Some(booted + 1),
             "the whole burst committed once"
+        );
+    });
+}
+
+/// A frame committed and held before the binding never replaces a newer one.
+///
+/// The realm's first epilogue commits the empty document before the entry has
+/// arrived, and holds that frame because nothing has bound. Here the entry and
+/// the binding then land together, the entry's task woken first, so the job
+/// that completes the entry runs before the metrics task's settle: its boot
+/// flush finds the binding already made and publishes at once. The held frame
+/// is older than that one, so nothing may publish it afterwards — what the
+/// view ends with is the document's own last commit.
+#[test]
+fn a_frame_held_before_the_binding_never_replaces_a_newer_one() {
+    on_a_js_thread(|thread| async move {
+        let (context, workers) = group(&thread);
+        let mut harness = Harness::unbound(context, workers);
+        harness
+            .until("the view never asked for its entry", |h| {
+                !h.sources.is_empty()
+            })
+            .await;
+        for _ in 0..8 {
+            harness.turn().await;
+        }
+        assert_eq!(
+            harness.view.published.commit(),
+            None,
+            "the empty document's frame is held rather than published"
+        );
+
+        harness.answer("app:///main.js", ONE_BOX);
+        harness.metrics.send_replace(Some(CREATE_VIEWPORT));
+        harness
+            .until("boot never finished once bound", |h| h.finished())
+            .await;
+        harness.background = Some(harness.background_worker());
+        let (probe, probed) = std::sync::mpsc::channel();
+        harness
+            .commands
+            .send(ToMain::Probe(Box::new(move |document| {
+                let _ = probe.send(document.committed_frame().map(|frame| frame.commit_id()));
+            })))
+            .expect("the view is serving");
+        let mut last = None;
+        harness
+            .until("the probe never ran", |_| {
+                last = probed.try_recv().ok();
+                last.is_some()
+            })
+            .await;
+        assert_eq!(
+            harness.view.published.commit(),
+            last.flatten(),
+            "the published frame is the document's newest commit"
         );
     });
 }
@@ -1703,7 +1783,7 @@ fn script_finished_is_published_once_without_any_bts_acknowledgement() {
     // nothing at all — and the view is ready anyway, exactly once.
     on_a_js_thread(|thread| async move {
         let (context, workers) = group(&thread);
-        let mut sources = ViewSources::new("app:///main.js");
+        let mut sources = ViewSources::new("app:///main.js", SCREEN);
         sources.background_entry = Some("app:///background.js".into());
         let mut harness = Harness::serving(context, workers, sources);
         harness
@@ -1814,7 +1894,7 @@ lynx.getJSContext().addEventListener('flood', () => {
 fn a_bts_worker_that_fails_reports_worker_failed_and_leaves_boot_alone() {
     on_a_js_thread(|thread| async move {
         let (context, workers) = group(&thread);
-        let mut sources = ViewSources::new("app:///main.js");
+        let mut sources = ViewSources::new("app:///main.js", SCREEN);
         sources.background_entry = Some("app:///background.js".into());
         let mut harness = Harness::serving(context, workers, sources);
         harness
@@ -2003,12 +2083,12 @@ fn a_disposal_reply_queued_with_view_release_is_not_discarded() {
 
 /// An entry the fetcher has not answered parks nothing.
 ///
-/// `entryUrl()` answers the boot module a `bobcat:future` instead of a URL
-/// where the entry is still outstanding, and boot awaits it: the answer is
-/// read on a task of this view's owner, and the job boot ran in has already
-/// returned. So this view's realm is live with a document in it, its
-/// `BeginFrame` is acknowledged by a job of its own, and the entry arriving
-/// later is what finishes the boot.
+/// Boot's `import("bobcat:entry")` stays pending while the entry is
+/// outstanding: the answer is awaited on a task of this view's owner, and the
+/// job boot ran in has already returned. So this view's realm is live with a
+/// document in it, its `BeginFrame` is acknowledged by a job of its own, and
+/// the task completing `bobcat:entry` when the answer arrives is what finishes
+/// the boot.
 #[test]
 fn an_outstanding_entry_leaves_the_view_serving() {
     on_a_js_thread(|thread| async move {
@@ -2061,19 +2141,103 @@ fn an_outstanding_entry_leaves_the_view_serving() {
     });
 }
 
-/// The realm opens and the document is created before any source has
-/// arrived: the boot module's first statement is what builds it, and the
-/// sheets it mounts are answers the view was promised rather than answers it
-/// has.
+/// A page whose one box carries the class both listed sheets style.
+const CLASSED_BOX: &str = r"
+globalThis.renderPage = function () {
+  const page = __CreatePage('card', 0);
+  const box = __CreateView(0);
+  __SetClasses(box, 'box');
+  __AppendElement(page, box);
+};
+";
+
+/// Author sheets mount as their answers arrive, on the live document, and
+/// nothing waits for them.
 ///
-/// Observed through the one thing visible from outside while the entry is
-/// still outstanding — a stylesheet that fails to load. Mounting is
-/// `createDocument`'s, so a failure that arrives with the entry request still
-/// unanswered says the document was being built before the entry was read.
-/// The message is the whole of what an embedder is told about it, so it has
-/// to name the sheet.
+/// The view lists `a.css` then `b.css`; the test answers `b.css`, then the
+/// entry, and `a.css` only once boot has finished. Both end up mounted — the
+/// height is `b.css`'s alone — and the width both declare is `a.css`'s,
+/// because it arrived last: the cascade order between listed sheets is the
+/// order the fetcher answered them in, not the order they were listed in.
 #[test]
-fn the_document_is_created_before_the_entry_is_read() {
+fn author_sheets_mount_in_arrival_order_without_holding_up_boot() {
+    on_a_js_thread(|thread| async move {
+        let (context, workers) = group(&thread);
+        let mut harness = Harness::serving(
+            context,
+            workers,
+            ViewSources {
+                style_sheets: vec!["app:///a.css".to_owned(), "app:///b.css".to_owned()],
+                ..ViewSources::new("app:///main.js", SCREEN)
+            },
+        );
+        harness
+            .until("the view never asked for its stylesheets", |h| {
+                h.wants_a_style_sheet()
+            })
+            .await;
+        harness.answer_style_sheet_at("app:///b.css", ".box{width:30px;height:20px}");
+        let entry = harness
+            .sources
+            .iter()
+            .position(|(request, _)| matches!(request, SourceRequest::Entry(_)))
+            .expect("the entry request is outstanding");
+        let (_, completion) = harness.sources.remove(entry);
+        completion.complete(Ok(LoadedSource::Entry {
+            source: CLASSED_BOX.to_owned(),
+            url: "app:///main.js".to_owned(),
+        }));
+        harness
+            .until("boot never finished with a sheet outstanding", |h| {
+                h.finished()
+            })
+            .await;
+        assert!(
+            harness.wants_a_style_sheet(),
+            "boot finished with a.css still unanswered"
+        );
+        harness.background = Some(harness.background_worker());
+
+        let booted = harness.view.published.commit();
+        harness.answer_style_sheet_at("app:///a.css", ".box{width:10px}");
+        // The entry that mounts it commits the restyle, with nothing else
+        // behind it: no command and no JavaScript of the card's.
+        harness
+            .until("the late sheet never committed", |h| {
+                h.view.published.commit() > booted
+            })
+            .await;
+        let (probe, probed) = std::sync::mpsc::channel();
+        harness
+            .commands
+            .send(ToMain::Probe(Box::new(move |document| {
+                let page = document.document_element().id();
+                let box_id = document.get(page).expect("the page is live").child_ids()[0];
+                let size = document.rounded_layout(box_id).expect("laid out").size;
+                let _ = probe.send((size.width, size.height));
+            })))
+            .expect("the view is serving");
+        let mut size = None;
+        harness
+            .until("the probe never ran", |_| {
+                size = probed.try_recv().ok();
+                size.is_some()
+            })
+            .await;
+        assert!(harness.startup_failure().is_none());
+        assert_eq!(
+            size,
+            Some((10.0, 20.0)),
+            "both sheets are mounted, and a.css, which arrived last, wins the width"
+        );
+    });
+}
+
+/// A listed sheet that fails to load ends the view with the load's own
+/// resource error while boot is still outstanding — the entry here is never
+/// answered at all, so nothing waited for it first.
+#[test]
+fn a_listed_sheet_that_fails_to_load_is_a_resource_startup_failure() {
     on_a_js_thread(|thread| async move {
         let (context, workers) = group(&thread);
         let mut harness = Harness::serving(
@@ -2081,7 +2245,7 @@ fn the_document_is_created_before_the_entry_is_read() {
             workers,
             ViewSources {
                 style_sheets: vec!["app:///a.css".to_owned()],
-                ..ViewSources::new("app:///main.js")
+                ..ViewSources::new("app:///main.js", SCREEN)
             },
         );
         harness
@@ -2095,11 +2259,17 @@ fn the_document_is_created_before_the_entry_is_read() {
                 h.startup_failure().is_some()
             })
             .await;
-        let message = harness.startup_failure().expect("a startup failure");
-        assert!(message.contains("app:///a.css"), "{message}");
+        assert!(
+            harness.events.iter().any(|event| matches!(
+                event,
+                EngineEvent::StartupFailed(LynxViewError::Resource(_))
+            )),
+            "{:?}",
+            harness.events
+        );
         assert!(
             harness.wants_its_entry(),
-            "and the entry was never answered, so nothing waited for it first"
+            "and the entry was never answered"
         );
     });
 }
@@ -2137,7 +2307,7 @@ fn a_synchronous_adoption_parks_javascript_and_leaves_a_siblings_tasks_running()
             context,
             ViewSources {
                 style_sheets: vec!["app:///b.css".to_owned()],
-                ..ViewSources::new("app:///b.js")
+                ..ViewSources::new("app:///b.js", SCREEN)
             },
         );
         // Both of B's startup requests are outstanding from its construction,

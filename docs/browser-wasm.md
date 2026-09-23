@@ -166,11 +166,11 @@ waits for none of them. That task creates a
 QuickJS realm at once, preloads `bobcat:runtime`, `bobcat:element` and the
 timer and event-target modules, and evaluates
 `bobcat:boot`. That module's first statement constructs its `Document` over the
-page configuration it read, which is what builds the page and mounts the author
-sheets in cascade order, waiting on each answer still outstanding; the
-statement after it reads and registers the entry the same way. It then uses
-top-level await to import
-the entry before it
+page configuration written into it, which is what builds the page; each author
+sheet is mounted on it by a task of the view when its answer arrives, so
+several sheets cascade in arrival order. It then uses top-level await to import
+the entry — `bobcat:entry`, which a task of the view completes from the
+entry's answer — before it
 calls a present `globalThis.renderPage` or dispatches `__RenderPage` on the
 realm-local EventTarget returned by `lynx.getEngine()`, and finally flushes the
 element tree. QuickJS drains its owned pending-job queue at each turn.
@@ -203,7 +203,7 @@ the family checked against them, inside the call that builds a view, so both
 must precede a load, and a family nothing provides makes that load reject with
 the construction error rather than through a lifecycle event. Author stylesheets
 reach core the way the entry module does — fetched and registered by the Render
-Worker, named in the load, mounted as author-origin rules in cascade order. The
+Worker, named in the load, mounted as author-origin rules as each answer arrives. The
 stylesheet contract has a second arm for pre-parsed CSS. Raw JavaScript and
 XML loads take the text arm; `loadTemplate` and `loadZip` decode binary containers
 through `bobcat-source::PageSource` and register their lowered `StyleInfo` through

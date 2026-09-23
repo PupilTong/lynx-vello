@@ -1,6 +1,11 @@
 use bobcat_source::native::{ConvertError, convert};
 use bobcat_source::web::css_property::{CssPropertyId, token_types};
 
+/// The screen these tests' views report, as a host with no screen to measure
+/// names it. None of them reads `SystemInfo`.
+const SCREEN: bobcat_core::ScreenMetrics =
+    bobcat_core::ScreenMetrics::for_viewport(32.0, 24.0, 1.0);
+
 const SECTION_ROUTE: u8 = 10;
 const SECTION_CONFIG: u8 = 6;
 const SECTION_ROOT_LEPUS: u8 = 11;
@@ -495,7 +500,7 @@ fn external_page_entry_must_be_selected_explicitly() {
     let page = bobcat_source::PageSource::from_native_bundle(&url, &bytes, "library__main-thread")
         .unwrap();
     assert!(page.config().enable_css_selector);
-    assert!(!page.view_sources().entry.is_empty());
+    assert!(!page.view_sources(SCREEN).entry.is_empty());
 }
 
 #[test]
@@ -676,7 +681,7 @@ async fn named_lepus_chunks_load_and_run_on_every_call() {
             1.0,
             resources.builder(),
             Vec::new(),
-            page.view_sources(),
+            page.view_sources(SCREEN),
         )
         .unwrap();
     // Boot's first flush waits for a painter to bind the view, and this waits
@@ -736,7 +741,7 @@ async fn named_css_is_loaded_by_url_after_native_web_conversion() {
         ])]);
         for web in [false, true] {
             let page = default_page(&native, web);
-            let mut sources = page.view_sources();
+            let mut sources = page.view_sources(SCREEN);
             // Isolate explicit named-sheet loading from ordinary boot styles.
             sources.style_sheets.clear();
             let resources = Resources::new(ResourcesConfig::default(), || {});
@@ -797,7 +802,7 @@ fn native_js_data_processor_requires_a_boolean_and_survives_web_conversion() {
         for web in [false, true] {
             assert_eq!(
                 default_page(&native, web)
-                    .view_sources()
+                    .view_sources(SCREEN)
                     .config
                     .enable_js_data_processor,
                 expected,

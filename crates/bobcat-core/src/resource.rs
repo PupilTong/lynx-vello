@@ -35,14 +35,15 @@ pub trait ResourceFetcher: dom::FrameImages {
     /// Begins one source load without blocking its caller.
     ///
     /// **A view's startup sources are requested before it runs at all**:
-    /// every author stylesheet in cascade order and then the entry are handed
-    /// over together inside
+    /// every author stylesheet in the order the view listed them and then the
+    /// entry are handed over together inside
     /// [`LynxGroup::create_lynx_view`](crate::LynxGroup::create_lynx_view),
     /// on the embedder's own thread, before it returns — this fetcher is
     /// built earlier in that same call, out of the builder the embedder
     /// passed, so a fetcher must be able to take them there. Order of
-    /// *completion* is this method's own business: the view reads the answers
-    /// in cascade order and then the entry whatever order they arrive in.
+    /// *completion* is this method's own business, and it is also the order
+    /// the view uses them in: each sheet is mounted as its answer arrives, so
+    /// several listed sheets cascade in the order this fetcher answered them.
     /// Every later request — an import, an adopted stylesheet, a worker
     /// script, a font, a plain fetch — is handed over in a
     /// [`LynxView::pump`](crate::LynxView::pump) turn instead.
@@ -318,41 +319,12 @@ pub(crate) fn unanswered_source() -> ResourceError {
     }
 }
 
-/// Waits inside a job for one answer the realm is already owed, with that
-/// realm's end as the first arm.
-///
-/// The one wait shape every synchronous host member that reads a source makes:
-/// `adoptStyleSheet`, the `createDocument` that mounts the view's author
-/// sheets, and the `entryUrl` that registers its entry. It parks the *job* it
-/// runs in — every task of the engine thread goes on running, including the
-/// one routing this very answer, and no other job does — so a realm holds its
-/// borrows across it. The token is biased first, so a release ends the wait
-/// rather than the answer doing it.
-///
-/// An answer that is already in hand costs no wait at all, which is what a
-/// startup source the fetcher completed before the realm opened is.
-pub(crate) fn wait_for_source(
-    thread: &crate::jobs::JsThreadHandle,
-    token: &tokio_util::sync::CancellationToken,
-    mut answer: crate::link::SourceAnswer,
-) -> Result<LoadedSource, String> {
-    use tokio::sync::oneshot::error::TryRecvError;
-    let reason = |answered: Result<LoadedSource, crate::view::LynxViewError>| {
-        answered.map_err(|error| error.to_string())
-    };
-    match answer.try_recv() {
-        Ok(answered) => reason(answered),
-        Err(TryRecvError::Closed) => reason(Err(unanswered_source().into())),
-        Err(TryRecvError::Empty) => thread.wait(async {
-            tokio::select! {
-                biased;
-                () = token.cancelled() => Err("view was released".to_owned()),
-                result = answer => reason(
-                    result.unwrap_or_else(|_| Err(unanswered_source().into())),
-                ),
-            }
-        }),
-    }
+/// What a request the fetcher answered with the wrong kind of source failed
+/// with: `request` names what was asked for and `answer` what came back.
+pub(crate) fn mismatched_source(request: &str, answer: &str) -> crate::LynxViewError {
+    let mut error = unanswered_source();
+    error.message = Arc::from(format!("the fetcher answered {request} with {answer}"));
+    error.into()
 }
 
 /// Stable resource failure details shared by every operation.

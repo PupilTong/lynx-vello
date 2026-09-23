@@ -2,8 +2,9 @@
 //!
 //! # Who owns the document
 //!
-//! The realm does, and it says so: the boot module's first statement is
-//! `export const document = new Document();`, and that constructor is what
+//! The realm does, and it says so: the boot module's first statement after its
+//! configuration literal is `export const document = new Document(config);`,
+//! and that constructor is what
 //! builds the document — out of the [`DocumentIngredients`] the view task
 //! staged before this realm was opened. No JavaScript in this realm runs
 //! ahead of that statement, so every host member that follows has a document
@@ -34,23 +35,23 @@ use dom::StylePool;
 use quickjs_rust_bridge::{HostArgument, HostValue};
 use smallvec::SmallVec;
 use tokio::sync::watch;
-use tokio_util::sync::CancellationToken;
 
 use super::quickjs::{ScriptEngine, ScriptRuntime};
 use crate::clock::ClockInstant;
 use crate::esm::{
     BTS_MODULE_SPECIFIER, BUNDLE_FETCH_MODULE_SOURCE, BUNDLE_FETCH_MODULE_SPECIFIER,
-    CONTEXT_MODULE_SOURCE, CONTEXT_MODULE_SPECIFIER, EVENT_TARGET_MODULE_SPECIFIER,
-    EVENT_TARGET_SOURCE, FUTURE_MODULE_SOURCE, FUTURE_MODULE_SPECIFIER, HOST_MODULE_SPECIFIER,
-    REQUIRE_MODULE_SOURCE, REQUIRE_MODULE_SPECIFIER, SECTION_URL_MODULE_SOURCE,
-    SECTION_URL_MODULE_SPECIFIER, TIMER_MODULE_SOURCE, TIMER_MODULE_SPECIFIER,
+    CONTEXT_MODULE_SOURCE, CONTEXT_MODULE_SPECIFIER, ENTRY_MODULE_SPECIFIER,
+    EVENT_TARGET_MODULE_SPECIFIER, EVENT_TARGET_SOURCE, FUTURE_MODULE_SOURCE,
+    FUTURE_MODULE_SPECIFIER, HOST_MODULE_SPECIFIER, REQUIRE_MODULE_SOURCE,
+    REQUIRE_MODULE_SPECIFIER, SECTION_URL_MODULE_SOURCE, SECTION_URL_MODULE_SPECIFIER,
+    TIMER_MODULE_SOURCE, TIMER_MODULE_SPECIFIER,
 };
 use crate::link::{InputEventPayload, ViewNotice, ViewOutbox};
 use crate::main::tree::{ImageOutcomes, LynxDocument, PageConfig, new_document};
-use crate::resource::{LoadedSource, unanswered_source};
+use crate::resource::{LoadedSource, mismatched_source};
 use crate::script::ScriptError;
 use crate::timers::{TimerState, install_timer_members, run_due_timers};
-use crate::view::{LynxViewError, ScreenMetrics, StartupSource, StartupSources, Viewport};
+use crate::view::{LynxViewError, ScreenMetrics, Viewport};
 
 const BOOT_MODULE_SPECIFIER: &str = "bobcat:boot";
 const ELEMENT_MODULE_SPECIFIER: &str = "bobcat:element";
@@ -141,10 +142,21 @@ mod style_sheets;
 
 /// What the MTS entry is given, which is [`crate::esm::MTS_CHUNK_PREAMBLE`] — the same
 /// list a lazy container's `main-thread` body is compiled against — plus the
-/// marker the compiler's own wrapper looks for. Built from it rather than
-/// written twice, so the two lists cannot drift.
+/// statement that names the entry, and the marker the compiler's own wrapper
+/// looks for. Built from it rather than written twice, so the two lists cannot
+/// drift.
+///
+/// **The entry names itself.** `import.meta.url` is the response URL the entry
+/// was registered under — the fetcher's, so a redirect is already applied —
+/// and handing it to `__BobcatInitEntry` before the body runs is what makes
+/// `__Card__` this page's own container URL for the body, for every chunk and
+/// stylesheet it names by `__Card__`, and for the base URL a `new Worker`
+/// specifier resolves against. The chunk preamble never carries it: a chunk
+/// that ran it would overwrite `__Card__` with its own URL.
 const ENTRY_PREAMBLE: &str = concat!(
     crate::esm::mts_chunk_preamble!(),
+    "import { __BobcatInitEntry } from \"bobcat:runtime\"; ",
+    "__BobcatInitEntry(import.meta.url);",
     "\n//# allFunctionsCalledOnLoad\n"
 );
 
@@ -202,7 +214,7 @@ const REMOVALS_PER_COLLECTION: u32 = 32;
 /// not told and does not decide.
 ///
 /// The boot module is what creates the document, by constructing a `Document`
-/// over the page configuration it read; the host member behind that
+/// over the page configuration written into it; the host member behind that
 /// constructor takes the rest from here. The view's own resources therefore
 /// never become JavaScript values — the realm names its metrics, its fonts and
 /// its style pool nowhere.
@@ -215,11 +227,11 @@ pub(crate) struct DocumentIngredients {
     /// screen, which the embedder names separately in
     /// [`ViewSources::screen`](crate::ViewSources::screen).
     pub(crate) viewport: Viewport,
-    /// The page configuration the view was built with, as the realm is handed
-    /// it: `pageConfig()` answers this once, the boot module parses it, and
-    /// the `createDocument` that builds the document is given it back. What
-    /// the document is actually built with is therefore the realm's copy, not
-    /// this one.
+    /// The page configuration the view was built with. The boot module is
+    /// written with its four switches as literals, and hands them back to the
+    /// `createDocument` that builds the document as four boolean arguments.
+    /// What the document is actually built with is therefore the realm's
+    /// copy, not this one.
     pub(crate) config: PageConfig,
     /// The fonts and the default family, already validated against a context
     /// of their own — see
@@ -228,19 +240,6 @@ pub(crate) struct DocumentIngredients {
     /// alone.
     pub(crate) text_context: Option<dom::TextContext>,
     pub(crate) style_pool: Option<Rc<StylePool>>,
-}
-
-/// One startup source the fetcher answered before the realm opened — what a
-/// view's are by the time boot reads them, and what a test that builds a realm
-/// by hand hands it instead of a fetcher.
-#[cfg(test)]
-pub(crate) fn answered_source(url: &str, source: LoadedSource) -> StartupSource {
-    let (completion, answer) = tokio::sync::oneshot::channel();
-    let _ = completion.send(Ok(source));
-    StartupSource {
-        url: url.to_owned(),
-        answer,
-    }
 }
 
 /// A metrics watch that already holds `viewport`, so the realm built over it
@@ -277,19 +276,14 @@ impl DocumentIngredients {
 /// [`update_global_props`](crate::LynxView::update_global_props) and
 /// [`reload`](crate::LynxView::reload) reach the realm through
 /// `ToMain::PageUpdate` instead, and never touch any of this. The four strings
-/// below become one-shot host members the realm alone reads; `startup` holds
-/// the answers the realm reads through two more of them; and
+/// below become one-shot host members the realm alone reads, and
 /// `background_entry` is spliced into the BTS Worker's boot script by
-/// `WorkerFactory::install`.
+/// `WorkerFactory::install`. Neither the author sheets nor the entry are here:
+/// each answer is a task of the view's owner, which mounts a sheet on the live
+/// document or completes the `bobcat:entry` module boot imports.
 pub(crate) struct RealmStartup {
-    /// The answers to the requests `create_lynx_view` already made: the author
-    /// sheets in cascade order, then the entry. The realm is what reads them —
-    /// `createDocument` mounts the sheets, `entryUrl` registers the entry —
-    /// so nothing here waits for any of them before the realm opens.
-    pub(crate) startup: StartupSources,
-    /// The screen the realm's `SystemInfo` reports, resolved by the view's
-    /// task: the embedder's own metrics where it named them, and the
-    /// create-time viewport in physical pixels where it did not.
+    /// The screen the realm's `SystemInfo` reports, as the embedder named it
+    /// in [`ViewSources::screen`](crate::ViewSources::screen).
     pub(crate) screen: ScreenMetrics,
     /// The BTS entry `bobcat:bts` imports, if the view named one.
     pub(crate) background_entry: Option<String>,
@@ -306,14 +300,12 @@ pub(crate) struct RealmStartup {
     pub(crate) native_modules: String,
 }
 
-/// Hand-written rather than derived, because there is no default screen: an
-/// embedder names one or the view derives one from its viewport. What opens a
-/// realm from `RealmStartup::default()` is this crate's own tests and
-/// benchmarks, and none of them reads `SystemInfo`.
+/// Hand-written rather than derived, because there is no default screen: every
+/// embedder names one. What opens a realm from `RealmStartup::default()` is
+/// this crate's own tests and benchmarks, and none of them reads `SystemInfo`.
 impl Default for RealmStartup {
     fn default() -> Self {
         Self {
-            startup: StartupSources::default(),
             screen: ScreenMetrics {
                 pixel_ratio: 1.0,
                 pixel_width: 0.0,
@@ -328,143 +320,13 @@ impl Default for RealmStartup {
     }
 }
 
-/// The MTS entry, from the answer the view is already owed to the URL the
-/// realm names it by.
-///
-/// Three members read it, which is why it is shared rather than owned: the
-/// `entryUrl` the boot module calls, the `createWorker` that resolves a
-/// specifier against the entry's URL, and the runtime, which hands the boot
-/// module's own `import()` the source it already holds instead of asking the
-/// host a second time.
-///
-/// **Reading it never parks.** An answer already in hand is named in the same
-/// call; one still outstanding becomes a `bobcat:future` the boot module
-/// awaits, settled on a task of the view's owner like any other. So a view
-/// whose entry is slow holds up nothing but its own boot — not its group's
-/// jobs, and not a sibling view's.
-#[derive(Default)]
-pub(super) struct EntrySlot {
-    /// The answer `create_lynx_view` already asked for, until `entryUrl` reads
-    /// it; `None` afterwards, which is what makes a second call an error.
-    answer: RefCell<Option<StartupSource>>,
-    /// The entry's response URL and its module source, waiting for the
-    /// `import()` the boot module makes next — which is what takes them.
-    module: RefCell<Option<(String, String)>>,
-    /// The entry's response URL, which every `new Worker` specifier resolves
-    /// against. `None` until the entry has been named: nothing in this realm
-    /// runs before the boot module, and the boot module names the entry before
-    /// it creates a worker.
-    base_url: RefCell<Option<String>>,
-}
-
-impl EntrySlot {
-    /// The slot a realm opens with: the answer to the entry request the view
-    /// already made, and nothing read yet.
-    fn over(answer: StartupSource) -> Self {
-        Self {
-            answer: RefCell::new(Some(answer)),
-            ..Self::default()
-        }
-    }
-
-    /// The base URL a `new Worker` specifier resolves against, once the entry
-    /// has answered. `None` is a worker asked for before then, which has no
-    /// base at all and is refused.
-    pub(super) fn base_url(&self) -> Option<String> {
-        self.base_url.borrow().clone()
-    }
-
-    /// Reads the entry the view already asked for, and answers it either way:
-    /// its response URL as a string where the fetcher has already answered,
-    /// and the id of a future that settles to that URL where it has not.
-    ///
-    /// Both shapes register the entry for the `import()` the boot module makes
-    /// next, so that import asks the host for nothing; what differs is only
-    /// *when*. The waiting shape is the one every asynchronous host operation
-    /// of this realm takes — a [`crate::future`] entry the boot module awaits,
-    /// settled on a task of the view's owner — so nothing is parked and no
-    /// other view's JavaScript stops for it.
-    ///
-    /// This is also the only place the entry's URL is learned: a redirect
-    /// makes the response URL a different one from the URL the view named, and
-    /// the response URL is what the entry's own relative imports and this
-    /// view's worker specifiers resolve against.
-    fn read(self: &Rc<Self>, futures: &crate::future::FutureTable) -> Result<HostValue, String> {
-        let Some(StartupSource { url, mut answer }) = self.answer.borrow_mut().take() else {
-            return Err("the realm already read its entry".to_owned());
-        };
-        if let Ok(answered) = answer.try_recv() {
-            return self.accept(&url, answered).map(HostValue::String);
-        }
-        let slot = Rc::clone(self);
-        let id = futures.register(async move {
-            let answered = answer
-                .await
-                .unwrap_or_else(|_| Err(unanswered_source().into()));
-            slot.accept(&url, answered).map(HostValue::String)
-        });
-        Ok(HostValue::Number(f64::from(id)))
-    }
-
-    /// Records one answered entry and names it. A load that failed, and an
-    /// answer that is not a script, are the message the boot module throws.
-    fn accept(
-        &self,
-        requested: &str,
-        answered: Result<LoadedSource, LynxViewError>,
-    ) -> Result<String, String> {
-        let source =
-            answered.map_err(|error| format!("loading the MTS entry {requested}: {error}"))?;
-        let LoadedSource::Entry { source, url } = source else {
-            return Err(format!("the MTS entry {requested} is not a script"));
-        };
-        *self.module.borrow_mut() = Some((url.clone(), entry_module_source(&source)));
-        *self.base_url.borrow_mut() = Some(url.clone());
-        Ok(url)
-    }
-
-    /// Answers this realm's outstanding entry request in place, with the
-    /// source in hand — what a fetcher would have answered it with.
-    ///
-    /// The seam `run_main_thread_script` boots a realm through, so a test or a
-    /// benchmark with its own entry text runs the production boot module
-    /// rather than a second one. It replaces whatever the realm was opened
-    /// with, which for those callers is an answer nobody will ever send, and
-    /// the answer is complete before boot reads it — so boot takes the
-    /// synchronous shape and finishes in the one call.
-    fn answer(&self, source: &str, url: &str) {
-        let (completion, answer) = tokio::sync::oneshot::channel();
-        let _ = completion.send(Ok(LoadedSource::Entry {
-            source: source.to_owned(),
-            url: url.to_owned(),
-        }));
-        *self.answer.borrow_mut() = Some(StartupSource {
-            url: url.to_owned(),
-            answer,
-        });
-    }
-
-    /// The entry's own source, for the one `import()` that names its URL.
-    ///
-    /// Answering it from here rather than through the fetcher is what keeps
-    /// the entry one request: it was fetched before this realm opened, and
-    /// [`Self::read`] is what has already read the answer.
-    fn take_module(&self, url: &str) -> Option<LoadedSource> {
-        let mut module = self.module.borrow_mut();
-        if module.as_ref().is_none_or(|(name, _)| name != url) {
-            return None;
-        }
-        let (url, source) = module.take()?;
-        Some(LoadedSource::Entry { source, url })
-    }
-}
-
 /// The realm's document and the ingredients it is built out of, plus the
 /// publish seam its commits leave through.
 ///
 /// Filling it is the realm's doing: `createDocument` builds the document out
 /// of the configuration the boot module hands it and the Rust-side ingredients
-/// below. Nothing empties it again — the slot drops with the view's task,
+/// below, and the view's author sheets are mounted on it as their answers
+/// arrive. Nothing empties it again — the slot drops with the view's task,
 /// after the realm that named the document has been freed.
 ///
 /// It is also where a view learns its painter's metrics, and so where the
@@ -474,14 +336,6 @@ impl EntrySlot {
 struct DocumentSlot {
     /// What a `createDocument` builds from, taken by the first one that runs.
     ingredients: Option<DocumentIngredients>,
-    /// The answers to this view's author stylesheet requests, in cascade
-    /// order, until the same `createDocument` mounts them.
-    ///
-    /// Order of *use* rather than of completion: a sheet mounted after the
-    /// entry ran would restyle a document the card has already built, so they
-    /// are read one at a time and in this order whatever order the fetcher
-    /// answered them in.
-    sheets: Vec<StartupSource>,
     document: Option<LynxDocument>,
     /// The device metrics an attached painter names, `None` until one binds.
     ///
@@ -502,7 +356,8 @@ struct DocumentSlot {
     /// its own size: it has no way to tell that the frame it adopted was
     /// committed for the metrics it has just replaced. The binding is what
     /// releases it — as it is, if the metrics match, or recomputed if they do
-    /// not.
+    /// not — and a newer commit published once bound drops it, so it is
+    /// never published after a frame that superseded it.
     held: Option<Arc<dom::CommittedFrame>>,
     /// The `load`s and `error`s the document's images owe, from both
     /// producers: the `image` component, which settles a `src` inside the
@@ -527,13 +382,11 @@ impl DocumentSlot {
     /// through.
     fn new(
         ingredients: DocumentIngredients,
-        sheets: Vec<StartupSource>,
         metrics: watch::Receiver<Option<Viewport>>,
         outbox: ViewOutbox,
     ) -> Rc<RefCell<Self>> {
         Rc::new(RefCell::new(Self {
             ingredients: Some(ingredients),
-            sheets,
             document: None,
             metrics,
             bound: false,
@@ -555,42 +408,33 @@ impl DocumentSlot {
     }
 
     /// Builds the realm's one document out of the configuration the boot
-    /// module read and the Rust-side ingredients the view was created with.
+    /// module hands it and the Rust-side ingredients the view was created
+    /// with.
     ///
     /// The ingredients are spent by the first call, which is the whole of the
     /// refusal a second one gets: a construction that fails rejects the boot
     /// module's `new Document(config)`, which fails the boot and ends the view,
     /// so nothing asks again.
     ///
-    /// Mounting the author sheets is where this **parks the job it runs in**,
-    /// once per sheet the fetcher has not answered yet: the engine thread's
-    /// tasks go on running — including the one routing that very answer — and
-    /// no other job does. A sheet that fails to load throws here, so the
-    /// failure the embedder sees is the boot module's rather than a resource
-    /// error of the view's own.
+    /// It never waits. The view's author sheets are not mounted here: each is
+    /// a task of the view's owner, which mounts it on this document when its
+    /// answer arrives.
     ///
-    /// Every phase is caught, because a panic that crosses the bridge is
+    /// The construction is caught, because a panic that crosses the bridge is
     /// erased into "the host function panicked" and this is the one host
-    /// member that runs the whole document pipeline — the UA cascade and the
-    /// author sheets — behind a single call.
-    fn create_document(
-        &mut self,
-        config: PageConfig,
-        thread: &crate::jobs::JsThreadHandle,
-    ) -> Result<(), String> {
+    /// member that runs the UA cascade behind a single call.
+    fn create_document(&mut self, config: PageConfig) -> Result<(), String> {
         let Some(ingredients) = self.ingredients.take() else {
             return Err("the realm already created its document".to_owned());
         };
         let DocumentIngredients {
             viewport,
             // The realm's copy is what the document is built with: the boot
-            // module read this one out of `pageConfig()` and handed it back.
+            // module was written with this one and handed it back.
             config: _,
             text_context,
             style_pool,
         } = ingredients;
-        let sheets = std::mem::take(&mut self.sheets);
-        let token = self.outbox.token().clone();
         // The create-time viewport is what the document works at until a
         // painter binds; a painter that bound before the boot module ran its
         // first statement has already named the real one.
@@ -602,7 +446,7 @@ impl DocumentSlot {
             None => viewport,
         };
         let outcomes = self.image_outcomes.clone();
-        let mut document = construction_phase("building the page", || {
+        let document = construction_phase("building the page", || {
             let mut document = new_document(viewport, config, outcomes);
             if let Some(pool) = style_pool {
                 document.set_style_pool(pool);
@@ -612,9 +456,6 @@ impl DocumentSlot {
             }
             document
         })?;
-        construction_phase("mounting the author stylesheets", || {
-            mount_startup_sheets(&mut document, sheets, thread, &token)
-        })??;
         self.document = Some(document);
         Ok(())
     }
@@ -662,6 +503,9 @@ impl DocumentSlot {
         self.adopt_metrics();
         let frame = self.document_mut().commit();
         if self.bound {
+            // A frame held from before the binding is older than this one, and
+            // publishing it after this one would put the stale frame back.
+            self.held = None;
             self.outbox.publish_frame(frame);
             self.request_wanted_images();
             return Ok(());
@@ -706,6 +550,8 @@ impl DocumentSlot {
         if self.document_mut().needs_render() {
             let frame = self.document_mut().commit();
             if self.bound {
+                // Superseded, as in `flush`: the held frame is older.
+                self.held = None;
                 self.outbox.publish_frame(frame);
             } else {
                 self.held = Some(frame);
@@ -736,8 +582,8 @@ impl DocumentSlot {
 
     /// The `@font-face` rules the mounted sheets declared, once each.
     ///
-    /// Empty before `createDocument`: the staged sheets are not in a cascade
-    /// yet, and the first entry after they are mounted asks again.
+    /// Empty before `createDocument`: there is no cascade yet, and the first
+    /// entry after a sheet is mounted asks again.
     fn take_font_face_requests(&mut self) -> Vec<dom::FontFaceRequest> {
         self.document
             .as_mut()
@@ -759,30 +605,6 @@ impl DocumentSlot {
         self.removals = 0;
         true
     }
-}
-
-/// Mounts this view's author stylesheets on the document being built, in
-/// cascade order.
-///
-/// One wait per sheet the fetcher has not answered yet, the realm's own end
-/// being the first arm of each; the requests themselves went out on the
-/// embedder's thread when the view was created, so what is waited for here is
-/// only the IO that has not finished. A sheet that failed to load, or that the
-/// fetcher answered with something else, is an error naming that sheet's URL:
-/// this runs inside `new Document(config)`, so the message is what the boot
-/// module throws.
-fn mount_startup_sheets(
-    document: &mut LynxDocument,
-    sheets: Vec<StartupSource>,
-    thread: &crate::jobs::JsThreadHandle,
-    token: &CancellationToken,
-) -> Result<(), String> {
-    for StartupSource { url, answer } in sheets {
-        let source = crate::resource::wait_for_source(thread, token, answer)
-            .map_err(|error| format!("loading stylesheet {url}: {error}"))?;
-        style_sheets::mount_style_sheet(document, &url, source)?;
-    }
-    Ok(())
 }
 
 /// Runs one phase of document construction, naming it if it panics.
@@ -819,13 +641,6 @@ pub(crate) struct MainThreadRuntime {
     /// from.
     workers: Rc<super::workers::WorkerOwner>,
     slot: Rc<RefCell<DocumentSlot>>,
-    /// The MTS entry: the answer `entryUrl` reads, and the source the boot
-    /// module's own `import()` is then answered from.
-    entry: Rc<EntrySlot>,
-    /// Module requests boot took out of the engine while looking for its
-    /// entry, which the owner reads before the engine's own. Empty in every
-    /// run where boot's first import is its entry, which is every run.
-    deferred_requests: std::collections::VecDeque<String>,
     timers: Rc<TimerState>,
     /// Every host-backed operation this realm holds a `Future` for, every
     /// `fetchResource` included.
@@ -842,10 +657,13 @@ pub(crate) struct MainThreadRuntime {
     /// frame. One clock, one epoch; nothing here takes a second reading of its
     /// own.
     timeline_milliseconds: f64,
-    /// The screen this realm's `SystemInfo` reports, as the view's task
-    /// resolved it. Held from construction because boot writes the three
-    /// numbers into its own module source, which runs after the realm exists.
+    /// The screen this realm's `SystemInfo` reports, as the embedder named
+    /// it. Held from construction because boot writes the three numbers into
+    /// its own module source, which runs after the realm exists.
     screen: ScreenMetrics,
+    /// The page configuration boot writes into its own module source as four
+    /// boolean literals, held for the same reason as [`Self::screen`].
+    config: PageConfig,
 }
 
 impl fmt::Debug for MainThreadRuntime {
@@ -868,11 +686,11 @@ impl MainThreadRuntime {
     /// constructs the built-in background context, during the entry evaluation
     /// this call does not make.
     ///
-    /// Opening spends the startup: the strings become one-shot members, the
-    /// author sheets go to the document slot and the entry answer to the entry
-    /// slot, each read later by the member the boot module calls for it.
-    /// Nothing here waits for any of them, which is what lets a realm open
-    /// while its own sources are still in flight.
+    /// Opening spends the startup: the strings become one-shot members read
+    /// later by the boot module, and the screen and the page configuration are
+    /// kept for the boot module's own source. The author sheets and the entry
+    /// are not part of it, which is what lets a realm open while its own
+    /// sources are still in flight.
     pub(crate) fn new(
         js_runtime: &mut ScriptRuntime,
         ingredients: DocumentIngredients,
@@ -908,13 +726,8 @@ impl MainThreadRuntime {
         })
         .map_err(|error| MainThreadError::from_engine("installing animation frames", error))?;
         engine.enable_module_loading();
-        // The realm reads all three of these for itself: the author sheets in
-        // `createDocument`, the entry in `entryUrl`, the page configuration in
-        // `pageConfig`. Nothing here waits for any of them.
-        let StartupSources { sheets, entry } = std::mem::take(&mut startup.startup);
         let config = ingredients.config;
-        let entry = Rc::new(EntrySlot::over(entry));
-        let slot = DocumentSlot::new(ingredients, sheets, metrics, outbox.clone());
+        let slot = DocumentSlot::new(ingredients, metrics, outbox.clone());
         install_bobcat(
             &mut engine,
             js_runtime,
@@ -949,18 +762,12 @@ impl MainThreadRuntime {
             thread,
         )
         .map_err(|error| MainThreadError::from_engine("installing require", error))?;
-        install_startup_strings(
-            &mut engine,
-            js_runtime,
-            startup_strings(&mut startup, config),
-        )?;
-        install_entry_member(&mut engine, js_runtime, &entry, &futures)?;
+        install_startup_strings(&mut engine, js_runtime, startup_strings(&mut startup))?;
         let (workers, incoming) = workers
             .install(
                 &mut engine,
                 js_runtime,
                 outbox,
-                Rc::clone(&entry),
                 startup.background_entry.take(),
             )
             .map_err(|error| MainThreadError::from_engine("installing Worker", error))?;
@@ -969,26 +776,14 @@ impl MainThreadRuntime {
                 engine,
                 workers,
                 slot,
-                entry,
-                deferred_requests: std::collections::VecDeque::new(),
                 timers,
                 futures,
                 timeline_milliseconds: 0.0,
                 screen: startup.screen,
+                config,
             },
             incoming,
         ))
-    }
-
-    /// Names the entry URL a `new Worker` specifier resolves against, which
-    /// boot's own `entryUrl()` is what does.
-    ///
-    /// For the tests that create workers in a realm they never boot: nothing
-    /// else supplies a base URL, because there is nothing else a worker
-    /// specifier could be relative to.
-    #[cfg(test)]
-    pub(crate) fn bind_entry_url_for_test(&self, url: &str) {
-        *self.entry.base_url.borrow_mut() = Some(url.to_owned());
     }
 
     /// How many of this realm's workers are still running, which is how many
@@ -1426,24 +1221,29 @@ impl MainThreadRuntime {
     }
 
     /// Evaluates `bobcat:boot`, which is this realm's whole startup: it
-    /// creates the document, reads the entry and imports it, connects the BTS
-    /// Worker, renders, and flushes.
+    /// creates the document, imports the entry, connects the BTS Worker,
+    /// renders, and flushes.
     ///
-    /// Nothing is waited for before this runs. The three sources the view was
-    /// created with — its page configuration, its author stylesheets and its
-    /// entry — reach the realm through host members the boot module calls, so
-    /// this returns with a document in place however long the entry takes,
-    /// and boot's own completion is the promise `main_module_finished` reads.
+    /// Nothing is waited for before this runs. The entry reaches the realm
+    /// through an ordinary `import` of [`ENTRY_MODULE_SPECIFIER`], a module a
+    /// task of the view's owner completes from the answer `create_lynx_view`
+    /// already asked for, and the author stylesheets are mounted on the
+    /// document by tasks of their own as they arrive. So this returns with a
+    /// document in place however long the entry takes, and boot's own
+    /// completion is the promise `main_module_finished` reads.
     ///
-    /// How much of boot has run when this returns depends on the entry alone.
-    /// An entry the fetcher had already answered is named in the call, so boot
-    /// runs through to its own flush here; one still outstanding is a future
-    /// boot awaits, and the rest of boot runs in the job the owner's epilogue
-    /// settles that future in.
+    /// How much of boot has run when this returns depends on the entry alone:
+    /// a `bobcat:entry` already completed is found in the realm's registry and
+    /// boot runs through to its own flush here; one still outstanding leaves
+    /// the import pending, and the rest of boot runs in the job that completes
+    /// it.
     ///
-    /// The only literals written into it are the screen's three numbers:
+    /// The only literals written into it are the screen's three numbers and
+    /// the page configuration's four switches — facts Rust owns, written as
+    /// primitives rather than as JSON the realm would parse and hand back.
     /// `SystemInfo` describes the screen the page is shown on, which this
-    /// view's viewport is not, and nothing here parses or models them.
+    /// view's viewport is not; the switches are what the realm builds its
+    /// document with and what `enableJSDataProcessor` tells the MTS runtime.
     pub(crate) fn run_boot_module(
         &mut self,
         js_runtime: &mut ScriptRuntime,
@@ -1453,32 +1253,33 @@ impl MainThreadRuntime {
             pixel_width,
             pixel_height,
         } = self.screen;
+        let PageConfig {
+            default_display_linear,
+            default_overflow_visible,
+            enable_css_selector,
+            enable_js_data_processor,
+        } = self.config;
         let boot = format!(
-            r#"import {{ lynx, __BobcatConnectBackground, __BobcatInitializeMTS, __BobcatProcessInitData, __BobcatRenderPage, __BobcatInitEntry }} from "{RUNTIME_MODULE_SPECIFIER}";
+            r#"import {{ lynx, __BobcatConnectBackground, __BobcatInitializeMTS, __BobcatProcessInitData, __BobcatRenderPage }} from "{RUNTIME_MODULE_SPECIFIER}";
 import {{ Document, __FlushElementTree }} from "{ELEMENT_MODULE_SPECIFIER}";
-import {{ pageConfig, entryUrl }} from "{HOST_MODULE_SPECIFIER}";
-import {{ Future }} from "{FUTURE_MODULE_SPECIFIER}";
 // Imported for its effect: it installs the timer globals, and a static
 // import runs before the entry this module then loads.
 import "{TIMER_MODULE_SPECIFIER}";
 
-const config = JSON.parse(pageConfig());
+const config = {{
+  defaultDisplayLinear: {default_display_linear},
+  defaultOverflowVisible: {default_overflow_visible},
+  enableCssSelector: {enable_css_selector},
+  enableJSDataProcessor: {enable_js_data_processor},
+}};
 
 // The realm's document, created out of that configuration and held by this
 // exported binding for the realm's life. Nothing in the realm releases it: it
 // goes when the realm does. The view's own resources — its metrics, its fonts,
-// its style pool and its author stylesheets — stay on the host side, and this
-// call is what mounts the sheets, in cascade order.
+// its style pool and its author stylesheets — stay on the host side; each
+// author sheet is mounted on this document when its answer arrives.
 export const document = new Document(config);
 
-// The entry, which the view asked for before this realm opened. Reading it
-// registers it, so the import below asks the host for nothing; it answers the
-// URL outright where the fetcher had already answered, and the id of a future
-// that settles to the URL where it had not. Either way nothing is parked: the
-// awaited future is settled on a task of the view's owner.
-const named = entryUrl();
-const entry = await (typeof named === "string" ? named : new Future(named));
-__BobcatInitEntry(entry);
 __BobcatInitializeMTS({{
   enableJSDataProcessor: config.enableJSDataProcessor,
   systemInfo: {{pixelRatio: {pixel_ratio}, pixelWidth: {pixel_width}, pixelHeight: {pixel_height}}},
@@ -1487,7 +1288,12 @@ __BobcatInitializeMTS({{
 // first-screen argument belongs to boot, independently of that mutable slot.
 let data = lynx.__initData;
 
-await import(entry);
+// The entry, under the one name it always has here. A task of the view's
+// owner completes this module from the answer the view asked for before this
+// realm opened, under the response URL the fetcher gave, so this import asks
+// the host for nothing and the entry's own preamble names that URL as
+// `__Card__` before its body runs.
+await import("{ENTRY_MODULE_SPECIFIER}");
 const {{ Worker }} = await import("bobcat-internal");
 data = __BobcatProcessInitData(data);
 __BobcatConnectBackground(new Worker("{BTS_MODULE_SPECIFIER}", {{ name: "lynx-bg" }}), data);
@@ -1502,76 +1308,168 @@ await Promise.resolve().then(() => __FlushElementTree());
             &boot,
             BOOT_MODULE_SPECIFIER,
             "booting the MTS entry",
-        )?;
-        self.complete_boot_entry(js_runtime)
+        )
     }
 
     /// Boots a realm over `source` as its entry, without a fetcher behind it —
     /// the seam this crate's own tests and benchmarks drive boot through.
     ///
-    /// It answers the entry request the realm was opened owing, with the
-    /// source in hand, and then runs the production boot: what follows is the
-    /// same module, the same members and the same order a view boots in, with
-    /// the one wait already settled.
+    /// It completes `bobcat:entry` with the source in hand, as the view's own
+    /// entry task would with a fetcher's answer, and then runs the production
+    /// boot: what follows is the same module, the same members and the same
+    /// order a view boots in, with the entry already in the registry.
     pub(crate) fn run_main_thread_script(
         &mut self,
         js_runtime: &mut ScriptRuntime,
         source: &str,
         source_name: &str,
     ) -> Result<(), MainThreadError> {
-        self.entry.answer(source, source_name);
+        self.complete_entry(
+            js_runtime,
+            source_name,
+            Ok(LoadedSource::Entry {
+                source: source.to_owned(),
+                url: source_name.to_owned(),
+            }),
+        )?;
         self.run_boot_module(js_runtime)
     }
 
-    /// The next module an import in this realm is waiting for, if any.
+    /// Boots a realm over `source` as its entry the way a view whose author
+    /// sheets arrived after its document was created and before its entry
+    /// boots: the boot module runs up to its `import` of `bobcat:entry`, each
+    /// sheet is mounted on the document it created, and the entry is completed
+    /// last, which runs the rest of boot.
     ///
-    /// What boot took out of the engine looking for its entry comes first, so
-    /// the order the owner reads requests in is the order they were made in.
-    pub(crate) fn take_module_request(&mut self) -> Option<String> {
-        self.deferred_requests
-            .pop_front()
-            .or_else(|| self.engine.take_module_request())
-    }
-
-    /// Hands boot the entry it has named — the one import this realm already
-    /// holds the source of.
-    ///
-    /// `entryUrl` read the entry before the boot module's `import()` asked for
-    /// it, so completing it here rather than through the view's ordinary
-    /// module path is what keeps the entry one request. What the entry's own
-    /// graph then names is a request like any other, taken by the view's owner
-    /// in its epilogue.
-    ///
-    /// Nothing outstanding is a boot that threw before it reached that
-    /// import, a boot still awaiting the entry's own arrival, or a boot long
-    /// past it; the first is reported by `main_module_finished`, and the other
-    /// two have nothing to do.
-    ///
-    /// Called from two places for that reason: where boot was evaluated, which
-    /// covers the entry the fetcher had already answered, and once per
-    /// epilogue, which covers the entry that arrived on a task and resumed
-    /// boot in a later job.
-    pub(crate) fn complete_boot_entry(
+    /// The seam for this crate's own tests of cards that come with a sheet;
+    /// the order is the one a fetcher that answered the sheets first produces.
+    #[cfg(test)]
+    pub(crate) fn run_main_thread_script_over_sheets(
         &mut self,
         js_runtime: &mut ScriptRuntime,
+        sheets: Vec<(&str, LoadedSource)>,
+        source: &str,
+        source_name: &str,
     ) -> Result<(), MainThreadError> {
-        while let Some(url) = self.engine.take_module_request() {
-            let Some(entry) = self.entry.take_module(&url) else {
-                // Taken out of the engine and not answered here, so it is
-                // handed back to the one queue the owner reads.
-                self.deferred_requests.push_back(url);
-                continue;
-            };
-            // Named as boot rather than as an import: this *is* boot's
-            // entry, and a card reads "booting the MTS entry" for a failure
-            // in it however the source reached the realm.
-            return self
-                .complete_module(js_runtime, &url, Ok(entry))
-                .map_err(|error| {
-                    MainThreadError::from_engine("booting the MTS entry", error.source)
-                });
+        self.run_boot_module(js_runtime)?;
+        // The one request boot left is its entry, which the view's owner
+        // never sends to a fetcher.
+        assert_eq!(
+            self.take_module_request().as_deref(),
+            Some(ENTRY_MODULE_SPECIFIER)
+        );
+        for (url, sheet) in sheets {
+            self.mount_startup_sheet(url, Ok(sheet))
+                .expect("an author sheet mounts");
         }
-        Ok(())
+        self.complete_entry(
+            js_runtime,
+            source_name,
+            Ok(LoadedSource::Entry {
+                source: source.to_owned(),
+                url: source_name.to_owned(),
+            }),
+        )
+    }
+
+    /// The next module an import in this realm is waiting for, if any.
+    pub(crate) fn take_module_request(&mut self) -> Option<String> {
+        self.engine.take_module_request()
+    }
+
+    /// Completes [`ENTRY_MODULE_SPECIFIER`] from the answer to the entry
+    /// request `create_lynx_view` made.
+    ///
+    /// A script answer is registered twice. The entry itself, with the entry
+    /// preamble prepended, is registered under the fetcher's response URL:
+    /// that is the name its errors and stack frames carry, the base its own
+    /// relative imports resolve against, and its `import.meta.url` — the
+    /// `__Card__` its preamble names. [`ENTRY_MODULE_SPECIFIER`] is then
+    /// completed with a one-line module that imports that URL, which is what
+    /// boot's `import` reaches. A load that failed, and an answer that is not
+    /// a script, complete [`ENTRY_MODULE_SPECIFIER`] with an error naming the
+    /// URL the view asked for and the reason, which rejects boot's `import`
+    /// and so fails the boot with that message.
+    ///
+    /// Either order against boot works: completed first, boot's `import`
+    /// finds it in the realm's registry; imported first, the request is
+    /// pending and this is what resumes it.
+    pub(crate) fn complete_entry(
+        &mut self,
+        js_runtime: &mut ScriptRuntime,
+        requested: &str,
+        answered: Result<LoadedSource, LynxViewError>,
+    ) -> Result<(), MainThreadError> {
+        let booting = |error| MainThreadError::from_engine("booting the MTS entry", error);
+        let entry = match answered {
+            // The name an import of the URL normalizes to, which is what the
+            // one-line module below imports it by.
+            Ok(LoadedSource::Entry { source, url }) => {
+                super::quickjs::normalize_module_url(ENTRY_MODULE_SPECIFIER, &url)
+                    .map(|name| (url, name, entry_module_source(&source)))
+                    .map_err(|error| format!("the MTS entry {requested}: {error}"))
+            }
+            Ok(_) => Err(format!("the MTS entry {requested} is not a script")),
+            Err(error) => Err(format!("loading the MTS entry {requested}: {error}")),
+        };
+        let (url, name, source) = match entry {
+            Ok(entry) => entry,
+            Err(message) => {
+                return self
+                    .engine
+                    .complete_module(
+                        js_runtime,
+                        ENTRY_MODULE_SPECIFIER,
+                        Err(&message.replace('\0', "\u{fffd}")),
+                    )
+                    .map_err(booting);
+            }
+        };
+        // Stored rather than completed: completing resumes and checkpoints,
+        // and the one completion below is what should run the entry.
+        self.engine
+            .store_module(&name, &url, &source)
+            .map_err(booting)?;
+        let import = format!(
+            "import {};",
+            serde_json::to_string(&name).expect("a string serializes")
+        );
+        self.engine
+            .complete_module(js_runtime, ENTRY_MODULE_SPECIFIER, Ok((&url, &import)))
+            .map_err(booting)
+    }
+
+    /// Mounts one of the view's author stylesheets, from the answer to the
+    /// request `create_lynx_view` made, on the live document.
+    ///
+    /// Called by a task of the view's owner when that answer arrives, which is
+    /// always after boot's first statement created the document: the task's
+    /// entry is queued behind the job that opens the realm. It is mounted
+    /// after whatever the realm already mounted, so several listed sheets
+    /// cascade in the order their answers arrived in, and one that arrives
+    /// after the entry evaluated restyles a document the entry already built.
+    ///
+    /// A load that failed is that load's error, and an answer that is not a
+    /// stylesheet is the fetcher's mistake, reported as a resource error
+    /// naming what it answered with.
+    pub(crate) fn mount_startup_sheet(
+        &mut self,
+        url: &str,
+        answered: Result<LoadedSource, LynxViewError>,
+    ) -> Result<(), LynxViewError> {
+        let answer = match answered? {
+            LoadedSource::StyleSheet(sheet) => {
+                style_sheets::add_style_sheet(self.slot.borrow_mut().document_mut(), sheet);
+                return Ok(());
+            }
+            LoadedSource::Entry { .. } => "a script",
+            LoadedSource::Font(_) => "a font",
+            LoadedSource::Fetched => "a plain fetch",
+        };
+        Err(mismatched_source(
+            &format!("the stylesheet request for {url}"),
+            answer,
+        ))
     }
 
     /// The futures this realm asked to settle asynchronously — a `.then` on a
@@ -1889,7 +1787,7 @@ fn install_host_module(
         Ok(HostValue::Undefined)
     })?;
 
-    install_document_members(engine, js_runtime, handle, thread.clone())?;
+    install_document_members(engine, js_runtime, handle)?;
     install_attribute_members(engine, js_runtime, handle)?;
     install_readback_members(engine, js_runtime, handle)?;
 
@@ -1949,75 +1847,38 @@ fn install_document_members(
     engine: &mut ScriptEngine,
     js_runtime: &mut ScriptRuntime,
     handle: &Rc<RefCell<DocumentSlot>>,
-    // `createDocument`'s, for the wait it makes on each author sheet the
-    // fetcher has not answered yet.
-    thread: crate::jobs::JsThreadHandle,
 ) -> Result<(), MainThreadError> {
     const NAME: &str = "bobcat-internal:host.createDocument";
     let tree = Rc::clone(handle);
-    install(engine, js_runtime, "createDocument", 1, move |arguments| {
-        let config = parse_page_config(string_argument(NAME, arguments, 0)?)?;
+    install(engine, js_runtime, "createDocument", 4, move |arguments| {
+        // The four switches, in `PageConfig`'s order, as the boot module
+        // wrote them. Read rather than passed through because Rust itself
+        // needs the fields: the UA cascade and the document's own switches are
+        // built out of them. A missing or non-boolean one fails the
+        // construction, which fails the boot.
+        let config = PageConfig {
+            default_display_linear: boolean_argument(NAME, arguments, 0)?,
+            default_overflow_visible: boolean_argument(NAME, arguments, 1)?,
+            enable_css_selector: boolean_argument(NAME, arguments, 2)?,
+            enable_js_data_processor: boolean_argument(NAME, arguments, 3)?,
+        };
         // The page id is not this member's answer: `createPage` is still what
         // hands the realm the permanent root, and it now has a document to
         // read it from.
-        //
-        // The borrow is held across the sheet waits inside, which is legal for
-        // the reason every synchronous member's borrow is: no other job runs
-        // while one is parked, and only a job takes this borrow.
-        borrow_slot(NAME, &tree)?.create_document(config, &thread)?;
+        borrow_slot(NAME, &tree)?.create_document(config)?;
         Ok(HostValue::Undefined)
     })?;
 
     Ok(())
 }
 
-/// The page configuration as the realm reads it: the four switches by the
-/// names `bobcat:element`'s `PageConfig` declares.
-///
-/// Written rather than modelled — there is no Rust type behind this text, and
-/// the realm is what holds the value between `pageConfig()` and the
-/// `createDocument` that hands it back.
-fn page_config_json(config: PageConfig) -> String {
-    serde_json::json!({
-        "defaultDisplayLinear": config.default_display_linear,
-        "defaultOverflowVisible": config.default_overflow_visible,
-        "enableCssSelector": config.enable_css_selector,
-        "enableJSDataProcessor": config.enable_js_data_processor,
-    })
-    .to_string()
-}
-
-/// Reads the configuration the boot module handed back.
-///
-/// Parsed rather than passed through because this is one of the payloads Rust
-/// itself needs the fields of: the UA cascade and the document's own switches
-/// are built out of them. A field that is missing or is not a boolean fails
-/// the construction, which fails the boot.
-fn parse_page_config(text: &str) -> Result<PageConfig, String> {
-    let config: serde_json::Value = serde_json::from_str(text)
-        .map_err(|error| format!("the page config is not JSON: {error}"))?;
-    let flag = |name: &str| {
-        config
-            .get(name)
-            .and_then(serde_json::Value::as_bool)
-            .ok_or_else(|| format!("the page config has no boolean '{name}'"))
-    };
-    Ok(PageConfig {
-        default_display_linear: flag("defaultDisplayLinear")?,
-        default_overflow_visible: flag("defaultOverflowVisible")?,
-        enable_css_selector: flag("enableCssSelector")?,
-        enable_js_data_processor: flag("enableJSDataProcessor")?,
-    })
-}
-
-/// Installs `initData`, `globalProps`, `initialProcessor`,
-/// `nativeModuleTable` and `pageConfig`, handing the realm the original
-/// strings. Missing initial data or props become `undefined`.
+/// Installs `initData`, `globalProps`, `initialProcessor` and
+/// `nativeModuleTable`, handing the realm the original strings. Missing
+/// initial data or props become `undefined`.
 ///
 /// Each hands its string over once and keeps nothing. `bobcat:runtime` parses
 /// the initial data and props, uses the processor name as a plain string, and
-/// reads the module table as the record the realm decodes; the boot module
-/// parses the page config and hands it to `createDocument`. All five answer
+/// reads the module table as the record the realm decodes. All four answer
 /// before a document exists.
 ///
 /// The strings are *moved* in rather than copied: each is handed over once and
@@ -2025,7 +1886,7 @@ fn parse_page_config(text: &str) -> Result<PageConfig, String> {
 fn install_startup_strings(
     engine: &mut ScriptEngine,
     js_runtime: &mut ScriptRuntime,
-    strings: [(&'static str, Option<String>); 5],
+    strings: [(&'static str, Option<String>); 4],
 ) -> Result<(), MainThreadError> {
     for (name, mut value) in strings {
         install(engine, js_runtime, name, 0, move |_arguments| {
@@ -2035,12 +1896,9 @@ fn install_startup_strings(
     Ok(())
 }
 
-/// The five strings this realm answers once, in the order they are
+/// The four strings this realm answers once, in the order they are
 /// installed, taken out of the startup that is being spent.
-fn startup_strings(
-    startup: &mut RealmStartup,
-    config: PageConfig,
-) -> [(&'static str, Option<String>); 5] {
+fn startup_strings(startup: &mut RealmStartup) -> [(&'static str, Option<String>); 4] {
     [
         ("initData", startup.init_data.take()),
         ("globalProps", startup.global_props.take()),
@@ -2052,29 +1910,7 @@ fn startup_strings(
             "nativeModuleTable",
             Some(std::mem::take(&mut startup.native_modules)),
         ),
-        ("pageConfig", Some(page_config_json(config))),
     ]
-}
-
-/// Installs `entryUrl`, the member boot reads the view's entry through.
-///
-/// One call and one answer, in whichever of its two shapes the fetcher has
-/// already made possible: the response URL as a string where the entry has
-/// arrived, and the id of a `bobcat:future` that settles to it where it has
-/// not. Neither parks. A second call, a load that failed and an answer that is
-/// not a script all fail the boot — the first two at the call, the third
-/// through the future the boot module is awaiting.
-fn install_entry_member(
-    engine: &mut ScriptEngine,
-    js_runtime: &mut ScriptRuntime,
-    entry: &Rc<EntrySlot>,
-    futures: &Rc<crate::future::FutureTable>,
-) -> Result<(), MainThreadError> {
-    let entry = Rc::clone(entry);
-    let futures = Rc::clone(futures);
-    install(engine, js_runtime, "entryUrl", 0, move |_arguments| {
-        entry.read(&futures)
-    })
 }
 
 /// Installs the two members the realm's event registrations speak to.
@@ -2501,13 +2337,22 @@ fn optional_node_id_argument(
     }
 }
 
-/// A flag the realm spells as `0` or `1`, which is every boolean the host
-/// module takes.
+/// A flag the realm spells as `0` or `1`, which is every boolean a tree
+/// member takes.
 fn flag_argument(function: &str, arguments: &[HostValue], index: usize) -> Result<bool, String> {
     match *argument(arguments, index) {
         HostValue::Number(0.0) => Ok(false),
         HostValue::Number(1.0) => Ok(true),
         _ => Err(format!("{function} expects 0 or 1 for argument {index}")),
+    }
+}
+
+/// A JavaScript boolean, which is what the boot module hands `createDocument`
+/// its four switches as.
+fn boolean_argument(function: &str, arguments: &[HostValue], index: usize) -> Result<bool, String> {
+    match *argument(arguments, index) {
+        HostValue::Boolean(value) => Ok(value),
+        _ => Err(format!("{function} expects a boolean for argument {index}")),
     }
 }
 

@@ -661,6 +661,14 @@ consequential choice about whether to follow the spec or the quirk.
   not a style-engine one. Until then, treat `@font-face` in a bundle as
   something that will silently do nothing.
 
+- **Listed author stylesheets cascade in arrival order, not listed order** —
+  web-core mounts a page's listed sheets in the order they are listed. Here
+  each listed sheet is mounted on the live document when the fetcher's answer
+  arrives, possibly after the entry has evaluated, so two listed sheets whose
+  rules tie cascade in the order their answers arrived. **Decision (2026-09):
+  arrival order** — boot waits for no sheet. See
+  `docs/runtime-architecture.md`, "Order of completion".
+
 ## Components (see [components.md](components.md))
 
 - **`<image>` is never sized by its bitmap**, unlike the `<img>` it resembles.

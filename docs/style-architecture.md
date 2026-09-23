@@ -166,11 +166,12 @@ Private `bobcat_core::tree` composes the native operations over
 the Lynx Element PAPI over them as the preloaded `bobcat:element` ESM.
 `LynxGroup::create_lynx_view` transfers that view's `ViewSources` to the
 group's `bobcat-main` and returns at once. The task serving that view there
-validates its fonts, fetches its sheets in cascade order and then its entry,
-stages all of it, and opens the view's realm on the group's QuickJS runtime.
+validates its fonts, fetches its sheets and then its entry, and opens the
+view's realm on the group's QuickJS runtime without waiting for any of them.
 The boot module's first statement constructs the realm's `Document`, which is
-what creates the page on the group's style pool and mounts those stylesheets
-in order; it then awaits that resolved entry URL before calling
+what creates the page on the group's style pool; each stylesheet is mounted on
+it by a task of the view when its answer arrives, so several sheets cascade in
+arrival order. Boot then awaits the entry, `bobcat:entry`, before calling
 a present `globalThis.renderPage` or the
 `__RenderPage` fallback on `lynx.getEngine()`, then flushes this composition.
 What that covers, and what it does not:
@@ -222,9 +223,9 @@ What that covers, and what it does not:
 
 - `.web.bundle` `StyleInfo` ingestion: a host lowers decoded CSS into
   `bobcat_core::style::PreparsedStyleSheet` and names its URL among
-  `ViewSources::style_sheets`, in cascade order; the realm's `createDocument`
-  mounts each as author-origin rules built directly, before the entry module
-  loads — no stylesheet text, no re-tokenizing. The
+  `ViewSources::style_sheets`; a task of the view mounts each as author-origin
+  rules built directly when its answer arrives, before or after the entry
+  module loads — no stylesheet text, no re-tokenizing. The
   CSS parser still owns one selector-list parse per rule and one value parse
   per declaration, because the wire format keeps attribute selectors and
   functional pseudo-classes as text and stylo builds specified values only

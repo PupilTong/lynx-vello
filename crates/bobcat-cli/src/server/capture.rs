@@ -16,7 +16,8 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use bobcat_core::{
-    DrawTarget, EngineEvent, EventRequester, LynxGroup, LynxView, Painter, Screenshot, StyleThreads,
+    DrawTarget, EngineEvent, EventRequester, LynxGroup, LynxView, Painter, ScreenMetrics,
+    Screenshot, StyleThreads,
 };
 use bobcat_resources::{Resources, ResourcesConfig, ViewResources};
 use bobcat_source::{PageSource, ZipSource};
@@ -355,7 +356,13 @@ async fn capture_page(request: &CaptureRequest) -> Result<Screenshot, CaptureFai
     for note in resources.take_notes() {
         eprintln!("bobcat-server: warning: {note}");
     }
-    let sources = page.view_sources();
+    // A capture has no screen, so `SystemInfo` reports the requested capture
+    // size in physical pixels, named as such.
+    let sources = page.view_sources(ScreenMetrics::for_viewport(
+        f32::from(request.width),
+        f32::from(request.height),
+        DEVICE_PIXEL_RATIO,
+    ));
     drop(page);
 
     let startup_deadline = tokio::time::Instant::now() + request.timeout;
@@ -363,8 +370,6 @@ async fn capture_page(request: &CaptureRequest) -> Result<Screenshot, CaptureFai
         // Preserve per-capture runtime isolation: the view keeps this
         // job's group alive until capture finishes and the view drops.
         let group = LynxGroup::new(Arc::clone(&wakeup), StyleThreads::Auto).await?;
-        // A capture has no screen, so `ViewSources::screen` stays `None` and
-        // `SystemInfo` reports the requested capture size in physical pixels.
         let view = group.create_lynx_view(
             f32::from(request.width),
             f32::from(request.height),

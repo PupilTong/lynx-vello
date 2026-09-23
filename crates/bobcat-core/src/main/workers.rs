@@ -47,11 +47,6 @@ impl WorkerFactory {
         engine: &mut ScriptEngine,
         runtime: &mut ScriptRuntime,
         outbox: ViewOutbox,
-        // Where a worker specifier resolves from: the MTS entry's response
-        // URL, which `entryUrl` is what learns. The boot module reads the
-        // entry before it creates its BTS Worker, so a worker asked for
-        // before that is a card reaching `createWorker` out of turn.
-        entry: Rc<super::runtime::EntrySlot>,
         background_entry: Option<String>,
     ) -> Result<(Rc<WorkerOwner>, mpsc::UnboundedReceiver<WorkerEvent>), ScriptError> {
         let (events, incoming) = mpsc::unbounded_channel();
@@ -69,11 +64,15 @@ impl WorkerFactory {
             runtime,
             HOST_MODULE_SPECIFIER,
             "createWorker",
-            2,
+            3,
             Box::new(move |arguments| {
                 let creator = creator.upgrade().ok_or("the creating realm has been released")?;
                 let specifier = string(arguments, 0)?.to_owned();
                 let name = string(arguments, 1)?.to_owned();
+                // Where the specifier resolves from: the MTS entry's response
+                // URL, which the realm holds as `__Card__` and hands over with
+                // every construction. Nothing on this side remembers it.
+                let base_url = string(arguments, 2)?.to_owned();
                 let id = creator.factory.next.get();
                 creator
                     .factory
@@ -105,9 +104,6 @@ impl WorkerFactory {
                 // here: what the host is handed is the far end of the
                 // one-shot that already rode to `bobcat-workers` with the
                 // `Start` above.
-                let base_url = entry
-                    .base_url()
-                    .ok_or("a worker cannot be created before the entry has resolved")?;
                 creator.outbox.notify(ViewNotice::RequestSource {
                     request: SourceRequest::Worker {
                         specifier,

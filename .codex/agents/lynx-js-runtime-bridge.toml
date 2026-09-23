@@ -76,9 +76,13 @@ Landed and not to be regressed:
   and jobs queued meanwhile run in FIFO order afterwards. Nothing of a view is
   served outside a job: opening its realm is the view's first job, so a burst
   that arrived earlier is queued behind it, and a `BeginFrame` acknowledgement
-  waits out whatever job of the group is parked — boot's own `createDocument`
-  among them, which parks per author sheet. Boot's *entry* never parks: an
-  answer that has not arrived is a `bobcat:future` the boot module awaits.
+  waits out whatever job of the group is parked. Boot parks for none of its
+  startup sources: it imports `bobcat:entry`, a task of the view completes
+  that module from the pre-issued answer (the entry registered under its
+  response URL), the entry preamble names itself through `import.meta.url`,
+  and a worker resolves against the entry URL JavaScript holds. Each author
+  sheet is mounted by a task of the view as its answer arrives, so listed
+  sheets cascade in arrival order.
   `consume_messages` on `bobcat-workers` never awaits the deliveries it
   queued, because `Terminate` is in band behind them.
 - The BTS is a `Worker` named `lynx-bg` on the group's `bobcat-workers` runtime.

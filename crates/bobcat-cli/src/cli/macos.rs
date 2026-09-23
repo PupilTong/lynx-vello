@@ -213,14 +213,17 @@ impl MacApplication {
         // The screen `SystemInfo` reports is the monitor this window is on,
         // in physical pixels: `MonitorHandle::size()` is already physical, so
         // the scale factor multiplies nothing here. A window winit cannot
-        // name a monitor for leaves the view to derive the numbers from its
-        // create-time viewport.
-        let mut sources = program.sources();
-        sources.screen = window
+        // name a monitor for has no screen to report, so it reports its own
+        // create-time viewport in physical pixels, as a headless capture does.
+        let screen = window
             .current_monitor()
             .or_else(|| event_loop.primary_monitor())
             .as_ref()
-            .map(screen_metrics);
+            .map_or_else(
+                || ScreenMetrics::for_viewport(css_width, css_height, scale_factor),
+                screen_metrics,
+            );
+        let sources = program.sources(screen);
         let view = group
             .create_lynx_view(
                 css_width,

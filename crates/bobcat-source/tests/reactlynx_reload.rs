@@ -23,6 +23,11 @@ use url::Url;
 mod support;
 use support::{DelayedBackground, PendingSource};
 
+/// The screen these tests' views report, as a host with no screen to measure
+/// names it. None of them reads `SystemInfo`.
+const SCREEN: bobcat_core::ScreenMetrics =
+    bobcat_core::ScreenMetrics::for_viewport(120.0, 120.0, 1.0);
+
 #[tokio::test]
 async fn native_reload_recreates_state_and_effects_without_reexecuting_the_entry() {
     verify_reload(false, false).await;
@@ -169,7 +174,7 @@ async fn prepare_view(before_background: bool, development: bool) -> ReloadView 
     let resources = Resources::new(ResourcesConfig::default(), || {});
     page.register_with(&resources);
     resources.set_base_url(Some(input));
-    let mut sources = page.view_sources();
+    let mut sources = page.view_sources(SCREEN);
     sources.init_data = Some(json!({"seed":0,"keep":"retained"}).to_string());
     let background = sources.background_entry.clone().unwrap();
     let released = Rc::new(Cell::new(!before_background));

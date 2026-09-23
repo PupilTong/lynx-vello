@@ -335,20 +335,6 @@ fn runtime_over_watching_names(
     DocumentProbe,
     PublishedNames,
 ) {
-    runtime_over_with_sheets(ingredients, Vec::new())
-}
-
-/// The same, over author sheets the fetcher has already answered — what
-/// `createDocument` mounts, in cascade order, as a view's own are.
-fn runtime_over_with_sheets(
-    ingredients: DocumentIngredients,
-    sheets: Vec<crate::view::StartupSource>,
-) -> (
-    ScriptRuntime,
-    MainThreadRuntime,
-    DocumentProbe,
-    PublishedNames,
-) {
     let (outbox, far_end) = detached_outbox(Arc::new(NoWakeup));
     let mut js_runtime = ScriptRuntime::new().expect("the test runtime starts");
     install_shared_modules(&mut js_runtime).expect("the shared modules register");
@@ -364,18 +350,9 @@ fn runtime_over_with_sheets(
         thread.handle(),
         // No entry here: these tests evaluate their own scripts against the
         // realm afterwards.
-        RealmStartup {
-            startup: crate::view::StartupSources {
-                sheets,
-                ..crate::view::StartupSources::default()
-            },
-            ..RealmStartup::default()
-        },
+        RealmStartup::default(),
     )
     .expect("main-thread runtime");
-    // The base URL every worker specifier in these tests resolves against,
-    // which a booted realm would have learned from its entry.
-    runtime.bind_entry_url_for_test("app:///main.js");
     let probe = DocumentProbe {
         slot: Rc::clone(&runtime.slot),
         _workers: inbox,
@@ -426,9 +403,6 @@ fn two_view_group_with(
             startup,
         )
         .expect("main-thread runtime");
-        // The base URL every worker specifier in these tests resolves
-        // against; each view's own script is evaluated by hand afterwards.
-        runtime.bind_entry_url_for_test("app:///main.js");
         ends.views.push(far_end);
         ends.worker_events.push(worker_events);
         views.push(runtime);
@@ -1122,16 +1096,15 @@ fn clearing_a_class_id_or_attribute_removes_it_from_the_private_document() {
     assert_eq!(view.attribute("text"), None);
 }
 
-/// The page configuration reaches the document through the realm, and back.
+/// The page configuration reaches the document through the realm.
 ///
-/// The host hands it over as JSON text through `pageConfig()`, the boot
-/// module parses it and hands the record to `new Document(config)`, and the
-/// UA cascade is built from *that* copy — so what these switches do to a
-/// `view`'s computed style is the round trip working. Nothing else reads the
-/// configuration on the way: the document is built from what JavaScript gave
-/// back.
+/// The boot module is written with the four switches as boolean literals and
+/// hands them to `new Document(config)`, whose `createDocument` call passes
+/// them back as four booleans, and the UA cascade is built from *those* — so
+/// what these switches do to a `view`'s computed style is the boot module's
+/// literals working. The document is built from what JavaScript handed back.
 #[test]
-fn the_page_config_the_boot_module_hands_back_builds_the_ua_cascade() {
+fn the_page_config_written_into_the_boot_module_builds_the_ua_cascade() {
     use dom::stylo::values::computed::{Display, Overflow};
 
     for linear in [true, false] {
@@ -1175,14 +1148,15 @@ fn the_page_config_the_boot_module_hands_back_builds_the_ua_cascade() {
     }
 }
 
-/// A page configuration the realm cannot read refuses the construction, and
-/// the boot that asked for it fails.
+/// A page configuration switch that is not a boolean refuses the
+/// construction, and the boot that asked for it fails.
 ///
-/// Rust needs these four fields, so this is one of the payloads it parses
-/// rather than forwards; a card that reaches `Document` and hands it anything
-/// else gets the message rather than a document built on defaults.
+/// Rust needs these four fields, so it reads each rather than forwarding
+/// them; a card that reaches `createDocument` and hands it anything else gets
+/// the message rather than a document built on defaults. The argument is read
+/// before the second-document refusal, so this is the message the card sees.
 #[test]
-fn a_malformed_page_config_refuses_the_document() {
+fn a_non_boolean_page_config_switch_refuses_the_document() {
     let (mut js_runtime, mut runtime, _elements, _names) =
         runtime_over_watching_names(ingredients());
     let error = runtime
@@ -1190,14 +1164,14 @@ fn a_malformed_page_config_refuses_the_document() {
             &mut js_runtime,
             r#"
             import { createDocument } from "bobcat-internal:host";
-            createDocument('{"defaultDisplayLinear":true}');
+            createDocument(true, "yes", true, false);
             "#,
             "app:///bad-config.js",
         )
-        .expect_err("a config missing three of its four switches");
+        .expect_err("a config whose second switch is a string");
     let message = error.to_string();
     assert!(
-        message.contains("the page config has no boolean 'defaultOverflowVisible'"),
+        message.contains("createDocument expects a boolean for argument 1"),
         "{message}"
     );
 }
@@ -4242,19 +4216,17 @@ fn sheet_source(text: bool, width: &str) -> crate::resource::LoadedSource {
 fn every_adoption_requests_its_url_and_mounts_the_fetchers_response() {
     use crate::resource::StyleSheetSource;
     for text in [true, false] {
-        let (mut js, mut runtime, elements, mut far) = runtime_over_with_sheets(
-            ingredients(),
-            vec![answered_source(
-                "app:///index.css",
-                crate::resource::LoadedSource::StyleSheet(StyleSheetSource::Text(
-                    ".box{width:20px;height:10px} #strong{width:90px} .important{width:95px!important}"
-                        .into(),
-                )),
-            )],
-        );
+        let (mut js, mut runtime, elements, mut far) = runtime_over_watching_names(ingredients());
         runtime
-            .run_main_thread_script(
+            .run_main_thread_script_over_sheets(
                 &mut js,
+                vec![(
+                    "app:///index.css",
+                    crate::resource::LoadedSource::StyleSheet(StyleSheetSource::Text(
+                        ".box{width:20px;height:10px} #strong{width:90px} .important{width:95px!important}"
+                            .into(),
+                    )),
+                )],
                 r"
             const page = __CreatePage();
             for (let i = 0; i !== 3; ++i) {

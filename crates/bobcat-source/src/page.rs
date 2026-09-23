@@ -42,7 +42,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
-use bobcat_core::{PageConfig, PreparsedStyleSheet, ViewSources};
+use bobcat_core::{PageConfig, PreparsedStyleSheet, ScreenMetrics, ViewSources};
 use bobcat_resources::Resources;
 use thiserror::Error;
 use url::Url;
@@ -452,9 +452,14 @@ impl PageSource {
     }
 
     /// The sources a view for this input is built from: the author CSS this
-    /// input carried, if any, its entry MTS module, and any raw BTS module.
+    /// input carried, if any, its entry MTS module, and any raw BTS module,
+    /// reporting `screen` as its `SystemInfo`.
+    ///
+    /// The screen is the host's to name, since no input carries one: the
+    /// monitor or browser screen it measured, or
+    /// [`ScreenMetrics::for_viewport`] of its capture size where it has none.
     #[must_use]
-    pub fn view_sources(&self) -> ViewSources {
+    pub fn view_sources(&self, screen: ScreenMetrics) -> ViewSources {
         ViewSources {
             config: self.config,
             background_entry: self
@@ -468,7 +473,7 @@ impl PageSource {
                 .map(Url::to_string)
                 .into_iter()
                 .collect(),
-            ..ViewSources::new(self.script_url.to_string())
+            ..ViewSources::new(self.script_url.to_string(), screen)
         }
     }
 
@@ -849,6 +854,10 @@ mod tests {
         Url::parse("file:///tmp/card.lynx.xml").expect("test URL")
     }
 
+    /// The screen these tests' views report: their own 32×24 viewport, as a
+    /// host with no screen to measure names it.
+    const SCREEN: ScreenMetrics = ScreenMetrics::for_viewport(32.0, 24.0, 1.0);
+
     fn resources() -> Resources {
         Resources::new(
             ResourcesConfig {
@@ -935,7 +944,7 @@ mod tests {
                 enable_js_data_processor: false,
             }
         );
-        let sources = page.view_sources();
+        let sources = page.view_sources(SCREEN);
         assert_eq!(sources.config, page.config());
         assert_eq!(sources.entry, "bobcat-memory://bundle/lepus-root.js");
         assert!(sources.background_entry.is_none());
@@ -1275,7 +1284,7 @@ mod tests {
                     1.0,
                     resources.builder(),
                     Vec::new(),
-                    page.view_sources(),
+                    page.view_sources(SCREEN),
                 )
                 .unwrap();
             // Boot's first flush waits for a painter to bind the view.
@@ -1333,7 +1342,7 @@ mod tests {
             page.background_script.as_ref(),
             Some((_, source)) if source.is_empty()
         ));
-        let sources = page.view_sources();
+        let sources = page.view_sources(SCREEN);
         assert_eq!(sources.config, page.config());
         assert_eq!(sources.entry, "bobcat-memory://lynx-xml/main-thread.js");
         assert_eq!(
@@ -1406,10 +1415,10 @@ mod tests {
 
         assert!(page.style_sheet.is_none());
         assert!(page.background_script.is_none());
-        assert!(page.view_sources().background_entry.is_none());
+        assert!(page.view_sources(SCREEN).background_entry.is_none());
         assert!(page.compatibility_warnings().is_empty());
         assert_eq!(
-            page.view_sources().entry,
+            page.view_sources(SCREEN).entry,
             "bobcat-memory://lynx-xml/main-thread.js"
         );
     }

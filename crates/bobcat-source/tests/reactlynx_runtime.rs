@@ -14,6 +14,11 @@ use bobcat_resources::{Resources, ResourcesConfig};
 use bobcat_source::PageSource;
 use url::Url;
 
+/// The screen these tests' views report, as a host with no screen to measure
+/// names it. None of them reads `SystemInfo`.
+const SCREEN: bobcat_core::ScreenMetrics =
+    bobcat_core::ScreenMetrics::for_viewport(393.0, 727.0, 1.0);
+
 async fn boot(bytes: &[u8], name: &str) {
     let input = Url::parse(&format!("app:///{name}")).unwrap();
     let page = if name == "react-native.lynx.bundle" {
@@ -24,7 +29,7 @@ async fn boot(bytes: &[u8], name: &str) {
     .expect("decode compiled card");
     let resources = Resources::new(ResourcesConfig::default(), || {});
     page.register_with(&resources);
-    boot_registered(page.view_sources(), resources, name).await;
+    boot_registered(page.view_sources(SCREEN), resources, name).await;
 }
 
 async fn boot_registered(sources: bobcat_core::ViewSources, resources: Resources, name: &str) {
@@ -112,7 +117,7 @@ async fn real_native_background_runs_from_its_preserved_custom_section() {
         .unwrap();
     let resources = Resources::new(ResourcesConfig::default(), || {});
     page.register_with(&resources);
-    let mut sources = page.view_sources();
+    let mut sources = page.view_sources(SCREEN);
     let entry = serde_json::to_string(sources.background_entry.as_ref().unwrap()).unwrap();
     let key = serde_json::to_string(key).unwrap();
     // Keep PageSource's actual section registration and the compiled factory.
@@ -197,7 +202,14 @@ async fn paint_and_tap(
         PageSource::from_bytes(&Url::parse("app:///tap.web.bundle").unwrap(), bytes).unwrap();
     let resources = Resources::new(ResourcesConfig::default(), || {});
     page.register_with(&resources);
-    paint_registered(page.view_sources(), resources, point, colors, verification).await;
+    paint_registered(
+        page.view_sources(SCREEN),
+        resources,
+        point,
+        colors,
+        verification,
+    )
+    .await;
 }
 
 async fn paint_registered(

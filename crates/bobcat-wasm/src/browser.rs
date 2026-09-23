@@ -246,11 +246,11 @@ pub struct BobcatRenderer {
     device_pixel_ratio: f32,
     /// The screen every view this renderer builds reports as `SystemInfo`,
     /// measured by the facade on the page's own thread — the one thread
-    /// `screen` and `devicePixelRatio` exist on. `None` for a host that could
-    /// not read them, which leaves each view deriving the numbers from its
-    /// own metrics. Wrapper state like the fonts: read once, at
-    /// `BobcatCanvas.create`, and not updated afterwards.
-    screen: Option<ScreenMetrics>,
+    /// `screen` and `devicePixelRatio` exist on — or, for a host that could
+    /// not read them, the renderer's create-time viewport in physical pixels.
+    /// Wrapper state like the fonts: read once, at `BobcatCanvas.create`, and
+    /// not updated afterwards.
+    screen: ScreenMetrics,
     /// Owned font containers are part of the stable browser wrapper, so every
     /// view this renderer builds receives the same registered faces without
     /// another UI-to-Worker transfer.
@@ -306,7 +306,8 @@ impl BobcatRenderer {
         device_pixel_ratio: f32,
         // The screen the facade measured, in physical pixels. Two plain
         // numbers rather than an option: a host with no `screen` passes
-        // values this refuses, and every view then derives its own.
+        // values this refuses, and the renderer then reports its own
+        // create-time viewport instead.
         screen_pixel_width: f32,
         screen_pixel_height: f32,
         worker_url: String,
@@ -349,7 +350,12 @@ impl BobcatRenderer {
         // function, so comparable hardware gets the same pool on both.
         let style_threads = usize::try_from(hardware_concurrency)
             .map_or(StyleThreads::Sequential, StyleThreads::for_parallelism);
-        let screen = measured_screen(device_pixel_ratio, screen_pixel_width, screen_pixel_height);
+        // A host that could not read `screen` sent numbers that describe none,
+        // so the renderer names its own create-time viewport in physical
+        // pixels instead: a view of its own metrics is a better `SystemInfo`
+        // than a zero or a `NaN`.
+        let screen = measured_screen(device_pixel_ratio, screen_pixel_width, screen_pixel_height)
+            .unwrap_or_else(|| ScreenMetrics::for_viewport(width, height, device_pixel_ratio));
         if RENDERER_CREATED.swap(true, Ordering::AcqRel) {
             return Err(js_error(
                 "one Bobcat Wasm instance supports exactly one renderer; load another page into the existing renderer to replace its native view",
@@ -455,7 +461,7 @@ impl BobcatRenderer {
             config: self.config,
             style_sheets: style_sheet_urls,
             background_entry: background_entry_url,
-            ..ViewSources::new(entry_url)
+            ..ViewSources::new(entry_url, self.screen)
         };
         self.load_sources(sources, base_url, global_props).await
     }
@@ -477,7 +483,7 @@ impl BobcatRenderer {
             console_warn(&JsValue::from(warning.to_string()));
         }
         page.register_with(&self.resources);
-        self.load_sources(page.view_sources(), input, global_props)
+        self.load_sources(page.view_sources(self.screen), input, global_props)
             .await
     }
 
@@ -500,7 +506,7 @@ impl BobcatRenderer {
             .register_with(&self.resources, &input)
             .map_err(js_error)?;
         page.register_with(&self.resources);
-        self.load_sources(page.view_sources(), input, global_props)
+        self.load_sources(page.view_sources(self.screen), input, global_props)
             .await
     }
 
@@ -944,9 +950,6 @@ impl BobcatRenderer {
         self.resources.set_base_url(Some(base_url));
         sources.fonts = self.fonts.clone();
         sources.default_font_family = self.default_font_family.clone();
-        // The page's screen, not this view's metrics: the facade measured it
-        // once and every view this renderer builds reports the same one.
-        sources.screen = self.screen;
         // JSON text the host serialized and Rust never reads.
         sources.global_props = global_props;
         // A draw target that failed cannot be reached again, so a page loaded
@@ -1056,8 +1059,8 @@ fn warn_notes(resources: &Resources) {
 /// The screen the facade measured, where it measured one.
 ///
 /// A screen only where all three numbers describe one: anything else is a host
-/// that could not read `screen`, and a view of its own metrics is a better
-/// `SystemInfo` than a zero or a `NaN`.
+/// that could not read `screen`, which [`BobcatRenderer::create`] answers with
+/// its own create-time viewport.
 fn measured_screen(pixel_ratio: f32, pixel_width: f32, pixel_height: f32) -> Option<ScreenMetrics> {
     (pixel_width.is_finite() && pixel_height.is_finite() && pixel_width > 0.0 && pixel_height > 0.0)
         .then_some(ScreenMetrics {

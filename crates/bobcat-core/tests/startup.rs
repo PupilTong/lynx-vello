@@ -12,6 +12,11 @@ use bobcat_core::resource::{ResourceFetcher, SourceCompletion, SourceRequest};
 use bobcat_core::{DrawTarget, EngineEvent, EventRequester, NoWakeup, ViewSources};
 use support::{FetcherDouble, solo_view, wait_for_script};
 
+/// The screen these tests' views report, as a host with no screen to measure
+/// names it. None of them reads `SystemInfo`.
+const SCREEN: bobcat_core::ScreenMetrics =
+    bobcat_core::ScreenMetrics::for_viewport(32.0, 24.0, 1.0);
+
 struct HostWakeup(flume::Sender<()>);
 impl EventRequester for HostWakeup {
     fn request_event(&self) {
@@ -87,7 +92,7 @@ async fn resource_completion_reaches_main_without_another_painter_turn() {
         1.0,
         DrawTarget::Offscreen,
         |_reports| fetcher,
-        ViewSources::new("main.js"),
+        ViewSources::new("main.js", SCREEN),
     )
     .await
     .expect("startup completes");
@@ -273,7 +278,7 @@ async fn dropping_loading_view_cancels_resource_and_reaps_main_body() {
         1.0,
         DrawTarget::Offscreen,
         |_reports| fetcher,
-        ViewSources::new("main.js"),
+        ViewSources::new("main.js", SCREEN),
     )
     .await
     .expect("creation returns a loading view even when the fetch never answers");
@@ -339,7 +344,7 @@ async fn metrics_that_arrive_before_the_document_are_what_it_is_created_at() {
             1.0,
             DrawTarget::Offscreen,
             |_| Rc::clone(&fetcher),
-            ViewSources::new("main.js"),
+            ViewSources::new("main.js", SCREEN),
         )
         .await
         .expect("creation returns a loading view");
@@ -405,7 +410,7 @@ async fn an_unknown_font_family_fails_construction_without_fetching() {
             |_| fetcher.clone(),
             ViewSources {
                 default_font_family: Some("no-such-family".to_owned()),
-                ..ViewSources::new("main.js")
+                ..ViewSources::new("main.js", SCREEN)
             },
         )
         .await
@@ -425,19 +430,20 @@ async fn an_unknown_font_family_fails_construction_without_fetching() {
     .await;
 }
 
-/// A resolution failure is one event, and the answers the same call already
-/// asked for are discarded.
+/// A resolution failure is one event, however many of the answers the same
+/// call asked for failed.
 ///
 /// All three startup sources — two sheets and the entry — are requested
 /// inside `create_lynx_view`, so the host has resolved all three before the
-/// view's own boot has read any of them. What stops at the first failure is
-/// the *reading*: the boot module is what mounts the sheets, in cascade
-/// order, so the remaining answers are dropped where the first one failed and
-/// one `StartupFailed` is reported — a `Script` error, because what the
-/// embedder is told is the exception `new Document(config)` threw, naming the
-/// sheet and the reason.
+/// view's own boot has read any of them, and every one of them fails here.
+/// Each is read by a task of its own, as its answer arrives; the first
+/// failure to reach the realm ends the view, and the rest are not reported.
+/// A sheet's failure is the fetcher's own `Resource` error — the view, not a
+/// script, is what failed to load it — and `first.css` is the one reported:
+/// both sheets were answered inside the construction, and their tasks enter
+/// the realm in the order they were started, which is the listed order.
 #[tokio::test]
-async fn a_resolution_failure_is_one_event_and_the_other_answers_are_discarded() {
+async fn a_resolution_failure_is_one_event_whatever_else_failed() {
     let fetcher = Rc::new(FetcherDouble::new(Vec::new()).resolving_to("not a URL"));
     let (mut view, _painter) = solo_view(
         Arc::new(NoWakeup),
@@ -448,7 +454,7 @@ async fn a_resolution_failure_is_one_event_and_the_other_answers_are_discarded()
         |_| fetcher.clone(),
         ViewSources {
             style_sheets: vec!["first.css".into(), "second.css".into()],
-            ..ViewSources::new("main.js")
+            ..ViewSources::new("main.js", SCREEN)
         },
     )
     .await
@@ -459,12 +465,11 @@ async fn a_resolution_failure_is_one_event_and_the_other_answers_are_discarded()
         "creation hands over both sheets and the entry, before any turn"
     );
     let error = wait_for_script(&mut view).expect_err("the first sheet cannot be resolved");
-    assert!(
-        matches!(error, bobcat_core::LynxViewError::Script(_)),
-        "{error}"
-    );
+    let bobcat_core::LynxViewError::Resource(resource) = &error else {
+        panic!("a sheet that cannot be loaded is a resource failure, got {error}");
+    };
+    assert_eq!(resource.locator.as_deref(), Some("first.css"), "{error}");
     let message = error.to_string();
-    assert!(message.contains("first.css"), "{message}");
     assert!(message.contains("relative URL without a base"), "{message}");
     assert_eq!(
         fetcher.resolve_count(),
@@ -477,12 +482,11 @@ async fn a_resolution_failure_is_one_event_and_the_other_answers_are_discarded()
 
 /// A view whose entry is still in flight holds up nothing.
 ///
-/// The entry is read inside the realm — `entryUrl()` in the boot module — but
-/// reading it never parks: an answer that has not arrived is a
-/// `bobcat:future` boot awaits, settled on a task of that view's owner. So the
-/// pending view's job has already returned, and a sibling view in the same
-/// group opens its realm, boots and paints while the first view's fetch is
-/// outstanding.
+/// The boot module imports the entry as `bobcat:entry`, and nothing parks for
+/// it: the import stays pending until a task of that view's owner completes
+/// the module from the answer. So the pending view's job has already
+/// returned, and a sibling view in the same group opens its realm, boots and
+/// paints while the first view's fetch is outstanding.
 #[tokio::test]
 async fn a_pending_view_does_not_block_a_sibling_in_the_same_group() {
     hang_budget(async {
@@ -507,7 +511,7 @@ async fn a_pending_view_does_not_block_a_sibling_in_the_same_group() {
                 1.0,
                 |_| Rc::clone(&fetcher),
                 Vec::new(),
-                ViewSources::new("pending.js"),
+                ViewSources::new("pending.js", SCREEN),
             )
             .expect("pending view");
         // Issued inside the construction above, so the fetcher is already
@@ -523,7 +527,7 @@ async fn a_pending_view_does_not_block_a_sibling_in_the_same_group() {
                 1.0,
                 |_| FetcherDouble::new(Vec::new()),
                 Vec::new(),
-                ViewSources::new("sibling.js"),
+                ViewSources::new("sibling.js", SCREEN),
             )
             .expect("sibling view");
         let mut sibling_painter = bobcat_core::Painter::new(DrawTarget::Offscreen, 32.0, 24.0, 1.0)
@@ -684,7 +688,7 @@ fn dropping_the_group_joins_both_of_its_threads() {
                                 })
                             },
                             Vec::new(),
-                            ViewSources::new("main.js"),
+                            ViewSources::new("main.js", SCREEN),
                         )
                         .expect("the view is created");
                     // Boot's first flush waits for a painter to bind the

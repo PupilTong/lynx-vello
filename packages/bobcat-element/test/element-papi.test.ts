@@ -73,15 +73,15 @@ rstest.mockRequire("bobcat:runtime", () => ({
 const DOCUMENT_REFUSAL = new Error("the realm already created its document");
 
 /**
- * The page configuration a boot module reads out of `pageConfig()` and hands
- * to the constructor. Its four switches are the host's; nothing in this file
- * reads them, and the constructor's only job is to serialize them.
+ * The page configuration a boot module is written with and hands to the
+ * constructor. Its four switches are the host's; nothing in this file reads
+ * them, and the constructor's only job is to pass them on, in order.
  */
 const PAGE_CONFIG: elementPapi.PageConfig = {
   defaultDisplayLinear: true,
-  defaultOverflowVisible: true,
-  enableCssSelector: true,
-  enableJSDataProcessor: false,
+  defaultOverflowVisible: false,
+  enableCssSelector: false,
+  enableJSDataProcessor: true,
 };
 
 /**
@@ -187,8 +187,8 @@ function createMockBobcat(issuedIds?: number[]): MockBobcat {
   const host: MockBobcat = {
     calls,
     named,
-    // Arguments are recorded rather than ignored: the member takes none, and
-    // a test that says so has to be able to see one that arrived.
+    // Arguments are recorded rather than ignored: a test asserts the four
+    // switches arrive as booleans, in `PageConfig`'s order.
     createDocument: (...args: unknown[]) => {
       calls.push(["createDocument", ...args]);
       if (documentSpent) {
@@ -432,8 +432,6 @@ function createMockBobcat(issuedIds?: number[]): MockBobcat {
     initData: () => undefined,
     globalProps: () => undefined,
     nativeModuleTable: () => "",
-    pageConfig: () => JSON.stringify(PAGE_CONFIG),
-    entryUrl: () => "app:///main.js",
   };
   return host;
 }
@@ -533,7 +531,8 @@ describe("installation", () => {
   it("creates the realm's document once, over the config it is given", () => {
     void new elementModule.Document(PAGE_CONFIG);
     expect(mock.named("createDocument")).toEqual([
-      ["createDocument", JSON.stringify(PAGE_CONFIG)],
+      // `PageConfig`'s order: display, overflow, selectors, processor.
+      ["createDocument", true, false, false, true],
     ]);
   });
 

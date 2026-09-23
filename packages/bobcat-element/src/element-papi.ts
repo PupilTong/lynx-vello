@@ -645,11 +645,11 @@ const registry = new FinalizationRegistry(
 
 /**
  * The four Lynx page switches a document is built with, as the boot module
- * reads them out of `pageConfig()`.
+ * is written with them.
  *
- * The realm owns this value: the boot module parses the host's JSON text,
- * reads `enableJSDataProcessor` out of it for the MTS runtime, and hands the
- * whole record to the constructor below.
+ * The host writes them into the boot module as boolean literals; the boot
+ * module reads `enableJSDataProcessor` out of the record for the MTS runtime
+ * and hands the whole record to the constructor below.
  */
 export interface PageConfig {
   /** Whether elements default to `display: linear`. */
@@ -669,8 +669,8 @@ export interface PageConfig {
  * The configuration is the constructor's one argument, so the realm decides
  * what the document is built as; the view's own resources — its metrics, its
  * fonts, its style pool and its author stylesheets — stay on the host side and
- * never reach this module. A sheet that has not arrived yet parks this call
- * until it does.
+ * never reach this module. The call never waits: each author stylesheet is
+ * mounted on the document by the host when its answer arrives.
  *
  * The boot module constructs exactly one, before it loads the card's entry,
  * and its exported binding is what holds the object. A card can reach this
@@ -679,7 +679,12 @@ export interface PageConfig {
  */
 export class Document {
   constructor(config: PageConfig) {
-    createDocument(JSON.stringify(config));
+    createDocument(
+      config.defaultDisplayLinear,
+      config.defaultOverflowVisible,
+      config.enableCssSelector,
+      config.enableJSDataProcessor,
+    );
   }
 
   get [Symbol.toStringTag](): string {
