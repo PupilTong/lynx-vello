@@ -7,6 +7,8 @@
 //! the curve running; for each later `t` the document is advanced and
 //! committed again as `late`, and `early` sampled at `Some(t)` is compared
 //! with `late` sampled at `None` — the reference involves no curve at all.
+//! Every item `late` shows inside the viewport must also be one `early`'s
+//! culled walk encodes: an encode serves its curves' whole domain.
 
 use euclid::default::Vector2D;
 
@@ -37,20 +39,24 @@ const KEYFRAMES: &str = "
 const CURVES: [&str; 4] = ["translate", "rotate", "scale", "opacity"];
 
 /// Where the timeline stands when `early` is committed, and the later
-/// instants it is composed at.
+/// instants it is composed at — the last one in the next iteration, at a
+/// progress before `EARLY`'s.
 const EARLY: f64 = 0.1;
-const LATER: [f64; 2] = [0.35, 0.8];
+const LATER: [f64; 3] = [0.35, 0.8, 1.05];
 
 /// Composed positions agree to this many CSS px.
 const TOLERANCE: f64 = 1e-3;
 
 /// One fixture: its document, the scroll offsets both frames compose at, the
-/// number of curves it exports, and elements the hit sweep must reach.
+/// number of curves it exports, elements the hit sweep must reach, and
+/// whether `early`'s walk must cull something for the coverage check to
+/// prove anything.
 struct Fixture {
     doc: Doc,
     offsets: Vec<(NodeId, Vector2D<f32>)>,
     exported: usize,
     probes: Vec<NodeId>,
+    culls: bool,
 }
 
 impl Fixture {
@@ -66,6 +72,7 @@ impl Fixture {
             offsets: Vec::new(),
             exported: 1,
             probes: Vec::new(),
+            culls: false,
         }
     }
 
@@ -113,6 +120,11 @@ impl Fixture {
             !early.needs_main_ticks(),
             "{label}: nothing is left to main-thread ticks"
         );
+        let encoded = crate::paint::walker::encoded_items(&self.doc.dom, &early.order);
+        assert!(
+            !self.culls || encoded.contains(&false),
+            "{label}: early's walk culls something"
+        );
         for t in LATER {
             self.doc.dom.advance_animations(t);
             self.doc.dom.render();
@@ -124,6 +136,36 @@ impl Fixture {
             let label = format!("{label} at t = {t}");
             self.compare_geometry(&early, &late, t, &label);
             self.compare_hits(&early, &late, t, &label);
+            self.compare_coverage(&encoded, &late, &label);
+        }
+    }
+
+    /// Every item `late` shows at a grid point inside the viewport is one
+    /// `early` encodes. Items pair by index, as [`Self::compare_geometry`]
+    /// checked.
+    fn compare_coverage(&self, encoded: &[bool], late: &CommittedFrame, label: &str) {
+        let offset_of = self.offset_of();
+        let animations = late.order.sample_animations(None);
+        let stickies = late.order.sample_stickies(1.0, &offset_of);
+        let samples = late
+            .order
+            .space_samples(&animations, &stickies, 1.0, &offset_of);
+        for (index, item) in late.order.items().iter().enumerate() {
+            if encoded[index] {
+                continue;
+            }
+            // The whole 800 × 600 viewport, 7 px apart.
+            for row in 0_u16..86 {
+                for column in 0_u16..115 {
+                    let point = Point2D::new(f32::from(column) * 7.0, f32::from(row) * 7.0);
+                    assert!(
+                        late.order.item_hit(item, point, &samples).is_none(),
+                        "{label}: {:?} {:?} shows at {point:?} but early culled it",
+                        item.node,
+                        item.kind,
+                    );
+                }
+            }
         }
     }
 
@@ -212,8 +254,9 @@ impl Fixture {
         let late_hit = |x: f32, y: f32| late.hit(Point2D::new(x, y), &offset_of, None);
         let mut reached = Vec::new();
         let mut compared = 0_usize;
-        for row in 0_u16..70 {
-            for column in 0_u16..70 {
+        // The whole 800 × 600 viewport, 7 px apart.
+        for row in 0_u16..86 {
+            for column in 0_u16..115 {
                 let (x, y) = (f32::from(column) * 7.0 + 0.25, f32::from(row) * 7.0 + 0.25);
                 let expected = late_hit(x, y);
                 // Four neighbors half a pixel away answering alike put the
@@ -403,4 +446,48 @@ fn nested_animated_elements_compose_as_committed() {
         fixture.probes = vec![outer, inner];
         fixture.check(&format!("nested, inner {curve}"));
     }
+}
+
+/// A 1600 px arm along the viewport's top edge turning a quarter about a
+/// point 400 px in: cells past the right edge at the commit swing down into
+/// view later, and the far end, which only enters below the bottom edge, is
+/// culled.
+#[test]
+fn a_rotating_arm_encodes_every_cell_its_turn_shows() {
+    let mut fixture = Fixture::new(
+        ".arm { width: 1600px; height: 40px; flex-shrink: 0; transform-origin: 400px 20px; }
+         .cell { width: 40px; height: 40px; flex-shrink: 0; background-color: teal; }",
+    );
+    let root = fixture.doc.root;
+    let arm = fixture.el(root, "view.arm");
+    let cells: Vec<_> = (0..40).map(|_| fixture.el(arm, "view.cell")).collect();
+    fixture.animate(arm, "rotate");
+    fixture.probes = vec![cells[10], cells[15]];
+    fixture.culls = true;
+    fixture.check("rotating arm");
+}
+
+/// A 4000 px card shrinking to half about its top inside a scroller composed
+/// 600 px down: the rows that come into view need the scroll window crossed
+/// before the curve's reach, and the far end, which no instant shows, is
+/// culled.
+#[test]
+fn a_shrinking_card_in_a_scrolled_list_encodes_every_row_it_shows() {
+    let mut fixture = Fixture::new(
+        ".scroller { overflow: scroll; width: 300px; height: 600px; flex-shrink: 0;
+                     flex-direction: column; }
+         .card { width: 300px; height: 4000px; flex-shrink: 0; flex-direction: column;
+                 transform-origin: 0px 0px; }
+         .row { height: 40px; flex-shrink: 0; background-color: teal; }
+         @keyframes shrink { from { transform: scale(1); } to { transform: scale(0.5); } }",
+    );
+    let root = fixture.doc.root;
+    let scroller = fixture.el(root, "view.scroller");
+    let card = fixture.el(scroller, "view.card");
+    let rows: Vec<_> = (0..100).map(|_| fixture.el(card, "view.row")).collect();
+    fixture.animate(card, "shrink");
+    fixture.offsets.push((scroller, Vector2D::new(0.0, 600.0)));
+    fixture.probes = vec![rows[27]];
+    fixture.culls = true;
+    fixture.check("shrinking card in a scrolled list");
 }

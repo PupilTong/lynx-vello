@@ -528,14 +528,19 @@ impl<'doc, T: Sync> Builder<'doc, T> {
             if !self.moving_extent_fits(node) {
                 return None;
             }
-            curve.transform = Some(self.attach_transform_track(
-                track,
+            let (pre, committed) = self.transform_track_maps(
                 style,
                 world,
                 size,
                 parent_perspective,
                 &export.committed_transform,
-            )?);
+            )?;
+            curve.transform = Some(crate::visual::curves::TransformTrack::new(
+                track,
+                curve.direction,
+                pre,
+                committed,
+            ));
         }
         self.animations.push(AnimationSlot { node, curve });
         Some(
@@ -555,24 +560,23 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         width * height <= MAX_MOVING_EXTENT_VIEWPORTS * viewport.width * viewport.height
     }
 
-    /// Attaches the geometry a transform track's delta needs: with the
-    /// element's world `W = pre · L · origin⁻¹` — which holds exactly when
+    /// The constant maps a transform track's delta needs, `(pre, Lc)`: with
+    /// the element's world `W = pre · L · origin⁻¹` — which holds exactly when
     /// nothing but the transform list and origin contribute — the constant
     /// factor is `pre = W · origin · Lc⁻¹`, and the compose-time delta is
-    /// `pre · L(t) · Lc⁻¹ · pre⁻¹`.
+    /// `pre · L(t) · Lc⁻¹ · pre⁻¹`. Both are invertible.
     #[expect(
         clippy::unused_self,
         reason = "kept beside the slot allocation it completes"
     )]
-    fn attach_transform_track(
+    fn transform_track_maps(
         &self,
-        track: crate::visual::curves::Track<crate::visual::curves::TransformList>,
         style: &ComputedValues,
         world: &Transform3D<f32>,
         size: Size2D<f32>,
         parent_perspective: Option<ParentPerspective>,
         committed: &crate::visual::curves::TransformList,
-    ) -> Option<crate::visual::curves::TransformTrack> {
+    ) -> Option<(Affine, Affine)> {
         use crate::visual::curves::transform_list_matrix;
         let box_style = style.get_box();
         let individual_transforms_present =
@@ -611,14 +615,10 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         if committed_matrix.determinant().abs() < 1e-9 || world.determinant().abs() < 1e-9 {
             return None;
         }
-        let committed_inverse = committed_matrix.inverse();
-        let pre = world * origin_affine * committed_inverse;
-        Some(crate::visual::curves::TransformTrack {
-            track,
-            pre,
-            pre_inverse: pre.inverse(),
-            committed_inverse,
-        })
+        Some((
+            world * origin_affine * committed_matrix.inverse(),
+            committed_matrix,
+        ))
     }
 
     #[allow(

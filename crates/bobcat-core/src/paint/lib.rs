@@ -1161,7 +1161,7 @@ impl Painter {
         }
         let generation = self.scroll_intents.generation;
         let frame = published.as_deref();
-        let animation_now = frame.and_then(|frame| frame.has_live_curves().then_some(at));
+        let animation_now = frame.and_then(|frame| frame.has_exported_curves().then_some(at));
         let target = route_published(frame, &self.scroll_intents, &event, animation_now);
         let mut decisions = InputDecisions::new();
         self.gesture
