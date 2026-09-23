@@ -63,9 +63,10 @@
 //!   `packages/bobcat-element/src/element-papi.ts:797-799`), so `wrapper` is named in the `:not()`
 //!   rather than left to lose.
 //!
-//! `sticky-top="true"` sets `position: sticky`; its inset is left to author
-//! styles. The remaining `sticky-top`/`sticky-bottom` rules
-//! (`x-list.css:104-135`) are still missing, along with `item-snap` /
+//! `sticky-top="true"` sets `position: sticky`, `top` from the list's sticky
+//! offset (default `0px`), and `z-index: 1` to paint above ordinary cells.
+//! Horizontal sticky insets and `sticky-bottom` (`x-list.css:104-135`)
+//! are still missing, along with `item-snap` /
 //! `paging-enabled` scroll snapping (`:137-151`), the scrollbar rules
 //! (`:8,45-61`), and every `::part()` threshold observer behind
 //! `scrolltoupper`/`scrolltolower` (`:153-193`).
@@ -140,7 +141,9 @@ list[scroll-orientation="horizontal"] list-item {
   contain-intrinsic-size: auto var(--estimated-main-axis-size-px, 100cqw) none;
 }
 list-item[recyclable="false"] { content-visibility: visible; contain: none; }
-list-item[sticky-top="true"] { position: sticky; }
+list-item[sticky-top="true"] {
+  position: sticky; top: var(--list-item-sticky-offset); z-index: 1;
+}
 list[list-type="flow"] {
   display: grid;
   grid-template-columns: repeat(var(--list-item-span-count), 1fr);
@@ -200,8 +203,8 @@ pub(super) fn define(document: &mut LynxDocument) {
 ///   invalid track lists that would drop the whole declaration and silently give the list one
 ///   implicit column. An unusable value clears the hint instead, which leaves the UA default of one
 ///   lane standing.
-/// - `sticky-offset` (`XListAttributes.ts:26-31`) is mapped even though nothing reads
-///   `--list-item-sticky-offset` yet: sticky positioning is the missing half, not the attribute.
+/// - `sticky-offset` (`XListAttributes.ts:26-31`) maps to `--list-item-sticky-offset`, which
+///   supplies a sticky-top cell's `top` inset.
 ///
 /// None of the three names is observed anywhere but on a `list`, which is what
 /// makes the hint's scope the tag's own: `--list-item-span-count` on some other
