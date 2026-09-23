@@ -1451,9 +1451,9 @@ and the sampler is `MirrorRepeat`, which reflects the backdrop back in at that
 crop rather than smearing an edge row or darkening toward a transparent
 border. The range points **backwards**: from the content start of the
 element's nearest Backdrop Root ancestor (`filter`, `opacity < 1`, `mask`,
-`clip-path`, `mix-blend-mode`, `backdrop-filter`, or the root) to the
-element's own scope open — exactly what was painted before it inside that
-root. A `will-change` naming one of those properties is a Backdrop Root per
+`clip-path`, `mix-blend-mode`, `backdrop-filter`, an exported opacity curve at
+any reading, or the root) to the element's own scope open — exactly what was
+painted before it inside that root. A `will-change` naming one of those properties is a Backdrop Root per
 the spec and is deliberately not one here, since no group layer is opened per
 `will-change` element (recorded in `docs/tracking/deviations.md`). Its one op, `PushBackdrop`, has no matching pop; it sits innermost in
 the element's own layers and before any of its items, so the element's
@@ -1471,18 +1471,24 @@ no GPU take that fallback by construction.
 
 The device side is `dom::render::blur::FilterTextures`, one per
 `vello::Renderer`, owned beside that renderer's `AtlasResidency` by `Headless`
-and by the painter's `WindowGraphics`. Its cache key is the commit id plus two
-conditional terms: the painter's scroll generation, only when some entry's
-range rides a scroll chain the entry itself does not — a blurred scroller's
-content slides under the blur, an ordinary blurred box moves with it — and the
-timeline reading, only when some *backdrop* entry's range rides another
-element's animation chain, which a blur group can never be in a position to
-do. So scrolling past an ordinary blurred box, and ticking an animation
-nothing is moving behind, both re-bake nothing. Commit ids restart per
-document, so a target pointed at a second document must `forget` the cache,
-the same obligation it already has for its own compose key. Bakes happen in
-increasing order of range end, so every texture an entry's own range draws
-already exists when it bakes; each bake is a `render_to_texture` and therefore
+and by the painter's `WindowGraphics`. Its cache holds one commit's bakes, and
+each entry re-bakes on its own two conditional readings: the painter's scroll
+generation, only when the entry's range rides a scroll or sticky node the
+entry itself does not — a blurred scroller's content slides under the blur, an
+ordinary blurred box moves with it — and the timeline reading, only when the
+entry's range rides an animation node the entry itself does not. For a
+backdrop that is another element's curve in its prefix. For a blur group it is
+a curve on its own content, or, on a moving element, an ancestor's clip its
+range re-pushes, which stays still while the group moves. An entry whose range
+draws a backdrop's texture also takes on that backdrop's two conditions: an
+element with both properties draws its backdrop inside its own blur group, and
+a child's backdrop range opens with its root's. So scrolling past an ordinary
+blurred box, and ticking an animation nothing is moving behind or inside, both
+re-bake nothing, and a tick re-bakes only the entries that read it. Commit ids
+restart per document, so a target pointed at a second document must `forget`
+the cache, the same obligation it already has for its own compose key. Bakes
+happen in increasing order of range end, so every texture an entry's own range
+draws already exists when it bakes; each bake is a `render_to_texture` and therefore
 owes the residency a pass of its own, because a bake of a solid-colour group
 is precisely the patch-free render that frees vello's image atlas. The baked
 textures are override images, so the *composite* render names them to the

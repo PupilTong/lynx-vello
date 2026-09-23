@@ -435,8 +435,11 @@ of the element's local-to-viewport linear map (read off
 isotropic number under a non-uniform scale or a skew (recorded limit).
 
 The Backdrop Root set is filter-effects-2's list — `filter`, `opacity < 1`,
-`mask`, `clip-path`, `mix-blend-mode`, `backdrop-filter`, and the root element.
-It is a separate predicate (`walker::is_backdrop_root`) rather than
+`mask`, `clip-path`, `mix-blend-mode`, `backdrop-filter`, and the root element —
+plus an element exporting an opacity curve, at every reading: Web Animations
+makes a running `opacity` animation act as `will-change: opacity`, and the
+range a commit fixes is composed at every instant of the curve. It is a
+separate predicate (`walker::is_backdrop_root`) rather than
 `stacking::needs_group_rendering` because that one also answers `true` for
 `isolation: isolate`, which the spec's list does not contain. `will-change`
 roots are **not** honored, which is the one observable gap: `will-change` is in

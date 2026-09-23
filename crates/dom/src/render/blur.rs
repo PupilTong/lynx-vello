@@ -32,19 +32,31 @@
 //!
 //! [`FilterTextures::prepare`] is the whole of it, and it is skipped
 //! altogether for a frame with no filter entry — which is every frame of a
-//! page that neither blurs nor filters a backdrop. Its cache key is the
-//! commit id, plus two conditional terms:
+//! page that neither blurs nor filters a backdrop. Its cache is keyed on the
+//! commit id, and each entry re-bakes on its own two conditional readings:
 //!
-//! - the painter's **scroll generation**, when some entry's range rides a scroll or sticky node the
+//! - the painter's **scroll generation**, when the entry's range rides a scroll or sticky node the
 //!   entry's own space does not: a blurred scroller's *content* moves under the blur, so its bake
 //!   depends on the offset, while an ordinary blurred box moves with it and its bake does not. So a
 //!   scroll frame over an ordinary blurred box re-bakes nothing.
-//! - the **timeline reading**, when some entry's range rides an animation node the entry's space
+//! - the **timeline reading**, when the entry's range rides an animation node the entry's space
 //!   does not. A backdrop's range is a *prefix of the frame*, so anything animating in front of the
-//!   Backdrop Root is behind the element; a `filter: blur()` group on a moving element re-pushes
-//!   its ancestors' clips, which stay where they are while the group moves.
+//!   Backdrop Root is behind the element; a `filter: blur()` group holds content its own curves
+//!   move inside it, and on a moving element re-pushes its ancestors' clips, which stay where they
+//!   are while the group moves.
 //!
-//! **That key identifies a commit of *one* document.** Commit ids restart at
+//! An entry whose range holds a `PushBackdrop` takes on that backdrop's two
+//! conditions when the commit records it. Scanning the range's ops alone
+//! does not give that, because a backdrop's range lies *before* its op: an
+//! element with both properties draws its backdrop inside its own blur
+//! group, in the group's own space, and a child's backdrop range opens with
+//! its root's backdrop op. A nested `PushFilter` needs nothing of the kind,
+//! since its ops lie inside the enclosing range and are scanned there. So
+//! re-baking an entry always re-bakes every entry that draws its texture,
+//! after it: the bake order is increasing range end, and a drawn entry's
+//! range ends before the drawing one's does.
+//!
+//! **The commit id identifies a commit of *one* document.** Commit ids restart at
 //! one per document, so a consumer pointing this renderer at a second
 //! document has to call [`FilterTextures::forget`] first — the same
 //! obligation, for the same reason, that it already has for its own compose
@@ -698,9 +710,13 @@ pub struct FilterTextures {
     /// The entries in bake order — increasing `ops.end`, so an entry whose
     /// range draws another one's texture bakes after it.
     order: Vec<u32>,
-    /// `(commit id, scroll generation, timeline reading)`; the last two are
-    /// zero unless some entry actually depends on them. See the module doc.
-    key: Option<(u64, u64, u64)>,
+    /// The commit the bakes belong to. See the module doc.
+    commit: Option<u64>,
+    /// Per entry, the readings its bake was taken at; see [`reading`].
+    readings: Vec<(u64, u64)>,
+    /// Per entry, whether this prepare bakes it. A field so the pass
+    /// allocates nothing.
+    due: Vec<bool>,
 }
 
 impl std::fmt::Debug for FilterTextures {
@@ -708,7 +724,7 @@ impl std::fmt::Debug for FilterTextures {
         formatter
             .debug_struct("FilterTextures")
             .field("groups", &self.banks.len())
-            .field("key", &self.key)
+            .field("commit", &self.commit)
             .finish_non_exhaustive()
     }
 }
@@ -717,13 +733,17 @@ impl FilterTextures {
     /// Brings the bake textures up to `frame` and answers the table the
     /// compose program indexes by filter group.
     ///
-    /// Cheap and allocation-free when the key has not moved, which is every
-    /// frame that neither commits nor scrolls a blurred scroller's content.
+    /// Cheap and allocation-free when no entry's readings moved, which is
+    /// every frame that neither commits nor scrolls a blurred scroller's
+    /// content nor ticks a curve some entry holds; otherwise only the
+    /// entries whose readings moved re-bake.
     ///
     /// # Errors
     ///
-    /// [`GpuError::Render`] if a bake render fails, in which case the table
-    /// is emptied: every group falls back to replaying raw.
+    /// [`GpuError::Render`] if a bake render fails. The table then holds a
+    /// texture for every entry that was not due or baked before the failure,
+    /// each current for these readings, and `None` for the rest, which fall
+    /// back to replaying raw; the next prepare re-bakes every entry.
     #[expect(
         clippy::too_many_arguments,
         reason = "one bake pre-step's full inputs: the renderer's three device handles, the \
@@ -742,32 +762,43 @@ impl FilterTextures {
         animation_now: Option<f64>,
     ) -> Result<&[Option<ImageData>], GpuError> {
         let groups = frame.filter_groups();
-        let key = cache_key(frame.commit_id(), groups, scroll_generation, animation_now);
-        // The length check is a net, not the contract: a key carries no
-        // document identity (see the module doc), and a table of the wrong
-        // length is the one such mix-up that is cheap to catch.
-        if self.key == Some(key) && self.images.len() == groups.len() {
-            return Ok(&self.images);
-        }
-        // Dropped first: a failed bake must not leave a stale texture bound
-        // to a group of a frame that is no longer the cached one.
-        self.key = None;
-        while self.banks.len() > groups.len() {
-            if let Some(bank) = self.banks.pop().flatten() {
-                renderer.override_image(&bank.handle, None);
+        let commit = frame.commit_id();
+        if self.mark_due(commit, groups, scroll_generation, animation_now) {
+            if !self.due.contains(&true) {
+                return Ok(&self.images);
             }
+            for (image, &due) in self.images.iter_mut().zip(&self.due) {
+                if due {
+                    *image = None;
+                }
+            }
+        } else {
+            while self.banks.len() > groups.len() {
+                if let Some(bank) = self.banks.pop().flatten() {
+                    renderer.override_image(&bank.handle, None);
+                }
+            }
+            self.banks.resize_with(groups.len(), || None);
+            self.images.clear();
+            self.images.resize(groups.len(), None);
+            self.plan(groups);
         }
-        self.banks.resize_with(groups.len(), || None);
-        self.images.clear();
-        self.images.resize(groups.len(), None);
+        // Unset until every due bake succeeds: a failed bake must not leave
+        // the cache serving a table it did not finish.
+        self.commit = None;
+        self.readings.clear();
+        self.readings.extend(
+            groups
+                .iter()
+                .map(|group| reading(group, scroll_generation, animation_now)),
+        );
         if groups.is_empty() {
-            self.key = Some(key);
+            self.commit = Some(commit);
             return Ok(&self.images);
         }
         if self.pipelines.is_none() {
             self.pipelines = Some(Pipelines::new(device));
         }
-        self.plan(groups);
         self.bake_all(
             renderer,
             device,
@@ -778,7 +809,7 @@ impl FilterTextures {
             offset_of,
             animation_now,
         )?;
-        self.key = Some(key);
+        self.commit = Some(commit);
         Ok(&self.images)
     }
 
@@ -797,7 +828,36 @@ impl FilterTextures {
     /// document's first frame. The textures stay allocated, since the next
     /// page's groups will want textures of their own.
     pub fn forget(&mut self) {
-        self.key = None;
+        self.commit = None;
+    }
+
+    /// Fills `due` with the entries this prepare bakes, answering whether the
+    /// cached bakes belong to `commit`: of another commit every entry bakes,
+    /// of the cached one only those whose readings moved.
+    fn mark_due(
+        &mut self,
+        commit: u64,
+        groups: &[crate::FilterGroup],
+        scroll_generation: u64,
+        animation_now: Option<f64>,
+    ) -> bool {
+        // The length checks are a net, not the contract: a commit id carries
+        // no document identity (see the module doc), and a table of the wrong
+        // length is the one such mix-up that is cheap to catch.
+        let cached = self.commit == Some(commit)
+            && self.images.len() == groups.len()
+            && self.readings.len() == groups.len();
+        self.due.clear();
+        if cached {
+            self.due.extend(
+                groups.iter().zip(&self.readings).map(|(group, &taken)| {
+                    reading(group, scroll_generation, animation_now) != taken
+                }),
+            );
+        } else {
+            self.due.resize(groups.len(), true);
+        }
+        cached
     }
 
     /// Decides which groups fit the budget, and the order to bake them in.
@@ -822,8 +882,9 @@ impl FilterTextures {
             (0..groups.len())
                 .map(|index| u32::try_from(index).expect("a frame cannot hold 2^32 filters")),
         );
-        // Post-order: a group's `ops` range contains every nested group's, so
-        // ordering by range end alone puts the inner ones first.
+        // Post-order: a group's `ops` range contains every nested group's, and
+        // a backdrop's range ends before its op, so ordering by range end
+        // alone bakes every drawn texture before the bake that draws it.
         self.order
             .sort_unstable_by_key(|&index| groups[index as usize].ops.end);
     }
@@ -851,6 +912,7 @@ impl FilterTextures {
             images: filtered,
             admitted,
             order,
+            due,
             ..
         } = self;
         let pipelines = pipelines
@@ -859,7 +921,7 @@ impl FilterTextures {
         let groups = frame.filter_groups();
         for &index in order.iter() {
             let index = index as usize;
-            if !admitted[index] {
+            if !(admitted[index] && due[index]) {
                 continue;
             }
             let group = &groups[index];
@@ -915,37 +977,31 @@ impl FilterTextures {
     }
 }
 
-/// The cache key for one frame's bakes: the commit id, plus each of the two
-/// compose-time readings *only* when some entry's pixels actually depend on
-/// it.
-///
-/// An entry whose range rides an inner scroll or sticky node bakes different pixels at
-/// a different offset; every other entry moves *with* its content, so its
-/// bake outlives any number of scroll frames. Likewise for the timeline: only
-/// an entry whose range rides an animation node its own space does not
-/// re-bakes per tick.
+/// The readings one entry's bake depends on: the scroll generation when its
+/// range rides a scroll or sticky node its own space does not, or draws a
+/// backdrop that reads it, and the timeline reading when it [samples
+/// animations](crate::FilterGroup::samples_animations); each zero otherwise.
 ///
 /// A timeline reading enters as its bit pattern, and an absent one as zero —
 /// which is also `0.0`'s pattern. The two therefore collide at the timeline's
 /// own origin, and the cost is one stale bake in the instant a page's first
 /// exported curve starts.
-fn cache_key(
-    commit_id: u64,
-    groups: &[crate::FilterGroup],
+fn reading(
+    group: &crate::FilterGroup,
     scroll_generation: u64,
     animation_now: Option<f64>,
-) -> (u64, u64, u64) {
-    let generation = if groups.iter().any(|group| group.inner_chains) {
+) -> (u64, u64) {
+    let generation = if group.inner_chains {
         scroll_generation
     } else {
         0
     };
-    let instant = if groups.iter().any(crate::FilterGroup::samples_animations) {
+    let instant = if group.samples_animations() {
         animation_now.map_or(0, f64::to_bits)
     } else {
         0
     };
-    (commit_id, generation, instant)
+    (generation, instant)
 }
 
 /// Records one group's whole pass chain against its bank.
@@ -1057,8 +1113,8 @@ fn ensure_bank<'bank>(
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::{
-        DECIMATE_ABOVE, MAX_FILTER_DIMENSION, MAX_LEVELS, MAX_TAPS, Params, cache_key, decimate,
-        kernel, level_size,
+        DECIMATE_ABOVE, FilterTextures, MAX_FILTER_DIMENSION, MAX_LEVELS, MAX_TAPS, Params,
+        decimate, kernel, level_size, reading,
     };
 
     /// A kernel is a probability distribution: the centre plus twice every
@@ -1194,14 +1250,14 @@ mod tests {
         assert!(smallest.levels == 0 && smallest.sigma > 0.0);
     }
 
-    /// The key's two conditional terms are independent, and each stays zero
-    /// unless some entry's own pixels depend on that reading.
+    /// An entry's two readings are independent, and each stays zero unless
+    /// its own pixels depend on it.
     ///
     /// This is what keeps a scroll frame over an ordinary blurred box, and an
     /// animation tick over a backdrop nothing is moving behind, from
-    /// re-baking anything at all.
+    /// re-baking it.
     #[test]
-    fn the_cache_key_carries_only_the_readings_an_entry_depends_on() {
+    fn an_entry_reads_only_what_its_pixels_depend_on() {
         use crate::paint::compose::{Backdrop, FilterGroup};
         use crate::vello::kurbo::{Affine, Rect};
 
@@ -1224,37 +1280,127 @@ mod tests {
             entry
         };
 
-        let plain = [FilterGroup::new(1.0, rect, None)];
+        let plain = FilterGroup::new(1.0, rect, None);
         assert_eq!(
-            cache_key(3, &plain, 9, Some(2.5)),
-            cache_key(3, &plain, 400, Some(77.0)),
+            reading(&plain, 9, Some(2.5)),
+            reading(&plain, 400, Some(77.0)),
             "a lone blur group depends on neither reading",
         );
-        let scrolling = [entry(true, false)];
-        assert_ne!(
-            cache_key(3, &scrolling, 9, None),
-            cache_key(3, &scrolling, 10, None)
-        );
+        let scrolling = entry(true, false);
+        assert_ne!(reading(&scrolling, 9, None), reading(&scrolling, 10, None));
         assert_eq!(
-            cache_key(3, &scrolling, 9, Some(2.5)),
-            cache_key(3, &scrolling, 9, Some(77.0)),
+            reading(&scrolling, 9, Some(2.5)),
+            reading(&scrolling, 9, Some(77.0)),
             "but not on the timeline",
         );
-        let animating = [entry(false, true)];
+        let animating = entry(false, true);
         assert_ne!(
-            cache_key(3, &animating, 9, Some(2.5)),
-            cache_key(3, &animating, 9, Some(77.0)),
+            reading(&animating, 9, Some(2.5)),
+            reading(&animating, 9, Some(77.0)),
         );
         assert_eq!(
-            cache_key(3, &animating, 9, Some(2.5)),
-            cache_key(3, &animating, 10, Some(2.5)),
+            reading(&animating, 9, Some(2.5)),
+            reading(&animating, 10, Some(2.5)),
             "but not on the scroll generation",
         );
-        assert_ne!(
-            cache_key(3, &animating, 0, None),
-            cache_key(4, &animating, 0, None),
-            "and the commit id is unconditional",
+    }
+
+    /// A tick re-bakes the entry that samples the timeline and leaves the
+    /// one beside it alone; a new commit re-bakes both.
+    #[test]
+    fn a_sampling_entry_does_not_re_bake_a_still_one() {
+        use crate::paint::compose::FilterGroup;
+        use crate::vello::kurbo::Rect;
+
+        let rect = Rect::new(0.0, 0.0, 8.0, 8.0);
+        let mut sampling = FilterGroup::new(1.0, rect, None);
+        sampling.inner_animations = true;
+        let groups = [FilterGroup::new(1.0, rect, None), sampling];
+        let mut textures = FilterTextures::default();
+        assert!(!textures.mark_due(3, &groups, 0, Some(2.5)));
+        assert_eq!(textures.due, [true, true], "a first commit bakes both");
+        // What a successful prepare at that instant leaves behind.
+        textures.commit = Some(3);
+        textures.images = vec![None; groups.len()];
+        textures.readings = groups
+            .iter()
+            .map(|group| reading(group, 0, Some(2.5)))
+            .collect();
+        assert!(textures.mark_due(3, &groups, 0, Some(2.5)));
+        assert_eq!(textures.due, [false, false], "the same instant bakes none");
+        assert!(textures.mark_due(3, &groups, 7, Some(77.0)));
+        assert_eq!(
+            textures.due,
+            [false, true],
+            "a tick and a scroll re-bake only the sampling entry"
         );
+        assert!(!textures.mark_due(4, &groups, 0, Some(2.5)));
+        assert_eq!(textures.due, [true, true], "and a new commit bakes both");
+    }
+
+    /// One element with both `filter: blur()` and `backdrop-filter`, over a
+    /// scroller and beside a sliding card: a scroll or a tick re-bakes its
+    /// backdrop, and with it the blur group that draws that backdrop, though
+    /// nothing in the group's own range moves.
+    #[test]
+    fn a_moving_backdrop_re_bakes_the_blur_group_drawing_it() {
+        let page = "page { display: flex; position: relative; width: 800px; height: 600px; }
+             .list { display: flex; flex-direction: column; overflow: scroll;
+                     width: 300px; height: 200px; }
+             .row { display: flex; flex-shrink: 0; width: 300px; height: 40px;
+                    background-color: navy; }
+             .card { display: flex; position: absolute; left: 400px; top: 0px;
+                     width: 40px; height: 40px; background-color: navy;
+                     animation: slide 1s linear infinite; }
+             @keyframes slide { from { transform: translateX(0px); }
+                                to { transform: translateX(200px); } }
+             .frost { display: flex; position: absolute; left: 20px; top: 20px;
+                      width: 600px; height: 100px; filter: blur(2px);
+                      backdrop-filter: blur(4px); }";
+        // What moves behind the element, and the two readings the second
+        // prepare takes after a first one at generation 0 and instant 0.25.
+        for (behind, generation, now) in [("list", 1, 0.25), ("card", 0, 0.5)] {
+            let mut doc = crate::test_common::Doc::with_css(page);
+            let root = doc.root;
+            let moving = doc.el(root, &format!("view.{behind}"));
+            if behind == "list" {
+                for _ in 0..10 {
+                    doc.el(moving, "view.row");
+                }
+            }
+            doc.el(root, "view.frost");
+            doc.dom.render();
+            doc.dom.advance_animations(0.0);
+            doc.dom.advance_animations(0.25);
+            doc.dom.render();
+            let frame = doc.dom.committed_frame().expect("a frame is committed");
+            let groups = frame.filter_groups();
+            let [blur, backdrop] = groups else {
+                panic!("{behind}: a blur group and a backdrop, got {groups:?}");
+            };
+            assert!(backdrop.is_backdrop() && !blur.is_backdrop(), "{behind}");
+            let expected = (behind == "list", behind == "card");
+            let reads = |entry: &crate::FilterGroup| (entry.inner_chains, entry.inner_animations);
+            assert_eq!(reads(backdrop), expected, "{behind}: the backdrop");
+            assert_eq!(reads(blur), expected, "{behind}: the group drawing it");
+
+            let commit = frame.commit_id();
+            let mut textures = FilterTextures::default();
+            assert!(!textures.mark_due(commit, groups, 0, Some(0.25)));
+            // What a successful prepare at those readings leaves behind.
+            textures.commit = Some(commit);
+            textures.images = vec![None; groups.len()];
+            textures.readings = groups
+                .iter()
+                .map(|group| reading(group, 0, Some(0.25)))
+                .collect();
+            assert!(textures.mark_due(commit, groups, generation, Some(now)));
+            assert_eq!(
+                textures.due,
+                [true, true],
+                "{behind}: the backdrop re-bakes, and so does the group drawing it",
+            );
+        }
     }
 
     /// The uniform block's WGSL offsets, which nothing but this test can see.

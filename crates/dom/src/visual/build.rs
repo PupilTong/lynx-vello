@@ -502,14 +502,16 @@ impl<'doc, T: Sync> Builder<'doc, T> {
     /// Records `node` in the frame's animation-slot table when it carries a
     /// composite-exportable animation.
     ///
-    /// Every refusal happens here, before the slot exists: an element inside
-    /// a composited group cannot export (the group's bounds were computed
-    /// for the committed geometry), a transform track needs a 2D, invertible
-    /// decomposition of the element's world matrix with no individual
-    /// transforms, motion path, or inherited perspective in the way, and a
-    /// moving element must fit [`MAX_MOVING_EXTENT_VIEWPORTS`]. A refusal
-    /// allocates nothing; the element keeps animating through main-thread
-    /// ticks, which cull it exactly.
+    /// Every refusal happens here, before the slot exists: a transform track
+    /// needs a 2D, invertible decomposition of the element's world matrix
+    /// with no individual transforms, motion path, or inherited perspective
+    /// in the way, a moving element must fit [`MAX_MOVING_EXTENT_VIEWPORTS`],
+    /// and the group enclosing it must bound it wherever its curve carries
+    /// it ([`super::space::movers_bounded`]). A refusal allocates nothing;
+    /// the element keeps animating through main-thread ticks, which cull it
+    /// exactly.
+    ///
+    /// `clip` is the clip chain enclosing the element.
     fn allocate_animation_slot(
         &mut self,
         node: NodeId,
@@ -517,15 +519,25 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         world: &Transform3D<f32>,
         size: Size2D<f32>,
         parent_perspective: Option<ParentPerspective>,
+        clip: Option<usize>,
     ) -> Option<u32> {
         let node_ref = self.node(node);
-        if !node_ref.may_have_animations() || self.current_layer.is_some() {
+        if !node_ref.may_have_animations() {
             return None;
         }
         let export = self.document.composite_export(node_ref)?;
         let mut curve = export.curve;
         if let Some(track) = export.transform_track {
-            if !self.moving_extent_fits(node) {
+            let bounded = self.current_layer.is_none_or(|layer| {
+                super::space::movers_bounded(
+                    &self.spaces,
+                    &self.clips,
+                    &self.animations,
+                    clip,
+                    self.layers[layer].space,
+                )
+            });
+            if !bounded || !self.moving_extent_fits(node) {
                 return None;
             }
             let (pre, committed) = self.transform_track_maps(
@@ -540,7 +552,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
                 curve.direction,
                 pre,
                 committed,
-            ));
+            )?);
         }
         self.animations.push(AnimationSlot { node, curve });
         Some(
@@ -649,8 +661,14 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         };
         let world = stacking_context_matrix(values, size, offset_in_parent, parent_perspective)
             .then(parent_world);
-        let own_animation =
-            self.allocate_animation_slot(root, values, &world, size, parent_perspective);
+        let own_animation = self.allocate_animation_slot(
+            root,
+            values,
+            &world,
+            size,
+            parent_perspective,
+            seed.current.clip,
+        );
         if let Some(index) = own_animation {
             box_space = Some(self.push_space(box_space, SpaceKind::Animation(index)));
         }

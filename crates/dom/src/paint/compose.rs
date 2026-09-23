@@ -339,15 +339,18 @@ pub struct FilterGroup {
     /// Backdrop Root's content start up to the element's own scope open.
     pub(crate) ops: Range<u32>,
     /// Whether some op in `ops` rides a scroll or sticky node `space` does
-    /// not — the one condition under which the bake's pixels depend on a
-    /// scroll offset, and therefore the one condition under which a scroll
-    /// invalidates the bake.
+    /// not, or draws a backdrop whose own flag is set — the one condition
+    /// under which the bake's pixels depend on a scroll offset, and
+    /// therefore the one condition under which a scroll invalidates the
+    /// bake.
     pub(crate) inner_chains: bool,
-    /// Whether some op in `ops` rides an animation node `space` does not —
-    /// the one condition under which the bake's pixels depend on the
-    /// timeline reading. For a backdrop that is another element's curve in
-    /// its prefix; for a `filter: blur()` group on a moving element, an
-    /// ancestor's clip its range re-pushes, which the group moves across.
+    /// Whether some op in `ops` rides an animation node `space` does not,
+    /// or draws a backdrop whose own flag is set — the one condition under
+    /// which the bake's pixels depend on the timeline reading. For a
+    /// backdrop that is another element's curve in its prefix; for a
+    /// `filter: blur()` group, a curve on its own content, or, on a moving
+    /// element, an ancestor's clip its range re-pushes, which the group
+    /// moves across.
     pub(crate) inner_animations: bool,
     /// The group this one nests inside, so the assembly needs no open-filter
     /// stack of its own.
@@ -393,7 +396,8 @@ impl FilterGroup {
     }
 
     /// Whether this entry's baked pixels depend on the timeline reading:
-    /// some op in its range rides an animation node the entry does not.
+    /// some op in its range rides an animation node the entry does not, or
+    /// its range draws a backdrop whose own bake samples the timeline.
     #[must_use]
     pub fn samples_animations(&self) -> bool {
         self.inner_animations
@@ -605,6 +609,14 @@ impl ComposeAssembly {
     /// One pass over an entry's range: whether it holds an op on another
     /// scroll or sticky node, whether it holds one on another animation
     /// node, and how many layers it leaves open at its end.
+    ///
+    /// A `PushBackdrop` op also carries its entry's two conditions: the
+    /// texture is re-baked on them, so a bake drawing it is stale after them
+    /// too. A backdrop's range lies before its op, so this is the only way
+    /// an entry learns what a backdrop drawn inside it reads — the element's
+    /// own blur group around its backdrop, and a child backdrop whose range
+    /// opens with its root's. A nested `PushFilter` needs no such arm: its
+    /// ops lie inside this range too, and are scanned here directly.
     fn scan_range(
         &self,
         ops: &Range<u32>,
@@ -618,6 +630,12 @@ impl ComposeAssembly {
             match op {
                 ComposeOp::Push { .. } => depth += 1,
                 ComposeOp::Pop => depth -= 1,
+                // Already scanned: a backdrop is recorded before its op.
+                ComposeOp::PushBackdrop { index } => {
+                    let drawn = &self.filter_groups[*index as usize];
+                    scrolls |= drawn.inner_chains;
+                    animations |= drawn.inner_animations;
+                }
                 _ => {}
             }
             if let Some(op) = op.space(&self.filter_groups) {
@@ -641,10 +659,11 @@ impl ComposeAssembly {
     /// deciding whether anything inside it rides another scroll, sticky or
     /// animation node of `spaces`.
     ///
-    /// Every group scope re-pushes its content's whole clip chain, so a
-    /// group on a moving element holds its ancestors' clips in their own,
-    /// still spaces: the bake then samples the instant, or those clips would
-    /// move with the texture.
+    /// Content a curve moves inside the group rides that curve's node, so
+    /// the bake samples the instant. So does a group on a moving element:
+    /// every group scope re-pushes its content's whole clip chain, which
+    /// holds its ancestors' clips in their own, still spaces, or those clips
+    /// would move with the texture.
     pub(crate) fn pop_filter(&mut self, spaces: &[Space]) {
         self.seal_fragment();
         let Some(index) = self.open_filter else {
@@ -1394,5 +1413,64 @@ mod tests {
             finished.filter_groups[0].inner_chains,
             "the outer group's range holds a bracket on another chain",
         );
+    }
+
+    /// An element with both properties: its backdrop's range is the prefix
+    /// before its blur group, and the backdrop op inside the group rides the
+    /// group's own space. The group still takes on what the backdrop reads,
+    /// since it draws that texture.
+    #[test]
+    fn a_blur_group_takes_on_what_the_backdrop_inside_it_reads() {
+        for behind in [SCROLLED, ANIMATED] {
+            let mut assembly = assembly();
+            assembly.push_op(push(behind));
+            assembly.push_op(ComposeOp::Pop);
+            let end = assembly.content_boundary();
+            assembly.push_filter(group(None));
+            assert!(assembly.push_backdrop(backdrop_entry(None), 0..end, &SPACES));
+            assembly.push_op(push(None));
+            assembly.push_op(ComposeOp::Pop);
+            assembly.pop_filter(&SPACES);
+            let finished = assembly.finish();
+            let [blur, backdrop] = &finished.filter_groups[..] else {
+                panic!("a blur group and a backdrop");
+            };
+            assert!(backdrop.is_backdrop() && !blur.is_backdrop());
+            assert!(
+                blur.ops.start >= backdrop.ops.end,
+                "the backdrop's range lies outside the group's",
+            );
+            let reads = |entry: &FilterGroup| (entry.inner_chains, entry.inner_animations);
+            let expected = (behind == SCROLLED, behind == ANIMATED);
+            assert_eq!(reads(backdrop), expected, "backdrop over {behind:?}");
+            assert_eq!(reads(blur), expected, "blur group around it, {behind:?}");
+        }
+    }
+
+    /// A child's backdrop range opens with its root's backdrop op: the child
+    /// takes on what the root's backdrop reads, though nothing it paints
+    /// itself moves.
+    #[test]
+    fn a_child_backdrop_takes_on_what_its_roots_backdrop_reads() {
+        let mut assembly = assembly();
+        assembly.push_op(push(ANIMATED));
+        assembly.push_op(ComposeOp::Pop);
+        let end = assembly.content_boundary();
+        let root_content = assembly.content_boundary();
+        assert!(assembly.push_backdrop(backdrop_entry(None), 0..end, &SPACES));
+        assembly.push_op(push(None));
+        assembly.push_op(ComposeOp::Pop);
+        let child_end = assembly.content_boundary();
+        assert!(assembly.push_backdrop(backdrop_entry(None), root_content..child_end, &SPACES));
+        let finished = assembly.finish();
+        let [root, child] = &finished.filter_groups[..] else {
+            panic!("two backdrops");
+        };
+        assert!(root.samples_animations(), "the root's prefix animates");
+        assert!(
+            child.samples_animations(),
+            "and the child's range draws the root's texture",
+        );
+        assert!(!child.inner_chains);
     }
 }

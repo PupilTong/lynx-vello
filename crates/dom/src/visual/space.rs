@@ -23,7 +23,8 @@
 
 use euclid::default::Vector2D;
 
-use super::{AnimationSamples, ScrollSlot, StickySamples};
+use super::reach::Reach;
+use super::{AnimationSamples, AnimationSlot, ClipNode, ScrollSlot, StickySamples};
 use crate::paint::compose::snap_offset;
 use crate::vello::kurbo::Affine;
 
@@ -52,6 +53,98 @@ pub(crate) fn path(spaces: &[Space], space: Option<u32>) -> impl Iterator<Item =
         node.parent.map(|index| spaces[index as usize])
     })
     .map(|node| node.kind)
+}
+
+/// The deepest space on both `a`'s and `b`'s paths; `None` is the root.
+///
+/// A node's parent is always an earlier entry, so of two distinct spaces the
+/// later is never the other's ancestor and steps outward.
+pub(crate) fn common_ancestor(
+    spaces: &[Space],
+    mut a: Option<u32>,
+    mut b: Option<u32>,
+) -> Option<u32> {
+    while a != b {
+        // `None` orders first, so the stepping side is always a node.
+        if a > b {
+            a = a.and_then(|index| spaces[index as usize].parent);
+        } else {
+            b = b.and_then(|index| spaces[index as usize].parent);
+        }
+    }
+    a
+}
+
+/// The nodes from `space` outward up to, not including, `outer`, an
+/// ancestor of `space` or the root.
+pub(crate) fn path_below(
+    spaces: &[Space],
+    space: Option<u32>,
+    outer: Option<u32>,
+) -> impl Iterator<Item = Space> + '_ {
+    std::iter::successors(space, |&index| spaces[index as usize].parent)
+        .take_while(move |&index| Some(index) != outer)
+        .map(|index| spaces[index as usize])
+}
+
+/// The reach of every transform curve that moves `content` relative to
+/// `group`: those on `content`'s path below the two spaces' common ancestor,
+/// innermost first. An opacity-only curve moves nothing.
+pub(crate) fn curves_within<'a>(
+    spaces: &'a [Space],
+    animations: &'a [AnimationSlot],
+    content: Option<u32>,
+    group: Option<u32>,
+) -> impl Iterator<Item = &'a Reach> + 'a {
+    let common = common_ancestor(spaces, content, group);
+    path_below(spaces, content, common).filter_map(move |node| match node.kind {
+        SpaceKind::Animation(slot) => animations[slot as usize]
+            .curve
+            .transform
+            .as_ref()
+            .map(|track| &track.reach),
+        SpaceKind::Scroll(_) | SpaceKind::Sticky(_) => None,
+    })
+}
+
+/// The innermost clip on `clip`'s chain that no transform curve moves
+/// relative to `group`. A curve carrying content around inside a group
+/// cannot carry it out of this clip.
+pub(crate) fn still_clip(
+    spaces: &[Space],
+    clips: &[ClipNode],
+    animations: &[AnimationSlot],
+    clip: Option<usize>,
+    group: Option<u32>,
+) -> Option<usize> {
+    std::iter::successors(clip, |&index| clips[index].parent).find(|&index| {
+        curves_within(spaces, animations, clips[index].space, group)
+            .next()
+            .is_none()
+    })
+}
+
+/// Whether a group in `group` bounds content a transform curve moves inside
+/// it under clip chain `clip`: the region of the chain's [`still_clip`] —
+/// or, with none, the viewport — pulls back into `group` through no curve
+/// whose scale range reaches 0.
+pub(crate) fn movers_bounded(
+    spaces: &[Space],
+    clips: &[ClipNode],
+    animations: &[AnimationSlot],
+    clip: Option<usize>,
+    group: Option<u32>,
+) -> bool {
+    let outer = still_clip(spaces, clips, animations, clip, group)
+        .and_then(|index| common_ancestor(spaces, clips[index].space, group));
+    path_below(spaces, group, outer).all(|node| match node.kind {
+        SpaceKind::Animation(slot) => animations[slot as usize]
+            .curve
+            .transform
+            .as_ref()
+            .is_none_or(|track| track.reach.inverse_norm().is_some()),
+        SpaceKind::Scroll(_) | SpaceKind::Sticky(_) => true,
+    })
 }
 
 /// The innermost scroll slot on `space`'s path.
@@ -246,6 +339,41 @@ mod tests {
             ratio: 1.0,
             offset_of: &|_| None,
         }
+    }
+
+    /// Two branches under a scroller: an animated element holding a
+    /// scroller (spaces 1 and 3), and a sticky box (space 2).
+    #[test]
+    fn two_spaces_meet_at_their_deepest_shared_node() {
+        let spaces = [
+            Space {
+                parent: None,
+                kind: SpaceKind::Scroll(0),
+            },
+            Space {
+                parent: Some(0),
+                kind: SpaceKind::Animation(0),
+            },
+            Space {
+                parent: Some(0),
+                kind: SpaceKind::Sticky(0),
+            },
+            Space {
+                parent: Some(1),
+                kind: SpaceKind::Scroll(1),
+            },
+        ];
+        let common = |a, b| super::common_ancestor(&spaces, a, b);
+        assert_eq!(common(Some(3), Some(2)), Some(0));
+        assert_eq!(common(Some(2), Some(3)), Some(0));
+        assert_eq!(common(Some(3), Some(1)), Some(1));
+        assert_eq!(common(Some(3), None), None);
+        assert_eq!(common(Some(3), Some(3)), Some(3));
+        let below: Vec<_> = super::path_below(&spaces, Some(3), Some(0))
+            .map(|node| node.kind)
+            .collect();
+        assert_eq!(below, [SpaceKind::Scroll(1), SpaceKind::Animation(0)]);
+        assert_eq!(super::path_below(&spaces, Some(3), None).count(), 3);
     }
 
     #[test]

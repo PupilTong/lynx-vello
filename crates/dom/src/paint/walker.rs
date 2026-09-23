@@ -61,10 +61,11 @@
 //!   [`paint_item`], so painter and culler cannot disagree about geometry. A non-finite bound, or a
 //!   reach that cannot be established, paints.
 //! - **A blur admits its own reach.** The bake of a `filter: blur()` group is 3σ larger than the
-//!   group's content on every side, so every item inside one is tested against a region grown by
+//!   group's content on every side, so every item inside one is tested against a viewport grown by
 //!   the sum of 3σ over each enclosing filtered layer, and the group's own layer bounds are grown
 //!   the same way *before* the viewport intersection — an element straddling the viewport edge
-//!   therefore still bakes the margin its visible pixels read from.
+//!   therefore still bakes the margin its visible pixels read from. The item's clip chain is not
+//!   grown: a group scope re-pushes its content's whole chain, so the chain cuts before any blur.
 //! - **Moving content is bounded by its curve's reach.** An animation node with a transform track
 //!   pulls the region above it back through every delta its curve can sample
 //!   ([`crate::visual::reach::Reach`]: each op's parameter range over the whole domain), so the
@@ -72,7 +73,11 @@
 //!   reach the screen. Clips and encode windows inside the moving subtree move with it and bound as
 //!   usual. A scale range reaching 0 bounds nothing; there the export's extent budget
 //!   ([`crate::visual::frame::MAX_MOVING_EXTENT_VIEWPORTS`]) caps what the element encodes. A
-//!   moving group's bounds are held to its clip chain and not cut to the viewport.
+//!   group's bounds hold moving content at every place its reach carries it inside the group, cut
+//!   to the clips moving with it, to the innermost clip of its chain that stays still in the group,
+//!   and to the viewport pulled back into the group's space. Where neither of the last two bounds
+//!   it, the export refuses the curve ([`crate::visual::space::movers_bounded`]). A blur margin
+//!   around content a curve can shrink inside its group grows by that shrink.
 //! - **Text runs are never culled by geometry.** [`text::extent`] bounds the authored reaches
 //!   (`text-shadow` offset, half the `-webkit-text-stroke` width) exactly, but a run's `size` is
 //!   its line box, and glyph ink leaves that box by font ascent and descent, synthetic oblique
@@ -313,15 +318,15 @@ pub(crate) struct Scratch {
     open_layers: Vec<usize>,
     bounds_acc: Vec<Option<Rect>>,
     /// Per layer, whether a transform curve on its space's path moves it:
-    /// the viewport bounds nothing of such a group, so its bounds are held
-    /// to [`Self::clip_extent`] instead. Index-parallel with
-    /// [`PaintOrder::layers`].
+    /// its content is then held to [`CullPlan::clip_extent`] (see [`held`]).
+    /// Index-parallel with [`PaintOrder::layers`].
     layer_moves: Vec<bool>,
-    /// Per clip node, what its chain alone admits in its own space, with no
-    /// viewport — filled only when some layer moves. It is independent of
-    /// the cull rect, so a moving group's bounds stay the same whether or not
-    /// culling is on. Index-parallel with [`PaintOrder::clips`].
-    clip_extent: Vec<Admitted>,
+    /// Per layer, how far past the clips of its content, in its own units,
+    /// the most any group closed inside it puts ink: that group's own blur
+    /// reach plus its own spill, carried. Group scopes re-push no enclosing
+    /// clip, so a nested group's blur leaves its content's clips. Filled as
+    /// layers close. Index-parallel with [`PaintOrder::layers`].
+    layer_spill: Vec<f64>,
     /// Per layer, the blur sigma of its `filter` in *viewport* CSS px — the
     /// element's own sigma scaled by its local-to-viewport map. Zero for
     /// every layer with no `blur()`. Index-parallel with
@@ -372,13 +377,23 @@ pub(crate) struct CullPlan {
     /// offset range the culled encode must stay valid for. Index-parallel
     /// with [`PaintOrder::slots`].
     slot_windows: Vec<(Vector2D<f32>, Vector2D<f32>)>,
+    /// Per clip node, what its chain alone admits in its own space, with no
+    /// viewport — resolved only when a transform curve can move content or a
+    /// group blurs, its two readers. It is independent of the cull rect, so
+    /// a group's bounds stay the same whether or not culling is on.
+    /// Index-parallel with [`PaintOrder::clips`].
+    clip_extent: Vec<Admitted>,
     /// Per group layer, the summed 3-sigma ink reach of that layer and every
     /// filtered layer outside it. Content inside a filtered group can put ink
-    /// that far past its own box, so the region admitted for it grows by the
-    /// sum — the reaches of nested blurs compose. Index-parallel with
+    /// that far past its own box, so the viewport admitted for it grows by
+    /// the sum — the reaches of nested blurs compose. Index-parallel with
     /// [`PaintOrder::layers`], resolved by one forward pass because a layer's
     /// parent is always an earlier entry.
     layer_inflate: Vec<f64>,
+    /// Per group layer, the outermost layer enclosing it, itself included,
+    /// whose filter blurs — the group whose units the summed reach is
+    /// measured against. Index-parallel with [`PaintOrder::layers`].
+    blur_roots: Vec<Option<usize>>,
 }
 
 impl CullPlan {
@@ -394,16 +409,19 @@ impl CullPlan {
                 .map(crate::visual::ScrollSlot::encode_window),
         );
         self.layer_inflate.clear();
+        self.blur_roots.clear();
         for (index, layer) in frame.layers().iter().enumerate() {
             debug_assert!(
                 layer.parent.is_none_or(|parent| parent < index),
                 "a group layer nests inside an earlier group layer",
             );
-            let outer = layer
-                .parent
-                .map_or(0.0, |parent| self.layer_inflate[parent]);
-            self.layer_inflate
-                .push(outer + BLUR_INK_SIGMAS * layer_blur_sigma(document, layer));
+            let (inflate, root) = layer.parent.map_or((0.0, None), |parent| {
+                (self.layer_inflate[parent], self.blur_roots[parent])
+            });
+            let sigma = layer_blur_sigma(document, layer);
+            self.layer_inflate.push(inflate + BLUR_INK_SIGMAS * sigma);
+            self.blur_roots
+                .push(root.or((sigma > 0.0).then_some(index)));
         }
         let mut bounds = std::mem::take(&mut self.clip_bounds);
         match self.cull {
@@ -416,6 +434,18 @@ impl CullPlan {
             None => bounds.clear(),
         }
         self.clip_bounds = bounds;
+        let mut extent = std::mem::take(&mut self.clip_extent);
+        if self.blur_roots.iter().any(Option::is_some)
+            || frame
+                .animations()
+                .iter()
+                .any(|slot| slot.curve.transform.is_some())
+        {
+            resolve_clips(&self.slot_windows, frame, Admitted::Everything, &mut extent);
+        } else {
+            extent.clear();
+        }
+        self.clip_extent = extent;
     }
 
     /// The same plan, resolved from a document's own device metrics — the
@@ -439,18 +469,39 @@ impl CullPlan {
         space: Option<u32>,
         layer: Option<usize>,
     ) -> Admitted {
-        if self.cull.is_none() {
+        let Some(cull) = self.cull else {
             return Admitted::Everything;
-        }
-        // Every enclosing blur carries this content's ink 3 sigma further
-        // out, so the region it may reach grows by their sum. That
-        // over-admits a little near an inner clip, which is the safe
-        // direction: culling needs a proof, uncertainty paints.
-        let inflate = layer.map_or(0.0, |layer| self.layer_inflate[layer]);
-        match admitted_region(self, frame, space, clip) {
-            Admitted::Region(region) => Admitted::Region(inflate_rect(region, inflate)),
-            other => other,
-        }
+        };
+        let Some((layer, root)) = layer.and_then(|layer| Some((layer, self.blur_roots[layer]?)))
+        else {
+            return admitted_region(self, frame, space, clip);
+        };
+        // Every group scope re-pushes its content's whole clip chain, so the
+        // chain cuts this content before any blur does and bounds it as is.
+        // Only the viewport grows: by every enclosing blur's 3 sigma, in that
+        // group's units, times how far a curve between the outermost blurred
+        // group and this content can shrink it — without bound when a scale
+        // range reaches 0.
+        let clips = admitted_under(
+            &self.slot_windows,
+            frame,
+            &self.clip_extent,
+            Admitted::Everything,
+            space,
+            clip,
+        );
+        let viewport = match inverse_norm_within(frame, space, frame.layers()[root].space) {
+            Some(norm) => pull_back(
+                &self.slot_windows,
+                frame,
+                Admitted::Region(cull),
+                None,
+                space,
+            )
+            .grown(self.layer_inflate[layer] * norm),
+            None => Admitted::Everything,
+        };
+        clips.meet(viewport)
     }
 
     /// Whether this `content-visibility: auto` box can put ink in that
@@ -486,6 +537,30 @@ enum Admitted {
 }
 
 impl Admitted {
+    /// What this and `other` both admit.
+    fn meet(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Nothing, _) | (_, Self::Nothing) => Self::Nothing,
+            (Self::Everything, other) | (other, Self::Everything) => other,
+            (Self::Region(a), Self::Region(b)) => {
+                let both = a.intersect(b);
+                if both.width() > 0.0 && both.height() > 0.0 {
+                    Self::Region(both)
+                } else {
+                    Self::Nothing
+                }
+            }
+        }
+    }
+
+    /// This region grown by `reach` on every side.
+    fn grown(self, reach: f64) -> Self {
+        match self {
+            Self::Region(region) => Self::Region(inflate_rect(region, reach)),
+            other => other,
+        }
+    }
+
     /// `bounds` cut down to what this admits, or `None` when nothing of it
     /// is. Non-finite bounds are undecidable and pass whole.
     fn cut(self, bounds: Rect) -> Option<Rect> {
@@ -651,6 +726,16 @@ pub(crate) fn encoded_items<T>(document: &Document<T>, frame: &PaintOrder) -> Ve
     scratch.item_plan.iter().map(Option::is_some).collect()
 }
 
+/// Per group layer of `frame`, the rect the production walk pushes it with,
+/// in CSS px of the layer's space.
+#[cfg(test)]
+pub(crate) fn layer_rects<T>(document: &Document<T>, frame: &PaintOrder) -> Vec<Rect> {
+    let mut scratch = Scratch::default();
+    scratch.plan.resolve_for(document, frame);
+    plan_frame(&mut scratch, document, frame);
+    scratch.layer_bounds
+}
+
 /// [`walk`] against an explicit admitted region, in viewport CSS px, or
 /// `None` to encode every item.
 fn walk_within<T>(
@@ -753,18 +838,10 @@ fn resolve_clips(
         let inherited = admitted_under(windows, frame, out, root, clip.space, clip.parent);
         // `push_clip` pushes an empty clip for a singular transform, so
         // nothing under this chain reaches the scene at all.
-        let resolved = match (clip_bounds(clip), inherited) {
-            (None, _) | (_, Admitted::Nothing) => Admitted::Nothing,
-            (Some(own), _) if !is_finite(own) => inherited,
-            (Some(own), Admitted::Everything) => Admitted::Region(own),
-            (Some(own), Admitted::Region(inherited)) => {
-                let both = own.intersect(inherited);
-                if both.width() > 0.0 && both.height() > 0.0 {
-                    Admitted::Region(both)
-                } else {
-                    Admitted::Nothing
-                }
-            }
+        let resolved = match clip_bounds(clip) {
+            None => Admitted::Nothing,
+            Some(own) if !is_finite(own) => inherited,
+            Some(own) => Admitted::Region(own).meet(inherited),
         };
         out.push(resolved);
     }
@@ -1002,6 +1079,10 @@ fn open_scope<T>(
         sink.push_backdrop(entry, root_start..end, frame.spaces());
     }
 
+    // An exported fade roots at every reading, 1 included: the range a
+    // descendant's backdrop fixes here is composed at all of them.
+    let fades = alpha_animation
+        .is_some_and(|slot| frame.animations()[slot as usize].curve.opacity.is_some());
     scratch.scopes.push(Scope {
         layer: layer_index,
         base,
@@ -1009,7 +1090,7 @@ fn open_scope<T>(
         filtered: !effects.filter.0.is_empty(),
         blurred,
         content_start,
-        backdrop_root: is_backdrop_root(style),
+        backdrop_root: fades || is_backdrop_root(style),
     });
 }
 
@@ -1072,7 +1153,10 @@ fn nearest_backdrop_root(scratch: &Scratch) -> u32 {
         .map_or(0, |scope| scope.content_start)
 }
 
-/// Whether this element is a Backdrop Root (filter-effects-2 §2.2).
+/// Whether this element is a Backdrop Root (filter-effects-2 §2.2) by its
+/// committed style. An element exporting an opacity curve is one as well,
+/// which [`open_scope`] adds: Web Animations makes a running `opacity`
+/// animation act as `will-change: opacity`.
 ///
 /// The spec's list, and the reason this predicate exists at all rather than
 /// reusing [`crate::visual::stacking::needs_group_rendering`]: that one also
@@ -1538,8 +1622,6 @@ fn plan_frame<T>(scratch: &mut Scratch, document: &Document<T>, frame: &PaintOrd
         f64::from(viewport_size.width),
         f64::from(viewport_size.height),
     );
-    let slots = frame.slots();
-    let spaces = frame.spaces();
     let mut next_open = 0_usize;
     let close = |scratch: &mut Scratch| close_layer(scratch, frame, viewport);
 
@@ -1553,8 +1635,10 @@ fn plan_frame<T>(scratch: &mut Scratch, document: &Document<T>, frame: &PaintOrd
         }
         while next_open < layers.len() && layers[next_open].items.start == index {
             let layer = &layers[next_open];
-            scratch.bounds_acc[next_open] = layer_root_rect(layer)
-                .and_then(|rect| held(scratch, frame, next_open, layer.clip, layer.space, rect));
+            scratch.bounds_acc[next_open] = layer_root_rect(layer).and_then(|rect| {
+                let moves = scratch.layer_moves[next_open];
+                held(scratch, frame, moves, layer.clip, layer.space, rect)
+            });
             scratch.open_layers.push(next_open);
             next_open += 1;
         }
@@ -1581,23 +1665,25 @@ fn plan_frame<T>(scratch: &mut Scratch, document: &Document<T>, frame: &PaintOrd
 
         let reach = extents(document, item);
         let bounds = item_bounds(item, local, reach.layer);
-        if let Some(top) = top
-            && let Some(bounds) = held(scratch, frame, top, item.clip, item.space, bounds)
-        {
-            let (low, high) = relative_offset_range(
-                slots,
-                &scratch.plan.slot_windows,
-                nearest_scroll(spaces, item.space),
-                nearest_scroll(spaces, layers[top].space),
-            );
-            let bounds = expand_cover(bounds, low, high);
-            let (sticky_low, sticky_high) = frame.sticky_range(
-                nearest_sticky(spaces, item.space),
-                nearest_sticky(spaces, layers[top].space),
-            );
-            let bounds = expand_region(bounds, sticky_low, sticky_high);
-            scratch.bounds_acc[top] =
-                Some(scratch.bounds_acc[top].map_or(bounds, |united| united.union(bounds)));
+        if let Some(top) = top {
+            let group = layers[top].space;
+            let within = moves_within(frame, item.space, group);
+            let moves = scratch.layer_moves[top] || within;
+            // An item's ink stays inside its clips: no margin past them.
+            if let Some(bounds) = held(scratch, frame, moves, item.clip, item.space, bounds)
+                && let Some(bounds) = into_group(
+                    scratch,
+                    frame,
+                    within,
+                    bounds,
+                    (item.space, item.clip),
+                    group,
+                    0.0,
+                )
+            {
+                scratch.bounds_acc[top] =
+                    Some(scratch.bounds_acc[top].map_or(bounds, |united| united.union(bounds)));
+            }
         }
         let reachable = match admitted {
             Admitted::Everything => true,
@@ -1627,8 +1713,8 @@ fn plan_frame<T>(scratch: &mut Scratch, document: &Document<T>, frame: &PaintOrd
 }
 
 /// Resets the per-layer state [`plan_frame`] fills: bounds, blur sigma,
-/// liveness seeded by `backdrop-filter`, whether the layer moves, and — only
-/// when one does — every clip chain's extent.
+/// liveness seeded by `backdrop-filter`, whether the layer moves, and its
+/// spill.
 fn reset_layers<T>(scratch: &mut Scratch, document: &Document<T>, frame: &PaintOrder) {
     let layers = frame.layers();
     scratch.layer_bounds.clear();
@@ -1649,25 +1735,17 @@ fn reset_layers<T>(scratch: &mut Scratch, document: &Document<T>, frame: &PaintO
     scratch
         .layer_moves
         .extend(layers.iter().map(|layer| moving(frame, layer.space)));
-    if scratch.layer_moves.contains(&true) {
-        resolve_clips(
-            &scratch.plan.slot_windows,
-            frame,
-            Admitted::Everything,
-            &mut scratch.clip_extent,
-        );
-    }
+    scratch.layer_spill.clear();
+    scratch.layer_spill.resize(layers.len(), 0.0);
 }
 
 /// Closes the topmost open layer: its accumulated bounds become its pushed
-/// rect — intersected with the viewport expanded into the layer's space,
-/// since the compose window may carry the layer's content across it, unless
-/// the layer moves (see [`held`]) — and fold into the parent layer still
-/// open, expanded into that parent's space, as does its liveness.
+/// rect — intersected with the viewport pulled back into the layer's space
+/// through every scroll window, sticky range and curve reach above it, the
+/// places the compose window may show — and fold into the parent layer still
+/// open, carried into that parent's space, as do its liveness and spill.
 fn close_layer(scratch: &mut Scratch, frame: &PaintOrder, viewport: Rect) {
     let layers = frame.layers();
-    let slots = frame.slots();
-    let spaces = frame.spaces();
     let closed = scratch
         .open_layers
         .pop()
@@ -1684,15 +1762,13 @@ fn close_layer(scratch: &mut Scratch, frame: &PaintOrder, viewport: Rect) {
         scratch.layer_live[parent] = true;
     }
     let reach = BLUR_INK_SIGMAS * scratch.layer_sigma[closed];
+    let spill = reach + scratch.layer_spill[closed];
     let accumulated = scratch.bounds_acc[closed];
-    let moves = scratch.layer_moves[closed];
     scratch.layer_bounds[closed] = accumulated.map_or(Rect::ZERO, |rect| {
         let rect = inflate_rect(rect, reach);
-        // The viewport cut applies to still layers only: a moving layer's
-        // content was held to the clips that move with it (see [`held`]).
-        if moves {
-            return rect;
-        }
+        // A scale range reaching 0 above the layer bounds nothing; the
+        // accumulated bounds, finite and cut to the clips holding what moves
+        // inside the layer, stand alone.
         match pull_back(
             &scratch.plan.slot_windows,
             frame,
@@ -1707,18 +1783,27 @@ fn close_layer(scratch: &mut Scratch, frame: &PaintOrder, viewport: Rect) {
     if let (Some(bounds), Some(&parent)) = (scratch.bounds_acc[closed], scratch.open_layers.last())
     {
         let outer = layers[parent].space;
-        let (low, high) = relative_offset_range(
-            slots,
-            &scratch.plan.slot_windows,
-            nearest_scroll(spaces, own),
-            nearest_scroll(spaces, outer),
-        );
-        let bounds = expand_cover(inflate_rect(bounds, reach), low, high);
-        let (sticky_low, sticky_high) =
-            frame.sticky_range(nearest_sticky(spaces, own), nearest_sticky(spaces, outer));
-        let bounds = expand_region(bounds, sticky_low, sticky_high);
-        scratch.bounds_acc[parent] =
-            Some(scratch.bounds_acc[parent].map_or(bounds, |united| united.union(bounds)));
+        let within = moves_within(frame, own, outer);
+        // The spill in the parent's units: a curve between the two can
+        // stretch it.
+        let spill = if within {
+            spill * stretch_within(frame, own, outer)
+        } else {
+            spill
+        };
+        scratch.layer_spill[parent] = scratch.layer_spill[parent].max(spill);
+        if let Some(bounds) = into_group(
+            scratch,
+            frame,
+            within,
+            inflate_rect(bounds, reach),
+            (own, layers[closed].clip),
+            outer,
+            spill,
+        ) {
+            scratch.bounds_acc[parent] =
+                Some(scratch.bounds_acc[parent].map_or(bounds, |united| united.union(bounds)));
+        }
     }
 }
 
@@ -1814,29 +1899,29 @@ fn admitted_under(
     pull_back(windows, frame, base, outer, space)
 }
 
-/// The part of `bounds` — content of layer `layer`, in `space` under `clip` —
-/// that the layer's own bounds accumulate.
+/// The part of `bounds` — group content in `space` under `clip` — that the
+/// group's bounds accumulate.
 ///
-/// A moving layer's content is held to what its clip chain admits, each clip
-/// pulled back through the nodes between it and the content — so a list
-/// inside a moving blurred card bakes its window, not its whole content. The
-/// viewport is not applied to it. A still layer's content passes whole; its
-/// rect meets the viewport at close.
+/// Content a transform curve `moves` — with its group or inside it — is held
+/// to what its clip chain admits, each clip pulled back through the nodes
+/// between it and the content: a list inside a moving blurred card bakes its
+/// window, not its whole content. Still content passes whole. Either way the
+/// group's rect meets the viewport at close.
 fn held(
     scratch: &Scratch,
     frame: &PaintOrder,
-    layer: usize,
+    moves: bool,
     clip: Option<usize>,
     space: Option<u32>,
     bounds: Rect,
 ) -> Option<Rect> {
-    if !scratch.layer_moves[layer] {
+    if !moves {
         return Some(bounds);
     }
     admitted_under(
         &scratch.plan.slot_windows,
         frame,
-        &scratch.clip_extent,
+        &scratch.plan.clip_extent,
         Admitted::Everything,
         space,
         clip,
@@ -1903,10 +1988,10 @@ fn pull_back(
                     // An opacity-only curve moves nothing.
                     continue;
                 };
-                let Some(reach) = &track.reach else {
+                let Some(pulled) = track.reach.pull_back(expand_region(region, low, high)) else {
                     return Admitted::Everything;
                 };
-                region = reach.pull_back(expand_region(region, low, high));
+                region = pulled;
                 if !is_finite(region) {
                     return Admitted::Everything;
                 }
@@ -1928,6 +2013,128 @@ fn moves(frame: &PaintOrder, slot: u32) -> bool {
 fn moving(frame: &PaintOrder, space: Option<u32>) -> bool {
     space::path(frame.spaces(), space)
         .any(|kind| matches!(kind, SpaceKind::Animation(slot) if moves(frame, slot)))
+}
+
+/// Whether a transform curve moves content in `content` inside a group in
+/// `group`; see [`space::curves_within`].
+fn moves_within(frame: &PaintOrder, content: Option<u32>, group: Option<u32>) -> bool {
+    space::curves_within(frame.spaces(), frame.animations(), content, group)
+        .next()
+        .is_some()
+}
+
+/// An upper bound on how far one CSS px in `group`'s coordinates reaches in
+/// `content`'s under the curves [`moves_within`] finds, never below 1 so it
+/// bounds every shorter stretch of the same path too; `None` when a scale
+/// range among them reaches 0.
+fn inverse_norm_within(
+    frame: &PaintOrder,
+    content: Option<u32>,
+    group: Option<u32>,
+) -> Option<f64> {
+    space::curves_within(frame.spaces(), frame.animations(), content, group)
+        .try_fold(1.0, |norm, reach| {
+            Some(norm * reach.inverse_norm()?.max(1.0))
+        })
+}
+
+/// An upper bound on how far one CSS px in `content`'s coordinates reaches
+/// in `group`'s under the curves [`moves_within`] finds, never below 1.
+fn stretch_within(frame: &PaintOrder, content: Option<u32>, group: Option<u32>) -> f64 {
+    space::curves_within(frame.spaces(), frame.animations(), content, group)
+        .fold(1.0, |norm, reach| norm * reach.norm().max(1.0))
+}
+
+/// `bounds`, of content in `content` under clip chain `clip`, in group space
+/// `group`'s coordinates: every place a node between the two can carry them,
+/// or `None` when nothing of them is left.
+///
+/// Content no curve moves inside the group (`within` false) differs from it
+/// by translations alone. Content a curve moves is [`carry`]'d, then cut to
+/// its chain's [`space::still_clip`] carried the same way and grown by
+/// `spill`, how far past its clips, in the group's units, the content puts
+/// ink: however far the curve carries the content, it shows only inside that
+/// clip, which moves with the group.
+fn into_group(
+    scratch: &Scratch,
+    frame: &PaintOrder,
+    within: bool,
+    bounds: Rect,
+    (content, clip): (Option<u32>, Option<usize>),
+    group: Option<u32>,
+    spill: f64,
+) -> Option<Rect> {
+    let windows = &scratch.plan.slot_windows;
+    let spaces = frame.spaces();
+    if within {
+        let holding = space::still_clip(spaces, frame.clips(), frame.animations(), clip, group)
+            .map_or(Admitted::Everything, |index| {
+                match scratch.plan.clip_extent[index] {
+                    Admitted::Region(region) => {
+                        carry(windows, frame, region, frame.clips()[index].space, group)
+                    }
+                    other => other,
+                }
+            });
+        return match carry(windows, frame, bounds, content, group) {
+            Admitted::Region(carried) => holding.grown(spill).cut(carried),
+            // Only a curve on the group's side lacks a pullback, and an
+            // element with a transform contains its positioned descendants:
+            // no group content sits outside a curve its group rides.
+            Admitted::Everything | Admitted::Nothing => {
+                debug_assert!(false, "group content escapes a curve its group rides");
+                Some(bounds)
+            }
+        };
+    }
+    let (low, high) = relative_offset_range(
+        frame.slots(),
+        windows,
+        nearest_scroll(spaces, content),
+        nearest_scroll(spaces, group),
+    );
+    let bounds = expand_cover(bounds, low, high);
+    let (sticky_low, sticky_high) = frame.sticky_range(
+        nearest_sticky(spaces, content),
+        nearest_sticky(spaces, group),
+    );
+    Some(expand_region(bounds, sticky_low, sticky_high))
+}
+
+/// `bounds`, in `from`'s coordinates, carried into `into`'s: forward through
+/// every node from `from` out to the two spaces' common ancestor — a scroll
+/// node over its encode window, a sticky node over its range, a transform
+/// curve over its [`Reach`](crate::visual::reach::Reach) — then pulled back
+/// from there into `into`. The forward carry is bounded whatever a curve's
+/// scale range; the pullback is [`Admitted::Everything`] through a scale
+/// range reaching 0.
+fn carry(
+    windows: &[(Vector2D<f32>, Vector2D<f32>)],
+    frame: &PaintOrder,
+    bounds: Rect,
+    from: Option<u32>,
+    into: Option<u32>,
+) -> Admitted {
+    let spaces = frame.spaces();
+    let common = space::common_ancestor(spaces, from, into);
+    let carried =
+        space::path_below(spaces, from, common).fold(bounds, |bounds, node| match node.kind {
+            SpaceKind::Scroll(slot) => {
+                let slot = slot as usize;
+                let (low, high) = viewport_window(&frame.slots()[slot], windows[slot]);
+                expand_cover(bounds, low, high)
+            }
+            SpaceKind::Sticky(slot) => {
+                let (low, high) = frame.sticky_slot_range(slot);
+                expand_region(bounds, low, high)
+            }
+            SpaceKind::Animation(slot) => frame.animations()[slot as usize]
+                .curve
+                .transform
+                .as_ref()
+                .map_or(bounds, |track| track.reach.carry(bounds)),
+        });
+    pull_back(windows, frame, Admitted::Region(carried), common, into)
 }
 
 fn layer_root_rect(layer: &RenderLayer) -> Option<Rect> {
@@ -2571,8 +2778,9 @@ mod tests {
 
     /// A blurred card sliding by an exported curve holds its bounds — its
     /// bake rect — to what its list's clip and encode window admit: the
-    /// viewport cannot bound a moving group, but the clips moving with it
-    /// can, and the list's 12000 px of rows are not in the card's extent.
+    /// clips moving with it bound it before the viewport, pulled back
+    /// through the slide, does, and the list's 12000 px of rows are not in
+    /// the card's extent.
     #[test]
     fn a_moving_blurred_card_bakes_its_lists_window_not_its_content() {
         let bounds = moving_layer_bounds(
@@ -2653,6 +2861,383 @@ mod tests {
         assert!(relevant(free), "the slide can carry it into view");
         assert!(relevant(rows[0]), "inside the list's window");
         assert!(!relevant(rows[39]), "past the list's window");
+    }
+
+    /// The rect of the one group layer of a page built from `css` by
+    /// `build`, which must export one curve inside that group, with its
+    /// filter entries when the group blurs.
+    fn still_group_with_a_mover(
+        css: &str,
+        build: impl FnOnce(&mut Doc),
+    ) -> (Rect, Vec<crate::paint::compose::FilterGroup>) {
+        let mut doc = Doc::with_css(&format!(
+            "{PAGE} .mover {{ display: flex; width: 50px; height: 50px;
+                             background-color: navy; }} {css}"
+        ));
+        build(&mut doc);
+        run_animations(&mut doc);
+        assert_eq!(doc.dom.build_paint_order().animations().len(), 1);
+        let frames = walk_twice(&mut doc);
+        assert_eq!(
+            frames.cultured_bounds, frames.uncultured_bounds,
+            "a group's bounds do not depend on culling",
+        );
+        let (finished, bounds) = compose(&mut doc);
+        let [rect] = bounds[..] else {
+            panic!("one group layer, got {bounds:?}");
+        };
+        (rect, finished.filter_groups)
+    }
+
+    /// A still group's rect holds a child sliding out of the group's box to
+    /// every place the slide shows it, up to the viewport's edge.
+    #[test]
+    fn a_still_group_holds_a_child_sliding_out_of_it() {
+        let (rect, _) = still_group_with_a_mover(
+            ".group { opacity: 0.5; left: 100px; top: 100px; }
+             .mover { animation: far 1s linear infinite; }
+             @keyframes far { from { transform: translateX(0px); }
+                              to { transform: translateX(1000px); } }",
+            |doc| {
+                let group = doc.el(doc.root, "view.box.group");
+                doc.el(group, "view.mover");
+            },
+        );
+        // Committed at 250 px along, the mover spans x = 350..400; the slide
+        // carries it from 100 on, past the viewport's right edge at 800.
+        assert!(
+            (rect.x0 - 100.0).abs() < 1e-3
+                && (rect.x1 - 800.0).abs() < 1e-3
+                && (rect.y0 - 100.0).abs() < 1e-3
+                && (rect.y1 - 200.0).abs() < 1e-3,
+            "the group holds the slide inside the viewport, got {rect:?}"
+        );
+    }
+
+    /// A blurred group whose child slides 5000 px bakes the viewport's worth
+    /// of that slide plus the ink margin: finite, and no wider.
+    #[test]
+    fn a_blurred_group_with_a_sliding_child_bakes_the_viewport_it_can_show() {
+        let (rect, groups) = still_group_with_a_mover(
+            ".group { filter: blur(4px); left: 100px; top: 100px; }
+             .mover { animation: far 1s linear infinite; }
+             @keyframes far { from { transform: translateX(0px); }
+                              to { transform: translateX(5000px); } }",
+            |doc| {
+                let group = doc.el(doc.root, "view.box.group");
+                doc.el(group, "view.mover");
+            },
+        );
+        // 3 sigma = 12 px of ink margin past the viewport's right edge.
+        assert!(
+            (rect.x0 - 88.0).abs() < 1e-3 && (rect.x1 - 812.0).abs() < 1e-3,
+            "{rect:?}"
+        );
+        let [group] = &groups[..] else {
+            panic!("one filter entry, got {groups:?}");
+        };
+        assert!(
+            super::is_finite(group.rect) && group.rect.x1 <= 812.0 && group.rect.x1 >= 800.0,
+            "the bake reaches the viewport's edge and no further, got {:?}",
+            group.rect,
+        );
+        assert!(group.samples_animations(), "and follows the slide");
+    }
+
+    /// A blurred group whose child shrinks to 0.4 carries the ink of that
+    /// child's content 30 px (3 sigma) in the group's units, which is 2.125
+    /// times as far in the content's own units as committed at 0.85: a box
+    /// that only comes within 30 px of the viewport at the smallest scale
+    /// still encodes.
+    #[test]
+    fn a_blur_margin_grows_by_what_a_curve_inside_its_group_can_shrink() {
+        let mut doc = Doc::with_css(
+            "page { display: flex; position: relative; width: 800px; height: 600px; }
+             .group { display: flex; position: absolute; left: 0px; top: 0px;
+                      width: 800px; height: 600px; filter: blur(10px); }
+             .shrinker { display: flex; position: relative; flex-shrink: 0;
+                         width: 2100px; height: 100px; transform-origin: 0px 0px;
+                         animation: shrink 1s linear infinite; }
+             .dot { display: flex; position: absolute; left: 2050px; top: 40px;
+                    width: 10px; height: 10px; background-color: navy; }
+             @keyframes shrink { from { transform: scale(1); } to { transform: scale(0.4); } }",
+        );
+        let group = doc.el(doc.root, "view.group");
+        let shrinker = doc.el(group, "view.shrinker");
+        let dot = doc.el(shrinker, "view.dot");
+        run_animations(&mut doc);
+        let frame = doc.dom.build_paint_order();
+        assert_eq!(frame.animations().len(), 1, "the shrink exports");
+        // At 0.4 the dot spans x = 820..824, within 30 px of the viewport.
+        assert!(box_encodes(&doc, &frame, dot), "the dot's ink can show");
+    }
+
+    /// The alpha of every layer `scene` begins, in encode order.
+    fn layer_alphas(scene: &Scene) -> Vec<f32> {
+        let encoding = scene.encoding();
+        let mut offset = 0_usize;
+        let mut alphas = Vec::new();
+        for tag in &encoding.draw_tags {
+            // `DrawTag::BEGIN_CLIP`, whose data is `DrawBeginClip { blend_mode, alpha }`.
+            if tag.0 == 0x49 {
+                alphas.push(f32::from_bits(encoding.draw_data[offset + 1]));
+            }
+            // The tag's data size in words, as vello's `DrawMonoid` reads it.
+            offset += ((tag.0 >> 2) & 0x7) as usize;
+        }
+        alphas
+    }
+
+    /// A fading child inside a fading parent's group: each effect layer's
+    /// push carries its own element's slot, and a compose at a later instant
+    /// fades each layer by its own sampled alpha.
+    #[test]
+    fn nested_fades_each_retarget_their_own_effect_layer() {
+        let mut doc = Doc::with_css(&format!(
+            "{PAGE}
+             .outer {{ left: 100px; top: 100px; width: 200px; height: 200px;
+                       animation: outer 1s linear infinite; }}
+             .inner {{ display: flex; width: 100px; height: 100px; background-color: navy;
+                       animation: inner 1s linear infinite; }}
+             @keyframes outer {{ from {{ opacity: 1; }} to {{ opacity: 0.2; }} }}
+             @keyframes inner {{ from {{ opacity: 1; }} to {{ opacity: 0.6; }} }}"
+        ));
+        let outer = doc.el(doc.root, "view.box.outer");
+        let inner = doc.el(outer, "view.inner");
+        run_animations(&mut doc);
+        doc.dom.render();
+        let frame = doc.dom.committed_frame().expect("a frame is committed");
+        let slots = frame.animation_slots();
+        assert_eq!(slots.len(), 2, "both fades export");
+        let retargeted: Vec<_> = frame
+            .presentation
+            .program
+            .iter()
+            .filter_map(|op| match op {
+                ComposeOp::Push {
+                    alpha_animation: Some(slot),
+                    ..
+                } => Some(slots[*slot as usize].node),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            retargeted,
+            [outer, inner],
+            "the outer layer's push takes the parent's slot, the inner's the child's",
+        );
+
+        let alphas = |now: Option<f64>| {
+            let mut scene = Scene::default();
+            frame.compose_into(&mut scene, &[], &[], &|_| None, now);
+            layer_alphas(&scene)
+                .into_iter()
+                .filter(|&alpha| alpha < 1.0)
+                .collect::<Vec<_>>()
+        };
+        let close = |got: &[f32], expected: [f32; 2]| {
+            got.len() == 2 && got.iter().zip(expected).all(|(a, b)| (a - b).abs() < 1e-4)
+        };
+        // Committed at 0.25 s: 0.8 outside, 0.9 inside. At 0.5 s: 0.6 and 0.8.
+        let committed = alphas(None);
+        assert!(close(&committed, [0.8, 0.9]), "committed {committed:?}");
+        let sampled = alphas(Some(0.5));
+        assert!(close(&sampled, [0.6, 0.8]), "at 0.5 s {sampled:?}");
+    }
+
+    /// A toast popping out to `scale(0)` holding a ticker that slides
+    /// 6000 px, built from `css`, with `fill` adding the ticker's children:
+    /// how many curves export, and the rect of every group layer.
+    fn toast(css: &str, fill: impl FnOnce(&mut Doc, crate::NodeId)) -> (usize, Vec<Rect>) {
+        let mut doc = Doc::with_css(&format!(
+            "{PAGE}
+             .toast {{ left: 100px; top: 100px; width: 300px; height: 60px;
+                       animation: dismiss 1s linear infinite; }}
+             .ticker {{ display: flex; flex-shrink: 0; width: 1000px; height: 20px;
+                        background-color: navy; animation: tick 20s linear infinite; }}
+             @keyframes dismiss {{ from {{ transform: scale(1); }} to {{ transform: scale(0); }} }}
+             @keyframes tick {{ from {{ transform: translateX(0px); }}
+                                to {{ transform: translateX(-6000px); }} }}
+             {css}"
+        ));
+        let toast = doc.el(doc.root, "view.box.toast");
+        let ticker = doc.el(toast, "view.ticker");
+        fill(&mut doc, ticker);
+        run_animations(&mut doc);
+        let exported = doc.dom.build_paint_order().animations().len();
+        let frames = walk_twice(&mut doc);
+        assert_eq!(
+            frames.cultured_bounds, frames.uncultured_bounds,
+            "a group's bounds do not depend on culling",
+        );
+        (exported, frames.cultured_bounds)
+    }
+
+    /// No viewport pulls back through a pop to `scale(0)`, but the toast's
+    /// own clip stays still in its group and holds the ticker's slide to the
+    /// toast: the blurred toast bakes its own box and 3 sigma, not the
+    /// slide. Committed at 0.75, the toast spans (137.5, 107.5)-(362.5,
+    /// 152.5), and its 2 px blur scales to 1.5.
+    #[test]
+    fn a_popping_toast_holds_its_sliding_ticker_to_its_own_clip() {
+        let (exported, rects) = toast(".toast { overflow: hidden; filter: blur(2px); }", |_, _| {});
+        assert_eq!(exported, 2, "the pop and the slide export");
+        let [rect] = rects[..] else {
+            panic!("one group layer, got {rects:?}");
+        };
+        let want = Rect::new(133.0, 103.0, 367.0, 157.0);
+        assert!(
+            (rect.x0 - want.x0).abs() < 1e-3
+                && (rect.y0 - want.y0).abs() < 1e-3
+                && (rect.x1 - want.x1).abs() < 1e-3
+                && (rect.y1 - want.y1).abs() < 1e-3,
+            "the toast and its blur margin, got {rect:?}",
+        );
+    }
+
+    /// With no clip on the toast nothing bounds the slide inside the pop,
+    /// so the slide does not export.
+    #[test]
+    fn a_slide_nothing_bounds_inside_a_popping_group_does_not_export() {
+        let (exported, rects) = toast(".toast { filter: blur(2px); }", |_, _| {});
+        assert_eq!(exported, 1, "the pop exports, the slide does not");
+        assert!(
+            rects.iter().all(|rect| rect.width() < 1000.0),
+            "the committed ticker alone, got {rects:?}"
+        );
+    }
+
+    /// A blurred panel riding the ticker is a group of its own, whose scope
+    /// re-pushes no clip of the toast's: its 3 sigma, 22.5 px at the
+    /// committed 0.75, leaves the toast's clip, and the toast's rect keeps
+    /// it — past the clip, and no further, however far the slide goes.
+    #[test]
+    fn a_blurred_panel_riding_a_ticker_spills_its_margin_past_the_toasts_clip() {
+        let (exported, rects) = toast(
+            ".toast { overflow: hidden; opacity: 0.5; }
+             .panel { display: flex; flex-shrink: 0; width: 1000px; height: 20px;
+                      background-color: teal; filter: blur(10px); }",
+            |doc, ticker| {
+                doc.el(ticker, "view.panel");
+            },
+        );
+        assert_eq!(exported, 2, "the pop and the slide export");
+        let [toast, _panel] = rects[..] else {
+            panic!("two group layers, got {rects:?}");
+        };
+        // The clip spans x = 137.5..362.5 and y = 107.5..152.5; the panel
+        // sits at y = 107.5..122.5.
+        let want = Rect::new(115.0, 85.0, 385.0, 152.5);
+        assert!(
+            (toast.x0 - want.x0).abs() < 1e-3
+                && (toast.y0 - want.y0).abs() < 1e-3
+                && (toast.x1 - want.x1).abs() < 1e-3
+                && (toast.y1 - want.y1).abs() < 1e-3,
+            "the toast's clip and the panel's spill, got {toast:?}",
+        );
+    }
+
+    /// A band twice the viewport's width, sliding by its own curve and
+    /// committed 250 px along: its rect is its box cut to the viewport
+    /// pulled back through the slide, which can still show x = -250..1550
+    /// of the band's committed coordinates.
+    #[test]
+    fn a_sliding_group_is_cut_to_the_viewport_its_slide_can_show() {
+        let mut doc = Doc::with_css(&format!(
+            "{PAGE}
+             .band {{ left: 0px; top: 100px; width: 2000px; height: 100px; opacity: 0.5;
+                      animation: pan 1s linear infinite; }}
+             @keyframes pan {{ from {{ transform: translateX(0px); }}
+                               to {{ transform: translateX(-1000px); }} }}"
+        ));
+        doc.el(doc.root, "view.box.band");
+        run_animations(&mut doc);
+        assert_eq!(doc.dom.build_paint_order().animations().len(), 1);
+        let frames = walk_twice(&mut doc);
+        let [rect] = frames.cultured_bounds[..] else {
+            panic!("one group layer, got {:?}", frames.cultured_bounds);
+        };
+        assert!(
+            (rect.x0 + 250.0).abs() < 1e-3
+                && (rect.x1 - 1550.0).abs() < 1e-3
+                && (rect.y0 - 100.0).abs() < 1e-3
+                && (rect.y1 - 200.0).abs() < 1e-3,
+            "the band where the slide can show it, got {rect:?}",
+        );
+    }
+
+    /// A clip wholly past the viewport inside a blurred group, but within
+    /// 3 sigma of it, admits its content: the blur carries that content's
+    /// ink onto the viewport. One 3 sigma further out admits nothing.
+    #[test]
+    fn a_clip_within_a_blurs_reach_of_the_viewport_admits_its_content() {
+        let encodes = |left: f32| {
+            let mut doc = Doc::with_css(&format!(
+                "{PAGE}
+                 .group {{ left: 600px; top: 100px; width: 400px; height: 100px;
+                           filter: blur(10px); }}
+                 .clipbox {{ display: flex; position: absolute; left: {left}px; top: 0px;
+                             width: 80px; height: 100px; overflow: hidden; }}
+                 .inner {{ display: flex; width: 80px; height: 100px;
+                           background-color: navy; }}"
+            ));
+            let group = doc.el(doc.root, "view.box.group");
+            let clipbox = doc.el(group, "view.clipbox");
+            let inner = doc.el(clipbox, "view.inner");
+            let frame = doc.dom.build_paint_order();
+            box_encodes(&doc, &frame, inner)
+        };
+        // The clip spans x = 810..890 against a viewport ending at 800 and a
+        // blur reaching 30 px.
+        assert!(encodes(210.0), "the blur carries it onto the viewport");
+        assert!(!encodes(240.0), "past the blur's reach");
+    }
+
+    /// A card popping in from `scale(0)` inside a blurred wrapper holds a
+    /// list of 2000 rows: no viewport pulls back through the pop, but the
+    /// list's clip and encode window pop with the card and bound its rows,
+    /// blur or not. Relevance follows.
+    #[test]
+    fn a_list_in_a_popping_card_in_a_blurred_wrapper_encodes_its_window() {
+        let build = |wrap: &str| {
+            let mut doc = Doc::with_css(&format!(
+                "page {{ display: flex; position: relative; width: 800px; height: 600px; }}
+                 .wrap {{ display: flex; {wrap} }}
+                 .card {{ display: flex; animation: pop 1s linear infinite; }}
+                 .list {{ display: flex; flex-direction: column; overflow: scroll;
+                          width: 300px; height: 300px; }}
+                 .row {{ display: flex; flex-shrink: 0; width: 300px; height: 50px;
+                         background-color: teal; content-visibility: auto;
+                         contain-intrinsic-size: 300px 50px; }}
+                 @keyframes pop {{ from {{ transform: scale(0); }} to {{ transform: scale(1); }} }}"
+            ));
+            let wrap = doc.el(doc.root, "view.wrap");
+            let card = doc.el(wrap, "view.card");
+            let list = doc.el(card, "view.list");
+            let rows: Vec<_> = (0..2000).map(|_| doc.el(list, "view.row")).collect();
+            run_animations(&mut doc);
+            (doc, rows)
+        };
+        let (mut bare, _) = build("");
+        let bare = walk_twice(&mut bare).painted;
+        let (mut doc, rows) = build("filter: blur(4px);");
+        let frame = doc.dom.build_paint_order();
+        assert_eq!(frame.animations().len(), 1, "the pop exports");
+        let mut plan = CullPlan::default();
+        plan.resolve_for(&doc.dom, &frame);
+        let relevant = |node| {
+            let auto = frame
+                .auto_boxes()
+                .iter()
+                .find(|auto| auto.node == node)
+                .expect("every auto box is recorded");
+            plan.admits_auto_box(&frame, auto)
+        };
+        assert!(relevant(rows[0]), "inside the list's window");
+        assert!(!relevant(rows[1999]), "past the list's window");
+        let blurred = walk_twice(&mut doc).painted;
+        assert!(bare < 30, "the window holds a few rows, got {bare}");
+        assert_eq!(blurred, bare, "the blur encodes the same window");
     }
 
     #[test]
@@ -2758,13 +3343,30 @@ mod tests {
     /// How many fragments a `backdrop-filter` box's range holds, on a page
     /// whose wrapper carries `wrapper`.
     fn fragments_behind(wrapper: &str) -> (usize, u32) {
-        let mut doc = Doc::with_css(BACKDROP_PAGE);
+        fragments_behind_in(BACKDROP_PAGE, wrapper, false)
+    }
+
+    /// [`fragments_behind`] over `css`, committed a quarter second into the
+    /// timeline when `animate`.
+    fn fragments_behind_in(css: &str, wrapper: &str, animate: bool) -> (usize, u32) {
+        let mut doc = Doc::with_css(css);
         let root = doc.root;
         doc.el(root, "view.mark");
         let wrap = doc.el(root, "view.wrap");
         doc.set_inline(wrap, wrapper);
         doc.el(wrap, "view.mark");
         doc.el(wrap, "view.box");
+        if animate {
+            run_animations(&mut doc);
+            let frame = doc.dom.build_paint_order();
+            assert!(
+                frame
+                    .animations()
+                    .iter()
+                    .any(|slot| slot.curve.opacity.is_some()),
+                "the wrapper's fade exports",
+            );
+        }
         let (finished, _) = compose(&mut doc);
         assert_eq!(finished.filter_groups.len(), 1, "one backdrop entry");
         let entry = &finished.filter_groups[0];
@@ -2810,6 +3412,22 @@ mod tests {
             assert_eq!(start, 0, "{wrapper} is no Backdrop Root");
             assert!(count >= 1, "{wrapper}: and the whole prefix is in range");
         }
+    }
+
+    /// A wrapper exporting an opacity curve is a Backdrop Root at every
+    /// reading, 1 included: the range a commit fixes must hold at every
+    /// instant the curve is composed at. Web Animations makes a running
+    /// `opacity` animation act as `will-change: opacity`, which
+    /// filter-effects-2 lists.
+    #[test]
+    fn an_exported_fade_roots_a_backdrop_while_it_reads_1() {
+        let css = format!(
+            "{BACKDROP_PAGE}
+             @keyframes fade {{ 0%, 50% {{ opacity: 1; }} 100% {{ opacity: 0.3; }} }}"
+        );
+        let (count, start) = fragments_behind_in(&css, "animation: fade 1s linear infinite", true);
+        assert_eq!(count, 1, "only what the wrapper painted itself");
+        assert!(start > 0, "and not from the frame's start");
     }
 
     /// An element with both properties records its blur bracket first, so the
