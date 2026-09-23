@@ -300,18 +300,25 @@ binds; they are not validated, because no target is built from them, and an
 attached painter's metrics supersede them. The view's `F` parameter is that
 view-owned fetcher; the wakeup is a separate group constructor generic held by
 `bobcat-main`. Construction returns a loading view at once, whose boot outcome
-arrives through `pump`; constructor errors cover attachment and two native
-modules claiming one name.
+arrives through `pump`; constructor errors cover attachment, an unknown default
+font family and two native modules claiming one name.
 
-The view's owner validates the fonts and default family first — a
-`dom::TextContext`'s business, with no document and zero fetches on failure —
-then requests each stylesheet in cascade order followed by the entry module,
-staging what arrives as the `DocumentIngredients` its document is built from;
-`LynxView::pump` services those requests and the view's images in ordinary
-turns. The default family is prepended to the `system-ui`, `sans-serif` and
-`serif` generic maps, so a Wasm embedder can supply its otherwise-absent
-system-font backend without baking a font into core; a name neither the
-containers nor the platform has fails with `EngineError::UnknownFontFamily`.
+**That same call hands the fetcher the view's startup sources.** It validates
+the fonts and default family first — a `dom::TextContext`'s business, with no
+document and zero fetches on failure, which is why the check has to be here
+rather than a turn later — and then requests each stylesheet in cascade order
+followed by the entry module, on the embedder's thread, before it returns. Only
+the built text context and the answering one-shots cross to `bobcat-main`,
+where the view's owner reads them in that same order and stages what arrives as
+the `DocumentIngredients` its document is built from. So the fetcher's IO, the
+realm's boot and the first frame's encode all overlap the painter the embedder
+builds next, and `LynxView::pump` services every *later* request — imports,
+`adoptStyleSheet`, worker scripts, fonts, plain fetches — and the view's images
+in ordinary turns. The default family is prepended to the `system-ui`,
+`sans-serif` and `serif` generic maps, so a Wasm embedder can supply its
+otherwise-absent system-font backend without baking a font into core; a name
+neither the containers nor the platform has fails the construction with
+`EngineError::UnknownFontFamily`.
 
 Dropping a loading view marks source work cancelled and stops that view before
 QuickJS begins. One `tokio_util::sync::CancellationToken` per view is minted on
@@ -838,7 +845,8 @@ and timers are delivered as normal. A frame the engine wants drawn rides the
 same wakeup, and the `Painter::pump` answering it draws it.
 
 **A host takes two turns per wakeup, and they are different calls.**
-`LynxView::pump` alone advances the resource protocol: it hands each
+`LynxView::pump` alone advances the resource protocol past the startup sources
+`create_lynx_view` already handed over: it hands each
 `RequestSource` to the fetcher, gives it its `service_images` moment, names
 every source the last paint walk discovered, drains the image inbox back to
 `bobcat-main`, and returns the turn's lifecycle events — after a fatal event,

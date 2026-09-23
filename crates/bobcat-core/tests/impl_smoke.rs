@@ -68,22 +68,22 @@ async fn host_capabilities_compose_into_the_opaque_view() {
     );
 }
 
-/// An unavailable default family fails startup through the event path,
-/// including when the supplied font container carries no usable face.
+/// An unavailable default family fails construction, including when the
+/// supplied font container carries no usable face.
 ///
-/// And the turns after it ask the host for nothing. A failed view's document
-/// will never commit again, so there is no frame for an image to be drawn in
-/// and nothing for a completed load to be reported to — the same rule the
-/// source requests are already held to.
+/// And the host is asked for nothing at all. The fonts are validated inside
+/// `create_lynx_view`, ahead of the startup requests that call issues, so
+/// there is no view, no document that could commit, and no turn in which an
+/// image could be named.
 #[tokio::test]
-async fn a_default_family_nothing_provides_fails_startup() {
+async fn a_default_family_nothing_provides_fails_construction() {
     let unusable = ViewSources {
         fonts: vec![FontBlob::from_static(b"not a font")],
         default_font_family: Some("Ahem".to_owned()),
         ..ViewSources::new(ENTRY)
     };
     let host = Rc::new(FetcherDouble::new(Vec::new()));
-    let (mut view, _painter) = view(
+    let error = view(
         {
             let host = Rc::clone(&host);
             move |_sink| host
@@ -91,23 +91,16 @@ async fn a_default_family_nothing_provides_fails_startup() {
         unusable,
     )
     .await
-    .expect("loading view");
+    .expect_err("no usable face registered");
     assert!(matches!(
-        wait_for_script(&mut view).expect_err("no usable face registered"),
+        error,
         LynxViewError::Engine(EngineError::UnknownFontFamily(_))
     ));
-
-    let serviced = host.image_service_count();
-    let _ = view.pump();
-    let _ = view.pump();
-    assert_eq!(
-        host.image_service_count(),
-        serviced,
-        "a failed view gives its host no image turn"
-    );
     assert_eq!(
         host.image_request_count(),
         0,
-        "and names no source against it"
+        "a view that was never built names no source against its host"
     );
+    assert_eq!(host.image_service_count(), 0, "and takes no image turn");
+    assert_eq!(host.resolve_count(), 0, "nor asks it for a source");
 }

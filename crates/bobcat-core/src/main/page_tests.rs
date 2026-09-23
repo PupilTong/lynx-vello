@@ -151,15 +151,35 @@ impl Harness {
     fn binding(
         context: Rc<GroupContext>,
         workers: mpsc::UnboundedReceiver<WorkerCommand>,
-        sources: ViewSources,
+        mut sources: ViewSources,
         bound: Option<Viewport>,
     ) -> Self {
         let (outbox, view) = detached_outbox(Arc::new(NoWakeup));
         let (commands, incoming) = mpsc::unbounded_channel();
         let (metrics, metric_receiver) = watch::channel(bound);
+        // What `create_lynx_view` does on the embedder's thread, which this
+        // test is: the startup sources are requested before the view's task
+        // exists, so they are outstanding from the first turn and the
+        // sheets are answered in whatever order the test likes.
+        let mut outstanding = Vec::new();
+        let request = |request: SourceRequest, outstanding: &mut Vec<_>| {
+            let (completion, answer) = SourceCompletion::new(view.token.clone());
+            outstanding.push((request, completion));
+            answer
+        };
+        let sheets = std::mem::take(&mut sources.style_sheets)
+            .into_iter()
+            .map(|url| request(SourceRequest::StyleSheet(url), &mut outstanding))
+            .collect();
+        let entry = request(
+            SourceRequest::Entry(std::mem::take(&mut sources.entry)),
+            &mut outstanding,
+        );
         let attached = AttachedView {
             viewport: CREATE_VIEWPORT,
             sources,
+            text_context: None,
+            startup: StartupSources { sheets, entry },
             native_modules: String::new(),
             commands: incoming,
             metrics: metric_receiver,
@@ -173,7 +193,7 @@ impl Harness {
             metrics,
             view,
             events: Vec::new(),
-            sources: Vec::new(),
+            sources: outstanding,
             preloads: Vec::new(),
             owner,
         }

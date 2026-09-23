@@ -19,8 +19,8 @@
 //! - [`consume_commands`], the one ordered consumer of the command stream;
 //! - [`consume_metrics`], which settles the page once per change of the painter's metrics, so a
 //!   resize with no JavaScript behind it still commits;
-//! - [`boot_page`], the page's boot future: the sheets in cascade order, the entry, and then the
-//!   realm;
+//! - [`boot_page`], the page's boot future: the answers to the requests `create_lynx_view` already
+//!   made — the sheets in cascade order, then the entry — and then the realm;
 //! - one [`load_module`] future per resource load an import produced;
 //! - one [`settle_future`] per host-backed `Future` a `.then` asked this realm to settle;
 //! - [`consume_worker_events`], the one ordered consumer of this view's workers;
@@ -137,7 +137,9 @@ use crate::lifetime::{EndOnUnwind, Lifetime, Settles, run_job, serve_clock};
 use crate::link::{SourceAnswer, ToMain, ViewOutbox};
 use crate::resource::{LoadedSource, SourceRequest, unanswered_source};
 use crate::threads::panicked;
-use crate::view::{EngineEvent, LynxViewError, ScreenMetrics, ViewSources, Viewport};
+use crate::view::{
+    EngineEvent, LynxViewError, ScreenMetrics, StartupSources, ViewSources, Viewport,
+};
 
 /// One view's page: what every task of that view acts on.
 ///
@@ -223,15 +225,15 @@ pub(super) struct Page {
     epilogues: Cell<u64>,
 }
 
-/// Everything boot still needs once the fonts have been validated and the
-/// document's ingredients staged: the pre-fetch form, mirroring
-/// [`ViewSources`], of what becomes one
+/// Everything boot still needs once the document's ingredients are staged:
+/// the pre-answer form, mirroring [`ViewSources`], of what becomes one
 /// [`RealmStartup`](super::runtime::RealmStartup) as soon as the entry has
-/// arrived — the sheets and the entry *specifier* here, the entry's own text
-/// and resolved URL there.
+/// arrived — the outstanding *answers* to the sheets and the entry here, the
+/// entry's own text and resolved URL there.
 struct BootSources {
-    style_sheets: Vec<String>,
-    entry: String,
+    /// The answers to the requests `create_lynx_view` already made: the
+    /// author sheets in cascade order, then the entry.
+    startup: StartupSources,
     /// The screen `SystemInfo` reports, already resolved: the embedder's own
     /// metrics, or the ones derived from the create-time viewport for a host
     /// that named none.
@@ -1024,6 +1026,8 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
     let AttachedView {
         viewport,
         sources,
+        text_context,
+        startup,
         native_modules,
         commands,
         metrics,
@@ -1035,10 +1039,13 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
     let _cancel = cancel.clone().drop_guard();
     let ViewSources {
         config,
-        fonts,
-        default_font_family,
-        style_sheets,
-        entry,
+        // Spent on the embedder's thread: the fonts and the default family
+        // became `text_context` above, and these two became the requests
+        // whose answers `startup` carries.
+        fonts: _,
+        default_font_family: _,
+        style_sheets: _,
+        entry: _,
         background_entry,
         init_data,
         initial_processor,
@@ -1050,20 +1057,11 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
     // in physical pixels where it did not. Nothing updates it afterwards, so
     // a painter binding at other metrics leaves it alone.
     let screen = screen.unwrap_or_else(|| ScreenMetrics::for_viewport(viewport));
-    // The fonts first, because a view whose containers cannot serve the family
-    // it named will never render and there is nothing worth fetching for it.
-    let text_context = match super::stage_text_context(fonts, default_font_family.as_deref()) {
-        Ok(text_context) => text_context,
-        Err(error) => {
-            outbox.engine_event(EngineEvent::StartupFailed(error));
-            return;
-        }
-    };
     let ingredients = DocumentIngredients {
         viewport,
         config,
         text_context,
-        sheets: Vec::with_capacity(style_sheets.len()),
+        sheets: Vec::with_capacity(startup.sheets.len()),
         style_pool: context.style_pool.clone(),
         pending_image_events: Vec::new(),
     };
@@ -1073,8 +1071,7 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
     page.spawn(boot_page(
         Rc::clone(&page),
         BootSources {
-            style_sheets,
-            entry,
+            startup,
             screen,
             background_entry,
             init_data,
@@ -1166,24 +1163,28 @@ async fn consume_metrics(page: Rc<Page>, mut metrics: watch::Receiver<Option<Vie
     }
 }
 
-/// Requests this view's author sheets in cascade order and stages each one,
+/// Reads this view's author sheets in cascade order and stages each one,
 /// answering whether boot may go on.
 ///
-/// A sheet that arrives after the entry has run would restyle a document the
-/// card has already built, so they are requested one at a time and in order.
-/// They are staged rather than mounted, because there is no document yet —
-/// `createDocument` mounts them in this order, and it runs before the entry.
+/// The requests are already out: `create_lynx_view` handed the fetcher all of
+/// them, in this order, before the view existed here. What this order decides
+/// is *use* rather than IO — a sheet that arrived after the entry had run
+/// would restyle a document the card has already built — so the answers are
+/// read one at a time and in cascade order whatever order they were completed
+/// in, and the rest are dropped where one fails. They are staged rather than
+/// mounted, because there is no document yet — `createDocument` mounts them in
+/// this order, and it runs before the entry.
 ///
 /// `false` is a view that has already reported its failure, or one released
 /// while a sheet was in flight; either way boot is over and the caller
 /// returns.
-async fn stage_sheets(page: &Rc<Page>, style_sheets: Vec<String>) -> bool {
-    for url in style_sheets {
+async fn stage_sheets(page: &Rc<Page>, sheets: Vec<SourceAnswer>) -> bool {
+    for answer in sheets {
         if page.outbox.is_cancelled() {
             page.end();
             return false;
         }
-        match request_source(&page.outbox, SourceRequest::StyleSheet(url)).await {
+        match await_source(answer).await {
             Ok(LoadedSource::StyleSheet(sheet)) => {
                 if !page.stage_sheet(sheet) {
                     return false;
@@ -1221,10 +1222,14 @@ async fn stage_sheets(page: &Rc<Page>, style_sheets: Vec<String>) -> bool {
 
 /// The page's boot future: every author sheet in cascade order, then the
 /// entry, then the realm.
+///
+/// It asks for none of the three. All of them were requested on the
+/// embedder's thread, inside `create_lynx_view`, so what is left here is
+/// reading the answers in the order the document needs them — which is what
+/// lets this run while that thread builds the view's painter.
 async fn boot_page(page: Rc<Page>, sources: BootSources) {
     let BootSources {
-        style_sheets,
-        entry,
+        startup,
         screen,
         background_entry,
         init_data,
@@ -1232,14 +1237,15 @@ async fn boot_page(page: Rc<Page>, sources: BootSources) {
         global_props,
         native_modules,
     } = sources;
-    if !stage_sheets(&page, style_sheets).await {
+    let StartupSources { sheets, entry } = startup;
+    if !stage_sheets(&page, sheets).await {
         return;
     }
     if page.outbox.is_cancelled() {
         page.end();
         return;
     }
-    let (source, url) = match request_source(&page.outbox, SourceRequest::Entry(entry)).await {
+    let (source, url) = match await_source(entry).await {
         Ok(LoadedSource::Entry { source, url }) => (source, url),
         Ok(LoadedSource::Font(_)) => {
             page.fail(EngineEvent::StartupFailed(mismatched_source(
@@ -1294,9 +1300,7 @@ async fn boot_page(page: Rc<Page>, sources: BootSources) {
 /// so the failure ends the view — reported as a startup failure while boot is
 /// still outstanding, and as a run failure once it has been reported.
 async fn load_module(page: Rc<Page>, url: String, answer: SourceAnswer) {
-    let source = answer
-        .await
-        .unwrap_or_else(|_| Err(unanswered_source().into()));
+    let source = await_source(answer).await;
     let completing = Rc::clone(&page);
     page.enter(move |runtime, js| {
         if let Err(error) = runtime.complete_module(js, &url, source) {
@@ -1412,16 +1416,22 @@ async fn consume_worker_events(page: Rc<Page>) {
     }
 }
 
+/// Waits for one source the host was already asked for. A fetcher that
+/// dropped the request without answering is a failed load, not a wait
+/// forever.
+async fn await_source(answer: SourceAnswer) -> Result<LoadedSource, LynxViewError> {
+    answer
+        .await
+        .unwrap_or_else(|_| Err(unanswered_source().into()))
+}
+
 /// Asks the host for one source and waits for it. A fetcher that dropped the
 /// request without answering is a failed load, not a wait forever.
 async fn request_source(
     outbox: &ViewOutbox,
     request: SourceRequest,
 ) -> Result<LoadedSource, LynxViewError> {
-    outbox
-        .request_source(request)
-        .await
-        .unwrap_or_else(|_| Err(unanswered_source().into()))
+    await_source(outbox.request_source(request)).await
 }
 
 fn mismatched_source(request: &str, answer: &str) -> LynxViewError {

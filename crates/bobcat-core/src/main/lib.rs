@@ -57,8 +57,8 @@ use crate::jobs::{JsThread, JsThreadHandle};
 use crate::link::{ToMain, ViewOutbox};
 use crate::threads::{self, ThreadJoin};
 use crate::view::{
-    EngineError, EngineEvent, EventRequester, GroupCommand, LynxViewError, StyleThreads,
-    ViewAttachment, ViewSources, Viewport,
+    EngineError, EngineEvent, EventRequester, GroupCommand, LynxViewError, StartupSources,
+    StyleThreads, ViewAttachment, ViewSources, Viewport,
 };
 
 /// The main thread's end of its group's link.
@@ -240,8 +240,8 @@ async fn group_task(context: Rc<GroupContext>, mut attach: mpsc::UnboundedReceiv
             command = attach.recv() => match command {
                 Some(GroupCommand::Attach(attachment)) => {
                     let ViewAttachment {
-                        viewport, sources, native_modules, commands, metrics, notices, frames,
-                        cancel, fetch_probe,
+                        viewport, sources, text_context, startup, native_modules, commands,
+                        metrics, notices, frames, cancel, fetch_probe,
                     } = *attachment;
                     let outbox = ViewOutbox::new(
                         notices,
@@ -257,8 +257,10 @@ async fn group_task(context: Rc<GroupContext>, mut attach: mpsc::UnboundedReceiv
                             outbox.engine_event(EngineEvent::ScriptRunError(error));
                         })
                     });
-                    let view =
-                        AttachedView { viewport, sources, native_modules, commands, metrics, cancel };
+                    let view = AttachedView {
+                        viewport, sources, text_context, startup, native_modules, commands,
+                        metrics, cancel,
+                    };
                     let handle = views.spawn_local(page::serve_view(
                         Rc::clone(&context),
                         view,
@@ -315,6 +317,12 @@ fn finish_view(
 struct AttachedView {
     viewport: Viewport,
     sources: ViewSources,
+    /// This view's fonts and default family, validated on the embedder's
+    /// thread before anything was requested.
+    text_context: Option<dom::TextContext>,
+    /// The answers to the startup requests `create_lynx_view` already made:
+    /// the author sheets in cascade order, then the entry.
+    startup: StartupSources,
     /// The embedder's native modules, as the realm is told about them: the
     /// record `create_lynx_view` encoded out of their names and methods.
     native_modules: String,
@@ -327,37 +335,6 @@ struct AttachedView {
     /// view's owner waits on, what its own end cancels, and the parent of the
     /// token every worker its realm creates carries.
     cancel: CancellationToken,
-}
-
-/// Registers a view's fonts and selects its default family, before any
-/// document exists and before anything has been fetched.
-///
-/// Neither needs a document: fonts and the default family are a
-/// [`TextContext`](dom::TextContext)'s business, and a document only ever
-/// adopts a finished one. That is what keeps a family nothing provides a
-/// zero-fetch failure — the check happens here, ahead of the first source
-/// request, rather than inside the document that would have been built for it.
-///
-/// `None` is a view that named neither, which leaves the document's own lazy
-/// context alone. `Err` is a default family neither the containers nor the
-/// platform has, which is a failure to build the view rather than to run it.
-fn stage_text_context(
-    fonts: Vec<dom::FontBlob>,
-    default_font_family: Option<&str>,
-) -> Result<Option<dom::TextContext>, LynxViewError> {
-    if fonts.is_empty() && default_font_family.is_none() {
-        return Ok(None);
-    }
-    let mut text = dom::TextContext::new();
-    for font in fonts {
-        text.register_fonts(font);
-    }
-    if let Some(family) = default_font_family
-        && !text.set_default_font_family(family)
-    {
-        return Err(EngineError::UnknownFontFamily(family.to_owned()).into());
-    }
-    Ok(Some(text))
 }
 
 #[cfg(all(target_arch = "wasm32", panic = "abort"))]
