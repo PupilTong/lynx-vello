@@ -810,6 +810,69 @@ fn a_blurred_box_in_a_scroller_moves_with_the_offset() {
     }
 }
 
+/// A blurred card sliding by an exported curve inside an ancestor's
+/// `overflow: clip`, composed later than its commit, is still cut at the
+/// ancestor's edge rather than at where that edge sat relative to the card
+/// when it was committed.
+///
+/// The group's range re-pushes the ancestor's clip in the ancestor's still
+/// space, so its bake has to sample the instant the composition does.
+#[test]
+fn a_sliding_blurred_card_stays_inside_its_ancestors_clip() {
+    let mut gpu = headless("a_sliding_blurred_card_stays_inside_its_ancestors_clip");
+    let mut doc = Doc::with_css_sized(
+        "page { display: flex; width: 200px; height: 100px; }
+         .frame { display: flex; width: 100px; height: 100px; overflow: clip; }
+         .card { display: flex; flex-shrink: 0; margin: 20px; width: 60px; height: 60px;
+                 background-color: #000000; filter: blur(2px);
+                 animation: slide 1s linear infinite; }
+         @keyframes slide { from { transform: translateX(0px); }
+                            to { transform: translateX(100px); } }",
+        200.0,
+        100.0,
+    );
+    let root = doc.root;
+    let clip = doc.el(root, "frame");
+    doc.el(clip, "card");
+    doc.dom.render();
+    doc.dom.advance_animations(0.0);
+    doc.dom.advance_animations(0.1);
+    doc.dom.render();
+    gpu.forget_filters();
+    let frame = doc
+        .dom
+        .committed_frame()
+        .expect("render leaves a committed frame retained");
+    assert!(frame.has_live_curves(), "the slide exports");
+    assert!(
+        frame.filter_groups()[0].samples_animations(),
+        "the card moves across its ancestor's clip",
+    );
+
+    // Committed at x = 30; at 0.6 s the card spans x = 80..140, and the
+    // frame's clip ends at x = 100.
+    let now = Some(0.6);
+    let filtered: Vec<Option<dom::vello::peniko::ImageData>> = gpu
+        .prepare_filters(&frame, &[], &|_| None, 0, now)
+        .expect("the filter bakes render")
+        .to_vec();
+    let mut scene = Scene::new();
+    frame.compose_into(&mut scene, &[], &filtered, &|_| None, now);
+    let pixels = gpu
+        .render(&scene, &[], 200, 100, Color::WHITE)
+        .expect("headless render");
+    assert!(
+        luma(&pixels, 200, 90, 50) < 40,
+        "the card shows inside the clip ({})",
+        luma(&pixels, 200, 90, 50),
+    );
+    assert_eq!(
+        pixel(&pixels, 200, 120, 50),
+        WHITE,
+        "and nothing of it past the clip's edge",
+    );
+}
+
 /// A blurred child inside a blurred parent renders, and blurs more than
 /// either blur alone.
 ///

@@ -38,6 +38,7 @@ use stylo::computed_values::scroll_initial_target;
 use stylo::properties::ComputedValues;
 use stylo::values::computed::{CSSPixelLength, PointerEvents};
 
+use super::frame::MAX_MOVING_EXTENT_VIEWPORTS;
 use super::geometry::{inner_radii, resolve_corner_radii};
 use super::transform::{ParentPerspective, stacking_context_matrix};
 use super::{
@@ -129,6 +130,9 @@ pub(crate) fn build<T: Sync>(
             auto_boxes: builder.auto_boxes,
             snap_points: builder.snap_points,
             initial_targets: builder.initial_targets,
+            // Filled by the painter once it has encoded the frame.
+            composed_animations: buffers.composed_animations,
+            composed_stickies: buffers.composed_stickies,
             commit_id,
         },
         builder.scratch,
@@ -387,10 +391,6 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         u32::try_from(self.spaces.len() - 1).expect("a frame cannot hold 2^32 spaces")
     }
 
-    fn nearest_animation(&self, space: Option<u32>) -> Option<u32> {
-        super::space::nearest_animation(&self.spaces, space)
-    }
-
     fn nearest_sticky(&self, space: Option<u32>) -> Option<u32> {
         super::space::nearest_sticky(&self.spaces, space)
     }
@@ -499,23 +499,20 @@ impl<'doc, T: Sync> Builder<'doc, T> {
             axes,
             parent_transform: *parent_transform,
         });
-        // A changing ancestor transform changes the coordinate map the
-        // constraints use, so it must rebuild the retained geometry.
-        self.kill_animation_chain(self.nearest_animation(flow.space));
         Some(u32::try_from(self.stickies.len() - 1).expect("a frame cannot hold 2^32 sticky boxes"))
     }
 
     /// Records `node` in the frame's animation-slot table when it carries a
-    /// composite-exportable animation, linked to the nearest animated
-    /// ancestor.
+    /// composite-exportable animation.
     ///
-    /// Structural refusals live here beside the geometric attach: an
-    /// element inside a composited group cannot export (the group's bounds
-    /// were computed for the committed geometry), and a transform track
-    /// needs a 2D, invertible decomposition of the element's world matrix
-    /// with no individual transforms, motion path, or inherited
-    /// perspective in the way. A refusal allocates nothing; the element
-    /// keeps animating through main-thread ticks.
+    /// Every refusal happens here, before the slot exists: an element inside
+    /// a composited group cannot export (the group's bounds were computed
+    /// for the committed geometry), a transform track needs a 2D, invertible
+    /// decomposition of the element's world matrix with no individual
+    /// transforms, motion path, or inherited perspective in the way, and a
+    /// moving element must fit [`MAX_MOVING_EXTENT_VIEWPORTS`]. A refusal
+    /// allocates nothing; the element keeps animating through main-thread
+    /// ticks, which cull it exactly.
     fn allocate_animation_slot(
         &mut self,
         node: NodeId,
@@ -523,7 +520,6 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         world: &Transform3D<f32>,
         size: Size2D<f32>,
         parent_perspective: Option<ParentPerspective>,
-        parent: Option<u32>,
     ) -> Option<u32> {
         let node_ref = self.node(node);
         if !node_ref.may_have_animations() || self.current_layer.is_some() {
@@ -532,6 +528,9 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         let export = self.document.composite_export(node_ref)?;
         let mut curve = export.curve;
         if let Some(track) = export.transform_track {
+            if !self.moving_extent_fits(node) {
+                return None;
+            }
             curve.transform = Some(self.attach_transform_track(
                 track,
                 style,
@@ -541,15 +540,22 @@ impl<'doc, T: Sync> Builder<'doc, T> {
                 &export.committed_transform,
             )?);
         }
-        self.animations.push(AnimationSlot {
-            node,
-            parent,
-            curve: Some(curve),
-        });
+        self.animations.push(AnimationSlot { node, curve });
         Some(
             u32::try_from(self.animations.len() - 1)
                 .expect("a frame cannot hold 2^32 animation slots"),
         )
+    }
+
+    /// Whether `node`'s extent — the box spanning its border box and its
+    /// content overflow, `max(size, content_size)` per axis — has an area
+    /// inside the moving-export budget. See [`MAX_MOVING_EXTENT_VIEWPORTS`].
+    fn moving_extent_fits(&self, node: NodeId) -> bool {
+        let layout = self.rounded(node);
+        let width = layout.size.width.max(layout.content_size.width);
+        let height = layout.size.height.max(layout.content_size.height);
+        let viewport = self.document.viewport_size();
+        width * height <= MAX_MOVING_EXTENT_VIEWPORTS * viewport.width * viewport.height
     }
 
     /// Attaches the geometry a transform track's delta needs: with the
@@ -618,18 +624,6 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         })
     }
 
-    /// Sets every slot on `chain` back to the committed values: something
-    /// under the animated subtree — a clip, a scroll container — cannot ride
-    /// a sampled delta, so the whole chain falls back to main-thread ticks.
-    fn kill_animation_chain(&mut self, chain: Option<u32>) {
-        let mut current = chain;
-        while let Some(index) = current {
-            let slot = &mut self.animations[index as usize];
-            slot.curve = None;
-            current = slot.parent;
-        }
-    }
-
     #[allow(
         clippy::too_many_lines,
         reason = "one linear pass over a context's own box, then its members"
@@ -658,24 +652,21 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         };
         let world = stacking_context_matrix(values, size, offset_in_parent, parent_perspective)
             .then(parent_world);
-        let own_animation = self.allocate_animation_slot(
+        let own_animation =
+            self.allocate_animation_slot(root, values, &world, size, parent_perspective);
+        if let Some(index) = own_animation {
+            box_space = Some(self.push_space(box_space, SpaceKind::Animation(index)));
+        }
+        let force_group = own_animation
+            .is_some_and(|index| self.animations[index as usize].curve.opacity.is_some());
+        let layer = self.open_layer(
             root,
             values,
             &world,
             size,
-            parent_perspective,
-            self.nearest_animation(seed.current.space),
+            (box_space, seed.current.clip),
+            force_group,
         );
-        if let Some(index) = own_animation {
-            box_space = Some(self.push_space(box_space, SpaceKind::Animation(index)));
-        }
-        let force_group = own_animation.is_some_and(|index| {
-            self.animations[index as usize]
-                .curve
-                .as_ref()
-                .is_some_and(|curve| curve.opacity.is_some())
-        });
-        let layer = self.open_layer(root, values, &world, size, box_space, force_group);
 
         let own_slot = self.allocate_scroll_slot(
             root,
@@ -686,12 +677,6 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         );
         let own_scroll =
             own_slot.map(|slot| (slot, self.push_space(box_space, SpaceKind::Scroll(slot))));
-        if own_slot.is_some() {
-            // The animated element is itself a scroll container: its own
-            // clip and its content's scroll translation cannot ride a
-            // sampled delta.
-            self.kill_animation_chain(self.nearest_animation(box_space));
-        }
         // Every `content-visibility: auto` box arrives here and nowhere else:
         // `auto` implies `LAYOUT | PAINT` containment, so it is always a
         // stacking context, and a stacking context is always built by this
@@ -806,7 +791,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         values: &ComputedValues,
         world: &Transform3D<f32>,
         size: Size2D<f32>,
-        space: Option<u32>,
+        (space, clip): (Option<u32>, Option<usize>),
         force_group: bool,
     ) -> Option<usize> {
         if !force_group && !stacking::needs_group_rendering(values) {
@@ -820,6 +805,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
             size,
             radii: resolve_corner_radii(values, size),
             space,
+            clip,
             items: start..start,
         });
         let index = self.layers.len() - 1;
@@ -1079,11 +1065,6 @@ impl<'doc, T: Sync> Builder<'doc, T> {
                 self.push_space(outer.current.space, SpaceKind::Scroll(slot)),
             )
         });
-        if own_slot.is_some() {
-            // A scroll translation inside an animated subtree cannot ride
-            // a sampled delta, as on the stacking-context path.
-            self.kill_animation_chain(self.nearest_animation(outer.current.space));
-        }
         // Entered before the records: the paragraph paints inside the
         // element's own clip, as `push_paragraph` gives it on the stacking
         // context path. The element's own box keeps the outer context.
@@ -1259,9 +1240,6 @@ impl<'doc, T: Sync> Builder<'doc, T> {
                 space: inner.current.space,
             });
             inner.current.clip = Some(self.clips.len() - 1);
-            // A clip rect never rides a sampled delta; anything animated
-            // around it falls back to main-thread ticks.
-            self.kill_animation_chain(self.nearest_animation(inner.current.space));
         }
         if let Some((slot, space)) = own_scroll {
             inner.current.chain = Some(slot);

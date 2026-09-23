@@ -96,6 +96,8 @@ pub(crate) struct Painter {
     spare_image_draws: Vec<crate::paint::compose::ImageDraw>,
     /// A retired frame's emptied filter-group table, capacity intact.
     spare_filter_groups: Vec<crate::paint::compose::FilterGroup>,
+    /// Scratch for marking the slots each committed program composes.
+    composed_marks: crate::visual::ComposedMarks,
 }
 
 impl std::fmt::Debug for Painter {
@@ -139,6 +141,9 @@ impl Painter {
             pool,
         } = assembly.finish();
         self.spare_scenes = pool;
+        let mut frame = frame;
+        frame.mark_composed_spaces(&program, &filter_groups, &mut self.composed_marks);
+        let earliest_expiry = frame.earliest_expiry();
         let committed = Arc::new(CommittedFrame {
             order: frame,
             presentation: crate::visual::frame::Presentation {
@@ -149,6 +154,7 @@ impl Painter {
             },
             animations_active,
             needs_main_ticks,
+            earliest_expiry,
             viewport,
             device_pixel_ratio,
         });

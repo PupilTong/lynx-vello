@@ -514,28 +514,32 @@ impl<T: Sync> Document<T> {
     /// Whether anything animating is *not* covered by one of `frame`'s
     /// exported curves — those elements still need per-frame ticks on this
     /// thread, so the presenting side keeps sending `BeginFrame`s.
+    ///
+    /// Every exported element has exactly one set, found by key, so counting
+    /// the covered sets answers without scanning the slots per set.
     pub(crate) fn animation_needs_main_ticks(&self, frame: &crate::visual::PaintOrder) -> bool {
         let handle = self.animations().context_handle();
         let sets = handle.sets.read();
         let arenas = self.arenas();
-        sets.iter().any(|(key, set)| {
-            if !set.needs_animation_ticks() {
-                return false;
-            }
-            let Some(id) = arenas.id_at_arena_key(key.node.0) else {
-                return false;
-            };
-            // A frozen element has no exported curve either — the build never
-            // descends into a skipped subtree — so it has to be excluded
-            // here rather than fall through as "uncovered, tick it".
-            if self.in_skipped_subtree(id) {
-                return false;
-            }
-            !frame
-                .animations()
-                .iter()
-                .any(|slot| slot.node == id && slot.curve.is_some())
-        })
+        let ticks = |key: &AnimationSetKey, set: &ElementAnimationSet| {
+            // A frozen element's animations do not advance, and it has no
+            // curve either: the build never descends into a skipped subtree.
+            set.needs_animation_ticks()
+                && arenas
+                    .id_at_arena_key(key.node.0)
+                    .is_some_and(|id| !self.in_skipped_subtree(id))
+        };
+        let ticking = sets.iter().filter(|(key, set)| ticks(key, set)).count();
+        let covered = frame
+            .animations()
+            .iter()
+            .filter(|slot| {
+                let key = AnimationSetKey::new_for_non_pseudo(OpaqueNode(slot.node.arena_key()));
+                sets.get_key_value(&key)
+                    .is_some_and(|(key, set)| ticks(key, set))
+            })
+            .count();
+        ticking > covered
     }
 
     /// Advances every live animation and transition to `now` — seconds on a

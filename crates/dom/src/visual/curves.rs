@@ -270,12 +270,6 @@ impl CompositeCurve {
         }
     }
 
-    /// Whether `now` is past this curve's domain — the compositor's cue to
-    /// hand the animation back to the main thread for its finish restyle.
-    pub(crate) fn expired_at(&self, now: f64) -> bool {
-        self.expires_at.is_some_and(|expiry| now >= expiry)
-    }
-
     /// The current-iteration progress at `now` plus the direction that
     /// iteration runs, emulating the `iterate_if_necessary` steps the main
     /// thread has not run: each whole elapsed iteration advances the start
@@ -488,8 +482,6 @@ mod tests {
         assert_eq!(curve.sample(0.0).alpha, Some(1.0));
         assert_eq!(curve.sample(0.25).alpha, Some(0.75));
         assert_eq!(curve.sample(2.0).alpha, Some(0.0));
-        assert!(curve.expired_at(1.0));
-        assert!(!curve.expired_at(0.5));
     }
 
     #[test]
@@ -503,7 +495,6 @@ mod tests {
         // Iteration 1 runs reversed: the same local progress reads the track
         // from the other end, so opacity rises again.
         assert_eq!(curve.sample(1.25).alpha, Some(0.25));
-        assert!(!curve.expired_at(1e6));
     }
 
     #[test]

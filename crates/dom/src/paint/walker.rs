@@ -49,7 +49,7 @@
 //! document's own viewport, so an item that reaches neither the viewport nor
 //! anything its clip chain admits contributes nothing at any device scale.
 //!
-//! Three disciplines keep it sound.
+//! Five disciplines keep it sound.
 //!
 //! - **Only the encode is skipped.** Scope open and close are driven by item index, and the group
 //!   bounds `plan_frame` produces are computed from every item, culled or not. Narrowing a group's
@@ -65,6 +65,14 @@
 //!   the sum of 3σ over each enclosing filtered layer, and the group's own layer bounds are grown
 //!   the same way *before* the viewport intersection — an element straddling the viewport edge
 //!   therefore still bakes the margin its visible pixels read from.
+//! - **Moving content is bounded only by what moves with it.** Below an animation node with a
+//!   transform track the viewport bounds nothing, since the sampled delta can carry content
+//!   anywhere. Clips and encode windows inside the moving subtree move with it and still bound, so
+//!   a list inside an animated card encodes only its own window, and a moving group's bounds are
+//!   held to the same clips. The export's extent budget
+//!   ([`crate::visual::frame::MAX_MOVING_EXTENT_VIEWPORTS`]) bounds each moving element's own
+//!   extent, not how many there are: every exported row of a long list encodes and composes,
+//!   whatever part of the list is on screen.
 //! - **Text runs are never culled by geometry.** [`text::extent`] bounds the authored reaches
 //!   (`text-shadow` offset, half the `-webkit-text-stroke` width) exactly, but a run's `size` is
 //!   its line box, and glyph ink leaves that box by font ascent and descent, synthetic oblique
@@ -89,7 +97,7 @@ use crate::render::image::ImageRegistry;
 use crate::vello::Scene;
 use crate::vello::kurbo::{Affine, Point, Rect};
 use crate::vello::peniko::{BlendMode, Compose, Fill, Mix};
-use crate::visual::space::{nearest_animation, nearest_scroll, nearest_sticky};
+use crate::visual::space::{self, SpaceKind, nearest_scroll, nearest_sticky};
 use crate::visual::{AutoBox, ClipNode, PaintItem, PaintItemKind, PaintOrder, RenderLayer, Space};
 
 /// Where one walk's output goes.
@@ -304,6 +312,16 @@ pub(crate) struct Scratch {
     layer_bounds: Vec<Rect>,
     open_layers: Vec<usize>,
     bounds_acc: Vec<Option<Rect>>,
+    /// Per layer, whether a transform curve on its space's path moves it:
+    /// the viewport bounds nothing of such a group, so its bounds are held
+    /// to [`Self::clip_extent`] instead. Index-parallel with
+    /// [`PaintOrder::layers`].
+    layer_moves: Vec<bool>,
+    /// Per clip node, what its chain alone admits in its own space, with no
+    /// viewport — filled only when some layer moves. It is independent of
+    /// the cull rect, so a moving group's bounds stay the same whether or not
+    /// culling is on. Index-parallel with [`PaintOrder::clips`].
+    clip_extent: Vec<Admitted>,
     /// Per layer, the blur sigma of its `filter` in *viewport* CSS px — the
     /// element's own sigma scaled by its local-to-viewport map. Zero for
     /// every layer with no `blur()`. Index-parallel with
@@ -320,8 +338,8 @@ pub(crate) struct Scratch {
 }
 
 /// The frame-wide geometry the cull test is decided against: the region every
-/// clip chain admits, how far every scroll slot's committed encode window
-/// reaches, and which animation nodes a sampled delta can move.
+/// clip chain admits and how far every scroll slot's committed encode window
+/// reaches.
 ///
 /// It is a type of its own, and `pub(crate)`, because two consumers must
 /// agree exactly: [`plan_frame`], which decides what the paint walk encodes,
@@ -335,21 +353,18 @@ pub(crate) struct CullPlan {
     /// The admitted base region: the viewport plus its slack, or `None` with
     /// culling switched off entirely.
     cull: Option<Rect>,
-    /// Per clip node, the region its whole chain admits, in viewport CSS px,
-    /// already intersected with `cull`. `None` means the chain admits
-    /// nothing: it leaves the cull rect, or one of its links has a
-    /// non-invertible transform, which [`push_clip`] encodes as an empty clip.
+    /// Per clip node, what its whole chain admits in the clip's **own**
+    /// space, already intersected with `cull` pulled back into that space.
+    /// [`Admitted::Nothing`] means the chain admits nothing: it leaves the
+    /// cull rect, or one of its links has a non-invertible transform, which
+    /// [`push_clip`] encodes as an empty clip. [`Admitted::Everything`] means
+    /// a transform curve moves the chain and no committed geometry bounds it.
     /// Index-parallel with [`PaintOrder::clips`].
-    clip_bounds: Vec<Option<Rect>>,
+    clip_bounds: Vec<Admitted>,
     /// Per scroll slot, the committed encode window `(low, high)` — the
     /// offset range the culled encode must stay valid for. Index-parallel
     /// with [`PaintOrder::slots`].
     slot_windows: Vec<(Vector2D<f32>, Vector2D<f32>)>,
-    /// Per animation slot, whether a live transform curve moves it —
-    /// transitive through slot parents. Content in a space whose innermost
-    /// animation node moves is never culled and its enclosing groups keep
-    /// unclipped bounds: the sampled delta can carry it anywhere.
-    animation_moves: Vec<bool>,
     /// Per group layer, the summed 3-sigma ink reach of that layer and every
     /// filtered layer outside it. Content inside a filtered group can put ink
     /// that far past its own box, so the region admitted for it grows by the
@@ -371,17 +386,6 @@ impl CullPlan {
                 .iter()
                 .map(crate::visual::ScrollSlot::encode_window),
         );
-        self.animation_moves.clear();
-        for slot in frame.animations() {
-            let own = slot
-                .curve
-                .as_ref()
-                .is_some_and(|curve| curve.transform.is_some());
-            let inherited = slot
-                .parent
-                .is_some_and(|parent| self.animation_moves[parent as usize]);
-            self.animation_moves.push(own || inherited);
-        }
         self.layer_inflate.clear();
         for (index, layer) in frame.layers().iter().enumerate() {
             debug_assert!(
@@ -394,7 +398,17 @@ impl CullPlan {
             self.layer_inflate
                 .push(outer + BLUR_INK_SIGMAS * layer_blur_sigma(document, layer));
         }
-        plan_clips(self, frame, cull);
+        let mut bounds = std::mem::take(&mut self.clip_bounds);
+        match self.cull {
+            Some(cull) => resolve_clips(
+                &self.slot_windows,
+                frame,
+                Admitted::Region(cull),
+                &mut bounds,
+            ),
+            None => bounds.clear(),
+        }
+        self.clip_bounds = bounds;
     }
 
     /// The same plan, resolved from a document's own device metrics — the
@@ -418,22 +432,18 @@ impl CullPlan {
         space: Option<u32>,
         layer: Option<usize>,
     ) -> Admitted {
-        if nearest_animation(frame.spaces(), space)
-            .is_some_and(|slot| self.animation_moves[slot as usize])
-        {
+        if self.cull.is_none() {
             return Admitted::Everything;
         }
-        let Some(cull) = self.cull else {
-            return Admitted::Everything;
-        };
         // Every enclosing blur carries this content's ink 3 sigma further
         // out, so the region it may reach grows by their sum. That
         // over-admits a little near an inner clip, which is the safe
         // direction: culling needs a proof, uncertainty paints.
         let inflate = layer.map_or(0.0, |layer| self.layer_inflate[layer]);
-        admitted_region(self, frame, cull, space, clip).map_or(Admitted::Nothing, |region| {
-            Admitted::Region(inflate_rect(region, inflate))
-        })
+        match admitted_region(self, frame, space, clip) {
+            Admitted::Region(region) => Admitted::Region(inflate_rect(region, inflate)),
+            other => other,
+        }
     }
 
     /// Whether this `content-visibility: auto` box can put ink in that
@@ -454,11 +464,12 @@ impl CullPlan {
     }
 }
 
-/// What a frame's culling admits for one piece of content, in viewport CSS px.
+/// What a frame's culling admits for one piece of content, in the CSS px of
+/// the space that content rides.
 #[derive(Clone, Copy, Debug)]
 enum Admitted {
-    /// No proof is possible at all: culling is switched off, or a sampled
-    /// animation delta can carry the content anywhere. Everything paints.
+    /// No proof is possible at all: culling is switched off, or a transform
+    /// curve on the path can carry the content anywhere. Everything paints.
     Everything,
     /// The region content in this space may put ink in.
     Region(Rect),
@@ -467,6 +478,19 @@ enum Admitted {
 }
 
 impl Admitted {
+    /// `bounds` cut down to what this admits, or `None` when nothing of it
+    /// is. Non-finite bounds are undecidable and pass whole.
+    fn cut(self, bounds: Rect) -> Option<Rect> {
+        match self {
+            Self::Region(region) if is_finite(bounds) => {
+                let both = bounds.intersect(region);
+                (both.width() > 0.0 && both.height() > 0.0).then_some(both)
+            }
+            Self::Nothing => None,
+            Self::Region(_) | Self::Everything => Some(bounds),
+        }
+    }
+
     /// Whether `bounds` reaches it. Undecidable bounds reach everything but
     /// [`Self::Nothing`]; see [`can_reach`], which this defers to so the
     /// non-finite rule has one definition.
@@ -685,38 +709,44 @@ fn cull_rect(viewport: euclid::Size2D<f32, stylo_traits::CSSPixel>, ratio: f64) 
     )
 }
 
-/// Resolves every clip chain in the frame to the region it admits, in viewport
-/// CSS px, intersected with `cull`.
+/// Resolves every clip chain in the frame to what it admits into `out`, each
+/// in its own clip's space, intersected with `root` pulled back into that
+/// space.
 ///
 /// One forward pass suffices because a clip node's parent is always an earlier
 /// entry: [`crate::visual`]'s builder pushes a clip only after the clip it
 /// nests inside.
-fn plan_clips(plan: &mut CullPlan, frame: &PaintOrder, cull: Option<Rect>) {
-    plan.clip_bounds.clear();
-    let Some(cull) = cull else {
-        return;
-    };
+fn resolve_clips(
+    windows: &[(Vector2D<f32>, Vector2D<f32>)],
+    frame: &PaintOrder,
+    root: Admitted,
+    out: &mut Vec<Admitted>,
+) {
+    out.clear();
     for (index, clip) in frame.clips().iter().enumerate() {
         debug_assert!(
             clip.parent.is_none_or(|parent| parent < index),
             "a clip node nests inside an earlier clip node",
         );
-        // The inherited region is expanded into this clip's space: everything
-        // here is baked unscrolled, so a region in an outer space admits
-        // content in an inner one anywhere the inner slots' encode windows
-        // can carry it.
-        let inherited = admitted_region(plan, frame, cull, clip.space, clip.parent);
-        let resolved = inherited.and_then(|inherited| {
-            // `push_clip` pushes an empty clip for a singular transform, so
-            // nothing under this chain reaches the scene at all.
-            let own = clip_bounds(clip)?;
-            if !is_finite(own) {
-                return Some(inherited);
+        // The inherited region arrives pulled back into this clip's own
+        // space, where the clip's rect is expressed.
+        let inherited = admitted_under(windows, frame, out, root, clip.space, clip.parent);
+        // `push_clip` pushes an empty clip for a singular transform, so
+        // nothing under this chain reaches the scene at all.
+        let resolved = match (clip_bounds(clip), inherited) {
+            (None, _) | (_, Admitted::Nothing) => Admitted::Nothing,
+            (Some(own), _) if !is_finite(own) => inherited,
+            (Some(own), Admitted::Everything) => Admitted::Region(own),
+            (Some(own), Admitted::Region(inherited)) => {
+                let both = own.intersect(inherited);
+                if both.width() > 0.0 && both.height() > 0.0 {
+                    Admitted::Region(both)
+                } else {
+                    Admitted::Nothing
+                }
             }
-            let both = own.intersect(inherited);
-            (both.width() > 0.0 && both.height() > 0.0).then_some(both)
-        });
-        plan.clip_bounds.push(resolved);
+        };
+        out.push(resolved);
     }
 }
 
@@ -892,7 +922,7 @@ fn open_scope<T>(
     let mut pushed = 1_u32;
     // The effect layer's alpha is replaced at compose time when this group's
     // own element exports an opacity curve.
-    let alpha_animation = nearest_animation(frame.spaces(), space)
+    let alpha_animation = space::nearest_animation(frame.spaces(), space)
         .filter(|&slot| frame.animations()[slot as usize].node == layer.node);
     sink.push_layer_rect(
         space,
@@ -1102,7 +1132,6 @@ fn backdrop_entry(
         transform,
         before: filters::passes(list, plan.before.clone()),
         after: filters::passes(list, plan.after.clone()),
-        inner_animations: false,
         open_pushes: 0,
     };
     Some(FilterGroup::with_backdrop(
@@ -1496,6 +1525,18 @@ fn plan_frame<T>(scratch: &mut Scratch, document: &Document<T>, frame: &PaintOrd
     );
     scratch.bounds_acc.clear();
     scratch.bounds_acc.resize(layers.len(), None);
+    scratch.layer_moves.clear();
+    scratch
+        .layer_moves
+        .extend(layers.iter().map(|layer| moving(frame, layer.space)));
+    if scratch.layer_moves.contains(&true) {
+        resolve_clips(
+            &scratch.plan.slot_windows,
+            frame,
+            Admitted::Everything,
+            &mut scratch.clip_extent,
+        );
+    }
     let slots = frame.slots();
     let spaces = frame.spaces();
     let mut next_open = 0_usize;
@@ -1510,7 +1551,9 @@ fn plan_frame<T>(scratch: &mut Scratch, document: &Document<T>, frame: &PaintOrd
             close(scratch);
         }
         while next_open < layers.len() && layers[next_open].items.start == index {
-            scratch.bounds_acc[next_open] = layer_root_rect(&layers[next_open]);
+            let layer = &layers[next_open];
+            scratch.bounds_acc[next_open] = layer_root_rect(layer)
+                .and_then(|rect| held(scratch, frame, next_open, layer.clip, layer.space, rect));
             scratch.open_layers.push(next_open);
             next_open += 1;
         }
@@ -1537,7 +1580,9 @@ fn plan_frame<T>(scratch: &mut Scratch, document: &Document<T>, frame: &PaintOrd
 
         let reach = extents(document, item);
         let bounds = item_bounds(item, local, reach.layer);
-        if let Some(top) = top {
+        if let Some(top) = top
+            && let Some(bounds) = held(scratch, frame, top, item.clip, item.space, bounds)
+        {
             let (low, high) = relative_offset_range(
                 slots,
                 &scratch.plan.slot_windows,
@@ -1579,8 +1624,9 @@ fn plan_frame<T>(scratch: &mut Scratch, document: &Document<T>, frame: &PaintOrd
 
 /// Closes the topmost open layer: its accumulated bounds become its pushed
 /// rect — intersected with the viewport expanded into the layer's space,
-/// since the compose window may carry the layer's content across it — and
-/// fold into the parent layer still open, expanded into that parent's space.
+/// since the compose window may carry the layer's content across it, unless
+/// the layer moves (see [`held`]) — and fold into the parent layer still
+/// open, expanded into that parent's space.
 fn close_layer(scratch: &mut Scratch, frame: &PaintOrder, viewport: Rect) {
     let layers = frame.layers();
     let slots = frame.slots();
@@ -1590,33 +1636,29 @@ fn close_layer(scratch: &mut Scratch, frame: &PaintOrder, viewport: Rect) {
         .pop()
         .expect("close is only called with an open layer");
     let own = layers[closed].space;
-    let moving = nearest_animation(spaces, own)
-        .is_some_and(|slot| scratch.plan.animation_moves[slot as usize]);
     // A blur puts ink 3 sigma past the group's own content, so the group's
     // pushed rect — which is also the bake's rect — has to carry that margin.
     // Inflating *before* the viewport intersection is what makes the margin
     // transparent rather than clipped: the bake's edges read transparent
     // black, which is filter-effects-1's edge mode.
     let reach = BLUR_INK_SIGMAS * scratch.layer_sigma[closed];
-    scratch.layer_bounds[closed] = scratch.bounds_acc[closed].map_or(Rect::ZERO, |rect| {
+    let accumulated = scratch.bounds_acc[closed];
+    scratch.layer_bounds[closed] = accumulated.map_or(Rect::ZERO, |rect| {
         let rect = inflate_rect(rect, reach);
-        if moving {
-            // The group's rect and content translate together under the
-            // sampled delta, but the *viewport* does not: clipping to it
-            // would cut content the delta moves into view.
-            return rect;
-        }
-        let (low, high) = relative_offset_range(
-            slots,
+        // The group's rect and content translate together under a sampled
+        // delta, but the *viewport* does not: a moving group's content was
+        // held to the clips moving with it instead, since clipping to the
+        // viewport would cut content the delta moves into view.
+        match pull_back(
             &scratch.plan.slot_windows,
-            nearest_scroll(spaces, own),
+            frame,
+            Admitted::Region(viewport),
             None,
-        );
-        let (sticky_low, sticky_high) = frame.sticky_range(nearest_sticky(spaces, own), None);
-        rect.intersect(inflate_rect(
-            expand_region(viewport, low - sticky_high, high - sticky_low),
-            reach,
-        ))
+            own,
+        ) {
+            Admitted::Region(region) => rect.intersect(inflate_rect(region, reach)),
+            Admitted::Everything | Admitted::Nothing => rect,
+        }
     });
     if let (Some(bounds), Some(&parent)) = (scratch.bounds_acc[closed], scratch.open_layers.last())
     {
@@ -1692,32 +1734,140 @@ fn inflate_rect(rect: Rect, reach: f64) -> Rect {
     )
 }
 
-/// The region admitted for content in `space`: the innermost enclosing
-/// `clip`'s resolved bounds, or the base `region` when there is no clip,
-/// expanded from its own space into `space` by however far the encode
-/// windows and sticky ranges between them can carry content. `None` means
-/// the clip chain admits nothing at all.
+/// What is admitted for content in `space`: the innermost enclosing `clip`'s
+/// resolved bounds, or the cull rect when there is no clip, pulled back from
+/// the space it is expressed in into `space`.
 fn admitted_region(
     plan: &CullPlan,
     frame: &PaintOrder,
-    region: Rect,
     space: Option<u32>,
     clip: Option<usize>,
-) -> Option<Rect> {
-    let spaces = frame.spaces();
-    let (base, outer) = match clip {
-        Some(clip) => (plan.clip_bounds[clip]?, frame.clips()[clip].space),
-        None => (region, None),
-    };
-    let (low, high) = relative_offset_range(
-        frame.slots(),
+) -> Admitted {
+    let root = plan.cull.map_or(Admitted::Everything, Admitted::Region);
+    admitted_under(
         &plan.slot_windows,
-        nearest_scroll(spaces, space),
-        nearest_scroll(spaces, outer),
-    );
-    let (sticky_low, sticky_high) =
-        frame.sticky_range(nearest_sticky(spaces, space), nearest_sticky(spaces, outer));
-    Some(expand_region(base, low - sticky_high, high - sticky_low))
+        frame,
+        &plan.clip_bounds,
+        root,
+        space,
+        clip,
+    )
+}
+
+/// [`admitted_region`] over any resolved clip table and root region.
+fn admitted_under(
+    windows: &[(Vector2D<f32>, Vector2D<f32>)],
+    frame: &PaintOrder,
+    clips: &[Admitted],
+    root: Admitted,
+    space: Option<u32>,
+    clip: Option<usize>,
+) -> Admitted {
+    let (base, outer) = match clip {
+        Some(clip) => (clips[clip], frame.clips()[clip].space),
+        None => (root, None),
+    };
+    pull_back(windows, frame, base, outer, space)
+}
+
+/// The part of `bounds` — content of layer `layer`, in `space` under `clip` —
+/// that the layer's own bounds accumulate.
+///
+/// A moving layer's content is held to what the clips moving with it admit:
+/// the viewport cannot bound it, and neither can a clip outside the moving
+/// subtree, but a clip or encode window inside it can — so a list inside a
+/// moving blurred card bakes its window, not its whole content. A still
+/// layer's content passes whole; its rect meets the viewport at close.
+fn held(
+    scratch: &Scratch,
+    frame: &PaintOrder,
+    layer: usize,
+    clip: Option<usize>,
+    space: Option<u32>,
+    bounds: Rect,
+) -> Option<Rect> {
+    if !scratch.layer_moves[layer] {
+        return Some(bounds);
+    }
+    admitted_under(
+        &scratch.plan.slot_windows,
+        frame,
+        &scratch.clip_extent,
+        Admitted::Everything,
+        space,
+        clip,
+    )
+    .cut(bounds)
+}
+
+/// `region`, in `outer`'s coordinates, pulled back into `space`'s, `outer`
+/// being an ancestor-or-self of `space`.
+///
+/// Content is baked unscrolled, unstuck and at committed transforms, so each
+/// node between the two carries it by its whole committed range — a scroll
+/// node by its encode window, a sticky node by its offset bounds — and the
+/// ranges add. An animation node with a transform track makes the region
+/// [`Admitted::Everything`]: nothing committed bounds its delta. A region
+/// expressed at or below that node (a clip inside the moving subtree) never
+/// walks through it, which is why such clips still bound.
+fn pull_back(
+    windows: &[(Vector2D<f32>, Vector2D<f32>)],
+    frame: &PaintOrder,
+    region: Admitted,
+    outer: Option<u32>,
+    space: Option<u32>,
+) -> Admitted {
+    let Admitted::Region(region) = region else {
+        return region;
+    };
+    let spaces = frame.spaces();
+    let mut low = Vector2D::zero();
+    let mut high = Vector2D::zero();
+    let mut current = space;
+    while current != outer {
+        let Some(index) = current else {
+            // Uncertainty paints.
+            debug_assert!(
+                false,
+                "a region's space encloses the space it is pulled into"
+            );
+            return Admitted::Everything;
+        };
+        let node = spaces[index as usize];
+        match node.kind {
+            SpaceKind::Scroll(slot) => {
+                let slot = slot as usize;
+                let (window_low, window_high) =
+                    viewport_window(&frame.slots()[slot], windows[slot]);
+                low += window_low;
+                high += window_high;
+            }
+            SpaceKind::Sticky(slot) => {
+                let (sticky_low, sticky_high) = frame.sticky_slot_range(slot);
+                low -= sticky_high;
+                high -= sticky_low;
+            }
+            SpaceKind::Animation(slot) => {
+                if moves(frame, slot) {
+                    return Admitted::Everything;
+                }
+            }
+        }
+        current = node.parent;
+    }
+    Admitted::Region(expand_region(region, low, high))
+}
+
+/// Whether animation slot `slot` carries a transform track; an opacity-only
+/// curve moves nothing.
+fn moves(frame: &PaintOrder, slot: u32) -> bool {
+    frame.animations()[slot as usize].curve.transform.is_some()
+}
+
+/// Whether a transform curve on `space`'s path moves it.
+fn moving(frame: &PaintOrder, space: Option<u32>) -> bool {
+    space::path(frame.spaces(), space)
+        .any(|kind| matches!(kind, SpaceKind::Animation(slot) if moves(frame, slot)))
 }
 
 fn layer_root_rect(layer: &RenderLayer) -> Option<Rect> {
@@ -1836,8 +1986,8 @@ mod tests {
     use vello::kurbo::Affine;
 
     use super::{
-        ComposeAssembly, ComposeOp, PaintItem, PaintItemKind, Rect, Scene, Scratch, can_reach,
-        cull_rect, item_bounds, walk, walk_compose, walk_uncultured,
+        ComposeAssembly, ComposeOp, CullPlan, PaintItem, PaintItemKind, Rect, Scene, Scratch,
+        can_reach, cull_rect, item_bounds, walk, walk_compose, walk_uncultured,
     };
     use crate::Size2D;
     use crate::paint::equivalence::assert_scenes_identical;
@@ -2140,6 +2290,192 @@ mod tests {
             "hoisted rows below the scrollport must not reach the encoding",
         );
         assert!(draws(&long.uncultured) > draws(&long.cultured));
+    }
+
+    /// A list inside a card sliding by an exported transform curve encodes
+    /// what the same list in a still card does: the viewport no longer
+    /// bounds the card's subtree, but the list's clip and encode window move
+    /// with it and still do.
+    #[test]
+    fn a_list_inside_an_animated_card_still_encodes_only_its_window() {
+        let painted = |animation: &str| {
+            let mut doc = Doc::with_css(&format!(
+                "page {{ display: flex; position: relative; width: 800px; height: 600px; }}
+                 .card {{ display: flex; padding: 10px; background-color: navy; {animation} }}
+                 .list {{ display: flex; flex-direction: column; overflow: scroll;
+                          width: 300px; height: 120px; }}
+                 .row {{ display: flex; flex-shrink: 0; width: 300px; height: 40px;
+                         background-color: teal; }}
+                 @keyframes slide {{ from {{ transform: translateX(0px); }}
+                                     to {{ transform: translateX(200px); }} }}"
+            ));
+            let root = doc.root;
+            let card = doc.el(root, "view.card");
+            let list = doc.el(card, "view.list");
+            for _ in 0..200 {
+                doc.el(list, "view.row");
+            }
+            doc.dom.render();
+            doc.dom.advance_animations(0.0);
+            doc.dom.advance_animations(0.25);
+            let exported = doc.dom.build_paint_order().animations().len();
+            (exported, walk_twice(&mut doc).painted)
+        };
+        let (still_curves, still) = painted("");
+        let (moving_curves, moving) = painted("animation: slide 1s linear infinite;");
+        assert_eq!((still_curves, moving_curves), (0, 1), "the slide exports");
+        assert_eq!(moving, still, "the moving list encodes its window alone");
+        assert!(
+            still < 20,
+            "the window holds a handful of 200 rows, got {still}"
+        );
+    }
+
+    /// Starts every animation on the timeline's origin and advances a
+    /// quarter second in, the state the exporter reads.
+    fn run_animations(doc: &mut Doc) {
+        doc.dom.render();
+        doc.dom.advance_animations(0.0);
+        doc.dom.advance_animations(0.25);
+    }
+
+    const SLIDE: &str = "@keyframes slide { from { transform: translateX(0px); }
+                                             to { transform: translateX(600px); } }";
+
+    /// A box a transform curve moves is never culled by the viewport, which
+    /// cannot bound where the sampled delta carries it.
+    #[test]
+    fn an_off_viewport_box_a_transform_curve_moves_still_encodes() {
+        let painted = |animation: &str| {
+            let mut doc = Doc::with_css(&format!("{PAGE} .mover {{ {animation} }} {SLIDE}"));
+            let root = doc.root;
+            let mover = doc.el(root, "view.box.mover");
+            doc.set_inline(mover, "left: -300px; top: 20px");
+            run_animations(&mut doc);
+            let exported = doc.dom.build_paint_order().animations().len();
+            (exported, walk_twice(&mut doc).painted)
+        };
+        assert_eq!(
+            painted(""),
+            (0, 1),
+            "a still box off the viewport is culled"
+        );
+        assert_eq!(
+            painted("animation: slide 1s linear infinite;"),
+            (1, 2),
+            "the slide exports and the box encodes, off the viewport at commit",
+        );
+    }
+
+    /// The bounds of a group a transform curve moves: the only layer of a
+    /// page built from `css` by `build`, which must export one curve.
+    fn moving_layer_bounds(css: &str, build: impl FnOnce(&mut Doc)) -> Rect {
+        let mut doc = Doc::with_css(&format!(
+            "page {{ display: flex; position: relative; width: 800px; height: 600px; }}
+             .list {{ display: flex; flex-direction: column; overflow: scroll;
+                      width: 300px; height: 200px; }}
+             .row {{ display: flex; flex-shrink: 0; width: 300px; height: 40px;
+                     background-color: teal; }}
+             {SLIDE} {css}"
+        ));
+        build(&mut doc);
+        run_animations(&mut doc);
+        assert_eq!(doc.dom.build_paint_order().animations().len(), 1);
+        let frames = walk_twice(&mut doc);
+        assert_eq!(
+            frames.cultured_bounds, frames.uncultured_bounds,
+            "a moving group's bounds do not depend on culling either",
+        );
+        let [bounds] = frames.cultured_bounds[..] else {
+            panic!("one group layer, got {:?}", frames.cultured_bounds);
+        };
+        bounds
+    }
+
+    /// A blurred card sliding by an exported curve holds its bounds — its
+    /// bake rect — to what its list's clip and encode window admit: the
+    /// viewport cannot bound a moving group, but the clips moving with it
+    /// can, and the list's 12000 px of rows are not in the card's extent.
+    #[test]
+    fn a_moving_blurred_card_bakes_its_lists_window_not_its_content() {
+        let bounds = moving_layer_bounds(
+            ".card { display: flex; padding: 10px; filter: blur(2px);
+                     animation: slide 1s linear infinite; }",
+            |doc| {
+                let card = doc.el(doc.root, "view.card");
+                let list = doc.el(card, "view.list");
+                for _ in 0..300 {
+                    doc.el(list, "view.row");
+                }
+            },
+        );
+        assert!(
+            bounds.height() < 1000.0,
+            "the list's window, not its rows, got {bounds:?}"
+        );
+    }
+
+    /// A blurred panel inside a list inside a sliding card: the panel's
+    /// group moves, and the list's clip moving with it bounds the panel's own
+    /// 5000 px box as well as its rows.
+    #[test]
+    fn a_blurred_panel_in_a_list_in_a_moving_card_bakes_the_lists_window() {
+        let bounds = moving_layer_bounds(
+            ".card { display: flex; animation: slide 1s linear infinite; }
+             .panel { display: flex; flex-direction: column; flex-shrink: 0;
+                      filter: blur(2px); }",
+            |doc| {
+                let card = doc.el(doc.root, "view.card");
+                let list = doc.el(card, "view.list");
+                let panel = doc.el(list, "view.panel");
+                for _ in 0..125 {
+                    doc.el(panel, "view.row");
+                }
+            },
+        );
+        assert!(
+            bounds.height() < 1000.0,
+            "the list's window, not the panel, got {bounds:?}"
+        );
+    }
+
+    /// Relevance follows the cull rule: under a sliding card a clip-free
+    /// `content-visibility: auto` box is relevant wherever it sits, and one
+    /// inside the card's list only inside the list's encode window.
+    #[test]
+    fn relevance_under_a_moving_card_is_bounded_by_the_clips_moving_with_it() {
+        let mut doc = Doc::with_css(&format!(
+            "page {{ display: flex; position: relative; width: 800px; height: 600px; }}
+             .card {{ display: flex; position: relative; animation: slide 1s linear infinite; }}
+             .list {{ display: flex; flex-direction: column; overflow: scroll;
+                      width: 300px; height: 120px; }}
+             .row {{ display: flex; flex-shrink: 0; width: 300px; height: 40px;
+                     content-visibility: auto; contain-intrinsic-size: 300px 40px; }}
+             .free {{ display: flex; position: absolute; left: -500px; top: 0px;
+                      width: 100px; height: 40px; content-visibility: auto;
+                      contain-intrinsic-size: 100px 40px; }}
+             {SLIDE}"
+        ));
+        let card = doc.el(doc.root, "view.card");
+        let list = doc.el(card, "view.list");
+        let rows: Vec<_> = (0..40).map(|_| doc.el(list, "view.row")).collect();
+        let free = doc.el(card, "view.free");
+        run_animations(&mut doc);
+        let frame = doc.dom.build_paint_order();
+        assert_eq!(frame.animations().len(), 1, "the slide exports");
+        let mut plan = CullPlan::default();
+        plan.resolve_for(&doc.dom, &frame);
+        let relevant = |node| {
+            let auto = frame
+                .auto_boxes()
+                .iter()
+                .find(|auto| auto.node == node)
+                .expect("every auto box is recorded");
+            plan.admits_auto_box(&frame, auto)
+        };
+        assert!(relevant(free), "the slide can carry it into view");
+        assert!(relevant(rows[0]), "inside the list's window");
+        assert!(!relevant(rows[39]), "past the list's window");
     }
 
     #[test]

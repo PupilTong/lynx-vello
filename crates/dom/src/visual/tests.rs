@@ -2124,28 +2124,155 @@ fn an_inexportable_animation_keeps_main_thread_ticks() {
     assert!(!frame.has_live_curves());
 }
 
+/// An animated scroll container exports: its own clip and its content's
+/// scroll translation are nodes of the same space tree as its animation, so
+/// the delta composes around them.
 #[test]
-fn a_scroll_container_inside_an_animated_subtree_falls_back_to_ticks() {
+fn an_animated_scroll_container_exports_its_curve() {
     let document = animated_document(
         "page { width: 100px; height: 100px; overflow: scroll;
                 animation: fade 1s linear infinite; }
          @keyframes fade { from { opacity: 1; } to { opacity: 0; } }",
     );
     let frame = document.committed_frame().expect("a frame is committed");
+    assert!(frame.has_live_curves(), "the fade exports a curve");
     assert!(
-        frame.needs_main_ticks(),
-        "an animated scroll container cannot ride a sampled delta"
-    );
-    assert!(
-        !frame.has_live_curves(),
-        "the allocated slot was set back to the committed values"
+        !frame.needs_main_ticks(),
+        "and the main thread is free of it"
     );
 }
 
-/// The same refusal for a scroll container that is no stacking context: it
-/// takes its slot on the in-context path, inside an animated card.
+/// A page-sized wrapper running `animation`, with content `height` px tall
+/// overflowing it: over the budget, if at all, by `content_size` alone.
+fn tall_wrapper(height: u16, animation: &str) -> std::sync::Arc<crate::CommittedFrame> {
+    let mut h = Harness::new(&format!(
+        "page {{ display: flex; flex-direction: column; width: 800px; height: 600px;
+                 animation: {animation} 1s linear infinite; }}
+         .tall {{ display: flex; flex-shrink: 0; width: 800px; height: {height}px; }}
+         @keyframes slide {{ from {{ transform: translateY(0px); }}
+                             to {{ transform: translateY(-100px); }} }}
+         @keyframes fade {{ from {{ opacity: 1; }} to {{ opacity: 0.5; }} }}"
+    ));
+    let root = h.root();
+    h.el(root, "view.tall");
+    let document = &mut h.doc.dom;
+    document.render();
+    document.advance_animations(0.0);
+    assert!(document.advance_animations(0.25).needs_next_frame);
+    document.commit()
+}
+
 #[test]
-fn an_in_context_scroll_container_inside_an_animated_card_falls_back_to_ticks() {
+fn a_transform_curve_over_the_extent_budget_is_not_exported() {
+    // 800 × 1400 is 2.3 viewports of 800 × 600; 800 × 2000 is 3.3.
+    let within = tall_wrapper(1400, "slide");
+    assert!(
+        within.has_live_curves(),
+        "within the budget the slide exports"
+    );
+    let over = tall_wrapper(2000, "slide");
+    assert!(!over.has_live_curves(), "over it the slide is refused");
+    assert!(over.needs_main_ticks(), "and ticks on the main thread");
+}
+
+#[test]
+fn an_opacity_curve_is_exempt_from_the_extent_budget() {
+    let frame = tall_wrapper(2000, "fade");
+    assert!(frame.has_live_curves(), "an opacity curve moves nothing");
+    assert!(!frame.needs_main_ticks());
+}
+
+/// Two animated elements, started on the timeline's origin and committed a
+/// quarter second in.
+fn two_animated(first: &str, second: &str) -> std::sync::Arc<crate::CommittedFrame> {
+    let mut h = Harness::new(&format!(
+        "page {{ display: flex; width: 800px; height: 600px; }}
+         .first {{ display: flex; width: 50px; height: 50px; background-color: red;
+                   animation: {first}; }}
+         .second {{ display: flex; width: 50px; height: 50px; background-color: red;
+                    animation: {second}; }}
+         @keyframes fade {{ from {{ opacity: 1; }} to {{ opacity: 0; }} }}
+         @keyframes recolor {{ from {{ background-color: red; }}
+                               to {{ background-color: blue; }} }}"
+    ));
+    let root = h.root();
+    h.el(root, "view.first");
+    h.el(root, "view.second");
+    let document = &mut h.doc.dom;
+    document.render();
+    document.advance_animations(0.0);
+    assert!(document.advance_animations(0.25).needs_next_frame);
+    document.commit()
+}
+
+/// One element's exported fade does not free the main thread of another
+/// element's inexportable animation.
+#[test]
+fn an_exported_curve_beside_an_inexportable_animation_keeps_main_thread_ticks() {
+    let frame = two_animated("fade 1s linear infinite", "recolor 1s linear infinite");
+    assert_eq!(frame.animation_slots().len(), 1, "the fade exports");
+    assert!(frame.needs_main_ticks(), "the recolor still ticks");
+}
+
+/// A frame hands its animations back at the earliest curve end — not the
+/// latest, nor the first slot's — and at exactly that instant.
+#[test]
+fn the_earliest_curve_end_is_the_handback_instant() {
+    let frame = two_animated("fade 5s linear 1", "fade 0.5s linear 1");
+    let ends: Vec<f64> = frame
+        .animation_slots()
+        .iter()
+        .map(|slot| slot.curve.expires_at.expect("a finite curve ends"))
+        .collect();
+    let [long, short] = ends[..] else {
+        panic!("both fades export, got {ends:?}");
+    };
+    assert!(short < long && (short - 0.5).abs() < 1e-3, "{ends:?}");
+    assert!(!frame.animation_boundary_passed(short - 1e-6));
+    assert!(frame.animation_boundary_passed(short));
+}
+
+/// A curve on content culling discards — a moving dot inside a clipped row
+/// the list's encode window never reaches — is exported but never sampled
+/// per frame: composition samples only the slots its program names.
+#[test]
+fn a_compose_samples_only_the_curves_its_program_encodes() {
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; }
+         .list { display: flex; flex-direction: column; overflow: scroll;
+                 width: 300px; height: 120px; }
+         .row { display: flex; flex-shrink: 0; height: 40px; overflow: clip; }
+         .dot { display: flex; width: 20px; height: 20px; background-color: teal;
+                animation: slide 1s linear infinite; }
+         @keyframes slide { from { transform: translateX(0px); }
+                            to { transform: translateX(100px); } }",
+    );
+    let root = h.root();
+    let list = h.el(root, "view.list");
+    for _ in 0..50 {
+        let row = h.el(list, "view.row");
+        h.el(row, "view.dot");
+    }
+    let document = &mut h.doc.dom;
+    document.render();
+    document.advance_animations(0.0);
+    assert!(document.advance_animations(0.25).needs_next_frame);
+    let frame = document.commit();
+    assert_eq!(frame.animation_slots().len(), 50, "every dot exports");
+    let composed = frame.order.composed_animations.len();
+    assert!(
+        (1..10).contains(&composed),
+        "only the dots in the list's window compose, got {composed}",
+    );
+    let mut scene = crate::vello::Scene::new();
+    frame.compose_into(&mut scene, &[], &[], &|_| None, Some(0.5));
+}
+
+/// The same for a scroll container that is no stacking context: it takes
+/// its slot and scroll node on the in-context path, inside the card's
+/// animation node, so the card's slide still exports.
+#[test]
+fn an_in_context_scroll_container_inside_an_animated_card_exports_the_curve() {
     let mut document: crate::Document<()> =
         crate::Document::new(crate::tree::document::tests::device(), "page", ());
     document.add_stylesheet(
@@ -2172,11 +2299,11 @@ fn an_in_context_scroll_container_inside_an_animated_card_falls_back_to_ticks() 
     assert!(tick.needs_next_frame, "the slide must be live");
     document.render();
     let frame = document.committed_frame().expect("a frame is committed");
+    assert!(frame.has_live_curves(), "the slide exports a curve");
     assert!(
-        frame.needs_main_ticks(),
-        "a scroll container inside the moving card cannot ride its delta"
+        !frame.needs_main_ticks(),
+        "the scroller inside the moving card rides its delta"
     );
-    assert!(!frame.has_live_curves());
 }
 
 /// An element's own box and clip ride its box space — inside its own sticky
