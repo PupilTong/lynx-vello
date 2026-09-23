@@ -16,6 +16,11 @@ use bobcat_core::{
 use flashbulb::{Image, Screenshots};
 use support::{FetcherDouble, solo_view, wait_for_script};
 
+/// The screen these tests' views report, as a host with no screen to measure
+/// names it. None of them reads `SystemInfo`.
+const SCREEN: bobcat_core::ScreenMetrics =
+    bobcat_core::ScreenMetrics::for_viewport(32.0, 24.0, 1.0);
+
 const SCRIPT_URL: &str = "app:///main.js";
 const MAIN_THREAD_SCRIPT: &str = r"
 globalThis.renderPage = function renderPage() {
@@ -162,7 +167,7 @@ async fn booted_with_sheet_at(
         height,
         ViewSources {
             style_sheets: vec!["app:///author.css".to_owned()],
-            ..ViewSources::new(SCRIPT_URL)
+            ..ViewSources::new(SCRIPT_URL, SCREEN)
         },
     )
     .await
@@ -306,7 +311,7 @@ fn checker_store() -> Rc<flashbulb::TestImages> {
 async fn fetched_script_reaches_the_offscreen_draw_target() {
     let (_view, mut painter) = booted(
         fetcher(MAIN_THREAD_SCRIPT.as_bytes()),
-        ViewSources::new(SCRIPT_URL),
+        ViewSources::new(SCRIPT_URL, SCREEN),
     )
     .await;
 
@@ -341,7 +346,7 @@ async fn an_embedder_image_store_reaches_the_private_painter() {
                     .serving(sink),
             )
         },
-        ViewSources::new(SCRIPT_URL),
+        ViewSources::new(SCRIPT_URL, SCREEN),
     )
     .await;
     settle_images(&mut view, &mut painter, &images);
@@ -375,7 +380,7 @@ async fn an_image_element_loads_and_paints_from_its_src() {
                     .serving(sink),
             )
         },
-        ViewSources::new(SCRIPT_URL),
+        ViewSources::new(SCRIPT_URL, SCREEN),
     )
     .await;
     settle_images(&mut view, &mut painter, &images);
@@ -396,7 +401,7 @@ async fn raw_text_reaches_the_private_painter_as_glyphs() {
         ViewSources {
             fonts: vec![FontBlob::from_static(ROBOTO)],
             default_font_family: Some("Roboto".to_owned()),
-            ..ViewSources::new(SCRIPT_URL)
+            ..ViewSources::new(SCRIPT_URL, SCREEN)
         },
     )
     .await;
@@ -432,7 +437,7 @@ globalThis.renderPage = function () {
         ViewSources {
             fonts: vec![FontBlob::from_static(AHEM)],
             default_font_family: Some("Ahem".to_owned()),
-            ..ViewSources::new(SCRIPT_URL)
+            ..ViewSources::new(SCRIPT_URL, SCREEN)
         },
     )
     .await
@@ -729,7 +734,7 @@ async fn booted_with_images(
                     .serving(sink),
             )
         },
-        ViewSources::new(SCRIPT_URL),
+        ViewSources::new(SCRIPT_URL, SCREEN),
     )
     .await
     .expect("view");
@@ -1259,7 +1264,7 @@ async fn a_blurred_card_reaches_the_offscreen_draw_target() {
             style_sheets: vec!["app:///author.css".to_owned()],
             fonts: vec![FontBlob::from_static(ROBOTO)],
             default_font_family: Some("Roboto".to_owned()),
-            ..ViewSources::new(SCRIPT_URL)
+            ..ViewSources::new(SCRIPT_URL, SCREEN)
         },
     )
     .await;
@@ -1418,7 +1423,7 @@ async fn a_backdrop_filtered_card_reaches_the_offscreen_draw_target() {
             style_sheets: vec!["app:///author.css".to_owned()],
             fonts: vec![FontBlob::from_static(ROBOTO)],
             default_font_family: Some("Roboto".to_owned()),
-            ..ViewSources::new(SCRIPT_URL)
+            ..ViewSources::new(SCRIPT_URL, SCREEN)
         },
     )
     .await;
@@ -1567,7 +1572,7 @@ async fn a_blur_view_reaches_the_offscreen_draw_target() {
             style_sheets: vec!["app:///author.css".to_owned()],
             fonts: vec![FontBlob::from_static(ROBOTO)],
             default_font_family: Some("Roboto".to_owned()),
-            ..ViewSources::new(SCRIPT_URL)
+            ..ViewSources::new(SCRIPT_URL, SCREEN)
         },
     )
     .await;

@@ -5,12 +5,21 @@
  */
 interface BobcatNative {
   /**
-   * Builds the realm's one document out of the ingredients the view staged
-   * before the realm opened: its metrics, its fonts, its author sheets in
-   * cascade order, and any image reports that arrived first. Throws when the
-   * realm already has one.
+   * Builds the realm's one document out of the four page switches, in
+   * `PageConfig`'s order, and the view's own resources, which never reach
+   * this realm: its metrics, its fonts and its style pool.
+   *
+   * It never waits. The view's author stylesheets are not mounted here: the
+   * first `flushElementTree` mounts them, in the order the view listed them.
+   * A switch that is not a boolean, and a realm that already has a document,
+   * both throw.
    */
-  createDocument(): void;
+  createDocument(
+    defaultDisplayLinear: boolean,
+    defaultOverflowVisible: boolean,
+    enableCssSelector: boolean,
+    enableJSDataProcessor: boolean,
+  ): void;
   /** Marks the permanent page live and returns its `NodeId`. */
   createPage(): number;
   /** Creates a detached element and returns its `NodeId`. */
@@ -110,7 +119,14 @@ interface BobcatNative {
    * — the text node a `raw-text` reflects — goes with it.
    */
   dropElement(nodeId: number): void;
-  /** Commits pending mutations through style and layout. */
+  /**
+   * Commits pending mutations through style and layout.
+   *
+   * The first call waits for every author stylesheet the view listed and
+   * mounts them in listed order before anything is styled; a sheet that
+   * failed to load throws `loading stylesheet <url>: <reason>`. Before a
+   * painter has bound the view it then waits for the binding.
+   */
   flushElementTree(): void;
   /**
    * Records that something in the realm is now registered for `eventName`,
@@ -198,7 +214,16 @@ declare module "bobcat-internal:host" {
   export function adoptStyleSheet(url: string): void;
   export function reportScriptError(level: string, message: string): void;
   export function logScriptMessage(level: string, message: string): void;
-  export function createWorker(url: string, name: string): string;
+  /**
+   * Starts one worker over the script `url` names, resolved against `baseUrl`
+   * — the page entry's response URL, which the realm holds and the host does
+   * not — and answers the key its other members name it by.
+   */
+  export function createWorker(
+    url: string,
+    name: string,
+    baseUrl: string,
+  ): string;
   /**
    * Posts one message to that worker. Any value the host boundary carries; a
    * value the engine's serializer refuses throws at this call.

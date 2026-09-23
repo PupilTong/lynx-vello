@@ -77,11 +77,23 @@ Landed and not to be regressed:
   `ScriptRuntime`. A job may park on `JsThread::wait` — a fresh `block_on` of
   the same `LocalSet` — so a synchronous host member (`adoptStyleSheet`, or a
   `require`) blocks JavaScript alone: tasks keep running, no other job does,
-  and jobs queued meanwhile run in FIFO order afterwards. A loading page's
-  burst and `stage_sheet` stay task-side so a sibling's load cannot delay a
-  `BeginFrame` acknowledgement; `consume_messages` on `bobcat-workers` never
-  awaits the deliveries it queued, because `Terminate` is in band behind
-  them.
+  and jobs queued meanwhile run in FIFO order afterwards. Nothing of a view is
+  served outside a job: opening its realm is the view's first job, so a burst
+  that arrived earlier is queued behind it, and a `BeginFrame` acknowledgement
+  waits out whatever job of the group is parked. Boot parks for its entry
+  not at all: it imports the entry by its URL, a task of the view completes
+  that module from the pre-issued answer (with the entry preamble prepended
+  and the response URL as its `import.meta.url`), the entry's own request
+  never reaches the fetcher, that task names the entry (`__BobcatInitEntry`
+  with the response URL) before completing it, and a worker resolves against
+  the entry URL JavaScript holds. The only two things boot waits on are both
+  inside its first `__FlushElementTree`: every listed author sheet, success or
+  failure, mounted in listed order before the document is styled (a failed
+  one is `StartupFailed(Script)` naming it), then the painter binding. Until
+  the sheets have settled the epilogue's `commit_if_dirty` skips rather than
+  waits, so no frame is published without them.
+  `consume_messages` on `bobcat-workers` never awaits the deliveries it
+  queued, because `Terminate` is in band behind them.
 - The BTS is a `Worker` named `lynx-bg` on the group's `bobcat-workers` runtime.
   A BTS failure is a nonfatal `EngineEvent::WorkerFailed` — never
   `StartupFailed`, never view teardown. `ScriptFinished` means MTS boot settled

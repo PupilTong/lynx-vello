@@ -7,9 +7,10 @@ either case. Core carries no decoded bundle metadata in its view configuration.
 
 ## Entry identity and URL mapping
 
-Boot passes its entry response URL to `__BobcatInitEntry` before importing the
-application entry. The `__Card__` import in MTS reads that JS binding from
-`bobcat:runtime`; there is no native URL getter. The string `"__Card__"` remains
+The host passes the entry's response URL to `__BobcatInitEntry` before it
+completes the module boot imports the application entry as. The `__Card__`
+import in MTS reads that JS binding from `bobcat:runtime`; there is no native
+URL getter. The string `"__Card__"` remains
 an accepted alias, replaced by JavaScript. A local Lepus chunk load accepts
 either the alias or the same entry URL, and its resource URL is built the same
 way and in the same place: `chunkURL` beside `styleSheetURL`, appending

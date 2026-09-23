@@ -20,6 +20,11 @@ use dom::Point2D;
 use dom::input::InputEvent;
 use support::{FetcherDouble, solo_view, wait_for_script};
 
+/// The screen these tests' views report, as a host with no screen to measure
+/// names it. None of them reads `SystemInfo`.
+const SCREEN: bobcat_core::ScreenMetrics =
+    bobcat_core::ScreenMetrics::for_viewport(32.0, 24.0, 1.0);
+
 const SCRIPT_URL: &str = "app:///main.js";
 
 /// A scroller filling the 100x100 viewport over two 100px rows: red, then
@@ -55,7 +60,7 @@ async fn booted() -> (LynxView<Rc<FetcherDouble>>, Painter) {
         1.0,
         DrawTarget::Offscreen,
         |_reports| fetcher,
-        ViewSources::new(SCRIPT_URL),
+        ViewSources::new(SCRIPT_URL, SCREEN),
     )
     .await
     .expect("view construction fetches and boots the entry script");

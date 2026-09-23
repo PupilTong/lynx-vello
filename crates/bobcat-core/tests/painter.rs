@@ -15,6 +15,11 @@ use std::time::{Duration, Instant};
 use bobcat_core::{DrawTarget, LynxGroup, NoWakeup, Painter, StyleThreads, ViewSources};
 use support::{FetcherDouble, wait_for_script};
 
+/// The screen these tests' views report, as a host with no screen to measure
+/// names it. None of them reads `SystemInfo`.
+const SCREEN: bobcat_core::ScreenMetrics =
+    bobcat_core::ScreenMetrics::for_viewport(32.0, 24.0, 1.0);
+
 const SCRIPT_URL: &str = "app:///main.js";
 const IMAGE_URL: &str = "https://example.test/pixel.png";
 
@@ -86,7 +91,7 @@ async fn a_second_painter_on_one_view_is_refused() {
             1.0,
             |_reports| Rc::new(FetcherDouble::new(page("#ff0000")).resolving_to(SCRIPT_URL)),
             Vec::new(),
-            ViewSources::new(SCRIPT_URL),
+            ViewSources::new(SCRIPT_URL, SCREEN),
         )
         .expect("the view is built");
     let mut first = offscreen_painter().await;
@@ -120,7 +125,7 @@ async fn a_detached_view_can_be_painted_by_another_painter() {
             1.0,
             |_reports| Rc::new(FetcherDouble::new(page("#ff0000")).resolving_to(SCRIPT_URL)),
             Vec::new(),
-            ViewSources::new(SCRIPT_URL),
+            ViewSources::new(SCRIPT_URL, SCREEN),
         )
         .expect("the view is built");
     let mut first = offscreen_painter().await;
@@ -165,7 +170,7 @@ async fn a_view_dropped_under_its_painter_leaves_the_last_frame_standing() {
             1.0,
             |_reports| Rc::new(FetcherDouble::new(page("#ff0000")).resolving_to(SCRIPT_URL)),
             Vec::new(),
-            ViewSources::new(SCRIPT_URL),
+            ViewSources::new(SCRIPT_URL, SCREEN),
         )
         .expect("the view is built");
     let mut painter = offscreen_painter().await;
@@ -218,7 +223,7 @@ async fn a_dropped_views_last_frame_keeps_the_image_pixels_it_read() {
                 )
             },
             Vec::new(),
-            ViewSources::new(SCRIPT_URL),
+            ViewSources::new(SCRIPT_URL, SCREEN),
         )
         .expect("the view is built");
     let mut painter = offscreen_painter().await;
@@ -280,7 +285,7 @@ async fn one_painter_re_attached_to_a_second_view_shows_the_second_page() {
             1.0,
             |_reports| Rc::new(FetcherDouble::new(page("#ff0000")).resolving_to(SCRIPT_URL)),
             Vec::new(),
-            ViewSources::new(SCRIPT_URL),
+            ViewSources::new(SCRIPT_URL, SCREEN),
         )
         .expect("the first view is built");
     painter.attach(&first).expect("the first page takes it");
@@ -305,7 +310,7 @@ async fn one_painter_re_attached_to_a_second_view_shows_the_second_page() {
             1.0,
             |_reports| Rc::new(FetcherDouble::new(page("#0000ff")).resolving_to(SCRIPT_URL)),
             Vec::new(),
-            ViewSources::new(SCRIPT_URL),
+            ViewSources::new(SCRIPT_URL, SCREEN),
         )
         .expect("the second view is built");
     painter.attach(&second).expect("the second page takes it");
@@ -343,7 +348,7 @@ async fn a_painter_whose_view_is_gone_attaches_to_the_next_one() {
             1.0,
             |_reports| Rc::new(FetcherDouble::new(page("#ff0000")).resolving_to(SCRIPT_URL)),
             Vec::new(),
-            ViewSources::new(SCRIPT_URL),
+            ViewSources::new(SCRIPT_URL, SCREEN),
         )
         .expect("the first view is built");
     painter.attach(&first).expect("the first page takes it");
@@ -364,7 +369,7 @@ async fn a_painter_whose_view_is_gone_attaches_to_the_next_one() {
             1.0,
             |_reports| Rc::new(FetcherDouble::new(page("#0000ff")).resolving_to(SCRIPT_URL)),
             Vec::new(),
-            ViewSources::new(SCRIPT_URL),
+            ViewSources::new(SCRIPT_URL, SCREEN),
         )
         .expect("the second view is built");
     painter
@@ -401,7 +406,7 @@ async fn a_painter_re_attached_through_the_auto_detach_resets_what_it_kept() {
             1.0,
             |_reports| Rc::new(FetcherDouble::new(page("#ff0000")).resolving_to(SCRIPT_URL)),
             Vec::new(),
-            ViewSources::new(SCRIPT_URL),
+            ViewSources::new(SCRIPT_URL, SCREEN),
         )
         .expect("the first view is built");
     painter.attach(&first).expect("the first page takes it");
@@ -427,7 +432,7 @@ async fn a_painter_re_attached_through_the_auto_detach_resets_what_it_kept() {
             1.0,
             |_reports| Rc::new(FetcherDouble::new(page("#0000ff")).resolving_to(SCRIPT_URL)),
             Vec::new(),
-            ViewSources::new(SCRIPT_URL),
+            ViewSources::new(SCRIPT_URL, SCREEN),
         )
         .expect("the second view is built");
     painter
@@ -484,7 +489,7 @@ async fn a_blurred_box_reaches_the_embedder_painter() {
             1.0,
             |_reports| Rc::new(FetcherDouble::new(blurred_page()).resolving_to(SCRIPT_URL)),
             Vec::new(),
-            ViewSources::new(SCRIPT_URL),
+            ViewSources::new(SCRIPT_URL, SCREEN),
         )
         .expect("the view is built");
     let mut painter = Painter::new(DrawTarget::Offscreen, 64.0, 64.0, 1.0)
@@ -568,7 +573,7 @@ async fn a_backdrop_filtered_box_reaches_the_embedder_painter() {
             1.0,
             |_reports| Rc::new(FetcherDouble::new(backdrop_page()).resolving_to(SCRIPT_URL)),
             Vec::new(),
-            ViewSources::new(SCRIPT_URL),
+            ViewSources::new(SCRIPT_URL, SCREEN),
         )
         .expect("the view is built");
     let mut painter = Painter::new(DrawTarget::Offscreen, 64.0, 64.0, 1.0)
@@ -640,7 +645,7 @@ async fn a_flush_after_the_painter_detached_does_not_park() {
             1.0,
             |_reports| Rc::new(FetcherDouble::new(flushing_page()).resolving_to(SCRIPT_URL)),
             Vec::new(),
-            ViewSources::new(SCRIPT_URL),
+            ViewSources::new(SCRIPT_URL, SCREEN),
         )
         .expect("the view is built");
     let mut painter = offscreen_painter().await;

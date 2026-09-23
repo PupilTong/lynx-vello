@@ -8,6 +8,11 @@ use std::sync::Arc;
 use bobcat_core::{DrawTarget, LynxViewError, NoWakeup, PageConfig, ViewSources};
 use support::{FetcherDouble, solo_view};
 
+/// The screen these tests' views report, as a host with no screen to measure
+/// names it. None of them reads `SystemInfo`.
+const SCREEN: bobcat_core::ScreenMetrics =
+    bobcat_core::ScreenMetrics::for_viewport(32.0, 24.0, 1.0);
+
 fn fixtures() -> [(&'static str, &'static [u8]); 2] {
     [
         ("basic-bindtap", fixtures::fixture("basic-bindtap").page),
@@ -39,7 +44,7 @@ async fn run(config: PageConfig, source: &str, resolved_url: &str) -> Result<(),
         |_reports| fetcher,
         ViewSources {
             config,
-            ..ViewSources::new("main.js")
+            ..ViewSources::new("app:///main.js", SCREEN)
         },
     )
     .await

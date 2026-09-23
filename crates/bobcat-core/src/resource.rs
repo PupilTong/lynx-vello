@@ -35,14 +35,16 @@ pub trait ResourceFetcher: dom::FrameImages {
     /// Begins one source load without blocking its caller.
     ///
     /// **A view's startup sources are requested before it runs at all**:
-    /// every author stylesheet in cascade order and then the entry are handed
-    /// over together inside
+    /// every author stylesheet in the order the view listed them and then the
+    /// entry are handed over together inside
     /// [`LynxGroup::create_lynx_view`](crate::LynxGroup::create_lynx_view),
     /// on the embedder's own thread, before it returns — this fetcher is
     /// built earlier in that same call, out of the builder the embedder
     /// passed, so a fetcher must be able to take them there. Order of
-    /// *completion* is this method's own business: the view reads the answers
-    /// in cascade order and then the entry whatever order they arrive in.
+    /// *completion* is this method's own business: the view's first
+    /// `__FlushElementTree` mounts the sheets in the order it listed them,
+    /// whatever order they were answered in, and the entry is completed when
+    /// its answer arrives.
     /// Every later request — an import, an adopted stylesheet, a worker
     /// script, a font, a plain fetch — is handed over in a
     /// [`LynxView::pump`](crate::LynxView::pump) turn instead.

@@ -24,6 +24,11 @@ use bobcat_core::{
     DrawTarget, EngineEvent, LynxGroup, NoWakeup, Painter, StyleThreads, ViewSources,
 };
 
+/// The screen these tests' views report, as a host with no screen to measure
+/// names it. None of them reads `SystemInfo`.
+const SCREEN: bobcat_core::ScreenMetrics =
+    bobcat_core::ScreenMetrics::for_viewport(32.0, 24.0, 1.0);
+
 const MAIN_URL: &str = "app:///main.js";
 const BACKGROUND_URL: &str = "app:///background.js";
 /// The container both realms ask for, by the string the card writes.
@@ -240,7 +245,7 @@ async fn logs_of(wanted: usize) -> (Vec<String>, usize) {
     let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Sequential)
         .await
         .expect("the group starts");
-    let mut sources = ViewSources::new(MAIN_URL);
+    let mut sources = ViewSources::new(MAIN_URL, SCREEN);
     sources.background_entry = Some(BACKGROUND_URL.to_owned());
     let lazy_requests = Arc::new(AtomicUsize::new(0));
     let counting = Arc::clone(&lazy_requests);

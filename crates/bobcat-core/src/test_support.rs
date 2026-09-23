@@ -164,7 +164,7 @@ enum TestTarget {
     Offscreen,
 }
 
-/// One view to build: its entry, its author sheets in cascade order, and
+/// One view to build: its entry, its author sheets in listed order, and
 /// where — if anywhere — its painter draws.
 pub(crate) struct TestViewSpec {
     entry: String,
@@ -251,7 +251,10 @@ impl TestViewSpec {
         } = self;
         let sources = ViewSources {
             style_sheets: sheets.iter().map(|(url, _)| url.clone()).collect(),
-            ..ViewSources::new("app:///main.js")
+            ..ViewSources::new(
+                "app:///main.js",
+                crate::ScreenMetrics::for_viewport(width, height, 1.0),
+            )
         };
         let fetcher = Rc::new(InlineFetcher {
             entry,

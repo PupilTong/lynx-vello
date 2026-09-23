@@ -47,7 +47,6 @@ impl WorkerFactory {
         engine: &mut ScriptEngine,
         runtime: &mut ScriptRuntime,
         outbox: ViewOutbox,
-        base_url: &str,
         background_entry: Option<String>,
     ) -> Result<(Rc<WorkerOwner>, mpsc::UnboundedReceiver<WorkerEvent>), ScriptError> {
         let (events, incoming) = mpsc::unbounded_channel();
@@ -61,16 +60,19 @@ impl WorkerFactory {
             live: RefCell::default(),
         });
         let creator = Rc::downgrade(&owner);
-        let base_url = base_url.to_owned();
         engine.register_host_module_function(
             runtime,
             HOST_MODULE_SPECIFIER,
             "createWorker",
-            2,
+            3,
             Box::new(move |arguments| {
                 let creator = creator.upgrade().ok_or("the creating realm has been released")?;
                 let specifier = string(arguments, 0)?.to_owned();
                 let name = string(arguments, 1)?.to_owned();
+                // Where the specifier resolves from: the MTS entry's response
+                // URL, which the realm holds as `__Card__` and hands over with
+                // every construction. Nothing on this side remembers it.
+                let base_url = string(arguments, 2)?.to_owned();
                 let id = creator.factory.next.get();
                 creator
                     .factory
@@ -81,11 +83,11 @@ impl WorkerFactory {
                 if specifier == BTS_MODULE_SPECIFIER {
                     let mut source = BTS_ENTRY_PREAMBLE.to_owned();
                     source.push_str("import { __BobcatStartBTS } from \"bobcat:bts-runtime\";\n__BobcatStartBTS(async () => {\n");
-                    if let Some(entry) = &background_entry {
-                        let entry =
-                            serde_json::to_string(entry).expect("a string is JSON serializable");
+                    if let Some(background) = &background_entry {
+                        let background = serde_json::to_string(background)
+                            .expect("a string is JSON serializable");
                         source.push_str("\nawait import(");
-                        source.push_str(&entry);
+                        source.push_str(&background);
                         source.push_str(");\n");
                     }
                     source.push_str("});\n");
@@ -105,7 +107,7 @@ impl WorkerFactory {
                 creator.outbox.notify(ViewNotice::RequestSource {
                     request: SourceRequest::Worker {
                         specifier,
-                        base_url: base_url.clone(),
+                        base_url,
                     },
                     completion: script,
                 });

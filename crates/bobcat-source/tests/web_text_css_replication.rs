@@ -119,6 +119,11 @@ use bobcat_source::web::style_info::{
 use bobcat_source::web::{SectionLabel, decode};
 use url::Url;
 
+/// The screen these tests' views report, as a host with no screen to measure
+/// names it. None of them reads `SystemInfo`.
+const SCREEN: bobcat_core::ScreenMetrics =
+    bobcat_core::ScreenMetrics::for_viewport(32.0, 24.0, 1.0);
+
 // ---------------------------------------------------------------------------
 // Building a `StyleInfo` the way the lynx-stack encoder would
 // ---------------------------------------------------------------------------
@@ -506,7 +511,7 @@ fn registered_style_sheet(style_info: &StyleInfo) -> Option<String> {
     );
     card.register_with(&resources);
 
-    let url = card.view_sources().style_sheets.first().cloned();
+    let url = card.view_sources(SCREEN).style_sheets.first().cloned();
     if let Some(url) = url.as_deref() {
         assert!(
             resources.unregister(url),
@@ -1081,7 +1086,7 @@ fn a_lynx_xml_envelope_carries_its_style_section_verbatim() {
     let url = Url::parse("bobcat-test://card/app.lynx.xml").expect("a valid URL");
     let card = PageSource::from_bytes(&url, source.as_bytes()).expect("the card decodes");
     assert_eq!(
-        card.view_sources().style_sheets.len(),
+        card.view_sources(SCREEN).style_sheets.len(),
         1,
         "the card registers its author stylesheet"
     );

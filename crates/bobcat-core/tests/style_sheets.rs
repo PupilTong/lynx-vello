@@ -17,6 +17,11 @@ use bobcat_core::{
 };
 use support::{FetcherDouble, solo_view, wait_for_script};
 
+/// The screen these tests' views report, as a host with no screen to measure
+/// names it. None of them reads `SystemInfo`.
+const SCREEN: bobcat_core::ScreenMetrics =
+    bobcat_core::ScreenMetrics::for_viewport(32.0, 24.0, 1.0);
+
 const SCRIPT_URL: &str = "app:///main-thread.js";
 const SHEET_URL: &str = "app:///author.css";
 
@@ -67,7 +72,7 @@ fn basic_sheet() -> PreparsedStyleSheet {
 fn sources(style_sheets: &[&str]) -> ViewSources {
     ViewSources {
         style_sheets: style_sheets.iter().map(|url| (*url).to_owned()).collect(),
-        ..ViewSources::new(SCRIPT_URL)
+        ..ViewSources::new(SCRIPT_URL, SCREEN)
     }
 }
 
@@ -89,11 +94,15 @@ async fn view_with(
 
 /// The pre-parsed arm mounts, and its rules reach the page the entry builds.
 ///
-/// That a sheet mounts *before* the entry module runs is asserted where the
-/// order is observable rather than here: bobcat-resources'
-/// `text_and_preparsed_sheets_keep_cascade_order_before_entry`, which paints
-/// the later of two sheets' colour, and this crate's
-/// `screenshots::a_preparsed_author_sheet_paints`.
+/// When a sheet mounts is not what this asserts: boot's first
+/// `__FlushElementTree` mounts every listed sheet before the document is
+/// styled. That a text sheet and a pre-parsed one both mount through the real
+/// resource system, in listed order, is bobcat-resources'
+/// `text_and_preparsed_sheets_keep_cascade_order`; that boot publishes
+/// nothing until a withheld sheet arrives, and that several sheets cascade in
+/// listed order whatever order they arrived in, are `page_tests`'
+/// `boot_publishes_nothing_until_a_withheld_sheet_arrives` and
+/// `author_sheets_cascade_in_listed_order_and_boot_waits_for_all_of_them`.
 #[tokio::test]
 async fn a_preparsed_sheet_styles_the_page() {
     let fetcher = Rc::new(
@@ -152,6 +161,11 @@ async fn a_byte_order_mark_prefixed_sheet_mounts() {
 }
 
 /// A stylesheet that will not decode reports a precise startup failure.
+///
+/// The listed sheets are mounted by boot's first `__FlushElementTree`, so what
+/// the embedder is told is the exception that flush threw — a `Script` error
+/// rather than the fetcher's own `InvalidStyleSheetEncoding` — and the message
+/// is what has to name the sheet and the reason.
 #[tokio::test]
 async fn a_stylesheet_that_is_not_utf8_is_a_precise_error() {
     let fetcher = Rc::new(
@@ -165,14 +179,11 @@ async fn a_stylesheet_that_is_not_utf8_is_a_precise_error() {
         .expect("loading view");
     let error = wait_for_script(&mut view)
         .expect_err("invalid UTF-8 CSS is rejected, not silently dropped");
+    assert!(matches!(error, LynxViewError::Script(_)), "{error}");
+    let message = error.to_string();
     // The reported URL is the resolved one, as it is for a script.
-    assert!(
-        matches!(
-            error,
-            LynxViewError::InvalidStyleSheetEncoding { ref url, .. } if url == SCRIPT_URL
-        ),
-        "{error}"
-    );
+    assert!(message.contains(SCRIPT_URL), "{message}");
+    assert!(message.contains("UTF-8"), "{message}");
 }
 
 /// Each listed sheet is a separate stylesheet request, so a repeated URL

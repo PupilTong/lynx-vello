@@ -283,17 +283,6 @@ impl ScriptEngine {
         self.realm.enable_module_loading(normalize_module_url);
     }
 
-    pub(crate) fn register_module_source(
-        &mut self,
-        name: &str,
-        url: &str,
-        source: &str,
-    ) -> Result<(), ScriptError> {
-        self.realm
-            .complete_module(name, Ok((url, source)))
-            .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterModule))
-    }
-
     pub(crate) fn take_module_request(&mut self) -> Option<String> {
         self.realm.take_module_request()
     }
@@ -526,18 +515,55 @@ impl ScriptEngine {
         export_name: &str,
         arguments: &[quickjs::HostArgument<'_>],
     ) -> Result<bool, ScriptError> {
-        const PHASE: ScriptErrorPhase = ScriptErrorPhase::CallModuleExport;
         self.take_deferred_checkpoint_error()?;
+        let result = self.invoke_module_export(module_specifier, export_name, arguments)?;
+        // The checkpoint runs through `finish_operation`, never inline:
+        // draining the job queue while this call is still on the stack would
+        // run promise jobs re-entrantly, inside the very walk they belong to.
+        self.finish_operation(runtime, result, ScriptErrorPhase::CallModuleExport)
+    }
+
+    /// Calls a module export as the first step of the operation its caller
+    /// runs next, without a checkpoint of its own.
+    ///
+    /// The promise jobs the call queued are drained by that next operation's
+    /// checkpoint, so the two are one checkpoint and one generation bump: no
+    /// sibling realm is woken in between to settle what it owes, as it would
+    /// be by [`Self::call_module_export`]'s own checkpoint. A call that fails
+    /// is finished the way [`Self::call_module_export`] finishes one, since
+    /// its caller runs nothing after it.
+    pub(crate) fn call_module_export_before_operation(
+        &mut self,
+        runtime: &mut ScriptRuntime,
+        module_specifier: &str,
+        export_name: &str,
+        arguments: &[quickjs::HostArgument<'_>],
+    ) -> Result<bool, ScriptError> {
+        self.take_deferred_checkpoint_error()?;
+        match self.invoke_module_export(module_specifier, export_name, arguments)? {
+            Ok(called) => Ok(called),
+            failed @ Err(_) => {
+                self.finish_operation(runtime, failed, ScriptErrorPhase::CallModuleExport)
+            }
+        }
+    }
+
+    /// The call both [`Self::call_module_export`] and
+    /// [`Self::call_module_export_before_operation`] make. The outer error is
+    /// a lookup that failed before JavaScript ran, which needs no checkpoint;
+    /// the inner result is the call's own.
+    fn invoke_module_export(
+        &mut self,
+        module_specifier: &str,
+        export_name: &str,
+        arguments: &[quickjs::HostArgument<'_>],
+    ) -> Result<Result<bool, ScriptError>, ScriptError> {
         let (object, member) = self.module_export(module_specifier, export_name)?;
         // One crossing carries the lookup and every argument, and nothing
         // here allocates: the primitives are described in place and a string
         // is lent, not copied — the caller holds it for the whole walk, and
         // the realm needs it only for the length of this call.
-        //
-        // The checkpoint runs through `finish_operation`, never inline:
-        // draining the job queue while this call is still on the stack would
-        // run promise jobs re-entrantly, inside the very walk they belong to.
-        let result = self
+        Ok(self
             .realm
             .call_member(&object, &member, arguments)
             .map(|outcome| match outcome {
@@ -546,8 +572,7 @@ impl ScriptEngine {
                 quickjs::CallOutcome::MemberAbsent => false,
                 quickjs::CallOutcome::Called(_) => true,
             })
-            .map_err(|error| map_quickjs_error(error, PHASE));
-        self.finish_operation(runtime, result, PHASE)
+            .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::CallModuleExport)))
     }
 }
 

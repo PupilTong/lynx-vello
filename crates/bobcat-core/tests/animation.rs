@@ -19,6 +19,11 @@ use bobcat_core::{
 };
 use support::{FetcherDouble, solo_view, wait_for_script};
 
+/// The screen these tests' views report, as a host with no screen to measure
+/// names it. None of them reads `SystemInfo`.
+const SCREEN: bobcat_core::ScreenMetrics =
+    bobcat_core::ScreenMetrics::for_viewport(32.0, 24.0, 1.0);
+
 const SCRIPT_URL: &str = "app:///main.js";
 const STYLE_URL: &str = "app:///author.css";
 
@@ -90,7 +95,7 @@ async fn booted() -> (LynxView<Rc<FetcherDouble>>, Painter) {
         |_reports| fetcher,
         ViewSources {
             style_sheets: vec![STYLE_URL.to_owned()],
-            ..ViewSources::new(SCRIPT_URL)
+            ..ViewSources::new(SCRIPT_URL, SCREEN)
         },
     )
     .await

@@ -10,7 +10,12 @@ use bobcat_core::{
 };
 use support::{FetcherDouble, solo_view, wait_for_script};
 
-const ENTRY: &str = "main.js";
+/// The screen these tests' views report, as a host with no screen to measure
+/// names it. None of them reads `SystemInfo`.
+const SCREEN: bobcat_core::ScreenMetrics =
+    bobcat_core::ScreenMetrics::for_viewport(32.0, 24.0, 1.0);
+
+const ENTRY: &str = "app:///main.js";
 
 async fn view(
     resources: impl FnOnce(bobcat_core::ImageReports) -> Rc<FetcherDouble>,
@@ -41,7 +46,7 @@ async fn host_capabilities_compose_into_the_opaque_view() {
                     .serving(sink),
             )
         },
-        ViewSources::new(ENTRY),
+        ViewSources::new(ENTRY, SCREEN),
     )
     .await
     .expect("opaque view");
@@ -80,7 +85,7 @@ async fn a_default_family_nothing_provides_fails_construction() {
     let unusable = ViewSources {
         fonts: vec![FontBlob::from_static(b"not a font")],
         default_font_family: Some("Ahem".to_owned()),
-        ..ViewSources::new(ENTRY)
+        ..ViewSources::new(ENTRY, SCREEN)
     };
     let host = Rc::new(FetcherDouble::new(Vec::new()));
     let error = view(

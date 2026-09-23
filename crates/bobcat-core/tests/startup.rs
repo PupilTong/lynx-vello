@@ -12,6 +12,11 @@ use bobcat_core::resource::{ResourceFetcher, SourceCompletion, SourceRequest};
 use bobcat_core::{DrawTarget, EngineEvent, EventRequester, NoWakeup, ViewSources};
 use support::{FetcherDouble, solo_view, wait_for_script};
 
+/// The screen these tests' views report, as a host with no screen to measure
+/// names it. None of them reads `SystemInfo`.
+const SCREEN: bobcat_core::ScreenMetrics =
+    bobcat_core::ScreenMetrics::for_viewport(32.0, 24.0, 1.0);
+
 struct HostWakeup(flume::Sender<()>);
 impl EventRequester for HostWakeup {
     fn request_event(&self) {
@@ -87,7 +92,7 @@ async fn resource_completion_reaches_main_without_another_painter_turn() {
         1.0,
         DrawTarget::Offscreen,
         |_reports| fetcher,
-        ViewSources::new("main.js"),
+        ViewSources::new("app:///main.js", SCREEN),
     )
     .await
     .expect("startup completes");
@@ -273,7 +278,7 @@ async fn dropping_loading_view_cancels_resource_and_reaps_main_body() {
         1.0,
         DrawTarget::Offscreen,
         |_reports| fetcher,
-        ViewSources::new("main.js"),
+        ViewSources::new("app:///main.js", SCREEN),
     )
     .await
     .expect("creation returns a loading view even when the fetch never answers");
@@ -311,10 +316,11 @@ async fn dropping_loading_view_cancels_resource_and_reaps_main_body() {
     drop(painter);
 }
 
-/// Metrics that arrive while the entry fetch is outstanding have no document
-/// to write into — the boot module has not created one yet — so the view's
-/// task writes them into the ingredients instead, and the document the boot
-/// module then creates is the resized one.
+/// Metrics that arrive while the entry fetch is outstanding reach the
+/// document through the seat's watch rather than through a command, and the
+/// document the boot module creates is the resized one: `createDocument`
+/// reads that watch, so a painter that bound before the realm's first
+/// statement has already named the metrics.
 ///
 /// Asserted through the pixels, because the document is what an integration
 /// test cannot name: the UA sheet gives `page` `width: 100%; height: 100%`, so
@@ -338,7 +344,7 @@ async fn metrics_that_arrive_before_the_document_are_what_it_is_created_at() {
             1.0,
             DrawTarget::Offscreen,
             |_| Rc::clone(&fetcher),
-            ViewSources::new("main.js"),
+            ViewSources::new("app:///main.js", SCREEN),
         )
         .await
         .expect("creation returns a loading view");
@@ -404,7 +410,7 @@ async fn an_unknown_font_family_fails_construction_without_fetching() {
             |_| fetcher.clone(),
             ViewSources {
                 default_font_family: Some("no-such-family".to_owned()),
-                ..ViewSources::new("main.js")
+                ..ViewSources::new("app:///main.js", SCREEN)
             },
         )
         .await
@@ -424,16 +430,49 @@ async fn an_unknown_font_family_fails_construction_without_fetching() {
     .await;
 }
 
-/// A resolution failure is one event, and the answers the same call already
-/// asked for are discarded.
+/// Boot imports the entry by the URL the view named it by, so that URL has to
+/// be absolute: a bare name is refused by the module normalizer, and the
+/// refusal rejects boot's `import` and fails the boot with the loader's own
+/// message. The fetcher answers the entry all the same, and nothing it answers
+/// can complete an import the realm already refused.
+#[tokio::test]
+async fn a_bare_entry_name_fails_the_boot() {
+    hang_budget(async {
+        let (mut view, _painter) = solo_view(
+            Arc::new(NoWakeup),
+            32.0,
+            24.0,
+            1.0,
+            DrawTarget::Offscreen,
+            |_| FetcherDouble::new(b"globalThis.renderPage = () => {};".to_vec()),
+            ViewSources::new("main.js", SCREEN),
+        )
+        .await
+        .expect("the entry name is not checked where the view is built");
+        let error = wait_for_script(&mut view).expect_err("a bare entry name fails the boot");
+        let message = error.to_string();
+        assert!(
+            message.contains("bare module specifier 'main.js' is not supported"),
+            "{message}"
+        );
+    })
+    .await;
+}
+
+/// A resolution failure is one event, however many of the answers the same
+/// call asked for failed.
 ///
 /// All three startup sources — two sheets and the entry — are requested
 /// inside `create_lynx_view`, so the host has resolved all three before the
-/// view's own boot has read any of them. What stops at the first failure is
-/// the *reading*: the remaining answers are dropped where the sheet failed,
-/// and one `StartupFailed` is reported.
+/// view's own boot has read any of them, and every one of them fails here.
+/// What stops at the first failure is the *reading*. The entry is read first:
+/// boot imports it before it renders, and the listed sheets are read only by
+/// boot's first `__FlushElementTree`, which a boot whose entry failed never
+/// reaches. So one `StartupFailed` is reported — a `Script` error, because
+/// what the embedder is told is the exception boot's `import` threw, naming
+/// the entry and the reason — and the sheets' answers are dropped unread.
 #[tokio::test]
-async fn a_resolution_failure_is_one_event_and_the_other_answers_are_discarded() {
+async fn a_resolution_failure_is_one_event_whatever_else_failed() {
     let fetcher = Rc::new(FetcherDouble::new(Vec::new()).resolving_to("not a URL"));
     let (mut view, _painter) = solo_view(
         Arc::new(NoWakeup),
@@ -444,7 +483,7 @@ async fn a_resolution_failure_is_one_event_and_the_other_answers_are_discarded()
         |_| fetcher.clone(),
         ViewSources {
             style_sheets: vec!["first.css".into(), "second.css".into()],
-            ..ViewSources::new("main.js")
+            ..ViewSources::new("app:///main.js", SCREEN)
         },
     )
     .await
@@ -454,10 +493,14 @@ async fn a_resolution_failure_is_one_event_and_the_other_answers_are_discarded()
         3,
         "creation hands over both sheets and the entry, before any turn"
     );
-    assert!(matches!(
-        wait_for_script(&mut view),
-        Err(bobcat_core::LynxViewError::Resource(_))
-    ));
+    let error = wait_for_script(&mut view).expect_err("the entry cannot be resolved");
+    assert!(
+        matches!(error, bobcat_core::LynxViewError::Script(_)),
+        "{error}"
+    );
+    let message = error.to_string();
+    assert!(message.contains("app:///main.js"), "{message}");
+    assert!(message.contains("relative URL without a base"), "{message}");
     assert_eq!(
         fetcher.resolve_count(),
         3,
@@ -467,6 +510,13 @@ async fn a_resolution_failure_is_one_event_and_the_other_answers_are_discarded()
     assert!(view.pump().is_empty(), "failure is delivered once");
 }
 
+/// A view whose entry is still in flight holds up nothing.
+///
+/// The boot module imports the entry by its URL, and nothing parks for it:
+/// the import stays pending until a task of that view's owner completes the
+/// module from the answer. So the pending view's job has already
+/// returned, and a sibling view in the same group opens its realm, boots and
+/// paints while the first view's fetch is outstanding.
 #[tokio::test]
 async fn a_pending_view_does_not_block_a_sibling_in_the_same_group() {
     hang_budget(async {
@@ -491,7 +541,7 @@ async fn a_pending_view_does_not_block_a_sibling_in_the_same_group() {
                 1.0,
                 |_| Rc::clone(&fetcher),
                 Vec::new(),
-                ViewSources::new("pending.js"),
+                ViewSources::new("app:///pending.js", SCREEN),
             )
             .expect("pending view");
         // Issued inside the construction above, so the fetcher is already
@@ -507,7 +557,7 @@ async fn a_pending_view_does_not_block_a_sibling_in_the_same_group() {
                 1.0,
                 |_| FetcherDouble::new(Vec::new()),
                 Vec::new(),
-                ViewSources::new("sibling.js"),
+                ViewSources::new("app:///sibling.js", SCREEN),
             )
             .expect("sibling view");
         let mut sibling_painter = bobcat_core::Painter::new(DrawTarget::Offscreen, 32.0, 24.0, 1.0)
@@ -668,7 +718,7 @@ fn dropping_the_group_joins_both_of_its_threads() {
                                 })
                             },
                             Vec::new(),
-                            ViewSources::new("main.js"),
+                            ViewSources::new("app:///main.js", SCREEN),
                         )
                         .expect("the view is created");
                     // Boot's first flush waits for a painter to bind the

@@ -16,6 +16,11 @@ use bobcat_core::{
     NativeModule, NoWakeup, Painter, StyleThreads, ViewSources,
 };
 
+/// The screen these tests' views report, as a host with no screen to measure
+/// names it. None of them reads `SystemInfo`.
+const SCREEN: bobcat_core::ScreenMetrics =
+    bobcat_core::ScreenMetrics::for_viewport(32.0, 24.0, 1.0);
+
 const MAIN_URL: &str = "app:///main.js";
 const BACKGROUND_URL: &str = "app:///background.js";
 
@@ -176,7 +181,7 @@ impl NativeModule for Twin {
 }
 
 fn sources() -> ViewSources {
-    let mut sources = ViewSources::new(MAIN_URL);
+    let mut sources = ViewSources::new(MAIN_URL, SCREEN);
     sources.background_entry = Some(BACKGROUND_URL.to_owned());
     sources
 }

@@ -3,13 +3,17 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use bobcat_core::resource::ResourceErrorKind;
 use bobcat_core::{
     DrawTarget, EngineEvent, EventRequester, LynxGroup, LynxView, LynxViewError, Painter,
     PreparsedDeclaration, PreparsedRule, PreparsedStyleSheet, StyleThreads, ViewSources,
 };
 use bobcat_resources::{Resources, ResourcesConfig, ViewResources};
 use bobcat_source::PageSource;
+
+/// The screen these tests' views report, as a host with no screen to measure
+/// names it. None of them reads `SystemInfo`.
+const SCREEN: bobcat_core::ScreenMetrics =
+    bobcat_core::ScreenMetrics::for_viewport(32.0, 24.0, 1.0);
 
 struct Wake(flume::Sender<()>);
 impl EventRequester for Wake {
@@ -71,8 +75,17 @@ fn boot(
     }
 }
 
+/// A text sheet and a pre-parsed sheet both mount through the real resource
+/// system, in the order the view listed them.
+///
+/// Boot's first `__FlushElementTree` mounts every listed sheet in listed
+/// order before the document is styled, whatever order the fetcher answered
+/// them in, so `ScriptFinished` means both are mounted. `first.css` sizes the
+/// box and paints it red; `second.css` paints it blue with a selector of the
+/// same specificity, so the pixel is blue only if `second.css`, listed later,
+/// won the tie, and it is a box of `first.css`'s size only if both mounted.
 #[tokio::test]
-async fn text_and_preparsed_sheets_keep_cascade_order_before_entry() {
+async fn text_and_preparsed_sheets_keep_cascade_order() {
     let (group, resources, receiver) = setup().await;
     resources
         .register(
@@ -115,7 +128,7 @@ async fn text_and_preparsed_sheets_keep_cascade_order_before_entry() {
         &resources,
         ViewSources {
             style_sheets: vec!["first.css".into(), "second.css".into()],
-            ..ViewSources::new("main.js")
+            ..ViewSources::new("app:///main.js", SCREEN)
         },
     )
     .await;
@@ -125,6 +138,13 @@ async fn text_and_preparsed_sheets_keep_cascade_order_before_entry() {
     assert_eq!(&screenshot.pixels[offset..offset + 4], &[0, 0, 255, 255]);
 }
 
+/// A decoding failure keeps the resolved URL, which is what a card's author
+/// needs to find the file.
+///
+/// The entry is read by the boot module's `import`, and a listed stylesheet by
+/// boot's first `__FlushElementTree`, so either failure reaches the embedder
+/// as the exception boot threw rather than as the fetcher's own error. What
+/// has to survive that is the resolved URL.
 #[tokio::test]
 async fn source_utf8_errors_keep_the_resolved_url() {
     for stylesheet in [false, true] {
@@ -136,45 +156,60 @@ async fn source_utf8_errors_keep_the_resolved_url() {
                 Some("application/octet-stream"),
             )
             .unwrap();
+        resources
+            .register("app:///main.js", "", Some("text/javascript"))
+            .unwrap();
         let sources = if stylesheet {
             ViewSources {
                 style_sheets: vec!["invalid.bin".into()],
-                ..ViewSources::new("never-requested.js")
+                ..ViewSources::new("app:///main.js", SCREEN)
             }
         } else {
-            ViewSources::new("invalid.bin")
+            ViewSources::new("app:///invalid.bin", SCREEN)
         };
         let (mut view, _painter) = view(&group, &resources, sources).await;
         let error = boot(&mut view, &receiver).unwrap_err();
-        match (stylesheet, error) {
-            (true, LynxViewError::InvalidStyleSheetEncoding { url, .. })
-            | (false, LynxViewError::InvalidScriptEncoding { url, .. }) => {
-                assert_eq!(url, "app:///invalid.bin");
-            }
-            (_, error) => panic!("unexpected source failure: {error}"),
-        }
+        assert!(matches!(error, LynxViewError::Script(_)), "{error}");
+        let message = error.to_string();
+        assert!(message.contains("app:///invalid.bin"), "{message}");
         assert!(view.pump().is_empty(), "failure arrives once");
     }
 }
 
+/// A view whose entry cannot be loaded fails, and its group goes on serving.
+///
+/// The failing view's boot reads its entry inside its own realm, so the read
+/// is a job of the group's one queue; what keeps a sibling from waiting on it
+/// is that the read *ends* — a resolution failure is an answer, and the
+/// exception it throws finishes the job.
 #[tokio::test]
 async fn missing_source_fails_without_blocking_sibling_startup() {
     let (group, resources, receiver) = setup().await;
-    let (mut failed, _failed_painter) =
-        view(&group, &resources, ViewSources::new("missing.js")).await;
+    let (mut failed, _failed_painter) = view(
+        &group,
+        &resources,
+        ViewSources::new("app:///missing.js", SCREEN),
+    )
+    .await;
     // `app:` is a plausible scheme that nothing registered and no transport
     // serves, so resolution is where the load stops.
     match boot(&mut failed, &receiver) {
-        Err(LynxViewError::Resource(error)) => {
-            assert_eq!(error.kind, ResourceErrorKind::UnsupportedScheme);
+        Err(LynxViewError::Script(error)) => {
+            let message = error.to_string();
+            assert!(message.contains("missing.js"), "{message}");
+            assert!(message.contains("UnsupportedScheme"), "{message}");
         }
         outcome => panic!("unexpected outcome for a missing source: {outcome:?}"),
     }
     resources
         .register("app:///main.js", "", Some("text/javascript"))
         .unwrap();
-    let (mut sibling, mut sibling_painter) =
-        view(&group, &resources, ViewSources::new("main.js")).await;
+    let (mut sibling, mut sibling_painter) = view(
+        &group,
+        &resources,
+        ViewSources::new("app:///main.js", SCREEN),
+    )
+    .await;
     boot(&mut sibling, &receiver).unwrap();
     sibling_painter.tick(true).unwrap();
     assert!(failed.pump().is_empty());
@@ -183,6 +218,11 @@ async fn missing_source_fails_without_blocking_sibling_startup() {
 /// A browser embedder learns the base only from the entry response, so it
 /// names one with `set_base_url` after the system is already built. A source
 /// specifier resolves against that base and not the one the config carried.
+///
+/// The relative source is a stylesheet: the entry itself is imported by the
+/// URL the view names it by, which is absolute. A sheet that did not resolve
+/// against the new base would fail the view, and the blue it paints is how
+/// this test sees that it mounted.
 #[tokio::test]
 async fn a_base_named_after_construction_resolves_a_relative_source() {
     let (group, resources, receiver) = setup().await;
@@ -198,14 +238,30 @@ async fn a_base_named_after_construction_resolves_a_relative_source() {
         globalThis.renderPage = () => {
             const page = __CreatePage('page', 0);
             const view = __CreateView(0);
-            __SetInlineStyles(view, 'width:32px;height:24px;background:blue');
+            __SetClasses(view, 'box');
+            __SetInlineStyles(view, 'width:32px;height:24px');
             __AppendElement(page, view);
         };
     ",
             Some("text/javascript"),
         )
         .unwrap();
-    let (mut view, mut painter) = view(&group, &resources, ViewSources::new("main.js")).await;
+    resources
+        .register(
+            "app:///nested/style.css",
+            ".box { background: blue; }",
+            Some("text/css"),
+        )
+        .unwrap();
+    let (mut view, mut painter) = view(
+        &group,
+        &resources,
+        ViewSources {
+            style_sheets: vec!["style.css".into()],
+            ..ViewSources::new("app:///nested/main.js", SCREEN)
+        },
+    )
+    .await;
     boot(&mut view, &receiver).unwrap();
     let screenshot = painter.capture().unwrap();
     let offset = (12 * screenshot.size.width as usize + 16) * 4;
@@ -269,13 +325,13 @@ async fn workers_load_relative_to_entry_and_route_back_to_their_own_views() {
     let (mut first, mut first_painter) = view(
         &group,
         &first_resources,
-        ViewSources::new("nested/first.js"),
+        ViewSources::new("app:///nested/first.js", SCREEN),
     )
     .await;
     let (mut second, mut second_painter) = view(
         &group,
         &second_resources,
-        ViewSources::new("nested/second.js"),
+        ViewSources::new("app:///nested/second.js", SCREEN),
     )
     .await;
     boot(&mut first, &receiver).unwrap();
@@ -346,7 +402,7 @@ async fn xml_background_loads_esm_through_the_view_fetcher() {
             1.0,
             resources.builder(),
             Vec::new(),
-            page.view_sources(),
+            page.view_sources(SCREEN),
         )
         .unwrap();
     assert!(!view.is_ready());
@@ -419,7 +475,12 @@ async fn dynamic_import_loads_relative_static_dependencies_and_waits_for_top_lev
             .register(url, source, Some("text/javascript"))
             .unwrap();
     }
-    let (mut view, mut painter) = view(&group, &resources, ViewSources::new("page/main.js")).await;
+    let (mut view, mut painter) = view(
+        &group,
+        &resources,
+        ViewSources::new("app:///page/main.js", SCREEN),
+    )
+    .await;
     boot(&mut view, &receiver).unwrap();
     let screenshot = painter.capture().unwrap();
     let offset = (12 * screenshot.size.width as usize + 16) * 4;
@@ -456,7 +517,12 @@ async fn import_failures_reject_promises_and_only_uncaught_startup_failures_end_
                 Some("text/javascript"),
             )
             .unwrap();
-        let (mut view, _painter) = view(&group, &resources, ViewSources::new("main.js")).await;
+        let (mut view, _painter) = view(
+            &group,
+            &resources,
+            ViewSources::new("app:///main.js", SCREEN),
+        )
+        .await;
         let outcome = boot(&mut view, &receiver);
         if caught {
             outcome.unwrap();
@@ -490,8 +556,18 @@ async fn sibling_views_can_import_the_same_urls_with_independent_module_instance
             Some("text/javascript"),
         )
         .unwrap();
-    let (mut first, _first_painter) = view(&group, &resources, ViewSources::new("main.js")).await;
-    let (mut second, _second_painter) = view(&group, &resources, ViewSources::new("main.js")).await;
+    let (mut first, _first_painter) = view(
+        &group,
+        &resources,
+        ViewSources::new("app:///main.js", SCREEN),
+    )
+    .await;
+    let (mut second, _second_painter) = view(
+        &group,
+        &resources,
+        ViewSources::new("app:///main.js", SCREEN),
+    )
+    .await;
     let mut finished = 0;
     while finished < 2 {
         receiver
@@ -536,7 +612,12 @@ async fn imports_started_after_boot_can_commit_a_later_frame() {
             Some("text/javascript"),
         )
         .unwrap();
-    let (mut view, mut painter) = view(&group, &resources, ViewSources::new("main.js")).await;
+    let (mut view, mut painter) = view(
+        &group,
+        &resources,
+        ViewSources::new("app:///main.js", SCREEN),
+    )
+    .await;
     boot(&mut view, &receiver).unwrap();
     let stop = std::time::Instant::now() + Duration::from_secs(20);
     loop {

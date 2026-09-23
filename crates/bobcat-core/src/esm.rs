@@ -51,8 +51,8 @@ pub(crate) const CONTEXT_MODULE_SOURCE: &str = runtime_source!("cross-thread-con
 pub(crate) const BTS_MODULE_SPECIFIER: &str = "bobcat:bts";
 
 /// The literal [`MTS_CHUNK_PREAMBLE`] is, as a macro, so that
-/// `main::runtime`'s `ENTRY_PREAMBLE` can `concat!` the entry marker onto it:
-/// `concat!` takes literals and a `const` is not one.
+/// `main::runtime`'s `ENTRY_PREAMBLE` can `concat!` onto it: `concat!` takes
+/// literals and a `const` is not one.
 macro_rules! mts_chunk_preamble {
     () => {
         concat!(

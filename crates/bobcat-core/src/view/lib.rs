@@ -94,16 +94,20 @@ pub struct ScreenMetrics {
 }
 
 impl ScreenMetrics {
-    /// The metrics a view with no stated screen reports: its create-time
-    /// viewport, in physical pixels.
+    /// The metrics of a viewport `width`×`height` CSS pixels at
+    /// `device_pixel_ratio`, in physical pixels: `pixel_ratio` is the ratio
+    /// and the two sizes are the CSS size multiplied by it.
     ///
-    /// Not a screen, and not meant to be one — it is what a host that has no
-    /// display to measure, a headless capture among them, reports instead.
-    pub(crate) const fn for_viewport(viewport: Viewport) -> Self {
+    /// Not a screen, and not meant to be one. It is what a host that has no
+    /// screen to measure — a headless or offscreen capture — reports, named
+    /// explicitly at the call that builds its [`ViewSources`]: nothing in the
+    /// engine derives a screen on a host's behalf.
+    #[must_use]
+    pub const fn for_viewport(width: f32, height: f32, device_pixel_ratio: f32) -> Self {
         Self {
-            pixel_ratio: viewport.device_pixel_ratio,
-            pixel_width: viewport.width * viewport.device_pixel_ratio,
-            pixel_height: viewport.height * viewport.device_pixel_ratio,
+            pixel_ratio: device_pixel_ratio,
+            pixel_width: width * device_pixel_ratio,
+            pixel_height: height * device_pixel_ratio,
         }
     }
 }
@@ -259,6 +263,13 @@ pub enum EngineError {
 /// A view construction or startup failure. Construction reports target,
 /// font, native-module and attachment errors directly; loading and boot
 /// report through [`EngineEvent::StartupFailed`] on the returned view.
+///
+/// **A startup source that fails to load reports as `Script`.** The boot
+/// module is what reads a view's stylesheets and its entry, so what reaches
+/// the embedder is the exception that reading threw, carrying the URL and the
+/// host's own reason in its message. The three source variants below are what
+/// a *fetcher* answers a request with, which is where they are produced and
+/// where they read as themselves.
 #[derive(Clone, Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum LynxViewError {
@@ -268,8 +279,12 @@ pub enum LynxViewError {
     Resource(#[from] crate::resource::ResourceError),
     #[error(transparent)]
     Script(#[from] ScriptError),
+    /// What a fetcher answers a source request with when the bytes are not
+    /// UTF-8. A realm reads it as the text of the exception its own read
+    /// threw, never as this variant.
     #[error("script `{url}` is not valid UTF-8: {message}")]
     InvalidScriptEncoding { url: String, message: String },
+    /// The same for a stylesheet.
     #[error("stylesheet `{url}` is not valid UTF-8: {message}")]
     InvalidStyleSheetEncoding { url: String, message: String },
 }
@@ -426,6 +441,11 @@ pub struct ViewSources {
     pub fonts: Vec<FontBlob>,
     pub default_font_family: Option<String>,
     pub style_sheets: Vec<String>,
+    /// The MTS entry, as an absolute URL. The fetcher is asked for it by this
+    /// string, and the realm's boot module imports it by the same string, so
+    /// a name the module normalizer refuses — a bare `main.js` — fails the
+    /// boot with that refusal. The fetcher may answer from another URL, which
+    /// becomes the entry's `import.meta.url`.
     pub entry: String,
     /// Optional BTS application module specifier imported by `bobcat:bts`.
     /// The view always starts a BTS context; without this it runs only the
@@ -452,17 +472,18 @@ pub struct ViewSources {
     /// measured it: the web-core algorithm in a browser, the monitor the
     /// window is on natively.
     ///
-    /// `None` derives the three numbers from the create-time viewport
-    /// instead — `pixel_ratio` is its device-pixel ratio and the two sizes
-    /// are its CSS size multiplied by that ratio — which is what a host with
-    /// no screen to measure, a headless capture among them, reports. Read
-    /// once as the realm opens and never updated, whichever it is.
-    pub screen: Option<ScreenMetrics>,
+    /// Required: every host names one. A host with no screen to measure — a
+    /// headless or offscreen capture — names
+    /// [`ScreenMetrics::for_viewport`] of its capture size. Read once as the
+    /// realm opens and never updated.
+    pub screen: ScreenMetrics,
 }
 
 impl ViewSources {
+    /// The sources of a view over `entry`, reporting `screen` as its
+    /// `SystemInfo`, with every other field at its default.
     #[must_use]
-    pub fn new(entry: impl Into<String>) -> Self {
+    pub fn new(entry: impl Into<String>, screen: ScreenMetrics) -> Self {
         Self {
             config: PageConfig::default(),
             fonts: Vec::new(),
@@ -473,7 +494,7 @@ impl ViewSources {
             init_data: None,
             global_props: None,
             initial_processor: String::new(),
-            screen: None,
+            screen,
         }
     }
 }
@@ -707,20 +728,31 @@ impl LynxGroup {
         let (reports, inbox) = ImageInbox::new();
         let fetcher = Rc::new(resources(reports));
         // The startup sources, issued rather than waited for: every author
-        // stylesheet in cascade order, then the entry. Nothing here waits —
+        // stylesheet in the order the view listed them, then the entry. Nothing here waits —
         // the fetcher takes each request and answers the one-shot minted with
         // it — so the load overlaps whatever this thread does next, which is
         // building this view's painter. Only the receivers cross; the fetcher
         // stays on this thread, as it must.
-        let sheets: Vec<SourceAnswer> = std::mem::take(&mut sources.style_sheets)
+        let sheets: Vec<StartupSource> = std::mem::take(&mut sources.style_sheets)
             .into_iter()
-            .map(|url| request_startup_source(&*fetcher, &cancel, SourceRequest::StyleSheet(url)))
+            .map(|url| {
+                let answer = request_startup_source(
+                    &*fetcher,
+                    &cancel,
+                    SourceRequest::StyleSheet(url.clone()),
+                );
+                StartupSource { url, answer }
+            })
             .collect();
-        let entry = request_startup_source(
-            &*fetcher,
-            &cancel,
-            SourceRequest::Entry(std::mem::take(&mut sources.entry)),
-        );
+        let entry_url = std::mem::take(&mut sources.entry);
+        let entry = StartupSource {
+            answer: request_startup_source(
+                &*fetcher,
+                &cancel,
+                SourceRequest::Entry(entry_url.clone()),
+            ),
+            url: entry_url,
+        };
         self.inner
             .attach
             .send(GroupCommand::Attach(Box::new(ViewAttachment {
@@ -1226,16 +1258,31 @@ pub(crate) struct ViewAttachment {
 }
 
 /// The answers to the requests [`LynxGroup::create_lynx_view`] made on the
-/// embedder's thread, in the order the view uses them.
+/// embedder's thread.
 ///
-/// Order of *completion* is the fetcher's business; this is order of *use*. A
-/// sheet that mounted after the entry ran would restyle a document the card
-/// has already built, so the view's task reads these one at a time and in
-/// this order, whatever order they were answered in.
+/// The entry is read by a task of the view's owner when its answer arrives,
+/// which completes the module boot imports by the entry's URL. The sheets go
+/// to the realm's document slot, and the first `__FlushElementTree` waits
+/// for each and mounts it, in the order the view listed them, before the
+/// document is styled: order of *use* rather than of completion, so the
+/// cascade order between several sheets is the listed order whatever order
+/// the fetcher answered them in.
 pub(crate) struct StartupSources {
-    /// One per author stylesheet, in cascade order.
-    pub(crate) sheets: Vec<SourceAnswer>,
-    pub(crate) entry: SourceAnswer,
+    /// One per author stylesheet, in the order the view listed them.
+    pub(crate) sheets: Vec<StartupSource>,
+    pub(crate) entry: StartupSource,
+}
+
+/// One startup source: the URL the view named it by, and the answer to the
+/// request [`LynxGroup::create_lynx_view`] already made for it.
+///
+/// The URL travels beside the answer because it is what a failure is named
+/// by: a sheet whose load failed makes `__FlushElementTree` throw a message
+/// naming it, which fails boot's own flush, and an entry whose load failed
+/// rejects boot's `import` with a message naming the URL.
+pub(crate) struct StartupSource {
+    pub(crate) url: String,
+    pub(crate) answer: SourceAnswer,
 }
 
 /// Hands the fetcher one startup request and keeps the answer.

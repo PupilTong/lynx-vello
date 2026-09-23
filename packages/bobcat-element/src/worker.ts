@@ -1,4 +1,8 @@
 import { EventTarget, installEventHandler } from "bobcat:event-target";
+// The entry's own response URL, which the entry's preamble names before its
+// body runs; a live binding, read at each construction. `bobcat:runtime`
+// imports this module for its type alone, so the import below is no cycle.
+import { __Card__ } from "bobcat:runtime";
 import {
   createWorker,
   sendWorkerMessage,
@@ -62,7 +66,10 @@ export class Worker extends EventTarget {
       throw new TypeError("Bobcat workers support only module scripts");
     }
     const name = options?.name === undefined ? "" : String(options.name);
-    this.#key = createWorker(url, name);
+    // A relative specifier resolves against the page's entry, as a browser's
+    // resolves against the document that constructs the worker. The host keeps
+    // no base URL of its own.
+    this.#key = createWorker(url, name, __Card__);
     this.onmessage = null;
     this.onerror = null;
     installEventHandler(this, "message");

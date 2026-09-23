@@ -107,10 +107,18 @@ const engineContext = new EventTarget();
 // `callLepusMethod` looks up by name.
 const scope = globalThis as Record<string, unknown>;
 
-/** The entry response URL supplied by the view's resource loader. */
+/**
+ * The entry's response URL, as the view's fetcher answered it. It names this
+ * page's own container for chunks and stylesheets, and is the base a
+ * `new Worker` specifier resolves against.
+ */
 export let __Card__: string;
 
-/** Boot supplies the entry URL before importing the application's module. */
+/**
+ * Names the entry: the host calls this with the entry's response URL before
+ * completing the module boot imports it as, so `__Card__` is set before the
+ * entry's body runs. Nothing calls it for a chunk.
+ */
 export function __BobcatInitEntry(url: string): void {
   __Card__ = url;
 }

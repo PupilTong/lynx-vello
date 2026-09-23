@@ -76,9 +76,7 @@ impl ScriptHarness {
             viewport,
             config: PageConfig::default(),
             text_context: None,
-            sheets: Vec::new(),
             style_pool: None,
-            pending_image_events: Vec::new(),
         };
         let (outbox, view) = detached_outbox(Arc::new(NoWakeup));
         let mut js_runtime = ScriptRuntime::new().expect("the benchmark runtime starts");
@@ -94,12 +92,9 @@ impl ScriptHarness {
             outbox,
             &WorkerFactory::new(workers),
             thread.handle(),
-            // The script is evaluated afterwards, so this supplies the base
-            // URL alone.
-            &mut RealmStartup {
-                url: "bench:///main.js".to_owned(),
-                ..RealmStartup::default()
-            },
+            // Nothing is outstanding: `boot` answers this realm's entry
+            // request in place, with the source the benchmark named.
+            RealmStartup::default(),
         )
         .expect("the benchmark realm boots");
         Self {

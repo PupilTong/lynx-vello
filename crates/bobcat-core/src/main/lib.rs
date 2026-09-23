@@ -321,7 +321,7 @@ struct AttachedView {
     /// thread before anything was requested.
     text_context: Option<dom::TextContext>,
     /// The answers to the startup requests `create_lynx_view` already made:
-    /// the author sheets in cascade order, then the entry.
+    /// the author sheets in the order the view listed them, and the entry.
     startup: StartupSources,
     /// The embedder's native modules, as the realm is told about them: the
     /// record `create_lynx_view` encoded out of their names and methods.

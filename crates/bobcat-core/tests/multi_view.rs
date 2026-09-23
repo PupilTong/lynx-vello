@@ -24,6 +24,11 @@ use bobcat_core::{
 };
 use support::{FetcherDouble, wait_for_script};
 
+/// The screen these tests' views report, as a host with no screen to measure
+/// names it. None of them reads `SystemInfo`.
+const SCREEN: bobcat_core::ScreenMetrics =
+    bobcat_core::ScreenMetrics::for_viewport(32.0, 24.0, 1.0);
+
 const STYLE_URL: &str = "app:///author.css";
 const VIEWS: usize = 3;
 
@@ -87,7 +92,7 @@ fn fetcher(entry_url: &str, color: &str) -> Rc<FetcherDouble> {
 fn sources(entry_url: &str) -> ViewSources {
     ViewSources {
         style_sheets: vec![STYLE_URL.to_owned()],
-        ..ViewSources::new(entry_url)
+        ..ViewSources::new(entry_url, SCREEN)
     }
 }
 

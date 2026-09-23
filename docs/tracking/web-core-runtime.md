@@ -99,7 +99,7 @@ termination recorded in `../runtime-architecture.md`.
 
 ## Bobcat BTS Context MVP (2026-09-09)
 
-After `await import(entry_url)`, boot creates a BTS Worker on the group's
+After it awaits the import of the entry by its URL, boot creates a BTS Worker on the group's
 existing `bobcat-workers` thread with `new Worker("bobcat:bts")`; that one's
 script is answered by `bobcat-main` itself, on the same one-shot, because the
 bootstrap is the engine's own source and no host has bytes for it. Every worker uses the

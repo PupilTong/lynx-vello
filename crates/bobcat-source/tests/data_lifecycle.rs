@@ -16,6 +16,11 @@ use url::Url;
 mod support;
 use support::DelayedBackground;
 
+/// The screen these tests' views report, as a host with no screen to measure
+/// names it. None of them reads `SystemInfo`.
+const SCREEN: bobcat_core::ScreenMetrics =
+    bobcat_core::ScreenMetrics::for_viewport(100.0, 100.0, 1.0);
+
 #[derive(Default)]
 struct Observed {
     messages: Vec<String>,
@@ -115,7 +120,7 @@ async fn public_updates_require_mts_boot_then_preserve_order() {
     page.register_with(&resources);
     let released = Rc::new(Cell::new(false));
     let pending = Rc::default();
-    let mut sources = page.view_sources();
+    let mut sources = page.view_sources(SCREEN);
     sources.init_data = Some(json!({"raw":1}).to_string());
     sources.global_props = Some(json!({"theme":"light","keep":1}).to_string());
     let background = sources.background_entry.clone().unwrap();

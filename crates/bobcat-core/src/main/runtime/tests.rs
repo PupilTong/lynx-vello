@@ -349,11 +349,8 @@ fn runtime_over_watching_names(
         &WorkerFactory::new(workers),
         thread.handle(),
         // No entry here: these tests evaluate their own scripts against the
-        // realm afterwards, so the startup supplies the base URL alone.
-        &mut RealmStartup {
-            url: "app:///main.js".to_owned(),
-            ..RealmStartup::default()
-        },
+        // realm afterwards.
+        RealmStartup::default(),
     )
     .expect("main-thread runtime");
     let probe = DocumentProbe {
@@ -394,10 +391,7 @@ fn two_view_group_with(
     let workers = WorkerFactory::new(workers);
     let thread = JsThread::new();
     ends.thread = Some(Rc::clone(&thread));
-    for mut startup in pages {
-        // The base URL every worker specifier in these tests resolves
-        // against; each view's own script is evaluated by hand afterwards.
-        startup.url = "app:///main.js".to_owned();
+    for startup in pages {
         let (outbox, far_end) = detached_outbox(Arc::new(NoWakeup));
         let (runtime, worker_events) = MainThreadRuntime::new(
             &mut js_runtime,
@@ -406,7 +400,7 @@ fn two_view_group_with(
             outbox,
             &workers,
             thread.handle(),
-            &mut startup,
+            startup,
         )
         .expect("main-thread runtime");
         ends.views.push(far_end);
@@ -1100,6 +1094,86 @@ fn clearing_a_class_id_or_attribute_removes_it_from_the_private_document() {
     assert_eq!(view.classes().len(), 0);
     assert_eq!(view.id_attribute(), None);
     assert_eq!(view.attribute("text"), None);
+}
+
+/// The page configuration reaches the document through the realm.
+///
+/// The boot module is written with the four switches as boolean literals and
+/// hands them to `new Document(config)`, whose `createDocument` call passes
+/// them back as four booleans, and the UA cascade is built from *those* — so
+/// what these switches do to a `view`'s computed style is the boot module's
+/// literals working. The document is built from what JavaScript handed back.
+#[test]
+fn the_page_config_written_into_the_boot_module_builds_the_ua_cascade() {
+    use dom::stylo::values::computed::{Display, Overflow};
+
+    for linear in [true, false] {
+        let (mut js_runtime, mut runtime, elements, _names) =
+            runtime_over_watching_names(DocumentIngredients::for_test(
+                Viewport::new(393.0, 727.0),
+                PageConfig {
+                    default_display_linear: linear,
+                    default_overflow_visible: !linear,
+                    ..PageConfig::default()
+                },
+            ));
+        runtime
+            .run_main_thread_script(
+                &mut js_runtime,
+                r"
+                globalThis.renderPage = function () {
+                  __AppendElement(__CreatePage('card', 0), __CreateView(0));
+                };
+                ",
+                "app:///config.js",
+            )
+            .expect("main-thread script");
+        let tree = elements.tree();
+        let view = tree.get(node_id(2)).expect("the card's one view");
+        let style = view.computed_style().expect("a flushed element has style");
+        assert_eq!(
+            style.clone_display(),
+            if linear {
+                Display::Linear
+            } else {
+                Display::Flex
+            },
+            "`defaultDisplayLinear` reached the cascade: linear={linear}"
+        );
+        assert_eq!(
+            style.clone_overflow_x() == Overflow::Visible,
+            !linear,
+            "`defaultOverflowVisible` reached it too: linear={linear}"
+        );
+    }
+}
+
+/// A page configuration switch that is not a boolean refuses the
+/// construction, and the boot that asked for it fails.
+///
+/// Rust needs these four fields, so it reads each rather than forwarding
+/// them; a card that reaches `createDocument` and hands it anything else gets
+/// the message rather than a document built on defaults. The argument is read
+/// before the second-document refusal, so this is the message the card sees.
+#[test]
+fn a_non_boolean_page_config_switch_refuses_the_document() {
+    let (mut js_runtime, mut runtime, _elements, _names) =
+        runtime_over_watching_names(ingredients());
+    let error = runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r#"
+            import { createDocument } from "bobcat-internal:host";
+            createDocument(true, "yes", true, false);
+            "#,
+            "app:///bad-config.js",
+        )
+        .expect_err("a config whose second switch is a string");
+    let message = error.to_string();
+    assert!(
+        message.contains("createDocument expects a boolean for argument 1"),
+        "{message}"
+    );
 }
 
 #[test]
@@ -4142,15 +4216,17 @@ fn sheet_source(text: bool, width: &str) -> crate::resource::LoadedSource {
 fn every_adoption_requests_its_url_and_mounts_the_fetchers_response() {
     use crate::resource::StyleSheetSource;
     for text in [true, false] {
-        let mut ingredients = ingredients();
-        ingredients.sheets.push(StyleSheetSource::Text(
-            ".box{width:20px;height:10px} #strong{width:90px} .important{width:95px!important}"
-                .into(),
-        ));
-        let (mut js, mut runtime, elements, mut far) = runtime_over_watching_names(ingredients);
+        let (mut js, mut runtime, elements, mut far) = runtime_over_watching_names(ingredients());
         runtime
-            .run_main_thread_script(
+            .run_main_thread_script_over_sheets(
                 &mut js,
+                vec![(
+                    "app:///index.css",
+                    crate::resource::LoadedSource::StyleSheet(StyleSheetSource::Text(
+                        ".box{width:20px;height:10px} #strong{width:90px} .important{width:95px!important}"
+                            .into(),
+                    )),
+                )],
                 r"
             const page = __CreatePage();
             for (let i = 0; i !== 3; ++i) {

@@ -30,10 +30,21 @@ await Promise.resolve().then(() => __FlushElementTree());
 The flush follows jobs already queued by the hooks. A job may enqueue another
 job behind the flush: `render -> job 1 -> flush -> job 2` is expected. The await
 keeps the flush in the boot completion/failure path; it does not await hook
-results or drain jobs recursively inside a host callback. This being boot's
-last act is also where a view waits for a painter to bind it: before the first
-binding the flush holds its frame and parks the job it runs in, and a release
-while it is parked throws there, which fails the boot. The existing outer
+results or drain jobs recursively inside a host callback. This flush is also
+where boot waits, and the only place it does, on two things in this order.
+First the view's listed author stylesheets: before anything is styled the
+first flush waits for every one of them, success or failure, parking the job
+it runs in on each answer that has not arrived and mounting them in listed
+order, so the first frame is styled and listed order is cascade order. A sheet
+that failed to load, or that the fetcher answered with something else, makes
+the flush throw `loading stylesheet <url>: <reason>`, which fails the boot
+with `StartupFailed(LynxViewError::Script(..))`; a flush the card makes itself
+throws to the card. Then the painter binding: before the first binding the
+flush holds its frame and parks the job it runs in. A release while either
+wait is parked throws there, which fails the boot. Until the sheets have
+settled, the page epilogue's implicit commit does nothing rather than wait:
+the epilogue runs after every entry, and a commit without the sheets would
+publish an unstyled frame. The existing outer
 checkpoint continues to report unhandled rejections and enforce its deadline,
 and runs the runtime's queued jobs until the queue is empty, as a browser's
 microtask checkpoint does: no job budget bounds it, and there is no incomplete
@@ -87,6 +98,15 @@ names `__Card__`, `lynx`, `console`, `SystemInfo`, `__globalProps`,
 what native does, where a chunk is a separate script evaluated in the same
 context. A `var` at a chunk's top level is local to that call and declares no
 global, and an `import` could not appear in a function body at all.
+
+The entry preamble is the chunk list and nothing more. Boot imports the entry
+by the URL the view named it by, and a task of the view completes that module
+from the pre-issued answer, answered from the fetcher's response URL, so
+`import.meta.url` is the fetcher's answer, redirect included. Before it
+completes the module, `MainThreadRuntime::complete_entry` calls
+`bobcat:runtime`'s `__BobcatInitEntry` with that response URL, which names
+`__Card__` the entry's response URL before the entry body runs. Nothing calls
+it for a chunk, which would overwrite `__Card__` with its own URL.
 
 Queued jobs remain the enclosing checkpoint's work: a job a chunk queues runs
 at the checkpoint the entry is already inside, not inside the load. ReactLynx's

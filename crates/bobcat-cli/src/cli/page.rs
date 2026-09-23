@@ -5,7 +5,7 @@
 //! reference resource system, registers the decoded in-memory sources, and
 //! chooses the cache and wakeup policy for the view it owns.
 
-use bobcat_core::ViewSources;
+use bobcat_core::{ScreenMetrics, ViewSources};
 use bobcat_resources::{DiskCacheConfig, Resources, ResourcesConfig};
 use bobcat_source::PageSource;
 use url::Url;
@@ -41,8 +41,10 @@ impl Program {
         })
     }
 
-    pub(crate) fn sources(&self) -> ViewSources {
-        self.source.view_sources()
+    /// The sources of this program's view, reporting `screen` as its
+    /// `SystemInfo`.
+    pub(crate) fn sources(&self, screen: ScreenMetrics) -> ViewSources {
+        self.source.view_sources(screen)
     }
 
     /// Builds this embedder's resource system and registers the script and

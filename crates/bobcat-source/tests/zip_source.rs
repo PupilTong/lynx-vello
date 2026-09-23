@@ -9,6 +9,11 @@ use bobcat_source::{ZipSource, ZipSourceError};
 use url::Url;
 use zip::write::SimpleFileOptions;
 
+/// The screen these tests' views report, as a host with no screen to measure
+/// names it. None of them reads `SystemInfo`.
+const SCREEN: bobcat_core::ScreenMetrics =
+    bobcat_core::ScreenMetrics::for_viewport(32.0, 24.0, 1.0);
+
 const XML: &[u8] = b"<lynx engine-version=\"4.2\"><script thread=\"main\">main</script></lynx>";
 
 fn archive(entries: &[(&str, &[u8])], method: zip::CompressionMethod) -> Vec<u8> {
@@ -60,7 +65,7 @@ fn loads_xml_and_registers_encoded_resource_paths_on_both_hosts() {
             let resources = resources();
             zip.register_with(&resources, &input).unwrap();
             page.register_with(&resources);
-            assert!(resources.unregister(&page.view_sources().entry));
+            assert!(resources.unregister(&page.view_sources(SCREEN).entry));
             let mut asset = input.clone();
             asset.set_query(None);
             asset.set_fragment(None);
@@ -89,10 +94,10 @@ fn selects_real_binary_bundle_through_the_shared_page_adapter() {
         .page(&Url::parse("https://cdn.example/dist/main.web.bundle").unwrap())
         .unwrap();
     assert_eq!(
-        page.view_sources().entry,
+        page.view_sources(SCREEN).entry,
         "bobcat-memory://bundle/lepus-root.js"
     );
-    assert!(!page.view_sources().style_sheets.is_empty());
+    assert!(!page.view_sources(SCREEN).style_sheets.is_empty());
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

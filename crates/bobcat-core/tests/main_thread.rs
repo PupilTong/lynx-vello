@@ -6,6 +6,11 @@ use std::sync::Arc;
 use bobcat_core::{DrawTarget, LynxView, LynxViewError, NoWakeup, ViewSources};
 use support::{FetcherDouble, solo_view, wait_for_script};
 
+/// The screen these tests' views report, as a host with no screen to measure
+/// names it. None of them reads `SystemInfo`.
+const SCREEN: bobcat_core::ScreenMetrics =
+    bobcat_core::ScreenMetrics::for_viewport(32.0, 24.0, 1.0);
+
 /// Builds a loading view; callers drive boot through normal pump turns.
 async fn view(
     source: &[u8],
@@ -19,7 +24,7 @@ async fn view(
         1.0,
         DrawTarget::Offscreen,
         |_reports| fetcher,
-        ViewSources::new("main.js"),
+        ViewSources::new("app:///main.js", SCREEN),
     )
     .await
 }
@@ -104,7 +109,12 @@ async fn a_card_that_constructs_a_second_document_fails_its_boot() {
     let error = run(
         r#"
         import { Document } from "bobcat:element";
-        new Document();
+        new Document({
+          defaultDisplayLinear: true,
+          defaultOverflowVisible: true,
+          enableCssSelector: true,
+          enableJSDataProcessor: false,
+        });
         "#,
         "app:///second-document.js",
     )
@@ -117,28 +127,38 @@ async fn a_card_that_constructs_a_second_document_fails_its_boot() {
     );
 }
 
+/// A failure in the entry is located by the URL boot imported it by, which is
+/// the URL the view named it by, even where the fetcher answered from another
+/// one: the module is registered under the name its import asks for, as every
+/// imported module is, and the response URL is its `import.meta.url` and the
+/// base its own imports resolve against.
 #[tokio::test]
-async fn resolved_script_url_is_preserved_in_errors() {
+async fn the_requested_entry_url_is_preserved_in_errors() {
     let error = run("const = 1", "app:///broken.js")
         .await
         .expect_err("syntax error");
     let message = error.to_string();
     assert!(matches!(error, LynxViewError::Script(_)));
     assert!(message.contains("booting the MTS entry"), "{message}");
-    assert!(message.contains("app:///broken.js:"), "{message}");
+    assert!(message.contains("app:///main.js:"), "{message}");
 }
 
 /// Invalid UTF-8 is a startup failure event, before the entry reaches the VM.
+///
+/// The boot module is what reads the entry, so what the embedder is told is
+/// the exception that reading threw — a `Script` error rather than the
+/// fetcher's own `InvalidScriptEncoding` — and the message is what still has
+/// to name the URL and the reason.
 #[tokio::test]
 async fn script_bytes_are_strict_utf8_at_the_view_boundary() {
     let (mut view, _painter) = view(&[0xff, 0xfe], "app:///invalid.js")
         .await
         .expect("loading view");
     let error = wait_for_script(&mut view).expect_err("invalid UTF-8 must not reach the VM");
-    assert!(matches!(
-        error,
-        LynxViewError::InvalidScriptEncoding { ref url, .. } if url == "app:///invalid.js"
-    ));
+    assert!(matches!(error, LynxViewError::Script(_)), "{error}");
+    let message = error.to_string();
+    assert!(message.contains("app:///invalid.js"), "{message}");
+    assert!(message.contains("UTF-8"), "{message}");
 }
 
 /// Both registration forms, end to end against the real element tree:

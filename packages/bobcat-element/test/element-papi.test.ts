@@ -73,6 +73,18 @@ rstest.mockRequire("bobcat:runtime", () => ({
 const DOCUMENT_REFUSAL = new Error("the realm already created its document");
 
 /**
+ * The page configuration a boot module is written with and hands to the
+ * constructor. Its four switches are the host's; nothing in this file reads
+ * them, and the constructor's only job is to pass them on, in order.
+ */
+const PAGE_CONFIG: elementPapi.PageConfig = {
+  defaultDisplayLinear: true,
+  defaultOverflowVisible: false,
+  enableCssSelector: false,
+  enableJSDataProcessor: true,
+};
+
+/**
  * Every native member, plus the recorded calls, a filter over them, and the
  * selector answer a test installs.
  *
@@ -175,8 +187,8 @@ function createMockBobcat(issuedIds?: number[]): MockBobcat {
   const host: MockBobcat = {
     calls,
     named,
-    // Arguments are recorded rather than ignored: the member takes none, and
-    // a test that says so has to be able to see one that arrived.
+    // Arguments are recorded rather than ignored: a test asserts the four
+    // switches arrive as booleans, in `PageConfig`'s order.
     createDocument: (...args: unknown[]) => {
       calls.push(["createDocument", ...args]);
       if (documentSpent) {
@@ -516,22 +528,25 @@ describe("installation", () => {
     expect(elementModule.__BobcatDispatchEvent).toHaveLength(6);
   });
 
-  it("creates the realm's document once, with no arguments", () => {
-    void new elementModule.Document();
-    expect(mock.named("createDocument")).toEqual([["createDocument"]]);
+  it("creates the realm's document once, over the config it is given", () => {
+    void new elementModule.Document(PAGE_CONFIG);
+    expect(mock.named("createDocument")).toEqual([
+      // `PageConfig`'s order: display, overflow, selectors, processor.
+      ["createDocument", true, false, false, true],
+    ]);
   });
 
   it("tags a document the way the standard's own exotic objects are tagged", () => {
-    expect(Object.prototype.toString.call(new elementModule.Document())).toBe(
-      "[object Document]",
-    );
+    expect(
+      Object.prototype.toString.call(new elementModule.Document(PAGE_CONFIG)),
+    ).toBe("[object Document]");
   });
 
   it("lets the host refuse a second document rather than refusing it here", () => {
-    const first = new elementModule.Document();
+    const first = new elementModule.Document(PAGE_CONFIG);
     let thrown: unknown;
     try {
-      void new elementModule.Document();
+      void new elementModule.Document(PAGE_CONFIG);
     } catch (error) {
       thrown = error;
     }

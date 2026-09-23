@@ -105,23 +105,36 @@ impl DocumentProbe {
 
 /// A runtime over a document that can shape text.
 fn text_runtime() -> (ScriptRuntime, MainThreadRuntime, DocumentProbe) {
-    text_runtime_with_author_css("")
-}
-
-/// The same, plus the card's own stylesheet — the `styleInfo` half of a
-/// bundle, which the Element PAPI never carries. It is staged the way a
-/// view's fetched sheets are, because the document does not exist until the
-/// boot module creates it.
-fn text_runtime_with_author_css(css: &str) -> (ScriptRuntime, MainThreadRuntime, DocumentProbe) {
     let mut text = dom::TextContext::new();
     assert_eq!(text.register_fonts(dom::FontBlob::from_static(AHEM)), 1);
     let mut ingredients =
         DocumentIngredients::for_test(Viewport::new(393.0, 727.0), PageConfig::default());
     ingredients.text_context = Some(text);
-    if !css.is_empty() {
-        ingredients.sheets.push(StyleSheetSource::Text(css.into()));
-    }
     runtime_over(ingredients)
+}
+
+/// The same, booted over `card` with the card's own stylesheet — the
+/// `styleInfo` half of a bundle, which the Element PAPI never carries. It is
+/// mounted the way a view's fetched sheets are, on the document boot created,
+/// and here before the entry runs.
+fn text_card_with_author_css(
+    css: &str,
+    card: &str,
+    name: &str,
+) -> (ScriptRuntime, MainThreadRuntime, DocumentProbe) {
+    let (mut js_runtime, mut runtime, elements) = text_runtime();
+    runtime
+        .run_main_thread_script_over_sheets(
+            &mut js_runtime,
+            vec![(
+                "app:///index.css",
+                LoadedSource::StyleSheet(StyleSheetSource::Text(css.into())),
+            )],
+            card,
+            name,
+        )
+        .expect("main-thread script");
+    (js_runtime, runtime, elements)
 }
 
 fn runtime_over(
@@ -139,12 +152,7 @@ fn runtime_over(
         outbox,
         &WorkerFactory::new(workers),
         thread.handle(),
-        // The script is evaluated afterwards, so this supplies the base URL
-        // alone.
-        &mut RealmStartup {
-            url: "app:///main.js".to_owned(),
-            ..RealmStartup::default()
-        },
+        RealmStartup::default(),
     )
     .expect("main-thread runtime");
     let probe = DocumentProbe {
@@ -217,10 +225,9 @@ fn background_pair(main: &str, background: &str) -> BackgroundPair {
         outbox,
         &WorkerFactory::new(home.commands()),
         thread.handle(),
-        // The main script is evaluated below, so this names the BTS entry and
-        // the base URL and nothing else.
-        &mut RealmStartup {
-            url: "app:///main.js".to_owned(),
+        // The main script boots below, which is what answers this realm's
+        // entry request; this names the BTS entry and nothing else.
+        RealmStartup {
             background_entry: Some("test:bts-entry".to_owned()),
             ..RealmStartup::default()
         },
@@ -776,12 +783,9 @@ fn content_spread_across_sibling_texts_keeps_its_count_and_order() {
 /// 128px wide at 32px.
 #[test]
 fn the_record_form_of_set_inline_styles_keeps_kebab_case_declarations() {
-    let (mut js_runtime, mut runtime, elements) =
-        text_runtime_with_author_css("page { font-family: Ahem; font-size: 32px; }");
-    runtime
-        .run_main_thread_script(
-            &mut js_runtime,
-            r"
+    let (_js_runtime, _runtime, elements) = text_card_with_author_css(
+        "page { font-family: Ahem; font-size: 32px; }",
+        r"
                 globalThis.renderPage = function () {
                   const page = __CreatePage('card', 0);
                   const el = __CreateElement('view', 0);
@@ -802,9 +806,8 @@ fn the_record_form_of_set_inline_styles_keeps_kebab_case_declarations() {
                   __AppendElement(el, text);
                 };
                 ",
-            "app:///bulk-inline-styles.js",
-        )
-        .expect("main-thread script");
+        "app:///bulk-inline-styles.js",
+    );
 
     let tree = elements.tree();
     let element = element_with_id(&tree, "test-bulk");
@@ -850,11 +853,6 @@ fn the_record_form_of_set_inline_styles_keeps_kebab_case_declarations() {
 fn dynamic_text_style_update_card(
     write_content: &str,
 ) -> (ScriptRuntime, MainThreadRuntime, DocumentProbe) {
-    let (mut js_runtime, mut runtime, elements) = text_runtime_with_author_css(
-        "text { font-family: Ahem; font-size: 20px; }
-         .normal-text { color: #add8e6; }
-         .active-text { color: red; font-style: italic; }",
-    );
     let card = format!(
         r"
             globalThis.renderPage = function () {{
@@ -891,14 +889,13 @@ fn dynamic_text_style_update_card(
             }};
             "
     );
-    runtime
-        .run_main_thread_script(
-            &mut js_runtime,
-            &card,
-            "app:///dynamic-text-style-update.js",
-        )
-        .expect("main-thread script");
-    (js_runtime, runtime, elements)
+    text_card_with_author_css(
+        "text { font-family: Ahem; font-size: 20px; }
+         .normal-text { color: #add8e6; }
+         .active-text { color: red; font-style: italic; }",
+        &card,
+        "app:///dynamic-text-style-update.js",
+    )
 }
 
 /// The six cascade facts the swap must produce: each class swap and each
