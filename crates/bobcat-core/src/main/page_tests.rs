@@ -48,8 +48,12 @@ where
 /// page's, awaited — and then completes its entry the way [`load_entry`] does,
 /// from an answer the fetcher has already given.
 async fn open_realm(page: &Rc<Page>, entry: &str, url: &str) {
+    let startup = RealmStartup {
+        entry: url.to_owned(),
+        ..RealmStartup::default()
+    };
     crate::lifetime::run_job(page, move |page| {
-        page.open_realm(ingredients(), RealmStartup::default());
+        page.open_realm(ingredients(), startup);
         Some(())
     })
     .await;
@@ -2083,12 +2087,12 @@ fn a_disposal_reply_queued_with_view_release_is_not_discarded() {
 
 /// An entry the fetcher has not answered parks nothing.
 ///
-/// Boot's `import("bobcat:entry")` stays pending while the entry is
+/// Boot's `import` of the entry stays pending while the entry is
 /// outstanding: the answer is awaited on a task of this view's owner, and the
 /// job boot ran in has already returned. So this view's realm is live with a
 /// document in it, its `BeginFrame` is acknowledged by a job of its own, and
-/// the task completing `bobcat:entry` when the answer arrives is what finishes
-/// the boot.
+/// the task completing the entry's module when the answer arrives is what
+/// finishes the boot.
 #[test]
 fn an_outstanding_entry_leaves_the_view_serving() {
     on_a_js_thread(|thread| async move {

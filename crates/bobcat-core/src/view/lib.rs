@@ -441,6 +441,11 @@ pub struct ViewSources {
     pub fonts: Vec<FontBlob>,
     pub default_font_family: Option<String>,
     pub style_sheets: Vec<String>,
+    /// The MTS entry, as an absolute URL. The fetcher is asked for it by this
+    /// string, and the realm's boot module imports it by the same string, so
+    /// a name the module normalizer refuses — a bare `main.js` — fails the
+    /// boot with that refusal. The fetcher may answer from another URL, which
+    /// becomes the entry's `import.meta.url`.
     pub entry: String,
     /// Optional BTS application module specifier imported by `bobcat:bts`.
     /// The view always starts a BTS context; without this it runs only the
@@ -1257,7 +1262,7 @@ pub(crate) struct ViewAttachment {
 ///
 /// Each is read by a task of its own on the view's owner, as it arrives: a
 /// sheet is mounted on the live document when its answer comes, and the entry
-/// completes the `bobcat:entry` module boot imports. Nothing orders the sheets
+/// completes the module boot imports by the entry's URL. Nothing orders the sheets
 /// against one another or against the entry, so the cascade order between
 /// several sheets is the order the fetcher answered them in.
 pub(crate) struct StartupSources {

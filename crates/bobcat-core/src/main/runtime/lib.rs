@@ -40,11 +40,10 @@ use super::quickjs::{ScriptEngine, ScriptRuntime};
 use crate::clock::ClockInstant;
 use crate::esm::{
     BTS_MODULE_SPECIFIER, BUNDLE_FETCH_MODULE_SOURCE, BUNDLE_FETCH_MODULE_SPECIFIER,
-    CONTEXT_MODULE_SOURCE, CONTEXT_MODULE_SPECIFIER, ENTRY_MODULE_SPECIFIER,
-    EVENT_TARGET_MODULE_SPECIFIER, EVENT_TARGET_SOURCE, FUTURE_MODULE_SOURCE,
-    FUTURE_MODULE_SPECIFIER, HOST_MODULE_SPECIFIER, REQUIRE_MODULE_SOURCE,
-    REQUIRE_MODULE_SPECIFIER, SECTION_URL_MODULE_SOURCE, SECTION_URL_MODULE_SPECIFIER,
-    TIMER_MODULE_SOURCE, TIMER_MODULE_SPECIFIER,
+    CONTEXT_MODULE_SOURCE, CONTEXT_MODULE_SPECIFIER, EVENT_TARGET_MODULE_SPECIFIER,
+    EVENT_TARGET_SOURCE, FUTURE_MODULE_SOURCE, FUTURE_MODULE_SPECIFIER, HOST_MODULE_SPECIFIER,
+    REQUIRE_MODULE_SOURCE, REQUIRE_MODULE_SPECIFIER, SECTION_URL_MODULE_SOURCE,
+    SECTION_URL_MODULE_SPECIFIER, TIMER_MODULE_SOURCE, TIMER_MODULE_SPECIFIER,
 };
 use crate::link::{InputEventPayload, ViewNotice, ViewOutbox};
 use crate::main::tree::{ImageOutcomes, LynxDocument, PageConfig, new_document};
@@ -147,7 +146,7 @@ mod style_sheets;
 /// drift.
 ///
 /// **The entry names itself.** `import.meta.url` is the response URL the entry
-/// was registered under — the fetcher's, so a redirect is already applied —
+/// was answered from — the fetcher's, so a redirect is already applied —
 /// and handing it to `__BobcatInitEntry` before the body runs is what makes
 /// `__Card__` this page's own container URL for the body, for every chunk and
 /// stylesheet it names by `__Card__`, and for the base URL a `new Worker`
@@ -276,15 +275,20 @@ impl DocumentIngredients {
 /// [`update_global_props`](crate::LynxView::update_global_props) and
 /// [`reload`](crate::LynxView::reload) reach the realm through
 /// `ToMain::PageUpdate` instead, and never touch any of this. The four strings
-/// below become one-shot host members the realm alone reads, and
-/// `background_entry` is spliced into the BTS Worker's boot script by
-/// `WorkerFactory::install`. Neither the author sheets nor the entry are here:
-/// each answer is a task of the view's owner, which mounts a sheet on the live
-/// document or completes the `bobcat:entry` module boot imports.
+/// below `background_entry` become one-shot host members the realm alone reads,
+/// `entry` is written into the boot module's source, and `background_entry` is
+/// spliced into the BTS Worker's boot script by `WorkerFactory::install`. Neither the author sheets
+/// nor the entry's source are here: each answer is a task of the view's owner, which mounts a sheet
+/// on the live document or completes the module boot imports the entry as.
 pub(crate) struct RealmStartup {
     /// The screen the realm's `SystemInfo` reports, as the embedder named it
     /// in [`ViewSources::screen`](crate::ViewSources::screen).
     pub(crate) screen: ScreenMetrics,
+    /// The URL the view named its MTS entry by, as the embedder passed it in
+    /// [`ViewSources::entry`](crate::ViewSources::entry). Boot imports the
+    /// entry by this string, so it has to be an absolute URL: the module
+    /// normalizer refuses a bare name, and that refusal rejects boot's import.
+    pub(crate) entry: String,
     /// The BTS entry `bobcat:bts` imports, if the view named one.
     pub(crate) background_entry: Option<String>,
     /// The host's processor name, page data and global props, as the strings
@@ -311,6 +315,9 @@ impl Default for RealmStartup {
                 pixel_width: 0.0,
                 pixel_height: 0.0,
             },
+            // No entry: the seams that boot a realm opened from this name one
+            // themselves.
+            entry: String::new(),
             background_entry: None,
             initial_processor: String::new(),
             init_data: None,
@@ -664,6 +671,11 @@ pub(crate) struct MainThreadRuntime {
     /// The page configuration boot writes into its own module source as four
     /// boolean literals, held for the same reason as [`Self::screen`].
     config: PageConfig,
+    /// The URL the view named its MTS entry by, which boot writes into its
+    /// own module source as the specifier it imports the entry by. Held for
+    /// the same reason as [`Self::screen`], and read again by
+    /// [`Self::complete_entry`] and [`Self::entry_module_name`].
+    entry: String,
 }
 
 impl fmt::Debug for MainThreadRuntime {
@@ -781,6 +793,7 @@ impl MainThreadRuntime {
                 timeline_milliseconds: 0.0,
                 screen: startup.screen,
                 config,
+                entry: startup.entry,
             },
             incoming,
         ))
@@ -1225,22 +1238,23 @@ impl MainThreadRuntime {
     /// renders, and flushes.
     ///
     /// Nothing is waited for before this runs. The entry reaches the realm
-    /// through an ordinary `import` of [`ENTRY_MODULE_SPECIFIER`], a module a
-    /// task of the view's owner completes from the answer `create_lynx_view`
-    /// already asked for, and the author stylesheets are mounted on the
-    /// document by tasks of their own as they arrive. So this returns with a
-    /// document in place however long the entry takes, and boot's own
-    /// completion is the promise `main_module_finished` reads.
+    /// through an ordinary `import` of the URL the view named it by, a module
+    /// a task of the view's owner completes from the answer
+    /// `create_lynx_view` already asked for, and the author stylesheets are
+    /// mounted on the document by tasks of their own as they arrive. So this
+    /// returns with a document in place however long the entry takes, and
+    /// boot's own completion is the promise `main_module_finished` reads.
     ///
     /// How much of boot has run when this returns depends on the entry alone:
-    /// a `bobcat:entry` already completed is found in the realm's registry and
-    /// boot runs through to its own flush here; one still outstanding leaves
-    /// the import pending, and the rest of boot runs in the job that completes
-    /// it.
+    /// an entry already completed is found in the realm's registry and boot
+    /// runs through to its own flush here; one still outstanding leaves the
+    /// import pending, and the rest of boot runs in the job that completes it.
     ///
-    /// The only literals written into it are the screen's three numbers and
-    /// the page configuration's four switches — facts Rust owns, written as
-    /// primitives rather than as JSON the realm would parse and hand back.
+    /// The only literals written into it are the screen's three numbers, the
+    /// page configuration's four switches and the entry's URL — facts Rust
+    /// owns, written as primitives rather than as JSON the realm would parse
+    /// and hand back. The URL is written as a JSON string literal, which is
+    /// the one quoting that is also a JavaScript string literal.
     /// `SystemInfo` describes the screen the page is shown on, which this
     /// view's viewport is not; the switches are what the realm builds its
     /// document with and what `enableJSDataProcessor` tells the MTS runtime.
@@ -1259,6 +1273,7 @@ impl MainThreadRuntime {
             enable_css_selector,
             enable_js_data_processor,
         } = self.config;
+        let entry = serde_json::to_string(&self.entry).expect("a string serializes");
         let boot = format!(
             r#"import {{ lynx, __BobcatConnectBackground, __BobcatInitializeMTS, __BobcatProcessInitData, __BobcatRenderPage }} from "{RUNTIME_MODULE_SPECIFIER}";
 import {{ Document, __FlushElementTree }} from "{ELEMENT_MODULE_SPECIFIER}";
@@ -1288,12 +1303,12 @@ __BobcatInitializeMTS({{
 // first-screen argument belongs to boot, independently of that mutable slot.
 let data = lynx.__initData;
 
-// The entry, under the one name it always has here. A task of the view's
-// owner completes this module from the answer the view asked for before this
-// realm opened, under the response URL the fetcher gave, so this import asks
-// the host for nothing and the entry's own preamble names that URL as
+// The entry, by the URL the view named it by. A task of the view's owner
+// completes this module from the answer the view asked for before this realm
+// opened, answered from the response URL the fetcher gave, so this import
+// asks the fetcher for nothing and the entry's own preamble names that URL as
 // `__Card__` before its body runs.
-await import("{ENTRY_MODULE_SPECIFIER}");
+await import({entry});
 const {{ Worker }} = await import("bobcat-internal");
 data = __BobcatProcessInitData(data);
 __BobcatConnectBackground(new Worker("{BTS_MODULE_SPECIFIER}", {{ name: "lynx-bg" }}), data);
@@ -1314,16 +1329,19 @@ await Promise.resolve().then(() => __FlushElementTree());
     /// Boots a realm over `source` as its entry, without a fetcher behind it —
     /// the seam this crate's own tests and benchmarks drive boot through.
     ///
-    /// It completes `bobcat:entry` with the source in hand, as the view's own
-    /// entry task would with a fetcher's answer, and then runs the production
-    /// boot: what follows is the same module, the same members and the same
-    /// order a view boots in, with the entry already in the registry.
+    /// `source_name` is both the URL the entry is requested by and the one it
+    /// is answered from; it replaces whatever entry the realm was opened with.
+    /// The entry is completed with the source in hand, as the view's own entry
+    /// task would with a fetcher's answer, and then the production boot runs:
+    /// what follows is the same module, the same members and the same order a
+    /// view boots in, with the entry already in the registry.
     pub(crate) fn run_main_thread_script(
         &mut self,
         js_runtime: &mut ScriptRuntime,
         source: &str,
         source_name: &str,
     ) -> Result<(), MainThreadError> {
+        source_name.clone_into(&mut self.entry);
         self.complete_entry(
             js_runtime,
             source_name,
@@ -1337,9 +1355,10 @@ await Promise.resolve().then(() => __FlushElementTree());
 
     /// Boots a realm over `source` as its entry the way a view whose author
     /// sheets arrived after its document was created and before its entry
-    /// boots: the boot module runs up to its `import` of `bobcat:entry`, each
-    /// sheet is mounted on the document it created, and the entry is completed
-    /// last, which runs the rest of boot.
+    /// boots: the boot module runs up to its `import` of the entry, each sheet
+    /// is mounted on the document it created, and the entry is completed last,
+    /// which runs the rest of boot. `source_name` is both the entry's request
+    /// URL and its response URL, as in [`Self::run_main_thread_script`].
     ///
     /// The seam for this crate's own tests of cards that come with a sheet;
     /// the order is the one a fetcher that answered the sheets first produces.
@@ -1351,13 +1370,11 @@ await Promise.resolve().then(() => __FlushElementTree());
         source: &str,
         source_name: &str,
     ) -> Result<(), MainThreadError> {
+        source_name.clone_into(&mut self.entry);
         self.run_boot_module(js_runtime)?;
         // The one request boot left is its entry, which the view's owner
         // never sends to a fetcher.
-        assert_eq!(
-            self.take_module_request().as_deref(),
-            Some(ENTRY_MODULE_SPECIFIER)
-        );
+        assert_eq!(self.take_module_request(), self.entry_module_name().ok());
         for (url, sheet) in sheets {
             self.mount_startup_sheet(url, Ok(sheet))
                 .expect("an author sheet mounts");
@@ -1377,23 +1394,32 @@ await Promise.resolve().then(() => __FlushElementTree());
         self.engine.take_module_request()
     }
 
-    /// Completes [`ENTRY_MODULE_SPECIFIER`] from the answer to the entry
-    /// request `create_lynx_view` made.
+    /// The name boot's `import` of the entry asks the realm for: the entry's
+    /// URL, normalized the way the module loader normalizes a specifier
+    /// imported from `bobcat:boot`. An absolute URL is its own serialization;
+    /// anything else is refused with the loader's own message, which is also
+    /// what rejects boot's `import`.
+    pub(crate) fn entry_module_name(&self) -> Result<String, String> {
+        super::quickjs::normalize_module_url(BOOT_MODULE_SPECIFIER, &self.entry)
+    }
+
+    /// Completes the module boot imports the entry as, from the answer to the
+    /// entry request `create_lynx_view` made.
     ///
-    /// A script answer is registered twice. The entry itself, with the entry
-    /// preamble prepended, is registered under the fetcher's response URL:
-    /// that is the name its errors and stack frames carry, the base its own
-    /// relative imports resolve against, and its `import.meta.url` — the
-    /// `__Card__` its preamble names. [`ENTRY_MODULE_SPECIFIER`] is then
-    /// completed with a one-line module that imports that URL, which is what
-    /// boot's `import` reaches. A load that failed, and an answer that is not
-    /// a script, complete [`ENTRY_MODULE_SPECIFIER`] with an error naming the
-    /// URL the view asked for and the reason, which rejects boot's `import`
-    /// and so fails the boot with that message.
+    /// The module is the one [`Self::entry_module_name`] names — the name
+    /// boot's `import` asks for, the request URL, which is also the name its
+    /// errors and stack frames carry — completed like any other import: a
+    /// script answer is the entry with the entry preamble prepended, answered
+    /// from the fetcher's response URL. That URL is the base its own relative
+    /// imports resolve against and its `import.meta.url` — the `__Card__` its
+    /// preamble names. A load that failed, and an answer that is not a script,
+    /// complete the module with an error naming the URL the view asked for
+    /// and the reason, which rejects boot's `import` and so fails the boot
+    /// with that message.
     ///
-    /// Either order against boot works: completed first, boot's `import`
-    /// finds it in the realm's registry; imported first, the request is
-    /// pending and this is what resumes it.
+    /// Either order against boot works: completed first, the module is
+    /// registered and boot's `import` finds it in the realm's registry;
+    /// imported first, the request is pending and this is what resumes it.
     pub(crate) fn complete_entry(
         &mut self,
         js_runtime: &mut ScriptRuntime,
@@ -1401,41 +1427,29 @@ await Promise.resolve().then(() => __FlushElementTree());
         answered: Result<LoadedSource, LynxViewError>,
     ) -> Result<(), MainThreadError> {
         let booting = |error| MainThreadError::from_engine("booting the MTS entry", error);
-        let entry = match answered {
-            // The name an import of the URL normalizes to, which is what the
-            // one-line module below imports it by.
-            Ok(LoadedSource::Entry { source, url }) => {
-                super::quickjs::normalize_module_url(ENTRY_MODULE_SPECIFIER, &url)
-                    .map(|name| (url, name, entry_module_source(&source)))
-                    .map_err(|error| format!("the MTS entry {requested}: {error}"))
-            }
+        let name = self.entry_module_name().map_err(|message| {
+            booting(ScriptError {
+                kind: crate::script::ScriptErrorKind::ModuleLoad,
+                phase: crate::script::ScriptErrorPhase::ExecuteModule,
+                message: format!("the MTS entry {requested}: {message}").into(),
+                location: None,
+            })
+        })?;
+        let loaded = match answered {
+            Ok(LoadedSource::Entry { source, url }) => Ok((url, entry_module_source(&source))),
             Ok(_) => Err(format!("the MTS entry {requested} is not a script")),
             Err(error) => Err(format!("loading the MTS entry {requested}: {error}")),
-        };
-        let (url, name, source) = match entry {
-            Ok(entry) => entry,
-            Err(message) => {
-                return self
-                    .engine
-                    .complete_module(
-                        js_runtime,
-                        ENTRY_MODULE_SPECIFIER,
-                        Err(&message.replace('\0', "\u{fffd}")),
-                    )
-                    .map_err(booting);
-            }
-        };
-        // Stored rather than completed: completing resumes and checkpoints,
-        // and the one completion below is what should run the entry.
+        }
+        .map_err(|message| message.replace('\0', "\u{fffd}"));
         self.engine
-            .store_module(&name, &url, &source)
-            .map_err(booting)?;
-        let import = format!(
-            "import {};",
-            serde_json::to_string(&name).expect("a string serializes")
-        );
-        self.engine
-            .complete_module(js_runtime, ENTRY_MODULE_SPECIFIER, Ok((&url, &import)))
+            .complete_module(
+                js_runtime,
+                &name,
+                loaded
+                    .as_ref()
+                    .map(|(url, source)| (url.as_str(), source.as_str()))
+                    .map_err(String::as_str),
+            )
             .map_err(booting)
     }
 

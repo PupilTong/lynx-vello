@@ -50,17 +50,6 @@ pub(crate) const CONTEXT_MODULE_SOURCE: &str = runtime_source!("cross-thread-con
 /// The built-in BTS bootstrap, loaded like any other Worker script.
 pub(crate) const BTS_MODULE_SPECIFIER: &str = "bobcat:bts";
 
-/// The name boot imports a view's MTS entry by, whatever URL it came from.
-///
-/// A task of the view's owner completes it from the answer `create_lynx_view`
-/// already asked for: the entry itself is registered under the fetcher's
-/// response URL — so its errors name that URL, its relative imports resolve
-/// against it and `import.meta.url` inside it is it — and this name is
-/// completed with a one-line module that imports that URL. No request for
-/// either ever reaches a fetcher. `bobcat:` is what lets this name through
-/// the module normalizer unchanged.
-pub(crate) const ENTRY_MODULE_SPECIFIER: &str = "bobcat:entry";
-
 /// The literal [`MTS_CHUNK_PREAMBLE`] is, as a macro, so that
 /// `main::runtime`'s `ENTRY_PREAMBLE` can `concat!` onto it the statement the
 /// entry names itself with and the entry marker: `concat!` takes literals and

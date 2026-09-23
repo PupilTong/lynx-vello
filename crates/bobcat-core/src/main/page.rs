@@ -132,7 +132,6 @@ use super::{AttachedView, GroupContext};
 use crate::background::WorkerEvent;
 #[cfg(test)]
 use crate::clock::ClockInstant;
-use crate::esm::ENTRY_MODULE_SPECIFIER;
 use crate::lifetime::{EndOnUnwind, Lifetime, Settles, run_job, serve_clock};
 use crate::link::{SourceAnswer, ToMain, ViewOutbox};
 use crate::resource::{LoadedSource, SourceRequest, unanswered_source};
@@ -400,11 +399,12 @@ impl Page {
             self.outbox.begin_frame_serviced(seq);
         }
         while let Some(url) = runtime.take_module_request() {
-            // Boot's entry is never the fetcher's to answer: `load_entry`, a
-            // task of this view since it was served, completes that module
-            // from the answer `create_lynx_view` already asked for, and
-            // completing it is what resumes the import this request stands for.
-            if url == ENTRY_MODULE_SPECIFIER {
+            // The entry's own request is answered by `load_entry`, a task of
+            // this view since it was served, from the answer
+            // `create_lynx_view` already asked for: completing it is what
+            // resumes the import this request stands for, and it must never
+            // reach the fetcher a second time.
+            if runtime.entry_module_name().is_ok_and(|entry| entry == url) {
                 continue;
             }
             let answer = self
@@ -950,7 +950,7 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
         config,
         // Spent on the embedder's thread: the fonts and the default family
         // became `text_context` above, and these two became the requests
-        // whose answers `startup` carries.
+        // whose answers `startup` carries, beside the URL each was named by.
         fonts: _,
         default_font_family: _,
         style_sheets: _,
@@ -967,6 +967,9 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
         text_context,
         style_pool: context.style_pool.clone(),
     };
+    let StartupSources { sheets, entry } = startup;
+    // What boot imports the entry by, and so what `load_entry` completes.
+    let entry_url = entry.url.clone();
     let page = Page::new(context, outbox, metrics.clone(), cancel);
     // Queued before the first task of this view is spawned, so it is the first
     // job of the view and nothing it owns can be served ahead of it. Nothing
@@ -980,6 +983,7 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
             ingredients,
             RealmStartup {
                 screen,
+                entry: entry_url,
                 background_entry,
                 initial_processor,
                 init_data,
@@ -994,7 +998,6 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
     // one another: a sheet mounts when it arrives, before or after the entry
     // has evaluated, and several sheets mount in the order the fetcher
     // answered them.
-    let StartupSources { sheets, entry } = startup;
     for sheet in sheets {
         page.spawn(load_style_sheet(Rc::clone(&page), sheet));
     }
@@ -1085,13 +1088,13 @@ async fn consume_metrics(page: Rc<Page>, mut metrics: watch::Receiver<Option<Vie
 }
 
 /// The view's MTS entry: the answer to the request `create_lynx_view` made,
-/// completed into the realm as `bobcat:entry`.
+/// completed into the realm as the module boot imports by the entry's URL.
 ///
 /// A task like [`load_module`], and for the same reason: the answer may take
 /// as long as the fetcher likes, and waiting for it on a task parks nothing —
 /// no job of this view's, no job of a sibling's. Its entry into the realm is
 /// queued behind `open_realm`, the view's first job, so the realm it completes
-/// the module in always exists. Boot's `import("bobcat:entry")` may have been
+/// the module in always exists. Boot's `import` of the entry may have been
 /// made already, in which case this is what resumes it, or not yet, in which
 /// case the import finds the module in the registry.
 ///

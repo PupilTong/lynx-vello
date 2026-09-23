@@ -287,21 +287,6 @@ impl ScriptEngine {
         self.realm.take_module_request()
     }
 
-    /// Stores one module's source in this realm under `name`, answered from
-    /// `url`, and runs nothing: no suspended import is resumed and no
-    /// checkpoint is taken, so an import of `name` finds it in the registry
-    /// whenever one is made.
-    pub(crate) fn store_module(
-        &mut self,
-        name: &str,
-        url: &str,
-        source: &str,
-    ) -> Result<(), ScriptError> {
-        self.realm
-            .complete_module(name, Ok((url, source)))
-            .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterModule))
-    }
-
     pub(crate) fn complete_module(
         &mut self,
         runtime: &mut ScriptRuntime,

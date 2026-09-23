@@ -15,7 +15,7 @@ use support::{FetcherDouble, solo_view, wait_for_script};
 const SCREEN: bobcat_core::ScreenMetrics =
     bobcat_core::ScreenMetrics::for_viewport(32.0, 24.0, 1.0);
 
-const ENTRY: &str = "main.js";
+const ENTRY: &str = "app:///main.js";
 
 async fn view(
     resources: impl FnOnce(bobcat_core::ImageReports) -> Rc<FetcherDouble>,

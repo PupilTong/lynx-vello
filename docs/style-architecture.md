@@ -171,7 +171,7 @@ view's realm on the group's QuickJS runtime without waiting for any of them.
 The boot module's first statement constructs the realm's `Document`, which is
 what creates the page on the group's style pool; each stylesheet is mounted on
 it by a task of the view when its answer arrives, so several sheets cascade in
-arrival order. Boot then awaits the entry, `bobcat:entry`, before calling
+arrival order. Boot then awaits the import of the entry by its URL before calling
 a present `globalThis.renderPage` or the
 `__RenderPage` fallback on `lynx.getEngine()`, then flushes this composition.
 What that covers, and what it does not:

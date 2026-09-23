@@ -44,7 +44,7 @@ async fn run(config: PageConfig, source: &str, resolved_url: &str) -> Result<(),
         |_reports| fetcher,
         ViewSources {
             config,
-            ..ViewSources::new("main.js", SCREEN)
+            ..ViewSources::new("app:///main.js", SCREEN)
         },
     )
     .await

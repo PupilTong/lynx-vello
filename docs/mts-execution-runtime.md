@@ -90,10 +90,10 @@ global, and an `import` could not appear in a function body at all.
 
 The entry preamble carries one statement the chunk list does not:
 `__BobcatInitEntry(import.meta.url)`, which names `__Card__` the entry's
-response URL before the entry body runs. The entry is registered under that
-URL (boot imports it through the one-line `bobcat:entry` module a task of the
-view completes), so `import.meta.url` is the fetcher's answer, redirect
-included. A chunk that ran the statement would overwrite `__Card__` with its
+response URL before the entry body runs. Boot imports the entry by the URL the
+view named it by, and a task of the view completes that module from the
+pre-issued answer, answered from the fetcher's response URL, so
+`import.meta.url` is the fetcher's answer, redirect included. A chunk that ran the statement would overwrite `__Card__` with its
 own URL, which is why only the entry's preamble has it.
 
 Queued jobs remain the enclosing checkpoint's work: a job a chunk queues runs

@@ -24,7 +24,7 @@ async fn view(
         1.0,
         DrawTarget::Offscreen,
         |_reports| fetcher,
-        ViewSources::new("main.js", SCREEN),
+        ViewSources::new("app:///main.js", SCREEN),
     )
     .await
 }
@@ -127,15 +127,20 @@ async fn a_card_that_constructs_a_second_document_fails_its_boot() {
     );
 }
 
+/// A failure in the entry is located by the URL boot imported it by, which is
+/// the URL the view named it by, even where the fetcher answered from another
+/// one: the module is registered under the name its import asks for, as every
+/// imported module is, and the response URL is its `import.meta.url` and the
+/// base its own imports resolve against.
 #[tokio::test]
-async fn resolved_script_url_is_preserved_in_errors() {
+async fn the_requested_entry_url_is_preserved_in_errors() {
     let error = run("const = 1", "app:///broken.js")
         .await
         .expect_err("syntax error");
     let message = error.to_string();
     assert!(matches!(error, LynxViewError::Script(_)));
     assert!(message.contains("booting the MTS entry"), "{message}");
-    assert!(message.contains("app:///broken.js:"), "{message}");
+    assert!(message.contains("app:///main.js:"), "{message}");
 }
 
 /// Invalid UTF-8 is a startup failure event, before the entry reaches the VM.

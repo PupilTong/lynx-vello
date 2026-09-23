@@ -169,7 +169,7 @@ timer and event-target modules, and evaluates
 page configuration written into it, which is what builds the page; each author
 sheet is mounted on it by a task of the view when its answer arrives, so
 several sheets cascade in arrival order. It then uses top-level await to import
-the entry — `bobcat:entry`, which a task of the view completes from the
+the entry by its URL — a module a task of the view completes from the
 entry's answer — before it
 calls a present `globalThis.renderPage` or dispatches `__RenderPage` on the
 realm-local EventTarget returned by `lynx.getEngine()`, and finally flushes the

@@ -86,7 +86,7 @@ view (`load_style_sheet` per author sheet, `load_entry` for the entry) that
 enters the realm when its answer arrives. **Nothing waits for any of it.**
 The page configuration and the screen are written into the boot module as
 literals; a sheet is mounted on the live document when it arrives; the entry
-completes the `bobcat:entry` module boot imports. `LynxView::update_data`,
+completes the module boot imports it as, by its URL. `LynxView::update_data`,
 `update_global_props` and `reload` reach the realm through `ToMain::PageUpdate`
 afterwards and never touch any of it.
 
@@ -161,9 +161,9 @@ QuickJS preloaded ESM graph — bobcat-main's runtime
     │            └──▶ four booleans + DocumentIngredients ──▶ private dom::Document<()>
     │   (each author sheet is mounted on this document by a task of the view
     │    when its answer arrives, in arrival order, never by a statement here)
-    └──▶ await import("bobcat:entry")   completed by the view's `load_entry`
-          │                               task: `import "<response URL>"`
-          └──▶ the entry, registered under its response URL; its preamble
+    └──▶ await import("<entry URL>")    completed by the view's `load_entry`
+          │                               task from the pre-issued answer
+          └──▶ the entry, with import.meta.url = its response URL; its preamble
                calls __BobcatInitEntry(import.meta.url), which names __Card__
           ├──▶ bobcat:runtime (packages/bobcat-element/src/main-thread-runtime.ts)
           │     ├── named compatibility exports + engine EventTarget
@@ -386,18 +386,21 @@ can boot or handle events while this view loads.
 **No startup source parks anything.** `createDocument` builds the document and
 returns; each author sheet's task (`load_style_sheet`) awaits its answer and
 then enters the realm, behind `open_realm`, to mount it with the same code
-`adoptStyleSheet` mounts an answer with. The entry's task (`load_entry`)
-awaits its answer and completes `bobcat:entry`: the entry is registered under
-the fetcher's response URL, which is therefore its `import.meta.url`, the name
-its errors carry and the base its relative imports resolve against, and
-`bobcat:entry` is a one-line module importing that URL. Boot's
-`import("bobcat:entry")` finds it in the registry if it was completed first,
-and is resumed by the completion otherwise; the epilogue never sends a request
-for `bobcat:entry` to the fetcher. A view whose entry or sheet is slow holds up
-nothing but itself.
+`adoptStyleSheet` mounts an answer with. Boot imports the entry by the URL the
+view named it by, which must be absolute: the module normalizer refuses a bare
+name, and that refusal fails the boot. The entry's task (`load_entry`) awaits
+its answer and completes that module with it, with the entry preamble
+prepended, exactly as an ordinary import is completed: the module is
+registered under the request URL, which is the name its errors carry, and
+answered from the fetcher's response URL, which is its `import.meta.url` and
+the base its relative imports resolve against. Boot's `import` finds it in the
+registry if it was completed first, and is resumed by the completion
+otherwise; the entry's own request is answered by `load_entry` and never
+reaches the fetcher a second time, so the epilogue skips it. A view whose entry
+or sheet is slow holds up nothing but itself.
 
 Failures are reported by where they happen. An entry that fails to load
-completes `bobcat:entry` with an error, which boot's `import` throws, so the
+completes the entry's module with an error, which boot's `import` throws, so the
 embedder is told `StartupFailed(LynxViewError::Script(..))` carrying the URL
 and the host's reason. A sheet that fails to load ends the view with the
 fetcher's own error — `Resource`, or `InvalidStyleSheetEncoding` — and one the
@@ -805,8 +808,8 @@ the document member `createDocument`, the tree and attribute
 members, the two event-name members, the two timer members, and the three worker
 members — then preloads three kinds of ESM source: the core-owned
 `bobcat:runtime` named compatibility exports, the embedded `bobcat:element`
-named Element-PAPI exports, and the fetched entry under its resolved URL,
-which a one-line `bobcat:entry` module imports.
+named Element-PAPI exports, and the fetched entry under the URL boot imports
+it by, answered from its resolved URL.
 `bobcat:element`
 imports its native operations directly; nothing is installed as
 `globalThis.bobcat`. Before registering the entry, core prepends its runtime
@@ -930,7 +933,7 @@ __BobcatInitializeMTS({
   systemInfo: screenMetrics,
 });
 let data = lynx.__initData;
-await import("bobcat:entry");
+await import("app:///main.js"); // the entry's URL, as the view named it
 const { Worker } = await import("bobcat-internal");
 data = __BobcatProcessInitData(data);
 __BobcatConnectBackground(new Worker("bobcat:bts", { name: "lynx-bg" }), data);
@@ -938,14 +941,14 @@ __BobcatRenderPage(data);
 await Promise.resolve().then(() => __FlushElementTree());
 ```
 
-The screen's three numbers and the page configuration's four switches are
-written into it as literals — facts Rust owns, passed as primitives, with no
-JSON the realm parses and hands back. `new Document(config)` builds the
+The screen's three numbers, the page configuration's four switches and the
+entry's URL are written into it as literals — facts Rust owns, passed as
+primitives, with no JSON the realm parses and hands back. `new Document(config)` builds the
 document and mounts nothing: each author stylesheet is mounted by a task of the
-view when its answer arrives. `import("bobcat:entry")` asks the host for
+view when its answer arrives. The entry's `import` asks the fetcher for
 nothing: a task of the view completes that name from the answer
-`create_lynx_view` already asked for, with the entry itself registered under
-its response URL. The entry's preamble calls `__BobcatInitEntry(import.meta.url)`
+`create_lynx_view` already asked for, answered from its response URL. The
+entry's preamble calls `__BobcatInitEntry(import.meta.url)`
 before its body runs, so `__Card__` is that URL, and a `new Worker` specifier
 resolves against it — the realm passes it to `createWorker` as the base. An
 entry that could not be loaded rejects the import, which fails the boot.
@@ -1602,9 +1605,9 @@ create/append/drop/flush DOM API is exposed to JavaScript.
    tasks awaiting them.
 3. Boot constructs the realm's `Document` over the page configuration written
    into it — which builds the private document from the create-time viewport,
-   the text context and the style pool — and then imports `bobcat:entry`.
-   Nothing parks for a startup source: a task of the view completes
-   `bobcat:entry` when the entry's answer arrives, and one task per author
+   the text context and the style pool — and then imports the entry by its
+   URL. Nothing parks for a startup source: a task of the view completes the
+   entry's module when the entry's answer arrives, and one task per author
    sheet mounts that sheet on the live document when its answer arrives, so
    several sheets cascade in arrival order.
    `ScriptFinished` or `StartupFailed` reports the outcome through the

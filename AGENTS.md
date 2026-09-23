@@ -318,7 +318,7 @@ cross to `bobcat-main`, where each is read by a task of the view's owner as it
 arrives and nothing parks for any of them: a sheet's task mounts it on the live
 document — before or after the entry evaluated, so the cascade order between
 several listed sheets is the order their answers arrived in — and the entry's
-task completes the `bobcat:entry` module boot imports. A sheet that failed to
+task completes the module boot imports the entry by its URL. A sheet that failed to
 load, or that the fetcher answered with something else, ends the view with that
 resource error (`StartupFailed` while boot is unreported, `ScriptRunError`
 after). The realm itself opens
@@ -719,14 +719,15 @@ JavaScript behind it.
 
 Main opens the realm and evaluates `bobcat:boot` as the view's first job,
 before anything has been fetched: its first statement creates the document,
-and it then `await import("bobcat:entry")`. Nothing parks for the answers
-`create_lynx_view` already asked for; each is a task of the view that enters
-the realm when it arrives, queued behind `open_realm`. The entry's task
-(`load_entry`) completes `bobcat:entry` — the entry itself is registered under
-the fetcher's response URL, with a one-line `bobcat:entry` module importing it,
-so boot's remainder (the BTS Worker, the render and the flush) runs in the job
-that completes it; the epilogue never sends a request for `bobcat:entry` to the
-fetcher. Each sheet's task (`load_style_sheet`) mounts that sheet on the live
+and it then imports the entry by the URL the view named it by (an absolute
+URL: the module normalizer refuses a bare name, which fails the boot). Nothing
+parks for the answers `create_lynx_view` already asked for; each is a task of
+the view that enters the realm when it arrives, queued behind `open_realm`. The
+entry's task (`load_entry`) completes that module from the pre-issued answer,
+with the entry preamble prepended and the fetcher's response URL as its
+`import.meta.url`, so boot's remainder (the BTS Worker, the render and the
+flush) runs in the job that completes it; the entry's own request never reaches
+the fetcher. Each sheet's task (`load_style_sheet`) mounts that sheet on the live
 document when it arrives, possibly after the entry evaluated, so **the cascade
 order between several listed sheets is their arrival order**, not the listed
 order (a recorded deviation from web-core). Success is `ScriptFinished`; a

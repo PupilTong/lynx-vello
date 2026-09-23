@@ -92,7 +92,7 @@ async fn resource_completion_reaches_main_without_another_painter_turn() {
         1.0,
         DrawTarget::Offscreen,
         |_reports| fetcher,
-        ViewSources::new("main.js", SCREEN),
+        ViewSources::new("app:///main.js", SCREEN),
     )
     .await
     .expect("startup completes");
@@ -278,7 +278,7 @@ async fn dropping_loading_view_cancels_resource_and_reaps_main_body() {
         1.0,
         DrawTarget::Offscreen,
         |_reports| fetcher,
-        ViewSources::new("main.js", SCREEN),
+        ViewSources::new("app:///main.js", SCREEN),
     )
     .await
     .expect("creation returns a loading view even when the fetch never answers");
@@ -344,7 +344,7 @@ async fn metrics_that_arrive_before_the_document_are_what_it_is_created_at() {
             1.0,
             DrawTarget::Offscreen,
             |_| Rc::clone(&fetcher),
-            ViewSources::new("main.js", SCREEN),
+            ViewSources::new("app:///main.js", SCREEN),
         )
         .await
         .expect("creation returns a loading view");
@@ -410,7 +410,7 @@ async fn an_unknown_font_family_fails_construction_without_fetching() {
             |_| fetcher.clone(),
             ViewSources {
                 default_font_family: Some("no-such-family".to_owned()),
-                ..ViewSources::new("main.js", SCREEN)
+                ..ViewSources::new("app:///main.js", SCREEN)
             },
         )
         .await
@@ -426,6 +426,35 @@ async fn an_unknown_font_family_fails_construction_without_fetching() {
         );
         assert_eq!(fetcher.resolve_count(), 0);
         assert_eq!(fetcher.fetch_count(), 0);
+    })
+    .await;
+}
+
+/// Boot imports the entry by the URL the view named it by, so that URL has to
+/// be absolute: a bare name is refused by the module normalizer, and the
+/// refusal rejects boot's `import` and fails the boot with the loader's own
+/// message. The fetcher answers the entry all the same, and nothing it answers
+/// can complete an import the realm already refused.
+#[tokio::test]
+async fn a_bare_entry_name_fails_the_boot() {
+    hang_budget(async {
+        let (mut view, _painter) = solo_view(
+            Arc::new(NoWakeup),
+            32.0,
+            24.0,
+            1.0,
+            DrawTarget::Offscreen,
+            |_| FetcherDouble::new(b"globalThis.renderPage = () => {};".to_vec()),
+            ViewSources::new("main.js", SCREEN),
+        )
+        .await
+        .expect("the entry name is not checked where the view is built");
+        let error = wait_for_script(&mut view).expect_err("a bare entry name fails the boot");
+        let message = error.to_string();
+        assert!(
+            message.contains("bare module specifier 'main.js' is not supported"),
+            "{message}"
+        );
     })
     .await;
 }
@@ -454,7 +483,7 @@ async fn a_resolution_failure_is_one_event_whatever_else_failed() {
         |_| fetcher.clone(),
         ViewSources {
             style_sheets: vec!["first.css".into(), "second.css".into()],
-            ..ViewSources::new("main.js", SCREEN)
+            ..ViewSources::new("app:///main.js", SCREEN)
         },
     )
     .await
@@ -482,9 +511,9 @@ async fn a_resolution_failure_is_one_event_whatever_else_failed() {
 
 /// A view whose entry is still in flight holds up nothing.
 ///
-/// The boot module imports the entry as `bobcat:entry`, and nothing parks for
-/// it: the import stays pending until a task of that view's owner completes
-/// the module from the answer. So the pending view's job has already
+/// The boot module imports the entry by its URL, and nothing parks for it:
+/// the import stays pending until a task of that view's owner completes the
+/// module from the answer. So the pending view's job has already
 /// returned, and a sibling view in the same group opens its realm, boots and
 /// paints while the first view's fetch is outstanding.
 #[tokio::test]
@@ -511,7 +540,7 @@ async fn a_pending_view_does_not_block_a_sibling_in_the_same_group() {
                 1.0,
                 |_| Rc::clone(&fetcher),
                 Vec::new(),
-                ViewSources::new("pending.js", SCREEN),
+                ViewSources::new("app:///pending.js", SCREEN),
             )
             .expect("pending view");
         // Issued inside the construction above, so the fetcher is already
@@ -527,7 +556,7 @@ async fn a_pending_view_does_not_block_a_sibling_in_the_same_group() {
                 1.0,
                 |_| FetcherDouble::new(Vec::new()),
                 Vec::new(),
-                ViewSources::new("sibling.js", SCREEN),
+                ViewSources::new("app:///sibling.js", SCREEN),
             )
             .expect("sibling view");
         let mut sibling_painter = bobcat_core::Painter::new(DrawTarget::Offscreen, 32.0, 24.0, 1.0)
@@ -688,7 +717,7 @@ fn dropping_the_group_joins_both_of_its_threads() {
                                 })
                             },
                             Vec::new(),
-                            ViewSources::new("main.js", SCREEN),
+                            ViewSources::new("app:///main.js", SCREEN),
                         )
                         .expect("the view is created");
                     // Boot's first flush waits for a painter to bind the
