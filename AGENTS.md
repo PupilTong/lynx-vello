@@ -1285,14 +1285,12 @@ web-core's `parseFloat` — the one tag module with no UA rules of its own,
 since a blur view is a container and nothing else). `tree::ua_sheet` owns what
 those tags agree on, the order
 they cascade in, and `PageConfig`; `tree/lib.rs` only mints the document they
-describe. **A tag's attribute-to-CSS mapping belongs to that tag's own
-`dom::CustomElement`, never to a shared name-keyed dispatcher** (user ruling,
-2026-09-21): `text`'s paragraph limits, `list`'s lane count and sticky offset,
-`list-item`'s size estimate, `image`'s `src` and `blur-view`'s `blur-radius`
-are each reflected by the component `tree/lib.rs` defines for that tag, in the
-`attribute_changed_callback` the `__SetAttribute` write itself raises, so the
-runtime's attribute members perform the DOM mutation and nothing more. That
-order is mostly documentation, with one exception that is
+describe. Attribute policy stays in each tag's module. Numeric text and list
+attributes use UA `attr()` declarations and registered custom properties;
+`tail-color-convert` uses an attribute selector. Only image resources and blur
+hints need `dom::CustomElement` callbacks. Runtime attribute members perform
+DOM mutations; Stylo tracks attribute dependencies and recascades on changes.
+The UA assembly order is mostly documentation, with one exception that is
 mechanism: `image`'s child suppression ties on specificity with the `display`
 rules `view`, `scroll-view`, `list`, `blur-view`, `x-blur-view` and `wrapper`
 carry, so it wins only by being assembled last.
@@ -1314,16 +1312,14 @@ paragraph whatever `defaultDisplayLinear` says, `wrapper` is
 inside (`display: none` anywhere else) with
 `white-space-collapse: preserve-breaks`, the one place Lynx keeps a literal
 newline. Sibling runs and nested text share the establishing element's
-paragraph. Core reflects `text-maxline`, `text-maxlength` and
-`tail-color-convert` into `--lynx-text-maxline` / `--lynx-text-maxlength` /
-`--lynx-tail-color-convert` presentational hints through
-`Document::set_presentational_hint`, and marks a `text > inline-truncation`
-subtree with `--lynx-inline-truncation` so `crates/dom` can lay it in at the
-clamp without naming a Lynx tag. Each element's optional declaration block
-enters Stylo at `CascadeOrigin::PresHints`, independently of inline style, so
-author CSS can override a limit and replacing or removing inline style reveals
-the attribute's current value. The UA registers them with `<integer>` syntax
-and `inherits: false`. DOM's borrowed `StyleView` reads their computed values
+paragraph. UA `attr(... number)` declarations supply `--lynx-text-maxline` and
+`--lynx-text-maxlength`; `<integer>`, non-inherited registrations reject
+fractional counts and default to `-1` (unlimited). No numeric-prefix parsing or
+CSS expressions in attributes are supported. `text[tail-color-convert="true"]`
+sets `--lynx-tail-color-convert: 1`, otherwise its registered default is zero.
+A `text > inline-truncation` subtree carries `--lynx-inline-truncation` so
+`crates/dom` can lay it in at the clamp without naming a Lynx tag.
+DOM's borrowed `StyleView` reads their computed values
 through `TextContainerStyle`, and `BlockStyle::from_container_style` consumes
 those inputs. Normal and animated style refreshes merge effective limit changes
 into layout damage to re-break the retained glyphs through existing box
@@ -2205,12 +2201,19 @@ would host it:
   `list-type` layout modes (`flow` = grid, `waterfall` = `grid-lanes`), cells
   virtualized by `content-visibility: auto` with a `100cqh` estimate fallback,
   and the `span-count`/`column-count`/`sticky-offset`/
-  `estimated-main-axis-size-px` hints. Underneath it, the data protocol —
+  `estimated-main-axis-size-px` `attr()` declarations. The span registration
+  defaults to one; `span-count` takes precedence over `column-count`, and the
+  track count is at least one. Sticky offsets are numeric pixels clamped at
+  zero. Cell estimates feed `contain-intrinsic-size` directly through
+  `attr(estimated-main-axis-size-px px, 100cqh)` (`100cqw` horizontally).
+  Estimates require nonnegative numbers; no Rust estimate adapter is needed.
+  Remembered sizes still win through the normal containment path.
+  Underneath it, the data protocol —
   `__SetAttribute(element, "update-list-info", …)` — delivers a compiled
   `<list>`'s cells as real element children, which is the only path one
   receives children on. `<list>` is not a `dom::CustomElement`: there is no
   cell recycling, no scroll-to-index, no threshold or scroll events, no list
-  UI method, and no sticky or snap rules (`docs/tracking/deviations.md`).
+  UI method, and no sticky-bottom or snap rules (`docs/tracking/deviations.md`).
 - **Gesture detectors and the arena.** `crates/bobcat-core/src/paint/gesture.rs`
   has no fling or velocity, no `:active` driving, no `consume-slide-event`, no
   per-element `GestureDetector`/arena relations and no `click`; `tapSlop` is

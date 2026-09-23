@@ -63,9 +63,10 @@
 //!   `packages/bobcat-element/src/element-papi.ts:797-799`), so `wrapper` is named in the `:not()`
 //!   rather than left to lose.
 //!
-//! `sticky-top="true"` sets `position: sticky`; its inset is left to author
-//! styles. The remaining `sticky-top`/`sticky-bottom` rules
-//! (`x-list.css:104-135`) are still missing, along with `item-snap` /
+//! `sticky-top="true"` sets `position: sticky`, `top` from the list's sticky
+//! offset (default `0px`), and `z-index: 1` to paint above ordinary cells.
+//! Horizontal sticky insets and `sticky-bottom` (`x-list.css:104-135`)
+//! are still missing, along with `item-snap` /
 //! `paging-enabled` scroll snapping (`:137-151`), the scrollbar rules
 //! (`:8,45-61`), and every `::part()` threshold observer behind
 //! `scrolltoupper`/`scrolltolower` (`:153-193`).
@@ -78,16 +79,12 @@
 //! (`crates/dom/tests/grammar_layout.rs:342-351`), so there is nothing to
 //! rename and the real gap properties are what an author writes.
 
-use dom::{CustomElement, NodeId};
-
-use super::{LynxDocument, parse_count};
-
 /// The `list` and `list-item` policy, in `x-list.css`'s own order.
 ///
 /// # Why a list is a size query container
 ///
 /// `container-type: size` (`x-list.css:9`) is what makes
-/// `contain-intrinsic-size: … var(--estimated-main-axis-size-px, 100cqh)`
+/// `contain-intrinsic-size: none auto 100cqh`
 /// mean anything: with no estimate supplied, a cell that has never been
 /// rendered is one scrollport tall, which is the best guess a sheet can make
 /// and the one web-core makes. css-contain-3 §2.1 makes a size query
@@ -118,11 +115,14 @@ use super::{LynxDocument, parse_count};
 /// exception and is not worth a second one — a `<text>` outside a
 /// `<list-item>` is not a shape `ReactLynx` emits.
 pub(super) const UA_RULES: &str = r#"
+@property --list-item-span-count { syntax: "<integer>"; inherits: false; initial-value: 1; }
+@property --list-item-sticky-offset { syntax: "<length>"; inherits: true; initial-value: 0px; }
 list {
   overflow-x: clip; overflow-y: scroll;
   flex-direction: column; linear-direction: column;
   contain: layout; container-type: size;
-  --list-item-span-count: 1; --list-item-sticky-offset: 0px;
+  --list-item-span-count: attr(span-count number, attr(column-count number));
+  --list-item-sticky-offset: attr(sticky-offset px, 0px);
 }
 list[scroll-orientation="horizontal"] {
   overflow-x: scroll; overflow-y: clip;
@@ -133,23 +133,25 @@ list[scroll-orientation="horizontal"][enable-scroll="false"] { overflow-x: hidde
 list > *:not(list-item):not(wrapper) { display: none; }
 list-item {
   content-visibility: auto; contain: layout paint;
-  contain-intrinsic-size: none auto var(--estimated-main-axis-size-px, 100cqh);
+  contain-intrinsic-size: none auto attr(estimated-main-axis-size-px px, 100cqh);
   flex: 0 0 auto;
 }
 list[scroll-orientation="horizontal"] list-item {
-  contain-intrinsic-size: auto var(--estimated-main-axis-size-px, 100cqw) none;
+  contain-intrinsic-size: auto attr(estimated-main-axis-size-px px, 100cqw) none;
 }
 list-item[recyclable="false"] { content-visibility: visible; contain: none; }
-list-item[sticky-top="true"] { position: sticky; }
+list-item[sticky-top="true"] {
+  position: sticky; top: max(0px, var(--list-item-sticky-offset)); z-index: 1;
+}
 list[list-type="flow"] {
   display: grid;
-  grid-template-columns: repeat(var(--list-item-span-count), 1fr);
+  grid-template-columns: repeat(max(1, var(--list-item-span-count)), 1fr);
   grid-auto-rows: min-content;
   justify-items: stretch; align-items: start;
 }
 list[list-type="flow"][scroll-orientation="horizontal"] {
   grid-template-columns: none;
-  grid-template-rows: repeat(var(--list-item-span-count), 1fr);
+  grid-template-rows: repeat(max(1, var(--list-item-span-count)), 1fr);
   grid-auto-flow: column; grid-auto-columns: min-content;
   justify-items: start; align-items: stretch;
 }
@@ -157,138 +159,16 @@ list[list-type="flow"] list-item[full-span]:not([full-span="false"]) { grid-colu
 list[list-type="flow"][scroll-orientation="horizontal"] list-item[full-span]:not([full-span="false"]) { grid-row: 1 / -1; }
 list[list-type="waterfall"] {
   display: grid-lanes;
-  grid-template-columns: repeat(var(--list-item-span-count), minmax(0, 1fr));
+  grid-template-columns: repeat(max(1, var(--list-item-span-count)), minmax(0, 1fr));
   flow-tolerance: 0;
 }
 list[list-type="waterfall"][scroll-orientation="horizontal"] {
   grid-template-columns: none;
-  grid-template-rows: repeat(var(--list-item-span-count), minmax(0, 1fr));
+  grid-template-rows: repeat(max(1, var(--list-item-span-count)), minmax(0, 1fr));
 }
 list[list-type="waterfall"] list-item[full-span]:not([full-span="false"]) { grid-column: 1 / -1; }
 list[list-type="waterfall"][scroll-orientation="horizontal"] list-item[full-span]:not([full-span="false"]) { grid-row: 1 / -1; }
 "#;
-
-const LIST_TAG: &str = "list";
-const LIST_ITEM_TAG: &str = "list-item";
-
-const SPAN_COUNT_ATTRIBUTE: &str = "span-count";
-const COLUMN_COUNT_ATTRIBUTE: &str = "column-count";
-const STICKY_OFFSET_ATTRIBUTE: &str = "sticky-offset";
-const ESTIMATED_MAIN_AXIS_SIZE_ATTRIBUTE: &str = "estimated-main-axis-size-px";
-
-const SPAN_COUNT_PROPERTY: &str = "--list-item-span-count";
-const STICKY_OFFSET_PROPERTY: &str = "--list-item-sticky-offset";
-const ESTIMATED_MAIN_AXIS_SIZE_PROPERTY: &str = "--estimated-main-axis-size-px";
-
-/// Installs both components, the scroller's and the cell's — one per tag,
-/// because the two tags observe different attributes, exactly as web-core's
-/// `XListAttributes` and `ListItemAttributes` are mixed into `x-list` and
-/// `x-list-item` separately. Must run before any element could carry either
-/// tag, which is [`Document::define`](dom::Document::define)'s own
-/// precondition.
-pub(super) fn define(document: &mut LynxDocument) {
-    document.define(LIST_TAG, Box::new(List));
-    document.define(LIST_ITEM_TAG, Box::new(ListItem));
-}
-
-/// Reflects the scroller's lane count and sticky offset into the custom
-/// properties [`UA_RULES`] resolves against.
-///
-/// - `span-count` and `column-count` are one hint in web-core too (`XListAttributes.ts:33-39`: the
-///   two handlers share `_handlerCount`). It is narrowed to **positive integers** here:
-///   `parseFloat` would let `2.5` or `0` through, and `repeat(2.5, 1fr)`/`repeat(0, 1fr)` are
-///   invalid track lists that would drop the whole declaration and silently give the list one
-///   implicit column. An unusable value clears the hint instead, which leaves the UA default of one
-///   lane standing.
-/// - `sticky-offset` (`XListAttributes.ts:26-31`) is mapped even though nothing reads
-///   `--list-item-sticky-offset` yet: sticky positioning is the missing half, not the attribute.
-///
-/// None of the three names is observed anywhere but on a `list`, which is what
-/// makes the hint's scope the tag's own: `--list-item-span-count` on some other
-/// element inherits, but never reaches a list, because [`UA_RULES`] sets the
-/// property on every `list` itself and that outranks inheritance. The
-/// `--list-item-sticky-offset` a cell reads *is* inherited — from the list
-/// the attribute was written on, as web-core's is.
-struct List;
-
-impl CustomElement<()> for List {
-    fn observed_attributes(&self) -> Vec<String> {
-        vec![
-            SPAN_COUNT_ATTRIBUTE.to_owned(),
-            COLUMN_COUNT_ATTRIBUTE.to_owned(),
-            STICKY_OFFSET_ATTRIBUTE.to_owned(),
-        ]
-    }
-
-    fn attribute_changed_callback(
-        &self,
-        document: &mut LynxDocument,
-        element: NodeId,
-        name: &str,
-        _old: Option<&str>,
-        new: Option<&str>,
-    ) {
-        let (property, css) = match name {
-            SPAN_COUNT_ATTRIBUTE | COLUMN_COUNT_ATTRIBUTE => {
-                (SPAN_COUNT_PROPERTY, span_count_css(parse_count(new)))
-            }
-            STICKY_OFFSET_ATTRIBUTE => (STICKY_OFFSET_PROPERTY, pixels_css(parse_count(new))),
-            other => {
-                debug_assert!(false, "`list` does not observe `{other}`");
-                return;
-            }
-        };
-        document.set_presentational_hint(element, property, &css);
-    }
-}
-
-/// Reflects a cell's own size estimate (`ListItemAttributes.ts:22-27`), which
-/// is what [`UA_RULES`]' `contain-intrinsic-size` prefers over the `100cqh`
-/// fallback a list's size query container supplies.
-struct ListItem;
-
-impl CustomElement<()> for ListItem {
-    fn observed_attributes(&self) -> Vec<String> {
-        vec![ESTIMATED_MAIN_AXIS_SIZE_ATTRIBUTE.to_owned()]
-    }
-
-    fn attribute_changed_callback(
-        &self,
-        document: &mut LynxDocument,
-        element: NodeId,
-        name: &str,
-        _old: Option<&str>,
-        new: Option<&str>,
-    ) {
-        debug_assert_eq!(
-            name, ESTIMATED_MAIN_AXIS_SIZE_ATTRIBUTE,
-            "`list-item` observes `{ESTIMATED_MAIN_AXIS_SIZE_ATTRIBUTE}` alone"
-        );
-        document.set_presentational_hint(
-            element,
-            ESTIMATED_MAIN_AXIS_SIZE_PROPERTY,
-            &pixels_css(parse_count(new)),
-        );
-    }
-}
-
-/// A lane count reflects as a bare integer; anything else clears the hint.
-#[expect(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "parse_count bounds values to [0, u32::MAX] and the filter keeps whole positives"
-)]
-fn span_count_css(count: Option<f64>) -> String {
-    count
-        .filter(|count| *count >= 1.0 && count.fract() == 0.0)
-        .map_or_else(String::new, |count| (count as u32).to_string())
-}
-
-/// A pixel length reflects with its unit; an unparsable or absent value
-/// clears the hint, which is what puts the UA fallback back in charge.
-fn pixels_css(length: Option<f64>) -> String {
-    length.map_or_else(String::new, |length| format!("{length}px"))
-}
 
 #[cfg(test)]
 mod tests {
@@ -297,11 +177,10 @@ mod tests {
     use dom::stylo::computed_values::{flex_direction, linear_direction};
     use dom::stylo::properties::PropertyId;
     use dom::stylo::values::computed::{Display, Overflow};
-    use dom::{CustomElement, NodeId, Vector2D};
+    use dom::{NodeId, Vector2D};
 
     use super::super::LynxDocument;
     use super::super::test_support::{child, display, document, element_under, overflow, style_of};
-    use super::{List, ListItem};
 
     const AHEM: &[u8] = include_bytes!("../../../../hughie/tests/fixtures/Ahem.ttf");
 
@@ -355,8 +234,7 @@ mod tests {
     }
 
     /// Sets or removes an attribute the way the runtime does: the DOM write
-    /// alone. An observed name raises the tag's component from inside that
-    /// write, and the reaction is what reflects the hint.
+    /// alone. Stylo tracks the `attr()` dependency and recascades the rule.
     fn set_attribute(
         document: &mut LynxDocument,
         element: NodeId,
@@ -518,6 +396,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_remembered_cell_size_takes_precedence_over_a_changed_estimate() {
+        let (mut document, list, cells) = virtualized_list();
+        let (head, label) = cells[0];
+        document.render();
+        assert_eq!(rect(&document, head).3, CELL_HEIGHT);
+
+        document.scroll_to(list, Vector2D::new(0.0, CELLS_EXTENT));
+        document.render();
+        assert!(
+            document.text_block_size(label).is_none(),
+            "the head now skips"
+        );
+        document.set_attribute(head, "estimated-main-axis-size-px", "120");
+        document.render();
+        assert_eq!(
+            rect(&document, head).3,
+            CELL_HEIGHT,
+            "a skipped cell retains the size it measured while visible",
+        );
+    }
+
     /// `recyclable="false"` is the opt-out, and it has to work from outside
     /// the window — that is the only place it is observable.
     #[test]
@@ -539,7 +439,7 @@ mod tests {
         );
     }
 
-    /// The `var()` fallback the whole estimate rests on: with no attribute a
+    /// The intrinsic-size fallback: with no attribute a
     /// cell is one scrollport of the list it is in, and the attribute wins
     /// over it when there is one.
     #[test]
@@ -566,8 +466,8 @@ mod tests {
             "the cross axis has no estimate at all",
         );
         assert_eq!(
-            value(&document, estimated, "contain-intrinsic-height"),
-            "auto 42px",
+            rect(&document, estimated).3,
+            42.0,
             "the attribute outranks the fallback",
         );
 
@@ -579,9 +479,9 @@ mod tests {
         );
         document.layout();
         assert_eq!(
-            value(&document, estimated, "contain-intrinsic-height"),
-            "auto 200px",
-            "removing the attribute clears the hint and puts the fallback back",
+            rect(&document, estimated).3,
+            200.0,
+            "removing the attribute restores the scrollport fallback",
         );
     }
 
@@ -606,10 +506,7 @@ mod tests {
             "auto 300px"
         );
         assert_eq!(value(&document, bare, "contain-intrinsic-height"), "none");
-        assert_eq!(
-            value(&document, estimated, "contain-intrinsic-width"),
-            "auto 42px"
-        );
+        assert_eq!(rect(&document, estimated).2, 42.0);
     }
 
     // --- what generates a box inside a list -------------------------------
@@ -805,13 +702,14 @@ mod tests {
             document.set_attribute(list, "list-type", "flow");
             for (written, expected) in [
                 ("3", "3"),
-                ("2.0", "2"),
-                // `parseFloat` prefixes and a leading sign, like every other
-                // Lynx numeric attribute.
-                ("+4px", "4"),
+                ("2.0", "1"),
+                // A unit suffix is not a lane count.
+                ("+4px", "1"),
                 // Neither a fraction nor zero nor a negative can be a track
-                // count, so each clears the hint and the UA default stands.
+                // count, so the effective track count remains one.
                 ("2.5", "1"),
+                ("calc(2)", "1"),
+                ("2 trailing", "1"),
                 ("0", "1"),
                 ("-1", "1"),
                 ("", "1"),
@@ -831,7 +729,7 @@ mod tests {
             assert_eq!(
                 value(&document, list, "grid-template-columns"),
                 "repeat(1, 1fr)",
-                "{name}: removal clears the hint",
+                "{name}: removal restores the default",
             );
         }
     }
@@ -854,7 +752,7 @@ mod tests {
         assert_eq!(
             value(&document, probe, "--list-item-sticky-offset"),
             "0px",
-            "an unusable value clears the hint and leaves the UA default",
+            "an unusable value uses the UA default",
         );
 
         set_attribute(&mut document, list, "sticky-offset", Some("7.5"));
@@ -870,53 +768,84 @@ mod tests {
     }
 
     #[test]
-    fn the_cell_estimate_attribute_maps_to_a_pixel_length() {
-        let (mut document, list) = list_page("width: 200px; height: 200px");
-        let cell = cell(&mut document, list, "");
-
-        for (written, expected) in [
-            ("120", "auto 120px"),
-            ("120.5", "auto 120.5px"),
-            ("1e2", "auto 100px"),
-            // `parse_count` rejects a negative, and a negative intrinsic size
-            // would be invalid anyway, so the fallback stands.
-            ("-1", "auto 200px"),
-            ("", "auto 200px"),
+    fn span_count_precedes_column_count_independently_of_mutation_order() {
+        let (mut document, list) = list_page("width: 200px; height: 400px");
+        document.set_attribute(list, "list-type", "flow");
+        for (name, input, expected) in [
+            ("span-count", Some("2"), "2"),
+            ("column-count", Some("3"), "2"),
+            ("span-count", None, "3"),
+            ("span-count", Some("4"), "4"),
+            ("span-count", Some("bad"), "3"),
+            ("span-count", Some("0"), "1"),
+            ("column-count", None, "1"),
+            ("span-count", None, "1"),
         ] {
-            set_attribute(
-                &mut document,
-                cell,
-                "estimated-main-axis-size-px",
-                Some(written),
-            );
+            set_attribute(&mut document, list, name, input);
             document.layout();
             assert_eq!(
-                value(&document, cell, "contain-intrinsic-height"),
-                expected,
-                "estimated-main-axis-size-px=\"{written}\"",
+                value(&document, list, "grid-template-columns"),
+                format!("repeat({expected}, 1fr)"),
+                "{name}={input:?}",
             );
         }
     }
 
-    /// The two components' contracts, which the tests above exercise through
-    /// layout: each name belongs to exactly one of the two tags, and a name
-    /// written on the other tag — or a name neither observes — reaches no
-    /// declaration at all.
     #[test]
-    fn the_list_tags_observe_their_own_attributes_and_nothing_else() {
-        assert_eq!(
-            CustomElement::<()>::observed_attributes(&List),
-            vec![
-                "span-count".to_owned(),
-                "column-count".to_owned(),
-                "sticky-offset".to_owned(),
-            ],
-        );
-        assert_eq!(
-            CustomElement::<()>::observed_attributes(&ListItem),
-            vec!["estimated-main-axis-size-px".to_owned()],
-        );
+    fn sticky_offsets_require_numbers_and_ignore_negatives() {
+        let (mut document, list) = list_page("width: 200px; height: 400px");
+        let cell = cell(&mut document, list, "");
+        document.set_attribute(cell, "sticky-top", "true");
+        for (input, expected) in [
+            (Some("12.5"), "12.5px"),
+            (Some("-5"), "0px"),
+            (Some("12px"), "0px"),
+            (Some("12 trailing"), "0px"),
+            (Some("calc(12)"), "0px"),
+            (Some("7"), "7px"),
+            (None, "0px"),
+        ] {
+            set_attribute(&mut document, list, "sticky-offset", input);
+            document.layout();
+            assert_eq!(value(&document, cell, "top"), expected, "{input:?}");
+        }
+    }
 
+    #[test]
+    fn cell_estimates_use_numbers_and_a_css_scrollport_fallback() {
+        for horizontal in [false, true] {
+            let (mut document, list) = list_page("width: 300px; height: 200px");
+            if horizontal {
+                document.set_attribute(list, "scroll-orientation", "horizontal");
+            }
+            let cell = cell(&mut document, list, "");
+            let fallback: f32 = if horizontal { 300.0 } else { 200.0 };
+            for (written, expected) in [
+                (Some("120"), 120.0),
+                (Some("120.5"), 120.5),
+                (Some("1e2"), 100.0),
+                (Some("0"), 0.0),
+                (Some(""), fallback),
+                (Some("12px"), fallback),
+                (Some("calc(12)"), fallback),
+                (Some("42"), 42.0),
+                (None, fallback),
+            ] {
+                set_attribute(&mut document, cell, "estimated-main-axis-size-px", written);
+                document.layout();
+                let size = document.rounded_layout(cell).unwrap().size;
+                assert_eq!(
+                    if horizontal { size.width } else { size.height },
+                    expected.round(),
+                    "horizontal={horizontal}, estimate={written:?}",
+                );
+            }
+        }
+    }
+
+    /// UA attribute rules only apply to the tag that owns the attribute.
+    #[test]
+    fn list_attribute_rules_are_scoped_to_their_tags() {
         let (mut document, list) = list_page("width: 200px; height: 200px");
         document.set_attribute(list, "list-type", "flow");
         let cell = cell(&mut document, list, "");
@@ -931,7 +860,7 @@ mod tests {
         for name in ["span-count", "column-count", "sticky-offset"] {
             set_attribute(&mut document, cell, name, Some("2"));
         }
-        // And a name neither observes: `list-type` is a selector rule, whose
+        // And a name neither numeric rule reads: `list-type` is a selector rule, whose
         // rules name the `list` tag, so it selects nothing on a cell.
         let untouched = self::cell(&mut document, list, "");
         set_attribute(&mut document, cell, "list-type", Some("waterfall"));

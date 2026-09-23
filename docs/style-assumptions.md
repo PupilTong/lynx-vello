@@ -625,8 +625,11 @@ and §D.16 with what the wire format actually permits.)*
     engine's rather than the reference's:
     - **A `list` is `container-type: size`**, as `x-list.css:9` is. That is
       what gives `contain-intrinsic-size: none auto
-      var(--estimated-main-axis-size-px, 100cqh)` a container to resolve
-      against, so a cell with no supplied estimate is one scrollport tall.
+      attr(estimated-main-axis-size-px px, 100cqh)` a container to resolve
+      against. The horizontal rule uses `100cqw` on the width axis. Missing
+      estimates fall back in CSS; no custom property or Rust estimate adapter
+      is needed. Estimates require nonnegative numbers, with no special
+      handling of negative values.
       The consequence is the one a browser has too: a size query container is
       a contained box, so a list's own size never answers to its cells and a
       list with no declared size is a zero-height scroller.
@@ -642,21 +645,28 @@ and §D.16 with what the wire format actually permits.)*
       decision is untouched for the case it was made about.
     - **The span count defaults to `1`, not web-core's `0`**, because
       `repeat(0, 1fr)` is an invalid track list and would drop the
-      declaration outright. `span-count`/`column-count` reflect only positive
-      integers; anything else clears the hint and leaves the default. The
-      reflection is the `list` tag's own `CustomElement`, with the cell's
-      `estimated-main-axis-size-px` on a second one for `list-item`: an
-      attribute-to-CSS mapping lives in its own tag's component, never in a
-      shared name-keyed dispatcher (user ruling, 2026-09-21).
+      declaration outright. The UA reads `span-count` with `column-count` as
+      its fallback through `attr(... number)`. A non-inherited `<integer>`
+      registration defaults to one, and `repeat(max(1, var(...)), …)` handles
+      nonpositive counts. Attribute writes need no custom-element callback.
     - **`wrapper` is exempt from the non-cell suppression.**
       `list > *:not(list-item):not(wrapper) { display: none }` names the tag
       explicitly, because this engine's `wrapper { display: contents }` is in
       the same origin and would lose on specificity, and ReactLynx routinely
       wraps a list's children.
 
-    Still absent from the list UA sheet: `sticky-top`/`sticky-bottom`
-    attribute rules and scroll-snap rules. CSS `position: sticky` itself is
-    implemented (2026-09-22); the component attribute mapping is separate.
+    `sticky-top="true"` selects `position: sticky`, a nonnegative `top` from
+    the list's `attr(sticky-offset px, 0px)`, and `z-index: 1`.
+    Still absent: horizontal sticky insets, `sticky-bottom` and scroll-snap rules.
+
+    **Numeric attribute grammar (2026-09-23 user ruling).** Text limits and
+    lane counts require integers; offsets and size estimates require bare
+    numbers in pixels. Units, trailing text, CSS expressions and fractional
+    counts are invalid. Previous `parseFloat` prefix acceptance and fractional
+    maxlength truncation were bugs, not compatibility requirements. Numeric
+    `attr()` plus registered syntax supplies validation; there are no text or
+    list attribute-reflection components. `tail-color-convert` is enabled only
+    by the exact value `"true"` through a UA attribute selector.
 
 24. **CSS Grid Level 3 grid lanes (`display: grid-lanes` +
     `flow-tolerance`): enabled as a user-directed extension beyond Lynx
