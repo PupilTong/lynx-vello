@@ -163,8 +163,9 @@ QuickJS preloaded ESM graph — bobcat-main's runtime
     │    when its answer arrives, in arrival order, never by a statement here)
     └──▶ await import("<entry URL>")    completed by the view's `load_entry`
           │                               task from the pre-issued answer
-          └──▶ the entry, with import.meta.url = its response URL; its preamble
-               calls __BobcatInitEntry(import.meta.url), which names __Card__
+          └──▶ the entry, with import.meta.url = its response URL; before
+               completing it, the task calls __BobcatInitEntry(response URL),
+               which names __Card__
           ├──▶ bobcat:runtime (packages/bobcat-element/src/main-thread-runtime.ts)
           │     ├── named compatibility exports + engine EventTarget
           │     ├──▶ bobcat:cross-thread-context (MTS getJSContext)
@@ -947,9 +948,9 @@ primitives, with no JSON the realm parses and hands back. `new Document(config)`
 document and mounts nothing: each author stylesheet is mounted by a task of the
 view when its answer arrives. The entry's `import` asks the fetcher for
 nothing: a task of the view completes that name from the answer
-`create_lynx_view` already asked for, answered from its response URL. The
-entry's preamble calls `__BobcatInitEntry(import.meta.url)`
-before its body runs, so `__Card__` is that URL, and a `new Worker` specifier
+`create_lynx_view` already asked for, answered from its response URL. That
+task calls `__BobcatInitEntry` with the response URL before it completes the
+module, so `__Card__` is that URL before the entry's body runs, and a `new Worker` specifier
 resolves against it — the realm passes it to `createWorker` as the base. An
 entry that could not be loaded rejects the import, which fails the boot.
 

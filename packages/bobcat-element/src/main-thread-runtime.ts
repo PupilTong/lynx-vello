@@ -115,8 +115,9 @@ const scope = globalThis as Record<string, unknown>;
 export let __Card__: string;
 
 /**
- * The entry names itself: its preamble calls this with its own
- * `import.meta.url` before its body runs. A chunk's preamble never does.
+ * Names the entry: the host calls this with the entry's response URL before
+ * completing the module boot imports it as, so `__Card__` is set before the
+ * entry's body runs. Nothing calls it for a chunk.
  */
 export function __BobcatInitEntry(url: string): void {
   __Card__ = url;

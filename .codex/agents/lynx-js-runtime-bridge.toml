@@ -80,9 +80,9 @@ Landed and not to be regressed:
   startup sources: it imports the entry by its URL, a task of the view
   completes that module from the pre-issued answer (with the entry preamble
   prepended and the response URL as its `import.meta.url`), the entry's own
-  request never reaches the fetcher, the entry preamble names itself through
-  `import.meta.url`, and a worker resolves against the entry URL JavaScript
-  holds. Each author
+  request never reaches the fetcher, that task names the entry
+  (`__BobcatInitEntry` with the response URL) before completing it, and a
+  worker resolves against the entry URL JavaScript holds. Each author
   sheet is mounted by a task of the view as its answer arrives, so listed
   sheets cascade in arrival order.
   `consume_messages` on `bobcat-workers` never awaits the deliveries it

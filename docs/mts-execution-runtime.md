@@ -88,13 +88,14 @@ what native does, where a chunk is a separate script evaluated in the same
 context. A `var` at a chunk's top level is local to that call and declares no
 global, and an `import` could not appear in a function body at all.
 
-The entry preamble carries one statement the chunk list does not:
-`__BobcatInitEntry(import.meta.url)`, which names `__Card__` the entry's
-response URL before the entry body runs. Boot imports the entry by the URL the
-view named it by, and a task of the view completes that module from the
-pre-issued answer, answered from the fetcher's response URL, so
-`import.meta.url` is the fetcher's answer, redirect included. A chunk that ran the statement would overwrite `__Card__` with its
-own URL, which is why only the entry's preamble has it.
+The entry preamble is the chunk list and nothing more. Boot imports the entry
+by the URL the view named it by, and a task of the view completes that module
+from the pre-issued answer, answered from the fetcher's response URL, so
+`import.meta.url` is the fetcher's answer, redirect included. Before it
+completes the module, `MainThreadRuntime::complete_entry` calls
+`bobcat:runtime`'s `__BobcatInitEntry` with that response URL, which names
+`__Card__` the entry's response URL before the entry body runs. Nothing calls
+it for a chunk, which would overwrite `__Card__` with its own URL.
 
 Queued jobs remain the enclosing checkpoint's work: a job a chunk queues runs
 at the checkpoint the entry is already inside, not inside the load. ReactLynx's

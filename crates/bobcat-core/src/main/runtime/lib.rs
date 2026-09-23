@@ -140,24 +140,16 @@ const RUNTIME_MODULE_SOURCE: &str = crate::esm::runtime_source!("main-thread-run
 mod style_sheets;
 
 /// What the MTS entry is given, which is [`crate::esm::MTS_CHUNK_PREAMBLE`] — the same
-/// list a lazy container's `main-thread` body is compiled against — plus the
-/// statement that names the entry, and the marker the compiler's own wrapper
-/// looks for. Built from it rather than written twice, so the two lists cannot
-/// drift.
+/// list a lazy container's `main-thread` body is compiled against. Built from
+/// it rather than written twice, so the two lists cannot drift. web-core's
+/// wrapper also carries a `//# allFunctionsCalledOnLoad` line, a V8
+/// eager-compilation hint that `QuickJS`'s parser ignores, so it is not
+/// reproduced here.
 ///
-/// **The entry names itself.** `import.meta.url` is the response URL the entry
-/// was answered from — the fetcher's, so a redirect is already applied —
-/// and handing it to `__BobcatInitEntry` before the body runs is what makes
-/// `__Card__` this page's own container URL for the body, for every chunk and
-/// stylesheet it names by `__Card__`, and for the base URL a `new Worker`
-/// specifier resolves against. The chunk preamble never carries it: a chunk
-/// that ran it would overwrite `__Card__` with its own URL.
-const ENTRY_PREAMBLE: &str = concat!(
-    crate::esm::mts_chunk_preamble!(),
-    "import { __BobcatInitEntry } from \"bobcat:runtime\"; ",
-    "__BobcatInitEntry(import.meta.url);",
-    "\n//# allFunctionsCalledOnLoad\n"
-);
+/// The preamble does not name the entry: [`MainThreadRuntime::complete_entry`]
+/// hands the response URL to `__BobcatInitEntry` before the body runs, so the
+/// statement is not compiled into every module this preamble is prepended to.
+const ENTRY_PREAMBLE: &str = concat!(crate::esm::mts_chunk_preamble!(), "\n");
 
 pub(crate) fn entry_module_source(source: &str) -> String {
     let mut module = String::with_capacity(ENTRY_PREAMBLE.len() + source.len());
@@ -1306,8 +1298,8 @@ let data = lynx.__initData;
 // The entry, by the URL the view named it by. A task of the view's owner
 // completes this module from the answer the view asked for before this realm
 // opened, answered from the response URL the fetcher gave, so this import
-// asks the fetcher for nothing and the entry's own preamble names that URL as
-// `__Card__` before its body runs.
+// asks the fetcher for nothing, and names that URL as `__Card__` before the
+// entry's body runs.
 await import({entry});
 const {{ Worker }} = await import("bobcat-internal");
 data = __BobcatProcessInitData(data);
@@ -1331,10 +1323,14 @@ await Promise.resolve().then(() => __FlushElementTree());
     ///
     /// `source_name` is both the URL the entry is requested by and the one it
     /// is answered from; it replaces whatever entry the realm was opened with.
-    /// The entry is completed with the source in hand, as the view's own entry
-    /// task would with a fetcher's answer, and then the production boot runs:
-    /// what follows is the same module, the same members and the same order a
-    /// view boots in, with the entry already in the registry.
+    /// The production boot runs up to its `import` of the entry, and the entry
+    /// is then completed with the source in hand, as the view's own entry task
+    /// would with a fetcher's answer, which runs the rest of boot: the same
+    /// module, the same members and the same order a view boots in.
+    ///
+    /// The result is boot's: an error if it failed, whether before the import
+    /// or in the entry, and `Ok` once it settled or while it still waits for a
+    /// resource or a timer.
     pub(crate) fn run_main_thread_script(
         &mut self,
         js_runtime: &mut ScriptRuntime,
@@ -1342,6 +1338,11 @@ await Promise.resolve().then(() => __FlushElementTree());
         source_name: &str,
     ) -> Result<(), MainThreadError> {
         source_name.clone_into(&mut self.entry);
+        self.run_boot_module(js_runtime)?;
+        // The one request boot left is its entry, which the view's owner
+        // never sends to a fetcher; it is answered below.
+        let requested = self.take_module_request();
+        debug_assert_eq!(requested, self.entry_module_name().ok());
         self.complete_entry(
             js_runtime,
             source_name,
@@ -1350,7 +1351,9 @@ await Promise.resolve().then(() => __FlushElementTree());
                 url: source_name.to_owned(),
             }),
         )?;
-        self.run_boot_module(js_runtime)
+        let finished = self.main_module_finished().map(|_| ());
+        let collected = self.finish_batch(js_runtime, finished.is_ok());
+        finished.and(collected)
     }
 
     /// Boots a realm over `source` as its entry the way a view whose author
@@ -1411,15 +1414,25 @@ await Promise.resolve().then(() => __FlushElementTree());
     /// errors and stack frames carry — completed like any other import: a
     /// script answer is the entry with the entry preamble prepended, answered
     /// from the fetcher's response URL. That URL is the base its own relative
-    /// imports resolve against and its `import.meta.url` — the `__Card__` its
-    /// preamble names. A load that failed, and an answer that is not a script,
-    /// complete the module with an error naming the URL the view asked for
-    /// and the reason, which rejects boot's `import` and so fails the boot
-    /// with that message.
+    /// imports resolve against and its `import.meta.url`. A load that failed,
+    /// and an answer that is not a script, complete the module with an error
+    /// naming the URL the view asked for and the reason, which rejects boot's
+    /// `import` and so fails the boot with that message.
     ///
-    /// Either order against boot works: completed first, the module is
-    /// registered and boot's `import` finds it in the realm's registry;
-    /// imported first, the request is pending and this is what resumes it.
+    /// **The entry is named here.** Before a script answer is completed, the
+    /// response URL — the fetcher's, so a redirect is already applied — is
+    /// handed to `bobcat:runtime`'s `__BobcatInitEntry`, which makes it
+    /// `__Card__`: this page's own container URL for the body, for every chunk
+    /// and stylesheet it names by `__Card__`, and for the base URL a
+    /// `new Worker` specifier resolves against. A chunk is never named: it
+    /// would overwrite `__Card__` with its own URL.
+    ///
+    /// Boot has run first: `bobcat:runtime` is one of its static imports, so
+    /// it is instantiated by the time this is called, and boot's `import` of
+    /// the entry is the pending request this completion resumes. The view's
+    /// entry task is queued behind `open_realm`, which runs boot, and
+    /// [`Self::run_main_thread_script`] and its sheet-mounting variant keep
+    /// the same order.
     pub(crate) fn complete_entry(
         &mut self,
         js_runtime: &mut ScriptRuntime,
@@ -1441,6 +1454,19 @@ await Promise.resolve().then(() => __FlushElementTree());
             Err(error) => Err(format!("loading the MTS entry {requested}: {error}")),
         }
         .map_err(|message| message.replace('\0', "\u{fffd}"));
+        // Without a checkpoint of its own: the completion below drains the
+        // queue for both, so naming the entry wakes no sibling realm between
+        // them.
+        if let Ok((url, _)) = &loaded {
+            self.engine
+                .call_module_export_before_operation(
+                    js_runtime,
+                    RUNTIME_MODULE_SPECIFIER,
+                    "__BobcatInitEntry",
+                    &[HostArgument::String(url)],
+                )
+                .map_err(booting)?;
+        }
         self.engine
             .complete_module(
                 js_runtime,

@@ -758,9 +758,10 @@ its resolved entry URL: core prepends named imports from both built-ins. The
 `bobcat:timers` for its effect. The runtime parses the view's `init_data` and `global_props`
 JSON in MTS; missing values become `{}` and malformed inputs fail boot. Boot
 creates its document, initializes MTS inputs, retains the host render argument,
-then awaits the entry, whose preamble names itself: it calls
-`__BobcatInitEntry(import.meta.url)`, so `__Card__` is the entry's response URL
-before its body runs, and a `new Worker` specifier resolves against that URL,
+then awaits the entry. The task that completes the entry calls
+`__BobcatInitEntry` with the entry's response URL before it completes the
+module, so `__Card__` is that URL before the entry's body runs, and a
+`new Worker` specifier resolves against it,
 which the realm hands `createWorker(url, name, baseUrl)` — the host keeps no base
 URL of its own. Boot then processes that argument and posts
 the result plus host props and SystemInfo as the first BTS Worker message,

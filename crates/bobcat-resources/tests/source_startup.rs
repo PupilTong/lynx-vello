@@ -75,6 +75,47 @@ fn boot(
     }
 }
 
+/// Pumps `view` and ticks `painter` until the pixel at the centre of its
+/// 32 × 24 box is `color`, for at most 20 seconds.
+///
+/// A listed author sheet is mounted by a task of the view when the fetcher's
+/// answer arrives, and boot waits for no sheet, so `ScriptFinished` does not
+/// mean a sheet has mounted. The real fetcher answers on its own pool, so its
+/// answer can arrive after the first flush; a test that sees a sheet's paint
+/// polls for it rather than capturing once after boot.
+fn await_sheet_pixel(
+    view: &mut LynxView<ViewResources>,
+    painter: &mut Painter,
+    receiver: &flume::Receiver<()>,
+    color: [u8; 4],
+) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        for event in view.pump() {
+            assert!(
+                !matches!(
+                    event,
+                    EngineEvent::StartupFailed(_) | EngineEvent::ScriptRunError(_)
+                ),
+                "{event:?}"
+            );
+        }
+        painter.tick(true).unwrap();
+        let screenshot = painter.capture().unwrap();
+        let offset = (12 * screenshot.size.width as usize + 16) * 4;
+        if screenshot.pixels[offset..offset + 4] == color {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the pixel is {:?}, not {color:?}: a listed sheet mounts when its answer \
+             arrives, and it never did",
+            &screenshot.pixels[offset..offset + 4]
+        );
+        let _ = receiver.recv_timeout(Duration::from_millis(5));
+    }
+}
+
 /// A text sheet and a pre-parsed sheet both mount through the real resource
 /// system.
 ///
@@ -133,9 +174,7 @@ async fn text_and_preparsed_sheets_both_mount() {
     )
     .await;
     boot(&mut view, &receiver).unwrap();
-    let screenshot = painter.capture().unwrap();
-    let offset = (12 * screenshot.size.width as usize + 16) * 4;
-    assert_eq!(&screenshot.pixels[offset..offset + 4], &[0, 0, 255, 255]);
+    await_sheet_pixel(&mut view, &mut painter, &receiver, [0, 0, 255, 255]);
 }
 
 /// A decoding failure keeps the resolved URL, which is what a card's author
@@ -293,9 +332,7 @@ async fn a_base_named_after_construction_resolves_a_relative_source() {
     )
     .await;
     boot(&mut view, &receiver).unwrap();
-    let screenshot = painter.capture().unwrap();
-    let offset = (12 * screenshot.size.width as usize + 16) * 4;
-    assert_eq!(&screenshot.pixels[offset..offset + 4], &[0, 0, 255, 255]);
+    await_sheet_pixel(&mut view, &mut painter, &receiver, [0, 0, 255, 255]);
 }
 
 #[tokio::test]

@@ -141,7 +141,14 @@ fn author_css_from_the_style_info_section_renders() {
 }
 
 /// Raw XML bypasses `StyleInfo`: its UTF-8 `<style>` body must still mount
-/// before the main-thread program creates the classed element.
+/// and restyle the classed element the main-thread program creates.
+///
+/// The `<style>` body is a text stylesheet, which the resource system answers
+/// on its own pool, and the view mounts a listed sheet when its answer
+/// arrives: boot waits for no sheet, so the frame the first `screenshot` sees
+/// can predate it. The test keeps the console open and asks for screenshots
+/// until one shows the styled box, reading each file once the CLI has said it
+/// saved it.
 #[test]
 fn author_css_from_raw_lynx_xml_renders() {
     let gpu = flashbulb::headless("author_css_from_raw_lynx_xml_renders");
@@ -154,7 +161,6 @@ fn author_css_from_raw_lynx_xml_renders() {
     ));
     std::fs::create_dir_all(&root).unwrap();
     let xml_path = root.join("styled.lynx.xml");
-    let screenshot_path = root.join("xml-styled.png");
     std::fs::write(&xml_path, styled_lynx_xml()).unwrap();
     let input = url::Url::from_file_path(&xml_path)
         .expect("absolute temporary path")
@@ -167,32 +173,81 @@ fn author_css_from_raw_lynx_xml_renders() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("start interactive bobcat");
-    write!(
-        child.stdin.take().expect("piped stdin"),
-        "screenshot {}\nquit\n",
-        screenshot_path.display()
-    )
-    .unwrap();
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    let stdout = child.stdout.take().expect("piped stdout");
+    let (lines, saved) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        for line in std::io::BufRead::lines(std::io::BufReader::new(stdout)) {
+            let Ok(line) = line else { break };
+            if lines.send(line).is_err() {
+                break;
+            }
+        }
+    });
+
+    // The deadline covers boot as well as the sheet: a `screenshot` is held
+    // until the script finished, and a test process's first font-system
+    // start can take a large part of it.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_mins(1);
+    let mut red = 0;
+    let mut unsaved = None;
+    'attempts: for attempt in 0.. {
+        let screenshot_path = root.join(format!("xml-styled-{attempt}.png"));
+        let announcement = format!("Saved screenshot to {}.", screenshot_path.display());
+        // A process that already exited has closed its stdin; the missing
+        // announcement below reports it, with its stderr.
+        let _ = writeln!(stdin, "screenshot {}", screenshot_path.display())
+            .and_then(|()| stdin.flush());
+        loop {
+            match saved.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+            {
+                Ok(line) if line.contains(&announcement) => break,
+                Ok(_) => {}
+                Err(error) => {
+                    unsaved = Some(format!("bobcat never said `{announcement}`: {error}"));
+                    break 'attempts;
+                }
+            }
+        }
+        let image = flashbulb::Image::read_png(&screenshot_path).unwrap();
+        assert_eq!((image.width(), image.height()), (32, 24));
+        red = image
+            .pixels()
+            .chunks_exact(4)
+            .filter(|pixel| *pixel == [255, 0, 0, 255])
+            .count();
+        if red == 16 * 12 || std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let _ = writeln!(stdin, "quit");
+    drop(stdin);
+    if unsaved.is_some() {
+        let _ = child.kill();
+    }
     let output = child
         .wait_with_output()
         .expect("wait for interactive bobcat");
+    reader
+        .join()
+        .expect("the stdout reader ends with the process");
+    if let Some(unsaved) = unsaved {
+        panic!(
+            "{unsaved}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     assert!(
         output.status.success(),
-        "interactive bobcat failed:\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
+        "interactive bobcat failed:\nstderr:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let image = flashbulb::Image::read_png(&screenshot_path).unwrap();
-    assert_eq!((image.width(), image.height()), (32, 24));
-    let red = image
-        .pixels()
-        .chunks_exact(4)
-        .filter(|pixel| *pixel == [255, 0, 0, 255])
-        .count();
     assert_eq!(
         red,
         16 * 12,
-        "the 16x12 box sized and coloured by raw XML CSS must be painted"
+        "the 16x12 box sized and coloured by raw XML CSS must be painted; the \
+         sheet mounts when its answer arrives, and it never did"
     );
 
     std::fs::remove_dir_all(root).unwrap();
