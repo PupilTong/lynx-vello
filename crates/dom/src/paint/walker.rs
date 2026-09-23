@@ -1079,10 +1079,12 @@ fn open_scope<T>(
         sink.push_backdrop(entry, root_start..end, frame.spaces());
     }
 
-    // An exported fade roots at every reading, 1 included: the range a
-    // descendant's backdrop fixes here is composed at all of them.
-    let fades = alpha_animation
-        .is_some_and(|slot| frame.animations()[slot as usize].curve.opacity.is_some());
+    // A current `opacity` animation roots at every reading, 1 included,
+    // exported or not: the range a descendant's backdrop fixes here is
+    // composed at all of them.
+    let fades = document
+        .get(layer.node)
+        .is_some_and(crate::tree::node::Node::animates_opacity);
     scratch.scopes.push(Scope {
         layer: layer_index,
         base,
@@ -1154,9 +1156,12 @@ fn nearest_backdrop_root(scratch: &Scratch) -> u32 {
 }
 
 /// Whether this element is a Backdrop Root (filter-effects-2 §2.2) by its
-/// committed style. An element exporting an opacity curve is one as well,
-/// which [`open_scope`] adds: Web Animations makes a running `opacity`
-/// animation act as `will-change: opacity`.
+/// committed style. An element with a current `opacity` animation is one as
+/// well, which [`open_scope`] adds: web-animations-1 makes it act as
+/// `will-change: opacity`, and the spec's list (`filter`, `opacity < 1`,
+/// `mask`, `clip-path`, `backdrop-filter`, `mix-blend-mode`, and
+/// `will-change` naming one of them) has no `transform`, so a transform
+/// animation adds nothing here.
 ///
 /// The spec's list, and the reason this predicate exists at all rather than
 /// reusing [`crate::visual::stacking::needs_group_rendering`]: that one also
@@ -1164,13 +1169,14 @@ fn nearest_backdrop_root(scratch: &Scratch) -> u32 {
 /// list does not contain. `isolation` is not in the fork's author grammar
 /// either, so that exclusion is unobservable here.
 ///
-/// The one **observable** omission is `will-change`: a
+/// The one **observable** omission is an authored `will-change`: a
 /// `will-change: opacity` (or `filter`, `backdrop-filter`, `mask`,
 /// `clip-path`) element is a Backdrop Root per the spec, and this engine
 /// opens no group layer for one, so a `backdrop-filter` element inside such a
 /// wrapper sees through it to the content behind. That is a ruled deviation —
 /// the decision is not to open a layer per `will-change` element — recorded
-/// in `docs/tracking/deviations.md`.
+/// in `docs/tracking/deviations.md`. The `will-change: opacity` an `opacity`
+/// animation implies is not omitted: the build forces that element's group.
 fn is_backdrop_root(style: &stylo::properties::ComputedValues) -> bool {
     use stylo::computed_values::mix_blend_mode::T as MixBlendMode;
     use stylo::values::computed::basic_shape::ClipPath;
@@ -2078,9 +2084,11 @@ fn into_group(
             });
         return match carry(windows, frame, bounds, content, group) {
             Admitted::Region(carried) => holding.grown(spill).cut(carried),
-            // Only a curve on the group's side lacks a pullback, and an
-            // element with a transform contains its positioned descendants:
-            // no group content sits outside a curve its group rides.
+            // Unreachable: only a curve on the group's side lacks a
+            // pullback, and an element with a transform curve contains its
+            // positioned descendants whatever its committed transform (the
+            // `animates_transform` bit a curve implies), so no group content
+            // sits outside a curve its group rides.
             Admitted::Everything | Admitted::Nothing => {
                 debug_assert!(false, "group content escapes a curve its group rides");
                 Some(bounds)
@@ -3343,12 +3351,12 @@ mod tests {
     /// How many fragments a `backdrop-filter` box's range holds, on a page
     /// whose wrapper carries `wrapper`.
     fn fragments_behind(wrapper: &str) -> (usize, u32) {
-        fragments_behind_in(BACKDROP_PAGE, wrapper, false)
+        fragments_behind_in(BACKDROP_PAGE, wrapper, None)
     }
 
     /// [`fragments_behind`] over `css`, committed a quarter second into the
-    /// timeline when `animate`.
-    fn fragments_behind_in(css: &str, wrapper: &str, animate: bool) -> (usize, u32) {
+    /// timeline when `fade_exports` says whether the wrapper's fade exports.
+    fn fragments_behind_in(css: &str, wrapper: &str, fade_exports: Option<bool>) -> (usize, u32) {
         let mut doc = Doc::with_css(css);
         let root = doc.root;
         doc.el(root, "view.mark");
@@ -3356,14 +3364,15 @@ mod tests {
         doc.set_inline(wrap, wrapper);
         doc.el(wrap, "view.mark");
         doc.el(wrap, "view.box");
-        if animate {
+        if let Some(exports) = fade_exports {
             run_animations(&mut doc);
             let frame = doc.dom.build_paint_order();
-            assert!(
+            assert_eq!(
                 frame
                     .animations()
                     .iter()
                     .any(|slot| slot.curve.opacity.is_some()),
+                exports,
                 "the wrapper's fade exports",
             );
         }
@@ -3414,20 +3423,33 @@ mod tests {
         }
     }
 
-    /// A wrapper exporting an opacity curve is a Backdrop Root at every
-    /// reading, 1 included: the range a commit fixes must hold at every
-    /// instant the curve is composed at. Web Animations makes a running
-    /// `opacity` animation act as `will-change: opacity`, which
-    /// filter-effects-2 lists.
+    /// A wrapper with a current `opacity` animation is a Backdrop Root at
+    /// every reading, 1 included, exported or not: the range a commit fixes
+    /// must hold at every instant the curve is composed at, and the handover
+    /// to main-thread ticks must not move it. Web Animations makes the
+    /// animation act as `will-change: opacity`, which filter-effects-2 lists.
     #[test]
-    fn an_exported_fade_roots_a_backdrop_while_it_reads_1() {
+    fn a_fade_roots_a_backdrop_while_it_reads_1() {
         let css = format!(
             "{BACKDROP_PAGE}
-             @keyframes fade {{ 0%, 50% {{ opacity: 1; }} 100% {{ opacity: 0.3; }} }}"
+             @keyframes fade {{ 0%, 50% {{ opacity: 1; }} 100% {{ opacity: 0.3; }} }}
+             @keyframes recolor {{ from {{ background-color: red; }}
+                                   to {{ background-color: blue; }} }}"
         );
-        let (count, start) = fragments_behind_in(&css, "animation: fade 1s linear infinite", true);
-        assert_eq!(count, 1, "only what the wrapper painted itself");
-        assert!(start > 0, "and not from the frame's start");
+        for (animation, exports) in [
+            ("animation: fade 1s linear infinite", true),
+            (
+                "animation: fade 1s linear infinite, recolor 1s linear infinite",
+                false,
+            ),
+        ] {
+            let (count, start) = fragments_behind_in(&css, animation, Some(exports));
+            assert_eq!(
+                count, 1,
+                "{animation}: only what the wrapper painted itself"
+            );
+            assert!(start > 0, "{animation}: and not from the frame's start");
+        }
     }
 
     /// An element with both properties records its blur bracket first, so the

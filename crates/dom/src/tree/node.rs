@@ -28,6 +28,11 @@ use crate::tree::shadow::{ShadowLinks, ShadowRootData, ShadowRootMode};
 pub(crate) const SNAPSHOT_PRESENT: u8 = 1 << 0;
 pub(crate) const SNAPSHOT_HANDLED: u8 = 1 << 1;
 
+/// [`StylingData::animates`] bits: a current or in-effect animation or
+/// transition on the element names `opacity`, or `transform`.
+pub(crate) const ANIMATES_OPACITY: u8 = 1 << 0;
+pub(crate) const ANIMATES_TRANSFORM: u8 = 1 << 1;
+
 struct DocumentNodeData {
     lock: StdArc<SharedRwLock>,
     url_data: UrlExtraData,
@@ -54,6 +59,12 @@ pub(crate) struct StylingData {
     /// matching, so it has to answer without touching the document's animation
     /// map.
     pub(crate) may_have_animations: AtomicBool,
+    /// [`ANIMATES_OPACITY`] and [`ANIMATES_TRANSFORM`]. Web Animations makes
+    /// such an element behave as if `will-change` named the property, so the
+    /// stacking, group, Backdrop Root and containing-block rules read these
+    /// rather than the document's animation map. The animation driver owns
+    /// them.
+    pub(crate) animates: AtomicU8,
     pub(crate) snapshot_flags: AtomicU8,
     pub(crate) children_to_process: AtomicIsize,
 }
@@ -65,6 +76,7 @@ impl Default for StylingData {
             dirty_descendants: AtomicBool::new(false),
             animation_dirty_descendants: AtomicBool::new(false),
             may_have_animations: AtomicBool::new(false),
+            animates: AtomicU8::new(0),
             snapshot_flags: AtomicU8::new(0),
             children_to_process: AtomicIsize::new(0),
         }
@@ -801,6 +813,24 @@ impl<T> Node<T> {
         self.styling_data()
             .may_have_animations
             .store(may, Ordering::Relaxed);
+    }
+
+    /// Whether a current or in-effect animation or transition names
+    /// `opacity` (see [`StylingData::animates`]).
+    pub(crate) fn animates_opacity(&self) -> bool {
+        self.styling_data().animates.load(Ordering::Relaxed) & ANIMATES_OPACITY != 0
+    }
+
+    /// Whether a current or in-effect animation or transition names
+    /// `transform` (see [`StylingData::animates`]).
+    pub(crate) fn animates_transform(&self) -> bool {
+        self.styling_data().animates.load(Ordering::Relaxed) & ANIMATES_TRANSFORM != 0
+    }
+
+    /// Replaces the [`StylingData::animates`] bits, answering the previous
+    /// ones.
+    pub(crate) fn replace_animates(&self, bits: u8) -> u8 {
+        self.styling_data().animates.swap(bits, Ordering::Relaxed)
     }
 
     pub(crate) fn snapshot_present(&self) -> bool {

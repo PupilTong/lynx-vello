@@ -811,9 +811,11 @@ impl<T> Document<T> {
             let Some(node) = self.tree.get(current) else {
                 continue;
             };
-            // The node survives an unlink, so its animation bit has to be
-            // cleared with its animations rather than left to the next flush.
+            // The node survives an unlink, so its animation bits have to be
+            // cleared with its animations rather than left to the next flush,
+            // which no longer visits it.
             node.set_may_have_animations(false);
+            node.replace_animates(0);
             subtree.push(current);
             stack.extend(
                 node.child_slots()

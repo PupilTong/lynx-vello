@@ -105,6 +105,9 @@ pub(crate) fn establishes_fixed_containing_block<T>(
     // element it applies to is a document root element.
     let filters = !effects.filter.0.is_empty() || !effects.backdrop_filter.0.is_empty();
     !box_style.transform.0.is_empty()
+        // web-animations-1: a current or in-effect transform animation acts
+        // as `will-change: transform`, whatever the committed value.
+        || node.animates_transform()
         || !matches!(
             box_style.perspective,
             stylo::values::generics::box_::Perspective::None
