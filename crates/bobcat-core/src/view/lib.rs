@@ -1260,11 +1260,13 @@ pub(crate) struct ViewAttachment {
 /// The answers to the requests [`LynxGroup::create_lynx_view`] made on the
 /// embedder's thread.
 ///
-/// Each is read by a task of its own on the view's owner, as it arrives: a
-/// sheet is mounted on the live document when its answer comes, and the entry
-/// completes the module boot imports by the entry's URL. Nothing orders the sheets
-/// against one another or against the entry, so the cascade order between
-/// several sheets is the order the fetcher answered them in.
+/// The entry is read by a task of the view's owner when its answer arrives,
+/// which completes the module boot imports by the entry's URL. The sheets go
+/// to the realm's document slot, and the first `__FlushElementTree` waits
+/// for each and mounts it, in the order the view listed them, before the
+/// document is styled: order of *use* rather than of completion, so the
+/// cascade order between several sheets is the listed order whatever order
+/// the fetcher answered them in.
 pub(crate) struct StartupSources {
     /// One per author stylesheet, in the order the view listed them.
     pub(crate) sheets: Vec<StartupSource>,
@@ -1275,9 +1277,9 @@ pub(crate) struct StartupSources {
 /// request [`LynxGroup::create_lynx_view`] already made for it.
 ///
 /// The URL travels beside the answer because it is what a failure is named
-/// by: a sheet whose load failed ends the view with that sheet's error, and
-/// an entry whose load failed rejects boot's `import` with a message naming
-/// the URL.
+/// by: a sheet whose load failed makes `__FlushElementTree` throw a message
+/// naming it, which fails boot's own flush, and an entry whose load failed
+/// rejects boot's `import` with a message naming the URL.
 pub(crate) struct StartupSource {
     pub(crate) url: String,
     pub(crate) answer: SourceAnswer,

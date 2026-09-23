@@ -465,12 +465,12 @@ async fn a_bare_entry_name_fails_the_boot() {
 /// All three startup sources — two sheets and the entry — are requested
 /// inside `create_lynx_view`, so the host has resolved all three before the
 /// view's own boot has read any of them, and every one of them fails here.
-/// Each is read by a task of its own, as its answer arrives; the first
-/// failure to reach the realm ends the view, and the rest are not reported.
-/// A sheet's failure is the fetcher's own `Resource` error — the view, not a
-/// script, is what failed to load it — and `first.css` is the one reported:
-/// both sheets were answered inside the construction, and their tasks enter
-/// the realm in the order they were started, which is the listed order.
+/// What stops at the first failure is the *reading*. The entry is read first:
+/// boot imports it before it renders, and the listed sheets are read only by
+/// boot's first `__FlushElementTree`, which a boot whose entry failed never
+/// reaches. So one `StartupFailed` is reported — a `Script` error, because
+/// what the embedder is told is the exception boot's `import` threw, naming
+/// the entry and the reason — and the sheets' answers are dropped unread.
 #[tokio::test]
 async fn a_resolution_failure_is_one_event_whatever_else_failed() {
     let fetcher = Rc::new(FetcherDouble::new(Vec::new()).resolving_to("not a URL"));
@@ -493,12 +493,13 @@ async fn a_resolution_failure_is_one_event_whatever_else_failed() {
         3,
         "creation hands over both sheets and the entry, before any turn"
     );
-    let error = wait_for_script(&mut view).expect_err("the first sheet cannot be resolved");
-    let bobcat_core::LynxViewError::Resource(resource) = &error else {
-        panic!("a sheet that cannot be loaded is a resource failure, got {error}");
-    };
-    assert_eq!(resource.locator.as_deref(), Some("first.css"), "{error}");
+    let error = wait_for_script(&mut view).expect_err("the entry cannot be resolved");
+    assert!(
+        matches!(error, bobcat_core::LynxViewError::Script(_)),
+        "{error}"
+    );
     let message = error.to_string();
+    assert!(message.contains("app:///main.js"), "{message}");
     assert!(message.contains("relative URL without a base"), "{message}");
     assert_eq!(
         fetcher.resolve_count(),

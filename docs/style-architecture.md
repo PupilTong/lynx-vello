@@ -169,11 +169,12 @@ group's `bobcat-main` and returns at once. The task serving that view there
 validates its fonts, fetches its sheets and then its entry, and opens the
 view's realm on the group's QuickJS runtime without waiting for any of them.
 The boot module's first statement constructs the realm's `Document`, which is
-what creates the page on the group's style pool; each stylesheet is mounted on
-it by a task of the view when its answer arrives, so several sheets cascade in
-arrival order. Boot then awaits the import of the entry by its URL before calling
-a present `globalThis.renderPage` or the
-`__RenderPage` fallback on `lynx.getEngine()`, then flushes this composition.
+what creates the page on the group's style pool. Boot then awaits the import of
+the entry by its URL before calling a present `globalThis.renderPage` or the
+`__RenderPage` fallback on `lynx.getEngine()`, then flushes this composition;
+that first flush waits for every listed stylesheet and mounts them in listed
+order before the document is styled, so several sheets cascade in listed order
+and the first frame carries them.
 What that covers, and what it does not:
 
 **Landed**
@@ -223,9 +224,9 @@ What that covers, and what it does not:
 
 - `.web.bundle` `StyleInfo` ingestion: a host lowers decoded CSS into
   `bobcat_core::style::PreparsedStyleSheet` and names its URL among
-  `ViewSources::style_sheets`; a task of the view mounts each as author-origin
-  rules built directly when its answer arrives, before or after the entry
-  module loads — no stylesheet text, no re-tokenizing. The
+  `ViewSources::style_sheets`; boot's first flush mounts each as author-origin
+  rules built directly, in listed order, before the document is styled — no
+  stylesheet text, no re-tokenizing. The
   CSS parser still owns one selector-list parse per rule and one value parse
   per declaration, because the wire format keeps attribute selectors and
   functional pseudo-classes as text and stylo builds specified values only

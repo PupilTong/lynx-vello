@@ -75,58 +75,17 @@ fn boot(
     }
 }
 
-/// Pumps `view` and ticks `painter` until the pixel at the centre of its
-/// 32 × 24 box is `color`, for at most 20 seconds.
-///
-/// A listed author sheet is mounted by a task of the view when the fetcher's
-/// answer arrives, and boot waits for no sheet, so `ScriptFinished` does not
-/// mean a sheet has mounted. The real fetcher answers on its own pool, so its
-/// answer can arrive after the first flush; a test that sees a sheet's paint
-/// polls for it rather than capturing once after boot.
-fn await_sheet_pixel(
-    view: &mut LynxView<ViewResources>,
-    painter: &mut Painter,
-    receiver: &flume::Receiver<()>,
-    color: [u8; 4],
-) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(20);
-    loop {
-        for event in view.pump() {
-            assert!(
-                !matches!(
-                    event,
-                    EngineEvent::StartupFailed(_) | EngineEvent::ScriptRunError(_)
-                ),
-                "{event:?}"
-            );
-        }
-        painter.tick(true).unwrap();
-        let screenshot = painter.capture().unwrap();
-        let offset = (12 * screenshot.size.width as usize + 16) * 4;
-        if screenshot.pixels[offset..offset + 4] == color {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the pixel is {:?}, not {color:?}: a listed sheet mounts when its answer \
-             arrives, and it never did",
-            &screenshot.pixels[offset..offset + 4]
-        );
-        let _ = receiver.recv_timeout(Duration::from_millis(5));
-    }
-}
-
 /// A text sheet and a pre-parsed sheet both mount through the real resource
-/// system.
+/// system, in the order the view listed them.
 ///
-/// Each mounts when its answer arrives, so the cascade order between them is
-/// arrival order, which this test does not control: the two are written not
-/// to tie. `first.css` sizes the box and paints it red; `second.css` paints
-/// it blue with a more specific selector, so the pixel is blue whichever
-/// arrived last, and it is a blue box of `first.css`'s size only if both
-/// mounted.
+/// Boot's first `__FlushElementTree` mounts every listed sheet in listed
+/// order before the document is styled, whatever order the fetcher answered
+/// them in, so `ScriptFinished` means both are mounted. `first.css` sizes the
+/// box and paints it red; `second.css` paints it blue with a selector of the
+/// same specificity, so the pixel is blue only if `second.css`, listed later,
+/// won the tie, and it is a box of `first.css`'s size only if both mounted.
 #[tokio::test]
-async fn text_and_preparsed_sheets_both_mount() {
+async fn text_and_preparsed_sheets_keep_cascade_order() {
     let (group, resources, receiver) = setup().await;
     resources
         .register(
@@ -154,7 +113,7 @@ async fn text_and_preparsed_sheets_both_mount() {
             "app:///second.css",
             PreparsedStyleSheet {
                 rules: vec![PreparsedRule::Style {
-                    selectors: "page .box".into(),
+                    selectors: ".box".into(),
                     declarations: vec![PreparsedDeclaration {
                         property: "background-color".into(),
                         value: "blue".into(),
@@ -174,19 +133,18 @@ async fn text_and_preparsed_sheets_both_mount() {
     )
     .await;
     boot(&mut view, &receiver).unwrap();
-    await_sheet_pixel(&mut view, &mut painter, &receiver, [0, 0, 255, 255]);
+    let screenshot = painter.capture().unwrap();
+    let offset = (12 * screenshot.size.width as usize + 16) * 4;
+    assert_eq!(&screenshot.pixels[offset..offset + 4], &[0, 0, 255, 255]);
 }
 
 /// A decoding failure keeps the resolved URL, which is what a card's author
 /// needs to find the file.
 ///
-/// The entry is read by the boot module's `import`, so its failure is the
-/// exception that import threw. A stylesheet is mounted by a task of the view
-/// when its answer arrives, so its failure is the fetcher's own
-/// `InvalidStyleSheetEncoding` — reported as `StartupFailed` if it arrives
-/// before boot finished, and as a `ScriptRunError` naming the sheet if it
-/// arrives after, which with a valid empty entry beside it this test does not
-/// control. Every one of them names the resolved URL.
+/// The entry is read by the boot module's `import`, and a listed stylesheet by
+/// boot's first `__FlushElementTree`, so either failure reaches the embedder
+/// as the exception boot threw rather than as the fetcher's own error. What
+/// has to survive that is the resolved URL.
 #[tokio::test]
 async fn source_utf8_errors_keep_the_resolved_url() {
     for stylesheet in [false, true] {
@@ -210,38 +168,11 @@ async fn source_utf8_errors_keep_the_resolved_url() {
             ViewSources::new("app:///invalid.bin", SCREEN)
         };
         let (mut view, _painter) = view(&group, &resources, sources).await;
-        let message = if stylesheet {
-            first_failure(&mut view, &receiver)
-        } else {
-            let error = boot(&mut view, &receiver).unwrap_err();
-            assert!(matches!(error, LynxViewError::Script(_)), "{error}");
-            error.to_string()
-        };
+        let error = boot(&mut view, &receiver).unwrap_err();
+        assert!(matches!(error, LynxViewError::Script(_)), "{error}");
+        let message = error.to_string();
         assert!(message.contains("app:///invalid.bin"), "{message}");
         assert!(view.pump().is_empty(), "failure arrives once");
-    }
-}
-
-/// The first failure that ends `view`, whether boot had finished or not; a
-/// startup failure must be the fetcher's own encoding error.
-fn first_failure(view: &mut LynxView<ViewResources>, receiver: &flume::Receiver<()>) -> String {
-    loop {
-        receiver
-            .recv_timeout(Duration::from_secs(20))
-            .expect("startup wakes the host");
-        for event in view.pump() {
-            match event {
-                EngineEvent::StartupFailed(error) => {
-                    assert!(
-                        matches!(error, LynxViewError::InvalidStyleSheetEncoding { .. }),
-                        "{error}"
-                    );
-                    return error.to_string();
-                }
-                EngineEvent::ScriptRunError(error) => return error.to_string(),
-                _ => {}
-            }
-        }
     }
 }
 
@@ -332,7 +263,9 @@ async fn a_base_named_after_construction_resolves_a_relative_source() {
     )
     .await;
     boot(&mut view, &receiver).unwrap();
-    await_sheet_pixel(&mut view, &mut painter, &receiver, [0, 0, 255, 255]);
+    let screenshot = painter.capture().unwrap();
+    let offset = (12 * screenshot.size.width as usize + 16) * 4;
+    assert_eq!(&screenshot.pixels[offset..offset + 4], &[0, 0, 255, 255]);
 }
 
 #[tokio::test]

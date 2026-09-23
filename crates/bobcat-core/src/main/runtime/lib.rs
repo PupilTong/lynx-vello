@@ -47,10 +47,10 @@ use crate::esm::{
 };
 use crate::link::{InputEventPayload, ViewNotice, ViewOutbox};
 use crate::main::tree::{ImageOutcomes, LynxDocument, PageConfig, new_document};
-use crate::resource::{LoadedSource, mismatched_source};
+use crate::resource::LoadedSource;
 use crate::script::ScriptError;
 use crate::timers::{TimerState, install_timer_members, run_due_timers};
-use crate::view::{LynxViewError, ScreenMetrics, Viewport};
+use crate::view::{LynxViewError, ScreenMetrics, StartupSource, Viewport};
 
 const BOOT_MODULE_SPECIFIER: &str = "bobcat:boot";
 const ELEMENT_MODULE_SPECIFIER: &str = "bobcat:element";
@@ -268,11 +268,17 @@ impl DocumentIngredients {
 /// [`reload`](crate::LynxView::reload) reach the realm through
 /// `ToMain::PageUpdate` instead, and never touch any of this. The four strings
 /// below `background_entry` become one-shot host members the realm alone reads,
-/// `entry` is written into the boot module's source, and `background_entry` is
-/// spliced into the BTS Worker's boot script by `WorkerFactory::install`. Neither the author sheets
-/// nor the entry's source are here: each answer is a task of the view's owner, which mounts a sheet
-/// on the live document or completes the module boot imports the entry as.
+/// `entry` is written into the boot module's source, `background_entry` is
+/// spliced into the BTS Worker's boot script by `WorkerFactory::install`, and
+/// `sheets` go to the document slot, which the first `__FlushElementTree`
+/// settles them out of. The entry's source is not here: its answer is a task
+/// of the view's owner, which completes the module boot imports the entry as.
 pub(crate) struct RealmStartup {
+    /// The answers to the author stylesheet requests `create_lynx_view` made,
+    /// in the order the view listed them, which is their cascade order. The
+    /// first `__FlushElementTree` waits for each and mounts it before the
+    /// document enters the style pipeline; nothing waits for them earlier.
+    pub(crate) sheets: Vec<StartupSource>,
     /// The screen the realm's `SystemInfo` reports, as the embedder named it
     /// in [`ViewSources::screen`](crate::ViewSources::screen).
     pub(crate) screen: ScreenMetrics,
@@ -302,6 +308,7 @@ pub(crate) struct RealmStartup {
 impl Default for RealmStartup {
     fn default() -> Self {
         Self {
+            sheets: Vec::new(),
             screen: ScreenMetrics {
                 pixel_ratio: 1.0,
                 pixel_width: 0.0,
@@ -324,9 +331,10 @@ impl Default for RealmStartup {
 ///
 /// Filling it is the realm's doing: `createDocument` builds the document out
 /// of the configuration the boot module hands it and the Rust-side ingredients
-/// below, and the view's author sheets are mounted on it as their answers
-/// arrive. Nothing empties it again — the slot drops with the view's task,
-/// after the realm that named the document has been freed.
+/// below, and the first `__FlushElementTree` mounts the view's author sheets
+/// on it, in listed order, before the document is styled for the first time.
+/// Nothing empties it again — the slot drops with the view's task, after the
+/// realm that named the document has been freed.
 ///
 /// It is also where a view learns its painter's metrics, and so where the
 /// binding is decided: the document is created at the create-time viewport
@@ -335,6 +343,15 @@ impl Default for RealmStartup {
 struct DocumentSlot {
     /// What a `createDocument` builds from, taken by the first one that runs.
     ingredients: Option<DocumentIngredients>,
+    /// The answers to this view's author stylesheet requests that have not
+    /// been mounted yet, in the order the view listed them.
+    ///
+    /// Order of *use* rather than of completion: [`Self::flush`] mounts them
+    /// one at a time and in this order, whatever order the fetcher answered
+    /// them in, so the cascade order between listed sheets is the listed
+    /// order. Non-empty is what keeps [`Self::commit_if_dirty`] from running
+    /// the pipeline, so no frame is committed without them.
+    sheets: Vec<StartupSource>,
     document: Option<LynxDocument>,
     /// The device metrics an attached painter names, `None` until one binds.
     ///
@@ -381,11 +398,13 @@ impl DocumentSlot {
     /// through.
     fn new(
         ingredients: DocumentIngredients,
+        sheets: Vec<StartupSource>,
         metrics: watch::Receiver<Option<Viewport>>,
         outbox: ViewOutbox,
     ) -> Rc<RefCell<Self>> {
         Rc::new(RefCell::new(Self {
             ingredients: Some(ingredients),
+            sheets,
             document: None,
             metrics,
             bound: false,
@@ -415,9 +434,9 @@ impl DocumentSlot {
     /// module's `new Document(config)`, which fails the boot and ends the view,
     /// so nothing asks again.
     ///
-    /// It never waits. The view's author sheets are not mounted here: each is
-    /// a task of the view's owner, which mounts it on this document when its
-    /// answer arrives.
+    /// It never waits. The view's author sheets are not mounted here: the
+    /// first [`Self::flush`] mounts them, which is the first point at which
+    /// the document is styled.
     ///
     /// The construction is caught, because a panic that crosses the bridge is
     /// erased into "the host function panicked" and this is the one host
@@ -487,18 +506,36 @@ impl DocumentSlot {
     /// Runs the whole pipeline and publishes the committed frame — the
     /// native half of `__FlushElementTree`.
     ///
-    /// Before any painter has bound this **parks the job it runs in** on the
-    /// metrics watch, exactly as `adoptStyleSheet` parks on its response: the
-    /// engine thread's tasks go on running, no other job does, and the view's
-    /// own token is the biased first arm so a release ends the wait. The
-    /// frame committed before the wait is held rather than published, because
-    /// a painter composes at its own size and cannot tell that the frame it
-    /// adopted predates the metrics it named. Waking with different metrics
-    /// discards it and commits again, which is the resize path.
+    /// Two waits can come first, and each **parks the job it runs in**,
+    /// exactly as `adoptStyleSheet` parks on its response: the engine
+    /// thread's tasks go on running, no other job does, and the view's own
+    /// token is the biased first arm so a release ends the wait.
+    ///
+    /// The first is the view's listed author sheets, which the first flush
+    /// settles before anything is styled: one wait per sheet whose answer has
+    /// not arrived, in listed order, each mounted as it is read. A sheet that
+    /// failed to load, or that the fetcher answered with something else, is
+    /// an error naming its URL, which `__FlushElementTree` throws — boot's own
+    /// flush fails the boot with it. A frame is never committed without the
+    /// sheets, because a frame styled without them would be published and
+    /// then restyled.
+    ///
+    /// The second is the binding. Before any painter has bound, the frame
+    /// committed here is held rather than published, because a painter
+    /// composes at its own size and cannot tell that the frame it adopted
+    /// predates the metrics it named, and the job parks on the metrics watch.
+    /// Waking with different metrics discards the frame and commits again,
+    /// which is the resize path. The sheets come first, so their IO and the
+    /// painter's construction overlap and the frame held for the binding
+    /// already carries them.
     ///
     /// Only the first binding is waited for. A painter that detaches leaves
     /// the last metrics behind, so every flush after it publishes at once.
     fn flush(&mut self, thread: &crate::jobs::JsThreadHandle) -> Result<(), String> {
+        // The sheets first, then the metrics: a painter that binds while a
+        // sheet is still in flight is adopted before the commit below, which
+        // is then already at its size rather than held and recomputed.
+        self.settle_sheets(thread)?;
         self.adopt_metrics();
         let frame = self.document_mut().commit();
         if self.bound {
@@ -536,15 +573,42 @@ impl DocumentSlot {
         Ok(())
     }
 
+    /// Mounts every listed author sheet not mounted yet, in listed order,
+    /// waiting inside the job for each answer that has not arrived.
+    ///
+    /// A sheet is taken off the front of the list before it is read, so a
+    /// failure consumes that sheet alone: the error is thrown to the caller
+    /// of `__FlushElementTree`, and a later flush goes on with the sheets
+    /// behind it.
+    fn settle_sheets(&mut self, thread: &crate::jobs::JsThreadHandle) -> Result<(), String> {
+        if self.sheets.is_empty() {
+            return Ok(());
+        }
+        let token = self.outbox.token().clone();
+        while !self.sheets.is_empty() {
+            let StartupSource { url, answer } = self.sheets.remove(0);
+            style_sheets::settle_style_sheet(self.document_mut(), thread, &token, &url, answer)?;
+        }
+        Ok(())
+    }
+
     /// Commits when anything is stale, and publishes it if a painter has
     /// bound — the epilogue of every entry into the realm, which is what
     /// makes "we do not guarantee the tree is not flushed outside
     /// `__FlushElementTree`" true.
     ///
-    /// It never waits: the epilogue runs on every entry, and parking here
-    /// would stop the group on any of them. What it commits before the
-    /// binding is held for whichever flush or binding publishes next.
+    /// It never waits: the epilogue runs after every entry, and parking here
+    /// would stop the group on any of them. So while any listed author sheet
+    /// is still outstanding it does nothing at all: a commit without the
+    /// sheets would publish an unstyled frame, and waiting for them is the
+    /// first [`Self::flush`]'s. Nothing is lost by skipping — boot's own
+    /// `__FlushElementTree` is what commits the first frame, and it settles
+    /// the sheets before it does. What it commits before the binding is held
+    /// for whichever flush or binding publishes next.
     fn commit_if_dirty(&mut self) {
+        if !self.sheets.is_empty() {
+            return;
+        }
         self.adopt_metrics();
         if self.document_mut().needs_render() {
             let frame = self.document_mut().commit();
@@ -581,8 +645,8 @@ impl DocumentSlot {
 
     /// The `@font-face` rules the mounted sheets declared, once each.
     ///
-    /// Empty before `createDocument`: there is no cascade yet, and the first
-    /// entry after a sheet is mounted asks again.
+    /// Empty before `createDocument`: there is no cascade yet, and the
+    /// epilogue of the entry that mounts a sheet asks again.
     fn take_font_face_requests(&mut self) -> Vec<dom::FontFaceRequest> {
         self.document
             .as_mut()
@@ -691,10 +755,12 @@ impl MainThreadRuntime {
     /// this call does not make.
     ///
     /// Opening spends the startup: the strings become one-shot members read
-    /// later by the boot module, and the screen and the page configuration are
-    /// kept for the boot module's own source. The author sheets and the entry
-    /// are not part of it, which is what lets a realm open while its own
-    /// sources are still in flight.
+    /// later by the boot module, the screen and the page configuration are
+    /// kept for the boot module's own source, and the author sheets' answers
+    /// go to the document slot for the first `__FlushElementTree` to settle.
+    /// Nothing here waits for any of them, and the entry is not part of it,
+    /// which is what lets a realm open while its own sources are still in
+    /// flight.
     pub(crate) fn new(
         js_runtime: &mut ScriptRuntime,
         ingredients: DocumentIngredients,
@@ -731,7 +797,8 @@ impl MainThreadRuntime {
         .map_err(|error| MainThreadError::from_engine("installing animation frames", error))?;
         engine.enable_module_loading();
         let config = ingredients.config;
-        let slot = DocumentSlot::new(ingredients, metrics, outbox.clone());
+        let sheets = std::mem::take(&mut startup.sheets);
+        let slot = DocumentSlot::new(ingredients, sheets, metrics, outbox.clone());
         install_bobcat(
             &mut engine,
             js_runtime,
@@ -1233,9 +1300,11 @@ impl MainThreadRuntime {
     /// through an ordinary `import` of the URL the view named it by, a module
     /// a task of the view's owner completes from the answer
     /// `create_lynx_view` already asked for, and the author stylesheets are
-    /// mounted on the document by tasks of their own as they arrive. So this
-    /// returns with a document in place however long the entry takes, and
-    /// boot's own completion is the promise `main_module_finished` reads.
+    /// mounted by boot's own `__FlushElementTree`, which waits for each before
+    /// the document is styled. So this returns with a document in place
+    /// however long the entry takes, and boot's own completion is the promise
+    /// `main_module_finished` reads. The only two things boot waits on are
+    /// both inside that flush: the listed sheets, and a painter's binding.
     ///
     /// How much of boot has run when this returns depends on the entry alone:
     /// an entry already completed is found in the realm's registry and boot
@@ -1283,8 +1352,9 @@ const config = {{
 // The realm's document, created out of that configuration and held by this
 // exported binding for the realm's life. Nothing in the realm releases it: it
 // goes when the realm does. The view's own resources — its metrics, its fonts,
-// its style pool and its author stylesheets — stay on the host side; each
-// author sheet is mounted on this document when its answer arrives.
+// its style pool and its author stylesheets — stay on the host side; the
+// first flush below mounts the author sheets, in listed order, before the
+// document is styled.
 export const document = new Document(config);
 
 __BobcatInitializeMTS({{
@@ -1357,14 +1427,14 @@ await Promise.resolve().then(() => __FlushElementTree());
     }
 
     /// Boots a realm over `source` as its entry the way a view whose author
-    /// sheets arrived after its document was created and before its entry
-    /// boots: the boot module runs up to its `import` of the entry, each sheet
-    /// is mounted on the document it created, and the entry is completed last,
-    /// which runs the rest of boot. `source_name` is both the entry's request
-    /// URL and its response URL, as in [`Self::run_main_thread_script`].
+    /// sheets the fetcher answered before its first flush boots: each sheet is
+    /// handed to the document slot as an answer already in hand, in the order
+    /// given, which is the listed order, and boot's own `__FlushElementTree`
+    /// mounts them before it styles the document. `source_name` is both the
+    /// entry's request URL and its response URL, as in
+    /// [`Self::run_main_thread_script`].
     ///
-    /// The seam for this crate's own tests of cards that come with a sheet;
-    /// the order is the one a fetcher that answered the sheets first produces.
+    /// The seam for this crate's own tests of cards that come with a sheet.
     #[cfg(test)]
     pub(crate) fn run_main_thread_script_over_sheets(
         &mut self,
@@ -1373,15 +1443,27 @@ await Promise.resolve().then(() => __FlushElementTree());
         source: &str,
         source_name: &str,
     ) -> Result<(), MainThreadError> {
+        {
+            let mut slot = self.slot.borrow_mut();
+            let token = slot.outbox.token().clone();
+            slot.sheets = sheets
+                .into_iter()
+                .map(|(url, sheet)| {
+                    let (completion, answer) =
+                        crate::resource::SourceCompletion::new(token.clone());
+                    completion.complete(Ok(sheet));
+                    StartupSource {
+                        url: url.to_owned(),
+                        answer,
+                    }
+                })
+                .collect();
+        }
         source_name.clone_into(&mut self.entry);
         self.run_boot_module(js_runtime)?;
         // The one request boot left is its entry, which the view's owner
         // never sends to a fetcher.
         assert_eq!(self.take_module_request(), self.entry_module_name().ok());
-        for (url, sheet) in sheets {
-            self.mount_startup_sheet(url, Ok(sheet))
-                .expect("an author sheet mounts");
-        }
         self.complete_entry(
             js_runtime,
             source_name,
@@ -1431,7 +1513,7 @@ await Promise.resolve().then(() => __FlushElementTree());
     /// it is instantiated by the time this is called, and boot's `import` of
     /// the entry is the pending request this completion resumes. The view's
     /// entry task is queued behind `open_realm`, which runs boot, and
-    /// [`Self::run_main_thread_script`] and its sheet-mounting variant keep
+    /// [`Self::run_main_thread_script`] and its variant with sheets keep
     /// the same order.
     pub(crate) fn complete_entry(
         &mut self,
@@ -1479,39 +1561,6 @@ await Promise.resolve().then(() => __FlushElementTree());
             .map_err(booting)
     }
 
-    /// Mounts one of the view's author stylesheets, from the answer to the
-    /// request `create_lynx_view` made, on the live document.
-    ///
-    /// Called by a task of the view's owner when that answer arrives, which is
-    /// always after boot's first statement created the document: the task's
-    /// entry is queued behind the job that opens the realm. It is mounted
-    /// after whatever the realm already mounted, so several listed sheets
-    /// cascade in the order their answers arrived in, and one that arrives
-    /// after the entry evaluated restyles a document the entry already built.
-    ///
-    /// A load that failed is that load's error, and an answer that is not a
-    /// stylesheet is the fetcher's mistake, reported as a resource error
-    /// naming what it answered with.
-    pub(crate) fn mount_startup_sheet(
-        &mut self,
-        url: &str,
-        answered: Result<LoadedSource, LynxViewError>,
-    ) -> Result<(), LynxViewError> {
-        let answer = match answered? {
-            LoadedSource::StyleSheet(sheet) => {
-                style_sheets::add_style_sheet(self.slot.borrow_mut().document_mut(), sheet);
-                return Ok(());
-            }
-            LoadedSource::Entry { .. } => "a script",
-            LoadedSource::Font(_) => "a font",
-            LoadedSource::Fetched => "a plain fetch",
-        };
-        Err(mismatched_source(
-            &format!("the stylesheet request for {url}"),
-            answer,
-        ))
-    }
-
     /// The futures this realm asked to settle asynchronously — a `.then` on a
     /// `Future` — since the last entry. Each is a task for the view's owner.
     pub(crate) fn take_future_settles(&mut self) -> Vec<(u32, crate::future::HostFuture)> {
@@ -1530,7 +1579,7 @@ await Promise.resolve().then(() => __FlushElementTree());
     }
 
     /// The `@font-face` rules the sheets mounted so far declared and this
-    /// realm has not reported before. Empty until a sheet arrives.
+    /// realm has not reported before. Empty until a sheet is mounted.
     pub(crate) fn take_font_face_requests(&mut self) -> Vec<dom::FontFaceRequest> {
         self.slot.borrow_mut().take_font_face_requests()
     }
@@ -1764,7 +1813,8 @@ fn install_host_module(
     engine: &mut ScriptEngine,
     js_runtime: &mut ScriptRuntime,
     handle: &Rc<RefCell<DocumentSlot>>,
-    // `flushElementTree`'s, for the wait it makes before a painter has bound.
+    // `flushElementTree`'s, for the waits it makes on the listed author sheets
+    // and before a painter has bound.
     thread: crate::jobs::JsThreadHandle,
 ) -> Result<(), MainThreadError> {
     tree_members! { engine, js_runtime, handle;

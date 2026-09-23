@@ -126,7 +126,7 @@ raw XML loader. Rust's `bobcat-source::xml` parser validates and extracts the se
 the Render Worker. The source uses `<lynx engine-version="...">` and
 `<script thread="main">` / `<script thread="background">`; legacy
 attribute spellings are rejected. A present stylesheet is registered as CSS
-text and mounted as the view's one sheet before the main-thread section starts;
+text and mounted as the view's one sheet by boot's first flush, before anything is styled;
 the returned Promise uses the same engine-event completion path as `load`. The
 exported `LYNX_XML_PAGE_CONFIG` supplies the source format's fixed
 `false`/`false`/`true` display/overflow/selector defaults, while callers may
@@ -166,11 +166,9 @@ waits for none of them. That task creates a
 QuickJS realm at once, preloads `bobcat:runtime`, `bobcat:element` and the
 timer and event-target modules, and evaluates
 `bobcat:boot`. That module's first statement constructs its `Document` over the
-page configuration written into it, which is what builds the page; each author
-sheet is mounted on it by a task of the view when its answer arrives, so
-several sheets cascade in arrival order. It then uses top-level await to import
-the entry by its URL — a module a task of the view completes from the
-entry's answer — before it
+page configuration written into it, which is what builds the page. It then uses
+top-level await to import the entry by its URL — a module a task of the view
+completes from the entry's answer — before it
 calls a present `globalThis.renderPage` or dispatches `__RenderPage` on the
 realm-local EventTarget returned by `lynx.getEngine()`, and finally flushes the
 element tree. QuickJS drains its owned pending-job queue at each turn.
@@ -203,7 +201,9 @@ the family checked against them, inside the call that builds a view, so both
 must precede a load, and a family nothing provides makes that load reject with
 the construction error rather than through a lifecycle event. Author stylesheets
 reach core the way the entry module does — fetched and registered by the Render
-Worker, named in the load, mounted as author-origin rules as each answer arrives. The
+Worker, named in the load, mounted as author-origin rules in listed order by
+boot's first flush, which waits for every one of them before the document is
+styled. The
 stylesheet contract has a second arm for pre-parsed CSS. Raw JavaScript and
 XML loads take the text arm; `loadTemplate` and `loadZip` decode binary containers
 through `bobcat-source::PageSource` and register their lowered `StyleInfo` through

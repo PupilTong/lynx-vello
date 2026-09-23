@@ -353,13 +353,6 @@ impl Harness {
         completion.complete(Err(unanswered_source().into()));
     }
 
-    /// Whether the entry request is still unanswered.
-    fn wants_its_entry(&self) -> bool {
-        self.sources
-            .iter()
-            .any(|(request, _)| matches!(request, SourceRequest::Entry(_)))
-    }
-
     /// The startup failure this view reported, if it has.
     fn startup_failure(&self) -> Option<String> {
         self.events.iter().find_map(|event| match event {
@@ -2155,16 +2148,70 @@ globalThis.renderPage = function () {
 };
 ";
 
-/// Author sheets mount as their answers arrive, on the live document, and
-/// nothing waits for them.
+/// The width and height the classed box of [`CLASSED_BOX`] was laid out at,
+/// read through a probe command, so it is the document's layout after every
+/// entry queued before the probe has run.
+async fn classed_box_size(harness: &mut Harness) -> (f32, f32) {
+    let (probe, probed) = std::sync::mpsc::channel();
+    harness
+        .commands
+        .send(ToMain::Probe(Box::new(move |document| {
+            let page = document.document_element().id();
+            let box_id = document.get(page).expect("the page is live").child_ids()[0];
+            let size = document.rounded_layout(box_id).expect("laid out").size;
+            let _ = probe.send((size.width, size.height));
+        })))
+        .expect("the view is serving");
+    let mut size = None;
+    harness
+        .until("the probe never ran", |_| {
+            size = probed.try_recv().ok();
+            size.is_some()
+        })
+        .await;
+    size.expect("the probe answered")
+}
+
+/// Answers the entry request with [`CLASSED_BOX`], leaving every stylesheet
+/// request where it is.
+fn answer_classed_entry(harness: &mut Harness) {
+    let entry = harness
+        .sources
+        .iter()
+        .position(|(request, _)| matches!(request, SourceRequest::Entry(_)))
+        .expect("the entry request is outstanding");
+    let (_, completion) = harness.sources.remove(entry);
+    completion.complete(Ok(LoadedSource::Entry {
+        source: CLASSED_BOX.to_owned(),
+        url: "app:///main.js".to_owned(),
+    }));
+}
+
+/// Whether boot has created its BTS `Worker`, keeping the `Start` it sent.
+///
+/// Boot creates the Worker after the entry has evaluated and flushes right
+/// behind it, in the same checkpoint of the same job, so a `Start` seen while
+/// that job has not finished boot is a job parked inside boot's flush.
+fn started_background(harness: &mut Harness) -> bool {
+    if harness.background.is_none()
+        && let Ok(WorkerCommand::Start(start)) = harness.workers.try_recv()
+    {
+        harness.background = Some(start);
+    }
+    harness.background.is_some()
+}
+
+/// Listed author sheets cascade in the order the view listed them, whatever
+/// order the fetcher answered them in, and boot finishes only once all of
+/// them have.
 ///
 /// The view lists `a.css` then `b.css`; the test answers `b.css`, then the
-/// entry, and `a.css` only once boot has finished. Both end up mounted — the
-/// height is `b.css`'s alone — and the width both declare is `a.css`'s,
-/// because it arrived last: the cascade order between listed sheets is the
-/// order the fetcher answered them in, not the order they were listed in.
+/// entry, and `a.css` last. Boot does not finish, and publishes nothing,
+/// while `a.css` is outstanding: its first flush is waiting for it. Both end
+/// up mounted — the height is `b.css`'s alone — and the width both declare is
+/// `b.css`'s, because it is listed later, although it arrived first.
 #[test]
-fn author_sheets_mount_in_arrival_order_without_holding_up_boot() {
+fn author_sheets_cascade_in_listed_order_and_boot_waits_for_all_of_them() {
     on_a_js_thread(|thread| async move {
         let (context, workers) = group(&thread);
         let mut harness = Harness::serving(
@@ -2181,67 +2228,46 @@ fn author_sheets_mount_in_arrival_order_without_holding_up_boot() {
             })
             .await;
         harness.answer_style_sheet_at("app:///b.css", ".box{width:30px;height:20px}");
-        let entry = harness
-            .sources
-            .iter()
-            .position(|(request, _)| matches!(request, SourceRequest::Entry(_)))
-            .expect("the entry request is outstanding");
-        let (_, completion) = harness.sources.remove(entry);
-        completion.complete(Ok(LoadedSource::Entry {
-            source: CLASSED_BOX.to_owned(),
-            url: "app:///main.js".to_owned(),
-        }));
+        answer_classed_entry(&mut harness);
         harness
-            .until("boot never finished with a sheet outstanding", |h| {
+            .until("boot never reached its flush", started_background)
+            .await;
+        for _ in 0..8 {
+            harness.turn().await;
+        }
+        assert!(
+            !harness.finished() && harness.view.published.commit().is_none(),
+            "boot finished or published with a.css still unanswered: {:?}",
+            harness.events
+        );
+
+        harness.answer_style_sheet_at("app:///a.css", ".box{width:10px}");
+        harness
+            .until("boot never finished once both sheets arrived", |h| {
                 h.finished()
             })
             .await;
-        assert!(
-            harness.wants_a_style_sheet(),
-            "boot finished with a.css still unanswered"
-        );
-        harness.background = Some(harness.background_worker());
-
-        let booted = harness.view.published.commit();
-        harness.answer_style_sheet_at("app:///a.css", ".box{width:10px}");
-        // The entry that mounts it commits the restyle, with nothing else
-        // behind it: no command and no JavaScript of the card's.
-        harness
-            .until("the late sheet never committed", |h| {
-                h.view.published.commit() > booted
-            })
-            .await;
-        let (probe, probed) = std::sync::mpsc::channel();
-        harness
-            .commands
-            .send(ToMain::Probe(Box::new(move |document| {
-                let page = document.document_element().id();
-                let box_id = document.get(page).expect("the page is live").child_ids()[0];
-                let size = document.rounded_layout(box_id).expect("laid out").size;
-                let _ = probe.send((size.width, size.height));
-            })))
-            .expect("the view is serving");
-        let mut size = None;
-        harness
-            .until("the probe never ran", |_| {
-                size = probed.try_recv().ok();
-                size.is_some()
-            })
-            .await;
+        assert!(harness.view.published.commit().is_some());
         assert!(harness.startup_failure().is_none());
         assert_eq!(
-            size,
-            Some((10.0, 20.0)),
-            "both sheets are mounted, and a.css, which arrived last, wins the width"
+            classed_box_size(&mut harness).await,
+            (30.0, 20.0),
+            "both sheets are mounted, and b.css, listed last, wins the width"
         );
     });
 }
 
-/// A listed sheet that fails to load ends the view with the load's own
-/// resource error while boot is still outstanding — the entry here is never
-/// answered at all, so nothing waited for it first.
+/// Nothing of a view is styled, laid out or published while a listed sheet is
+/// outstanding, and the first frame it publishes carries that sheet.
+///
+/// The entry is answered and the sheet is withheld, so boot runs to its own
+/// `__FlushElementTree` and parks there. While it is parked the view publishes
+/// no frame and reports no `ScriptFinished`, and a `BeginFrame` sent meanwhile
+/// is a job queued behind the parked one, so it is acknowledged only after the
+/// sheet's answer arrives. Once it does, the frame boot publishes is styled
+/// by the sheet, and `ScriptFinished` follows it.
 #[test]
-fn a_listed_sheet_that_fails_to_load_is_a_resource_startup_failure() {
+fn boot_publishes_nothing_until_a_withheld_sheet_arrives() {
     on_a_js_thread(|thread| async move {
         let (context, workers) = group(&thread);
         let mut harness = Harness::serving(
@@ -2257,23 +2283,106 @@ fn a_listed_sheet_that_fails_to_load_is_a_resource_startup_failure() {
                 h.wants_a_style_sheet()
             })
             .await;
+        answer_classed_entry(&mut harness);
+        harness
+            .until("boot never reached its flush", started_background)
+            .await;
+        harness
+            .commands
+            .send(ToMain::BeginFrame { now: 0.0, seq: 4 })
+            .expect("the view is serving");
+        for _ in 0..8 {
+            harness.turn().await;
+        }
+        assert!(
+            harness.view.published.commit().is_none(),
+            "a frame was published without the listed sheet"
+        );
+        assert!(
+            !harness.finished(),
+            "boot finished with its sheet outstanding"
+        );
+        assert_eq!(
+            harness.view.published.begin_frame_serviced(),
+            0,
+            "the BeginFrame is a job behind the parked flush"
+        );
+
+        harness.answer_style_sheet_at("app:///a.css", ".box{width:10px;height:20px}");
+        harness
+            .until("boot never finished once the sheet arrived", |h| {
+                h.finished()
+            })
+            .await;
+        assert!(
+            harness.view.published.commit().is_some(),
+            "ScriptFinished follows the frame boot published"
+        );
+        assert!(harness.startup_failure().is_none());
+        harness
+            .until("the BeginFrame was never acknowledged", |h| {
+                h.view.published.begin_frame_serviced() == 4
+            })
+            .await;
+        assert_eq!(
+            classed_box_size(&mut harness).await,
+            (10.0, 20.0),
+            "the first frame is laid out with the sheet mounted"
+        );
+    });
+}
+
+/// A listed sheet that fails to load fails boot's own flush, which is the
+/// boot failing: one `StartupFailed` carrying the `Script` error
+/// `__FlushElementTree` threw, whose message names the sheet. Nothing was
+/// published first.
+#[test]
+fn a_listed_sheet_that_fails_to_load_fails_the_boot_naming_it() {
+    on_a_js_thread(|thread| async move {
+        let (context, workers) = group(&thread);
+        let mut harness = Harness::serving(
+            context,
+            workers,
+            ViewSources {
+                style_sheets: vec!["app:///a.css".to_owned()],
+                ..ViewSources::new("app:///main.js", SCREEN)
+            },
+        );
+        harness
+            .until("the view never asked for its stylesheet", |h| {
+                h.wants_a_style_sheet()
+            })
+            .await;
+        answer_classed_entry(&mut harness);
+        harness
+            .until("boot never reached its flush", started_background)
+            .await;
         harness.refuse_style_sheet();
         harness
             .until("the sheet failure never reached the embedder", |h| {
                 h.startup_failure().is_some()
             })
             .await;
+        let failures: Vec<_> = harness
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                EngineEvent::StartupFailed(error) => Some(error),
+                _ => None,
+            })
+            .collect();
+        let [LynxViewError::Script(error)] = failures.as_slice() else {
+            panic!("one Script startup failure, got {:?}", harness.events);
+        };
+        let message = error.to_string();
         assert!(
-            harness.events.iter().any(|event| matches!(
-                event,
-                EngineEvent::StartupFailed(LynxViewError::Resource(_))
-            )),
-            "{:?}",
-            harness.events
+            message.contains("loading stylesheet app:///a.css"),
+            "{message}"
         );
+        assert!(!harness.finished());
         assert!(
-            harness.wants_its_entry(),
-            "and the entry was never answered"
+            harness.view.published.commit().is_none(),
+            "nothing was published without the sheet"
         );
     });
 }

@@ -10,8 +10,9 @@ interface BobcatNative {
    * this realm: its metrics, its fonts and its style pool.
    *
    * It never waits. The view's author stylesheets are not mounted here: the
-   * host mounts each on this document when its answer arrives. A switch that
-   * is not a boolean, and a realm that already has a document, both throw.
+   * first `flushElementTree` mounts them, in the order the view listed them.
+   * A switch that is not a boolean, and a realm that already has a document,
+   * both throw.
    */
   createDocument(
     defaultDisplayLinear: boolean,
@@ -118,7 +119,14 @@ interface BobcatNative {
    * — the text node a `raw-text` reflects — goes with it.
    */
   dropElement(nodeId: number): void;
-  /** Commits pending mutations through style and layout. */
+  /**
+   * Commits pending mutations through style and layout.
+   *
+   * The first call waits for every author stylesheet the view listed and
+   * mounts them in listed order before anything is styled; a sheet that
+   * failed to load throws `loading stylesheet <url>: <reason>`. Before a
+   * painter has bound the view it then waits for the binding.
+   */
   flushElementTree(): void;
   /**
    * Records that something in the realm is now registered for `eventName`,

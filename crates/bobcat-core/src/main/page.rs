@@ -19,8 +19,7 @@
 //! - [`consume_commands`], the one ordered consumer of the command stream;
 //! - [`consume_metrics`], which settles the page once per change of the painter's metrics, so a
 //!   resize with no JavaScript behind it still commits;
-//! - one [`load_style_sheet`] per author stylesheet the view listed, and one [`load_entry`] for its
-//!   MTS entry, each entering the realm when its answer arrives;
+//! - one [`load_entry`] for its MTS entry, entering the realm when its answer arrives;
 //! - one [`load_module`] future per resource load an import produced;
 //! - one [`settle_future`] per host-backed `Future` a `.then` asked this realm to settle;
 //! - [`consume_worker_events`], the one ordered consumer of this view's workers;
@@ -115,8 +114,10 @@
 //! their own shape — this view's token against the answer — parked on inside
 //! a job through [`JsThread::wait`](crate::jobs::JsThread): stylesheet
 //! adoption, [`crate::future`]'s `waitFuture`, which adds an optional
-//! deadline behind the token, and `__FlushElementTree` before a painter has
-//! bound, whose other arm is that same metrics watch.
+//! deadline behind the token, and `__FlushElementTree`, which waits for each
+//! listed author sheet not answered yet and then, before a painter has bound,
+//! on that same metrics watch. Those two waits inside boot's own flush are
+//! the only things boot waits on.
 
 use std::cell::{Cell, RefCell};
 use std::future::{Future, poll_fn};
@@ -135,7 +136,7 @@ use crate::clock::ClockInstant;
 use crate::lifetime::{EndOnUnwind, Lifetime, Settles, run_job, serve_clock};
 use crate::link::{SourceAnswer, ToMain, ViewOutbox};
 use crate::resource::{LoadedSource, SourceRequest, unanswered_source};
-use crate::threads::{panicked, platform_script_error};
+use crate::threads::panicked;
 use crate::view::{
     EngineEvent, LynxViewError, StartupSource, StartupSources, ViewSources, Viewport,
 };
@@ -348,7 +349,9 @@ impl Page {
     ///    the same frame as whatever else this entry changed. A zero-delay timer armed during boot
     ///    therefore fires inside boot's own epilogue and adds no commit of its own.
     /// 2. **The commit**, which is what publishes the frame and the image sources the walk
-    ///    discovered.
+    ///    discovered — skipped while any listed author sheet is outstanding, because the first
+    ///    `__FlushElementTree` is what waits for them and a commit without them would publish an
+    ///    unstyled frame.
     /// 3. **The `contentvisibilityautostatechange` deliveries** that commit decided — posted as an
     ///    entry of their own, never run here: see [`Self::post_content_visibility_changes`].
     /// 4. **The `<image>` `load`s and `error`s** this entry settled — posted as an entry of their
@@ -415,10 +418,10 @@ impl Page {
         for (id, future) in runtime.take_future_settles() {
             self.spawn(settle_future(Rc::clone(self), id, future));
         }
-        // Every path that mounts author CSS — the startup sheets
-        // `load_style_sheet` mounts, `adoptStyleSheet`, and any rules a card
-        // appends — runs inside an entry, so draining here is what covers
-        // them all with one call site rather than one per mount.
+        // Every path that mounts author CSS — the listed sheets the first
+        // `__FlushElementTree` mounts, `adoptStyleSheet`, and any rules a
+        // card appends — runs inside an entry, so draining here is what
+        // covers them all with one call site rather than one per mount.
         for request in runtime.take_font_face_requests() {
             self.spawn(load_font_face(Rc::clone(self), request));
         }
@@ -630,10 +633,10 @@ impl Page {
     /// **The first job of every view**, queued by [`serve_view`] before any of
     /// that view's tasks is spawned and before anything has been fetched: the
     /// boot module creates the document as its first statement and imports
-    /// the entry, which [`load_entry`] completes when its answer arrives, as
-    /// [`load_style_sheet`] mounts each author sheet. So a command, a sheet or
-    /// the entry that arrived before the realm existed is a job queued behind
-    /// this one, and finds a document.
+    /// the entry, which [`load_entry`] completes when its answer arrives; the
+    /// author sheets are the realm's, settled by boot's first flush. So a
+    /// command or the entry that arrived before the realm existed is a job
+    /// queued behind this one, and finds a document.
     ///
     /// A job like every other entry, and the one that does not go through
     /// [`Self::enter`], because the realm it would enter does not exist until
@@ -982,6 +985,7 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
         page.open_realm(
             ingredients,
             RealmStartup {
+                sheets,
                 screen,
                 entry: entry_url,
                 background_entry,
@@ -993,14 +997,11 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
         );
         Some(())
     }));
-    // One task per startup source, each entering the realm as its answer
-    // arrives and therefore behind `open_realm`. Nothing orders them against
-    // one another: a sheet mounts when it arrives, before or after the entry
-    // has evaluated, and several sheets mount in the order the fetcher
-    // answered them.
-    for sheet in sheets {
-        page.spawn(load_style_sheet(Rc::clone(&page), sheet));
-    }
+    // The entry is a task, entering the realm as its answer arrives and
+    // therefore behind `open_realm`. The sheets went to the realm with the
+    // rest of its startup: boot's first flush waits for each, in listed
+    // order, and they need no task of their own because the fetcher answers
+    // them without one.
     page.spawn(load_entry(Rc::clone(&page), entry));
     page.spawn(consume_commands(Rc::clone(&page), commands));
     page.spawn(consume_metrics(Rc::clone(&page), metrics));
@@ -1104,10 +1105,11 @@ async fn consume_metrics(page: Rc<Page>, mut metrics: watch::Receiver<Option<Vie
 /// reports one.
 ///
 /// Except where the embedder released the view meanwhile. Completing the entry
-/// evaluates it, and an entry that adopts a stylesheet parks inside that
-/// evaluation on a wait whose first arm is the view's token, so a release
-/// makes the evaluation throw. That is the end of a view nobody is watching
-/// rather than a failure of it, and is not reported.
+/// evaluates it and runs the rest of boot, and an entry that adopts a
+/// stylesheet, like boot's own flush waiting for the listed sheets or the
+/// binding, parks inside that evaluation on a wait whose first arm is the
+/// view's token, so a release makes the evaluation throw. That is the end of a view nobody is
+/// watching rather than a failure of it, and is not reported.
 async fn load_entry(page: Rc<Page>, entry: StartupSource) {
     let StartupSource { url, answer } = entry;
     let answered = await_source(answer).await;
@@ -1119,39 +1121,6 @@ async fn load_entry(page: Rc<Page>, entry: StartupSource) {
                 return;
             }
             completing.fail(EngineEvent::StartupFailed(error.into_script_error().into()));
-        }
-    })
-    .await;
-}
-
-/// One author stylesheet the view listed: the answer to the request
-/// `create_lynx_view` made, mounted on the live document when it arrives.
-///
-/// A task like [`load_entry`], queued behind `open_realm` for the same reason,
-/// so the document exists by the time this enters the realm: boot's first
-/// statement creates it. Nothing waits for it — not boot, not the entry, and
-/// not another sheet — so a sheet that arrives after the entry evaluated
-/// restyles a document the entry already built, and the cascade order between
-/// several sheets is the order they arrived in. The epilogue of the entry that
-/// mounts it commits the restyle, and asks for any faces the sheet declared.
-///
-/// A load that failed, or an answer that is not a stylesheet, ends the view the
-/// way [`load_module`]'s failures do: a startup failure carrying the resource
-/// error while boot is still outstanding, and a run failure once it has been
-/// reported.
-async fn load_style_sheet(page: Rc<Page>, sheet: StartupSource) {
-    let StartupSource { url, answer } = sheet;
-    let answered = await_source(answer).await;
-    let mounting = Rc::clone(&page);
-    page.enter(move |runtime, _| {
-        if let Err(error) = runtime.mount_startup_sheet(&url, answered) {
-            mounting.fail(if mounting.boot_reported.get() {
-                EngineEvent::ScriptRunError(platform_script_error(format!(
-                    "loading stylesheet {url}: {error}"
-                )))
-            } else {
-                EngineEvent::StartupFailed(error)
-            });
         }
     })
     .await;

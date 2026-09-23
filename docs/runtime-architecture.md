@@ -78,15 +78,16 @@ Construction sends `ViewSources` whole to the view's task on `bobcat-main`,
 since nothing in it belongs on the embedder's thread. The task keeps the
 Rust-side document inputs — the create-time viewport, the page configuration,
 the validated text context and the group's style pool — as
-`DocumentIngredients`, and collects the rest — the screen, the BTS entry, the
-page data, the processor name and the module table — into one `RealmStartup`
-that opens the realm. The *answers* to the startup requests
-`create_lynx_view` already issued are not part of it: each is a task of the
-view (`load_style_sheet` per author sheet, `load_entry` for the entry) that
-enters the realm when its answer arrives. **Nothing waits for any of it.**
-The page configuration and the screen are written into the boot module as
-literals; a sheet is mounted on the live document when it arrives; the entry
-completes the module boot imports it as, by its URL. `LynxView::update_data`,
+`DocumentIngredients`, and collects the rest — the author sheets' answers,
+the screen, the BTS entry, the page data, the processor name and the module
+table — into one `RealmStartup` that opens the realm. The entry's answer is
+not part of it: it is a task of the view (`load_entry`) that enters the realm
+when its answer arrives. **Nothing waits for any of it before the realm
+opens.** The page configuration and the screen are written into the boot
+module as literals; the sheets' answers go to the realm's `DocumentSlot`, in
+listed order, and boot's first `__FlushElementTree` waits for each and mounts
+it before the document is styled; the entry completes the module boot imports
+it as, by its URL. `LynxView::update_data`,
 `update_global_props` and `reload` reach the realm through `ToMain::PageUpdate`
 afterwards and never touch any of it.
 
@@ -159,8 +160,8 @@ QuickJS preloaded ESM graph — bobcat-main's runtime
     ├──  export const document = new Document(config)  the realm's first
     │      └──▶ bobcat-internal:host.createDocument      statement
     │            └──▶ four booleans + DocumentIngredients ──▶ private dom::Document<()>
-    │   (each author sheet is mounted on this document by a task of the view
-    │    when its answer arrives, in arrival order, never by a statement here)
+    │   (the author sheets are mounted on this document, in listed order, by
+    │    the first __FlushElementTree below, never by a statement here)
     └──▶ await import("<entry URL>")    completed by the view's `load_entry`
           │                               task from the pre-issued answer
           └──▶ the entry, with import.meta.url = its response URL; before
@@ -363,15 +364,13 @@ frame without a host turn. Every *later* source request rides a
 which `LynxView::pump` hands to the fetcher: imports, `adoptStyleSheet`,
 worker scripts, fonts and plain fetches.
 
-**Order of completion is the fetcher's, and so is the order of use.** Each
-startup answer is read by a task of its own on the view's owner as it arrives,
-and nothing orders them against one another: an author sheet mounts on the live
-document when its answer arrives, possibly after the entry evaluated — in which
-case it restyles a document the card already built — so **the cascade order
-between several listed sheets is the order their answers arrived in**, not the
-order the view listed them in. That is a recorded deviation from web-core,
-which mounts listed sheets in order (`docs/tracking/deviations.md`). The first
-failure to reach the realm ends the view, and later ones are not reported.
+**Order of completion is the fetcher's; order of use is the view's.** The
+entry is read by a task of the view's owner as its answer arrives. The author
+sheets are read by boot's first `__FlushElementTree`, one at a time and in the
+order the view listed them, whatever order they were answered in, so **the
+cascade order between several listed sheets is the listed order**, as in
+web-core. The first failure to reach the realm ends the view, and later ones
+are not reported.
 
 Either way the fetcher resolves the URL, fetches bytes and validates UTF-8, or
 supplies a pre-parsed stylesheet. Completion consumes the handle and answers
@@ -384,10 +383,22 @@ fetcher itself is owned by value and needs neither `Send`, `Sync` nor
 `'static`. A view's task awaits no IO on any other view's behalf, so a sibling
 can boot or handle events while this view loads.
 
-**No startup source parks anything.** `createDocument` builds the document and
-returns; each author sheet's task (`load_style_sheet`) awaits its answer and
-then enters the realm, behind `open_realm`, to mount it with the same code
-`adoptStyleSheet` mounts an answer with. Boot imports the entry by the URL the
+**No startup source parks anything before the first flush.** `createDocument`
+builds the document and returns. Boot's first `__FlushElementTree` is where the
+author sheets are settled, **before the document enters the style pipeline**:
+for each sheet in listed order it parks the job on that sheet's answer —
+`JsThread::wait`, the view's token as the biased first arm, and no wait at all
+for an answer already in hand — and mounts it with the same code
+`adoptStyleSheet` mounts an answer with. The sheets need no task of their own:
+the fetcher answers the one-shots from its own pool, so nothing on
+`bobcat-main` has to run for them to arrive. Until every listed sheet has
+settled the epilogue's implicit commit (`commit_if_dirty`) does nothing, and
+never waits: it runs after every entry, and parking there would stop the group
+on any of them, while a commit without the sheets would publish an unstyled
+frame. Nothing is lost by skipping it, because boot's own flush is what commits
+the first frame and it settles the sheets first. So a view publishes nothing —
+no frame and no `ScriptFinished` — until every listed sheet has loaded or
+failed. Boot imports the entry by the URL the
 view named it by, which must be absolute: the module normalizer refuses a bare
 name, and that refusal fails the boot. The entry's task (`load_entry`) awaits
 its answer and completes that module with it, with the entry preamble
@@ -397,17 +408,22 @@ answered from the fetcher's response URL, which is its `import.meta.url` and
 the base its relative imports resolve against. Boot's `import` finds it in the
 registry if it was completed first, and is resumed by the completion
 otherwise; the entry's own request is answered by `load_entry` and never
-reaches the fetcher a second time, so the epilogue skips it. A view whose entry
-or sheet is slow holds up nothing but itself.
+reaches the fetcher a second time, so the epilogue skips it. The only two
+things boot waits on are both inside its first flush: the listed sheets, then
+a painter's binding (see
+[Document and rendering ownership](#document-and-rendering-ownership)). While
+that flush is parked no other job of the group runs, as for any synchronous
+host member; the sheets were requested inside `create_lynx_view`, so the wait
+is for IO already in flight, and the painter's construction overlaps it.
 
 Failures are reported by where they happen. An entry that fails to load
 completes the entry's module with an error, which boot's `import` throws, so the
 embedder is told `StartupFailed(LynxViewError::Script(..))` carrying the URL
-and the host's reason. A sheet that fails to load ends the view with the
-fetcher's own error — `Resource`, or `InvalidStyleSheetEncoding` — and one the
-fetcher answered with something other than a stylesheet with a `Resource`
-error naming what it answered with; either is `StartupFailed` while boot is
-unreported and `ScriptRunError` after, the `load_module` policy. What Rust
+and the host's reason. A sheet that fails to load, or that the fetcher answered
+with something other than a stylesheet, makes `__FlushElementTree` throw
+`loading stylesheet <url>: <reason>`: boot's own flush rejects boot, so the
+embedder is told `StartupFailed(LynxViewError::Script(..))` naming the sheet,
+and a flush the card makes itself throws to the card. What Rust
 keeps for itself is `DocumentIngredients` — the create-time viewport, the
 `PageConfig`, the validated text context and the group's style pool — which
 `MainThreadRuntime::new` puts in the realm's `DocumentSlot`.
@@ -497,9 +513,9 @@ view's first job, queued before its own tasks exist, so a burst that arrived
 before the realm did is a job queued behind it and finds a document. The cost
 is that a `BeginFrame` is acknowledged by a job too: while any job of the group
 is parked — an entry's `adoptStyleSheet` or `require` among them — the
-acknowledgement waits with it. Boot itself parks for none of its startup
-sources: the entry and each author sheet are tasks of the view that enter the
-realm when their answers arrive.
+acknowledgement waits with it. Boot parks for its startup sources only
+inside its first flush, on the listed author sheets that have not arrived; the
+entry is a task of the view that enters the realm when its answer arrives.
 
 That checkpoint watch is a runtime-wide `u64` bumped inside
 `ScriptEngine::checkpoint`. The promise-job queue belongs to the runtime rather
@@ -945,8 +961,8 @@ await Promise.resolve().then(() => __FlushElementTree());
 The screen's three numbers, the page configuration's four switches and the
 entry's URL are written into it as literals — facts Rust owns, passed as
 primitives, with no JSON the realm parses and hands back. `new Document(config)` builds the
-document and mounts nothing: each author stylesheet is mounted by a task of the
-view when its answer arrives. The entry's `import` asks the fetcher for
+document and mounts nothing: the first `__FlushElementTree` mounts the author
+stylesheets, in listed order, before it styles the document. The entry's `import` asks the fetcher for
 nothing: a task of the view completes that name from the answer
 `create_lynx_view` already asked for, answered from its response URL. That
 task calls `__BobcatInitEntry` with the response URL before it completes the
@@ -1002,8 +1018,8 @@ enableCssSelector, enableJSDataProcessor)`, which reads the four
 `HostValue::Boolean` arguments — Rust genuinely needs these fields — and builds
 a `LynxDocument` out of them plus the `DocumentIngredients` that never reached
 the realm: the create-time viewport, the validated `dom::TextContext` and the
-group's `StylePool`. It never waits and mounts no author stylesheet; those are
-mounted by tasks of the view as their answers arrive. The construction runs
+group's `StylePool`. It never waits and mounts no author stylesheet; the first
+`__FlushElementTree` mounts those, in listed order. The construction runs
 under a catch, because the bridge erases a panic into "the host function
 panicked" and this member runs the UA cascade behind one call. A missing or
 non-boolean switch and a realm that already has a document both throw, and the
@@ -1039,6 +1055,15 @@ behind that one and finds a document when it runs. Nothing is buffered, replayed
 or dropped for want of one. The painter's metrics are not a command at all:
 they are observed state on a watch the document reads for itself, so a
 `Document` is already at the painter's size if one has attached.
+
+**A flush waits for the listed sheets, then for the binding.** Before anything
+is styled, the first `__FlushElementTree` settles the view's listed author
+sheets, as [Startup boundary](#startup-boundary) describes: one park per
+sheet whose answer has not arrived, in listed order, and a throw naming the
+sheet if one failed. Until then `commit_if_dirty` skips, so no frame is
+committed without them. The sheets come before the binding wait below, so
+their IO and the painter's construction overlap and the frame held for the
+binding already carries them.
 
 **The painter's metrics bind the view, and a flush waits for the binding.**
 `ViewSeat` carries a `watch<Option<Viewport>>`, `None` until a painter writes
@@ -1607,10 +1632,11 @@ create/append/drop/flush DOM API is exposed to JavaScript.
 3. Boot constructs the realm's `Document` over the page configuration written
    into it — which builds the private document from the create-time viewport,
    the text context and the style pool — and then imports the entry by its
-   URL. Nothing parks for a startup source: a task of the view completes the
-   entry's module when the entry's answer arrives, and one task per author
-   sheet mounts that sheet on the live document when its answer arrives, so
-   several sheets cascade in arrival order.
+   URL. Nothing parks for a startup source before the first flush: a task of
+   the view completes the entry's module when the entry's answer arrives, and
+   boot's first `__FlushElementTree` waits for each listed author sheet and
+   mounts it, in listed order, before the document is styled, so several
+   sheets cascade in listed order and no frame is published without them.
    `ScriptFinished` or `StartupFailed` reports the outcome through the
    lifecycle event path. Dropping the view cancels its pending resource work
    and ends any wait boot is inside; other views continue.

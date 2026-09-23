@@ -94,12 +94,15 @@ async fn view_with(
 
 /// The pre-parsed arm mounts, and its rules reach the page the entry builds.
 ///
-/// When a sheet mounts is not what this asserts: it mounts when its answer
-/// arrives, before or after the entry has run. That a text sheet and a
-/// pre-parsed one both mount through the real resource system is
-/// bobcat-resources' `text_and_preparsed_sheets_both_mount`, and the order
-/// several sheets mount in is `page_tests`'
-/// `author_sheets_mount_in_arrival_order_without_holding_up_boot`.
+/// When a sheet mounts is not what this asserts: boot's first
+/// `__FlushElementTree` mounts every listed sheet before the document is
+/// styled. That a text sheet and a pre-parsed one both mount through the real
+/// resource system, in listed order, is bobcat-resources'
+/// `text_and_preparsed_sheets_keep_cascade_order`; that boot publishes
+/// nothing until a withheld sheet arrives, and that several sheets cascade in
+/// listed order whatever order they arrived in, are `page_tests`'
+/// `boot_publishes_nothing_until_a_withheld_sheet_arrives` and
+/// `author_sheets_cascade_in_listed_order_and_boot_waits_for_all_of_them`.
 #[tokio::test]
 async fn a_preparsed_sheet_styles_the_page() {
     let fetcher = Rc::new(
@@ -159,9 +162,10 @@ async fn a_byte_order_mark_prefixed_sheet_mounts() {
 
 /// A stylesheet that will not decode reports a precise startup failure.
 ///
-/// A listed sheet is mounted by a task of the view when its answer arrives,
-/// so what the embedder is told is the fetcher's own
-/// `InvalidStyleSheetEncoding`, whose message names the sheet and the reason.
+/// The listed sheets are mounted by boot's first `__FlushElementTree`, so what
+/// the embedder is told is the exception that flush threw — a `Script` error
+/// rather than the fetcher's own `InvalidStyleSheetEncoding` — and the message
+/// is what has to name the sheet and the reason.
 #[tokio::test]
 async fn a_stylesheet_that_is_not_utf8_is_a_precise_error() {
     let fetcher = Rc::new(
@@ -175,10 +179,7 @@ async fn a_stylesheet_that_is_not_utf8_is_a_precise_error() {
         .expect("loading view");
     let error = wait_for_script(&mut view)
         .expect_err("invalid UTF-8 CSS is rejected, not silently dropped");
-    assert!(
-        matches!(error, LynxViewError::InvalidStyleSheetEncoding { .. }),
-        "{error}"
-    );
+    assert!(matches!(error, LynxViewError::Script(_)), "{error}");
     let message = error.to_string();
     // The reported URL is the resolved one, as it is for a script.
     assert!(message.contains(SCRIPT_URL), "{message}");

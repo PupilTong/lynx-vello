@@ -314,14 +314,16 @@ document and zero fetches on failure, which is why the check has to be here
 rather than a turn later — and then requests each stylesheet in the order the
 view listed them, followed by the entry module, on the embedder's thread,
 before it returns. Only the built text context and the answering one-shots
-cross to `bobcat-main`, where each is read by a task of the view's owner as it
-arrives and nothing parks for any of them: a sheet's task mounts it on the live
-document — before or after the entry evaluated, so the cascade order between
-several listed sheets is the order their answers arrived in — and the entry's
-task completes the module boot imports the entry by its URL. A sheet that failed to
-load, or that the fetcher answered with something else, ends the view with that
-resource error (`StartupFailed` while boot is unreported, `ScriptRunError`
-after). The realm itself opens
+cross to `bobcat-main`. The entry's is read by a task of the view's owner as it
+arrives, which completes the module boot imports the entry by its URL. The
+sheets' go to the realm's `DocumentSlot`, and **boot's first
+`__FlushElementTree` waits for every listed sheet, success or failure, before
+the document enters the style pipeline**, mounting them in listed order — so
+the cascade order between several listed sheets is the listed order, and no
+frame is published without them. A sheet that failed to load, or that the
+fetcher answered with something else, makes that flush throw
+`loading stylesheet <url>: <reason>`, which fails the boot with
+`StartupFailed(LynxViewError::Script(..))` naming the sheet. The realm itself opens
 immediately, before any answer has arrived, so the fetcher's IO,
 the whole of boot and the first frame's encode all overlap the painter the
 embedder builds next, and `LynxView::pump` services every *later* request — imports,
@@ -674,8 +676,8 @@ enableCssSelector, enableJSDataProcessor)`, which reads four
 `HostValue::Boolean` arguments and builds the document from them plus the
 `DocumentIngredients` that never reach the realm: the create-time viewport, the
 validated text context and the group's style pool. It never waits: **the view's
-author sheets are not mounted here** but by tasks of the view as their answers
-arrive (below). The construction runs under a catch, because the bridge erases
+author sheets are not mounted here** but by the first `__FlushElementTree`
+(below). The construction runs under a catch, because the bridge erases
 a panic into "the host function panicked". A missing or non-boolean switch and
 a second construction both throw, which fails the boot; the second one is
 refused whichever module asks, because the ingredients are spent. The realm
@@ -700,6 +702,20 @@ module's first statement is what creates the document — so a command that
 arrived earlier is a job queued behind that one. Nothing is buffered, replayed
 or dropped for want of a document.
 
+**The first flush settles the listed sheets, then waits for the binding.**
+Before anything is styled, `DocumentSlot::flush` takes the listed sheets off
+the slot one at a time, in listed order, parks the job on each answer that has
+not arrived — `JsThread::wait`, the view's token as the biased first arm — and
+mounts it; an answer already in hand costs no wait. Until the slot's sheets are
+gone the epilogue's `commit_if_dirty` returns without committing: the epilogue
+runs after every entry, so parking there would stop the group on any of them,
+and a commit without the sheets would publish an unstyled frame. Nothing is
+lost, because boot's own flush is what commits the first frame. The sheets come
+before the binding wait, so their IO overlaps the painter's construction and
+the frame held for the binding already carries them. **The only two things
+boot waits on are both inside that flush: the listed sheets, then the
+binding.**
+
 **A painter binding the view is what releases its first frame.** The document
 is created at the create-time viewport unless a painter has already written the
 seat's metrics watch, and every epilogue adopts whatever that watch holds. A
@@ -721,22 +737,19 @@ Main opens the realm and evaluates `bobcat:boot` as the view's first job,
 before anything has been fetched: its first statement creates the document,
 and it then imports the entry by the URL the view named it by (an absolute
 URL: the module normalizer refuses a bare name, which fails the boot). Nothing
-parks for the answers `create_lynx_view` already asked for; each is a task of
-the view that enters the realm when it arrives, queued behind `open_realm`. The
+parks for the entry's answer: it is a task of the view that enters the realm
+when it arrives, queued behind `open_realm`. The
 entry's task (`load_entry`) completes that module from the pre-issued answer,
 with the entry preamble prepended and the fetcher's response URL as its
 `import.meta.url`, so boot's remainder (the BTS Worker, the render and the
 flush) runs in the job that completes it; the entry's own request never reaches
-the fetcher. Each sheet's task (`load_style_sheet`) mounts that sheet on the live
-document when it arrives, possibly after the entry evaluated, so **the cascade
-order between several listed sheets is their arrival order**, not the listed
-order (a recorded deviation from web-core). Success is `ScriptFinished`; a
-font, realm or boot failure is `StartupFailed`. An entry that cannot be loaded
-is `LynxViewError::Script`, because boot's `import` is what threw, naming the
-URL and the host's reason; a sheet that cannot be loaded is the fetcher's own
-error (`Resource`, or the encoding variant), and one the fetcher answered with
-something else is a `Resource` error naming what it answered with — as
-`StartupFailed` while boot is unreported and `ScriptRunError` after. That
+the fetcher. The listed sheets are mounted by that flush, in listed order, as
+above. Success is `ScriptFinished`; a font, realm or boot failure is
+`StartupFailed`. An entry that cannot be loaded is `LynxViewError::Script`,
+because boot's `import` is what threw, naming the URL and the host's reason; a
+sheet that cannot be loaded, or that the fetcher answered with something else,
+is `LynxViewError::Script` too, because boot's `__FlushElementTree` is what
+threw, naming the sheet and the reason. That
 failure stays the failing view's and is
 reported once: an entry that throws under boot's top-level `await` rejects
 through the promise-job queue the group's realms share, and what it leaves

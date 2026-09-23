@@ -4,10 +4,12 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use quickjs_rust_bridge::HostValue;
+use tokio_util::sync::CancellationToken;
 
 use super::{DocumentSlot, MainThreadError, ScriptEngine, ScriptRuntime, install};
 use crate::jobs::JsThreadHandle;
 use crate::link::{SourceAnswer, ViewOutbox};
+use crate::main::tree::LynxDocument;
 use crate::resource::{LoadedSource, SourceRequest, StyleSheetSource, unanswered_source};
 
 pub(super) fn install_styles(
@@ -37,65 +39,68 @@ pub(super) fn install_styles(
         // in-flight preload belong to the resource fetcher on the host thread.
         let answer = sources.request(SourceRequest::StyleSheet(url.clone()));
         // A synchronous wait, the same shape a `require` makes (see
-        // `crate::require`). It is
-        // inside a job, so what it drives is this engine thread's tasks —
-        // channel reads, lifecycle signals, acknowledgements, the routing that
-        // answers this very request — and none of its jobs: no JavaScript of
-        // this realm's or any sibling's runs before this returns. The view's
-        // own token is first, so a release ends the wait rather than the
-        // response doing it.
-        let source = wait_for_source(&thread, &token, answer)
-            .map_err(|error| format!("loading stylesheet {url}: {error}"))?;
+        // `crate::require`). It is inside a job, so what it drives is this
+        // engine thread's tasks — channel reads, lifecycle signals,
+        // acknowledgements, the routing that answers this very request — and
+        // none of its jobs: no JavaScript of this realm's or any sibling's
+        // runs before this returns. The view's own token is first, so a
+        // release ends the wait rather than the response doing it.
         let mut slot = document.borrow_mut();
-        mount_style_sheet(slot.document_mut(), url, source)?;
+        // The listed sheets first: they are the page's own cascade and were
+        // requested before this one, so an adoption a card makes while the
+        // entry evaluates still lands behind them, as it did when they were
+        // mounted at the document's construction.
+        slot.settle_sheets(&thread)?;
+        settle_style_sheet(slot.document_mut(), &thread, &token, url, answer)?;
         Ok(HostValue::Undefined)
     })
 }
 
-/// Mounts one loaded author sheet, whichever form the fetcher answered in —
-/// what `adoptStyleSheet` does with its answer.
-pub(super) fn mount_style_sheet(
-    document: &mut crate::main::tree::LynxDocument,
+/// Waits inside a job for the answer to one author stylesheet request, then
+/// mounts it on `document` after every sheet it already holds.
+///
+/// The one path both kinds of author sheet take: `adoptStyleSheet` with the
+/// answer to the request it just made, and the first `__FlushElementTree`
+/// with each sheet the view listed, in listed order, from the answers
+/// `create_lynx_view` asked for. A load that failed, and an answer that is not
+/// a stylesheet, are an error naming `url` and the reason, which the host
+/// member that called this throws.
+pub(super) fn settle_style_sheet(
+    document: &mut LynxDocument,
+    thread: &JsThreadHandle,
+    token: &CancellationToken,
     url: &str,
-    source: LoadedSource,
+    answer: SourceAnswer,
 ) -> Result<(), String> {
-    match source {
-        LoadedSource::StyleSheet(sheet) => {
-            add_style_sheet(document, sheet);
-            Ok(())
-        }
-        LoadedSource::Entry { .. } => Err(format!("stylesheet {url} returned a script")),
-        LoadedSource::Font(_) => Err(format!("stylesheet {url} returned a font")),
-        LoadedSource::Fetched => Err(format!("stylesheet {url} returned a plain fetch")),
+    let sheet = match wait_for_source(thread, token, answer) {
+        Ok(LoadedSource::StyleSheet(sheet)) => Ok(sheet),
+        Ok(LoadedSource::Entry { .. }) => Err("the fetcher returned a script".to_owned()),
+        Ok(LoadedSource::Font(_)) => Err("the fetcher returned a font".to_owned()),
+        Ok(LoadedSource::Fetched) => Err("the fetcher returned a plain fetch".to_owned()),
+        Err(reason) => Err(reason),
     }
-}
-
-/// Appends one author sheet to the document's cascade, after every sheet it
-/// already holds. Shared with the view's startup sheets, which a task of the
-/// view's owner mounts as each answer arrives.
-pub(super) fn add_style_sheet(
-    document: &mut crate::main::tree::LynxDocument,
-    sheet: StyleSheetSource,
-) {
+    .map_err(|reason| format!("loading stylesheet {url}: {reason}"))?;
     match sheet {
         StyleSheetSource::Text(css) => crate::style::add_style_sheet_text(document, &css),
         StyleSheetSource::Preparsed(sheet) => {
             crate::style::add_preparsed_style_sheet(document, &sheet);
         }
     }
+    Ok(())
 }
 
-/// Waits inside a job for the answer to one `adoptStyleSheet` request, with the
+/// Waits inside a job for one answer the realm is already owed, with the
 /// realm's end as the first arm.
 ///
 /// It parks the *job* it runs in: every task of the engine thread goes on
 /// running, including the one routing this very answer, and no other job
 /// does, so the realm holds its borrows across it. The token is biased first,
 /// so a release ends the wait rather than the answer doing it. An answer
-/// already in hand costs no wait at all.
+/// already in hand — a listed sheet the fetcher answered before the first
+/// flush — costs no wait at all.
 fn wait_for_source(
     thread: &JsThreadHandle,
-    token: &tokio_util::sync::CancellationToken,
+    token: &CancellationToken,
     mut answer: SourceAnswer,
 ) -> Result<LoadedSource, String> {
     use tokio::sync::oneshot::error::TryRecvError;

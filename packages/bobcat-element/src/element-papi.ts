@@ -669,8 +669,8 @@ export interface PageConfig {
  * The configuration is the constructor's one argument, so the realm decides
  * what the document is built as; the view's own resources — its metrics, its
  * fonts, its style pool and its author stylesheets — stay on the host side and
- * never reach this module. The call never waits: each author stylesheet is
- * mounted on the document by the host when its answer arrives.
+ * never reach this module. The call never waits: the author stylesheets are
+ * mounted by the first `__FlushElementTree`, in listed order.
  *
  * The boot module constructs exactly one, before it loads the card's entry,
  * and its exported binding is what holds the object. A card can reach this

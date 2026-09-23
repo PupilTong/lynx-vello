@@ -41,9 +41,10 @@ pub trait ResourceFetcher: dom::FrameImages {
     /// on the embedder's own thread, before it returns — this fetcher is
     /// built earlier in that same call, out of the builder the embedder
     /// passed, so a fetcher must be able to take them there. Order of
-    /// *completion* is this method's own business, and it is also the order
-    /// the view uses them in: each sheet is mounted as its answer arrives, so
-    /// several listed sheets cascade in the order this fetcher answered them.
+    /// *completion* is this method's own business: the view's first
+    /// `__FlushElementTree` mounts the sheets in the order it listed them,
+    /// whatever order they were answered in, and the entry is completed when
+    /// its answer arrives.
     /// Every later request — an import, an adopted stylesheet, a worker
     /// script, a font, a plain fetch — is handed over in a
     /// [`LynxView::pump`](crate::LynxView::pump) turn instead.
@@ -317,14 +318,6 @@ pub(crate) fn unanswered_source() -> ResourceError {
         message: "the fetcher dropped a source request without completing it".into(),
         retry: RetryAdvice::Never,
     }
-}
-
-/// What a request the fetcher answered with the wrong kind of source failed
-/// with: `request` names what was asked for and `answer` what came back.
-pub(crate) fn mismatched_source(request: &str, answer: &str) -> crate::LynxViewError {
-    let mut error = unanswered_source();
-    error.message = Arc::from(format!("the fetcher answered {request} with {answer}"));
-    error.into()
 }
 
 /// Stable resource failure details shared by every operation.
