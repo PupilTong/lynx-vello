@@ -143,6 +143,10 @@ pub struct Node<T> {
 
 /// What a post-flush style swap moved on one element.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent verdicts the harvest reads one by one, not a state machine"
+)]
 pub(crate) struct StyleRefresh {
     /// Whether the element's computed style is a different `Arc` than before.
     pub(crate) changed: bool,
@@ -152,6 +156,11 @@ pub(crate) struct StyleRefresh {
     /// Whether the paragraph's effective custom-property limits changed.
     /// These layout inputs are outside Stylo's longhand damage comparison.
     pub(crate) paragraph_limits_changed: bool,
+    /// Whether the element started or stopped establishing the containing
+    /// block of its absolute or fixed descendants. Its own relayout damage
+    /// does not reach a positioned box deeper than a child, so the harvest
+    /// hands this to [`crate::Document::invalidate_containing_block`].
+    pub(crate) containing_block_changed: bool,
 }
 
 impl StyleRefresh {
@@ -159,6 +168,7 @@ impl StyleRefresh {
         changed: false,
         shaping_changed: false,
         paragraph_limits_changed: false,
+        containing_block_changed: false,
     };
 }
 
@@ -602,7 +612,7 @@ impl<T> Node<T> {
             debug_assert!(live.is_none(), "only elements own computed styles");
             return StyleRefresh::UNCHANGED;
         };
-        let refresh = match (&*snapshot, live) {
+        let mut refresh = match (&*snapshot, live) {
             (None, None) => StyleRefresh::UNCHANGED,
             (Some(old), Some(new)) => {
                 if Arc::ptr_eq(old, new) {
@@ -612,17 +622,36 @@ impl<T> Node<T> {
                         changed: true,
                         shaping_changed: crate::layout::shaping_inputs_changed(old, new),
                         paragraph_limits_changed: crate::layout::paragraph_limits_changed(old, new),
+                        containing_block_changed: false,
                     }
                 }
             }
+            // A first style has no old role to flip from: the element's
+            // descendants have never been laid out under it.
             _ => StyleRefresh {
                 changed: true,
                 shaping_changed: true,
                 paragraph_limits_changed: false,
+                containing_block_changed: false,
             },
         };
-        if refresh.changed {
-            *snapshot = live.cloned();
+        if !refresh.changed {
+            return refresh;
+        }
+        let old = std::mem::replace(snapshot, live.cloned());
+        drop(data);
+        // Both roles read the element too (its root-ness, its transform
+        // animation bit, its content-visibility relevance), none of which a
+        // restyle moves, so evaluating each style against the same node
+        // isolates what the style change did.
+        if let (Some(old), NodeData::Element(Some(new))) = (old, &self.data) {
+            let role = |style: &ComputedValues| {
+                (
+                    crate::layout::establishes_fixed_containing_block(self, style),
+                    crate::layout::establishes_absolute_containing_block(self, style),
+                )
+            };
+            refresh.containing_block_changed = role(&old) != role(new);
         }
         refresh
     }

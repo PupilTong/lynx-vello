@@ -1079,6 +1079,7 @@ impl<T: Sync> Document<T> {
     /// walk has to follow it.
     fn harvest_animation_damage(&mut self, root: NodeId) -> AnimationTick {
         let mut tick = AnimationTick::default();
+        let mut containing_blocks = Vec::new();
         let mut stack = vec![root];
         while let Some(current) = stack.pop() {
             let harvested = {
@@ -1123,6 +1124,11 @@ impl<T: Sync> Document<T> {
                 continue;
             };
             tick.restyled += 1;
+            // An animated `filter` or `perspective` leaving or reaching
+            // `none` flips the role as a class change does.
+            if refresh.containing_block_changed {
+                containing_blocks.push(current);
+            }
             if damage.needs_relayout() {
                 tick.relayout = true;
                 // An animated `font-size` reaches its text through this
@@ -1131,6 +1137,9 @@ impl<T: Sync> Document<T> {
                 self.invalidate_text_children(current, refresh.shaping_changed);
                 self.invalidate_layout(current);
             }
+        }
+        for id in containing_blocks {
+            tick.relayout |= self.invalidate_containing_block(id);
         }
         tick
     }

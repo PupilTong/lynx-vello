@@ -754,10 +754,13 @@ impl<T> Document<T> {
         }
     }
 
-    /// `id`'s transform animation started or ended, so it gained or lost the
-    /// containing block of its absolute and fixed descendants a current
-    /// transform animation gives (it acts as `will-change: transform`).
-    /// Answers whether any such descendant was invalidated.
+    /// `id` gained or lost the containing block of its absolute and fixed
+    /// descendants: its transform animation started or ended (a current one
+    /// acts as `will-change: transform`), or a restyle flipped what
+    /// [`establishes_fixed_containing_block`] or
+    /// [`establishes_absolute_containing_block`] read (the harvests compare
+    /// the old and new computed style). Answers whether any such descendant
+    /// was invalidated.
     ///
     /// Every positioned descendant that could name `id` lays out again:
     /// rounding only re-hoists a box under a subtree some write reached. That
@@ -767,8 +770,8 @@ impl<T> Document<T> {
     /// child whose lowered position flipped, whose upward walk clears it; a
     /// deeper box is hoisted on both sides of the flip. The walk stops below
     /// an element that establishes the fixed containing block itself, which
-    /// the absolute one implies; it runs at an animation's start and end,
-    /// never per frame.
+    /// the absolute one implies; it runs only for an element whose role
+    /// flipped, never per frame.
     pub(crate) fn invalidate_containing_block(&mut self, id: crate::NodeId) -> bool {
         let mut positioned = Vec::new();
         let mut stack = vec![(id, false)];
