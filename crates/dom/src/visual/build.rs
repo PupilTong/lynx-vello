@@ -130,9 +130,6 @@ pub(crate) fn build<T: Sync>(
             auto_boxes: builder.auto_boxes,
             snap_points: builder.snap_points,
             initial_targets: builder.initial_targets,
-            // Filled by the painter once it has encoded the frame.
-            composed_animations: buffers.composed_animations,
-            composed_stickies: buffers.composed_stickies,
             commit_id,
         },
         builder.scratch,

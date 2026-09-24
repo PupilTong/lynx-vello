@@ -156,13 +156,6 @@ pub(crate) struct PaintOrder {
     /// with its slot; see `scroll::initial_target`. Rarely non-empty, so
     /// not a recycled buffer.
     initial_targets: Vec<InitialTarget>,
-    /// The animation slots the committed program composes, ascending; see
-    /// [`Self::mark_composed_spaces`]. Empty until the painter encodes the
-    /// frame.
-    composed_animations: Vec<u32>,
-    /// The sticky slots the committed program composes or solves against,
-    /// ascending.
-    composed_stickies: Vec<u32>,
     commit_id: u64,
 }
 
@@ -224,6 +217,26 @@ pub(crate) struct ComposedMarks {
     stickies: Vec<bool>,
 }
 
+/// The slots one compose program reads, derived from the program by
+/// [`PaintOrder::mark_composed_spaces`] and carried beside it, so a
+/// composition samples only what it draws.
+#[derive(Debug, Default)]
+pub(crate) struct ComposedSlots {
+    /// The animation slots on the path of a space some op names, ascending.
+    pub(crate) animations: Vec<u32>,
+    /// The sticky slots on those paths plus the boxes they solve against,
+    /// ascending.
+    pub(crate) stickies: Vec<u32>,
+}
+
+impl ComposedSlots {
+    /// Empties both lists, keeping their capacity.
+    pub(crate) fn clear(&mut self) {
+        self.animations.clear();
+        self.stickies.clear();
+    }
+}
+
 /// One animation slot's compose-time values, sampled at one instant: the
 /// CSS-px delta from the committed geometry, and the opacity replacing the
 /// committed one on the element's effect layer.
@@ -252,8 +265,6 @@ pub(crate) struct FrameBuffers {
     spaces: Vec<Space>,
     auto_boxes: Vec<AutoBox>,
     snap_points: Vec<SnapPoint>,
-    composed_animations: Vec<u32>,
-    composed_stickies: Vec<u32>,
 }
 
 impl FrameBuffers {
@@ -287,8 +298,6 @@ impl PaintOrder {
         self.spaces.clear();
         self.auto_boxes.clear();
         self.snap_points.clear();
-        self.composed_animations.clear();
-        self.composed_stickies.clear();
         FrameBuffers {
             items: self.items,
             clips: self.clips,
@@ -299,8 +308,6 @@ impl PaintOrder {
             spaces: self.spaces,
             auto_boxes: self.auto_boxes,
             snap_points: self.snap_points,
-            composed_animations: self.composed_animations,
-            composed_stickies: self.composed_stickies,
         }
     }
 
@@ -319,8 +326,6 @@ impl PaintOrder {
             auto_boxes: Vec::new(),
             snap_points: Vec::new(),
             initial_targets: Vec::new(),
-            composed_animations: Vec::new(),
-            composed_stickies: Vec::new(),
             commit_id: 0,
         }
     }
@@ -400,10 +405,14 @@ impl PaintOrder {
             .collect()
     }
 
-    /// [`Self::sample_animations`] over only the slots the committed program
-    /// composes; see [`Self::mark_composed_spaces`].
-    pub(crate) fn sample_composed_animations(&self, now: Option<f64>) -> AnimationSamples {
-        self.composed_animations
+    /// [`Self::sample_animations`] over only `composed`, the slots a
+    /// program composes; see [`Self::mark_composed_spaces`].
+    pub(crate) fn sample_composed_animations(
+        &self,
+        composed: &[u32],
+        now: Option<f64>,
+    ) -> AnimationSamples {
+        composed
             .iter()
             .map(|&index| (index, self.animations[index as usize].sample(now)))
             .collect()
@@ -418,18 +427,20 @@ impl PaintOrder {
             .reduce(f64::min)
     }
 
-    /// Records the animation and sticky slots `program` composes: those on
-    /// the path of a space some op names, plus the sticky boxes their
-    /// constraints solve against. Composition samples only these, which keeps
-    /// a composed frame screen-bounded however much of the page animates.
+    /// Writes into `composed` the animation and sticky slots `program`
+    /// composes: those on the path of a space some op names, plus the sticky
+    /// boxes their constraints solve against. Composition samples only these,
+    /// which keeps a composed frame screen-bounded however much of the page
+    /// animates.
     ///
     /// Hit testing reads every slot instead: it answers over items this
     /// commit may never have encoded.
     pub(crate) fn mark_composed_spaces(
-        &mut self,
+        &self,
         program: &[crate::paint::compose::ComposeOp],
         groups: &[crate::FilterGroup],
         marks: &mut ComposedMarks,
+        composed: &mut ComposedSlots,
     ) {
         let spaces = &mut marks.spaces;
         spaces.clear();
@@ -442,7 +453,7 @@ impl PaintOrder {
         let stickies = &mut marks.stickies;
         stickies.clear();
         stickies.resize(self.stickies.len(), false);
-        self.composed_animations.clear();
+        composed.clear();
         // A node is pushed after its parent, so one reverse pass closes the
         // set under `Space::parent`.
         for index in (0..spaces.len()).rev() {
@@ -456,11 +467,11 @@ impl PaintOrder {
             match node.kind {
                 SpaceKind::Scroll(_) => {}
                 SpaceKind::Sticky(slot) => stickies[slot as usize] = true,
-                SpaceKind::Animation(slot) => self.composed_animations.push(slot),
+                SpaceKind::Animation(slot) => composed.animations.push(slot),
             }
         }
         // Space order is slot order within each kind.
-        self.composed_animations.reverse();
+        composed.animations.reverse();
         // A sticky box solves against its parent box's cumulative shift and
         // the one its scrollport shares, both allocated before it.
         for index in (0..stickies.len()).rev() {
@@ -479,8 +490,7 @@ impl PaintOrder {
                 stickies[input as usize] = true;
             }
         }
-        self.composed_stickies.clear();
-        self.composed_stickies.extend(
+        composed.stickies.extend(
             (0_u32..)
                 .zip(stickies.iter())
                 .filter(|(_, marked)| **marked)

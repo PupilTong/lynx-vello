@@ -225,6 +225,8 @@ pub(crate) struct Presentation {
     /// One entry per [`ComposeOp::PushFilter`] and [`ComposeOp::PushBackdrop`],
     /// in program order. Carries device geometry and σ; never a GPU resource.
     pub(crate) filter_groups: Vec<FilterGroup>,
+    /// The slots `program` reads, derived from it at commit.
+    pub(crate) composed: crate::visual::ComposedSlots,
 }
 
 impl std::fmt::Debug for CommittedFrame {
@@ -270,10 +272,15 @@ impl CommittedFrame {
         offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
         animation_now: Option<f64>,
     ) {
-        let animations = self.order.sample_composed_animations(animation_now);
-        let stickies = self
+        let composed = &self.presentation.composed;
+        let animations = self
             .order
-            .sample_composed_stickies(self.device_pixel_ratio, offset_of);
+            .sample_composed_animations(&composed.animations, animation_now);
+        let stickies = self.order.sample_composed_stickies(
+            &composed.stickies,
+            self.device_pixel_ratio,
+            offset_of,
+        );
         compose::replay(
             scene,
             &self.presentation.fragments,
@@ -331,12 +338,16 @@ impl CommittedFrame {
         let Some(group) = groups.get(index) else {
             return;
         };
-        let animations = self
-            .order
-            .sample_composed_animations(animation_now.filter(|_| group.samples_animations()));
-        let stickies = self
-            .order
-            .sample_composed_stickies(self.device_pixel_ratio, offset_of);
+        let composed = &self.presentation.composed;
+        let animations = self.order.sample_composed_animations(
+            &composed.animations,
+            animation_now.filter(|_| group.samples_animations()),
+        );
+        let stickies = self.order.sample_composed_stickies(
+            &composed.stickies,
+            self.device_pixel_ratio,
+            offset_of,
+        );
         let samples =
             self.order
                 .space_samples(&animations, &stickies, self.device_pixel_ratio, offset_of);

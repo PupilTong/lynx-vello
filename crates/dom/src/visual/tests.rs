@@ -2259,7 +2259,7 @@ fn a_compose_samples_only_the_curves_its_program_encodes() {
     assert!(document.advance_animations(0.25).needs_next_frame);
     let frame = document.commit();
     assert_eq!(frame.animation_slots().len(), 50, "every dot exports");
-    let composed = frame.order.composed_animations.len();
+    let composed = frame.presentation.composed.animations.len();
     assert!(
         (1..10).contains(&composed),
         "only the dots in the list's window compose, got {composed}",

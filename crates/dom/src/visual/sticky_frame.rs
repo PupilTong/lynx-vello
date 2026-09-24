@@ -49,15 +49,16 @@ impl PaintOrder {
         self.solve_stickies(every, ratio, offsets)
     }
 
-    /// [`Self::sample_stickies`] over only the boxes the committed program
+    /// [`Self::sample_stickies`] over only `composed`, the boxes a program
     /// composes and the boxes those solve against; see
     /// [`Self::mark_composed_spaces`].
     pub(crate) fn sample_composed_stickies(
         &self,
+        composed: &[u32],
         ratio: f32,
         offsets: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
     ) -> StickySamples {
-        self.solve_stickies(self.composed_stickies.iter().copied(), ratio, offsets)
+        self.solve_stickies(composed.iter().copied(), ratio, offsets)
     }
 
     /// Solves `slots`, ascending and closed under each box's solve inputs.
