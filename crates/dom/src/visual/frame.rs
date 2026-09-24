@@ -17,7 +17,7 @@
 
 use euclid::default::{Point2D, Size2D, Vector2D};
 
-use super::{AnimationSample, PaintOrder, StickySample};
+use super::{AnimationSample, PaintOrder, SpaceSamples};
 use crate::NodeId;
 use crate::paint::compose::{self, ComposeOp, FilterGroup};
 use crate::scroll::{ChainLink, ScrollAxes, ScrollCapture, SnapAxis, SnapPoint, SnapStrictness};
@@ -166,7 +166,6 @@ impl AnimationSlot {
     /// samples the committed values (identity delta, committed opacity).
     pub(crate) fn sample(&self, now: Option<f64>) -> AnimationSample {
         let committed = AnimationSample {
-            parent: self.parent,
             delta: Affine::IDENTITY,
             alpha: None,
         };
@@ -175,7 +174,6 @@ impl AnimationSlot {
         };
         let sample = curve.sample(now);
         AnimationSample {
-            parent: self.parent,
             delta: sample.delta,
             alpha: sample.alpha,
         }
@@ -198,7 +196,7 @@ pub struct HitTarget {
 /// `Arc`: the committer retains one for its own queries, the compositor holds
 /// one to draw and route input from.
 ///
-/// The scene is carried *split*: per-chain fragments plus the compose
+/// The scene is carried *split*: per-space fragments plus the compose
 /// program over them, so scroll offsets apply at composition.
 pub struct CommittedFrame {
     pub(crate) order: PaintOrder,
@@ -242,8 +240,10 @@ impl CommittedFrame {
     pub fn scene(&self) -> Option<&Scene> {
         matches!(
             self.presentation.program.as_slice(),
-            [ComposeOp::Fragment { index: 0, chain }]
-                if *chain == crate::paint::compose::ComposeChain::default()
+            [ComposeOp::Fragment {
+                index: 0,
+                space: None
+            }]
         )
         .then(|| &self.presentation.fragments[0])
     }
@@ -262,7 +262,7 @@ impl CommittedFrame {
         offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
         animation_now: Option<f64>,
     ) {
-        let samples = self.order.sample_animations(animation_now);
+        let animations = self.order.sample_animations(animation_now);
         let stickies = self
             .order
             .sample_stickies(self.device_pixel_ratio, offset_of);
@@ -274,11 +274,9 @@ impl CommittedFrame {
             images,
             &self.presentation.filter_groups,
             filtered,
-            self.order.slots(),
-            &samples,
-            &stickies,
-            self.device_pixel_ratio,
-            offset_of,
+            &self
+                .order
+                .space_samples(&animations, &stickies, self.device_pixel_ratio, offset_of),
         );
     }
 
@@ -293,15 +291,17 @@ impl CommittedFrame {
 
     /// Replays filter entry `index`'s own ops into `scene`, in the bake
     /// target's coordinates: device px with the entry's `rect` origin at
-    /// `(0, 0)` and the entry's own chain factored *out*, because that chain
-    /// is applied when the baked texture is drawn rather than baked into it.
+    /// `(0, 0)` and the entry's own space divided out, because that space is
+    /// applied when the baked texture is drawn rather than baked into it.
+    /// `SpaceSamples::bake_map` fixes that division's side — left, the only
+    /// side that survives a rotating or scaling node between the entry's
+    /// space and an op's.
     ///
     /// A `filter: blur()` group samples no animation instant, and
-    /// `animation_now` is ignored for one. Export eligibility refuses a
-    /// scroll container inside an animated subtree and an animated element's
-    /// whole subtree rides its own slot, so content inside a group never sits
-    /// on a different *animation* chain than the group; only an inner
-    /// *scroll* or *sticky* chain produces a non-identity relative transform, and that is
+    /// `animation_now` is ignored for one. Export eligibility refuses an
+    /// animated element inside a composited group, so no animation node
+    /// sits between a group's space and its content's; only an inner scroll
+    /// or sticky node produces a non-identity relative transform, and that is
     /// exactly what `FilterGroup`'s `inner_chains` reports.
     ///
     /// A `backdrop-filter` entry is the opposite case: its range is a prefix
@@ -328,20 +328,14 @@ impl CommittedFrame {
             return;
         };
         let backdrop = group.backdrop.as_ref();
-        let samples = self.order.sample_animations(backdrop.and(animation_now));
+        let animations = self.order.sample_animations(backdrop.and(animation_now));
         let stickies = self
             .order
             .sample_stickies(self.device_pixel_ratio, offset_of);
-        let chain_transform = compose::device_transform(
-            self.order.slots(),
-            &samples,
-            &stickies,
-            self.device_pixel_ratio,
-            offset_of,
-        );
-        let own = chain_transform(group.chain).inverse();
-        let origin = Affine::translate((-group.rect.x0, -group.rect.y0));
-        let transform = |chain| origin * chain_transform(chain) * own;
+        let samples =
+            self.order
+                .space_samples(&animations, &stickies, self.device_pixel_ratio, offset_of);
+        let transform = samples.bake_map(group.space, (group.rect.x0, group.rect.y0));
         compose::replay_ops(
             scene,
             compose::Tables {
@@ -351,7 +345,8 @@ impl CommittedFrame {
                 images,
                 filter_groups: groups,
                 filtered,
-                samples: &samples,
+                spaces: self.order.spaces(),
+                samples: &animations,
             },
             group.ops.start as usize..group.ops.end as usize,
             &transform,
@@ -541,19 +536,14 @@ impl CommittedFrame {
         offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
         animation_now: Option<f64>,
     ) -> Option<HitTarget> {
-        let samples = self.order.sample_animations(animation_now);
+        let animations = self.order.sample_animations(animation_now);
         let stickies = self
             .order
             .sample_stickies(self.device_pixel_ratio, offset_of);
-        self.order
-            .raw_hits_at(
-                point,
-                offset_of,
-                &samples,
-                &stickies,
-                self.device_pixel_ratio,
-            )
-            .next()
+        let samples =
+            self.order
+                .space_samples(&animations, &stickies, self.device_pixel_ratio, offset_of);
+        self.order.raw_hits_at(point, &samples).next()
     }
 
     /// The frame's composite-animated elements; see [`AnimationSlot`].
@@ -585,13 +575,10 @@ impl PaintOrder {
     pub(crate) fn raw_hits_at<'frame>(
         &'frame self,
         point: Point2D<f32>,
-        offset_of: &'frame (dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>> + 'frame),
-        samples: &'frame [AnimationSample],
-        stickies: &'frame [StickySample],
-        ratio: f32,
+        samples: &'frame SpaceSamples<'frame>,
     ) -> impl Iterator<Item = HitTarget> + 'frame {
         self.items().iter().rev().filter_map(move |item| {
-            let node = self.item_hit(item, point, offset_of, samples, stickies, ratio)?;
+            let node = self.item_hit(item, point, samples)?;
             Some(HitTarget {
                 node,
                 scroll: item.slot,

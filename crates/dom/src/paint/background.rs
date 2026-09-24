@@ -44,7 +44,7 @@ use stylo::values::specified::background::BackgroundRepeatKeyword;
 use stylo::values::specified::position::{HorizontalPositionKeyword, VerticalPositionKeyword};
 
 use crate::layout::NaturalSize;
-use crate::paint::compose::{ComposeChain, ImageArea, ImageDraw};
+use crate::paint::compose::{ImageArea, ImageDraw};
 use crate::paint::convert::resolve_color;
 use crate::paint::shape::{BoxShape, inner_radii, with_shape};
 use crate::paint::walker::WalkSink;
@@ -70,13 +70,13 @@ pub(crate) fn needs_text_clip(style: &ComputedValues) -> bool {
 
 pub(crate) fn paint(
     sink: &mut WalkSink<'_>,
-    chain: ComposeChain,
+    space: Option<u32>,
     style: &ComputedValues,
     fragment: &BoxFragment,
     images: &ImageRegistry,
     text_clip: Option<&TextClip<'_>>,
 ) {
-    let scene = sink.scene_for(chain);
+    let scene = sink.scene_for(space);
     let background = style.get_background();
     let layers = background.background_image.0.as_slice();
 
@@ -100,7 +100,7 @@ pub(crate) fn paint(
                 }
             }
             Some(UsedClip::Text) => {
-                paint_text_clipped_color(sink, chain, fragment, text_clip, color);
+                paint_text_clipped_color(sink, space, fragment, text_clip, color);
             }
             None => {}
         }
@@ -129,11 +129,11 @@ pub(crate) fn paint(
         match clip {
             UsedClip::Shape(shape) => {
                 let layer = make_layer(shape);
-                paint_pattern_layer(sink, chain, style, fragment, images, &layer, None);
+                paint_pattern_layer(sink, space, style, fragment, images, &layer, None);
             }
             UsedClip::Text => {
                 let layer = make_layer(level_shape(fragment, BoxLevel::Border));
-                paint_pattern_layer(sink, chain, style, fragment, images, &layer, text_clip);
+                paint_pattern_layer(sink, space, style, fragment, images, &layer, text_clip);
             }
         }
     }
@@ -146,7 +146,7 @@ pub(crate) fn paint(
 )]
 fn paint_raster_layer(
     sink: &mut WalkSink<'_>,
-    chain: ComposeChain,
+    space: Option<u32>,
     style: &ComputedValues,
     fragment: &BoxFragment,
     layer: &PatternLayer<'_>,
@@ -158,12 +158,12 @@ fn paint_raster_layer(
     let Some(area) = image_area(&layer.clip, grid.draw_rect(clip_bounds)) else {
         return;
     };
-    let opened = open_text_clip_ops(sink, chain, fragment, text_clip);
+    let opened = open_text_clip_ops(sink, space, fragment, text_clip);
     if text_clip.is_some() && !opened {
         return;
     }
     sink.image(
-        chain,
+        space,
         ImageDraw {
             image: std::sync::Arc::clone(image),
             transform: fragment.transform,
@@ -188,16 +188,16 @@ fn paint_raster_layer(
 /// glyph silhouettes rather than the box.
 fn paint_text_clipped_color(
     sink: &mut WalkSink<'_>,
-    chain: ComposeChain,
+    space: Option<u32>,
     fragment: &BoxFragment,
     text_clip: Option<&TextClip<'_>>,
     color: Color,
 ) {
-    if !open_text_clip_ops(sink, chain, fragment, text_clip) {
+    if !open_text_clip_ops(sink, space, fragment, text_clip) {
         return;
     }
     let shape = level_shape(fragment, BoxLevel::Border);
-    with_shape!(&shape, |s| sink.scene_for(chain).fill(
+    with_shape!(&shape, |s| sink.scene_for(space).fill(
         Fill::NonZero,
         fragment.transform,
         color,
@@ -218,7 +218,7 @@ fn paint_text_clipped_color(
 /// owes two pops.
 fn open_text_clip_ops(
     sink: &mut WalkSink<'_>,
-    chain: ComposeChain,
+    space: Option<u32>,
     fragment: &BoxFragment,
     text_clip: Option<&TextClip<'_>>,
 ) -> bool {
@@ -226,14 +226,14 @@ fn open_text_clip_ops(
         return false;
     };
     sink.push_layer_box(
-        chain,
+        space,
         Fill::NonZero,
         peniko::BlendMode::new(peniko::Mix::Normal, peniko::Compose::SrcOver),
         1.0,
         fragment.transform,
         level_shape(fragment, BoxLevel::Border),
     );
-    let scene = sink.scene_for(chain);
+    let scene = sink.scene_for(space);
     for (offset, layout) in &text_clip.runs {
         crate::paint::text::paint_silhouette(
             scene,
@@ -242,7 +242,7 @@ fn open_text_clip_ops(
         );
     }
     sink.push_layer_rect(
-        chain,
+        space,
         None,
         Fill::NonZero,
         peniko::BlendMode::new(peniko::Mix::Normal, peniko::Compose::SrcIn),
@@ -260,7 +260,7 @@ fn open_text_clip_ops(
 /// dimensions of that same bitmap.
 pub(crate) fn paint_replaced_content(
     sink: &mut WalkSink<'_>,
-    chain: ComposeChain,
+    space: Option<u32>,
     style: &ComputedValues,
     fragment: &BoxFragment,
     image: Arc<str>,
@@ -305,7 +305,7 @@ pub(crate) fn paint_replaced_content(
     // reduced scale, or a generation whose dimensions changed — and the image
     // stretches, which is the same asymmetry the inline path had.
     sink.image(
-        chain,
+        space,
         ImageDraw {
             image,
             transform: fragment.transform,
@@ -416,7 +416,7 @@ pub(super) fn level_shape(fragment: &BoxFragment, level: BoxLevel) -> BoxShape {
 
 pub(super) fn paint_pattern_layer(
     sink: &mut WalkSink<'_>,
-    chain: ComposeChain,
+    space: Option<u32>,
     style: &ComputedValues,
     fragment: &BoxFragment,
     images: &ImageRegistry,
@@ -460,7 +460,7 @@ pub(super) fn paint_pattern_layer(
     if let Source::Raster(image, _) = &source {
         paint_raster_layer(
             sink,
-            chain,
+            space,
             style,
             fragment,
             layer,
@@ -508,11 +508,11 @@ pub(super) fn paint_pattern_layer(
     // layer has to take this path — its pixels are late — and giving
     // gradients and solids a second, inline copy would mean two encodings of
     // one CSS feature that must stay byte-identical.
-    let opened = open_text_clip_ops(sink, chain, fragment, text_clip);
+    let opened = open_text_clip_ops(sink, space, fragment, text_clip);
     if text_clip.is_some() && !opened {
         return;
     }
-    inline(sink.scene_for(chain));
+    inline(sink.scene_for(space));
     if opened {
         sink.pop();
         sink.pop();

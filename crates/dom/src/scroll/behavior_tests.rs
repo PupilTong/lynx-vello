@@ -36,8 +36,8 @@ impl Harness {
     }
 
     /// The on-screen origin of `id`'s box: the baked (unscrolled) transform
-    /// with the compose-time chain translation applied at the document's
-    /// live offsets — exactly what composition and hit testing see.
+    /// mapped through its space at the document's live offsets — exactly
+    /// what composition and hit testing see.
     fn origin(&mut self, id: NodeId) -> Point2D<f32> {
         let frame = self.paint();
         let item = frame
@@ -51,13 +51,15 @@ impl Harness {
             .expect("a paintable item has a non-singular matrix");
         let offsets =
             |slot: &crate::visual::ScrollSlot| Some(self.doc.dom.scroll_offset(slot.node));
-        let translation = crate::paint::compose::chain_translation(
-            frame.slots(),
-            frame.item_translation_chain(item),
-            self.doc.dom.device_pixel_ratio(),
-            &offsets,
-        );
-        baked - translation
+        let ratio = self.doc.dom.device_pixel_ratio();
+        let animations = frame.sample_animations(None);
+        let stickies = frame.sample_stickies(ratio, &offsets);
+        let moved = frame
+            .space_samples(&animations, &stickies, ratio, &offsets)
+            .css(item.space)
+            * crate::vello::kurbo::Point::new(f64::from(baked.x), f64::from(baked.y));
+        #[allow(clippy::cast_possible_truncation, reason = "CSS px fit f32")]
+        Point2D::new(moved.x as f32, moved.y as f32)
     }
 
     fn hit(&mut self, x: f32, y: f32) -> Option<NodeId> {

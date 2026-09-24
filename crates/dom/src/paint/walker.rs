@@ -80,7 +80,7 @@
 use euclid::default::{Size2D, Vector2D};
 
 use crate::Document;
-use crate::paint::compose::{CapturedShape, ComposeAssembly, ComposeChain, ComposeOp, FilterGroup};
+use crate::paint::compose::{CapturedShape, ComposeAssembly, ComposeOp, FilterGroup};
 use crate::paint::shape::{BoxShape, with_shape};
 use crate::paint::{
     BoxFragment, PathScratch, background, border, convert, filters, mask, shadow, text,
@@ -89,14 +89,15 @@ use crate::render::image::ImageRegistry;
 use crate::vello::Scene;
 use crate::vello::kurbo::{Affine, Point, Rect};
 use crate::vello::peniko::{BlendMode, Compose, Fill, Mix};
-use crate::visual::{AutoBox, ClipNode, PaintItem, PaintItemKind, PaintOrder, RenderLayer};
+use crate::visual::space::{nearest_animation, nearest_scroll, nearest_sticky};
+use crate::visual::{AutoBox, ClipNode, PaintItem, PaintItemKind, PaintOrder, RenderLayer, Space};
 
 /// Where one walk's output goes.
 ///
 /// `Monolithic` is the pre-compose shape — one scene, everything inline —
 /// kept for the equivalence tests; production encodes through `Compose`, where
 /// walker-level pushes become program ops and content between them lands in
-/// per-chain fragments.
+/// per-space fragments.
 pub(crate) enum WalkSink<'s> {
     #[cfg_attr(
         not(test),
@@ -110,11 +111,11 @@ pub(crate) enum WalkSink<'s> {
 }
 
 impl WalkSink<'_> {
-    /// The scene content riding `chain` encodes into.
-    pub(super) fn scene_for(&mut self, chain: ComposeChain) -> &mut Scene {
+    /// The scene content in `space` encodes into.
+    pub(super) fn scene_for(&mut self, space: Option<u32>) -> &mut Scene {
         match self {
             Self::Monolithic(scene, _) => scene,
-            Self::Compose(assembly) => assembly.fragment_for(chain),
+            Self::Compose(assembly) => assembly.fragment_for(space),
         }
     }
 
@@ -124,14 +125,14 @@ impl WalkSink<'_> {
     /// In the monolithic mode the equivalence tests use it is encoded inline
     /// against that walk's own pixel source, so a culling regression in image
     /// draws stays observable to the culling oracle.
-    pub(super) fn image(&mut self, chain: ComposeChain, draw: crate::paint::compose::ImageDraw) {
+    pub(super) fn image(&mut self, space: Option<u32>, draw: crate::paint::compose::ImageDraw) {
         match self {
             Self::Monolithic(scene, pixels) => {
                 if let Some(data) = pixels.read(&draw.image, draw.size_hint()) {
                     crate::paint::compose::encode_image(scene, &draw, Affine::IDENTITY, &data);
                 }
             }
-            Self::Compose(assembly) => assembly.push_image(chain, draw),
+            Self::Compose(assembly) => assembly.push_image(space, draw),
         }
     }
 
@@ -141,7 +142,7 @@ impl WalkSink<'_> {
     )]
     pub(super) fn push_layer_rect(
         &mut self,
-        chain: ComposeChain,
+        space: Option<u32>,
         alpha_animation: Option<u32>,
         fill: Fill,
         blend: BlendMode,
@@ -158,7 +159,7 @@ impl WalkSink<'_> {
                 alpha,
                 transform,
                 shape: CapturedShape::Rect(rect),
-                chain,
+                space,
                 alpha_animation,
             }),
         }
@@ -166,7 +167,7 @@ impl WalkSink<'_> {
 
     pub(super) fn push_layer_box(
         &mut self,
-        chain: ComposeChain,
+        space: Option<u32>,
         fill: Fill,
         blend: BlendMode,
         alpha: f32,
@@ -185,7 +186,7 @@ impl WalkSink<'_> {
                 alpha,
                 transform,
                 shape: CapturedShape::Box(shape),
-                chain,
+                space,
                 alpha_animation: None,
             }),
         }
@@ -193,7 +194,7 @@ impl WalkSink<'_> {
 
     pub(super) fn push_clip_box(
         &mut self,
-        chain: ComposeChain,
+        space: Option<u32>,
         fill: Fill,
         transform: Affine,
         shape: BoxShape,
@@ -209,13 +210,13 @@ impl WalkSink<'_> {
                 alpha: 1.0,
                 transform,
                 shape: CapturedShape::Box(shape),
-                chain,
+                space,
                 alpha_animation: None,
             }),
         }
     }
 
-    fn push_clip_empty(&mut self, chain: ComposeChain) {
+    fn push_clip_empty(&mut self, space: Option<u32>) {
         match self {
             Self::Monolithic(scene, _) => {
                 scene.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &Rect::ZERO);
@@ -227,7 +228,7 @@ impl WalkSink<'_> {
                 alpha: 1.0,
                 transform: Affine::IDENTITY,
                 shape: CapturedShape::Rect(Rect::ZERO),
-                chain,
+                space,
                 alpha_animation: None,
             }),
         }
@@ -256,10 +257,10 @@ impl WalkSink<'_> {
         }
     }
 
-    fn pop_filter(&mut self) {
+    fn pop_filter(&mut self, spaces: &[Space]) {
         match self {
             Self::Monolithic(..) => {}
-            Self::Compose(assembly) => assembly.pop_filter(),
+            Self::Compose(assembly) => assembly.pop_filter(spaces),
         }
     }
 
@@ -281,10 +282,15 @@ impl WalkSink<'_> {
     /// filter group: with no side table and no composer its walk simply
     /// leaves the backdrop unfiltered, which keeps it a usable culling
     /// oracle for a page that uses the property.
-    fn push_backdrop(&mut self, entry: FilterGroup, ops: std::ops::Range<u32>) -> bool {
+    fn push_backdrop(
+        &mut self,
+        entry: FilterGroup,
+        ops: std::ops::Range<u32>,
+        spaces: &[Space],
+    ) -> bool {
         match self {
             Self::Monolithic(..) => false,
-            Self::Compose(assembly) => assembly.push_backdrop(entry, ops),
+            Self::Compose(assembly) => assembly.push_backdrop(entry, ops, spaces),
         }
     }
 }
@@ -315,7 +321,7 @@ pub(crate) struct Scratch {
 
 /// The frame-wide geometry the cull test is decided against: the region every
 /// clip chain admits, how far every scroll slot's committed encode window
-/// reaches, and which animation chains a sampled delta can move.
+/// reaches, and which animation nodes a sampled delta can move.
 ///
 /// It is a type of its own, and `pub(crate)`, because two consumers must
 /// agree exactly: [`plan_frame`], which decides what the paint walk encodes,
@@ -339,10 +345,10 @@ pub(crate) struct CullPlan {
     /// offset range the culled encode must stay valid for. Index-parallel
     /// with [`PaintOrder::slots`].
     slot_windows: Vec<(Vector2D<f32>, Vector2D<f32>)>,
-    /// Per animation slot, whether a live transform curve moves its chain —
-    /// transitive through slot parents. Content on a moving chain is never
-    /// culled and its enclosing groups keep unclipped bounds: the sampled
-    /// delta can carry it anywhere.
+    /// Per animation slot, whether a live transform curve moves it —
+    /// transitive through slot parents. Content in a space whose innermost
+    /// animation node moves is never culled and its enclosing groups keep
+    /// unclipped bounds: the sampled delta can carry it anywhere.
     animation_moves: Vec<bool>,
     /// Per group layer, the summed 3-sigma ink reach of that layer and every
     /// filtered layer outside it. Content inside a filtered group can put ink
@@ -403,18 +409,18 @@ impl CullPlan {
         );
     }
 
-    /// The region this frame's culling admits for content on `chain` inside
+    /// The region this frame's culling admits for content in `space` inside
     /// `clip` and inside group `layer`.
     fn admitted_for(
         &self,
         frame: &PaintOrder,
         clip: Option<usize>,
-        chain: Option<u32>,
-        animation: Option<u32>,
-        sticky: Option<u32>,
+        space: Option<u32>,
         layer: Option<usize>,
     ) -> Admitted {
-        if animation.is_some_and(|slot| self.animation_moves[slot as usize]) {
+        if nearest_animation(frame.spaces(), space)
+            .is_some_and(|slot| self.animation_moves[slot as usize])
+        {
             return Admitted::Everything;
         }
         let Some(cull) = self.cull else {
@@ -425,10 +431,9 @@ impl CullPlan {
         // over-admits a little near an inner clip, which is the safe
         // direction: culling needs a proof, uncertainty paints.
         let inflate = layer.map_or(0.0, |layer| self.layer_inflate[layer]);
-        admitted_region(self, frame, cull, chain, sticky, clip)
-            .map_or(Admitted::Nothing, |region| {
-                Admitted::Region(inflate_rect(region, inflate))
-            })
+        admitted_region(self, frame, cull, space, clip).map_or(Admitted::Nothing, |region| {
+            Admitted::Region(inflate_rect(region, inflate))
+        })
     }
 
     /// Whether this `content-visibility: auto` box can put ink in that
@@ -438,21 +443,14 @@ impl CullPlan {
     /// [`Self::admitted_for`] and the same [`box_bounds`]: the one that lets
     /// a box already reaching the admitted region paint without computing any
     /// fragment reach. Everything uncertain (a singular transform, a
-    /// non-finite bound, a moving animation chain, culling switched off)
+    /// non-finite bound, a moving animation node, culling switched off)
     /// answers `true`, because a cull needs a proof and relevance needs none.
     pub(crate) fn admits_auto_box(&self, frame: &PaintOrder, auto: &AutoBox) -> bool {
         let Some(local) = convert::item_affine(&auto.transform, auto.size) else {
             return true;
         };
-        self.admitted_for(
-            frame,
-            auto.clip,
-            auto.chain,
-            auto.animation,
-            auto.sticky,
-            auto.layer,
-        )
-        .reached_by(box_bounds(local, auto.size, 0.0))
+        self.admitted_for(frame, auto.clip, auto.space, auto.layer)
+            .reached_by(box_bounds(local, auto.size, 0.0))
     }
 }
 
@@ -462,7 +460,7 @@ enum Admitted {
     /// No proof is possible at all: culling is switched off, or a sampled
     /// animation delta can carry the content anywhere. Everything paints.
     Everything,
-    /// The region content on this chain may put ink in.
+    /// The region content in this space may put ink in.
     Region(Rect),
     /// The clip chain admits nothing whatever.
     Nothing,
@@ -570,7 +568,7 @@ pub(crate) fn walk<T>(
     );
 }
 
-/// The production walk: encodes the frame as per-chain fragments plus the
+/// The production walk: encodes the frame as per-space fragments plus the
 /// compose program over them.
 pub(crate) fn walk_compose<T>(
     assembly: &mut ComposeAssembly,
@@ -703,11 +701,11 @@ fn plan_clips(plan: &mut CullPlan, frame: &PaintOrder, cull: Option<Rect>) {
             clip.parent.is_none_or(|parent| parent < index),
             "a clip node nests inside an earlier clip node",
         );
-        // The inherited region is expanded into this clip's chain
-        // coordinates: everything here is baked unscrolled, so a region on
-        // an outer chain admits content on an inner one anywhere the inner
-        // slots' encode windows can carry it.
-        let inherited = admitted_region(plan, frame, cull, clip.slot, clip.sticky, clip.parent);
+        // The inherited region is expanded into this clip's space: everything
+        // here is baked unscrolled, so a region in an outer space admits
+        // content in an inner one anywhere the inner slots' encode windows
+        // can carry it.
+        let inherited = admitted_region(plan, frame, cull, clip.space, clip.parent);
         let resolved = inherited.and_then(|inherited| {
             // `push_clip` pushes an empty clip for a singular transform, so
             // nothing under this chain reaches the scene at all.
@@ -874,11 +872,7 @@ fn open_scope<T>(
         ratio,
     } = painting;
     let layer = &frame.layers()[layer_index];
-    let chain = ComposeChain {
-        scroll: layer.slot,
-        animation: layer.animation,
-        sticky: layer.sticky,
-    };
+    let space = layer.space;
     let base = scratch.scopes.last().map_or(0, |scope| scope.base);
     pop_clips_to(sink, scratch, base);
 
@@ -898,11 +892,10 @@ fn open_scope<T>(
     let mut pushed = 1_u32;
     // The effect layer's alpha is replaced at compose time when this group's
     // own element exports an opacity curve.
-    let alpha_animation = layer
-        .animation
+    let alpha_animation = nearest_animation(frame.spaces(), space)
         .filter(|&slot| frame.animations()[slot as usize].node == layer.node);
     sink.push_layer_rect(
-        chain,
+        space,
         alpha_animation,
         Fill::NonZero,
         blend,
@@ -921,16 +914,16 @@ fn open_scope<T>(
         )
     });
 
-    if push_clip_path(sink, chain, style, fragment.as_ref(), local, scale) {
+    if push_clip_path(sink, space, style, fragment.as_ref(), local, scale) {
         pushed += 1;
     }
 
     if mask::has_mask(style) {
         if let Some(fragment) = fragment.as_ref() {
-            mask::paint(sink, chain, style, fragment, images);
+            mask::paint(sink, space, style, fragment, images);
         }
         sink.push_layer_rect(
-            chain,
+            space,
             None,
             Fill::NonZero,
             BlendMode::new(Mix::Normal, Compose::SrcIn),
@@ -945,7 +938,7 @@ fn open_scope<T>(
     // bakes is exactly the pixels the effect/clip-path/mask stack will then
     // clip, mask and fade — filter-effects-1's order, with clip and mask
     // swapped (both intersective, so unobservable; see the module doc).
-    let blurred = filter_group(scratch, layer_index, chain, ratio)
+    let blurred = filter_group(scratch, layer_index, space, ratio)
         .is_some_and(|group| sink.push_filter(group));
 
     // Innermost of all, and before any item: the filtered backdrop is the
@@ -954,9 +947,9 @@ fn open_scope<T>(
     // and to the element together.
     let content_start = sink.content_boundary();
     if let Some((root_start, end)) = backdrop_end
-        && let Some(entry) = backdrop_entry(style, layer, chain, scale, ratio)
+        && let Some(entry) = backdrop_entry(style, layer, space, scale, ratio)
     {
-        sink.push_backdrop(entry, root_start..end);
+        sink.push_backdrop(entry, root_start..end, frame.spaces());
     }
 
     scratch.scopes.push(Scope {
@@ -977,7 +970,7 @@ fn open_scope<T>(
 /// instead — which encodes the same "nothing gets through".
 fn push_clip_path(
     sink: &mut WalkSink<'_>,
-    chain: ComposeChain,
+    space: Option<u32>,
     style: &stylo::properties::ComputedValues,
     fragment: Option<&BoxFragment>,
     local: Option<Affine>,
@@ -993,7 +986,7 @@ fn push_clip_path(
     };
     match local {
         Some(local) => sink.push_layer_box(
-            chain,
+            space,
             fill,
             BlendMode::new(Mix::Normal, Compose::SrcOver),
             1.0,
@@ -1001,7 +994,7 @@ fn push_clip_path(
             clip_shape,
         ),
         None => sink.push_layer_rect(
-            chain,
+            space,
             None,
             Fill::NonZero,
             BlendMode::new(Mix::Normal, Compose::SrcOver),
@@ -1071,7 +1064,7 @@ fn is_backdrop_root(style: &stylo::properties::ComputedValues) -> bool {
 fn backdrop_entry(
     style: &stylo::properties::ComputedValues,
     layer: &RenderLayer,
-    chain: ComposeChain,
+    space: Option<u32>,
     scale: Affine,
     ratio: f64,
 ) -> Option<FilterGroup> {
@@ -1119,7 +1112,7 @@ fn backdrop_entry(
             0.0
         },
         rect,
-        chain,
+        space,
         backdrop,
     ))
 }
@@ -1133,7 +1126,7 @@ fn backdrop_entry(
 fn filter_group(
     scratch: &Scratch,
     layer_index: usize,
-    chain: ComposeChain,
+    space: Option<u32>,
     ratio: f64,
 ) -> Option<FilterGroup> {
     let sigma = scratch.layer_sigma[layer_index] * ratio;
@@ -1155,7 +1148,7 @@ fn filter_group(
     if !(is_finite(rect) && rect.width() >= 1.0 && rect.height() >= 1.0) {
         return None;
     }
-    Some(FilterGroup::new(sigma as f32, rect, chain))
+    Some(FilterGroup::new(sigma as f32, rect, space))
 }
 
 fn close_scope<T>(sink: &mut WalkSink<'_>, scratch: &mut Scratch, painting: Painting<'_, T>) {
@@ -1171,11 +1164,7 @@ fn close_scope<T>(sink: &mut WalkSink<'_>, scratch: &mut Scratch, painting: Pain
         .expect("close_scope is only called with an open scope");
     pop_clips_to(sink, scratch, scope.base);
     let layer = &frame.layers()[scope.layer];
-    let chain = ComposeChain {
-        scroll: layer.slot,
-        animation: layer.animation,
-        sticky: layer.sticky,
-    };
+    let space = layer.space;
     let bounds = scratch.layer_bounds[scope.layer];
     // The list splits at its first `blur()`: what precedes it composites
     // against the group's own pixels *inside* the bake, what follows it
@@ -1190,7 +1179,7 @@ fn close_scope<T>(sink: &mut WalkSink<'_>, scratch: &mut Scratch, painting: Pain
         });
     if let Some((list, plan)) = &plan {
         filters::apply(
-            sink.scene_for(chain),
+            sink.scene_for(space),
             list,
             plan.before.clone(),
             bounds,
@@ -1198,11 +1187,11 @@ fn close_scope<T>(sink: &mut WalkSink<'_>, scratch: &mut Scratch, painting: Pain
         );
     }
     if scope.blurred {
-        sink.pop_filter();
+        sink.pop_filter(frame.spaces());
     }
     if let Some((list, plan)) = &plan {
         filters::apply(
-            sink.scene_for(chain),
+            sink.scene_for(space),
             list,
             plan.after.clone(),
             bounds,
@@ -1230,7 +1219,7 @@ fn paint_item<T>(
         ..
     } = painting;
     sync_clips(sink, scratch, frame, item, scale);
-    let chain = frame.item_compose_chain(item);
+    let space = item.space;
     let transform = scale * local;
 
     match item.kind {
@@ -1247,11 +1236,11 @@ fn paint_item<T>(
             // Each painter re-acquires the fragment rather than sharing one
             // borrow across the item: an image draw between them is a
             // program op, which cuts the open fragment. `fragment_for` cuts
-            // only when the chain actually changed, so re-acquiring where
+            // only when the space actually changed, so re-acquiring where
             // nothing was emitted costs a comparison.
-            shadow::paint_outset(sink.scene_for(chain), &mut scratch.paths, style, &fragment);
-            background::paint(sink, chain, style, &fragment, images, text_clip.as_ref());
-            shadow::paint_inset(sink.scene_for(chain), &mut scratch.paths, style, &fragment);
+            shadow::paint_outset(sink.scene_for(space), &mut scratch.paths, style, &fragment);
+            background::paint(sink, space, style, &fragment, images, text_clip.as_ref());
+            shadow::paint_inset(sink.scene_for(space), &mut scratch.paths, style, &fragment);
             // Of a replaced element's two sources, the registry picks the one
             // whose bitmap the node's natural size was recomputed from, so
             // `object-fit` fits the bitmap drawn here.
@@ -1259,15 +1248,15 @@ fn paint_item<T>(
             if let Some((image, _)) = images.resolve_presented(source, placeholder) {
                 background::paint_replaced_content(
                     sink,
-                    chain,
+                    space,
                     style,
                     &fragment,
                     image,
                     document.natural_size(item.node),
                 );
             }
-            border::paint(sink.scene_for(chain), &mut scratch.paths, style, &fragment);
-            border::paint_outline(sink.scene_for(chain), &mut scratch.paths, style, &fragment);
+            border::paint(sink.scene_for(space), &mut scratch.paths, style, &fragment);
+            border::paint_outline(sink.scene_for(space), &mut scratch.paths, style, &fragment);
         }
         PaintItemKind::TextRun { element } => {
             let Some(style) = document.paint_style(element) else {
@@ -1288,9 +1277,9 @@ fn paint_item<T>(
             // inline box's: one fragment per line, under every shadow and
             // every glyph in the paragraph. Only paragraphs that have one pay.
             if runs.has_inline_backgrounds() {
-                paint_inline_backgrounds(sink, chain, document, block, &runs, transform, images);
+                paint_inline_backgrounds(sink, space, document, block, &runs, transform, images);
             }
-            text::paint(sink.scene_for(chain), layout, transform, &runs);
+            text::paint(sink.scene_for(space), layout, transform, &runs);
         }
     }
 }
@@ -1309,7 +1298,7 @@ fn paint_item<T>(
 /// directly.
 fn paint_inline_backgrounds<T>(
     sink: &mut WalkSink<'_>,
-    chain: ComposeChain,
+    space: Option<u32>,
     document: &Document<T>,
     block: &hughie::text::block::TextBlock,
     runs: &text::RunPaints<'_>,
@@ -1336,7 +1325,7 @@ fn paint_inline_backgrounds<T>(
             border_widths: crate::layout::Edges::uniform(0.0),
             padding_widths: crate::layout::Edges::uniform(0.0),
         };
-        background::paint(sink, chain, style, &fragment, images, None);
+        background::paint(sink, space, style, &fragment, images, None);
     }
 }
 
@@ -1455,21 +1444,10 @@ fn sync_clips(
     }
 }
 
-/// A clip node's compose chain: its scroll chain, and never an animation
-/// chain — export eligibility refuses a clip established inside an animated
-/// subtree, so a clip's rect never moves with a sampled delta.
-fn clip_chain(clip: &ClipNode) -> ComposeChain {
-    ComposeChain {
-        scroll: clip.slot,
-        animation: None,
-        sticky: clip.sticky,
-    }
-}
-
 fn push_clip(sink: &mut WalkSink<'_>, clip: &ClipNode, scale: Affine) {
     let size = crate::Size2D::new(clip.rect.size.width, clip.rect.size.height);
     let Some(local) = convert::item_affine(&clip.transform, size) else {
-        sink.push_clip_empty(clip_chain(clip));
+        sink.push_clip_empty(clip.space);
         return;
     };
     let rect = Rect::new(
@@ -1479,7 +1457,7 @@ fn push_clip(sink: &mut WalkSink<'_>, clip: &ClipNode, scale: Affine) {
         (clip.rect.origin.y + clip.rect.size.height) as f64,
     );
     let shape = BoxShape::new(rect, &clip.radii);
-    sink.push_clip_box(clip_chain(clip), Fill::NonZero, scale * local, shape);
+    sink.push_clip_box(clip.space, Fill::NonZero, scale * local, shape);
 }
 
 fn pop_clips_to(sink: &mut WalkSink<'_>, scratch: &mut Scratch, len: usize) {
@@ -1519,6 +1497,7 @@ fn plan_frame<T>(scratch: &mut Scratch, document: &Document<T>, frame: &PaintOrd
     scratch.bounds_acc.clear();
     scratch.bounds_acc.resize(layers.len(), None);
     let slots = frame.slots();
+    let spaces = frame.spaces();
     let mut next_open = 0_usize;
     let close = |scratch: &mut Scratch| close_layer(scratch, frame, viewport);
 
@@ -1543,15 +1522,7 @@ fn plan_frame<T>(scratch: &mut Scratch, document: &Document<T>, frame: &PaintOrd
             continue;
         };
         let top = scratch.open_layers.last().copied();
-        let content_chain = frame.item_translation_chain(item);
-        let admitted = scratch.plan.admitted_for(
-            frame,
-            item.clip,
-            content_chain,
-            item.animation,
-            item.sticky,
-            top,
-        );
+        let admitted = scratch.plan.admitted_for(frame, item.clip, item.space, top);
 
         // An item whose plain border box already reaches the admitted region
         // paints whatever its fragments reach, because every reach only grows
@@ -1570,11 +1541,14 @@ fn plan_frame<T>(scratch: &mut Scratch, document: &Document<T>, frame: &PaintOrd
             let (low, high) = relative_offset_range(
                 slots,
                 &scratch.plan.slot_windows,
-                content_chain,
-                layers[top].slot,
+                nearest_scroll(spaces, item.space),
+                nearest_scroll(spaces, layers[top].space),
             );
             let bounds = expand_cover(bounds, low, high);
-            let (sticky_low, sticky_high) = frame.sticky_range(item.sticky, layers[top].sticky);
+            let (sticky_low, sticky_high) = frame.sticky_range(
+                nearest_sticky(spaces, item.space),
+                nearest_sticky(spaces, layers[top].space),
+            );
             let bounds = expand_region(bounds, sticky_low, sticky_high);
             scratch.bounds_acc[top] =
                 Some(scratch.bounds_acc[top].map_or(bounds, |united| united.union(bounds)));
@@ -1604,19 +1578,19 @@ fn plan_frame<T>(scratch: &mut Scratch, document: &Document<T>, frame: &PaintOrd
 }
 
 /// Closes the topmost open layer: its accumulated bounds become its pushed
-/// rect — intersected with the viewport expanded into the layer's chain
-/// coordinates, since the compose window may carry the layer's content
-/// across it — and fold into the parent layer still open, expanded into
-/// that parent's chain.
+/// rect — intersected with the viewport expanded into the layer's space,
+/// since the compose window may carry the layer's content across it — and
+/// fold into the parent layer still open, expanded into that parent's space.
 fn close_layer(scratch: &mut Scratch, frame: &PaintOrder, viewport: Rect) {
     let layers = frame.layers();
     let slots = frame.slots();
+    let spaces = frame.spaces();
     let closed = scratch
         .open_layers
         .pop()
         .expect("close is only called with an open layer");
-    let moving = layers[closed]
-        .animation
+    let own = layers[closed].space;
+    let moving = nearest_animation(spaces, own)
         .is_some_and(|slot| scratch.plan.animation_moves[slot as usize]);
     // A blur puts ink 3 sigma past the group's own content, so the group's
     // pushed rect — which is also the bake's rect — has to carry that margin.
@@ -1632,9 +1606,13 @@ fn close_layer(scratch: &mut Scratch, frame: &PaintOrder, viewport: Rect) {
             // would cut content the delta moves into view.
             return rect;
         }
-        let (low, high) =
-            relative_offset_range(slots, &scratch.plan.slot_windows, layers[closed].slot, None);
-        let (sticky_low, sticky_high) = frame.sticky_range(layers[closed].sticky, None);
+        let (low, high) = relative_offset_range(
+            slots,
+            &scratch.plan.slot_windows,
+            nearest_scroll(spaces, own),
+            None,
+        );
+        let (sticky_low, sticky_high) = frame.sticky_range(nearest_sticky(spaces, own), None);
         rect.intersect(inflate_rect(
             expand_region(viewport, low - sticky_high, high - sticky_low),
             reach,
@@ -1642,15 +1620,16 @@ fn close_layer(scratch: &mut Scratch, frame: &PaintOrder, viewport: Rect) {
     });
     if let (Some(bounds), Some(&parent)) = (scratch.bounds_acc[closed], scratch.open_layers.last())
     {
+        let outer = layers[parent].space;
         let (low, high) = relative_offset_range(
             slots,
             &scratch.plan.slot_windows,
-            layers[closed].slot,
-            layers[parent].slot,
+            nearest_scroll(spaces, own),
+            nearest_scroll(spaces, outer),
         );
         let bounds = expand_cover(inflate_rect(bounds, reach), low, high);
         let (sticky_low, sticky_high) =
-            frame.sticky_range(layers[closed].sticky, layers[parent].sticky);
+            frame.sticky_range(nearest_sticky(spaces, own), nearest_sticky(spaces, outer));
         let bounds = expand_region(bounds, sticky_low, sticky_high);
         scratch.bounds_acc[parent] =
             Some(scratch.bounds_acc[parent].map_or(bounds, |united| united.union(bounds)));
@@ -1713,29 +1692,31 @@ fn inflate_rect(rect: Rect, reach: f64) -> Rect {
     )
 }
 
-/// The region admitted for content on `chain`: the innermost enclosing
+/// The region admitted for content in `space`: the innermost enclosing
 /// `clip`'s resolved bounds, or the base `region` when there is no clip,
-/// expanded from its own chain into `chain`'s coordinates by however far the
-/// encode windows between them can carry content. `None` means the clip
-/// chain admits nothing at all.
+/// expanded from its own space into `space` by however far the encode
+/// windows and sticky ranges between them can carry content. `None` means
+/// the clip chain admits nothing at all.
 fn admitted_region(
     plan: &CullPlan,
     frame: &PaintOrder,
     region: Rect,
-    chain: Option<u32>,
-    sticky: Option<u32>,
+    space: Option<u32>,
     clip: Option<usize>,
 ) -> Option<Rect> {
-    let (base, outer, outer_sticky) = match clip {
-        Some(clip) => (
-            plan.clip_bounds[clip]?,
-            frame.clips()[clip].slot,
-            frame.clips()[clip].sticky,
-        ),
-        None => (region, None, None),
+    let spaces = frame.spaces();
+    let (base, outer) = match clip {
+        Some(clip) => (plan.clip_bounds[clip]?, frame.clips()[clip].space),
+        None => (region, None),
     };
-    let (low, high) = relative_offset_range(frame.slots(), &plan.slot_windows, chain, outer);
-    let (sticky_low, sticky_high) = frame.sticky_range(sticky, outer_sticky);
+    let (low, high) = relative_offset_range(
+        frame.slots(),
+        &plan.slot_windows,
+        nearest_scroll(spaces, space),
+        nearest_scroll(spaces, outer),
+    );
+    let (sticky_low, sticky_high) =
+        frame.sticky_range(nearest_sticky(spaces, space), nearest_sticky(spaces, outer));
     Some(expand_region(base, low - sticky_high, high - sticky_low))
 }
 
@@ -1931,8 +1912,7 @@ mod tests {
             radii: CornerRadii::ZERO,
             hit_testable: true,
             slot: None,
-            animation: None,
-            sticky: None,
+            space: None,
         }
     }
 

@@ -15,18 +15,16 @@
 
 use euclid::default::{Point2D, Rect, Vector2D};
 
-use super::{
-    AnimationSample, PaintItem, PaintItemKind, PaintOrder, ScrollSlot, StickySample, geometry,
-};
+use super::{PaintItem, PaintItemKind, PaintOrder, ScrollSlot, SpaceSamples, geometry};
 use crate::NodeId;
-use crate::paint::compose::{animation_deltas, chain_translation, sticky_translation};
 use crate::tree::document::Document;
+use crate::vello::kurbo::{Affine, Point};
 
 /// Where a hit query's scroll offsets come from: `None` falls back to the
 /// slot's committed offset. The frame is baked unscrolled, so a query
-/// translates the point *into* each item's scrolled space before inverting
-/// its transform — the same chain translation composition applies, snapped
-/// the same way.
+/// carries the point *into* each item's space before inverting its
+/// transform — the inverse of the map composition applies, snapped the same
+/// way.
 pub(crate) type OffsetSource<'a> = dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>> + 'a;
 
 impl PaintOrder {
@@ -46,10 +44,11 @@ impl PaintOrder {
         offsets: &OffsetSource<'_>,
         ratio: f32,
     ) -> Vec<NodeId> {
-        let samples = self.sample_animations(None);
+        let animations = self.sample_animations(None);
         let stickies = self.sample_stickies(ratio, offsets);
+        let samples = self.space_samples(&animations, &stickies, ratio, offsets);
         let mut elements = Vec::new();
-        for node in self.hits_at(document, point, offsets, &samples, &stickies, ratio) {
+        for node in self.hits_at(document, point, &samples) {
             if !elements.contains(&node) {
                 elements.push(node);
             }
@@ -65,10 +64,10 @@ impl PaintOrder {
         offsets: &OffsetSource<'_>,
         ratio: f32,
     ) -> Option<NodeId> {
-        let samples = self.sample_animations(None);
+        let animations = self.sample_animations(None);
         let stickies = self.sample_stickies(ratio, offsets);
-        self.hits_at(document, point, offsets, &samples, &stickies, ratio)
-            .next()
+        let samples = self.space_samples(&animations, &stickies, ratio, offsets);
+        self.hits_at(document, point, &samples).next()
     }
 
     /// Items whose node died since the frame was built are skipped, not
@@ -78,15 +77,12 @@ impl PaintOrder {
         &'frame self,
         document: &'frame Document<T>,
         point: Point2D<f32>,
-        offsets: &'frame OffsetSource<'frame>,
-        samples: &'frame [AnimationSample],
-        stickies: &'frame [StickySample],
-        ratio: f32,
+        samples: &'frame SpaceSamples<'frame>,
     ) -> impl Iterator<Item = NodeId> + 'frame {
         self.items
             .iter()
             .rev()
-            .filter_map(move |item| self.item_hit(item, point, offsets, samples, stickies, ratio))
+            .filter_map(move |item| self.item_hit(item, point, samples))
             .filter(move |&node| document.contains_node(node))
     }
 
@@ -94,47 +90,23 @@ impl PaintOrder {
         &self,
         item: &PaintItem,
         point: Point2D<f32>,
-        offsets: &OffsetSource<'_>,
-        samples: &[AnimationSample],
-        stickies: &[StickySample],
-        ratio: f32,
+        samples: &SpaceSamples<'_>,
     ) -> Option<NodeId> {
         if !item.hit_testable {
             return None;
         }
-        let screen = point;
-        // The frame is baked unscrolled: carry the screen point into the
-        // item's scrolled space — the scroll translation first, then the
-        // inverse of the animation deltas moving the item — before inverting
-        // its transform.
-        let translation = chain_translation(
-            &self.slots,
-            self.item_translation_chain(item),
-            ratio,
-            offsets,
-        );
-        let mut point = point + translation - sticky_translation(stickies, item.sticky);
-        if item.animation.is_some() {
-            let delta = animation_deltas(samples, item.animation);
-            if delta.determinant().abs() < f64::EPSILON {
-                // A degenerate delta paints the item collapsed; nothing to hit.
-                return None;
-            }
-            let unmoved = delta.inverse()
-                * crate::vello::kurbo::Point::new(f64::from(point.x), f64::from(point.y));
-            #[allow(clippy::cast_possible_truncation, reason = "CSS px fit f32")]
-            {
-                point = Point2D::new(unmoved.x as f32, unmoved.y as f32);
-            }
-        }
-        let local = item.transform.inverse()?.transform_point2d(point)?;
+        // The frame is baked unscrolled: carry the screen point back through
+        // the item's space before inverting its own transform. A degenerate
+        // space paints the item collapsed; nothing to hit.
+        let unmoved = unmap(samples.css(item.space), point)?;
+        let local = item.transform.inverse()?.transform_point2d(unmoved)?;
         if local.x >= item.size.width || local.y >= item.size.height {
             return None;
         }
         if !geometry::rounded_rect_contains(Rect::from_size(item.size), &item.radii, local) {
             return None;
         }
-        if !self.point_passes_clips(item.clip, screen, offsets, stickies, ratio) {
+        if !self.point_passes_clips(item.clip, point, samples) {
             return None;
         }
         Some(match item.kind {
@@ -147,19 +119,15 @@ impl PaintOrder {
         &self,
         mut clip: Option<usize>,
         point: Point2D<f32>,
-        offsets: &OffsetSource<'_>,
-        stickies: &[StickySample],
-        ratio: f32,
+        samples: &SpaceSamples<'_>,
     ) -> bool {
         while let Some(index) = clip {
             let node = &self.clips[index];
-            let translated = point + chain_translation(&self.slots, node.slot, ratio, offsets)
-                - sticky_translation(stickies, node.sticky);
-            let Some(local) = node
-                .transform
-                .inverse()
-                .and_then(|inverse| inverse.transform_point2d(translated))
-            else {
+            let Some(local) = unmap(samples.css(node.space), point).and_then(|unmoved| {
+                node.transform
+                    .inverse()
+                    .and_then(|inverse| inverse.transform_point2d(unmoved))
+            }) else {
                 return false;
             };
             if !geometry::rounded_rect_contains(node.rect, &node.radii, local) {
@@ -169,4 +137,15 @@ impl PaintOrder {
         }
         true
     }
+}
+
+/// `point` carried back through a space's live map, or `None` when the map
+/// is degenerate.
+fn unmap(map: Affine, point: Point2D<f32>) -> Option<Point2D<f32>> {
+    if map.determinant().abs() < f64::EPSILON {
+        return None;
+    }
+    let unmoved = map.inverse() * Point::new(f64::from(point.x), f64::from(point.y));
+    #[allow(clippy::cast_possible_truncation, reason = "CSS px fit f32")]
+    Some(Point2D::new(unmoved.x as f32, unmoved.y as f32))
 }
