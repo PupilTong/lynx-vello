@@ -368,9 +368,9 @@ nothing, and one past that slot's `encode_window`
 it there is no encoded content to compose and no `auto` box was determined
 for it. Composition is the one render path: `compose_into` replays
 the whole program into one flat scene at those offsets, and nothing is retained
-per scroller. Scroll
-containers are forced stacking contexts (matching Lynx's native scroll views;
-the deviation from the web is recorded in `runtime-architecture.md`). Composite
+per scroller. A scroll
+container is no stacking context by itself, as on the web (see
+`runtime-architecture.md`). Composite
 animations ride the same split: an exportable `opacity`/`transform` animation
 publishes an `AnimationSlot` curve the consumer samples at its own timeline
 reading. `docs/dom-public-api.md`'s "Retained visual output" row is the

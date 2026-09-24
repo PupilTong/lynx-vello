@@ -171,3 +171,61 @@ fn grid_lanes_waterfall_matches_reference() {
     );
     screenshot::assert_golden(&["grid-lanes-waterfall"], &actual);
 }
+
+/// A scroller holding two `z-index` columns beside a `z-index: 2` bar that
+/// is its DOM sibling. The scroller's own `z-index` is the only difference
+/// between the two goldens below; both scroll it 40px, so each column shows
+/// its scrolled position and the scrollport's cut.
+const SCROLL_STACKING_CSS: &str = "
+    page { display: flex; position: relative; width: 240px; height: 200px;
+           background-color: #e5e7eb; }
+    .scroller { display: flex; position: absolute; left: 20px; top: 20px;
+                width: 200px; height: 160px; padding: 10px; gap: 10px;
+                box-sizing: border-box; overflow: scroll;
+                background-color: #cbd5e1; }
+    .stacked { z-index: 0; }
+    .column { display: flex; flex-shrink: 0; position: relative;
+              width: 85px; height: 220px; }
+    .a { z-index: 1; background-color: #38bdf8; }
+    .b { z-index: 3; background-color: #22c55e; }
+    .bar { display: flex; position: absolute; left: 0; top: 80px;
+           width: 240px; height: 40px; z-index: 2; background-color: #5b21b6; }
+";
+
+fn capture_scroll_stacking(test: &str, scroller_class: &str) -> flashbulb::Image {
+    let mut doc = paint_common::Doc::with_css_sized(SCROLL_STACKING_CSS, 240.0, 200.0);
+    let root = doc.root;
+    let scroller = doc.el(root, scroller_class);
+    doc.el(scroller, "column a");
+    doc.el(scroller, "column b");
+    doc.el(root, "bar");
+    doc.dom.layout();
+    let applied = doc.dom.scroll_to(scroller, dom::Vector2D::new(0.0, 40.0));
+    assert!(
+        (applied.y - 40.0).abs() < f32::EPSILON,
+        "the columns must overflow the scrollport"
+    );
+    screenshot::capture_prebuilt_document(test, &mut doc.dom, &dom::NoImages)
+}
+
+/// `z-index: auto`: the scroller is no stacking context, so its columns sort
+/// against the bar in the page's context — A (1) under the bar, B (3) over it.
+#[test]
+fn scroll_container_without_z_index_interleaves_its_content_with_a_sibling() {
+    let actual = capture_scroll_stacking(
+        "scroll_container_without_z_index_interleaves_its_content_with_a_sibling",
+        "scroller",
+    );
+    screenshot::assert_golden(&["scroll-stacking", "z-index-auto"], &actual);
+}
+
+/// `z-index: 0`: the scroller is a stacking context at level 0, so both
+/// columns stay inside it and the bar (2) covers them both.
+#[test]
+fn scroll_container_with_z_index_zero_keeps_its_content_below_a_sibling() {
+    let actual = capture_scroll_stacking(
+        "scroll_container_with_z_index_zero_keeps_its_content_below_a_sibling",
+        "scroller stacked",
+    );
+    screenshot::assert_golden(&["scroll-stacking", "z-index-zero"], &actual);
+}

@@ -98,12 +98,11 @@ fn negative_z_index_paints_below_in_flow_content() {
     assert_eq!(h.hit(50.0, 50.0), Some(flow));
 }
 
+/// A scroll container is no stacking context by itself, as on the web: a
+/// `z-index` inside it sorts against its siblings outside, so the content
+/// paints above a positioned sibling with a lower level.
 #[test]
-fn a_scroll_container_paints_as_one_atomic_stacking_context() {
-    // A scroll container is a forced stacking context (its subtree is one
-    // compose run a retained layer can carry), so a `z-index` inside it
-    // compares against nothing outside it: the whole scroller stays below a
-    // positioned sibling with any positive level.
+fn a_scroll_containers_z_index_content_sorts_in_the_enclosing_context() {
     let mut h = Harness::new(&format!(
         "{PAGE}
          .scroller {{ display: flex; position: absolute; left: 0; top: 0;
@@ -117,8 +116,76 @@ fn a_scroll_container_paints_as_one_atomic_stacking_context() {
     let scroller = h.el(root, "view.scroller");
     let content = h.el(scroller, "view.content");
     let above = h.el(root, "view.above");
-    assert_eq!(h.element_order(), vec![root, scroller, content, above]);
-    assert_eq!(h.hit(50.0, 50.0), Some(above));
+    assert_eq!(h.element_order(), vec![root, scroller, above, content]);
+    assert_eq!(h.hit(50.0, 50.0), Some(content));
+    // Sorted outside the scroller, still cut by its scrollport.
+    assert_eq!(h.hit(150.0, 250.0), Some(root));
+}
+
+/// Content hoisted out of its scroller by `z-index` keeps the scroller's
+/// clip and scroll space: it is painted in the enclosing context but moves
+/// with the scroll offset and is cut by the scrollport.
+#[test]
+fn hoisted_scroll_content_keeps_its_scrollers_clip_and_space() {
+    let mut h = Harness::new(&format!(
+        "{PAGE}
+         .scroller {{ display: flex; flex-direction: column; position: absolute;
+                      left: 0; top: 0; overflow: scroll; width: 200px; height: 200px; }}
+         .content {{ flex-shrink: 0; position: relative; z-index: 1; margin-top: 150px;
+                     width: 200px; height: 100px; }}
+         .spacer {{ flex-shrink: 0; width: 10px; height: 400px; }}"
+    ));
+    let root = h.root();
+    let scroller = h.el(root, "view.scroller");
+    let content = h.el(scroller, "view.content");
+    h.el(scroller, "view.spacer");
+    let frame = h.paint();
+    let item = frame
+        .items()
+        .iter()
+        .find(|item| item.node == content)
+        .expect("the content paints");
+    let clip = &frame.clips()[item.clip.expect("the content is clipped")];
+    assert_eq!(clip.node, scroller, "the scroller's scrollport cuts it");
+    let space = item.space.expect("the content rides a space");
+    assert!(
+        matches!(
+            frame.spaces()[space as usize].kind,
+            crate::visual::SpaceKind::Scroll(_)
+        ),
+        "the innermost space is the scroller's scroll node",
+    );
+
+    // Below the scrollport's end before the scroll, inside it after.
+    assert_eq!(h.hit(150.0, 225.0), Some(root));
+    assert_eq!(h.hit(150.0, 120.0), Some(scroller));
+    h.doc.dom.layout();
+    h.doc
+        .dom
+        .scroll_to(scroller, crate::Vector2D::new(0.0, 100.0));
+    assert_eq!(h.hit(150.0, 120.0), Some(content));
+}
+
+/// A fixed box inside scroll content escapes the scroller's clip and scroll
+/// space for its containing block's, and with no stacking context in the
+/// way its `z-index` also lifts it over the scroller's later siblings.
+#[test]
+fn a_fixed_popup_in_scroll_content_overlays_the_scrollers_siblings() {
+    let mut h = Harness::new(&format!(
+        "{PAGE}
+         .scroller {{ display: flex; position: absolute; left: 0; top: 0;
+                      overflow: scroll; width: 200px; height: 200px; }}
+         .popup {{ position: fixed; left: 150px; top: 150px; z-index: 10;
+                   width: 200px; height: 200px; }}
+         .sibling {{ position: absolute; left: 150px; top: 150px; z-index: 5;
+                     width: 200px; height: 200px; }}"
+    ));
+    let root = h.root();
+    let scroller = h.el(root, "view.scroller");
+    let popup = h.el(scroller, "view.popup");
+    h.el(root, "view.sibling");
+    assert_eq!(h.hit(175.0, 175.0), Some(popup));
+    assert_eq!(h.hit(300.0, 300.0), Some(popup), "outside the scrollport");
 }
 
 #[test]
@@ -2073,6 +2140,43 @@ fn a_scroll_container_inside_an_animated_subtree_falls_back_to_ticks() {
         !frame.has_live_curves(),
         "the allocated slot was set back to the committed values"
     );
+}
+
+/// The same refusal for a scroll container that is no stacking context: it
+/// takes its slot on the in-context path, inside an animated card.
+#[test]
+fn an_in_context_scroll_container_inside_an_animated_card_falls_back_to_ticks() {
+    let mut document: crate::Document<()> =
+        crate::Document::new(crate::tree::document::tests::device(), "page", ());
+    document.add_stylesheet(
+        ".card { width: 100px; height: 100px; animation: slide 1s linear infinite; }
+         .scroller { overflow: scroll; width: 100px; height: 100px; }
+         .content { width: 100px; height: 300px; }
+         @keyframes slide { from { transform: translateX(0px); }
+                            to { transform: translateX(50px); } }",
+        crate::StylesheetOrigin::Author,
+    );
+    let page = document.document_element().id();
+    let card = document.create_element("view", ());
+    document.set_attribute(card, "class", "card");
+    document.append_child(page, card);
+    let scroller = document.create_element("view", ());
+    document.set_attribute(scroller, "class", "scroller");
+    document.append_child(card, scroller);
+    let content = document.create_element("view", ());
+    document.set_attribute(content, "class", "content");
+    document.append_child(scroller, content);
+    document.render();
+    document.advance_animations(0.0);
+    let tick = document.advance_animations(0.25);
+    assert!(tick.needs_next_frame, "the slide must be live");
+    document.render();
+    let frame = document.committed_frame().expect("a frame is committed");
+    assert!(
+        frame.needs_main_ticks(),
+        "a scroll container inside the moving card cannot ride its delta"
+    );
+    assert!(!frame.has_live_curves());
 }
 
 /// An element's own box and clip ride its box space — inside its own sticky

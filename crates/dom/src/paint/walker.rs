@@ -2110,6 +2110,38 @@ mod tests {
         assert!(draws(&long.uncultured) > draws(&long.cultured));
     }
 
+    /// The same bound for rows a `z-index` sorts out of their scroller into
+    /// the page's stacking context: they paint there, but still carry the
+    /// scroller's clip, so the rows below its scrollport stay unencoded.
+    #[test]
+    fn hoisted_rows_clipped_out_of_their_scroll_container_encode_nothing() {
+        let mut doc = Doc::with_css(
+            "page { display: flex; position: relative; width: 800px; height: 600px; }
+             .list { display: flex; flex-direction: column; overflow: scroll;
+                     width: 300px; height: 120px; }
+             .row { display: flex; flex-shrink: 0; position: relative; z-index: 1;
+                    width: 300px; height: 40px; background-color: teal; }",
+        );
+        let root = doc.root;
+        let list = doc.el(root, "view.list");
+        for _ in 0..8 {
+            doc.el(list, "view.row");
+        }
+        let short = walk_twice(&mut doc);
+
+        for _ in 0..200 {
+            doc.el(list, "view.row");
+        }
+        let long = walk_twice(&mut doc);
+
+        assert_eq!(
+            draws(&short.cultured),
+            draws(&long.cultured),
+            "hoisted rows below the scrollport must not reach the encoding",
+        );
+        assert!(draws(&long.uncultured) > draws(&long.cultured));
+    }
+
     #[test]
     fn a_wholly_culled_group_stays_layer_balanced() {
         let mut doc = Doc::with_css(&format!(

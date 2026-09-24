@@ -2031,8 +2031,10 @@ Rulings and limits to know before touching it:
   retained frame) and the document element is permanent and pre-created.
 - `overflow: auto` stays out (user decision, 2026-07-29) and a `visible` axis
   pairs into `hidden`; only `scroll` is user-scrollable, `hidden` is a scroll
-  container only script moves, `clip` is no container at all, and scroll
-  containers are forced stacking contexts.
+  container only script moves, and `clip` is no container at all. A scroll
+  container is no stacking context by itself, as on the web and web-core
+  (user decision, 2026-09-24): native Lynx's `z-index` capping inside
+  scroll views is deliberately not followed.
 - `content-visibility: auto` relevance is `dom`'s, determined once per commit
   against the region the paint walk's culling admits, and stored as
   layout-side per-element state in a slot-keyed side table on `TreeArenas` —
