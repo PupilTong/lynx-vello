@@ -856,6 +856,33 @@ fn text_runs_are_clipped_by_their_element() {
     assert_eq!(h.hit(100.0, 10.0), Some(root));
 }
 
+/// The same for a block that is no stacking context: `overflow: clip` makes
+/// no scroll container, and the UA sheet gives every `text` exactly that, so
+/// an ordinary `<text>` paints its paragraph on the in-context path.
+#[test]
+fn text_runs_are_clipped_by_their_element_outside_a_stacking_context() {
+    let mut h = Harness::new(
+        "page { display: flex; position: relative; width: 800px; height: 600px; }
+         .clipper { display: -lynx-text; overflow: clip; width: 60px; height: 20px;
+                    font-family: Ahem; font-size: 20px; }",
+    );
+    h.doc.dom.register_fonts(FontBlob::from_static(AHEM));
+    let root = h.root();
+    let clipper = h.el(root, "view.clipper");
+    let text = h.doc.dom.create_text_node("hellohello", ());
+    h.doc.dom.append_child(clipper, text);
+    let paint = h.paint();
+    let item = paint
+        .items()
+        .iter()
+        .find(|item| item.kind == PaintItemKind::TextRun { element: clipper })
+        .expect("the block paints one paragraph item");
+    let clip = &paint.clips()[item.clip.expect("text is clipped by its element")];
+    assert_eq!(clip.node, clipper);
+    assert_eq!(h.hit(30.0, 10.0), Some(clipper));
+    assert_eq!(h.hit(100.0, 10.0), Some(root));
+}
+
 #[test]
 fn shared_edges_resolve_by_paint_order_and_trailing_edges_miss() {
     let mut h = Harness::new(
