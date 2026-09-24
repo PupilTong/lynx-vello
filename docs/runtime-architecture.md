@@ -1411,10 +1411,15 @@ frame they were slower than flat recomposition — each frame copied a plane
 larger than the viewport into vello's image atlas — and every commit re-baked
 all of them.
 
-A scroll container is a forced stacking context (Lynx's native scroll
-views are compositing boundaries; recorded deviation from the web, where
-`overflow` alone creates none), which keeps a scroller's content contiguous
-in the compose program.
+A scroll container is no stacking context by itself, as on the web and in
+web-core (whose `scroll-view` is `position: relative` with no `z-index`;
+`list` is one through its own `contain: layout`). Native Lynx scroll views are
+compositing boundaries that cap a descendant's `z-index`; this engine does
+not follow that. A scroller's content therefore need not be contiguous in the
+compose program: a positioned or `z-index` descendant sorts in the enclosing
+stacking context, and every record it produces still names the scroller's
+scroll space and clip, which is all composition, culling and hit testing
+read.
 
 No frame materializes a whole composition beside its fragments (that would be
 a content-proportional second encoding): `scene()` borrows the single fragment

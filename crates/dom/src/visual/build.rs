@@ -929,18 +929,15 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         let position = style.clone_position();
         let clips = member_clip_contexts(position, *cursor.ctx);
         let z_applies = stacking::z_index_applies(position, cursor.is_item_container);
-        // Two forced stacking contexts beyond the CSS triggers. An element
+        // One forced stacking context beyond the CSS triggers: an element
         // whose running animation moves only composite properties paints as
         // a stacking context — the rule browsers apply to animated
         // `opacity`/`transform` — so its subtree is one atomic, retargetable
-        // unit. A scroll container likewise: its subtree then encodes as one
-        // contiguous compose run, which is what lets scrolling move a
-        // retained layer instead of recomposing content (Lynx's native
-        // scroll views are compositing boundaries, so this matches the
-        // reference behavior rather than the web's).
-        let forced_context = (child_node.may_have_animations()
-            && self.document.animates_composite_properties(child_node))
-            || scroll::is_scroll_container(style);
+        // unit. A scroll container is none by itself, as on the web: its
+        // content rides its scroll space and clip wherever it paints, so a
+        // positioned descendant sorts in the enclosing stacking context.
+        let forced_context = child_node.may_have_animations()
+            && self.document.animates_composite_properties(child_node);
         Some(ChildBox {
             node,
             level: (stacking::establishes_stacking_context(child_node, style, z_applies)
@@ -1065,21 +1062,33 @@ impl<'doc, T: Sync> Builder<'doc, T> {
             None => (target, ctx),
         };
 
-        // No scroll slot here: a scroll container is a forced stacking
-        // context, so it never reaches this in-context path.
-        //
+        // A scroll container that is no stacking context takes its slot and
+        // scroll space here, in the order `build_stacking_context` allocates
+        // them: beside its own box, before any descend.
+        let world = translated(collection.world, child.offset);
+        let own_slot = self.allocate_scroll_slot(
+            child.node,
+            style,
+            outer.current.chain,
+            self.nearest_sticky(outer.current.space),
+            &world,
+        );
+        let own_scroll = own_slot.map(|slot| {
+            (
+                slot,
+                self.push_space(outer.current.space, SpaceKind::Scroll(slot)),
+            )
+        });
+        if own_slot.is_some() {
+            // A scroll translation inside an animated subtree cannot ride
+            // a sampled delta, as on the stacking-context path.
+            self.kill_animation_chain(self.nearest_animation(outer.current.space));
+        }
         // Entered before the records: the paragraph paints inside the
         // element's own clip, as `push_paragraph` gives it on the stacking
         // context path. The element's own box keeps the outer context.
-        let inner = descend.then(|| {
-            self.enter_element(
-                child.node,
-                style,
-                &translated(collection.world, child.offset),
-                outer,
-                None,
-            )
-        });
+        let inner =
+            descend.then(|| self.enter_element(child.node, style, &world, outer, own_scroll));
         if visible {
             self.push_stream(
                 target,
@@ -1090,7 +1099,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
                     child.size,
                     outer.current.clip,
                     hit_testable,
-                    outer.current.chain,
+                    own_slot.or(outer.current.chain),
                     outer.current.space,
                 ),
             );
