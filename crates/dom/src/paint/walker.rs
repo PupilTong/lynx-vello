@@ -355,6 +355,10 @@ pub(crate) struct Scratch {
     /// The per-frame cull geometry, shared with the relevance pass.
     plan: CullPlan,
     paths: PathScratch,
+    /// Asks every item's admitted region afresh, for the tests that check
+    /// [`plan_frame`]'s reuse of it changes nothing.
+    #[cfg(test)]
+    recompute_admitted: bool,
 }
 
 /// The frame-wide geometry the cull test is decided against: the region every
@@ -530,6 +534,10 @@ impl CullPlan {
             .reached_by(box_bounds(local, auto.size, 0.0))
     }
 }
+
+/// What [`CullPlan::admitted_for`] decides a region from: an item's clip,
+/// space and innermost group.
+type AdmittedKey = (Option<usize>, Option<u32>, Option<usize>);
 
 /// What a frame's culling admits for one piece of content, in the CSS px of
 /// the space that content rides.
@@ -728,10 +736,28 @@ pub(crate) fn walk_uncultured<T>(
 /// Per item of `frame`, whether the production walk encodes it.
 #[cfg(test)]
 pub(crate) fn encoded_items<T>(document: &Document<T>, frame: &PaintOrder) -> Vec<bool> {
-    let mut scratch = Scratch::default();
+    item_plans(document, frame, false)
+        .iter()
+        .map(Option::is_some)
+        .collect()
+}
+
+/// Per item of `frame`, the local affine [`plan_frame`] encodes it with, or
+/// `None` where it culls it; with `recompute_admitted`, asking every item's
+/// admitted region afresh.
+#[cfg(test)]
+fn item_plans<T>(
+    document: &Document<T>,
+    frame: &PaintOrder,
+    recompute_admitted: bool,
+) -> Vec<Option<Affine>> {
+    let mut scratch = Scratch {
+        recompute_admitted,
+        ..Scratch::default()
+    };
     scratch.plan.resolve_for(document, frame);
     plan_frame(&mut scratch, document, frame);
-    scratch.item_plan.iter().map(Option::is_some).collect()
+    scratch.item_plan
 }
 
 /// Per group layer of `frame`, the rect the production walk pushes it with,
@@ -1641,6 +1667,11 @@ fn plan_frame<T>(scratch: &mut Scratch, document: &Document<T>, frame: &PaintOrd
     );
     let mut next_open = 0_usize;
     let close = |scratch: &mut Scratch| close_layer(scratch, frame, viewport);
+    // The admitted region is a function of `(clip, space, group)` alone —
+    // the plan it reads is resolved before this loop — and runs of siblings
+    // share all three. One entry spares each run all but its first pull-back
+    // through every curve's reach on its path.
+    let mut last_admitted: Option<(AdmittedKey, Admitted)> = None;
 
     for (index, item) in items.iter().enumerate() {
         while scratch
@@ -1667,7 +1698,19 @@ fn plan_frame<T>(scratch: &mut Scratch, document: &Document<T>, frame: &PaintOrd
             continue;
         };
         let top = scratch.open_layers.last().copied();
-        let admitted = scratch.plan.admitted_for(frame, item.clip, item.space, top);
+        let key = (item.clip, item.space, top);
+        #[cfg(test)]
+        let reuse = !scratch.recompute_admitted;
+        #[cfg(not(test))]
+        let reuse = true;
+        let admitted = match last_admitted {
+            Some((last, admitted)) if reuse && last == key => admitted,
+            _ => {
+                let admitted = scratch.plan.admitted_for(frame, item.clip, item.space, top);
+                last_admitted = Some((key, admitted));
+                admitted
+            }
+        };
 
         // An item whose plain border box already reaches the admitted region
         // paints whatever its fragments reach, because every reach only grows
@@ -2623,6 +2666,116 @@ mod tests {
         doc.dom.render();
         doc.dom.advance_animations(0.0);
         doc.dom.advance_animations(0.25);
+    }
+
+    /// Reusing one item's admitted region for the next item with the same
+    /// `(clip, space, group)` decides every item as asking afresh does, over
+    /// pages whose adjacent items differ in each part of that key alone, on a
+    /// rotating arm half off the viewport: cells alternating with clipped
+    /// cells (clip), with cells sliding on their own curve (space), and,
+    /// inside a blurred group, with cells blurring further (group); plus a
+    /// sliding card holding a scrolled list.
+    #[test]
+    fn reusing_the_admitted_region_decides_every_item_as_recomputing_does() {
+        type Page = (&'static str, fn(&mut Doc));
+        let pages: [Page; 5] = [
+            ("arm", |doc| {
+                let root = doc.root;
+                let arm = doc.el(root, "view.arm");
+                for index in 0..40 {
+                    if index % 2 == 0 {
+                        doc.el(arm, "view.cell");
+                    } else {
+                        let boxed = doc.el(arm, "view.cell.boxed");
+                        doc.el(boxed, "view.dot");
+                    }
+                }
+            }),
+            ("blurred arm", |doc| {
+                let root = doc.root;
+                let blur = doc.el(root, "view.blur");
+                let arm = doc.el(blur, "view.arm");
+                for index in 0..40 {
+                    let cell = doc.el(arm, "view.cell.boxed");
+                    if index % 3 == 0 {
+                        doc.el(cell, "view.dot");
+                    }
+                }
+            }),
+            ("arm of sliders", |doc| {
+                let root = doc.root;
+                let arm = doc.el(root, "view.arm");
+                for index in 0..40 {
+                    let class = if index % 2 == 0 {
+                        "view.cell"
+                    } else {
+                        "view.cell.slider"
+                    };
+                    doc.el(arm, class);
+                }
+            }),
+            ("blurred arm of fuzzy cells", |doc| {
+                let root = doc.root;
+                let blur = doc.el(root, "view.blur");
+                let arm = doc.el(blur, "view.arm");
+                for index in 0..40 {
+                    let class = if index % 2 == 0 {
+                        "view.cell"
+                    } else {
+                        "view.cell.fuzzy"
+                    };
+                    doc.el(arm, class);
+                }
+            }),
+            ("list", |doc| {
+                let root = doc.root;
+                let card = doc.el(root, "view.card");
+                let list = doc.el(card, "view.list");
+                for index in 0..200 {
+                    let row = doc.el(list, "view.row");
+                    if index % 2 == 0 {
+                        let boxed = doc.el(row, "view.cell.boxed");
+                        doc.el(boxed, "view.dot");
+                    }
+                }
+            }),
+        ];
+        for (label, build) in pages {
+            let mut doc = Doc::with_css(&format!(
+                "{PAGE}
+                 .arm {{ display: flex; position: absolute; left: 200px; top: 200px;
+                         width: 1600px; height: 40px; transform-origin: 200px 20px;
+                         animation: spin 1s linear infinite; }}
+                 .cell {{ display: flex; flex-shrink: 0; width: 40px; height: 40px;
+                          background-color: teal; }}
+                 .boxed {{ overflow: clip; background-color: navy; }}
+                 .dot {{ display: flex; flex-shrink: 0; width: 60px; height: 20px;
+                         background-color: orange; }}
+                 .blur {{ display: flex; position: absolute; left: 0; top: 0;
+                          filter: blur(4px); }}
+                 .card {{ display: flex; position: absolute; left: 0; top: 0;
+                          animation: slide 1s linear infinite; }}
+                 .list {{ display: flex; flex-direction: column; overflow: scroll;
+                          width: 300px; height: 120px; }}
+                 .row {{ display: flex; flex-shrink: 0; width: 300px; height: 40px; }}
+                 .slider {{ animation: slide 1s linear infinite; }}
+                 .fuzzy {{ filter: blur(40px); }}
+                 @keyframes spin {{ from {{ transform: rotate(0deg); }}
+                                    to {{ transform: rotate(90deg); }} }}
+                 {SLIDE}"
+            ));
+            build(&mut doc);
+            run_animations(&mut doc);
+            let frame = doc.dom.build_paint_order();
+            assert!(!frame.animations().is_empty(), "{label}: a curve exports");
+            let reused = super::item_plans(&doc.dom, &frame, false);
+            let recomputed = super::item_plans(&doc.dom, &frame, true);
+            assert!(
+                reused.contains(&None),
+                "{label}: something is culled, or the check proves little"
+            );
+            assert_eq!(reused, recomputed, "{label}");
+        }
     }
 
     const SLIDE: &str = "@keyframes slide { from { transform: translateX(0px); }
