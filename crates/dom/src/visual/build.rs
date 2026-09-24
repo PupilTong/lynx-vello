@@ -1067,6 +1067,19 @@ impl<'doc, T: Sync> Builder<'doc, T> {
 
         // No scroll slot here: a scroll container is a forced stacking
         // context, so it never reaches this in-context path.
+        //
+        // Entered before the records: the paragraph paints inside the
+        // element's own clip, as `push_paragraph` gives it on the stacking
+        // context path. The element's own box keeps the outer context.
+        let inner = descend.then(|| {
+            self.enter_element(
+                child.node,
+                style,
+                &translated(collection.world, child.offset),
+                outer,
+                None,
+            )
+        });
         if visible {
             self.push_stream(
                 target,
@@ -1088,6 +1101,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
                 // Offset to the element's *content* box: a paragraph is laid
                 // out inside the border and padding, so its origin is not the
                 // element's own.
+                let content = inner.map_or(outer.current, |inner| inner.current);
                 let inset = self.rounded(child.node);
                 let content_offset = Point2D::new(
                     child.offset.x + inset.border.left + inset.padding.left,
@@ -1101,24 +1115,17 @@ impl<'doc, T: Sync> Builder<'doc, T> {
                             element: child.node,
                         },
                         offset: content_offset,
-                        clip: outer.current.clip,
+                        clip: content.clip,
                         size: child.size,
                         radii: CornerRadii::ZERO,
                         hit_testable,
-                        slot: outer.current.chain,
-                        space: outer.current.space,
+                        slot: content.chain,
+                        space: content.space,
                     },
                 );
             }
         }
-        if descend {
-            let inner = self.enter_element(
-                child.node,
-                style,
-                &translated(collection.world, child.offset),
-                outer,
-                None,
-            );
+        if let Some(inner) = inner {
             self.collect(
                 Cursor {
                     node: child.node,
