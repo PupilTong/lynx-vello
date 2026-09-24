@@ -39,10 +39,10 @@
 //!   entry's own space does not: a blurred scroller's *content* moves under the blur, so its bake
 //!   depends on the offset, while an ordinary blurred box moves with it and its bake does not. So a
 //!   scroll frame over an ordinary blurred box re-bakes nothing.
-//! - the **timeline reading**, when some backdrop entry's range rides an animation node the entry's
-//!   space does not. A `filter: blur()` group can never be in that position — export eligibility
-//!   refuses an animated element inside a composited group — but a backdrop's range is a *prefix of
-//!   the frame*, so anything animating in front of the Backdrop Root is behind the element.
+//! - the **timeline reading**, when some entry's range rides an animation node the entry's space
+//!   does not. A backdrop's range is a *prefix of the frame*, so anything animating in front of the
+//!   Backdrop Root is behind the element; a `filter: blur()` group on a moving element re-pushes
+//!   its ancestors' clips, which stay where they are while the group moves.
 //!
 //! **That key identifies a commit of *one* document.** Commit ids restart at
 //! one per document, so a consumer pointing this renderer at a second
@@ -922,8 +922,8 @@ impl FilterTextures {
 /// An entry whose range rides an inner scroll or sticky node bakes different pixels at
 /// a different offset; every other entry moves *with* its content, so its
 /// bake outlives any number of scroll frames. Likewise for the timeline: only
-/// a backdrop whose prefix holds another element's exported curve re-bakes
-/// per tick.
+/// an entry whose range rides an animation node its own space does not
+/// re-bakes per tick.
 ///
 /// A timeline reading enters as its bit pattern, and an absent one as zero —
 /// which is also `0.0`'s pattern. The two therefore collide at the timeline's
@@ -1216,11 +1216,11 @@ mod tests {
                     transform: Affine::IDENTITY,
                     before: Vec::new(),
                     after: Vec::new(),
-                    inner_animations: animates,
                     open_pushes: 0,
                 },
             );
             entry.inner_chains = scrolls;
+            entry.inner_animations = animates;
             entry
         };
 

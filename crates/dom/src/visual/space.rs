@@ -23,7 +23,7 @@
 
 use euclid::default::Vector2D;
 
-use super::{AnimationSample, ScrollSlot, StickySample};
+use super::{AnimationSamples, ScrollSlot, StickySamples};
 use crate::paint::compose::snap_offset;
 use crate::vello::kurbo::Affine;
 
@@ -85,8 +85,8 @@ pub(crate) fn nearest_animation(spaces: &[Space], space: Option<u32>) -> Option<
 pub(crate) struct SpaceSamples<'a> {
     pub(crate) spaces: &'a [Space],
     pub(crate) slots: &'a [ScrollSlot],
-    pub(crate) animations: &'a [AnimationSample],
-    pub(crate) stickies: &'a [StickySample],
+    pub(crate) animations: &'a AnimationSamples,
+    pub(crate) stickies: &'a StickySamples,
     pub(crate) ratio: f32,
     pub(crate) offset_of: &'a dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
 }
@@ -158,10 +158,10 @@ impl SpaceSamples<'_> {
                 Affine::translate((-f64::from(shift.x), -f64::from(shift.y)))
             }
             SpaceKind::Sticky(slot) => {
-                let shift = self.stickies[slot as usize].mapped;
+                let shift = self.stickies.get(slot).mapped;
                 Affine::translate((f64::from(shift.x), f64::from(shift.y)))
             }
-            SpaceKind::Animation(slot) => self.animations[slot as usize].delta,
+            SpaceKind::Animation(slot) => self.animations.get(slot).delta,
         }
     }
 }
@@ -176,8 +176,8 @@ mod tests {
     use crate::tree::document::DOCUMENT_ELEMENT_NODE_ID;
     use crate::vello::kurbo::{Affine, Point};
     use crate::visual::{
-        AnimationSample, ClipNode, CornerRadii, PaintItem, PaintItemKind, PaintOrder, ScrollSlot,
-        SnapSlot, StickySample,
+        AnimationSample, AnimationSamples, ClipNode, CornerRadii, PaintItem, PaintItemKind,
+        PaintOrder, ScrollSlot, SlotSamples, SnapSlot, StickySample, StickySamples,
     };
 
     /// Scroller `R` at the root, an animated element `A` inside it, and a
@@ -228,10 +228,15 @@ mod tests {
             .all(|(a, b)| (a - b).abs() < 1e-9)
     }
 
+    /// A whole-frame sample table: slot `i` is `samples[i]`.
+    fn table<S>(samples: impl IntoIterator<Item = S>) -> SlotSamples<S> {
+        (0..).zip(samples).collect()
+    }
+
     fn samples<'a>(
         slots: &'a [ScrollSlot],
-        animations: &'a [AnimationSample],
-        stickies: &'a [StickySample],
+        animations: &'a AnimationSamples,
+        stickies: &'a StickySamples,
     ) -> SpaceSamples<'a> {
         SpaceSamples {
             spaces: &TREE,
@@ -246,11 +251,12 @@ mod tests {
     #[test]
     fn a_space_map_is_its_path_root_first() {
         let slots = [slot(None, 30.0), slot(Some(0), 20.0)];
-        let animations = [AnimationSample {
+        let animations = table([AnimationSample {
             delta: quarter_turn(),
             alpha: None,
-        }];
-        let samples = samples(&slots, &animations, &[]);
+        }]);
+        let stickies = StickySamples::default();
+        let samples = samples(&slots, &animations, &stickies);
         let outer = Affine::translate((0.0, -30.0));
         let inner = Affine::translate((0.0, -20.0));
 
@@ -274,11 +280,12 @@ mod tests {
     #[test]
     fn a_bake_divides_the_entrys_own_map_out_on_the_left() {
         let slots = [slot(None, 30.0), slot(Some(0), 20.0)];
-        let animations = [AnimationSample {
+        let animations = table([AnimationSample {
             delta: quarter_turn(),
             alpha: None,
-        }];
-        let samples = samples(&slots, &animations, &[]);
+        }]);
+        let stickies = StickySamples::default();
+        let samples = samples(&slots, &animations, &stickies);
         let origin = (7.0, 11.0);
         let entry = Some(0);
         let bake = samples.bake_map(entry, origin);
@@ -315,9 +322,11 @@ mod tests {
         let mut stickies = [StickySample::default(); 2];
         stickies[0].mapped = Vector2D::new(0.0, 5.0);
         stickies[1].mapped = Vector2D::new(3.0, 7.0);
+        let stickies = table(stickies);
+        let animations = AnimationSamples::default();
         let samples = SpaceSamples {
             spaces: &spaces,
-            ..samples(&[], &[], &stickies)
+            ..samples(&[], &animations, &stickies)
         };
         assert!(close(samples.css(Some(1)), Affine::translate((3.0, 12.0))));
     }
@@ -359,11 +368,12 @@ mod tests {
     #[test]
     fn hit_testing_inverts_the_space_map_for_items_and_clips() {
         let order = frame(&[(50.0, Some(0)), (0.0, Some(0)), (0.0, None)]);
-        let animations = [AnimationSample {
+        let animations = table([AnimationSample {
             delta: quarter_turn(),
             alpha: None,
-        }];
-        let samples = order.space_samples(&animations, &[], 1.0, &|_| None);
+        }]);
+        let stickies = StickySamples::default();
+        let samples = order.space_samples(&animations, &stickies, 1.0, &|_| None);
         let [inside, clipped, unclipped] = [0, 1, 2].map(|index| &order.items[index]);
 
         // Baked at (5, 55); `S` scrolls it to (5, 35) in `A`'s box, inside
@@ -393,11 +403,11 @@ mod tests {
             "only the clip rejects it",
         );
 
-        let collapsed = [AnimationSample {
+        let collapsed = table([AnimationSample {
             delta: Affine::scale(0.0),
             alpha: None,
-        }];
-        let samples = order.space_samples(&collapsed, &[], 1.0, &|_| None);
+        }]);
+        let samples = order.space_samples(&collapsed, &stickies, 1.0, &|_| None);
         assert_eq!(
             order.item_hit(unclipped, Point2D::new(0.0, 0.0), &samples),
             None,

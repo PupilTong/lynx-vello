@@ -144,35 +144,40 @@ impl ScrollSlot {
 /// the encode covers — the compose headroom before a refill commit is due.
 pub const ENCODE_WINDOW_SCROLLPORTS: f32 = 1.0;
 
+/// The largest area, in viewports, of an element's `max(size, content_size)`
+/// that still exports a transform curve: the viewport cannot cull a moving
+/// subtree, so this bounds what one moving element encodes. It bounds each
+/// element on its own, not a commit's moving elements together: any number
+/// of exported siblings, each within it, all encode. Firefox caps composited
+/// transform animations the same way (`nsDisplayList.cpp`: 1.125 viewports,
+/// 4096² px).
+pub(crate) const MAX_MOVING_EXTENT_VIEWPORTS: f32 = 3.0;
+
 /// One composite-animated element in the committed frame: the target of the
 /// compose-time retargeting that lets its animation play without commits.
 ///
-/// A slot with no exported curve still tags its subtree — the element's
-/// animation was found ineligible after the slot was allocated — and samples
-/// as the committed values, so composition draws exactly the committed frame
-/// and the element rides main-thread ticks instead.
+/// A slot exists only where a curve was exported — every structural and
+/// value-level refusal happens before it is allocated — so sampling one is
+/// always sampling a live curve.
 #[derive(Debug)]
 pub struct AnimationSlot {
     /// The animated element.
     pub node: NodeId,
-    /// The nearest enclosing animation slot, when animated elements nest.
-    pub(crate) parent: Option<u32>,
-    /// The exported curve, absent in the ineligible case described above.
-    pub(crate) curve: Option<crate::visual::curves::CompositeCurve>,
+    /// The exported curve.
+    pub(crate) curve: crate::visual::curves::CompositeCurve,
 }
 
 impl AnimationSlot {
-    /// This slot's compose values at `now`: `None` — or no exported curve —
-    /// samples the committed values (identity delta, committed opacity).
+    /// This slot's compose values at `now`; `None` is the committed values
+    /// (identity delta, committed opacity).
     pub(crate) fn sample(&self, now: Option<f64>) -> AnimationSample {
-        let committed = AnimationSample {
-            delta: Affine::IDENTITY,
-            alpha: None,
+        let Some(now) = now else {
+            return AnimationSample {
+                delta: Affine::IDENTITY,
+                alpha: None,
+            };
         };
-        let (Some(curve), Some(now)) = (&self.curve, now) else {
-            return committed;
-        };
-        let sample = curve.sample(now);
+        let sample = self.curve.sample(now);
         AnimationSample {
             delta: sample.delta,
             alpha: sample.alpha,
@@ -203,6 +208,9 @@ pub struct CommittedFrame {
     pub(crate) presentation: Presentation,
     pub(crate) animations_active: bool,
     pub(crate) needs_main_ticks: bool,
+    /// The earliest instant an exported curve leaves its domain at, over
+    /// every slot; `None` when nothing exported ever ends.
+    pub(crate) earliest_expiry: Option<f64>,
     pub(crate) viewport: Size2D<f32>,
     pub(crate) device_pixel_ratio: f32,
 }
@@ -217,6 +225,8 @@ pub(crate) struct Presentation {
     /// One entry per [`ComposeOp::PushFilter`] and [`ComposeOp::PushBackdrop`],
     /// in program order. Carries device geometry and σ; never a GPU resource.
     pub(crate) filter_groups: Vec<FilterGroup>,
+    /// The slots `program` reads, derived from it at commit.
+    pub(crate) composed: crate::visual::ComposedSlots,
 }
 
 impl std::fmt::Debug for CommittedFrame {
@@ -262,10 +272,15 @@ impl CommittedFrame {
         offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
         animation_now: Option<f64>,
     ) {
-        let animations = self.order.sample_animations(animation_now);
-        let stickies = self
+        let composed = &self.presentation.composed;
+        let animations = self
             .order
-            .sample_stickies(self.device_pixel_ratio, offset_of);
+            .sample_composed_animations(&composed.animations, animation_now);
+        let stickies = self.order.sample_composed_stickies(
+            &composed.stickies,
+            self.device_pixel_ratio,
+            offset_of,
+        );
         compose::replay(
             scene,
             &self.presentation.fragments,
@@ -297,20 +312,16 @@ impl CommittedFrame {
     /// side that survives a rotating or scaling node between the entry's
     /// space and an op's.
     ///
-    /// A `filter: blur()` group samples no animation instant, and
-    /// `animation_now` is ignored for one. Export eligibility refuses an
-    /// animated element inside a composited group, so no animation node
-    /// sits between a group's space and its content's; only an inner scroll
-    /// or sticky node produces a non-identity relative transform, and that is
-    /// exactly what `FilterGroup`'s `inner_chains` reports.
-    ///
-    /// A `backdrop-filter` entry is the opposite case: its range is a prefix
-    /// of the frame, so it can hold any number of *other* elements' exported
-    /// curves. It therefore samples at `animation_now`, and the bake's own
-    /// cache keys on that reading whenever the range actually holds one.
-    /// After the replay it pops the layers the range left open and draws its
-    /// pre-blur passes over the whole bake rect, so neither lands inside a
-    /// clip.
+    /// The replay samples at `animation_now` exactly when the entry
+    /// [`FilterGroup::samples_animations`], and at the committed instant
+    /// otherwise, where every relative map in its range is time-independent.
+    /// A `backdrop-filter` entry's range is a prefix of the frame, so it can
+    /// hold other elements' exported curves; a `filter: blur()` group's holds
+    /// its ancestors' clips, which its own element's curve moves it across.
+    /// Export eligibility refuses an animated element inside a composited
+    /// group, so no curve moves a group's own content. After the replay a
+    /// backdrop pops the layers the range left open and draws its pre-blur
+    /// passes over the whole bake rect, so neither lands inside a clip.
     ///
     /// `filtered` must already hold the textures of every entry this one's
     /// range draws — bake in order of increasing `ops.end`.
@@ -327,11 +338,16 @@ impl CommittedFrame {
         let Some(group) = groups.get(index) else {
             return;
         };
-        let backdrop = group.backdrop.as_ref();
-        let animations = self.order.sample_animations(backdrop.and(animation_now));
-        let stickies = self
-            .order
-            .sample_stickies(self.device_pixel_ratio, offset_of);
+        let composed = &self.presentation.composed;
+        let animations = self.order.sample_composed_animations(
+            &composed.animations,
+            animation_now.filter(|_| group.samples_animations()),
+        );
+        let stickies = self.order.sample_composed_stickies(
+            &composed.stickies,
+            self.device_pixel_ratio,
+            offset_of,
+        );
         let samples =
             self.order
                 .space_samples(&animations, &stickies, self.device_pixel_ratio, offset_of);
@@ -351,7 +367,7 @@ impl CommittedFrame {
             group.ops.start as usize..group.ops.end as usize,
             &transform,
         );
-        let Some(backdrop) = backdrop else {
+        let Some(backdrop) = group.backdrop.as_ref() else {
             return;
         };
         for _ in 0..backdrop.open_pushes {
@@ -446,24 +462,22 @@ impl CommittedFrame {
     /// Whether the frame carries any exported curve — the compositor then
     /// recomposes each frame at its clock reading instead of reusing the
     /// drawn frame.
+    ///
+    /// A slot exists only with a curve, so this is the table being non-empty.
     #[must_use]
     pub fn has_live_curves(&self) -> bool {
-        self.order
-            .animations()
-            .iter()
-            .any(|slot| slot.curve.is_some())
+        !self.order.animations().is_empty()
     }
 
     /// Whether any exported curve has run past its domain at `now`: the cue
     /// to send one `BeginFrame` so the main thread runs the finish restyle
     /// and commits the animation's end state.
+    ///
+    /// Read off the commit's own minimum expiry, because the compositor asks
+    /// this on every input, draw, capture and tick.
     #[must_use]
     pub fn animation_boundary_passed(&self, now: f64) -> bool {
-        self.order.animations().iter().any(|slot| {
-            slot.curve
-                .as_ref()
-                .is_some_and(|curve| curve.expired_at(now))
-        })
+        self.earliest_expiry.is_some_and(|expiry| now >= expiry)
     }
 
     /// The CSS-px viewport this frame was committed for.
