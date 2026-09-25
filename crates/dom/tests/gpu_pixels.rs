@@ -815,8 +815,10 @@ fn a_blurred_box_in_a_scroller_moves_with_the_offset() {
 /// ancestor's edge rather than at where that edge sat relative to the card
 /// when it was committed.
 ///
-/// The group's range re-pushes the ancestor's clip in the ancestor's still
-/// space, so its bake has to sample the instant the composition does.
+/// The ancestor's clip is the card's output clip, pushed in the ancestor's
+/// still space outside the bake. The bake is the card's own content, which
+/// rides the slide with it, so it does not sample the instant: the
+/// composition moves the texture and cuts it at the still edge.
 #[test]
 fn a_sliding_blurred_card_stays_inside_its_ancestors_clip() {
     let mut gpu = headless("a_sliding_blurred_card_stays_inside_its_ancestors_clip");
@@ -845,8 +847,8 @@ fn a_sliding_blurred_card_stays_inside_its_ancestors_clip() {
         .expect("render leaves a committed frame retained");
     assert!(frame.has_live_curves(), "the slide exports");
     assert!(
-        frame.filter_groups()[0].samples_animations(),
-        "the card moves across its ancestor's clip",
+        !frame.filter_groups()[0].samples_animations(),
+        "the slide moves the texture across its ancestor's clip, not what is baked",
     );
 
     // Committed at x = 30; at 0.6 s the card spans x = 80..140, and the
@@ -1354,6 +1356,129 @@ fn a_blur_halo_stops_at_its_ancestors_overflow_clip() {
             WHITE,
             "only the outer blur's own 3σ passes the card's edge, not the box's halo (x = {x})",
         );
+    }
+}
+
+/// A blurred box straddling its `overflow: hidden` parent's edge reads, just
+/// inside the edge, what it reads with the parent's overflow visible — the
+/// blur spreads the box's ink from past the edge back inside it — and past
+/// the edge it shows nothing. A box wholly past the edge, but within 3σ of
+/// it, still spreads ink back inside.
+///
+/// CSS clips the blur's *output* by the ancestor's clip, not its input: the
+/// group renders whole, is blurred, and only then is cut.
+#[test]
+fn a_blur_straddling_an_overflow_clip_reads_its_content_past_the_edge() {
+    let mut gpu = headless("a_blur_straddling_an_overflow_clip_reads_its_content_past_the_edge");
+    // The card spans x 16..80. The straddling box spans x 40..120, so 40 px of
+    // it lie past the edge; the outside one spans x 84..124, 4 px past it.
+    let css = "page { display: flex; position: relative; width: 128px; height: 128px; }
+         .card { display: flex; position: absolute; left: 16px; top: 16px;
+                 width: 64px; height: 96px; }
+         .box { display: flex; position: absolute; top: 24px; height: 48px;
+                background-color: #000000; filter: blur(4px); }";
+    let read = |gpu: &mut dom::render::gpu::Headless, overflow: &str, (left, width): (f32, f32)| {
+        let mut doc = Doc::with_css_sized(css, 128.0, 128.0);
+        let root = doc.root;
+        let card = doc.el(root, "card");
+        doc.dom
+            .set_inline_style(card, &format!("overflow: {overflow}"));
+        let boxed = doc.el(card, "box");
+        doc.dom
+            .set_inline_style(boxed, &format!("left: {left}px; width: {width}px"));
+        render_filtered(gpu, &mut doc, 128)
+    };
+
+    for (label, geometry) in [("straddling", (24.0_f32, 80.0)), ("outside", (68.0, 40.0))] {
+        let clipped = read(&mut gpu, "hidden", geometry);
+        let open = read(&mut gpu, "visible", geometry);
+        for y in (44..=84).step_by(4) {
+            for x in 56..80 {
+                let (inside, reference) = (luma(&clipped, 128, x, y), luma(&open, 128, x, y));
+                assert!(
+                    (inside - reference).abs() <= 2,
+                    "{label}: ({x}, {y}) inside the edge reads {inside}, \
+                     {reference} with the overflow visible",
+                );
+            }
+            for x in 80..128 {
+                assert_eq!(
+                    pixel(&clipped, 128, x, y),
+                    WHITE,
+                    "{label}: nothing past the edge at ({x}, {y})",
+                );
+            }
+        }
+        if label == "straddling" {
+            assert!(
+                luma(&clipped, 128, 79, 64) < 40,
+                "the box's own ink reaches the edge nearly whole ({})",
+                luma(&clipped, 128, 79, 64),
+            );
+        } else {
+            assert!(
+                luma(&clipped, 128, 79, 64) < 250,
+                "ink from past the edge reaches back inside it ({})",
+                luma(&clipped, 128, 79, 64),
+            );
+        }
+    }
+}
+
+/// A backdrop nested in a `backdrop-filter` root that straddles an
+/// `overflow: hidden` card reads the root's content past the card's edge:
+/// just inside the edge it draws what it draws with the card's overflow
+/// visible, and past the edge the page shows unfiltered.
+///
+/// The root's Backdrop Root Image is its group's content, which the card
+/// clips only when the root's output is composited — after the nested
+/// element has read it.
+#[test]
+fn a_nested_backdrop_reads_its_roots_content_past_an_ancestors_edge() {
+    let mut gpu = headless("a_nested_backdrop_reads_its_roots_content_past_an_ancestors_edge");
+    // The card spans x 20..100; the root and the nested box span x 60..140.
+    let css = ".card { display: flex; position: absolute; left: 20px; top: 20px;
+                       width: 80px; height: 60px; }
+               .root { display: flex; position: absolute; left: 40px; top: 10px;
+                       width: 80px; height: 40px; backdrop-filter: brightness(1); }
+               .frost { display: flex; position: absolute; left: 0px; top: 0px;
+                        width: 80px; height: 40px; backdrop-filter: blur(4px); }";
+    let read = |gpu: &mut dom::render::gpu::Headless, overflow: Option<&str>| {
+        let mut doc = striped_page(css, 200.0, 100.0);
+        let root = doc.root;
+        let card = doc.el(root, "card");
+        if let Some(overflow) = overflow {
+            doc.dom
+                .set_inline_style(card, &format!("overflow: {overflow}"));
+            let backdrop_root = doc.el(card, "root");
+            doc.el(backdrop_root, "frost");
+        }
+        render_filtered(gpu, &mut doc, 200)
+    };
+    let plain = read(&mut gpu, None);
+    let clipped = read(&mut gpu, Some("hidden"));
+    let open = read(&mut gpu, Some("visible"));
+
+    assert!(
+        (luma(&clipped, 200, 81, 50) - luma(&plain, 200, 81, 50)).abs() > 60,
+        "the nested backdrop blurs the stripes inside the card",
+    );
+    for y in (32..=68).step_by(4) {
+        for x in 84..100 {
+            let (inside, reference) = (luma(&clipped, 200, x, y), luma(&open, 200, x, y));
+            assert!(
+                (inside - reference).abs() <= 2,
+                "({x}, {y}) inside the edge reads {inside}, \
+                 {reference} with the overflow visible",
+            );
+        }
+        for x in 101..140 {
+            assert_eq!(
+                pixel(&clipped, 200, x, y),
+                pixel(&plain, 200, x, y),
+                "({x}, {y}) is past the card's clip and shows the page unfiltered",
+            );
+        }
     }
 }
 

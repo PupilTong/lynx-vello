@@ -14,14 +14,12 @@
 //! pixel-perfect):
 //!
 //! - `filter: blur()` bakes the group offscreen and blurs it on the GPU (`render/blur.rs`), which
-//!   costs five recorded approximations: sigma is isotropic, scaled by the arithmetic mean of the
+//!   costs four recorded approximations: sigma is isotropic, scaled by the arithmetic mean of the
 //!   two singular values of the group's local-to-viewport linear map, so a non-uniform scale or a
 //!   skew gets one sigma where the spec's filter region is anisotropic; `filter` is never exported
 //!   as a composite curve, so an animated blur recommits and re-bakes every tick; the bakes share a
-//!   device-pixel area budget and a group past it renders *unblurred* rather than not at all;
-//!   several `blur()` functions in one list fold into the first by variance addition; and an
-//!   ancestor's `overflow` clip cuts the group's content before the blur as well as its texture
-//!   after it, so content just past the ancestor's edge spreads no ink back inside. Color filters
+//!   device-pixel area budget and a group past it renders *unblurred* rather than not at all; and
+//!   several `blur()` functions in one list fold into the first by variance addition. Color filters
 //!   use blend-composite approximations; factors above one are only partially expressible.
 //! - `backdrop-filter` bakes the same way, over the prefix of the frame painted before the element
 //!   inside its nearest Backdrop Root, and carries every one of those approximations plus six of
@@ -32,9 +30,9 @@
 //!   mirrors at its bbox rather than at its rotated border box — which is what Chromium does; items
 //!   the walk culled are absent from the crop of an element straddling the viewport; there is no
 //!   composite curve; an element past the shared area budget draws no backdrop at all, leaving the
-//!   *unfiltered* backdrop showing; and a backdrop reading another backdrop inside their shared
-//!   root sees it already cut by the root's ancestors' clips. `docs/tracking/deviations.md` records
-//!   the set.
+//!   *unfiltered* backdrop showing; and a backdrop inside an `opacity`, `mask-image`, `clip-path`
+//!   or blend root reads that root's content already cut by the root's ancestors' clips, which a
+//!   `filter` or `backdrop-filter` root does not do. `docs/tracking/deviations.md` records the set.
 //! - Perspective-projected items use the affine map agreeing with the true projection at three
 //!   border-box corners because Vello transforms are affine; hit testing remains projectively
 //!   exact.

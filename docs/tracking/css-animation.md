@@ -202,10 +202,10 @@ concretely, so the tables above are read as "the target" and this section as
   `has_exported_curves` is true when any curve exported: input hit tests then
   sample at the input's instant, since a curve moves its element's hit area
   even where nothing of it is drawn. A `filter: blur()` group whose content
-  carries a curve, or whose element's transform curve moves it across an
-  ancestor's clip, bakes at the frame's instant; its element's own
-  opacity-only curve does not make it, and each filter entry re-bakes on its
-  own readings.
+  carries a curve bakes at the frame's instant; its element's own curves do
+  not make it — the ancestors' clips a transform moves it across are output
+  clips outside the bake — and each filter entry re-bakes on its own
+  readings.
 - **Side effects follow the animation, not its export** (web-animations-1:
   an in-effect `opacity`/`transform` animation acts as `will-change` naming
   it). The driver keeps two node bits, `animates_opacity` and
