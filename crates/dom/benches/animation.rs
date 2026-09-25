@@ -12,7 +12,8 @@
 //! - **What a production frame costs.** `frame_card_text_*` and `frame_shimmer_rows` run the frame
 //!   the painter runs: a main-thread tick only when the committed frame asks for one, then the
 //!   composition at the frame's instant. An exported curve makes that a composition and nothing
-//!   else.
+//!   else: per composed curve, stylo's own `progress_at`/`sample_at` over the cloned animation
+//!   state into one value map the pass reuses, and for a transform one f32 world fold.
 //! - **How the animation scales.** The `args` are how many of the page's elements animate. A
 //!   frame's animation cost should be O(animating), not O(document), and a composed frame's cost
 //!   O(what can reach the screen).

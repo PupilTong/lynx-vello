@@ -2655,7 +2655,8 @@ mod tests {
     }
 
     /// A list 600 px tall of 200 rows 40 px tall, each row running
-    /// `animation`, except row `lifted`, which rises 5000 px.
+    /// `animation` — `shimmer`, `wobble` or none — except row `lifted`,
+    /// which rises 5000 px.
     fn animated_list(animation: &str, lifted: usize) -> (Doc, Vec<crate::NodeId>) {
         let mut doc = Doc::with_css(&format!(
             "page {{ display: flex; position: relative; width: 800px; height: 600px; }}
@@ -2667,7 +2668,9 @@ mod tests {
              @keyframes shimmer {{ from {{ transform: translateX(-10px); }}
                                    to {{ transform: translateX(10px); }} }}
              @keyframes lift {{ from {{ transform: translateY(0px); }}
-                                to {{ transform: translateY(-5000px); }} }}"
+                                to {{ transform: translateY(-5000px); }} }}
+             @keyframes wobble {{ from {{ transform: matrix(1, 0, 0, 1, -10, 0); }}
+                                  to {{ transform: matrix(1, 0, 0, 1, 10, 0); }} }}"
         ));
         let list = doc.el(doc.root, "view.list");
         let rows = (0..200)
@@ -2714,6 +2717,26 @@ mod tests {
             still <= moving && moving <= still + 2,
             "shimmering rows encode {moving}, still ones {still}"
         );
+    }
+
+    /// Rows sliding by `matrix()` keyframes, which stylo interpolates by
+    /// decomposition, have no reach: every row exports and encodes, each
+    /// bounded by the extent budget alone.
+    #[test]
+    fn matrix_rows_without_a_reach_encode_every_row() {
+        let (mut doc, _) = animated_list("animation: wobble 1s linear infinite;", usize::MAX);
+        let frame = doc.dom.build_paint_order();
+        assert_eq!(frame.animations().len(), 200, "every row exports");
+        assert!(frame.animations().iter().all(|slot| {
+            !slot
+                .curve
+                .transform
+                .as_ref()
+                .expect("a track")
+                .reach
+                .is_bounded()
+        }),);
+        assert!(walk_twice(&mut doc).painted >= 200, "every row encodes");
     }
 
     /// A row far below the list's window whose keyframes lift it 5000 px
@@ -3420,7 +3443,7 @@ mod tests {
                 frame
                     .animations()
                     .iter()
-                    .any(|slot| slot.curve.opacity.is_some()),
+                    .any(|slot| slot.curve.animates(stylo::properties::LonghandId::Opacity)),
                 exports,
                 "the wrapper's fade exports",
             );

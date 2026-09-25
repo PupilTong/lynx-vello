@@ -142,47 +142,89 @@ concretely, so the tables above are read as "the target" and this section as
   tick only when the committed frame asks for one, then the composition — over
   cards holding a `<text>` and over a list of 200 shimmering rows.
 - **Composite curve export** (`dom::style::curve_export` +
-  `dom::visual::curves`) closes §11's gap for the common case: at commit, an
-  element whose one running animation moves only `opacity`/`transform` — with
-  context-free keyframe values (numbers, absolute lengths, angles),
-  `linear`/`cubic-bezier` easing, matched transform lists, both track ends
-  declared, no transitions — is re-expressed as an `AnimationSlot` curve on
-  the committed frame. Sampling mirrors stylo's
-  `get_property_declaration_at_time` exactly (interval pick, FROM-keyframe
-  timing function, `1/(200×segment)` bezier tolerance, iteration/direction
-  emulation), so while the curve is inside its domain the compositor's frames
-  and the next commit's restyle land on the same values. Anything the
-  exporter refuses simply keeps the per-frame `BeginFrame` path — a refusal
-  is never wrong — and a refusal allocates no slot, so every slot carries a
-  live curve.
-- **Where the two sides differ.** Past a finite curve's end the compositor
-  holds the curve's end value, whatever the fill mode, until the commit of
-  the finish restyle is adopted — at least one frame. With a `forwards` fill
-  the restyle lands on that value; without one it returns to the base value
-  and those frames show the end value instead. And a finished animation that
-  fills does not export: in `animation: pulse 1s infinite, fade .3s forwards`
-  with both animating `opacity`, once `fade` finishes the compositor samples
-  `pulse` while the main thread shows `fade`'s fill. That one is value-level,
-  open until the export takes more than one animation. The cascade value of an exported animation is
-  stale between main-thread readings (`docs/style-assumptions.md` §12).
+  `dom::visual::curves`) closes §11's gap: at commit, an element whose
+  animation set moves only `opacity`/`transform` is exported whole as an
+  `AnimationSlot` curve on the committed frame — a clone of every non-canceled
+  stylo `Animation` in the set's order. The painter samples the clones with
+  stylo's own code: `Animation::progress_at` and `sample_at`, the two halves
+  the fork splits `get_property_declaration_at_time` into (the main thread's
+  cascade runs the same sampling half on its own iteration state, which the
+  driver's `iterate_to` moves by the arithmetic `progress_at` repeats on a
+  copy). Inside the curve's domain the sampled `AnimationValue`s are bit-equal
+  to the ones the main thread's cascade commits at the same instant whenever
+  both sides iterate from the same animation state; start times the main
+  thread accumulates over several ticks can differ from the sampler's single
+  step in the last bit for durations that are not binary fractions. Servo's
+  deviations come along: later in the set wins, and `maybe_start_animations`'
+  `return;` after updating an existing animation (so `animation-name: a`
+  restyled to `a, b` never starts `b`). A sampled transform folds by the
+  builder's own f32 fold (`visual::transform::ContextMatrix`) onto the
+  parent's committed world, so the element's world matches a commit's bit for
+  bit relative to that parent world; composed geometry agrees to f32 rounding.
+  This exports several animations, pending (anchored, with or without a
+  backwards fill), paused and held-fill animations, `steps()`,
+  `square-bezier`, `%`/`em`/`rem`/`rpx`/`vw`/`calc()`/`var()` values (already
+  px in stylo's computed keyframes, `%` resolved against the border box as the
+  commit resolves it), mismatched lists, backfilled `from`/`to` and every Lynx
+  transform function. There is no second interpolation. The export is exact
+  whenever, per exported property, either nothing contributed at the commit
+  instant or every instant inside the domain keeps a contribution: an
+  animation starts contributing only when a pending one starts, before which
+  it contributed nothing, and stops only at `expires_at`, the hand-back. One
+  stylo limitation is shared rather than fixed: a mismatched remainder holding
+  a `%` length interpolates as `InterpolateMatrix`, which stylo's matrix
+  conversion reads as the identity, on the main thread and in the curve alike.
+- **What still refuses** — and keeps the element on per-frame `BeginFrame`
+  ticks, a refusal never being wrong; a refusal allocates no slot, so every
+  slot carries a live curve: an animation animating a property other than
+  `opacity`/`transform`; author `!important` on an exported property
+  (`get_properties_overriding_animations`: it outranks the animations origin,
+  so the main thread holds it still); a pending animation the driver has not
+  anchored yet (its next tick moves its start; anchoring commits a frame, so
+  the export follows one tick later); an element frozen when the last tick
+  ended (css-contain-2 §4: the next tick carries its start times, and commits
+  so the export follows it); a pending or running transition (while a curve
+  covers the element the main thread gets no ticks, so a transition that a
+  later restyle — a tap's script, say — retargets or reverses reads its
+  progress at that stale instant and jumps; admitting them needs the main
+  thread's clock synced at such a restyle); a keyframe value some
+  interpolation takes out of the plane — a perspective term in its matrix, or
+  any 3D function under a parent `perspective` — or a committed world that is
+  not 2D invertible; pseudo-element sets; and the structural refusals below.
+- **Where the two sides differ.** Past the curve's domain: it ends at its
+  first animation's end (`expires_at`: the first instant a finite animation,
+  iterated as the sampler iterates it, has ended), after which an animation's
+  contribution can be replaced by the base value. The compositor then holds
+  the domain's last instant until the commit of the finish restyle is adopted
+  — at least one frame — and the frame asks for main-thread ticks from that
+  instant on. And at the tick a filling animation finishes beside a running
+  one on the same property: that tick's cascade still lets the later-listed
+  running one win, then the driver puts the held one back last in the set, so
+  the curve cloned for that commit — and every later commit — shows the held
+  value while the commit's own bake shows the running one; the delta carries
+  the bake to the held value from the first composed frame. The cascade value
+  of an exported animation is stale between main-thread readings
+  (`docs/style-assumptions.md` §12).
 - **Structure refuses only a curve with a `transform` track, and only where
   its motion cannot be re-expressed or bounded** — and a refusal takes the
-  whole curve, its opacity track included, to main-thread ticks: individual
-  transforms, a motion path or an inherited perspective in the way; a world
-  matrix that is not 2D invertible; an element whose extent, `max(size, content_size)`, exceeds
+  whole curve, its opacity values included, to main-thread ticks: an element
+  whose extent, `max(size, content_size)`, exceeds
   `MAX_MOVING_EXTENT_VIEWPORTS` (three viewport areas; Firefox caps composited
-  transforms the same way); and an enclosing composited group that neither a
+  transforms the same way); an enclosing composited group that neither a
   still clip nor the viewport bounds the element in, which only a scale range
-  through 0 on the group's side produces (`visual::space::movers_bounded`).
+  through 0 on the group's side produces (`visual::space::movers_bounded`);
+  and an enclosing composited group around a curve without a reach (below).
+  Individual transforms, a motion path and the transform origin are factors
+  the fold holds still between commits, so they refuse nothing.
   Clips (a `<text>`'s UA `overflow: clip` included), scroll containers (every
   `overflow: hidden` card included), sticky boxes and enclosing groups, inside
   or around the animated subtree, do not refuse it. The committed frame
   records one compose space tree (`visual::space`) of scroll, sticky and
   animation nodes in containing-block order; the curve's delta
-  `pre·L(t)·Lc⁻¹·pre⁻¹` is its animation node's map, so it applies at that
-  node's place on every path through it — fragments, layer pushes, clips,
-  image draws, filter bakes and hit tests alike — and composition retargets
-  the element's group alpha.
+  `planar(W(t))·planar(W_c)⁻¹` is its animation node's map, so it applies at
+  that node's place on every path through it — fragments, layer pushes,
+  clips, image draws, filter bakes and hit tests alike — and composition
+  retargets the element's group alpha.
 - **Moving content is culled through the curve's reach.** Each exported
   transform track carries, per op, the range its parameters take over the
   whole curve domain (the cubic-bezier control-point hull covers overshoot).
@@ -191,9 +233,19 @@ concretely, so the tables above are read as "the target" and this section as
   meet the list's window. Clips and scroll encode windows inside the moving
   subtree bound as usual, and `content-visibility: auto` relevance follows.
   A scale range reaching 0 bounds nothing; there the extent cap is what bounds
-  the encode. A composited group whose content moves inside it takes its rect
-  from that content carried through the same ranges, cut to its clips and to
-  the viewport pulled back into the group's space.
+  the encode. The ranges are read off stylo's computed keyframes where stylo
+  interpolates op by op: every keyframe's list holds the same translate, scale
+  and planar rotate primitives in the same order, a shorter list — `none`
+  included — padded with identities as stylo pads it; a segment eases by its
+  lower keyframe's timing function running forward and by its upper keyframe's
+  running reversed, as stylo eases it. A list holding an op the reach does not
+  model (matrix, skew, 3D rotation) or a mismatched remainder stylo decomposes
+  has no reach: its pullback admits everything, the extent cap bounds its
+  encode, and it does not export inside a composited group. That is the one
+  culling coarsening the stylo-sampled curves brought. A composited group
+  whose content moves inside it takes its rect from that content carried
+  through the same ranges, cut to its clips and to the viewport pulled back
+  into the group's space.
 - **Per-frame work is bounded by what the program draws.** Composition
   samples only the curves and sticky boxes the compose program references;
   the earliest curve end is a commit-time value. `has_live_curves` is true

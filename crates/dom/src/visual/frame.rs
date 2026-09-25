@@ -16,6 +16,7 @@
 //! same screen-semantics staleness hit testing already accepts.
 
 use euclid::default::{Point2D, Size2D, Vector2D};
+use stylo::properties::animated_properties::AnimationValueMap;
 
 use super::{AnimationSample, PaintOrder, SpaceSamples};
 use crate::NodeId;
@@ -147,9 +148,11 @@ pub const ENCODE_WINDOW_SCROLLPORTS: f32 = 1.0;
 /// The largest area, in viewports, of an element's `max(size, content_size)`
 /// that still exports a transform curve. Culling bounds a moving subtree by
 /// the viewport pulled back through its curve's reach, so this cap is what
-/// bounds the encode only where no reach does — a scale range reaching 0,
-/// which admits the whole subtree. Firefox caps composited transform
-/// animations the same way (`nsDisplayList.cpp`: 1.125 viewports, 4096² px).
+/// bounds the encode only where no reach does — a scale range reaching 0, or
+/// a list holding an op the reach does not model (matrix, skew, 3D rotation)
+/// or a mismatched remainder stylo decomposes, either of which admits the
+/// whole subtree. Firefox caps composited transform animations the same way
+/// (`nsDisplayList.cpp`: 1.125 viewports, 4096² px).
 pub(crate) const MAX_MOVING_EXTENT_VIEWPORTS: f32 = 3.0;
 
 /// One composite-animated element in the committed frame: the target of the
@@ -157,7 +160,8 @@ pub(crate) const MAX_MOVING_EXTENT_VIEWPORTS: f32 = 3.0;
 ///
 /// A slot exists only where a curve was exported — every structural and
 /// value-level refusal happens before it is allocated — so sampling one is
-/// always sampling a live curve.
+/// always sampling a live curve. The curve is a clone of the element's stylo
+/// animation state, `Send + Sync` by construction.
 #[derive(Debug)]
 pub struct AnimationSlot {
     /// The animated element.
@@ -167,16 +171,20 @@ pub struct AnimationSlot {
 }
 
 impl AnimationSlot {
-    /// This slot's compose values at `now`; `None` is the committed values
-    /// (identity delta, committed opacity).
-    pub(crate) fn sample(&self, now: Option<f64>) -> AnimationSample {
+    /// This slot's compose values at `now`, with `values` as scratch; `None`
+    /// is the committed values (identity delta, committed opacity).
+    pub(crate) fn sample(
+        &self,
+        now: Option<f64>,
+        values: &mut AnimationValueMap,
+    ) -> AnimationSample {
         let Some(now) = now else {
             return AnimationSample {
                 delta: Affine::IDENTITY,
                 alpha: None,
             };
         };
-        let sample = self.curve.sample(now);
+        let sample = self.curve.sample(now, values);
         AnimationSample {
             delta: sample.delta,
             alpha: sample.alpha,
@@ -483,7 +491,9 @@ impl CommittedFrame {
     /// to send `BeginFrame` — each frame, until a commit without the passed
     /// curve is adopted — so the main thread runs the finish restyle and
     /// commits the animation's end state. Until then the compositor draws
-    /// the curve's end value, whatever its fill mode.
+    /// the curve's last instant inside its domain: past it an animation's
+    /// contribution can be replaced by the base value, which only that
+    /// commit knows.
     ///
     /// Read off the commit's own minimum expiry, because the compositor asks
     /// this on every input, draw, capture and tick.
