@@ -160,16 +160,19 @@ the semantics are stylo's.** Everything below refines that sentence.
     traversal over just the animating elements, with no selector matching and
     no layout for properties that cannot move a box. **Throttling follows
     composite export.** A browser can skip the per-frame restyle because a
-    compositor is interpolating instead. Here an `opacity`/`transform`
-    animation the commit exports as a composite curve is the same: the painter
-    samples the curve and composes the retained frame, and a window painter
-    does not tick the main thread for it until the curve ends (an offscreen
-    `tick` ticks it every call). Everything else — a property the
-    exporter does not carry, a value it cannot re-express — still restyles
-    through the animation-only traversal and rebuilds the retained scene every
-    frame; what that frame saves is the cascade over the elements that are
-    *not* animating, and the layout pass (`docs/tracking/css-animation.md`
-    records what exports).
+    compositor is interpolating instead. Here an element whose
+    `opacity`/`transform` animation set the commit exports as a composite
+    curve is the same: the painter samples a clone of the set with stylo's own
+    sampling code, as Firefox runs stylo on its compositor — the values the
+    next cascade produces whenever both sides iterate from the same animation
+    state — and composes the retained frame, and a window painter does not
+    tick the main thread for it until the curve ends (an offscreen `tick`
+    ticks it every call). Everything else — a property the export does not
+    carry, an `!important` override, a start the driver has not anchored, a
+    transition — still restyles through the animation-only traversal and
+    rebuilds the retained scene every frame; what that frame saves is the
+    cascade over the elements that are *not* animating, and the layout pass
+    (`docs/tracking/css-animation.md` records what exports).
 
     *Structural side effects are per-animation constants.* A transform/filter
     also creates a containing block for positioned descendants and a stacking
@@ -193,12 +196,15 @@ the semantics are stylo's.** Everything below refines that sentence.
     gap.** For an animation that ticks on the main thread the cascade output
     *is* the animated value, so a style query, a transition starting *from* an
     animating value, and invalidation all read one truth. An exported curve
-    (11) is a render-private value: the painter samples it per frame, and
-    nothing on the main thread advances the timeline for it, so its cascade
-    value holds at the last tick or commit until something ticks or commits
-    again. `getComputedStyle` on an element fading by an exported curve
-    therefore reads the opacity of the last main-thread reading while the
-    screen shows the sampled one. Browsers say what closing it takes: keep the
+    (11) is a render-private value: the painter samples it per frame — with
+    the code the cascade runs, so the two agree whenever both read the same
+    instant from the same animation state — and nothing on the main thread
+    advances the timeline for it, so its cascade value holds at the last tick
+    or commit until something ticks or commits again. `getComputedStyle` on an
+    element fading by an exported curve therefore reads the opacity of the
+    last main-thread reading while the screen shows the sampled one. The same
+    stale reading is why transitions do not export: one a restyle retargets or
+    reverses would start from it. Browsers say what closing it takes: keep the
     cascade authoritative and re-sample on demand rather than let the two
     diverge. Not built.
 

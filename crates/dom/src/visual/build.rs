@@ -36,11 +36,12 @@ use hughie::style::{
 use hughie::tree::{Layout, LayoutTree};
 use stylo::computed_values::scroll_initial_target;
 use stylo::properties::ComputedValues;
-use stylo::values::computed::{CSSPixelLength, PointerEvents};
+use stylo::values::computed::PointerEvents;
 
+use super::curves::TransformTrack;
 use super::frame::MAX_MOVING_EXTENT_VIEWPORTS;
 use super::geometry::{inner_radii, resolve_corner_radii};
-use super::transform::{ParentPerspective, stacking_context_matrix};
+use super::transform::{ContextMatrix, ParentPerspective};
 use super::{
     AnimationSlot, AutoBox, ClipNode, CornerRadii, FrameBuffers, PaintItem, PaintItemKind,
     PaintOrder, RenderLayer, ScrollSlot, SnapSlot, SnapSlotAxis, Space, SpaceKind, StickySlot,
@@ -52,9 +53,9 @@ use crate::layout::{
 };
 use crate::scroll::initial_target::InitialTarget;
 use crate::scroll::{ScrollAxes, SnapAxisPositions, SnapPoint};
+use crate::style::curve_export::ExportedComposite;
 use crate::tree::document::{Document, DocumentLayoutState, NodeSlot, TreeArenas};
 use crate::tree::node::Node;
-use crate::vello::kurbo::Affine;
 use crate::{NodeId, scroll};
 
 /// Builds one frame's paint order into `buffers`, using and returning
@@ -503,61 +504,62 @@ impl<'doc, T: Sync> Builder<'doc, T> {
     /// composite-exportable animation.
     ///
     /// Every refusal happens here, before the slot exists: a transform track
-    /// needs a 2D, invertible decomposition of the element's world matrix
-    /// with no individual transforms, motion path, or inherited perspective
-    /// in the way, a moving element must fit [`MAX_MOVING_EXTENT_VIEWPORTS`],
-    /// and the group enclosing it must bound it wherever its curve carries
-    /// it ([`super::space::movers_bounded`]). A refusal allocates nothing;
-    /// the element keeps animating through main-thread ticks, which cull it
-    /// exactly.
+    /// needs a planar, invertible committed world and contributors that stay
+    /// planar (see [`TransformTrack::new`]), a moving element must fit
+    /// [`MAX_MOVING_EXTENT_VIEWPORTS`], and the group enclosing it must bound
+    /// it wherever its curve carries it ([`super::space::movers_bounded`]),
+    /// which a curve without a bounded reach never is. A refusal allocates
+    /// nothing; the element keeps animating through main-thread ticks, which
+    /// cull it exactly.
     ///
-    /// `clip` is the clip chain enclosing the element.
+    /// `clip` is the clip chain enclosing the element; `context` and
+    /// `parent_world` fold its world, `world` being the committed one.
     fn allocate_animation_slot(
         &mut self,
         node: NodeId,
         style: &ComputedValues,
-        world: &Transform3D<f32>,
-        size: Size2D<f32>,
-        parent_perspective: Option<ParentPerspective>,
+        (context, parent_world, world): (&ContextMatrix, &Transform3D<f32>, &Transform3D<f32>),
         clip: Option<usize>,
     ) -> Option<u32> {
         let node_ref = self.node(node);
         if !node_ref.animates_opacity() && !node_ref.animates_transform() {
             return None;
         }
-        let export = self.document.composite_export(node_ref)?;
-        // The export reads the running animation of the same `@keyframes`
-        // the driver's bits do, so the group an opacity curve retargets and
-        // the containing block a transform curve moves both exist.
-        debug_assert!(export.curve.opacity.is_none() || node_ref.animates_opacity());
-        debug_assert!(export.transform_track.is_none() || node_ref.animates_transform());
-        let mut curve = export.curve;
-        if let Some(track) = export.transform_track {
-            let bounded = self.current_layer.is_none_or(|layer| {
+        let ExportedComposite {
+            mut curve,
+            opacity,
+            transform,
+        } = self.document.composite_export(node_ref)?;
+        // The export reads the same set the driver's bits do, so the group an
+        // opacity curve retargets and the containing block a transform curve
+        // moves both exist.
+        debug_assert!(!opacity || node_ref.animates_opacity());
+        debug_assert!(!transform || node_ref.animates_transform());
+        if transform {
+            let enclosing = self.current_layer.map(|layer| self.layers[layer].space);
+            let bounded = enclosing.is_none_or(|group| {
                 super::space::movers_bounded(
                     &self.spaces,
                     &self.clips,
                     &self.animations,
                     clip,
-                    self.layers[layer].space,
+                    group,
                 )
             });
             if !bounded || !self.moving_extent_fits(node) {
                 return None;
             }
-            let (pre, committed) = self.transform_track_maps(
-                style,
+            let track = TransformTrack::new(
+                &curve,
+                context.clone(),
+                *parent_world,
                 world,
-                size,
-                parent_perspective,
-                &export.committed_transform,
+                &style.get_box().transform,
             )?;
-            curve.transform = Some(crate::visual::curves::TransformTrack::new(
-                track,
-                curve.direction,
-                pre,
-                committed,
-            )?);
+            if enclosing.is_some() && !track.reach.is_bounded() {
+                return None;
+            }
+            curve.transform = Some(track);
         }
         self.animations.push(AnimationSlot { node, curve });
         Some(
@@ -575,67 +577,6 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         let height = layout.size.height.max(layout.content_size.height);
         let viewport = self.document.viewport_size();
         width * height <= MAX_MOVING_EXTENT_VIEWPORTS * viewport.width * viewport.height
-    }
-
-    /// The constant maps a transform track's delta needs, `(pre, Lc)`: with
-    /// the element's world `W = pre · L · origin⁻¹` — which holds exactly when
-    /// nothing but the transform list and origin contribute — the constant
-    /// factor is `pre = W · origin · Lc⁻¹`, and the compose-time delta is
-    /// `pre · L(t) · Lc⁻¹ · pre⁻¹`. Both are invertible.
-    #[expect(
-        clippy::unused_self,
-        reason = "kept beside the slot allocation it completes"
-    )]
-    fn transform_track_maps(
-        &self,
-        style: &ComputedValues,
-        world: &Transform3D<f32>,
-        size: Size2D<f32>,
-        parent_perspective: Option<ParentPerspective>,
-        committed: &crate::visual::curves::TransformList,
-    ) -> Option<(Affine, Affine)> {
-        use crate::visual::curves::transform_list_matrix;
-        let box_style = style.get_box();
-        let individual_transforms_present =
-            !matches!(box_style.scale, stylo::values::computed::Scale::None)
-                || !matches!(box_style.rotate, stylo::values::computed::Rotate::None)
-                || !matches!(
-                    box_style.translate,
-                    stylo::values::computed::Translate::None
-                );
-        if parent_perspective.is_some()
-            || individual_transforms_present
-            || super::motion::offset_sample(style, size).is_some()
-        {
-            return None;
-        }
-        let origin = &box_style.transform_origin;
-        if origin.depth.px() != 0.0 {
-            return None;
-        }
-        let origin_affine = Affine::translate((
-            f64::from(
-                origin
-                    .horizontal
-                    .resolve(CSSPixelLength::new(size.width))
-                    .px(),
-            ),
-            f64::from(
-                origin
-                    .vertical
-                    .resolve(CSSPixelLength::new(size.height))
-                    .px(),
-            ),
-        ));
-        let world = affine_2d(world)?;
-        let committed_matrix = transform_list_matrix(committed);
-        if committed_matrix.determinant().abs() < 1e-9 || world.determinant().abs() < 1e-9 {
-            return None;
-        }
-        Some((
-            world * origin_affine * committed_matrix.inverse(),
-            committed_matrix,
-        ))
     }
 
     #[allow(
@@ -664,14 +605,14 @@ impl<'doc, T: Sync> Builder<'doc, T> {
             let layout = self.rounded(root);
             Size2D::new(layout.size.width, layout.size.height)
         };
-        let world = stacking_context_matrix(values, size, offset_in_parent, parent_perspective)
+        let context = ContextMatrix::of(values, size, offset_in_parent, parent_perspective);
+        let world = context
+            .with_list(&values.get_box().transform)
             .then(parent_world);
         let own_animation = self.allocate_animation_slot(
             root,
             values,
-            &world,
-            size,
-            parent_perspective,
+            (&context, parent_world, &world),
             seed.current.clip,
         );
         if let Some(index) = own_animation {
@@ -1264,21 +1205,6 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         }
         inner
     }
-}
-
-/// The 2D affine of a world matrix, if it is one.
-fn affine_2d(matrix: &Transform3D<f32>) -> Option<Affine> {
-    if !matrix.is_2d() {
-        return None;
-    }
-    Some(Affine::new([
-        f64::from(matrix.m11),
-        f64::from(matrix.m12),
-        f64::from(matrix.m21),
-        f64::from(matrix.m22),
-        f64::from(matrix.m41),
-        f64::from(matrix.m42),
-    ]))
 }
 
 /// The rounded layout of a node the walk already holds a slot for. The paint

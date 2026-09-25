@@ -365,6 +365,24 @@ fn an_infinite_animation_keeps_iterating() {
     );
 }
 
+/// One stalled tick crossing three iterations of an alternating fade lands
+/// on the value the fourth iteration, running reversed, holds a quarter in.
+#[test]
+fn a_stalled_alternating_animation_lands_on_its_current_iteration() {
+    let (mut doc, fader) = animated(
+        "
+        @keyframes fade { from { opacity: 1; } to { opacity: 0; } }
+        .fader { animation: fade 1s linear infinite alternate; width: 20px; height: 20px; }
+        ",
+        "view.fader",
+    );
+    doc.dom.advance_animations(0.0);
+    doc.dom.advance_animations(3.25);
+    assert_eq!(doc.value(fader, "opacity"), "0.25");
+    doc.dom.advance_animations(7.75);
+    assert_eq!(doc.value(fader, "opacity"), "0.75");
+}
+
 #[test]
 fn animation_time_never_runs_backwards() {
     let (mut doc, mover) = animated(SLIDE, "view.mover");
@@ -883,5 +901,56 @@ fn an_animation_in_a_scrolled_away_auto_row_freezes_and_resumes() {
         doc.value(mover, "transform"),
         "translateX(50px)",
         "three seconds on from the two it had when it froze"
+    );
+}
+
+/// A reveal is noticed between two ticks, and the tick after it carries the
+/// revealed element's start times across the interval. Until that tick its
+/// animation does not export — the painter would sample start times about to
+/// move — and from it on it does.
+#[test]
+fn a_revealed_animation_exports_once_its_start_times_are_carried() {
+    let mut doc = Doc::with_device(device(200.0, 100.0));
+    doc.add_css(
+        "@keyframes slide {
+             from { transform: translateX(0px); }
+             to { transform: translateX(100px); }
+         }
+         page { display: flex; width: 200px; height: 100px; align-items: flex-start; }
+         .scroller { display: flex; flex-direction: column; overflow: hidden;
+                     width: 200px; height: 100px; align-items: flex-start; }
+         .row { display: flex; width: 200px; height: 20px; flex-shrink: 0;
+                content-visibility: auto; contain-intrinsic-size: 200px 20px; }
+         .mover { width: 20px; height: 20px; animation: slide 10s linear both; }",
+    );
+    let root = doc.root;
+    let scroller = doc.el(root, "view.scroller");
+    let rows: Vec<dom::NodeId> = (0..20).map(|_| doc.el(scroller, "view.row")).collect();
+    doc.el(rows[0], "view.mover");
+
+    doc.dom.render();
+    doc.dom.advance_animations(0.0);
+    doc.dom.advance_animations(2.0);
+    assert!(doc.dom.commit().has_exported_curves(), "the slide exports");
+
+    doc.dom.scroll_to(scroller, Vector2D::new(0.0, 300.0));
+    doc.dom.render();
+    doc.dom.advance_animations(8.0);
+    doc.dom.advance_animations(40.0);
+
+    doc.dom.scroll_to(scroller, Vector2D::new(0.0, 0.0));
+    let revealed = doc.dom.commit();
+    assert!(
+        doc.dom.has_active_animations(),
+        "the reveal resumes the slide"
+    );
+    assert!(
+        !revealed.has_exported_curves() && revealed.needs_main_ticks(),
+        "the next tick carries its start times, so the reveal's commit ticks it"
+    );
+    doc.dom.advance_animations(41.0);
+    assert!(
+        doc.dom.commit().has_exported_curves(),
+        "once carried, the slide exports"
     );
 }

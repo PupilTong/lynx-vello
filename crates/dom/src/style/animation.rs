@@ -274,14 +274,23 @@ struct Step<'a> {
 }
 
 impl Step<'_> {
-    /// Whether a `Pending` animation or transition takes the interval now.
+    /// Whether a `Pending` animation or transition takes the interval now,
+    /// `fresh` when this tick is the first to see it.
     ///
     /// Carry and anchor are exclusive by construction: the shift lands once,
     /// from whichever of the two claims it, so an animation created inside a
     /// skipped subtree is not pushed forward twice on the tick that reveals
     /// it.
-    fn shifts_pending(&self, entry: &AnchoredAnimation) -> bool {
-        self.carry || !self.anchored.contains(entry)
+    const fn shifts_pending(&self, fresh: bool) -> bool {
+        self.carry || fresh
+    }
+
+    /// Whether this tick settles an animation's start on an element that is
+    /// not frozen: it anchors a `fresh` `Pending` one, or carries the starts
+    /// of an element revealed since the last tick. A curve exports only
+    /// settled starts, so the step owes the next frame a commit.
+    const fn settles(&self, fresh: bool) -> bool {
+        !self.skipped && (fresh || self.carry)
     }
 
     /// Advances one element's `@keyframes` animations, collecting the ones
@@ -301,22 +310,25 @@ impl Step<'_> {
                     set: key.clone(),
                     what: AnchoredKind::Keyframes(animation.name.clone()),
                 };
-                if self.shifts_pending(&entry) {
+                let fresh = !self.anchored.contains(&entry);
+                if self.shifts_pending(fresh) {
                     animation.started_at += self.shift;
                 }
                 if !self.skipped && animation.started_at <= self.now {
                     animation.state = AnimationState::Running;
                     moved = true;
                 } else {
+                    moved |= self.settles(fresh);
                     self.pending.insert(entry);
                 }
             } else if self.carry {
                 animation.started_at += self.shift;
+                moved |= self.settles(false);
             }
             if self.skipped {
                 continue;
             }
-            while animation.iterate_if_necessary(self.now) {
+            if animation.iterate_to(self.now) {
                 moved = true;
             }
             if animation.state == AnimationState::Running && animation.has_ended(self.now) {
@@ -345,7 +357,8 @@ impl Step<'_> {
                         transition.property_animation.property_id().to_owned(),
                     ),
                 };
-                if self.shifts_pending(&entry) {
+                let fresh = !self.anchored.contains(&entry);
+                if self.shifts_pending(fresh) {
                     transition.start_time += self.shift;
                 }
                 if !self.skipped && transition.start_time <= self.now {
@@ -430,6 +443,21 @@ impl AnimationDriver {
     /// `Arc<RwLock<..>>`, which is how the state survives a flush.
     pub(crate) fn context_handle(&self) -> DocumentAnimationSet {
         self.sets.clone()
+    }
+
+    /// Whether the pending `@keyframes` animation `name` of set `set` is
+    /// anchored to the timeline, so the next tick leaves its start alone.
+    pub(crate) fn keyframes_anchored(&self, set: &AnimationSetKey, name: &Atom) -> bool {
+        self.anchored.contains(&AnchoredAnimation {
+            set: set.clone(),
+            what: AnchoredKind::Keyframes(name.clone()),
+        })
+    }
+
+    /// Whether the next tick carries `id`'s start times: it was frozen when
+    /// the last tick ended.
+    pub(crate) fn carries(&self, id: NodeId) -> bool {
+        self.carried.contains(&id)
     }
 
     /// The time the animations were last sampled at, in seconds.
@@ -886,10 +914,11 @@ impl<T: Sync> Document<T> {
     /// elements whose animated values may have moved.
     ///
     /// Stylo itself never writes [`AnimationState::Running`] outside
-    /// `Animation::update_from_other`, and `iterate_if_necessary` refuses to
-    /// advance an animation that is still `Pending`, so both the start
-    /// promotion and the iteration loop belong to the driver. The loop matters
-    /// for a frame that stalled across several iterations.
+    /// `Animation::update_from_other`, and `iterate_to` refuses to advance an
+    /// animation that is still `Pending`, so both the start promotion and the
+    /// iteration belong to the driver. `iterate_to` takes every iteration a
+    /// stalled frame skipped at once, by the arithmetic an exported curve's
+    /// sampler repeats.
     ///
     /// `shift` is how far the timeline moved to reach `now`. Every `Pending`
     /// animation the driver has not anchored yet starts at this frame, so it
