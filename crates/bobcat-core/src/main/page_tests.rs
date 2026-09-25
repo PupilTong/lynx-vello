@@ -1767,10 +1767,6 @@ fn a_burst_queued_behind_a_release_is_never_applied() {
     });
 }
 
-/// A panic is reported whatever the view was told before it. The report-once
-/// latch a startup failure spends is not the one a panic goes through: the
-/// lifetime holds a latch of its own for the payload-bearing report, so a view
-/// that failed and then trapped says both.
 /// A group whose runtime could not be built still serves its views: each
 /// one fails its startup with that runtime's error, and opens nothing — no
 /// document, no BTS `Start`, and no request past the ones `create_lynx_view`
@@ -1812,6 +1808,10 @@ fn a_view_on_a_runtime_that_was_never_built_fails_its_startup() {
     });
 }
 
+/// A panic is reported whatever the view was told before it. The report-once
+/// latch a startup failure spends is not the one a panic goes through: the
+/// lifetime holds a latch of its own for the payload-bearing report, so a view
+/// that failed and then trapped says both.
 #[test]
 fn a_view_that_already_failed_still_reports_a_task_that_traps() {
     on_a_js_thread(|thread| async move {
