@@ -20,7 +20,6 @@ verified! {
     basic_element_text_dynamic_text_style_update => "basic-element-text-dynamic-text-style-update",
     // An `@font-face` family reaches shaping.
     basic_element_text_extra_font_family => "basic-element-text-extra-font-family",
-    // `text-maxline` 1 / 2 / unset clamps the wrapped paragraph, and the
     // marker stays gated on `text-overflow` (2026-09-14 ruling).
     basic_element_text_maxline => "basic-element-text-maxline",
     // `text-maxlength` cuts by character, including CJK and a mid-word 200.
@@ -81,4 +80,34 @@ verified! {
     basic_flex_item_shrink => "basic-flex-item-shrink",
     // `:root` matches the `<page>` element
     basic_style_root_selector => "basic-style-root-selector",
+    // sibling `<text>` flex items keep their own baselines where nested runs share one
+    basic_element_text_baseline => "basic-element-text-baseline",
+    // a gradient `color` tiles per element over the union of its own line fragments, and inherits into a nested run
+    basic_element_text_linear_gradient_color => "basic-element-text-linear-gradient-color",
+    // a nested run inherits weight, and `text-maxline="1"` clamps the wrapped paragraph with no marker: both ruled
+    basic_element_text_nest_text => "basic-element-text-nest-text",
+    // `align-items` keywords on a block cross axis, where both readings of `start`/`end` agree
+    basic_flex_column_align_items => "basic-flex-column-align-items",
+    // on `column-reverse`, `start` packs at the block start and `flex-start` at the flow start: the css-align-3 meaning (2026-09-25 ruling)
+    basic_flex_column_container_main_axis_justify_content_start_end_with_direction_rtl => "basic-flex-column-container-main-axis-justify-content-start-end-with-direction-rtl",
+    // the same contrast on `row`/`row-reverse` under `direction: rtl`, which deliberately differs from web-core's rewritten value
+    basic_flex_row_container_main_axis_justify_content_start_end_with_direction_rtl => "basic-flex-row-container-main-axis-justify-content-start-end-with-direction-rtl",
+    // `linear-gravity: left|right` is a dropped deprecated longhand, so every box takes the initial flow-start packing
+    basic_linear_column_container_main_axis_graverty_right_left_with_direction_rtl => "basic-linear-column-container-main-axis-graverty-right-left-with-direction-rtl",
+    // `justify-content: center` is reversal-agnostic, and item order follows the flow
+    basic_linear_column_container_main_axis_justify_content_center => "basic-linear-column-container-main-axis-justify-content-center",
+    // dropped `linear-gravity`, so each strip packs at its own flow start — which `direction: rtl` now really moves
+    basic_linear_row_container_main_axis_graverty_right_left_with_direction_rtl => "basic-linear-row-container-main-axis-graverty-right-left-with-direction-rtl",
+    // the same with `start|end` gravity: dropped longhand, flow-start packing in all eight strips
+    basic_linear_row_container_main_axis_graverty_start_end_with_direction_rtl => "basic-linear-row-container-main-axis-graverty-start-end-with-direction-rtl",
+    // the same with `top|bottom`, a cross-axis keyword on a horizontal main axis; dropped, flow-start packing
+    basic_linear_row_container_main_axis_graverty_top_bottom_with_direction_rtl => "basic-linear-row-container-main-axis-graverty-top-bottom-with-direction-rtl",
+    // `justify-content: left|right` dropped as unsupported, matching the `linear-gravity` siblings exactly
+    basic_linear_row_container_main_axis_justify_content_right_left_with_direction_rtl => "basic-linear-row-container-main-axis-justify-content-right-left-with-direction-rtl",
+    // linear keeps Lynx's own aliasing of `start`/`end` to `flex-start`/`flex-end`,
+    // so every strip packs at its flow end — the 2026-09-25 ruling that `linear`
+    // answers to Lynx and `flex` to CSS.
+    basic_linear_row_container_main_axis_justify_content_start_end_with_direction_rtl => "basic-linear-row-container-main-axis-justify-content-start-end-with-direction-rtl",
+    // the same aliasing on `column-reverse` columns, where the flow runs upward.
+    basic_linear_column_container_main_axis_justify_content_start_end_with_direction_rtl => "basic-linear-column-container-main-axis-justify-content-start-end-with-direction-rtl",
 }

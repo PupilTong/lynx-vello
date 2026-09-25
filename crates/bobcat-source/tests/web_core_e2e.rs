@@ -15,14 +15,13 @@
 //!
 //! So each card sits in exactly one list:
 //!
-//! * [`verified!`] — the case was read, this engine's rendering of it is
-//!   right, and the golden beside this file is that rendering. It fails when
-//!   the rendering changes, which is then either a regression or a new
-//!   judgement to make.
-//! * [`pending!`] — nobody has judged it yet, or the rendering is wrong and
-//!   the reason says what about it. There is deliberately no golden: an image
-//!   of a wrong rendering is worse than none, because the next reader would
-//!   take it for a decision. `no_pending_case_has_a_golden` holds that line.
+//! * [`verified!`] — the case was read, this engine's rendering of it is right, and the golden
+//!   beside this file is that rendering. It fails when the rendering changes, which is then either
+//!   a regression or a new judgement to make.
+//! * [`pending!`] — nobody has judged it yet, or the rendering is wrong and the reason says what
+//!   about it. There is deliberately no golden: an image of a wrong rendering is worse than none,
+//!   because the next reader would take it for a decision. `no_pending_case_has_a_golden` holds
+//!   that line.
 //!
 //! `unlisted_cases_are_an_error` fails when the corpus gains a card that is in
 //! neither list, so the suite cannot quietly stop covering the corpus.

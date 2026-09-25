@@ -109,18 +109,12 @@ pending! {
     "basic-element-svg-utf8" => "not read yet",
     "basic-element-svg-with-css" => "not read yet",
     "basic-element-svg-with-position" => "not read yet",
-    "basic-element-text-baseline" =>
-        "the same vanishing <x-text> child: only the first of the two groups renders. UNRULED",
     "basic-element-text-bindlayout" =>
         "the layout event is produced but never dispatched, so the result row stays empty",
     "basic-element-text-bindselectionchange" =>
         "selection events are not dispatched; the paragraph itself is right",
-    "basic-element-text-linear-gradient-color" =>
-        "two of its three paragraphs are <x-text> runs and render as nothing. UNRULED",
     "basic-element-text-maxline-with-setData" =>
         "the setState carrying the clamped string lands at 1000 ms, past this suite's 500 ms settle",
-    "basic-element-text-nest-text" =>
-        "a nested <x-text> run vanishes: the UA sheet hides every tag it has no rule for inside a <text>, where web-core re-enables x-text > x-text. UNRULED",
     "basic-element-text-set-native-props-text" =>
         "the setNativeProps push is not retargeted onto the leading raw-text (recorded GAP)",
     "basic-element-text-set-native-props-text-do-not-change-inline-text" =>
@@ -153,9 +147,12 @@ pending! {
     "basic-element-x-input-setValue" => "not read yet",
     "basic-element-x-input-type" => "not read yet",
     "basic-element-x-input-value" => "not read yet",
-    "basic-element-x-overlay-ng-counter-test2" => "not read yet",
-    "basic-element-x-overlay-ng-demo" => "not read yet",
-    "basic-element-x-overlay-ng-playground-test" => "not read yet",
+    "basic-element-x-overlay-ng-counter-test2" =>
+        "there is no `x-overlay-ng`, so four overlays that are hidden on the first screen paint in place and cover the page",
+    "basic-element-x-overlay-ng-demo" =>
+        "there is no `x-overlay-ng`: a hidden overlay's scrim paints over the whole page",
+    "basic-element-x-overlay-ng-playground-test" =>
+        "there is no `x-overlay-ng`: a hidden modal leaks into the bottom half of the page",
     "basic-element-x-refresh-view-demo" => "not read yet",
     "basic-element-x-swiper-autoplay" => "not read yet",
     "basic-element-x-swiper-bindchange" => "not read yet",
@@ -207,14 +204,9 @@ pending! {
     "basic-event-target-id" => "not read yet",
     "basic-event-trigger" => "not read yet",
     "basic-flex-1" => "not read yet",
-    "basic-flex-column-align-items" => "not read yet",
     "basic-flex-column-container-items-align-self" => "not read yet",
-    "basic-flex-column-container-main-axis-justify-content-start-end-with-direction-rtl" =>
-        "Lynx aliases `justify-content: start|end` to `flex-start|flex-end`, but hughie resolves them against the writing mode, so reversed containers pack at the opposite end",
     "basic-flex-nested-linear-setting" =>
         "the case asserts computed style only and neither box has a background, so a first screen shows nothing either way",
-    "basic-flex-row-container-main-axis-justify-content-start-end-with-direction-rtl" =>
-        "the same `start|end` aliasing, and the `lynx-rtl` containers are not mirrored either",
     "basic-flex-with-overflow" =>
         "the flex shrink is right, but nothing clips: children spill past intermediate views that declare no `overflow` and should take the UA default",
     "basic-global-bind" => "not read yet",
@@ -249,9 +241,6 @@ pending! {
     "basic-lazy-component-when-need-with-itself" => "not read yet",
     "basic-lazy-component-when-needed" => "not read yet",
     "basic-linear-column-container-items-align-self" => "not read yet",
-    "basic-linear-column-container-main-axis-graverty-right-left-with-direction-rtl" => "not read yet",
-    "basic-linear-column-container-main-axis-justify-content-center" => "not read yet",
-    "basic-linear-column-container-main-axis-justify-content-start-end-with-direction-rtl" => "not read yet",
     "basic-linear-default-orientation" => "not read yet",
     "basic-linear-grand-kid-weight" => "not read yet",
     "basic-linear-item-do-not-respond-to-flex" => "not read yet",
@@ -261,16 +250,6 @@ pending! {
     "basic-linear-item-use-order-affect-z-layout" => "not read yet",
     "basic-linear-margin-not-collapse" => "not read yet",
     "basic-linear-orientation-horizontal-with-direction" => "not read yet",
-    "basic-linear-row-container-main-axis-graverty-right-left-with-direction-rtl" =>
-        "`direction: lynx-rtl` must reverse a horizontal linear main axis, but the fork rejects the value, so the rtl containers render as their LTR twins. UNRULED",
-    "basic-linear-row-container-main-axis-graverty-start-end-with-direction-rtl" =>
-        "the dropped-gravity start packing is right; the `lynx-rtl` containers are not main-axis-reversed. UNRULED",
-    "basic-linear-row-container-main-axis-graverty-top-bottom-with-direction-rtl" =>
-        "`lynx-rtl` never reaches layout, so the rtl half of the case is unexercised. UNRULED",
-    "basic-linear-row-container-main-axis-justify-content-right-left-with-direction-rtl" =>
-        "dropping `justify-content: left|right` is right, but the `lynx-rtl` containers should still flip the row main axis",
-    "basic-linear-row-container-main-axis-justify-content-start-end-with-direction-rtl" =>
-        "linear `justify-content: start|end` is right; the `lynx-rtl` containers are not reversed",
     "basic-linear-weight-calced-large-than-size" => "not read yet",
     "basic-linear-weight-calced-less-than-size" => "not read yet",
     "basic-linear-weight-sum-is-float" => "not read yet",
