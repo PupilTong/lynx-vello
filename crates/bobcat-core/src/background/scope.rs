@@ -8,16 +8,21 @@ use std::rc::Rc;
 
 use quickjs_rust_bridge::HostValue;
 
-use crate::background::{WorkerKey, WorkerRole};
-use crate::esm::{BTS_MODULE_SPECIFIER, TIMER_MODULE_SPECIFIER, WORKER_MODULE_SPECIFIER};
+use crate::background::{BackgroundStart, WorkerKey, WorkerRole};
+use crate::esm::{
+    BTS_MODULE_SPECIFIER, NATIVE_MODULES_HOST_SPECIFIER, TIMER_MODULE_SPECIFIER,
+    WORKER_MODULE_SPECIFIER,
+};
 use crate::link::{HostOutbox, ViewNotice};
 use crate::main::quickjs::{ScriptEngine, ScriptRuntime};
 use crate::script::ScriptError;
 
-/// The worker realm's own host module. A worker realm declares two: this one,
-/// with the members only a worker has, and `bobcat-internal:host`, which
+/// The worker realm's own host module. A worker realm declares three: this
+/// one, with the members only a worker has; `bobcat-internal:host`, which
 /// carries the core [`crate::realm::open_realm`] installs in every realm and
-/// none of the MTS realm's document members.
+/// none of the MTS realm's document members; and
+/// [`NATIVE_MODULES_HOST_SPECIFIER`], which carries the embedder's module
+/// table.
 const WORKER_HOST_MODULE_SPECIFIER: &str = "bobcat-internal:worker";
 /// Called on `bobcat:worker`, in a worker realm, with one message value.
 pub(super) const WORKER_DELIVER_EXPORT: &str = "__BobcatDeliverWorkerMessage";
@@ -59,16 +64,21 @@ import "{TIMER_MODULE_SPECIFIER}";
     )
 }
 
-/// Installs a worker realm's own host module, `bobcat-internal:worker`: the
-/// members that are a worker's whole outward surface beyond the core
-/// [`crate::realm::open_realm`] installed under `bobcat-internal:host`. The
-/// BTS and a plain `Worker` get the same members; a plain `Worker`'s
-/// `backgroundEntry` answers `undefined`. Answers with the flag `closeWorker`
-/// sets.
+/// Installs a worker realm's own host modules, `bobcat-internal:worker` and
+/// `bobcat-internal:native-modules`: the members that are a worker's whole
+/// outward surface beyond the core [`crate::realm::open_realm`] installed
+/// under `bobcat-internal:host`. The BTS and a plain `Worker` get the same
+/// members. A BTS's members answer with its `background` data; a plain
+/// `Worker` has none, so its `backgroundEntry` and three screen members
+/// answer `undefined` and its `nativeModuleTable` an empty table. Answers
+/// with the flag `closeWorker` sets.
 ///
-/// `workerName` and `backgroundEntry` each hand their string over once and
-/// keep nothing, as an MTS realm's page data members do: `bobcat:worker`
-/// reads the name, and `bobcat:bts` the entry, as each is evaluated.
+/// `workerName`, `backgroundEntry` and `nativeModuleTable` each hand their
+/// string over once and keep nothing, as an MTS realm's page data members
+/// do: `bobcat:worker` reads the name, `bobcat:bts` the entry and
+/// `bobcat:bts-runtime` the table, as each is evaluated. The screen members
+/// answer numbers, primitives Rust owns, rather than an object the realm
+/// would have to be handed and parse.
 ///
 /// There is no document member here and no way to add one: this realm is on
 /// another runtime, on another thread, and the document is neither `Send` nor
@@ -81,23 +91,50 @@ pub(super) fn install_worker_members(
     key: WorkerKey,
     host: &HostOutbox,
     name: String,
-    background_entry: Option<String>,
+    background: Option<BackgroundStart>,
     mut post: impl FnMut(HostValue) + 'static,
 ) -> Result<Rc<Cell<bool>>, ScriptError> {
     install_native_modules(engine, js_runtime, key, host)?;
 
-    for (member, mut value) in [
-        ("workerName", Some(name)),
-        ("backgroundEntry", background_entry),
+    let (entry, screen, table) = match background {
+        Some(BackgroundStart {
+            entry,
+            screen,
+            native_modules,
+        }) => (entry, Some(screen), native_modules),
+        None => (None, None, String::new()),
+    };
+    for (specifier, member, mut value) in [
+        (WORKER_HOST_MODULE_SPECIFIER, "workerName", Some(name)),
+        (WORKER_HOST_MODULE_SPECIFIER, "backgroundEntry", entry),
+        (
+            NATIVE_MODULES_HOST_SPECIFIER,
+            "nativeModuleTable",
+            Some(table),
+        ),
     ] {
         engine.register_host_module_function(
             js_runtime,
-            WORKER_HOST_MODULE_SPECIFIER,
+            specifier,
             member,
             0,
             Box::new(move |_arguments| {
                 Ok(value.take().map_or(HostValue::Undefined, HostValue::String))
             }),
+        )?;
+    }
+    for (member, value) in [
+        ("pixelRatio", screen.map(|screen| screen.pixel_ratio)),
+        ("pixelWidth", screen.map(|screen| screen.pixel_width)),
+        ("pixelHeight", screen.map(|screen| screen.pixel_height)),
+    ] {
+        let value = value.map_or(HostValue::Undefined, screen_number);
+        engine.register_host_module_function(
+            js_runtime,
+            WORKER_HOST_MODULE_SPECIFIER,
+            member,
+            0,
+            Box::new(move |_arguments| Ok(value.clone())),
         )?;
     }
 
@@ -131,6 +168,22 @@ pub(super) fn install_worker_members(
         }),
     )?;
     Ok(closing)
+}
+
+/// One screen number as the MTS boot module's literal for it evaluates.
+///
+/// Boot writes an `f32` into its source in the shortest decimal that reads
+/// back as that `f32`, and JavaScript reads the decimal as the nearest
+/// `f64`, which is not always the `f32`'s own value: `1.1_f32` is written
+/// `1.1`, while `f64::from(1.1_f32)` is `1.100000023841858`. Reading the
+/// same decimal here keeps the BTS's `SystemInfo` equal to the MTS's.
+fn screen_number(value: f32) -> HostValue {
+    HostValue::Number(
+        value
+            .to_string()
+            .parse()
+            .expect("an f32's decimal form parses as an f64"),
+    )
 }
 
 /// Installs the one member `NativeModules.<module>.<method>(...)` reaches the

@@ -51,6 +51,11 @@ macro_rules! builtin_module {
 /// The native module every realm's Rust-backed members are exported from.
 pub(crate) const HOST_MODULE_SPECIFIER: &str = "bobcat-internal:host";
 
+/// The native module a worker realm's embedder module table is read from,
+/// which every worker realm declares: the view's table in a BTS, an empty
+/// one in a plain `Worker`.
+pub(crate) const NATIVE_MODULES_HOST_SPECIFIER: &str = "bobcat-internal:native-modules";
+
 /// The timer runtime: the realm's half of `setTimeout` and its three
 /// companions, imported for its effect.
 pub(crate) const TIMER_MODULE_SPECIFIER: &str = "bobcat:timers";
@@ -85,6 +90,11 @@ pub(crate) const ANIMATION_FRAME_MODULE_SPECIFIER: &str = "bobcat:animation-fram
 /// The one builder of a realm's `SystemInfo`, where its runtime constants are
 /// written.
 pub(crate) const SYSTEM_INFO_MODULE_SPECIFIER: &str = "bobcat:system-info";
+
+/// The one reader of the `<utf16Length>:<text>` records the host writes: the
+/// Element PAPI's attribute and style answers, and a worker realm's native
+/// module table.
+pub(crate) const RECORD_MODULE_SPECIFIER: &str = "bobcat:record";
 
 pub(crate) const GLOBAL_EVENT_MODULE_SPECIFIER: &str = "bobcat:global-event-emitter";
 
@@ -230,6 +240,7 @@ pub(crate) const BUILTIN_MODULES: &[BuiltinModule] = &[
     builtin_module!(EVENT_TARGET_MODULE_SPECIFIER, "event-target"),
     builtin_module!(ANIMATION_FRAME_MODULE_SPECIFIER, "animation-frame"),
     builtin_module!(SYSTEM_INFO_MODULE_SPECIFIER, "system-info"),
+    builtin_module!(RECORD_MODULE_SPECIFIER, "record"),
     builtin_module!(CONTEXT_MODULE_SPECIFIER, "cross-thread-context"),
     builtin_module!(WORKER_CLASS_MODULE_SPECIFIER, "worker"),
     builtin_module!(WORKER_MODULE_SPECIFIER, "worker-runtime"),

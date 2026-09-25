@@ -1454,8 +1454,9 @@ pub(crate) struct ViewAttachment {
     pub(crate) text_context: Option<dom::TextContext>,
     /// The answers to the requests `create_lynx_view` already made.
     pub(crate) startup: StartupSources,
-    /// The embedder's native modules as the realm hears about them: one
-    /// `<utf16Length>:<text>` record of names and comma-joined method lists.
+    /// The embedder's native modules as the BTS realm hears about them: one
+    /// `<utf16Length>:<text>` record of names and comma-joined method lists,
+    /// which the MTS realm hands to its BTS Worker in that worker's `Start`.
     /// The modules themselves stay on the view, on the embedder's thread.
     pub(crate) native_modules: String,
     pub(crate) commands: mpsc::UnboundedReceiver<ToMain>,

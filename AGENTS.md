@@ -818,7 +818,7 @@ module, so `__Card__` is that URL before the entry's body runs, and a
 `new Worker` URL resolves against it: the realm hands it to
 `createWorker(url, name, baseUrl)`, and Rust joins the two by URL rules and
 does not keep `__Card__`. Boot then processes that argument and posts
-the result plus host props and SystemInfo as the first BTS Worker message,
+the result plus host props as the first BTS Worker message,
 before rendering. The BTS bootstrap returns after installing a JS receiver, and
 that message initializes its inputs before importing the entry. Later internal
 messages wait on the import Promise and are delivered in order once it settles,
@@ -837,7 +837,9 @@ its capture size that host named explicitly. It is read once and never updated,
 so a painter binding at other metrics leaves it alone. `ViewSources.initial_processor` is a plain `String`,
 handed to JS by the one-shot startup-data binding without JSON serialization or
 source interpolation. JS merges those three numbers over its own runtime
-constants into SystemInfo and sends its snapshot to BTS. Entries receive runtime bindings through
+constants into SystemInfo; BTS builds its own out of the same three numbers,
+which reach it in its `Start` rather than in a message, and each is the number
+the MTS literal reads as. Entries receive runtime bindings through
 prepended ESM imports; global props updates replace the live module binding,
 and there is no native evaluator or separate Script lexical environment.
 
@@ -1055,7 +1057,8 @@ One realm per live worker, and the group's workers take turns. **One task per
 live worker, and a worker's whole state is that task**: a `WorkerStart` carries
 its key, its name, its role — which `createWorker` decides from the specifier
 before it sends the `Start`, and which carries what that role starts from:
-`WorkerRole::Background` for `bobcat:bts`, with the view's BTS entry, or
+`WorkerRole::Background` for `bobcat:bts`, with the view's BTS entry, screen
+and native module table, or
 `Dedicated` for a script URL, with that URL and the one-shot its script will
 arrive on — the receiving end of its message channel, the sender its events go
 back on — the creating MTS realm's `WorkerEvent` channel — and the Worker's own
@@ -1123,7 +1126,13 @@ boot creates a BTS Worker** named
 That is a registered module (`bts.ts`) the BTS realm's root module imports: it
 reads the view's BTS entry once through the host member `backgroundEntry`,
 installs its JS initializer from `bobcat:bts-runtime` and returns, with no
-top-level `await`, so the first message is delivered. Its first
+top-level `await`, so the first message is delivered. `bobcat:bts-runtime`
+builds `SystemInfo` and `NativeModules` as it is evaluated, from the view's
+screen and native module table, which the BTS's `Start` carries
+(`BackgroundStart`) and its realm answers through the `bobcat-internal:worker`
+members `pixelRatio`/`pixelWidth`/`pixelHeight` and the one-shot
+`nativeModuleTable` of `bobcat-internal:native-modules`; a plain `Worker`
+declares the same members and reads no screen and an empty table. Its first
 Worker message supplies initial data and starts the optional
 `ViewSources.background_entry` import. MTS JavaScript owns BTS disposal: send
 `dispose`, await `disposed`, then terminate its Worker. BTS calls the current
@@ -1209,19 +1218,21 @@ neither identifies BTS nor calls its hook.
 The private `MainThreadRuntime` registers the native QuickJS ESM
 `bobcat-internal:host` as one Rust-backed named function export per member, and
 `packages/bobcat-element/src/native.d.ts` is the authoritative enumeration: a
-`declare module "bobcat-internal:host"` block for the MTS realm and
+`declare module "bobcat-internal:host"` block for the MTS realm;
 `"bobcat-internal:worker"` for a worker's, which carries `postWorkerMessage`,
-`closeWorker`, `invokeNativeModule` and the one-shot `workerName` and
-`backgroundEntry` and nothing else. The MTS members group as the document's own
-life, tree vocabulary over numeric `NodeId`s, attributes and style, selector
-queries, the commit, the event-name edges, timers, the page-data triple handed
-over once as plain JSON and processor-name strings the realm alone reads, the
-native-module table handed over once as one length-prefixed record, the
-stylesheet pair, the diagnostics pair, the display-frame demand, and the three
-worker operations. Those four one-shot strings do not arrive separately:
-they, the entry's own text and resolved URL, and the BTS entry specifier are
-one `RealmStartup`, which is everything a realm is opened with and nothing
-that is ever updated — `LynxView::update_data`, `update_global_props` and
+`closeWorker`, `invokeNativeModule`, the one-shot `workerName` and
+`backgroundEntry`, and the screen numbers `pixelRatio`, `pixelWidth` and
+`pixelHeight`, and nothing else; and `"bobcat-internal:native-modules"`, which
+every worker realm also declares, for the one-shot `nativeModuleTable`. The MTS
+members group as the document's own life, tree vocabulary over numeric
+`NodeId`s, attributes and style, selector queries, the commit, the event-name
+edges, timers, the page-data triple handed over once as plain JSON and
+processor-name strings the realm alone reads, the stylesheet pair, the
+diagnostics pair, the display-frame demand, and the three worker operations.
+Those three one-shot strings do not arrive separately: they, the entry's own
+text and resolved URL, the screen, and the BTS entry and native-module table
+the BTS's `Start` carries are one `RealmStartup`, which is everything a realm
+is opened with and nothing that is ever updated — `LynxView::update_data`, `update_global_props` and
 `reload` reach the realm through `ToMain::PageUpdate` and never touch it.
 
 Every realm, MTS or worker, is opened by the one constructor
@@ -1234,7 +1245,7 @@ enables module loading and installs the core every realm has under
 `ConsoleMessage` through the realm's own `HostOutbox`. Every other host module
 is a parameter of that call: `MainThreadRuntime::new` passes the document,
 stylesheet, startup-string, event-name and `Worker` members, and a worker
-passes `bobcat-internal:worker`. The constructor has no role field; it is told
+passes `bobcat-internal:worker` and `bobcat-internal:native-modules`. The constructor has no role field; it is told
 two things about a realm: the key its display-frame demand is reported under,
 `None` for MTS and the worker's key for a worker, and the `ScriptSource` its
 diagnostics carry, `Main` for MTS and, for a worker, the one its `WorkerRole`
@@ -2001,7 +2012,7 @@ browser WebGPU completion is Promise-driven.
 
 The dependency-free TypeScript sources of the ESMs `bobcat-core` preloads into
 its QuickJS realms, one file per module. Both of a group's runtimes register
-all nineteen, as `esm.rs`'s `BUILTIN_MODULES` lists them in the order of
+all twenty, as `esm.rs`'s `BUILTIN_MODULES` lists them in the order of
 `src/tsconfig.json`'s `paths` (a unit test holds the two equal):
 `src/lynx-modules.ts` as `bobcat:lynx-modules`, `src/global-event-emitter.ts`
 as `bobcat:global-event-emitter`, `src/selector-query.ts` as
@@ -2022,7 +2033,10 @@ exception to the reporter the realm's runtime installed),
 `requestAnimationFrame`/`cancelAnimationFrame`, the demand it sends the host,
 and the `__BobcatBeginFrame` a vsync calls in any realm that asked for one),
 `src/system-info.ts` as `bobcat:system-info` (`createSystemInfo`, where the
-three runtime constants of `SystemInfo` are written),
+three runtime constants of `SystemInfo` are written), `src/record.ts` as
+`bobcat:record` (`splitRecord`, the one reader of the `<utf16Length>:<text>`
+records the host answers with: the Element PAPI's attribute and style
+answers, and a worker realm's native module table),
 `src/cross-thread-context.ts` as
 `bobcat:cross-thread-context`, `src/worker.ts` as the `Worker` class under
 `bobcat-internal`, `src/worker-runtime.ts` as `bobcat:worker`,
@@ -2032,9 +2046,10 @@ three runtime constants of `SystemInfo` are written),
 from the host member `backgroundEntry`). They are
 registered per runtime, because a source is runtime-wide and no value crosses
 between two runtimes; which of them a realm can link is decided by the host
-modules it declares, not by the table. `src/native.d.ts` declares the two
-native modules' contracts and is the authoritative list of what
-`bobcat-internal:host` and `bobcat-internal:worker` export.
+modules it declares, not by the table. `src/native.d.ts` declares the three
+host modules' contracts and is the authoritative list of what
+`bobcat-internal:host`, `bobcat-internal:worker` and
+`bobcat-internal:native-modules` export.
 
 What core embeds, with `include_str!`, is the JavaScript TypeScript 7 compiles
 from `src/*.ts` during the Cargo build. `bobcat-core/build.rs` invokes the
@@ -2123,7 +2138,7 @@ receives the same names as the parameters of the body it is compiled as.
 Rstest imports
 the TypeScript directly, and TypeScript 7 checks the sources as a program with
 `lib: es2023` and no ambient types, resolving each `bobcat:*` specifier to its
-file through `paths` and declaring the two native modules' contracts in a
+file through `paths` and declaring the three host modules' contracts in a
 `.d.ts`.
 
 `src/timers.ts` is the one module here that does install globals, because bare

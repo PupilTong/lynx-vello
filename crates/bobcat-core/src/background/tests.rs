@@ -21,6 +21,7 @@ use super::{
     BackgroundStart, WorkerCommand, WorkerEvent, WorkerHome, WorkerKey, WorkerMessage,
     WorkerPayload, WorkerRole, WorkerStart, wire_json, wire_value,
 };
+use crate::ScreenMetrics;
 use crate::clock::ClockInstant;
 use crate::link::{HostOutbox, ViewNotice, block_on_deadline, detached_base};
 use crate::resource::{
@@ -174,18 +175,12 @@ impl Group {
         key
     }
 
-    /// Names one BTS on a view, started over `entry` the way boot's
+    /// Names one BTS on a view, started over `background` the way boot's
     /// `new Worker("bobcat:bts")` starts one. Nothing is answered for it:
     /// its root module imports the registered `bobcat:bts`, which asks the
     /// host for the entry once an `initialize` message arrives.
-    fn construct_background(&mut self, view: usize, entry: Option<&str>) -> WorkerKey {
-        self.start_worker(
-            view,
-            "lynx-bg",
-            WorkerRole::Background(BackgroundStart {
-                entry: entry.map(str::to_owned),
-            }),
-        )
+    fn construct_background(&mut self, view: usize, background: BackgroundStart) -> WorkerKey {
+        self.start_worker(view, "lynx-bg", WorkerRole::Background(background))
     }
 
     /// Sends one `Start` for `role` on a view, and keeps the sending end of
@@ -475,7 +470,14 @@ fn a_post_and_a_terminate_while_the_answered_script_still_imports_end_the_worker
 #[test]
 fn a_bts_imports_its_entry_through_bobcat_bts_once_initialized() {
     let mut group = Group::new();
-    let key = group.construct_background(0, Some("app:///bts.js"));
+    let key = group.construct_background(
+        0,
+        BackgroundStart {
+            entry: Some("app:///bts.js".to_owned()),
+            screen: ScreenMetrics::for_viewport(32.0, 24.0, 1.0),
+            native_modules: String::new(),
+        },
+    );
     group.send(
         key,
         WorkerMessage::Post(wire_value(r#"({bobcat: "runtime", method: "initialize"})"#)),
@@ -489,6 +491,61 @@ fn a_bts_imports_its_entry_through_bobcat_bts_once_initialized() {
         url,
     }));
     assert_eq!(group.message(0), wire("lynx-bg function app:///bts.js"));
+}
+
+/// A BTS's `SystemInfo` and `NativeModules` come from the `Start` that
+/// created it: `bobcat:bts-runtime` reads the screen and the module table
+/// from the realm's host modules as it is evaluated. The `initialize` message
+/// carries neither, and the entry it lets through sees both.
+#[test]
+fn a_bts_reads_its_screen_and_native_modules_from_its_start() {
+    let mut group = Group::new();
+    let table = vec![
+        (
+            "Echo".to_owned(),
+            vec!["ping".to_owned(), "pong".to_owned()],
+        ),
+        ("Bare".to_owned(), Vec::new()),
+    ];
+    let key = group.construct_background(
+        0,
+        BackgroundStart {
+            entry: Some("app:///bts.js".to_owned()),
+            screen: ScreenMetrics {
+                pixel_ratio: 3.0,
+                pixel_width: 1170.0,
+                pixel_height: 2532.0,
+            },
+            native_modules: crate::native_module::encode_table(&table),
+        },
+    );
+    group.send(
+        key,
+        WorkerMessage::Post(wire_value(
+            r#"({bobcat: "runtime", method: "initialize", updateData: {}})"#,
+        )),
+    );
+    let (url, completion) = group.views[0].source();
+    completion.complete(Ok(LoadedSource::Module {
+        source: r"
+            import { lynx, NativeModules, SystemInfo } from 'bobcat:bts-runtime';
+            postMessage([
+                SystemInfo.pixelRatio,
+                SystemInfo.pixelWidth,
+                SystemInfo.pixelHeight,
+                lynx.SystemInfo === SystemInfo && globalThis.SystemInfo === SystemInfo,
+                Object.keys(NativeModules),
+                Object.keys(NativeModules.Echo),
+                Object.keys(NativeModules.Bare),
+            ]);
+        "
+        .to_owned(),
+        url,
+    }));
+    assert_eq!(
+        wire_json(&group.message(0)),
+        r#"[3,1170,2532,true,["Echo","Bare"],["ping","pong"],[]]"#
+    );
 }
 
 #[test]
@@ -953,8 +1010,8 @@ fn a_worker_links_only_the_built_ins_its_host_modules_have_members_for() {
     assert!(group.views[0].sources.try_recv().is_err());
 }
 
-/// The members a worker realm's two host modules export, which is what
-/// decides the built-ins it can link. Written down so that a change to either
+/// The members a worker realm's three host modules export, which is what
+/// decides the built-ins it can link. Written down so that a change to any
 /// set is a change to these lists. A namespace lists its exports sorted by
 /// name; `testFuture` is the test build's own producer.
 #[test]
@@ -965,6 +1022,7 @@ fn a_worker_realm_declares_these_host_members() {
         postMessage([
             Object.keys(await import('bobcat-internal:host')).join(','),
             Object.keys(await import('bobcat-internal:worker')).join(','),
+            Object.keys(await import('bobcat-internal:native-modules')).join(','),
         ].join(' / '));
     ",
     );
@@ -986,12 +1044,21 @@ fn a_worker_realm_declares_these_host_members() {
         "backgroundEntry",
         "closeWorker",
         "invokeNativeModule",
+        "pixelHeight",
+        "pixelRatio",
+        "pixelWidth",
         "postWorkerMessage",
         "workerName",
     ];
+    let native_modules = ["nativeModuleTable"];
     assert_eq!(
         group.message(0),
-        wire(&format!("{} / {}", host.join(","), worker.join(",")))
+        wire(&format!(
+            "{} / {} / {}",
+            host.join(","),
+            worker.join(","),
+            native_modules.join(",")
+        ))
     );
 }
 

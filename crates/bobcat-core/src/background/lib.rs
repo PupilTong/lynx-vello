@@ -84,7 +84,7 @@ use wasm_thread::Builder as ThreadBuilder;
 use crate::link::SourceAnswer;
 use crate::script::ScriptError;
 use crate::threads::ThreadJoin;
-use crate::view::{EngineError, ScriptSource, WorkerId};
+use crate::view::{EngineError, ScreenMetrics, ScriptSource, WorkerId};
 
 /// Names one `Worker` for the life of its group.
 ///
@@ -109,8 +109,9 @@ impl WorkerKey {
 /// No state. What it says about the worker is its key, its name and its
 /// role, which the creating realm decided before sending it and which carries
 /// what that role needs: a dedicated worker's script URL and the answer to
-/// the request for it, or the BTS entry. Everything else a worker has — what
-/// is posted to it, what it says back — is a channel that arrives with it.
+/// the request for it, or the BTS's entry, screen and native module table.
+/// Everything else a worker has — what is posted to it, what it says back —
+/// is a channel that arrives with it.
 pub(crate) struct WorkerStart {
     pub(crate) key: WorkerKey,
     /// The worker's `self.name`, empty when the constructor named none.
@@ -140,7 +141,8 @@ pub(crate) struct WorkerStart {
 pub(crate) enum WorkerRole {
     /// The view's background thread (BTS), which boot creates as
     /// `new Worker("bobcat:bts")`. Its realm's root module imports the
-    /// registered module `bobcat:bts`, so nothing is fetched to start it.
+    /// registered module `bobcat:bts`, so nothing is fetched to start it,
+    /// and its realm's host modules answer with the view's data.
     Background(BackgroundStart),
     /// A `Worker` whose script is fetched from the URL its specifier
     /// resolves to. The creating realm has already asked its host for it.
@@ -158,13 +160,26 @@ pub(crate) enum WorkerRole {
 /// What a BTS is started with beyond what every worker is.
 ///
 /// Cloned into each `Start` for `bobcat:bts`: a card that constructs a
-/// second one gets the same data.
+/// second one gets the same data. `bobcat:bts-runtime` reads the screen and
+/// the module table from the realm's host modules as it is evaluated, so a
+/// plain `Worker` that imports it reads what a `Start` without this answers:
+/// no screen and an empty table.
 #[derive(Clone)]
 pub(crate) struct BackgroundStart {
     /// The view's BTS entry, which `bobcat:bts` imports once the BTS is
     /// initialized: [`ViewSources::background_entry`](crate::ViewSources::background_entry)
     /// as `create_lynx_view` resolved it. `None` is a view that named none.
     pub(crate) entry: Option<String>,
+    /// The screen the BTS's `SystemInfo` reports: the view's
+    /// [`ViewSources::screen`](crate::ViewSources::screen), which the MTS
+    /// boot module reports too.
+    pub(crate) screen: ScreenMetrics,
+    /// The embedder's native modules, as the record
+    /// [`encode_table`](crate::native_module::encode_table) wrote: two
+    /// fields per module, its name and then its method names joined with
+    /// commas. Empty for a view built with none. The BTS's `NativeModules`
+    /// is built out of it.
+    pub(crate) native_modules: String,
 }
 
 impl WorkerRole {

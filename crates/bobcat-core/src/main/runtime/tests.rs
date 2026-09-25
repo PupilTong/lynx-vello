@@ -4410,7 +4410,6 @@ fn an_mts_realm_declares_these_host_members() {
         "listenerNameOpened",
         "loadModuleSync",
         "logScriptMessage",
-        "nativeModuleTable",
         "parentNode",
         "preloadStyleSheet",
         "queryElementIds",

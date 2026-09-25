@@ -155,14 +155,6 @@ interface BobcatNative {
   initData(): string | undefined;
   /** The view's global props, handed over like `initData`. */
   globalProps(): string | undefined;
-  /**
-   * The native modules the embedder injected when the view was built, as one
-   * record payload: a flat sequence of `<utf16Length>:<text>` fields, two per
-   * module — its `NativeModules` key, then its method names joined with
-   * commas, empty for a module that declared none. Empty for a view built with
-   * no modules at all. Answers once, like `initData`.
-   */
-  nativeModuleTable(): string;
 }
 
 /**
@@ -197,6 +189,15 @@ interface BobcatWorkerNative {
    * entry and in a plain `Worker`. Answers once, like `workerName`.
    */
   backgroundEntry(): string | undefined;
+  /**
+   * The screen the view's `SystemInfo` reports, as three numbers: physical
+   * pixels per CSS pixel, and the screen's width and height in physical
+   * pixels. The view's own numbers in a BTS, the ones its MTS boot module
+   * reports; `undefined` in a plain `Worker`, which reports no screen.
+   */
+  pixelRatio(): number | undefined;
+  pixelWidth(): number | undefined;
+  pixelHeight(): number | undefined;
   /**
    * Hands one `NativeModules.<module>.<method>(...)` call to the embedder's
    * module of that name, and returns at once: a module answers through the
@@ -287,7 +288,6 @@ declare module "bobcat-internal:host" {
   export const clearTimer: BobcatNative["clearTimer"];
   export const initData: BobcatNative["initData"];
   export const globalProps: BobcatNative["globalProps"];
-  export const nativeModuleTable: BobcatNative["nativeModuleTable"];
   /**
    * Fetches `url` the way an image is fetched and answers the id of a
    * `bobcat:future` that settles when the fetch is over: fulfilled with
@@ -445,5 +445,24 @@ declare module "bobcat-internal:worker" {
   export const closeWorker: BobcatWorkerNative["closeWorker"];
   export const workerName: BobcatWorkerNative["workerName"];
   export const backgroundEntry: BobcatWorkerNative["backgroundEntry"];
+  export const pixelRatio: BobcatWorkerNative["pixelRatio"];
+  export const pixelWidth: BobcatWorkerNative["pixelWidth"];
+  export const pixelHeight: BobcatWorkerNative["pixelHeight"];
   export const invokeNativeModule: BobcatWorkerNative["invokeNativeModule"];
+}
+
+/**
+ * The embedder's native modules as a worker realm reads them. Every worker
+ * realm declares this module: a BTS answers with the modules its view was
+ * built with, and a plain `Worker` with none.
+ */
+declare module "bobcat-internal:native-modules" {
+  /**
+   * The modules as one record payload: a flat sequence of
+   * `<utf16Length>:<text>` fields, two per module — its `NativeModules` key,
+   * then its method names joined with commas, empty for a module that
+   * declared none. Empty for a view built with no modules at all, and in a
+   * plain `Worker`. Answers once: the string is handed over, not kept.
+   */
+  export function nativeModuleTable(): string;
 }

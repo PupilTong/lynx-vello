@@ -307,8 +307,9 @@ struct AttachedView {
     /// The answers to the startup requests `create_lynx_view` already made:
     /// the author sheets in the order the view listed them, and the entry.
     startup: StartupSources,
-    /// The embedder's native modules, as the realm is told about them: the
-    /// record `create_lynx_view` encoded out of their names and methods.
+    /// The embedder's native modules, as the BTS realm is told about them:
+    /// the record `create_lynx_view` encoded out of their names and methods,
+    /// which the MTS realm hands to its BTS Worker in that worker's `Start`.
     native_modules: String,
     commands: mpsc::UnboundedReceiver<ToMain>,
     /// The metrics an attached painter names, `None` until one binds. Not a

@@ -216,7 +216,7 @@ impl Drop for ModuleCallback {
 /// already refused where the view was constructed.
 pub(crate) type NativeModuleTable = Vec<(String, Vec<String>)>;
 
-/// Encodes a module table as the `<utf16Length>:<text>` record the MTS realm
+/// Encodes a module table as the `<utf16Length>:<text>` record the BTS realm
 /// decodes, two fields per module: the name, then the comma-joined method
 /// list.
 ///

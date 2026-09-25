@@ -5,7 +5,9 @@
   // either: a module that logs imports `bobcat:diagnostics`'s, which is also
   // the one `bobcat:worker` installs on a worker realm's global. `paths`
   // resolves each specifier core registers to the file it registers under it;
-  // the two native modules have no source and are declared in `native.d.ts`.
+  // the three host modules — `bobcat-internal:host`, `bobcat-internal:worker`
+  // and `bobcat-internal:native-modules` — have no source and are declared in
+  // `native.d.ts`.
   "extends": "../../../tsconfig.base.json",
   "compilerOptions": {
     "lib": ["es2023"],
@@ -25,6 +27,7 @@
       "bobcat:event-target": ["./event-target.ts"],
       "bobcat:animation-frame": ["./animation-frame.ts"],
       "bobcat:system-info": ["./system-info.ts"],
+      "bobcat:record": ["./record.ts"],
       "bobcat:cross-thread-context": ["./cross-thread-context.ts"],
       "bobcat-internal": ["./worker.ts"],
       "bobcat:worker": ["./worker-runtime.ts"],

@@ -260,13 +260,15 @@ impl DocumentIngredients {
 /// [`LynxView::update_data`](crate::LynxView::update_data),
 /// [`update_global_props`](crate::LynxView::update_global_props) and
 /// [`reload`](crate::LynxView::reload) reach the realm through
-/// `ToMain::PageUpdate` instead, and never touch any of this. The four strings
-/// below `background_entry` become one-shot host members the realm alone reads,
-/// `entry` is written into the boot module's source, `background_entry` goes
-/// to `WorkerFactory::install`, which hands it to the BTS Worker in its
+/// `ToMain::PageUpdate` instead, and never touch any of this. The three
+/// page-data strings become one-shot host members the realm alone reads,
+/// `entry` and `screen` are written into the boot module's source,
+/// `background_entry`, `native_modules` and a copy of `screen` go to
+/// `WorkerFactory::install`, which hands them to the BTS Worker in its
 /// `Start`, and `sheets` go to the document slot, which the first
-/// `__FlushElementTree` settles them out of. The entry's source is not here: its answer is a task
-/// of the view's owner, which completes the module boot imports the entry as.
+/// `__FlushElementTree` settles them out of. The entry's source is not here:
+/// its answer is a task of the view's owner, which completes the module boot
+/// imports the entry as.
 pub(crate) struct RealmStartup {
     /// The answers to the author stylesheet requests `create_lynx_view` made,
     /// in the order the view listed them, which is their cascade order. The
@@ -274,7 +276,10 @@ pub(crate) struct RealmStartup {
     /// document enters the style pipeline; nothing waits for them earlier.
     pub(crate) sheets: Vec<StartupSource>,
     /// The screen the realm's `SystemInfo` reports, as the embedder named it
-    /// in [`ViewSources::screen`](crate::ViewSources::screen).
+    /// in [`ViewSources::screen`](crate::ViewSources::screen). The BTS's
+    /// `SystemInfo` reports the same one: it reaches that realm in the
+    /// `Start` boot's `new Worker("bobcat:bts")` sends, as
+    /// [`BackgroundStart::screen`].
     pub(crate) screen: ScreenMetrics,
     /// The view's MTS entry, [`ViewSources::entry`](crate::ViewSources::entry)
     /// as `create_lynx_view` resolved it: always an absolute URL, in its
@@ -293,8 +298,10 @@ pub(crate) struct RealmStartup {
     pub(crate) global_props: Option<String>,
     /// The embedder's modules as one `<utf16Length>:<text>` record, two fields
     /// per module: its name, then its method names joined with commas. Empty
-    /// for a view built with none. The realm reads it into the
-    /// `{name: methods}` object it sends the BTS Worker.
+    /// for a view built with none. This realm does not read it: it reaches
+    /// the BTS realm in the `Start` boot's `new Worker("bobcat:bts")` sends,
+    /// as [`BackgroundStart::native_modules`], and `bobcat:bts-runtime`
+    /// builds `NativeModules` out of it.
     pub(crate) native_modules: String,
 }
 
@@ -826,6 +833,8 @@ impl MainThreadRuntime {
                     .map_err(MainThreadError::into_script_error)?;
                 let background = BackgroundStart {
                     entry: startup.background_entry.take(),
+                    screen: startup.screen,
+                    native_modules: std::mem::take(&mut startup.native_modules),
                 };
                 workers
                     .install(engine, js_runtime, outbox, background)
@@ -1913,21 +1922,20 @@ fn install_document_members(
     Ok(())
 }
 
-/// Installs `initData`, `globalProps`, `initialProcessor` and
-/// `nativeModuleTable`, handing the realm the original strings. Missing
-/// initial data or props become `undefined`.
+/// Installs `initData`, `globalProps` and `initialProcessor`, handing the
+/// realm the original strings. Missing initial data or props become
+/// `undefined`.
 ///
 /// Each hands its string over once and keeps nothing. `bobcat:runtime` parses
-/// the initial data and props, uses the processor name as a plain string, and
-/// reads the module table as the record the realm decodes. All four answer
-/// before a document exists.
+/// the initial data and props and uses the processor name as a plain string.
+/// All three answer before a document exists.
 ///
 /// The strings are *moved* in rather than copied: each is handed over once and
 /// never read again, so the move says what the lifetime is.
 fn install_startup_strings(
     engine: &mut ScriptEngine,
     js_runtime: &mut ScriptRuntime,
-    strings: [(&'static str, Option<String>); 4],
+    strings: [(&'static str, Option<String>); 3],
 ) -> Result<(), MainThreadError> {
     for (name, mut value) in strings {
         install(engine, js_runtime, name, 0, move |_arguments| {
@@ -1937,19 +1945,15 @@ fn install_startup_strings(
     Ok(())
 }
 
-/// The four strings this realm answers once, in the order they are
+/// The three strings this realm answers once, in the order they are
 /// installed, taken out of the startup that is being spent.
-fn startup_strings(startup: &mut RealmStartup) -> [(&'static str, Option<String>); 4] {
+fn startup_strings(startup: &mut RealmStartup) -> [(&'static str, Option<String>); 3] {
     [
         ("initData", startup.init_data.take()),
         ("globalProps", startup.global_props.take()),
         (
             "initialProcessor",
             Some(std::mem::take(&mut startup.initial_processor)),
-        ),
-        (
-            "nativeModuleTable",
-            Some(std::mem::take(&mut startup.native_modules)),
         ),
     ]
 }
