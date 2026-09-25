@@ -1,4 +1,5 @@
 import initWasm, { BobcatRenderer } from '../pkg/bobcat_wasm.js'
+import { monitorFrameRate } from './frame-rate.ts'
 import type {
   FacadeMessage,
   InitMessage,
@@ -18,6 +19,7 @@ let initialized = false
 let scriptCompletion: Promise<void> | undefined
 let engineEventGeneration = 0
 let requestQueue: Promise<void> = Promise.resolve()
+let stopFrameRate: (() => void) | undefined
 
 const MAX_SCRIPT_BYTES = 16 * 1024 * 1024
 const MAX_STYLE_SHEET_BYTES = 16 * 1024 * 1024
@@ -60,13 +62,14 @@ function postResponse(request: number, ok: boolean, error?: unknown): void {
 
 function reportFatal(error: unknown): void {
   running = false
+  stopFrameRate?.()
   self.postMessage({
     type: 'bobcat-error',
     message: errorMessage(error),
   } satisfies RenderWorkerMessage)
 }
 
-// The Worker's frame clock, and the only one: while the engine owes the
+// The Worker's rendering clock: while the engine owes the
 // timeline another frame it draws at the display's rate, because drawing
 // faster than the compositor shows is waste. `requestAnimationFrame` is that
 // rate where a Worker is given one; a frame-interval timer stands in where it
@@ -152,6 +155,20 @@ async function initialize(message: InitMessage): Promise<void> {
     postNativeModuleCall,
   )
   running = true
+  if (message.measureFrameRate) {
+    const report = (fps: number | null): void => {
+      self.postMessage({ type: 'bobcat-frame-rate', fps } satisfies RenderWorkerMessage)
+    }
+    if (typeof self.requestAnimationFrame === 'function') {
+      stopFrameRate = monitorFrameRate(
+        (callback) => self.requestAnimationFrame(callback),
+        (id) => self.cancelAnimationFrame(id),
+        report,
+      )
+    } else {
+      report(null)
+    }
+  }
   self.postMessage({ type: 'bobcat-ready' } satisfies RenderWorkerMessage)
 }
 
@@ -401,6 +418,7 @@ async function dispatchRequest(message: RequestMessage): Promise<void> {
       break
     case 'dispose':
       running = false
+      stopFrameRate?.()
       await renderer.dispose()
       renderer.free()
       renderer = undefined

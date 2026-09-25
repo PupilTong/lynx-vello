@@ -31,6 +31,12 @@ interface Indicator {
 type BobcatCanvasFactory = Pick<typeof BobcatCanvas, 'create'>;
 
 interface Shell {
+  readonly sourcePanel: HTMLElement;
+  readonly frameRate: HTMLElement;
+  readonly navigation: HTMLSelectElement;
+  readonly navigationPosition: HTMLElement;
+  readonly backButton: HTMLButtonElement;
+  readonly forwardButton: HTMLButtonElement;
   readonly uploadPanel: HTMLFormElement;
   readonly entryInput: HTMLInputElement;
   readonly loadButton: HTMLButtonElement;
@@ -130,59 +136,78 @@ function mountShell(): Shell {
         </div>
 
         <div class="workspace-grid" id="renderer-workspace" data-active-tab="canvas">
-          <form class="upload-panel" id="canvas-source-panel" aria-labelledby="canvas-source-title">
-            <div class="pane-heading">
-              <div>
-                <p class="panel-kicker">SOURCE</p>
-                <h3 id="canvas-source-title">Canvas source</h3>
+          <div class="source-panel" id="source-panel">
+            <section class="canvas-tools" aria-label="Canvas monitoring and navigation">
+              <div class="frame-rate-row">
+                <span class="status-label" title="Sampled with requestAnimationFrame on the Painter thread; not GPU presents">Canvas FPS <span class="frame-rate-method">/ rAF</span></span>
+                <span class="frame-rate-value" id="frame-rate" aria-live="off">—</span>
               </div>
-              <button id="load-template" class="primary-button" type="submit" disabled>Load template</button>
-            </div>
-            <div class="upload-fields">
-              <div class="source-field">
-                <label for="canvas-zip">Local ZIP file (optional)</label>
-                <p id="zip-help" class="field-help">Optionally choose a ZIP archive to provide local templates and resources.</p>
-                <input id="canvas-zip" type="file" accept=".zip,application/zip,application/x-zip-compressed" aria-describedby="zip-help zip-status">
-                <output id="zip-status" class="field-help" aria-live="polite">No ZIP selected</output>
+              <div class="navigation-heading">
+                <label for="navigation-stack" class="status-label">Navigation stack</label>
+                <span id="navigation-position" class="field-help">0 / 0</span>
               </div>
-              <div class="source-field">
-                <label for="entry-template-url">Entry template URL</label>
-                <input id="entry-template-url" type="text" required value="${HOMEPAGE_TEMPLATE}" placeholder="https://example.com/main.web.bundle" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="template-loading-note">
+              <div class="navigation-controls">
+                <button id="navigate-back" type="button" aria-label="Go back" title="Go back" disabled>←</button>
+                <button id="navigate-forward" type="button" aria-label="Go forward" title="Go forward" disabled>→</button>
+                <select id="navigation-stack" aria-describedby="navigation-position" disabled>
+                  <option>No pages yet</option>
+                </select>
               </div>
-              <p id="template-loading-note" class="field-help">Enter a template URL to load directly. With a ZIP selected, use zip:///dist/main.web.bundle, a path from the ZIP root, or a full URL whose pathname matches an archive entry. Supports .lynx.xml, binary .web.bundle, and source-based .lynx.bundle templates.</p>
-            </div>
-            <div class="editor-footer">
-              <output id="upload-status" class="field-help" aria-live="polite">Enter a template URL. A local ZIP is optional.</output>
-            </div>
-          </form>
+            </section>
+            <form class="upload-panel" id="canvas-source-panel" aria-labelledby="canvas-source-title">
+              <div class="pane-heading">
+                <div>
+                  <p class="panel-kicker">SOURCE</p>
+                  <h3 id="canvas-source-title">Canvas source</h3>
+                </div>
+                <button id="load-template" class="primary-button" type="submit" disabled>Load template</button>
+              </div>
+              <div class="upload-fields">
+                <div class="source-field">
+                  <label for="canvas-zip">Local ZIP file (optional)</label>
+                  <p id="zip-help" class="field-help">Optionally choose a ZIP archive to provide local templates and resources.</p>
+                  <input id="canvas-zip" type="file" accept=".zip,application/zip,application/x-zip-compressed" aria-describedby="zip-help zip-status">
+                  <output id="zip-status" class="field-help" aria-live="polite">No ZIP selected</output>
+                </div>
+                <div class="source-field">
+                  <label for="entry-template-url">Entry template URL</label>
+                  <input id="entry-template-url" type="text" required value="${HOMEPAGE_TEMPLATE}" placeholder="https://example.com/main.web.bundle" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="template-loading-note">
+                </div>
+                <p id="template-loading-note" class="field-help">Enter a template URL to load directly. With a ZIP selected, use zip:///dist/main.web.bundle, a path from the ZIP root, or a full URL whose pathname matches an archive entry. Supports .lynx.xml, binary .web.bundle, and source-based .lynx.bundle templates.</p>
+              </div>
+              <div class="editor-footer">
+                <output id="upload-status" class="field-help" aria-live="polite">Enter a template URL. A local ZIP is optional.</output>
+              </div>
+            </form>
 
-          <form class="editor-panel" id="lynx-xml-panel" hidden>
-            <div class="pane-heading editor-heading">
-              <div>
-                <p class="panel-kicker">SOURCE</p>
-                <h3>Lynx XML editor</h3>
+            <form class="editor-panel" id="lynx-xml-panel" hidden>
+              <div class="pane-heading editor-heading">
+                <div>
+                  <p class="panel-kicker">SOURCE</p>
+                  <h3>Lynx XML editor</h3>
+                </div>
+                <button id="render-xml" type="submit" disabled>
+                  <span id="render-xml-label">Submit XML</span>
+                  <span class="button-arrow" aria-hidden="true">↗</span>
+                </button>
               </div>
-              <button id="render-xml" type="submit" disabled>
-                <span id="render-xml-label">Submit XML</span>
-                <span class="button-arrow" aria-hidden="true">↗</span>
-              </button>
-            </div>
-            <textarea
-              id="lynx-xml-editor"
-              aria-describedby="source-status source-metrics"
-              aria-label="Lynx XML source"
-              autocomplete="off"
-              autocapitalize="off"
-              placeholder="Loading demo.lynx.xml…"
-              spellcheck="false"
-              wrap="off"
-            ></textarea>
-            <div class="editor-footer">
-              <output id="source-status" data-state="idle" aria-live="polite">Loading demo…</output>
-              <span id="source-metrics">—</span>
-            </div>
-          </form>
+              <textarea
+                id="lynx-xml-editor"
+                aria-describedby="source-status source-metrics"
+                aria-label="Lynx XML source"
+                autocomplete="off"
+                autocapitalize="off"
+                placeholder="Loading demo.lynx.xml…"
+                spellcheck="false"
+                wrap="off"
+              ></textarea>
+              <div class="editor-footer">
+                <output id="source-status" data-state="idle" aria-live="polite">Loading demo…</output>
+                <span id="source-metrics">—</span>
+              </div>
+            </form>
 
+          </div>
           <section class="preview-panel" aria-labelledby="canvas-title">
             <div class="pane-heading preview-heading">
               <div>
@@ -191,7 +216,7 @@ function mountShell(): Shell {
               </div>
               <div class="preview-actions">
                 <output id="canvas-size">—</output>
-                <button id="expand-preview" type="button" aria-controls="canvas-source-panel lynx-xml-panel" aria-pressed="false" title="Expand canvas and hide source panel">
+                <button id="expand-preview" type="button" aria-controls="source-panel" aria-pressed="false" title="Expand canvas and hide source panel">
                   <span class="expand-icon" aria-hidden="true">⤢</span>
                   <span id="expand-preview-label">Expand</span>
                 </button>
@@ -215,6 +240,12 @@ function mountShell(): Shell {
   `;
 
   return {
+    sourcePanel: requiredElement<HTMLElement>(root, '#source-panel'),
+    frameRate: requiredElement<HTMLElement>(root, '#frame-rate'),
+    navigation: requiredElement<HTMLSelectElement>(root, '#navigation-stack'),
+    navigationPosition: requiredElement<HTMLElement>(root, '#navigation-position'),
+    backButton: requiredElement<HTMLButtonElement>(root, '#navigate-back'),
+    forwardButton: requiredElement<HTMLButtonElement>(root, '#navigate-forward'),
     uploadPanel: requiredElement<HTMLFormElement>(root, '#canvas-source-panel'),
     entryInput: requiredElement<HTMLInputElement>(root, '#entry-template-url'),
     loadButton: requiredElement<HTMLButtonElement>(root, '#load-template'),
@@ -268,6 +299,7 @@ function createTabRouter(shell: Shell): TabRouter {
     );
     shell.workspace.dataset['activeTab'] = active;
     shell.workspace.dataset['expanded'] = String(expanded);
+    shell.sourcePanel.hidden = expanded;
     shell.editorForm.hidden = expanded || active !== 'lynx-xml';
     shell.uploadPanel.hidden = expanded || active !== 'canvas';
     shell.expandButton.setAttribute('aria-pressed', String(expanded));
@@ -733,7 +765,14 @@ class PreviewRenderer {
           initial.dpr,
           this.#config,
           // Retained for every page this canvas loads, like the fonts.
-          { nativeModules: this.#nativeModules },
+          {
+            nativeModules: this.#nativeModules,
+            onFrameRate: (fps) => {
+              if (this.#canvas === canvas) {
+                this.#shell.frameRate.textContent = fps === null ? 'Unavailable' : fps.toFixed(1);
+              }
+            },
+          },
         );
       } catch (error) {
         if (this.#canvas === canvas) {
@@ -748,6 +787,7 @@ class PreviewRenderer {
       this.#view = view;
       view.onerror = (error): void => {
         if (this.#view === view) {
+          this.#shell.frameRate.textContent = '—';
           this.#reportFatal(error);
         }
       };
@@ -818,6 +858,7 @@ class PreviewRenderer {
   }
 
   async #releaseView(): Promise<void> {
+    this.#shell.frameRate.textContent = '—';
     const view = this.#view;
     this.#view = undefined;
     if (view === undefined) {
@@ -868,13 +909,31 @@ function installSources(
   renderer: PreviewRenderer,
 ): (label: string, template?: boolean) => Promise<void> {
   let rendering = false;
+  const entries: string[] = [];
+  let position = -1;
 
-  const renderSource = async (label: string, template = false): Promise<void> => {
+  const updateNavigation = (): void => {
+    shell.navigation.replaceChildren(...(entries.length === 0
+      ? [new Option('No pages yet')]
+      : entries.map((url, index) => {
+        const label = url.startsWith(document.baseURI) ? url.slice(document.baseURI.length) : url;
+        return new Option(`${index + 1}. ${label}`, String(index));
+      })));
+    shell.backButton.disabled = rendering || position <= 0;
+    shell.forwardButton.disabled = rendering || position >= entries.length - 1;
+    shell.navigation.disabled = rendering || entries.length === 0;
+    shell.navigation.selectedIndex = Math.max(0, position);
+    shell.navigation.title = entries[position] ?? '';
+    shell.navigationPosition.textContent = `${position + 1} / ${entries.length}`;
+  };
+
+  const renderSource = async (label: string, template = false, target?: number): Promise<void> => {
     if (rendering) {
       return;
     }
     rendering = true;
-    const source = shell.editor.value;
+    updateNavigation();
+    const entry = shell.entryInput.value.trim();
     const status = template ? shell.uploadStatus : shell.sourceStatus;
     const setStatus = (value: string, state: SourceState): void => {
       status.textContent = value;
@@ -895,9 +954,18 @@ function installSources(
 
     try {
       if (template) {
-        await renderer.renderTemplate(shell.entryInput.value, shell.zipInput.files?.[0]);
+        await renderer.renderTemplate(entry, shell.zipInput.files?.[0]);
+        if (target === undefined) {
+          entries.splice(position + 1, entries.length, entry);
+          position = entries.length - 1;
+        } else {
+          position = target;
+        }
       } else {
-        await renderer.render(source);
+        await renderer.render(shell.editor.value);
+        // Submitted XML has no reloadable URL.
+        entries.length = 0;
+        position = -1;
       }
       setStatus(`Rendered ${label}`, 'ok');
       setIndicator(shell.renderer, 'Offscreen WebGPU', 'ok');
@@ -911,6 +979,7 @@ function installSources(
       throw error;
     } finally {
       rendering = false;
+      updateNavigation();
       shell.editor.readOnly = false;
       shell.editorForm.removeAttribute('aria-busy');
       shell.renderButton.disabled = false;
@@ -922,6 +991,17 @@ function installSources(
       shell.renderButtonLabel.textContent = 'Submit XML';
     }
   };
+
+  const navigate = (target: number): void => {
+    const url = entries[target];
+    if (url === undefined || target === position || rendering) return;
+    shell.entryInput.value = url;
+    shell.tabLinks.find((link) => link.dataset['workspaceTab'] === 'canvas')?.click();
+    void renderSource(url, true, target).catch((error: unknown) => console.error(error));
+  };
+  shell.backButton.addEventListener('click', () => navigate(position - 1));
+  shell.forwardButton.addEventListener('click', () => navigate(position + 1));
+  shell.navigation.addEventListener('change', () => navigate(Number(shell.navigation.value)));
 
   shell.editor.addEventListener('input', () => {
     updateSourceMetrics(shell);

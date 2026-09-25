@@ -58,6 +58,9 @@ export type NativeModules = Record<
 /** What a canvas keeps for every page it loads, beyond its metrics. */
 export interface BobcatCanvasOptions {
   nativeModules?: NativeModules
+  /** Opt-in Painter-thread rAF cadence, reported twice a second. This is
+   * not a count of GPU presents; null means Worker rAF is unavailable. */
+  onFrameRate?: (fps: number | null) => void
 }
 
 /** What one load hands the page it builds. */
@@ -617,8 +620,10 @@ class RenderWorkerClient {
   #resolveReady!: () => void
   #readySettled = false
   #worker: Worker
+  #onFrameRate: BobcatCanvasOptions['onFrameRate']
 
-  constructor(worker: Worker, modules: NativeModules) {
+  constructor(worker: Worker, modules: NativeModules, onFrameRate: BobcatCanvasOptions['onFrameRate']) {
+    this.#onFrameRate = onFrameRate
     this.#modules = modules
     this.#worker = worker
     this.#ready = new Promise((resolve, reject) => {
@@ -668,6 +673,14 @@ class RenderWorkerClient {
 
   #onMessage = (event: MessageEvent) => {
     const message = event.data as RenderWorkerMessage
+    if (message?.type === 'bobcat-frame-rate') {
+      try {
+        this.#onFrameRate?.(message.fps)
+      } catch (error) {
+        console.error('Bobcat frame rate callback threw', error)
+      }
+      return
+    }
     if (message?.type === 'bobcat-ready') {
       if (!this.#readySettled) {
         this.#readySettled = true
@@ -903,7 +916,7 @@ export class BobcatCanvas {
         name: 'bobcat-render',
         type: 'module',
       })
-      client = new RenderWorkerClient(worker, modules)
+      client = new RenderWorkerClient(worker, modules, options.onFrameRate)
       worker.postMessage(
         {
           type: 'bobcat-init',
@@ -914,6 +927,7 @@ export class BobcatCanvas {
           imagePort: images.port2,
           hardwareConcurrency: hardwareConcurrency(),
           nativeModules,
+          measureFrameRate: options.onFrameRate !== undefined,
           screenPixelHeight: screen.height,
           screenPixelWidth: screen.width,
           workerUrl: THREAD_WORKER_URL,
