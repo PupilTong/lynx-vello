@@ -1,5 +1,4 @@
 import { callNativeModule } from "bobcat:worker";
-import { requestScriptFrame } from "bobcat-internal:host";
 import type { WorkerGlobalScope } from "bobcat:worker";
 import {
   type ContextEvent,
@@ -11,6 +10,8 @@ import { type BundleHandle, createBundleFetches } from "bobcat:bundle-fetch";
 import { GlobalEventEmitter } from "bobcat:global-event-emitter";
 import { console, reportError } from "bobcat:diagnostics";
 import type { TimerGlobals } from "bobcat:timers";
+import { cancelAnimationFrame, clearAnimationFrames, requestAnimationFrame } from "bobcat:animation-frame";
+import { createSystemInfo } from "bobcat:system-info";
 
 const timers = globalThis as unknown as TimerGlobals;
 
@@ -79,8 +80,6 @@ const destructionRegistry = new FinalizationRegistry<() => unknown>(callback => 
 const callbacks: Map<number | undefined, (result: unknown) => void> =
   new Map();
 let nextCallbackId = 1;
-const animationCallbacks = new Map<number, (milliseconds: number) => void>();
-let nextAnimationId = 1;
 
 /**
  * What the main thread sends this realm: a runtime call, tagged
@@ -307,8 +306,7 @@ function receiveMessage(message: FromMainThread): void | Promise<void> {
 }
 
 async function dispose() {
-  animationCallbacks.clear();
-  updateFrameRequest();
+  clearAnimationFrames();
   // `lynx.reportError`, not the global scope's. That one is reported when this
   // entry's checkpoint returns its rejection, after the `disposed` reply below
   // has been posted, and the main thread terminates this Worker on that reply,
@@ -322,37 +320,8 @@ async function dispose() {
   scope.postMessage({ bobcat: "runtime", method: "disposed" });
 }
 
-// The selected runtime target, independent of the compiler's minimum SDK.
-export let SystemInfo: Readonly<Record<string, unknown>> = Object.freeze({
-  platform: "headless", runtimeType: "quickjs", lynxSdkVersion: "4.1.0",
-});
-
-let frameRequested = false;
-function updateFrameRequest() {
-  const pending = animationCallbacks.size > 0;
-  if (pending === frameRequested) return;
-  frameRequested = pending;
-  requestScriptFrame(pending);
-}
-
-// Called while handling the painter's Vsync message. Callback IDs
-// and errors stay on BTS; no MTS message or acknowledgement participates.
-// A callback that throws is an uncaught exception of this worker realm, as it
-// is in a browser worker: the global scope's `reportError` reports it at the
-// parent `Worker` and to the embedder, and the frame's other callbacks run.
-export function __BobcatBeginFrame(milliseconds: number) {
-  frameRequested = false;
-  const ids = Array.from(animationCallbacks.keys());
-  for (const id of ids) {
-    const callback = animationCallbacks.get(id);
-    animationCallbacks.delete(id);
-    if (callback) {
-      try { callback(milliseconds); }
-      catch (error) { scope.reportError(error); }
-    }
-  }
-  updateFrameRequest();
-}
+// The runtime constants until `initialize` adds the screen the view names.
+export let SystemInfo = createSystemInfo();
 
 // The realm's one console, which `bobcat:worker` also installs as the global
 // `console`: a raw BTS entry's import and a bundle body's preamble binding
@@ -373,17 +342,14 @@ export const lynx = {
       try { callback(); } catch (error) { scope.reportError(error); }
     });
   },
-  requestAnimationFrame(callback: (milliseconds: number) => void) {
-    if (typeof callback !== "function") throw new TypeError("requestAnimationFrame requires a function");
-    const id = nextAnimationId++;
-    animationCallbacks.set(id, callback);
-    updateFrameRequest();
-    return id;
-  },
-  cancelAnimationFrame(id: number) {
-    animationCallbacks.delete(id);
-    updateFrameRequest();
-  },
+  // `bobcat:animation-frame`'s, which runs them on this worker's vsync: IDs
+  // and errors stay on BTS, and no MTS message or acknowledgement takes part.
+  // A callback that throws is an uncaught exception of this worker realm, as
+  // it is in a browser worker: the global scope's `reportError` reports it at
+  // the parent `Worker` and to the embedder, and the frame's other callbacks
+  // run.
+  requestAnimationFrame,
+  cancelAnimationFrame,
   reload(value?: unknown, callback?: unknown) {
     // Native only parses object arguments. Primitives (including null) mean
     // an empty data table; arrays/functions do not produce a reload table.
@@ -468,8 +434,7 @@ export const setTimeout = lynx.setTimeout;
 export const setInterval = lynx.setInterval;
 export const clearTimeout = lynx.clearTimeout;
 export const clearInterval = lynx.clearInterval;
-export const requestAnimationFrame = lynx.requestAnimationFrame;
-export const cancelAnimationFrame = lynx.cancelAnimationFrame;
+export { requestAnimationFrame, cancelAnimationFrame };
 
 /**
  * One entry's bundle: the URL its template answered from, and nothing else.
@@ -516,7 +481,7 @@ export function __BobcatInitializeBTS(options: InitializeOptions) {
     nativeModules[name] = Object.fromEntries(methods.map(method =>
       [method, (...args: unknown[]) => callNativeModule(name, method, args)]));
   }
-  if (options.systemInfo) SystemInfo = Object.freeze({ ...SystemInfo, ...options.systemInfo });
+  if (options.systemInfo) SystemInfo = createSystemInfo(options.systemInfo);
   lynx.SystemInfo = SystemInfo;
   // Keep the raw BTS environment consistent with its module snapshot.
   Object.assign(scope, { SystemInfo });

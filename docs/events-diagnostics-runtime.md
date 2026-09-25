@@ -112,9 +112,10 @@ import. The BTS exports `console` from `bobcat:bts-runtime`, where a raw BTS
 entry imports it and a bundle body's preamble binds it. A worker realm, the
 BTS included, also has `console` on its global, installed by `bobcat:worker`
 as WebIDL installs a namespace: writable, configurable and not enumerable. It
-is the same object the BTS module exports. A plain `Worker` has no
-`requestAnimationFrame`; only `bobcat:bts-runtime` has one, as an export and a
-`lynx` member. The MTS realm adds no global `console`.
+is the same object the BTS module exports. A plain `Worker` has no global
+`requestAnimationFrame`; it imports one from `bobcat:animation-frame`, the
+module `bobcat:bts-runtime` also takes its export and `lynx` member from. The
+MTS realm adds no global `console`.
 
 The module is written over two members every realm's core has under
 `bobcat-internal:host`, `reportScriptError(level, message)` and

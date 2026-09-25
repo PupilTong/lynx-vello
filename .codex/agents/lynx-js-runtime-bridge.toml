@@ -63,7 +63,12 @@ and `bobcat-workers` (every Worker realm, including the BTS).
   `__FlushElementTree`, and `__SetCSSId`, accepted and ignored),
   `main-thread-runtime.ts` (`bobcat:runtime`), `worker.ts` (the W3C `Worker`),
   `worker-runtime.ts`, `background-thread-runtime.ts` (`bobcat:bts-runtime`),
-  `cross-thread-context.ts`, `event-target.ts`, `diagnostics.ts`
+  `cross-thread-context.ts`, `event-target.ts` (with `reportException`, the
+  realm's installed exception reporter), `animation-frame.ts`
+  (`bobcat:animation-frame` — every realm's `requestAnimationFrame`, frame
+  demand and `__BobcatBeginFrame`, which both vsync paths call),
+  `system-info.ts` (`bobcat:system-info` — `createSystemInfo`, the one place
+  the three runtime constants are written), `diagnostics.ts`
   (`bobcat:diagnostics` — every realm's `console` and `reportError`, the one
   `printable` and the `lynx.reportError` level rule), `timers.ts`, `future.ts`
   (`bobcat:future` — the `Future` class), `module.ts`
@@ -142,7 +147,8 @@ Landed and not to be regressed:
   ordered only among themselves. `ScriptReported.level` is `"warn"`,
   `"error"` or `"fatal"`, and `"fatal"` ends nothing. A worker's global
   `console` is the module's (the BTS export is the same object); a plain
-  `Worker` has no `requestAnimationFrame`. A BTS animation-frame,
+  `Worker` has no global `requestAnimationFrame` and imports
+  `bobcat:animation-frame`'s. A BTS animation-frame,
   `queueMicrotask` or `fetchBundle` callback that throws is an uncaught
   exception (`WorkerThrew`); only the dispose hook and a misused
   `SelectorQuery` use `lynx.reportError`.

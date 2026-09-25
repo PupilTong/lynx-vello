@@ -1978,7 +1978,7 @@ browser WebGPU completion is Promise-driven.
 
 The dependency-free TypeScript sources of the ESMs `bobcat-core` preloads into
 its QuickJS realms, one file per module. Both of a group's runtimes register
-all sixteen, as `esm.rs`'s `BUILTIN_MODULES` lists them in the order of
+all eighteen, as `esm.rs`'s `BUILTIN_MODULES` lists them in the order of
 `src/tsconfig.json`'s `paths` (a unit test holds the two equal):
 `src/lynx-modules.ts` as `bobcat:lynx-modules`, `src/global-event-emitter.ts`
 as `bobcat:global-event-emitter`, `src/selector-query.ts` as
@@ -1990,9 +1990,17 @@ as `bobcat:global-event-emitter`, `src/selector-query.ts` as
 `bobcat:diagnostics` (every realm's `console` and `reportError`: the one value
 formatting and the `lynx.reportError` level rule, over the core's diagnostics
 pair; `bobcat:worker` also installs its `console` on a worker's global, so a
-plain `Worker` has a global `console` and still no `requestAnimationFrame`),
+plain `Worker` has a global `console` and still no global
+`requestAnimationFrame`),
 `src/event-target.ts` as
-`bobcat:event-target`, `src/cross-thread-context.ts` as
+`bobcat:event-target` (it also exports `reportException`, which hands an
+exception to the reporter the realm's runtime installed),
+`src/animation-frame.ts` as `bobcat:animation-frame` (every realm's
+`requestAnimationFrame`/`cancelAnimationFrame`, the demand it sends the host,
+and the `__BobcatBeginFrame` a vsync calls in any realm that asked for one),
+`src/system-info.ts` as `bobcat:system-info` (`createSystemInfo`, where the
+three runtime constants of `SystemInfo` are written),
+`src/cross-thread-context.ts` as
 `bobcat:cross-thread-context`, `src/worker.ts` as the `Worker` class under
 `bobcat-internal`, `src/worker-runtime.ts` as `bobcat:worker` and
 `src/background-thread-runtime.ts` as `bobcat:bts-runtime`. They are

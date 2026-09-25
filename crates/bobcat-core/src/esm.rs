@@ -75,6 +75,17 @@ pub(crate) const DIAGNOSTICS_MODULE_SPECIFIER: &str = "bobcat:diagnostics";
 /// are both built on.
 pub(crate) const EVENT_TARGET_MODULE_SPECIFIER: &str = "bobcat:event-target";
 
+/// A realm's animation-frame callbacks and its one frame demand, for every
+/// realm kind: the module both [`RUNTIME_MODULE_SPECIFIER`] and
+/// [`BTS_RUNTIME_MODULE_SPECIFIER`] take `lynx.requestAnimationFrame` from,
+/// and the one whose `__BobcatBeginFrame` both engine threads call to deliver
+/// a vsync to a realm that asked for one.
+pub(crate) const ANIMATION_FRAME_MODULE_SPECIFIER: &str = "bobcat:animation-frame";
+
+/// The one builder of a realm's `SystemInfo`, where its runtime constants are
+/// written.
+pub(crate) const SYSTEM_INFO_MODULE_SPECIFIER: &str = "bobcat:system-info";
+
 pub(crate) const GLOBAL_EVENT_MODULE_SPECIFIER: &str = "bobcat:global-event-emitter";
 
 /// Lynx's typed asynchronous Context channel, shared by MTS and BTS.
@@ -213,6 +224,8 @@ pub(crate) const BUILTIN_MODULES: &[BuiltinModule] = &[
     builtin_module!(BUNDLE_FETCH_MODULE_SPECIFIER, "bundle-fetch"),
     builtin_module!(DIAGNOSTICS_MODULE_SPECIFIER, "diagnostics"),
     builtin_module!(EVENT_TARGET_MODULE_SPECIFIER, "event-target"),
+    builtin_module!(ANIMATION_FRAME_MODULE_SPECIFIER, "animation-frame"),
+    builtin_module!(SYSTEM_INFO_MODULE_SPECIFIER, "system-info"),
     builtin_module!(CONTEXT_MODULE_SPECIFIER, "cross-thread-context"),
     builtin_module!(WORKER_CLASS_MODULE_SPECIFIER, "worker"),
     builtin_module!(WORKER_MODULE_SPECIFIER, "worker-runtime"),

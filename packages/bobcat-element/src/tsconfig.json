@@ -23,6 +23,8 @@
       "bobcat:bundle-fetch": ["./bundle-fetch.ts"],
       "bobcat:diagnostics": ["./diagnostics.ts"],
       "bobcat:event-target": ["./event-target.ts"],
+      "bobcat:animation-frame": ["./animation-frame.ts"],
+      "bobcat:system-info": ["./system-info.ts"],
       "bobcat:cross-thread-context": ["./cross-thread-context.ts"],
       "bobcat-internal": ["./worker.ts"],
       "bobcat:worker": ["./worker-runtime.ts"],

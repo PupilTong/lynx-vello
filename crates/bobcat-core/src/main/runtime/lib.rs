@@ -39,8 +39,9 @@ use tokio::sync::watch;
 use super::quickjs::{ScriptEngine, ScriptRuntime};
 use crate::clock::ClockInstant;
 use crate::esm::{
-    BTS_MODULE_SPECIFIER, ELEMENT_MODULE_SPECIFIER, HOST_MODULE_SPECIFIER,
-    RUNTIME_MODULE_SPECIFIER, TIMER_MODULE_SPECIFIER, WORKER_CLASS_MODULE_SPECIFIER,
+    ANIMATION_FRAME_MODULE_SPECIFIER, BTS_MODULE_SPECIFIER, ELEMENT_MODULE_SPECIFIER,
+    HOST_MODULE_SPECIFIER, RUNTIME_MODULE_SPECIFIER, TIMER_MODULE_SPECIFIER,
+    WORKER_CLASS_MODULE_SPECIFIER,
 };
 use crate::link::{InputEventPayload, ViewNotice, ViewOutbox};
 use crate::main::tree::{ImageOutcomes, LynxDocument, PageConfig, new_document};
@@ -974,6 +975,9 @@ impl MainThreadRuntime {
             .advance_animations(now);
     }
 
+    /// Runs the realm's animation-frame callbacks at the painting side's
+    /// vsync, through `bobcat:animation-frame`, the module every realm kind
+    /// files them with.
     pub(crate) fn vsync(
         &mut self,
         js: &mut ScriptRuntime,
@@ -984,7 +988,7 @@ impl MainThreadRuntime {
             .engine
             .call_module_export(
                 js,
-                RUNTIME_MODULE_SPECIFIER,
+                ANIMATION_FRAME_MODULE_SPECIFIER,
                 "__BobcatBeginFrame",
                 &[HostArgument::Number(milliseconds)],
             )

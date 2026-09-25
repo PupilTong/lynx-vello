@@ -2836,6 +2836,36 @@ fn vsync_can_resume_mts_and_bts_entries_awaiting_their_first_frame() {
     assert!(worker_failures(pair.notices()).is_empty());
 }
 
+/// A plain `Worker` that imports `bobcat:animation-frame` and nothing of the
+/// BTS gets its frame: a vsync is delivered to the realm's own animation-frame
+/// module, not to a runtime module only the BTS imports.
+#[test]
+fn a_plain_worker_gets_a_frame_from_the_shared_animation_frame_module() {
+    let mut pair = Pair::new(
+        r"
+        import {Worker} from 'bobcat-internal';
+        globalThis.worker = new Worker('./worker.js');
+    ",
+    );
+    pair.answer(
+        r"
+        import {requestAnimationFrame} from 'bobcat:animation-frame';
+        requestAnimationFrame(time => postMessage(`frame ${time}`));
+        postMessage('requested');
+    ",
+    );
+    // The demand is sent before the message behind it, so the frame below
+    // finds it registered.
+    assert!(matches!(pair.next_event().unwrap().payload,
+        WorkerPayload::Message(ref value) if posted(value, "requested")));
+    pair.frame(1250.0);
+    assert!(matches!(pair.next_event().unwrap().payload,
+        WorkerPayload::Message(ref value) if posted(value, "frame 1250")));
+    assert!(worker_failures(pair.notices()).is_empty());
+    pair.check("worker.terminate();");
+    assert!(pair.finish().is_empty());
+}
+
 #[test]
 fn animation_callbacks_use_display_timestamps_and_defer_nested_requests() {
     let mut pair = Pair::with_background(

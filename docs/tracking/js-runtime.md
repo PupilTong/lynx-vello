@@ -39,16 +39,24 @@ loads its sections, on both threads. The asynchronous half —
 `requireModuleAsync` and `loadScriptAsync` — is still absent. See
 [worker resources](../worker-resources-runtime.md).
 
-`lynx.requestAnimationFrame` and `cancelAnimationFrame` use each realm's own JS
-callback map. A pending callback requests vsync from the painter, whose
+`lynx.requestAnimationFrame` and `cancelAnimationFrame` are one module,
+`bobcat:animation-frame` (`packages/bobcat-element/src/animation-frame.ts`), on
+both threads: `bobcat:runtime` and `bobcat:bts-runtime` take both functions
+from it, and a plain `Worker` imports it directly, since no realm has a global
+`requestAnimationFrame`. Each realm that imports it has its own callback map. A
+pending callback requests vsync from the painter, whose
 `owes_frame()` tells the host to enable its display callback. Demand changes use
 the existing view-to-host notice channel, including direct notices from BTS.
 Only the host display callback calls `Painter::vsync()`, which sends a timestamp
 to each requesting realm through its existing `ToMain` or `WorkerMessage` queue.
-Each calls its runtime module to run the JS callbacks on its own event loop;
-neither waits for the other. Cancelling the last callback withdraws that realm's
-demand. Worker addresses held by the painter are weak and cannot extend Worker
-lifetime. A callback requesting another frame waits for another host vsync.
+Each calls `bobcat:animation-frame`'s `__BobcatBeginFrame` to run the JS
+callbacks on its own event loop; neither waits for the other. A callback that
+throws is reported through the realm's installed exception reporter —
+`_ReportError` on MTS, the global `reportError` (an uncaught exception) on a
+worker — and the frame's other callbacks run. Cancelling the last callback
+withdraws that realm's demand. Worker addresses held by the painter are weak
+and cannot extend Worker lifetime. A callback requesting another frame waits
+for another host vsync.
 Ordinary pumping and native animation ticks do not deliver script frames. Timers
 and BTS microtask aliases use the existing realm timer/job machinery. This follows
 the independent worker rendering steps in
