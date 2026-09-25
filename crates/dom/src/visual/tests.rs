@@ -2167,18 +2167,22 @@ fn a_transform_curve_over_the_extent_budget_is_not_exported() {
     // 800 × 1400 is 2.3 viewports of 800 × 600; 800 × 2000 is 3.3.
     let within = tall_wrapper(1400, "slide");
     assert!(
-        within.has_live_curves(),
+        within.has_exported_curves(),
         "within the budget the slide exports"
     );
     let over = tall_wrapper(2000, "slide");
-    assert!(!over.has_live_curves(), "over it the slide is refused");
+    assert!(!over.has_exported_curves(), "over it the slide is refused");
     assert!(over.needs_main_ticks(), "and ticks on the main thread");
 }
 
 #[test]
 fn an_opacity_curve_is_exempt_from_the_extent_budget() {
     let frame = tall_wrapper(2000, "fade");
-    assert!(frame.has_live_curves(), "an opacity curve moves nothing");
+    assert!(
+        frame.has_exported_curves(),
+        "an opacity curve moves nothing"
+    );
+    assert!(frame.has_live_curves(), "and its group composes it");
     assert!(!frame.needs_main_ticks());
 }
 
@@ -2230,6 +2234,80 @@ fn the_earliest_curve_end_is_the_handback_instant() {
     assert!(short < long && (short - 0.5).abs() < 1e-3, "{ends:?}");
     assert!(!frame.animation_boundary_passed(short - 1e-6));
     assert!(frame.animation_boundary_passed(short));
+}
+
+/// A curve culling leaves out of the program is exported but not live: the
+/// frame composes once, and still hands the animation back at its end. An
+/// opacity curve forces a group, which is left out with its content.
+#[test]
+fn a_frame_whose_curves_are_all_culled_has_no_live_curves() {
+    for keyframes in [
+        "from { transform: translateX(0px); } to { transform: translateX(100px); }",
+        "from { opacity: 0; } to { opacity: 1; }",
+        "from { opacity: 0; transform: translateY(20px); }
+         to { opacity: 1; transform: translateY(0px); }",
+    ] {
+        let mut h = Harness::new(&format!(
+            "page {{ display: flex; position: relative; width: 800px; height: 600px; }}
+             .far {{ display: flex; position: absolute; left: 5000px; top: 0px;
+                     width: 50px; height: 50px; background-color: red;
+                     animation: move 0.5s linear 1; }}
+             @keyframes move {{ {keyframes} }}"
+        ));
+        let root = h.root();
+        h.el(root, "view.far");
+        let document = &mut h.doc.dom;
+        document.render();
+        document.advance_animations(0.0);
+        assert!(document.advance_animations(0.25).needs_next_frame);
+        let frame = document.commit();
+        assert!(
+            frame.has_exported_curves(),
+            "{keyframes}: the curve exports"
+        );
+        assert!(frame.animations_active());
+        assert!(
+            !frame.has_live_curves(),
+            "{keyframes}: and composes nothing"
+        );
+        assert!(!frame.needs_main_ticks());
+        assert!(
+            frame.animation_boundary_passed(0.5),
+            "{keyframes}: it still hands back at its end"
+        );
+    }
+}
+
+/// A transparent mover draws nothing, so the program names no curve, yet
+/// its hit area moves with the curve: hit tests sample the instant whenever
+/// a curve is exported.
+#[test]
+fn an_inkless_mover_is_hit_where_its_curve_carries_it() {
+    let mut h = Harness::new(
+        "page { display: flex; position: relative; width: 800px; height: 600px; }
+         .hotspot { display: flex; position: absolute; left: 0px; top: 0px;
+                    width: 100px; height: 100px;
+                    animation: slide 1s linear infinite; }
+         @keyframes slide { from { transform: translateX(0px); }
+                            to { transform: translateX(600px); } }",
+    );
+    let root = h.root();
+    let hotspot = h.el(root, "view.hotspot");
+    let document = &mut h.doc.dom;
+    document.render();
+    document.advance_animations(0.0);
+    assert!(document.advance_animations(0.1).needs_next_frame);
+    let frame = document.commit();
+    assert!(frame.has_exported_curves(), "the slide exports");
+    assert!(!frame.has_live_curves(), "and draws nothing");
+    let hit = |x: f32, now: f64| {
+        frame
+            .hit(Point2D::new(x, 50.0), &|_| None, Some(now))
+            .map(|target| target.node)
+    };
+    // Committed at x = 60; at t = 0.9 the slide puts it at x = 540.
+    assert_eq!(hit(580.0, 0.9), Some(hotspot), "hit where it moved to");
+    assert_ne!(hit(80.0, 0.9), Some(hotspot), "not where it was committed");
 }
 
 /// A curve on content culling discards — a moving dot inside a clipped row
@@ -2303,6 +2381,50 @@ fn an_in_context_scroll_container_inside_an_animated_card_exports_the_curve() {
     assert!(
         !frame.needs_main_ticks(),
         "the scroller inside the moving card rides its delta"
+    );
+}
+
+/// 200 rows fading in and up, each an opacity group: a row the list's window
+/// does not encode opens no group, so exactly the encoded rows' curves
+/// compose.
+#[test]
+fn only_the_rows_a_list_window_encodes_compose_their_curves() {
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; }
+         .list { display: flex; flex-direction: column; overflow: scroll;
+                 width: 300px; height: 600px; }
+         .row { display: flex; flex-shrink: 0; width: 300px; height: 40px;
+                background-color: teal; animation: rise 1s linear infinite; }
+         @keyframes rise { from { opacity: 0; transform: translateY(20px); }
+                           to { opacity: 1; transform: translateY(0px); } }",
+    );
+    let root = h.root();
+    let list = h.el(root, "view.list");
+    let rows: Vec<_> = (0..200).map(|_| h.el(list, "view.row")).collect();
+    let document = &mut h.doc.dom;
+    document.render();
+    document.advance_animations(0.0);
+    assert!(document.advance_animations(0.25).needs_next_frame);
+    let frame = document.commit();
+    assert_eq!(frame.animation_slots().len(), 200, "every row exports");
+    let encoded = crate::paint::walker::encoded_items(&h.doc.dom, &frame.order);
+    let encoded_rows = frame
+        .order
+        .items()
+        .iter()
+        .zip(encoded)
+        .filter(|(item, encoded)| {
+            *encoded && item.kind == PaintItemKind::ElementBox && rows.contains(&item.node)
+        })
+        .count();
+    assert!(
+        (1..40).contains(&encoded_rows),
+        "the window encodes a few rows, got {encoded_rows}"
+    );
+    assert_eq!(
+        frame.presentation.composed.animations.len(),
+        encoded_rows,
+        "only the encoded rows compose their curves"
     );
 }
 

@@ -106,6 +106,7 @@ mod hit;
 mod motion;
 #[cfg(test)]
 mod oracle_tests;
+pub(crate) mod reach;
 pub(crate) mod relevance;
 pub(crate) mod space;
 mod stacking;

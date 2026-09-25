@@ -84,3 +84,7 @@ harness = false
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "culling"
+harness = false

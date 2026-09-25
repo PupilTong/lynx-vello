@@ -26,6 +26,7 @@
               sampling code"
 )]
 
+use super::reach::Reach;
 use crate::vello::kurbo::Affine;
 
 /// One `animation-timing-function` value the exporter can replay.
@@ -213,6 +214,29 @@ pub(crate) struct TransformTrack {
     pub(crate) pre_inverse: Affine,
     /// The inverse of the committed transform the frame was baked at.
     pub(crate) committed_inverse: Affine,
+    /// Where the delta can carry content over the curve's domain; `None`
+    /// when a scale range reaches 0 and nothing bounds it.
+    pub(crate) reach: Option<Reach>,
+}
+
+impl TransformTrack {
+    /// `track`, run in `direction`, on an element whose world is
+    /// `pre·L·origin⁻¹`, baked at `L = committed`. Both maps are invertible.
+    pub(crate) fn new(
+        track: Track<TransformList>,
+        direction: DirectionState,
+        pre: Affine,
+        committed: Affine,
+    ) -> Self {
+        let reach = Reach::of(&track, direction, pre, committed);
+        Self {
+            track,
+            pre,
+            pre_inverse: pre.inverse(),
+            committed_inverse: committed.inverse(),
+            reach,
+        }
+    }
 }
 
 /// What one sample answers: the CSS-px delta against the committed bake and
@@ -554,12 +578,15 @@ mod tests {
             },
             expires_at: Some(1.0),
             opacity: None,
-            transform: Some(TransformTrack {
+            transform: Some(TransformTrack::new(
                 track,
-                pre: Affine::IDENTITY,
-                pre_inverse: Affine::IDENTITY,
-                committed_inverse: committed.inverse(),
-            }),
+                DirectionState {
+                    reversed: false,
+                    alternates: false,
+                },
+                Affine::IDENTITY,
+                committed,
+            )),
         };
         // At the commit instant the delta is the identity.
         let at_commit = curve.sample(0.25).delta;
@@ -585,8 +612,8 @@ mod tests {
             },
             expires_at: Some(1.0),
             opacity: None,
-            transform: Some(TransformTrack {
-                track: Track {
+            transform: Some(TransformTrack::new(
+                Track {
                     points: vec![
                         TrackPoint {
                             percentage: 0.0,
@@ -600,10 +627,13 @@ mod tests {
                         },
                     ],
                 },
+                DirectionState {
+                    reversed: false,
+                    alternates: false,
+                },
                 pre,
-                pre_inverse: pre.inverse(),
-                committed_inverse: Affine::IDENTITY,
-            }),
+                Affine::IDENTITY,
+            )),
         };
         let half_turn = curve.sample(1.0).delta;
         let moved = half_turn * crate::vello::kurbo::Point::new(50.0, 0.0);

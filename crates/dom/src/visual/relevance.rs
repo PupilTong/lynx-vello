@@ -25,8 +25,8 @@
 //! still paint — skipping contents is not skipping the box.
 //!
 //! Anything the test cannot decide — a singular transform, a non-finite
-//! bound, a box a transform curve moves with no clip moving along to bound
-//! it — counts as relevant. Skipping needs a proof; painting does not.
+//! bound, a box a curve scaling through 0 moves with no clip moving along to
+//! bound it — counts as relevant. Skipping needs a proof; painting does not.
 //!
 //! # Which boxes are asked
 //!

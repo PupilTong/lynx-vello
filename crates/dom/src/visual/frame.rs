@@ -145,12 +145,11 @@ impl ScrollSlot {
 pub const ENCODE_WINDOW_SCROLLPORTS: f32 = 1.0;
 
 /// The largest area, in viewports, of an element's `max(size, content_size)`
-/// that still exports a transform curve: the viewport cannot cull a moving
-/// subtree, so this bounds what one moving element encodes. It bounds each
-/// element on its own, not a commit's moving elements together: any number
-/// of exported siblings, each within it, all encode. Firefox caps composited
-/// transform animations the same way (`nsDisplayList.cpp`: 1.125 viewports,
-/// 4096² px).
+/// that still exports a transform curve. Culling bounds a moving subtree by
+/// the viewport pulled back through its curve's reach, so this cap is what
+/// bounds the encode only where no reach does — a scale range reaching 0,
+/// which admits the whole subtree. Firefox caps composited transform
+/// animations the same way (`nsDisplayList.cpp`: 1.125 viewports, 4096² px).
 pub(crate) const MAX_MOVING_EXTENT_VIEWPORTS: f32 = 3.0;
 
 /// One composite-animated element in the committed frame: the target of the
@@ -459,13 +458,25 @@ impl CommittedFrame {
         self.needs_main_ticks
     }
 
-    /// Whether the frame carries any exported curve — the compositor then
-    /// recomposes each frame at its clock reading instead of reusing the
-    /// drawn frame.
+    /// Whether the compose program references an exported curve — the
+    /// compositor then recomposes each frame at its clock reading instead of
+    /// reusing the drawn frame.
     ///
-    /// A slot exists only with a curve, so this is the table being non-empty.
+    /// A curve the program leaves out — culled, or on content that draws
+    /// nothing — changes no pixel at any instant of its domain, so a frame
+    /// whose curves are all left out composes once. Hit tests read
+    /// [`Self::has_exported_curves`] instead, and
+    /// [`Self::animation_boundary_passed`] counts every curve.
     #[must_use]
     pub fn has_live_curves(&self) -> bool {
+        !self.presentation.composed.animations.is_empty()
+    }
+
+    /// Whether the frame exports any curve — hit tests then sample at the
+    /// input's clock reading: a curve moves its element's hit area even where
+    /// the program draws nothing of it.
+    #[must_use]
+    pub fn has_exported_curves(&self) -> bool {
         !self.order.animations().is_empty()
     }
 

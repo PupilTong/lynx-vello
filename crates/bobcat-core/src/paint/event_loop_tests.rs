@@ -1177,6 +1177,45 @@ fn an_exported_curve_stops_asking_for_main_thread_ticks() {
     );
 }
 
+/// A transparent tap target sliding by an exported curve draws nothing, so
+/// the compose program names no curve; a tap still finds it where the curve
+/// carries it at the tap's clock reading, not where it was committed.
+#[test]
+fn a_tap_finds_an_inkless_mover_where_its_curve_carries_it() {
+    let mut engine = TestViewSpec::new(
+        r"
+        globalThis.renderPage = function () {
+          const page = __CreatePage('card', 0);
+          const view = __CreateView(0);
+          __AppendElement(page, view);
+          globalThis.held = [page, view];
+          __SetClasses(view, 'hotspot');
+          __AddEventListener(view, 'tap', (event) => {
+            __SetAttribute(view, 'log', 'tap:' + event.detail.x);
+          }, {});
+          __FlushElementTree();
+        };
+        ",
+    )
+    .with_style_sheet(
+        ".hotspot { position: absolute; left: 0px; top: 0px; width: 100px; height: 100px;
+                    animation: slide 1s linear infinite; }
+         @keyframes slide { from { transform: translateX(0px); }
+                            to { transform: translateX(250px); } }",
+    )
+    .boot();
+    synchronized_tick(&mut engine, 0.1);
+    let frame = engine.published_frame().expect("the promotion committed");
+    assert!(frame.has_exported_curves(), "the slide exported");
+    assert!(!frame.has_live_curves(), "and draws nothing");
+    // Committed at x ≤ 25; at 0.9 the slide has carried it to x ≥ 200,
+    // whether its first tick was at 0 or at 0.1.
+    engine.painter.clock.pin(0.9);
+    engine.dispatch_input(touch(1, PointerPhase::Down, 260.0));
+    engine.dispatch_input(touch(1, PointerPhase::Up, 260.0));
+    wait_for_log(&mut engine, "tap:260");
+}
+
 /// A finite curve's expiry is the one moment the main thread must hear
 /// about: the boundary tick runs the finish restyle and the next frame
 /// reports the timeline idle.
