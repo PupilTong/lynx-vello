@@ -29,11 +29,13 @@ and `bobcat-workers` (every Worker realm, including the BTS).
   top loop runs between two turns of that scheduler; `JsThreadHandle` is the
   `Weak` everything inside a task or a realm holds.
 - `crates/bobcat-core/src/main/` — the Lynx main thread. `page.rs` holds
-  `Page::enter`, the single boundary every task reaches the realm through, and
-  the epilogue it owes; `quickjs.rs` is the crate-private `ScriptEngine`;
-  `runtime/` is `MainThreadRuntime` and the host module; `workers.rs` installs
-  `createWorker`/`sendWorkerMessage`/`terminateWorker`; `tree/` is the Lynx
-  element policy layer (page root, UA sheet, `<text>`, `<image>`, scrollers).
+  the view's `Page`: its tasks and what a page adds to the realm driver (the
+  commit, `ScriptFinished`, the `BeginFrame` acknowledgement, the `@font-face`
+  loads, the JavaScript disposal); `quickjs.rs` is the crate-private
+  `ScriptEngine`; `runtime/` is `MainThreadRuntime` and the host module;
+  `workers.rs` installs `createWorker`/`sendWorkerMessage`/`terminateWorker`;
+  `tree/` is the Lynx element policy layer (page root, UA sheet, `<text>`,
+  `<image>`, scrollers).
 - `crates/bobcat-core/src/background/` — the `bobcat-workers` thread and worker
   realm scopes. There is one kind of worker: the BTS is the dedicated worker
   whose URL is `bobcat:bts`. A worker realm opens as its `Start` is served,
@@ -67,8 +69,14 @@ and `bobcat-workers` (every Worker realm, including the BTS).
   `bobcat:native-modules` in the realm that made the call. `view/` holds
   `LynxGroup`, `LynxView`, `ViewSources` and `create_lynx_view`; `paint/` the
   `Painter`; `link.rs` the per-view channels;
-  `lifetime.rs` the `CancellationToken`, `serve_clock` and `run_job`;
-  `realm.rs` (`open_realm`, the one constructor both threads open a realm
+  `lifetime.rs` the `CancellationToken`, the end and report latches,
+  `serve_clock` and `run_job`;
+  `realm/owner.rs` (the `RealmOwner` trait and the one driver a view's page and
+  a worker share: `enter`, the epilogue and its fixed step order,
+  `load_module`/`settle_future`/`module_answer`, `end`/`terminal`/`trapped`
+  and `run_owner`); `realm/policy.rs` (the MTS and worker failure tables, read
+  by `Scene`, and each table's Panic row and the MTS Disposal row);
+  `realm/mod.rs` (`open_realm`, the one constructor both threads open a realm
   with: it installs the core every realm has under `bobcat-internal:host` —
   frame demand, timers, `Future`, `fetchResource`, `require`, and the
   diagnostics pair `reportScriptError`/`logScriptMessage`, which report with

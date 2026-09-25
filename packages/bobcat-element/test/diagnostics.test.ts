@@ -1,5 +1,5 @@
 // `bobcat:diagnostics` over a recording stand-in for the two host members
-// every realm's core installs (`crates/bobcat-core/src/realm.rs`).
+// every realm's core installs (`crates/bobcat-core/src/realm/mod.rs`).
 //
 // What is pinned here is what the module decides: the text a value prints
 // as, what each console method hands the host, and the level a `reportError`
