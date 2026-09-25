@@ -19,6 +19,11 @@
 //!   O(what can reach the screen).
 //! - **What a reflow costs.** `frame_transform` cannot move a box and never reaches layout;
 //!   `frame_width` does both. Their difference is the reflow the paint-only path avoids.
+//! - **What a scroll-driven frame costs.** `frame_scroll_driven_composite` composes a list whose
+//!   rows and header animate on scroll timelines at a moving offset, with no clock and no tick: per
+//!   composed curve, `iteration_progress` from the offset, then stylo's `sample_at`.
+//!   `frame_scroll_driven_main` is the path of a dependent that does not export: the adopted
+//!   offset, `Document::advance_scroll_timelines`, and the commit its restyle owes.
 
 use std::cell::{Cell, RefCell};
 
@@ -243,6 +248,111 @@ page { display: flex; position: relative; width: 800px; height: 600px; }
 @keyframes bench-shimmer { from { transform: translateX(-10px); }
                            to { transform: translateX(10px); } }
 ";
+
+/// A header over a list of [`SHIMMER_ROWS`] rows: each row fades and rises
+/// in over its `view()` entry range, and the header moves by the list's
+/// named scroll timeline with `header_animation`.
+fn scroll_driven_css(header_animation: &str) -> String {
+    format!(
+        "page {{ display: flex; flex-direction: column; position: relative;
+                 width: 800px; height: 600px; }}
+         .header {{ flex-shrink: 0; width: 300px; height: 60px; background-color: #333333;
+                    animation: {header_animation} linear both; animation-timeline: --list; }}
+         .list {{ display: flex; flex-direction: column; overflow: scroll;
+                  width: 300px; height: 540px; scroll-timeline: --list; }}
+         .row {{ display: flex; flex-shrink: 0; width: 300px; height: 40px;
+                 background-color: #f6f6f8; border-radius: 6px;
+                 animation: bench-enter linear both; animation-timeline: view();
+                 animation-range: entry; }}
+         @keyframes bench-enter {{ from {{ opacity: 0.2; transform: translateY(20px); }}
+                                   to {{ opacity: 1; transform: translateY(0px); }} }}
+         @keyframes bench-lift {{ from {{ transform: translateY(0px); }}
+                                  to {{ transform: translateY(-40px); }} }}
+         @keyframes bench-tint {{ from {{ background-color: #333333; }}
+                                  to {{ background-color: #3355aa; }} }}"
+    )
+}
+
+/// The page of [`scroll_driven_css`], and its list.
+fn scroll_driven_page(header_animation: &str) -> (Document<()>, dom::NodeId) {
+    let mut dom = Document::new(device(), "page", ());
+    dom.add_stylesheet(
+        &scroll_driven_css(header_animation),
+        StylesheetOrigin::Author,
+    );
+    let root = dom.document_element().id();
+    let header = dom.create_element("view", ());
+    dom.add_class(header, "header");
+    dom.append_child(root, header);
+    let list = dom.create_element("view", ());
+    dom.add_class(list, "list");
+    dom.append_child(root, list);
+    for _ in 0..SHIMMER_ROWS {
+        let row = dom.create_element("view", ());
+        dom.add_class(row, "row");
+        dom.append_child(list, row);
+    }
+    (dom, list)
+}
+
+/// The list offset of frame `frame`: sweeping 0 to 480 px and back, inside
+/// the committed encode window.
+fn swept_offset(frame: u32) -> f32 {
+    let phase = frame % 96;
+    #[expect(clippy::cast_precision_loss, reason = "a small frame index")]
+    let step = if phase < 48 { phase } else { 96 - phase } as f32;
+    step * 10.0
+}
+
+/// A production frame of a list scrolling under scroll-driven rows and
+/// header: composition at a moving offset, with no tick and no commit.
+#[divan::bench]
+fn frame_scroll_driven_composite(bencher: divan::Bencher<'_, '_>) {
+    let (mut page, list) = scroll_driven_page("bench-lift");
+    let frame = page.commit();
+    assert_eq!(
+        frame.animation_slots().len(),
+        SHIMMER_ROWS + 1,
+        "every scroll-driven animation must export"
+    );
+    assert!(!frame.has_live_curves() && !frame.needs_main_ticks());
+    let mut scene = Scene::new();
+    let mut index = 0_u32;
+    bencher.bench_local(move || {
+        index += 1;
+        let offset = dom::Vector2D::new(0.0, swept_offset(index));
+        scene.reset();
+        frame.compose_into(
+            &mut scene,
+            &[],
+            &[],
+            &|slot| (slot.node == list).then_some(offset),
+            None,
+        );
+        divan::black_box(scene.encoding().draw_tags.len());
+    });
+}
+
+/// A frame of the same page whose header tints by the list's timeline: a
+/// `background-color` animation never exports, so each adopted offset
+/// re-samples and re-cascades it on the main thread and commits.
+#[divan::bench]
+fn frame_scroll_driven_main(bencher: divan::Bencher<'_, '_>) {
+    let (mut page, list) = scroll_driven_page("bench-tint");
+    let frame = page.commit();
+    assert_eq!(
+        frame.animation_slots().len(),
+        SHIMMER_ROWS,
+        "the rows export and the header does not"
+    );
+    let mut index = 0_u32;
+    bencher.bench_local(move || {
+        index += 1;
+        page.scroll_to(list, dom::Vector2D::new(0.0, swept_offset(index)));
+        page.advance_scroll_timelines(&[list]);
+        divan::black_box(page.render());
+    });
+}
 
 /// Starts every armed animation and commits it running: the first
 /// `advance_animations` resolves the start times, the second runs them.
