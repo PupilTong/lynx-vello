@@ -1024,7 +1024,8 @@ impl MainThreadRuntime {
     /// commits nothing; one that has used half the window's headroom toward
     /// an edge ([`dom::ScrollSlot::recenter_due`]) asks this entry's commit
     /// to bake windows re-centered on it, and one past the window already
-    /// did inside `scroll_to`.
+    /// did inside `scroll_to`. The scroll-driven animations those containers
+    /// drive then re-sample, which is a commit only when one moved.
     pub(crate) fn adopt_scroll_offsets(
         &mut self,
         entries: impl Iterator<Item = (dom::NodeId, crate::link::ScrollEntry)>,
@@ -1033,8 +1034,10 @@ impl MainThreadRuntime {
         let document = slot.document_mut();
         let frame = document.committed_frame();
         let mut recenter = false;
+        let mut moved: SmallVec<[dom::NodeId; 4]> = SmallVec::new();
         for (node, entry) in entries {
             document.scroll_to(node, entry.offset);
+            moved.push(node);
             recenter |= frame.as_ref().is_some_and(|frame| {
                 frame.slot_of(node).is_some_and(|index| {
                     frame.scroll_slots()[index as usize].recenter_due(entry.offset)
@@ -1044,6 +1047,7 @@ impl MainThreadRuntime {
         if recenter {
             document.note_scroll_windows_stale();
         }
+        document.advance_scroll_timelines(&moved);
     }
 
     /// Applies the painting side's image reports, queueing the `load`s and

@@ -1450,9 +1450,11 @@ into the document with `scroll_to` — which recommits at once for an offset
 past the committed window — and, when the committed slot finds the offset
 `recenter_due` (past half the window's remaining headroom toward an edge,
 the rule beside `encode_window`), marks the windows stale once, so the entry's
-commit re-bakes them centered on it; no script involvement anywhere. A
-document-side read — `boundingClientRect` included — sees the offset from
-the marker on. The encode is windowed: each slot's fragments cover one
+commit re-bakes them centered on it; no script involvement anywhere. Then
+`Document::advance_scroll_timelines` re-samples the scroll-driven animations
+those containers drive, and re-cascades — and so commits — only the elements
+whose sample moved. A document-side read — `boundingClientRect` included —
+sees the offset from the marker on. The encode is windowed: each slot's fragments cover one
 scrollport past its committed offset per scrollable axis
 (`ENCODE_WINDOW_SCROLLPORTS`). A committed frame indexes its slots by node at
 commit, so neither the painter's lookups nor main's check scan the table.
@@ -1681,6 +1683,16 @@ at the instant the painter showed, not at the last tick. A `transform`
 transition's reach is unbounded for now (the fork keeps a transition's timing
 function private), so the extent budget bounds its encode and a composited
 group around it refuses it.
+
+A scroll-driven animation (scroll-animations-1) has no clock at all: stylo
+cascades the sample `Document::resolve_timelines` writes after each layout
+pass and `Document::advance_scroll_timelines` rewrites when the marker adopts
+its scroll container's offset. It asks for no frame post, keeps
+`animations_active` false and refuses the export for now, so while its source
+moves the main thread runs one animation-only restyle and one commit per
+adopted scroll, one frame behind the painter's scroll (scroll-animations-1
+§5.1 allows it), and nothing at rest. See
+[tracking/css-animation.md](tracking/css-animation.md#scroll-driven-animations).
 
 ## Native and Wasm spawning
 

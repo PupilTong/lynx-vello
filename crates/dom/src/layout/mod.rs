@@ -75,7 +75,11 @@ impl<T: Sync> Document<T> {
         for pass in 0..committed_box::CONTAINER_PASSES {
             self.layout_pass(&mut resized);
             let cap = pass + 1 == committed_box::CONTAINER_PASSES;
-            if !self.recascade_resized_containers(&mut resized, cap) {
+            // First: its animation-only traversal would strip the
+            // `RECASCADE_SELF` marks the containers' pass writes.
+            let timelines = self.resolve_timelines();
+            let containers = self.recascade_resized_containers(&mut resized, cap);
+            if !timelines && !containers {
                 break;
             }
         }

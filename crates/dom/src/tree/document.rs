@@ -1006,6 +1006,11 @@ impl<T> Document<T> {
                     // sound only because clearing restyle state touches the
                     // hint, the damage, and the flags — never `styles`.
                     let refresh = node.refresh_layout_style();
+                    if refresh.changed {
+                        self.animations
+                            .timelines
+                            .restyled(current, node.layout_computed_style());
+                    }
                     let harvested = StyleDamage::from_style_change(
                         damage.unwrap_or_default(),
                         refresh.paragraph_limits_changed,

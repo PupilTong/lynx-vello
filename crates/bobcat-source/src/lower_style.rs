@@ -464,6 +464,87 @@ mod tests {
         assert_eq!(declarations[0].property, "color");
     }
 
+    /// The scroll-animations-1 properties have no wire id, so a bundle names
+    /// them as unknown properties; lowering hands their names and values to
+    /// stylo as written.
+    #[test]
+    fn scroll_timeline_declarations_lower_unchanged() {
+        let token = |token_type, value: &str| ValueToken {
+            token_type,
+            value: value.to_owned(),
+        };
+        let space = || token(token_types::WHITESPACE_TOKEN, " ");
+        let named = |name: &str, value_tokens: Vec<ValueToken>| ParsedDeclaration {
+            property: CssProperty::from_name(name),
+            value_tokens,
+            is_important: false,
+        };
+        let declarations = vec![
+            named(
+                "scroll-timeline-name",
+                vec![token(token_types::IDENT_TOKEN, "--card")],
+            ),
+            named(
+                "view-timeline",
+                vec![
+                    token(token_types::IDENT_TOKEN, "--item"),
+                    space(),
+                    token(token_types::IDENT_TOKEN, "block"),
+                    space(),
+                    token(token_types::DIMENSION_TOKEN, "10px"),
+                ],
+            ),
+            named(
+                "timeline-scope",
+                vec![token(token_types::IDENT_TOKEN, "--card")],
+            ),
+            named(
+                "animation-timeline",
+                vec![
+                    token(token_types::FUNCTION_TOKEN, "scroll("),
+                    token(token_types::IDENT_TOKEN, "root"),
+                    space(),
+                    token(token_types::IDENT_TOKEN, "inline"),
+                    token(token_types::RIGHT_PARENTHESES_TOKEN, ")"),
+                ],
+            ),
+            named(
+                "animation-range",
+                vec![
+                    token(token_types::IDENT_TOKEN, "entry"),
+                    space(),
+                    token(token_types::PERCENTAGE_TOKEN, "10%"),
+                    space(),
+                    token(token_types::IDENT_TOKEN, "exit"),
+                    space(),
+                    token(token_types::PERCENTAGE_TOKEN, "90%"),
+                ],
+            ),
+        ];
+        let info = style_info(vec![(
+            0,
+            StyleSheet {
+                imports: vec![],
+                rules: vec![style_rule(vec![class_selector("a")], declarations)],
+            },
+        )]);
+
+        let PreparsedRule::Style { declarations, .. } = &to_preparsed_style_sheet(&info).rules[0]
+        else {
+            panic!("a style rule");
+        };
+        assert_eq!(
+            declarations,
+            &vec![
+                preparsed("scroll-timeline-name", "--card"),
+                preparsed("view-timeline", "--item block 10px"),
+                preparsed("timeline-scope", "--card"),
+                preparsed("animation-timeline", "scroll(root inline)"),
+                preparsed("animation-range", "entry 10% exit 90%"),
+            ]
+        );
+    }
+
     /// The wire leaves `is_important` false and puts the marker in the value,
     /// so lowering must recover it.
     #[test]

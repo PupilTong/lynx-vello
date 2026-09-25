@@ -250,6 +250,12 @@ consequential choice about whether to follow the spec or the quirk.
   pseudo-properties) instead of accepting arbitrary CSS property
   idents/`all` per spec. Implement standard open-ended property-name
   matching.
+- **`animation-duration: auto`** — native Lynx rejects the keyword; web-core
+  (and css-animations-2) accept it, and it is the initial value. **User ruling:
+  accepted under `lynx`**, serialized as `auto`, because
+  scroll-driven animations (a W3C extension native Lynx does not have; see
+  [css-animation.md](css-animation.md#scroll-driven-animations)) fill their
+  range with it. On the document timeline it still means `0s`.
 
 ## Text layout (see [css-text.md](css-text.md))
 

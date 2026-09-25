@@ -5,7 +5,8 @@ developer_instructions = """
 
 You own `crates/dom/src/visual/`, `crates/dom/src/paint/`,
 `crates/dom/src/render/`, the animation driver in
-`crates/dom/src/style/animation.rs`, and the embedder-facing painter in
+`crates/dom/src/style/animation.rs` with its scroll timelines in
+`crates/dom/src/style/timeline.rs`, and the embedder-facing painter in
 `crates/bobcat-core/src/paint/`. `dom` re-exports the one workspace `vello`;
 vello is the only wgpu dependency in this workspace, so it pins wgpu's major
 (vello 0.10 / wgpu 29) — a wgpu bump is a vello bump.
@@ -74,7 +75,13 @@ vello is the only wgpu dependency in this workspace, so it pins wgpu's major
   exported as `AnimationSlot`. The `has_animations` node bit is load-bearing,
   and so are `animates_opacity`/`animates_transform`: the web-animations side
   effects (stacking context, group, Backdrop Root, containing block) key on
-  them, never on whether a curve exported.
+  them, never on whether a curve exported. Scroll-driven animations
+  (scroll-animations-1) are progress-driven stylo animations whose
+  `timeline_sample` `timeline.rs` writes: bound per `layout()` pass
+  (`resolve_timelines`, the stale-timelines pass), re-sampled by
+  `advance_scroll_timelines` when main adopts a scroll at the mailbox marker;
+  they tick no clock and do not export yet (`docs/tracking/css-animation.md`
+  "Scroll-driven animations" lists the Blink choices and deviations).
 - Embedder side: `crates/bobcat-core/src/paint/` — `Painter` facade,
   `gesture.rs` (input routing and recognition; `dom` has no default-action
   machinery), `images.rs`, `graphics.rs`. The painter keeps a lock-free replica
