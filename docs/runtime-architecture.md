@@ -1476,13 +1476,21 @@ border box; without one the group's range replays raw and the frame is simply
 backdrop it sits on is what shows. `Document::scene()` and any consumer with
 no GPU take that fallback by construction.
 
-Either texture is drawn inside the element's own clip chain. A group scope
-opens outside its ancestors' clips and its content re-pushes them inside it,
-so without that a blur's 3σ margin and a backdrop's border box would show past
-an ancestor's `overflow` clip. Each entry therefore carries the chain as
-`OutputClip`s, root first, each in the space its establishing box rides, and
-the op opens them around its draw. The fallbacks need none: raw content is
-already cut by its own chains, and an absent backdrop draws nothing.
+CSS clips a filter's *output* by the ancestors' `overflow` clips, not its
+input, and the walker does the same. A group scope opens outside the clips its
+enclosing scope's items pushed and its items push their chains again inside
+it; for a scope whose element has `filter` or `backdrop-filter` — both
+contain their positioned descendants, so every chain inside extends the
+element's own — the chain is cut at that element's chain. The links between
+the enclosing such scope's chain and this one are the scope's output clips,
+ordinary `Push` ops outside its own layers, the innermost a full `SrcOver`
+layer so the effect layer never opens directly inside a clip layer, and its
+items push only the links below. So an ancestor's clip cuts the texture, the
+raw fallback and the backdrop once, after the filter; content just past the
+edge still blurs ink back inside it; and a nested backdrop reads its root's
+content uncut by the root's ancestors. Every other group re-pushes whole
+chains, which lets a fixed descendant of an `opacity` group escape the
+group's ancestors' clips.
 
 The device side is `dom::render::blur::FilterTextures`, one per
 `vello::Renderer`, owned beside that renderer's `AtlasResidency` by `Headless`
@@ -1490,22 +1498,20 @@ and by the painter's `WindowGraphics`. Its cache holds one commit's bakes, and
 each entry re-bakes on its own two conditional readings. The painter's scroll
 generation counts when some op in the entry's range and the entry's own space
 differ in their innermost scroll or sticky node, a node on one path and not
-the other. A blurred scroller's content slides under the blur, and a blurred
-box inside a scroller slides across the scroller's clip, which the box's range
-re-pushes and which stays still. Every Lynx scroll container clips, so a
-blurred box inside one re-bakes on every scroll frame; only an entry that no
-scroll or sticky node moves relative to anything in its range re-bakes nothing.
-The timeline reading counts when a curve moves or fades some op in the range
-relative to the entry. For a backdrop that is another element's curve in its
-prefix, or its own element's transform curve. For a blur group it is a curve on
-its own content, or its element's transform curve, which moves the group
-across the ancestors' clips its range re-pushes; the element's own
-opacity-only curve changes no baked pixel. An entry whose range draws a
-backdrop's texture also takes on that backdrop's two conditions: an element
-with both properties draws its backdrop inside its own blur group, and a
-child's backdrop range opens with its root's. An entry whose range draws any
-texture also reads the spaces of that texture's clip chain, which the texture
-is drawn inside. So a tick re-bakes only the entries that read it. Commit ids
+the other. A blurred scroller's content slides under the blur, and a backdrop
+inside a scroller slides over what was painted outside it. A blurred box inside
+a scroller re-bakes nothing: its range is its own content, and the scroller's
+clip is an output clip outside it, so a scroll moves the texture under a still
+clip. The timeline reading counts when a curve moves or fades some op in the
+range relative to the entry. For a backdrop that is another element's curve in
+its prefix, or its own element's transform curve. For a blur group it is a
+curve on its own content; the element's own curves change no baked pixel — a
+transform moves the texture across the ancestors' clips outside the range,
+and an opacity-only curve applies where the texture is drawn. An entry whose
+range draws a backdrop's texture also takes on that backdrop's two conditions:
+an element with both properties draws its backdrop inside its own blur group,
+and a child's backdrop range opens with its root's. So a tick re-bakes only
+the entries that read it. Commit ids
 restart per document, so a target pointed at a second document must `forget`
 the cache, the same obligation it already has for its own compose key. Bakes
 happen in increasing order of range end, so every texture an entry's own range

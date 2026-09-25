@@ -427,8 +427,7 @@ backdrop and to the element together.
 Neither op encodes anything without a texture, so one program serves both
 readings: `compose_into` takes a `filtered` table and, where one exists, draws
 a group's texture in place of its ops or a backdrop's through the element's own
-rounded border box, either one inside the element's own clip chain (the entry's
-`OutputClip`s); where none does, a group replays its range raw and a
+rounded border box; where none does, a group replays its range raw and a
 backdrop draws nothing, which are the documented *unfiltered* fallbacks a
 GPU-less consumer, `Document::scene()`, and an entry past the memory budget all
 take. `CommittedFrame::bake_filter` replays one entry's range into an offscreen
@@ -445,14 +444,19 @@ enclosing filtered layer. `backdrop-filter` inflates nothing. Either way σ is
 scaled into viewport pixels by the arithmetic mean of the two singular values
 of the element's local-to-viewport linear map (read off
 `Affine::nuclear_norm_squared`) — exact under rotation and uniform scale, one
-isotropic number under a non-uniform scale or a skew (recorded limit). A group
-scope opens outside its ancestors' clips and its content re-pushes them inside
-it; the texture is then drawn inside the element's own clip chain, so an
-ancestor's `overflow` clip cuts the 3σ ink after the blur as CSS requires, and
-cuts the content before it as well (recorded deviation: content just past the
-ancestor's edge spreads no ink back inside). Every group's ink therefore stays
-inside its own clip chain, which is what lets a group's bounds hold a nested
-group's blur margin to that chain with no allowance past it.
+isotropic number under a non-uniform scale or a skew (recorded limit).
+
+An ancestor's `overflow` clip cuts a filter's output, not its input. A scope
+whose element has `filter` or `backdrop-filter` opens inside the links of its
+own clip chain — the output clips, pushed outside its layers, the innermost
+as a full `SrcOver` layer for the #1198 rule — and its content pushes only the
+links below them; every other scope re-pushes whole chains so a fixed
+descendant of an `opacity` group escapes the group's ancestors' clips. Culling
+follows the same split, coarsely: inside a blurred group only the links below
+the innermost blurred group's own chain take part in the cull test and hold
+moving content, since those cut before any blur; the links from that chain
+outward cut blurred output, which the blur spreads back past them, so they are
+left out and the grown viewport bounds what encodes.
 
 The Backdrop Root set is filter-effects-2's list — `filter`, `opacity < 1`,
 `mask`, `clip-path`, `mix-blend-mode`, `backdrop-filter`, and the root element —

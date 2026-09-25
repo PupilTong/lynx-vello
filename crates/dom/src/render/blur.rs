@@ -37,17 +37,17 @@
 //!
 //! - the painter's **scroll generation**, when some op in the entry's range and the entry's own
 //!   space differ in their innermost scroll or sticky node — a node on one path and not the other.
-//!   A blurred scroller's *content* moves under the blur; a blurred box inside a scroller moves
-//!   across the scroller's clip, which its range re-pushes and which stays still. Every Lynx scroll
-//!   container clips, so a blurred box inside one re-bakes on every scroll frame; only an entry no
-//!   scroll or sticky node moves relative to anything in its range re-bakes nothing.
+//!   A blurred scroller's *content* moves under the blur, and a backdrop inside a scroller moves
+//!   over what was painted outside it. A blurred box inside a scroller re-bakes nothing: its range
+//!   is its own content, and the scroller's clip is one of the output clips the walker pushes
+//!   outside the group, so a scroll moves the texture under a still clip.
 //! - the **timeline reading**, when a curve moves or fades some op in the range relative to the
 //!   entry ([`crate::FilterGroup::samples_animations`]). A backdrop's range is a *prefix of the
 //!   frame*, so anything animating in front of the Backdrop Root is behind the element, and the
 //!   element's own transform curve moves it over that prefix; a `filter: blur()` group holds
-//!   content its own curves move or fade inside it, and its element's transform curve moves it
-//!   across the ancestors' clips its range re-pushes, which stay where they are. The element's own
-//!   opacity-only curve changes no baked pixel.
+//!   content its own curves move or fade inside it. Its element's own curves change no baked pixel:
+//!   a transform moves the texture across the ancestors' clips outside the range, and an
+//!   opacity-only curve applies where the texture is drawn.
 //!
 //! An entry whose range holds a `PushBackdrop` takes on that backdrop's two
 //! conditions when the commit records it. Scanning the range's ops alone

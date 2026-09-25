@@ -316,8 +316,8 @@ impl CommittedFrame {
     /// otherwise, where every relative map in its range is time-independent.
     /// A `backdrop-filter` entry's range is a prefix of the frame, so it can
     /// hold other elements' exported curves; a `filter: blur()` group's holds
-    /// the curves of its own content, and its ancestors' clips, which its
-    /// own element's transform curve moves it across. After the replay a
+    /// the curves of its own content, and no clip of its ancestors', which
+    /// the walker pushes outside the group. After the replay a
     /// backdrop pops the layers the range left open and draws its pre-blur
     /// passes over the whole bake rect, so neither lands inside a clip.
     ///
