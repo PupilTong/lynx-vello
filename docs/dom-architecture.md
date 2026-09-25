@@ -452,10 +452,11 @@ own clip chain — the output clips, pushed outside its layers, the innermost
 as a full `SrcOver` layer for the #1198 rule — and its content pushes only the
 links below them; every other scope re-pushes whole chains so a fixed
 descendant of an `opacity` group escapes the group's ancestors' clips. Culling
-follows the same split: a link a blurred group's own chain holds cuts after
-that blur, so the cull test grows it by the 3σ of every blur applied before
-it, and a group's bounds hold moving content to its chain grown by the blurs
-*around* the group (the group's own margin is added when it closes).
+follows the same split, coarsely: inside a blurred group only the links below
+the innermost blurred group's own chain take part in the cull test and hold
+moving content, since those cut before any blur; the links from that chain
+outward cut blurred output, which the blur spreads back past them, so they are
+left out and the grown viewport bounds what encodes.
 
 The Backdrop Root set is filter-effects-2's list — `filter`, `opacity < 1`,
 `mask`, `clip-path`, `mix-blend-mode`, `backdrop-filter`, and the root element —

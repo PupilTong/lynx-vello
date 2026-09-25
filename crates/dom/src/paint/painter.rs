@@ -22,17 +22,15 @@
 //!   several `blur()` functions in one list fold into the first by variance addition. Color filters
 //!   use blend-composite approximations; factors above one are only partially expressible.
 //! - `backdrop-filter` bakes the same way, over the prefix of the frame painted before the element
-//!   inside its nearest Backdrop Root, and carries every one of those approximations plus six of
+//!   inside its nearest Backdrop Root, and carries every one of those approximations plus five of
 //!   its own: `will-change` roots are not honored, so a `backdrop-filter` element inside a
 //!   `will-change: opacity` wrapper sees through it (ruled; `isolation: isolate` is not in the
 //!   spec's Backdrop Root list at all, and is absent from the fork's grammar besides); the mirror
 //!   edge mode applies at the element's axis-aligned *device* bounding box, so a rotated element
 //!   mirrors at its bbox rather than at its rotated border box — which is what Chromium does; items
 //!   the walk culled are absent from the crop of an element straddling the viewport; there is no
-//!   composite curve; an element past the shared area budget draws no backdrop at all, leaving the
-//!   *unfiltered* backdrop showing; and a backdrop inside an `opacity`, `mask-image`, `clip-path`
-//!   or blend root reads that root's content already cut by the root's ancestors' clips, which a
-//!   `filter` or `backdrop-filter` root does not do. `docs/tracking/deviations.md` records the set.
+//!   composite curve; and an element past the shared area budget draws no backdrop at all, leaving
+//!   the *unfiltered* backdrop showing. `docs/tracking/deviations.md` records the set.
 //! - Perspective-projected items use the affine map agreeing with the true projection at three
 //!   border-box corners because Vello transforms are affine; hit testing remains projectively
 //!   exact.

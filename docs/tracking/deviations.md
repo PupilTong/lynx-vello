@@ -216,16 +216,6 @@ consequential choice about whether to follow the spec or the quirk.
     `MAX_FILTER_AREA`), consumed in program order; an element past it draws no backdrop at all, so
     what shows is the **unfiltered** backdrop underneath. The same fallback covers a consumer with
     no GPU.
-  - **A Backdrop Root that does not contain its positioned descendants has its content cut by
-    its ancestors' clips before a nested backdrop reads it** — open, not ruled. That is a root by
-    `opacity`, `mask-image`, `clip-path`, `mix-blend-mode` or a current `opacity` animation.
-    filter-effects-2 builds the Backdrop Root Image from the root's own content, which an
-    ancestor's `overflow` clip cuts only when the root is composited. A `filter` or
-    `backdrop-filter` root does exactly that here: its scope opens inside the links of its own
-    clip chain and its content pushes only the links below them (`open_scope` in
-    `crates/dom/src/paint/walker.rs`). These roots instead re-push their content's whole chains,
-    because a fixed descendant of an `opacity` element escapes the element's ancestors' clips and
-    must not be cut by them. Only a blur reading within its reach of such an edge can tell.
 - **`background-clip: border-area`** — a genuine Lynx-only value with no CSS
   equivalent (distinct from `border-box`); needs its own behavioral
   spec-mining rather than mapping to any standard box.

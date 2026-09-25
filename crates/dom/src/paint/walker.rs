@@ -76,10 +76,11 @@
 //!   group's content on every side, so every item inside one is tested against a viewport grown by
 //!   the sum of 3σ over each enclosing filtered layer, and the group's own layer bounds are grown
 //!   the same way *before* the viewport intersection — an element straddling the viewport edge
-//!   therefore still bakes the margin its visible pixels read from. The item's clip chain grows
-//!   link by link ([`CullPlan::grown_chain`]): a link below every blurred floor cuts before any
-//!   blur and grows by nothing, and a link a blurred group's own chain holds cuts that group's
-//!   output, after its blur, so it grows by the 3σ of every blur applied before it.
+//!   therefore still bakes the margin its visible pixels read from. Of the item's clip chain only
+//!   the links below the innermost blurred group's own chain take part ([`CullPlan::chain_below`]):
+//!   those cut the content before any blur, while the links from that chain outward cut blurred
+//!   output, which a blur spreads back past them. Leaving them out is coarser than growing each by
+//!   the blurs applied before it, and never smaller; the viewport still bounds what encodes.
 //! - **Moving content is bounded by its curve's reach.** An animation node with a transform track
 //!   pulls the region above it back through every delta its curve can sample
 //!   ([`crate::visual::reach::Reach`]: each op's parameter range over the whole domain), so the
@@ -406,10 +407,11 @@ pub(crate) struct CullPlan {
     /// whose filter blurs — the group whose units the summed reach is
     /// measured against. Index-parallel with [`PaintOrder::layers`].
     blur_roots: Vec<Option<usize>>,
-    /// Per group layer, the 3-sigma ink reach of its own filter alone, zero
-    /// for a layer that does not blur. Index-parallel with
+    /// Per group layer, the innermost layer enclosing it, itself included,
+    /// whose filter blurs: the group whose own clip chain the cull test
+    /// stops at ([`Self::chain_below`]). Index-parallel with
     /// [`PaintOrder::layers`].
-    layer_reach: Vec<f64>,
+    inner_blurs: Vec<Option<usize>>,
 }
 
 impl CullPlan {
@@ -426,20 +428,24 @@ impl CullPlan {
         );
         self.layer_inflate.clear();
         self.blur_roots.clear();
-        self.layer_reach.clear();
+        self.inner_blurs.clear();
         for (index, layer) in frame.layers().iter().enumerate() {
             debug_assert!(
                 layer.parent.is_none_or(|parent| parent < index),
                 "a group layer nests inside an earlier group layer",
             );
-            let (inflate, root) = layer.parent.map_or((0.0, None), |parent| {
-                (self.layer_inflate[parent], self.blur_roots[parent])
+            let (inflate, root, inner) = layer.parent.map_or((0.0, None, None), |parent| {
+                (
+                    self.layer_inflate[parent],
+                    self.blur_roots[parent],
+                    self.inner_blurs[parent],
+                )
             });
             let sigma = layer_blur_sigma(document, layer);
-            self.layer_reach.push(BLUR_INK_SIGMAS * sigma);
+            let blurs = (sigma > 0.0).then_some(index);
             self.layer_inflate.push(inflate + BLUR_INK_SIGMAS * sigma);
-            self.blur_roots
-                .push(root.or((sigma > 0.0).then_some(index)));
+            self.blur_roots.push(root.or(blurs));
+            self.inner_blurs.push(blurs.or(inner));
         }
         let mut bounds = std::mem::take(&mut self.clip_bounds);
         match self.cull {
@@ -493,14 +499,13 @@ impl CullPlan {
         else {
             return admitted_region(self, frame, space, clip);
         };
-        // The chain grows link by link, by the blurs applied before each
-        // link cuts; the viewport by every enclosing blur's 3 sigma. Both in
-        // that group's units, times how far a curve between the outermost
-        // blurred group and this content can shrink it — without bound when
-        // a scale range reaches 0.
-        let norm = inverse_norm_within(frame, space, frame.layers()[root].space);
-        let clips = self.grown_chain(frame, clip, space, Some(layer), norm);
-        let viewport = match norm {
+        // Only the links below the innermost blur's own chain cut this
+        // content before a blur does. The viewport grows by every enclosing
+        // blur's 3 sigma, in that group's units, times how far a curve
+        // between the outermost blurred group and this content can shrink it
+        // — without bound when a scale range reaches 0.
+        let clips = self.chain_below(frame, clip, space, Some(layer));
+        let viewport = match inverse_norm_within(frame, space, frame.layers()[root].space) {
             Some(norm) => pull_back(
                 &self.slot_windows,
                 frame,
@@ -514,82 +519,48 @@ impl CullPlan {
         clips.meet(viewport)
     }
 
-    /// The 3 sigma of every blurred group at or around `from` whose own
-    /// chain holds clip `link`: the blurs among them applied before that
-    /// link cuts, and the growth [`Self::grown_chain`] reaches at it.
-    fn growth_at(&self, frame: &PaintOrder, link: usize, from: Option<usize>) -> f64 {
-        let layers = frame.layers();
-        let clips = frame.clips();
-        let mut growth = 0.0;
-        let mut group = from;
-        while let Some(at) = group {
-            if self.layer_reach[at] > 0.0
-                && std::iter::successors(layers[at].clip, |&index| clips[index].parent)
-                    .any(|index| index == link)
-            {
-                growth += self.layer_reach[at];
-            }
-            group = layers[at].parent;
-        }
-        growth
-    }
-
-    /// What `clip`'s chain admits, with no viewport, for content in `space`:
-    /// each link pulled back into `space` and grown by the 3 sigma of every
-    /// blurred group at or around `from` whose own chain holds the link,
-    /// times `norm`.
+    /// What the links of `clip`'s chain below the innermost blurred group at
+    /// or around `layer` admit, with no viewport, for content in `space`:
+    /// each pulled back into `space` and met.
     ///
-    /// The cull test passes the content's own group, since every blur around
-    /// the content carries its ink. A group's bounds pass the group's parent:
-    /// the group's own margin is added when it closes.
-    ///
-    /// Those are exactly the blurs applied before the link cuts. A group
-    /// whose element has `filter` opens inside its own chain's links and its
-    /// content pushes only the ones below them (see [`open_scope`]), so a
-    /// link its own chain holds cuts its blurred output, and a link below
-    /// cuts its content before the blur. Walking the chain from the content
-    /// outward, a group's reach therefore joins at the innermost link of its
-    /// own chain and stays for every link above. `norm` bounds how far one
-    /// px of the blurring groups' units reaches in `space`; `None` leaves
-    /// every grown link unbounded.
-    fn grown_chain(
+    /// A group whose element has `filter` opens inside its own chain's links
+    /// and its content pushes only the ones below them (see [`open_scope`]).
+    /// The links below cut the content before any blur; the ones from the
+    /// blurred group's own chain outward cut its blurred output, which the
+    /// blur spreads back past them, so they are left out rather than grown —
+    /// coarser, and never smaller. With no blurred group the whole chain
+    /// takes part. The cull test passes the content's own group, since its
+    /// own blur carries its ink too; a group's bounds pass the group's
+    /// parent, since the group's own margin is added when it closes.
+    fn chain_below(
         &self,
         frame: &PaintOrder,
         clip: Option<usize>,
         space: Option<u32>,
-        from: Option<usize>,
-        norm: Option<f64>,
+        layer: Option<usize>,
     ) -> Admitted {
-        let layers = frame.layers();
-        let mut growth = 0.0;
+        let floor = layer
+            .and_then(|layer| self.inner_blurs[layer])
+            .map(|blurred| frame.layers()[blurred].clip);
         let mut region = Admitted::Everything;
         let mut next = clip;
-        while let Some(index) = next {
-            let mut group = from;
-            while let Some(at) = group {
-                if layers[at].clip == Some(index) {
-                    growth += self.layer_reach[at];
-                }
-                group = layers[at].parent;
-            }
+        while let Some(index) = next
+            && floor.is_none_or(|floor| next != floor)
+        {
             let node = &frame.clips()[index];
-            // A singular link is an empty clip: nothing passes it, blurred or
-            // not.
+            // A singular link is an empty clip: nothing passes it.
             let Some(bounds) = clip_bounds(node) else {
                 return Admitted::Nothing;
             };
-            let own = if is_finite(bounds) {
-                Admitted::Region(bounds)
-            } else {
-                Admitted::Everything
-            };
-            let pulled = pull_back(&self.slot_windows, frame, own, node.space, space);
-            let grown = match norm {
-                _ if growth <= 0.0 => pulled,
-                Some(norm) => pulled.grown(growth * norm),
-                None => Admitted::Everything,
-            };
-            region = region.meet(grown);
+            if is_finite(bounds) {
+                region = region.meet(pull_back(
+                    &self.slot_windows,
+                    frame,
+                    Admitted::Region(bounds),
+                    node.space,
+                    space,
+                ));
+            }
             if matches!(region, Admitted::Nothing) {
                 return region;
             }
@@ -2102,9 +2073,9 @@ fn admitted_under(
 /// Content a transform curve `moves` — with its group or inside it — is held
 /// to what its clip chain admits, each clip pulled back through the nodes
 /// between it and the content: a list inside a moving blurred card bakes its
-/// window, not its whole content. Inside a blurred group the chain is
-/// [`CullPlan::grown_chain`]'s for the blurs around `layer`, since a link a
-/// blurred group's own chain holds cuts only after that blur; `layer`'s own
+/// window, not its whole content. Inside a blurred group around `layer` only
+/// the links below that group's own chain hold it ([`CullPlan::chain_below`]),
+/// since the ones from it outward cut only after the blur; `layer`'s own
 /// blur margin is added when it closes. Still content passes whole. Either
 /// way the group's rect meets the viewport at close.
 fn held(
@@ -2120,14 +2091,8 @@ fn held(
     }
     let plan = &scratch.plan;
     let around = frame.layers()[layer].parent;
-    match around.and_then(|parent| plan.blur_roots[parent]) {
-        Some(root) => plan.grown_chain(
-            frame,
-            clip,
-            space,
-            around,
-            inverse_norm_within(frame, space, frame.layers()[root].space),
-        ),
+    match around.and_then(|parent| plan.inner_blurs[parent]) {
+        Some(_) => plan.chain_below(frame, clip, space, around),
         None => admitted_under(
             &plan.slot_windows,
             frame,
@@ -2260,10 +2225,10 @@ fn inverse_norm_within(
 /// with the group. A closed group's blur margin is content here too, since
 /// its texture is drawn inside its element's clip chain.
 ///
-/// Inside a blurred group around layer `layer`, that clip may cut only after
-/// the group's blur, so it is taken alone rather than with the chain above
-/// it, and grown by the blurs around `layer` applied before it
-/// ([`CullPlan::growth_at`]); `layer`'s own margin is added when it closes.
+/// Inside a blurred group around layer `layer`, that clip holds only when it
+/// lies below the group's own chain, and then with the links between the two
+/// ([`CullPlan::chain_below`]): from the group's chain outward the clips cut
+/// only after the blur. `layer`'s own margin is added when it closes.
 fn into_group(
     scratch: &Scratch,
     frame: &PaintOrder,
@@ -2279,25 +2244,25 @@ fn into_group(
             .map_or(Admitted::Everything, |index| {
                 let node = &frame.clips()[index];
                 let around = frame.layers()[layer].parent;
-                let Some(root) = around.and_then(|parent| scratch.plan.blur_roots[parent]) else {
-                    return match scratch.plan.clip_extent[index] {
-                        Admitted::Region(region) => {
-                            carry(windows, frame, region, node.space, group)
+                let region = match around.and_then(|parent| scratch.plan.inner_blurs[parent]) {
+                    None => scratch.plan.clip_extent[index],
+                    Some(blurred) => {
+                        let floor = frame.layers()[blurred].clip;
+                        let below = std::iter::successors(clip, |&at| frame.clips()[at].parent)
+                            .take_while(|&at| Some(at) != floor)
+                            .any(|at| at == index);
+                        if !below {
+                            return Admitted::Everything;
                         }
-                        other => other,
-                    };
+                        scratch
+                            .plan
+                            .chain_below(frame, Some(index), node.space, around)
+                    }
                 };
-                let carried = match clip_bounds(node) {
-                    None => return Admitted::Nothing,
-                    Some(own) if !is_finite(own) => return Admitted::Everything,
-                    Some(own) => carry(windows, frame, own, node.space, group),
-                };
-                let growth = scratch.plan.growth_at(frame, index, around);
-                if growth <= 0.0 {
-                    return carried;
+                match region {
+                    Admitted::Region(region) => carry(windows, frame, region, node.space, group),
+                    other => other,
                 }
-                inverse_norm_within(frame, group, frame.layers()[root].space)
-                    .map_or(Admitted::Everything, |norm| carried.grown(growth * norm))
             });
         return match carry(windows, frame, bounds, content, group) {
             Admitted::Region(carried) => holding.cut(carried),
@@ -3401,13 +3366,15 @@ mod tests {
 
     /// A long ticker sliding inside a faded group, inside a blurred group,
     /// inside an `overflow: clip` frame. The frame's clip is the blurred
-    /// group's output clip: it cuts after the blur, so the faded group holds
-    /// the ticker to the clip grown by the blur's 30 px, not to the clip
-    /// itself — the blur spreads that band back inside. Without the blur the
-    /// clip holds it exactly. Only x grows: the ticker runs past the clip
-    /// that way, and the faded group's own box fills it the other.
+    /// group's output clip, which cuts only after the blur, so the faded
+    /// group does not hold the ticker to it: the viewport pulled back into
+    /// the group holds it instead. A clip on the blurred element itself lies
+    /// below its own chain, cuts before the blur, and holds the ticker
+    /// exactly, as the frame's clip does with no blur at all. Only x
+    /// changes: the ticker runs past the clip that way, and the faded
+    /// group's own box fills it the other.
     #[test]
-    fn a_ticker_under_a_blur_around_its_group_is_held_to_the_blurs_reach() {
+    fn a_ticker_under_a_blur_around_its_group_is_held_below_the_blur() {
         let rect = |blur: &str| {
             let mut doc = Doc::with_css(&format!(
                 "{PAGE}
@@ -3439,10 +3406,15 @@ mod tests {
                 && (got.x1 - want.x1).abs() < 1e-3
                 && (got.y1 - want.y1).abs() < 1e-3
         };
-        let grown = rect("filter: blur(10px);");
+        let viewport = rect("filter: blur(10px);");
         assert!(
-            near(grown, Rect::new(70.0, 100.0, 330.0, 200.0)),
-            "the frame's clip grown by 3 sigma, got {grown:?}",
+            near(viewport, Rect::new(0.0, 100.0, 800.0, 200.0)),
+            "the viewport, not the frame's clip, got {viewport:?}",
+        );
+        let own = rect("filter: blur(10px); overflow: clip;");
+        assert!(
+            near(own, Rect::new(100.0, 100.0, 300.0, 200.0)),
+            "the blurred element's own clip, got {own:?}",
         );
         let exact = rect("filter: grayscale(1);");
         assert!(
@@ -3507,14 +3479,15 @@ mod tests {
         assert!(!encodes(240.0), "past the blur's reach");
     }
 
-    /// Content wholly past a clip its blurred group's own chain holds, but
-    /// within 3 sigma of it, is admitted: the clip cuts the group's blurred
-    /// output, not its content, so that content's ink reaches back inside.
-    /// A clip inside the group still cuts before the blur, and past the
-    /// blur's reach the outer clip admits nothing. `overflow: clip` rather
-    /// than `hidden`, whose scroll window would admit the content anyway.
+    /// Content wholly past a clip its blurred group's own chain holds is
+    /// admitted: the clip cuts the group's blurred output, not its content,
+    /// so content within 3 sigma of it reaches back inside — and the cull
+    /// test leaves such a clip out altogether, which admits content further
+    /// past it too, up to the grown viewport. A clip inside the group still
+    /// cuts before the blur. `overflow: clip` rather than `hidden`, whose
+    /// scroll window would admit the content anyway.
     #[test]
-    fn content_within_a_blurs_reach_of_its_groups_clip_is_admitted() {
+    fn content_past_its_blurred_groups_clip_is_admitted() {
         let encodes = |clipped: &str, left: f32| {
             let mut doc = Doc::with_css(&format!(
                 "{PAGE}
@@ -3537,8 +3510,8 @@ mod tests {
             "10 px past the card's clip, the blur carries it back inside",
         );
         assert!(
-            !encodes("", 140.0),
-            "40 px past it, beyond the blur's reach"
+            encodes("", 140.0),
+            "40 px past it too: the card's clip, left out of the test, culls nothing",
         );
         assert!(
             !encodes("overflow: clip;", 110.0),
