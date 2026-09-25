@@ -604,6 +604,43 @@ fn fixed_anchors_to_the_viewport_unless_an_ancestor_establishes_the_cb() {
 }
 
 #[test]
+fn a_class_that_toggles_the_containing_block_relayouts_positioned_grandchildren() {
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; }
+         .host { display: flex; width: 300px; height: 200px; margin-left: 100px;
+                 margin-top: 50px; }
+         .transformed { transform: translateX(0px); }
+         .mid { display: flex; width: 100px; height: 100px; margin-left: 20px;
+                margin-top: 10px; }
+         .fixed { position: fixed; left: 10px; top: 20px; width: 30px; height: 40px; }
+         .abs { position: absolute; left: 10px; top: 20px; width: 30px; height: 40px; }",
+    );
+    let root = h.doc.root;
+    let host = h.doc.el(root, ".host");
+    let mid = h.doc.el(host, ".mid");
+    let fixed = h.doc.el(mid, ".fixed");
+    let abs = h.doc.el(mid, ".abs");
+    h.layout();
+    // Anchored to the viewport: (10, 20) less the mid's origin (120, 60).
+    let viewport = (-110.0, -40.0, 30.0, 40.0);
+    assert_eq!(h.rect(fixed), viewport);
+    assert_eq!(h.rect(abs), viewport);
+
+    // The host now contains both, through a non-positioned intermediate:
+    // (10, 20) less the mid's offset (20, 10) inside the host.
+    h.doc.add_class(host, "transformed");
+    h.layout();
+    let hosted = (-10.0, 10.0, 30.0, 40.0);
+    assert_eq!(h.rect(fixed), hosted);
+    assert_eq!(h.rect(abs), hosted);
+
+    h.doc.remove_class(host, "transformed");
+    h.layout();
+    assert_eq!(h.rect(fixed), viewport);
+    assert_eq!(h.rect(abs), viewport);
+}
+
+#[test]
 fn fixed_stays_viewport_anchored_when_its_parent_answers_from_cache() {
     let mut h = Harness::new(
         "page { display: flex; width: 800px; height: 600px; }

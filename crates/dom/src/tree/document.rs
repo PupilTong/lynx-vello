@@ -990,6 +990,7 @@ impl<T> Document<T> {
     where
         F: FnMut(NodeId, StyleDamage),
     {
+        let mut containing_blocks = Vec::new();
         while let Some(current) = stack.pop() {
             let harvested = {
                 let (harvested, descend) = {
@@ -1033,6 +1034,9 @@ impl<T> Document<T> {
             let Some((damage, refresh)) = harvested else {
                 continue;
             };
+            if refresh.containing_block_changed {
+                containing_blocks.push(current);
+            }
             if damage.needs_relayout() {
                 self.invalidate_text_children(current, refresh.shaping_changed);
                 // Reconstruction damage needs no second walk from the parent:
@@ -1045,6 +1049,11 @@ impl<T> Document<T> {
                 self.invalidate_layout(current);
             }
             sink(current, damage);
+        }
+        // After the walk, so every descendant it reads holds its post-flush
+        // style. Only elements whose role flipped get here.
+        for id in containing_blocks {
+            self.invalidate_containing_block(id);
         }
     }
 }
