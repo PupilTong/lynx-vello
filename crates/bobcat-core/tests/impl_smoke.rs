@@ -46,7 +46,7 @@ async fn host_capabilities_compose_into_the_opaque_view() {
                     .serving(sink),
             )
         },
-        ViewSources::new(ENTRY, SCREEN),
+        ViewSources::new("app:///", ENTRY, SCREEN),
     )
     .await
     .expect("opaque view");
@@ -85,7 +85,7 @@ async fn a_default_family_nothing_provides_fails_construction() {
     let unusable = ViewSources {
         fonts: vec![FontBlob::from_static(b"not a font")],
         default_font_family: Some("Ahem".to_owned()),
-        ..ViewSources::new(ENTRY, SCREEN)
+        ..ViewSources::new("app:///", ENTRY, SCREEN)
     };
     let host = Rc::new(FetcherDouble::new(Vec::new()));
     let error = view(

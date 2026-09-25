@@ -60,7 +60,7 @@ async fn booted() -> (LynxView<Rc<FetcherDouble>>, Painter) {
         1.0,
         DrawTarget::Offscreen,
         |_reports| fetcher,
-        ViewSources::new(SCRIPT_URL, SCREEN),
+        ViewSources::new("app:///", SCRIPT_URL, SCREEN),
     )
     .await
     .expect("view construction fetches and boots the entry script");

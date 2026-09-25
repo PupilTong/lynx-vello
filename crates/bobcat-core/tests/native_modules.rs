@@ -255,7 +255,7 @@ impl NativeModule for Twin {
 }
 
 fn sources(background: &str) -> ViewSources {
-    let mut sources = ViewSources::new(MAIN_URL, SCREEN);
+    let mut sources = ViewSources::new("app:///", MAIN_URL, SCREEN);
     sources.background_entry = Some(background.to_owned());
     sources
 }

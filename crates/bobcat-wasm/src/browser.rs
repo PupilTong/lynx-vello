@@ -456,14 +456,14 @@ impl BobcatRenderer {
     ) -> Result<(), JsValue> {
         self.ensure_running()?;
 
-        let base_url = Url::parse(&entry_url).map_err(js_error)?;
+        // The entry's own URL is the view's base, and so the fetcher's.
         let sources = ViewSources {
             config: self.config,
             style_sheets: style_sheet_urls,
             background_entry: background_entry_url,
-            ..ViewSources::new(entry_url, self.screen)
+            ..ViewSources::new(entry_url.clone(), entry_url, self.screen)
         };
-        self.load_sources(sources, base_url, global_props).await
+        self.load_sources(sources, global_props).await
     }
 
     /// Decode a fetched page container through the shared source adapter.
@@ -483,7 +483,7 @@ impl BobcatRenderer {
             console_warn(&JsValue::from(warning.to_string()));
         }
         page.register_with(&self.resources);
-        self.load_sources(page.view_sources(self.screen), input, global_props)
+        self.load_sources(page.view_sources(self.screen), global_props)
             .await
     }
 
@@ -506,7 +506,7 @@ impl BobcatRenderer {
             .register_with(&self.resources, &input)
             .map_err(js_error)?;
         page.register_with(&self.resources);
-        self.load_sources(page.view_sources(self.screen), input, global_props)
+        self.load_sources(page.view_sources(self.screen), global_props)
             .await
     }
 
@@ -914,9 +914,13 @@ impl BobcatRenderer {
     async fn load_sources(
         &mut self,
         mut sources: ViewSources,
-        base_url: Url,
         global_props: Option<String>,
     ) -> Result<(), JsValue> {
+        // Parsed before anything of the previous page is released, so a base
+        // that is not a URL leaves that page running. The fetcher is given
+        // the same base below, which is what keeps the view's resolution and
+        // the fetcher's alike.
+        let base_url = Url::parse(&sources.base_url).map_err(js_error)?;
         // Detaching first, then dropping the previous view — which stops it —
         // and then the group it belonged to, which is what ends its two
         // Workers, the Lynx-main one and the worker-realm one after it. All
@@ -946,7 +950,8 @@ impl BobcatRenderer {
         self.events.request_event();
         self.script_finished = false;
 
-        // A relative `url(...)` in the page's CSS resolves against the page.
+        // A relative `url(...)` in the page's CSS resolves against the page,
+        // which is the view's own base.
         self.resources.set_base_url(Some(base_url));
         sources.fonts = self.fonts.clone();
         sources.default_font_family = self.default_font_family.clone();

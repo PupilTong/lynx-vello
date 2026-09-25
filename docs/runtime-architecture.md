@@ -7,7 +7,8 @@ runtime by `Painter::attach`. The document, Element-PAPI tree, script realm,
 and the commit/publish protocol are implementation state. An embedder supplies
 only capabilities and OS facts:
 
-- a `ViewSources` — page config, owned font bytes, an optional default font
+- a `ViewSources` — the required base URL the view's entries resolve
+  against, page config, owned font bytes, an optional default font
   family, author stylesheet URLs, the one entry MTS
   module URL, optional `init_data` and `global_props` JSON text, and the
   required `screen` metrics `SystemInfo` reports — and,
@@ -357,12 +358,21 @@ create-time viewport equal to the painter's is the one that costs nothing —
 see [Document and rendering ownership](#document-and-rendering-ownership) for
 what a mismatch costs.
 
-**The view's startup sources are requested inside `create_lynx_view`.** Fonts
-and the default family come first, validated against a `dom::TextContext` of
+**The view's startup sources are requested inside `create_lynx_view`.** The
+entry and the BTS entry are resolved first, against `ViewSources::base_url` by
+URL rules (so `main.js`, `./main.js` and `/main.js` are all relative URLs), and
+replaced by the WHATWG serialization of the result: a base that is not an
+absolute URL, or an entry that does not resolve against it, is a zero-fetch,
+synchronous `EngineError::InvalidUrl` naming the string that failed. The base
+itself is not handed to the fetcher, which resolves stylesheets, fonts and
+fetches against a base of its own; every embedder in this workspace gives it
+the same one. Fonts
+and the default family come next, validated against a `dom::TextContext` of
 their own: they are a text context's business, no document exists yet, and an
 unknown default family is therefore a zero-fetch, synchronous
 `EngineError::UnknownFontFamily` rather than a later `StartupFailed`. Then each
-author stylesheet in the order the view listed them, then the entry, handed straight to
+author stylesheet in the order the view listed them, by the string it was
+listed as, then the entry, by its resolved URL, handed straight to
 `ResourceFetcher::request_source` on the embedder's own thread — the fetcher
 was built a few statements earlier in this same call — with the answering
 one-shots crossing to `bobcat-main` inside the attachment. That is what makes
@@ -383,7 +393,8 @@ cascade order between several listed sheets is the listed order**, as in
 web-core. The first failure to reach the realm ends the view, and later ones
 are not reported.
 
-Either way the fetcher resolves the URL, fetches bytes and validates UTF-8, or
+Either way the fetcher resolves the URL — a stylesheet's against its own base;
+the entry's is already absolute — fetches bytes and validates UTF-8, or
 supplies a pre-parsed stylesheet. Completion consumes the handle and answers
 the one-shot minted with the request, which wakes whichever task was awaiting
 that source — a stylesheet or entry on `bobcat-main`, a worker script on
@@ -409,9 +420,9 @@ on any of them, while a commit without the sheets would publish an unstyled
 frame. Nothing is lost by skipping it, because boot's own flush is what commits
 the first frame and it settles the sheets first. So a view publishes nothing —
 no frame and no `ScriptFinished` — until every listed sheet has loaded or
-failed. Boot imports the entry by the URL the
-view named it by, which must be absolute: the module normalizer refuses a bare
-name, and that refusal fails the boot. The entry's task (`load_entry`) awaits
+failed. Boot imports the entry by the URL
+`create_lynx_view` resolved, which is absolute, so the module normalizer maps
+it to itself. The entry's task (`load_entry`) awaits
 its answer and completes that module with it, with the entry preamble
 prepended, exactly as an ordinary import is completed: the module is
 registered under the request URL, which is the name its errors carry, and

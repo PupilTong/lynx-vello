@@ -245,7 +245,7 @@ async fn logs_of(wanted: usize) -> (Vec<String>, usize) {
     let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Sequential)
         .await
         .expect("the group starts");
-    let mut sources = ViewSources::new(MAIN_URL, SCREEN);
+    let mut sources = ViewSources::new("app:///", MAIN_URL, SCREEN);
     sources.background_entry = Some(BACKGROUND_URL.to_owned());
     let lazy_requests = Arc::new(AtomicUsize::new(0));
     let counting = Arc::clone(&lazy_requests);

@@ -97,8 +97,9 @@ response URLs, then calls `BobcatRenderer::load(entry_url, style_sheet_urls)`.
 Core reads them through `ResourceFetcher`, validates UTF-8 strictly, and uses
 the entry's final URL as the ESM entry specifier; it never receives a bundle
 decoder. That 16 MiB bound is browser-embedder policy and crosses no part of the
-resource protocol. The load also makes the entry URL the base a relative
-`url(...)` in the page's CSS resolves against.
+resource protocol. The load also makes the entry URL the view's base URL and
+the fetcher's, the base a relative `url(...)` in the page's CSS resolves
+against.
 
 Everything else a page names — its images — the resource system fetches
 itself, in Rust, through the same Worker `fetch` (so the same origin, CORS,
@@ -152,6 +153,11 @@ The UI facade resolves relative script, stylesheet, and Lynx XML URLs against
 the embedding document's `document.baseURI` before crossing the Worker boundary.
 The Render Worker accepts only absolute URLs: resolving there against
 `self.location` would incorrectly use the npm package/Worker URL as the base.
+`load` names the entry URL as the view's `ViewSources::base_url`, and
+`load_sources` parses `sources.base_url` — the input URL for `loadTemplate`
+and `loadZip` — before it releases the previous page and gives the result to
+the resource system's `set_base_url`, so the view and its fetcher resolve
+against one base.
 
 The browser names no script engine at all. Core creates its realm inside the
 Lynx main Worker, so the realm remains owner-thread-bound and uses Bobcat's

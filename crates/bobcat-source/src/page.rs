@@ -455,6 +455,11 @@ impl PageSource {
     /// input carried, if any, its entry MTS module, and any raw BTS module,
     /// reporting `screen` as its `SystemInfo`.
     ///
+    /// The view's base URL is the input URL, the base an embedder gives its
+    /// fetcher for this input, so the view and the fetcher resolve a
+    /// container's URL alike. The entries are already absolute URLs, which
+    /// resolve to themselves.
+    ///
     /// The screen is the host's to name, since no input carries one: the
     /// monitor or browser screen it measured, or
     /// [`ScreenMetrics::for_viewport`] of its capture size where it has none.
@@ -473,7 +478,11 @@ impl PageSource {
                 .map(Url::to_string)
                 .into_iter()
                 .collect(),
-            ..ViewSources::new(self.script_url.to_string(), screen)
+            ..ViewSources::new(
+                self.input_url.to_string(),
+                self.script_url.to_string(),
+                screen,
+            )
         }
     }
 
@@ -945,6 +954,7 @@ mod tests {
             }
         );
         let sources = page.view_sources(SCREEN);
+        assert_eq!(sources.base_url, page.input_url().as_str());
         assert_eq!(sources.config, page.config());
         assert_eq!(sources.entry, "bobcat-memory://bundle/lepus-root.js");
         assert!(sources.background_entry.is_none());
@@ -1343,6 +1353,7 @@ mod tests {
             Some((_, source)) if source.is_empty()
         ));
         let sources = page.view_sources(SCREEN);
+        assert_eq!(sources.base_url, page.input_url().as_str());
         assert_eq!(sources.config, page.config());
         assert_eq!(sources.entry, "bobcat-memory://lynx-xml/main-thread.js");
         assert_eq!(

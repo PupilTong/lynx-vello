@@ -257,6 +257,7 @@ impl TestViewSpec {
         let sources = ViewSources {
             style_sheets: sheets.iter().map(|(url, _)| url.clone()).collect(),
             ..ViewSources::new(
+                "app:///",
                 ENTRY,
                 crate::ScreenMetrics::for_viewport(width, height, 1.0),
             )

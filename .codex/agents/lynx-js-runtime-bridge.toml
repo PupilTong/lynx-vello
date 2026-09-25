@@ -86,7 +86,10 @@ Landed and not to be regressed:
   served outside a job: opening its realm is the view's first job, so a burst
   that arrived earlier is queued behind it, and a `BeginFrame` acknowledgement
   waits out whatever job of the group is parked. Boot parks for its entry
-  not at all: it imports the entry by its URL, a task of the view completes
+  not at all: it imports the entry by its URL (`create_lynx_view` resolved
+  it, and the BTS entry, against the required `ViewSources::base_url` by URL
+  rules before any request; a failure is the construction error
+  `EngineError::InvalidUrl`), a task of the view completes
   that module from the pre-issued answer (with the entry preamble prepended
   and the response URL as its `import.meta.url`), the entry's own request
   never reaches the fetcher, that task names the entry (`__BobcatInitEntry`

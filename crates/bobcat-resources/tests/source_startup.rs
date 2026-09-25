@@ -128,7 +128,7 @@ async fn text_and_preparsed_sheets_keep_cascade_order() {
         &resources,
         ViewSources {
             style_sheets: vec!["first.css".into(), "second.css".into()],
-            ..ViewSources::new("app:///main.js", SCREEN)
+            ..ViewSources::new("app:///", "app:///main.js", SCREEN)
         },
     )
     .await;
@@ -162,10 +162,10 @@ async fn source_utf8_errors_keep_the_resolved_url() {
         let sources = if stylesheet {
             ViewSources {
                 style_sheets: vec!["invalid.bin".into()],
-                ..ViewSources::new("app:///main.js", SCREEN)
+                ..ViewSources::new("app:///", "app:///main.js", SCREEN)
             }
         } else {
-            ViewSources::new("app:///invalid.bin", SCREEN)
+            ViewSources::new("app:///", "app:///invalid.bin", SCREEN)
         };
         let (mut view, _painter) = view(&group, &resources, sources).await;
         let error = boot(&mut view, &receiver).unwrap_err();
@@ -188,7 +188,7 @@ async fn missing_source_fails_without_blocking_sibling_startup() {
     let (mut failed, _failed_painter) = view(
         &group,
         &resources,
-        ViewSources::new("app:///missing.js", SCREEN),
+        ViewSources::new("app:///", "app:///missing.js", SCREEN),
     )
     .await;
     // `app:` is a plausible scheme that nothing registered and no transport
@@ -207,7 +207,7 @@ async fn missing_source_fails_without_blocking_sibling_startup() {
     let (mut sibling, mut sibling_painter) = view(
         &group,
         &resources,
-        ViewSources::new("app:///main.js", SCREEN),
+        ViewSources::new("app:///", "app:///main.js", SCREEN),
     )
     .await;
     boot(&mut sibling, &receiver).unwrap();
@@ -219,10 +219,11 @@ async fn missing_source_fails_without_blocking_sibling_startup() {
 /// names one with `set_base_url` after the system is already built. A source
 /// specifier resolves against that base and not the one the config carried.
 ///
-/// The relative source is a stylesheet: the entry itself is imported by the
-/// URL the view names it by, which is absolute. A sheet that did not resolve
-/// against the new base would fail the view, and the blue it paints is how
-/// this test sees that it mounted.
+/// The relative source is a stylesheet: the entry is resolved against the
+/// view's own base, which this embedder names the same, while a relative
+/// stylesheet is resolved by the fetcher against its base. A sheet that did
+/// not resolve against the new base would fail the view, and the blue it
+/// paints is how this test sees that it mounted.
 #[tokio::test]
 async fn a_base_named_after_construction_resolves_a_relative_source() {
     let (group, resources, receiver) = setup().await;
@@ -258,7 +259,7 @@ async fn a_base_named_after_construction_resolves_a_relative_source() {
         &resources,
         ViewSources {
             style_sheets: vec!["style.css".into()],
-            ..ViewSources::new("app:///nested/main.js", SCREEN)
+            ..ViewSources::new("app:///nested/", "app:///nested/main.js", SCREEN)
         },
     )
     .await;
@@ -325,13 +326,13 @@ async fn workers_load_relative_to_entry_and_route_back_to_their_own_views() {
     let (mut first, mut first_painter) = view(
         &group,
         &first_resources,
-        ViewSources::new("app:///nested/first.js", SCREEN),
+        ViewSources::new("app:///", "app:///nested/first.js", SCREEN),
     )
     .await;
     let (mut second, mut second_painter) = view(
         &group,
         &second_resources,
-        ViewSources::new("app:///nested/second.js", SCREEN),
+        ViewSources::new("app:///", "app:///nested/second.js", SCREEN),
     )
     .await;
     boot(&mut first, &receiver).unwrap();
@@ -478,7 +479,7 @@ async fn dynamic_import_loads_relative_static_dependencies_and_waits_for_top_lev
     let (mut view, mut painter) = view(
         &group,
         &resources,
-        ViewSources::new("app:///page/main.js", SCREEN),
+        ViewSources::new("app:///", "app:///page/main.js", SCREEN),
     )
     .await;
     boot(&mut view, &receiver).unwrap();
@@ -520,7 +521,7 @@ async fn import_failures_reject_promises_and_only_uncaught_startup_failures_end_
         let (mut view, _painter) = view(
             &group,
             &resources,
-            ViewSources::new("app:///main.js", SCREEN),
+            ViewSources::new("app:///", "app:///main.js", SCREEN),
         )
         .await;
         let outcome = boot(&mut view, &receiver);
@@ -559,13 +560,13 @@ async fn sibling_views_can_import_the_same_urls_with_independent_module_instance
     let (mut first, _first_painter) = view(
         &group,
         &resources,
-        ViewSources::new("app:///main.js", SCREEN),
+        ViewSources::new("app:///", "app:///main.js", SCREEN),
     )
     .await;
     let (mut second, _second_painter) = view(
         &group,
         &resources,
-        ViewSources::new("app:///main.js", SCREEN),
+        ViewSources::new("app:///", "app:///main.js", SCREEN),
     )
     .await;
     let mut finished = 0;
@@ -615,7 +616,7 @@ async fn imports_started_after_boot_can_commit_a_later_frame() {
     let (mut view, mut painter) = view(
         &group,
         &resources,
-        ViewSources::new("app:///main.js", SCREEN),
+        ViewSources::new("app:///", "app:///main.js", SCREEN),
     )
     .await;
     boot(&mut view, &receiver).unwrap();

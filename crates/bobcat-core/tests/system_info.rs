@@ -93,17 +93,24 @@ impl ResourceFetcher for Entries {
     }
 }
 
-/// Boots one view at `device_pixel_ratio` reporting `screen`, and returns
-/// what its two realms printed.
+/// Boots one view at `device_pixel_ratio` reporting `screen`, over the
+/// entry `main` and the BTS entry `background` named against `base`, and
+/// returns what its two realms printed.
 ///
 /// The painter is not optional: both lines are pumped out past boot's flush,
 /// and an unbound view never gets there.
-async fn printed(device_pixel_ratio: f32, screen: ScreenMetrics) -> (String, String) {
+async fn printed(
+    device_pixel_ratio: f32,
+    screen: ScreenMetrics,
+    base: &str,
+    main: &str,
+    background: &str,
+) -> (String, String) {
     let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Sequential)
         .await
         .expect("the group starts");
-    let mut sources = ViewSources::new(MAIN_URL, screen);
-    sources.background_entry = Some(BACKGROUND_URL.to_owned());
+    let mut sources = ViewSources::new(base, main, screen);
+    sources.background_entry = Some(background.to_owned());
     let mut view = group
         .create_lynx_view(
             VIEW_WIDTH,
@@ -163,6 +170,9 @@ async fn both_realms_report_the_screen_the_embedder_measured() {
             pixel_width: 1170.0,
             pixel_height: 2532.0,
         },
+        "app:///",
+        MAIN_URL,
+        BACKGROUND_URL,
     )
     .await;
     assert_eq!(main_thread, "3 1170 2532");
@@ -174,8 +184,29 @@ async fn a_host_with_no_screen_reports_its_viewport_in_physical_pixels() {
     let (main_thread, background) = printed(
         2.0,
         ScreenMetrics::for_viewport(VIEW_WIDTH, VIEW_HEIGHT, 2.0),
+        "app:///",
+        MAIN_URL,
+        BACKGROUND_URL,
     )
     .await;
     assert_eq!(main_thread, "2 64 48");
     assert_eq!(background, "2 64 48");
+}
+
+/// The view resolves both entries against its base before either is
+/// requested. [`Entries`] answers only `app:///main.js` and
+/// `app:///background.js`, so both realms printing is what shows that
+/// neither request reached the fetcher as the relative string.
+#[tokio::test]
+async fn relative_entries_resolve_against_the_view_base() {
+    let (main_thread, background) = printed(
+        1.0,
+        ScreenMetrics::for_viewport(VIEW_WIDTH, VIEW_HEIGHT, 1.0),
+        "app:///",
+        "main.js",
+        "./background.js",
+    )
+    .await;
+    assert_eq!(main_thread, "1 32 24");
+    assert_eq!(background, "1 32 24");
 }

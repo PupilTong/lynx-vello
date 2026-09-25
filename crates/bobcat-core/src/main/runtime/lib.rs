@@ -275,12 +275,12 @@ pub(crate) struct RealmStartup {
     /// The screen the realm's `SystemInfo` reports, as the embedder named it
     /// in [`ViewSources::screen`](crate::ViewSources::screen).
     pub(crate) screen: ScreenMetrics,
-    /// The URL the view named its MTS entry by, as the embedder passed it in
-    /// [`ViewSources::entry`](crate::ViewSources::entry). Boot imports the
-    /// entry by this string, so it has to be an absolute URL: the module
-    /// normalizer refuses a bare name, and that refusal rejects boot's import.
+    /// The view's MTS entry, [`ViewSources::entry`](crate::ViewSources::entry)
+    /// as `create_lynx_view` resolved it: always an absolute URL, in its
+    /// WHATWG serialization. Boot imports the entry by this string.
     pub(crate) entry: String,
-    /// The BTS entry `bobcat:bts` imports, if the view named one.
+    /// The BTS entry `bobcat:bts` imports, if the view named one: always an
+    /// absolute URL `create_lynx_view` resolved, like [`Self::entry`].
     pub(crate) background_entry: Option<String>,
     /// The host's processor name, page data and global props, as the strings
     /// it passed in. `bobcat:runtime` parses the data and props as JSON and
@@ -1445,8 +1445,11 @@ await Promise.resolve().then(() => __FlushElementTree());
 
     /// The name boot's `import` of the entry asks the realm for: the entry's
     /// URL, normalized the way the module loader normalizes a specifier
-    /// imported from `bobcat:boot`. An absolute URL is its own serialization;
-    /// anything else is refused with the loader's own message, which is also
+    /// imported from `bobcat:boot`. For this entry the normalization is the
+    /// identity: `create_lynx_view` already resolved it to an absolute URL's
+    /// serialization, which the loader serializes to itself. A name that is
+    /// not an absolute URL, which only a seam that skips `create_lynx_view`
+    /// can put here, is refused with the loader's own message, which is also
     /// what rejects boot's `import`.
     pub(crate) fn entry_module_name(&self) -> Result<String, String> {
         super::quickjs::normalize_module_url(BOOT_MODULE_SPECIFIER, &self.entry)

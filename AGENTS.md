@@ -228,13 +228,17 @@ facades plus the protocol-only, host-injected `ResourceFetcher`, draw-target,
 OS-input and lifecycle-wakeup capabilities. The script engine is deliberately
 not one of them: core owns its `QuickJS` realm, and an embedder sees only the
 sanitized `script::ScriptError`. A view is built from one `ViewSources` —
-`PageConfig`, owned font containers, an optional default font family, author
-stylesheet URLs, the entry MTS module URL, optional
+the required `base_url` its entry and BTS entry resolve against by URL rules
+(inside `create_lynx_view`, before any request; one that does not resolve is
+the construction error `EngineError::InvalidUrl`, and an embedder gives its
+fetcher the same base), `PageConfig`, owned font containers, an optional
+default font family, author stylesheet URLs, the entry MTS module URL
+(relative allowed), optional
 `init_data` and `global_props` JSON text only the realm parses, and the
 required `screen` metrics `SystemInfo` reports
-(`ViewSources::new(entry, screen)`; a host with no screen — a headless or
-offscreen capture — names `ScreenMetrics::for_viewport` of its capture size
-explicitly) — plus a builder
+(`ViewSources::new(base_url, entry, screen)`; a host with no screen — a
+headless or offscreen capture — names `ScreenMetrics::for_viewport` of its
+capture size explicitly) — plus a builder
 turning the view's `ImageReports` into its `ResourceFetcher`; both go to
 `LynxGroup::create_lynx_view` with device metrics.
 
@@ -743,8 +747,8 @@ JavaScript behind it.
 
 Main opens the realm and evaluates `bobcat:boot` as the view's first job,
 before anything has been fetched: its first statement creates the document,
-and it then imports the entry by the URL the view named it by (an absolute
-URL: the module normalizer refuses a bare name, which fails the boot). Nothing
+and it then imports the entry by the URL `create_lynx_view` resolved against
+`ViewSources::base_url`, the same URL the fetcher was asked for. Nothing
 parks for the entry's answer: it is a task of the view that enters the realm
 when it arrives, queued behind `open_realm`. The
 entry's task (`load_entry`) completes that module from the pre-issued answer,

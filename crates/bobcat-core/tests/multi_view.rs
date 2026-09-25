@@ -92,7 +92,7 @@ fn fetcher(entry_url: &str, color: &str) -> Rc<FetcherDouble> {
 fn sources(entry_url: &str) -> ViewSources {
     ViewSources {
         style_sheets: vec![STYLE_URL.to_owned()],
-        ..ViewSources::new(entry_url, SCREEN)
+        ..ViewSources::new("app:///", entry_url, SCREEN)
     }
 }
 
