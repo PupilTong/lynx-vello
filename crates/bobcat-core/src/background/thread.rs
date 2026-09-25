@@ -23,7 +23,11 @@
 //! `close()` it may have called, the root module finishing, the imports and
 //! futures it left waiting, the next deadline, and the checkpoint generation
 //! as of that entry. What a worker adds to that epilogue is its
-//! [`RealmOwner`] impl.
+//! [`RealmOwner`] impl. What a failure in a worker's realm is reported as —
+//! `Errored`, or a `Failed` that ends the worker — is the worker table in
+//! [`policy`], read by the scene the failure happened in, and every report
+//! here goes through [`policy::report`]; a panic is that table's Panic row,
+//! whether the worker's own owner saw it or the thread did.
 //!
 //! A worker's tasks, the token that ends them and the latch this thread reads
 //! are one [`Lifetime`], the same helper a view on `bobcat-main` is built
@@ -44,7 +48,6 @@
 //! - one [`serve_clock`] per live worker realm, waiting on its deadline, the re-arm that moves it,
 //!   and a sibling's checkpoint.
 
-use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::panic::AssertUnwindSafe;
 use std::rc::Rc;
@@ -66,10 +69,11 @@ use crate::link::{HostOutbox, SourceAnswer};
 use crate::main::quickjs::{
     ScriptRuntime, SharedRuntime, mark_checkpoint_later, normalize_module_url,
 };
-use crate::realm::owner::{self, RealmOwner, Scene};
-use crate::realm::{self, RealmCore, context_of};
+use crate::realm::owner::{self, RealmOwner};
+use crate::realm::policy::{self, Row, Scene};
+use crate::realm::{self, RealmCore};
 use crate::script::ScriptError;
-use crate::threads::{panicked, platform_script_error};
+use crate::threads::platform_script_error;
 use crate::view::ScriptSource;
 
 /// Who each worker task reports to: its worker's key and the creating view's
@@ -134,11 +138,11 @@ fn serve(
         let trapped = Arc::clone(trapped);
         let reporters = Rc::clone(&reporters);
         crate::threads::add_script_panic_reporter(Box::new(move |detail| {
-            report_thread_trap(
-                &trapped,
-                &reporters,
-                &platform_script_error(format!("the worker thread {detail}")),
-            );
+            report_thread_trap(&trapped, &reporters, &|| {
+                (policy::worker_panic().event)(platform_script_error(format!(
+                    "the worker thread {detail}"
+                )))
+            });
         }));
     }
     let thread = JsThread::new();
@@ -151,11 +155,9 @@ fn serve(
         ));
     }));
     if let Err(payload) = served {
-        report_thread_trap(
-            trapped,
-            &reporters,
-            &panicked("the worker thread panicked", payload.as_ref()),
-        );
+        report_thread_trap(trapped, &reporters, &|| {
+            policy::worker_panic().event_for_panic(payload.as_ref())
+        });
         std::panic::resume_unwind(payload);
     }
     drop(thread);
@@ -227,17 +229,19 @@ fn finish_worker_task(
         }
     };
     if let Some((reporter, error)) = trapped {
-        let error = panicked("the worker thread panicked", error.into_panic().as_ref());
         let _ = reporter.events.send(WorkerEvent {
             key: reporter.key,
-            payload: WorkerPayload::Failed(error),
+            payload: policy::worker_panic().event_for_panic(error.into_panic().as_ref()),
         });
     }
     mark_checkpoint_later(js, thread);
 }
 
 /// The whole thread is over: the flag `bobcat-main` reads before each `Start`
-/// is set, and the creator of every worker still live on it hears `Failed`.
+/// is set, and the creator of every worker still live on it hears `Failed`,
+/// one that `failed` builds per worker with the worker table's Panic row —
+/// over the panic's payload natively, and over the panic hook's own detail on
+/// wasm.
 ///
 /// The flag goes first, so a `Worker` constructed after any of these reports
 /// fails at once. `try_borrow`, because on wasm this runs from the panic hook
@@ -250,7 +254,11 @@ fn finish_worker_task(
 /// cancelled by the trap itself before this runs: on wasm this runs at the
 /// panic, and natively the worker tasks, whose unwind guards cancel their
 /// tokens, are dropped only after this report.
-fn report_thread_trap(trapped: &AtomicBool, reporters: &Reporters, error: &ScriptError) {
+fn report_thread_trap(
+    trapped: &AtomicBool,
+    reporters: &Reporters,
+    failed: &dyn Fn() -> WorkerPayload,
+) {
     trapped.store(true, Ordering::Release);
     let Ok(reporters) = reporters.try_borrow() else {
         return;
@@ -261,7 +269,7 @@ fn report_thread_trap(trapped: &AtomicBool, reporters: &Reporters, error: &Scrip
         }
         let _ = reporter.events.send(WorkerEvent {
             key: reporter.key,
-            payload: WorkerPayload::Failed(error.clone()),
+            payload: failed(),
         });
     }
 }
@@ -437,7 +445,7 @@ impl Worker {
                             // queue, and what it leaves there is this realm's — it
                             // waits for this worker rather than reaching the next
                             // realm to be entered on this runtime.
-                            Self::report(self, Scene::Boot, error);
+                            policy::report(self, Scene::Boot, error);
                         }
                         // Both under the borrow the root module's load ran
                         // under, so a sibling's bump between this boot and
@@ -466,7 +474,7 @@ impl Worker {
             // The runtime never came up or the realm could not be built: the
             // worker is over and nothing of it will ever run.
             Err(error) => {
-                owner::terminal(self, WorkerPayload::Failed(error));
+                policy::report(self, Scene::Open, error);
                 None
             }
         }
@@ -559,22 +567,11 @@ impl RealmOwner for Worker {
         });
     }
 
-    /// A worker whose realm or script could not be made ready is over, which
-    /// is `Failed`. Anything its realm threw after that is `Errored`: HTML
-    /// reports an uncaught exception at the worker and then at its parent
-    /// and leaves both running.
-    fn report(worker: &Rc<Self>, scene: Scene, error: ScriptError) {
-        let context = match scene {
-            Scene::Open => {
-                owner::terminal(worker, WorkerPayload::Failed(error));
-                return;
-            }
-            Scene::Boot => "running the worker's script",
-            Scene::Module => "loading an imported worker module",
-            Scene::Future => "settling a worker's future",
-            Scene::Timer => "running a worker's timer callback",
-        };
-        worker.send(WorkerPayload::Errored(context_of(context, error)));
+    /// The worker table: a worker whose realm or script could not be made
+    /// ready is over, which is `Failed`, and anything its realm threw after
+    /// that is `Errored`.
+    fn row(scene: Scene) -> Row<WorkerPayload> {
+        policy::worker(scene)
     }
 
     /// A panic is a `Failed`: a worker nothing will be heard from again.
@@ -584,8 +581,8 @@ impl RealmOwner for Worker {
     /// realm drops it if it has already delivered that first end, though:
     /// delivering a worker's end removes the key's source, and a key without
     /// a source is reported to no one.
-    fn panic_event(payload: &(dyn Any + Send)) -> WorkerPayload {
-        WorkerPayload::Failed(panicked("the worker thread panicked", payload))
+    fn panic_row() -> Row<WorkerPayload> {
+        policy::worker_panic()
     }
 
     /// Every timer this realm armed that has come due — none once the script
@@ -706,12 +703,7 @@ fn deliver_vsync(worker: &Rc<Worker>, milliseconds: f64) {
             "__BobcatBeginFrame",
             &[HostArgument::Number(milliseconds)],
         ) {
-            report(
-                &reporting.events,
-                reporting.key,
-                "running animation callbacks",
-                error,
-            );
+            policy::report(&reporting, Scene::Frame, error);
         }
     }));
 }
@@ -729,12 +721,7 @@ fn deliver_module_callback(worker: &Rc<Worker>, call: u64, index: u32, arguments
             arguments.as_deref(),
         );
         if let Err(error) = delivered {
-            report(
-                &reporting.events,
-                reporting.key,
-                "running a native module callback",
-                error,
-            );
+            policy::report(&reporting, Scene::HostCall, error);
         }
     }));
 }
@@ -816,7 +803,7 @@ async fn consume_messages(
                         let error = platform_script_error(format!(
                             "loading the worker's script: {error}"
                         ));
-                        owner::terminal(&worker, WorkerPayload::Failed(error));
+                        policy::report(&worker, Scene::Open, error);
                         return;
                     }
                 }
@@ -852,7 +839,7 @@ fn complete_script(worker: &Rc<Worker>, url: String, source: String) {
                 .engine
                 .complete_module(js, &completing.entry, Ok((&url, &source)));
         if let Err(error) = completed {
-            Worker::report(&completing, Scene::Boot, error);
+            policy::report(&completing, Scene::Boot, error);
         }
     }));
 }
@@ -861,14 +848,13 @@ fn complete_script(worker: &Rc<Worker>, url: String, source: String) {
 fn deliver_post(worker: &Rc<Worker>, data: HostValue) {
     let delivering = Rc::clone(worker);
     drop(owner::enter(worker, move |realm, js| {
-        deliver(&delivering.events, delivering.key, realm, js, &data);
+        deliver(&delivering, realm, js, &data);
     }));
 }
 
 /// Hands one message value to a realm that is up.
 fn deliver(
-    events: &mpsc::UnboundedSender<WorkerEvent>,
-    key: WorkerKey,
+    worker: &Rc<Worker>,
     realm: &mut WorkerRealm,
     js_runtime: &mut ScriptRuntime,
     data: &HostValue,
@@ -907,28 +893,8 @@ fn deliver(
         &[data.as_argument()],
     );
     if let Err(error) = delivered {
-        report(events, key, "delivering a message to a worker", error);
+        policy::report(worker, Scene::Listener, error);
     }
-}
-
-/// Reports what a worker's realm threw, without ending it, for what a worker
-/// runs outside the driver's own steps — a message, a frame, a native
-/// module's callback. The driver's own steps, and the worker's root module
-/// and script, report through [`RealmOwner::report`], which words `Errored`
-/// the same way.
-/// HTML reports an uncaught exception at the worker and then at its parent
-/// and leaves both running, which is exactly what `Errored` means and
-/// `Failed` does not.
-fn report(
-    events: &mpsc::UnboundedSender<WorkerEvent>,
-    key: WorkerKey,
-    context: &str,
-    error: ScriptError,
-) {
-    let _ = events.send(WorkerEvent {
-        key,
-        payload: WorkerPayload::Errored(context_of(context, error)),
-    });
 }
 
 #[cfg(test)]

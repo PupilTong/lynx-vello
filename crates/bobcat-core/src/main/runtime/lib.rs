@@ -46,7 +46,8 @@ use crate::esm::{
 };
 use crate::link::{InputEventPayload, ViewNotice, ViewOutbox};
 use crate::main::tree::{ImageOutcomes, LynxDocument, PageConfig, new_document};
-use crate::realm::{RealmCore, context_of, open_realm, string_argument};
+use crate::realm::policy::context_of;
+use crate::realm::{RealmCore, open_realm, string_argument};
 use crate::script::ScriptError;
 use crate::timers::run_due_timers;
 use crate::view::{LynxViewError, ScreenMetrics, ScriptSource, StartupSource, Viewport};

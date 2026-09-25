@@ -436,7 +436,8 @@ impl EngineEvent {
 
     /// The event a caught panic is reported as, whichever place caught it: a
     /// job or a task of the view's, the group thread reaping the view's task,
-    /// or the panic hook under `panic = "abort"`.
+    /// or the panic hook under `panic = "abort"`. Each of them reaches it
+    /// through the Panic row of the main-thread policy table.
     pub(crate) const fn from_panic(error: ScriptError) -> Self {
         Self::Panicked(error)
     }

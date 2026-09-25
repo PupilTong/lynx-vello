@@ -8,9 +8,9 @@
 //! why; and the owner's own task waits for that end, reclaims the tasks and
 //! releases the realm. [`RealmOwner`] is what each of the two supplies —
 //! where its runtime, its realm, its host and its [`Lifetime`] are, where
-//! what it reports goes and how, and what its role adds to an entry, to the
-//! epilogue, to the end and to the release — and the functions here are the
-//! rest, written once.
+//! what it reports goes, which of the tables in [`policy`] its failures are
+//! read from, and what its role adds to an entry, to the epilogue, to the end
+//! and to the release — and the functions here are the rest, written once.
 //!
 //! # Entries
 //!
@@ -47,7 +47,13 @@
 //! A panic that unwinds an owner's own task — `serve_view` or `serve_worker` —
 //! or a whole engine thread is not reported here: the `Rc` of the owner that
 //! task held is dropped with it, so the report is the thread's, read from the
-//! thread's own table of who to tell.
+//! thread's own table of who to tell. The event it sends is built by the
+//! same Panic row [`trapped`] reports through.
+//!
+//! Every failure the driver itself meets — a timer callback, a module load, a
+//! future's settle, and the root module's rejection where the owner's
+//! [`RealmOwner::BOOT_REJECTION`] names a scene — is reported through
+//! [`policy::report`], under the [`Scene`] it happened in.
 
 use std::any::Any;
 use std::cell::RefCell;
@@ -57,6 +63,7 @@ use std::rc::Rc;
 use tokio::sync::oneshot::error::RecvError;
 
 use super::RealmCore;
+use super::policy::{self, Row, Scene};
 use crate::future::HostFuture;
 use crate::lifetime::{EndOnUnwind, Lifetime, Settles, run_job};
 use crate::link::{HostOutbox, SourceAnswer};
@@ -66,26 +73,10 @@ use crate::script::ScriptError;
 use crate::threads::platform_script_error;
 use crate::view::LynxViewError;
 
-/// Where a failure the driver reports happened, which is what an owner's
-/// [`RealmOwner::report`] decides the report by.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Scene {
-    /// The realm, its entry or the engine's own startup code could not be
-    /// made ready.
-    Open,
-    /// The app's startup code threw.
-    Boot,
-    /// Completing a module an import was waiting for: [`load_module`].
-    Module,
-    /// Handing a future its outcome: [`settle_future`].
-    Future,
-    /// A timer callback, run by the [`epilogue`].
-    Timer,
-}
-
 /// What a realm-owning object supplies to the driver: where its runtime, its
-/// realm, its host and its lifetime are, where what it reports goes and how,
-/// and what its role adds to an entry, the epilogue, an end and a release.
+/// realm, its host and its lifetime are, where what it reports goes and which
+/// table decides it, and what its role adds to an entry, the epilogue, an end
+/// and a release.
 ///
 /// Implemented by the view's `Page` and the worker's `Worker`, which is every
 /// realm-owning object there is.
@@ -124,13 +115,14 @@ pub(crate) trait RealmOwner: Sized + 'static {
     /// Sends one report to where this owner's reports go.
     fn send(&self, event: Self::Event);
 
-    /// Reports one failure the driver met in `scene`: what it is reported
-    /// as, what it is prefixed with, and whether it ends the owner are the
-    /// role's.
-    fn report(owner: &Rc<Self>, scene: Scene, error: ScriptError);
+    /// This owner's realm kind's row for `scene`: what a failure there is
+    /// reported as, whether it ends the owner, and what it is prefixed with.
+    /// One of the tables in [`policy`], which [`policy::report`] reads.
+    fn row(scene: Scene) -> Row<Self::Event>;
 
-    /// What a panic of this owner's is reported as.
-    fn panic_event(payload: &(dyn Any + Send)) -> Self::Event;
+    /// This owner's realm kind's Panic row, which [`trapped`] reports
+    /// through.
+    fn panic_row() -> Row<Self::Event>;
 
     /// Runs every timer of `realm`'s that has come due, and answers with what
     /// their callbacks threw. The first thing the [`epilogue`] runs.
@@ -152,10 +144,10 @@ pub(crate) trait RealmOwner: Sized + 'static {
     fn on_booted(&self) {}
 
     /// The scene a rejection of the realm's root module is reported under,
-    /// and the context the [`epilogue`] names it by first, for a scene whose
-    /// report adds none of its own. `None` for a realm kind whose epilogue
-    /// reads the root module only to learn that it has settled, because the
-    /// entry the rejection happened in has already reported it.
+    /// and the context the [`epilogue`] names it by first, for a row that
+    /// adds none of its own. `None` for a realm kind whose epilogue reads the
+    /// root module only to learn that it has settled, because the entry the
+    /// rejection happened in has already reported it.
     const BOOT_REJECTION: Option<(Scene, Option<&'static str>)>;
 
     /// What this owner's role settles once the boot report is behind it.
@@ -241,7 +233,7 @@ pub(crate) fn terminal<O: RealmOwner>(owner: &Rc<O>, event: O::Event) {
 /// already reported why it ended and then traps still says so.
 pub(crate) fn trapped<O: RealmOwner>(owner: &Rc<O>, payload: &(dyn Any + Send)) {
     if owner.lifetime().report_panic() {
-        owner.send(O::panic_event(payload));
+        owner.send(O::panic_row().event_for_panic(payload));
     }
     end(owner);
 }
@@ -333,7 +325,7 @@ fn epilogue<O: RealmOwner>(owner: &Rc<O>, realm: &mut O::Realm, js: &mut ScriptR
     #[cfg(test)]
     lifetime.count_epilogue();
     for error in O::run_due_timers(realm, js) {
-        O::report(owner, Scene::Timer, error);
+        policy::report(owner, Scene::Timer, error);
     }
     O::after_timers(owner, realm);
     if lifetime.ended() {
@@ -350,10 +342,10 @@ fn epilogue<O: RealmOwner>(owner: &Rc<O>, realm: &mut O::Realm, js: &mut ScriptR
                 owner.mark_booted();
                 if let Some((scene, context)) = O::BOOT_REJECTION {
                     let error = match context {
-                        Some(context) => super::context_of(context, error),
+                        Some(context) => policy::context_of(context, error),
                         None => error,
                     };
-                    O::report(owner, scene, error);
+                    policy::report(owner, scene, error);
                 }
             }
         }
@@ -404,7 +396,7 @@ async fn load_module<O: RealmOwner>(owner: Rc<O>, url: String, answer: SourceAns
             .map(|(response, source)| (response.as_str(), source.as_str()))
             .map_err(String::as_str);
         if let Err(error) = O::core(realm).engine.complete_module(js, &url, loaded) {
-            O::report(&completing, Scene::Module, error);
+            policy::report(&completing, Scene::Module, error);
         }
     })
     .await;
@@ -421,7 +413,7 @@ async fn settle_future<O: RealmOwner>(owner: Rc<O>, id: u32, future: HostFuture)
     enter(&owner, move |realm, js| {
         let delivered = crate::future::deliver(&mut O::core(realm).engine, js, id, outcome);
         if let Err(error) = delivered {
-            O::report(&settling, Scene::Future, error);
+            policy::report(&settling, Scene::Future, error);
         }
     })
     .await;

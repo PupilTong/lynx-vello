@@ -75,7 +75,9 @@
 //! views and `serve_workers`'s workers, each with a side map naming who to
 //! report a trapped task to. Those are the *thread's* tasks rather than one
 //! realm's: nothing about them has an end signal, an entry boundary or an
-//! epilogue, so they stay where they are.
+//! epilogue, so they stay where they are. What such a report sends is still
+//! the realm kind's: the event is built by the Panic row of its table in
+//! [`crate::realm::policy`], the row an owner's own panic is reported through.
 
 use std::any::Any;
 use std::cell::{Cell, RefCell};

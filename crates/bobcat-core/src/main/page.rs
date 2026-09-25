@@ -51,11 +51,17 @@
 //! The epilogue's steps, and their order, are the driver's
 //! ([`crate::realm::owner`]). What the driver is told about a page is the
 //! page's [`RealmOwner`] impl: where the realm, the runtime and the host are,
-//! that its reports are engine events and which of them ends the view, the
-//! epilogue steps only a page has — the commit and the deliveries it posts,
-//! `ScriptFinished`, the `BeginFrame` acknowledgement, the `@font-face` loads —
-//! and the two things only a page owes — the `BeginFrame` acknowledgement at
-//! the end, and the JavaScript disposal before the release.
+//! that its reports are engine events, the epilogue steps only a page has —
+//! the commit and the deliveries it posts, `ScriptFinished`, the `BeginFrame`
+//! acknowledgement, the `@font-face` loads — and the two things only a page
+//! owes — the `BeginFrame` acknowledgement at the end, and the JavaScript
+//! disposal before the release.
+//!
+//! What a failure is reported as, and whether it ends the view, is the MTS
+//! table in [`policy`], read by the scene the failure happened in: every
+//! report here goes through [`policy::report`], except the disposal's, which
+//! is the table's Disposal row, and an entry the fetcher could not load, which
+//! is the Open row over the fetcher's own error.
 //!
 //! Nothing of this view's is served outside a job. [`Page::open_realm`] is the
 //! *first* job of every view, queued before any of those tasks is spawned, so
@@ -133,7 +139,6 @@
 //! on that same metrics watch. Those two waits inside boot's own flush are
 //! the only things boot waits on.
 
-use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::future::poll_fn;
 use std::rc::Rc;
@@ -149,11 +154,12 @@ use crate::background::WorkerEvent;
 use crate::clock::ClockInstant;
 use crate::lifetime::{Lifetime, Settles, run_job, serve_clock};
 use crate::link::{HostOutbox, ToMain, ViewOutbox};
-use crate::realm::owner::{self, RealmOwner, Scene};
-use crate::realm::{RealmCore, context_of};
+use crate::realm::RealmCore;
+use crate::realm::owner::{self, RealmOwner};
+use crate::realm::policy::{self, Row, Scene};
 use crate::resource::{LoadedSource, SourceRequest};
 use crate::script::ScriptError;
-use crate::threads::{panicked, platform_script_error};
+use crate::threads::platform_script_error;
 use crate::view::{
     EngineEvent, LynxViewError, StartupSource, StartupSources, ViewSources, Viewport,
 };
@@ -350,8 +356,7 @@ impl Page {
         drop(owner::enter(self, move |runtime, js| {
             page.image_outcomes_posted.set(false);
             for failure in runtime.dispatch_image_outcomes(js) {
-                page.outbox
-                    .engine_event(EngineEvent::ListenerFailed(failure.into_script_error()));
+                policy::report(&page, Scene::Listener, failure.into_script_error());
             }
         }));
     }
@@ -405,10 +410,13 @@ impl Page {
     ///
     /// A command whose script fails is reported and the burst goes on, boot
     /// finished or not: the failure is the app's, and the realm is still
-    /// there for the next command. A panic is the view's, as anywhere else in
-    /// an entry: [`run_job`] catches it and [`owner::trapped`] reports it.
+    /// there for the next command. What it is reported as is the MTS table's
+    /// row for the kind of command — a page update and a native module's
+    /// answer are host calls, an input event a listener's, a vsync a frame's.
+    /// A panic is the view's, as anywhere else in an entry: [`run_job`]
+    /// catches it and [`owner::trapped`] reports it.
     fn apply_command(
-        &self,
+        self: &Rc<Self>,
         runtime: &mut MainThreadRuntime,
         js: &mut ScriptRuntime,
         command: ToMain,
@@ -417,8 +425,7 @@ impl Page {
             ToMain::PageUpdate(update) => {
                 // All host lifecycle commands passed LynxView's MTS-boot gate.
                 if let Err(error) = runtime.apply_page_update(js, &update) {
-                    self.outbox
-                        .engine_event(EngineEvent::ScriptRunError(error.into_script_error()));
+                    policy::report(self, Scene::HostCall, error.into_script_error());
                 }
             }
             ToMain::DispatchEvent {
@@ -427,14 +434,12 @@ impl Page {
                 payload,
             } => {
                 if let Err(error) = runtime.dispatch_input_event(js, target, name, &payload) {
-                    self.outbox
-                        .engine_event(EngineEvent::ListenerFailed(error.into_script_error()));
+                    policy::report(self, Scene::Listener, error.into_script_error());
                 }
             }
             ToMain::Vsync(milliseconds) => {
                 if let Err(error) = runtime.vsync(js, milliseconds) {
-                    self.outbox
-                        .engine_event(EngineEvent::ScriptRunError(error.into_script_error()));
+                    policy::report(self, Scene::Frame, error.into_script_error());
                 }
             }
             ToMain::BeginFrame { now, seq } => {
@@ -451,8 +456,7 @@ impl Page {
                 if let Err(error) =
                     runtime.deliver_module_callback(js, call, index, arguments.as_deref())
                 {
-                    self.outbox
-                        .engine_event(EngineEvent::ScriptRunError(error.into_script_error()));
+                    policy::report(self, Scene::HostCall, error.into_script_error());
                 }
             }
             ToMain::ImageEvents(events) => runtime.apply_image_events(&events),
@@ -504,7 +508,7 @@ impl Page {
             match js.as_mut() {
                 // The runtime failed once, for every view that will ever
                 // attach to this group. Each hears the same reason.
-                Err(error) => Some(Err(LynxViewError::Script(error.clone()))),
+                Err(error) => Some(Err(error.clone())),
                 Ok(js) => self.build_realm(js, ingredients, startup),
             }
         };
@@ -512,7 +516,7 @@ impl Page {
             // Nobody is listening for this view any more, so there is nobody
             // to report to.
             None => owner::end(self),
-            Some(Err(error)) => owner::terminal(self, EngineEvent::StartupFailed(error)),
+            Some(Err(error)) => policy::report(self, Scene::Open, error),
             // The latch can have flipped while the entry was inside a
             // synchronous wait: a task ran during it and ended the view, and
             // the owner may already be past its reap and have taken the worker
@@ -556,7 +560,7 @@ impl Page {
                 mpsc::UnboundedReceiver<WorkerEvent>,
                 tokio::sync::watch::Receiver<u64>,
             ),
-            LynxViewError,
+            ScriptError,
         >,
     > {
         let (mut runtime, worker_events) = match MainThreadRuntime::new(
@@ -569,7 +573,7 @@ impl Page {
             startup,
         ) {
             Ok(opened) => opened,
-            Err(error) => return Some(Err(error.into_script_error().into())),
+            Err(error) => return Some(Err(error.into_script_error())),
         };
         if self.outbox.is_cancelled() {
             return None;
@@ -578,7 +582,7 @@ impl Page {
             if self.outbox.is_cancelled() {
                 return None;
             }
-            return Some(Err(error.into_script_error().into()));
+            return Some(Err(error.into_script_error()));
         }
         let checkpoints = js.checkpoints();
         self.lifetime.record_checkpoint(js.checkpoint_generation());
@@ -629,8 +633,7 @@ impl Page {
                 return Ok(());
             };
             if let Err(error) = delivered {
-                self.outbox
-                    .engine_event(EngineEvent::ListenerFailed(error.into_script_error()));
+                self.send(policy::main_thread_disposal().event_for(error.into_script_error()));
             }
             if finished? {
                 return Ok(());
@@ -749,27 +752,15 @@ impl RealmOwner for Page {
         self.outbox.engine_event(event);
     }
 
-    /// What could not be made ready — the realm, the entry, or the engine's
-    /// own boot code — fails the view's startup and ends it. Everything else
-    /// is the app's failure: reported, and the view goes on.
-    fn report(page: &Rc<Self>, scene: Scene, error: ScriptError) {
-        match scene {
-            Scene::Open => owner::terminal(page, EngineEvent::StartupFailed(error.into())),
-            Scene::Boot => page.send(EngineEvent::ScriptRunError(error)),
-            Scene::Module => page.send(EngineEvent::ScriptRunError(context_of(
-                "loading an imported module",
-                error,
-            ))),
-            Scene::Future => page.send(EngineEvent::ScriptRunError(context_of(
-                "settling a future",
-                error,
-            ))),
-            Scene::Timer => page.send(EngineEvent::TimerFailed(error)),
-        }
+    /// The MTS table: what could not be made ready fails the view's startup
+    /// and ends it, and everything else is the app's failure, reported while
+    /// the view goes on.
+    fn row(scene: Scene) -> Row<EngineEvent> {
+        policy::main_thread(scene)
     }
 
-    fn panic_event(payload: &(dyn Any + Send)) -> EngineEvent {
-        EngineEvent::from_panic(panicked("the Lynx main thread panicked", payload))
+    fn panic_row() -> Row<EngineEvent> {
+        policy::main_thread_panic()
     }
 
     /// The realm's own due timers, and the collection the removals they made
@@ -859,8 +850,7 @@ impl RealmOwner for Page {
         if let Some(mut events) = events
             && let Err(error) = page.dispose(&mut events).await
         {
-            page.outbox
-                .engine_event(EngineEvent::ListenerFailed(error.into_script_error()));
+            page.send(policy::main_thread_disposal().event_for(error.into_script_error()));
         }
     }
 }
@@ -1075,9 +1065,10 @@ async fn load_entry(page: Rc<Page>, entry: StartupSource) {
         match completed {
             Ok(Ok(())) => {}
             _ if completing.outbox.is_cancelled() => owner::end(&completing),
-            Ok(Err(error)) => completing
-                .outbox
-                .engine_event(EngineEvent::ScriptRunError(error.into_script_error())),
+            Ok(Err(error)) => policy::report(&completing, Scene::Boot, error.into_script_error()),
+            // The Open row, over an error that need not be a script's: a load
+            // the fetcher could not make is reported as the fetcher's own
+            // error, which `StartupFailed` carries as it is.
             Err(error) => owner::terminal(&completing, EngineEvent::StartupFailed(error)),
         }
     })
@@ -1173,9 +1164,7 @@ async fn consume_worker_events(page: Rc<Page>) {
         let delivering = Rc::clone(&page);
         owner::enter(&page, move |runtime, js| {
             if let Err(error) = runtime.dispatch_worker_event(js, key, payload) {
-                delivering
-                    .outbox
-                    .engine_event(EngineEvent::ListenerFailed(error.into_script_error()));
+                policy::report(&delivering, Scene::Listener, error.into_script_error());
             }
         })
         .await;
