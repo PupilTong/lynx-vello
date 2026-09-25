@@ -166,9 +166,12 @@ interface BobcatNative {
 }
 
 /**
- * The native functions a worker realm gets instead of the document. Its
- * `bobcat-internal:host` carries the timer pair and nothing else, because a
- * worker has no tree to mutate.
+ * The native functions a worker realm gets instead of the document, under
+ * `bobcat-internal:worker`. Its `bobcat-internal:host` carries only the
+ * members every realm is opened with — `requestScriptFrame`, the timer pair,
+ * the `Future` members, `fetchResource`, `resolveModuleUrl` and
+ * `loadModuleSync` — and none of the document members, because a worker has
+ * no tree to mutate.
  */
 interface BobcatWorkerNative {
   /**
@@ -194,8 +197,9 @@ interface BobcatWorkerNative {
    * host mints one single-shot callback per index, and each is answered — or
    * released unanswered — through `__BobcatNativeModuleCallback`.
    *
-   * A module no view of this group carries is not an error here: the call is
-   * dropped and its callbacks released.
+   * A module no view of this group carries is not an error here, and neither
+   * is a method its module did not declare: the call is dropped and its
+   * callbacks released.
    */
   invokeNativeModule(
     call: number,

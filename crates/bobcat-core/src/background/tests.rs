@@ -388,16 +388,47 @@ fn a_script_that_cannot_be_fetched_fails_its_worker_and_nothing_else() {
 
 /// A trap in the thread's own loop ends every worker on it at once, and no
 /// worker's own owner is left to say so: the thread tells the creator of each
-/// one `Failed` and sets the flag `bobcat-main` reads before a `Start`. The
-/// thread is over, so the group's drop still joins it.
+/// live one `Failed` and sets the flag `bobcat-main` reads before a `Start`.
+/// A worker that ended before the trap is not told again, even while its task
+/// has not been joined yet. The thread is over, so the group's drop still
+/// joins it.
 #[test]
 fn a_trapped_worker_thread_fails_every_live_worker() {
     let mut group = Group::new();
+    group.views.push(View::new());
     // One worker per view, each still waiting for its script.
     let first = group.construct(0, "");
     let second = group.construct(1, "");
+    // This one's boot job waits on a load until the test answers it, and no
+    // other job runs meanwhile.
+    let parked = group.construct(2, "");
+    group.answer(
+        parked,
+        "app:///parked.js",
+        "import { createRequire } from 'bobcat:module';
+createRequire(import.meta.url)('./held.cjs');",
+    );
+    let (url, held) = group.views[2].source();
+    // Ended by a `Terminate` its task reads during that wait. Its task is not
+    // joined before the trap: the job that reclaims its realm is queued
+    // behind the waiting one. Its boot task dropping the script's receiver is
+    // what shows it has ended.
+    let ended = group.construct(1, "");
+    group.terminate(ended);
+    let deadline = ClockInstant::now() + PATIENCE;
+    while !group.scripts[&ended].is_closed() {
+        assert!(
+            ClockInstant::now() < deadline,
+            "the terminated worker ended"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
     group.tell(WorkerCommand::Panic);
-    for (view, key) in [(0, first), (1, second)] {
+    held.complete(Ok(LoadedSource::Entry {
+        source: String::new(),
+        url,
+    }));
+    for (view, key) in [(0, first), (1, second), (2, parked)] {
         let event = group.next(view);
         assert_eq!(event.key, key);
         let WorkerPayload::Failed(error) = event.payload else {
@@ -410,10 +441,15 @@ fn a_trapped_worker_thread_fails_every_live_worker() {
         );
     }
     assert!(group.home.trapped().load(Ordering::Acquire));
-    // Exactly one each: once the thread has dropped every clone of a view's
-    // sender, nothing more can arrive on it.
-    for view in [0, 1] {
-        group.wait_for_workers_to_end(view, PATIENCE, "the trapped thread let go of the view");
+    // Exactly one each, and none for the worker that had ended: once the
+    // thread has dropped every clone of a view's sender, nothing more can
+    // arrive on it.
+    for view in [0, 1, 2] {
+        group.wait_for_workers_to_end(
+            view,
+            PATIENCE,
+            "the trapped thread dropped its clones of the view's event sender",
+        );
         assert!(group.views[view].incoming.try_recv().is_err());
     }
 }

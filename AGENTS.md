@@ -209,10 +209,14 @@ and bounce back) with `inertia.rs` running them over the scroll intents,
 `images.rs` image protocol and `graphics.rs` GPU target. `link.rs` is
 the one channel set a view spans its two threads with, `jobs.rs` the engine
 thread itself — its scheduler and its job queue — `lifetime.rs` the view's
-task set, `timers.rs` and `clock.rs`/`alarm.rs` the timer machinery both realm
-kinds share, `future.rs` the per-realm table the `Future` class is written
-over, `fetch.rs` the one member a realm fetches a URL through, `esm.rs` the
-preloaded module specifiers, `script.rs` the
+task set, `realm.rs` the one constructor every realm is opened with
+(`open_realm`, which installs the `RealmCore` members and then the host
+modules its caller passes), `timers.rs` and `clock.rs`/`alarm.rs` the timer
+machinery both realm kinds share, `future.rs` the per-realm table the `Future`
+class is written over, `fetch.rs` the one member a realm fetches a URL
+through, `esm.rs` the built-in module table both runtimes register
+(`BUILTIN_MODULES`), `build_runtime` that registers it, and the engine's
+module names and reserved prefixes, `script.rs` the
 sanitized error a failure is reported with, `style.rs` the
 `PreparsedStyleSheet` vocabulary, `resource.rs` the host protocol, and
 `threads.rs` the two engine threads.
@@ -1160,8 +1164,11 @@ its realm does not declare (an MTS realm importing `bobcat:worker` or
 (`bobcat:`, `bobcat-internal:`), so any other name under them — one no runtime
 registered and no realm declared — fails its `import` or `require` in the
 realm with a `ReferenceError` and is never sent to a fetcher.
-`bobcat-internal`, which has no colon, is registered on both runtimes, so it
-never reaches a fetcher either. `bobcat:bts` is the BTS Worker's engine entry,
+`bobcat-internal`, which has no colon, is registered on both runtimes, so an
+`import` of it always finds its source and never reaches a fetcher. The
+reserved prefixes do not cover it, though: a `require` of it in a realm that
+has not imported it still goes to the host's synchronous loader, which asks
+the fetcher for it. `bobcat:bts` is the BTS Worker's engine entry,
 `bobcat:boot` the MTS boot module's own specifier. A worker's own script
 is *inlined* into the one module its realm evaluates, as `ENTRY_PREAMBLE`
 carries the MTS entry, and never registered on the runtime. The Element module

@@ -109,15 +109,27 @@ modules.Echo.echo({ note: 'hello' }, function (method, echoed) {
 /// A background entry that first calls a method `Echo` never declared. Only
 /// the host member reaches it, because `NativeModules.Echo.nope` is
 /// `undefined`; the callback prints if anything ever answers it. The declared
-/// call after it is what the test waits for.
+/// call after it is what the test waits for, and its callback also prints
+/// whether the realm still holds the undeclared call's function.
+///
+/// That function is an arrow function created inside a function that has
+/// returned, so the realm's table of outstanding calls holds its only strong
+/// reference. An arrow function has no `prototype` object pointing back at
+/// it, so dropping that reference frees it at once, and `QuickJS` answers a
+/// `WeakRef` from the reference count: `deref()` is `undefined` from then on,
+/// with no collection needed.
 const UNDECLARED_ENTRY: &str = r"
 import { console, lynx } from 'bobcat:bts-runtime';
 import { callNativeModule } from 'bobcat:worker';
-callNativeModule('Echo', 'nope', [function () {
-  console.log('the undeclared call was answered');
-}]);
+let undeclared;
+(() => {
+  const callback = () => console.log('the undeclared call was answered');
+  undeclared = new WeakRef(callback);
+  callNativeModule('Echo', 'nope', [callback]);
+})();
 lynx.getApp().NativeModules.Echo.echo({ note: 'hello' }, function (method, echoed) {
-  console.log('echoed ' + method + ' ' + JSON.stringify(echoed));
+  console.log('echoed ' + method + ' ' + JSON.stringify(echoed)
+    + ', released ' + (undeclared.deref() === undefined));
 });
 ";
 
@@ -250,19 +262,27 @@ fn sources(background: &str) -> ViewSources {
 }
 
 /// Pumps `view` until the background realm prints, and answers with what it
-/// printed first. Any failure of a realm fails the test.
+/// printed first. Every event of the batch that message arrived in is still
+/// read, so a failure of a realm in that batch or an earlier one fails the
+/// test.
 fn first_console_message(view: &mut LynxView<Entries>) -> String {
     let deadline = Instant::now() + Duration::from_secs(30);
+    let mut first = None;
     loop {
         for event in view.pump() {
             match event {
-                EngineEvent::ConsoleMessage { message, .. } => return message,
+                EngineEvent::ConsoleMessage { message, .. } => {
+                    first.get_or_insert(message);
+                }
                 EngineEvent::StartupFailed(error) => panic!("boot failed: {error}"),
                 EngineEvent::WorkerFailed(error) | EngineEvent::ScriptRunError(error) => {
                     panic!("the realm failed: {}", error.message)
                 }
                 _ => {}
             }
+        }
+        if let Some(message) = first {
+            return message;
         }
         assert!(
             Instant::now() < deadline,
@@ -335,7 +355,8 @@ async fn two_modules_of_one_name_refuse_to_build_a_view() {
 /// A call naming a method its module never declared is dropped by `pump`
 /// rather than handed to the module, and dropping it releases its function in
 /// the realm uninvoked. The release reaches the realm ahead of the declared
-/// call's answer, so the first thing printed is that answer.
+/// call's answer, so the first thing printed is that answer, and by then the
+/// realm no longer holds the released function.
 #[tokio::test]
 async fn an_undeclared_method_never_reaches_its_module() {
     let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Sequential)
@@ -359,7 +380,7 @@ async fn an_undeclared_method_never_reaches_its_module() {
 
     assert_eq!(
         first_console_message(&mut view),
-        r#"echoed echo [{"note":"hello"},null]"#,
+        r#"echoed echo [{"note":"hello"},null], released true"#,
         "the undeclared call's function was released, not answered"
     );
     assert_eq!(

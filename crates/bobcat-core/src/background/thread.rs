@@ -67,10 +67,24 @@ use crate::script::ScriptError;
 use crate::threads::{panicked, platform_script_error};
 use crate::timers::run_due_timers;
 
-/// Who each live worker task reports to: its worker's key and the creating
-/// view's channel. Kept by [`serve_workers`], and read by
-/// [`report_thread_trap`] when the whole thread is over.
-type Reporters = Rc<RefCell<FxHashMap<task::Id, (WorkerKey, mpsc::UnboundedSender<WorkerEvent>)>>>;
+/// Who each worker task reports to: its worker's key and the creating view's
+/// channel, beside the worker's own token. Kept by [`serve_workers`] until it
+/// joins the task, and read by [`report_thread_trap`] when the whole thread is
+/// over.
+type Reporters = Rc<RefCell<FxHashMap<task::Id, Reporter>>>;
+
+/// One entry of [`Reporters`].
+///
+/// The token is the one [`Worker::end`] cancels, and every way a worker ends
+/// goes through that call: a `Failed` or `Closed` it reported, a panic of its
+/// own, a `Terminate`, its channel closing. A task stays in the table until it
+/// is joined, which is some time after its worker ended, so the token is what
+/// tells a worker that is over from a live one.
+struct Reporter {
+    key: WorkerKey,
+    events: mpsc::UnboundedSender<WorkerEvent>,
+    token: CancellationToken,
+}
 
 /// The thread's whole body.
 pub(super) fn run(commands: mpsc::UnboundedReceiver<WorkerCommand>, trapped: &Arc<AtomicBool>) {
@@ -152,7 +166,11 @@ async fn serve_workers(
         tokio::select! {
             command = commands.recv() => match command {
                 Some(WorkerCommand::Start(start)) => {
-                    let reporter = (start.key, start.events.clone());
+                    let reporter = Reporter {
+                        key: start.key,
+                        events: start.events.clone(),
+                        token: start.token.clone(),
+                    };
                     let handle = workers.spawn_local(
                         serve_worker(Rc::clone(&js), start, thread.clone()),
                     );
@@ -201,10 +219,10 @@ fn finish_worker_task(
                 .map(|reporter| (reporter, error))
         }
     };
-    if let Some(((key, events), error)) = trapped {
+    if let Some((reporter, error)) = trapped {
         let error = panicked("the worker thread panicked", error.into_panic().as_ref());
-        let _ = events.send(WorkerEvent {
-            key,
+        let _ = reporter.events.send(WorkerEvent {
+            key: reporter.key,
             payload: WorkerPayload::Failed(error),
         });
     }
@@ -212,20 +230,30 @@ fn finish_worker_task(
 }
 
 /// The whole thread is over: the flag `bobcat-main` reads before each `Start`
-/// is set, and the creator of every worker still on it hears `Failed`.
+/// is set, and the creator of every worker still live on it hears `Failed`.
 ///
 /// The flag goes first, so a `Worker` constructed after any of these reports
 /// fails at once. `try_borrow`, because on wasm this runs from the panic hook
 /// at the panic itself, which may be inside a borrow of the table; such a trap
 /// sets the flag and reports nothing else.
+///
+/// A worker whose token is already cancelled is skipped: it ended before the
+/// trap, and either it has already reported its end or its creator ended it
+/// (a `terminate()`, or the release of the creating realm). No token is
+/// cancelled by the trap itself before this runs: on wasm this runs at the
+/// panic, and natively the worker tasks, whose unwind guards cancel their
+/// tokens, are dropped only after this report.
 fn report_thread_trap(trapped: &AtomicBool, reporters: &Reporters, error: &ScriptError) {
     trapped.store(true, Ordering::Release);
     let Ok(reporters) = reporters.try_borrow() else {
         return;
     };
-    for (key, events) in reporters.values() {
-        let _ = events.send(WorkerEvent {
-            key: *key,
+    for reporter in reporters.values() {
+        if reporter.token.is_cancelled() {
+            continue;
+        }
+        let _ = reporter.events.send(WorkerEvent {
+            key: reporter.key,
             payload: WorkerPayload::Failed(error.clone()),
         });
     }
@@ -485,11 +513,11 @@ impl Worker {
                 // asked for. Each hears the same reason.
                 Err(error) => Err(error.clone()),
                 Ok(js) => {
-                    // This worker's own token rides in `sources`, so what a
-                    // `Future.wait` or a `require` parks on is cancelled with
-                    // the worker rather than with the view: a `Terminate` read
-                    // while the job is parked ends the wait, because that
-                    // token is the one [`Worker::end`] cancels.
+                    // This worker's own token is the one `sources` carries,
+                    // so what a `Future.wait` or a `require` parks on is
+                    // cancelled with the worker rather than with the view: a
+                    // `Terminate` read while the job is parked ends the wait,
+                    // because that token is the one [`Worker::end`] cancels.
                     realm::open_realm(
                         js,
                         &self.sources,
