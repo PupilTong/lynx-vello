@@ -138,11 +138,11 @@ consequential choice about whether to follow the spec or the quirk.
   σ ≈ 2.81 where ours is σ = 4. Edge mode: the spec's is transparent black,
   which Clay matches (`TileMode::kDecal`, same lines) but Android ≥ 31 does
   not — `RenderEffect.createBlurEffect(radius, radius, Shader.TileMode.CLAMP)`
-  in `platform/android/lynx_android/src/main/java/com/lynx/tasm/utils/BlurUtils.java:47-70`
+  in `platform/android/lynx_android/src/main/java/com/lynx/tasm/utils/BlurUtils.java:46-70`
   extends the edge pixels instead. Filter region: Android < 31 has no
   `RenderEffect` at all and falls back to a `ViewTreeObserver.OnPreDrawListener`
   that redraws the view into a bitmap of the view's own size
-  (`.../behavior/ui/view/AndroidView.java:61-76,436-449`), so its blur is
+  (`.../behavior/ui/view/AndroidView.java:61-76,436-456`), so its blur is
   clipped to the view box rather than overflowing it by 3σ. Grouping: iOS sets
   the `CIFilter` on the view's own layer *and separately* on the background,
   border and outline layers (`platform/darwin/ios/lynx/ui/LynxUI.m:3670-3676`
@@ -158,21 +158,33 @@ consequential choice about whether to follow the spec or the quirk.
   together with the approximations the offscreen implementation carries (one
   isotropic σ under a non-uniform scale or skew, an area budget past which a
   group renders *unblurred*, several `blur()` functions folded into one, and
-  blur ink past an ancestor's clip, below).
+  an ancestor's clip cutting the group's content before the blur, below).
 
-  **A blurred group's ink is not clipped by its ancestors' overflow clips.**
-  CSS clips a descendant's filter output by an ancestor's `overflow` clip, so
-  a blurred box inside an `overflow: hidden`/`clip` ancestor stops at the
-  ancestor's edge. Here a group scope opens *outside* the clips of its
-  ancestors: `open_scope` in `crates/dom/src/paint/walker.rs` pops the clip
-  stack to the enclosing scope's base before pushing the group's layers, and
-  the group's items re-push their whole clip chains inside it (which is what
-  gives a fixed descendant its escape and keeps vello's blend layers out of
-  clip layers). The content is therefore cut by the ancestor's clip before the
-  blur, and the up-to-3σ ink the blur spreads past that edge is not cut after
-  it. The difference is confined to a band of 3σ outside an ancestor's clip
-  edge; `opacity`, blend, `clip-path` and `mask` groups put no ink outside
-  their content and are unaffected.
+  **An ancestor's overflow clip also cuts a blurred group's content before
+  the blur** — open, not ruled. CSS clips a descendant's filter *output* by
+  an ancestor's `overflow` clip: the group renders unclipped by its
+  ancestors, is blurred, and the result is cut at the ancestor's edge —
+  css-overflow-3 clips everything a box's descendants paint, and
+  filter-effects-1 counts the blur's spread as the element's own ink
+  overflow. Both references agree, and so do we on the part
+  outside the edge: web-core gives every built-in element `overflow: clip`
+  (`lynx-stack/packages/web-platform/web-elements/src/elements/common-css/linear.css:143`)
+  and leaves the filter to Chrome, and Clay paints a clipping parent's
+  children inside its `PushClipRect` (`lynx/clay/ui/rendering/render_container.cc:41-63`),
+  around the child's `PushImageFilter`. Here a group scope opens *outside*
+  the clips of its ancestors: `open_scope` in
+  `crates/dom/src/paint/walker.rs` pops the clip stack to the enclosing
+  scope's base before pushing the group's layers, and the group's items
+  re-push their whole clip chains inside it (which is what gives a fixed
+  descendant its escape and keeps vello's blend layers out of clip layers).
+  The group's baked texture is then drawn inside the element's own clip
+  chain, which the entry carries as its `OutputClip`s
+  (`crates/dom/src/paint/compose.rs`), so nothing of the blur shows past an
+  ancestor's edge. What remains is the other half: the content was already
+  cut at that edge before the blur, so content lying just past it spreads no
+  ink back inside, and a box straddling the edge reads lighter within 3σ
+  inside it than in a browser. `opacity`, blend, `clip-path` and `mask`
+  groups move no pixels and are unaffected.
 - **`backdrop-filter`** — Lynx has the property nowhere: no handler, no
   property ID, no wire enum entry, and `web-core` therefore never emits one.
   We expose it anyway with filter-effects-2 W3C semantics (user decision,
@@ -231,11 +243,13 @@ consequential choice about whether to follow the spec or the quirk.
     `MAX_FILTER_AREA`), consumed in program order; an element past it draws no backdrop at all, so
     what shows is the **unfiltered** backdrop underneath. The same fallback covers a consumer with
     no GPU.
-  - **An ancestor's overflow clip does not clip the filtered backdrop** — open, not ruled. The
-    `PushBackdrop` op sits in the element's group scope before any of its items, and that scope
-    opens outside its ancestors' clips (the `filter: blur()` entry above), so the filtered backdrop
-    fills the element's whole border box, including the part an `overflow: hidden`/`clip`
-    ancestor hides.
+  - **Content inside a Backdrop Root is cut by the root's ancestors' clips before a nested
+    backdrop reads it**, the same half the `filter: blur()` entry above records. The filtered
+    backdrop itself is drawn inside the element's own clip chain, so an `overflow: hidden`/`clip`
+    ancestor hides it exactly as it hides the element's other painting; but a backdrop that reads
+    another backdrop drawn inside their shared root sees that one already cut at the clips outside
+    the root, where a browser would cut it only when the root is composited. Only a blur near such
+    an edge can tell.
 - **`background-clip: border-area`** — a genuine Lynx-only value with no CSS
   equivalent (distinct from `border-box`); needs its own behavioral
   spec-mining rather than mapping to any standard box.

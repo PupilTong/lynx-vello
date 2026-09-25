@@ -19,10 +19,10 @@
 //!   skew gets one sigma where the spec's filter region is anisotropic; `filter` is never exported
 //!   as a composite curve, so an animated blur recommits and re-bakes every tick; the bakes share a
 //!   device-pixel area budget and a group past it renders *unblurred* rather than not at all;
-//!   several `blur()` functions in one list fold into the first by variance addition; and the group
-//!   opens outside its ancestors' clips, so an ancestor's `overflow` clip cuts the content before
-//!   the blur but not the 3σ ink after it. Color filters use blend-composite approximations;
-//!   factors above one are only partially expressible.
+//!   several `blur()` functions in one list fold into the first by variance addition; and an
+//!   ancestor's `overflow` clip cuts the group's content before the blur as well as its texture
+//!   after it, so content just past the ancestor's edge spreads no ink back inside. Color filters
+//!   use blend-composite approximations; factors above one are only partially expressible.
 //! - `backdrop-filter` bakes the same way, over the prefix of the frame painted before the element
 //!   inside its nearest Backdrop Root, and carries every one of those approximations plus six of
 //!   its own: `will-change` roots are not honored, so a `backdrop-filter` element inside a
@@ -32,9 +32,9 @@
 //!   mirrors at its bbox rather than at its rotated border box — which is what Chromium does; items
 //!   the walk culled are absent from the crop of an element straddling the viewport; there is no
 //!   composite curve; an element past the shared area budget draws no backdrop at all, leaving the
-//!   *unfiltered* backdrop showing; and the element's scope opens outside its ancestors' clips, so
-//!   the filtered backdrop fills the part of its border box an ancestor's `overflow` clip hides.
-//!   `docs/tracking/deviations.md` records the set.
+//!   *unfiltered* backdrop showing; and a backdrop reading another backdrop inside their shared
+//!   root sees it already cut by the root's ancestors' clips. `docs/tracking/deviations.md` records
+//!   the set.
 //! - Perspective-projected items use the affine map agreeing with the true projection at three
 //!   border-box corners because Vello transforms are affine; hit testing remains projectively
 //!   exact.

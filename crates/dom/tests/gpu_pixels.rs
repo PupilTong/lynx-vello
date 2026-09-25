@@ -1186,6 +1186,177 @@ fn a_blurred_backdrop_over_a_scroller_re_bakes_with_it() {
     );
 }
 
+/// A page of 4 px black stripes on 8 px centres over white, which any blur
+/// visibly greys: a pixel reading pure black or pure white is one no filter
+/// reached. The page paints its own white, because a backdrop is made of what
+/// the scene drew, not of the render's base colour.
+fn striped_page(css: &str, width: f32, height: f32) -> Doc {
+    let mut doc = Doc::with_css_sized(
+        &format!(
+            "page {{ display: flex; position: relative; width: {width}px; height: {height}px;
+                     background-color: #ffffff; }}
+             .stripe {{ display: flex; position: absolute; top: 0px; width: 4px;
+                        height: {height}px; background-color: #000000; }}
+             {css}"
+        ),
+        width,
+        height,
+    );
+    let root = doc.root;
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a test page a few hundred px wide"
+    )]
+    for stripe in 0..(width as u32).div_ceil(8) {
+        let id = doc.el(root, "stripe");
+        doc.dom
+            .set_inline_style(id, &format!("left: {}px", stripe * 8));
+    }
+    doc
+}
+
+/// A `backdrop-filter` element hanging half out of an `overflow: hidden`
+/// card is cut at the card's edge: past it the page shows unfiltered, the
+/// same pixels a page without the element shows, and hit testing there
+/// answers the page rather than the element.
+///
+/// css-overflow-3 clips everything a box's descendants paint, and
+/// filter-effects-2 composites the filtered backdrop into the element's
+/// parent, inside that clip.
+#[test]
+fn a_backdrop_half_outside_an_overflow_hidden_card_stops_at_its_edge() {
+    use euclid::default::Point2D;
+
+    let mut gpu = headless("a_backdrop_half_outside_an_overflow_hidden_card_stops_at_its_edge");
+    // The card spans x 20..100; the frost spans x 60..140, so its right half
+    // lies outside the card.
+    let css = ".card { display: flex; position: absolute; left: 20px; top: 20px;
+                       width: 80px; height: 60px; overflow: hidden; }
+               .frost { display: flex; position: absolute; left: 40px; top: 10px;
+                        width: 80px; height: 40px; }
+               .frosted { backdrop-filter: blur(8px); }";
+    let read = |gpu: &mut dom::render::gpu::Headless, class: &str| {
+        let mut doc = striped_page(css, 200.0, 100.0);
+        let root = doc.root;
+        let card = doc.el(root, "card");
+        let frost = doc.el(card, class);
+        let pixels = render_filtered(gpu, &mut doc, 200);
+        (pixels, doc, frost)
+    };
+    let (plain, _, _) = read(&mut gpu, "frost");
+    let (frosted, doc, frost) = read(&mut gpu, "frost frosted");
+    let frame = doc
+        .dom
+        .committed_frame()
+        .expect("render leaves a committed frame retained");
+    assert!(
+        frame
+            .filter_groups()
+            .iter()
+            .any(dom::FilterGroup::is_backdrop),
+        "the frost records a backdrop",
+    );
+
+    // Inside the card the backdrop is filtered: x = 81 is a black stripe's
+    // centre, which the blur greys.
+    assert_eq!(
+        luma(&plain, 200, 81, 50),
+        0,
+        "the stripe is black unfiltered"
+    );
+    assert!(
+        luma(&frosted, 200, 81, 50) > 60,
+        "the frost greys the stripe inside the card ({})",
+        luma(&frosted, 200, 81, 50),
+    );
+    // Outside it the page shows exactly as it does with no frost at all.
+    for y in (32..=68).step_by(4) {
+        for x in 101..140 {
+            assert_eq!(
+                pixel(&frosted, 200, x, y),
+                pixel(&plain, 200, x, y),
+                "({x}, {y}) is past the card's clip and shows the page unfiltered",
+            );
+        }
+    }
+    assert!(
+        doc.dom
+            .elements_from_point(Point2D::new(80.0, 50.0))
+            .contains(&frost),
+        "the frost is hit inside the card",
+    );
+    assert!(
+        !doc.dom
+            .elements_from_point(Point2D::new(120.0, 50.0))
+            .contains(&frost),
+        "and not past its edge, where it paints nothing",
+    );
+}
+
+/// A blurred box whose right edge meets its `overflow: hidden` parent's shows
+/// its 3σ halo inside the parent and none past the parent's edge — and the
+/// same holds for that box inside a second, outer blurred group, whose own
+/// blur is the only ink allowed past the edge.
+#[test]
+fn a_blur_halo_stops_at_its_ancestors_overflow_clip() {
+    let mut gpu = headless("a_blur_halo_stops_at_its_ancestors_overflow_clip");
+    // The card spans x 16..80 and the box x 40..80, so the box's right edge
+    // is the card's: a 4 px blur spreads 12 px of halo past it, to x = 92.
+    let css = "page { display: flex; position: relative; width: 128px; height: 128px; }
+         .outer { display: flex; position: absolute; left: 0px; top: 0px;
+                  width: 128px; height: 128px; }
+         .card { display: flex; position: absolute; left: 16px; top: 16px;
+                 width: 64px; height: 96px; overflow: hidden; }
+         .box { display: flex; position: absolute; left: 24px; top: 24px;
+                width: 40px; height: 48px; background-color: #000000;
+                filter: blur(4px); }";
+    let read = |gpu: &mut dom::render::gpu::Headless, outer: &str| -> Vec<u8> {
+        let mut doc = Doc::with_css_sized(css, 128.0, 128.0);
+        let root = doc.root;
+        let outer_box = doc.el(root, "outer");
+        doc.dom.set_inline_style(outer_box, outer);
+        let card = doc.el(outer_box, "card");
+        doc.el(card, "box");
+        render_filtered(gpu, &mut doc, 128)
+    };
+
+    let single = read(&mut gpu, "");
+    assert!(
+        luma(&single, 128, 36, 64) < 250,
+        "the halo shows inside the card, left of the box ({})",
+        luma(&single, 128, 36, 64),
+    );
+    for x in 80..96 {
+        assert_eq!(
+            pixel(&single, 128, x, 64),
+            WHITE,
+            "no halo past the card's edge at x = {x}",
+        );
+    }
+
+    // The outer group blurs the card's clipped content by 1 px more, so ink
+    // may reach 3 px past the edge and no further.
+    let nested = read(&mut gpu, "filter: blur(1px)");
+    assert!(
+        luma(&nested, 128, 36, 64) < 250,
+        "the nested halo shows inside the card ({})",
+        luma(&nested, 128, 36, 64),
+    );
+    assert!(
+        luma(&nested, 128, 80, 64) < 250,
+        "the outer blur spreads the clipped halo past the card's edge ({})",
+        luma(&nested, 128, 80, 64),
+    );
+    for x in 84..96 {
+        assert_eq!(
+            pixel(&nested, 128, x, 64),
+            WHITE,
+            "only the outer blur's own 3σ passes the card's edge, not the box's halo (x = {x})",
+        );
+    }
+}
+
 /// A blurred child inside a blurred parent renders, and blurs more than
 /// either blur alone.
 ///
