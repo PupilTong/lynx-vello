@@ -1,4 +1,4 @@
-//! Opening a realm, on either engine thread.
+//! Opening a realm, on either engine thread, and driving it once it is open.
 //!
 //! Every realm is opened by [`open_realm`]: a view's MTS realm on
 //! `bobcat-main`, and the BTS and every plain `Worker` on `bobcat-workers`.
@@ -17,6 +17,12 @@
 //! realm: the key its display-frame demand is reported under — `None` for a
 //! view's MTS realm and the worker's own key for a worker realm — and the
 //! [`ScriptSource`] its diagnostics name.
+//!
+//! Once a realm is open, its owner — a view's page or a worker — drives it
+//! through [`owner`]: the tasks, the one job per entry, the end and the
+//! release are written there once for both threads.
+
+pub(crate) mod owner;
 
 use std::rc::Rc;
 use std::sync::Arc;

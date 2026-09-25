@@ -1928,6 +1928,99 @@ fn the_end_acknowledges_the_begin_frame_a_painter_is_blocked_on() {
     });
 }
 
+/// A fatal end acknowledges the pending `BeginFrame` as the embedder's
+/// release does: the acknowledgement is the end's, whichever path reached it.
+///
+/// First a listed sheet whose load failed before the realm opened. Boot's own
+/// `__FlushElementTree` settles it and throws, boot's module rejects, and the
+/// epilogue reports one `StartupFailed` and ends the view before its own
+/// acknowledgement step, so the acknowledgement seen here is the end's. Then a
+/// fresh view whose task panics: the `Panicked` ends it, and its end
+/// acknowledges too.
+#[test]
+fn a_fatal_end_acknowledges_the_begin_frame_a_painter_is_blocked_on() {
+    on_a_js_thread(|thread| async move {
+        let (context, _workers) = group(&thread);
+
+        let mut failing = OwnedPage::new(Rc::clone(&context));
+        let (completion, answer) = SourceCompletion::new(failing.token.clone());
+        completion.complete(Err(unanswered_source().into()));
+        let startup = RealmStartup {
+            sheets: vec![StartupSource {
+                url: "app:///a.css".to_owned(),
+                answer,
+            }],
+            entry: "app:///main.js".to_owned(),
+            ..RealmStartup::default()
+        };
+        crate::lifetime::run_job(&failing.page, move |page| {
+            page.open_realm(ingredients(), startup);
+            Some(())
+        })
+        .await;
+        failing.page.arm_begin_frame_for_test(9);
+        load_entry(
+            Rc::clone(&failing.page),
+            answered_entry(ONE_BOX, "app:///main.js", &failing.token),
+        )
+        .await;
+
+        let events = failing.events();
+        let failures: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                EngineEvent::StartupFailed(error) => Some(error),
+                _ => None,
+            })
+            .collect();
+        let [LynxViewError::Script(error)] = failures.as_slice() else {
+            panic!("one Script startup failure, got {events:?}");
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("loading stylesheet app:///a.css"),
+            "{message}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, EngineEvent::ScriptFinished)),
+            "boot never finished: {events:?}"
+        );
+        assert_eq!(
+            failing.view.published.begin_frame_serviced(),
+            9,
+            "the startup failure's end acknowledged the pending BeginFrame"
+        );
+        assert!(
+            failing.page.armed_deadline().is_none(),
+            "the end left no deadline armed"
+        );
+
+        let mut trapping = OwnedPage::new(context);
+        trapping.page.arm_begin_frame_for_test(12);
+        trapping
+            .page
+            .spawn(async { panic!("a task of the view trapped") });
+        trapping.page.run_owner().await;
+
+        let events = trapping.events();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, EngineEvent::Panicked(_)))
+                .count(),
+            1,
+            "the panic is reported once: {events:?}"
+        );
+        assert_eq!(
+            trapping.view.published.begin_frame_serviced(),
+            12,
+            "the panic's end acknowledged the pending BeginFrame"
+        );
+    });
+}
+
 /// A burst queued behind the embedder's release is discarded rather than
 /// applied: the consumer reads the token once per burst, at the wake
 /// boundary, and a token already cancelled there ends the view instead of
