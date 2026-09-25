@@ -481,20 +481,38 @@ shape is native Lynx's, not a promise's: every function argument becomes a
 single-shot `ModuleCallback` the module invokes later with JSON array text, the
 method itself answers `undefined`, and there is no synchronous return value and
 no error channel. `ModuleCallback::invoke` consumes the handle, dropping one
-releases the JavaScript function uninvoked, and the answer rides the calling
-Worker's inbox weakly — the very handle the view already registered from
-`ViewNotice::WorkerCreated` for frame demand, so nothing is carried across a
-second time. A callback therefore holds no realm open however long a module
-keeps it, and `is_cancelled()` is that handle's own liveness: a worker's
-receiving end drops with its task, so there is nothing left to answer exactly
-when there is nothing left to answer *through*. An answer is delivered to the
-BTS realm the moment it arrives, never queued behind BTS boot: an entry
-awaiting its own call's answer would otherwise deadlock.
-`NativeModules` is **BTS only** — MTS's stays `undefined`, as Lepus has no
-module binding — an unknown module is `undefined` (web-core's answer, where
-native answers `null`; see `docs/tracking/deviations.md`), an undeclared method
-is `undefined` on both references, and a call naming a module this view lacks
-or a method its module did not declare is assembled and dropped, which releases
+releases the JavaScript function uninvoked, and the answer rides back to the
+calling realm weakly, through a handle the view already holds
+(`native_module::ModuleReply`): a worker's inbox, which the view registered
+from `ViewNotice::WorkerCreated` for frame demand, or, for a call the MTS realm
+made, the view's own command FIFO, as `ToMain::ModuleCallback`. Each
+`ViewNotice::NativeModuleCall` names its caller the way `ScriptFrameDemand`
+does (`None` for the MTS realm), and `FrameDemand::reply` picks the handle, so
+nothing is carried across a second time. A callback therefore holds no realm
+open however long a module keeps it, and `is_cancelled()` is that handle's own
+liveness: the receiving end drops with the task that serves the realm, so
+there is nothing left to answer exactly when there is nothing left to answer
+*through*. An answer is delivered to a worker realm the moment it arrives,
+never queued behind BTS boot: an entry awaiting its own call's answer would
+otherwise deadlock. An MTS realm's answer is a command, applied by the next
+job of the view like any other.
+The transport is the built-in `bobcat:native-modules` (`callNativeModule` and
+`__BobcatNativeModuleCallback`, which both engine threads call), written over
+the host module `bobcat-internal:native-modules` (`invokeNativeModule` and the
+one-shot `nativeModuleTable`) that `native_module::install` gives every realm
+kind. The table is data: the BTS is handed the view's modules and builds
+`NativeModules` out of them; the MTS realm and a plain `Worker` are handed an
+empty table, so a plain `Worker`'s `NativeModules` (through
+`bobcat:bts-runtime`) is an empty object and the MTS realm's stays
+`undefined`. Native's main thread has a module path of its own,
+`lynx.module(name).invoke(...)`, off by default behind `enableMTSModule`, and
+web-core's has none; no MTS API is built yet (see
+`docs/tracking/deviations.md`). A script that calls `bobcat:native-modules`
+directly still reaches the view's modules from any realm, which is accepted.
+An unknown module is `undefined` (web-core's answer, where native answers
+`null`; see `docs/tracking/deviations.md`), an undeclared method is
+`undefined` on both references, and a call naming a module this view lacks or
+a method its module did not declare is assembled and dropped, which releases
 its functions. No built-in module ships: `bridge`, `LynxUIMethodModule`,
 exposure and intersection are all absent.
 
@@ -1220,10 +1238,11 @@ The private `MainThreadRuntime` registers the native QuickJS ESM
 `packages/bobcat-element/src/native.d.ts` is the authoritative enumeration: a
 `declare module "bobcat-internal:host"` block for the MTS realm;
 `"bobcat-internal:worker"` for a worker's, which carries `postWorkerMessage`,
-`closeWorker`, `invokeNativeModule`, the one-shot `workerName` and
-`backgroundEntry`, and the screen numbers `pixelRatio`, `pixelWidth` and
-`pixelHeight`, and nothing else; and `"bobcat-internal:native-modules"`, which
-every worker realm also declares, for the one-shot `nativeModuleTable`. The MTS
+`closeWorker`, the one-shot `workerName` and `backgroundEntry`, and the screen
+numbers `pixelRatio`, `pixelWidth` and `pixelHeight`, and nothing else; and
+`"bobcat-internal:native-modules"`, which every realm kind declares, the MTS
+realm included, for `invokeNativeModule` and the one-shot
+`nativeModuleTable`. The MTS
 members group as the document's own life, tree vocabulary over numeric
 `NodeId`s, attributes and style, selector queries, the commit, the event-name
 edges, timers, the page-data triple handed over once as plain JSON and
@@ -1244,8 +1263,9 @@ enables module loading and installs the core every realm has under
 `reportScriptError`/`logScriptMessage`, which send `ScriptReported` and
 `ConsoleMessage` through the realm's own `HostOutbox`. Every other host module
 is a parameter of that call: `MainThreadRuntime::new` passes the document,
-stylesheet, startup-string, event-name and `Worker` members, and a worker
-passes `bobcat-internal:worker` and `bobcat-internal:native-modules`. The constructor has no role field; it is told
+stylesheet, startup-string, event-name and `Worker` members and
+`bobcat-internal:native-modules` with an empty table, and a worker passes
+`bobcat-internal:worker` and `bobcat-internal:native-modules`. The constructor has no role field; it is told
 two things about a realm: the key its display-frame demand is reported under,
 `None` for MTS and the worker's key for a worker, and the `ScriptSource` its
 diagnostics carry, `Main` for MTS and, for a worker, the one its `WorkerRole`
@@ -2012,7 +2032,7 @@ browser WebGPU completion is Promise-driven.
 
 The dependency-free TypeScript sources of the ESMs `bobcat-core` preloads into
 its QuickJS realms, one file per module. Both of a group's runtimes register
-all twenty, as `esm.rs`'s `BUILTIN_MODULES` lists them in the order of
+all twenty-one, as `esm.rs`'s `BUILTIN_MODULES` lists them in the order of
 `src/tsconfig.json`'s `paths` (a unit test holds the two equal):
 `src/lynx-modules.ts` as `bobcat:lynx-modules`, `src/global-event-emitter.ts`
 as `bobcat:global-event-emitter`, `src/selector-query.ts` as
@@ -2036,7 +2056,10 @@ and the `__BobcatBeginFrame` a vsync calls in any realm that asked for one),
 three runtime constants of `SystemInfo` are written), `src/record.ts` as
 `bobcat:record` (`splitRecord`, the one reader of the `<utf16Length>:<text>`
 records the host answers with: the Element PAPI's attribute and style
-answers, and a worker realm's native module table),
+answers, and a worker realm's native module table), `src/native-modules.ts`
+as `bobcat:native-modules` (the native module transport every realm kind
+links: `callNativeModule` over `invokeNativeModule`, and the
+`__BobcatNativeModuleCallback` both engine threads call with an answer),
 `src/cross-thread-context.ts` as
 `bobcat:cross-thread-context`, `src/worker.ts` as the `Worker` class under
 `bobcat-internal`, `src/worker-runtime.ts` as `bobcat:worker`,

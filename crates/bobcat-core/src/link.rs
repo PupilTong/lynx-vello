@@ -41,6 +41,7 @@ use crate::background::{WorkerKey, WorkerMessage};
 use crate::clock::ClockInstant;
 #[cfg(test)]
 use crate::main::tree::LynxDocument;
+use crate::native_module::ModuleReply;
 use crate::paint::RouterHost;
 use crate::resource::{FetchProbe, LoadedSource, SourceCompletion, SourceRequest};
 use crate::view::{EngineEvent, EventRequester, LynxViewError, Viewport};
@@ -164,6 +165,17 @@ pub(crate) enum ToMain {
     /// carry pixels, which is what makes "`ImageData` never crosses a
     /// channel" a property of the type.
     ImageEvents(Vec<dom::ImageEvent>),
+    /// An embedder's native module answering one function argument of one
+    /// call the MTS realm made, sent by a
+    /// [`ModuleCallback`](crate::native_module::ModuleCallback) as it drops:
+    /// the call the realm numbered, which argument it was, and the JSON array
+    /// text to spread — or `None`, which releases the function uninvoked.
+    /// What [`WorkerMessage::ModuleCallback`] is for a worker realm.
+    ModuleCallback {
+        call: u64,
+        index: u32,
+        arguments: Option<String>,
+    },
     #[cfg(test)]
     Probe(Box<dyn FnOnce(&mut LynxDocument) + Send>),
     /// The one command that is not the realm's: it spawns a task of the view
@@ -266,20 +278,24 @@ pub(crate) enum ViewNotice {
         request: SourceRequest,
         completion: SourceCompletion,
     },
-    /// One `NativeModules.<module>.<method>(...)` the BTS realm made, for the
-    /// embedder's own module of that name to serve.
+    /// One `NativeModules.<module>.<method>(...)` a realm of this view made,
+    /// for the embedder's own module of that name to serve.
     ///
     /// Raw fields rather than a built
     /// [`ModuleCall`](crate::native_module::ModuleCall): a callback answers
-    /// through the calling worker's inbox, and the handle on that inbox is
-    /// the one the view already registered from
-    /// [`ViewNotice::WorkerCreated`] — so the call is assembled where that
-    /// handle is, in `LynxView::pump`, rather than carrying a second copy of
-    /// it across. A view that has failed or been released assembles nothing,
-    /// which leaves the realm's functions released the way a dropped
-    /// [`SourceCompletion`] answers its request with nothing.
+    /// through the calling realm's own channel, and the view already holds
+    /// the handle on it — its command sender for the MTS realm, the handle it
+    /// registered from [`ViewNotice::WorkerCreated`] for a worker — so the
+    /// call is assembled where that handle is, in `LynxView::pump`, rather
+    /// than carrying a second copy of it across. A view that has failed or
+    /// been released assembles nothing, which leaves the realm's functions
+    /// released the way a dropped [`SourceCompletion`] answers its request
+    /// with nothing.
     NativeModuleCall {
-        worker: WorkerKey,
+        /// The realm that made the call, as [`ViewNotice::ScriptFrameDemand`]
+        /// names one: `None` for the MTS realm, the worker's key for a
+        /// worker.
+        caller: Option<WorkerKey>,
         call: u64,
         module: String,
         method: String,
@@ -353,16 +369,24 @@ impl FrameDemand {
         self.workers.insert(key, (messages, false));
     }
 
-    /// The registered handle on one worker's inbox, for the other thing a
-    /// view sends a worker: a native module's answer to a call that worker
-    /// made. `None` is a worker this view never heard of — every
+    /// The channel a native module's answer to a call `caller` made goes
+    /// back through: `main`, the view's command sender, held weakly, for the
+    /// MTS realm, and the registered handle on a worker's inbox for that
+    /// worker. `None` is a worker this view never heard of — every
     /// `WorkerCreated` precedes that worker's own traffic on the one notice
     /// FIFO — or one whose entry a frame demand has already swept.
-    pub(crate) fn sender(
+    pub(crate) fn reply(
         &self,
-        key: WorkerKey,
-    ) -> Option<mpsc::WeakUnboundedSender<WorkerMessage>> {
-        self.workers.get(&key).map(|(messages, _)| messages.clone())
+        caller: Option<WorkerKey>,
+        main: &mpsc::UnboundedSender<ToMain>,
+    ) -> Option<ModuleReply> {
+        match caller {
+            Some(key) => self
+                .workers
+                .get(&key)
+                .map(|(messages, _)| ModuleReply::Worker(messages.clone())),
+            None => Some(ModuleReply::Main(main.downgrade())),
+        }
     }
 
     pub(crate) fn set(&mut self, worker: Option<WorkerKey>, pending: bool) {

@@ -132,13 +132,23 @@ as `BackgroundStart::native_modules`. Every worker realm declares the host
 module `bobcat-internal:native-modules`, whose one-shot `nativeModuleTable`
 answers that record in a BTS and an empty one in a plain `Worker`, and
 `bobcat:bts-runtime` builds `NativeModules` out of it as it is evaluated. The
-`initialize` message carries the page's data only. The modules
+`initialize` message carries the page's data only. The MTS realm declares the
+same host module with an empty table, so the transport `bobcat:native-modules`
+links in every realm kind. The modules
 themselves never leave the embedder's thread: a call arrives back as
-`ViewNotice::NativeModuleCall` — the call's text and the indices of its
+`ViewNotice::NativeModuleCall` — the calling realm (`None` for the MTS realm,
+the worker's key for a worker), the call's text and the indices of its
 function arguments, nothing built — and `LynxView::pump` assembles the
-`ModuleCall` there, over the weak handle on the calling worker's inbox that
-`ViewNotice::WorkerCreated` already registered, then hands it to the module of
-that name.
+`ModuleCall` there, over a weak handle `FrameDemand::reply` picks by that
+caller: the calling worker's inbox, which `ViewNotice::WorkerCreated` already
+registered, or the view's own command sender. It then hands the call to the
+module of that name. An answer goes back as `WorkerMessage::ModuleCallback`,
+which the worker delivers at once, or as `ToMain::ModuleCallback`, which the
+MTS realm applies in the view's next command burst; both call
+`bobcat:native-modules`' `__BobcatNativeModuleCallback` in the realm that made
+the call. Because the MTS answer is a command, it waits while a job of the
+view is parked on a synchronous wait, and after a fatal event a callback reads
+as cancelled only once the view's task has ended.
 
 Main asks for loads through the view's own `ViewNotice` channel, and
 `LynxView::pump` is what hands each ask to the host's `ResourceFetcher`.
@@ -203,7 +213,7 @@ QuickJS ESM graph — a worker realm, on bobcat-workers' runtime
     │     ├──▶ bobcat:diagnostics ──▶ bobcat-internal:host (reportScriptError,
     │     │                             logScriptMessage), the global console
     │     └──▶ bobcat-internal:worker (postWorkerMessage, closeWorker,
-    │                                   invokeNativeModule, workerName)
+    │                                   workerName)
     ├──▶ bobcat:timers ──▶ bobcat-internal:host (setTimer, clearTimer only)
     ├──▶ await import("<script URL>")   a plain Worker: completed by the
     │     │                             worker's consume_messages task, under
@@ -217,17 +227,22 @@ QuickJS ESM graph — a worker realm, on bobcat-workers' runtime
           │     │     pixelHeight: SystemInfo's screen)
           │     ├──▶ bobcat-internal:native-modules (nativeModuleTable,
           │     │     read through bobcat:record into NativeModules)
+          │     ├──▶ bobcat:native-modules (callNativeModule, the transport
+          │     │     each NativeModules method calls) ──▶
+          │     │     bobcat-internal:native-modules (invokeNativeModule)
           │     ├──▶ bobcat:diagnostics (console, lynx.reportError; the
           │     │     console export is the global one)
           │     └──▶ bobcat:cross-thread-context ──▶ bobcat:event-target
           └──▶ await import(BTS entry) once `initialize` arrives, when
                 configured: HostOutbox → view resource host → worker completion
-  Both runtimes register the same twenty built-ins (esm.rs BUILTIN_MODULES),
+  Both runtimes register the same twenty-one built-ins (esm.rs BUILTIN_MODULES),
   and a realm's host modules decide which of them link. Here bobcat:element,
   bobcat:runtime and bobcat-internal fail at link with a SyntaxError: they
   import bobcat-internal:host members only an MTS realm has. In an MTS realm
   bobcat:worker and bobcat:bts-runtime fail to load with a ReferenceError:
-  they import bobcat-internal:worker, which it does not declare. Any other
+  they import bobcat-internal:worker, which it does not declare.
+  bobcat:native-modules links in both: every realm kind declares
+  bobcat-internal:native-modules, the MTS realm with an empty table. Any other
   bobcat: or bobcat-internal: name, one no runtime registered and no realm
   declared, fails its import or require in the realm with a ReferenceError
   and is never sent to the fetcher.
@@ -703,8 +718,10 @@ worker realm, so a synchronous wait in either ends with the realm that asked,
 and a worker realm's diagnostics reach the host from its own thread, with no
 message to the main-thread realm. The realm's other
 host modules are a parameter of the same call: the document, stylesheet,
-startup and `Worker` members for an MTS realm, `bobcat-internal:worker` and
-`bobcat-internal:native-modules` for a worker realm. The constructor names no realm kind. It is told two things: the
+startup and `Worker` members for an MTS realm, `bobcat-internal:worker` for a
+worker realm, and `bobcat-internal:native-modules` for both, which
+`native_module::install` installs with the realm's own table: empty in an MTS
+realm and a plain `Worker`. The constructor names no realm kind. It is told two things: the
 key the realm's display-frame demand is reported under, `None` for an MTS
 realm and the worker's key for a worker realm, and the `ScriptSource` its
 `ScriptReported` and `ConsoleMessage` carry, `Main` for an MTS realm and, for

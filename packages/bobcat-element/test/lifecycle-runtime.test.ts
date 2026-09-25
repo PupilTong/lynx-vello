@@ -26,10 +26,13 @@ rstest.mockRequire("bobcat:element", () => ({ __BobcatQueryNodes: queryNodes }))
 
 rstest.mockRequire("bobcat:event-target", () => eventTarget);
 rstest.mockRequire("bobcat:cross-thread-context", () => crossThreadContext);
+// The BTS runtime imports the worker realm's global scope for its effect,
+// which this suite stands in for on the global itself.
+rstest.mockRequire("bobcat:worker", () => ({}));
 // This suite drives no native module; the BTS runtime only needs the
 // transport to exist, because `callNativeModule` is what its method wrappers
 // close over.
-rstest.mockRequire("bobcat:worker", () => ({ callNativeModule: rstest.fn() }));
+rstest.mockRequire("bobcat:native-modules", () => ({ callNativeModule: rstest.fn() }));
 // The worker realm's host members the BTS runtime reads as it evaluates: no
 // screen and no modules, which is what a plain `Worker` is handed.
 rstest.mockRequire("bobcat-internal:worker", () => ({

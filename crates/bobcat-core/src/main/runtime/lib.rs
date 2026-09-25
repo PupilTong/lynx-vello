@@ -773,8 +773,9 @@ impl MainThreadRuntime {
     /// Opens one view's realm through [`crate::realm::open_realm`], which
     /// installs the core every realm has, and installs this realm's own host
     /// members — the document and host module, the stylesheet members, the
-    /// startup strings and the `Worker` bindings — handing back the one
-    /// channel everything this view's workers say arrives on.
+    /// startup strings, the native module members with an empty table and
+    /// the `Worker` bindings — handing back the one channel everything this
+    /// view's workers say arrives on.
     ///
     /// A realm has its `Worker` members from the moment it exists: there is no
     /// state in which it is missing them, and so no order between furnishing
@@ -831,6 +832,11 @@ impl MainThreadRuntime {
                     .map_err(MainThreadError::into_script_error)?;
                 install_startup_strings(engine, js_runtime, startup_strings(&mut startup))
                     .map_err(MainThreadError::into_script_error)?;
+                // An empty table: the view's modules are the BTS's, and what
+                // this realm has is the transport, which is what lets a
+                // later MTS API answer calls through it.
+                crate::native_module::install(engine, js_runtime, &host, None, String::new())
+                    .map_err(|error| context_of("installing the native module members", error))?;
                 let background = BackgroundStart {
                     entry: startup.background_entry.take(),
                     screen: startup.screen,
@@ -1009,6 +1015,20 @@ impl MainThreadRuntime {
             )
             .map(|_| ())
             .map_err(|error| MainThreadError::from_engine("delivering animation callbacks", error))
+    }
+
+    /// Hands one native module's answer to one function argument of a call
+    /// this realm made back to it, through `bobcat:native-modules`.
+    pub(crate) fn deliver_module_callback(
+        &mut self,
+        js: &mut ScriptRuntime,
+        call: u64,
+        index: u32,
+        arguments: Option<&str>,
+    ) -> Result<(), MainThreadError> {
+        crate::native_module::deliver(&mut self.core.engine, js, call, index, arguments).map_err(
+            |error| MainThreadError::from_engine("running a native module callback", error),
+        )
     }
 
     /// Writes the painting side's scroll offsets into the document and

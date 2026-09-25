@@ -1280,20 +1280,22 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
                     }
                 }
                 // Assembled here, because here is where the handle a callback
-                // answers through already is: `WorkerCreated` registered it,
-                // and it precedes every call that worker makes on this one
-                // FIFO — so a sender this turn cannot find is a worker that
-                // has since gone, and there is nobody left to answer.
+                // answers through already is: the view's own command sender
+                // for a call the MTS realm made, and for a worker's the
+                // handle `WorkerCreated` registered, which precedes every
+                // call that worker makes on this one FIFO — so a handle this
+                // turn cannot find is a worker that has since gone, and there
+                // is nobody left to answer.
                 //
                 // A module nothing here is named for, or a method its module
                 // did not declare, is no error either: the realm's
                 // `NativeModules` object never carried that name, so such a
-                // call can only come from a script importing the host member
-                // directly. The call is assembled and dropped rather than
-                // invoked, and dropping it releases each of its functions in
-                // the realm that is waiting on them.
+                // call can only come from a script calling
+                // `bobcat:native-modules` directly. The call is assembled and
+                // dropped rather than invoked, and dropping it releases each
+                // of its functions in the realm that is waiting on them.
                 ViewNotice::NativeModuleCall {
-                    worker,
+                    caller,
                     call,
                     module,
                     method,
@@ -1304,7 +1306,11 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
                         // A statement of its own, so the borrow ends here: a
                         // module may drive this view's painter inside
                         // `invoke`, and the painter borrows the same cell.
-                        let reply = self.seat.frame_demand.borrow().sender(worker);
+                        let reply = self
+                            .seat
+                            .frame_demand
+                            .borrow()
+                            .reply(caller, &self.seat.commands);
                         if let Some(reply) = reply {
                             let call = crate::native_module::ModuleCall::assemble(
                                 call, method, arguments, &callbacks, &reply,

@@ -48,7 +48,14 @@ and `bobcat-workers` (every Worker realm, including the BTS).
   realm answers through `bobcat-internal:worker` (`backgroundEntry`,
   `pixelRatio`/`pixelWidth`/`pixelHeight`) and
   `bobcat-internal:native-modules` (`nativeModuleTable`); a plain Worker
-  declares the same members and reads no screen and an empty table. `view/` holds
+  declares the same members and reads no screen and an empty table.
+  `native_module.rs` — the `NativeModule` seam and the transport every realm
+  kind shares: `install` gives each realm `bobcat-internal:native-modules`
+  (`invokeNativeModule`, and the one-shot table: the view's in a BTS, empty in
+  the MTS realm and a plain Worker), a call names its caller (`None` for the
+  MTS realm), and `ModuleReply` answers it through the view's command FIFO
+  (`ToMain::ModuleCallback`) or the worker's inbox; `deliver` calls
+  `bobcat:native-modules` in the realm that made the call. `view/` holds
   `LynxGroup`, `LynxView`, `ViewSources` and `create_lynx_view`; `paint/` the
   `Painter`; `link.rs` the per-view channels;
   `lifetime.rs` the `CancellationToken`, `serve_clock` and `run_job`;
@@ -86,7 +93,10 @@ and `bobcat-workers` (every Worker realm, including the BTS).
   `system-info.ts` (`bobcat:system-info` — `createSystemInfo`, the one place
   the three runtime constants are written), `record.ts` (`bobcat:record` —
   `splitRecord`, the one reader of the host's `<utf16Length>:<text>`
-  records), `diagnostics.ts`
+  records), `native-modules.ts` (`bobcat:native-modules` — `callNativeModule`
+  and `__BobcatNativeModuleCallback`, the native module transport; it links in
+  every realm kind, and `bobcat:bts-runtime` builds `NativeModules` over it),
+  `diagnostics.ts`
   (`bobcat:diagnostics` — every realm's `console` and `reportError`, the one
   `printable` and the `lynx.reportError` level rule), `timers.ts`, `future.ts`
   (`bobcat:future` — the `Future` class), `module.ts`

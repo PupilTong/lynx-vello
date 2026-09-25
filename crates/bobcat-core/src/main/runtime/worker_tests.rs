@@ -111,7 +111,9 @@ impl Pair {
 
     /// Waits for the next native-module call the BTS realm made, and
     /// assembles it out of the reply handle this test registered from
-    /// `WorkerCreated` — which is exactly what `LynxView::pump` does.
+    /// `WorkerCreated` — which is exactly what `LynxView::pump` does. The
+    /// command sender stands in for the view's own, which only a call the
+    /// MTS realm made is answered through.
     fn module_call(&mut self) -> (String, crate::native_module::ModuleCall) {
         let deadline = ClockInstant::now() + PATIENCE;
         loop {
@@ -122,7 +124,7 @@ impl Pair {
                 .position(|notice| matches!(notice, ViewNotice::NativeModuleCall { .. }));
             if let Some(position) = waiting
                 && let Some(ViewNotice::NativeModuleCall {
-                    worker,
+                    caller,
                     call,
                     module,
                     method,
@@ -130,9 +132,10 @@ impl Pair {
                     callbacks,
                 }) = self.deferred_notices.remove(position)
             {
+                let (commands, _) = mpsc::unbounded_channel();
                 let reply = self
                     .frame_demand
-                    .sender(worker)
+                    .reply(caller, &commands)
                     .expect("the worker announced itself before it called");
                 return (
                     module,
@@ -1372,8 +1375,11 @@ fn a_worker_created_after_its_thread_trapped_fails_without_starting() {
         "a worker that failed at once asks the host for nothing"
     );
     let event = pair.next_event().expect("the worker's failure");
+    let (commands, _) = mpsc::unbounded_channel();
     assert!(
-        pair.frame_demand.sender(event.key).is_none(),
+        pair.frame_demand
+            .reply(Some(event.key), &commands)
+            .is_none(),
         "the view never heard of the worker"
     );
     pair.runtime
@@ -2940,6 +2946,38 @@ fn a_plain_worker_gets_a_frame_from_the_shared_animation_frame_module() {
     assert!(worker_failures(pair.notices()).is_empty());
     pair.check("worker.terminate();");
     assert!(pair.finish().is_empty());
+}
+
+/// The native module transport is `bobcat:native-modules`, and the global
+/// scope module exports none of it: a plain `Worker` whose script imports
+/// `callNativeModule` from `bobcat:worker` fails at link, as an ordinary
+/// worker error, and runs nothing.
+#[test]
+fn a_plain_worker_cannot_import_the_transport_from_the_global_scope_module() {
+    let mut pair = Pair::new(
+        r"
+        import {Worker} from 'bobcat-internal';
+        globalThis.worker = new Worker('./worker.js');
+    ",
+    );
+    pair.answer("import { callNativeModule } from 'bobcat:worker'; postMessage('linked');");
+    let event = pair.next_event().expect("the script's link failure");
+    let WorkerPayload::Errored(error) = &event.payload else {
+        panic!("a link failure is an ordinary worker error");
+    };
+    assert!(
+        error.message.contains("SyntaxError") && error.message.contains("callNativeModule"),
+        "{}",
+        error.message
+    );
+    pair.check("worker.terminate();");
+    assert!(
+        !pair.finish().iter().any(|event| matches!(
+            event.payload,
+            WorkerPayload::Message(ref value) if posted(value, "linked")
+        )),
+        "a script that failed to link ran nothing"
+    );
 }
 
 #[test]

@@ -627,6 +627,18 @@ impl Page {
                 self.pending_begin_frame.set(Some(seq.max(pending)));
             }
             ToMain::Refill { offsets } => runtime.refill_scroll_windows(&offsets),
+            ToMain::ModuleCallback {
+                call,
+                index,
+                arguments,
+            } => {
+                if let Err(error) =
+                    runtime.deliver_module_callback(js, call, index, arguments.as_deref())
+                {
+                    self.outbox
+                        .engine_event(EngineEvent::ScriptRunError(error.into_script_error()));
+                }
+            }
             ToMain::ImageEvents(events) => runtime.apply_image_events(&events),
             #[cfg(test)]
             ToMain::Probe(probe) => runtime.with_document(probe),

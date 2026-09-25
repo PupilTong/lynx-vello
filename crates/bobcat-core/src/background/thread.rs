@@ -54,10 +54,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::{self, JoinError, JoinSet};
 use tokio_util::sync::CancellationToken;
 
-use super::scope::{
-    WORKER_DELIVER_EXPORT, WORKER_MODULE_CALLBACK_EXPORT, install_worker_members,
-    worker_boot_source,
-};
+use super::scope::{WORKER_DELIVER_EXPORT, install_worker_members, worker_boot_source};
 use super::{
     BackgroundStart, WorkerCommand, WorkerEvent, WorkerKey, WorkerMessage, WorkerPayload,
     WorkerRole, WorkerStart,
@@ -797,30 +794,17 @@ fn deliver_vsync(worker: &Rc<Worker>, milliseconds: f64) {
     }));
 }
 
-/// One native module's answer to one function argument of one call.
-///
-/// `arguments` is the JSON array text the realm spreads; `None` releases the
-/// function without calling it, which is what a module that dropped its
-/// callback owes. A callback for a call the realm has forgotten is a no-op
-/// over there, so nothing here has to know which calls are outstanding.
+/// One native module's answer to one function argument of one call this
+/// worker's realm made, handed to it by [`crate::native_module::deliver`].
 fn deliver_module_callback(worker: &Rc<Worker>, call: u64, index: u32, arguments: Option<String>) {
     let reporting = Rc::clone(worker);
     drop(worker.enter(move |realm, js| {
-        #[allow(
-            clippy::cast_precision_loss,
-            reason = "the realm mints these counting up from one"
-        )]
-        let delivered = realm.core.engine.call_module_export(
+        let delivered = crate::native_module::deliver(
+            &mut realm.core.engine,
             js,
-            WORKER_MODULE_SPECIFIER,
-            WORKER_MODULE_CALLBACK_EXPORT,
-            &[
-                HostArgument::Number(call as f64),
-                HostArgument::Number(f64::from(index)),
-                arguments
-                    .as_deref()
-                    .map_or(HostArgument::Undefined, HostArgument::String),
-            ],
+            call,
+            index,
+            arguments.as_deref(),
         );
         if let Err(error) = delivered {
             report(

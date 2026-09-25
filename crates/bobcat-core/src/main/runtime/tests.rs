@@ -4381,10 +4381,12 @@ fn an_engine_name_nothing_answers_fails_in_the_realm_without_a_request() {
     }
 }
 
-/// The members an MTS realm's `bobcat-internal:host` exports, which is what
-/// decides the built-ins it can link. Written down so that a change to the
-/// set is a change to this list. A namespace lists its exports sorted by
-/// name; `testFuture` is the test build's own producer.
+/// The members an MTS realm's `bobcat-internal:host` and
+/// `bobcat-internal:native-modules` export, which is what decides the
+/// built-ins it can link. Written down so that a change to either set is a
+/// change to these lists. A namespace lists its exports sorted by name;
+/// `testFuture` is the test build's own producer. The native module members
+/// are the ones a worker realm has too.
 #[test]
 fn an_mts_realm_declares_these_host_members() {
     let expected = [
@@ -4434,6 +4436,7 @@ fn an_mts_realm_declares_these_host_members() {
         "waitFuture",
     ]
     .join(",");
+    let native_modules = ["invokeNativeModule", "nativeModuleTable"].join(",");
     let (mut js, mut runtime, _elements) = runtime();
     runtime
         .evaluate_module(
@@ -4442,6 +4445,8 @@ fn an_mts_realm_declares_these_host_members() {
                 r"
         const members = Object.keys(await import('bobcat-internal:host')).join(',');
         if (members !== '{expected}') throw Error(members);
+        const native = Object.keys(await import('bobcat-internal:native-modules')).join(',');
+        if (native !== '{native_modules}') throw Error(native);
         globalThis.finished = true;
     "
             ),

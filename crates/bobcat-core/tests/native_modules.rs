@@ -1,6 +1,6 @@
 //! The public `NativeModule` seam: an embedder's module, injected at view
-//! construction, answering a call the BTS realm made — over a real group, a
-//! real Worker and a real fetcher.
+//! construction, answering a call the BTS realm or the MTS realm made — over
+//! a real group, a real Worker and a real fetcher.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -13,7 +13,7 @@ use bobcat_core::resource::{
 };
 use bobcat_core::{
     DrawTarget, EngineError, EngineEvent, LynxGroup, LynxView, LynxViewError, ModuleCall,
-    ModuleCallback, NativeModule, NoWakeup, Painter, StyleThreads, ViewSources,
+    ModuleCallback, NativeModule, NoWakeup, Painter, ScriptSource, StyleThreads, ViewSources,
 };
 
 /// The screen these tests' views report, as a host with no screen to measure
@@ -22,12 +22,29 @@ const SCREEN: bobcat_core::ScreenMetrics =
     bobcat_core::ScreenMetrics::for_viewport(32.0, 24.0, 1.0);
 
 const MAIN_URL: &str = "app:///main.js";
+const MAIN_CALLER_URL: &str = "app:///main-caller.js";
 const BACKGROUND_URL: &str = "app:///background.js";
 const UNDECLARED_URL: &str = "app:///undeclared.js";
 const ON_EVENT_URL: &str = "app:///on-event.js";
 
 /// A minimal main-thread entry: a card with one element, so boot finishes.
 const MAIN_ENTRY: &str = r"
+globalThis.renderPage = function () {
+  __AppendElement(__CreatePage('card', 0), __CreateView(0));
+};
+";
+
+/// A main-thread entry that calls `Echo` through the transport itself, as
+/// its top level runs: the MTS realm's `NativeModules` is `undefined`, and
+/// its table is empty, but `bobcat:native-modules` links there and the view
+/// answers the call back to this realm. The card is the one [`MAIN_ENTRY`]
+/// renders.
+const MAIN_CALLER_ENTRY: &str = r"
+import { callNativeModule } from 'bobcat:native-modules';
+if (NativeModules !== undefined) throw Error('the MTS NativeModules is undefined');
+callNativeModule('Echo', 'echo', [{ note: 'main' }, function (method, echoed) {
+  console.log('echoed ' + method + ' ' + JSON.stringify(echoed));
+}]);
 globalThis.renderPage = function () {
   __AppendElement(__CreatePage('card', 0), __CreateView(0));
 };
@@ -52,6 +69,7 @@ impl Entries {
     fn source(specifier: &str) -> Option<&'static str> {
         match specifier {
             MAIN_URL => Some(MAIN_ENTRY),
+            MAIN_CALLER_URL => Some(MAIN_CALLER_ENTRY),
             BACKGROUND_URL => Some(BACKGROUND_ENTRY),
             UNDECLARED_URL => Some(UNDECLARED_ENTRY),
             ON_EVENT_URL => Some(ON_EVENT_ENTRY),
@@ -77,7 +95,7 @@ impl ResourceFetcher for Entries {
                     kind: ResourceErrorKind::NotFound,
                     phase: ResourceErrorPhase::Resolve,
                     locator: Some(Arc::from(specifier.as_str())),
-                    message: "this host serves four entries".into(),
+                    message: "this host serves five entries".into(),
                     retry: RetryAdvice::Never,
                 }
                 .into())
@@ -120,7 +138,7 @@ modules.Echo.echo({ note: 'hello' }, function (method, echoed) {
 /// with no collection needed.
 const UNDECLARED_ENTRY: &str = r"
 import { console, lynx } from 'bobcat:bts-runtime';
-import { callNativeModule } from 'bobcat:worker';
+import { callNativeModule } from 'bobcat:native-modules';
 let undeclared;
 (() => {
   const callback = () => console.log('the undeclared call was answered');
@@ -273,17 +291,27 @@ fn sources(background: &str) -> ViewSources {
 }
 
 /// Pumps `view` until the background realm prints, and answers with what it
-/// printed first. Every event of the batch that message arrived in is still
+/// printed first.
+fn first_console_message(view: &mut LynxView<Entries>) -> String {
+    let (source, message) = first_console_output(view);
+    assert_eq!(source, ScriptSource::Background, "{message}");
+    message
+}
+
+/// Pumps `view` until a realm prints, and answers with which realm printed
+/// first and what. Every event of the batch that message arrived in is still
 /// read, so a failure of a realm in that batch or an earlier one fails the
 /// test.
-fn first_console_message(view: &mut LynxView<Entries>) -> String {
+fn first_console_output(view: &mut LynxView<Entries>) -> (ScriptSource, String) {
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut first = None;
     loop {
         for event in view.pump() {
             match event {
-                EngineEvent::ConsoleMessage { message, .. } => {
-                    first.get_or_insert(message);
+                EngineEvent::ConsoleMessage {
+                    source, message, ..
+                } => {
+                    first.get_or_insert((source, message));
                 }
                 EngineEvent::StartupFailed(error) => panic!("boot failed: {error}"),
                 EngineEvent::WorkerThrew { error, .. }
@@ -300,7 +328,7 @@ fn first_console_message(view: &mut LynxView<Entries>) -> String {
         }
         assert!(
             Instant::now() < deadline,
-            "the module's callback reached the background realm"
+            "the module's callback reached the calling realm"
         );
         std::thread::sleep(Duration::from_millis(1));
     }
@@ -339,6 +367,44 @@ async fn an_injected_module_answers_a_background_call_on_the_embedders_own_threa
         [std::thread::current().id()],
         "a module is invoked on the thread that pumps its view"
     );
+}
+
+/// A call the MTS realm makes through `bobcat:native-modules` reaches the
+/// embedder's module like a BTS call does, and its answer goes back to the
+/// MTS realm: `pump` answers a call with no worker through the view's own
+/// command FIFO, and the callback runs in the realm that made the call.
+#[tokio::test]
+async fn a_main_thread_call_is_answered_back_to_the_main_thread() {
+    let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Sequential)
+        .await
+        .expect("the group starts");
+    let echo = Rc::new(Echo::new("Echo"));
+    let mut view = group
+        .create_lynx_view(
+            32.0,
+            24.0,
+            1.0,
+            |_reports| Entries,
+            vec![Box::new(Shared(Rc::clone(&echo))) as Box<dyn NativeModule>],
+            ViewSources::new("app:///", MAIN_CALLER_URL, SCREEN),
+        )
+        .expect("the view is built");
+    // The answer is applied by a job of the view, which runs once boot's
+    // flush has found a painter bound.
+    let mut painter = Painter::new(DrawTarget::Offscreen, 32.0, 24.0, 1.0)
+        .await
+        .expect("the painter is built");
+    painter.attach(&view).expect("a fresh view takes a painter");
+
+    assert_eq!(
+        first_console_output(&mut view),
+        (
+            ScriptSource::Main,
+            r#"echoed echo [{"note":"main"},null]"#.to_owned()
+        ),
+        "the MTS realm's own callback printed the answer"
+    );
+    assert_eq!(echo.named.borrow().as_slice(), ["echo"]);
 }
 
 /// A script failure after boot leaves the view running, and its native

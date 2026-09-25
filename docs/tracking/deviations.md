@@ -1305,7 +1305,20 @@ consequential choice about whether to follow the spec or the quirk.
   in-repo consumer tolerates either (compiled bundles probe with `?.`,
   explorer-lib guards on `typeof`). A method a module did not declare is
   `undefined` on both references, and so here. MTS `NativeModules` stays
-  `undefined` altogether, as Lepus has no module binding.
+  `undefined` altogether, as it is in both references (see the next entry).
+- **No native module API on the main thread** — native's MTS has one,
+  `lynx.module(name).invoke(method, ...args)`: it returns synchronously, turns
+  each function argument into a callback, and is off by default, turned on by
+  the host's `enableMTSModule` (`renderer_ng.cc`, `lynx_lepus_module.cc`).
+  Neither reference has a `NativeModules` global on the main thread, and
+  ReactLynx sets it to `undefined` there. web-core's MTS has no native module
+  path at all. **Decision: web-core's surface for now, with the transport in
+  place** (user ruling): no MTS API is built yet, and `NativeModules` stays
+  `undefined`. The MTS realm declares `bobcat-internal:native-modules` with an
+  empty table, `bobcat:native-modules` links there, and `LynxView::pump`
+  answers a call it makes through the view's command FIFO
+  (`ToMain::ModuleCallback`), so the native API can be added later without a
+  second reply path.
 - **`lynx.reportError(error, {level: 'fatal'})` is reported and nothing more**
   — lynx-core's `reportError` maps `'fatal'` to `LynxErrorLevel.Fatal`
   (`lynx.ts`), and native's `App::ReportException` then sets the BTS app state

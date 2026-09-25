@@ -28,6 +28,7 @@
       "bobcat:animation-frame": ["./animation-frame.ts"],
       "bobcat:system-info": ["./system-info.ts"],
       "bobcat:record": ["./record.ts"],
+      "bobcat:native-modules": ["./native-modules.ts"],
       "bobcat:cross-thread-context": ["./cross-thread-context.ts"],
       "bobcat-internal": ["./worker.ts"],
       "bobcat:worker": ["./worker-runtime.ts"],
