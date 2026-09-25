@@ -1,0 +1,17 @@
+{
+  "name": "web-core-e2e-fixtures",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "lynx-stack's web-core end-to-end cards, compiled for the engine version this repository targets.",
+  "scripts": {
+    "build": "node scripts/build.js"
+  },
+  "dependencies": {
+    "@lynx-js/react": "catalog:"
+  },
+  "devDependencies": {
+    "@lynx-js/react-rsbuild-plugin": "catalog:",
+    "@rsbuild/core": "catalog:"
+  }
+}
