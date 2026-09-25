@@ -11,9 +11,9 @@
 //! each thing it can wait for is a task of its own, and tokio is what polls,
 //! parks and wakes them. An owner ([`serve_worker`]) waits only for the end;
 //! [`boot_worker`] opens the realm as the worker's first job, the way a view's
-//! realm opens as its first; [`consume_messages`] is the one ordered consumer
-//! of what is posted and, until the realm's root module has finished, of a
-//! dedicated worker's script; [`serve_clock`] owns this realm's one
+//! realm opens as its first; [`consume_messages`], started beside that job,
+//! is the one ordered consumer of what is posted and of a dedicated worker's
+//! script; [`serve_clock`] owns this realm's one
 //! pinned sleep and watches the runtime-wide checkpoint generation, because the
 //! job queue every worker realm here drains is the runtime's and a sibling's
 //! entry can finish this realm's jobs. Every one of them reaches the realm
@@ -35,9 +35,9 @@
 //! - [`serve_workers`], which is that `main` task, waiting on attach versus join;
 //! - each [`serve_worker`], waiting on its worker's [`Lifetime`]: the end, versus the next task of
 //!   that worker to finish;
-//! - each [`consume_messages`]' wait before its realm's root module has finished, on what is posted
-//!   versus a dedicated worker's script versus that module finishing — one task's wait rather than
-//!   a scheduler;
+//! - each [`consume_messages`]' wait on what is posted, versus a dedicated worker's script while it
+//!   is outstanding, versus the realm's root module finishing until it has — one task's wait rather
+//!   than a scheduler;
 //! - one [`serve_clock`] per live worker realm, waiting on its deadline, the re-arm that moves it,
 //!   and a sibling's checkpoint.
 
@@ -730,14 +730,22 @@ async fn serve_worker(js: SharedRuntime, start: WorkerStart, thread: JsThreadHan
     worker.run_owner().await;
 }
 
-/// The worker's boot future: open its realm and evaluate its root module as
-/// the worker's first job, then start the waits a live worker has.
+/// The worker's boot future: queue the worker's first job, which opens its
+/// realm and evaluates its root module, start its message consumer beside
+/// that job, and once the job has run start the clock a live worker has.
 ///
 /// The role decides the root module and what the realm is given: a BTS gets
 /// its entry for `bobcat:bts` to import and the screen and module table for
 /// `bobcat:bts-runtime` to read, and a dedicated worker's answer goes to
 /// [`consume_messages`], which completes the script the root module is
 /// waiting in the import of.
+///
+/// The consumer does not wait for the boot job. That job can sit in the
+/// queue behind a sibling's job parked on a synchronous wait, which runs no
+/// other job, and a `Terminate` sent meanwhile still has to end this worker
+/// at once: the end is what cancels the fetch of its script, and the boot
+/// job opens nothing for a worker that has ended. Every job the consumer
+/// queues runs after the boot job, because that one was queued first.
 async fn boot_worker(
     worker: Rc<Worker>,
     name: String,
@@ -749,18 +757,17 @@ async fn boot_worker(
         WorkerRole::Background(background) => (Some(background), None),
         WorkerRole::Dedicated { script, .. } => (None, Some(script)),
     };
+    let booted = run_job(&worker, move |worker| worker.boot(name, background, &root));
+    worker.spawn(consume_messages(Rc::clone(&worker), messages, script));
     // The boot job runs the first epilogue itself, so the first deadline has
     // already been published by the time this returns — and that epilogue
     // may have ended the worker.
-    let Some(checkpoints) =
-        run_job(&worker, move |worker| worker.boot(name, background, &root)).await
-    else {
+    let Some(checkpoints) = booted.await else {
         return;
     };
     if worker.ended() {
         return;
     }
-    worker.spawn(consume_messages(Rc::clone(&worker), messages, script));
     worker.spawn(serve_clock(
         Rc::clone(&worker),
         worker.lifetime.deadlines(),
@@ -817,8 +824,8 @@ fn deliver_module_callback(worker: &Rc<Worker>, call: u64, index: u32, arguments
     }));
 }
 
-/// The one ordered consumer of what is posted to this worker, and, until the
-/// realm's root module has finished, of a dedicated worker's script.
+/// The one ordered consumer of what is posted to this worker, and of a
+/// dedicated worker's script.
 ///
 /// **It never waits for a delivery it queued.** `Terminate` is in-band, behind
 /// whatever was posted before it, so the consumer has to go on reading: each
@@ -834,28 +841,44 @@ fn deliver_module_callback(worker: &Rc<Worker>, call: u64, index: u32, arguments
 /// Until the root module has finished, a post is held here rather than
 /// delivered: HTML queues what is posted before a worker's script has run and
 /// delivers it after, which is what lets the commonest shape there is —
-/// construct, then post — keep its first message. The `select!` of that
-/// stretch is `biased`, messages first, for the reason HTML's "terminate a
-/// worker" aborts the fetch: a `Terminate` that lands in the same instant as
-/// the script must win, so a worker told to stop before its script arrived
-/// never runs it. Returning drops the script's receiving end, which is what
-/// cancels that fetch.
+/// construct, then post — keep its first message. The `select!` is `biased`,
+/// messages first, for the reason HTML's "terminate a worker" aborts the
+/// fetch: a `Terminate` that lands in the same instant as the script must
+/// win, so a worker told to stop before its script arrived never runs it.
+/// Returning drops the script's receiving end, which is what cancels that
+/// fetch.
+///
+/// The script's answer is read whenever it arrives, after the root module has
+/// finished as well. It is what that module waits for, except where the
+/// script URL is an engine name — `new Worker("bobcat:timers")` — which the
+/// realm's own loader resolves or refuses without the host, so the module
+/// finishes first; the host still answers the request `createWorker` made,
+/// and an answer that is not a script ends such a worker with `Failed` too.
 async fn consume_messages(
     worker: Rc<Worker>,
     mut messages: mpsc::UnboundedReceiver<WorkerMessage>,
     mut script: Option<SourceAnswer>,
 ) {
-    let mut queued: Vec<HostValue> = Vec::new();
+    // What is posted before the root module has finished; `None` once it has
+    // and what was held has been delivered.
+    let mut held: Option<Vec<HostValue>> = Some(Vec::new());
     let mut ready = worker.boot_finished.subscribe();
-    while !*ready.borrow_and_update() {
+    loop {
+        if let Some(queued) = held.take_if(|_| *ready.borrow_and_update()) {
+            for data in queued {
+                deliver_post(&worker, data);
+            }
+        }
         tokio::select! {
             biased;
             message = messages.recv() => match message {
-                None | Some(WorkerMessage::Terminate) => {
-                    worker.end();
-                    return;
-                }
-                Some(WorkerMessage::Post(data)) => queued.push(data),
+                // Explicit termination or collection of the MTS handle, or
+                // the release of its realm.
+                None | Some(WorkerMessage::Terminate) => break,
+                Some(WorkerMessage::Post(data)) => match held.as_mut() {
+                    Some(held) => held.push(data),
+                    None => deliver_post(&worker, data),
+                },
                 Some(WorkerMessage::Vsync(milliseconds)) => deliver_vsync(&worker, milliseconds),
                 // Immediately, like a frame and unlike a post: the entry that
                 // has not finished importing may itself be awaiting this
@@ -880,23 +903,7 @@ async fn consume_messages(
                     }
                 }
             }
-            changed = ready.changed() => if changed.is_err() { return; },
-        }
-    }
-    for data in queued {
-        deliver_post(&worker, data);
-    }
-    while let Some(message) = messages.recv().await {
-        match message {
-            // Explicit termination or collection of the MTS handle.
-            WorkerMessage::Terminate => break,
-            WorkerMessage::Vsync(milliseconds) => deliver_vsync(&worker, milliseconds),
-            WorkerMessage::ModuleCallback {
-                call,
-                index,
-                arguments,
-            } => deliver_module_callback(&worker, call, index, arguments),
-            WorkerMessage::Post(data) => deliver_post(&worker, data),
+            changed = ready.changed(), if held.is_some() => if changed.is_err() { return; },
         }
     }
     worker.end();

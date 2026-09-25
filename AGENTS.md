@@ -1098,7 +1098,13 @@ reference the channel owner weakly, so queued finalizers cannot keep a
 released realm's workers or group thread alive. The worker's message consumer
 waits for a plain Worker's script in a `biased` select with the message channel
 first, so a `terminate` landing in the same instant as the script wins and a
-worker told to stop never runs its script. The timer machinery both
+worker told to stop never runs its script. The consumer starts beside the
+worker's first job rather than after it, so a `terminate` also ends at once a
+worker whose first job is still queued behind another realm's parked job. It
+reads the script's answer whenever it arrives, so a worker whose root module
+finished without that answer (a script URL that is an engine name, which the
+realm's loader resolves or refuses itself) still ends with `Failed` when the
+answer is not a script. The timer machinery both
 realm kinds run on — the schedule, the two host members, the firing loop — is
 `crate::timers` beside `crate::clock`, owned by neither thread.
 
@@ -1248,10 +1254,10 @@ members group as the document's own life, tree vocabulary over numeric
 edges, timers, the page-data triple handed over once as plain JSON and
 processor-name strings the realm alone reads, the stylesheet pair, the
 diagnostics pair, the display-frame demand, and the three worker operations.
-Those three one-shot strings do not arrive separately: they, the entry's own
-text and resolved URL, the screen, and the BTS entry and native-module table
-the BTS's `Start` carries are one `RealmStartup`, which is everything a realm
-is opened with and nothing that is ever updated — `LynxView::update_data`, `update_global_props` and
+Those three one-shot strings do not arrive separately: they, the entry's
+resolved URL, the listed stylesheets' answers, the screen, and the BTS entry
+and native-module table the BTS's `Start` carries are one `RealmStartup`, which
+is everything a realm is opened with and nothing that is ever updated — `LynxView::update_data`, `update_global_props` and
 `reload` reach the realm through `ToMain::PageUpdate` and never touch it.
 
 Every realm, MTS or worker, is opened by the one constructor
@@ -1298,8 +1304,9 @@ which of them it can use. A module written for the other realm kind fails at
 link with a `SyntaxError` naming a member its realm's `bobcat-internal:host`
 lacks (a worker importing `bobcat:element`, `bobcat:runtime` or
 `bobcat-internal`), or at load with a `ReferenceError` naming a host module
-its realm does not declare (an MTS realm importing `bobcat:worker` or
-`bobcat:bts-runtime`, both of which import `bobcat-internal:worker`).
+its realm does not declare (an MTS realm importing `bobcat:worker`,
+`bobcat:bts-runtime` or `bobcat:bts`, each of which imports
+`bobcat-internal:worker`).
 `build_runtime` also reserves the prefixes `ENGINE_MODULE_PREFIXES`
 (`bobcat:`, `bobcat-internal:`), so any other name under them — one no runtime
 registered and no realm declared — fails its `import` or `require` in the

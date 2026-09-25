@@ -579,6 +579,56 @@ fn a_script_that_cannot_be_fetched_fails_its_worker_and_nothing_else() {
     assert_eq!(group.next(0).key, key);
 }
 
+/// A script URL that is an engine name is resolved by the realm's own loader,
+/// so the root module finishes without the host's answer: a registered
+/// built-in links and runs, and a name nothing registered is refused in the
+/// realm with a `ReferenceError`. The host is still asked for that URL, as
+/// for every script, and its answer is still read after that module has
+/// finished: one that is not a script ends the worker with `Failed`, as it
+/// does for any other URL.
+#[test]
+fn a_worker_named_by_an_engine_url_still_ends_on_the_hosts_failed_answer() {
+    let mut group = Group::new();
+    let registered = group.construct_requesting(0, "", "bobcat:timers");
+    let refused = group.construct_requesting(1, "", "bobcat:nope");
+    // Its root module has finished by the time this is reported.
+    let event = group.next(1);
+    assert_eq!(event.key, refused);
+    let WorkerPayload::Errored(error) = event.payload else {
+        panic!("a refused import is something the realm threw")
+    };
+    assert!(
+        error.message.contains("ReferenceError") && error.message.contains("'bobcat:nope'"),
+        "{}",
+        error.message
+    );
+    for (view, key) in [(0, registered), (1, refused)] {
+        let _ = group
+            .scripts
+            .remove(&key)
+            .expect("the host has not answered yet")
+            .send(Err(ResourceError {
+                kind: ResourceErrorKind::UnsupportedScheme,
+                phase: ResourceErrorPhase::Resolve,
+                locator: None,
+                message: "no transport serves `bobcat:` URLs".into(),
+                retry: RetryAdvice::Never,
+            }
+            .into()));
+        let event = group.next(view);
+        assert_eq!(event.key, key);
+        let WorkerPayload::Failed(error) = event.payload else {
+            panic!("a script that never arrived leaves no worker")
+        };
+        assert!(
+            error.message.contains("loading the worker's script")
+                && error.message.contains("no transport serves"),
+            "{}",
+            error.message
+        );
+    }
+}
+
 /// A trap in the thread's own loop ends every worker on it at once, and no
 /// worker's own owner is left to say so: the thread tells the creator of each
 /// live one `Failed` and sets the flag `bobcat-main` reads before a `Start`.
@@ -592,11 +642,6 @@ fn a_trapped_worker_thread_fails_every_live_worker() {
     // One worker per view, each still waiting for its script.
     let first = group.construct(0, "");
     let second = group.construct(1, "");
-    // Up and reading its messages before the wait below begins, so the
-    // `Terminate` it is sent during that wait is read.
-    let ended = group.construct(1, "");
-    group.answer(ended, "app:///ended.js", "postMessage('up');");
-    assert_eq!(group.message(1), wire("up"));
     // This one's script job waits on a load until the test answers it, and
     // no other job runs meanwhile.
     let parked = group.construct(2, "");
@@ -607,14 +652,15 @@ fn a_trapped_worker_thread_fails_every_live_worker() {
 createRequire(import.meta.url)('./held.cjs');",
     );
     let (url, held) = group.views[2].source();
-    // Ended by a `Terminate` its task reads during that wait. Its task is not
-    // joined before the trap: the job that reclaims its realm is queued
-    // behind the waiting one. Its message consumer dropping the receiving
-    // end of its channel is what shows it has ended.
-    let messages = group.views[1].messages[&ended].clone();
+    // Constructed and ended during that wait, by a `Terminate` its message
+    // consumer reads while its boot job is still queued behind the waiting
+    // one. Its task is not joined before the trap: the job that reclaims its
+    // realm is queued there too. Its consumer dropping the script's receiver
+    // is what shows it has ended.
+    let ended = group.construct(1, "");
     group.terminate(ended);
     let deadline = ClockInstant::now() + PATIENCE;
-    while !messages.is_closed() {
+    while !group.scripts[&ended].is_closed() {
         assert!(
             ClockInstant::now() < deadline,
             "the terminated worker ended"

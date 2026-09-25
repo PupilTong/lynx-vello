@@ -89,7 +89,7 @@
 //!
 //! # Waits
 //!
-//! After this module every `select!` in this crate is one of five kinds, and
+//! After this module every `select!` in this crate is one of six kinds, and
 //! each is a wait rather than a dispatcher:
 //!
 //! - **the top loop's turn** — one per engine thread, inside
@@ -100,15 +100,16 @@
 //!   versus the next task of that object to finish;
 //! - **a realm's clock** — one [`serve_clock`] per live realm, a view's and a worker's alike,
 //!   waiting on its deadline, the re-arm that moves it, and a sibling's checkpoint;
-//! - **the worker's pre-boot wait** — its script versus termination, channel closure, or its own
-//!   cancellation;
+//! - **a worker's message consumer** — one `consume_messages` per worker, waiting on what is
+//!   posted, termination included, versus a dedicated worker's script while it is outstanding,
+//!   versus the worker's root module finishing until it has;
 //! - **the painter's metrics** — one [`consume_metrics`] per view, waiting on the end versus the
 //!   next value the view's seat publishes.
 //!
 //! How many there are is the group's shape rather than a constant: one of the
 //! first two kinds per engine thread, one of the third and one of the sixth
 //! per live view, one of the third per live worker, one of the fourth per
-//! live realm, one of the fifth per worker that has not booted yet.
+//! live realm, one of the fifth per live worker.
 //! `link.rs`'s `block_on_deadline` is a hand-rolled poll loop rather than a
 //! select, and the only one left. The synchronous host members are a wait of
 //! their own shape — this view's token against the answer — parked on inside

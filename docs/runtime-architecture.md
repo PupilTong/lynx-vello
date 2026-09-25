@@ -239,8 +239,9 @@ QuickJS ESM graph — a worker realm, on bobcat-workers' runtime
   and a realm's host modules decide which of them link. Here bobcat:element,
   bobcat:runtime and bobcat-internal fail at link with a SyntaxError: they
   import bobcat-internal:host members only an MTS realm has. In an MTS realm
-  bobcat:worker and bobcat:bts-runtime fail to load with a ReferenceError:
-  they import bobcat-internal:worker, which it does not declare.
+  bobcat:worker, bobcat:bts-runtime and bobcat:bts fail to load with a
+  ReferenceError: they import bobcat-internal:worker, which it does not
+  declare.
   bobcat:native-modules links in both: every realm kind declares
   bobcat-internal:native-modules, the MTS realm with an empty table. Any other
   bobcat: or bobcat-internal: name, one no runtime registered and no realm
@@ -803,8 +804,16 @@ finished, which is what HTML does. A runtime that never came up fails the
 worker at its `Start`, without waiting for the answer. A worker told to
 terminate before its script arrives never runs it, because the consumer's
 wait for the script is a `biased` select with the message channel first. The
-worker's token is independent of the view, so its cancellation cannot race
-ahead of JS disposal.
+consumer starts beside the worker's first job, the one that opens its realm,
+rather than after it: that job can be queued behind another realm's job
+parked on a synchronous wait, and a `Terminate` read meanwhile ends the
+worker and cancels its fetch at once; the job then opens nothing. The
+consumer reads the script's answer whenever it arrives. A script URL that is
+an engine name, such as `bobcat:timers`, is resolved or refused by the realm's
+own loader, so the root module finishes without the answer; the host is still
+asked for that URL, and an answer that is not a script still ends the worker
+with `Failed`. The worker's token is independent of the view, so its
+cancellation cannot race ahead of JS disposal.
 
 Worker keys are allocated once per group on main and never reused. A worker's
 whole state is its own task; `bobcat-main` keeps two things per worker. One is

@@ -4327,8 +4327,9 @@ fn a_fetch_reaches_the_fetcher_as_the_realm_wrote_it() {
 /// A name under an engine prefix is answered from the runtime's built-ins and
 /// this realm's host modules, and from nothing else. One that is neither
 /// fails in the realm with a `ReferenceError`, through an `import` or a
-/// `require`, and never reaches the host: `bobcat:worker` is registered, but
-/// it imports `bobcat-internal:worker`, which an MTS realm does not declare.
+/// `require`, and never reaches the host: `bobcat:worker` and `bobcat:bts` are
+/// registered, but each imports `bobcat-internal:worker`, which an MTS realm
+/// does not declare.
 /// `bobcat:lynx-modules`, `bobcat:selector-query` and
 /// `bobcat:global-event-emitter` import nothing an MTS realm lacks, so they
 /// load here as well.
@@ -4344,6 +4345,7 @@ fn an_engine_name_nothing_answers_fails_in_the_realm_without_a_request() {
             ['bobcat:nope', 'bobcat:nope'],
             ['bobcat-internal:nope', 'bobcat-internal:nope'],
             ['bobcat:worker', 'bobcat-internal:worker'],
+            ['bobcat:bts', 'bobcat-internal:worker'],
         ];
         for (const [specifier, named] of expected) {
             let failure;
