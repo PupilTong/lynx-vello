@@ -19,8 +19,9 @@
 //! [`ScriptSource`] its diagnostics name.
 //!
 //! Once a realm is open, its owner — a view's page or a worker — drives it
-//! through [`owner`]: the tasks, the one job per entry, the end and the
-//! release are written there once for both threads.
+//! through [`owner`]: the tasks, the one job per entry, the epilogue with the
+//! module loads and future settles it spawns, the end and the release are
+//! written there once for both threads.
 
 pub(crate) mod owner;
 

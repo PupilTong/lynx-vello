@@ -39,7 +39,7 @@
 //! call — inside the `__SetAttribute` that wrote the attribute — where nothing
 //! may dispatch. So it is queued in [`ImageOutcomes`], which the runtime drains
 //! in the epilogue of the entry that produced it; `docs/runtime-architecture.md`
-//! has the entry boundary, and [`super::super::page`] the epilogue's order.
+//! has the entry boundary, and [`crate::realm::owner`] the epilogue's order.
 //!
 //! What is deliberately still missing: `cap-insets` (a 9-slice composite the
 //! paint layer has no primitive for) and the animated-image events.

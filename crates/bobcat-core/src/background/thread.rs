@@ -18,10 +18,12 @@
 //! job queue every worker realm here drains is the runtime's and a sibling's
 //! entry can finish this realm's jobs. Every one of them reaches the realm
 //! through [`owner::enter`], the driver a worker shares with every view, which
-//! queues one job: it runs one synchronous operation and then the worker's
+//! queues one job: it runs one synchronous operation and then the driver's
 //! epilogue, which settles what it left owing — the timers that came due, a
-//! `close()` it may have called, the next deadline, and the checkpoint
-//! generation as of that entry.
+//! `close()` it may have called, the root module finishing, the imports and
+//! futures it left waiting, the next deadline, and the checkpoint generation
+//! as of that entry. What a worker adds to that epilogue is its
+//! [`RealmOwner`] impl.
 //!
 //! A worker's tasks, the token that ends them and the latch this thread reads
 //! are one [`Lifetime`], the same helper a view on `bobcat-main` is built
@@ -64,12 +66,10 @@ use crate::link::{HostOutbox, SourceAnswer};
 use crate::main::quickjs::{
     ScriptRuntime, SharedRuntime, mark_checkpoint_later, normalize_module_url,
 };
-use crate::realm::owner::{self, RealmOwner};
+use crate::realm::owner::{self, RealmOwner, Scene};
 use crate::realm::{self, RealmCore, context_of};
-use crate::resource::{LoadedSource, SourceRequest};
 use crate::script::ScriptError;
 use crate::threads::{panicked, platform_script_error};
-use crate::timers::run_due_timers;
 use crate::view::ScriptSource;
 
 /// Who each worker task reports to: its worker's key and the creating view's
@@ -437,7 +437,7 @@ impl Worker {
                             // queue, and what it leaves there is this realm's — it
                             // waits for this worker rather than reaching the next
                             // realm to be entered on this runtime.
-                            report(&self.events, self.key, "running the worker's script", error);
+                            Self::report(self, Scene::Boot, error);
                         }
                         // Both under the borrow the root module's load ran
                         // under, so a sibling's bump between this boot and
@@ -510,12 +510,27 @@ impl Worker {
     }
 }
 
-/// What the driver in [`owner`] is told about a worker: where its realm and
-/// runtime are, and that its reports go to the realm that created it. Neither
+/// What the driver in [`owner`] is told about a worker: where its realm,
+/// runtime and host are, that its reports go to the realm that created it,
+/// and what a worker adds to the epilogue — a `close()` that ends it, the
+/// root module finishing, and its script, which it completes itself. Neither
 /// the end nor the release owes anything beyond the driver's own steps.
 impl RealmOwner for Worker {
     type Realm = WorkerRealm;
     type Event = WorkerPayload;
+
+    /// A rejected root module is not reported by the epilogue, which reads
+    /// the root module's load only to learn that it has settled. Only the
+    /// host holds that load's promise, so nothing in the realm can handle
+    /// its rejection, and a checkpoint of this realm reports it as it
+    /// reports every rejection nothing handles. The checkpoint that ends the
+    /// entry the load settled in — the boot job, the completion of the
+    /// script or of a module it imports, a timer — reports it named by that
+    /// entry, or drops it with the other leftovers of the one failure that
+    /// entry reported. So a failure of the root module is reported once,
+    /// whichever job it is in, and the worker stays up, as HTML's "run a
+    /// worker" leaves it.
+    const BOOT_REJECTION: Option<(Scene, Option<&'static str>)> = None;
 
     fn lifetime(&self) -> &Lifetime {
         &self.lifetime
@@ -529,6 +544,14 @@ impl RealmOwner for Worker {
         &self.realm
     }
 
+    fn core(realm: &mut WorkerRealm) -> &mut RealmCore {
+        &mut realm.core
+    }
+
+    fn host(&self) -> &HostOutbox {
+        &self.host
+    }
+
     fn send(&self, payload: WorkerPayload) {
         let _ = self.events.send(WorkerEvent {
             key: self.key,
@@ -536,62 +559,22 @@ impl RealmOwner for Worker {
         });
     }
 
-    /// Everything one entry into this realm leaves owing: the timers that
-    /// have come due, a `close()` whatever just ran may have called, entry
-    /// completion, module requests, the futures a `.then` asked to settle,
-    /// the next timer deadline, and the checkpoint generation as of this
-    /// entry.
-    fn epilogue(worker: &Rc<Self>, realm: &mut WorkerRealm, js: &mut ScriptRuntime) {
-        if worker.ended() {
-            return;
-        }
-        #[cfg(test)]
-        worker.lifetime.count_epilogue();
-        fire_timers(&worker.events, worker.key, realm, js);
-        // A `close()` from the script that just ran ends the worker rather
-        // than parking it again, and discards what it had armed and queued.
-        if realm.closing.get() {
-            owner::terminal(worker, WorkerPayload::Closed);
-            return;
-        }
-        if !*worker.boot_finished.borrow() {
-            // Read to learn whether the root module's load has settled, and
-            // for nothing else: a rejected load is not reported here. Only the
-            // host holds that load's promise, so nothing in the realm can
-            // handle its rejection, and a checkpoint of this realm reports it
-            // as it reports every rejection nothing handles. The checkpoint
-            // that ends the entry the load settled in — the boot job, the
-            // completion of the script or of a module it imports, a timer —
-            // reports it named by that entry, or drops it with the other
-            // leftovers of the one failure that entry reported. So a failure
-            // of the root module is reported once, whichever job it is in.
-            let finished = realm.core.engine.module_finished().unwrap_or(true);
-            if finished {
-                worker.boot_finished.send_replace(true);
+    /// A worker whose realm or script could not be made ready is over, which
+    /// is `Failed`. Anything its realm threw after that is `Errored`: HTML
+    /// reports an uncaught exception at the worker and then at its parent
+    /// and leaves both running.
+    fn report(worker: &Rc<Self>, scene: Scene, error: ScriptError) {
+        let context = match scene {
+            Scene::Open => {
+                owner::terminal(worker, WorkerPayload::Failed(error));
+                return;
             }
-        }
-        while let Some(url) = realm.core.engine.take_module_request() {
-            // The worker's script is answered by `consume_messages` from the
-            // answer to the request `createWorker` made: completing it is
-            // what resumes the load of the root module, which is the script
-            // itself, and it must never reach the fetcher a second time.
-            if url == worker.entry {
-                continue;
-            }
-            let answer = worker.host.request(SourceRequest::Module(url.clone()));
-            owner::spawn(worker, load_module(Rc::clone(worker), url, answer));
-        }
-        for (id, future) in realm.core.futures.take_settle_requests() {
-            owner::spawn(worker, settle_future(Rc::clone(worker), id, future));
-        }
-        worker
-            .lifetime
-            .arm_deadline(realm.core.timers.next_deadline());
-        // Last, so it names the generation this entry ran up rather than the
-        // one it started from.
-        worker
-            .lifetime
-            .record_checkpoint(js.checkpoint_generation());
+            Scene::Boot => "running the worker's script",
+            Scene::Module => "loading an imported worker module",
+            Scene::Future => "settling a worker's future",
+            Scene::Timer => "running a worker's timer callback",
+        };
+        worker.send(WorkerPayload::Errored(context_of(context, error)));
     }
 
     /// A panic is a `Failed`: a worker nothing will be heard from again.
@@ -603,6 +586,44 @@ impl RealmOwner for Worker {
     /// a source is reported to no one.
     fn panic_event(payload: &(dyn Any + Send)) -> WorkerPayload {
         WorkerPayload::Failed(panicked("the worker thread panicked", payload))
+    }
+
+    /// Every timer this realm armed that has come due — none once the script
+    /// has called `close()`, which discards the worker's armed timers along
+    /// with its queued messages; the realm itself goes with the epilogue
+    /// that reports it.
+    fn run_due_timers(realm: &mut WorkerRealm, js: &mut ScriptRuntime) -> Vec<ScriptError> {
+        if realm.closing.get() {
+            return Vec::new();
+        }
+        crate::timers::run_due_timers(&mut realm.core.engine, js, &realm.core.timers)
+            .unwrap_or_default()
+    }
+
+    /// A `close()` from the script that just ran ends the worker rather than
+    /// parking it again, and discards what it had armed and queued.
+    fn after_timers(worker: &Rc<Self>, realm: &mut WorkerRealm) {
+        if realm.closing.get() {
+            owner::terminal(worker, WorkerPayload::Closed);
+        }
+    }
+
+    fn booted(&self) -> bool {
+        *self.boot_finished.borrow()
+    }
+
+    /// Lets through what [`consume_messages`] held while the root module was
+    /// running, a rejected one included: the worker is up either way.
+    fn mark_booted(&self) {
+        self.boot_finished.send_replace(true);
+    }
+
+    /// The worker's script is answered by [`consume_messages`] from the
+    /// answer to the request `createWorker` made. A URL that is an engine
+    /// name, the BTS's `bobcat:bts` among them, was never requested, and the
+    /// realm's own loader answers it without a module request.
+    fn entry_name(&self, _realm: &WorkerRealm) -> Option<String> {
+        Some(self.entry.clone())
     }
 }
 
@@ -782,15 +803,18 @@ async fn consume_messages(
             },
             // Polled only while it is still outstanding: a one-shot that has
             // answered must not be polled again.
-            answer = async {
-                script.as_mut().expect("the arm is enabled only while it is held").await
+            answered = async {
+                owner::await_source(
+                    script.as_mut().expect("the arm is enabled only while it is held"),
+                )
+                .await
             }, if script.is_some() => {
                 script = None;
-                match worker_script(answer) {
-                    Ok((source, url)) => complete_script(&worker, url, source),
-                    Err(reason) => {
+                match owner::module_answer(&worker.entry, answered) {
+                    Ok((url, source)) => complete_script(&worker, url, source),
+                    Err(error) => {
                         let error = platform_script_error(format!(
-                            "loading the worker's script: {reason}"
+                            "loading the worker's script: {error}"
                         ));
                         owner::terminal(&worker, WorkerPayload::Failed(error));
                         return;
@@ -817,8 +841,8 @@ async fn consume_messages(
 /// A script that throws at its top level rejects the root module's load, and
 /// the completion's checkpoint reports that rejection as this entry's
 /// failure. The epilogue's read of the load after it only learns that the
-/// load has settled (see [`Worker::epilogue`]), so the throw is reported
-/// once.
+/// load has settled (see `BOOT_REJECTION` in the worker's [`RealmOwner`]
+/// impl), so the throw is reported once.
 fn complete_script(worker: &Rc<Worker>, url: String, source: String) {
     let completing = Rc::clone(worker);
     drop(owner::enter(worker, move |realm, js| {
@@ -828,12 +852,7 @@ fn complete_script(worker: &Rc<Worker>, url: String, source: String) {
                 .engine
                 .complete_module(js, &completing.entry, Ok((&url, &source)));
         if let Err(error) = completed {
-            report(
-                &completing.events,
-                completing.key,
-                "running the worker's script",
-                error,
-            );
+            Worker::report(&completing, Scene::Boot, error);
         }
     }));
 }
@@ -844,70 +863,6 @@ fn deliver_post(worker: &Rc<Worker>, data: HostValue) {
     drop(owner::enter(worker, move |realm, js| {
         deliver(&delivering.events, delivering.key, realm, js, &data);
     }));
-}
-
-/// One imported resource, awaited by the realm that requested it. The source
-/// response supplies the base URL for its own dependencies, just as on MTS.
-async fn load_module(worker: Rc<Worker>, url: String, answer: SourceAnswer) {
-    let loaded = worker_script(answer.await);
-    let completing = Rc::clone(&worker);
-    owner::enter(&worker, move |realm, js| {
-        let result = loaded
-            .as_ref()
-            .map(|(source, resolved)| (resolved.as_str(), source.as_str()))
-            .map_err(String::as_str);
-        if let Err(error) = realm.core.engine.complete_module(js, &url, result) {
-            report(
-                &completing.events,
-                completing.key,
-                "loading an imported worker module",
-                error,
-            );
-        }
-    })
-    .await;
-}
-
-/// One future a `.then` asked this realm to settle.
-///
-/// Its shape is [`load_module`]'s, and so is its error policy: a realm that
-/// refuses the delivery is reported and goes on running, like a script that
-/// threw or a timer callback that did.
-async fn settle_future(worker: Rc<Worker>, id: u32, future: crate::future::HostFuture) {
-    let outcome = future.await;
-    let settling = Rc::clone(&worker);
-    owner::enter(&worker, move |realm, js| {
-        if let Err(error) = crate::future::deliver(&mut realm.core.engine, js, id, outcome) {
-            report(
-                &settling.events,
-                settling.key,
-                "settling a worker's future",
-                error,
-            );
-        }
-    })
-    .await;
-}
-
-/// The script and the URL it is named by, or why there is neither.
-fn worker_script(
-    answer: Result<
-        Result<LoadedSource, crate::LynxViewError>,
-        tokio::sync::oneshot::error::RecvError,
-    >,
-) -> Result<(String, String), String> {
-    match answer {
-        Ok(Ok(LoadedSource::Module { source, url })) => Ok((source, url)),
-        Ok(Ok(LoadedSource::StyleSheet(_))) => {
-            Err("the fetcher returned a stylesheet for a worker".to_owned())
-        }
-        Ok(Ok(LoadedSource::Font(_))) => Err("the fetcher returned a font for a worker".to_owned()),
-        Ok(Ok(LoadedSource::Fetched)) => {
-            Err("the fetcher returned a plain fetch for a worker".to_owned())
-        }
-        Ok(Err(error)) => Err(error.to_string()),
-        Err(_) => Err("the fetcher dropped the request".to_owned()),
-    }
 }
 
 /// Hands one message value to a realm that is up.
@@ -956,33 +911,14 @@ fn deliver(
     }
 }
 
-/// Runs every timer this realm armed that has come due.
-fn fire_timers(
-    events: &mpsc::UnboundedSender<WorkerEvent>,
-    key: WorkerKey,
-    realm: &mut WorkerRealm,
-    js_runtime: &mut ScriptRuntime,
-) {
-    // A `close()` discards this worker's armed timers along with its queued
-    // messages; the realm itself goes with the epilogue that reports it.
-    if realm.closing.get() {
-        return;
-    }
-    let Some(failures) = run_due_timers(&mut realm.core.engine, js_runtime, &realm.core.timers)
-    else {
-        return;
-    };
-    for error in failures {
-        report(events, key, "running a worker's timer callback", error);
-    }
-}
-
-/// Reports what a worker's realm threw, without ending it.
-///
-/// The one error policy for everything a realm does — loading its script,
-/// taking a message, running a timer. HTML reports an uncaught exception at
-/// the worker and then at its parent and leaves both running, which is exactly
-/// what `Errored` means and `Failed` does not.
+/// Reports what a worker's realm threw, without ending it, for what a worker
+/// runs outside the driver's own steps — a message, a frame, a native
+/// module's callback. The driver's own steps, and the worker's root module
+/// and script, report through [`RealmOwner::report`], which words `Errored`
+/// the same way.
+/// HTML reports an uncaught exception at the worker and then at its parent
+/// and leaves both running, which is exactly what `Errored` means and
+/// `Failed` does not.
 fn report(
     events: &mpsc::UnboundedSender<WorkerEvent>,
     key: WorkerKey,
@@ -1004,6 +940,7 @@ mod tests {
     use tokio::sync::oneshot;
 
     use super::*;
+    use crate::resource::{LoadedSource, SourceRequest};
 
     /// How many times the test lets every ready task run before it gives up on
     /// something happening. A hang detector rather than a schedule: everything
