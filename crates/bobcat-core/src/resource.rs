@@ -29,12 +29,16 @@ use crate::style::PreparsedStyleSheet;
 /// [`ImageReports`](dom::ImageReports), then read during composition.
 ///
 /// **A fetcher's base URL must be the view's
-/// [`ViewSources::base_url`](crate::ViewSources::base_url).** Scripts reach it
-/// already resolved against that base, while the stylesheets, fonts and plain
-/// fetches it is asked for are resolved against its own. With two different
-/// bases, a lazy container's sections would be registered under the URL the
-/// fetcher resolved the container's fetch to and loaded by the URL the realm
-/// resolved its section load to, and the two would not meet.
+/// [`ViewSources::base_url`](crate::ViewSources::base_url).** Every script
+/// request reaches it absolute: the entry, the BTS entry and every
+/// synchronous load resolved against that base, a worker script against the
+/// entry's response URL and an import against its importer's. The
+/// stylesheets and plain fetches it is asked for carry the URL as it was
+/// named, and it resolves them against its own base by URL rules. A lazy
+/// container is fetched, and its sections registered, by the fetcher's
+/// resolution, and each section is loaded synchronously by the realm's: with
+/// two different bases, the URL a section is registered under and the URL
+/// the realm requests it by would differ.
 ///
 /// Every protocol method is synchronous: it starts work and returns. Core therefore holds no
 /// resource future and polls none, and nothing here names a host's transport, caches or
@@ -167,9 +171,10 @@ impl<T: ResourceFetcher + ?Sized> ResourceFetcher for Rc<T> {
 /// One source requested by the document owner.
 ///
 /// A [`Self::Module`] carries an absolute URL the engine already resolved,
-/// in its WHATWG serialization. [`Self::StyleSheet`], [`Self::Font`] and
-/// [`Self::Fetch`] carry the URL as the view, the document or the realm named
-/// it, and the fetcher resolves it against its own base.
+/// in its WHATWG serialization, and a [`Self::Font`] the absolute URL the
+/// document resolved. [`Self::StyleSheet`] and [`Self::Fetch`] carry the URL
+/// as the view or the realm named it, and the fetcher resolves it against its
+/// own base.
 #[derive(Debug)]
 pub enum SourceRequest {
     StyleSheet(String),
@@ -183,7 +188,7 @@ pub enum SourceRequest {
     /// What the fetcher makes of the bytes is its own — the reference
     /// fetcher, given a container installer, registers a Lynx container's
     /// sections beside it — and nothing about them comes back. Resolution is
-    /// the fetcher's, as for `StyleSheet` and `Font`.
+    /// the fetcher's, as for `StyleSheet`.
     ///
     /// Complete with [`LoadedSource::Fetched`].
     Fetch {

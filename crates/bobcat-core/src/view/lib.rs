@@ -456,8 +456,8 @@ pub struct ViewSources {
     /// the view — MTS, BTS and each Worker — resolves the URL of a
     /// synchronous load (`loadModuleSync`) against it.
     ///
-    /// It is not handed to the fetcher, which resolves the stylesheets, fonts
-    /// and fetches it is asked for against a base of its own. An embedder
+    /// It is not handed to the fetcher, which resolves the stylesheets and
+    /// fetches it is asked for against a base of its own. An embedder
     /// that installs lazy containers must give its fetcher this same base, so
     /// that a container's URL resolves alike on both sides: the container is
     /// fetched and its sections registered by the fetcher's resolution, and

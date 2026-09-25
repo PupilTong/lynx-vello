@@ -4205,6 +4205,60 @@ fn a_sync_load_resolves_against_the_views_base() {
     host.join().unwrap();
 }
 
+/// A synchronous load whose URL does not resolve against the view's base
+/// throws in the realm, as a failed load does, and is never requested.
+#[test]
+fn a_sync_load_that_does_not_resolve_throws_without_a_request() {
+    let (mut js, mut runtime, _elements, far) = runtime_over_watching_names(ingredients());
+    let mut notices = far.0.notices;
+    let (finished, mut finish) = tokio::sync::oneshot::channel::<()>();
+    // Every source request that reaches this thread is recorded and its
+    // completion dropped, which fails that load: a URL that was requested
+    // fails the assertion below instead of leaving the realm waiting for an
+    // answer. Dropping `finished` ends the loop.
+    let host = std::thread::spawn(move || {
+        let deadline = ClockInstant::now() + std::time::Duration::from_secs(10);
+        let mut requested = Vec::new();
+        loop {
+            let notice = crate::link::block_on_deadline(
+                async {
+                    tokio::select! {
+                        notice = notices.recv() => notice,
+                        _ = &mut finish => None,
+                    }
+                },
+                deadline,
+            )
+            .flatten();
+            match notice {
+                Some(ViewNotice::RequestSource { request, .. }) => requested.push(request),
+                Some(_) => {}
+                None => break requested,
+            }
+        }
+    });
+    runtime
+        .evaluate_module(
+            &mut js,
+            r"
+        import { lynx } from 'bobcat:runtime';
+        let failure;
+        try { lynx.loadScript('x', {bundleName: 'http://['}); } catch (error) { failure = error; }
+        if (failure?.name !== 'Error' || !failure.message.includes('http://[/x.js'))
+            throw Error(`${failure}`);
+    ",
+            "app:///nested/load.js",
+            "loading a section whose URL does not resolve",
+        )
+        .unwrap();
+    drop(finished);
+    let requested = host.join().unwrap();
+    assert!(
+        requested.is_empty(),
+        "an unresolvable URL reached the host: {requested:?}"
+    );
+}
+
 /// A fetch is not resolved by the engine: the fetcher gets the string the
 /// realm wrote and resolves it against its own base.
 #[test]

@@ -441,10 +441,10 @@ specified values only through its value parsers. Decoding a container stays
 embedder work: core owns the `PreparsedStyleSheet` vocabulary, the embedder
 fills it. Source requests select a stylesheet or module payload. A
 `SourceRequest::Module` — an entry, an import, a worker script or a
-synchronous load — carries an absolute URL Rust already resolved; a
-stylesheet, font or fetch carries the URL as it was named, and the fetcher
-resolves it against its own base, which the embedder keeps equal to
-`ViewSources::base_url`. The fetcher supplies the transport policy. The protocol
+synchronous load — carries an absolute URL Rust already resolved; a font
+carries the absolute URL the document resolved; a stylesheet or fetch
+carries the URL as it was named, and the fetcher resolves it against its own
+base, which the embedder keeps equal to `ViewSources::base_url`. The fetcher supplies the transport policy. The protocol
 also offers the optional `preload_source` hint,
 `request_image`/`service_images` and the `FrameImages` supertrait: every method
 is synchronous, so no resource future crosses it, and core names none of a
@@ -796,7 +796,7 @@ then awaits the entry. The task that completes the entry calls
 module, so `__Card__` is that URL before the entry's body runs, and a
 `new Worker` URL resolves against it: the realm hands it to
 `createWorker(url, name, baseUrl)`, and Rust joins the two by URL rules and
-keeps no base URL of its own. Boot then processes that argument and posts
+does not keep `__Card__`. Boot then processes that argument and posts
 the result plus host props and SystemInfo as the first BTS Worker message,
 before rendering. The BTS bootstrap returns after installing a JS receiver, and
 that message initializes its inputs before importing the entry. Later internal
@@ -1025,8 +1025,8 @@ through the view's resource fetcher and support TLA. `main/workers.rs` installs
 its three native operations — `createWorker`, `sendWorkerMessage`,
 `terminateWorker` — before entry boot. `createWorker` tells the built-in
 `bobcat:bts` apart first, then joins any other script URL by URL rules to the
-`__Card__` the realm passes as its third argument (Rust keeps no base URL of
-its own); a URL that does not resolve starts nothing and `new Worker` throws a
+`__Card__` the realm passes as its third argument (Rust does not keep
+`__Card__`); a URL that does not resolve starts nothing and `new Worker` throws a
 synchronous `SyntaxError`. The `Start` goes out before the host is asked for
 anything, the script is requested as a `SourceRequest::Module` of the joined
 URL, and the host is handed the far end of the one-shot that already rode
@@ -1497,9 +1497,12 @@ libcurl loaded at runtime with `libloading` on macOS and Linux (no build-time
 link, no bundled HTTP or TLS stack; a host without it gets a precise
 `Unavailable`), and the Render Worker's `fetch` in the browser.
 
-**The `FetchIndex`**: the base URL stylesheet, font, fetch and image URLs
-resolve against (script requests arrive resolved against the view's
-`ViewSources::base_url`, which this must equal), and the
+**The `FetchIndex`**: the base URL relative stylesheet, fetch and image URLs
+resolve against by URL rules (a font URL arrives absolute, and so does every
+script URL: an entry or a synchronous load, which is how a lazy container's
+section is loaded, resolved against the view's `ViewSources::base_url`, which
+this must therefore equal; a worker script against the entry's response URL;
+an import against its importer's), and the
 set of URLs a plain `SourceRequest::Fetch` has **completed successfully** for,
 written after the container installer ran. It is behind an `Arc` of its own
 rather than inside the shared state, because `ViewResources::fetch_probe()`

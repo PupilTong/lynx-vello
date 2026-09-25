@@ -366,7 +366,7 @@ absolute URL, or an entry that does not resolve against it, is a zero-fetch,
 synchronous `EngineError::InvalidUrl` naming the string that failed. The
 parsed base then crosses to `bobcat-main` in the attachment, and every realm of
 the view resolves its synchronous loads against it. The base itself is not
-handed to the fetcher, which resolves stylesheets, fonts and fetches against a
+handed to the fetcher, which resolves stylesheets and fetches against a
 base of its own; an embedder must give it the same one, and every embedder in
 this workspace does. Fonts
 and the default family come next, validated against a `dom::TextContext` of
@@ -481,9 +481,9 @@ group/view handle joins the group's threads.
 Source requests select a module or stylesheet payload. A
 `SourceRequest::Module` — the entry, an import, a worker script or a
 synchronous load — carries an absolute URL Rust resolved, in its WHATWG
-serialization; a stylesheet, font or fetch carries the URL as it was named,
-and the fetcher resolves it against its own base, which must equal
-`ViewSources::base_url`. The fetcher owns transport policy. That call, the optional
+serialization; a font carries the absolute URL the document resolved; a
+stylesheet or fetch carries the URL as it was named, and the fetcher resolves
+it against its own base, which must equal `ViewSources::base_url`. The fetcher owns transport policy. That call, the optional
 `preload_source` hint, `request_image`, `service_images` and the `FrameImages`
 supertrait are the whole protocol. Every method is synchronous — no transport
 future crosses this interface, and core

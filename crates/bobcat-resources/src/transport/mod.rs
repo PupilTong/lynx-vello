@@ -67,6 +67,19 @@ pub(crate) struct Fetched {
     pub restorable: bool,
 }
 
+/// `specifier` resolved by URL rules: joined to `base` when there is one,
+/// and parsed on its own when there is none.
+///
+/// With a base, the join is the whole algorithm, as it is where the engine
+/// resolves a script URL against the view's base. Parsing first and joining
+/// only on failure gives a different URL for one kind of input: a reference
+/// that repeats the base's own special scheme, such as `https:x` against an
+/// `https:` base, which a join reads as a relative path and a parse as the
+/// host `x`.
+pub(crate) fn join(specifier: &str, base: Option<&Url>) -> Result<Url, url::ParseError> {
+    base.map_or_else(|| Url::parse(specifier), |base| base.join(specifier))
+}
+
 /// Every transport, behind one dispatch.
 pub(crate) struct Transports {
     pub registry: Registry,
@@ -89,18 +102,13 @@ impl Transports {
     /// serve — so the failure is at resolution, where the protocol reports
     /// it, and never a request that was doomed from the start.
     pub(crate) fn resolve(&self, specifier: &str, base: Option<&Url>) -> Result<Url, Failure> {
-        let url = Url::parse(specifier)
-            .or_else(|_| {
-                base.ok_or(url::ParseError::RelativeUrlWithoutBase)
-                    .and_then(|base| base.join(specifier))
-            })
-            .map_err(|error| {
-                Failure::new(
-                    ResourceErrorKind::InvalidUrl,
-                    ResourceErrorPhase::Resolve,
-                    format!("`{specifier}` is not a URL: {error}"),
-                )
-            })?;
+        let url = join(specifier, base).map_err(|error| {
+            Failure::new(
+                ResourceErrorKind::InvalidUrl,
+                ResourceErrorPhase::Resolve,
+                format!("`{specifier}` is not a URL: {error}"),
+            )
+        })?;
         if self.registry.contains(&url) || Self::serves_scheme(url.scheme()) {
             Ok(url)
         } else {
@@ -443,6 +451,15 @@ mod tests {
                 .unwrap()
                 .as_str(),
             "https://cards.test/img/a.png"
+        );
+        // With a base, the join is the whole algorithm, as the engine's is: a
+        // reference that repeats the base's own special scheme is relative.
+        assert_eq!(
+            transports
+                .resolve("https:img/a.png", Some(&base))
+                .unwrap()
+                .as_str(),
+            "https://cards.test/app/img/a.png"
         );
         assert_eq!(
             transports.resolve("data:,x", None).unwrap().scheme(),

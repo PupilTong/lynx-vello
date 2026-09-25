@@ -69,7 +69,7 @@ export class Worker extends EventTarget {
     const name = options?.name === undefined ? "" : String(options.name);
     // A relative URL resolves against the page's entry, as a browser's
     // resolves against the document that constructs the worker: the host
-    // joins the two by URL rules and keeps no base URL of its own. One that
+    // joins the two by URL rules and does not keep `__Card__`. One that
     // does not resolve is HTML's `SyntaxError`: the host answers `null` for
     // it rather than throwing, because every error a host member throws is
     // an `InternalError`, and the class is this realm's to choose.

@@ -228,7 +228,7 @@ either thread's half of a ReactLynx `lazy()` may be the one that asks.
 
 **The request.** `SourceRequest::Fetch { url }` carries the string the card
 passed; resolution is the fetcher's, against its own base, as it is for a
-stylesheet or a font. A host
+stylesheet. A host
 answers `LoadedSource::Fetched` — which carries nothing — once the fetch is
 over, or fails the request. Core never learns what came back, and there is no
 `Bundle` request, no installed set and no record JSON anywhere in it: the one
@@ -256,8 +256,9 @@ write that URL as the container was named, rooted or relative, and load it
 through `loadModuleSync`, which resolves it against the view's
 `ViewSources::base_url` in Rust. The container's fetch — and so the URLs the
 installer registers its sections at — and a `__LoadStyleSheet('CSS')` of its
-`index.css` are resolved by the fetcher against its own base. The two meet
-only because the embedder gives its fetcher the view's base: every embedder
+`index.css` are resolved by the fetcher against its own base. The URL a
+section is registered under and the URL a realm loads it by are equal only
+because the embedder gives its fetcher the view's base: every embedder
 in this workspace does, the CLI and the server through `PageSource`'s input
 URL and the browser through `load_sources`. A
 `main-thread` section becomes an MTS module — `MTS_CHUNK_PREAMBLE`, the entry's
