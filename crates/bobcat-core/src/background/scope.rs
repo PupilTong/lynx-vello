@@ -13,10 +13,11 @@ use crate::esm::{TIMER_MODULE_SPECIFIER, WORKER_MODULE_SPECIFIER};
 use crate::link::{HostOutbox, ViewNotice};
 use crate::main::quickjs::{ScriptEngine, ScriptRuntime};
 use crate::script::ScriptError;
-use crate::timers::{TimerState, install_timer_members};
 
-/// The worker realm's host module: what `bobcat-internal:host` is to
-/// `bobcat-main`, minus everything that would need a document.
+/// The worker realm's own host module. A worker realm declares two: this one,
+/// with the members only a worker has, and `bobcat-internal:host`, which
+/// carries the core [`crate::realm::open_realm`] installs in every realm and
+/// none of the MTS realm's document members.
 const WORKER_HOST_MODULE_SPECIFIER: &str = "bobcat-internal:worker";
 /// Called on `bobcat:worker`, in a worker realm, with one message value.
 pub(super) const WORKER_DELIVER_EXPORT: &str = "__BobcatDeliverWorkerMessage";
@@ -49,9 +50,11 @@ globalThis.name = {name};
     )
 }
 
-/// Installs everything one worker realm reaches the host through: the timer
-/// pair under `bobcat-internal:host`, so `bobcat:timers` compiles unchanged,
-/// and the three members that are a worker's whole outward surface.
+/// Installs a worker realm's own host module, `bobcat-internal:worker`: the
+/// three members that are a worker's whole outward surface beyond the core
+/// [`crate::realm::open_realm`] installed under `bobcat-internal:host`. The
+/// BTS and a plain `Worker` get the same three. Answers with the flag
+/// `closeWorker` sets.
 ///
 /// There is no document member here and no way to add one: this realm is on
 /// another runtime, on another thread, and the document is neither `Send` nor
@@ -61,13 +64,10 @@ globalThis.name = {name};
 pub(super) fn install_worker_members(
     engine: &mut ScriptEngine,
     js_runtime: &mut ScriptRuntime,
-    timers: &Rc<TimerState>,
-    closing: &Rc<Cell<bool>>,
     key: WorkerKey,
     host: &HostOutbox,
     mut post: impl FnMut(HostValue) + 'static,
-) -> Result<(), ScriptError> {
-    install_timer_members(engine, js_runtime, timers)?;
+) -> Result<Rc<Cell<bool>>, ScriptError> {
     install_native_modules(engine, js_runtime, key, host)?;
 
     engine.register_host_module_function(
@@ -85,7 +85,8 @@ pub(super) fn install_worker_members(
         }),
     )?;
 
-    let closing = Rc::clone(closing);
+    let closing = Rc::new(Cell::new(false));
+    let closer = Rc::clone(&closing);
     engine.register_host_module_function(
         js_runtime,
         WORKER_HOST_MODULE_SPECIFIER,
@@ -94,10 +95,11 @@ pub(super) fn install_worker_members(
         Box::new(move |_arguments| {
             // A flag, not a teardown: this runs inside the realm it would
             // tear down, so the thread reads it once the task returns.
-            closing.set(true);
+            closer.set(true);
             Ok(HostValue::Undefined)
         }),
-    )
+    )?;
+    Ok(closing)
 }
 
 /// Installs the one member `NativeModules.<module>.<method>(...)` reaches the

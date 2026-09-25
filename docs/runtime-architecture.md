@@ -614,6 +614,22 @@ separation is also what makes "a worker cannot touch the document" structural
 — there is no path from a worker realm to a `LynxDocument`, and no value of
 either runtime can be named by the other.
 
+Both threads open a realm through one constructor, `realm::open_realm`. It
+creates the realm on that thread's runtime, enables module loading, and
+installs the core every realm has under `bobcat-internal:host`: the
+display-frame demand, the timer pair, the three `Future` members,
+`fetchResource`, and the two members `bobcat:module` is written over. They
+reach the view through the `HostOutbox` the caller passes, whose token is the
+view's for an MTS realm and the worker's own for a worker realm, so a
+synchronous wait in either ends with the realm that asked. The realm's other
+host modules are a parameter of the same call: the document, stylesheet,
+startup and `Worker` members for an MTS realm, `bobcat-internal:worker` for a
+worker realm. The constructor names no realm kind. The one thing it is told
+is the key the realm's display-frame demand is reported under: `None` for an
+MTS realm, the worker's key for a worker realm. Since both runtimes register
+every built-in module, these host modules are also what decides which
+built-ins a realm can link.
+
 The main realm can explicitly import `Worker` from `bobcat-internal`:
 
 ```js

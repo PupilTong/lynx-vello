@@ -537,7 +537,7 @@ fn initial_values_reach_each_view_before_its_entry_and_render() {
             ..RealmStartup::default()
         },
     ]);
-    first.engine.collect_garbage(&mut js).unwrap();
+    first.core.engine.collect_garbage(&mut js).unwrap();
     first.run_main_thread_script(&mut js, r"
         if (lynx.__initData.count !== 42 || lynx.__initData.text !== '中文') throw Error('entry data');
         const data = lynx.__initData;

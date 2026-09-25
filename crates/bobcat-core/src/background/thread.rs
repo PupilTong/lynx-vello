@@ -60,11 +60,12 @@ use crate::esm::{WORKER_MODULE_SPECIFIER, build_runtime};
 use crate::jobs::{JsThread, JsThreadHandle};
 use crate::lifetime::{EndOnUnwind, Lifetime, Settles, run_job, serve_clock};
 use crate::link::{HostOutbox, SourceAnswer};
-use crate::main::quickjs::{ScriptEngine, ScriptRuntime, SharedRuntime, mark_checkpoint_later};
+use crate::main::quickjs::{ScriptRuntime, SharedRuntime, mark_checkpoint_later};
+use crate::realm::{self, RealmCore, context_of};
 use crate::resource::{LoadedSource, SourceRequest};
 use crate::script::ScriptError;
 use crate::threads::{panicked, platform_script_error};
-use crate::timers::{TimerState, run_due_timers};
+use crate::timers::run_due_timers;
 
 /// Who each live worker task reports to: its worker's key and the creating
 /// view's channel. Kept by [`serve_workers`], and read by
@@ -231,12 +232,12 @@ fn report_thread_trap(trapped: &AtomicBool, reporters: &Reporters, error: &Scrip
 }
 
 /// One live worker on this thread: its realm and everything that realm owns.
+///
+/// `core` is what [`realm::open_realm`] builds for every realm; `closing` is
+/// the one piece of state the worker's own host module,
+/// `bobcat-internal:worker`, adds to it.
 struct WorkerRealm {
-    engine: ScriptEngine,
-    timers: Rc<TimerState>,
-    /// Every host-backed operation this realm holds a `Future` for, every
-    /// `fetchResource` included.
-    futures: Rc<crate::future::FutureTable>,
+    core: RealmCore,
     /// Set by the native `closeWorker` export. A flag rather than a direct
     /// teardown because it is written from inside the realm it would tear
     /// down: the task reads it once the call that set it has returned.
@@ -430,7 +431,7 @@ impl Worker {
             return;
         }
         if !*self.boot_finished.borrow() {
-            let finished = match realm.engine.module_finished() {
+            let finished = match realm.core.engine.module_finished() {
                 Ok(finished) => finished,
                 Err(error) => {
                     report(&self.events, self.key, "running the worker's script", error);
@@ -441,14 +442,15 @@ impl Worker {
                 self.boot_finished.send_replace(true);
             }
         }
-        while let Some(url) = realm.engine.take_module_request() {
+        while let Some(url) = realm.core.engine.take_module_request() {
             let answer = self.sources.request(SourceRequest::Module(url.clone()));
             self.spawn(load_module(Rc::clone(self), url, answer));
         }
-        for (id, future) in realm.futures.take_settle_requests() {
+        for (id, future) in realm.core.futures.take_settle_requests() {
             self.spawn(settle_future(Rc::clone(self), id, future));
         }
-        self.lifetime.arm_deadline(realm.timers.next_deadline());
+        self.lifetime
+            .arm_deadline(realm.core.timers.next_deadline());
         // Last, so it names the generation this entry ran up rather than the
         // one it started from.
         self.lifetime.record_checkpoint(js.checkpoint_generation());
@@ -483,17 +485,32 @@ impl Worker {
                 // asked for. Each hears the same reason.
                 Err(error) => Err(error.clone()),
                 Ok(js) => {
-                    open_realm(
+                    // This worker's own token rides in `sources`, so what a
+                    // `Future.wait` or a `require` parks on is cancelled with
+                    // the worker rather than with the view: a `Terminate` read
+                    // while the job is parked ends the wait, because that
+                    // token is the one [`Worker::end`] cancels.
+                    realm::open_realm(
                         js,
-                        self.events.clone(),
-                        self.key,
                         &self.sources,
                         self.lifetime.thread().clone(),
+                        Some(self.key),
+                        |engine, js| {
+                            let events = self.events.clone();
+                            let key = self.key;
+                            install_worker_members(engine, js, key, &self.sources, move |data| {
+                                let _ = events.send(WorkerEvent {
+                                    key,
+                                    payload: WorkerPayload::Message(data),
+                                });
+                            })
+                        },
                     )
+                    .map(|(core, closing)| WorkerRealm { core, closing })
                     .map(|mut realm| {
                         let (source, url) = script;
                         let source = worker_boot_source(name, &source);
-                        if let Err(error) = realm.engine.start_module(js, &source, &url) {
+                        if let Err(error) = realm.core.engine.start_module(js, &source, &url) {
                             // Nothing to clean up after: a throw at this module's
                             // top level rejects through the runtime's shared job
                             // queue, and what it leaves there is this realm's — it
@@ -693,7 +710,7 @@ async fn boot_worker(
 fn deliver_vsync(worker: &Rc<Worker>, milliseconds: f64) {
     let reporting = Rc::clone(worker);
     drop(worker.enter(move |realm, js| {
-        if let Err(error) = realm.engine.call_module_export(
+        if let Err(error) = realm.core.engine.call_module_export(
             js,
             crate::esm::BTS_RUNTIME_MODULE_SPECIFIER,
             "__BobcatBeginFrame",
@@ -722,7 +739,7 @@ fn deliver_module_callback(worker: &Rc<Worker>, call: u64, index: u32, arguments
             clippy::cast_precision_loss,
             reason = "the realm mints these counting up from one"
         )]
-        let delivered = realm.engine.call_module_export(
+        let delivered = realm.core.engine.call_module_export(
             js,
             WORKER_MODULE_SPECIFIER,
             WORKER_MODULE_CALLBACK_EXPORT,
@@ -821,7 +838,7 @@ async fn load_module(worker: Rc<Worker>, url: String, answer: SourceAnswer) {
                 .as_ref()
                 .map(|(source, resolved)| (resolved.as_str(), source.as_str()))
                 .map_err(String::as_str);
-            if let Err(error) = realm.engine.complete_module(js, &url, result) {
+            if let Err(error) = realm.core.engine.complete_module(js, &url, result) {
                 report(
                     &completing.events,
                     completing.key,
@@ -843,7 +860,7 @@ async fn settle_future(worker: Rc<Worker>, id: u32, future: crate::future::HostF
     let settling = Rc::clone(&worker);
     worker
         .enter(move |realm, js| {
-            if let Err(error) = crate::future::deliver(&mut realm.engine, js, id, outcome) {
+            if let Err(error) = crate::future::deliver(&mut realm.core.engine, js, id, outcome) {
                 report(
                     &settling.events,
                     settling.key,
@@ -876,65 +893,6 @@ fn worker_script(
     }
 }
 
-fn open_realm(
-    js_runtime: &mut ScriptRuntime,
-    events: mpsc::UnboundedSender<WorkerEvent>,
-    key: WorkerKey,
-    host: &HostOutbox,
-    thread: JsThreadHandle,
-) -> Result<WorkerRealm, ScriptError> {
-    let mut engine = js_runtime
-        .create_realm()
-        .map_err(|error| context_of("creating the worker realm", error))?;
-    engine.enable_module_loading();
-    let frames = host.clone();
-    crate::script_frames::install(&mut engine, js_runtime, move |pending| {
-        frames.notify(crate::link::ViewNotice::ScriptFrameDemand {
-            worker: Some(key),
-            pending,
-        });
-    })?;
-    // This worker's own token, so what a `Future.wait` parks on is cancelled
-    // with the worker rather than with the view: a `Terminate` read while the
-    // job is parked ends the wait, because the token this outbox carries is
-    // the one [`Worker::end`] cancels. The same holds for the load a `require`
-    // asks for, over the same outbox.
-    let futures = Rc::new(crate::future::FutureTable::new());
-    crate::future::install(
-        &mut engine,
-        js_runtime,
-        &futures,
-        host.token().clone(),
-        thread.clone(),
-    )?;
-    // Both realm kinds get `fetchResource`, over the table above: what a
-    // fetch answers is a future of this realm's.
-    crate::fetch::install(&mut engine, js_runtime, host, &futures)?;
-    crate::require::install(&mut engine, js_runtime, host.clone(), thread)?;
-    let timers = Rc::new(TimerState::new());
-    let closing = Rc::new(Cell::new(false));
-    install_worker_members(
-        &mut engine,
-        js_runtime,
-        &timers,
-        &closing,
-        key,
-        host,
-        move |data| {
-            let _ = events.send(WorkerEvent {
-                key,
-                payload: WorkerPayload::Message(data),
-            });
-        },
-    )?;
-    Ok(WorkerRealm {
-        engine,
-        timers,
-        futures,
-        closing,
-    })
-}
-
 /// Hands one message value to a realm that is up.
 fn deliver(
     events: &mpsc::UnboundedSender<WorkerEvent>,
@@ -950,7 +908,7 @@ fn deliver(
     if realm.closing.get() {
         return;
     }
-    let delivered = realm.engine.call_module_export(
+    let delivered = realm.core.engine.call_module_export(
         js_runtime,
         WORKER_MODULE_SPECIFIER,
         WORKER_DELIVER_EXPORT,
@@ -973,7 +931,8 @@ fn fire_timers(
     if realm.closing.get() {
         return;
     }
-    let Some(failures) = run_due_timers(&mut realm.engine, js_runtime, &realm.timers) else {
+    let Some(failures) = run_due_timers(&mut realm.core.engine, js_runtime, &realm.core.timers)
+    else {
         return;
     };
     for error in failures {
@@ -997,13 +956,6 @@ fn report(
         key,
         payload: WorkerPayload::Errored(context_of(context, error)),
     });
-}
-
-/// Prefixes a failure with what the host was doing, the way `MainThreadError`
-/// does for the errors that reach an embedder through a view.
-fn context_of(context: &str, mut error: ScriptError) -> ScriptError {
-    error.message = std::sync::Arc::from(format!("{context}: {}", error.message));
-    error
 }
 
 #[cfg(test)]
@@ -1235,17 +1187,18 @@ mod tests {
             self.worker
                 .enter_now(|realm, js| {
                     realm
+                        .core
                         .engine
                         .start_module(js, source, "app:///observer-test.js")
                         .unwrap();
-                    assert!(realm.engine.module_finished().unwrap());
+                    assert!(realm.core.engine.module_finished().unwrap());
                 })
                 .expect("the worker is live");
         }
 
         fn collect(&self) {
             self.worker
-                .enter_now(|realm, js| realm.engine.collect_garbage(js).unwrap())
+                .enter_now(|realm, js| realm.core.engine.collect_garbage(js).unwrap())
                 .expect("the worker is live");
         }
 

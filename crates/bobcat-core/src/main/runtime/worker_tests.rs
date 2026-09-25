@@ -2463,6 +2463,7 @@ fn bts_animation_frames_continue_while_an_mts_callback_is_blocked() {
     pair.runtime
         .as_mut()
         .unwrap()
+        .core
         .engine
         .register_host_module_function(
             &mut pair.js,

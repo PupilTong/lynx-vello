@@ -1115,6 +1115,20 @@ one `RealmStartup`, which is everything a realm is opened with and nothing
 that is ever updated — `LynxView::update_data`, `update_global_props` and
 `reload` reach the realm through `ToMain::PageUpdate` and never touch it.
 
+Every realm, MTS or worker, is opened by the one constructor
+`realm::open_realm` (`crates/bobcat-core/src/realm.rs`). It creates the realm,
+enables module loading and installs the core every realm has under
+`bobcat-internal:host`: `requestScriptFrame`, `setTimer`/`clearTimer`,
+`waitFuture`/`takeFuture`/`settleFuture`, `fetchResource`, and
+`resolveModuleUrl`/`loadModuleSync`. Every other host module is a parameter
+of that call: `MainThreadRuntime::new` passes the document, stylesheet,
+startup-string, diagnostics, event-name and `Worker` members, and a worker
+passes `bobcat-internal:worker`. The constructor has no role field; the one
+thing it is told about a realm is the key its display-frame demand is
+reported under, `None` for MTS and the worker's key for a worker. What it
+answers with, `RealmCore { engine, timers, futures }`, is the first field of
+both `MainThreadRuntime` and the worker thread's `WorkerRealm`.
+
 The members that answer with a list encode it in the return string, since
 the boundary's value type carries no array: `attributeNames` and
 `getComputedStyleMap` as the length-prefixed record `setInlineStyles` accepts,

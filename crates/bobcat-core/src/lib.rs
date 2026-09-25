@@ -50,6 +50,7 @@ mod main;
 pub mod native_module;
 #[path = "paint/lib.rs"]
 mod paint;
+mod realm;
 mod require;
 pub mod resource;
 pub mod script;

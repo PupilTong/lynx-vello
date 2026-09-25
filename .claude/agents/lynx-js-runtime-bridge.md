@@ -42,6 +42,11 @@ and `bobcat-workers` (every Worker realm, including the BTS).
   realm scopes. `view/` holds `LynxGroup`, `LynxView`, `ViewSources` and
   `create_lynx_view`; `paint/` the `Painter`; `link.rs` the per-view channels;
   `lifetime.rs` the `CancellationToken`, `serve_clock` and `run_job`;
+  `realm.rs` (`open_realm`, the one constructor both threads open a realm
+  with: it installs the core every realm has under `bobcat-internal:host` —
+  frame demand, timers, `Future`, `fetchResource`, `require` — then runs the
+  caller's own host modules, passed as a parameter, and answers with
+  `RealmCore { engine, timers, futures }`);
   `timers.rs`, `clock.rs`/`alarm.rs`, `future.rs` (the per-realm `FutureTable`
   and `waitFuture`/`takeFuture`/`settleFuture`), `esm.rs` (`BUILTIN_MODULES`,
   the one table both runtimes register, and `build_runtime`, which also
