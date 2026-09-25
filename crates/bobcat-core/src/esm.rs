@@ -1,10 +1,16 @@
-//! The module names both kinds of realm agree on, and the built-in modules
-//! each engine thread registers on its runtime.
+//! The built-in modules both runtimes register, and the module names both
+//! kinds of realm agree on.
 //!
-//! A source is registered per `QuickJS` runtime, so a group registers each
-//! module both lists name twice: once on the runtime its views' realms share,
-//! once on the one its workers share. The names are here, beside
-//! [`crate::clock`], because neither runtime owns them.
+//! Both engine threads register the whole of [`BUILTIN_MODULES`] on their
+//! runtime, so a group holds each source twice: once on the runtime its views'
+//! realms share, once on the one its workers share. What a realm can use of
+//! them is decided by the host modules it declares: an import of a host module
+//! the realm does not declare fails with a `ReferenceError`, and an import of a
+//! member its host module lacks fails at link with a `SyntaxError`. A name
+//! under [`ENGINE_MODULE_PREFIXES`] that is neither registered nor declared
+//! fails in the realm that asked with a `ReferenceError`, and is never
+//! fetched. The names are here, beside [`crate::clock`], because neither
+//! runtime owns them.
 
 use std::sync::Arc;
 
@@ -84,7 +90,7 @@ pub(crate) const RUNTIME_MODULE_SPECIFIER: &str = "bobcat:runtime";
 /// which the module normalizer passes through by name.
 pub(crate) const WORKER_CLASS_MODULE_SPECIFIER: &str = "bobcat-internal";
 
-/// The worker realm's global-scope module, on the *worker* runtime.
+/// The worker realm's global-scope module.
 pub(crate) const WORKER_MODULE_SPECIFIER: &str = "bobcat:worker";
 
 /// The compiler factory ABI: what the BTS runtime's `lynx.requireModule` and
@@ -176,44 +182,41 @@ pub(crate) const BUNDLE_FETCH_MODULE_SPECIFIER: &str = "bobcat:bundle-fetch";
 /// BTS query builders carry selection tokens across Worker messages.
 pub(crate) const SELECTOR_QUERY_SPECIFIER: &str = "bobcat:selector-query";
 
-/// What `bobcat-main` registers on the runtime its views' realms share.
-pub(crate) const MAIN_THREAD_MODULES: &[BuiltinModule] = &[
-    builtin_module!(WORKER_CLASS_MODULE_SPECIFIER, "worker"),
-    builtin_module!(EVENT_TARGET_MODULE_SPECIFIER, "event-target"),
-    builtin_module!(CONTEXT_MODULE_SPECIFIER, "cross-thread-context"),
-    builtin_module!(RUNTIME_MODULE_SPECIFIER, "main-thread-runtime"),
-    builtin_module!(ELEMENT_MODULE_SPECIFIER, "element-papi"),
-    builtin_module!(TIMER_MODULE_SPECIFIER, "timers"),
-    builtin_module!(FUTURE_MODULE_SPECIFIER, "future"),
-    builtin_module!(SECTION_URL_MODULE_SPECIFIER, "section-url"),
-    builtin_module!(BUNDLE_FETCH_MODULE_SPECIFIER, "bundle-fetch"),
-    builtin_module!(REQUIRE_MODULE_SPECIFIER, "module"),
-];
-
-/// What `bobcat-workers` registers on the runtime its worker realms share:
-/// the global scope, timers, `Future`, `require`, the shared event machinery
-/// and the BTS runtime module. Each script chooses its own imports.
+/// The name prefixes of the engine's own modules. A runtime reserves both: a
+/// name under one is answered from the runtime's registered sources and the
+/// importing realm's host modules, and from nothing else.
 ///
-/// `bobcat:element` and `bobcat:runtime` are absent because a worker has no
-/// document to reach and no page to be the main thread of, and registering
-/// them would make an import that must fail merely fail late.
-pub(crate) const WORKER_MODULES: &[BuiltinModule] = &[
-    builtin_module!(SELECTOR_QUERY_SPECIFIER, "selector-query"),
+/// [`WORKER_CLASS_MODULE_SPECIFIER`] has no colon, so neither covers it; both
+/// runtimes register it, so an import of it never reaches a fetcher either.
+pub(crate) const ENGINE_MODULE_PREFIXES: [&str; 2] = ["bobcat:", "bobcat-internal:"];
+
+/// Every built-in module. Both runtimes register all of them, and a realm's
+/// host modules decide which of them it can link.
+///
+/// In the order of the `paths` of `packages/bobcat-element/src/tsconfig.json`,
+/// which maps each specifier to the same file; a test holds the two equal.
+pub(crate) const BUILTIN_MODULES: &[BuiltinModule] = &[
     builtin_module!(LYNX_MODULES_SPECIFIER, "lynx-modules"),
     builtin_module!(GLOBAL_EVENT_MODULE_SPECIFIER, "global-event-emitter"),
-    builtin_module!(EVENT_TARGET_MODULE_SPECIFIER, "event-target"),
-    builtin_module!(WORKER_MODULE_SPECIFIER, "worker-runtime"),
-    builtin_module!(CONTEXT_MODULE_SPECIFIER, "cross-thread-context"),
-    builtin_module!(BTS_RUNTIME_MODULE_SPECIFIER, "background-thread-runtime"),
+    builtin_module!(SELECTOR_QUERY_SPECIFIER, "selector-query"),
+    builtin_module!(ELEMENT_MODULE_SPECIFIER, "element-papi"),
+    builtin_module!(RUNTIME_MODULE_SPECIFIER, "main-thread-runtime"),
     builtin_module!(TIMER_MODULE_SPECIFIER, "timers"),
     builtin_module!(FUTURE_MODULE_SPECIFIER, "future"),
+    builtin_module!(REQUIRE_MODULE_SPECIFIER, "module"),
     builtin_module!(SECTION_URL_MODULE_SPECIFIER, "section-url"),
     builtin_module!(BUNDLE_FETCH_MODULE_SPECIFIER, "bundle-fetch"),
-    builtin_module!(REQUIRE_MODULE_SPECIFIER, "module"),
+    builtin_module!(EVENT_TARGET_MODULE_SPECIFIER, "event-target"),
+    builtin_module!(CONTEXT_MODULE_SPECIFIER, "cross-thread-context"),
+    builtin_module!(WORKER_CLASS_MODULE_SPECIFIER, "worker"),
+    builtin_module!(WORKER_MODULE_SPECIFIER, "worker-runtime"),
+    builtin_module!(BTS_RUNTIME_MODULE_SPECIFIER, "background-thread-runtime"),
 ];
 
-/// Builds one of a group's two `QuickJS` runtimes, with `modules` registered
-/// on it for every realm that will be opened there.
+/// Builds one of a group's two `QuickJS` runtimes: every built-in module
+/// registered on it for every realm that will be opened there, and the
+/// [`ENGINE_MODULE_PREFIXES`] reserved to those and to each realm's host
+/// modules.
 ///
 /// Both engine threads build theirs with this, and both keep an `Err` rather
 /// than failing the group: it is the failure of every view or worker that
@@ -222,9 +225,9 @@ pub(crate) const WORKER_MODULES: &[BuiltinModule] = &[
 /// Sources are registered once per runtime rather than once per realm: a
 /// runtime holds one source per name and compiles it into a module per realm,
 /// so a second registration of a name would refuse the second realm.
-pub(crate) fn build_runtime(modules: &[BuiltinModule]) -> Result<ScriptRuntime, ScriptError> {
+pub(crate) fn build_runtime() -> Result<ScriptRuntime, ScriptError> {
     let mut runtime = ScriptRuntime::new()?;
-    for module in modules {
+    for module in BUILTIN_MODULES {
         runtime
             .register_module_source(module.specifier, module.source)
             .map_err(|mut error| {
@@ -235,5 +238,50 @@ pub(crate) fn build_runtime(modules: &[BuiltinModule]) -> Result<ScriptRuntime, 
                 error
             })?;
     }
+    for prefix in ENGINE_MODULE_PREFIXES {
+        runtime.reserve_module_prefix(prefix).map_err(|mut error| {
+            error.message = Arc::from(format!("reserving {prefix}: {}", error.message));
+            error
+        })?;
+    }
     Ok(runtime)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BUILTIN_MODULES;
+
+    /// What type-checks the built-ins: its `paths` resolve each specifier to
+    /// the file the realm registers under it, one entry per line.
+    const TSCONFIG: &str = include_str!("../../../packages/bobcat-element/src/tsconfig.json");
+
+    /// The table a runtime registers and the `paths` the TypeScript is
+    /// checked against name the same files under the same specifiers, in the
+    /// same order, so neither can gain or rename a module alone.
+    #[test]
+    fn the_built_in_table_is_the_tsconfig_paths() {
+        let paths: Vec<(&str, &str)> = TSCONFIG
+            .lines()
+            .map(str::trim)
+            .skip_while(|line| *line != r#""paths": {"#)
+            .skip(1)
+            .take_while(|line| *line != "}")
+            .map(|line| {
+                let (specifier, file) = line
+                    .split_once(": ")
+                    .unwrap_or_else(|| panic!("one path per line: {line}"));
+                let file = file
+                    .trim_end_matches(',')
+                    .strip_prefix(r#"["./"#)
+                    .and_then(|file| file.strip_suffix(r#""]"#))
+                    .unwrap_or_else(|| panic!("one file per path: {line}"));
+                (specifier.trim_matches('"'), file)
+            })
+            .collect();
+        let table: Vec<(&str, &str)> = BUILTIN_MODULES
+            .iter()
+            .map(|module| (module.specifier, module.file))
+            .collect();
+        assert_eq!(table, paths);
+    }
 }

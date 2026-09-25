@@ -56,7 +56,7 @@ use super::scope::{
     worker_boot_source,
 };
 use super::{WorkerCommand, WorkerEvent, WorkerKey, WorkerMessage, WorkerPayload, WorkerStart};
-use crate::esm::{WORKER_MODULE_SPECIFIER, WORKER_MODULES, build_runtime};
+use crate::esm::{WORKER_MODULE_SPECIFIER, build_runtime};
 use crate::jobs::{JsThread, JsThreadHandle};
 use crate::lifetime::{EndOnUnwind, Lifetime, Settles, run_job, serve_clock};
 use crate::link::{HostOutbox, SourceAnswer};
@@ -73,11 +73,7 @@ type Reporters = Rc<RefCell<FxHashMap<task::Id, (WorkerKey, mpsc::UnboundedSende
 
 /// The thread's whole body.
 pub(super) fn run(commands: mpsc::UnboundedReceiver<WorkerCommand>, trapped: &Arc<AtomicBool>) {
-    serve(
-        Rc::new(RefCell::new(build_runtime(WORKER_MODULES))),
-        commands,
-        trapped,
-    );
+    serve(Rc::new(RefCell::new(build_runtime())), commands, trapped);
 }
 
 /// Preloads a fixture through the existing runtime API for Context tests.
@@ -88,7 +84,7 @@ pub(super) fn run_with_entry(
     trapped: &Arc<AtomicBool>,
 ) {
     let (source, url) = entry;
-    let mut runtime = build_runtime(WORKER_MODULES).unwrap();
+    let mut runtime = build_runtime().unwrap();
     let source = format!("{}{source}", crate::esm::BTS_ENTRY_PREAMBLE);
     runtime.register_module_source(&url, &source).unwrap();
     serve(Rc::new(RefCell::new(Ok(runtime))), commands, trapped);
@@ -1100,7 +1096,7 @@ mod tests {
 
     /// One worker runtime, furnished the way [`run`] furnishes this thread's.
     fn worker_runtime() -> SharedRuntime {
-        let js = build_runtime(WORKER_MODULES).expect("the worker runtime builds");
+        let js = build_runtime().expect("the worker runtime builds");
         Rc::new(RefCell::new(Ok(js)))
     }
 

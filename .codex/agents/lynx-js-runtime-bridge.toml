@@ -39,10 +39,14 @@ and `bobcat-workers` (every Worker realm, including the BTS).
   `create_lynx_view`; `paint/` the `Painter`; `link.rs` the per-view channels;
   `lifetime.rs` the `CancellationToken`, `serve_clock` and `run_job`;
   `timers.rs`, `clock.rs`/`alarm.rs`, `future.rs` (the per-realm `FutureTable`
-  and `waitFuture`/`takeFuture`/`settleFuture`), `esm.rs`, `require.rs`
-  (`resolveModuleUrl` and `loadModuleSync`, the two members `bobcat:module` is
-  written over), `fetch.rs` (`fetchResource`, the one member a realm fetches a
-  URL through — a plain fetch registered as a `Future`, or `true` at once when
+  and `waitFuture`/`takeFuture`/`settleFuture`), `esm.rs` (`BUILTIN_MODULES`,
+  the one table both runtimes register, and `build_runtime`, which also
+  reserves `bobcat:`/`bobcat-internal:` so that an engine name nothing
+  registered or declared fails in the realm with a `ReferenceError` instead of
+  reaching the fetcher), `require.rs` (`resolveModuleUrl` and
+  `loadModuleSync`, the two members `bobcat:module` is written over),
+  `fetch.rs` (`fetchResource`, the one member a realm fetches a URL through —
+  a plain fetch registered as a `Future`, or `true` at once when
   `ResourceFetcher::fetch_probe` says this view already fetched the URL, with
   nothing bundle-specific anywhere in core), `script.rs`, `resource.rs`,
   `style.rs`.

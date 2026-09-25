@@ -152,7 +152,7 @@ bobcat-wasm ──┬───▶ bobcat-resources ─┘          │          
 bobcat-source ────────────────────────────────────┘
                                                   └──▶ quickjs-rust-bridge
 
-QuickJS preloaded ESM graph — bobcat-main's runtime
+QuickJS ESM graph — an MTS realm, on bobcat-main's runtime
   bobcat:boot
     ├──▶ bobcat:element (Document class + flush binding)
     ├──▶ bobcat:timers (timer-global installation)
@@ -178,7 +178,7 @@ QuickJS preloaded ESM graph — bobcat-main's runtime
                 └──▶ bobcat-internal:host (native named function exports)
                       └──▶ the document created above
 
-QuickJS ESM graph — shared built-ins and per-worker imports, on bobcat-workers
+QuickJS ESM graph — a worker realm, on bobcat-workers' runtime
   bobcat:worker-boot (one per live worker, evaluated, never registered)
     ├──▶ bobcat:worker (packages/bobcat-element/src/worker-runtime.ts)
     │     ├── the global scope: self, postMessage, close, name, onmessage
@@ -192,9 +192,15 @@ QuickJS ESM graph — shared built-ins and per-worker imports, on bobcat-workers
                 │     └──▶ bobcat:cross-thread-context ──▶ bobcat:event-target
                 └──▶ await import(BTS entry) when configured
                       HostOutbox → view resource host → worker completion
-  No bobcat:element and no bobcat:runtime here: a worker has no document to
-  reach and no page to be the main thread of, so reaching for either fails to
-  resolve rather than failing late.
+  Both runtimes register the same fifteen built-ins (esm.rs BUILTIN_MODULES),
+  and a realm's host modules decide which of them link. Here bobcat:element,
+  bobcat:runtime and bobcat-internal fail at link with a SyntaxError: they
+  import bobcat-internal:host members only an MTS realm has. In an MTS realm
+  bobcat:worker and bobcat:bts-runtime fail to load with a ReferenceError:
+  they import bobcat-internal:worker, which it does not declare. Any other
+  bobcat: or bobcat-internal: name, one no runtime registered and no realm
+  declared, fails its import or require in the realm with a ReferenceError
+  and is never sent to the fetcher.
 
 bobcat-cli ──▶ bobcat-source + winit
 bobcat-wasm ──▶ bobcat-source + wasm-bindgen + wasm_thread

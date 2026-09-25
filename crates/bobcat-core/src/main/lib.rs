@@ -54,7 +54,7 @@ use wasm_thread::Builder as ThreadBuilder;
 use self::quickjs::{SharedRuntime, mark_checkpoint_later};
 pub(crate) use self::workers::WorkerFactory;
 use crate::background::WorkerCommand;
-use crate::esm::{MAIN_THREAD_MODULES, build_runtime};
+use crate::esm::build_runtime;
 use crate::jobs::{JsThread, JsThreadHandle};
 use crate::link::{ToMain, ViewOutbox};
 use crate::threads::{self, ThreadJoin};
@@ -177,7 +177,7 @@ fn run_group(style_threads: StyleThreads, link: GroupLink) {
     // built is kept as its error, which every view that attaches reports as
     // its own startup failure — as `bobcat-workers` keeps its own runtime's
     // error for each of its workers.
-    let js_runtime = build_runtime(MAIN_THREAD_MODULES);
+    let js_runtime = build_runtime();
     let style_pool = match build_style_pool(style_threads.resolve()) {
         Ok(pool) => pool.map(Rc::new),
         Err(error) => {

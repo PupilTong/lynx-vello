@@ -1132,15 +1132,23 @@ preconditions before entering `dom`, returning misuse as a JavaScript exception
 (unexpected internal panics remain fatal on abort-only Wasm). An unflushed
 batch may present once its evaluation ends — web-core's visibility model.
 
-Beside the host module, each runtime registers a fixed set of built-in ESM
-sources in QuickJS's loader: `build_runtime` over `MAIN_THREAD_MODULES` for
-`bobcat-main` and over `WORKER_MODULES` for `bobcat-workers`, both tables and
-the specifiers in `esm.rs`, and the per-runtime lists with their TypeScript
-sources in the
-`packages/bobcat-element` section below. The worker list is deliberately
-different, so importing `bobcat:element` or `bobcat:runtime` there fails to
-resolve rather than failing late. `bobcat:bts` is the BTS Worker's engine
-entry, `bobcat:boot` the MTS boot module's own specifier. A worker's own script
+Beside the host module, both runtimes register the same built-in ESM sources
+in QuickJS's loader: `build_runtime` registers `BUILTIN_MODULES`, the one table
+in `esm.rs` beside the specifiers, and the list with its TypeScript sources is
+in the `packages/bobcat-element` section below. A realm's host modules decide
+which of them it can use. A module written for the other realm kind fails at
+link with a `SyntaxError` naming a member its realm's `bobcat-internal:host`
+lacks (a worker importing `bobcat:element`, `bobcat:runtime` or
+`bobcat-internal`), or at load with a `ReferenceError` naming a host module
+its realm does not declare (an MTS realm importing `bobcat:worker` or
+`bobcat:bts-runtime`, both of which import `bobcat-internal:worker`).
+`build_runtime` also reserves the prefixes `ENGINE_MODULE_PREFIXES`
+(`bobcat:`, `bobcat-internal:`), so any other name under them — one no runtime
+registered and no realm declared — fails its `import` or `require` in the
+realm with a `ReferenceError` and is never sent to a fetcher.
+`bobcat-internal`, which has no colon, is registered on both runtimes, so it
+never reaches a fetcher either. `bobcat:bts` is the BTS Worker's engine entry,
+`bobcat:boot` the MTS boot module's own specifier. A worker's own script
 is *inlined* into the one module its realm evaluates, as `ENTRY_PREAMBLE`
 carries the MTS entry, and never registered on the runtime. The Element module
 imports native operations directly from `bobcat-internal:host`; no host object
@@ -1376,6 +1384,17 @@ first point another load can replace the buffers the host lent. A module is
 linked during that compile, so the imports it pulls in are loaded — each
 through the same borrowed-until-the-next-load host callback — before its own
 evaluation starts.
+
+A runtime can also reserve module-name prefixes
+(`Runtime::reserve_module_prefix`), which checks a name at two places. The
+loader looks a name up in the realm's own sources, the runtime's registered
+sources, the pending loads and the realm's native modules; a reserved name
+found in none of them fails the import in that realm with a `ReferenceError`
+instead of becoming a module request or a call of the synchronous loader.
+`loadModuleSync` makes the same check itself, after its lookup of a module the
+realm already has an instance of, because a top-level `require` does not pass
+through the loader. Which prefixes are reserved is the host's choice.
+
 Every heap allocation made by the C shim or the five compiled QuickJS C
 translation units is redirected through a private C ABI into Rust's global
 allocator; a fixed aligned prefix supplies the size required for matching
@@ -1832,25 +1851,25 @@ browser WebGPU completion is Promise-driven.
 ### packages/bobcat-element
 
 The dependency-free TypeScript sources of the ESMs `bobcat-core` preloads into
-its QuickJS realms, one file per module. The main-thread runtime gets
-`src/main-thread-runtime.ts` as `bobcat:runtime`, `src/element-papi.ts` as
-`bobcat:element`, `src/timers.ts` as `bobcat:timers`, `src/module.ts` as
-`bobcat:module`, `src/event-target.ts` as `bobcat:event-target`,
-`src/cross-thread-context.ts` as `bobcat:cross-thread-context`, and
-`src/worker.ts` as the `Worker` class under `bobcat-internal`. The group's
-*worker* runtime gets `src/worker-runtime.ts` as `bobcat:worker`,
-`src/background-thread-runtime.ts` as `bobcat:bts-runtime`,
-`src/global-event-emitter.ts` as `bobcat:global-event-emitter`,
-`src/lynx-modules.ts` as `bobcat:lynx-modules`, `src/selector-query.ts` as
-`bobcat:selector-query`, plus `bobcat:event-target`,
-`bobcat:cross-thread-context`, `bobcat:timers`, `bobcat:module`,
-`src/section-url.ts` as `bobcat:section-url` and `src/bundle-fetch.ts` as
-`bobcat:bundle-fetch` again — the last two being on both runtimes because a
-container's section URLs and `lynx.fetchBundle`'s handle are both realms' —
+its QuickJS realms, one file per module. Both of a group's runtimes register
+all fifteen, as `esm.rs`'s `BUILTIN_MODULES` lists them in the order of
+`src/tsconfig.json`'s `paths` (a unit test holds the two equal):
+`src/lynx-modules.ts` as `bobcat:lynx-modules`, `src/global-event-emitter.ts`
+as `bobcat:global-event-emitter`, `src/selector-query.ts` as
+`bobcat:selector-query`, `src/element-papi.ts` as `bobcat:element`,
+`src/main-thread-runtime.ts` as `bobcat:runtime`, `src/timers.ts` as
+`bobcat:timers`, `src/future.ts` as `bobcat:future`, `src/module.ts` as
+`bobcat:module`, `src/section-url.ts` as `bobcat:section-url`,
+`src/bundle-fetch.ts` as `bobcat:bundle-fetch`, `src/event-target.ts` as
+`bobcat:event-target`, `src/cross-thread-context.ts` as
+`bobcat:cross-thread-context`, `src/worker.ts` as the `Worker` class under
+`bobcat-internal`, `src/worker-runtime.ts` as `bobcat:worker` and
+`src/background-thread-runtime.ts` as `bobcat:bts-runtime`. They are
 registered per runtime, because a source is runtime-wide and no value crosses
-between two runtimes. `src/native.d.ts` declares the two native modules' contracts and is
-the authoritative list of what `bobcat-internal:host` and
-`bobcat-internal:worker` export.
+between two runtimes; which of them a realm can link is decided by the host
+modules it declares, not by the table. `src/native.d.ts` declares the two
+native modules' contracts and is the authoritative list of what
+`bobcat-internal:host` and `bobcat-internal:worker` export.
 
 What core embeds, with `include_str!`, is the JavaScript TypeScript 7 compiles
 from `src/*.ts` during the Cargo build. `bobcat-core/build.rs` invokes the

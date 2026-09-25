@@ -716,6 +716,77 @@ fn a_require_nobody_answers_throws_in_the_worker_and_leaves_it_usable() {
     assert_eq!(wire_json(&group.views[0].message()), r#"[true,"queued"]"#);
 }
 
+/// The worker runtime registers every built-in, and a worker realm's host
+/// modules decide which of them link: the MTS modules import members only an
+/// MTS realm's `bobcat-internal:host` has, so they fail at link, and a name
+/// no runtime registered fails to load. None of the three reaches the host.
+#[test]
+fn a_worker_links_only_the_built_ins_its_host_modules_have_members_for() {
+    let mut group = Group::new();
+    group.start(
+        r"
+        const outcomes = [];
+        for (const specifier of ['bobcat:element', 'bobcat-internal', 'bobcat:nope']) {
+            try { await import(specifier); outcomes.push('loaded'); }
+            catch (error) { outcomes.push(`${error.name}: ${error.message}`); }
+        }
+        postMessage(JSON.stringify(outcomes));
+    ",
+    );
+    let HostValue::String(outcomes) = group.message(0) else {
+        panic!("the worker posts its outcomes as JSON text");
+    };
+    let outcomes: Vec<String> = serde_json::from_str(&outcomes).unwrap();
+    let [element, worker_class, missing] = outcomes.as_slice() else {
+        panic!("one outcome per import: {outcomes:?}");
+    };
+    for linked in [element, worker_class] {
+        assert!(
+            linked.starts_with("SyntaxError: Could not find export"),
+            "{linked}"
+        );
+    }
+    assert!(
+        missing.starts_with("ReferenceError: ") && missing.contains("'bobcat:nope'"),
+        "{missing}"
+    );
+    assert!(group.views[0].sources.try_recv().is_err());
+}
+
+/// The members a worker realm's two host modules export, which is what
+/// decides the built-ins it can link. Written down so that a change to either
+/// set is a change to these lists. A namespace lists its exports sorted by
+/// name; `testFuture` is the test build's own producer.
+#[test]
+fn a_worker_realm_declares_these_host_members() {
+    let mut group = Group::new();
+    group.start(
+        r"
+        postMessage([
+            Object.keys(await import('bobcat-internal:host')).join(','),
+            Object.keys(await import('bobcat-internal:worker')).join(','),
+        ].join(' / '));
+    ",
+    );
+    let host = [
+        "clearTimer",
+        "fetchResource",
+        "loadModuleSync",
+        "requestScriptFrame",
+        "resolveModuleUrl",
+        "setTimer",
+        "settleFuture",
+        "takeFuture",
+        "testFuture",
+        "waitFuture",
+    ];
+    let worker = ["closeWorker", "invokeNativeModule", "postWorkerMessage"];
+    assert_eq!(
+        group.message(0),
+        wire(&format!("{} / {}", host.join(","), worker.join(",")))
+    );
+}
+
 #[test]
 fn a_handled_import_failure_keeps_the_worker_usable() {
     let mut group = Group::new();

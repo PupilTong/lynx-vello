@@ -17,7 +17,7 @@ use dom::event::EventSteps;
 use tokio::sync::{mpsc, watch};
 
 use crate::background::{WorkerCommand, WorkerEvent};
-use crate::esm::{MAIN_THREAD_MODULES, build_runtime};
+use crate::esm::build_runtime;
 use crate::jobs::JsThread;
 use crate::link::{DetachedView, InputEventPayload, detached_outbox};
 use crate::main::WorkerFactory;
@@ -79,8 +79,7 @@ impl ScriptHarness {
             style_pool: None,
         };
         let (outbox, view) = detached_outbox(Arc::new(NoWakeup));
-        let mut js_runtime =
-            build_runtime(MAIN_THREAD_MODULES).expect("the benchmark runtime builds");
+        let mut js_runtime = build_runtime().expect("the benchmark runtime builds");
         let (workers, inbox) = mpsc::unbounded_channel();
         let thread = JsThread::new();
         let (runtime, worker_events) = MainThreadRuntime::new(

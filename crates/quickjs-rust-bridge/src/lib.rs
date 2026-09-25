@@ -1056,6 +1056,46 @@ mod implementation {
             }
         }
 
+        /// Reserves every module name that starts with `prefix` for what
+        /// this runtime and its realms already have.
+        ///
+        /// An `import` of a reserved name resolves to a source registered on
+        /// this runtime or to a native module the importing realm declared,
+        /// and a synchronous load (the export
+        /// [`Context::register_synchronous_loader`] installs) of one answers
+        /// only from a module the realm has already instantiated. Any other
+        /// reserved name fails that call with a `ReferenceError` in the
+        /// realm, and never becomes a [`Context::take_module_request`] or a
+        /// call of the realm's loader, so a name the host keeps for itself is
+        /// never fetched.
+        ///
+        /// A source the host completes on a realm itself, through
+        /// [`Context::complete_module`], is found by an `import` under any
+        /// name: the reservation decides only what a name found in none of
+        /// those tables does.
+        pub fn reserve_module_prefix(&mut self, prefix: &str) -> Result<(), Error> {
+            self.inner.reclaim();
+            let prefix = CString::new(prefix).map_err(|_| {
+                Error::bridge(
+                    ErrorKind::InvalidInput,
+                    ErrorPhase::RegisterModule,
+                    "module prefix contains a NUL byte",
+                )
+            })?;
+            let status = unsafe {
+                ffi::qjs_runtime_reserve_module_prefix(self.inner.raw.as_ptr(), prefix.as_ptr())
+            };
+            if status == 0 {
+                Ok(())
+            } else {
+                Err(Error::bridge(
+                    ErrorKind::OutOfMemory,
+                    ErrorPhase::RegisterModule,
+                    "QuickJS could not retain the module prefix",
+                ))
+            }
+        }
+
         /// Runs a full garbage collection and reclaims host closures.
         pub fn run_gc(&mut self) {
             unsafe { ffi::qjs_runtime_run_gc(self.inner.raw.as_ptr()) };
@@ -2888,6 +2928,47 @@ mod implementation {
             );
         }
 
+        /// A name under a reserved prefix resolves to a source the runtime
+        /// registered or a native module the realm declared. Any other one
+        /// fails the import in the realm and is never left for the host to
+        /// take as a request.
+        #[test]
+        fn a_reserved_name_nothing_answers_fails_without_becoming_a_request() {
+            let (mut runtime, mut realm) = import_test_realm();
+            runtime.reserve_module_prefix("bobcat:").unwrap();
+            runtime
+                .register_module_source("bobcat:shared", "export const answer = 40;")
+                .unwrap();
+            realm
+                .register_host_module_function("bobcat:native", "two", 0, |_| {
+                    Ok(HostValue::Number(2.0))
+                })
+                .unwrap();
+            import_eval(
+                &mut realm,
+                r"
+                globalThis.outcome = 'pending';
+                import('bobcat:missing').then(
+                    () => { outcome = 'loaded'; },
+                    error => { outcome = `${error.name}: ${error.message}`; },
+                );
+                globalThis.answer = 0;
+                Promise.all([import('bobcat:shared'), import('bobcat:native')])
+                    .then(([shared, native]) => { answer = shared.answer + native.two(); });
+            ",
+            );
+            runtime.drain_pending_jobs(&realm).unwrap();
+            assert!(realm.take_module_request().is_none());
+            import_eval(
+                &mut realm,
+                r#"
+                if (outcome !== "ReferenceError: module 'bobcat:missing' is not preloaded")
+                    throw Error(outcome);
+                if (answer !== 42) throw Error('answer ' + answer);
+            "#,
+            );
+        }
+
         /// The specifier these tests register the synchronous loader under.
         /// Only a name here: what Bobcat puts behind it is a source module of
         /// its own, and this crate knows nothing about it.
@@ -3495,6 +3576,55 @@ mod implementation {
                 "{}",
                 error.message
             );
+        }
+
+        /// An inline link asks the loader for each import it cannot find,
+        /// except a reserved name: that fails the `require` in the realm, and
+        /// the loader never hears of it.
+        #[test]
+        fn a_required_module_that_imports_an_unanswered_reserved_name_fails_locally() {
+            let (mut runtime, mut realm, host) = loader_realm(
+                RequireHost::default().module("app:///a.mjs", "import 'bobcat:missing';"),
+            );
+            runtime.reserve_module_prefix("bobcat:").unwrap();
+            let error = run_loader(
+                &mut runtime,
+                &mut realm,
+                "entry",
+                "loadModuleSync('app:///a.mjs', 'unread');",
+            )
+            .expect_err("an import of a reserved name nothing answers");
+            assert_eq!(error.name.as_deref(), Some("ReferenceError"));
+            assert!(
+                error.message.contains("'bobcat:missing' is not preloaded"),
+                "{}",
+                error.message
+            );
+            assert_eq!(host.borrow().loads, ["app:///a.mjs"]);
+        }
+
+        /// A synchronous load of a reserved name answers only from a module
+        /// the realm already has, and otherwise never reaches the loader.
+        #[test]
+        fn a_synchronous_load_of_a_reserved_name_never_reaches_the_loader() {
+            let (mut runtime, mut realm, host) = loader_realm(
+                RequireHost::default().commonjs("bobcat:missing", "exports.answer = 42;"),
+            );
+            runtime.reserve_module_prefix("bobcat:").unwrap();
+            let error = run_loader(
+                &mut runtime,
+                &mut realm,
+                "entry",
+                "loadModuleSync('bobcat:missing', 'unread');",
+            )
+            .expect_err("a load of a reserved name nothing answers");
+            assert_eq!(error.name.as_deref(), Some("ReferenceError"));
+            assert!(
+                error.message.contains("'bobcat:missing' is not preloaded"),
+                "{}",
+                error.message
+            );
+            assert!(host.borrow().loads.is_empty());
         }
 
         #[test]

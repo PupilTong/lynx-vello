@@ -184,6 +184,20 @@ impl ScriptRuntime {
             .register_module_source(specifier, source)
             .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterModule))
     }
+
+    /// Keeps every module name under `prefix` to what this runtime registered
+    /// and what each realm declares: an `import` of one resolves only to
+    /// those, and a `require` of one answers only from a module the realm has
+    /// already imported. Any other fails in the realm that asked with a
+    /// `ReferenceError`, and is never sent to a fetcher as a
+    /// [`SourceRequest::Module`].
+    ///
+    /// [`SourceRequest::Module`]: crate::resource::SourceRequest::Module
+    pub(crate) fn reserve_module_prefix(&mut self, prefix: &str) -> Result<(), ScriptError> {
+        self.runtime
+            .reserve_module_prefix(prefix)
+            .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterModule))
+    }
 }
 
 /// The runtime every realm on one engine thread is opened on, as that
@@ -633,8 +647,9 @@ impl ScriptEngine {
 /// host member [`crate::require`] installs over this.
 pub(crate) fn normalize_module_url(base: &str, specifier: &str) -> Result<String, String> {
     if specifier == crate::esm::WORKER_CLASS_MODULE_SPECIFIER
-        || specifier.starts_with("bobcat:")
-        || specifier.starts_with("bobcat-internal:")
+        || crate::esm::ENGINE_MODULE_PREFIXES
+            .iter()
+            .any(|prefix| specifier.starts_with(prefix))
     {
         return Ok(specifier.to_owned());
     }
