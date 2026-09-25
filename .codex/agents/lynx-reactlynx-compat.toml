@@ -52,7 +52,12 @@ Landed and not to be regressed:
 
 - A compiled bundle boots, taps route to the BTS, `setState` comes back, and the
   view repaints. A BTS throw is nonfatal — the page degrades rather than
-  failing.
+  failing. So is an MTS throw (`ScriptRunError`), during boot or after it:
+  `bobcat-server` logs it and still captures the page, and of the engine's
+  events only a fatal one (`EngineEvent::is_fatal`: `StartupFailed`,
+  `Panicked`) fails a capture with 422. Censuses taken while `ScriptRunError`
+  still failed a capture counted those pages as 422, so their numbers are not
+  comparable with later ones.
 - Page data and global props are JSON text Rust never parses.
 - Not implemented on purpose: list cell recycling, UI methods other than
   `boundingClientRect`, per-component css-id scoping (every fragment mounts

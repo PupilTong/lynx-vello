@@ -1665,22 +1665,26 @@ and that turn ends in `about_to_wait`, taking both turns in order —
 and returns what the realm had to say. Winit's `RedrawRequested` is not
 relayed. Drawing there coalesces a turn's events into one frame and keeps the
 vsync wait out of winit's proxy-event drain, which iterates until empty. The
-painter goes first deliberately: the pixels a fatal script error left behind
-reach the screen on the turn that reports it. The loop always waits — a realm
-timer is not its deadline to keep — and what wakes it for a *frame* is the
-window's own display: while `Painter::owes_frame` holds, a `CVDisplayLink` on
-the window's monitor posts one wakeup per refresh and stops when nothing is
+painter goes first deliberately: the frame a view committed before a fatal
+event reaches the screen on the turn that reports it. The loop always waits —
+a realm timer is not its deadline to keep — and what wakes it for a *frame* is
+the window's own display: while `Painter::owes_frame` holds, a `CVDisplayLink`
+on the window's monitor posts one wakeup per refresh and stops when nothing is
 owed.
 
 It renders one page: one group, one `create_lynx_view` given the author CSS and
-entry MTS URL as a `ViewSources`, any group, resource or TLA boot failure
-reported as `CliError::StartView`, and the preserved `ScriptFinished` edge and
-any later `ScriptRunError` consumed through `view.pump()`. Headed mode builds
-its painter over the window; headless builds one over `DrawTarget::Offscreen`
-and relays synthetic vsync ticks into `Painter::tick`, whether a tick becomes
-GPU work being the engine's decision. Fields drop in the order `vsync, painter,
-view, …, window`, so the display link stops before what it wakes goes away and
-the surface is released before the last window handle.
+entry MTS URL as a `ViewSources`, and the preserved `ScriptFinished` edge
+consumed through `view.pump()`. Only an event for which `EngineEvent::is_fatal`
+holds ends the run: `StartupFailed`, like a group or view construction
+failure, as `CliError::StartView`, and any other fatal event (`Panicked`) as
+`CliError::Script`. Every other event is printed to standard error and the run
+goes on: `ScriptRunError`, `ListenerFailed`, `TimerFailed`, `WorkerThrew` and
+`WorkerEnded`, and the realms' diagnostics as `[{source}] [{level}] {message}`.
+Headed mode builds its painter over the window; headless builds one over
+`DrawTarget::Offscreen` and relays synthetic vsync ticks into `Painter::tick`,
+whether a tick becomes GPU work being the engine's decision. Fields drop in the
+order `vsync, painter, view, …, window`, so the display link stops before what
+it wakes goes away and the surface is released before the last window handle.
 
 Its resource system is `bobcat-resources`: the decoded input's scripts and
 stylesheet registered under `bobcat-memory://` URLs, the input's own `file://`
@@ -1749,7 +1753,12 @@ main thread, QuickJS runtime and Stylo pool; no runtime is shared across jobs.
 BMP encoding runs on Tokio's blocking pool after the view is gone, so it cannot
 retain the view or hold the GPU lane. Queue saturation and an unavailable
 worker are 503, input/render failures 422, encoding failures 500, and
-capture/upload timeouts 408. A worker panic makes `/health` unavailable and
+capture/upload timeouts 408. Of the engine's events, only one for which
+`EngineEvent::is_fatal` holds fails a capture with 422: `StartupFailed` as a
+start failure, `Panicked` as a script failure. A `ScriptRunError`, a BTS or
+`Worker` realm's `WorkerThrew` or `WorkerEnded`, a listener or timer failure
+and the realms' diagnostics are written to standard error and the page is
+still captured. A capture-thread panic makes `/health` unavailable and
 initiates graceful server shutdown.
 
 Remote template/ZIP downloads follow UI Judge's public HTTP(S), no-credentials,

@@ -1306,6 +1306,16 @@ consequential choice about whether to follow the spec or the quirk.
   explorer-lib guards on `typeof`). A method a module did not declare is
   `undefined` on both references, and so here. MTS `NativeModules` stays
   `undefined` altogether, as Lepus has no module binding.
+- **`lynx.reportError(error, {level: 'fatal'})` is reported and nothing more**
+  — lynx-core's `reportError` maps `'fatal'` to `LynxErrorLevel.Fatal`
+  (`lynx.ts`), and native's `App::ReportException` then sets the BTS app state
+  to `kAppLoadFailed` (`js_app.cc`), so the BTS stops taking calls into its app
+  while the view and MTS go on. web-core ignores the level altogether
+  (`createNativeApp.ts` `reportException`). **Decision: report it as a level**
+  (user ruling): `EngineEvent::ScriptReported` carries `"fatal"` from the realm
+  that reported it, beside `"warn"` for `'warning'` and `"error"` for anything
+  else, and the engine does nothing more for it — the BTS keeps taking messages
+  and calls, and no realm and no view ends.
 - **Accessibility**: Lynx has **no implicit ARIA-like semantic
   roles/focusability** (nothing is focusable/announced unless explicitly
   opted in via `accessibility-element`), and `accessibility-traits` is a flat

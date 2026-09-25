@@ -193,11 +193,18 @@ browser microtask checkpoint or timer interception participates in completion;
 the fallback listener is retained inside the preloaded runtime ESM rather than
 by the browser.
 
-`ListenerFailed` is written to the browser console without stopping the page,
-while a later script-Worker failure remains fatal; neither is tied to animation
-frames, so a hidden document cannot strand it. A load advances the loop's
-generation before replacing the native view, so an old page cannot consume the
-new page's event.
+Only an event for which `EngineEvent::is_fatal` holds — `StartupFailed` or
+`Panicked` — fails `pump`: before `ScriptFinished` it rejects the load, and
+after it the Render Worker reports it as `bobcat-error` and stops its loop.
+Every other failure is written to the browser console without stopping the
+page: `ScriptRunError`, `ListenerFailed`, `TimerFailed`, `WorkerThrew` and
+`WorkerEnded` through `console.error`; a `ScriptReported` through
+`console.warn` at level `"warn"` and `console.error` otherwise; a
+`ConsoleMessage` through `console.error` or `console.warn` at those levels and
+`console.log` otherwise, each diagnostic as `[{source}] [{level}] {message}`.
+None of this is tied to animation frames, so a hidden document cannot strand
+it. A load advances the loop's generation before replacing the native view, so
+an old page cannot consume the new page's event.
 
 There is no browser create/append/drop/flush/direct-stylesheet API. Element
 mutation is reachable only from the fetched entry MTS module through the named
@@ -368,8 +375,8 @@ loop answers each wakeup with one `BobcatRenderer::pump`. That stays one
 method and takes both turns in order — `Painter::pump` draws the frame the
 canvas painter owes, then `LynxView::pump` services the host's resources and
 hands back the lifecycle events. The painter goes first deliberately: the
-pixels a fatal script error left behind reach the canvas on the turn that
-reports it, with nobody left to ask for another frame.
+frame a view committed before a fatal event reaches the canvas on the turn
+that reports it, with nobody left to ask for another frame.
 The same signal is what this Worker arms for *itself*, because the
 painter draws here and wakes nobody on its own: a pointer or a resize that
 arrives while the loop is parked applies immediately and then arms the signal

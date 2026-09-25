@@ -398,9 +398,9 @@ impl MacApplication {
     /// this thread waits for the display — and then the view services its
     /// host's resources and hands back the lifecycle events it produced.
     ///
-    /// The painter first, deliberately. The pixels a fatal script error left
-    /// behind reach the screen on the turn that reports it, with nobody left
-    /// to ask for another frame.
+    /// The painter first, deliberately. The frame a view committed before a
+    /// fatal event reaches the screen on the turn that reports it, with
+    /// nobody left to ask for another frame.
     fn serve(&mut self, event_loop: &ActiveEventLoop) {
         let mut fatal = None;
         // A draw target that failed cannot be reached again, so the window
@@ -418,33 +418,39 @@ impl MacApplication {
         };
         for event in view.pump() {
             match event {
-                EngineEvent::StartupFailed(source) if fatal.is_none() => {
-                    fatal = Some(CliError::StartView {
-                        input: self.input.clone(),
-                        source,
-                    });
+                // The view has ended. The first failure is the one reported.
+                event if event.is_fatal() && fatal.is_none() => {
+                    fatal = Some(CliError::from_fatal_event(&self.input, event));
                 }
-                EngineEvent::ScriptRunError(source) if fatal.is_none() => {
-                    fatal = Some(CliError::Script {
-                        input: self.input.clone(),
-                        source,
-                    });
+                // Not fatal — the view and its realms go on and later events
+                // are still delivered — so each is reported and the window
+                // stays up.
+                EngineEvent::ScriptRunError(error) => {
+                    eprintln!("script failed: {error}");
                 }
-                // Not fatal — the realm survives it and later events are
-                // still delivered — so it is reported and the window stays up.
                 EngineEvent::ListenerFailed(error) => {
                     eprintln!("event listener failed: {error}");
                 }
-                // The same standing: only that one timer's turn was lost.
-                EngineEvent::WorkerThrew { error, .. } | EngineEvent::WorkerEnded { error, .. } => {
-                    eprintln!("worker failed: {error}");
-                }
-                EngineEvent::ScriptReported { level, message, .. }
-                | EngineEvent::ConsoleMessage { level, message, .. } => {
-                    eprintln!("[{level}] {message}");
-                }
                 EngineEvent::TimerFailed(error) => {
                     eprintln!("timer callback failed: {error}");
+                }
+                EngineEvent::WorkerThrew { source, error } => {
+                    eprintln!("[{source}] worker threw: {error}");
+                }
+                EngineEvent::WorkerEnded { source, error } => {
+                    eprintln!("[{source}] worker ended: {error}");
+                }
+                EngineEvent::ScriptReported {
+                    source,
+                    level,
+                    message,
+                }
+                | EngineEvent::ConsoleMessage {
+                    source,
+                    level,
+                    message,
+                } => {
+                    eprintln!("[{source}] [{level}] {message}");
                 }
                 _ => {}
             }
