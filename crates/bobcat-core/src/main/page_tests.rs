@@ -9,7 +9,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc;
 use tokio::task;
@@ -20,16 +20,18 @@ use crate::background::{WorkerCommand, WorkerMessage, WorkerStart};
 use crate::esm::build_runtime;
 use crate::jobs::{JsThread, JsThreadHandle};
 use crate::link::{
-    CommandSender, DetachedView, FramePost, InputEventPayload, PageUpdate, ScrollEntry,
+    CommandSender, DetachedView, FramePost, InputEventPayload, PageUpdate, Published, ScrollEntry,
     ScrollMailbox, ViewNotice, detached_base, detached_outbox,
 };
 use crate::main::WorkerFactory;
 use crate::main::runtime::{bound_metrics, card_entry};
 use crate::main::tree::PageConfig;
-use crate::resource::{SourceCompletion, SourceRequest};
+use crate::resource::{SourceCompletion, SourceRequest, unanswered_source};
 use crate::script::ScriptError;
 use crate::threads::platform_script_error;
-use crate::view::{NoWakeup, ScreenMetrics, StartupSource, StartupSources, resolve_startup_urls};
+use crate::view::{
+    EventRequester, NoWakeup, ScreenMetrics, StartupSource, StartupSources, resolve_startup_urls,
+};
 
 /// How many times the harness lets every ready task run before it gives up on
 /// something happening. A hang detector rather than a schedule: everything
@@ -2877,6 +2879,187 @@ fn a_panic_acknowledges_the_frame_post_a_painter_is_blocked_on() {
             owned.view.published.begin_frame_serviced(),
             serviced + 1,
             "the panic's end acknowledged the frame post no burst had applied"
+        );
+    });
+}
+
+/// What a [`RecordingRequester`] saw, in the order the view asked its host
+/// for a turn.
+enum Seen {
+    /// A notice the view sent. Held rather than dropped, so a request it
+    /// carries is not answered by its completion's drop.
+    Notice(ViewNotice),
+    /// What the view had published when it asked: the newest commit, and the
+    /// newest frame post acknowledged.
+    Published { commit: Option<u64>, serviced: u64 },
+}
+
+impl Seen {
+    fn is_script_finished(&self) -> bool {
+        matches!(
+            self,
+            Self::Notice(ViewNotice::Engine(EngineEvent::ScriptFinished))
+        )
+    }
+
+    /// One line of a log, for a failure message: `ViewNotice` itself has no
+    /// `Debug`.
+    fn describe(&self) -> String {
+        match self {
+            Self::Notice(ViewNotice::Engine(event)) => format!("{event:?}"),
+            Self::Notice(_) => "a notice".to_owned(),
+            Self::Published { commit, serviced } => {
+                format!("published commit {commit:?}, frame post {serviced}")
+            }
+        }
+    }
+}
+
+/// A host's wakeup that records, at each request for a turn, what that turn
+/// would find: every notice sent since the last request, in order, and then
+/// what the view has published. Publishing a frame and acknowledging a
+/// frame post both ask for a turn, as sending a notice does.
+struct RecordingRequester {
+    link: Mutex<(
+        mpsc::UnboundedReceiver<ViewNotice>,
+        watch::Receiver<Published>,
+    )>,
+    seen: Arc<Mutex<Vec<Seen>>>,
+}
+
+impl EventRequester for RecordingRequester {
+    fn request_event(&self) {
+        let mut link = self.link.lock().expect("no recording panicked");
+        let (notices, frames) = &mut *link;
+        let mut seen = self.seen.lock().expect("no recording panicked");
+        while let Ok(notice) = notices.try_recv() {
+            seen.push(Seen::Notice(notice));
+        }
+        let published = frames.borrow();
+        seen.push(Seen::Published {
+            commit: published.commit(),
+            serviced: published.begin_frame_serviced,
+        });
+    }
+}
+
+/// A frame post taken while boot is still open is acknowledged by the
+/// epilogue of the entry that finishes boot, and only after that entry's
+/// commit and its `ScriptFinished`: a host blocked on the sequence number is
+/// blocked on the frame it implies, and on the event that says the page has
+/// booted.
+///
+/// The entry holds boot open until its first animation frame. The post is
+/// fenced behind the vsync that delivers that frame, and its marker reaches
+/// the page in a burst of its own first: the post is taken there, and the
+/// burst that carries the vsync both finishes boot and applies it.
+///
+/// The three happen in one job, so only a host's own wakeup can tell their
+/// order apart, which is why this page's outbox has one that records.
+#[test]
+fn a_frame_post_pending_across_boot_is_acknowledged_after_the_boot_report_and_its_commit() {
+    on_a_js_thread(|thread| async move {
+        let (context, _workers) = group(&thread);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (notices, notice_receiver) = mpsc::unbounded_channel();
+        let (frames, frame_receiver) = watch::channel(Published::default());
+        let token = CancellationToken::new();
+        let outbox = ViewOutbox::new(
+            notices,
+            frames,
+            Arc::new(RecordingRequester {
+                link: Mutex::new((notice_receiver, frame_receiver)),
+                seen: Arc::clone(&seen),
+            }),
+            token.clone(),
+            None,
+            detached_base(),
+        );
+        // Bound from the start, and no listed sheets: boot's own flush parks
+        // on neither.
+        let (_metrics, metric_receiver) = watch::channel(Some(CREATE_VIEWPORT));
+        let scroll = Arc::new(ScrollMailbox::default());
+        let page = Page::new(
+            context,
+            outbox,
+            metric_receiver,
+            Arc::clone(&scroll),
+            token.clone(),
+        );
+        let startup = RealmStartup {
+            entry: "app:///main.js".to_owned(),
+            ..RealmStartup::default()
+        };
+        crate::lifetime::run_job(&page, move |page| {
+            page.open_realm(ingredients(), startup);
+            Some(())
+        })
+        .await;
+        load_entry(
+            Rc::clone(&page),
+            answered_entry(
+                &format!(
+                    "{ONE_BOX}
+await new Promise((resolve) => lynx.requestAnimationFrame(resolve));
+"
+                ),
+                "app:///main.js",
+                &token,
+            ),
+        )
+        .await;
+        // The marker is sent first, the vsync second, then the post.
+        let fence = page.applied.get() + 2;
+        assert!(scroll.post(
+            [],
+            Some(FramePost {
+                now: 0.0,
+                seq: 7,
+                fence
+            })
+        ));
+        page.apply(vec![ToMain::Posted]).await;
+        // What was published while boot was still open: the document as it
+        // stood before the entry rendered anything.
+        let before_boot = {
+            let seen = seen.lock().expect("no recording panicked");
+            let log: Vec<String> = seen.iter().map(Seen::describe).collect();
+            assert!(
+                !seen.iter().any(|seen| {
+                    seen.is_script_finished() || matches!(seen, Seen::Published { serviced: 7, .. })
+                }),
+                "boot is still open, and the post waits for the vsync sent before it: {log:#?}"
+            );
+            seen.iter()
+                .filter_map(|seen| match seen {
+                    Seen::Published { commit, .. } => Some(*commit),
+                    Seen::Notice(_) => None,
+                })
+                .next_back()
+                .flatten()
+        };
+        page.apply(vec![ToMain::Vsync(16.0)]).await;
+
+        let seen = std::mem::take(&mut *seen.lock().expect("no recording panicked"));
+        let log: Vec<String> = seen.iter().map(Seen::describe).collect();
+        let finished = seen
+            .iter()
+            .position(Seen::is_script_finished)
+            .unwrap_or_else(|| panic!("boot finished: {log:#?}"));
+        let acknowledged = seen
+            .iter()
+            .position(|seen| matches!(seen, Seen::Published { serviced: 7, .. }))
+            .unwrap_or_else(|| panic!("the frame post was acknowledged: {log:#?}"));
+        assert!(
+            finished < acknowledged,
+            "ScriptFinished came before the acknowledgement: {log:#?}"
+        );
+        let Seen::Published { commit, .. } = &seen[acknowledged] else {
+            unreachable!("the position was found by this pattern");
+        };
+        assert!(
+            *commit > before_boot,
+            "boot's commit was published before the acknowledgement: {log:#?}"
         );
     });
 }
