@@ -438,6 +438,15 @@ fn asked_for_a_worker(notices: &[ViewNotice]) -> bool {
     })
 }
 
+/// Whether any notice asks the host for a source, whatever it is. The BTS
+/// asks for none in these tests: its root module imports the registered
+/// `bobcat:bts`, and the test's worker thread serves the BTS entry itself.
+fn asked_the_host(notices: &[ViewNotice]) -> bool {
+    notices
+        .iter()
+        .any(|notice| matches!(notice, ViewNotice::RequestSource { .. }))
+}
+
 #[test]
 fn bts_entry_receives_processed_initial_data_before_it_installs_app_hooks() {
     let mut pair = Pair::unbooted_with_data(
@@ -1402,8 +1411,8 @@ fn a_view_booted_after_its_worker_thread_trapped_hears_each_worker_end() {
     pair.deliver();
     let notices = pair.notices();
     assert!(
-        !asked_for_a_worker(&notices),
-        "a worker that failed at once asks the host for nothing"
+        !asked_the_host(&notices),
+        "each worker failed at once and asked the host for nothing"
     );
     let events = worker_events(notices);
     let [
@@ -1831,7 +1840,7 @@ fn background_starts_only_after_the_awaited_main_entry_finishes() {
     );
     pair.check("if (!connected) throw Error('BTS was not connected');");
     pair.deliver();
-    assert!(!asked_for_a_worker(&pair.notices()));
+    assert!(!asked_the_host(&pair.notices()));
 }
 
 #[test]
@@ -1914,27 +1923,49 @@ fn an_omitted_background_entry_boots_without_host_io() {
     pair.deliver();
     pair.check("if (answer !== 'barrier') throw Error('worker barrier failed');");
     let notices = pair.notices();
-    assert!(!asked_for_a_worker(&notices));
+    assert!(!asked_the_host(&notices));
     assert!(worker_failures(notices).is_empty());
 }
 
+/// A main entry that rejects is app code that failed, and boot goes on past
+/// it: boot finishes, the BTS is connected, and the event the entry sent
+/// before it rejected reaches the BTS once the BTS entry has run. The seam
+/// still returns the entry's rejection, which a view reports without ending.
 #[test]
-fn a_rejected_main_entry_never_starts_its_background_context() {
-    let mut pair = Pair::unbooted(Some("throw Error('BTS must not run');"));
+fn a_rejected_main_entry_still_connects_its_background_context() {
+    let mut pair = Pair::unbooted(Some(
+        r"
+        const core = lynx.getCoreContext();
+        core.addEventListener('queued', event => core.dispatchEvent({type: 'reply', data: event.data}));
+    ",
+    ));
     let error = pair
         .boot(
             r"
-            lynx.getJSContext().dispatchEvent({type: 'queued', data: 1});
+            globalThis.results = [];
+            const context = lynx.getJSContext();
+            context.addEventListener('reply', event => results.push(event.data));
+            context.dispatchEvent({type: 'queued', data: 1});
             await Promise.resolve();
             throw Error('main entry rejected');
         ",
         )
         .unwrap_err();
     assert!(error.to_string().contains("main entry rejected"));
-    assert!(!asked_for_a_worker(&pair.notices()));
-    drop(pair.runtime.take());
-    drop(pair.home.take());
-    assert!(pair.events.try_recv().is_err());
+    assert!(
+        pair.runtime
+            .as_mut()
+            .unwrap()
+            .main_module_finished()
+            .unwrap(),
+        "boot finished past the rejected entry"
+    );
+    assert_eq!(pair.live_workers(), 1, "boot connected the BTS");
+    pair.deliver();
+    pair.check("if (JSON.stringify(results) !== '[1]') throw Error(JSON.stringify(results));");
+    let notices = pair.notices();
+    assert!(!asked_the_host(&notices));
+    assert!(worker_failures(notices).is_empty());
 }
 
 #[test]
