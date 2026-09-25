@@ -44,10 +44,10 @@ use crate::esm::{
 };
 use crate::link::{InputEventPayload, ViewNotice, ViewOutbox};
 use crate::main::tree::{ImageOutcomes, LynxDocument, PageConfig, new_document};
-use crate::realm::{RealmCore, context_of, open_realm};
+use crate::realm::{RealmCore, context_of, open_realm, string_argument};
 use crate::script::ScriptError;
 use crate::timers::run_due_timers;
-use crate::view::{LynxViewError, ScreenMetrics, StartupSource, Viewport};
+use crate::view::{LynxViewError, ScreenMetrics, ScriptSource, StartupSource, Viewport};
 
 const BOOT_MODULE_SPECIFIER: &str = "bobcat:boot";
 const EVENT_DISPATCH_EXPORT: &str = "__BobcatDispatchEvent";
@@ -811,6 +811,7 @@ impl MainThreadRuntime {
             &host,
             thread.clone(),
             None,
+            ScriptSource::Main,
             |engine, js_runtime| {
                 install_bobcat(engine, js_runtime, &slot, &outbox, thread.clone())
                     .map_err(MainThreadError::into_script_error)?;
@@ -1698,19 +1699,6 @@ fn install_bobcat(
     outbox: &ViewOutbox,
     thread: crate::jobs::JsThreadHandle,
 ) -> Result<(), MainThreadError> {
-    for (name, is_error) in [("reportScriptError", true), ("logScriptMessage", false)] {
-        let reporting = outbox.clone();
-        install(engine, js_runtime, name, 2, move |arguments| {
-            let level = string_argument(name, arguments, 0)?.to_owned();
-            let message = string_argument(name, arguments, 1)?.to_owned();
-            reporting.engine_event(if is_error {
-                crate::EngineEvent::ScriptReported { level, message }
-            } else {
-                crate::EngineEvent::ConsoleMessage { level, message }
-            });
-            Ok(HostValue::Undefined)
-        })?;
-    }
     install_host_module(engine, js_runtime, handle, thread)?;
     install_event_members(engine, js_runtime, outbox)
 }
@@ -2395,20 +2383,6 @@ fn boolean_argument(function: &str, arguments: &[HostValue], index: usize) -> Re
     match *argument(arguments, index) {
         HostValue::Boolean(value) => Ok(value),
         _ => Err(format!("{function} expects a boolean for argument {index}")),
-    }
-}
-
-/// A timer id, which the realm only ever passes back after the host handed
-/// it one.
-fn string_argument<'a>(
-    function: &str,
-    arguments: &'a [HostValue],
-    index: usize,
-) -> Result<&'a str, String> {
-    match argument(arguments, index) {
-        HostValue::String(value) => Ok(value),
-        HostValue::Undefined | HostValue::Null => Ok(""),
-        _ => Err(format!("{function} expects a string for argument {index}")),
     }
 }
 

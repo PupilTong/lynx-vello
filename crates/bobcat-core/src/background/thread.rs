@@ -66,6 +66,7 @@ use crate::resource::{LoadedSource, SourceRequest};
 use crate::script::ScriptError;
 use crate::threads::{panicked, platform_script_error};
 use crate::timers::run_due_timers;
+use crate::view::ScriptSource;
 
 /// Who each worker task reports to: its worker's key and the creating view's
 /// channel, beside the worker's own token. Kept by [`serve_workers`] until it
@@ -294,6 +295,9 @@ enum WorkerState {
 struct Worker {
     js: SharedRuntime,
     key: WorkerKey,
+    /// What this worker's realm is named by in the diagnostics it reports:
+    /// the background thread, or the `Worker` its key names.
+    source: ScriptSource,
     /// Where this worker reports, which is the creating view's own channel.
     events: mpsc::UnboundedSender<WorkerEvent>,
     state: RefCell<WorkerState>,
@@ -319,6 +323,7 @@ impl Worker {
     fn new(
         js: SharedRuntime,
         key: WorkerKey,
+        source: ScriptSource,
         events: mpsc::UnboundedSender<WorkerEvent>,
         token: CancellationToken,
         sources: HostOutbox,
@@ -327,6 +332,7 @@ impl Worker {
         Rc::new(Self {
             js,
             key,
+            source,
             events,
             state: RefCell::new(WorkerState::Loading),
             lifetime: Lifetime::new(token, thread),
@@ -523,6 +529,7 @@ impl Worker {
                         &self.sources,
                         self.lifetime.thread().clone(),
                         Some(self.key),
+                        self.source,
                         |engine, js| {
                             let events = self.events.clone();
                             let key = self.key;
@@ -642,14 +649,14 @@ async fn serve_worker(js: SharedRuntime, start: WorkerStart, thread: JsThreadHan
     let WorkerStart {
         key,
         name,
-        role: _,
+        role,
         script,
         messages,
         events,
         token,
         sources,
     } = start;
-    let worker = Worker::new(js, key, events, token, sources, thread);
+    let worker = Worker::new(js, key, role.source(key), events, token, sources, thread);
     worker.spawn(boot_worker(Rc::clone(&worker), name, script, messages));
     worker.run_owner().await;
 }
@@ -1057,6 +1064,7 @@ mod tests {
         let worker = Worker::new(
             Rc::clone(js),
             WorkerKey::new(key),
+            WorkerRole::Dedicated.source(WorkerKey::new(key)),
             events,
             token.clone(),
             HostOutbox::new(

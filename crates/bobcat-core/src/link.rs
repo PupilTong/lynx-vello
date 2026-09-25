@@ -48,9 +48,10 @@ use crate::view::{EngineEvent, EventRequester, LynxViewError, Viewport};
 /// The answer to one source request, as the side that awaits it sees it.
 pub(crate) type SourceAnswer = oneshot::Receiver<Result<LoadedSource, LynxViewError>>;
 
-/// A realm's source requests and frame demand sent to its view's host.
-/// Unlike `ViewOutbox`, this carries no main-thread publication state and can
-/// travel to a worker. Completions are cancelled with that worker's lifetime.
+/// A realm's source requests, frame demand and diagnostics sent to its view's
+/// host. Unlike `ViewOutbox`, this carries no main-thread publication state and
+/// can travel to a worker. Completions are cancelled with that worker's
+/// lifetime.
 #[derive(Clone)]
 pub(crate) struct HostOutbox {
     notices: mpsc::UnboundedSender<ViewNotice>,
@@ -124,6 +125,10 @@ impl HostOutbox {
 
     pub(crate) fn preload(&self, request: SourceRequest) {
         self.notify(ViewNotice::PreloadSource(request));
+    }
+
+    pub(crate) fn engine_event(&self, event: EngineEvent) {
+        self.notify(ViewNotice::Engine(event));
     }
 
     fn send(&self, request: SourceRequest, completion: SourceCompletion) {

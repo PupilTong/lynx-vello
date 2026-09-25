@@ -876,9 +876,13 @@ by `is_ready()`. Global events require that observed MTS boot and otherwise
 return `EngineError::NotReady`; rejected events are never queued or replayed,
 accepted ones retain host FIFO order. Internal pre-connection MTS messages
 still wait for Worker construction. `ScriptReported` and `ConsoleMessage` are
-nonfatal host notices, their BTS path ordinary Worker postMessage delivery with
-JS-side dispatch. `lynx.getEngine()` returns one stable, realm-local
-`EventTarget` whose listeners never cross the host boundary. Render, update,
+nonfatal host notices that every realm — MTS, BTS or a `Worker` — sends to
+the view's host itself through its `HostOutbox`, each carrying the realm's
+`ScriptSource`; the BTS's do not pass through MTS as Worker messages. One
+realm's arrive in the order it made them, and they have no order relative to
+another realm's or to the worker events. `lynx.getEngine()` returns one
+stable, realm-local `EventTarget` whose listeners never cross the host
+boundary. Render, update,
 component removal and global-prop events carry argument arrays, taking
 precedence over legacy global hooks; listeners receive the engine as `this`,
 with no `origin` field. The MTS `getCoreContext` and `getNative` sinks retain
@@ -939,8 +943,12 @@ during event delivery), `TimerFailed` (a `setTimeout` or `setInterval`
 callback that threw when it came due), `WorkerThrew` (code in a worker's
 realm threw, BTS included, and the worker still runs), `WorkerEnded` (a
 worker ended without being told to: its script could not be loaded, its realm
-could not be built, or the worker thread trapped) and `Panicked` (the engine
-panicked while it served the view). The three script failures are separate by
+could not be built, or the worker thread trapped), `Panicked` (the engine
+panicked while it served the view), and the two diagnostics, `ScriptReported`
+(a `lynx.reportError`, at level `"warn"`, `"error"` or `"fatal"`) and
+`ConsoleMessage` (at the console method's name), each carrying the
+`ScriptSource` of the realm that made it; a `"fatal"` report is a diagnostic
+like the others and ends nothing. The three script failures are separate by
 the kind of entry they happened in, also where the code that failed was a
 continuation that entry resumed, and none of them is fatal: the realm goes
 on, the walk continues, a repeating timer stays armed, and later events and
@@ -1123,9 +1131,15 @@ DOM listener options. The shared `bobcat:event-target` EventTarget every
 Context, `Worker` and engine target extends follows the DOM's inner-invoke
 rule: a listener that throws is reported and the walk continues with the next —
 in the MTS realm through `lynx.reportError` and the host's `reportScriptError`,
-as a nonfatal `ScriptReported`; in a worker realm through the worker global's
-`reportError`, reaching the parent `Worker`'s `error` event and a nonfatal
-`WorkerThrew`. Origins identify the sending CoreContext or JSContext. MTS
+as a nonfatal `ScriptReported` from `ScriptSource::Main`; in a worker realm
+through the worker global's `reportError`, reaching the parent `Worker`'s
+`error` event and a nonfatal `WorkerThrew`. The BTS reports an animation-frame,
+`queueMicrotask` or `lynx.fetchBundle` callback that throws the same way, as an
+uncaught exception of its realm. Only its disposal hook's throw and a misused
+`SelectorQuery` go through `lynx.reportError`, as a `ScriptReported` from
+`ScriptSource::Background`; the hook's has to, because it must reach the host
+before the `disposed` reply lets MTS terminate the Worker. Origins identify
+the sending CoreContext or JSContext. MTS
 queues payload references until the Worker is connected; Worker postMessage
 takes the structured-clone snapshot above for early and connected sends alike,
 and `toJSON` is never consulted. Do not add a custom codec or a deep clone on
@@ -1188,13 +1202,17 @@ Every realm, MTS or worker, is opened by the one constructor
 `realm::open_realm` (`crates/bobcat-core/src/realm.rs`). It creates the realm,
 enables module loading and installs the core every realm has under
 `bobcat-internal:host`: `requestScriptFrame`, `setTimer`/`clearTimer`,
-`waitFuture`/`takeFuture`/`settleFuture`, `fetchResource`, and
-`resolveModuleUrl`/`loadModuleSync`. Every other host module is a parameter
-of that call: `MainThreadRuntime::new` passes the document, stylesheet,
-startup-string, diagnostics, event-name and `Worker` members, and a worker
-passes `bobcat-internal:worker`. The constructor has no role field; the one
-thing it is told about a realm is the key its display-frame demand is
-reported under, `None` for MTS and the worker's key for a worker. What it
+`waitFuture`/`takeFuture`/`settleFuture`, `fetchResource`,
+`resolveModuleUrl`/`loadModuleSync`, and the diagnostics pair
+`reportScriptError`/`logScriptMessage`, which send `ScriptReported` and
+`ConsoleMessage` through the realm's own `HostOutbox`. Every other host module
+is a parameter of that call: `MainThreadRuntime::new` passes the document,
+stylesheet, startup-string, event-name and `Worker` members, and a worker
+passes `bobcat-internal:worker`. The constructor has no role field; it is told
+two things about a realm: the key its display-frame demand is reported under,
+`None` for MTS and the worker's key for a worker, and the `ScriptSource` its
+diagnostics carry, `Main` for MTS and, for a worker, the one its `WorkerRole`
+and key give (`Background` or `Worker(WorkerId)`). What it
 answers with, `RealmCore { engine, timers, futures }`, is the first field of
 both `MainThreadRuntime` and the worker thread's `WorkerRealm`.
 
@@ -1943,7 +1961,7 @@ browser WebGPU completion is Promise-driven.
 
 The dependency-free TypeScript sources of the ESMs `bobcat-core` preloads into
 its QuickJS realms, one file per module. Both of a group's runtimes register
-all fifteen, as `esm.rs`'s `BUILTIN_MODULES` lists them in the order of
+all sixteen, as `esm.rs`'s `BUILTIN_MODULES` lists them in the order of
 `src/tsconfig.json`'s `paths` (a unit test holds the two equal):
 `src/lynx-modules.ts` as `bobcat:lynx-modules`, `src/global-event-emitter.ts`
 as `bobcat:global-event-emitter`, `src/selector-query.ts` as
@@ -1951,7 +1969,12 @@ as `bobcat:global-event-emitter`, `src/selector-query.ts` as
 `src/main-thread-runtime.ts` as `bobcat:runtime`, `src/timers.ts` as
 `bobcat:timers`, `src/future.ts` as `bobcat:future`, `src/module.ts` as
 `bobcat:module`, `src/section-url.ts` as `bobcat:section-url`,
-`src/bundle-fetch.ts` as `bobcat:bundle-fetch`, `src/event-target.ts` as
+`src/bundle-fetch.ts` as `bobcat:bundle-fetch`, `src/diagnostics.ts` as
+`bobcat:diagnostics` (every realm's `console` and `reportError`: the one value
+formatting and the `lynx.reportError` level rule, over the core's diagnostics
+pair; `bobcat:worker` also installs its `console` on a worker's global, so a
+plain `Worker` has a global `console` and still no `requestAnimationFrame`),
+`src/event-target.ts` as
 `bobcat:event-target`, `src/cross-thread-context.ts` as
 `bobcat:cross-thread-context`, `src/worker.ts` as the `Worker` class under
 `bobcat-internal`, `src/worker-runtime.ts` as `bobcat:worker` and
@@ -2043,7 +2066,7 @@ The JavaScript layer deliberately does not validate handles: a foreign handle
 resolves to `undefined`, which the private native boundary rejects as a
 JavaScript error before entering `dom`. Native access is limited to named
 imports from the native `bobcat-internal:host` ESM; the realm has no
-`globalThis.bobcat`, no `console`, and no DOM. Named exports are the only
+`globalThis.bobcat`, no global `console`, and no DOM. Named exports are the only
 Element-PAPI surface for transformed MTS entries; a local named Lepus chunk
 receives the same names as the parameters of the body it is compiled as.
 Rstest imports

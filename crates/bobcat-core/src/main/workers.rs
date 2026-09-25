@@ -25,7 +25,7 @@ use crate::link::{ViewNotice, ViewOutbox};
 use crate::resource::{LoadedSource, SourceCompletion, SourceRequest};
 use crate::script::ScriptError;
 use crate::threads::platform_script_error;
-use crate::view::{ScriptSource, WorkerId};
+use crate::view::ScriptSource;
 
 /// Issued on bobcat-main, once per group. No cross-thread allocator or lock:
 /// the one thing it reads across threads is the worker thread's trap flag.
@@ -109,12 +109,12 @@ impl WorkerFactory {
                 // The specifier has already said which kind of worker this is,
                 // and the source is recorded before anything is sent, so a
                 // worker that fails at once below has one too.
-                let (role, source) = if url.is_some() {
-                    (WorkerRole::Dedicated, ScriptSource::Worker(WorkerId::from(key)))
+                let role = if url.is_some() {
+                    WorkerRole::Dedicated
                 } else {
-                    (WorkerRole::Background, ScriptSource::Background)
+                    WorkerRole::Background
                 };
-                creator.sources.borrow_mut().insert(key, source);
+                creator.sources.borrow_mut().insert(key, role.source(key));
                 // A worker that has already failed is still a worker to the
                 // script that named it: its `error` event arrives with the
                 // `Failed` the owner queued, and nothing is asked of the host.

@@ -171,6 +171,9 @@ QuickJS ESM graph — an MTS realm, on bobcat-main's runtime
           ├──▶ bobcat:runtime (packages/bobcat-element/src/main-thread-runtime.ts)
           │     ├── named compatibility exports + engine EventTarget
           │     ├──▶ bobcat:cross-thread-context (MTS getJSContext)
+          │     ├──▶ bobcat:diagnostics (packages/bobcat-element/src/diagnostics.ts)
+          │     │     └──▶ bobcat-internal:host (reportScriptError, logScriptMessage)
+          │     │           console and _ReportError, re-exported as module bindings
           │     └──▶ bobcat:event-target (packages/bobcat-element/src/event-target.ts)
           ├──▶ bobcat-internal (explicit import; Worker class in worker.ts)
           │     ├──▶ bobcat:event-target
@@ -182,18 +185,23 @@ QuickJS ESM graph — an MTS realm, on bobcat-main's runtime
 QuickJS ESM graph — a worker realm, on bobcat-workers' runtime
   bobcat:worker-boot (one per live worker, evaluated, never registered)
     ├──▶ bobcat:worker (packages/bobcat-element/src/worker-runtime.ts)
-    │     ├── the global scope: self, postMessage, close, name, onmessage
+    │     ├── the global scope: self, postMessage, close, name, onmessage,
+    │     │   console (no requestAnimationFrame)
     │     ├──▶ bobcat:event-target
+    │     ├──▶ bobcat:diagnostics ──▶ bobcat-internal:host (reportScriptError,
+    │     │                             logScriptMessage), the global console
     │     └──▶ bobcat-internal:worker (postWorkerMessage, closeWorker,
     │                                   invokeNativeModule)
     ├──▶ bobcat:timers ──▶ bobcat-internal:host (setTimer, clearTimer only)
     └── the worker's entry source
           └── bobcat:bts (bootstrap)
                 ├──▶ bobcat:bts-runtime exports lynx
+                │     ├──▶ bobcat:diagnostics (console, lynx.reportError; the
+                │     │     console export is the global one)
                 │     └──▶ bobcat:cross-thread-context ──▶ bobcat:event-target
                 └──▶ await import(BTS entry) when configured
                       HostOutbox → view resource host → worker completion
-  Both runtimes register the same fifteen built-ins (esm.rs BUILTIN_MODULES),
+  Both runtimes register the same sixteen built-ins (esm.rs BUILTIN_MODULES),
   and a realm's host modules decide which of them link. Here bobcat:element,
   bobcat:runtime and bobcat-internal fail at link with a SyntaxError: they
   import bobcat-internal:host members only an MTS realm has. In an MTS realm
@@ -661,15 +669,21 @@ Both threads open a realm through one constructor, `realm::open_realm`. It
 creates the realm on that thread's runtime, enables module loading, and
 installs the core every realm has under `bobcat-internal:host`: the
 display-frame demand, the timer pair, the three `Future` members,
-`fetchResource`, and the two members `bobcat:module` is written over. They
-reach the view through the `HostOutbox` the caller passes, whose token is the
-view's for an MTS realm and the worker's own for a worker realm, so a
-synchronous wait in either ends with the realm that asked. The realm's other
+`fetchResource`, the two members `bobcat:module` is written over, and the two
+`bobcat:diagnostics` is written over, `reportScriptError` and
+`logScriptMessage`. They reach the view through the `HostOutbox` the caller
+passes, whose token is the view's for an MTS realm and the worker's own for a
+worker realm, so a synchronous wait in either ends with the realm that asked,
+and a worker realm's diagnostics reach the host from its own thread, with no
+message to the main-thread realm. The realm's other
 host modules are a parameter of the same call: the document, stylesheet,
 startup and `Worker` members for an MTS realm, `bobcat-internal:worker` for a
-worker realm. The constructor names no realm kind. The one thing it is told
-is the key the realm's display-frame demand is reported under: `None` for an
-MTS realm, the worker's key for a worker realm. Since both runtimes register
+worker realm. The constructor names no realm kind. It is told two things: the
+key the realm's display-frame demand is reported under, `None` for an MTS
+realm and the worker's key for a worker realm, and the `ScriptSource` its
+`ScriptReported` and `ConsoleMessage` carry, `Main` for an MTS realm and, for
+a worker realm, `Background` or `Worker(WorkerId)` by the worker's
+`WorkerRole`. Since both runtimes register
 every built-in module, these host modules are also what decides which
 built-ins a realm can link.
 
@@ -784,9 +798,13 @@ reports `ListenerFailed`. A JS `EventTarget` listener — a Context event, a
 `Worker` `message` or `error` event, an engine event — follows the DOM's
 inner-invoke rule instead: the throw is reported and the walk continues with
 the next listener, through `lynx.reportError` and the host's
-`reportScriptError` (a nonfatal `ScriptReported`) in the MTS realm, and through
-the worker global's `reportError`, hence the parent `Worker`'s `error` event
-and a nonfatal `WorkerThrew`, in a worker realm.
+`reportScriptError` (a nonfatal `ScriptReported` from `ScriptSource::Main`) in
+the MTS realm, and through the worker global's `reportError`, hence the parent
+`Worker`'s `error` event and a nonfatal `WorkerThrew`, in a worker realm. The
+BTS treats an animation-frame, `queueMicrotask` or `lynx.fetchBundle`
+callback that throws as the same uncaught exception; its `lynx.reportError`
+is a diagnostic instead, a `ScriptReported` from `ScriptSource::Background`
+sent to the host by the BTS realm itself.
 
 Each MTS boot starts one BTS Worker named `lynx-bg` once its entry import has
 settled, whether the entry succeeded or threw.

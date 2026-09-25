@@ -58,7 +58,7 @@ async fn boot_registered(sources: bobcat_core::ViewSources, resources: Resources
                     finished = true;
                     finished_at = Some(Instant::now());
                 }
-                EngineEvent::ConsoleMessage { level, message } => {
+                EngineEvent::ConsoleMessage { level, message, .. } => {
                     eprintln!("{name} [{level}] {message}");
                 }
                 other => panic!("{name}: unexpected runtime event: {other:?}"),
@@ -249,7 +249,7 @@ async fn paint_registered(
             for event in view.pump() {
                 match event {
                     EngineEvent::ScriptFinished => booted = true,
-                    EngineEvent::ConsoleMessage { level, message } => {
+                    EngineEvent::ConsoleMessage { level, message, .. } => {
                         verified |= verification.is_some_and(|required| message.contains(required));
                         eprintln!("[{level}] {message}");
                     }

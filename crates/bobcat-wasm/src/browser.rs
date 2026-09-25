@@ -682,10 +682,10 @@ impl BobcatRenderer {
                 | EngineEvent::WorkerEnded { error, .. } => {
                     console_error(&js_error(error));
                 }
-                EngineEvent::ScriptReported { level, message } => {
+                EngineEvent::ScriptReported { level, message, .. } => {
                     console_error(&JsValue::from_str(&format!("[{level}] {message}")));
                 }
-                EngineEvent::ConsoleMessage { level, message } => {
+                EngineEvent::ConsoleMessage { level, message, .. } => {
                     let message = JsValue::from_str(&format!("[{level}] {message}"));
                     match level.as_str() {
                         "error" => console_error(&message),

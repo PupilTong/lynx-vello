@@ -84,7 +84,11 @@ interface Fetch {
 }
 
 export interface BundleFetchOptions {
-  /** How this realm reports a callback that threw: `_ReportError` on MTS, `lynx.reportError` on BTS. */
+  /**
+   * How this realm reports a callback that threw: `_ReportError` on MTS, and
+   * on BTS the global scope's `reportError`, which reports it as the worker's
+   * uncaught exception.
+   */
   report: (error: unknown) => void;
   /**
    * How this realm runs a callback registered on a handle that has already

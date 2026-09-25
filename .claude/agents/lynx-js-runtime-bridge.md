@@ -44,8 +44,10 @@ and `bobcat-workers` (every Worker realm, including the BTS).
   `lifetime.rs` the `CancellationToken`, `serve_clock` and `run_job`;
   `realm.rs` (`open_realm`, the one constructor both threads open a realm
   with: it installs the core every realm has under `bobcat-internal:host` —
-  frame demand, timers, `Future`, `fetchResource`, `require` — then runs the
-  caller's own host modules, passed as a parameter, and answers with
+  frame demand, timers, `Future`, `fetchResource`, `require`, and the
+  diagnostics pair `reportScriptError`/`logScriptMessage`, which report with
+  the `ScriptSource` the caller names — then runs the caller's own host
+  modules, passed as a parameter, and answers with
   `RealmCore { engine, timers, futures }`);
   `timers.rs`, `clock.rs`/`alarm.rs`, `future.rs` (the per-realm `FutureTable`
   and `waitFuture`/`takeFuture`/`settleFuture`), `esm.rs` (`BUILTIN_MODULES`,
@@ -65,7 +67,9 @@ and `bobcat-workers` (every Worker realm, including the BTS).
   `__FlushElementTree`, and `__SetCSSId`, accepted and ignored),
   `main-thread-runtime.ts` (`bobcat:runtime`), `worker.ts` (the W3C `Worker`),
   `worker-runtime.ts`, `background-thread-runtime.ts` (`bobcat:bts-runtime`),
-  `cross-thread-context.ts`, `event-target.ts`, `timers.ts`, `future.ts`
+  `cross-thread-context.ts`, `event-target.ts`, `diagnostics.ts`
+  (`bobcat:diagnostics` — every realm's `console` and `reportError`, the one
+  `printable` and the `lynx.reportError` level rule), `timers.ts`, `future.ts`
   (`bobcat:future` — the `Future` class), `module.ts`
   (`bobcat:module` — Node's `require` algorithm), `selector-query.ts`,
   `global-event-emitter.ts`, `lynx-modules.ts` (the compiler factory ABI,
@@ -132,6 +136,17 @@ Landed and not to be regressed:
   `WorkerOwner` recorded when it allocated the key, and is reported before the
   JS `error` event. A key the script let go of (`terminate()`, collection)
   has no source and reports nothing; `close()` reports nothing.
+- Every realm reports its own diagnostics: `bobcat:diagnostics` is written
+  over the core pair, which sends `ScriptReported`/`ConsoleMessage` with the
+  realm's `ScriptSource` through the realm's own `HostOutbox`. Nothing is
+  relayed through MTS as a Worker message, so a realm's diagnostics are
+  ordered only among themselves. `ScriptReported.level` is `"warn"`,
+  `"error"` or `"fatal"`, and `"fatal"` ends nothing. A worker's global
+  `console` is the module's (the BTS export is the same object); a plain
+  `Worker` has no `requestAnimationFrame`. A BTS animation-frame,
+  `queueMicrotask` or `fetchBundle` callback that throws is an uncaught
+  exception (`WorkerThrew`); only the dispose hook and a misused
+  `SelectorQuery` use `lynx.reportError`.
 - Cross-thread messages are QuickJS structured clones. A refused value
   (function, `Symbol`, `Map`, `Set`, `RegExp`, `Error`, `DataView`, accessor)
   **throws synchronously at the send**. Do not add a custom codec, a deep

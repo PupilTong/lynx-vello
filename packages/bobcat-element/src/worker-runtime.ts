@@ -9,6 +9,7 @@ import {
   invokeNativeModule,
   postWorkerMessage,
 } from "bobcat-internal:worker";
+import { console } from "bobcat:diagnostics";
 
 // The `bobcat:worker` ESM: one worker realm's global scope, preloaded on the
 // group's worker runtime and imported for its effect before the worker's own
@@ -21,11 +22,14 @@ import {
 //
 // # What is here and what is not
 //
-// `postMessage`, `close`, `name`, `self`, `reportError`, the `message` event
-// and the EventTarget surface under it — including its rule that a listener
-// which throws is reported here (through `reportError`) and the listeners
-// behind it still run. Not here: `importScripts` (this realm
-// loads ESM, so a worker script uses `import`), `location`, `navigator`,
+// `postMessage`, `close`, `name`, `self`, `reportError`, `console`, the
+// `message` event and the EventTarget surface under it — including its rule
+// that a listener which throws is reported here (through `reportError`) and
+// the listeners behind it still run. `console` is `bobcat:diagnostics`'s, so
+// what it prints reaches the embedder from this realm directly. Not here:
+// `requestAnimationFrame` (only `bobcat:bts-runtime` has one, as an export and
+// a `lynx` member rather than a global), `importScripts` (this realm loads
+// ESM, so a worker script uses `import`), `location`, `navigator`,
 // `fetch`, `XMLHttpRequest`, `MessagePort`, `messageerror` (the reader cannot
 // fail on what the same build's writer produced), `onerror` (an uncaught
 // exception in here is reported at the parent `Worker` and to the embedder,
@@ -35,10 +39,11 @@ import {
 
 /**
  * The worker realm's global scope once this module has run: an `EventTarget`
- * whose own members include `self`, `postMessage` and `close`.
+ * whose own members include `self`, `console`, `postMessage` and `close`.
  */
 export interface WorkerGlobalScope extends EventTarget {
   self: WorkerGlobalScope;
+  console: typeof console;
   postMessage(message: unknown, transfer?: unknown): undefined;
   close(): undefined;
   reportError(error: unknown): undefined;
@@ -85,6 +90,15 @@ Object.defineProperty(scope, "self", {
   enumerable: true,
   writable: true,
   value: scope,
+});
+
+// A namespace property, as WebIDL defines one for `console` on every global:
+// writable and configurable, and not enumerable.
+Object.defineProperty(scope, "console", {
+  configurable: true,
+  enumerable: false,
+  writable: true,
+  value: console,
 });
 
 Object.assign(scope, {

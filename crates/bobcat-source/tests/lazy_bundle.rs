@@ -80,7 +80,7 @@ async fn boots(name: &str, expected: &str) {
         for event in view.pump() {
             match event {
                 EngineEvent::ScriptFinished => {}
-                EngineEvent::ConsoleMessage { level, message } => {
+                EngineEvent::ConsoleMessage { level, message, .. } => {
                     logged |= message.contains(expected);
                     eprintln!("{name} [{level}] {message}");
                 }

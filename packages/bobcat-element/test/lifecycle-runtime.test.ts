@@ -27,15 +27,19 @@ rstest.mockRequire("bobcat:timers", () => ({}));
 import type * as sectionUrl from "../src/section-url.ts";
 import type * as bundleFetch from "../src/bundle-fetch.ts";
 import type * as future from "../src/future.ts";
-// Answered lazily for the reason `bobcat:lynx-modules` is: all three import
+import type * as diagnosticsModule from "../src/diagnostics.ts";
+// Answered lazily for the reason `bobcat:lynx-modules` is: all four import
 // `bobcat-internal:host`, whose replacement below is built out of this file's
-// own bindings.
+// own bindings. Both runtimes report through the one `bobcat:diagnostics`, so
+// every diagnostic of either reaches the two recorders below directly.
 let sectionUrls: typeof sectionUrl;
 let bundleFetches: typeof bundleFetch;
 let futures: typeof future;
+let diagnostics: typeof diagnosticsModule;
 rstest.mockRequire("bobcat:section-url", () => sectionUrls);
 rstest.mockRequire("bobcat:bundle-fetch", () => bundleFetches);
 rstest.mockRequire("bobcat:future", () => futures);
+rstest.mockRequire("bobcat:diagnostics", () => diagnostics);
 const requestScriptFrame = rstest.fn();
 const preloadStyleSheet = rstest.fn();
 const adoptStyleSheet = rstest.fn();
@@ -150,6 +154,7 @@ const worker = Object.assign(new eventTarget.EventTarget(), {
 });
 
 beforeAll(async () => {
+  diagnostics = await import("../src/diagnostics.ts");
   sectionUrls = await import("../src/section-url.ts");
   futures = await import("../src/future.ts");
   bundleFetches = await import("../src/bundle-fetch.ts");
@@ -324,17 +329,23 @@ describe("MTS/BTS lifecycle runtime", () => {
   });
 
   it("reports a microtask throw before the next job and ignores callback return values", async () => {
+    // The worker realm's global `reportError`, which a throw goes to as an
+    // uncaught exception does; Node has none, so the test stands one in.
+    const reportError = rstest.fn();
+    scope.reportError = reportError;
+    reportedErrors.mockClear();
     const then = rstest.fn();
     const before = toMain.length;
+    const failure = Error("microtask failure");
     bts.queueMicrotask(() => ({then}));
-    bts.queueMicrotask(() => { throw Error("microtask failure"); });
+    bts.queueMicrotask(() => { throw failure; });
     bts.queueMicrotask(() => bts.reportError("after microtask"));
     await Promise.resolve();
     expect(then).not.toHaveBeenCalled();
-    const reports = toMain.splice(before) as {method:string; message:string}[];
-    expect(reports.map(message => message.method)).toEqual(["reportError", "reportError"]);
-    expect(reports[0]!.message).toContain("microtask failure");
-    expect(reports[1]!.message).toBe("after microtask");
+    expect(reportError).toHaveBeenCalledExactlyOnceWith(failure);
+    expect(reportedErrors.mock.calls).toEqual([["error", "after microtask"]]);
+    expect(toMain).toHaveLength(before);
+    delete scope.reportError;
   });
 
   it("runs MTS frames with cancellation, nested requests and errors kept on their own frame", () => {
@@ -1050,25 +1061,27 @@ describe("runtime events and diagnostics", () => {
     emitter.removeAllListeners("host-event");
   });
 
-  it("forwards both realms' diagnostics with severity, values and Error stacks", async () => {
+  it("reports both realms' diagnostics directly, with severity, values and Error stacks", async () => {
     reportedErrors.mockClear();
     consoleMessages.mockClear();
     const error = new Error("render failed");
     mts._ReportError(error, {level: "warning"});
-    expect(reportedErrors).toHaveBeenLastCalledWith("warning", expect.stringContaining("render failed"));
+    expect(reportedErrors).toHaveBeenLastCalledWith("warn", expect.stringContaining("render failed"));
     mts.lynx.reportError("still running", {level: "fatal"});
     expect(reportedErrors).toHaveBeenLastCalledWith("fatal", "still running");
     mts.console["log"]?.("MTS", {value: 1}, undefined);
     expect(consoleMessages).toHaveBeenLastCalledWith("log", 'MTS {"value":1} undefined');
     const {console: backgroundConsole} = await import("../src/background-thread-runtime.ts");
+    // Both runtimes' bindings are `bobcat:diagnostics`'s, which this suite
+    // loads once for the two of them: what the BTS reports goes to the host
+    // itself, never to the main thread as a message to forward.
+    expect(backgroundConsole).toBe(mts.console);
+    expect(bts.reportError).toBe(mts._ReportError);
     bts.reportError(error, {level: "invalid"});
     bts.reportError(null, {level: "warning"});
     backgroundConsole["warn"]?.("BTS", [1, 2]);
-    await deliverToMain();
-    await deliverToMain();
-    await deliverToMain();
     expect(reportedErrors.mock.calls.slice(2)).toEqual([
-      ["error", expect.stringContaining("render failed")], ["warning", "null"],
+      ["error", expect.stringContaining("render failed")], ["warn", "null"],
     ]);
     expect(reportedErrors.mock.calls[2]?.[1]).toContain(error.stack);
     expect(consoleMessages).toHaveBeenLastCalledWith("warn", "BTS [1,2]");
@@ -1102,12 +1115,13 @@ it("waits for the JS disposal acknowledgement before terminating the Worker", as
   await deliverToBackground();
   expect(calls).toEqual(["hook", "job"]);
   expect(worker.terminate).not.toHaveBeenCalled();
-  await deliverToMain(); // reportError from the hook
-  await deliverToMain(); // disposal acknowledgement
+  // The hook's throw reached the host during the hook; the one message is
+  // the disposal acknowledgement.
+  expect(reportedErrors).toHaveBeenLastCalledWith("error", expect.stringContaining("BTS destroy"));
+  await deliverToMain();
   await disposing;
   expect(worker.terminate).toHaveBeenCalledTimes(1);
   expect(toBackground).toHaveLength(0);
-  expect(reportedErrors).toHaveBeenLastCalledWith("error", expect.stringContaining("BTS destroy"));
 });
 
 it("reports a BTS entry that throws and keeps taking messages after it", async () => {

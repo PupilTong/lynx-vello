@@ -395,9 +395,34 @@ pub enum EngineEvent {
     /// An application reported an error through `lynx.reportError`, or the
     /// runtime reported a recoverable operation failure.
     /// Reporting does not throw into its caller or end the view.
-    ScriptReported { level: String, message: String },
+    ///
+    /// `level` is `"warn"`, `"error"` or `"fatal"`: `lynx.reportError`'s
+    /// `'warning'` spelled as the console method, its `'fatal'` as it is, and
+    /// `"error"` for `'error'`, for a level it does not know and for none.
+    /// The engine does nothing more for `"fatal"` than for the other two: the
+    /// view and the realm that reported it go on.
+    ///
+    /// The realm that reported it sends it to the view's host itself, and
+    /// `source` names that realm: a report of the BTS or of a `Worker` does
+    /// not pass through the main-thread realm. One realm's diagnostics arrive
+    /// in the order it made them. Two realms' diagnostics have no order
+    /// between them, and a worker's diagnostics have none relative to its
+    /// [`EngineEvent::WorkerThrew`] and [`EngineEvent::WorkerEnded`], which
+    /// the creating realm reports.
+    ScriptReported {
+        source: ScriptSource,
+        level: String,
+        message: String,
+    },
     /// A realm's console output, delivered to the embedder that owns the view.
-    ConsoleMessage { level: String, message: String },
+    /// `level` is the name of the console method that was called: `"log"`,
+    /// `"info"`, `"debug"`, `"warn"` or `"error"`. Reported under the same
+    /// rules as [`EngineEvent::ScriptReported`].
+    ConsoleMessage {
+        source: ScriptSource,
+        level: String,
+        message: String,
+    },
 }
 
 impl EngineEvent {

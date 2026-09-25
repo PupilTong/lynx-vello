@@ -496,8 +496,8 @@ fn check_events(view: &mut LynxView<ViewResources>, url: &Url) -> Result<bool, C
             EngineEvent::WorkerThrew { error, .. } | EngineEvent::WorkerEnded { error, .. } => {
                 eprintln!("bobcat-server: worker failed: {error}");
             }
-            EngineEvent::ScriptReported { level, message }
-            | EngineEvent::ConsoleMessage { level, message } => {
+            EngineEvent::ScriptReported { level, message, .. }
+            | EngineEvent::ConsoleMessage { level, message, .. } => {
                 eprintln!("bobcat-server: [{level}] {message}");
             }
             EngineEvent::TimerFailed(error) => {

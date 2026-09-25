@@ -838,6 +838,8 @@ fn a_worker_realm_declares_these_host_members() {
         "clearTimer",
         "fetchResource",
         "loadModuleSync",
+        "logScriptMessage",
+        "reportScriptError",
         "requestScriptFrame",
         "resolveModuleUrl",
         "setTimer",

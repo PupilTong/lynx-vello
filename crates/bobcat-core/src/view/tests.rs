@@ -349,15 +349,19 @@ fn only_fatal_events_end_the_view() {
             },
             false,
         ),
+        // A report at the `"fatal"` level included: it is a diagnostic, and
+        // the engine does nothing more for it than for the other levels.
         (
             EngineEvent::ScriptReported {
-                level: "error".to_owned(),
+                source: ScriptSource::Background,
+                level: "fatal".to_owned(),
                 message: "reported".to_owned(),
             },
             false,
         ),
         (
             EngineEvent::ConsoleMessage {
+                source: ScriptSource::Main,
                 level: "log".to_owned(),
                 message: "logged".to_owned(),
             },

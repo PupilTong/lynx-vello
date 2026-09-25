@@ -439,8 +439,8 @@ impl MacApplication {
                 EngineEvent::WorkerThrew { error, .. } | EngineEvent::WorkerEnded { error, .. } => {
                     eprintln!("worker failed: {error}");
                 }
-                EngineEvent::ScriptReported { level, message }
-                | EngineEvent::ConsoleMessage { level, message } => {
+                EngineEvent::ScriptReported { level, message, .. }
+                | EngineEvent::ConsoleMessage { level, message, .. } => {
                     eprintln!("[{level}] {message}");
                 }
                 EngineEvent::TimerFailed(error) => {
