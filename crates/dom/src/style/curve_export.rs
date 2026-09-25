@@ -57,17 +57,6 @@ pub(crate) struct ExportedComposite {
 }
 
 impl<T: Sync> Document<T> {
-    /// Whether `node`'s running animation moves only composite properties —
-    /// the paint-order builder's cue to treat the element as a stacking
-    /// context with a composited group even where its committed style would
-    /// not make one.
-    pub(crate) fn animates_composite_properties(&self, node: &Node<T>) -> bool {
-        if !node.may_have_animations() {
-            return false;
-        }
-        self.composite_export(node).is_some()
-    }
-
     /// The exportable composite animation on `node`, if its whole animation
     /// state is exportable; see the module documentation for what refuses.
     pub(crate) fn composite_export(&self, node: &Node<T>) -> Option<ExportedComposite> {

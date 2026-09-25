@@ -522,10 +522,15 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         clip: Option<usize>,
     ) -> Option<u32> {
         let node_ref = self.node(node);
-        if !node_ref.may_have_animations() {
+        if !node_ref.animates_opacity() && !node_ref.animates_transform() {
             return None;
         }
         let export = self.document.composite_export(node_ref)?;
+        // The export reads the running animation of the same `@keyframes`
+        // the driver's bits do, so the group an opacity curve retargets and
+        // the containing block a transform curve moves both exist.
+        debug_assert!(export.curve.opacity.is_none() || node_ref.animates_opacity());
+        debug_assert!(export.transform_track.is_none() || node_ref.animates_transform());
         let mut curve = export.curve;
         if let Some(track) = export.transform_track {
             let bounded = self.current_layer.is_none_or(|layer| {
@@ -672,15 +677,15 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         if let Some(index) = own_animation {
             box_space = Some(self.push_space(box_space, SpaceKind::Animation(index)));
         }
-        let force_group = own_animation
-            .is_some_and(|index| self.animations[index as usize].curve.opacity.is_some());
+        // A current `opacity` animation gets the group an exported curve
+        // retargets, exported or not.
         let layer = self.open_layer(
             root,
             values,
             &world,
             size,
             (box_space, seed.current.clip),
-            force_group,
+            self.node(root).animates_opacity(),
         );
 
         let own_slot = self.allocate_scroll_slot(
@@ -930,19 +935,9 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         let position = style.clone_position();
         let clips = member_clip_contexts(position, *cursor.ctx);
         let z_applies = stacking::z_index_applies(position, cursor.is_item_container);
-        // One forced stacking context beyond the CSS triggers: an element
-        // whose running animation moves only composite properties paints as
-        // a stacking context — the rule browsers apply to animated
-        // `opacity`/`transform` — so its subtree is one atomic, retargetable
-        // unit. A scroll container is none by itself, as on the web: its
-        // content rides its scroll space and clip wherever it paints, so a
-        // positioned descendant sorts in the enclosing stacking context.
-        let forced_context = child_node.may_have_animations()
-            && self.document.animates_composite_properties(child_node);
         Some(ChildBox {
             node,
-            level: (stacking::establishes_stacking_context(child_node, style, z_applies)
-                || forced_context)
+            level: stacking::establishes_stacking_context(child_node, style, z_applies)
                 .then(|| stacking::stack_level(style, z_applies)),
             offset,
             size,

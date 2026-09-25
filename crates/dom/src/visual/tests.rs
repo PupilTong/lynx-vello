@@ -2209,6 +2209,109 @@ fn two_animated(first: &str, second: &str) -> std::sync::Arc<crate::CommittedFra
     document.commit()
 }
 
+/// web-animations-1: an `opacity` or `transform` animation makes its element
+/// a stacking context — and an `opacity` one a group — for as long as it is
+/// current, whether or not its curve exports. A second concurrent animation
+/// makes the exporter refuse; a delay keeps it pending. The fade still reads
+/// 1 at the commit, so no committed style stacks the card. Paint order is the
+/// same in every case, so nothing reorders at the handover.
+#[test]
+fn an_animation_stacks_its_element_whether_or_not_it_exports() {
+    for (keyframes, grouped) in [("fade", true), ("slide", false)] {
+        let mut orders = Vec::new();
+        for (animation, exports) in [
+            (format!("{keyframes} 1s linear infinite"), true),
+            (
+                format!("{keyframes} 1s linear infinite, recolor 1s linear infinite"),
+                false,
+            ),
+            (format!("{keyframes} 1s linear 5s infinite"), false),
+        ] {
+            let mut h = Harness::new(&format!(
+                "{PAGE}
+                 .card {{ display: flex; width: 200px; height: 200px; background-color: red;
+                          animation: {animation}; }}
+                 .under {{ display: flex; position: relative; z-index: -1;
+                           width: 50px; height: 50px; }}
+                 .flow {{ display: flex; width: 50px; height: 50px; }}
+                 @keyframes fade {{ 0%, 50% {{ opacity: 1; }} 100% {{ opacity: 0.5; }} }}
+                 @keyframes slide {{ from {{ transform: translateX(0px); }}
+                                     to {{ transform: translateX(10px); }} }}
+                 @keyframes recolor {{ from {{ background-color: red; }}
+                                       to {{ background-color: blue; }} }}"
+            ));
+            let root = h.root();
+            let card = h.el(root, "view.card");
+            let under = h.el(card, "view.under");
+            let flow = h.el(card, "view.flow");
+            let document = &mut h.doc.dom;
+            document.render();
+            document.advance_animations(0.0);
+            assert!(document.advance_animations(0.25).needs_next_frame);
+            let frame = h.paint();
+            let label = &animation;
+            assert_eq!(
+                frame.animations().len(),
+                usize::from(exports),
+                "{label}: export"
+            );
+            assert_eq!(
+                frame.layers().iter().any(|layer| layer.node == card),
+                grouped,
+                "{label}: group",
+            );
+            let order = h.element_order();
+            assert_eq!(
+                order,
+                vec![root, card, under, flow],
+                "{label}: stacking context"
+            );
+            orders.push(order);
+        }
+        assert!(orders.windows(2).all(|pair| pair[0] == pair[1]));
+    }
+}
+
+/// web-animations-1: a current transform animation makes its element the
+/// containing block of a fixed descendant during a delay too, where the
+/// committed transform is `none`. Layout places the box against the card,
+/// and paint and hit testing clip it with the card's `overflow`, so a box
+/// placed outside the card is hidden until the animation ends and it
+/// escapes to the viewport.
+#[test]
+fn a_delayed_transform_animation_clips_its_fixed_descendant() {
+    let mut h = Harness::new(&format!(
+        "{PAGE}
+         .card {{ display: flex; width: 100px; height: 100px; margin-left: 50px;
+                  margin-top: 40px; overflow: hidden; animation: slide 1s linear 1s; }}
+         .pinned {{ display: flex; position: fixed; left: 150px; top: 0;
+                    width: 20px; height: 20px; }}
+         @keyframes slide {{ from {{ transform: translateX(0px); }}
+                             to {{ transform: translateX(10px); }} }}"
+    ));
+    let root = h.root();
+    let card = h.el(root, "view.card");
+    let pinned = h.el(card, "view.pinned");
+    let document = &mut h.doc.dom;
+    document.render();
+    document.advance_animations(0.0);
+    document.advance_animations(0.5);
+    let style = document
+        .get(card)
+        .and_then(crate::Node::computed_style)
+        .expect("the card is styled");
+    assert!(
+        style.get_box().transform.0.is_empty(),
+        "the delay commits no transform"
+    );
+    assert_eq!(h.hit(205.0, 45.0), Some(root), "clipped by the card");
+    assert_eq!(h.hit(155.0, 5.0), Some(root), "not against the viewport");
+
+    h.doc.dom.advance_animations(2.5);
+    assert_eq!(h.hit(155.0, 5.0), Some(pinned), "escaped after the end");
+    assert_eq!(h.hit(205.0, 45.0), Some(root));
+}
+
 /// One element's exported fade does not free the main thread of another
 /// element's inexportable animation.
 #[test]
@@ -2238,7 +2341,7 @@ fn the_earliest_curve_end_is_the_handback_instant() {
 
 /// A curve culling leaves out of the program is exported but not live: the
 /// frame composes once, and still hands the animation back at its end. An
-/// opacity curve forces a group, which is left out with its content.
+/// opacity animation forces a group, which is left out with its content.
 #[test]
 fn a_frame_whose_curves_are_all_culled_has_no_live_curves() {
     for keyframes in [

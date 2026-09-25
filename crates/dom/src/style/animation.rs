@@ -38,6 +38,17 @@
 //! An animation shifted once is recorded as anchored and never shifted again,
 //! however many frames its delay keeps it `Pending` for.
 //!
+//! # Side effects of animation
+//!
+//! While an `opacity` or `transform` animation or transition is current or
+//! in effect, web-animations-1 has its element behave as if `will-change`
+//! named the property: a stacking context either way, a group and Backdrop
+//! Root for `opacity`, the absolute and fixed containing block for
+//! `transform`. [`Document::sync_animation_state`] records that as the node's
+//! `animates` bits, so the paint build and layout read a bit, never the map,
+//! and none of it depends on whether a curve exports. A transform bit that
+//! flips relayouts the element's positioned descendants.
+//!
 //! # Frozen animations: css-contain-2 §4
 //!
 //! > While an element is skipped, CSS transitions and animations on the
@@ -94,8 +105,10 @@ use stylo::context::{SharedStyleContext, StyleSystemOptions};
 use stylo::dom::OpaqueNode;
 use stylo::driver;
 use stylo::invalidation::element::restyle_hints::RestyleHint;
-use stylo::properties::OwnedPropertyDeclarationId;
 use stylo::properties::longhands::animation_fill_mode::computed_value::single_value::T as AnimationFillMode;
+use stylo::properties::{
+    LonghandId, OwnedPropertyDeclarationId, PropertyDeclarationId, PropertyDeclarationIdSet,
+};
 use stylo::selector_parser::SnapshotMap;
 use stylo::servo::animation::{
     Animation, AnimationSetKey, AnimationState, DocumentAnimationSet, ElementAnimationSet,
@@ -109,7 +122,7 @@ use crate::layout::skips_contents;
 use crate::style::damage::StyleDamage;
 use crate::style::flush::{LayoutThreadStateGuard, NO_PAINTERS, RecalcStyle};
 use crate::tree::document::{Document, NodeId};
-use crate::tree::node::Node;
+use crate::tree::node::{ANIMATES_OPACITY, ANIMATES_TRANSFORM, Node};
 
 /// What one [`Document::advance_animations`] call did.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -120,8 +133,10 @@ pub struct AnimationTick {
     /// How many elements were re-cascaded. Zero means the retained scene is
     /// still current and this frame can be skipped.
     pub restyled: usize,
-    /// An animated element produced relayout damage, so the next `layout()`
-    /// will do real work. Always false for a purely visual animation.
+    /// An animated element produced relayout damage, or a transform
+    /// animation starting or ending moved the containing block of its
+    /// element's positioned descendants, so the next `layout()` will do real
+    /// work. False on every other tick of a purely visual animation.
     pub relayout: bool,
 }
 
@@ -147,6 +162,55 @@ impl Cancellable for Transition {
     fn is_cancelled(&self) -> bool {
         self.state == AnimationState::Canceled
     }
+}
+
+/// The longhands whose animation acts as `will-change` naming a composite
+/// property, and the [`crate::tree::node::StylingData::animates`] bit each
+/// sets. The individual transforms are storage-only in the fork's grammar.
+const COMPOSITES: [(LonghandId, u8); 5] = [
+    (LonghandId::Opacity, ANIMATES_OPACITY),
+    (LonghandId::Transform, ANIMATES_TRANSFORM),
+    (LonghandId::Translate, ANIMATES_TRANSFORM),
+    (LonghandId::Rotate, ANIMATES_TRANSFORM),
+    (LonghandId::Scale, ANIMATES_TRANSFORM),
+];
+
+/// web-animations-1 "Side effects of animation": whether a CSS animation is
+/// *current* or *in effect*. Stylo runs every animation at a positive
+/// playback rate, so its before phase (`Pending`, a delay included) and a
+/// pause are current; a finished one stays in effect only while its fill
+/// holds the last keyframe.
+fn animation_has_side_effects(animation: &Animation) -> bool {
+    match animation.state {
+        AnimationState::Pending | AnimationState::Running | AnimationState::Paused(_) => true,
+        AnimationState::Finished => matches!(
+            animation.fill_mode,
+            AnimationFillMode::Forwards | AnimationFillMode::Both
+        ),
+        AnimationState::Canceled => false,
+    }
+}
+
+/// The same for a CSS transition, which fills nothing once it finishes.
+fn transition_has_side_effects(transition: &Transition) -> bool {
+    matches!(
+        transition.state,
+        AnimationState::Pending | AnimationState::Running
+    )
+}
+
+fn composite_bits(properties: &PropertyDeclarationIdSet) -> u8 {
+    COMPOSITES
+        .iter()
+        .filter(|(longhand, _)| properties.contains(PropertyDeclarationId::Longhand(*longhand)))
+        .fold(0, |bits, (_, bit)| bits | bit)
+}
+
+fn composite_bit(property: PropertyDeclarationId<'_>) -> u8 {
+    COMPOSITES
+        .iter()
+        .find(|(longhand, _)| property.as_longhand() == Some(*longhand))
+        .map_or(0, |(_, bit)| *bit)
 }
 
 /// What one step of Stylo's animation state machine produced.
@@ -577,7 +641,7 @@ impl<T: Sync> Document<T> {
 
         let Stepped { hinted, moved } = self.step_animation_states(now, now - previous);
         if hinted.is_empty() {
-            self.sync_animation_state();
+            let relayout = self.sync_animation_state();
             // If the timeline was active on entry and this step ended it, the
             // idle fact must reach the next committed frame even though no
             // style moved — the frame's animation flag is itself visual
@@ -589,14 +653,17 @@ impl<T: Sync> Document<T> {
             if moved || (was_active && !self.animations().is_active()) {
                 self.note_visual_mutation();
             }
-            return AnimationTick::default();
+            return AnimationTick {
+                relayout,
+                ..AnimationTick::default()
+            };
         }
 
         let root = self.hint_animated_elements(&hinted);
         let mut tick = self.recascade_animated_elements(root);
         // The traversal runs `process_animations` again, which prunes finished
         // animations, so what the timeline owns is only settled afterwards.
-        self.sync_animation_state();
+        tick.relayout |= self.sync_animation_state();
         tick.needs_next_frame = self.animations().is_active();
         // A restyle is a visual change; so is the timeline going idle, whose
         // flag rides the committed frame (see above). So is a state change on
@@ -611,7 +678,10 @@ impl<T: Sync> Document<T> {
     }
 
     /// Re-reads Stylo's animation map: which elements own animation state,
-    /// and whether anything still needs frames.
+    /// which composite properties each animates (the node's `animates`
+    /// bits), and whether anything still needs frames. Answers whether the
+    /// next `layout()` has work: a transform bit flip moved a containing
+    /// block, or the cancelled elements' re-cascade relayouts.
     ///
     /// Both the style flush and the tick mutate the map through Stylo, which
     /// reports neither, so the bookkeeping is rebuilt from the map itself.
@@ -619,33 +689,69 @@ impl<T: Sync> Document<T> {
     /// pass does not answer itself: it goes through
     /// [`Document::refresh_animation_activity`] below, so freezing and the
     /// render's own re-ask read one rule.
-    pub(crate) fn sync_animation_state(&mut self) {
+    pub(crate) fn sync_animation_state(&mut self) -> bool {
+        // The cancelled elements' re-cascade can start a transition from the
+        // value the animation left, and prunes the finished animations a fill
+        // holds, so everything below reads the map after it.
+        let cancelled = self.drop_cancelled_animations();
+        let mut relayout = !cancelled.is_empty() && self.recascade_cancelled_animations(&cancelled);
+
         let handle = self.animations().context_handle();
         let mut held = std::mem::take(&mut self.animations_mut().held);
         let mut animated = Vec::new();
-        let mut cancelled = Vec::new();
+        // Elements whose `animates` bits changed, with the bits that did.
+        let mut flipped = Vec::new();
         {
             let mut sets = handle.sets.write();
             if !held.is_empty() {
                 self.restore_held_animations(&mut held, &mut sets);
             }
-            for (key, set) in &mut *sets {
+            for (key, set) in &*sets {
                 let Some(id) = self.arenas().id_at_arena_key(key.node.0) else {
                     continue;
                 };
-                if set.animations.iter().any(is_cancelled)
-                    || set.transitions.iter().any(is_cancelled)
+                if key.pseudo_element.is_none()
+                    && let Some(node) = self.get(id)
                 {
-                    cancelled.push(id);
-                    set.clear_canceled_animations();
+                    let bits = self.animates(node, set);
+                    let changed = node.replace_animates(bits) ^ bits;
+                    if changed != 0 {
+                        flipped.push((id, changed));
+                    }
                 }
                 if !set.is_empty() {
                     animated.push(id);
                 }
             }
             sets.retain(|_, set| !set.is_empty());
+            // An element whose set Stylo dropped since the last sync
+            // animates nothing; the loop above never saw it.
+            for &id in &self.animations().flagged {
+                let key = AnimationSetKey::new_for_non_pseudo(OpaqueNode(id.arena_key()));
+                if !sets.contains_key(&key)
+                    && let Some(node) = self.get(id)
+                {
+                    let changed = node.replace_animates(0);
+                    if changed != 0 {
+                        flipped.push((id, changed));
+                    }
+                }
+            }
         }
         self.animations_mut().held = held;
+        if !flipped.is_empty() {
+            // Either bit moves the stacking context and group the paint build
+            // gives the element.
+            self.note_visual_mutation();
+        }
+        for (id, changed) in flipped {
+            // `will-change: transform` makes the element the containing block
+            // of its absolute and fixed descendants. Only an animation's start
+            // or end gets here, never a frame.
+            if changed & ANIMATES_TRANSFORM != 0 {
+                relayout |= self.invalidate_containing_block(id);
+            }
+        }
 
         let mut flagged = std::mem::take(&mut self.animations_mut().flagged);
         for &id in &flagged {
@@ -662,10 +768,57 @@ impl<T: Sync> Document<T> {
         }
         self.animations_mut().flagged = flagged;
         self.refresh_animation_activity();
+        relayout
+    }
 
-        if !cancelled.is_empty() {
-            self.recascade_cancelled_animations(&cancelled);
+    /// Puts the held animations back, then drops every cancelled animation
+    /// and transition from the map, answering the elements that had one. The
+    /// held ones go back first so that a cancelled one stops filling.
+    fn drop_cancelled_animations(&mut self) -> Vec<NodeId> {
+        let handle = self.animations().context_handle();
+        let mut held = std::mem::take(&mut self.animations_mut().held);
+        let mut cancelled = Vec::new();
+        {
+            let mut sets = handle.sets.write();
+            if !held.is_empty() {
+                self.restore_held_animations(&mut held, &mut sets);
+            }
+            for (key, set) in &mut *sets {
+                let Some(id) = self.arenas().id_at_arena_key(key.node.0) else {
+                    continue;
+                };
+                if set.animations.iter().any(is_cancelled)
+                    || set.transitions.iter().any(is_cancelled)
+                {
+                    cancelled.push(id);
+                    set.clear_canceled_animations();
+                }
+            }
         }
+        self.animations_mut().held = held;
+        cancelled
+    }
+
+    /// The [`ANIMATES_OPACITY`] and [`ANIMATES_TRANSFORM`] bits of `node`'s
+    /// own set: the composite properties its animations and transitions name
+    /// while they have side effects. A keyframes animation's properties are
+    /// its `@keyframes` rule's, the set Stylo built the animation from.
+    fn animates(&self, node: &Node<T>, set: &ElementAnimationSet) -> u8 {
+        let stylist = self.style_engine().stylist();
+        let animations = set
+            .animations
+            .iter()
+            .filter(|animation| animation_has_side_effects(animation))
+            .filter_map(|animation| stylist.lookup_keyframes(&animation.name, node))
+            .fold(0, |bits, keyframes| {
+                bits | composite_bits(&keyframes.properties_changed)
+            });
+        set.transitions
+            .iter()
+            .filter(|transition| transition_has_side_effects(transition))
+            .fold(animations, |bits, transition| {
+                bits | composite_bit(transition.property_animation.property_id())
+            })
     }
 
     /// Re-cascades elements whose animations a restyle just cancelled.
@@ -679,11 +832,14 @@ impl<T: Sync> Document<T> {
     /// browser drops straight back to the un-animated style, so the driver
     /// replaces that origin itself: the animation is out of the map by now, so
     /// `TElement::animation_rule` answers `None` and the origin goes away.
-    fn recascade_cancelled_animations(&mut self, cancelled: &[NodeId]) {
+    /// Answers whether that produced relayout damage.
+    fn recascade_cancelled_animations(&mut self, cancelled: &[NodeId]) -> bool {
         let root = self.hint_animated_elements(cancelled);
-        if self.recascade_animated_elements(root).restyled > 0 {
+        let tick = self.recascade_animated_elements(root);
+        if tick.restyled > 0 {
             self.note_visual_mutation();
         }
+        tick.relayout
     }
 
     /// Puts back the finished-but-filling animations Stylo's restyle removed,
@@ -982,8 +1138,233 @@ impl<T: Sync> Document<T> {
 
 #[cfg(test)]
 mod tests {
+    use crate::test_common::Doc;
     use crate::tree::document::tests::device;
-    use crate::{Document, StylesheetOrigin};
+    use crate::{Document, NodeId, StylesheetOrigin};
+
+    const SIDE_EFFECTS: &str = "
+        page { display: flex; width: 800px; height: 600px; }
+        .card { width: 100px; height: 100px; }
+        @keyframes slide { from { transform: translateX(0px); }
+                           to { transform: translateX(100px); } }
+        @keyframes fade { from { opacity: 1; } to { opacity: 0; } }
+        @keyframes recolor { from { background-color: red; }
+                             to { background-color: blue; } }";
+
+    /// A `.card` running `inline`, created by a flush and started on the
+    /// timeline's origin by the tick at 0.
+    fn animated_card(inline: &str) -> (Doc, NodeId) {
+        let mut doc = Doc::with_css(SIDE_EFFECTS);
+        let root = doc.root;
+        let card = doc.el(root, "view.card");
+        doc.set_inline(card, inline);
+        doc.flush();
+        (doc, card)
+    }
+
+    /// `(animates_opacity, animates_transform)`.
+    fn animates(doc: &Doc, id: NodeId) -> (bool, bool) {
+        let node = doc.dom.get(id).expect("the card is live");
+        (node.animates_opacity(), node.animates_transform())
+    }
+
+    /// web-animations-1 "Side effects of animation": the bits hold while an
+    /// animation is current (its delay, a pause, while it runs) or in effect
+    /// (a forwards fill), and name only what its `@keyframes` animate.
+    #[test]
+    fn the_animates_bits_follow_current_and_in_effect_animations() {
+        for (inline, at, expected) in [
+            ("animation: slide 1s linear 1s", 0.5, (false, true)),
+            ("animation: fade 1s linear", 0.5, (true, false)),
+            ("animation: recolor 1s linear", 0.5, (false, false)),
+            (
+                "animation: slide 1s linear, fade 1s linear",
+                0.5,
+                (true, true),
+            ),
+            ("animation: slide 1s linear paused", 0.5, (false, true)),
+            ("animation: slide 1s linear", 1.5, (false, false)),
+            ("animation: slide 1s linear forwards", 1.5, (false, true)),
+            ("animation: fade 1s linear both", 1.5, (true, false)),
+            ("animation: slide 1s linear backwards", 1.5, (false, false)),
+        ] {
+            let (mut doc, card) = animated_card(inline);
+            doc.dom.advance_animations(0.0);
+            doc.dom.advance_animations(at);
+            doc.flush();
+            assert_eq!(animates(&doc, card), expected, "{inline} at {at}s");
+        }
+    }
+
+    /// A canceled animation and a finished transition leave no bits; a
+    /// pending or running transition sets them.
+    #[test]
+    fn cancellation_and_transitions_move_the_animates_bits() {
+        let (mut doc, card) = animated_card("animation: slide 10s linear");
+        doc.dom.advance_animations(0.0);
+        assert_eq!(animates(&doc, card), (false, true));
+        doc.set_inline(card, "animation: none");
+        doc.flush();
+        assert_eq!(animates(&doc, card), (false, false), "canceled");
+
+        let (mut doc, card) = animated_card("opacity: 1; transition: opacity 1s linear");
+        doc.set_inline(card, "opacity: 0; transition: opacity 1s linear");
+        doc.flush();
+        assert_eq!(animates(&doc, card), (true, false), "pending");
+        doc.dom.advance_animations(0.0);
+        doc.dom.advance_animations(0.5);
+        assert_eq!(animates(&doc, card), (true, false), "running");
+        doc.dom.advance_animations(1.5);
+        doc.flush();
+        assert_eq!(animates(&doc, card), (false, false), "finished");
+    }
+
+    /// Unlinking cancels the animations and clears the bits with them.
+    #[test]
+    fn unlinking_clears_the_animates_bits() {
+        let (mut doc, card) = animated_card("animation: fade 10s linear");
+        assert_eq!(animates(&doc, card), (true, false));
+        doc.dom.remove_element(card);
+        assert_eq!(animates(&doc, card), (false, false));
+    }
+
+    /// Whether the next `layout()` does a pass.
+    fn needs_layout(doc: &Doc) -> bool {
+        let viewport = doc.dom.viewport_size();
+        doc.dom.layout_needs_pass(
+            hughie::geometry::Size::new(viewport.width, viewport.height),
+            doc.dom.device().device_pixel_ratio().get(),
+        )
+    }
+
+    /// The transform bit moves the containing block of the card's fixed
+    /// child, so its start and end each invalidate that child once; no frame
+    /// between them does. Adding the class changes `animation-*` longhands,
+    /// which relayout the card by themselves, so the start reads the child's
+    /// cache rather than whether a pass is due.
+    #[test]
+    fn a_transform_bit_flip_relayouts_once_not_per_frame() {
+        let mut doc = Doc::with_css(&format!(
+            "{SIDE_EFFECTS}
+             .card {{ transform: translateX(0px); }}
+             .slide {{ animation: slide 1s linear 0.5s; }}
+             .fixed {{ position: fixed; left: 0; top: 0; width: 10px; height: 10px; }}"
+        ));
+        let root = doc.root;
+        let card = doc.el(root, "view.card");
+        let fixed = doc.el(card, "view.fixed");
+        doc.flush();
+        assert!(!needs_layout(&doc));
+        assert_eq!(doc.dom.layout_cache_is_empty(fixed), Some(false));
+
+        doc.add_class(card, "slide");
+        doc.dom.flush_styles_with_damage_sink(&mut |_, _| {});
+        assert_eq!(
+            doc.dom.layout_cache_is_empty(fixed),
+            Some(true),
+            "the start invalidates the fixed child"
+        );
+        doc.flush();
+        for now in [0.0, 0.25, 0.75, 1.0, 1.25] {
+            let tick = doc.dom.advance_animations(now);
+            assert!(
+                !tick.relayout && !needs_layout(&doc),
+                "no relayout at {now}s"
+            );
+            doc.flush();
+        }
+        let tick = doc.dom.advance_animations(2.0);
+        assert!(tick.relayout && needs_layout(&doc), "the end relayouts");
+        assert_eq!(doc.dom.layout_cache_is_empty(fixed), Some(true));
+        doc.flush();
+        assert_eq!(animates(&doc, card), (false, false));
+    }
+
+    /// With no absolute or fixed descendant no containing block moves, so a
+    /// transform transition or animation relayouts nothing at its start or
+    /// end, whatever its bit does. The card's own transform keeps the style
+    /// from relayouting on its own.
+    #[test]
+    fn a_transform_bit_flip_without_positioned_descendants_relayouts_nothing() {
+        let css = format!(
+            "{SIDE_EFFECTS}
+             .card {{ transform: translateX(0px); }}
+             .eased {{ transition: transform 1s linear; }}
+             .moved {{ transform: translateX(50px); }}
+             .flow {{ width: 10px; height: 10px; }}"
+        );
+        let mut doc = Doc::with_css(&css);
+        let root = doc.root;
+        let card = doc.el(root, "view.card.eased");
+        doc.el(card, "view.flow");
+        doc.flush();
+        doc.add_class(card, "moved");
+        doc.dom.flush_styles_with_damage_sink(&mut |_, _| {});
+        assert_eq!(animates(&doc, card), (false, true), "the transition runs");
+        assert!(!needs_layout(&doc), "its start relayouts nothing");
+        doc.flush();
+        doc.dom.advance_animations(0.0);
+        let tick = doc.dom.advance_animations(1.5);
+        assert_eq!(animates(&doc, card), (false, false), "the transition ended");
+        assert!(
+            !tick.relayout && !needs_layout(&doc),
+            "the transition's end relayouts nothing"
+        );
+
+        let mut doc = Doc::with_css(&css);
+        let root = doc.root;
+        let card = doc.el(root, "view.card");
+        doc.el(card, "view.flow");
+        doc.set_inline(card, "animation: slide 1s linear");
+        doc.flush();
+        doc.dom.advance_animations(0.0);
+        let tick = doc.dom.advance_animations(1.5);
+        assert_eq!(animates(&doc, card), (false, false), "the animation ended");
+        assert!(
+            !tick.relayout && !needs_layout(&doc),
+            "the animation's end relayouts nothing"
+        );
+    }
+
+    /// Cancelling an animation re-cascades its element once more, and that
+    /// cascade can start a transition from the animated value. The bits and
+    /// the timeline read the map after it, so the transition's side effects
+    /// land in the same flush.
+    #[test]
+    fn a_transition_the_cancel_recascade_starts_sets_the_bits_at_once() {
+        for (base, animation, expected) in [
+            (
+                "opacity: 0.5; transition: opacity 1s linear",
+                "animation: pulse 10s linear",
+                (true, false),
+            ),
+            (
+                "transform: translateX(100px); transition: transform 1s linear",
+                "animation: rest 10s linear",
+                (false, true),
+            ),
+        ] {
+            let mut doc = Doc::with_css(&format!(
+                "{SIDE_EFFECTS}
+                 @keyframes pulse {{ from {{ opacity: 1; }} to {{ opacity: 0.2; }} }}
+                 @keyframes rest {{ from {{ transform: none; }}
+                                    to {{ transform: translateX(10px); }} }}"
+            ));
+            let root = doc.root;
+            let card = doc.el(root, "view.card");
+            // Pending until the first tick, the animation holds its first
+            // keyframe, which the cancelling flush transitions from.
+            doc.set_inline(card, &format!("{base}; {animation}"));
+            doc.flush();
+            doc.set_inline(card, base);
+            doc.flush();
+            assert_eq!(animates(&doc, card), expected, "{animation} cancelled");
+            assert!(
+                doc.dom.has_active_animations(),
+                "{animation}: the transition ticks"
+            );
+        }
+    }
 
     /// The finishing tick must republish even when the final style equals the
     /// previous one: the committed frame's animation flag is what keeps the

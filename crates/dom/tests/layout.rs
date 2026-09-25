@@ -839,6 +839,91 @@ fn hoisted_nodes_relayout_across_passes() {
     assert_eq!(h.rect(fixed), (50.0, 20.0, 30.0, 40.0));
 }
 
+/// The four positioned boxes [`a_current_transform_animation_contains_positioned_descendants`]
+/// reads: a fixed and an absolute child of `.host`, a fixed grandchild under a
+/// static `.mid`, and a fixed child sized against its containing block.
+const CONTAINED: [(f32, f32, f32, f32); 4] = [
+    (10.0, 20.0, 30.0, 40.0),
+    (5.0, 7.0, 30.0, 40.0),
+    (10.0, 20.0, 30.0, 40.0),
+    (0.0, 0.0, 150.0, 20.0),
+];
+/// The same boxes against the viewport, relative to `.host` at (100, 50):
+/// the grandchild's `.mid` sits at the host's origin.
+const ESCAPED: [(f32, f32, f32, f32); 4] = [
+    (-90.0, -30.0, 30.0, 40.0),
+    (-95.0, -43.0, 30.0, 40.0),
+    (-90.0, -30.0, 30.0, 40.0),
+    (-100.0, -50.0, 400.0, 20.0),
+];
+
+/// web-animations-1: a current or in-effect transform animation acts as
+/// `will-change: transform`, so its element contains its absolute and fixed
+/// descendants — through a positive delay, where the committed transform is
+/// `none`, and while it runs — and they escape again once it ends without a
+/// forwards fill. With `forwards` it keeps them.
+#[test]
+fn a_current_transform_animation_contains_positioned_descendants() {
+    for (animation, delayed, filled) in [
+        ("slide 1s linear 1s", true, false),
+        ("slide 1s linear", false, false),
+        ("slide 1s linear forwards", false, true),
+    ] {
+        let mut h = Harness::new(&format!(
+            "page {{ display: flex; width: 800px; height: 600px; align-items: flex-start; }}
+             .host {{ display: flex; width: 300px; height: 200px; margin-left: 100px;
+                      margin-top: 50px; align-items: flex-start; }}
+             .mid {{ display: flex; width: 100px; height: 100px; }}
+             .fixed {{ position: fixed; left: 10px; top: 20px; width: 30px; height: 40px; }}
+             .abs {{ position: absolute; left: 5px; top: 7px; width: 30px; height: 40px; }}
+             .half {{ position: fixed; left: 0; top: 0; width: 50%; height: 20px; }}
+             .slide {{ animation: {animation}; }}
+             @keyframes slide {{ from {{ transform: none; }}
+                                 to {{ transform: translateX(100px); }} }}"
+        ));
+        let root = h.doc.root;
+        let host = h.doc.el(root, ".host");
+        let fixed = h.doc.el(host, ".fixed");
+        let abs = h.doc.el(host, ".abs");
+        let mid = h.doc.el(host, ".mid");
+        let deep = h.doc.el(mid, ".fixed");
+        let half = h.doc.el(host, ".half");
+        let boxes = [fixed, abs, deep, half];
+        let rects = |h: &Harness| boxes.map(|id| h.rect(id));
+        h.layout();
+        assert_eq!(
+            rects(&h),
+            ESCAPED,
+            "{animation}: no animation, no containing block"
+        );
+
+        h.doc.add_class(host, "slide");
+        h.layout();
+        assert_eq!(
+            rects(&h),
+            CONTAINED,
+            "{animation}: contained before the first tick"
+        );
+        let last = if delayed { 1.8 } else { 0.8 };
+        for now in [0.0, 0.5, last] {
+            h.doc.dom.advance_animations(now);
+            h.layout();
+            if delayed && now < 1.0 {
+                assert_eq!(
+                    h.doc.value(host, "transform"),
+                    "none",
+                    "{animation}: the delay commits no transform at {now}s",
+                );
+            }
+            assert_eq!(rects(&h), CONTAINED, "{animation}: contained at {now}s");
+        }
+        h.doc.dom.advance_animations(2.5);
+        h.layout();
+        let expected = if filled { CONTAINED } else { ESCAPED };
+        assert_eq!(rects(&h), expected, "{animation}: after the end");
+    }
+}
+
 #[test]
 fn omitted_display_uses_flex_and_lays_out_children() {
     let mut h = Harness::new(

@@ -2,10 +2,10 @@
 //!
 //! This is the full CSS trigger set (CSS2 §9.9 + css-position-3 +
 //! css-transforms-2 + filter-effects + css-masking + compositing +
-//! css-will-change + css-contain), not Lynx's reduced one — the recorded
-//! z-index deviation ruling (docs/tracking/deviations.md) mandates the real
-//! per-context algorithm. Triggers whose properties are storage-only in the
-//! fork (`isolation`, `mix-blend-mode`, individual transforms,
+//! css-will-change + css-contain + web-animations-1's side effects), not
+//! Lynx's reduced one — the recorded z-index deviation ruling
+//! (docs/tracking/deviations.md) mandates the real per-context algorithm. Triggers whose properties
+//! are storage-only in the fork (`isolation`, `mix-blend-mode`, individual transforms,
 //! `transform-style`) are still read so they go live on a grammar rebase;
 //! they are unreachable from author CSS today and therefore untestable
 //! through the cascade.
@@ -24,12 +24,12 @@ pub(crate) fn z_index_applies(position: PositionProperty, is_item: bool) -> bool
     position != PositionProperty::Static || is_item
 }
 
-/// `node` is here only so the containment trigger reads the same
-/// `skips_contents` answer layout does. It cannot change this predicate's
-/// result — `effective_containment` gives a `content-visibility: auto` box
-/// `LAYOUT | PAINT` whether or not it is skipping, and the skip bit adds only
-/// `SIZE` — but deriving the same fact two ways is how the two halves of the
-/// pipeline drift apart.
+/// `node` carries the animation driver's `animates` bits, and lets the
+/// containment trigger read the same `skips_contents` answer layout does.
+/// The latter cannot change this predicate's result — `effective_containment`
+/// gives a `content-visibility: auto` box `LAYOUT | PAINT` whether or not it
+/// is skipping, and the skip bit adds only `SIZE` — but deriving the same fact
+/// two ways is how the two halves of the pipeline drift apart.
 pub(crate) fn establishes_stacking_context<T>(
     node: &Node<T>,
     style: &ComputedValues,
@@ -80,6 +80,12 @@ pub(crate) fn establishes_stacking_context<T>(
         return true;
     }
     if z_applies && will_change.intersects(WillChangeBits::Z_INDEX) {
+        return true;
+    }
+    // web-animations-1: a current or in-effect `opacity` or `transform`
+    // animation acts as `will-change` naming it, whether or not its curve
+    // exports, so paint order is the same on either side of the handover.
+    if node.animates_opacity() || node.animates_transform() {
         return true;
     }
     effective_containment(

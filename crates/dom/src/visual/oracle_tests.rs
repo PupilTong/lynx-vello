@@ -687,3 +687,56 @@ fn a_ticker_in_a_shrinking_clipped_toast_composes_as_committed() {
     fixture.probes = vec![toast, ticker];
     fixture.check("ticker in a shrinking clipped toast");
 }
+
+/// A card holding a fixed box under a child. Under a transform curve the
+/// card's committed transform contains the box, so it moves with the curve;
+/// under an opacity curve it escapes the card and stays put, fading inside
+/// the card's group. The card's base transform is `none`; the curves start
+/// at the identity function because the exporter refuses a `none` keyframe,
+/// so an exported transform curve always commits a non-empty list and the
+/// `animates_transform` bit is not observable here (the delay case in
+/// `visual/tests.rs` covers it). (`position: static` is outside the Lynx
+/// grammar and the UA makes every `view` relative, so an absolute box never
+/// escapes its parent here.)
+#[test]
+fn a_fixed_box_inside_an_animated_card_composes_as_committed() {
+    let fixture = |curve: &str| {
+        let mut fixture = Fixture::new(
+            ".card { width: 220px; height: 140px; margin: 60px 0 0 80px; padding: 20px;
+                     background-color: teal; }
+             .mid { width: 60px; height: 40px; background-color: orange; }
+             .pinned { position: fixed; left: 300px; top: 30px; width: 60px; height: 40px;
+                       background-color: navy; }",
+        );
+        let root = fixture.doc.root;
+        let card = fixture.el(root, "view.card");
+        let mid = fixture.el(card, "view.mid");
+        let pinned = fixture.el(mid, "view.pinned");
+        fixture.animate(card, curve);
+        fixture.probes = vec![card, mid, pinned];
+        (fixture, card, pinned)
+    };
+    for curve in CURVES {
+        let (mut probe, card, pinned) = fixture(curve);
+        let dom = &mut probe.doc.dom;
+        dom.render();
+        dom.advance_animations(0.0);
+        dom.advance_animations(EARLY);
+        let frame = dom.build_paint_order();
+        let item = frame
+            .items()
+            .iter()
+            .find(|item| item.node == pinned)
+            .expect("the fixed box paints");
+        let rides = super::space::nearest_animation(frame.spaces(), item.space)
+            .is_some_and(|slot| frame.animations()[slot as usize].node == card);
+        assert_eq!(
+            rides,
+            curve != "opacity",
+            "{curve}: the fixed box rides the card"
+        );
+        fixture(curve)
+            .0
+            .check(&format!("fixed box in an animated card, {curve}"));
+    }
+}
