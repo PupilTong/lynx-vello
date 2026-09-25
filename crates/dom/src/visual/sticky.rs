@@ -34,14 +34,7 @@ impl StickyAxis {
         if self.inset_start.is_none() && self.inset_end.is_none() {
             return 0.0;
         }
-        let mut start = self.inset_start.unwrap_or(0.0);
-        let mut end = self.inset_end.unwrap_or(0.0);
-        let deficit = (self.size - (self.scrollport_size - start - end)).max(0.0);
-        if self.end_is_start {
-            start -= deficit;
-        } else {
-            end -= deficit;
-        }
+        let (start, end) = self.edges();
         let normal = self.normal_start + ancestor_shift - scroll;
         let mut shift: f32 = 0.0;
         if self.inset_start.is_some() {
@@ -52,6 +45,41 @@ impl StickyAxis {
         }
         let (min, max) = self.offset_bounds();
         shift.clamp(min, max)
+    }
+
+    /// The view rectangle's insets `(start, end)`, a box larger than the
+    /// rectangle taking the deficit off its logical end.
+    fn edges(self) -> (f32, f32) {
+        let mut start = self.inset_start.unwrap_or(0.0);
+        let mut end = self.inset_end.unwrap_or(0.0);
+        let deficit = (self.size - (self.scrollport_size - start - end)).max(0.0);
+        if self.end_is_start {
+            start -= deficit;
+        } else {
+            end -= deficit;
+        }
+        (start, end)
+    }
+
+    /// Every `scroll - ancestor_shift` at which [`Self::offset`] may change
+    /// slope. The offset is piecewise linear in that difference, with slopes
+    /// 0 and 1, and constant outside these points; the list may hold points
+    /// where nothing changes.
+    pub(crate) fn kinks(self) -> [f32; 6] {
+        let (start, end) = self.edges();
+        let (min, max) = self.offset_bounds();
+        // Where `start - normal` and `scrollport - end - size - normal` cross
+        // zero, and where each reaches a travel bound.
+        let from_start = self.normal_start - start;
+        let from_end = self.normal_start + self.size + end - self.scrollport_size;
+        [
+            from_start,
+            from_start + min,
+            from_start + max,
+            from_end,
+            from_end + min,
+            from_end + max,
+        ]
     }
 
     /// Conservative travel bounds, also used to retain ink that can become
