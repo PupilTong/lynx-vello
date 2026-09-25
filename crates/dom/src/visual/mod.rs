@@ -120,6 +120,7 @@ mod transform;
 use std::sync::Arc;
 
 use euclid::default::{Point2D, Rect, Size2D, Transform3D};
+use rustc_hash::FxHashMap;
 use stylo::properties::animated_properties::AnimationValueMap;
 
 pub(crate) use self::build::BuildScratch;
@@ -144,6 +145,8 @@ pub(crate) struct PaintOrder {
     clips: Vec<ClipNode>,
     layers: Vec<RenderLayer>,
     slots: Vec<ScrollSlot>,
+    /// Each slot's index by its container, built once per commit.
+    slot_index: FxHashMap<NodeId, u32>,
     animations: Vec<AnimationSlot>,
     stickies: Vec<StickySlot>,
     /// The scroll, sticky and animation nodes, in allocation order; see
@@ -263,6 +266,7 @@ pub(crate) struct FrameBuffers {
     clips: Vec<ClipNode>,
     layers: Vec<RenderLayer>,
     slots: Vec<ScrollSlot>,
+    slot_index: FxHashMap<NodeId, u32>,
     animations: Vec<AnimationSlot>,
     stickies: Vec<StickySlot>,
     spaces: Vec<Space>,
@@ -296,6 +300,7 @@ impl PaintOrder {
         self.clips.clear();
         self.layers.clear();
         self.slots.clear();
+        self.slot_index.clear();
         self.animations.clear();
         self.stickies.clear();
         self.spaces.clear();
@@ -306,6 +311,7 @@ impl PaintOrder {
             clips: self.clips,
             layers: self.layers,
             slots: self.slots,
+            slot_index: self.slot_index,
             animations: self.animations,
             stickies: self.stickies,
             spaces: self.spaces,
@@ -323,6 +329,7 @@ impl PaintOrder {
             clips: Vec::new(),
             layers: Vec::new(),
             slots: Vec::new(),
+            slot_index: FxHashMap::with_hasher(rustc_hash::FxBuildHasher),
             animations: Vec::new(),
             stickies: Vec::new(),
             spaces: Vec::new(),
@@ -364,6 +371,12 @@ impl PaintOrder {
     #[must_use]
     pub(crate) fn slots(&self) -> &[ScrollSlot] {
         &self.slots
+    }
+
+    /// The slot `node` has in this frame, if it is a scroll container here.
+    #[must_use]
+    pub(crate) fn slot_of(&self, node: NodeId) -> Option<u32> {
+        self.slot_index.get(&node).copied()
     }
 
     /// Every slot's snap positions, sliced by [`ScrollSlot::snap`].

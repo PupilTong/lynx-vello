@@ -86,26 +86,33 @@ concretely, so the tables above are read as "the target" and this section as
   style flush, through `MatchMethods::process_animations`.
 - **Where the frame work happens.** `Document::advance_animations(now)` runs on
   the document's owner thread — the Lynx main thread once the script starts —
-  driven by `BeginFrame` commands that carry the presenting side's clock
-  reading; no JavaScript is involved. For an animation the commit exported as
-  a composite curve (below), a window painter sends no per-frame `BeginFrame`
-  at all: the compositor samples the curve itself, and the main thread hears
-  about the animation again only when a finite curve runs out (a `BeginFrame`
-  per frame from its end until the finish restyle's commit is adopted) or
-  something else commits. An offscreen `Painter::tick` sends a `BeginFrame`
-  on every call whatever the frame reports, so a headless host still ticks
-  the main thread each frame. It is a Stylo animation-only traversal, which
+  once per burst holding the painter's frame post, which carries the
+  presenting side's clock reading (posts coalesce in the view's scroll
+  mailbox: the latest `now`, the greatest `seq`); no JavaScript is involved.
+  For an animation the commit exported as a composite curve (below), a window
+  painter posts no per-frame request at all: the compositor samples the curve
+  itself, and the main thread hears about the animation again only when a
+  finite curve runs out (a frame post per frame from its end until the finish
+  restyle's commit is adopted) or something else commits. An offscreen
+  `Painter::tick` posts a frame on every call whatever the frame reports, so
+  a headless host still ticks the main thread each frame. Every job on the
+  main thread first runs `Document::sync_animation_clock` at the painter's
+  latest clock: the timeline and the states move (promotion at an anchored
+  start, iteration, end), nothing is re-cascaded or committed unless
+  something ends, and the next tick re-cascades what moved — so a restyle
+  inside the job computes from the current instant. It is a Stylo animation-only traversal, which
   does no selector matching and reads no snapshots, over just the animating
   elements and whatever inherits from them.
   A property that cannot move a box never reaches layout, because the damage
   harvest only invalidates layout for damage that says relayout.
-- **When an animation starts.** The flush arms it; the first `BeginFrame` after
-  that flush starts it. Because the timeline only moves inside
-  `advance_animations`, and the painting side stops sending `BeginFrame` for an
-  idle page or for an animation an exported curve already covers, the time a
-  flush hands Stylo can be arbitrarily stale — a tap after ten idle seconds
-  would otherwise create an animation ten seconds in the past and finish it on
-  its first frame. Web Animations resolves a pending animation's start time at
+- **When an animation starts.** The flush arms it; the first frame after that
+  flush starts it. The painting side stops posting frames for an idle page and
+  for an animation an exported curve already covers, and a host that does not
+  sync the clock at every job (Bobcat does) hands Stylo a time that can be
+  arbitrarily stale — a tap after ten idle seconds would otherwise create an
+  animation ten seconds in the past and finish it on its first frame. A job's
+  clock sync carries a fresh pending start with the clock rather than
+  anchoring it. Web Animations resolves a pending animation's start time at
   the first frame after it was created, so the driver shifts every `Pending`
   animation and transition it has not anchored yet forward by the interval that
   tick advanced the timeline over, once, keeping delays (positive and negative)
@@ -162,7 +169,13 @@ concretely, so the tables above are read as "the target" and this section as
   parent's committed world, so the element's world matches a commit's bit for
   bit relative to that parent world; composed geometry agrees to f32 rounding.
   This exports several animations, pending (anchored, with or without a
-  backwards fill), paused and held-fill animations, `steps()`,
+  backwards fill), paused and held-fill animations, pending (anchored) and
+  running transitions — sampled with `Transition::calculate_value`, inserted
+  after the animations so a transition wins its property as the `Transitions`
+  origin does, ending the domain at `start_time + duration`; a `transform`
+  transition's reach is unbounded until the fork exposes
+  `PropertyAnimation::{from, to, timing_function}`, so the extent budget
+  bounds its encode and a composited group around it refuses it — `steps()`,
   `square-bezier`, `%`/`em`/`rem`/`rpx`/`vw`/`calc()`/`var()` values (already
   px in stylo's computed keyframes, `%` resolved against the border box as the
   commit resolves it), mismatched lists, backfilled `from`/`to` and every Lynx
@@ -174,20 +187,19 @@ concretely, so the tables above are read as "the target" and this section as
   stylo limitation is shared rather than fixed: a mismatched remainder holding
   a `%` length interpolates as `InterpolateMatrix`, which stylo's matrix
   conversion reads as the identity, on the main thread and in the curve alike.
-- **What still refuses** — and keeps the element on per-frame `BeginFrame`
+- **What still refuses** — and keeps the element on per-frame main-thread
   ticks, a refusal never being wrong; a refusal allocates no slot, so every
-  slot carries a live curve: an animation animating a property other than
-  `opacity`/`transform`; author `!important` on an exported property
-  (`get_properties_overriding_animations`: it outranks the animations origin,
-  so the main thread holds it still); a pending animation the driver has not
-  anchored yet (its next tick moves its start; anchoring commits a frame, so
-  the export follows one tick later); an element frozen when the last tick
+  slot carries a live curve: an animation or a transition on a property other
+  than `opacity`/`transform`; author `!important` on a property only
+  animations drive (`get_properties_overriding_animations`: it outranks the
+  animations origin, so the main thread holds it still; the transitions
+  origin outranks it in turn); a pending animation or transition the driver
+  has not anchored yet (its next tick moves its start; anchoring commits a
+  frame, so the export follows one tick later — a transition a listener
+  starts is anchored by the frame the listener's pass posted, since that
+  frame runs after the burst's events); an element frozen when the last tick
   ended (css-contain-2 §4: the next tick carries its start times, and commits
-  so the export follows it); a pending or running transition (while a curve
-  covers the element the main thread gets no ticks, so a transition that a
-  later restyle — a tap's script, say — retargets or reverses reads its
-  progress at that stale instant and jumps; admitting them needs the main
-  thread's clock synced at such a restyle); a keyframe value some
+  so the export follows it); a keyframe or transition value some
   interpolation takes out of the plane — a perspective term in its matrix, or
   any 3D function under a parent `perspective` — or a committed world that is
   not 2D invertible; pseudo-element sets; and the structural refusals below.

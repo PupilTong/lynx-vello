@@ -7,7 +7,9 @@
 //! more chain walk over the published slot table, a bounce back moves one
 //! offset per frame, and neither recommits, waits on the main thread, or
 //! involves the input router or any event — the same contract a drag step
-//! has. The curves and their constants are `motion`'s; what this module
+//! has. Each step's offsets are posted to the main thread like a drag
+//! step's, and the step that ends a fling or lands a bounce back posts the
+//! container's rest. The curves and their constants are `motion`'s; what this module
 //! adds is when each starts and stops:
 //!
 //! - A drag's release velocity is measured here, from the drag's own steps over its last
@@ -33,12 +35,12 @@ use dom::scroll::{ScrollAxes, SnapAxis};
 use dom::{CommittedFrame, NodeId, Size2D, Vector2D};
 use smallvec::SmallVec;
 
-use super::ScrollIntents;
 use super::motion::{
     FLING_DECAY_PER_MS, Motion, OVERSHOOT_DECAY_PER_MS, bounce_back, fling_distance, fling_travel,
     fling_velocity, fling_velocity_for_travel, rest_threshold, rubber_band_slope,
     rubber_band_travel, stretch_of,
 };
+use super::{ScrollIntents, note_changed};
 
 /// How far back a release looks for its velocity: the drag's travel over
 /// the steps inside this window, divided by their span. A drag whose last
@@ -240,7 +242,7 @@ impl ScrollIntents {
 
     fn set_offset(&mut self, node: NodeId, offset: Vector2D<f32>) {
         if self.offsets.get(&node).copied() != Some(offset) {
-            self.offsets.insert(node, offset);
+            self.write(node, offset);
             self.generation += 1;
         }
     }
@@ -547,7 +549,7 @@ impl ScrollIntents {
     }
 
     /// Whether some fling's chain runs through `node`.
-    fn is_flinging(&self, frame: &CommittedFrame, node: NodeId) -> bool {
+    pub(super) fn is_flinging(&self, frame: &CommittedFrame, node: NodeId) -> bool {
         self.flings
             .iter()
             .any(|fling| chain_nodes(frame, fling.from).contains(&node))
@@ -560,20 +562,28 @@ impl ScrollIntents {
 
     /// Drops what no longer applies to `frame`: a fling whose latched slot
     /// is gone, a bounce back whose container is gone or no longer
-    /// stretched, a drag whose slot is gone.
+    /// stretched, a drag whose slot is gone. A dropped bounce back records
+    /// its container: a commit that widened the range ends one without a
+    /// step, and the offset main holds clamped to the old edge is posted
+    /// again, at rest.
     pub(super) fn retain_motion(&mut self, frame: &CommittedFrame) {
         self.flings
             .retain(|fling| frame.slot_of(fling.from).is_some());
         self.drags
             .retain(|_, track| frame.slot_of(track.from).is_some());
         let offsets = &self.offsets;
+        let changed = &mut self.changed;
         self.bounce_backs.retain(|back| {
-            frame.slot_of(back.node).is_some_and(|index| {
+            let stretched = frame.slot_of(back.node).is_some_and(|index| {
                 let slot = &frame.scroll_slots()[index as usize];
                 offsets.get(&back.node).is_some_and(|offset| {
                     stretch_of(back.axis.of(*offset), back.axis.of(slot.max_offset)) != 0.0
                 })
-            })
+            });
+            if !stretched {
+                note_changed(changed, back.node);
+            }
+            stretched
         });
     }
 }

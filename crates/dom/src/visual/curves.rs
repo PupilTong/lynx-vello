@@ -1,10 +1,13 @@
 //! Exported composite-animation curves, sampled at compose time.
 //!
-//! A [`CompositeCurve`] is a clone of one element's stylo animations: every
-//! non-canceled `Animation` in its set's order, all on `opacity` or
-//! `transform`. Sampling runs stylo's own code — `Animation::progress_at`
-//! and `sample_at`, the halves of the main thread's cascade — so there is
-//! no second interpolation here, and servo's deviations come along. The
+//! A [`CompositeCurve`] is a clone of one element's stylo animation state:
+//! every non-canceled `Animation` in its set's order and every live
+//! `Transition`, all on `opacity` or `transform`. Sampling runs stylo's own
+//! code — `Animation::progress_at` and `sample_at`, the halves of the main
+//! thread's cascade, and `Transition::calculate_value` — so there is no
+//! second interpolation here, and servo's deviations come along: the
+//! transitions are inserted after the animations, so a transition wins its
+//! property as the `Transitions` origin does. The
 //! sampled values are bit-equal to the next main-thread cascade's at the
 //! same instant when both sides iterate from the same animation state; start
 //! times the main thread accumulates over several ticks can differ from the
@@ -23,7 +26,7 @@ use euclid::default::Transform3D;
 use stylo::properties::animated_properties::{AnimationValue, AnimationValueMap};
 use stylo::properties::longhands::animation_direction::computed_value::single_value::T as AnimationDirection;
 use stylo::properties::{LonghandId, OwnedPropertyDeclarationId, PropertyDeclarationId};
-use stylo::servo::animation::Animation;
+use stylo::servo::animation::{Animation, Transition};
 use stylo::values::computed::transform::Transform as ComputedTransform;
 
 use super::reach::{Interval, Reach, Segment, eased_range};
@@ -41,9 +44,11 @@ pub(crate) struct CompositeCurve {
     /// The set's animations in its order, canceled ones dropped: the order
     /// the cascade inserts them in, a later one winning a property.
     pub(crate) animations: Box<[Animation]>,
-    /// The timeline second the first animation ends at: past it its
-    /// contribution can be replaced by the base value, which only a commit
-    /// knows. `None` when nothing ends.
+    /// The set's pending and running transitions in its order.
+    pub(crate) transitions: Box<[Transition]>,
+    /// The timeline second the first animation or transition ends at: past
+    /// it its contribution can be replaced by the base value, which only a
+    /// commit knows. `None` when nothing ends.
     pub(crate) expires_at: Option<f64>,
     /// Present when an animation animates `transform`.
     pub(crate) transform: Option<TransformTrack>,
@@ -73,9 +78,18 @@ impl TransformTrack {
         world: &Transform3D<f32>,
         committed: &ComputedTransform,
     ) -> Option<Self> {
+        let ends = curve.transition_ends();
+        let transitions = ends.iter().map(|(from, to)| Segment {
+            from,
+            to,
+            // The timing function is private to the fork's `PropertyAnimation`,
+            // so its eased range is unknown and the reach unbounded.
+            eased: None,
+        });
         if !world.is_2d()
             || curve
                 .transform_segments()
+                .chain(transitions.clone())
                 .any(|segment| context.projective(segment.from) || context.projective(segment.to))
         {
             return None;
@@ -88,7 +102,7 @@ impl TransformTrack {
         // `W = pre · Lc · origin⁻¹`, every factor of `pre` constant.
         let pre = world * context.origin() * committed_matrix.inverse();
         let reach = Reach::of(
-            curve.transform_segments(),
+            curve.transform_segments().chain(transitions),
             committed,
             context.reference_size(),
             pre,
@@ -139,7 +153,7 @@ impl CompositeCurve {
     }
 
     /// Fills `values` with what the cascade at `now` takes from the
-    /// animations, in their order.
+    /// animations, in their order, then from the transitions over them.
     pub(crate) fn values_at(&self, now: f64, values: &mut AnimationValueMap) {
         // Past its domain the curve holds the domain's last instant until the
         // hand-back commit is adopted.
@@ -150,6 +164,37 @@ impl CompositeCurve {
                 animation.sample_at(at, values);
             }
         }
+        for transition in &self.transitions {
+            let value = transition.calculate_value(now);
+            values.insert(value.id().to_owned(), value);
+        }
+    }
+
+    /// Each `transform` transition's value at its start and at its end.
+    ///
+    /// Sampled, because the fork keeps a transition's own `from`, `to` and
+    /// timing function private: at the start the eased progress is 0 for
+    /// every timing function but a jump-start `steps()`, and at the end it is
+    /// 1 for all of them.
+    fn transition_ends(&self) -> Vec<(ComputedTransform, ComputedTransform)> {
+        let list = |value: AnimationValue| match value {
+            AnimationValue::Transform(list) => list,
+            _ => unreachable!("a transform transition samples a transform list"),
+        };
+        self.transitions
+            .iter()
+            .filter(|transition| {
+                transition.property_animation.property_id()
+                    == PropertyDeclarationId::Longhand(LonghandId::Transform)
+            })
+            .map(|transition| {
+                let end = transition.start_time + transition.property_animation.duration;
+                (
+                    list(transition.calculate_value(transition.start_time)),
+                    list(transition.calculate_value(end)),
+                )
+            })
+            .collect()
     }
 
     /// Every segment an animation interpolates `transform` over, with the
@@ -194,18 +239,23 @@ impl CompositeCurve {
     pub(crate) fn inert(transform: Option<TransformTrack>) -> Self {
         Self {
             animations: Box::new([]),
+            transitions: Box::new([]),
             expires_at: None,
             transform,
         }
     }
 
-    /// Whether an animation animates `property`.
+    /// Whether an animation or a transition animates `property`.
     pub(crate) fn animates(&self, property: LonghandId) -> bool {
+        let property = PropertyDeclarationId::Longhand(property);
         self.animations.iter().any(|animation| {
             animation
                 .animating_properties()
-                .any(|(_, animated)| animated == PropertyDeclarationId::Longhand(property))
-        })
+                .any(|(_, animated)| animated == property)
+        }) || self
+            .transitions
+            .iter()
+            .any(|transition| transition.property_animation.property_id() == property)
     }
 }
 

@@ -399,8 +399,8 @@ fn scroll_offset_of(engine: &mut TestEngine, node: u64) -> dom::Vector2D<f32> {
 
 /// A drag the user-agent scroll consumed is the claim that suppresses
 /// `tap` — end to end: recognition against the published scroll-slot
-/// table, consumption arbitrated against published bounds, the scroll
-/// applied authoritatively on the main thread. The drag travels 30px:
+/// table, consumption arbitrated against published bounds, the offset
+/// posted to the main thread and adopted there. The drag travels 30px:
 /// past the 8px drag slop so it scrolls, inside the 50px tap slop so the
 /// claim is the only suppressor. The fence tap at another x pins that
 /// the suppressed one never crossed the channel.
@@ -430,8 +430,8 @@ fn a_scroll_consuming_drag_suppresses_the_tap() {
     wait_for_log(&mut engine, "tap:150");
 
     // The router's scroll decision landed in the intents: 30px of
-    // travel minus the 8px drag slop moved the scroller 22px. The
-    // document never hears about a windowed scroll.
+    // travel minus the 8px drag slop moved the scroller 22px, and the
+    // document followed: the marker queued ahead of the probe.
     let offset = engine
         .painter
         .scroll_intents
@@ -443,8 +443,8 @@ fn a_scroll_consuming_drag_suppresses_the_tap() {
     );
     assert_eq!(
         scroll_offset_of(&mut engine, 3),
-        dom::Vector2D::zero(),
-        "a windowed scroll leaves the document untouched"
+        offset,
+        "the document adopts the posted offset"
     );
 }
 
@@ -996,10 +996,11 @@ const TWO_ROW_SCROLLER_PAGE: &str = r"
         ";
 
 /// The composed-scroll law, from the engine's side: a user scroll
-/// inside the encode window lands in the painting side's intents and
-/// nowhere else — no command crosses, the document's offsets stay put,
-/// nothing recommits — and hit testing follows the intent offsets, not
-/// the committed ones, so a tap lands on what the screen shows.
+/// inside the encode window is composed from the painting side's intents;
+/// the document adopts the posted offset, but inside the window and short
+/// of half its headroom nothing recommits — and hit testing follows the
+/// intent offsets, not the committed ones, so a tap lands on what the
+/// screen shows.
 #[test]
 fn a_windowed_scroll_recommits_nothing_and_hits_route_at_the_intent_offsets() {
     let mut engine = booted(TWO_ROW_SCROLLER_PAGE);
@@ -1008,15 +1009,15 @@ fn a_windowed_scroll_recommits_nothing_and_hits_route_at_the_intent_offsets() {
     drop(frame);
 
     // 30px is inside half the encode-window headroom (the 200px
-    // scrollport), so no refill commit is due either.
+    // scrollport), so no recentering commit is due either.
     engine.dispatch_input(InputEvent::wheel(
         Point2D::new(100.0, 100.0),
         dom::Vector2D::new(0.0, 30.0),
     ));
     assert_eq!(
         scroll_offset_of(&mut engine, 3),
-        dom::Vector2D::zero(),
-        "a windowed scroll leaves the document untouched"
+        dom::Vector2D::new(0.0, 30.0),
+        "the document adopts the posted offset"
     );
     // The probe round-tripped the main thread, so the epilogue of that entry
     // has already run its commit-if-dirty — and found nothing.
@@ -1072,11 +1073,12 @@ fn a_windowed_scroll_recommits_nothing_and_hits_route_at_the_intent_offsets() {
     );
 }
 
-/// A scroll past half the encode-window headroom asks the main thread
-/// for a refill: the next commit re-centers the windows and publishes
-/// the scrolled offsets, all without any script involvement.
+/// An adopted offset past half the encode-window headroom is
+/// `recenter_due` on the committed slot, so main recommits: the frame
+/// re-centers its window on the scrolled offset, all without any script
+/// involvement.
 #[test]
-fn a_scroll_past_half_the_encode_window_requests_a_refill_commit() {
+fn main_recenters_when_the_adopted_offset_is_recenter_due() {
     let mut engine = booted(TWO_ROW_SCROLLER_PAGE);
     let boot_commit = engine
         .published_frame()
@@ -1085,6 +1087,11 @@ fn a_scroll_past_half_the_encode_window_requests_a_refill_commit() {
 
     // max_offset is 200 (400px of rows in a 200px scrollport), so the
     // window tops out at 200 and 150 is past half its headroom.
+    let boot = engine.published_frame().expect("boot published a frame");
+    let boot_slot = boot.scroll_slots()[boot.slot_of(node_id(3)).expect("a slot") as usize];
+    assert!(boot_slot.recenter_due(dom::Vector2D::new(0.0, 150.0)));
+    assert!(boot.covers_scroll_offset(node_id(3), dom::Vector2D::new(0.0, 150.0)));
+    drop(boot);
     engine.dispatch_input(InputEvent::wheel(
         Point2D::new(100.0, 100.0),
         dom::Vector2D::new(0.0, 150.0),
@@ -1098,16 +1105,39 @@ fn a_scroll_past_half_the_encode_window_requests_a_refill_commit() {
         }
         assert!(
             Instant::now() < deadline,
-            "the refill commit never published"
+            "the recentering commit never published"
         );
         std::thread::yield_now();
     };
     let scroller = node_id(3);
-    let slot = frame.slot_of(scroller).expect("the scroller has a slot");
-    let published = frame.scroll_slots()[slot as usize].offset;
+    let slot = frame.scroll_slots()[frame.slot_of(scroller).expect("a slot") as usize];
     assert!(
-        (published.y - 150.0).abs() < 0.5,
-        "the refill commit publishes the scrolled offset, got {published:?}"
+        (slot.offset.y - 150.0).abs() < 0.5,
+        "the commit publishes the scrolled offset, got {:?}",
+        slot.offset
+    );
+    assert!(
+        !slot.recenter_due(dom::Vector2D::new(0.0, 150.0)),
+        "and its window is centered on it"
+    );
+}
+
+/// A layout read on the main thread sees the user's scroll once the marker
+/// is serviced: `boundingClientRect` subtracts the adopted offset.
+#[test]
+fn a_bounding_client_rect_follows_an_adopted_scroll() {
+    let mut engine = booted(TWO_ROW_SCROLLER_PAGE);
+    engine.dispatch_input(InputEvent::wheel(
+        Point2D::new(100.0, 100.0),
+        dom::Vector2D::new(0.0, 30.0),
+    ));
+    let rect = engine
+        .probe_document(|tree| tree.bounding_client_rect(node_id(5)))
+        .expect("the view's task answers probes")
+        .expect("the second row is laid out");
+    assert!(
+        (rect.origin.y - 170.0).abs() < 0.5,
+        "the second row sits 30px higher, got {rect:?}"
     );
 }
 
@@ -1132,7 +1162,7 @@ fn booted_animated(animation_css: &str) -> TestEngine {
     .boot()
 }
 
-/// Sends one `BeginFrame` and waits for the commit it implies to publish.
+/// Posts one frame request and waits for the commit it implies to publish.
 fn synchronized_tick(engine: &mut TestEngine, now: f64) {
     let seq = engine
         .painter
@@ -1173,7 +1203,7 @@ fn an_exported_curve_stops_asking_for_main_thread_ticks() {
     );
     assert!(
         engine.painter.begin_frame(0.5, false).is_none(),
-        "no BeginFrame crosses while the curve covers the animation"
+        "no frame post crosses while the curve covers the animation"
     );
 }
 
@@ -1275,8 +1305,8 @@ fn a_finished_curve_hands_the_animation_back_to_the_main_thread() {
     assert!(!finished.has_live_curves());
 }
 
-/// One windowed-painter frame: adopt whatever the view published, then send a
-/// `BeginFrame` only if that frame asks for one — the protocol
+/// One windowed-painter frame: adopt whatever the view published, then post a
+/// frame request only if that frame asks for one — the protocol
 /// [`crate::Painter::pump`] runs, rather than the unconditional tick an
 /// offscreen painter takes.
 fn windowed_frame(engine: &mut TestEngine, now: f64) {
@@ -1299,7 +1329,7 @@ fn is_animating(engine: &mut TestEngine) -> bool {
         .expect("the view is live")
 }
 
-/// A windowed painter sends no `BeginFrame` while nothing is moving, so an
+/// A windowed painter sends no frame post while nothing is moving, so an
 /// idle page leaves the timeline wherever the last frame left it — here, at
 /// boot. The animation a tap starts ten seconds later must still run its whole
 /// duration from the frame that follows the tap, rather than being created ten
@@ -1330,7 +1360,7 @@ fn an_animation_started_after_idle_time_runs_from_the_next_frame() {
     .boot();
 
     // Ten idle seconds. Nothing on the page asked for a frame, so no
-    // `BeginFrame` has crossed since boot and the document's timeline still
+    // frame post has crossed since boot and the document's timeline still
     // reads zero.
     let tapped_at = 10.0;
     engine.painter.clock.pin(tapped_at);

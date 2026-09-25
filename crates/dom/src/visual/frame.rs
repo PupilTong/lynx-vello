@@ -114,7 +114,9 @@ impl ScrollSlot {
     /// The offset range the committed encode covers on each axis — the
     /// window compose may move through without a recommit. Sized in
     /// scrollports around the committed offset, clamped to what the geometry
-    /// admits.
+    /// admits. A scroll outside it recommits at once (`Document::scroll_to`);
+    /// one that has used half the headroom toward an edge recommits early
+    /// ([`Self::recenter_due`]), so the painter is never left at the edge.
     #[must_use]
     pub fn encode_window(&self) -> (Vector2D<f32>, Vector2D<f32>) {
         let slack = Vector2D::new(
@@ -139,10 +141,48 @@ impl ScrollSlot {
         );
         (low, high)
     }
+
+    /// Whether a scroll to `offset` has used more than half the headroom
+    /// [`Self::encode_window`] leaves toward the edge it moves to, on either
+    /// axis, so the commit should re-center the window on it. `offset` is
+    /// clamped to the committed range first: a `contain-bounce` stretch is
+    /// composed from the edge's own content and asks for nothing.
+    #[must_use]
+    pub fn recenter_due(&self, offset: Vector2D<f32>) -> bool {
+        let clamp = |value: f32, max: f32| {
+            if value.is_finite() {
+                value.clamp(0.0, max)
+            } else {
+                0.0
+            }
+        };
+        let axis = |pending: f32, committed: f32, low: f32, high: f32| {
+            if pending < committed {
+                pending - low < (committed - low) / 2.0
+            } else if pending > committed {
+                high - pending < (high - committed) / 2.0
+            } else {
+                false
+            }
+        };
+        let (low, high) = self.encode_window();
+        axis(
+            clamp(offset.x, self.max_offset.x),
+            self.offset.x,
+            low.x,
+            high.x,
+        ) || axis(
+            clamp(offset.y, self.max_offset.y),
+            self.offset.y,
+            low.y,
+            high.y,
+        )
+    }
 }
 
 /// How far past the committed offset, in scrollports per scrollable axis,
-/// the encode covers — the compose headroom before a refill commit is due.
+/// the encode covers — the compose headroom before a recentering commit is
+/// due.
 pub const ENCODE_WINDOW_SCROLLPORTS: f32 = 1.0;
 
 /// The largest area, in viewports, of an element's `max(size, content_size)`
@@ -459,7 +499,7 @@ impl CommittedFrame {
 
     /// Whether something animating still needs per-frame main-thread ticks:
     /// an animation or transition this frame could not export as a curve.
-    /// The compositor sends one `BeginFrame` per frame while this holds.
+    /// The painter posts one frame request per frame while this holds.
     #[must_use]
     pub const fn needs_main_ticks(&self) -> bool {
         self.needs_main_ticks
@@ -488,7 +528,7 @@ impl CommittedFrame {
     }
 
     /// Whether any exported curve has run past its domain at `now`: the cue
-    /// to send `BeginFrame` — each frame, until a commit without the passed
+    /// to post a frame request — each frame, until a commit without the passed
     /// curve is adopted — so the main thread runs the finish restyle and
     /// commits the animation's end state. Until then the compositor draws
     /// the curve's last instant inside its domain: past it an animation's
@@ -536,14 +576,11 @@ impl CommittedFrame {
         self.order.slots()
     }
 
-    /// The slot a scroll container node has in this frame, if it is one.
+    /// The slot a scroll container node has in this frame, if it is one:
+    /// one lookup in the index the commit built.
     #[must_use]
     pub fn slot_of(&self, node: NodeId) -> Option<u32> {
-        self.order
-            .slots()
-            .iter()
-            .position(|slot| slot.node == node)
-            .map(|index| u32::try_from(index).expect("a frame cannot hold 2^32 scroll containers"))
+        self.order.slot_of(node)
     }
 
     /// Whether this frame can still be composed at `offset` for the scroll

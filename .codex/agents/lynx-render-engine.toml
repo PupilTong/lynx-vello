@@ -52,10 +52,10 @@ vello is the only wgpu dependency in this workspace, so it pins wgpu's major
   `ImageInbox`).
 - The committed frame is baked **unscrolled** as fragments plus a compose
   program, and one render path composes it flat at the painter's offsets.
-  Offsets stay on the painter's side between refills — a scroll recomposes
-  without a commit — and cross only as a `ToMain::Refill` when an offset leaves its
-  slot's `ScrollSlot::encode_window`, which the main thread answers with a
-  recentered commit. A commit publishes one immutable `Arc<CommittedFrame>`.
+  A scroll recomposes without a commit; the painter posts its offsets into the
+  view's `ScrollMailbox` (one `ToMain::Posted` marker per take), main adopts them
+  with `scroll_to`, and recommits only past the slot's `ScrollSlot::encode_window`
+  or when the committed slot finds the offset `recenter_due`. A commit publishes one immutable `Arc<CommittedFrame>`.
 - That render path has **one optional pre-step**, shared by two properties: a
   frame carrying `filter: blur()` groups or `backdrop-filter` elements
   (`CommittedFrame::filter_groups`, non-empty on almost no page) has each entry

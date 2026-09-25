@@ -56,8 +56,10 @@ What that wait does and does not run follows from `bobcat-main` being a
 job, no timer callback and no sibling view's entry runs before this adoption
 returns. The thread's *tasks* keep running throughout — the command consumers,
 the boot futures, the clock tasks, and the notice traffic that carries this very
-request to the host — so a sibling view that is still loading goes on staging
-what arrives and acknowledging the `BeginFrame` an offscreen host is blocked on.
+request to the host. What a task receives meanwhile waits as a job behind the
+adoption: a sibling view's command burst, and with it the acknowledgement of
+the frame post an offscreen host is blocked on, runs only once this adoption
+returns.
 The resource host continues servicing requests through `LynxView::pump`.
 
 The reference fetcher, `bobcat-resources`, owns a stylesheet response cache keyed

@@ -6,8 +6,9 @@
 //! event module (`Document::event_steps`) — this layer decides the *type and
 //! target*, never the chain. The engine feeds each routed event in and
 //! executes the returned [`InputDecision`]s in order: a scroll decision
-//! drives `Document::scroll_chain`, an emit decision goes to path
-//! construction and the ordered script channel. That order is therefore the
+//! drives the painter's own chain walk over the published slot table
+//! (`ScrollIntents::chain`, on `dom`'s `drive_chain`), an emit decision goes
+//! to path construction and the ordered script channel. That order is therefore the
 //! delivery order, which is how the layer guarantees a due `longpress`
 //! precedes the release that follows it and a `tap` follows its own
 //! `pointerup`.
@@ -29,10 +30,11 @@
 //!   independent) and wheel scrolling (per-event nearest scrollable filtered by the CSS-pixel
 //!   delta's axes). Both were `dom`'s default action; the engine now routes with
 //!   `default_prevented` set so `dom` performs none, and this router is the one decision point. The
-//!   scroll *primitives* (`scroll_chain`'s remainder chaining, clamping, the containing-block walk)
-//!   stay in `dom`. A drag that scrolled ends with a [`InputDecision::ScrollEnd`] at its release or
-//!   cancel, ahead of the release's own events, so the containers it moved settle onto their
-//!   css-scroll-snap-1 positions (the executor's intents own that; the router only marks the end).
+//!   scroll *primitives* (`drive_chain`'s remainder chaining, the step rule, the published chain
+//!   links) stay in `dom`. A drag that scrolled ends with a [`InputDecision::ScrollEnd`] at its
+//!   release or cancel, ahead of the release's own events, so the containers it moved settle onto
+//!   their css-scroll-snap-1 positions (the executor's intents own that; the router only marks the
+//!   end).
 //! - **Gesture synthesis** per the 2026-08-21 ruling (recorded in `docs/tracking/deviations.md`):
 //!   `tap` fires at release, targeted at the down-routed node, unless the sequence travelled past
 //!   the 50px radial [`TAP_SLOP`], the drag recognizer's scroll consumed (reported back by the
