@@ -1476,6 +1476,14 @@ border box; without one the group's range replays raw and the frame is simply
 backdrop it sits on is what shows. `Document::scene()` and any consumer with
 no GPU take that fallback by construction.
 
+Either texture is drawn inside the element's own clip chain. A group scope
+opens outside its ancestors' clips and its content re-pushes them inside it,
+so without that a blur's 3σ margin and a backdrop's border box would show past
+an ancestor's `overflow` clip. Each entry therefore carries the chain as
+`OutputClip`s, root first, each in the space its establishing box rides, and
+the op opens them around its draw. The fallbacks need none: raw content is
+already cut by its own chains, and an absent backdrop draws nothing.
+
 The device side is `dom::render::blur::FilterTextures`, one per
 `vello::Renderer`, owned beside that renderer's `AtlasResidency` by `Headless`
 and by the painter's `WindowGraphics`. Its cache holds one commit's bakes, and
@@ -1495,8 +1503,9 @@ across the ancestors' clips its range re-pushes; the element's own
 opacity-only curve changes no baked pixel. An entry whose range draws a
 backdrop's texture also takes on that backdrop's two conditions: an element
 with both properties draws its backdrop inside its own blur group, and a
-child's backdrop range opens with its root's. So a tick re-bakes only the
-entries that read it. Commit ids
+child's backdrop range opens with its root's. An entry whose range draws any
+texture also reads the spaces of that texture's clip chain, which the texture
+is drawn inside. So a tick re-bakes only the entries that read it. Commit ids
 restart per document, so a target pointed at a second document must `forget`
 the cache, the same obligation it already has for its own compose key. Bakes
 happen in increasing order of range end, so every texture an entry's own range

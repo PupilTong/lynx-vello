@@ -123,7 +123,7 @@ fn blur_shapes_matrix_matches_reference() {
         ),
         // The one cell whose blurred output *is* clipped, and the only one:
         // the clip belongs to an ancestor, outside the group, so it cuts the
-        // baked texture rather than the content inside the bake.
+        // baked texture where it is drawn; the content lies wholly inside it.
         cell(
             3,
             0,

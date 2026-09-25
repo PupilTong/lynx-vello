@@ -60,11 +60,6 @@ impl Interval {
     fn least_magnitude(self) -> f64 {
         self.low.abs().min(self.high.abs())
     }
-
-    /// The largest `|y|` over `y` in `self`.
-    fn greatest_magnitude(self) -> f64 {
-        self.low.abs().max(self.high.abs())
-    }
 }
 
 /// Every eased progress `easing` yields over progress `[0, 1]`: a cubic
@@ -280,9 +275,6 @@ pub(crate) struct Reach {
     /// far one CSS px above the node can reach in its space. `None` when a
     /// scale range reaches or crosses 0.
     inverse_norm: Option<f64>,
-    /// An upper bound on the spectral norm of every delta — how far one CSS
-    /// px in the node's space can reach above it.
-    norm: f64,
 }
 
 impl Reach {
@@ -339,17 +331,8 @@ impl Reach {
                 OpReach::Translate(..) | OpReach::Rotate(_) => Some(norm),
             },
         );
-        // `Δ = pre·L(t)·Lc⁻¹·pre⁻¹`: a scale multiplies distances by its
-        // greatest magnitude.
         let lift = pre * committed;
         let lift_inverse = lift.inverse();
-        let norm = ops.iter().fold(
-            conjugate * committed.inverse().spectral_norm(),
-            |norm, op| match *op {
-                OpReach::Scale(x, y) => norm * x.greatest_magnitude().max(y.greatest_magnitude()),
-                OpReach::Translate(..) | OpReach::Rotate(_) => norm,
-            },
-        );
         Some(Self {
             pre,
             pre_inverse,
@@ -357,7 +340,6 @@ impl Reach {
             lift,
             lift_inverse,
             inverse_norm,
-            norm,
         })
     }
 
@@ -391,12 +373,6 @@ impl Reach {
     /// space under any delta in reach; `None` when a scale range reaches 0.
     pub(crate) fn inverse_norm(&self) -> Option<f64> {
         self.inverse_norm
-    }
-
-    /// An upper bound on how far one CSS px in the node's space can reach
-    /// above it under any delta in reach. Finite whatever the scale range.
-    pub(crate) fn norm(&self) -> f64 {
-        self.norm
     }
 }
 
@@ -748,9 +724,9 @@ mod tests {
     }
 
     /// Every delta a composite curve samples keeps `bounds` inside the
-    /// carry, pulls `region` back inside the pullback, and stretches no
-    /// distance past the norm, nor its inverse past the inverse norm — with
-    /// conjugating maps that neither commute with the ops nor are rigid.
+    /// carry, pulls `region` back inside the pullback, and its inverse
+    /// stretches no distance past the inverse norm — with conjugating maps
+    /// that neither commute with the ops nor are rigid.
     #[test]
     fn every_sampled_delta_stays_inside_the_reach() {
         let list = |y: f64| {
@@ -811,12 +787,6 @@ mod tests {
                 delta.inverse().spectral_norm() <= norm + 1e-9,
                 "y = {y}: {} past {norm}",
                 delta.inverse().spectral_norm(),
-            );
-            assert!(
-                delta.spectral_norm() <= reach.norm() + 1e-9,
-                "y = {y}: {} past {}",
-                delta.spectral_norm(),
-                reach.norm(),
             );
         }
     }

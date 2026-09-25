@@ -38,6 +38,15 @@
 //! border box, as the first thing inside the element's group; without one it
 //! draws nothing at all, and the unfiltered backdrop the op sits on top of
 //! is what shows.
+//!
+//! Both textures are drawn inside the element's own clip chain, which each
+//! entry carries as its [`OutputClip`]s. A group scope opens outside its
+//! ancestors' clips (see [`crate::paint::walker`]), so without them a blur's
+//! 3σ ink and a backdrop's border box would show past an ancestor's
+//! `overflow` clip; css-overflow-3 clips everything a box's descendants
+//! paint, filter output included. The fallbacks need no such clip: a group
+//! replayed raw is its content, which its own clip chains already cut, and a
+//! backdrop without a texture draws nothing.
 
 use std::ops::Range;
 use std::sync::Arc;
@@ -49,7 +58,8 @@ use crate::render::image::{ImageSizeHint, is_renderable};
 use crate::vello::Scene;
 use crate::vello::kurbo::{Affine, Point, Rect, Size};
 use crate::vello::peniko::{
-    BlendMode, BrushRef, Extend, Fill, ImageBrush, ImageData, ImageQuality, ImageSampler,
+    BlendMode, BrushRef, Compose, Extend, Fill, ImageBrush, ImageData, ImageQuality, ImageSampler,
+    Mix,
 };
 use crate::visual::space::{self, Space, SpaceSamples};
 use crate::visual::{AnimationSamples, AnimationSlot};
@@ -281,6 +291,25 @@ fn differs(
     pick(spaces, a) != pick(spaces, b)
 }
 
+/// One link of the clip chain an entry's element is painted under: an
+/// ancestor's `overflow` clip, captured the way the walker pushes it.
+///
+/// The entry's texture — a blurred group or a filtered backdrop — is drawn
+/// inside every link, root first, each mapped by its own space, so the clip
+/// stays where its establishing box is while the texture rides the entry's
+/// space. A link whose transform is singular is an empty rect, which clips
+/// everything, the same as the walker's empty clip for it.
+#[derive(Debug)]
+pub(crate) struct OutputClip {
+    /// Clip-local CSS px to device px within `space` — the walker's
+    /// `scale * local`.
+    pub(crate) transform: Affine,
+    pub(crate) shape: CapturedShape,
+    /// The space the clip's establishing box rides, an ancestor-or-self of
+    /// the entry's own.
+    pub(crate) space: Option<u32>,
+}
+
 /// What a [`FilterGroup`] needs beyond σ and a rect to be a
 /// `backdrop-filter` entry rather than a `filter: blur()` group.
 ///
@@ -359,6 +388,11 @@ pub struct FilterGroup {
     /// The group this one nests inside, so the assembly needs no open-filter
     /// stack of its own.
     pub(crate) parent: Option<u32>,
+    /// The element's own clip chain, root first: what the texture is drawn
+    /// inside. Empty for an element no ancestor clips. Its spaces count
+    /// toward the readings of every entry whose range draws this texture,
+    /// which is why [`ComposeAssembly::scan_range`] folds them in.
+    pub(crate) clips: Vec<OutputClip>,
     /// Set exactly for a `backdrop-filter` entry; see [`Backdrop`].
     pub(crate) backdrop: Option<Backdrop>,
 }
@@ -374,6 +408,7 @@ impl FilterGroup {
             inner_chains: false,
             inner_animations: false,
             parent: None,
+            clips: Vec::new(),
             backdrop: None,
         }
     }
@@ -623,6 +658,9 @@ impl ComposeAssembly {
     /// own blur group around its backdrop, and a child backdrop whose range
     /// opens with its root's. A nested `PushFilter` needs no such arm: its
     /// ops lie inside this range too, and are scanned here directly.
+    ///
+    /// Both ops also draw inside their entry's [`OutputClip`]s, each in its
+    /// own space, so those spaces are read like any op's.
     fn scan_range(
         &self,
         ops: &Range<u32>,
@@ -633,24 +671,38 @@ impl ComposeAssembly {
         let mut scrolls = false;
         let mut animations = false;
         let mut depth = 0_i64;
+        let mut read = |op: Option<u32>| {
+            scrolls |= differs(spaces, op, own, space::nearest_scroll)
+                || differs(spaces, op, own, space::nearest_sticky);
+            animations |= space::sampled_against(spaces, slots, op, own);
+        };
+        let mut drawn_readings = (false, false);
         for op in &self.program[ops.start as usize..ops.end as usize] {
             match op {
                 ComposeOp::Push { .. } => depth += 1,
                 ComposeOp::Pop => depth -= 1,
+                ComposeOp::PushFilter { index } => {
+                    for clip in &self.filter_groups[*index as usize].clips {
+                        read(clip.space);
+                    }
+                }
                 // Already scanned: a backdrop is recorded before its op.
                 ComposeOp::PushBackdrop { index } => {
                     let drawn = &self.filter_groups[*index as usize];
-                    scrolls |= drawn.inner_chains;
-                    animations |= drawn.inner_animations;
+                    drawn_readings.0 |= drawn.inner_chains;
+                    drawn_readings.1 |= drawn.inner_animations;
+                    for clip in &drawn.clips {
+                        read(clip.space);
+                    }
                 }
                 _ => {}
             }
             if let Some(op) = op.space(&self.filter_groups) {
-                scrolls |= differs(spaces, op, own, space::nearest_scroll)
-                    || differs(spaces, op, own, space::nearest_sticky);
-                animations |= space::sampled_against(spaces, slots, op, own);
+                read(op);
             }
         }
+        scrolls |= drawn_readings.0;
+        animations |= drawn_readings.1;
         // The range starts and ends with an empty clip stack (every group
         // scope restarts clip chains), and no scope enclosing the range can
         // close inside it, so nothing in here pops a layer it did not push.
@@ -803,7 +855,8 @@ pub(crate) struct Tables<'a> {
 /// skips the group's ops; one without replays them raw — the documented
 /// unblurred fallback. A `PushBackdrop` with a texture draws it through the
 /// element's border box; one without encodes nothing, and the unfiltered
-/// backdrop underneath is what shows.
+/// backdrop underneath is what shows. Either texture is drawn inside its
+/// entry's [`OutputClip`]s.
 pub(crate) fn replay_ops(
     scene: &mut Scene,
     tables: Tables<'_>,
@@ -884,6 +937,7 @@ pub(crate) fn replay_ops(
                     } else {
                         ImageQuality::Medium
                     };
+                    let clips = push_output_clips(scene, &group.clips, device_transform);
                     scene.draw_image(
                         ImageBrush {
                             image,
@@ -897,6 +951,7 @@ pub(crate) fn replay_ops(
                         device_transform(group.space)
                             * Affine::translate((group.rect.x0, group.rect.y0)),
                     );
+                    pop_layers(scene, clips);
                     // Straight to the matching `PopFilter`, which is a no-op.
                     index = group.ops.end as usize;
                     continue;
@@ -908,11 +963,64 @@ pub(crate) fn replay_ops(
                 let entry = &filter_groups[slot];
                 if let (Some(Some(image)), Some(backdrop)) = (filtered.get(slot), &entry.backdrop) {
                     let animated = space::nearest_animation(spaces, entry.space).is_some();
+                    let clips = push_output_clips(scene, &entry.clips, device_transform);
                     draw_backdrop(scene, entry, backdrop, image, animated, device_transform);
+                    pop_layers(scene, clips);
                 }
             }
         }
         index += 1;
+    }
+}
+
+/// Opens an entry's [`OutputClip`]s, root first, answering how many layers
+/// that pushed.
+///
+/// Every link but the innermost is a clip layer. The innermost is a full
+/// `SrcOver` layer at alpha 1 over the same shape, which clips exactly the
+/// same pixels and is the real layer vello
+/// [#1198](https://github.com/linebender/vello/issues/1198) requires directly
+/// around a blend: a backdrop's post-blur passes are `SrcAtop` blend layers
+/// (see the walker's module doc for the invariant).
+fn push_output_clips(
+    scene: &mut Scene,
+    clips: &[OutputClip],
+    device_transform: &dyn Fn(Option<u32>) -> Affine,
+) -> usize {
+    let isolating = BlendMode::new(Mix::Normal, Compose::SrcOver);
+    for (position, clip) in clips.iter().enumerate() {
+        let transform = device_transform(clip.space) * clip.transform;
+        match (position + 1 == clips.len(), &clip.shape) {
+            (false, CapturedShape::Rect(rect)) => {
+                scene.push_clip_layer(Fill::NonZero, transform, rect);
+            }
+            (false, CapturedShape::Box(shape)) => {
+                with_shape!(shape, |s| scene.push_clip_layer(
+                    Fill::NonZero,
+                    transform,
+                    s
+                ));
+            }
+            (true, CapturedShape::Rect(rect)) => {
+                scene.push_layer(Fill::NonZero, isolating, 1.0, transform, rect);
+            }
+            (true, CapturedShape::Box(shape)) => {
+                with_shape!(shape, |s| scene.push_layer(
+                    Fill::NonZero,
+                    isolating,
+                    1.0,
+                    transform,
+                    s
+                ));
+            }
+        }
+    }
+    clips.len()
+}
+
+fn pop_layers(scene: &mut Scene, count: usize) {
+    for _ in 0..count {
+        scene.pop_layer();
     }
 }
 
@@ -1467,6 +1575,125 @@ mod tests {
             plain.encoding().draw_tags.len() + 3,
             "one post-blur pass is a blend layer, its flat fill, and the pop",
         );
+    }
+
+    /// An output clip in `space`.
+    fn output_clip(space: Option<u32>) -> OutputClip {
+        OutputClip {
+            transform: Affine::IDENTITY,
+            shape: CapturedShape::Rect(Rect::new(0.0, 0.0, 4.0, 4.0)),
+            space,
+        }
+    }
+
+    /// Either texture is drawn inside its entry's output clips, one layer
+    /// each, and the stack stays balanced. Without a texture the clips encode
+    /// nothing: the raw group is its already-clipped content, and a backdrop
+    /// draws nothing at all.
+    #[test]
+    fn a_texture_is_drawn_inside_its_output_clips_and_a_fallback_is_not() {
+        let baked = ImageData {
+            data: crate::vello::peniko::Blob::new(Arc::new([0_u8, 0, 0, 0])),
+            format: crate::vello::peniko::ImageFormat::Rgba8,
+            alpha_type: crate::vello::peniko::ImageAlphaType::AlphaPremultiplied,
+            width: 8,
+            height: 8,
+        };
+        let blurred = [
+            ComposeOp::PushFilter { index: 0 },
+            ComposeOp::Fragment {
+                index: 0,
+                space: None,
+            },
+            ComposeOp::PopFilter,
+        ];
+        let backdropped = [
+            ComposeOp::Fragment {
+                index: 0,
+                space: None,
+            },
+            ComposeOp::PushBackdrop { index: 0 },
+        ];
+        let entry = |backdrop: bool, clips: usize| {
+            let mut entry = if backdrop {
+                let mut entry = backdrop_entry(None);
+                entry.ops = 0..1;
+                entry
+            } else {
+                let mut entry = group(None);
+                entry.ops = 1..2;
+                entry
+            };
+            entry.clips = (0..clips).map(|_| output_clip(None)).collect();
+            [entry]
+        };
+        for (program, backdrop) in [(&blurred[..], false), (&backdropped[..], true)] {
+            let unclipped = replay_program(program, &entry(backdrop, 0), &[Some(baked.clone())]);
+            let clipped = replay_program(program, &entry(backdrop, 2), &[Some(baked.clone())]);
+            assert_eq!(
+                clipped.encoding().draw_tags.len(),
+                unclipped.encoding().draw_tags.len() + 4,
+                "two clips around the texture, each a push and a pop (backdrop: {backdrop})",
+            );
+            assert_eq!(
+                clipped.encoding().n_open_clips,
+                0,
+                "balanced (backdrop: {backdrop})"
+            );
+            assert_eq!(
+                clipped.encoding().resources.patches.len(),
+                1,
+                "the texture, once (backdrop: {backdrop})",
+            );
+            for filtered in [&[][..], &[None][..]] {
+                crate::paint::equivalence::assert_scenes_identical(
+                    &replay_program(program, &entry(backdrop, 2), filtered),
+                    &replay_program(program, &entry(backdrop, 0), filtered),
+                );
+            }
+        }
+    }
+
+    /// An entry's output clips are drawn wherever its texture is, so an
+    /// entry whose range draws that texture reads their spaces like any
+    /// op's — even when nothing else in the range rides them.
+    #[test]
+    fn an_output_clip_counts_toward_the_entry_drawing_its_texture() {
+        for (clip, expected) in [(None, (false, false)), (SCROLLED, (true, false))] {
+            let mut assembly = assembly();
+            assembly.push_filter(group(None));
+            let mut inner = group(None);
+            inner.clips.push(output_clip(clip));
+            assembly.push_filter(inner);
+            assembly.pop_filter(&SPACES, &slots(true));
+            assembly.pop_filter(&SPACES, &slots(true));
+            let finished = assembly.finish();
+            let outer = &finished.filter_groups[0];
+            assert_eq!(
+                (outer.inner_chains, outer.inner_animations),
+                expected,
+                "a nested blur clipped in {clip:?}",
+            );
+        }
+        for (clip, expected) in [(None, (false, false)), (ANIMATED, (false, true))] {
+            let mut assembly = assembly();
+            assembly.push_op(push(None));
+            assembly.push_op(ComposeOp::Pop);
+            let end = assembly.content_boundary();
+            assembly.push_filter(group(None));
+            let mut entry = backdrop_entry(None);
+            entry.clips.push(output_clip(clip));
+            assert!(assembly.push_backdrop(entry, 0..end, &SPACES, &slots(true)));
+            assembly.pop_filter(&SPACES, &slots(true));
+            let finished = assembly.finish();
+            let blur = &finished.filter_groups[0];
+            assert!(!blur.is_backdrop());
+            assert_eq!(
+                (blur.inner_chains, blur.inner_animations),
+                expected,
+                "a blur group drawing a backdrop clipped in {clip:?}",
+            );
+        }
     }
 
     /// A nested group's own chain counts as an op's chain, so an inner

@@ -59,7 +59,9 @@ vello is the only wgpu dependency in this workspace, so it pins wgpu's major
   replaces its own ops; a backdrop's range points **backwards** — the prefix
   painted before the element inside its nearest Backdrop Root — and its
   texture is drawn through the element's own rounded border box as the first
-  thing inside the element's group, with no matching pop. The commit itself
+  thing inside the element's group, with no matching pop. Either texture is
+  drawn inside the element's own clip chain (the entry's `OutputClip`s), since
+  the group scope opens outside its ancestors' clips. The commit itself
   touches no GPU device — a `FilterGroup` is device px plus an op range — and an
   entry with no texture (no GPU, or past the shared area budget) falls back:
   a group replays raw and renders *unblurred*, a backdrop draws nothing and

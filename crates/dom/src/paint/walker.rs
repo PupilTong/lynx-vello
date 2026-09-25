@@ -16,11 +16,14 @@
 //!    an opacity group is grouped but not clipped by the group's ancestors)
 //!    and keeps group blend layers from opening inside a clip layer
 //!    (vello [#1198](https://github.com/linebender/vello/issues/1198) —
-//!    re-pushing intersecting clips is idempotent). The one visible cost: a
-//!    group's own layers sit outside its ancestors' clips, so ink a group
-//!    effect adds past its content — a blur's 3σ margin, a filtered
-//!    backdrop's border box — is not cut by them (recorded in
-//!    `docs/tracking/deviations.md`). The precise #1198 invariant
+//!    re-pushing intersecting clips is idempotent). A group's own layers
+//!    therefore sit outside its ancestors' clips, so the ink a group effect
+//!    adds past its content — a blur's 3σ margin, a filtered backdrop's
+//!    border box — is cut by them where it is drawn instead: each such entry
+//!    carries its element's clip chain as [`OutputClip`]s, and the compose
+//!    program draws its texture inside them. What that leaves is that the
+//!    ancestors' clips also cut the group's *content* before its blur
+//!    (recorded in `docs/tracking/deviations.md`). The precise #1198 invariant
 //!    maintained crate-wide: a blend layer's *immediate* enclosing layer is
 //!    always a real (isolating) layer, never a clip layer — clip layers
 //!    share their parent's buffer, so a blend directly inside one reads
@@ -98,7 +101,7 @@
 use euclid::default::{Size2D, Vector2D};
 
 use crate::Document;
-use crate::paint::compose::{CapturedShape, ComposeAssembly, ComposeOp, FilterGroup};
+use crate::paint::compose::{CapturedShape, ComposeAssembly, ComposeOp, FilterGroup, OutputClip};
 use crate::paint::shape::{BoxShape, with_shape};
 use crate::paint::{
     BoxFragment, PathScratch, background, border, convert, filters, mask, shadow, text,
@@ -329,12 +332,6 @@ pub(crate) struct Scratch {
     /// its content is then held to [`CullPlan::clip_extent`] (see [`held`]).
     /// Index-parallel with [`PaintOrder::layers`].
     layer_moves: Vec<bool>,
-    /// Per layer, how far past the clips of its content, in its own units,
-    /// the most any group closed inside it puts ink: that group's own blur
-    /// reach plus its own spill, carried. Group scopes re-push no enclosing
-    /// clip, so a nested group's blur leaves its content's clips. Filled as
-    /// layers close. Index-parallel with [`PaintOrder::layers`].
-    layer_spill: Vec<f64>,
     /// Per layer, the blur sigma of its `filter` in *viewport* CSS px — the
     /// element's own sigma scaled by its local-to-viewport map. Zero for
     /// every layer with no `blur()`. Index-parallel with
@@ -1010,8 +1007,9 @@ fn open_scope<T>(
     let space = layer.space;
     let base = scratch.scopes.last().map_or(0, |scope| scope.base);
     // The scope opens outside its ancestors' clips; its items re-push them
-    // inside it. Ink the scope itself adds past its content is therefore
-    // not cut by them (a recorded deviation, docs/tracking/deviations.md).
+    // inside it. Ink the scope itself adds past its content — a blur's
+    // margin, a filtered backdrop — is cut by them where its texture is
+    // drawn, which is what each entry's `OutputClip`s are.
     pop_clips_to(sink, scratch, base);
 
     let style = document
@@ -1077,7 +1075,7 @@ fn open_scope<T>(
     // clip, mask and fade — filter-effects-1's order, with clip and mask
     // swapped (both intersective, so unobservable; see the module doc).
     let blurred = filter_group(scratch, layer_index, space, ratio)
-        .is_some_and(|group| sink.push_filter(group));
+        .is_some_and(|group| sink.push_filter(clipped(group, frame, layer, scale)));
 
     // Innermost of all, and before any item: the filtered backdrop is the
     // first thing painted inside this element's own group, so this scope's
@@ -1087,7 +1085,12 @@ fn open_scope<T>(
     if let Some((root_start, end)) = backdrop_end
         && let Some(entry) = backdrop_entry(style, layer, space, scale, ratio)
     {
-        sink.push_backdrop(entry, root_start..end, frame.spaces(), frame.animations());
+        sink.push_backdrop(
+            clipped(entry, frame, layer, scale),
+            root_start..end,
+            frame.spaces(),
+            frame.animations(),
+        );
     }
 
     // A current `opacity` animation roots at every reading, 1 included,
@@ -1265,6 +1268,45 @@ fn backdrop_entry(
         space,
         backdrop,
     ))
+}
+
+/// `entry` with its element's clip chain as its [`OutputClip`]s, root first:
+/// the ancestors' clips its texture is drawn inside.
+///
+/// The chain is the group element's own — the one its border-box item is
+/// painted under — so every link rides a space on the path of the element's
+/// own. Every item inside the group re-pushes a chain that extends this one
+/// (`filter` and `backdrop-filter` both contain their positioned
+/// descendants), so the content is cut by it already and only the ink the
+/// entry adds past its content is new to it.
+fn clipped(
+    entry: FilterGroup,
+    frame: &PaintOrder,
+    layer: &RenderLayer,
+    scale: Affine,
+) -> FilterGroup {
+    let mut clips = Vec::new();
+    let mut next = layer.clip;
+    while let Some(index) = next {
+        let clip = &frame.clips()[index];
+        debug_assert_eq!(
+            space::common_ancestor(frame.spaces(), clip.space, layer.space),
+            clip.space,
+            "an element's clip rides a space on the element's own path",
+        );
+        let (transform, shape) = clip_geometry(clip, scale).map_or(
+            (Affine::IDENTITY, CapturedShape::Rect(Rect::ZERO)),
+            |(transform, shape)| (transform, CapturedShape::Box(shape)),
+        );
+        clips.push(OutputClip {
+            transform,
+            shape,
+            space: clip.space,
+        });
+        next = clip.parent;
+    }
+    clips.reverse();
+    FilterGroup { clips, ..entry }
 }
 
 /// The filter group this layer bakes, if it blurs at all.
@@ -1595,19 +1637,24 @@ fn sync_clips(
 }
 
 fn push_clip(sink: &mut WalkSink<'_>, clip: &ClipNode, scale: Affine) {
+    match clip_geometry(clip, scale) {
+        Some((transform, shape)) => sink.push_clip_box(clip.space, Fill::NonZero, transform, shape),
+        None => sink.push_clip_empty(clip.space),
+    }
+}
+
+/// One clip node's rounded rect and its clip-local to device px map, or
+/// `None` for a singular transform, which has no shape to clip with.
+fn clip_geometry(clip: &ClipNode, scale: Affine) -> Option<(Affine, BoxShape)> {
     let size = crate::Size2D::new(clip.rect.size.width, clip.rect.size.height);
-    let Some(local) = convert::item_affine(&clip.transform, size) else {
-        sink.push_clip_empty(clip.space);
-        return;
-    };
+    let local = convert::item_affine(&clip.transform, size)?;
     let rect = Rect::new(
         clip.rect.origin.x as f64,
         clip.rect.origin.y as f64,
         (clip.rect.origin.x + clip.rect.size.width) as f64,
         (clip.rect.origin.y + clip.rect.size.height) as f64,
     );
-    let shape = BoxShape::new(rect, &clip.radii);
-    sink.push_clip_box(clip.space, Fill::NonZero, scale * local, shape);
+    Some((scale * local, BoxShape::new(rect, &clip.radii)))
 }
 
 fn pop_clips_to(sink: &mut WalkSink<'_>, scratch: &mut Scratch, len: usize) {
@@ -1695,7 +1742,6 @@ fn plan_frame<T>(scratch: &mut Scratch, document: &Document<T>, frame: &PaintOrd
                     bounds,
                     (item.space, item.clip),
                     group,
-                    0.0,
                 )
             {
                 scratch.bounds_acc[top] =
@@ -1730,8 +1776,7 @@ fn plan_frame<T>(scratch: &mut Scratch, document: &Document<T>, frame: &PaintOrd
 }
 
 /// Resets the per-layer state [`plan_frame`] fills: bounds, blur sigma,
-/// liveness seeded by `backdrop-filter`, whether the layer moves, and its
-/// spill.
+/// liveness seeded by `backdrop-filter`, and whether the layer moves.
 fn reset_layers<T>(scratch: &mut Scratch, document: &Document<T>, frame: &PaintOrder) {
     let layers = frame.layers();
     scratch.layer_bounds.clear();
@@ -1752,15 +1797,13 @@ fn reset_layers<T>(scratch: &mut Scratch, document: &Document<T>, frame: &PaintO
     scratch
         .layer_moves
         .extend(layers.iter().map(|layer| moving(frame, layer.space)));
-    scratch.layer_spill.clear();
-    scratch.layer_spill.resize(layers.len(), 0.0);
 }
 
 /// Closes the topmost open layer: its accumulated bounds become its pushed
 /// rect — intersected with the viewport pulled back into the layer's space
 /// through every scroll window, sticky range and curve reach above it, the
 /// places the compose window may show — and fold into the parent layer still
-/// open, carried into that parent's space, as do its liveness and spill.
+/// open, carried into that parent's space, as does its liveness.
 fn close_layer(scratch: &mut Scratch, frame: &PaintOrder, viewport: Rect) {
     let layers = frame.layers();
     let closed = scratch
@@ -1779,7 +1822,6 @@ fn close_layer(scratch: &mut Scratch, frame: &PaintOrder, viewport: Rect) {
         scratch.layer_live[parent] = true;
     }
     let reach = BLUR_INK_SIGMAS * scratch.layer_sigma[closed];
-    let spill = reach + scratch.layer_spill[closed];
     let accumulated = scratch.bounds_acc[closed];
     scratch.layer_bounds[closed] = accumulated.map_or(Rect::ZERO, |rect| {
         let rect = inflate_rect(rect, reach);
@@ -1801,14 +1843,8 @@ fn close_layer(scratch: &mut Scratch, frame: &PaintOrder, viewport: Rect) {
     {
         let outer = layers[parent].space;
         let within = moves_within(frame, own, outer);
-        // The spill in the parent's units: a curve between the two can
-        // stretch it.
-        let spill = if within {
-            spill * stretch_within(frame, own, outer)
-        } else {
-            spill
-        };
-        scratch.layer_spill[parent] = scratch.layer_spill[parent].max(spill);
+        // The blur margin is drawn inside the layer's own clip chain, so it
+        // is held to that chain like the content it spreads from.
         if let Some(bounds) = into_group(
             scratch,
             frame,
@@ -1816,7 +1852,6 @@ fn close_layer(scratch: &mut Scratch, frame: &PaintOrder, viewport: Rect) {
             inflate_rect(bounds, reach),
             (own, layers[closed].clip),
             outer,
-            spill,
         ) {
             scratch.bounds_acc[parent] =
                 Some(scratch.bounds_acc[parent].map_or(bounds, |united| united.union(bounds)));
@@ -2055,23 +2090,16 @@ fn inverse_norm_within(
         })
 }
 
-/// An upper bound on how far one CSS px in `content`'s coordinates reaches
-/// in `group`'s under the curves [`moves_within`] finds, never below 1.
-fn stretch_within(frame: &PaintOrder, content: Option<u32>, group: Option<u32>) -> f64 {
-    space::curves_within(frame.spaces(), frame.animations(), content, group)
-        .fold(1.0, |norm, reach| norm * reach.norm().max(1.0))
-}
-
 /// `bounds`, of content in `content` under clip chain `clip`, in group space
 /// `group`'s coordinates: every place a node between the two can carry them,
 /// or `None` when nothing of them is left.
 ///
 /// Content no curve moves inside the group (`within` false) differs from it
 /// by translations alone. Content a curve moves is [`carry`]'d, then cut to
-/// its chain's [`space::still_clip`] carried the same way and grown by
-/// `spill`, how far past its clips, in the group's units, the content puts
-/// ink: however far the curve carries the content, it shows only inside that
-/// clip, which moves with the group.
+/// its chain's [`space::still_clip`] carried the same way: however far the
+/// curve carries the content, it shows only inside that clip, which moves
+/// with the group. A closed group's blur margin is content here too, since
+/// its texture is drawn inside its element's clip chain.
 fn into_group(
     scratch: &Scratch,
     frame: &PaintOrder,
@@ -2079,7 +2107,6 @@ fn into_group(
     bounds: Rect,
     (content, clip): (Option<u32>, Option<usize>),
     group: Option<u32>,
-    spill: f64,
 ) -> Option<Rect> {
     let windows = &scratch.plan.slot_windows;
     let spaces = frame.spaces();
@@ -2094,7 +2121,7 @@ fn into_group(
                 }
             });
         return match carry(windows, frame, bounds, content, group) {
-            Admitted::Region(carried) => holding.grown(spill).cut(carried),
+            Admitted::Region(carried) => holding.cut(carried),
             // Unreachable: only a curve on the group's side lacks a
             // pullback, and an element with a transform curve contains its
             // positioned descendants whatever its committed transform (the
@@ -2272,8 +2299,9 @@ mod tests {
     use vello::kurbo::Affine;
 
     use super::{
-        ComposeAssembly, ComposeOp, CullPlan, PaintItem, PaintItemKind, Rect, Scene, Scratch,
-        can_reach, cull_rect, item_bounds, walk, walk_compose, walk_uncultured,
+        CapturedShape, ComposeAssembly, ComposeOp, CullPlan, OutputClip, PaintItem, PaintItemKind,
+        Rect, Scene, Scratch, can_reach, cull_rect, item_bounds, walk, walk_compose,
+        walk_uncultured,
     };
     use crate::Size2D;
     use crate::paint::equivalence::assert_scenes_identical;
@@ -3164,12 +3192,12 @@ mod tests {
         );
     }
 
-    /// A blurred panel riding the ticker is a group of its own, whose scope
-    /// re-pushes no clip of the toast's: its 3 sigma, 22.5 px at the
-    /// committed 0.75, leaves the toast's clip, and the toast's rect keeps
-    /// it — past the clip, and no further, however far the slide goes.
+    /// A blurred panel riding the ticker is a group of its own, whose 3 sigma
+    /// — 22.5 px at the committed 0.75 — is drawn inside the panel's clip
+    /// chain, which holds the toast's clip: the toast's rect is that clip,
+    /// with no margin past it, however far the slide goes.
     #[test]
-    fn a_blurred_panel_riding_a_ticker_spills_its_margin_past_the_toasts_clip() {
+    fn a_blurred_panel_riding_a_ticker_keeps_its_margin_inside_the_toasts_clip() {
         let (exported, rects) = toast(
             ".toast { overflow: hidden; opacity: 0.5; }
              .panel { display: flex; flex-shrink: 0; width: 1000px; height: 20px;
@@ -3182,15 +3210,14 @@ mod tests {
         let [toast, _panel] = rects[..] else {
             panic!("two group layers, got {rects:?}");
         };
-        // The clip spans x = 137.5..362.5 and y = 107.5..152.5; the panel
-        // sits at y = 107.5..122.5.
-        let want = Rect::new(115.0, 85.0, 385.0, 152.5);
+        // The clip spans x = 137.5..362.5 and y = 107.5..152.5.
+        let want = Rect::new(137.5, 107.5, 362.5, 152.5);
         assert!(
             (toast.x0 - want.x0).abs() < 1e-3
                 && (toast.y0 - want.y0).abs() < 1e-3
                 && (toast.x1 - want.x1).abs() < 1e-3
                 && (toast.y1 - want.y1).abs() < 1e-3,
-            "the toast's clip and the panel's spill, got {toast:?}",
+            "the toast's clip alone, got {toast:?}",
         );
     }
 
@@ -3545,6 +3572,61 @@ mod tests {
             ),
             "which is exactly the element's first layer push",
         );
+    }
+
+    /// Both entries of an element carry its own clip chain as output clips,
+    /// root first, each link in the space its establishing box rides: a
+    /// scroll container's clip stays outside its own scroll node while the
+    /// entry rides that node, so a scroll moves the texture under the clip.
+    /// `overflow: hidden` makes the card a scroll container too, so its clip
+    /// rides the scroller's node and the box the card's, one below. An
+    /// element no ancestor clips carries none.
+    #[test]
+    fn an_entry_carries_its_elements_clip_chain_root_first() {
+        let css = "page { display: flex; position: relative; width: 800px; height: 600px;
+                    background-color: white; }
+             .scroller { display: flex; flex-direction: column; overflow: scroll;
+                         width: 300px; height: 300px; }
+             .card { display: flex; flex-shrink: 0; position: relative; margin: 20px;
+                     width: 200px; height: 400px; overflow: hidden; }
+             .box { display: flex; position: absolute; left: 10px; top: 10px;
+                    width: 100px; height: 100px; background-color: teal;
+                    filter: blur(4px); backdrop-filter: blur(4px); }";
+        let mut doc = Doc::with_css(css);
+        let root = doc.root;
+        doc.el(root, "view.box");
+        let scroller = doc.el(root, "view.scroller");
+        let card = doc.el(scroller, "view.card");
+        doc.el(card, "view.box");
+        let spaces = doc.dom.build_paint_order().spaces().to_vec();
+        let (finished, _) = compose(&mut doc);
+
+        let bbox = |clip: &OutputClip| match &clip.shape {
+            CapturedShape::Box(shape) => clip.transform.transform_rect_bbox(shape.bounding_box()),
+            CapturedShape::Rect(rect) => clip.transform.transform_rect_bbox(*rect),
+        };
+        let [free_blur, free_backdrop, blur, backdrop] = &finished.filter_groups[..] else {
+            panic!("two entries per box, got {}", finished.filter_groups.len());
+        };
+        assert!(!free_blur.is_backdrop() && free_backdrop.is_backdrop());
+        assert!(free_blur.clips.is_empty() && free_backdrop.clips.is_empty());
+        for entry in [blur, backdrop] {
+            let [outer, inner] = &entry.clips[..] else {
+                panic!(
+                    "the scroller's clip and the card's, got {}",
+                    entry.clips.len()
+                );
+            };
+            let card_node = entry.space.expect("the box rides the card's scroll node");
+            assert_eq!(outer.space, None, "the scroller's clip does not scroll");
+            assert_eq!(
+                inner.space, spaces[card_node as usize].parent,
+                "the card's clip rides the scroller's node, above the card's own",
+            );
+            assert!(inner.space.is_some(), "and that node is the scroller's");
+            assert_eq!(bbox(outer), Rect::new(0.0, 0.0, 300.0, 300.0));
+            assert_eq!(bbox(inner), Rect::new(20.0, 20.0, 220.0, 420.0));
+        }
     }
 
     /// `backdrop-filter` enlarges no ink overflow: the group's pushed rect is
