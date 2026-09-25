@@ -12,7 +12,13 @@ source text to JavaScript callbacks.
 own cancellation token, which no view token is a parent of. Discovered imports
 use `SourceRequest::Module` on the view's existing notice channel.
 `LynxView::pump` calls `ResourceFetcher::request_source`; the concrete
-`SourceCompletion` answers the requesting worker directly. A `Module` request
+`SourceCompletion` answers the requesting worker directly. A plain Worker's
+script is the one request the worker does not make itself: `createWorker`
+makes it on the creating view's thread and the `Start` carries the answer's
+receiving end, in `WorkerRole::Dedicated`. The worker's realm opens as its
+`Start` is served, its root module imports the script by the request URL,
+and the worker completes that module from the answer, under the request URL,
+without asking again. A `Module` request
 arrives absolute: an import is normalized against its importer's response URL,
 a worker script is joined to the creating view's entry URL, and a synchronous
 load is resolved against the view's `ViewSources::base_url`, which the
@@ -21,12 +27,15 @@ response URL belong to the fetcher. MTS does not route resource replies.
 
 The Worker uses the same asynchronous QuickJS ESM loader as main. Imports share
 one evaluation and namespace per normalized URL in each realm. Response URLs
-provide the base for dependencies. Imports and timers continue during entry
-top-level await; posted messages wait for entry settlement. Worker termination
-or view release cancels outstanding completions and discards late results.
+provide the base for dependencies, the script's own included. Imports and
+timers continue during the script's top-level await; posted messages wait until
+the root module, and with it the script, has settled. Worker termination or
+view release cancels outstanding completions and discards late results.
 
-Raw XML background entries use this path and import their runtime bindings from
-`bobcat:bts-runtime`. The built-in bootstrap installs a JS initializer and
+Raw XML background entries use this path and import their runtime bindings,
+`lynx` included, from `bobcat:bts-runtime`. The BTS starts from nothing
+fetched: its root module imports the registered bootstrap `bobcat:bts`, which
+reads the view's BTS entry from its `Start`, installs a JS initializer and
 returns; the first Worker message supplies inputs before the application entry
 imports. Later messages wait on that import Promise and are delivered in order
 once it settles,

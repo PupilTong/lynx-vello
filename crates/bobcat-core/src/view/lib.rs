@@ -626,10 +626,12 @@ pub struct ViewSources {
     /// serialization. The fetcher may answer from another URL, which becomes
     /// the entry's `import.meta.url`.
     pub entry: String,
-    /// Optional URL of the BTS application module `bobcat:bts` imports,
-    /// resolved against [`Self::base_url`] like [`Self::entry`].
-    /// The view always starts a BTS context; without this it runs only the
-    /// built-in environment. Its imports load through the view's resource fetcher.
+    /// Optional URL of the BTS application module the engine's `bobcat:bts`
+    /// bootstrap imports, resolved against [`Self::base_url`] like
+    /// [`Self::entry`]. The BTS is started with it and imports it once its
+    /// first message has initialized it. The view always starts a BTS context;
+    /// without this it runs only the built-in environment. The entry and its
+    /// imports load through the view's resource fetcher.
     /// Neither MTS evaluation nor [`EngineEvent::ScriptFinished`] waits for it:
     /// a host update accepted while the BTS entry is still importing is
     /// forwarded to the Worker, which queues it behind that import. An entry
