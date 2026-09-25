@@ -1630,15 +1630,19 @@ process isolation, and page subresources use the ordinary resource transport.
 synchronous view teardown. Source fetching, HTTP policy, BMP encoding,
 queueing, and server lifecycle stay outside core.
 
-`.github/scripts/web-core-census.py` drives this server over the
-`packages/web-core-e2e-fixtures` corpus — `lynx-stack`'s web-core end-to-end
-cards, vendored as source and compiled here for the engine version this
-repository targets. It captures every card, classifies each as content, blank
-or failed, and scores the captures against web-core's own chromium goldens,
-which stay in a `lynx-stack` checkout. It is a local tool; CI holds only its
-decoders and scoring (`.github/scripts/test-web-core-census.py`).
-`docs/web-core-census.md` covers the arrangement it needs and what a blank does
-and does not mean.
+`crates/bobcat-source/tests/web_core_e2e.rs` boots that corpus without this
+server — the cards reach their own bitmaps and fonts through `file:` URLs the
+build bakes in — and holds each card to a rendering **someone read the case
+for and judged right**. Every card is in one of two lists: `verified.rs`, whose
+cards have a golden beside the test, and `pending.rs`, whose cards have a
+reason instead and deliberately no golden, because a picture of an unjudged
+rendering reads as a decision. Two invariants keep that honest:
+`no_pending_case_has_a_golden` and `unlisted_cases_are_an_error`. Comparing
+against web-core's own screenshots was tried and dropped: the two stacks
+rasterize text differently and several cases are about behaviour an image only
+indirectly shows, so a pixel distance to chromium answers a question nobody
+asked. Accepting a rendering is `FLASHBULB_UPDATE_SNAPSHOTS=1` on one test,
+after the reading, in the same change that moves the card to `verified!`.
 
 ### crates/bobcat-wasm
 

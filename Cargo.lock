@@ -364,6 +364,7 @@ dependencies = [
  "bytecheck",
  "codspeed-divan-compat",
  "cssparser",
+ "flashbulb",
  "percent-encoding",
  "rkyv",
  "serde_json",

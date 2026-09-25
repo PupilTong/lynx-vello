@@ -42,9 +42,18 @@ sit elsewhere:
   and upstream's spec never opens one — so keeping them out of `dist/`'s top
   level is what makes "every `dist/*.web.bundle`" mean "every page".
 
+Cards reach their own bitmaps and fonts through `file:` URLs pointing into this
+`dist/`, which the engine's resource transport reads directly — upstream points
+the same setting at its dev server. Nothing has to be served for a card to
+resolve its assets, and because `dist/` is never committed, the absolute path
+baked into a bundle belongs to the machine that built it.
+
 This build is not part of `pnpm --filter reactlynx-test-fixtures build`, which
 the Rust tests need before every `cargo` run. Hundreds of cards are minutes of
-work and nothing in `crates/` reads them; the census is their only consumer.
+work, and one suite reads them:
+`crates/bobcat-source/tests/web_core_e2e.rs`, which holds each card to a
+rendering someone read the case for and judged right. CI builds the corpus in
+the job that runs tests and nowhere else.
 
 ## `groups.js`
 
