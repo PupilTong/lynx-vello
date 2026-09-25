@@ -39,7 +39,7 @@ class Page extends Component {
         <view
           id='container-right-rtl'
           class='container right vertical rtl'
-          style='background-color:#99ddaa;width:50px;height:300px;direction:lynx-rtl;'
+          style='background-color:#99ddaa;width:50px;height:300px;direction:rtl;'
         >
           <view class='container-item' style='background-color:red;' />
           <view class='container-item' style='background-color:green;' />
