@@ -28,7 +28,7 @@ walk, with Lynx-specific argument and receiver semantics:
   listener. In the MTS realm the report goes through `lynx.reportError` to the
   host's `reportScriptError`, as a nonfatal `EngineEvent::ScriptReported`; in a
   worker realm it goes through the worker global's `reportError`, so it reaches
-  the parent `Worker`'s `error` event and a nonfatal `WorkerFailed`.
+  the parent `Worker`'s `error` event and a nonfatal `WorkerThrew`.
 
 Context and runtime messages share one FIFO, including sends before Worker
 connection. Queued payloads remain references until Worker `postMessage` copies
@@ -65,9 +65,11 @@ importing its entry, its entry threw, or it ended — is no part of that, so a
 BTS entry whose top-level await never settles does not keep the view from
 becoming ready.
 A BTS entry that throws calls the worker realm's `reportError`, so it reaches
-the `Worker`'s `error` event and a nonfatal `WorkerFailed` like any other
-worker script; BTS stays up and still takes messages. No BTS failure ends
-the view.
+the `Worker`'s `error` event and a nonfatal `WorkerThrew` from
+`ScriptSource::Background` like any other worker script; BTS stays up and
+still takes messages. A BTS that ends without being told to — its realm could
+not be built, or the worker thread trapped — is a nonfatal `WorkerEnded` from
+the same source. No BTS failure ends the view.
 Worker ESM loading is part of this layer: the bootstrap's application import
 requests its source from the view fetcher, including XML background entries.
 The first Worker message initializes BTS before that import; later messages
@@ -91,9 +93,12 @@ and a post to an ended Worker is dropped by the host, as a browser drops
 
 ## Diagnostics
 
-Worker failures remain typed Rust diagnostics for the host. MTS receives the
-message, filename, line and column as primitive binding arguments and creates
-the Worker error event in JS; Rust builds no diagnostic envelope of its own.
+Worker failures remain typed Rust diagnostics for the host: `WorkerThrew` for
+a worker that threw and still runs, `WorkerEnded` for one that ended without
+being told to, each carrying the worker's `ScriptSource` and reported before
+the JS `error` event is dispatched. MTS receives the message, filename, line
+and column as primitive binding arguments and creates the Worker error event
+in JS; Rust builds no diagnostic envelope of its own.
 
 Both runtimes export `console.log/info/debug/warn/error`. MTS entries receive
 `console` through their injected ESM import; raw BTS entries can import it from
@@ -137,5 +142,8 @@ readiness observed through `pump()`, startup failure, an entry that throws and
 still becomes ready, early-event refusal without replay, and refusal after
 cancellation. Page-owner and runtime tests verify that
 MTS boot alone settles readiness, and that a BTS failure reports one
-`WorkerFailed` and still publishes `ScriptFinished`, without a `StartupFailed`
-or a listener failure.
+`WorkerEnded` from `ScriptSource::Background` and still publishes
+`ScriptFinished`, without a `StartupFailed`, a `WorkerThrew` or a listener
+failure. Runtime tests fix which of the two worker events a throw and an end
+report, the source each names, and that a worker stopped with `terminate()`
+reports neither.

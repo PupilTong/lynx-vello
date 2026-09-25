@@ -285,16 +285,19 @@ impl WorkerOwner {
         }
     }
 
-    /// Tells the embedder that one of this realm's workers threw or could not
-    /// be started.
+    /// Tells the embedder that the worker `source` names threw, or, when
+    /// `ended`, that it ended without being told to.
     ///
-    /// Reported from here because this is the realm's side of its workers: a
-    /// `WorkerFailed` is the only lifecycle event a worker produces, and the
-    /// outbox it goes out on is the one this side already holds for asking the
-    /// host to fetch a worker's script.
-    pub(super) fn report_failure(&self, error: ScriptError) {
-        self.outbox
-            .engine_event(crate::EngineEvent::WorkerFailed(error));
+    /// Reported from here because this is the realm's side of its workers:
+    /// `WorkerThrew` and `WorkerEnded` are the only lifecycle events a worker
+    /// produces, and the outbox they go out on is the one this side already
+    /// holds for asking the host to fetch a worker's script.
+    pub(super) fn report_failure(&self, source: ScriptSource, ended: bool, error: ScriptError) {
+        self.outbox.engine_event(if ended {
+            crate::EngineEvent::WorkerEnded { source, error }
+        } else {
+            crate::EngineEvent::WorkerThrew { source, error }
+        });
     }
 
     /// Drops what this side kept of a worker that ended on its own — it
@@ -310,10 +313,6 @@ impl WorkerOwner {
 
     /// Which realm the worker under `key` is, while the script still holds
     /// that key.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "no worker event names its source yet")
-    )]
     pub(super) fn source_of(&self, key: WorkerKey) -> Option<ScriptSource> {
         self.sources.borrow().get(&key).copied()
     }

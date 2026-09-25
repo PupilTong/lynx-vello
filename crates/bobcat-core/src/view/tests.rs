@@ -335,7 +335,20 @@ fn only_fatal_events_end_the_view() {
         (EngineEvent::Panicked(error()), true),
         (EngineEvent::ListenerFailed(error()), false),
         (EngineEvent::TimerFailed(error()), false),
-        (EngineEvent::WorkerFailed(error()), false),
+        (
+            EngineEvent::WorkerThrew {
+                source: ScriptSource::Background,
+                error: error(),
+            },
+            false,
+        ),
+        (
+            EngineEvent::WorkerEnded {
+                source: ScriptSource::Background,
+                error: error(),
+            },
+            false,
+        ),
         (
             EngineEvent::ScriptReported {
                 level: "error".to_owned(),

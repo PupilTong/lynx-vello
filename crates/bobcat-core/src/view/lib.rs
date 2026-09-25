@@ -307,7 +307,8 @@ pub enum EngineEvent {
     /// MTS boot completed: the entry module evaluated — its top-level await
     /// settled — and its first flush committed. The BTS Worker plays no part
     /// in it: it may still be importing its entry, may have thrown (reported
-    /// separately as [`EngineEvent::WorkerFailed`]), or may have ended.
+    /// separately as [`EngineEvent::WorkerThrew`]), or may have ended
+    /// ([`EngineEvent::WorkerEnded`]).
     /// `LynxView::pump` records the view as ready before returning this
     /// notification.
     ///
@@ -362,9 +363,35 @@ pub enum EngineEvent {
     /// Not fatal either: only the timer that threw is affected, a repeating
     /// one stays armed, and the realm goes on.
     TimerFailed(ScriptError),
-    /// A worker failed to load or threw, the BTS Worker included. The owning
-    /// view remains usable.
-    WorkerFailed(ScriptError),
+    /// Code in a worker's realm threw, and the worker is still running: its
+    /// script, a message delivered to it, a timer, animation or native module
+    /// callback, a module it imported or a `Future` it awaited. The BTS
+    /// Worker included. Not fatal: HTML reports such an exception at the
+    /// worker and then at the creating realm's `Worker` object without ending
+    /// either, and the owning view remains usable.
+    ///
+    /// `source` is [`ScriptSource::Background`] or a
+    /// [`ScriptSource::Worker`]. Both worker events are reported before the
+    /// creating realm's `Worker` object dispatches its `error` event, so a
+    /// listener there, `preventDefault()` included, has no effect on them.
+    /// Neither is reported for a worker its script has already let go of,
+    /// through `terminate()` or the collection of its `Worker` object, and a
+    /// worker that ends itself with `close()` reports neither.
+    WorkerThrew {
+        source: ScriptSource,
+        error: ScriptError,
+    },
+    /// A worker ended without being told to: its script could not be fetched
+    /// or was not a script, its realm could not be built, or the thread
+    /// workers run on has trapped, including before this worker was started.
+    /// Nothing more arrives from it. Not fatal: the owning view remains
+    /// usable, and a view whose BTS Worker ended goes on without a BTS.
+    ///
+    /// Reported under the same rules as [`EngineEvent::WorkerThrew`].
+    WorkerEnded {
+        source: ScriptSource,
+        error: ScriptError,
+    },
     /// An application reported an error through `lynx.reportError`, or the
     /// runtime reported a recoverable operation failure.
     /// Reporting does not throw into its caller or end the view.
@@ -581,8 +608,9 @@ pub struct ViewSources {
     /// Neither MTS evaluation nor [`EngineEvent::ScriptFinished`] waits for it:
     /// a host update accepted while the BTS entry is still importing is
     /// forwarded to the Worker, which queues it behind that import. An entry
-    /// that throws is reported as [`EngineEvent::WorkerFailed`], like any
-    /// worker script, and leaves the view and the BTS Worker running.
+    /// that throws is reported as [`EngineEvent::WorkerThrew`] from
+    /// [`ScriptSource::Background`], like any worker script, and leaves the
+    /// view and the BTS Worker running.
     pub background_entry: Option<String>,
     /// Initial page data, as JSON text. The engine hands it to the view's
     /// realm unread, as a plain string; `bobcat:runtime` parses it there and

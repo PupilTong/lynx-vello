@@ -286,7 +286,10 @@ fn first_console_message(view: &mut LynxView<Entries>) -> String {
                     first.get_or_insert(message);
                 }
                 EngineEvent::StartupFailed(error) => panic!("boot failed: {error}"),
-                EngineEvent::WorkerFailed(error) | EngineEvent::ScriptRunError(error) => {
+                EngineEvent::WorkerThrew { error, .. }
+                | EngineEvent::WorkerEnded { error, .. }
+                | EngineEvent::ScriptRunError(error)
+                | EngineEvent::Panicked(error) => {
                     panic!("the realm failed: {}", error.message)
                 }
                 _ => {}

@@ -853,6 +853,11 @@ impl MainThreadRuntime {
     ) -> Result<(), MainThreadError> {
         use crate::background::WorkerPayload;
         let failed = matches!(payload, WorkerPayload::Failed(_));
+        // Read before `forget` below removes it. `None` is a key the script
+        // has already let go of, through `terminate()` or the collection of
+        // its `Worker` object: what that worker still says reaches neither a
+        // `Worker` object nor the embedder.
+        let source = self.workers.source_of(key);
         // A worker that closed itself, or whose script or realm failed, has
         // ended: this is where the realm learns it, and so where the right to
         // tell it to stop stops being worth keeping.
@@ -869,7 +874,11 @@ impl MainThreadRuntime {
                 let kind = if failed { "failed" } else { "error" };
                 let data = HostValue::String(error.message.to_string());
                 let location = error.location.clone();
-                self.workers.report_failure(error);
+                // Before the `Worker` object's `error` event below, so no
+                // listener of it decides whether the embedder hears of this.
+                if let Some(source) = source {
+                    self.workers.report_failure(source, failed, error);
+                }
                 (kind, data, location)
             }
         };

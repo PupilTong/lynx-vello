@@ -114,7 +114,7 @@ Object.assign(scope, {
     // This realm has no synchronous host hook. A rejection nothing handles is
     // reported by the checkpoint that ends the current entry, on the path an
     // uncaught exception takes: at the parent Worker's `error` event and to the
-    // embedder as `WorkerFailed`, with this realm still running.
+    // embedder as `WorkerThrew`, with this realm still running.
     void Promise.reject(error);
     return undefined;
   },

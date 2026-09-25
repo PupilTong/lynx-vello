@@ -192,13 +192,19 @@ pub(crate) enum WorkerPayload {
     /// One value, primitive or structured clone, from the worker's
     /// `postMessage`.
     Message(HostValue),
-    /// Something in the worker threw and it is still running — a timer
-    /// callback, which HTML reports at the worker and then at its parent
-    /// without ending either.
+    /// Something in the worker's realm threw and the worker is still
+    /// running, whichever entry into the realm it was: its script, a message
+    /// delivered to it, a timer, animation or native module callback, a
+    /// module it imported, a `Future` it awaited. HTML reports such an
+    /// exception at the worker and then at its parent without ending either.
+    /// The creating realm reports it as `EngineEvent::WorkerThrew`.
     Errored(ScriptError),
-    /// The worker's script could not be fetched, its realm could not be
-    /// built, or the thread it runs on has trapped. The realm is gone with it;
-    /// nothing more will ever arrive under this key.
+    /// The worker's script could not be fetched or was not a script, its
+    /// realm could not be built, or the thread it runs on has trapped —
+    /// while it ran, or before it was started, in which case the creating
+    /// realm queued this itself and nothing was sent to that thread. The
+    /// realm is gone with it; nothing more will ever arrive under this key.
+    /// The creating realm reports it as `EngineEvent::WorkerEnded`.
     Failed(ScriptError),
     /// The worker ended itself with `close()`.
     Closed,

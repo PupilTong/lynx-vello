@@ -237,7 +237,7 @@ fn check_script(view: &mut LynxView<ViewResources>, input: &str) -> Result<bool,
                 eprintln!("event listener failed: {error}");
             }
             // The same standing: only that one timer's turn was lost.
-            EngineEvent::WorkerFailed(error) => {
+            EngineEvent::WorkerThrew { error, .. } | EngineEvent::WorkerEnded { error, .. } => {
                 eprintln!("worker failed: {error}");
             }
             EngineEvent::ScriptReported { level, message }

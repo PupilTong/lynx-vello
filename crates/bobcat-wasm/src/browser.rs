@@ -678,7 +678,8 @@ impl BobcatRenderer {
                 }
                 EngineEvent::ListenerFailed(error)
                 | EngineEvent::TimerFailed(error)
-                | EngineEvent::WorkerFailed(error) => {
+                | EngineEvent::WorkerThrew { error, .. }
+                | EngineEvent::WorkerEnded { error, .. } => {
                     console_error(&js_error(error));
                 }
                 EngineEvent::ScriptReported { level, message } => {

@@ -436,7 +436,7 @@ impl MacApplication {
                     eprintln!("event listener failed: {error}");
                 }
                 // The same standing: only that one timer's turn was lost.
-                EngineEvent::WorkerFailed(error) => {
+                EngineEvent::WorkerThrew { error, .. } | EngineEvent::WorkerEnded { error, .. } => {
                     eprintln!("worker failed: {error}");
                 }
                 EngineEvent::ScriptReported { level, message }

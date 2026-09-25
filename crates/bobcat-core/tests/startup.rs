@@ -654,10 +654,11 @@ const WORKER_ENTRY: &str = "import { Worker } from 'bobcat-internal';
      globalThis.worker = new Worker('./worker.js');
      globalThis.renderPage = function () { __CreatePage('card', 0); };";
 
-/// Pumps until a worker of this view reports a failure carrying `message`,
+/// Pumps until a worker of this view reports a throw carrying `message`,
 /// which for the test below is its interval callback throwing: proof that the
 /// worker booted and that its timer is armed and firing, rather than that some
-/// other worker of the view's went wrong.
+/// other worker of the view's went wrong. A throw rather than an end, because
+/// the worker that threw is still running.
 ///
 /// A fraction of [`HANG_BUDGET`], because this runs inside the thread the
 /// budget is watching: a worker that never boots has to fail here, naming the
@@ -670,12 +671,16 @@ fn wait_for_worker_error<F: ResourceFetcher + 'static>(
     let deadline = std::time::Instant::now() + HANG_BUDGET / 4;
     loop {
         for event in view.pump() {
-            if let EngineEvent::WorkerFailed(error) = event {
-                assert!(
-                    error.to_string().contains(message),
-                    "unexpected worker failure: {error}"
-                );
-                return;
+            match event {
+                EngineEvent::WorkerThrew { error, .. } => {
+                    assert!(
+                        error.to_string().contains(message),
+                        "unexpected worker failure: {error}"
+                    );
+                    return;
+                }
+                EngineEvent::WorkerEnded { error, .. } => panic!("the worker ended: {error}"),
+                _ => {}
             }
         }
         assert!(
@@ -704,7 +709,7 @@ fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
 ///
 /// That is all this checks. The worker arms an interval that throws, which is
 /// what makes its liveness observable from the embedder: every tick is a
-/// nonfatal `WorkerFailed`, so reaching the drops means a worker is running
+/// nonfatal `WorkerThrew`, so reaching the drops means a worker is running
 /// and would go on running. Why its task then ends — the `Terminate` its realm
 /// sends, or the channel closing behind that message — is not something the
 /// two joins returning can tell apart.

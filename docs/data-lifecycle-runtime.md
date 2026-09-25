@@ -26,7 +26,7 @@ BTS module. The BTS bootstrap installs its receiver and returns, allowing the
 initialization message to arrive. JS initializes its inputs and imports the
 entry. An entry that throws is reported through the worker realm's
 `reportError`, which reaches the `Worker`'s `error` event and a nonfatal
-`WorkerFailed`, and leaves BTS running.
+`WorkerThrew`, and leaves BTS running.
 Context/lifecycle messages received during that import wait on its Promise and
 are delivered in order once it settles, success or failure. Undefined object members, nonfinite numbers and negative zero all
 survive; own `__proto__` keys remain ordinary data. Rust

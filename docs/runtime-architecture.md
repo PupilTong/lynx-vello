@@ -761,8 +761,21 @@ reference their channel owner weakly, so finalizers queued during realm release
 cannot retain it. Worker entry/import completions use the Worker's independent
 token and become cancelled when that Worker ends.
 
-Worker errors still produce a nonfatal `WorkerFailed` host event. A private JS
-close notification lets MTS disposal finish when BTS already closed or failed.
+Worker errors still produce a nonfatal host event, one of two. A worker's
+`Errored` — something its realm ran threw, whichever entry it was, and the
+worker still runs — is `EngineEvent::WorkerThrew`; its `Failed` — its script
+could not be loaded, its realm could not be built, or `bobcat-workers`
+trapped, before or after it was started — is `EngineEvent::WorkerEnded`. Both
+carry the `ScriptSource` recorded for the key, which `dispatch_worker_event`
+reads before it forgets an ended worker, and both are reported before the
+realm's JS dispatches the `Worker`'s `error` event, so `preventDefault()` there
+does not suppress them. A key without a source reports neither: a worker the
+script stopped with `terminate()`, or whose `Worker` object was collected, is
+reported to no one, as the JS dispatch drops its events too, and a `close()`
+is no event at all. The source table is kept apart from `live`, so a worker
+created after the trap, which never entered `live`, still reports its
+`WorkerEnded`. A private JS close notification lets MTS disposal finish when
+BTS already closed or failed.
 MTS keeps its Worker reference after that Worker ends; a post to an ended
 Worker is dropped by the host, as a browser drops `postMessage` to a terminated
 worker, and nothing accumulates in a queue for it.
@@ -773,7 +786,7 @@ inner-invoke rule instead: the throw is reported and the walk continues with
 the next listener, through `lynx.reportError` and the host's
 `reportScriptError` (a nonfatal `ScriptReported`) in the MTS realm, and through
 the worker global's `reportError`, hence the parent `Worker`'s `error` event
-and a nonfatal `WorkerFailed`, in a worker realm.
+and a nonfatal `WorkerThrew`, in a worker realm.
 
 Each MTS boot starts one BTS Worker named `lynx-bg` once its entry import has
 settled, whether the entry succeeded or threw.
@@ -825,14 +838,15 @@ throws at the `dispatchEvent` call. That pre-connection queue is only for
 messages the MTS entry itself produces, before boot constructs the Worker; it
 is not a holding area for anything else. The worker's task queues what
 is posted until its entry has evaluated. Worker release, source cancellation
-and `WorkerFailed` reporting apply to BTS too. `ScriptFinished` means MTS boot
-finished: the entry module evaluated, its top-level await settled, and its
-first flush committed. The BTS Worker's state — still importing its entry, its
+and `WorkerThrew` / `WorkerEnded` reporting apply to BTS too, from
+`ScriptSource::Background`. `ScriptFinished` means MTS boot finished: the
+entry module evaluated, its top-level await settled, and its first flush
+committed. The BTS Worker's state — still importing its entry, its
 entry threw, or it ended — is no part of that, so a BTS entry whose top-level
 await never settles does not keep the view from becoming ready.
 A BTS entry that throws is reported like any worker script: the worker
 realm's `reportError` surfaces it at the `Worker`'s `error` event and as a
-nonfatal `WorkerFailed`, and BTS stays up and still takes messages.
+nonfatal `WorkerThrew`, and BTS stays up and still takes messages.
 No BTS failure ends the view.
 `LynxView::pump` records readiness before returning `ScriptFinished`, and
 `is_ready()` exposes that state. Host global events require that observed MTS

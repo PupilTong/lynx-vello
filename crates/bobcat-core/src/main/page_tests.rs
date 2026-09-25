@@ -2195,7 +2195,7 @@ lynx.getJSContext().addEventListener('flood', () => {
 }
 
 #[test]
-fn a_bts_worker_that_fails_reports_worker_failed_and_leaves_boot_alone() {
+fn a_bts_worker_that_fails_reports_worker_ended_and_leaves_boot_alone() {
     on_a_js_thread(|thread| async move {
         let (context, workers) = group(&thread);
         let mut sources = ViewSources::new("app:///", "app:///main.js", SCREEN);
@@ -2238,9 +2238,15 @@ fn a_bts_worker_that_fails_reports_worker_failed_and_leaves_boot_alone() {
             .unwrap();
         harness
             .until("the BTS failure was never reported", |h| {
-                h.events
-                    .iter()
-                    .any(|e| matches!(e, EngineEvent::WorkerFailed(_)))
+                h.events.iter().any(|e| {
+                    matches!(
+                        e,
+                        EngineEvent::WorkerEnded {
+                            source: crate::ScriptSource::Background,
+                            ..
+                        }
+                    )
+                })
             })
             .await;
         assert!(
@@ -2251,10 +2257,15 @@ fn a_bts_worker_that_fails_reports_worker_failed_and_leaves_boot_alone() {
             .events
             .iter()
             .filter_map(|event| match event {
-                EngineEvent::WorkerFailed(error) => Some(error.to_string()),
+                EngineEvent::WorkerEnded {
+                    source: crate::ScriptSource::Background,
+                    error,
+                } => Some(error.to_string()),
                 EngineEvent::StartupFailed(_)
                 | EngineEvent::ListenerFailed(_)
-                | EngineEvent::ScriptRunError(_) => {
+                | EngineEvent::ScriptRunError(_)
+                | EngineEvent::WorkerThrew { .. }
+                | EngineEvent::WorkerEnded { .. } => {
                     panic!("BTS startup failure was misreported: {event:?}")
                 }
                 _ => None,

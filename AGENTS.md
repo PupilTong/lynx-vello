@@ -936,15 +936,23 @@ that threw, or a host call into the realm that failed — the entry's
 evaluation, a module load, a `Future` settle, a page update, an animation
 frame — during boot or after it), `ListenerFailed` (a listener that threw
 during event delivery), `TimerFailed` (a `setTimeout` or `setInterval`
-callback that threw when it came due) and `Panicked` (the engine panicked
-while it served the view). The three script failures are separate by the
-kind of entry they happened in, also where the code that failed was a
+callback that threw when it came due), `WorkerThrew` (code in a worker's
+realm threw, BTS included, and the worker still runs), `WorkerEnded` (a
+worker ended without being told to: its script could not be loaded, its realm
+could not be built, or the worker thread trapped) and `Panicked` (the engine
+panicked while it served the view). The three script failures are separate by
+the kind of entry they happened in, also where the code that failed was a
 continuation that entry resumed, and none of them is fatal: the realm goes
 on, the walk continues, a repeating timer stays armed, and later events and
-timers are delivered as normal. `EngineEvent::is_fatal` names the events that
-end the view (`StartupFailed` and `Panicked`); `LynxView::pump` ends a view on
-exactly those, and an embedder asks it rather than matching variants. Every
-panic is reported through one constructor, `EngineEvent::from_panic`, from
+timers are delivered as normal. The two worker events are not fatal either;
+each carries the worker's `ScriptSource` (`Background` or `Worker(WorkerId)`),
+is reported before the creating realm's `Worker` object dispatches its `error`
+event, so no listener there suppresses it, and is reported only while the
+script still holds that worker's key: never after `terminate()`, and never for
+`close()`. `EngineEvent::is_fatal` names the events that end the view
+(`StartupFailed` and `Panicked`); `LynxView::pump` ends a view on exactly
+those, and an embedder asks it rather than matching variants. Every panic is
+reported through one constructor, `EngineEvent::from_panic`, from
 `Page::trapped` (a job or a task of the view, an input dispatch included),
 `finish_view` (the group thread reaping the view's task) and the Wasm panic
 hook. A frame the engine wants drawn rides the same wakeup, and the
@@ -1041,7 +1049,8 @@ the MTS realm closes its remaining senders. Apart from those handles, the
 realm's `WorkerOwner` records each key's public `ScriptSource` (`Background`,
 or `Worker(WorkerId)`) from the moment the key is allocated until
 `terminate()` or delivery of the worker's own end, so a worker that fails
-before it is started has a source too. Host functions reference the channel
+before it is started has a source too; `WorkerThrew` and `WorkerEnded` carry
+it, and a key without one reports neither. Host functions reference the channel
 owner weakly, so queued finalizers cannot keep a released realm's workers or
 group thread alive. The script wait is a `biased` select over the message
 channel first and that token behind it, so a `terminate` landing in the same
@@ -1073,8 +1082,10 @@ Worker entry/import requests use the Worker's cancellation scope, and host
 release does not cancel it ahead of JS disposal. Once the MTS realm is
 released, closing its senders ends remaining Workers, including after failed
 boot; Rust has no Worker termination sweep. A `WorkerEvent` delivers messages
-and errors to the owning realm; worker errors also produce nonfatal
-`EngineEvent::WorkerFailed`. See `docs/runtime-architecture.md` for the
+and errors to the owning realm; a worker's `Errored` also produces a nonfatal
+`EngineEvent::WorkerThrew` and its `Failed` a nonfatal
+`EngineEvent::WorkerEnded`, each naming the worker by the `ScriptSource` its
+`WorkerOwner` recorded. See `docs/runtime-architecture.md` for the
 transport and lifetime boundaries.
 
 **After the MTS entry import settles, whether the entry succeeded or threw,
@@ -1114,7 +1125,7 @@ rule: a listener that throws is reported and the walk continues with the next �
 in the MTS realm through `lynx.reportError` and the host's `reportScriptError`,
 as a nonfatal `ScriptReported`; in a worker realm through the worker global's
 `reportError`, reaching the parent `Worker`'s `error` event and a nonfatal
-`WorkerFailed`. Origins identify the sending CoreContext or JSContext. MTS
+`WorkerThrew`. Origins identify the sending CoreContext or JSContext. MTS
 queues payload references until the Worker is connected; Worker postMessage
 takes the structured-clone snapshot above for early and connected sends alike,
 and `toJSON` is never consulted. Do not add a custom codec or a deep clone on
@@ -1135,10 +1146,11 @@ committed. The BTS Worker's state is no part of it, so a BTS entry whose
 top-level await never settles does not keep the view from becoming ready. A BTS
 entry that throws is reported like any worker script: `reportError` in the
 worker realm surfaces it at the `Worker`'s `error` event and as a nonfatal
-`WorkerFailed`; the BTS keeps running and still takes messages, and no BTS
-failure ends the view. MTS keeps its Worker reference after that Worker ends; a
-post to an ended Worker is dropped by the host, and the pre-connection FIFO
-holds only what the MTS entry sends before boot constructs the Worker.
+`WorkerThrew` from `ScriptSource::Background`; the BTS keeps running and still
+takes messages, and no BTS failure ends the view. MTS keeps its Worker
+reference after that Worker ends; a post to an ended Worker is dropped by the
+host, and the pre-connection FIFO holds only what the MTS entry sends before
+boot constructs the Worker.
 
 BTS also exposes stable `getApp()` and `getNativeApp()` objects. The current
 app hooks receive `OnLifecycleEvent`, `publishEvent`, `publicComponentEvent`

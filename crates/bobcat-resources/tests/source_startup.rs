@@ -361,9 +361,11 @@ async fn workers_load_relative_to_entry_and_route_back_to_their_own_views() {
             for event in view.pump() {
                 match event {
                     EngineEvent::StartupFailed(error) => panic!("startup: {error}"),
-                    EngineEvent::WorkerFailed(error)
+                    EngineEvent::WorkerThrew { error, .. }
+                    | EngineEvent::WorkerEnded { error, .. }
                     | EngineEvent::ListenerFailed(error)
-                    | EngineEvent::ScriptRunError(error) => panic!("script: {error}"),
+                    | EngineEvent::ScriptRunError(error)
+                    | EngineEvent::Panicked(error) => panic!("script: {error}"),
                     _ => {}
                 }
             }
@@ -440,9 +442,11 @@ async fn xml_background_loads_esm_through_the_view_fetcher() {
                     received_queued_event = true;
                 }
                 EngineEvent::StartupFailed(error) => panic!("startup: {error}"),
-                EngineEvent::WorkerFailed(error)
+                EngineEvent::WorkerThrew { error, .. }
+                | EngineEvent::WorkerEnded { error, .. }
                 | EngineEvent::ListenerFailed(error)
-                | EngineEvent::ScriptRunError(error) => panic!("script: {error}"),
+                | EngineEvent::ScriptRunError(error)
+                | EngineEvent::Panicked(error) => panic!("script: {error}"),
                 _ => {}
             }
         }

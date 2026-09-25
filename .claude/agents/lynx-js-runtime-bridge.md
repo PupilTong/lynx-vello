@@ -124,9 +124,14 @@ Landed and not to be regressed:
   own. A checkpoint error beside a failure an entry is already reporting is
   dropped with the other leftover rejections, never kept for the next entry.
 - The BTS is a `Worker` named `lynx-bg` on the group's `bobcat-workers` runtime.
-  A BTS failure is a nonfatal `EngineEvent::WorkerFailed` — never
-  `StartupFailed`, never view teardown. `ScriptFinished` means MTS boot settled
-  and says nothing about the BTS.
+  A BTS failure is a nonfatal `EngineEvent::WorkerThrew` (it threw and still
+  runs) or `WorkerEnded` (it ended without being told to) from
+  `ScriptSource::Background` — never `StartupFailed`, never view teardown.
+  `ScriptFinished` means MTS boot settled and says nothing about the BTS.
+- A worker event names its worker by the `ScriptSource` the realm's
+  `WorkerOwner` recorded when it allocated the key, and is reported before the
+  JS `error` event. A key the script let go of (`terminate()`, collection)
+  has no source and reports nothing; `close()` reports nothing.
 - Cross-thread messages are QuickJS structured clones. A refused value
   (function, `Symbol`, `Map`, `Set`, `RegExp`, `Error`, `DataView`, accessor)
   **throws synchronously at the send**. Do not add a custom codec, a deep
