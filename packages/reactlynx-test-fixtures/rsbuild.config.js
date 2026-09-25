@@ -31,7 +31,8 @@ export default defineConfig(({ env }) => {
       ])),
       ...(mode === 'production' ? {
         ...Object.fromEntries(['react-bts-query', 'basic-bindtap', 'basic-class-selector',
-          'basic-performance-large-css', 'basic-mts-run-on-main-thread', 'basic-mts-run-on-background']
+          'basic-performance-large-css', 'basic-mts-run-on-main-thread', 'basic-mts-run-on-background',
+          'react-scroll-timeline']
           .map(fixture => [`web-${fixture}`, {
             source: { entry: { [fixture]: fixture === 'react-bts-query'
               ? `./src/${fixture}.jsx` : `./src/${fixture}/index.jsx` } },

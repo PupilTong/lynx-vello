@@ -1,0 +1,36 @@
+.page {
+  display: flex;
+  flex-direction: column;
+  width: 800px;
+  height: 600px;
+  background-color: white;
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  width: 300px;
+  height: 300px;
+  overflow: scroll;
+}
+
+.row {
+  flex-shrink: 0;
+  width: 300px;
+  height: 100px;
+  background-color: rgb(0, 0, 255);
+}
+
+.reveal {
+  animation: reveal linear both;
+  animation-timeline: scroll();
+}
+
+@keyframes reveal {
+  from {
+    opacity: 0.25;
+  }
+  to {
+    opacity: 1;
+  }
+}

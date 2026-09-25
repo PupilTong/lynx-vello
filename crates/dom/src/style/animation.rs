@@ -192,7 +192,7 @@ const COMPOSITES: [(LonghandId, u8); 5] = [
 /// holds the last keyframe. A progress-driven animation is current exactly
 /// while its timeline is active (`timeline_active`): on an inactive one it
 /// is idle, as in Blink.
-fn animation_has_side_effects(
+pub(crate) fn animation_has_side_effects(
     animation: &Animation,
     timeline_active: impl FnOnce() -> bool,
 ) -> bool {

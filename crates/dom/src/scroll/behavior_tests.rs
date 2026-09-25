@@ -52,7 +52,7 @@ impl Harness {
         let offsets =
             |slot: &crate::visual::ScrollSlot| Some(self.doc.dom.scroll_offset(slot.node));
         let ratio = self.doc.dom.device_pixel_ratio();
-        let animations = frame.sample_animations(None);
+        let animations = frame.sample_animations(None, &offsets);
         let stickies = frame.sample_stickies(ratio, &offsets);
         let moved = frame
             .space_samples(&animations, &stickies, ratio, &offsets)

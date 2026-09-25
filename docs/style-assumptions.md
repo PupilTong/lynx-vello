@@ -203,9 +203,15 @@ the semantics are stylo's.** Everything below refines that sentence.
     advances the timeline for it, so its cascade value holds at the last tick
     or commit until something ticks or commits again. `getComputedStyle` on an
     element fading by an exported curve therefore reads the opacity of the
-    last main-thread reading while the screen shows the sampled one. The same
-    stale reading is why transitions do not export: one a restyle retargets or
-    reverses would start from it. Browsers say what closing it takes: keep the
+    last main-thread reading while the screen shows the sampled one. A curve
+    on a scroll timeline (26) is stale the same way against the offset: main
+    adopts the painter's scroll at the mailbox marker — `scroll_offset` and
+    layout reads follow it — but leaves an element whose committed curve
+    samples that scroll container to the painter, so its cascade value holds
+    at the last commit's offset until the next commit's resolution re-samples
+    it. (Transitions export all the same: every job syncs main's clock to the
+    painter's first, so a restyle that retargets or reverses one reads the
+    instant the painter showed.) Browsers say what closing it takes: keep the
     cascade authoritative and re-sample on demand rather than let the two
     diverge. Not built.
 
@@ -828,7 +834,7 @@ and §D.16 with what the wire format actually permits.)*
     table, which now carries each slot's chaining policy and snap positions.
 
 26. **Scroll-driven animations (user-directed): scroll-animations-1
-    on the main thread, Blink where the specs are silent.** Native Lynx has no
+    on the main thread and the painter, Blink where the specs are silent.** Native Lynx has no
     scroll timelines; the surface and every choice are in
     [tracking/css-animation.md](tracking/css-animation.md#scroll-driven-animations).
     Two rules belong here because they are about the cascade:
@@ -845,8 +851,10 @@ and §D.16 with what the wire format actually permits.)*
       at the offset it found, never its base value first. What that final
       pass changes is re-sampled at the next commit, as §5.1 allows. Between
       commits an adopted scroll re-samples only the animations its container
-      drives (`Document::advance_scroll_timelines`) — one animation-only
-      restyle, no layout unless an animated property moves a box.
+      drives that the committed frame does not sample itself
+      (`Document::advance_scroll_timelines`) — one animation-only restyle, no
+      layout unless an animated property moves a box. An exported one is the
+      painter's between commits, and stale here (12).
     - **An animation on an inactive timeline is not current.** It is idle
       (Blink), so it has no effect whatever its fill and none of 11's side
       effects: no stacking context, group or containing block. A binding is

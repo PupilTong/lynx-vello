@@ -767,7 +767,12 @@ impl FilterTextures {
     ) -> Result<&[Option<ImageData>], GpuError> {
         let groups = frame.filter_groups();
         let commit = frame.commit_id();
-        if self.mark_due(commit, groups, scroll_generation, animation_now) {
+        let readings = Readings {
+            scroll_generation,
+            animation_now,
+            scroll_curves: frame.composes_scroll_curves(),
+        };
+        if self.mark_due(commit, groups, readings) {
             if !self.due.contains(&true) {
                 return Ok(&self.images);
             }
@@ -791,11 +796,8 @@ impl FilterTextures {
         // the cache serving a table it did not finish.
         self.commit = None;
         self.readings.clear();
-        self.readings.extend(
-            groups
-                .iter()
-                .map(|group| reading(group, scroll_generation, animation_now)),
-        );
+        self.readings
+            .extend(groups.iter().map(|group| reading(group, readings)));
         if groups.is_empty() {
             self.commit = Some(commit);
             return Ok(&self.images);
@@ -838,13 +840,7 @@ impl FilterTextures {
     /// Fills `due` with the entries this prepare bakes, answering whether the
     /// cached bakes belong to `commit`: of another commit every entry bakes,
     /// of the cached one only those whose readings moved.
-    fn mark_due(
-        &mut self,
-        commit: u64,
-        groups: &[crate::FilterGroup],
-        scroll_generation: u64,
-        animation_now: Option<f64>,
-    ) -> bool {
+    fn mark_due(&mut self, commit: u64, groups: &[crate::FilterGroup], readings: Readings) -> bool {
         // The length checks are a net, not the contract: a commit id carries
         // no document identity (see the module doc), and a table of the wrong
         // length is the one such mix-up that is cheap to catch.
@@ -854,9 +850,10 @@ impl FilterTextures {
         self.due.clear();
         if cached {
             self.due.extend(
-                groups.iter().zip(&self.readings).map(|(group, &taken)| {
-                    reading(group, scroll_generation, animation_now) != taken
-                }),
+                groups
+                    .iter()
+                    .zip(&self.readings)
+                    .map(|(group, &taken)| reading(group, readings) != taken),
             );
         } else {
             self.due.resize(groups.len(), true);
@@ -981,27 +978,36 @@ impl FilterTextures {
     }
 }
 
+/// One prepare's readings: the compositor's scroll generation and clock
+/// reading, and whether the frame composes a curve on a scroll timeline.
+#[derive(Clone, Copy)]
+struct Readings {
+    scroll_generation: u64,
+    animation_now: Option<f64>,
+    scroll_curves: bool,
+}
+
 /// The readings one entry's bake depends on: the scroll generation when its
 /// range rides a scroll or sticky node its own space does not, or draws a
-/// backdrop that reads it, and the timeline reading when it [samples
-/// animations](crate::FilterGroup::samples_animations); each zero otherwise.
+/// backdrop that reads it, or when it [samples
+/// animations](crate::FilterGroup::samples_animations) and some composed
+/// curve reads a scroll offset — whose source need not be on the range's
+/// paths at all; and the timeline reading when it samples animations; each
+/// zero otherwise.
 ///
 /// A timeline reading enters as its bit pattern, and an absent one as zero —
 /// which is also `0.0`'s pattern. The two therefore collide at the timeline's
 /// own origin, and the cost is one stale bake in the instant a page's first
 /// exported curve starts.
-fn reading(
-    group: &crate::FilterGroup,
-    scroll_generation: u64,
-    animation_now: Option<f64>,
-) -> (u64, u64) {
-    let generation = if group.inner_chains {
-        scroll_generation
+fn reading(group: &crate::FilterGroup, readings: Readings) -> (u64, u64) {
+    let animates = group.samples_animations();
+    let generation = if group.inner_chains || (animates && readings.scroll_curves) {
+        readings.scroll_generation
     } else {
         0
     };
-    let instant = if group.samples_animations() {
-        animation_now.map_or(0, f64::to_bits)
+    let instant = if animates {
+        readings.animation_now.map_or(0, f64::to_bits)
     } else {
         0
     };
@@ -1118,8 +1124,17 @@ fn ensure_bank<'bank>(
 mod tests {
     use super::{
         DECIMATE_ABOVE, FilterTextures, MAX_FILTER_DIMENSION, MAX_LEVELS, MAX_TAPS, Params,
-        decimate, kernel, level_size, reading,
+        Readings, decimate, kernel, level_size, reading,
     };
+
+    /// The readings of a frame composing no scroll-timeline curve.
+    const fn at(scroll_generation: u64, animation_now: Option<f64>) -> Readings {
+        Readings {
+            scroll_generation,
+            animation_now,
+            scroll_curves: false,
+        }
+    }
 
     /// A kernel is a probability distribution: the centre plus twice every
     /// symmetric tap has to be one, or the blur changes the image's total
@@ -1286,26 +1301,43 @@ mod tests {
 
         let plain = FilterGroup::new(1.0, rect, None);
         assert_eq!(
-            reading(&plain, 9, Some(2.5)),
-            reading(&plain, 400, Some(77.0)),
+            reading(&plain, at(9, Some(2.5))),
+            reading(&plain, at(400, Some(77.0))),
             "a lone blur group depends on neither reading",
         );
         let scrolling = entry(true, false);
-        assert_ne!(reading(&scrolling, 9, None), reading(&scrolling, 10, None));
+        assert_ne!(
+            reading(&scrolling, at(9, None)),
+            reading(&scrolling, at(10, None))
+        );
         assert_eq!(
-            reading(&scrolling, 9, Some(2.5)),
-            reading(&scrolling, 9, Some(77.0)),
+            reading(&scrolling, at(9, Some(2.5))),
+            reading(&scrolling, at(9, Some(77.0))),
             "but not on the timeline",
         );
         let animating = entry(false, true);
         assert_ne!(
-            reading(&animating, 9, Some(2.5)),
-            reading(&animating, 9, Some(77.0)),
+            reading(&animating, at(9, Some(2.5))),
+            reading(&animating, at(9, Some(77.0))),
         );
         assert_eq!(
-            reading(&animating, 9, Some(2.5)),
-            reading(&animating, 10, Some(2.5)),
+            reading(&animating, at(9, Some(2.5))),
+            reading(&animating, at(10, Some(2.5))),
             "but not on the scroll generation",
+        );
+        let scrolled = |generation| Readings {
+            scroll_curves: true,
+            ..at(generation, None)
+        };
+        assert_ne!(
+            reading(&animating, scrolled(9)),
+            reading(&animating, scrolled(10)),
+            "unless a composed curve reads a scroll offset",
+        );
+        assert_eq!(
+            reading(&plain, scrolled(9)),
+            reading(&plain, scrolled(10)),
+            "which a range no curve moves does not read",
         );
     }
 
@@ -1321,24 +1353,24 @@ mod tests {
         sampling.inner_animations = true;
         let groups = [FilterGroup::new(1.0, rect, None), sampling];
         let mut textures = FilterTextures::default();
-        assert!(!textures.mark_due(3, &groups, 0, Some(2.5)));
+        assert!(!textures.mark_due(3, &groups, at(0, Some(2.5))));
         assert_eq!(textures.due, [true, true], "a first commit bakes both");
         // What a successful prepare at that instant leaves behind.
         textures.commit = Some(3);
         textures.images = vec![None; groups.len()];
         textures.readings = groups
             .iter()
-            .map(|group| reading(group, 0, Some(2.5)))
+            .map(|group| reading(group, at(0, Some(2.5))))
             .collect();
-        assert!(textures.mark_due(3, &groups, 0, Some(2.5)));
+        assert!(textures.mark_due(3, &groups, at(0, Some(2.5))));
         assert_eq!(textures.due, [false, false], "the same instant bakes none");
-        assert!(textures.mark_due(3, &groups, 7, Some(77.0)));
+        assert!(textures.mark_due(3, &groups, at(7, Some(77.0))));
         assert_eq!(
             textures.due,
             [false, true],
             "a tick and a scroll re-bake only the sampling entry"
         );
-        assert!(!textures.mark_due(4, &groups, 0, Some(2.5)));
+        assert!(!textures.mark_due(4, &groups, at(0, Some(2.5))));
         assert_eq!(textures.due, [true, true], "and a new commit bakes both");
     }
 
@@ -1390,21 +1422,79 @@ mod tests {
 
             let commit = frame.commit_id();
             let mut textures = FilterTextures::default();
-            assert!(!textures.mark_due(commit, groups, 0, Some(0.25)));
+            assert!(!textures.mark_due(commit, groups, at(0, Some(0.25))));
             // What a successful prepare at those readings leaves behind.
             textures.commit = Some(commit);
             textures.images = vec![None; groups.len()];
             textures.readings = groups
                 .iter()
-                .map(|group| reading(group, 0, Some(0.25)))
+                .map(|group| reading(group, at(0, Some(0.25))))
                 .collect();
-            assert!(textures.mark_due(commit, groups, generation, Some(now)));
+            assert!(textures.mark_due(commit, groups, at(generation, Some(now))));
             assert_eq!(
                 textures.due,
                 [true, true],
                 "{behind}: the backdrop re-bakes, and so does the group drawing it",
             );
         }
+    }
+
+    /// A backdrop over a card that a list elsewhere drives by a named
+    /// scroll timeline: nothing in the backdrop's range rides the list's
+    /// scroll node, yet a scroll moves the card, so the frame's scroll
+    /// curve makes the scroll generation one of the backdrop's readings.
+    #[test]
+    fn a_backdrop_over_an_off_path_scroll_curve_re_bakes_on_scroll() {
+        let mut doc = crate::test_common::Doc::with_css(
+            "page { display: flex; position: relative; width: 800px; height: 600px; }
+             .card { display: flex; position: absolute; left: 40px; top: 20px;
+                     width: 60px; height: 60px; background-color: navy;
+                     animation: slide 1s linear both; animation-timeline: --list; }
+             @keyframes slide { from { transform: translateX(0px); }
+                                to { transform: translateX(200px); } }
+             .frost { display: flex; position: absolute; left: 20px; top: 10px;
+                      width: 400px; height: 100px; backdrop-filter: blur(4px); }
+             .list { display: flex; flex-direction: column; position: absolute;
+                     left: 0px; top: 200px; overflow: scroll; width: 300px; height: 200px;
+                     scroll-timeline: --list; }
+             .row { display: flex; flex-shrink: 0; width: 300px; height: 40px;
+                    background-color: teal; }",
+        );
+        let root = doc.root;
+        doc.el(root, "view.card");
+        doc.el(root, "view.frost");
+        let list = doc.el(root, "view.list");
+        for _ in 0..10 {
+            doc.el(list, "view.row");
+        }
+        let frame = doc.dom.commit();
+        assert_eq!(frame.animation_slots().len(), 1, "the card exports");
+        assert!(frame.composes_scroll_curves() && !frame.has_live_curves());
+        let [backdrop] = frame.filter_groups() else {
+            panic!("one backdrop, got {:?}", frame.filter_groups());
+        };
+        assert!(backdrop.samples_animations(), "the card moves in its range");
+        assert!(!backdrop.inner_chains, "and nothing rides the list there");
+
+        let groups = frame.filter_groups();
+        let commit = frame.commit_id();
+        let readings = |scroll_generation| Readings {
+            scroll_generation,
+            animation_now: None,
+            scroll_curves: frame.composes_scroll_curves(),
+        };
+        let mut textures = FilterTextures::default();
+        assert!(!textures.mark_due(commit, groups, readings(0)));
+        textures.commit = Some(commit);
+        textures.images = vec![None; groups.len()];
+        textures.readings = groups
+            .iter()
+            .map(|group| reading(group, readings(0)))
+            .collect();
+        assert!(textures.mark_due(commit, groups, readings(0)));
+        assert_eq!(textures.due, [false], "an unscrolled frame keeps the bake");
+        assert!(textures.mark_due(commit, groups, readings(1)));
+        assert_eq!(textures.due, [true], "a scroll re-bakes it");
     }
 
     /// The uniform block's WGSL offsets, which nothing but this test can see.

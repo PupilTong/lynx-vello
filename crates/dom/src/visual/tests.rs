@@ -2046,7 +2046,11 @@ fn an_opacity_animation_exports_a_curve_and_frees_the_main_thread() {
     let slots = frame.animation_slots();
     assert_eq!(slots.len(), 1);
     let sampled = slots[0]
-        .sample(Some(0.5), &mut AnimationValueMap::default())
+        .sample(
+            Some(0.5),
+            &frame.committed_offsets(),
+            &mut AnimationValueMap::default(),
+        )
         .alpha
         .expect("the slot exports an opacity curve");
     assert!(
@@ -2394,7 +2398,11 @@ fn a_curve_ends_where_the_main_thread_finds_its_animation_over() {
     };
     let end = slot.curve.expires_at.expect("the fade ends");
     let mut values = AnimationValueMap::default();
-    slot.curve.values_at(end.next_down(), &mut values);
+    slot.curve.values_at(
+        Some(end.next_down()),
+        &frame.committed_offsets(),
+        &mut values,
+    );
     assert!(
         values.contains_key(&OwnedPropertyDeclarationId::Longhand(LonghandId::Opacity)),
         "the hold instant samples the fade"
@@ -2419,13 +2427,17 @@ fn an_overshooting_opacity_never_composes_past_one() {
     let mut overshot = false;
     for step in 0_u8..=64 {
         let now = 0.25 + f64::from(step) / 64.0;
-        slot.curve.values_at(now, &mut values);
+        slot.curve
+            .values_at(Some(now), &frame.committed_offsets(), &mut values);
         if let Some(AnimationValue::Opacity(raw)) =
             values.get(&OwnedPropertyDeclarationId::Longhand(LonghandId::Opacity))
         {
             overshot |= *raw > 1.0;
         }
-        let alpha = slot.sample(Some(now), &mut values).alpha.expect("a fade");
+        let alpha = slot
+            .sample(Some(now), &frame.committed_offsets(), &mut values)
+            .alpha
+            .expect("a fade");
         assert!((0.0..=1.0).contains(&alpha), "{now}: {alpha}");
     }
     assert!(overshot, "the easing overshoots");
@@ -2696,5 +2708,449 @@ fn a_box_and_its_clip_ride_the_box_space_and_its_content_the_content_space() {
         clip(stick),
         Some(1),
         "a clip rides its box space, not its own scroll"
+    );
+}
+
+/// `scroll(self)` on an animated scroller binds the scroller's own slot,
+/// which the build allocates after the element's animation slot: a composed
+/// offset fades it, and a `contain-bounce` stretch past either end clamps the
+/// progress to the scroll range, where a fade with no fill still has an
+/// effect.
+#[test]
+fn a_scroll_self_timeline_binds_the_scrollers_own_slot() {
+    use crate::visual::curves::Timeline;
+    use crate::visual::{ScrollOffsets, ScrollSlot, SpaceKind};
+
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; }
+         .scroller { display: flex; flex-direction: column; overflow: scroll;
+                     width: 200px; height: 200px;
+                     animation: fade linear; animation-timeline: scroll(self); }
+         .filler { flex-shrink: 0; width: 200px; height: 1200px; }
+         @keyframes fade { from { opacity: 1; } to { opacity: 0; } }",
+    );
+    let root = h.root();
+    let scroller = h.el(root, "view.scroller");
+    h.el(scroller, "view.filler");
+    let frame = h.doc.dom.commit();
+    let [slot] = frame.animation_slots() else {
+        panic!("the scroller exports its fade");
+    };
+    let Timeline::Scroll(scroll) = &slot.curve.animations[0].1 else {
+        panic!("the fade reads a scroll timeline");
+    };
+    let own = frame.slot_of(scroller).expect("the scroller has a slot");
+    assert_eq!(scroll.slot, Some(own), "bound to its own slot");
+    let position = |kind: SpaceKind| {
+        frame
+            .order
+            .spaces()
+            .iter()
+            .position(|space| space.kind == kind)
+            .expect("the slot has a space")
+    };
+    assert!(position(SpaceKind::Animation(0)) < position(SpaceKind::Scroll(own)));
+    let alpha = |y: f32| {
+        let offset_of =
+            |slot: &ScrollSlot| (slot.node == scroller).then_some(crate::Vector2D::new(0.0, y));
+        let offsets = ScrollOffsets {
+            slots: frame.scroll_slots(),
+            offset_of: &offset_of,
+        };
+        slot.sample(None, &offsets, &mut AnimationValueMap::default())
+            .alpha
+    };
+    assert_eq!(alpha(0.0), Some(1.0));
+    assert_eq!(alpha(500.0), Some(0.5));
+    assert_eq!(alpha(1000.0), Some(0.0));
+    assert_eq!(alpha(1400.0), Some(0.0), "a stretch is no scroll offset");
+    assert_eq!(alpha(-80.0), Some(1.0));
+}
+
+/// An animation on an inactive timeline is not current, so it animates
+/// nothing, as the driver's bits count it: beside a clock fade, a slide on a
+/// `scroll()` whose scroller cannot scroll yet exports no transform track,
+/// and stays in the curve contributing nothing.
+#[test]
+fn an_animation_on_an_inactive_timeline_animates_nothing_in_the_export() {
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; }
+         .scroller { display: flex; flex-direction: column; overflow: scroll;
+                     width: 200px; height: 200px; }
+         .card { flex-shrink: 0; width: 40px; height: 40px; background-color: teal;
+                 animation: fade 1s infinite, slide linear both;
+                 animation-timeline: auto, scroll(); }
+         @keyframes fade { from { opacity: 1; } to { opacity: 0.2; } }
+         @keyframes slide { from { transform: translateX(0px); }
+                            to { transform: translateX(100px); } }",
+    );
+    let root = h.root();
+    let scroller = h.el(root, "view.scroller");
+    let card = h.el(scroller, "view.card");
+    let document = &mut h.doc.dom;
+    document.render();
+    document.advance_animations(0.0);
+    document.advance_animations(0.25);
+    let frame = document.commit();
+    let [slot] = frame.animation_slots() else {
+        panic!("the card exports its fade");
+    };
+    assert_eq!(slot.node, card);
+    assert!(
+        slot.curve.animates(LonghandId::Transform),
+        "the slide stays"
+    );
+    assert!(slot.curve.transform.is_none(), "but moves nothing");
+    assert!(
+        slot.sample(
+            Some(0.5),
+            &frame.committed_offsets(),
+            &mut AnimationValueMap::default()
+        )
+        .alpha
+        .is_some()
+    );
+}
+
+/// A scroll-driven transform's reach eases in the direction its binding
+/// samples: after `animation-direction: normal, normal` becomes `normal,
+/// reverse`, stylo's `return;` deviation leaves the second clone `normal`
+/// while its binding reads `reverse`, easing through the `to` keyframe's
+/// overshooting function — and every delta a sweep over the scroll range
+/// composes stays inside the reach.
+#[test]
+fn a_scroll_driven_reach_eases_in_the_bindings_direction() {
+    use stylo::properties::longhands::animation_direction::computed_value::single_value::T as AnimationDirection;
+
+    use crate::vello::kurbo::{Point, Rect};
+    use crate::visual::curves::Timeline;
+    use crate::visual::{ScrollOffsets, ScrollSlot};
+
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; }
+         .scroller { display: flex; flex-direction: column; overflow: scroll;
+                     width: 300px; height: 200px; }
+         .card { flex-shrink: 0; width: 40px; height: 40px; background-color: teal;
+                 animation-name: fade, slide; animation-duration: 1s, 1s;
+                 animation-iteration-count: infinite, 1; animation-fill-mode: none, both;
+                 animation-timing-function: linear, linear;
+                 animation-timeline: auto, scroll(); }
+         .filler { flex-shrink: 0; width: 300px; height: 1000px; }
+         @keyframes fade { from { opacity: 1; } to { opacity: 0.2; } }
+         @keyframes slide {
+             from { transform: translateX(0px); }
+             to { transform: translateX(100px);
+                  animation-timing-function: cubic-bezier(0.5, -1, 0.5, 2); } }",
+    );
+    let root = h.root();
+    let scroller = h.el(root, "view.scroller");
+    let card = h.el(scroller, "view.card");
+    h.el(scroller, "view.filler");
+    h.doc
+        .set_inline(card, "animation-direction: normal, normal");
+    let document = &mut h.doc.dom;
+    document.render();
+    document.advance_animations(0.0);
+    h.doc
+        .set_inline(card, "animation-direction: normal, reverse");
+    let document = &mut h.doc.dom;
+    document.render();
+    document.advance_animations(0.25);
+    let frame = document.commit();
+    let [slot] = frame.animation_slots() else {
+        panic!("the card exports");
+    };
+    let (animation, Timeline::Scroll(scroll)) = &slot.curve.animations[1] else {
+        panic!("the slide reads a scroll timeline");
+    };
+    assert_eq!(
+        animation.direction,
+        AnimationDirection::Normal,
+        "the clone lags"
+    );
+    assert_eq!(scroll.timing.direction, AnimationDirection::Reverse);
+    let reach = &slot
+        .curve
+        .transform
+        .as_ref()
+        .expect("a transform track")
+        .reach;
+    let bounds = Rect::new(0.0, 0.0, 40.0, 40.0);
+    let carried = reach.carry(bounds);
+    let mut values = AnimationValueMap::default();
+    for step in 0_u8..=100 {
+        let y = f32::from(step) * 10.0;
+        let offset_of =
+            |slot: &ScrollSlot| (slot.node == scroller).then_some(crate::Vector2D::new(0.0, y));
+        let offsets = ScrollOffsets {
+            slots: frame.scroll_slots(),
+            offset_of: &offset_of,
+        };
+        let delta = slot.sample(Some(0.25), &offsets, &mut values).delta;
+        for corner in [Point::new(0.0, 0.0), Point::new(40.0, 40.0)] {
+            let moved = delta * corner;
+            assert!(
+                moved.x >= carried.x0 - 1e-6 && moved.x <= carried.x1 + 1e-6,
+                "offset {y}: {moved:?} escapes {carried:?}"
+            );
+        }
+    }
+}
+
+/// A scroll timeline's effect is representable at every offset only where
+/// the commit had none, or where it keeps one over the whole scroll range:
+/// `view()` over its `entry` range (80 px to 160 px of 300 px) without a
+/// fill exports when committed before the range and refuses inside it;
+/// `both` exports anywhere; `scroll()` without a fill has an effect at every
+/// offset of its range, the limit included, and exports.
+#[test]
+fn a_scroll_timeline_exports_only_where_every_offset_is_representable() {
+    let exports = |animation: &str, offset: f32| {
+        let mut h = Harness::new(
+            "page { display: flex; width: 800px; height: 600px; }
+             .scroller { display: flex; flex-direction: column; overflow: scroll;
+                         width: 300px; height: 300px; }
+             .lead { flex-shrink: 0; width: 280px; height: 380px; }
+             .card { flex-shrink: 0; width: 120px; height: 80px; background-color: teal; }
+             .tail { flex-shrink: 0; width: 280px; height: 140px; }
+             @keyframes fade { from { opacity: 1; } to { opacity: 0.2; } }",
+        );
+        let root = h.root();
+        let scroller = h.el(root, "view.scroller");
+        h.el(scroller, "view.lead");
+        let card = h.el(scroller, "view.card");
+        h.el(scroller, "view.tail");
+        h.doc.set_inline(card, animation);
+        let dom = &mut h.doc.dom;
+        dom.render();
+        dom.scroll_to(scroller, crate::Vector2D::new(0.0, offset));
+        dom.note_scroll_windows_stale();
+        !dom.commit().animation_slots().is_empty()
+    };
+    let view = "animation: fade linear; animation-timeline: view(); animation-range: entry";
+    assert!(
+        exports(view, 0.0),
+        "committed before its range, with no effect"
+    );
+    assert!(!exports(view, 120.0), "committed inside it");
+    let filled = "animation: fade linear both; animation-timeline: view(); animation-range: entry";
+    assert!(exports(filled, 120.0));
+    assert!(exports(filled, 300.0));
+    let scroll = "animation: fade linear; animation-timeline: scroll()";
+    assert!(
+        exports(scroll, 150.0),
+        "the whole range, its limit included"
+    );
+}
+
+/// 200 rows in a list, each styled `animation`, committed with the list
+/// scrolled to `offset` after `ticks`: the frame, and which items its walk
+/// encodes.
+fn rising_rows(
+    animation: &str,
+    offset: f32,
+    ticks: &[f64],
+) -> (std::sync::Arc<crate::CommittedFrame>, Vec<bool>) {
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; }
+         .list { display: flex; flex-direction: column; overflow: scroll;
+                 width: 300px; height: 600px; }
+         .row { display: flex; flex-shrink: 0; width: 300px; height: 40px;
+                background-color: teal; }
+         @keyframes rise { from { transform: translateY(20px); }
+                           to { transform: translateY(-60px); } }",
+    );
+    let root = h.root();
+    let list = h.el(root, "view.list");
+    for _ in 0..200 {
+        let row = h.el(list, "view.row");
+        h.doc.set_inline(row, animation);
+    }
+    let document = &mut h.doc.dom;
+    document.render();
+    document.scroll_to(list, crate::Vector2D::new(0.0, offset));
+    for &now in ticks {
+        document.advance_animations(now);
+    }
+    document.note_scroll_windows_stale();
+    let frame = document.commit();
+    let encoded = crate::paint::walker::encoded_items(&h.doc.dom, &frame.order);
+    (frame, encoded)
+}
+
+/// A curve's reach reads no time, so a row on a scroll timeline is culled
+/// through its keyframes exactly as the same row on the document timeline:
+/// committed at the same progress and offset — a quarter, 1850 px of a
+/// 7400 px range — the two frames encode the same items, compose the same
+/// curves and pull the viewport back alike.
+#[test]
+fn a_scroll_driven_mover_is_culled_like_a_time_mover() {
+    let (timed, timed_encoded) =
+        rising_rows("animation: rise 1s linear infinite", 1850.0, &[0.0, 0.25]);
+    let (driven, driven_encoded) = rising_rows(
+        "animation: rise 1s linear both; animation-timeline: scroll()",
+        1850.0,
+        &[],
+    );
+    assert_eq!(timed.animation_slots().len(), 200);
+    assert_eq!(driven.animation_slots().len(), 200);
+    assert!(
+        driven
+            .animation_slots()
+            .iter()
+            .all(|slot| slot.curve.reads_scroll())
+    );
+    assert_eq!(timed_encoded, driven_encoded, "the same items encode");
+    assert!(driven_encoded.contains(&false), "and the walk culls");
+    assert_eq!(
+        timed.presentation.composed.animations,
+        driven.presentation.composed.animations,
+    );
+    let region = crate::vello::kurbo::Rect::new(-40.0, 10.0, 260.0, 90.0);
+    for (a, b) in timed.animation_slots().iter().zip(driven.animation_slots()) {
+        let reach = |slot: &crate::AnimationSlot| {
+            slot.curve
+                .transform
+                .as_ref()
+                .expect("a transform track")
+                .reach
+                .pull_back(region)
+        };
+        assert_eq!(reach(a), reach(b));
+    }
+}
+
+/// A `transform` transition's reach runs from its `from` to its `to`, so it
+/// culls: 200 rows sliding up by a transition encode only the rows that can
+/// meet the list's window, as a keyframes curve would.
+#[test]
+fn a_transform_transition_bounds_the_encode_of_its_rows() {
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; }
+         .list { display: flex; flex-direction: column; overflow: scroll;
+                 width: 300px; height: 600px; }
+         .row { display: flex; flex-shrink: 0; width: 300px; height: 40px;
+                background-color: teal; transition: transform 1s ease-in-out; }",
+    );
+    let root = h.root();
+    let list = h.el(root, "view.list");
+    let rows: Vec<_> = (0..200).map(|_| h.el(list, "view.row")).collect();
+    let document = &mut h.doc.dom;
+    document.render();
+    document.advance_animations(0.0);
+    for &row in &rows {
+        document.set_inline_style(row, "transform: translateY(-30px)");
+    }
+    document.render();
+    document.advance_animations(0.0);
+    document.advance_animations(0.25);
+    let frame = document.commit();
+    assert_eq!(
+        frame.animation_slots().len(),
+        200,
+        "every transition exports"
+    );
+    assert!(frame.animation_slots().iter().all(|slot| {
+        slot.curve
+            .transform
+            .as_ref()
+            .is_some_and(|track| track.reach.is_bounded())
+    }));
+    let encoded = crate::paint::walker::encoded_items(&h.doc.dom, &frame.order);
+    let encoded_rows = frame
+        .order
+        .items()
+        .iter()
+        .zip(encoded)
+        .filter(|(item, encoded)| {
+            *encoded && item.kind == PaintItemKind::ElementBox && rows.contains(&item.node)
+        })
+        .count();
+    assert!(
+        (1..40).contains(&encoded_rows),
+        "the window encodes a few rows, got {encoded_rows}"
+    );
+}
+
+/// With a reach, a `transform` transition exports inside a composited group:
+/// a card sliding by a transition inside a fading group exports beside the
+/// group's own fade.
+#[test]
+fn a_transform_transition_exports_inside_a_fading_group() {
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; }
+         .group { display: flex; width: 400px; height: 300px; padding: 20px;
+                  background-color: navy; animation: fade 1s linear infinite; }
+         .card { display: flex; width: 100px; height: 80px; background-color: teal;
+                 transition: transform 1s linear; }
+         @keyframes fade { from { opacity: 1; } to { opacity: 0.2; } }",
+    );
+    let root = h.root();
+    let group = h.el(root, "view.group");
+    let card = h.el(group, "view.card");
+    let document = &mut h.doc.dom;
+    document.render();
+    document.advance_animations(0.0);
+    document.set_inline_style(card, "transform: translateX(120px) rotate(20deg)");
+    document.render();
+    document.advance_animations(0.0);
+    document.advance_animations(0.25);
+    let frame = document.commit();
+    let exported: Vec<NodeId> = frame
+        .animation_slots()
+        .iter()
+        .map(|slot| slot.node)
+        .collect();
+    assert_eq!(
+        exported,
+        [group, card],
+        "the transition exports in the group"
+    );
+    assert!(!frame.needs_main_ticks());
+}
+
+/// A paused scroll-driven animation holds its sample on the painter as the
+/// main thread holds it: its curve reads no slot, and a composed offset
+/// leaves it at the value of the offset it was created at.
+#[test]
+fn a_paused_scroll_driven_animation_holds_on_the_painter() {
+    use crate::visual::ScrollOffsets;
+
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; }
+         .scroller { display: flex; flex-direction: column; overflow: scroll;
+                     width: 200px; height: 200px; }
+         .mover { flex-shrink: 0; width: 20px; height: 20px; background-color: teal;
+                  animation: fade linear both paused; animation-timeline: scroll(); }
+         .filler { flex-shrink: 0; width: 200px; height: 1180px; }
+         @keyframes fade { from { opacity: 1; } to { opacity: 0; } }",
+    );
+    let root = h.root();
+    let scroller = h.el(root, "view.scroller");
+    let mover = h.el(scroller, "view.mover");
+    h.el(scroller, "view.filler");
+    h.doc.dom.render();
+    h.doc
+        .dom
+        .scroll_to(scroller, crate::Vector2D::new(0.0, 250.0));
+    h.doc.dom.note_scroll_windows_stale();
+    let frame = h.doc.dom.commit();
+    let [slot] = frame.animation_slots() else {
+        panic!("the paused fade exports");
+    };
+    assert_eq!(slot.node, mover);
+    assert!(!slot.curve.reads_scroll() && !slot.curve.reads_clock());
+    let offset_of = |_: &crate::visual::ScrollSlot| Some(crate::Vector2D::new(0.0, 700.0));
+    let offsets = ScrollOffsets {
+        slots: frame.scroll_slots(),
+        offset_of: &offset_of,
+    };
+    let alpha = slot
+        .sample(None, &offsets, &mut AnimationValueMap::default())
+        .alpha;
+    assert_eq!(
+        alpha,
+        Some(1.0),
+        "created paused at offset 0, it holds there"
     );
 }
