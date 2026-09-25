@@ -2007,6 +2007,7 @@ fn an_omitted_background_entry_boots_without_host_io() {
 fn a_rejected_main_entry_still_connects_its_background_context() {
     let mut pair = Pair::unbooted(Some(
         r"
+        import { lynx } from 'bobcat:bts-runtime';
         const core = lynx.getCoreContext();
         core.addEventListener('queued', event => core.dispatchEvent({type: 'reply', data: event.data}));
     ",
