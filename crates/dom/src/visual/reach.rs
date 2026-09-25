@@ -1029,7 +1029,10 @@ mod tests {
             let mut values = stylo::properties::animated_properties::AnimationValueMap::default();
             for step in 0_u8..=80 {
                 let t = 0.3 + f64::from(step) / 40.0;
-                let delta = slot.curve.sample(t, &mut values).delta;
+                let delta = slot
+                    .curve
+                    .sample(Some(t), &frame.committed_offsets(), &mut values)
+                    .delta;
                 for corner in corners(bounds) {
                     assert!(
                         inside(carried, delta * corner),

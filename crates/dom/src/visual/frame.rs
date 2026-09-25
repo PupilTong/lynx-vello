@@ -70,6 +70,22 @@ pub struct ScrollSlot {
     pub viewport_axes: [Vector2D<f32>; 2],
 }
 
+/// Where compose puts a frame's scroll slots at one instant: `offset_of`'s
+/// override for a slot, else its committed offset.
+#[derive(Clone, Copy)]
+pub(crate) struct ScrollOffsets<'a> {
+    pub(crate) slots: &'a [ScrollSlot],
+    pub(crate) offset_of: &'a dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
+}
+
+impl ScrollOffsets<'_> {
+    /// Slot `slot`'s offset.
+    pub(crate) fn of(&self, slot: u32) -> Vector2D<f32> {
+        let slot = &self.slots[slot as usize];
+        (self.offset_of)(slot).unwrap_or(slot.offset)
+    }
+}
+
 /// One axis of a slot's snapping: its strictness and the `start..end`
 /// range of its points in the frame's snap-point table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -211,20 +227,15 @@ pub struct AnimationSlot {
 }
 
 impl AnimationSlot {
-    /// This slot's compose values at `now`, with `values` as scratch; `None`
-    /// is the committed values (identity delta, committed opacity).
+    /// This slot's compose values at `now` — the committed instant when
+    /// `None` — with each scroll slot at `offsets`, and `values` as scratch.
     pub(crate) fn sample(
         &self,
         now: Option<f64>,
+        offsets: &ScrollOffsets<'_>,
         values: &mut AnimationValueMap,
     ) -> AnimationSample {
-        let Some(now) = now else {
-            return AnimationSample {
-                delta: Affine::IDENTITY,
-                alpha: None,
-            };
-        };
-        let sample = self.curve.sample(now, values);
+        let sample = self.curve.sample(now, offsets, values);
         AnimationSample {
             delta: sample.delta,
             alpha: sample.alpha,
@@ -320,9 +331,9 @@ impl CommittedFrame {
         animation_now: Option<f64>,
     ) {
         let composed = &self.presentation.composed;
-        let animations = self
-            .order
-            .sample_composed_animations(&composed.animations, animation_now);
+        let animations =
+            self.order
+                .sample_composed_animations(&composed.animations, animation_now, offset_of);
         let stickies = self.order.sample_composed_stickies(
             &composed.stickies,
             self.device_pixel_ratio,
@@ -359,9 +370,10 @@ impl CommittedFrame {
     /// side that survives a rotating or scaling node between the entry's
     /// space and an op's.
     ///
-    /// The replay samples at `animation_now` exactly when the entry
-    /// [`FilterGroup::samples_animations`], and at the committed instant
-    /// otherwise, where every relative map in its range is time-independent.
+    /// The replay samples the curves at `animation_now` and the live offsets
+    /// exactly when the entry [`FilterGroup::samples_animations`], and takes
+    /// their committed values otherwise, where no relative map in its range
+    /// depends on them.
     /// A `backdrop-filter` entry's range is a prefix of the frame, so it can
     /// hold other elements' exported curves; a `filter: blur()` group's holds
     /// the curves of its own content, and its ancestors' clips, which its
@@ -385,10 +397,12 @@ impl CommittedFrame {
             return;
         };
         let composed = &self.presentation.composed;
-        let animations = self.order.sample_composed_animations(
-            &composed.animations,
-            animation_now.filter(|_| group.samples_animations()),
-        );
+        let animations = if group.samples_animations() {
+            self.order
+                .sample_composed_animations(&composed.animations, animation_now, offset_of)
+        } else {
+            PaintOrder::committed_animations(&composed.animations)
+        };
         let stickies = self.order.sample_composed_stickies(
             &composed.stickies,
             self.device_pixel_ratio,
@@ -505,23 +519,32 @@ impl CommittedFrame {
         self.needs_main_ticks
     }
 
-    /// Whether the compose program references an exported curve — the
-    /// compositor then recomposes each frame at its clock reading instead of
-    /// reusing the drawn frame.
+    /// Whether the compose program references an exported curve that reads
+    /// the document timeline — the compositor then recomposes each frame at
+    /// its clock reading instead of reusing the drawn frame.
     ///
     /// A curve the program leaves out — culled, or on content that draws
     /// nothing — changes no pixel at any instant of its domain, so a frame
-    /// whose curves are all left out composes once. Hit tests read
-    /// [`Self::has_exported_curves`] instead, and
-    /// [`Self::animation_boundary_passed`] counts every curve.
+    /// whose curves are all left out composes once. A curve on a scroll
+    /// timeline alone moves only when a scroll offset does, and a scroll
+    /// recomposes by itself. Hit tests read [`Self::has_exported_curves`]
+    /// instead, and [`Self::animation_boundary_passed`] counts every curve.
     #[must_use]
     pub fn has_live_curves(&self) -> bool {
-        !self.presentation.composed.animations.is_empty()
+        self.presentation.composed.clock
+    }
+
+    /// Whether the compose program references a curve that reads a scroll
+    /// slot's offset: a filter entry sampling animations then re-bakes on a
+    /// scroll, whatever the paths its range rides.
+    pub(crate) fn composes_scroll_curves(&self) -> bool {
+        self.presentation.composed.scroll
     }
 
     /// Whether the frame exports any curve — hit tests then sample at the
     /// input's clock reading: a curve moves its element's hit area even where
-    /// the program draws nothing of it.
+    /// the program draws nothing of it. A scroll timeline's curve samples its
+    /// offsets whatever the reading.
     #[must_use]
     pub fn has_exported_curves(&self) -> bool {
         !self.order.animations().is_empty()
@@ -609,7 +632,7 @@ impl CommittedFrame {
         offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
         animation_now: Option<f64>,
     ) -> Option<HitTarget> {
-        let animations = self.order.sample_animations(animation_now);
+        let animations = self.order.sample_animations(animation_now, offset_of);
         let stickies = self
             .order
             .sample_stickies(self.device_pixel_ratio, offset_of);
@@ -640,6 +663,20 @@ impl CommittedFrame {
             current = slot.parent;
         }
         None
+    }
+}
+
+#[cfg(test)]
+impl CommittedFrame {
+    /// The frame's scroll slots at their committed offsets.
+    pub(crate) fn committed_offsets(&self) -> ScrollOffsets<'_> {
+        fn committed(_: &ScrollSlot) -> Option<Vector2D<f32>> {
+            None
+        }
+        ScrollOffsets {
+            slots: self.scroll_slots(),
+            offset_of: &committed,
+        }
     }
 }
 

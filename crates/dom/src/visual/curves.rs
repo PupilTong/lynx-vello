@@ -21,6 +21,13 @@
 //! element's world matches a commit's bit for bit relative to its parent's
 //! committed world, the delta is the identity to f64 rounding at the commit
 //! instant, and composed geometry agrees with a commit to f32 rounding.
+//!
+//! An animation on a scroll progress timeline (scroll-animations-1) reads
+//! its progress from its source's slot instead of the clock: the offset
+//! compose puts that slot at, clamped to the scroll range and unsnapped as
+//! the cascade reads it, through the same [`iteration_progress`] the main
+//! thread writes `Animation::timeline_sample` with. So it is sampled at
+//! compose time from the live offset, with no commit and no clock.
 
 use euclid::default::Transform3D;
 use stylo::properties::animated_properties::{AnimationValue, AnimationValueMap};
@@ -29,8 +36,11 @@ use stylo::properties::{LonghandId, OwnedPropertyDeclarationId, PropertyDeclarat
 use stylo::servo::animation::{Animation, Transition};
 use stylo::values::computed::transform::Transform as ComputedTransform;
 
+use super::ScrollOffsets;
 use super::reach::{Interval, Reach, Segment, eased_range};
 use super::transform::{ContextMatrix, planar};
+use crate::NodeId;
+use crate::style::timeline::{Axis, ProgressTiming, iteration_progress};
 use crate::vello::kurbo::Affine;
 
 const OPACITY: OwnedPropertyDeclarationId =
@@ -42,16 +52,65 @@ const TRANSFORM: OwnedPropertyDeclarationId =
 #[derive(Debug, Clone)]
 pub(crate) struct CompositeCurve {
     /// The set's animations in its order, canceled ones dropped: the order
-    /// the cascade inserts them in, a later one winning a property.
-    pub(crate) animations: Box<[Animation]>,
+    /// the cascade inserts them in, a later one winning a property. Each
+    /// with the timeline it reads its progress from.
+    pub(crate) animations: Box<[(Animation, Timeline)]>,
     /// The set's pending and running transitions in its order.
     pub(crate) transitions: Box<[Transition]>,
+    /// The timeline second the curve was committed at: a sample with no
+    /// clock reading samples the document timeline here, which is the
+    /// committed cascade's instant.
+    pub(crate) committed_at: f64,
     /// The timeline second the first animation or transition ends at: past
     /// it its contribution can be replaced by the base value, which only a
     /// commit knows. `None` when nothing ends.
     pub(crate) expires_at: Option<f64>,
     /// Present when an animation animates `transform`.
     pub(crate) transform: Option<TransformTrack>,
+}
+
+/// Where one exported animation reads its progress.
+#[derive(Debug, Clone)]
+pub(crate) enum Timeline {
+    /// `Animation::progress_at`: the document timeline at the instant
+    /// sampled; for a progress-driven animation, its cloned
+    /// `timeline_sample` — held while paused, `None` on an inactive timeline.
+    Clock,
+    /// A running animation on an active scroll progress timeline.
+    Scroll(ScrollTimeline),
+}
+
+/// A running animation's scroll progress timeline, as the commit bound it.
+#[derive(Debug, Clone)]
+pub(crate) struct ScrollTimeline {
+    /// The scroll container whose offset drives it.
+    pub(crate) source: NodeId,
+    /// `source`'s scroll slot in this frame, bound after the build's walk
+    /// (the element's own slot, and a later-painted source's, do not exist
+    /// yet when the curve is built). `None` when the frame has none: nothing
+    /// moves the source between commits then, and the animation holds its
+    /// cloned sample.
+    pub(crate) slot: Option<u32>,
+    pub(crate) axis: Axis,
+    pub(crate) timing: ProgressTiming,
+}
+
+impl ScrollTimeline {
+    /// Where the animation stands with `slot` at `offsets`: the offset along
+    /// `axis`, clamped to the scroll range as the document clamps it (a
+    /// `contain-bounce` stretch is no scroll offset) and unsnapped.
+    fn progress(
+        &self,
+        slot: u32,
+        offsets: &ScrollOffsets<'_>,
+    ) -> Option<stylo::servo::animation::AnimationProgress> {
+        let offset = self
+            .axis
+            .of_vector(offsets.of(slot))
+            .max(0.0)
+            .min(self.timing.limit);
+        iteration_progress(&self.timing, offset)
+    }
 }
 
 /// The constant factors the transform delta folds a sampled list with.
@@ -78,18 +137,9 @@ impl TransformTrack {
         world: &Transform3D<f32>,
         committed: &ComputedTransform,
     ) -> Option<Self> {
-        let ends = curve.transition_ends();
-        let transitions = ends.iter().map(|(from, to)| Segment {
-            from,
-            to,
-            // The timing function is private to the fork's `PropertyAnimation`,
-            // so its eased range is unknown and the reach unbounded.
-            eased: None,
-        });
         if !world.is_2d()
             || curve
                 .transform_segments()
-                .chain(transitions.clone())
                 .any(|segment| context.projective(segment.from) || context.projective(segment.to))
         {
             return None;
@@ -102,7 +152,7 @@ impl TransformTrack {
         // `W = pre · Lc · origin⁻¹`, every factor of `pre` constant.
         let pre = world * context.origin() * committed_matrix.inverse();
         let reach = Reach::of(
-            curve.transform_segments().chain(transitions),
+            curve.transform_segments(),
             committed,
             context.reference_size(),
             pre,
@@ -135,11 +185,17 @@ pub(crate) struct CurveSample {
 }
 
 impl CompositeCurve {
-    /// Samples the curve at timeline second `now`, with `values` as scratch.
-    /// A property no animation contributes keeps its committed value:
-    /// identity delta, `None` alpha.
-    pub(crate) fn sample(&self, now: f64, values: &mut AnimationValueMap) -> CurveSample {
-        self.values_at(now, values);
+    /// Samples the curve at timeline second `now` — the committed instant
+    /// when `None` — with each scroll slot at `offsets`, and `values` as
+    /// scratch. A property no animation contributes keeps its committed
+    /// value: identity delta, `None` alpha.
+    pub(crate) fn sample(
+        &self,
+        now: Option<f64>,
+        offsets: &ScrollOffsets<'_>,
+        values: &mut AnimationValueMap,
+    ) -> CurveSample {
+        self.values_at(now, offsets, values);
         let alpha = match values.get(&OPACITY) {
             // Paint clamps the committed opacity the same way.
             Some(AnimationValue::Opacity(opacity)) => Some(opacity.clamp(0.0, 1.0)),
@@ -152,15 +208,30 @@ impl CompositeCurve {
         CurveSample { delta, alpha }
     }
 
-    /// Fills `values` with what the cascade at `now` takes from the
-    /// animations, in their order, then from the transitions over them.
-    pub(crate) fn values_at(&self, now: f64, values: &mut AnimationValueMap) {
+    /// Fills `values` with what the cascade at `now` (the committed instant
+    /// when `None`) and `offsets` takes from the animations, in their order,
+    /// then from the transitions over them.
+    pub(crate) fn values_at(
+        &self,
+        now: Option<f64>,
+        offsets: &ScrollOffsets<'_>,
+        values: &mut AnimationValueMap,
+    ) {
+        let now = now.unwrap_or(self.committed_at);
         // Past its domain the curve holds the domain's last instant until the
         // hand-back commit is adopted.
         let now = self.expires_at.map_or(now, |end| now.min(end.next_down()));
         values.clear();
-        for animation in &self.animations {
-            if let Some(at) = animation.progress_at(now) {
+        for (animation, timeline) in &self.animations {
+            let at = match timeline {
+                Timeline::Scroll(
+                    scroll @ ScrollTimeline {
+                        slot: Some(slot), ..
+                    },
+                ) => scroll.progress(*slot, offsets),
+                _ => animation.progress_at(now),
+            };
+            if let Some(at) = at {
                 animation.sample_at(at, values);
             }
         }
@@ -170,64 +241,86 @@ impl CompositeCurve {
         }
     }
 
-    /// Each `transform` transition's value at its start and at its end.
-    ///
-    /// Sampled, because the fork keeps a transition's own `from`, `to` and
-    /// timing function private: at the start the eased progress is 0 for
-    /// every timing function but a jump-start `steps()`, and at the end it is
-    /// 1 for all of them.
-    fn transition_ends(&self) -> Vec<(ComputedTransform, ComputedTransform)> {
-        let list = |value: AnimationValue| match value {
-            AnimationValue::Transform(list) => list,
-            _ => unreachable!("a transform transition samples a transform list"),
-        };
-        self.transitions
+    /// Every segment an animation or a transition interpolates `transform`
+    /// over, with the eased progress it samples there. An animation's
+    /// segment eases by the lower keyframe's function running forward and by
+    /// the upper's over flipped progress running reversed, as stylo eases
+    /// them, in the direction the sample runs; iterations, fill and a scroll
+    /// timeline only pick progress in `[0, 1]`. A transition runs once forward from its `from` to
+    /// its `to`.
+    fn transform_segments(&self) -> impl Iterator<Item = Segment<'_>> {
+        fn list(value: &AnimationValue) -> &ComputedTransform {
+            let AnimationValue::Transform(list) = value else {
+                unreachable!("a transform transition holds transform lists");
+            };
+            list
+        }
+        let transform = PropertyDeclarationId::Longhand(LonghandId::Transform);
+        let transitions = self
+            .transitions
             .iter()
-            .filter(|transition| {
-                transition.property_animation.property_id()
-                    == PropertyDeclarationId::Longhand(LonghandId::Transform)
-            })
-            .map(|transition| {
-                let end = transition.start_time + transition.property_animation.duration;
-                (
-                    list(transition.calculate_value(transition.start_time)),
-                    list(transition.calculate_value(end)),
-                )
-            })
-            .collect()
+            .map(|transition| &transition.property_animation)
+            .filter(move |animation| animation.property_id() == transform)
+            .map(move |animation| Segment {
+                from: list(animation.from()),
+                to: list(animation.to()),
+                eased: eased_range(animation.timing_function()),
+            });
+        let animations = self
+            .animations
+            .iter()
+            .flat_map(move |(animation, timeline)| {
+                // A progress-driven animation's direction is its binding's, read
+                // from the style by name, which stylo's `return;` deviation can
+                // leave apart from the clone's; a held sample's binding is gone.
+                let direction = match timeline {
+                    Timeline::Scroll(scroll) => Some(scroll.timing.direction),
+                    Timeline::Clock if animation.is_progress_driven() => None,
+                    Timeline::Clock => Some(animation.direction),
+                };
+                let index = animation
+                    .animating_properties()
+                    .find_map(|(index, property)| (property == transform).then_some(index));
+                index
+                    .into_iter()
+                    .flat_map(|index| animation.keyframe_segments(index))
+                    .map(move |segment| {
+                        let (AnimationValue::Transform(from), AnimationValue::Transform(to)) =
+                            (segment.from.value, segment.to.value)
+                        else {
+                            unreachable!("a transform keyframe holds a transform list");
+                        };
+                        let forward = eased_range(segment.from.timing_function);
+                        let reversed =
+                            eased_range(segment.to.timing_function).map(Interval::flipped);
+                        let eased = match direction {
+                            Some(AnimationDirection::Normal) => forward,
+                            Some(AnimationDirection::Reverse) => reversed,
+                            _ => forward.zip(reversed).map(|(a, b)| a.union(b)),
+                        };
+                        Segment { from, to, eased }
+                    })
+            });
+        animations.chain(transitions)
     }
 
-    /// Every segment an animation interpolates `transform` over, with the
-    /// eased progress it samples there: eased by the lower keyframe's
-    /// function running forward and by the upper's over flipped progress
-    /// running reversed, as stylo eases them. Iterations and fill only pick
-    /// progress in `[0, 1]`.
-    fn transform_segments(&self) -> impl Iterator<Item = Segment<'_>> {
-        let transform = PropertyDeclarationId::Longhand(LonghandId::Transform);
-        self.animations.iter().flat_map(move |animation| {
-            let index = animation
-                .animating_properties()
-                .find_map(|(index, property)| (property == transform).then_some(index));
-            index
-                .into_iter()
-                .flat_map(|index| animation.keyframe_segments(index))
-                .map(move |segment| {
-                    let (AnimationValue::Transform(from), AnimationValue::Transform(to)) =
-                        (segment.from.value, segment.to.value)
-                    else {
-                        unreachable!("a transform keyframe holds a transform list");
-                    };
-                    let forward = eased_range(segment.from.timing_function);
-                    let reversed = eased_range(segment.to.timing_function).map(Interval::flipped);
-                    let eased = match animation.direction {
-                        AnimationDirection::Normal => forward,
-                        AnimationDirection::Reverse => reversed,
-                        AnimationDirection::Alternate | AnimationDirection::AlternateReverse => {
-                            forward.zip(reversed).map(|(a, b)| a.union(b))
-                        }
-                    };
-                    Segment { from, to, eased }
-                })
+    /// Whether an animation or a transition reads the document timeline:
+    /// the compositor then recomposes each frame at its clock reading.
+    pub(crate) fn reads_clock(&self) -> bool {
+        !self.transitions.is_empty()
+            || self
+                .animations
+                .iter()
+                .any(|(animation, _)| !animation.is_progress_driven())
+    }
+
+    /// Whether an animation reads a scroll slot's offset.
+    pub(crate) fn reads_scroll(&self) -> bool {
+        self.animations.iter().any(|(_, timeline)| {
+            matches!(
+                timeline,
+                Timeline::Scroll(ScrollTimeline { slot: Some(_), .. })
+            )
         })
     }
 }
@@ -240,6 +333,7 @@ impl CompositeCurve {
         Self {
             animations: Box::new([]),
             transitions: Box::new([]),
+            committed_at: 0.0,
             expires_at: None,
             transform,
         }
@@ -248,7 +342,7 @@ impl CompositeCurve {
     /// Whether an animation or a transition animates `property`.
     pub(crate) fn animates(&self, property: LonghandId) -> bool {
         let property = PropertyDeclarationId::Longhand(property);
-        self.animations.iter().any(|animation| {
+        self.animations.iter().any(|(animation, _)| {
             animation
                 .animating_properties()
                 .any(|(_, animated)| animated == property)

@@ -1452,8 +1452,8 @@ past the committed window — and, when the committed slot finds the offset
 the rule beside `encode_window`), marks the windows stale once, so the entry's
 commit re-bakes them centered on it; no script involvement anywhere. Then
 `Document::advance_scroll_timelines` re-samples the scroll-driven animations
-those containers drive, and re-cascades — and so commits — only the elements
-whose sample moved. A document-side read — `boundingClientRect` included —
+those containers drive that the committed frame does not sample itself, and
+re-cascades — and so commits — only the elements whose sample moved. A document-side read — `boundingClientRect` included —
 sees the offset from the marker on. The encode is windowed: each slot's fragments cover one
 scrollport past its committed offset per scrollable axis
 (`ENCODE_WINDOW_SCROLLPORTS`). A committed frame indexes its slots by node at
@@ -1619,20 +1619,25 @@ and hit tests. Between commits the compositor animates alone. A curve with a
 transform track stays on the main thread, its opacity values included, when
 its element's extent exceeds three viewport areas, and when an enclosing
 composited group cannot bound it — a scale through 0 on the group's side, or a
-curve of its own without a reach.
+curve of its own without a reach. An animation on a scroll progress timeline
+exports the same way and samples its source's offset instead of the clock
+(below).
 
 The encode stays screen-bounded while content moves. Each transform track
 carries its reach — per op, the range its parameters take over the curve's
-whole domain, read off stylo's computed keyframes — and culling pulls the
-viewport back through it, so a list of rows each running its own animation
+whole domain, read off stylo's computed keyframes and a transition's own
+endpoints and timing function — and culling pulls the viewport back through it, so a list of rows each running its own animation
 encodes the rows that can reach the list's window, and the clips and encode
 windows inside a moving subtree bound as usual. A list holding an op the reach
 does not model (matrix, skew, 3D rotation) or a mismatched remainder stylo
 decomposes has no reach; the extent cap alone bounds its encode. Composition
 samples only the curves and sticky boxes the program references.
-`has_live_curves` says the program references a curve, which is what makes the
-painter recompose every frame; `has_exported_curves` says any curve exported,
-which is what makes an input's hit test sample at the input's instant.
+`has_live_curves` says the program references a curve that reads the document
+timeline, which is what makes the painter recompose every frame; a curve on a
+scroll timeline alone moves only when an offset does, and a scroll bumps the
+painter's compose key by itself. `has_exported_curves` says any curve exported,
+which is what makes an input's hit test sample at the input's instant; a
+scroll timeline's curve samples the hit's offsets whatever the instant.
 
 The side effects Web Animations gives an in-effect `opacity`/`transform`
 animation are keyed on the animation, not on its export: a stacking context
@@ -1680,16 +1685,29 @@ origin does, and ending the domain at `start_time + duration` — because every
 job syncs main's clock to the painter's before it runs: a restyle that
 retargets or reverses one while a curve covers the element reads its progress
 at the instant the painter showed, not at the last tick. A `transform`
-transition's reach is unbounded for now (the fork keeps a transition's timing
-function private), so the extent budget bounds its encode and a composited
-group around it refuses it.
+transition's reach runs from its `from` to its `to` over its timing function's
+eased range (the fork's `PropertyAnimation::{from, to, timing_function}`), so
+it culls like a keyframes curve and exports inside a composited group.
 
 A scroll-driven animation (scroll-animations-1) has no clock at all: stylo
 cascades the sample `Document::resolve_timelines` writes after each layout
-pass and `Document::advance_scroll_timelines` rewrites when the marker adopts
-its scroll container's offset. It asks for no frame post, keeps
-`animations_active` false and refuses the export for now, so while its source
-moves the main thread runs one animation-only restyle and one commit per
+pass. It asks for no frame post and keeps `animations_active` false. When it
+exports, its curve carries the binding the commit resolved — source, axis and
+the timing normalized into scroll-offset px — and after the build's walk each
+binding is bound to its source's scroll slot (an element's own slot, and a
+later-painted source's, do not exist yet when its curve is built). The
+compositor samples it at compose time from the offset it composes that slot at,
+clamped to the scroll range (a `contain-bounce` stretch is no offset) and
+unsnapped, through the `iteration_progress` main writes the sample with, then
+stylo's `sample_at` — so a drag or a fling moves it with no commit and no frame
+post, and at rest the painter owes nothing. A filter bake whose range such a
+curve moves re-bakes on every scroll, since its source need not ride the
+range's paths. The export refuses a property contributed at the commit that
+some offset in the scroll range would leave with no contribution (a scroll
+timeline has no hand-back). Every other scroll-driven animation re-samples when
+the marker adopts its source's offset (`Document::advance_scroll_timelines`,
+which skips the elements whose committed curve samples a slot), so while its
+source moves the main thread runs one animation-only restyle and one commit per
 adopted scroll, one frame behind the painter's scroll (scroll-animations-1
 §5.1 allows it), and nothing at rest. See
 [tracking/css-animation.md](tracking/css-animation.md#scroll-driven-animations).

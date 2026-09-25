@@ -31,7 +31,8 @@ use stylo::rule_tree::CascadeOrigin;
 use crate::paint::convert::item_affine;
 use crate::test_common::Doc;
 use crate::vello::kurbo::{Affine, Point, Rect};
-use crate::visual::{CommittedFrame, PaintItemKind, ScrollSlot, SpaceKind};
+use crate::visual::curves::Timeline;
+use crate::visual::{CommittedFrame, PaintItemKind, ScrollOffsets, ScrollSlot, SpaceKind};
 use crate::{FontBlob, NodeId, Point2D};
 
 const AHEM: &[u8] = include_bytes!("../../../hughie/tests/fixtures/Ahem.ttf");
@@ -208,11 +209,66 @@ impl Fixture {
                 Self::compare_hold(&early, t, &label);
                 continue;
             }
-            self.compare_values(&early, &late, t, &label);
-            self.compare_geometry(&early, &late, t, &label);
-            self.compare_hits(&early, &late, t, &label);
+            self.compare_values(&early, &late, Some(t), &label);
+            self.compare_geometry(&early, &late, Some(t), &label);
+            self.compare_hits(&early, &late, Some(t), &label);
             self.compare_coverage(&encoded, &late, &label);
-            self.compare_groups(&rects, &early, &late, t, &label);
+            self.compare_groups(&rects, &early, &late, Some(t), &label);
+        }
+    }
+
+    /// Commits `early` with `source` scrolled to `from` and every curve on a
+    /// scroll timeline of it, then checks `early` composed with `source` at
+    /// each of `offsets` against a fresh commit after the document scrolled
+    /// there. The clock never moves.
+    fn check_scroll(mut self, label: &str, source: NodeId, from: f32, offsets: &[f32]) {
+        let dom = &mut self.doc.dom;
+        dom.render();
+        dom.advance_animations(0.0);
+        dom.scroll_to(source, Vector2D::new(0.0, from));
+        dom.note_scroll_windows_stale();
+        dom.render();
+        let early = dom.committed_frame().expect("a frame is committed");
+        assert_eq!(
+            early.animation_slots().len(),
+            self.exported,
+            "{label}: every animated element exports",
+        );
+        assert!(
+            early
+                .animation_slots()
+                .iter()
+                .all(|slot| slot.curve.reads_scroll()),
+            "{label}: every curve reads its source's slot"
+        );
+        assert!(
+            !early.needs_main_ticks() && !early.animations_active(),
+            "{label}: nothing ticks"
+        );
+        assert!(
+            !early.has_live_curves(),
+            "{label}: no curve reads the clock"
+        );
+        self.compare_commit_instant(&early, label);
+        let encoded = crate::paint::walker::encoded_items(&self.doc.dom, &early.order);
+        let rects = crate::paint::walker::layer_rects(&self.doc.dom, &early.order);
+        for &offset in offsets {
+            let offset = Vector2D::new(0.0, offset);
+            let dom = &mut self.doc.dom;
+            dom.scroll_to(source, offset);
+            // A scroll the main thread adopts re-cascades no painted curve;
+            // the next commit's resolution re-samples it.
+            dom.note_scroll_windows_stale();
+            dom.render();
+            let late = dom.committed_frame().expect("a frame is committed");
+            self.offsets.retain(|(node, _)| *node != source);
+            self.offsets.push((source, offset));
+            let label = format!("{label} at offset {}", offset.y);
+            self.compare_values(&early, &late, None, &label);
+            self.compare_geometry(&early, &late, None, &label);
+            self.compare_hits(&early, &late, None, &label);
+            self.compare_coverage(&encoded, &late, &label);
+            self.compare_groups(&rects, &early, &late, None, &label);
         }
     }
 
@@ -237,12 +293,12 @@ impl Fixture {
         })
     }
 
-    /// At the commit instant every curve composes the committed frame: an
-    /// identity delta and the committed opacity.
+    /// At the commit instant and offsets every curve composes the committed
+    /// frame: an identity delta and the committed opacity.
     fn compare_commit_instant(&self, early: &CommittedFrame, label: &str) {
         let mut values = AnimationValueMap::default();
         for slot in early.animation_slots() {
-            let sample = slot.sample(Some(self.early), &mut values);
+            let sample = slot.sample(Some(self.early), &early.committed_offsets(), &mut values);
             let error = sample
                 .delta
                 .as_coeffs()
@@ -284,8 +340,10 @@ impl Fixture {
             if t < end {
                 continue;
             }
-            slot.curve.values_at(t, &mut held);
-            slot.curve.values_at(end.next_down(), &mut last);
+            let offsets = early.committed_offsets();
+            slot.curve.values_at(Some(t), &offsets, &mut held);
+            slot.curve
+                .values_at(Some(end.next_down()), &offsets, &mut last);
             assert_eq!(
                 held, last,
                 "{label}: {:?} holds its last instant",
@@ -294,15 +352,26 @@ impl Fixture {
         }
     }
 
-    /// `early`'s curves sample a property at `t` exactly when `late`'s
-    /// cascade animated it, every sampled value is the one `late`
-    /// committed, bit for bit, and a sampled transform folds to `late`'s
-    /// world exactly relative to the parent's committed world.
-    fn compare_values(&self, early: &CommittedFrame, late: &CommittedFrame, t: f64, label: &str) {
+    /// `early`'s curves sample a property at `at` and the fixture's offsets
+    /// exactly when `late`'s cascade animated it, every sampled value is the
+    /// one `late` committed, bit for bit, and a sampled transform folds to
+    /// `late`'s world exactly relative to the parent's committed world.
+    fn compare_values(
+        &self,
+        early: &CommittedFrame,
+        late: &CommittedFrame,
+        at: Option<f64>,
+        label: &str,
+    ) {
+        let offset_of = self.offset_of();
+        let offsets = ScrollOffsets {
+            slots: early.scroll_slots(),
+            offset_of: &offset_of,
+        };
         let mut values = AnimationValueMap::default();
         for slot in early.animation_slots() {
             let label = format!("{label}: {:?}", slot.node);
-            slot.curve.values_at(t, &mut values);
+            slot.curve.values_at(at, &offsets, &mut values);
             for property in [LonghandId::Opacity, LonghandId::Transform] {
                 let sampled = values.contains_key(&OwnedPropertyDeclarationId::Longhand(property));
                 assert_eq!(
@@ -358,23 +427,23 @@ impl Fixture {
 
     /// Every grid point inside the viewport where `late` shows an item lies
     /// inside `early`'s rect of every group holding that item, composed at
-    /// `t`.
+    /// `at`.
     fn compare_groups(
         &self,
         rects: &[Rect],
         early: &CommittedFrame,
         late: &CommittedFrame,
-        t: f64,
+        at: Option<f64>,
         label: &str,
     ) {
         let offset_of = self.offset_of();
-        let early_animations = early.order.sample_animations(Some(t));
+        let early_animations = early.order.sample_animations(at, &offset_of);
         let early_stickies = early.order.sample_stickies(1.0, &offset_of);
         let early_samples =
             early
                 .order
                 .space_samples(&early_animations, &early_stickies, 1.0, &offset_of);
-        let late_animations = late.order.sample_animations(None);
+        let late_animations = late.order.sample_animations(None, &offset_of);
         let late_stickies = late.order.sample_stickies(1.0, &offset_of);
         let late_samples =
             late.order
@@ -420,7 +489,7 @@ impl Fixture {
     /// checked.
     fn compare_coverage(&self, encoded: &[bool], late: &CommittedFrame, label: &str) {
         let offset_of = self.offset_of();
-        let animations = late.order.sample_animations(None);
+        let animations = late.order.sample_animations(None, &offset_of);
         let stickies = late.order.sample_stickies(1.0, &offset_of);
         let samples = late
             .order
@@ -446,15 +515,21 @@ impl Fixture {
 
     /// Every paired item's and clip's composed box, and every exported
     /// opacity, agree.
-    fn compare_geometry(&self, early: &CommittedFrame, late: &CommittedFrame, t: f64, label: &str) {
+    fn compare_geometry(
+        &self,
+        early: &CommittedFrame,
+        late: &CommittedFrame,
+        at: Option<f64>,
+        label: &str,
+    ) {
         let offset_of = self.offset_of();
-        let early_animations = early.order.sample_animations(Some(t));
+        let early_animations = early.order.sample_animations(at, &offset_of);
         let early_stickies = early.order.sample_stickies(1.0, &offset_of);
         let early_samples =
             early
                 .order
                 .space_samples(&early_animations, &early_stickies, 1.0, &offset_of);
-        let late_animations = late.order.sample_animations(None);
+        let late_animations = late.order.sample_animations(None, &offset_of);
         let late_stickies = late.order.sample_stickies(1.0, &offset_of);
         let late_samples =
             late.order
@@ -529,9 +604,15 @@ impl Fixture {
         }
     }
 
-    /// `early` hit at `Some(t)` answers what `late` answers at `None` at
-    /// every grid point clear of the edges `late` draws.
-    fn compare_hits(&self, early: &CommittedFrame, late: &CommittedFrame, t: f64, label: &str) {
+    /// `early` hit at `at` answers what `late` answers at `None` at every
+    /// grid point clear of the edges `late` draws.
+    fn compare_hits(
+        &self,
+        early: &CommittedFrame,
+        late: &CommittedFrame,
+        at: Option<f64>,
+        label: &str,
+    ) {
         let offset_of = self.offset_of();
         let late_hit = |x: f32, y: f32| late.hit(Point2D::new(x, y), &offset_of, None);
         let mut reached = Vec::new();
@@ -549,7 +630,7 @@ impl Fixture {
                 if !stable {
                     continue;
                 }
-                let got = early.hit(Point2D::new(x, y), &offset_of, Some(t));
+                let got = early.hit(Point2D::new(x, y), &offset_of, at);
                 assert_eq!(got, expected, "{label}: hit at ({x}, {y})");
                 compared += 1;
                 if let Some(target) = got
@@ -1204,9 +1285,9 @@ fn a_planar_curve_under_a_perspective_parent_composes_as_committed() {
 
 /// A `transform` transition started by a restyle: sampled through
 /// `Transition::calculate_value`, it composes as committed until its end,
-/// where the frame hands back. Its reach is unbounded — the fork keeps a
-/// transition's timing function private — so the extent budget bounds its
-/// encode, and the coverage check holds over the whole viewport.
+/// where the frame hands back. Its reach runs from its `from` to its `to`
+/// over its timing function's eased range, and the coverage check holds
+/// over the whole viewport.
 #[test]
 fn a_transform_transition_composes_as_committed() {
     let fixture = || {
@@ -1226,7 +1307,7 @@ fn a_transform_transition_composes_as_committed() {
     let curve = &frame.animation_slots()[0].curve;
     assert_eq!(curve.transitions.len(), 1, "the transition exports");
     let track = curve.transform.as_ref().expect("a transform track");
-    assert!(!track.reach.is_bounded(), "a transition has no reach yet");
+    assert!(track.reach.is_bounded(), "a transition has a reach");
     assert_eq!(curve.expires_at, Some(1.0), "it hands back at its end");
     fixture().check("transform transition");
 }
@@ -1282,7 +1363,9 @@ fn a_delayed_transition_exports_once_anchored() {
 /// painter shows then.
 fn painted(frame: &CommittedFrame, property: LonghandId, t: f64) -> AnimationValue {
     let mut values = AnimationValueMap::default();
-    frame.animation_slots()[0].curve.values_at(t, &mut values);
+    frame.animation_slots()[0]
+        .curve
+        .values_at(Some(t), &frame.committed_offsets(), &mut values);
     values
         .get(&OwnedPropertyDeclarationId::Longhand(property))
         .cloned()
@@ -1480,4 +1563,169 @@ fn a_row_without_a_reach_inside_a_fading_group_refuses_the_export() {
         .collect();
     assert_eq!(exported, [group], "only the group's fade exports");
     assert!(frame.needs_main_ticks(), "the row ticks on the main thread");
+}
+
+/// A 300 px scroller holding a `.lead` when `lead`, then a card animating
+/// `curve` with `fill` on `timeline`, then a `.filler`.
+fn scroll_fixture(
+    extra: &str,
+    lead: bool,
+    (curve, fill): (&str, &str),
+    timeline: &str,
+) -> (Fixture, NodeId, NodeId) {
+    let mut fixture = Fixture::new(&format!(
+        ".scroller {{ overflow: scroll; flex-direction: column; flex-shrink: 0;
+                      width: 300px; height: 300px; margin: 40px 0 0 60px; }}
+         .card {{ flex-shrink: 0; width: 120px; height: 80px; margin: 20px;
+                  background-color: teal; }}
+         .filler {{ flex-shrink: 0; width: 280px; background-color: navy; }}
+         {extra}"
+    ));
+    let root = fixture.doc.root;
+    let scroller = fixture.el(root, "view.scroller");
+    if lead {
+        fixture.el(scroller, "view.lead");
+    }
+    let card = fixture.el(scroller, "view.card");
+    fixture.el(scroller, "view.filler");
+    fixture.doc.set_inline(
+        card,
+        &format!("animation: {curve} 1s linear {fill}; {timeline}"),
+    );
+    fixture.probes = vec![card];
+    (fixture, scroller, card)
+}
+
+/// `scroll()`: the card rides its scroller and animates across the whole
+/// scroll range — at the range's start, inside it, and at its end, which is
+/// the scroll limit.
+#[test]
+fn a_scroll_timeline_composes_as_committed() {
+    for curve in CURVES {
+        // 200 px of lead, 120 px of card and 260 px of filler: a 280 px
+        // scroll range, over which some of the card stays in view.
+        let (fixture, scroller, _) = scroll_fixture(
+            ".lead { flex-shrink: 0; width: 280px; height: 200px; }
+             .filler { height: 260px; }",
+            true,
+            (curve, "both"),
+            "animation-timeline: scroll()",
+        );
+        fixture.check_scroll(
+            &format!("scroll(), {curve}"),
+            scroller,
+            100.0,
+            &[70.0, 0.0, 280.0, 123.25],
+        );
+    }
+}
+
+/// `view()` on the card over its `entry` range, 80 px to 160 px of a 300 px
+/// scroll range: before it, exactly at its start and end, inside it, past
+/// it, and at the scroll limit.
+#[test]
+fn a_view_timeline_composes_as_committed() {
+    for curve in CURVES {
+        // The card's border box spans 380 px to 460 px of 600 px content,
+        // out of view before its range; the sweep reaches the scroller.
+        let (mut fixture, scroller, _) = scroll_fixture(
+            ".filler { height: 120px; }
+             .lead { flex-shrink: 0; width: 280px; height: 360px; }",
+            true,
+            (curve, "both"),
+            "animation-timeline: view(); animation-range: entry",
+        );
+        fixture.probes = vec![scroller];
+        fixture.check_scroll(
+            &format!("view(), {curve}"),
+            scroller,
+            120.0,
+            &[40.0, 80.0, 160.0, 101.5, 230.0, 300.0],
+        );
+    }
+}
+
+/// The same `view()` range with no fill, committed before it, where the
+/// cascade has no effect: the curve contributes exactly where the cascade
+/// does — at the range's start and inside it, not before it, at its end, or
+/// past it.
+#[test]
+fn a_view_timeline_without_a_fill_composes_its_presence_as_committed() {
+    for curve in CURVES {
+        let (mut fixture, scroller, _) = scroll_fixture(
+            ".filler { height: 120px; }
+             .lead { flex-shrink: 0; width: 280px; height: 360px; }",
+            true,
+            (curve, "none"),
+            "animation-timeline: view(); animation-range: entry",
+        );
+        fixture.probes = vec![scroller];
+        fixture.check_scroll(
+            &format!("view() without a fill, {curve}"),
+            scroller,
+            40.0,
+            &[0.0, 79.5, 80.0, 101.5, 160.0, 230.0, 300.0, 40.0],
+        );
+    }
+}
+
+/// A named scroll timeline on a list painted after the header it drives:
+/// its slot is allocated after the header's animation slot, and the header,
+/// outside the list, does not move with it.
+#[test]
+fn a_named_timeline_on_a_later_painted_list_composes_as_committed() {
+    let fixture = |curve: &str| {
+        let mut fixture = Fixture::new(
+            ".header { flex-shrink: 0; width: 200px; height: 60px; margin: 20px 0 0 60px;
+                       background-color: teal; }
+             .list { overflow: scroll; flex-direction: column; flex-shrink: 0; z-index: 1;
+                     width: 300px; height: 300px; margin: 20px 0 0 60px;
+                     scroll-timeline: --list; }
+             .row { flex-shrink: 0; width: 280px; height: 50px; margin-bottom: 10px;
+                    background-color: navy; }",
+        );
+        let root = fixture.doc.root;
+        let header = fixture.el(root, "view.header");
+        let list = fixture.el(root, "view.list");
+        for _ in 0..10 {
+            fixture.el(list, "view.row");
+        }
+        fixture.doc.set_inline(
+            header,
+            &format!("animation: {curve} 1s linear both; animation-timeline: --list"),
+        );
+        fixture.probes = vec![header];
+        (fixture, list)
+    };
+    for curve in CURVES {
+        let (mut probe, list) = fixture(curve);
+        let frame = probe.doc.dom.commit();
+        let [slot] = frame.animation_slots() else {
+            panic!("{curve}: the header exports");
+        };
+        let Timeline::Scroll(scroll) = &slot.curve.animations[0].1 else {
+            panic!("{curve}: the header reads the list");
+        };
+        let bound = scroll.slot.expect("the list has a slot");
+        assert_eq!(frame.scroll_slots()[bound as usize].node, list);
+        let space = |kind: SpaceKind| {
+            frame
+                .order
+                .spaces()
+                .iter()
+                .position(|space| space.kind == kind)
+                .expect("the slot has a space")
+        };
+        assert!(
+            space(SpaceKind::Animation(0)) < space(SpaceKind::Scroll(bound)),
+            "{curve}: the list is allocated after the header"
+        );
+        let (fixture, list) = fixture(curve);
+        fixture.check_scroll(
+            &format!("named timeline, {curve}"),
+            list,
+            100.0,
+            &[150.0, 0.0, 300.0, 37.5],
+        );
+    }
 }

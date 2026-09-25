@@ -641,4 +641,46 @@ mod tests {
             "the bundle's pink element must survive rendering and BMP encoding"
         );
     }
+
+    /// A compiled `ReactLynx` card whose stylesheet declares
+    /// `animation-timeline: scroll()`: the lowering carries it to stylo, the
+    /// row binds its list's scroll timeline, and at the boot offset it shows
+    /// its `from` keyframe — opacity 0.25 over white — while its sibling
+    /// stays solid blue.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_scroll_timeline_card_renders_at_its_scroll_progress() {
+        let executor = CaptureExecutor::new().expect("start capture owner thread");
+        let result = executor
+            .capture(CaptureRequest {
+                input: CaptureInput::Bytes(
+                    fixtures::fixture("react-scroll-timeline").page.to_vec(),
+                ),
+                width: 800,
+                height: 600,
+                screenshot_settle: Duration::ZERO,
+                timeout: Duration::from_secs(30),
+                url: Url::parse("file:///react-scroll-timeline.web.bundle").expect("fixture URL"),
+            })
+            .await
+            .expect("capture queue remains available");
+        executor.shutdown().expect("stop capture owner thread");
+
+        let screenshot = result.expect("decode, boot, and render the web bundle");
+        let width = usize::try_from(screenshot.size.width).expect("an addressable width");
+        let pixel = |x: usize, y: usize| {
+            let at = (y * width + x) * 4;
+            [
+                screenshot.pixels[at],
+                screenshot.pixels[at + 1],
+                screenshot.pixels[at + 2],
+            ]
+        };
+        let [red, green, blue] = pixel(150, 50);
+        assert!(
+            (187..=195).contains(&red) && (187..=195).contains(&green) && blue == 255,
+            "the revealing row shows its from keyframe, got {:?}",
+            pixel(150, 50)
+        );
+        assert_eq!(pixel(150, 150), [0, 0, 255], "the next row is solid");
+    }
 }

@@ -998,10 +998,6 @@ fn a_scroll_driven_animation_follows_its_scroller() {
         "the first layout samples offset 0"
     );
     assert!(!doc.dom.has_active_animations(), "no clock frames");
-    assert!(
-        !doc.dom.commit().has_exported_curves(),
-        "no curve carries a scroll timeline yet: as a clock curve it would recompose every frame"
-    );
     scroll(&mut doc, scroller, 250.0);
     assert_eq!(doc.value(mover, "opacity"), "0.25", "no flush needed");
     doc.flush();
@@ -1013,6 +1009,36 @@ fn a_scroll_driven_animation_follows_its_scroller() {
         doc.value(mover, "opacity"),
         "0.1",
         "scrolling back un-finishes it"
+    );
+}
+
+/// Once a commit exports the fade as a scroll-timeline curve, the painter
+/// samples it from the live offset: nothing reads the clock, an adopted
+/// scroll re-cascades nothing and commits nothing, and the next commit's
+/// resolution catches the cascade up.
+#[test]
+fn an_exported_scroll_driven_animation_is_left_to_the_painter() {
+    let (mut doc, scroller, mover) = scroll_driven(".driven");
+    let frame = doc.dom.commit();
+    assert!(frame.has_exported_curves(), "the fade exports");
+    assert!(
+        !frame.has_live_curves() && !frame.animations_active() && !frame.needs_main_ticks(),
+        "and asks for no frame"
+    );
+    // Inside the committed encode window.
+    scroll(&mut doc, scroller, 150.0);
+    assert!(!doc.dom.needs_render(), "an adopted scroll commits nothing");
+    assert_eq!(
+        doc.value(mover, "opacity"),
+        "0",
+        "the cascade value is stale between commits"
+    );
+    doc.dom.note_scroll_windows_stale();
+    doc.dom.commit();
+    assert_eq!(
+        doc.value(mover, "opacity"),
+        "0.15",
+        "a commit re-samples it"
     );
 }
 

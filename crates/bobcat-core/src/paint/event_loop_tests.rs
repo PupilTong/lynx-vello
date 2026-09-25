@@ -1234,6 +1234,67 @@ fn a_scroll_driven_color_follows_the_users_scroll() {
     assert!(!engine.is_animating(), "the painter is idle at rest");
 }
 
+/// A tap finds a header a list below it drives by a named scroll timeline
+/// where the list's scroll carries it: hit testing samples the exported
+/// curve at the painter's offsets, with no commit in between.
+#[test]
+fn a_tap_finds_a_scroll_driven_header_where_the_scroll_carries_it() {
+    let mut engine = TestViewSpec::new(
+        r"
+        globalThis.renderPage = function () {
+          const page = __CreatePage('card', 0);
+          const header = __CreateView(0);
+          const list = __CreateView(0);
+          const filler = __CreateView(0);
+          __AppendElement(page, header);
+          __AppendElement(page, list);
+          __AppendElement(list, filler);
+          globalThis.held = [page, header, list, filler];
+          __SetClasses(header, 'header');
+          __SetClasses(list, 'list');
+          __SetClasses(filler, 'filler');
+          __AddEventListener(header, 'tap', (event) => {
+            __SetAttribute(header, 'log', 'tap:' + event.detail.x);
+          }, {});
+          __FlushElementTree();
+        };
+        ",
+    )
+    .with_style_sheet(
+        ".header { position: absolute; left: 0px; top: 0px; width: 40px; height: 40px;
+                   animation: slide linear both; animation-timeline: --list; }
+         .list { position: absolute; left: 0px; top: 100px; width: 200px; height: 200px;
+                 display: flex; flex-direction: column; overflow: scroll;
+                 scroll-timeline: --list; }
+         .filler { flex-shrink: 0; width: 200px; height: 400px; }
+         @keyframes slide { from { transform: translateX(0px); }
+                            to { transform: translateX(200px); } }",
+    )
+    .boot();
+    let boot = engine.published_frame().expect("boot committed a frame");
+    assert!(boot.has_exported_curves() && !boot.has_live_curves());
+    // 100px of travel less the 8px slop: the header slides 92px right.
+    touch_at(&mut engine, 0.0, PointerPhase::Down, 250.0);
+    touch_at(&mut engine, 0.05, PointerPhase::Move, 150.0);
+    touch_at(&mut engine, 0.5, PointerPhase::Up, 150.0);
+    assert!((intent_y(&engine, 4) - 92.0).abs() < 0.5);
+    assert!(
+        (scroll_offset_of(&mut engine, 4).y - 92.0).abs() < 0.5,
+        "main adopted the scroll"
+    );
+    assert_eq!(
+        engine
+            .published_frame()
+            .expect("still published")
+            .commit_id(),
+        boot.commit_id(),
+        "and no commit carried the header"
+    );
+    engine.dispatch_input(touch(1, PointerPhase::Down, 110.0));
+    engine.dispatch_input(touch(1, PointerPhase::Up, 110.0));
+    wait_for_log(&mut engine, "tap:110");
+}
+
 /// Boots a card whose one view runs `animation_css`, waiting for the
 /// boot flush like [`booted`] does.
 ///

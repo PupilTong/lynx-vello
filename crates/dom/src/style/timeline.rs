@@ -58,7 +58,7 @@ impl Axis {
         }
     }
 
-    const fn of_vector(self, vector: Vector2D<f32>) -> f32 {
+    pub(crate) const fn of_vector(self, vector: Vector2D<f32>) -> f32 {
         match self {
             Self::X => vector.x,
             Self::Y => vector.y,
@@ -153,6 +153,25 @@ impl ProgressTiming {
     /// The active duration.
     fn active(&self) -> f64 {
         (f64::from(self.end) - self.origin).max(0.0)
+    }
+
+    /// Whether [`iteration_progress`] has an effect at every offset of the
+    /// scroll range `[0, limit]`: offset 0 is not in a before phase without
+    /// a backwards fill, and the limit not in an after phase without a
+    /// forwards fill. The phases are monotone in the offset, so the ends
+    /// decide.
+    pub(crate) fn contributes_throughout(&self) -> bool {
+        let backwards = matches!(
+            self.fill,
+            AnimationFillMode::Backwards | AnimationFillMode::Both
+        );
+        let forwards = matches!(
+            self.fill,
+            AnimationFillMode::Forwards | AnimationFillMode::Both
+        );
+        let before = 0.0 < self.origin.max(f64::from(self.start));
+        let after = self.limit > self.end;
+        (backwards || !before) && (forwards || !after)
     }
 }
 
@@ -319,15 +338,25 @@ pub(crate) struct ScrollTimelines {
     defined: FxHashMap<NodeId, SmallVec<[Atom; 2]>>,
     /// The elements whose `timeline-scope` is not `none`.
     scopers: FxHashSet<NodeId>,
+    /// The elements whose curve in the last frame built samples a scroll
+    /// slot itself: the painter re-samples their animations from the live
+    /// offset, so a scroll the main thread adopts re-cascades none of them.
+    pub(crate) painted: FxHashSet<NodeId>,
 }
 
 impl ScrollTimelines {
-    /// The binding `id`'s animation `name` resolved to.
+    /// The binding `id`'s animation `name` resolved to at the last
+    /// resolution.
+    pub(crate) fn binding_of(&self, id: NodeId, name: &Atom) -> Option<&Binding> {
+        self.bindings
+            .get(&(id, name.clone()))
+            .map(|bound| &bound.binding)
+    }
+
+    /// [`Self::binding_of`] by name.
     #[cfg(test)]
     pub(crate) fn binding(&self, id: NodeId, name: &str) -> Option<&Binding> {
-        self.bindings
-            .get(&(id, Atom::from(name)))
-            .map(|bound| &bound.binding)
+        self.binding_of(id, &Atom::from(name))
     }
 
     /// Whether `id` is in the definer table.
@@ -407,6 +436,7 @@ impl ScrollTimelines {
         for &id in ids {
             self.undefine(id);
             self.progress_driven.remove(&id);
+            self.painted.remove(&id);
         }
         self.bindings.retain(|(id, _), _| !ids.contains(id));
         for list in self.dependents.values_mut() {
@@ -678,8 +708,11 @@ impl<T: Sync> Document<T> {
     /// the main thread — and re-cascades the elements whose sample changed.
     /// A paused animation holds, and so does one in a skipped subtree.
     ///
-    /// Every dependent is re-sampled: an element holding a progress-driven
-    /// animation exports no curve, so none is covered by the painter.
+    /// An element whose committed curve samples a scroll slot is left alone:
+    /// the painter samples it from the live offset, and its cascade value is
+    /// stale between commits as an exported curve's is
+    /// (`docs/style-assumptions.md` §12); the next commit's resolution
+    /// re-samples it.
     pub fn advance_scroll_timelines(&mut self, sources: &[NodeId]) {
         if self.animations().timelines.dependents.is_empty() {
             return;
@@ -695,6 +728,9 @@ impl<T: Sync> Document<T> {
                         continue;
                     };
                     let (id, name) = (key.0, &key.1);
+                    if timelines.painted.contains(&id) {
+                        continue;
+                    }
                     let set_key = AnimationSetKey::new_for_non_pseudo(OpaqueNode(id.arena_key()));
                     let Some(animation) = sets.get_mut(&set_key).and_then(|set| {
                         set.animations.iter_mut().find(|animation| {

@@ -44,7 +44,7 @@ impl PaintOrder {
         offsets: &OffsetSource<'_>,
         ratio: f32,
     ) -> Vec<NodeId> {
-        let animations = self.sample_animations(None);
+        let animations = self.sample_animations(None, offsets);
         let stickies = self.sample_stickies(ratio, offsets);
         let samples = self.space_samples(&animations, &stickies, ratio, offsets);
         let mut elements = Vec::new();
@@ -64,7 +64,7 @@ impl PaintOrder {
         offsets: &OffsetSource<'_>,
         ratio: f32,
     ) -> Option<NodeId> {
-        let animations = self.sample_animations(None);
+        let animations = self.sample_animations(None, offsets);
         let stickies = self.sample_stickies(ratio, offsets);
         let samples = self.space_samples(&animations, &stickies, ratio, offsets);
         self.hits_at(document, point, &samples).next()

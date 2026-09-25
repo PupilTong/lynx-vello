@@ -173,9 +173,10 @@ concretely, so the tables above are read as "the target" and this section as
   running transitions — sampled with `Transition::calculate_value`, inserted
   after the animations so a transition wins its property as the `Transitions`
   origin does, ending the domain at `start_time + duration`; a `transform`
-  transition's reach is unbounded until the fork exposes
-  `PropertyAnimation::{from, to, timing_function}`, so the extent budget
-  bounds its encode and a composited group around it refuses it — `steps()`,
+  transition's reach runs from its `from` to its `to` over its timing
+  function's eased range (the fork's `PropertyAnimation::{from, to,
+  timing_function}`), so it culls and exports inside a composited group like
+  a keyframes curve — `steps()`,
   `square-bezier`, `%`/`em`/`rem`/`rpx`/`vw`/`calc()`/`var()` values (already
   px in stylo's computed keyframes, `%` resolved against the border box as the
   commit resolves it), mismatched lists, backfilled `from`/`to` and every Lynx
@@ -202,7 +203,10 @@ concretely, so the tables above are read as "the target" and this section as
   so the export follows it); a keyframe or transition value some
   interpolation takes out of the plane — a perspective term in its matrix, or
   any 3D function under a parent `perspective` — or a committed world that is
-  not 2D invertible; pseudo-element sets; and the structural refusals below.
+  not 2D invertible; a property contributed at the commit that some offset of
+  a scroll timeline would leave with no contribution (the base-value rule under
+  "Scroll-driven animations"); pseudo-element sets; and the structural
+  refusals below.
 - **Where the two sides differ.** Past the curve's domain: it ends at its
   first animation's end (`expires_at`: the first instant a finite animation,
   iterated as the sampler iterates it, has ended), after which an animation's
@@ -250,7 +254,13 @@ concretely, so the tables above are read as "the target" and this section as
   and planar rotate primitives in the same order, a shorter list — `none`
   included — padded with identities as stylo pads it; a segment eases by its
   lower keyframe's timing function running forward and by its upper keyframe's
-  running reversed, as stylo eases it. A list holding an op the reach does not
+  running reversed, as stylo eases it; a transition's one segment runs from its
+  `from` to its `to`, eased by its own timing function. A scroll timeline
+  picks progress in `[0, 1]` as the clock does, so the reach — which reads no
+  time — bounds a scroll-driven curve exactly as it bounds the same keyframes on
+  the document timeline. It eases in the direction the binding samples, which
+  stylo's `return;` deviation can leave apart from the cloned animation's; a
+  held progress-driven sample takes both directions. A list holding an op the reach does not
   model (matrix, skew, 3D rotation) or a mismatched remainder stylo decomposes
   has no reach: its pullback admits everything, the extent cap bounds its
   encode, and it does not export inside a composited group. That is the one
@@ -261,15 +271,18 @@ concretely, so the tables above are read as "the target" and this section as
 - **Per-frame work is bounded by what the program draws.** Composition
   samples only the curves and sticky boxes the compose program references;
   the earliest curve end is a commit-time value. `has_live_curves` is true
-  when the program references a curve — the compositor then recomposes each
-  frame — so a frame whose curves are all culled composes once.
+  when the program references a curve that reads the document timeline — the
+  compositor then recomposes each frame — so a frame whose curves are all
+  culled, or all on scroll timelines, composes once per scroll.
   `has_exported_curves` is true when any curve exported: input hit tests then
   sample at the input's instant, since a curve moves its element's hit area
   even where nothing of it is drawn. A `filter: blur()` group whose content
   carries a curve, or whose element's transform curve moves it across an
   ancestor's clip, bakes at the frame's instant; its element's own
   opacity-only curve does not make it, and each filter entry re-bakes on its
-  own readings.
+  own readings — a scroll among them whenever such an entry samples curves and
+  the program composes one on a scroll timeline, whose source need not ride
+  the entry's paths.
 - **Side effects follow the animation, not its export** (web-animations-1:
   an in-effect `opacity`/`transform` animation acts as `will-change` naming
   it). The driver keeps two node bits, `animates_opacity` and
@@ -333,10 +346,11 @@ concretely, so the tables above are read as "the target" and this section as
 
 ## Scroll-driven animations
 
-scroll-animations-1 over the css-animations-2 `animation-timeline`, landed on
-the main thread (the painter does not sample these animations yet). Native
-Lynx has no scroll timelines, so there is nothing to reconcile with it; the
-choices below follow Blink where the specifications are silent or disagree.
+scroll-animations-1 over the css-animations-2 `animation-timeline`: bound and
+sampled on the main thread, and sampled by the painter from the live scroll
+offset where the animation exports. Native Lynx has no scroll timelines, so
+there is nothing to reconcile with it; the choices below follow Blink where
+the specifications are silent or disagree.
 
 - **Properties.** `animation-timeline: scroll() | view() | <dashed-ident> |
   none | auto`, `scroll-timeline-name/-axis` (+ `scroll-timeline`),
@@ -372,6 +386,39 @@ choices below follow Blink where the specifications are silent or disagree.
   runtime calls when it adopts the painter's scroll at the mailbox marker).
   No clock frame is ever asked for; a scroll-driven animation leaves the
   timeline idle.
+- **Composite path.** A running scroll-driven animation on `opacity` or
+  `transform` exports with its element's curve (the set walk above), carrying
+  its binding: the source, the axis and the `ProgressTiming`. After the
+  build's walk each binding is bound to its source's scroll slot — the
+  element's own slot for `scroll(self)` and a later-painted source's are
+  allocated after its curve — and a source the frame has no slot for holds the
+  committed sample, as a paused animation and an inactive timeline do. The
+  compositor samples the curve from the offset it composes that slot at,
+  clamped to `[0, max]` and unsnapped, through `iteration_progress`, then
+  stylo's `sample_at`: the sampled values are bit-equal to the ones the main
+  thread's cascade commits after scrolling to the same offset. A scroll-driven
+  curve has no `expires_at`, asks for no recompose per frame
+  (`has_live_curves` counts only curves that read the clock; a scroll
+  recomposes by itself) and no main-thread tick; a drag, a fling or a bounce
+  moves it with no commit. The main thread leaves an element whose committed
+  curve samples a slot to the painter when it adopts a scroll: its cascade
+  value is stale between commits, as any exported curve's is
+  (`docs/style-assumptions.md` §12), and every commit's resolution re-samples
+  it.
+- **Base-value rule.** A scroll timeline's offsets move both ways, so there is
+  no hand-back: the export refuses when, for a property some entry
+  contributes at the commit's instant and offsets, no entry keeps a
+  contribution over the whole domain — a document-timeline entry contributing
+  now, a transition, a held sample, or a scroll-driven entry with no before
+  phase without a backwards fill and no after phase without a forwards fill
+  anywhere in the scroll range `[0, max]`. A property no entry contributes at
+  the commit is always representable: the committed value is then the base
+  value, which a sample without the property reproduces. So a `view()`
+  animation with fill `none` committed while its subject is outside its range
+  exports, and one committed inside it refuses; `scroll()` over its whole
+  range contributes at every offset, the limit included, fill or not. The
+  specification's examples use `both`, which is representable at every
+  offset.
 - **Stale timelines** (scroll-animations-1 §5.1). The flush that creates an
   animation cascades it with no effect; the same `layout()` binds it, writes
   its sample and re-cascades it before the commit, and a change that relayouts
@@ -424,7 +471,8 @@ choices below follow Blink where the specifications are silent or disagree.
   - Progress reads the offset clamped to `[0, max]`: a `contain-bounce`
     stretch is not a scroll offset.
   - An animation on an inactive timeline is idle: no effect whatever its
-    fill, and not *current*, so it sets none of the `animates` side effects.
+    fill, and not *current*, so it sets none of the `animates` side effects,
+    and an exported curve counts it animating nothing.
 - **Deviations and limits.**
   - Stylo's `return;` after updating an existing same-name animation is kept
     (the servo deviation is mirrored), and it now also freezes the timeline
@@ -440,10 +488,15 @@ choices below follow Blink where the specifications are silent or disagree.
   - An element in skipped contents (css-contain-2 §4) holds its sample.
   - No animation events and no JS `ScrollTimeline`/`ViewTimeline` API: the
     engine dispatches no animation events at all.
-  - The composite export refuses an element holding a progress-driven
-    animation, so these animations re-cascade on the main thread when their
-    scroll container moves: one animation-only restyle and one commit per
-    adopted scroll while a source moves, and nothing at rest.
+  - An animation the composite path refuses — another property, a
+    representability refusal, or any of the export's other refusals —
+    re-cascades on the main thread when its scroll container moves: one
+    animation-only restyle and one commit per adopted scroll while a source
+    moves, one frame behind the painter's scroll, and nothing at rest.
+  - The painter clamps a scroll-driven offset to the timing's `limit`, the
+    source's scroll range as the commit resolved it, rather than to the
+    slot's `max_offset`: the two are the same value, and reading the timing's
+    keeps the timeline-boundary comparison exact.
 
 ---
 

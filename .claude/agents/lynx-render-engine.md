@@ -84,8 +84,14 @@ vello is the only wgpu dependency in this workspace, so it pins wgpu's major
   `timeline_sample` `timeline.rs` writes: bound per `layout()` pass
   (`resolve_timelines`, the stale-timelines pass), re-sampled by
   `advance_scroll_timelines` when main adopts a scroll at the mailbox marker;
-  they tick no clock and do not export yet (`docs/tracking/css-animation.md`
-  "Scroll-driven animations" lists the Blink choices and deviations).
+  they tick no clock. An exported one's curve carries its binding
+  (`curves::Timeline::Scroll`), bound to the source's scroll slot after the
+  build's walk (`PaintOrder::bind_scroll_timelines`), and samples the composed
+  offset, clamped and unsnapped, through `timeline::iteration_progress`:
+  `has_live_curves` counts only clock-reading curves, and main leaves an
+  element whose curve samples a slot to the painter
+  (`docs/tracking/css-animation.md` "Scroll-driven animations" lists the Blink
+  choices, the base-value rule and the deviations).
 - Embedder side: `crates/bobcat-core/src/paint/` — `Painter` facade,
   `gesture.rs` (input routing and recognition; `dom` has no default-action
   machinery), `images.rs`, `graphics.rs`. The painter keeps a lock-free replica
