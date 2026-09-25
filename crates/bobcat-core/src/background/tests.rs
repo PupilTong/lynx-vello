@@ -1043,14 +1043,13 @@ fn a_worker_realm_declares_these_host_members() {
     let worker = [
         "backgroundEntry",
         "closeWorker",
-        "invokeNativeModule",
         "pixelHeight",
         "pixelRatio",
         "pixelWidth",
         "postWorkerMessage",
         "workerName",
     ];
-    let native_modules = ["nativeModuleTable"];
+    let native_modules = ["invokeNativeModule", "nativeModuleTable"];
     assert_eq!(
         group.message(0),
         wire(&format!(

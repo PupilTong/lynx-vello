@@ -10,9 +10,10 @@
 //! What differs between realm kinds is the host modules installed after the
 //! core, and those are the caller's: [`open_realm`] takes them as a closure.
 //! An MTS realm's are its document, style, startup and `Worker` members; a
-//! worker realm's are `bobcat-internal:worker` and
-//! `bobcat-internal:native-modules`. Nothing here names a kind or branches on
-//! one. The core is told two things about its realm: the key its
+//! worker realm's are the members of `bobcat-internal:worker`. Both kinds
+//! also install `bobcat-internal:native-modules` through
+//! [`crate::native_module::install`], each with its own table. Nothing here
+//! names a kind or branches on one. The core is told two things about its realm: the key its
 //! display-frame demand is reported under — `None` for a view's MTS realm and
 //! the worker's own key for a worker realm — and the [`ScriptSource`] its
 //! diagnostics name.

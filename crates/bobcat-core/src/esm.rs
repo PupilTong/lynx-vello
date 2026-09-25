@@ -51,9 +51,11 @@ macro_rules! builtin_module {
 /// The native module every realm's Rust-backed members are exported from.
 pub(crate) const HOST_MODULE_SPECIFIER: &str = "bobcat-internal:host";
 
-/// The native module a worker realm's embedder module table is read from,
-/// which every worker realm declares: the view's table in a BTS, an empty
-/// one in a plain `Worker`.
+/// The native module a realm reaches the embedder's native modules through,
+/// which every realm kind declares: `invokeNativeModule` and the one-shot
+/// module table, which is the view's table in a BTS and an empty one in the
+/// MTS realm and a plain `Worker`. [`crate::native_module::install`] is what
+/// installs it.
 pub(crate) const NATIVE_MODULES_HOST_SPECIFIER: &str = "bobcat-internal:native-modules";
 
 /// The timer runtime: the realm's half of `setTimeout` and its three
@@ -95,6 +97,17 @@ pub(crate) const SYSTEM_INFO_MODULE_SPECIFIER: &str = "bobcat:system-info";
 /// Element PAPI's attribute and style answers, and a worker realm's native
 /// module table.
 pub(crate) const RECORD_MODULE_SPECIFIER: &str = "bobcat:record";
+
+/// The native module transport, for every realm kind: `callNativeModule`,
+/// which hands one call to [`NATIVE_MODULES_HOST_SPECIFIER`]'s
+/// `invokeNativeModule`, and [`NATIVE_MODULE_CALLBACK_EXPORT`], which both
+/// engine threads call with a module's answer. `bobcat:bts-runtime` builds
+/// the BTS's `NativeModules` over it.
+pub(crate) const NATIVE_MODULES_MODULE_SPECIFIER: &str = "bobcat:native-modules";
+
+/// Called on [`NATIVE_MODULES_MODULE_SPECIFIER`] with one native module
+/// callback's answer.
+pub(crate) const NATIVE_MODULE_CALLBACK_EXPORT: &str = "__BobcatNativeModuleCallback";
 
 pub(crate) const GLOBAL_EVENT_MODULE_SPECIFIER: &str = "bobcat:global-event-emitter";
 
@@ -241,6 +254,7 @@ pub(crate) const BUILTIN_MODULES: &[BuiltinModule] = &[
     builtin_module!(ANIMATION_FRAME_MODULE_SPECIFIER, "animation-frame"),
     builtin_module!(SYSTEM_INFO_MODULE_SPECIFIER, "system-info"),
     builtin_module!(RECORD_MODULE_SPECIFIER, "record"),
+    builtin_module!(NATIVE_MODULES_MODULE_SPECIFIER, "native-modules"),
     builtin_module!(CONTEXT_MODULE_SPECIFIER, "cross-thread-context"),
     builtin_module!(WORKER_CLASS_MODULE_SPECIFIER, "worker"),
     builtin_module!(WORKER_MODULE_SPECIFIER, "worker-runtime"),

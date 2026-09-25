@@ -1,7 +1,13 @@
 // The `bobcat:runtime` compatibility ESM imported by each transformed MTS entry.
 //
 // The JS Context and lifecycle/event calls reach this view's BTS Worker.
-// This realm has no `NativeModules` of its own — Lepus has none.
+// `NativeModules` is `undefined` here, as it is on native's main thread and in
+// web-core. Native's main thread does have a native module path of its own,
+// `lynx.module(name).invoke(method, ...args)`, off by default and turned on by
+// the host's `enableMTSModule`; web-core's has none, and neither does this
+// runtime yet. The transport is in place: this realm declares
+// `bobcat-internal:native-modules` with an empty table, and a call made through
+// `bobcat:native-modules` is answered back here.
 // Diagnostics reach the view's host through `bobcat:diagnostics`, as every
 // realm's do, and the BTS Worker's own reach it without this realm; global
 // events reach BTS through the same Worker FIFO as Context messages. This

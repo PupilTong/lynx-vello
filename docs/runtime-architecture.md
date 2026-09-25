@@ -132,13 +132,28 @@ as `BackgroundStart::native_modules`. Every worker realm declares the host
 module `bobcat-internal:native-modules`, whose one-shot `nativeModuleTable`
 answers that record in a BTS and an empty one in a plain `Worker`, and
 `bobcat:bts-runtime` builds `NativeModules` out of it as it is evaluated. The
-`initialize` message carries the page's data only. The modules
+`initialize` message carries the page's data only. The MTS realm declares the
+same host module with an empty table, so the transport `bobcat:native-modules`
+links in every realm kind. The modules
 themselves never leave the embedder's thread: a call arrives back as
-`ViewNotice::NativeModuleCall` — the call's text and the indices of its
+`ViewNotice::NativeModuleCall` — the calling realm (`None` for the MTS realm,
+the worker's key for a worker), the call's text and the indices of its
 function arguments, nothing built — and `LynxView::pump` assembles the
-`ModuleCall` there, over the weak handle on the calling worker's inbox that
-`ViewNotice::WorkerCreated` already registered, then hands it to the module of
-that name.
+`ModuleCall` there, over a weak handle `FrameDemand::reply` picks by that
+caller: the calling worker's inbox, which `ViewNotice::WorkerCreated` already
+registered, or the view's own command sender. It then hands the call to the
+module of that name. An answer goes back as `WorkerMessage::ModuleCallback`,
+which the worker delivers at once, or as `ToMain::ModuleCallback`, which the
+MTS realm applies in the view's next command burst; both call
+`bobcat:native-modules`' `__BobcatNativeModuleCallback` in the realm that made
+the call. Because the MTS answer is a command, it waits while a job of the
+view is parked on a synchronous wait, and after a fatal event a callback reads
+as cancelled only once the view's task has ended. It is also the one command
+sent outside the seat's counting `CommandSender`: the module's callback sends
+it as it drops, on whichever thread that is, through the weak sender
+`CommandSender::uncounted` hands out. A frame post's fence therefore does not
+count it, and `Page::apply` leaves it out of the count of applied commands the
+fence is compared with (see "Ordering guarantees").
 
 Main asks for loads through the view's own `ViewNotice` channel, and
 `LynxView::pump` is what hands each ask to the host's `ResourceFetcher`.
@@ -203,7 +218,7 @@ QuickJS ESM graph — a worker realm, on bobcat-workers' runtime
     │     ├──▶ bobcat:diagnostics ──▶ bobcat-internal:host (reportScriptError,
     │     │                             logScriptMessage), the global console
     │     └──▶ bobcat-internal:worker (postWorkerMessage, closeWorker,
-    │                                   invokeNativeModule, workerName)
+    │                                   workerName)
     ├──▶ bobcat:timers ──▶ bobcat-internal:host (setTimer, clearTimer only)
     ├──▶ await import("<script URL>")   a plain Worker: completed by the
     │     │                             worker's consume_messages task, under
@@ -217,17 +232,22 @@ QuickJS ESM graph — a worker realm, on bobcat-workers' runtime
           │     │     pixelHeight: SystemInfo's screen)
           │     ├──▶ bobcat-internal:native-modules (nativeModuleTable,
           │     │     read through bobcat:record into NativeModules)
+          │     ├──▶ bobcat:native-modules (callNativeModule, the transport
+          │     │     each NativeModules method calls) ──▶
+          │     │     bobcat-internal:native-modules (invokeNativeModule)
           │     ├──▶ bobcat:diagnostics (console, lynx.reportError; the
           │     │     console export is the global one)
           │     └──▶ bobcat:cross-thread-context ──▶ bobcat:event-target
           └──▶ await import(BTS entry) once `initialize` arrives, when
                 configured: HostOutbox → view resource host → worker completion
-  Both runtimes register the same twenty built-ins (esm.rs BUILTIN_MODULES),
+  Both runtimes register the same twenty-one built-ins (esm.rs BUILTIN_MODULES),
   and a realm's host modules decide which of them link. Here bobcat:element,
   bobcat:runtime and bobcat-internal fail at link with a SyntaxError: they
   import bobcat-internal:host members only an MTS realm has. In an MTS realm
   bobcat:worker and bobcat:bts-runtime fail to load with a ReferenceError:
-  they import bobcat-internal:worker, which it does not declare. Any other
+  they import bobcat-internal:worker, which it does not declare.
+  bobcat:native-modules links in both: every realm kind declares
+  bobcat-internal:native-modules, the MTS realm with an empty table. Any other
   bobcat: or bobcat-internal: name, one no runtime registered and no realm
   declared, fails its import or require in the realm with a ReferenceError
   and is never sent to the fetcher.
@@ -618,7 +638,10 @@ a fence — how many commands the view had been sent before the post — and is
 applied once, after the last command of the first burst that has applied that
 many, so the events a painter pass dispatched and the host's own updates run
 before the frame its acknowledgement implies, even when the marker was
-collected ahead of them. The consumer awaits that burst's job
+collected ahead of them. A `ToMain::ModuleCallback`, a native module's answer
+to the MTS realm, is in neither count: it is sent outside the seat's counting
+sender, and the burst that holds one applies it without counting it as
+applied. The consumer awaits that burst's job
 before reading the channel again, so what arrives meanwhile is one later
 burst.
 
@@ -730,8 +753,10 @@ worker realm, so a synchronous wait in either ends with the realm that asked,
 and a worker realm's diagnostics reach the host from its own thread, with no
 message to the main-thread realm. The realm's other
 host modules are a parameter of the same call: the document, stylesheet,
-startup and `Worker` members for an MTS realm, `bobcat-internal:worker` and
-`bobcat-internal:native-modules` for a worker realm. The constructor names no realm kind. It is told two things: the
+startup and `Worker` members for an MTS realm, `bobcat-internal:worker` for a
+worker realm, and `bobcat-internal:native-modules` for both, which
+`native_module::install` installs with the realm's own table: empty in an MTS
+realm and a plain `Worker`. The constructor names no realm kind. It is told two things: the
 key the realm's display-frame demand is reported under, `None` for an MTS
 realm and the worker's key for a worker realm, and the `ScriptSource` its
 `ScriptReported` and `ConsoleMessage` carry, `Main` for an MTS realm and, for
@@ -1409,10 +1434,15 @@ sibling's traffic is not on this path at all, so no message names its view and
 no receiver has to defer one.
 
 - `ToMain`, an mpsc FIFO in: `PageUpdate`, `DispatchEvent`, `Vsync`, `Posted`,
-  `ImageEvents`. A FIFO because the order two commands arrive in is what they
-  mean. `LynxView` holds the one strong sender, inside the seat an attached
-  `Painter` holds only a `Weak` of, so a painter can never keep a released
-  view's task alive.
+  `ImageEvents`, `ModuleCallback`. A FIFO because the order two commands
+  arrive in is what they mean. `LynxView` holds the one strong sender, inside
+  the seat an attached `Painter` holds only a `Weak` of, so a painter can never
+  keep a released view's task alive. That sender is a `CommandSender`, which
+  counts what it sends on the embedder's thread; the count at a frame post is
+  the post's fence. `ModuleCallback` alone is sent outside it — by a native
+  module's callback as it drops, on whichever thread that is, through a weak
+  handle on the same channel (`CommandSender::uncounted`) — and is in no
+  count.
 - `ScrollMailbox` on the same seat, main holding an `Arc` of its own: what the
   painter *posts* rather than sends — the latest offset per scroll container
   (with where it came to rest, if it did), one coalesced frame post
@@ -1734,7 +1764,12 @@ without the marker.
   pass dispatched, and a `PageUpdate` or image report the host sent first,
   run before that frame, and an animation a listener starts begins on it,
   even when main collected the marker in an earlier burst than those
-  commands.
+  commands. A `ToMain::ModuleCallback` is outside the fence on both sides:
+  the painter's count (`CommandSender::sent`) never includes one, because a
+  native module's answer is sent through a weak handle that does not count,
+  and `Page::apply` leaves one out of the count of applied commands. So an
+  answer applied before a post does not make main apply that post's frame
+  one command early, and a frame post never waits for an answer.
 - The offscreen `tick` stays deterministic: post, mark, wait for
   `begin_frame_serviced(seq)`, which the fence makes imply every command sent
   before the tick. `tick` delivers its `Vsync` before its frame post, as it

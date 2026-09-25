@@ -1088,6 +1088,72 @@ fn a_frame_post_waits_for_the_commands_sent_before_it() {
     });
 }
 
+/// A native module's answer to the MTS realm is the one command outside the
+/// fence count: its sender does not count it, so main does not either. The
+/// burst that holds one applies it, which runs the function the realm kept
+/// for the answer, and a frame post made afterwards still waits for exactly
+/// the commands sent before it, as in
+/// [`a_frame_post_waits_for_the_commands_sent_before_it`]. Counting the
+/// answer here would apply that frame one command early, ahead of the tap.
+#[test]
+fn a_frame_post_behind_a_module_callback_still_waits_for_the_commands_sent_before_it() {
+    on_a_js_thread(|thread| async move {
+        let (context, _workers) = group(&thread);
+        let mut owned = OwnedPage::new(context);
+        owned
+            .boot(&format!(
+                "{TRANSITION_ON_TAP}
+import {{ callNativeModule }} from 'bobcat:native-modules';
+callNativeModule('Echo', 'echo', [() => console.log('answered')]);
+"
+            ))
+            .await;
+        let target = first_box(&owned.page).await;
+        let serviced = owned.view.published.begin_frame_serviced();
+        // What the seat's sender has counted so far. The answer below is not
+        // sent through it.
+        let sent = owned.page.applied.get();
+        owned
+            .page
+            .apply(vec![ToMain::ModuleCallback {
+                call: 1,
+                index: 0,
+                arguments: Some("[]".to_owned()),
+            }])
+            .await;
+        assert!(
+            owned.events().iter().any(|event| {
+                matches!(event, EngineEvent::ConsoleMessage { message, .. } if message == "answered")
+            }),
+            "the burst ran the function the realm kept for the answer"
+        );
+        // The marker is sent first, the tap second, then the post.
+        let fence = sent + 2;
+        assert!(owned.scroll.post(
+            [],
+            Some(FramePost {
+                now: 0.5,
+                seq: serviced + 1,
+                fence
+            })
+        ));
+        owned.page.apply(vec![ToMain::Posted]).await;
+        assert_eq!(
+            owned.view.published.begin_frame_serviced(),
+            serviced,
+            "not acknowledged ahead of the tap sent before it"
+        );
+        owned.page.apply(vec![tap(target)]).await;
+        assert_eq!(owned.view.published.begin_frame_serviced(), serviced + 1);
+        let frame = owned.view.published.frame().expect("a frame is published");
+        assert_eq!(
+            frame.animation_slots().len(),
+            1,
+            "the frame anchored the transition the tap's listener started"
+        );
+    });
+}
+
 /// Two frame posts the painter made before main took either are one frame:
 /// `begin_frame` runs once, at the later post's clock, and the greater
 /// sequence number is acknowledged.

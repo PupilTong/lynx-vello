@@ -199,7 +199,9 @@ pub(super) struct Page {
     /// the last command of the first burst that reaches its fence.
     frame_due: Cell<Option<FramePost>>,
     /// How many commands this view has been sent and has applied, counted
-    /// the way [`crate::link::CommandSender`] counts them.
+    /// the way [`crate::link::CommandSender`] counts them: a
+    /// [`ToMain::ModuleCallback`] is sent outside that sender and is not
+    /// counted here either.
     applied: Cell<u64>,
     /// The newest frame-post sequence taken and not yet acknowledged.
     ///
@@ -619,10 +621,17 @@ impl Page {
         if self.ended() {
             return;
         }
+        // What `CommandSender` counted of this burst: every command but a
+        // native module's answer, which is sent outside that sender, so no
+        // fence includes it. Counted before the seam below is taken out,
+        // which the sender counted like any other command.
+        let count = commands
+            .iter()
+            .filter(|command| !matches!(command, ToMain::ModuleCallback { .. }))
+            .count() as u64;
         // Taken here rather than in the job, because what the seam spawns has
         // to trap the way any other task of this view does, rather than into
         // the `catch_unwind` an entry runs under.
-        let count = commands.len() as u64;
         #[cfg(test)]
         let commands = self.take_test_seams(commands);
         let page = Rc::clone(self);
@@ -706,6 +715,18 @@ impl Page {
                 }
             }
             ToMain::Posted => self.adopt_posted(runtime),
+            ToMain::ModuleCallback {
+                call,
+                index,
+                arguments,
+            } => {
+                if let Err(error) =
+                    runtime.deliver_module_callback(js, call, index, arguments.as_deref())
+                {
+                    self.outbox
+                        .engine_event(EngineEvent::ScriptRunError(error.into_script_error()));
+                }
+            }
             #[cfg(not(target_arch = "wasm32"))]
             ToMain::ImageEvents(events) => self.apply_image_events(runtime, events),
             // No blocking pool to parse on: `dom` parses a reported document

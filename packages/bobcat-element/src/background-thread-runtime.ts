@@ -1,4 +1,9 @@
-import { callNativeModule } from "bobcat:worker";
+// Imported for their effects, first: this module calls
+// `scope.addEventListener` and reads the timer globals as it is evaluated,
+// so the global scope and the timers are in place before it runs.
+import "bobcat:worker";
+import "bobcat:timers";
+import { callNativeModule } from "bobcat:native-modules";
 import type { WorkerGlobalScope } from "bobcat:worker";
 import { pixelHeight, pixelRatio, pixelWidth } from "bobcat-internal:worker";
 import { nativeModuleTable } from "bobcat-internal:native-modules";
