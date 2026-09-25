@@ -1534,8 +1534,7 @@ await Promise.resolve().then(() => __FlushElementTree());
             Ok(LoadedSource::Entry { source, url }) => Ok((url, entry_module_source(&source))),
             Ok(_) => Err(format!("the MTS entry {requested} is not a script")),
             Err(error) => Err(format!("loading the MTS entry {requested}: {error}")),
-        }
-        .map_err(|message| message.replace('\0', "\u{fffd}"));
+        };
         // Without a checkpoint of its own: the completion below drains the
         // queue for both, so naming the entry wakes no sibling realm between
         // them.
@@ -1633,7 +1632,7 @@ await Promise.resolve().then(() => __FlushElementTree());
             }
             Ok(LoadedSource::Font(_)) => Err("a module request returned a font".to_owned()),
             Ok(LoadedSource::Fetched) => Err("a module request returned a plain fetch".to_owned()),
-            Err(error) => Err(format!("module '{name}': {error}").replace('\0', "\u{fffd}")),
+            Err(error) => Err(format!("module '{name}': {error}")),
         };
         self.engine
             .complete_module(

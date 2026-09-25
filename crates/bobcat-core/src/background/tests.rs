@@ -8,6 +8,7 @@
 
 use std::cell::Cell;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use quickjs_rust_bridge::HostValue;
@@ -29,12 +30,17 @@ use crate::resource::{
 impl WorkerHome {
     pub(crate) fn with_entry_for_test(entry: (String, String)) -> Self {
         let (commands, receiver) = mpsc::unbounded_channel();
+        let trapped = Arc::new(AtomicBool::new(false));
         let thread = super::ThreadBuilder::new()
             .name("bobcat-test-workers".into())
-            .spawn(move || super::thread::run_with_entry(receiver, entry))
+            .spawn({
+                let trapped = Arc::clone(&trapped);
+                move || super::thread::run_with_entry(receiver, entry, &trapped)
+            })
             .unwrap();
         Self {
             commands,
+            trapped,
             thread: crate::threads::ThreadJoin::new(thread),
         }
     }
@@ -111,7 +117,6 @@ struct Group {
     /// The thread itself, waited for by its own drop — which is reached with
     /// the goodbye already said, because [`Drop for Group`](Group::drop) drops
     /// the test's own sender and every view before any field drops.
-    #[expect(dead_code, reason = "held to end and wait for the worker thread")]
     home: WorkerHome,
     commands: Option<mpsc::UnboundedSender<WorkerCommand>>,
     views: Vec<View>,
@@ -379,6 +384,38 @@ fn a_script_that_cannot_be_fetched_fails_its_worker_and_nothing_else() {
     // The runtime is untouched: the next worker over the same thread runs.
     let key = group.start("postMessage(\"alive\");");
     assert_eq!(group.next(0).key, key);
+}
+
+/// A trap in the thread's own loop ends every worker on it at once, and no
+/// worker's own owner is left to say so: the thread tells the creator of each
+/// one `Failed` and sets the flag `bobcat-main` reads before a `Start`. The
+/// thread is over, so the group's drop still joins it.
+#[test]
+fn a_trapped_worker_thread_fails_every_live_worker() {
+    let mut group = Group::new();
+    // One worker per view, each still waiting for its script.
+    let first = group.construct(0, "");
+    let second = group.construct(1, "");
+    group.tell(WorkerCommand::Panic);
+    for (view, key) in [(0, first), (1, second)] {
+        let event = group.next(view);
+        assert_eq!(event.key, key);
+        let WorkerPayload::Failed(error) = event.payload else {
+            panic!("a worker on a trapped thread is over")
+        };
+        assert!(
+            error.message.contains("the worker thread panicked"),
+            "{}",
+            error.message
+        );
+    }
+    assert!(group.home.trapped().load(Ordering::Acquire));
+    // Exactly one each: once the thread has dropped every clone of a view's
+    // sender, nothing more can arrive on it.
+    for view in [0, 1] {
+        group.wait_for_workers_to_end(view, PATIENCE, "the trapped thread let go of the view");
+        assert!(group.views[view].incoming.try_recv().is_err());
+    }
 }
 
 #[test]

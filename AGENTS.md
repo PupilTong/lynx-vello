@@ -470,8 +470,9 @@ awaiting its own call's answer would otherwise deadlock.
 module binding — an unknown module is `undefined` (web-core's answer, where
 native answers `null`; see `docs/tracking/deviations.md`), an undeclared method
 is `undefined` on both references, and a call naming a module this view lacks
-is never assembled at all, which leaves its functions released. No built-in module ships: `bridge`,
-`LynxUIMethodModule`, exposure and intersection are all absent.
+or a method its module did not declare is assembled and dropped, which releases
+its functions. No built-in module ships: `bridge`, `LynxUIMethodModule`,
+exposure and intersection are all absent.
 
 `PageSource` registers named CSS under entry-relative resource URLs. Boot
 supplies the entry response URL to the JS runtime before importing the entry,
@@ -968,7 +969,10 @@ them.
 joins it after `bobcat-main` has returned, so a thread that will not start
 fails the *group*. `bobcat-main` holds one sender on it and only ever sends:
 start a context with its script, post to a context, stop a context — and hears
-events back. A released view stops its own workers by sending each that stop.
+events back. It also reads one flag the worker thread sets when it traps: the
+trap reports `Failed` to the creator of every worker still on it, and a
+`new Worker` constructed afterwards fails at once instead of being sent there.
+A released view stops its own workers by sending each that stop.
 The price is one parked thread and one idle runtime per group; there is no
 lazily-built state and no lock. The runtime is separate from `bobcat-main`'s
 because worker script must not stop the thread that owns the document, and
@@ -1028,14 +1032,15 @@ its callback (`docs/destruction-runtime.md`). Raw BTS application entries
 explicitly import their bindings from `bobcat:bts-runtime`; neither runtime
 installs `globalThis.lynx`. XML uses this identical startup path, and the
 bootstrap contains no application source and does not fetch it in advance. A
-worker carries a `SourceRequester` that sends module requests directly to the
-view's resource host. ESM completion and timers continue during entry TLA;
-posted messages wait for entry settlement, and each completion shares its
-worker's cancellation token. ReactLynx compiled module execution and
-lazy-bundle APIs remain a later layer over this transport; bypassing
-`lynx_core.js` does not require its `requestScript`/`readScript` source-text
-interfaces (`docs/worker-resources-runtime.md`). Without an entry, only the
-built-in environment runs, and all workers use the same scope and protocol.
+worker carries a `HostOutbox` (`WorkerStart.sources`) that sends module
+requests directly to the view's resource host. ESM completion and timers
+continue during entry TLA; posted messages wait for entry settlement, and each
+completion shares its worker's cancellation token. ReactLynx compiled module
+execution and lazy-bundle APIs remain a later layer over this transport;
+bypassing `lynx_core.js` does not require its `requestScript`/`readScript`
+source-text interfaces (`docs/worker-resources-runtime.md`). Without an entry,
+only the built-in environment runs, and all workers use the same scope and
+protocol.
 
 MTS `lynx.getJSContext()` and this BTS Context are stable
 `CrossThreadContext extends EventTarget` instances returned directly by

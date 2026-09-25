@@ -23,7 +23,10 @@
 //! its script, post to one, stop one — and hears events back. A thread that
 //! will not start is a failure to build the *group*, named there, rather than
 //! a failure of whichever worker happened to be first — which is what lets
-//! everything below it be a plain channel send with no state to consult.
+//! everything below it be a plain channel send. The one state `bobcat-main`
+//! consults is whether this thread has trapped: a trap reports `Failed` to
+//! the creator of every worker still on it and sets a flag, and a `Worker`
+//! constructed after that fails at once rather than being sent here.
 //!
 //! # Who talks to whom
 //!
@@ -66,6 +69,8 @@ mod scope;
 mod tests;
 mod thread;
 
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread::Builder as ThreadBuilder;
 
@@ -127,6 +132,10 @@ pub(crate) struct WorkerStart {
 pub(crate) enum WorkerCommand {
     /// A realm constructed a `Worker`.
     Start(WorkerStart),
+    /// Panics the thread's `main` task, for the test of what a trapped
+    /// thread reports.
+    #[cfg(test)]
+    Panic,
 }
 
 /// Everything one worker in particular is ever told.
@@ -164,9 +173,9 @@ pub(crate) enum WorkerPayload {
     /// callback, which HTML reports at the worker and then at its parent
     /// without ending either.
     Errored(ScriptError),
-    /// The worker's script could not be fetched, or its realm could not be
-    /// built. The realm is gone with it; nothing more will ever arrive under
-    /// this key.
+    /// The worker's script could not be fetched, its realm could not be
+    /// built, or the thread it runs on has trapped. The realm is gone with it;
+    /// nothing more will ever arrive under this key.
     Failed(ScriptError),
     /// The worker ended itself with `close()`.
     Closed,
@@ -262,10 +271,11 @@ pub(crate) fn wire_matches(value: &HostValue, predicate: &str) -> bool {
 ///
 /// One per [`LynxGroup`](crate::LynxGroup), started by `LynxGroup::new` and
 /// joined by the group handle's drop, after `bobcat-main`. Everything that
-/// names a worker holds a sender cloned from here and nothing else — one of
-/// them is `bobcat-main`'s, which is the whole of what that thread has of this
-/// one: there is no shared state to guard, so there is no lock, no atomic and
-/// no handle to pass around.
+/// names a worker holds a sender cloned from here — one of them is
+/// `bobcat-main`'s, which with the trap flag is the whole of what that thread
+/// has of this one. The flag is the one piece of shared state, written once
+/// by this thread as it traps and read by `bobcat-main` before each `Start`,
+/// so it is one atomic and there is no lock.
 ///
 /// **The field order is the teardown, and it must stay in this order.** Fields
 /// drop in declaration order, so the goodbye — this side's last sender closing
@@ -273,6 +283,9 @@ pub(crate) fn wire_matches(value: &HostValue, predicate: &str) -> bool {
 /// answer it. A wait reached with a sender still alive would never return.
 pub(crate) struct WorkerHome {
     commands: mpsc::UnboundedSender<WorkerCommand>,
+    /// Set by the thread once it has trapped, before it reports `Failed` for
+    /// the workers still on it.
+    trapped: Arc<AtomicBool>,
     #[expect(dead_code, reason = "held to wait for the worker thread on drop")]
     thread: ThreadJoin,
 }
@@ -292,15 +305,20 @@ impl WorkerHome {
     /// failure to build the group.
     pub(crate) fn start() -> Result<Self, EngineError> {
         let (commands, command_receiver) = mpsc::unbounded_channel();
+        let trapped = Arc::new(AtomicBool::new(false));
         let thread = ThreadBuilder::new()
             .name("bobcat-workers".to_owned())
-            .spawn(move || thread::run(command_receiver))
+            .spawn({
+                let trapped = Arc::clone(&trapped);
+                move || thread::run(command_receiver, &trapped)
+            })
             .map_err(|error| EngineError::Thread {
                 name: "worker",
                 message: error.to_string(),
             })?;
         Ok(Self {
             commands,
+            trapped,
             thread: ThreadJoin::new(thread),
         })
     }
@@ -308,5 +326,11 @@ impl WorkerHome {
     /// The sending end, for anything that names a worker.
     pub(crate) fn commands(&self) -> mpsc::UnboundedSender<WorkerCommand> {
         self.commands.clone()
+    }
+
+    /// The flag the thread sets once it has trapped, for whatever sends it a
+    /// `Start`.
+    pub(crate) fn trapped(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.trapped)
     }
 }

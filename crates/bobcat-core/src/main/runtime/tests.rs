@@ -346,7 +346,7 @@ fn runtime_over_watching_names(
         ingredients,
         bound_metrics(viewport),
         outbox,
-        &WorkerFactory::new(workers),
+        &WorkerFactory::new(workers, Arc::default()),
         thread.handle(),
         // No entry here: these tests evaluate their own scripts against the
         // realm afterwards.
@@ -388,7 +388,7 @@ fn two_view_group_with(
     let mut ends = GroupFarEnds::default();
     let (workers, inbox) = mpsc::unbounded_channel();
     ends.workers = Some(inbox);
-    let workers = WorkerFactory::new(workers);
+    let workers = WorkerFactory::new(workers, Arc::default());
     let thread = JsThread::new();
     ends.thread = Some(Rc::clone(&thread));
     for startup in pages {

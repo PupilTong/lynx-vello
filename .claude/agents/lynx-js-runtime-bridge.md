@@ -169,6 +169,10 @@ Shorthand `lynx/`, `lynx-stack/`, `Paws/`; absolute paths live once in AGENTS.md
   `pnpm --filter reactlynx-test-fixtures build` first — `bobcat-core`'s build
   compiles the realm runtime into `OUT_DIR`, so a stale install breaks cargo.
 - `cargo clippy --all-targets -- -D warnings`.
+- The wasm32 clippy of CI's `browser` job (the command and the Homebrew
+  `llvm@22` `CC`/`CXX` are in AGENTS.md) whenever a change touches
+  `cfg(target_arch = "wasm32")` or `cfg(panic = "abort")` code, or an API
+  `crates/bobcat-wasm/src/browser.rs` uses: no native build type-checks either.
 - `cargo test -p bobcat-core` — `tests/main_thread.rs` runs the emitted JS
   through the real realm, beside `startup`, `multi_view`, `web_bundle`,
   `style_sheets`, `src/main/runtime/{tests,worker_tests}.rs` and

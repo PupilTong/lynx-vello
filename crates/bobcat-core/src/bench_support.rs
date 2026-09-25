@@ -90,7 +90,7 @@ impl ScriptHarness {
             // the view, and an unbound flush would park.
             watch::channel(Some(viewport)).1,
             outbox,
-            &WorkerFactory::new(workers),
+            &WorkerFactory::new(workers, Arc::default()),
             thread.handle(),
             // Nothing is outstanding: `boot` answers this realm's entry
             // request in place, with the source the benchmark named.

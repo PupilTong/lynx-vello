@@ -9,7 +9,36 @@
 //! parks in its scheduler, so what is left in common is only [`ThreadJoin`] —
 //! how a thread is waited for — and how one reports having trapped.
 
+#[cfg(all(target_arch = "wasm32", panic = "abort"))]
+use std::cell::RefCell;
+#[cfg(all(target_arch = "wasm32", panic = "abort"))]
+use std::sync::OnceLock;
+
 use crate::script::{ScriptError, ScriptErrorKind, ScriptErrorPhase};
+
+#[cfg(all(target_arch = "wasm32", panic = "abort"))]
+static WASM_SCRIPT_PANIC_HOOK: OnceLock<()> = OnceLock::new();
+
+/// Reports a panic on the thread that installed it, over whatever link that
+/// thread holds. Erased to a closure because a `thread_local!` static cannot
+/// be generic — and the hook it feeds is process-global anyway.
+///
+/// It is handed what the panic said, without a subject: each thread's
+/// reporter names itself, so one hook serves both of them.
+#[cfg(all(target_arch = "wasm32", panic = "abort"))]
+pub(crate) type ScriptPanicReporter = Box<dyn Fn(&str)>;
+
+#[cfg(all(target_arch = "wasm32", panic = "abort"))]
+thread_local! {
+    /// On `bobcat-main`, one reporter per view that thread has ever carried;
+    /// on `bobcat-workers`, the one reporter for every worker on it.
+    /// Append-only: a view that is gone has a closed channel, and sending onto
+    /// one is already a no-op, so nothing has to be pruned on a path that only
+    /// runs as the thread traps.
+    static WASM_SCRIPT_PANIC_REPORTERS: RefCell<Vec<ScriptPanicReporter>> = const {
+        RefCell::new(Vec::new())
+    };
+}
 
 /// The right to wait for one of this engine's threads.
 #[cfg(not(target_arch = "wasm32"))]
@@ -88,4 +117,40 @@ pub(crate) fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
     } else {
         "non-string panic payload"
     }
+}
+
+/// Installs the process-wide hook that hands a panic to the reporters of the
+/// thread it happened on, once for both threads.
+///
+/// Under `panic = "abort"` nothing unwinds, so no task's owner ever sees the
+/// panic: the hook, which runs before the abort, is the only place left to
+/// report it from. Each thread calls this before it registers a reporter,
+/// because either may be the first to start — `bobcat-workers` is started
+/// before `bobcat-main`.
+#[cfg(all(target_arch = "wasm32", panic = "abort"))]
+pub(crate) fn install_script_panic_hook() {
+    WASM_SCRIPT_PANIC_HOOK.get_or_init(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            WASM_SCRIPT_PANIC_REPORTERS.with(|reporters| {
+                let location = info
+                    .location()
+                    .map_or_else(String::new, |location| format!(" at {location}"));
+                let detail = format!(
+                    "aborted after a panic{location}: {}",
+                    panic_message(info.payload())
+                );
+                for reporter in reporters.borrow().iter() {
+                    reporter(&detail);
+                }
+            });
+            previous(info);
+        }));
+    });
+}
+
+/// Adds one reporter for panics on the calling thread.
+#[cfg(all(target_arch = "wasm32", panic = "abort"))]
+pub(crate) fn add_script_panic_reporter(reporter: ScriptPanicReporter) {
+    WASM_SCRIPT_PANIC_REPORTERS.with(|reporters| reporters.borrow_mut().push(reporter));
 }

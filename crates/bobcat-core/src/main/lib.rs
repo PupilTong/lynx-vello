@@ -7,9 +7,10 @@
 //! timers and the one boundary into JavaScript live.
 //!
 //! `bobcat-workers` is not this thread's. The group starts it beside this one
-//! and joins it after it; what arrives here is one sender, and the three
-//! messages a realm sends on it — start a context with its script, post to
-//! one, stop one — are the whole of what this thread does to it.
+//! and joins it after it; what arrives here is one sender and the flag that
+//! thread sets when it traps, and the three messages a realm sends on it —
+//! start a context with its script, post to one, stop one — are the whole of
+//! what this thread does to it.
 //!
 //! Tasks rather than one state machine for all of them. A view waiting for its
 //! entry parks on its own channels, so nothing it is waiting for can hold up a
@@ -38,6 +39,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 #[cfg(target_arch = "wasm32")]
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicBool;
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread::Builder as ThreadBuilder;
 
@@ -69,10 +71,14 @@ pub(crate) struct GroupLink {
     pub(crate) requester: Arc<dyn EventRequester>,
     /// How this thread's own startup went, answered exactly once.
     pub(crate) ready: oneshot::Sender<Result<(), LynxViewError>>,
-    /// The one thing this thread is given of `bobcat-workers`: the right to
-    /// send it messages. The thread itself is the group's, started before
-    /// this one and joined after it.
+    /// What this thread is given of `bobcat-workers`: the right to send it
+    /// messages, and the flag below. The thread itself is the group's,
+    /// started before this one and joined after it.
     pub(crate) workers: mpsc::UnboundedSender<WorkerCommand>,
+    /// Set by `bobcat-workers` once it has trapped. A `Worker` constructed
+    /// after that fails at once instead of being sent to a thread that will
+    /// never read it.
+    pub(crate) workers_trapped: Arc<AtomicBool>,
 }
 
 /// What every view on this thread shares.
@@ -93,25 +99,6 @@ struct GroupContext {
 
 #[cfg(target_arch = "wasm32")]
 static WASM_WORKER_BOOTSTRAP: OnceLock<()> = OnceLock::new();
-#[cfg(all(target_arch = "wasm32", panic = "abort"))]
-static WASM_SCRIPT_PANIC_HOOK: OnceLock<()> = OnceLock::new();
-
-/// Reports a panic on the thread that installed it, over whatever link that
-/// thread holds. Erased to a closure because a `thread_local!` static cannot
-/// be generic — and the hook it feeds is process-global anyway.
-#[cfg(all(target_arch = "wasm32", panic = "abort"))]
-type ScriptPanicReporter = Box<dyn Fn(crate::script::ScriptError)>;
-
-#[cfg(all(target_arch = "wasm32", panic = "abort"))]
-thread_local! {
-    /// One reporter per view this thread has ever carried. Append-only: a
-    /// view that is gone has a closed channel, and sending onto one is
-    /// already a no-op, so nothing has to be pruned on a path that only runs
-    /// as the Worker traps.
-    static WASM_SCRIPT_PANIC_REPORTERS: RefCell<Vec<ScriptPanicReporter>> = const {
-        RefCell::new(Vec::new())
-    };
-}
 
 /// Tells `wasm_thread` which script boots a Worker, which is what every
 /// thread a view spawns — `bobcat-main` and each of its style workers — is
@@ -167,9 +154,10 @@ fn run_group(style_threads: StyleThreads, link: GroupLink) {
         requester,
         ready,
         workers,
+        workers_trapped,
     } = link;
     #[cfg(all(target_arch = "wasm32", panic = "abort"))]
-    install_script_panic_hook();
+    threads::install_script_panic_hook();
 
     // Both the runtime and the pool are the group's, not any view's. A group
     // opens one realm per view on that runtime, which is why the modules its
@@ -220,7 +208,7 @@ fn run_group(style_threads: StyleThreads, link: GroupLink) {
         js: Rc::new(RefCell::new(js_runtime)),
         style_pool,
         requester,
-        workers: WorkerFactory::new(workers),
+        workers: WorkerFactory::new(workers, workers_trapped),
         thread: thread.handle(),
     });
     // By value: the context — and with it this thread's one sender to
@@ -251,10 +239,14 @@ async fn group_task(context: Rc<GroupContext>, mut attach: mpsc::UnboundedReceiv
                         fetch_probe,
                     );
                     #[cfg(all(target_arch = "wasm32", panic = "abort"))]
-                    add_script_panic_reporter({
+                    threads::add_script_panic_reporter({
                         let outbox = outbox.clone();
-                        Box::new(move |error| {
-                            outbox.engine_event(EngineEvent::ScriptRunError(error));
+                        Box::new(move |detail| {
+                            outbox.engine_event(EngineEvent::ScriptRunError(
+                                threads::platform_script_error(format!(
+                                    "the Lynx main thread {detail}"
+                                )),
+                            ));
                         })
                     });
                     let view = AttachedView {
@@ -332,36 +324,8 @@ struct AttachedView {
     /// this, and no other job runs while one is parked.
     metrics: watch::Receiver<Option<Viewport>>,
     /// This view's end signal, minted on the embedder's thread. It is what the
-    /// view's owner waits on, what its own end cancels, and the parent of the
-    /// token every worker its realm creates carries.
+    /// view's owner waits on and what its own end cancels.
     cancel: CancellationToken,
-}
-
-#[cfg(all(target_arch = "wasm32", panic = "abort"))]
-fn install_script_panic_hook() {
-    WASM_SCRIPT_PANIC_HOOK.get_or_init(|| {
-        let previous = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
-            WASM_SCRIPT_PANIC_REPORTERS.with(|reporters| {
-                let location = info
-                    .location()
-                    .map_or_else(String::new, |location| format!(" at {location}"));
-                let error = threads::platform_script_error(format!(
-                    "the script Worker aborted after a panic{location}: {}",
-                    threads::panic_message(info.payload())
-                ));
-                for reporter in reporters.borrow().iter() {
-                    reporter(error.clone());
-                }
-            });
-            previous(info);
-        }));
-    });
-}
-
-#[cfg(all(target_arch = "wasm32", panic = "abort"))]
-fn add_script_panic_reporter(reporter: ScriptPanicReporter) {
-    WASM_SCRIPT_PANIC_REPORTERS.with(|reporters| reporters.borrow_mut().push(reporter));
 }
 
 /// Builds one group's style pool, on `bobcat-main` — the thread that owns

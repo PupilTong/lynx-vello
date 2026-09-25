@@ -191,7 +191,7 @@ QuickJS ESM graph — shared built-ins and per-worker imports, on bobcat-workers
                 ├──▶ bobcat:bts-runtime exports lynx
                 │     └──▶ bobcat:cross-thread-context ──▶ bobcat:event-target
                 └──▶ await import(BTS entry) when configured
-                      SourceRequester → view resource host → worker completion
+                      HostOutbox → view resource host → worker completion
   No bobcat:element and no bobcat:runtime here: a worker has no document to
   reach and no page to be the main thread of, so reaching for either fails to
   resolve rather than failing late.
@@ -525,7 +525,13 @@ That checkpoint watch is a runtime-wide `u64` bumped inside
 than to any realm, so a view whose import finished inside a *sibling's* entry
 into JavaScript has to settle what its own realm owes; the checkpoint arm of
 `serve_clock` is how it learns to, and comparing the generation against the one
-the epilogue recorded is what keeps a page's own entries from waking it.
+the epilogue recorded is what keeps a page's own entries from waking it. The
+generation is also bumped, by a job, whenever a view task on `bobcat-main` or a
+worker task on `bobcat-workers` ends, whether it returned or panicked: a task
+that ended part-way through may have left the shared queue with work in it, and
+a panic inside one of its jobs is caught there, after which the task returns
+normally. The bump settles every other realm on that runtime once; it does not
+drain the queue itself.
 
 An end is one signal rather than a message anything has to race. A view and a
 worker are both built from `lifetime.rs`'s `Lifetime`: the `JoinSet` holding
@@ -591,8 +597,9 @@ them, and each with its own global object and native modules.
 other, with one task and one realm per live worker. It is an independent
 runtime environment rather than something `bobcat-main` offloads work to:
 `bobcat-main` holds one sender on it, sends three messages (start a context
-with its script, post to a context, stop a context) and receives events back,
-and nothing else crosses. Separating
+with its script, post to a context, stop a context) and receives events back.
+The one other thing that crosses is a flag `bobcat-workers` sets when it traps,
+which `bobcat-main` reads before each `Start`. Separating
 them is the whole point of a worker: script that must not stop the thread that
 owns the document. Because `QuickJS` binds a runtime to one thread, that
 separation is also what makes "a worker cannot touch the document" structural

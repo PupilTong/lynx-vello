@@ -88,7 +88,7 @@ fn group(thread: &JsThreadHandle) -> (Rc<GroupContext>, mpsc::UnboundedReceiver<
         js: Rc::new(RefCell::new(js)),
         style_pool: None,
         requester: Arc::new(NoWakeup),
-        workers: WorkerFactory::new(workers),
+        workers: WorkerFactory::new(workers, Arc::default()),
         thread: thread.clone(),
     };
     (Rc::new(context), commands)

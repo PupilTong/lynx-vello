@@ -150,7 +150,7 @@ fn runtime_over(
         ingredients,
         bound_metrics(Viewport::new(393.0, 727.0)),
         outbox,
-        &WorkerFactory::new(workers),
+        &WorkerFactory::new(workers, Arc::default()),
         thread.handle(),
         RealmStartup::default(),
     )
@@ -223,7 +223,7 @@ fn background_pair(main: &str, background: &str) -> BackgroundPair {
         ingredients,
         bound_metrics(Viewport::new(393.0, 727.0)),
         outbox,
-        &WorkerFactory::new(home.commands()),
+        &WorkerFactory::new(home.commands(), home.trapped()),
         thread.handle(),
         // The main script boots below, which is what answers this realm's
         // entry request; this names the BTS entry and nothing else.

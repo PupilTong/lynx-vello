@@ -287,6 +287,16 @@ impl ScriptEngine {
         self.realm.take_module_request()
     }
 
+    /// Answers one module request of this realm's with its source and
+    /// response URL, or with why there is none, and resumes the imports
+    /// waiting on it.
+    ///
+    /// The bridge passes the URL and the error text on as C strings, and
+    /// refuses one containing a NUL without completing the module, which
+    /// would leave the import pending forever. So both are made safe here,
+    /// for every caller: a NUL in the error text is replaced with U+FFFD, and
+    /// a response URL containing one fails the module instead, because the
+    /// replaced URL would name an address the fetcher never answered for.
     pub(crate) fn complete_module(
         &mut self,
         runtime: &mut ScriptRuntime,
@@ -295,8 +305,15 @@ impl ScriptEngine {
     ) -> Result<(), ScriptError> {
         const PHASE: ScriptErrorPhase = ScriptErrorPhase::ExecuteModule;
         self.take_deferred_checkpoint_error()?;
+        let result = match result {
+            Ok((url, _)) if url.contains('\0') => Err(format!(
+                "module '{name}': the response URL contains a NUL byte"
+            )),
+            Ok(loaded) => Ok(loaded),
+            Err(error) => Err(error.replace('\0', "\u{fffd}")),
+        };
         self.realm
-            .complete_module(name, result)
+            .complete_module(name, result.as_ref().copied().map_err(String::as_str))
             .map_err(|error| map_quickjs_error(error, PHASE))?;
         let result = self
             .realm
@@ -783,6 +800,54 @@ mod tests {
         assert_eq!(error.phase, ScriptErrorPhase::ExecuteModule);
         assert!(error.message.contains("app:///missing.mjs"));
         assert!(error.message.contains("not preloaded"));
+    }
+
+    /// The bridge refuses a C string containing a NUL without completing the
+    /// module, which would leave the import pending forever. So a completion
+    /// makes both of its strings safe first — the error text by replacement,
+    /// the response URL by failing the module — and either way the import
+    /// settles and the completion itself succeeds.
+    #[test]
+    fn a_nul_in_a_module_completion_still_settles_the_import() {
+        let (mut runtime, mut engine) = engine();
+        engine.enable_module_loading();
+        engine
+            .execute_script(
+                &mut runtime,
+                "globalThis.outcomes = {};
+                 for (const name of ['error', 'url']) {
+                     import(`app:///${name}.js`).then(
+                         () => { outcomes[name] = 'loaded'; },
+                         error => { outcomes[name] = String(error); });
+                 }",
+                "app:///main.js",
+            )
+            .expect("the imports are asked for");
+        let mut requests: Vec<String> =
+            std::iter::from_fn(|| engine.take_module_request()).collect();
+        requests.sort();
+        assert_eq!(requests, ["app:///error.js", "app:///url.js"]);
+
+        engine
+            .complete_module(&mut runtime, "app:///error.js", Err("broken\0text"))
+            .expect("an error text with a NUL completes the module");
+        engine
+            .complete_module(
+                &mut runtime,
+                "app:///url.js",
+                Ok(("app:///redirected\0.js", "export default 1;")),
+            )
+            .expect("a response URL with a NUL completes the module");
+        engine
+            .execute_script(
+                &mut runtime,
+                "if (!outcomes.error.includes('broken\\uFFFDtext'))
+                     throw new Error('the error text: ' + outcomes.error);
+                 if (!outcomes.url.includes('the response URL contains a NUL byte'))
+                     throw new Error('the response URL: ' + outcomes.url);",
+                "app:///verify.js",
+            )
+            .expect("both imports rejected with what the completion said");
     }
 
     #[test]

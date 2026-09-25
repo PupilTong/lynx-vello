@@ -40,7 +40,10 @@
 
 use std::cell::{Cell, RefCell};
 use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use quickjs_rust_bridge::{HostArgument, HostValue};
 use rustc_hash::FxHashMap;
@@ -69,11 +72,16 @@ use crate::timers::{TimerState, run_due_timers};
 /// when it is asked for.
 type WorkerRuntime = Rc<RefCell<Result<ScriptRuntime, ScriptError>>>;
 
+/// Who each live worker task reports to: its worker's key and the creating
+/// view's channel. Kept by [`serve_workers`], and read by
+/// [`report_thread_trap`] when the whole thread is over.
+type Reporters = Rc<RefCell<FxHashMap<task::Id, (WorkerKey, mpsc::UnboundedSender<WorkerEvent>)>>>;
+
 /// The thread's whole body.
-pub(super) fn run(commands: mpsc::UnboundedReceiver<WorkerCommand>) {
+pub(super) fn run(commands: mpsc::UnboundedReceiver<WorkerCommand>, trapped: &Arc<AtomicBool>) {
     let runtime = ScriptRuntime::new()
         .and_then(|mut runtime| install_worker_modules(&mut runtime).map(|()| runtime));
-    serve(Rc::new(RefCell::new(runtime)), commands);
+    serve(Rc::new(RefCell::new(runtime)), commands, trapped);
 }
 
 /// Preloads a fixture through the existing runtime API for Context tests.
@@ -81,30 +89,73 @@ pub(super) fn run(commands: mpsc::UnboundedReceiver<WorkerCommand>) {
 pub(super) fn run_with_entry(
     commands: mpsc::UnboundedReceiver<WorkerCommand>,
     entry: (String, String),
+    trapped: &Arc<AtomicBool>,
 ) {
     let (source, url) = entry;
     let mut runtime = ScriptRuntime::new().unwrap();
     install_worker_modules(&mut runtime).unwrap();
     let source = format!("{}{source}", crate::esm::BTS_ENTRY_PREAMBLE);
     runtime.register_module_source(&url, &source).unwrap();
-    serve(Rc::new(RefCell::new(Ok(runtime))), commands);
+    serve(Rc::new(RefCell::new(Ok(runtime))), commands, trapped);
 }
 
-fn serve(js: WorkerRuntime, commands: mpsc::UnboundedReceiver<WorkerCommand>) {
+/// Runs the thread's loop, and reports its trap to every worker still on it.
+///
+/// A panic in [`serve_workers`] — the loop's `main` task — is resumed by
+/// [`JsThread::run`] and ends every worker here at once. It is caught around
+/// that call and reported before the unwind goes on: the worker tasks are
+/// dropped with the loop, and their own owners report nothing. Under
+/// `panic = "abort"` nothing unwinds and nothing is caught, so on wasm the
+/// panic hook reports it instead, through the same function.
+fn serve(
+    js: WorkerRuntime,
+    commands: mpsc::UnboundedReceiver<WorkerCommand>,
+    trapped: &Arc<AtomicBool>,
+) {
+    let reporters = Reporters::default();
+    // Installed here as well as on `bobcat-main`, because this thread is
+    // started first.
+    #[cfg(all(target_arch = "wasm32", panic = "abort"))]
+    {
+        crate::threads::install_script_panic_hook();
+        let trapped = Arc::clone(trapped);
+        let reporters = Rc::clone(&reporters);
+        crate::threads::add_script_panic_reporter(Box::new(move |detail| {
+            report_thread_trap(
+                &trapped,
+                &reporters,
+                &platform_script_error(format!("the worker thread {detail}")),
+            );
+        }));
+    }
     let thread = JsThread::new();
-    thread.run(serve_workers(js, commands, thread.handle()));
+    let served = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        thread.run(serve_workers(
+            js,
+            commands,
+            thread.handle(),
+            Rc::clone(&reporters),
+        ));
+    }));
+    if let Err(payload) = served {
+        report_thread_trap(
+            trapped,
+            &reporters,
+            &panicked("the worker thread panicked", payload.as_ref()),
+        );
+        std::panic::resume_unwind(payload);
+    }
     drop(thread);
 }
 
-/// Starts a task per worker and reports the ones that trapped.
+/// Starts a task per worker, and finishes each one that ends.
 async fn serve_workers(
     js: WorkerRuntime,
     mut commands: mpsc::UnboundedReceiver<WorkerCommand>,
     thread: JsThreadHandle,
+    reporters: Reporters,
 ) {
     let mut workers = JoinSet::new();
-    let mut reporters: FxHashMap<task::Id, (WorkerKey, mpsc::UnboundedSender<WorkerEvent>)> =
-        FxHashMap::default();
     loop {
         tokio::select! {
             command = commands.recv() => match command {
@@ -113,46 +164,87 @@ async fn serve_workers(
                     let handle = workers.spawn_local(
                         serve_worker(Rc::clone(&js), start, thread.clone()),
                     );
-                    reporters.insert(handle.id(), reporter);
+                    reporters.borrow_mut().insert(handle.id(), reporter);
                 }
+                #[cfg(test)]
+                Some(WorkerCommand::Panic) => panic!("the test asked the worker thread to trap"),
                 // Every realm that could name a worker is gone, and with it
                 // every message sender, so the tasks below are ending too.
                 None => break,
             },
             Some(finished) = workers.join_next_with_id(), if !workers.is_empty() => {
-                report_trap(finished, &mut reporters);
+                finish_worker_task(&js, &thread, finished, &reporters);
             }
         }
     }
     while let Some(finished) = workers.join_next_with_id().await {
-        report_trap(finished, &mut reporters);
+        finish_worker_task(&js, &thread, finished, &reporters);
     }
 }
 
-/// A worker task that panicked is a worker nothing will ever be heard from
-/// again, which is exactly what `Failed` means.
-fn report_trap(
+/// A worker task ended. If it trapped, the view that created its worker hears
+/// `Failed` — a worker nothing will ever be heard from again, which is exactly
+/// what `Failed` means. Either way the other realms on this runtime settle
+/// what their own realms owe, because a task that ended part-way through may
+/// have left the shared job queue with work in it.
+///
+/// The bump is made for a task that returned as well: a panic inside one of
+/// its jobs is caught by [`run_job`], and the task that queued that job then
+/// returns normally.
+fn finish_worker_task(
+    js: &WorkerRuntime,
+    thread: &JsThreadHandle,
     finished: Result<(task::Id, ()), JoinError>,
-    reporters: &mut FxHashMap<task::Id, (WorkerKey, mpsc::UnboundedSender<WorkerEvent>)>,
+    reporters: &Reporters,
 ) {
-    let error = match finished {
+    let trapped = match finished {
         Ok((id, ())) => {
-            reporters.remove(&id);
-            return;
+            reporters.borrow_mut().remove(&id);
+            None
         }
-        Err(error) => error,
+        Err(error) => {
+            let reporter = reporters.borrow_mut().remove(&error.id());
+            reporter
+                .filter(|_| error.is_panic())
+                .map(|reporter| (reporter, error))
+        }
     };
-    let Some((key, events)) = reporters.remove(&error.id()) else {
-        return;
-    };
-    if !error.is_panic() {
-        return;
+    if let Some(((key, events), error)) = trapped {
+        let error = panicked("the worker thread panicked", error.into_panic().as_ref());
+        let _ = events.send(WorkerEvent {
+            key,
+            payload: WorkerPayload::Failed(error),
+        });
     }
-    let error = panicked("the worker thread panicked", error.into_panic().as_ref());
-    let _ = events.send(WorkerEvent {
-        key,
-        payload: WorkerPayload::Failed(error),
-    });
+    // A job rather than a call: this runs in `serve_workers`, which is a task,
+    // and the shared runtime belongs to whichever job holds it. Nothing waits
+    // for the bump, so the answer is dropped.
+    let js = Rc::clone(js);
+    drop(thread.run(move || {
+        if let Ok(js) = &*js.borrow() {
+            js.mark_checkpoint();
+        }
+    }));
+}
+
+/// The whole thread is over: the flag `bobcat-main` reads before each `Start`
+/// is set, and the creator of every worker still on it hears `Failed`.
+///
+/// The flag goes first, so a `Worker` constructed after any of these reports
+/// fails at once. `try_borrow`, because on wasm this runs from the panic hook
+/// at the panic itself, which may be inside a borrow of the table; such a trap
+/// sets the flag and reports nothing else.
+fn report_thread_trap(trapped: &AtomicBool, reporters: &Reporters, error: &ScriptError) {
+    trapped.store(true, Ordering::Release);
+    let Ok(reporters) = reporters.try_borrow() else {
+        return;
+    };
+    for (key, events) in reporters.values() {
+        let _ = events.send(WorkerEvent {
+            key: *key,
+            payload: WorkerPayload::Failed(error.clone()),
+        });
+    }
 }
 
 /// One live worker on this thread: its realm and everything that realm owns.
@@ -1074,6 +1166,84 @@ mod tests {
             );
         });
     }
+
+    /// A worker task that ends may have left the job queue every realm here
+    /// shares with work in it — a panic in one of its jobs is caught and the
+    /// task returns normally — so its ending settles every other realm on
+    /// the runtime once, the way a view task's ending does on `bobcat-main`.
+    ///
+    /// The task that ends runs no JavaScript at all: its script never
+    /// arrives, and a `Terminate` ends it in its boot. So the one settle the
+    /// parked worker runs is the ending's and nothing else's.
+    #[test]
+    fn a_finished_worker_task_makes_a_parked_sibling_settle() {
+        on_a_js_thread(|thread| async move {
+            let js = worker_runtime();
+            let first = start(&js, &thread, 1);
+            assert!(
+                until(|| first.worker.is_live()).await,
+                "the first worker booted"
+            );
+
+            let (commands, receiver) = mpsc::unbounded_channel();
+            task::spawn_local(serve_workers(
+                Rc::clone(&js),
+                receiver,
+                thread.clone(),
+                Rc::default(),
+            ));
+            // Held for the whole test: a dropped script sender would fail the
+            // second worker, which ends its task before the `Terminate`.
+            let (_script, script) = oneshot::channel();
+            let (messages, incoming) = mpsc::unbounded_channel();
+            let (events, _events) = mpsc::unbounded_channel();
+            let (notices, _notices) = mpsc::unbounded_channel();
+            let token = CancellationToken::new();
+            commands
+                .send(WorkerCommand::Start(WorkerStart {
+                    key: WorkerKey::new(2),
+                    name: String::new(),
+                    script,
+                    messages: incoming,
+                    events,
+                    token: token.clone(),
+                    sources: HostOutbox::new(notices, Arc::new(crate::NoWakeup), token, None),
+                }))
+                .expect("the loop is serving");
+
+            // Parked: whatever the `Start` set off has settled, and a settle
+            // that finds nothing due enters no JavaScript, so the count stops
+            // moving.
+            let mut settled = first.worker.epilogue_count();
+            for _ in 0..TURNS {
+                for _ in 0..8 {
+                    task::yield_now().await;
+                }
+                let count = first.worker.epilogue_count();
+                if count == settled {
+                    break;
+                }
+                settled = count;
+            }
+
+            messages
+                .send(WorkerMessage::Terminate)
+                .expect("the second worker is waiting for its script");
+            assert!(
+                until(|| first.worker.epilogue_count() > settled).await,
+                "the second worker's ending settled the first"
+            );
+            for _ in 0..8 {
+                task::yield_now().await;
+            }
+            assert_eq!(
+                first.worker.epilogue_count(),
+                settled + 1,
+                "the ending is what settles this worker, once"
+            );
+        });
+    }
+
     impl Started {
         /// Runs one entry's body here and now, which is what the engine
         /// thread's top loop does with a queued job: these two pins are about
