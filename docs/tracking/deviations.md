@@ -30,15 +30,21 @@ consequential choice about whether to follow the spec or the quirk.
   algorithm** (reuse stylo/Servo's existing stacking-context logic) —
   apps relying on Lynx's actual buggy z-index behavior may render
   differently, and that's intentional.
-- **`justify-content: start | end` resolve against the writing mode
-  (user, 2026-09-25)** — Lynx's own value table aliases them to `flex-start`
+- **`justify-content: start | end` mean different things in flex and in
+  linear (user, 2026-09-25)** — css-align-3 resolves them against the writing
+  mode, so on a `*-reverse` container `start` sits at the opposite end from
+  `flex-start`. Lynx's own value table instead aliases them to `flex-start`
   and `flex-end` (`css_defines/58-justify-content.json` gives `start` the
-  align-type `flex-start`), and web-core inherits that through the browser
-  only because its containers are always left-to-right. css-align-3 defines
-  them as flow-relative instead, so they follow `direction` and the axis's
-  reversal rather than the flex line. **Decision: implement and test the W3C
-  meaning.** The difference is visible only on a reversed container or under
-  `direction: rtl`, where `start` sits at the opposite end from `flex-start`.
+  align-type `flex-start`), and web-core rewrites the declaration outright —
+  `("start", &[("justify-content", "flex-start")])` in its
+  `style_transformer/rules.rs`, which also poisons `left`/`right` into
+  `--lynx-invalid-invalid-invalid`. **Decision: flexbox implements the W3C
+  meaning; `display: linear` keeps Lynx's.** `linear` is a layout mode only
+  Lynx has, so its keywords mean what Lynx says they mean, while `flex` is a
+  CSS box and answers to CSS. The two therefore differ on a reversed
+  container, which is the only place either pair parts, and
+  `computed_main_gravity` in `crates/hughie/src/compute/linear.rs` is where
+  the alias lives.
 - **`overflow`/`overflow-x`/`overflow-y` default** — Lynx defaults to
   `hidden`; CSS defaults to `visible`. **Decision: match Lynx's default**,
   not CSS's — this is a values/defaults divergence, not an algorithm one,
