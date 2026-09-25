@@ -26,7 +26,10 @@
 //! - author `!important` on a property only animations drive (a transition outranks it);
 //! - a pending animation or transition the driver has not anchored yet: its next tick moves its
 //!   start;
-//! - the element was frozen when the last tick ended: the next tick carries its start times.
+//! - the element was frozen when the last tick ended: the next tick carries its start times;
+//! - a progress-driven animation (scroll-animations-1): no curve carries a scroll timeline yet, and
+//!   as a clock curve it would hold the committed sample and recompose every frame. It re-cascades
+//!   on the main thread when its scroll container moves instead of ticking.
 //!
 //! The geometry refusals are the builder's (`TransformTrack::new`).
 
@@ -86,6 +89,7 @@ impl<T: Sync> Document<T> {
         for animation in &set.animations {
             match animation.state {
                 AnimationState::Canceled => continue,
+                _ if animation.is_progress_driven() => return None,
                 AnimationState::Pending if !driver.keyframes_anchored(&key, &animation.name) => {
                     return None;
                 }

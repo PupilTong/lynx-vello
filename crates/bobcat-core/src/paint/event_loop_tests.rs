@@ -1141,6 +1141,99 @@ fn a_bounding_client_rect_follows_an_adopted_scroll() {
     );
 }
 
+/// A 200px scroller (node 3) whose first row (node 4) recolors along a
+/// `scroll()` timeline of 1000px: `color` never exports, so only the main
+/// thread's cascade moves it.
+fn booted_scroll_driven() -> TestEngine {
+    TestViewSpec::new(
+        r"
+        globalThis.renderPage = function () {
+          const page = __CreatePage('card', 0);
+          const scroller = __CreateView(0);
+          const row = __CreateView(0);
+          const filler = __CreateView(0);
+          __AppendElement(page, scroller);
+          __AppendElement(scroller, row);
+          __AppendElement(scroller, filler);
+          globalThis.held = [page, scroller, row, filler];
+          __SetInlineStyles(scroller, 'display:flex;flex-direction:column;overflow:scroll;width:200px;height:200px');
+          __SetInlineStyles(row, 'flex-shrink:0;width:200px;height:20px');
+          __SetInlineStyles(filler, 'flex-shrink:0;width:200px;height:1180px');
+          __SetClasses(row, 'driven');
+          __FlushElementTree();
+        };
+        ",
+    )
+    .with_style_sheet(
+        ".driven { animation: recolor linear both; animation-timeline: scroll(); }
+         @keyframes recolor { from { color: rgb(0, 0, 0); } to { color: rgb(0, 0, 250); } }",
+    )
+    .boot()
+}
+
+/// The row's blue channel as the document computes it, in `[0, 1]`.
+fn blue_of(engine: &mut TestEngine, node: u64) -> f32 {
+    engine
+        .probe_document(move |tree| {
+            tree.get(node_id(node))
+                .and_then(dom::Node::computed_style)
+                .map(|style| style.clone_color().components.2)
+        })
+        .flatten()
+        .expect("the row is styled")
+}
+
+/// A scroll-driven animation the painter does not sample follows the user's
+/// scroll on the main thread: the offset the painter posts is adopted at the
+/// marker and re-samples the row, and the commit that follows carries its
+/// color. Nothing ticks: the frame asks for no frame posts, and the painter
+/// is idle at rest.
+#[test]
+fn a_scroll_driven_color_follows_the_users_scroll() {
+    let mut engine = booted_scroll_driven();
+    let boot = engine.published_frame().expect("boot published a frame");
+    assert!(!boot.animations_active() && !boot.needs_main_ticks());
+    assert!(!boot.has_exported_curves(), "color never exports");
+    drop(boot);
+    assert!(
+        blue_of(&mut engine, 4).abs() < 1e-6,
+        "the boot commit samples offset 0"
+    );
+
+    drag(&mut engine, 150.0, 50.0);
+    // Whatever the release flung comes to rest first.
+    let mut at = 1.0;
+    while engine.is_animating() {
+        assert!(at < 10.0, "the fling never came to rest");
+        at += 0.016;
+        frame_at(&mut engine, at);
+    }
+    let dragged = scroll_offset_of(&mut engine, 3).y;
+    assert!(dragged > 50.0, "the drag scrolled, got {dragged}");
+    let expected = dragged / 1000.0 * 250.0 / 255.0;
+    assert!(
+        (blue_of(&mut engine, 4) - expected).abs() < 1e-3,
+        "the color follows the adopted offset {dragged}"
+    );
+
+    engine.dispatch_input(InputEvent::wheel(
+        Point2D::new(100.0, 100.0),
+        dom::Vector2D::new(0.0, 100.0),
+    ));
+    let offset = scroll_offset_of(&mut engine, 3).y;
+    assert!(
+        (blue_of(&mut engine, 4) - offset / 1000.0 * 250.0 / 255.0).abs() < 1e-3,
+        "and every further scroll, at {offset}"
+    );
+    let frame = engine.published_frame().expect("still published");
+    assert!(!frame.animations_active() && !frame.needs_main_ticks());
+    assert!(
+        engine.painter.begin_frame(at + 1.0, false).is_none(),
+        "no frame post crosses for a scroll-driven animation"
+    );
+    assert!(!engine.is_animating(), "the painter is idle at rest");
+}
+
 /// Boots a card whose one view runs `animation_css`, waiting for the
 /// boot flush like [`booted`] does.
 ///

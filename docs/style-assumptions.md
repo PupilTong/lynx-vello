@@ -186,7 +186,8 @@ the semantics are stylo's.** Everything below refines that sentence.
     `opacity` and `transform` as two node bits the animation driver keeps
     (`animates_opacity`, `animates_transform`): an animation counts while
     pending (its delay included), running or paused, or finished with a
-    `forwards`/`both` fill, a transition while pending or running. Either bit
+    `forwards`/`both` fill, a transition while pending or running, and a
+    scroll-driven animation only while its timeline is active (26). Either bit
     makes a stacking context, the opacity bit a composited group, and the
     transform bit a containing block for absolute and fixed descendants. Not
     yet implemented for `filter`: an animation from `filter: none` has no
@@ -825,6 +826,33 @@ and §D.16 with what the wire format actually permits.)*
     The one chain walk (`drive_chain`) and the snap rules are shared by the
     document and by `bobcat-core`'s painter over the frame's scroll-slot
     table, which now carries each slot's chaining policy and snap positions.
+
+26. **Scroll-driven animations (user-directed): scroll-animations-1
+    on the main thread, Blink where the specs are silent.** Native Lynx has no
+    scroll timelines; the surface and every choice are in
+    [tracking/css-animation.md](tracking/css-animation.md#scroll-driven-animations).
+    Two rules belong here because they are about the cascade:
+    - **The stale-timelines pass.** A timeline's ranges are layout outputs
+      (the source's `max_offset`, the view subject's position) that feed the
+      cascade, like a query container's size (19). So `Document::layout`
+      resolves every progress-driven animation's timeline after each layout
+      pass, writes its sample into stylo's `Animation::timeline_sample`, and
+      re-cascades the elements whose sample or binding changed before the
+      containers' own marks are made (an animation-only traversal would strip
+      their `RECASCADE_SELF`); a re-cascade that relayouts is one more pass of
+      the same bounded loop. This is scroll-animations-1 §5.1's extra style
+      and layout pass: the commit that creates an animation already shows it
+      at the offset it found, never its base value first. What that final
+      pass changes is re-sampled at the next commit, as §5.1 allows. Between
+      commits an adopted scroll re-samples only the animations its container
+      drives (`Document::advance_scroll_timelines`) — one animation-only
+      restyle, no layout unless an animated property moves a box.
+    - **An animation on an inactive timeline is not current.** It is idle
+      (Blink), so it has no effect whatever its fill and none of 11's side
+      effects: no stacking context, group or containing block. A binding is
+      resolved in the same `layout()` that creates the animation; until then
+      it counts as active, so an animation on an active timeline — the usual
+      case — never flips its bits.
 
 ## Deliberately still open (known non-decisions)
 

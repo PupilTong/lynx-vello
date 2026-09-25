@@ -51,6 +51,13 @@
 //! and none of it depends on whether a curve exports. A transform bit that
 //! flips relayouts the element's positioned descendants.
 //!
+//! # Scroll-driven animations
+//!
+//! An animation on a scroll or view progress timeline takes no clock at all:
+//! stylo never iterates, ends or ticks it, and cascades the progress
+//! [`crate::style::timeline`] writes from its scroll container's offset. The
+//! driver only records which elements hold one, for that module to bind.
+//!
 //! # Frozen animations: css-contain-2 §4
 //!
 //! > While an element is skipped, CSS transitions and animations on the
@@ -123,6 +130,7 @@ use stylo_atoms::Atom;
 use crate::layout::skips_contents;
 use crate::style::damage::StyleDamage;
 use crate::style::flush::{LayoutThreadStateGuard, NO_PAINTERS, RecalcStyle};
+use crate::style::timeline::ScrollTimelines;
 use crate::tree::document::{Document, NodeId};
 use crate::tree::node::{ANIMATES_OPACITY, ANIMATES_TRANSFORM, Node};
 
@@ -181,8 +189,16 @@ const COMPOSITES: [(LonghandId, u8); 5] = [
 /// *current* or *in effect*. Stylo runs every animation at a positive
 /// playback rate, so its before phase (`Pending`, a delay included) and a
 /// pause are current; a finished one stays in effect only while its fill
-/// holds the last keyframe.
-fn animation_has_side_effects(animation: &Animation) -> bool {
+/// holds the last keyframe. A progress-driven animation is current exactly
+/// while its timeline is active (`timeline_active`): on an inactive one it
+/// is idle, as in Blink.
+fn animation_has_side_effects(
+    animation: &Animation,
+    timeline_active: impl FnOnce() -> bool,
+) -> bool {
+    if animation.is_progress_driven() {
+        return animation.state != AnimationState::Canceled && timeline_active();
+    }
     match animation.state {
         AnimationState::Pending | AnimationState::Running | AnimationState::Paused(_) => true,
         AnimationState::Finished => matches!(
@@ -475,6 +491,8 @@ pub(crate) struct AnimationDriver {
     /// Elements whose states a [`Document::sync_animation_clock`] moved
     /// without re-cascading them, which the next tick re-cascades.
     owed: FxHashSet<NodeId>,
+    /// The progress-driven animations' timelines; see [`crate::style::timeline`].
+    pub(crate) timelines: ScrollTimelines,
 }
 
 impl AnimationDriver {
@@ -533,10 +551,11 @@ impl AnimationDriver {
         self.frozen || !self.carried.is_empty()
     }
 
-    /// Whether the document holds no animation state at all — the check that
-    /// keeps removal and unlinking free on a page that never animates.
+    /// Whether the document holds no animation state and no timeline
+    /// definition at all — the check that keeps removal and unlinking free on
+    /// a page that never animates.
     pub(crate) fn is_empty(&self) -> bool {
-        self.sets.sets.read().is_empty()
+        self.sets.sets.read().is_empty() && !self.timelines.has_definers()
     }
 
     /// Drops every animation belonging to the given nodes.
@@ -556,6 +575,7 @@ impl AnimationDriver {
         self.carried.retain(|carried| !ids.contains(carried));
         self.held.retain(|(id, _)| !ids.contains(id));
         self.owed.retain(|owed| !ids.contains(owed));
+        self.timelines.forget(ids);
         self.anchored
             .retain(|entry| !ids.iter().any(|id| id.arena_key() == entry.set.node.0));
         let mut sets = self.sets.sets.write();
@@ -832,6 +852,9 @@ impl<T: Sync> Document<T> {
         let handle = self.animations().context_handle();
         let mut held = std::mem::take(&mut self.animations_mut().held);
         let mut animated = Vec::new();
+        let mut progress_driven =
+            std::mem::take(&mut self.animations_mut().timelines.progress_driven);
+        progress_driven.clear();
         // Elements whose `animates` bits changed, with the bits that did.
         let mut flipped = Vec::new();
         {
@@ -846,6 +869,12 @@ impl<T: Sync> Document<T> {
                 if key.pseudo_element.is_none()
                     && let Some(node) = self.get(id)
                 {
+                    if set.animations.iter().any(|animation| {
+                        animation.is_progress_driven()
+                            && animation.state != AnimationState::Canceled
+                    }) {
+                        progress_driven.insert(id);
+                    }
                     let bits = self.animates(node, set);
                     let changed = node.replace_animates(bits) ^ bits;
                     if changed != 0 {
@@ -872,6 +901,7 @@ impl<T: Sync> Document<T> {
             }
         }
         self.animations_mut().held = held;
+        self.animations_mut().timelines.progress_driven = progress_driven;
         if !flipped.is_empty() {
             // Either bit moves the stacking context and group the paint build
             // gives the element.
@@ -938,10 +968,15 @@ impl<T: Sync> Document<T> {
     /// its `@keyframes` rule's, the set Stylo built the animation from.
     fn animates(&self, node: &Node<T>, set: &ElementAnimationSet) -> u8 {
         let stylist = self.style_engine().stylist();
+        let timelines = &self.animations().timelines;
         let animations = set
             .animations
             .iter()
-            .filter(|animation| animation_has_side_effects(animation))
+            .filter(|animation| {
+                animation_has_side_effects(animation, || {
+                    timelines.is_current(node.id(), &animation.name)
+                })
+            })
             .filter_map(|animation| stylist.lookup_keyframes(&animation.name, node))
             .fold(0, |bits, keyframes| {
                 bits | composite_bits(&keyframes.properties_changed)
@@ -1113,7 +1148,7 @@ impl<T: Sync> Document<T> {
     /// (`RestyleHint::propagate` returns empty and strips the animation bits),
     /// so descent is driven purely by the animation-only dirty-descendants
     /// bit, which the caller has to open from the root down.
-    fn hint_animated_elements(&mut self, hinted: &[NodeId]) -> NodeId {
+    pub(super) fn hint_animated_elements(&mut self, hinted: &[NodeId]) -> NodeId {
         for &id in hinted {
             let Some(node) = self.arenas_mut().get_mut(id) else {
                 continue;
@@ -1146,7 +1181,7 @@ impl<T: Sync> Document<T> {
     }
 
     /// Runs the animation-only traversal and harvests what it changed.
-    fn recascade_animated_elements(&mut self, root: NodeId) -> AnimationTick {
+    pub(super) fn recascade_animated_elements(&mut self, root: NodeId) -> AnimationTick {
         let now = self.animations().now();
         let animations = self.animations().context_handle();
         let phase = self.begin_flush_phase();
