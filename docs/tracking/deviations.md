@@ -45,6 +45,21 @@ consequential choice about whether to follow the spec or the quirk.
   container, which is the only place either pair parts, and
   `computed_main_gravity` in `crates/hughie/src/compute/linear.rs` is where
   the alias lives.
+- **`defaultOverflowVisible` never reaches `page` (user, 2026-09-25)** — the
+  switch releases `view` and the two blur-view tags back to `visible`, and
+  nothing else. Both references pin the page: native calls
+  `SetDefaultOverflow(false)` in `PageElement`'s constructor under the comment
+  "make sure page's default overflow is hidden" and reads the config in
+  `ViewElement` (and `ComponentElement`) alone; web-core's page is a plain
+  `div` with no UA overflow, and its release selector is
+  `[lynx-default-overflow-visible="true"] x-view`, so the root clip comes from
+  `lynx-view { contain: strict }` instead. A card asking for visible overflow
+  asks it of its views, not of the window it is drawn in. Two related
+  divergences between the references, not resolved here because nothing in
+  this engine reaches them yet: native's decoder *raises* an absent key to
+  true for any `targetSdkVersion >= 2.0`, where web-core needs the key to say
+  `"true"` (this engine follows web-core — an absent key is false); and native
+  also applies the switch to `<component>`, which has no DOM counterpart.
 - **`overflow`/`overflow-x`/`overflow-y` default** — Lynx defaults to
   `hidden`; CSS defaults to `visible`. **Decision: match Lynx's default**,
   not CSS's — this is a values/defaults divergence, not an algorithm one,
