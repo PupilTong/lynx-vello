@@ -207,8 +207,6 @@ pending! {
     "basic-flex-column-container-items-align-self" => "not read yet",
     "basic-flex-nested-linear-setting" =>
         "the case asserts computed style only and neither box has a background, so a first screen shows nothing either way",
-    "basic-flex-with-overflow" =>
-        "the flex shrink is right, but nothing clips: children spill past intermediate views that declare no `overflow` and should take the UA default",
     "basic-global-bind" => "not read yet",
     "basic-global-bindkeydown" => "not read yet",
     "basic-global-bindkeydown-code" => "not read yet",

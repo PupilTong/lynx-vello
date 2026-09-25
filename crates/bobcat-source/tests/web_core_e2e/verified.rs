@@ -76,7 +76,8 @@ verified! {
     basic_flex_item_main_axis_content_based_min_size_not_from_content_size_suggestion => "basic-flex-item-main-axis-content-based-min-size-not-from-content-size-suggestion",
     // scaled shrink over unequal bases keeps the smaller item from collapsing
     basic_flex_item_not_shrink_to_zero => "basic-flex-item-not-shrink-to-zero",
-    // two equal items shrink equally, and the overflowing child is clipped at the container
+    // two equal items shrink equally; the inner box keeps its own size, and the
+    // container declares `overflow: visible`, so nothing clips here
     basic_flex_item_shrink => "basic-flex-item-shrink",
     // `:root` matches the `<page>` element
     basic_style_root_selector => "basic-style-root-selector",
@@ -110,4 +111,9 @@ verified! {
     basic_linear_row_container_main_axis_justify_content_start_end_with_direction_rtl => "basic-linear-row-container-main-axis-justify-content-start-end-with-direction-rtl",
     // the same aliasing on `column-reverse` columns, where the flow runs upward.
     basic_linear_column_container_main_axis_justify_content_start_end_with_direction_rtl => "basic-linear-column-container-main-axis-justify-content-start-end-with-direction-rtl",
+    // two 300px flex items shrink to 50 and nothing clips, which is what both
+    // references do with this card's own `defaultOverflowVisible: true`: every
+    // view is `visible`, and only the page clips. Upstream's committed golden
+    // shows the opposite because it predates the switch and was never redone.
+    basic_flex_with_overflow => "basic-flex-with-overflow",
 }
