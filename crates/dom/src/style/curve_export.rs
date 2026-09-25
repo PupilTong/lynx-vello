@@ -1,417 +1,137 @@
-//! Re-expresses one element's running CSS animation as an exported curve.
+//! Exports one element's animation state as a curve the painter samples.
 //!
-//! Stylo's per-keyframe computed values are private, so the exporter reads
-//! the two public surfaces that together determine them: the `Animation`'s
-//! timing fields, and the stylist's `@keyframes` steps — whose declaration
-//! blocks it converts *literally*. Only context-free values convert: plain
-//! numbers, absolute lengths, angles. Anything else — `em`, percentages,
-//! `calc()`, `var()`, unmatched transform lists, a second running
-//! animation, any transition — refuses the export and the element keeps
-//! animating through per-frame `BeginFrame` commits. A refusal can never be
-//! wrong; only an inexact conversion could be, so conversions are exact or
-//! absent.
+//! The export is the element's whole stylo set, all or nothing: every
+//! non-canceled animation in the set's order, cloned into the curve (see
+//! [`crate::visual::curves`]), which samples them with stylo's own code.
+//! The curve is exact whenever, per exported property, either nothing
+//! contributed at the commit instant or every instant inside its domain
+//! keeps a contribution. Both hold by construction: an animation starts
+//! contributing only when a pending one starts, before which it contributed
+//! nothing, and stops only when it ends without a forwards fill, at
+//! `expires_at`, where the frame hands the element back to the main thread.
+//! The export refuses — and the element keeps animating through per-frame
+//! `BeginFrame` commits — when the painter could not reproduce the main
+//! thread's cascade over the domain:
 //!
-//! The compositor's samples must land where the main thread's restyle would
-//! land at the same instant — the refill commit's values are the same
-//! curve's — so the track structure mirrors `ComputedKeyframe` generation:
-//! collapsed same-percentage steps, per-step timing functions defaulting to
-//! the element's `animation-timing-function`, and per-property declaring
-//! keyframes. Where stylo backfills a missing `from`/`to` from the base
-//! style, the exporter refuses instead: the base style at animation start
-//! is not recoverable from outside.
-
-#![expect(
-    clippy::float_cmp,
-    reason = "keyframe percentages collapse and validate on exact equality, \
-              as stylo's own step collapse does"
-)]
+//! - an animation animates a property other than `opacity` or `transform`;
+//! - author `!important` on an exported property outranks the animations origin, so the main thread
+//!   holds it still;
+//! - a pending animation the driver has not anchored yet: its next tick moves its start;
+//! - the element was frozen when the last tick ended: the next tick carries its start times;
+//! - a pending or running transition: while a curve covers the element the main thread gets no
+//!   ticks, so a transition that a later restyle retargets or reverses reads its progress at a
+//!   stale instant and jumps. Admitting them needs the main thread's clock synced at that restyle.
+//!
+//! The geometry refusals are the builder's (`TransformTrack::new`).
 
 use stylo::dom::OpaqueNode;
-use stylo::properties::longhands::animation_direction::computed_value::single_value::T as AnimationDirection;
-use stylo::properties::{ComputedValues, PropertyDeclaration};
-use stylo::servo::animation::{AnimationSetKey, AnimationState, KeyframesIterationState};
-use stylo::shared_lock::SharedRwLockReadGuard;
-use stylo::stylesheets::keyframes_rule::{KeyframesStep, KeyframesStepValue};
-use stylo::values::generics::easing::{TimingFunction, TimingKeyword};
-use stylo::values::generics::transform::GenericTransformOperation;
-use stylo_traits::ToCss;
+use stylo::properties::{LonghandId, PropertyDeclarationId};
+use stylo::servo::animation::{Animation, AnimationSetKey, AnimationState};
+use stylo::shared_lock::StylesheetGuards;
 
 use crate::tree::document::Document;
 use crate::tree::node::Node;
-use crate::visual::curves::{
-    CompositeCurve, DirectionState, Easing, Iterations, Track, TrackPoint, TransformList,
-    TransformOp,
-};
+use crate::visual::curves::CompositeCurve;
 
-/// One element's exportable animation, minus the geometry only the
-/// paint-order builder knows (the world matrix the transform delta needs).
+/// One element's exportable animation state, minus the geometry only the
+/// paint-order builder knows.
 pub(crate) struct ExportedComposite {
+    /// `curve.transform` starts `None`; the builder attaches it when
+    /// `transform` holds.
     pub(crate) curve: CompositeCurve,
-    /// The transform track, waiting for the builder to attach `pre` and the
-    /// committed inverse. `curve.transform` starts `None` and is filled by
-    /// the builder from this.
-    pub(crate) transform_track: Option<Track<TransformList>>,
-    /// The committed transform as a list in the same vocabulary, so the
-    /// delta's `Lc⁻¹` is built by the exact code that builds `L(t)`.
-    pub(crate) committed_transform: TransformList,
+    /// Whether an animation animates `opacity`.
+    pub(crate) opacity: bool,
+    /// Whether an animation animates `transform`.
+    pub(crate) transform: bool,
 }
 
 impl<T: Sync> Document<T> {
-    /// The exportable composite animation on `node`, if its whole animation
-    /// state is exportable; see the module documentation for what refuses.
+    /// The exportable animation state of `node`, if the whole of it
+    /// exports; see the module documentation for what refuses.
     pub(crate) fn composite_export(&self, node: &Node<T>) -> Option<ExportedComposite> {
         if !node.may_have_animations() {
             return None;
         }
         let style = self.paint_style(node.id())?;
-        let handle = self.animations().context_handle();
+        let driver = self.animations();
+        let handle = driver.context_handle();
         let sets = handle.sets.read();
         let key = AnimationSetKey::new_for_non_pseudo(OpaqueNode(node.id().arena_key()));
         let set = sets.get(&key)?;
-        // A transition restyles the element per frame regardless, and a
-        // second running animation would need track merging.
-        if !set.transitions.is_empty() {
+        let ended = |state: &AnimationState| {
+            matches!(state, AnimationState::Canceled | AnimationState::Finished)
+        };
+        if set
+            .transitions
+            .iter()
+            .any(|transition| !ended(&transition.state))
+        {
             return None;
         }
-        let mut running = None;
-        for animation in &set.animations {
-            match animation.state {
-                AnimationState::Running => {
-                    if running.replace(animation).is_some() {
-                        return None;
-                    }
-                }
-                AnimationState::Finished | AnimationState::Canceled => {}
-                AnimationState::Pending | AnimationState::Paused(_) => return None,
-            }
-        }
-        let animation = running?;
-
-        // The element-level default timing function is per animation index.
-        let ui = style.get_ui();
-        let index = ui
-            .animation_name_iter()
-            .position(|name| name.as_atom() == Some(&animation.name))?;
-        let default_easing = convert_computed_timing(&ui.animation_timing_function_mod(index))?;
-
-        let keyframes = self
-            .style_engine()
-            .stylist()
-            .lookup_keyframes(&animation.name, node)?;
-        let guard = self.style_engine().shared_lock().read();
-
-        // Collapse same-percentage steps, later declarations winning — the
-        // collapse `IntermediateComputedKeyframe` applies.
-        let mut points: Vec<StepPoint> = Vec::new();
-        for step in &keyframes.steps {
-            let converted = convert_step(step, &guard, default_easing)?;
-            match points
-                .iter_mut()
-                .find(|existing| existing.percentage == converted.percentage)
-            {
-                Some(existing) => existing.merge(converted),
-                None => points.push(converted),
-            }
-        }
-        points.sort_by(|a, b| {
-            a.percentage
-                .partial_cmp(&b.percentage)
-                .expect("keyframe percentages are finite")
-        });
-
-        let opacity = build_track(&points, |point| point.opacity)?;
-        let transform_track = build_track(&points, |point| point.transform.clone())?;
-        if opacity.is_none() && transform_track.is_none() {
-            // Nothing this animation declares is a composite property.
-            return None;
-        }
-        if let Some(track) = &transform_track
-            && !lists_matched(track)
+        if driver.carries(node.id())
+            && set.animations.iter().any(|animation| {
+                matches!(
+                    animation.state,
+                    AnimationState::Pending | AnimationState::Running
+                )
+            })
         {
             return None;
         }
 
-        let committed_transform = if transform_track.is_some() {
-            convert_computed_transform(style)?
-        } else {
-            Vec::new()
-        };
-
-        let curve = timed_curve(animation, opacity)?;
-        Some(ExportedComposite {
-            curve,
-            transform_track,
-            committed_transform,
-        })
-    }
-}
-
-/// The exported curve's timing shell around its tracks, from the public
-/// `Animation` fields. `None` when the timing itself is inexportable: a
-/// zero or unbounded duration, or no iterations left.
-fn timed_curve(
-    animation: &stylo::servo::animation::Animation,
-    opacity: Option<Track<f32>>,
-) -> Option<CompositeCurve> {
-    let remaining = match animation.iteration_state {
-        KeyframesIterationState::Finite(current, max) => {
-            let remaining = (max - current).max(0.0);
-            if remaining <= 0.0 {
-                return None;
-            }
-            Iterations::Finite(remaining)
-        }
-        KeyframesIterationState::Infinite(_) => Iterations::Infinite,
-    };
-    if !(animation.duration > 0.0 && animation.duration.is_finite()) {
-        return None;
-    }
-    let expires_at = match remaining {
-        Iterations::Finite(count) => Some(animation.started_at + animation.duration * count),
-        Iterations::Infinite => None,
-    };
-    Some(CompositeCurve {
-        started_at: animation.started_at,
-        duration: animation.duration,
-        iterations: remaining,
-        direction: DirectionState {
-            reversed: animation.current_direction == AnimationDirection::Reverse,
-            alternates: matches!(
-                animation.direction,
-                AnimationDirection::Alternate | AnimationDirection::AlternateReverse
-            ),
-        },
-        expires_at,
-        opacity,
-        transform: None,
-    })
-}
-
-/// One collapsed keyframe step in the exporter's vocabulary.
-struct StepPoint {
-    percentage: f64,
-    easing: Easing,
-    opacity: Option<f32>,
-    transform: Option<TransformList>,
-}
-
-impl StepPoint {
-    fn merge(&mut self, later: Self) {
-        self.easing = later.easing;
-        if later.opacity.is_some() {
-            self.opacity = later.opacity;
-        }
-        if later.transform.is_some() {
-            self.transform = later.transform;
-        }
-    }
-}
-
-/// A per-property track over the declaring points; `None` when the property
-/// is never declared, refusal when it is declared but not at both ends.
-#[expect(
-    clippy::option_option,
-    reason = "the outer level is the export refusal; the inner is whether \
-              this property has a track at all"
-)]
-fn build_track<V: Clone>(
-    points: &[StepPoint],
-    value_of: impl Fn(&StepPoint) -> Option<V>,
-) -> Option<Option<Track<V>>> {
-    let declaring: Vec<TrackPoint<V>> = points
-        .iter()
-        .filter_map(|point| {
-            value_of(point).map(|value| TrackPoint {
-                percentage: point.percentage,
-                value,
-                easing: point.easing,
-            })
-        })
-        .collect();
-    if declaring.is_empty() {
-        return Some(None);
-    }
-    let first = declaring.first().expect("non-empty").percentage;
-    let last = declaring.last().expect("non-empty").percentage;
-    if first != 0.0 || last != 1.0 {
-        return None;
-    }
-    Some(Some(Track { points: declaring }))
-}
-
-/// Every adjacent pair of a transform track must interpolate componentwise.
-fn lists_matched(track: &Track<TransformList>) -> bool {
-    track.points.windows(2).all(|pair| {
-        pair[0].value.len() == pair[1].value.len()
-            && pair[0]
-                .value
-                .iter()
-                .zip(&pair[1].value)
-                .all(|(a, b)| std::mem::discriminant(a) == std::mem::discriminant(b))
-    })
-}
-
-fn convert_step(
-    step: &KeyframesStep,
-    guard: &SharedRwLockReadGuard<'_>,
-    default_easing: Easing,
-) -> Option<StepPoint> {
-    let KeyframesStepValue::Declarations { block } = &step.value else {
-        return None;
-    };
-    let easing = match step.get_animation_timing_function(guard) {
-        Some(specified) => convert_specified_timing(&specified)?,
-        None => default_easing,
-    };
-    let mut point = StepPoint {
-        percentage: f64::from(step.start_offset.percentage.0),
-        easing,
-        opacity: None,
-        transform: None,
-    };
-    for declaration in block.read_with(guard).declarations() {
-        match declaration {
-            PropertyDeclaration::Opacity(value) => {
-                point.opacity = Some(parse_literal_opacity(value)?);
-            }
-            PropertyDeclaration::Transform(value) => {
-                let ops: &[SpecifiedTransformOperation] = &value.0;
-                let mut list = Vec::with_capacity(ops.len());
-                for op in ops {
-                    list.push(convert_specified_op(op)?);
+        let (mut opacity, mut transform) = (false, false);
+        let mut animations = Vec::with_capacity(set.animations.len());
+        for animation in &set.animations {
+            match animation.state {
+                AnimationState::Canceled => continue,
+                AnimationState::Pending if !driver.keyframes_anchored(&key, &animation.name) => {
+                    return None;
                 }
-                point.transform = Some(list);
+                _ => {}
             }
-            PropertyDeclaration::AnimationTimingFunction(_) => {}
-            // Any other declaration means the animation moves a
-            // non-composite property.
-            _ => return None,
-        }
-    }
-    Some(point)
-}
-
-type SpecifiedTransformOperation = stylo::values::specified::transform::TransformOperation;
-
-fn convert_specified_op(op: &SpecifiedTransformOperation) -> Option<TransformOp> {
-    use stylo::values::specified::LengthPercentage;
-    let px = |value: &LengthPercentage| match value {
-        LengthPercentage::Length(length) => length.to_px_if_absolute().map(f64::from),
-        LengthPercentage::Percentage(_) | LengthPercentage::Calc(_) => None,
-    };
-    Some(match op {
-        GenericTransformOperation::TranslateX(x) => TransformOp::TranslateX(px(x)?),
-        GenericTransformOperation::TranslateY(y) => TransformOp::TranslateY(px(y)?),
-        GenericTransformOperation::Translate(x, y) => TransformOp::Translate(px(x)?, px(y)?),
-        GenericTransformOperation::ScaleX(x) => TransformOp::ScaleX(f64::from(x.get()?)),
-        GenericTransformOperation::ScaleY(y) => TransformOp::ScaleY(f64::from(y.get()?)),
-        GenericTransformOperation::Scale(x, y) => {
-            TransformOp::Scale(f64::from(x.get()?), f64::from(y.get()?))
-        }
-        GenericTransformOperation::Rotate(angle) | GenericTransformOperation::RotateZ(angle) => {
-            TransformOp::Rotate(f64::from(angle.degrees()?))
-        }
-        _ => return None,
-    })
-}
-
-/// A specified `opacity` keyframe value, via its serialization: the field
-/// is private upstream, and a literal value round-trips exactly. `calc()`
-/// does not parse as a number and correctly refuses the export.
-fn parse_literal_opacity(value: &stylo::values::specified::Opacity) -> Option<f32> {
-    let css = value.to_css_string();
-    if let Some(percent) = css.strip_suffix('%') {
-        return percent.parse::<f32>().ok().map(|value| value / 100.0);
-    }
-    css.parse::<f32>().ok()
-}
-
-/// The committed style's transform, in the same vocabulary — so `Lc` is
-/// built by the same code as `L(t)` and the delta closes exactly.
-fn convert_computed_transform(style: &ComputedValues) -> Option<TransformList> {
-    let ops: &[stylo::values::computed::transform::TransformOperation] =
-        &style.get_box().transform.0;
-    let mut list = Vec::with_capacity(ops.len());
-    for op in ops {
-        let px = |value: &stylo::values::computed::length_percentage::LengthPercentage| {
-            value.to_length().map(|length| f64::from(length.px()))
-        };
-        list.push(match op {
-            GenericTransformOperation::TranslateX(x) => TransformOp::TranslateX(px(x)?),
-            GenericTransformOperation::TranslateY(y) => TransformOp::TranslateY(px(y)?),
-            GenericTransformOperation::Translate(x, y) => TransformOp::Translate(px(x)?, px(y)?),
-            GenericTransformOperation::ScaleX(x) => TransformOp::ScaleX(f64::from(*x)),
-            GenericTransformOperation::ScaleY(y) => TransformOp::ScaleY(f64::from(*y)),
-            GenericTransformOperation::Scale(x, y) => {
-                TransformOp::Scale(f64::from(*x), f64::from(*y))
+            for (_, property) in animation.animating_properties() {
+                match property {
+                    PropertyDeclarationId::Longhand(LonghandId::Opacity) => opacity = true,
+                    PropertyDeclarationId::Longhand(LonghandId::Transform) => transform = true,
+                    _ => return None,
+                }
             }
-            GenericTransformOperation::Rotate(angle)
-            | GenericTransformOperation::RotateZ(angle) => {
-                TransformOp::Rotate(f64::from(angle.degrees()))
+            let mut animation = animation.clone();
+            // The driver promotes a pending animation on the first tick at or
+            // past its start, then iterates it. Stylo samples a pending and a
+            // running animation alike before the start, so a running copy
+            // samples what the main thread does at every instant.
+            if animation.state == AnimationState::Pending {
+                animation.state = AnimationState::Running;
             }
-            _ => return None,
-        });
-    }
-    Some(list)
-}
+            animations.push(animation);
+        }
+        if !opacity && !transform {
+            return None;
+        }
 
-fn convert_computed_timing(
-    timing: &stylo::values::computed::easing::TimingFunction,
-) -> Option<Easing> {
-    match timing {
-        TimingFunction::Keyword(keyword) => Some(keyword_easing(*keyword)),
-        TimingFunction::CubicBezier { x1, y1, x2, y2 } => Some(Easing::CubicBezier {
-            x1: *x1,
-            y1: *y1,
-            x2: *x2,
-            y2: *y2,
-        }),
-        _ => None,
-    }
-}
+        let guard = self.style_engine().shared_lock().read();
+        let (overriding, _) = style
+            .rules()
+            .get_properties_overriding_animations(&StylesheetGuards::same(&guard));
+        if (opacity && overriding.contains(LonghandId::Opacity))
+            || (transform && overriding.contains(LonghandId::Transform))
+        {
+            return None;
+        }
 
-fn convert_specified_timing(
-    timing: &stylo::values::specified::easing::TimingFunction,
-) -> Option<Easing> {
-    match timing {
-        TimingFunction::Keyword(keyword) => Some(keyword_easing(*keyword)),
-        TimingFunction::CubicBezier { x1, y1, x2, y2 } => Some(Easing::CubicBezier {
-            x1: x1.get()?,
-            y1: y1.get()?,
-            x2: x2.get()?,
-            y2: y2.get()?,
-        }),
-        _ => None,
-    }
-}
-
-/// The keyword control points from stylo's `calculate_output`.
-fn keyword_easing(keyword: TimingKeyword) -> Easing {
-    match keyword {
-        TimingKeyword::Linear => Easing::Linear,
-        TimingKeyword::Ease => Easing::CubicBezier {
-            x1: 0.25,
-            y1: 0.1,
-            x2: 0.25,
-            y2: 1.0,
-        },
-        TimingKeyword::EaseIn => Easing::CubicBezier {
-            x1: 0.42,
-            y1: 0.0,
-            x2: 1.0,
-            y2: 1.0,
-        },
-        TimingKeyword::EaseOut => Easing::CubicBezier {
-            x1: 0.0,
-            y1: 0.0,
-            x2: 0.58,
-            y2: 1.0,
-        },
-        TimingKeyword::EaseInOut => Easing::CubicBezier {
-            x1: 0.42,
-            y1: 0.0,
-            x2: 0.58,
-            y2: 1.0,
-        },
+        let expires_at = animations
+            .iter()
+            .filter_map(Animation::expires_at)
+            .reduce(f64::min);
+        Some(ExportedComposite {
+            curve: CompositeCurve {
+                animations: animations.into_boxed_slice(),
+                expires_at,
+                transform: None,
+            },
+            opacity,
+            transform,
+        })
     }
 }

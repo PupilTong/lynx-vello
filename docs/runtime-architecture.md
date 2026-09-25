@@ -1518,33 +1518,35 @@ recommits and re-bakes every tick.
 ## Composite animations compose; the rest tick
 
 The same compose machinery carries animations. At commit, an element whose
-one running animation moves only `opacity`/`transform` — and whose keyframes
-the exporter can re-express exactly (see `docs/tracking/css-animation.md`) —
-publishes an `AnimationSlot` curve on the frame: timing from stylo's public
-`Animation` fields, per-property tracks re-read from the stylist's
-`@keyframes` steps. The curve is one animation node in the frame's compose
-space tree, between the scroll and sticky nodes around and inside the
-element, so clips, scroll containers and sticky boxes in the animated subtree
-compose at their place on the path and refuse nothing. Each presented frame
-samples the curve at the frame clock: the element's group alpha is replaced,
-and the transform delta against the committed bake is the node's map, applied
-to everything whose path passes through it — fragments, layer pushes, clips,
-image draws, filter bakes, and hit tests. Between commits the compositor
-animates alone. A curve with a transform track stays on the main thread,
-its opacity track included, when its element's extent exceeds three viewport
-areas, and when an enclosing composited group cannot bound it — only a scale
-through 0 on the group's side.
+animation set moves only `opacity`/`transform` (see
+`docs/tracking/css-animation.md` for what else refuses) publishes an
+`AnimationSlot` curve on the frame: a clone of the set's stylo `Animation`s,
+which the painter samples with stylo's own `progress_at`/`sample_at`. The
+curve is one animation node in the frame's compose space tree, between the
+scroll and sticky nodes around and inside the element, so clips, scroll
+containers and sticky boxes in the animated subtree compose at their place on
+the path and refuse nothing. Each presented frame samples the curve at the
+frame clock: the element's group alpha is replaced, and the transform delta
+against the committed bake is the node's map, applied to everything whose path
+passes through it — fragments, layer pushes, clips, image draws, filter bakes,
+and hit tests. Between commits the compositor animates alone. A curve with a
+transform track stays on the main thread, its opacity values included, when
+its element's extent exceeds three viewport areas, and when an enclosing
+composited group cannot bound it — a scale through 0 on the group's side, or a
+curve of its own without a reach.
 
 The encode stays screen-bounded while content moves. Each transform track
 carries its reach — per op, the range its parameters take over the curve's
-whole domain — and culling pulls the viewport back through it, so a list of
-rows each running its own animation encodes the rows that can reach the list's
-window, and the clips and encode windows inside a moving subtree bound as
-usual. Composition samples only the curves and sticky boxes the program
-references. `has_live_curves` says the program references a curve, which is
-what makes the painter recompose every frame; `has_exported_curves` says any
-curve exported, which is what makes an input's hit test sample at the input's
-instant.
+whole domain, read off stylo's computed keyframes — and culling pulls the
+viewport back through it, so a list of rows each running its own animation
+encodes the rows that can reach the list's window, and the clips and encode
+windows inside a moving subtree bound as usual. A list holding an op the reach
+does not model (matrix, skew, 3D rotation) or a mismatched remainder stylo
+decomposes has no reach; the extent cap alone bounds its encode. Composition
+samples only the curves and sticky boxes the program references.
+`has_live_curves` says the program references a curve, which is what makes the
+painter recompose every frame; `has_exported_curves` says any curve exported,
+which is what makes an input's hit test sample at the input's instant.
 
 The side effects Web Animations gives an in-effect `opacity`/`transform`
 animation are keyed on the animation, not on its export: a stacking context
@@ -1554,15 +1556,15 @@ driver keeps them as two node bits and relayouts positioned descendants only
 when the transform bit flips, so paint order and containment are the same on
 both sides of a hand-over between the compositor and the main thread.
 
-A window painter's `BeginFrame` narrows accordingly: it is sent per frame
-only while the committed frame reports `needs_main_ticks` — something
-animating that could not export — and, once a finite curve runs past its end,
-per frame until the commit of its finish restyle is adopted. There an
-infinite exported animation involves the main thread zero times per frame.
-An offscreen `tick` does not narrow: it sends `BeginFrame` and waits on it
-every call, so a headless host ticks the main thread each frame. An animation
-**frozen** by css-contain-2 §4 narrows it all the way to nothing: an element in
-a skipped subtree (`content-visibility: hidden`, or a non-relevant
+A window painter's `BeginFrame` narrows accordingly: it is sent per frame only
+while the committed frame reports `needs_main_ticks` — something animating
+that could not export — and, once a finite curve runs past its end, per frame
+until the commit of its finish restyle is adopted. There an infinite exported
+animation involves the main thread zero times per frame. An offscreen `tick`
+does not narrow: it sends `BeginFrame` and waits on it every call, so a
+headless host ticks the main thread each frame. An animation **frozen** by
+css-contain-2 §4 narrows it all the way to nothing: an element in a skipped
+subtree (`content-visibility: hidden`, or a non-relevant
 `content-visibility: auto` box) does not advance its timeline, so the commit
 reports neither `animations_active` nor `needs_main_ticks` for it and
 `owes_frame`/`is_animating` stay false — a page whose only animations are
@@ -1571,20 +1573,24 @@ The reveal — a style change, or the relevance flip the commit itself makes —
 reactivates it in that same commit, and the first `BeginFrame` after it is
 where the animation resumes, from exactly the progress the freeze found (the
 driver carries its start times by every interval it slept through; see
-`crates/dom/src/style/animation.rs`). The
-sampling mirrors stylo's own progress computation exactly, so while a curve
-is inside its domain the values composition shows between commits are the
-values any commit's restyle lands on at the same instant. Past a finite
-curve's end they need not be: the compositor holds the curve's end value,
-whatever the fill mode, until the commit of the finish restyle is adopted —
-at least one frame, since that commit follows an asynchronous `BeginFrame`.
-With a `forwards` fill the restyle lands on that same value; without one it
-returns to the base value, and those frames show the end value instead. A
-second gap is value-level, open until the export takes more than one
-animation: a finished animation that fills does not export, so where a
-filling animation later in the `animation` list covers a running one, the
-compositor samples the running curve while the main thread shows the fill
-(`docs/tracking/css-animation.md`).
+`crates/dom/src/style/animation.rs`). The reveal's commit ticks it on the main
+thread; its curve exports from the commit of that first tick, once the start
+times are carried. The painter samples through the same stylo functions the
+main thread's cascade calls, so while a curve is inside its domain the sampled
+values are bit-equal to the ones a commit's cascade produces at the same
+instant whenever both sides iterate from the same animation state; start times
+the main thread accumulates over several ticks can differ in the last bit for
+durations that are not binary fractions. A sampled transform folds by the
+builder's own f32 fold onto the parent's committed world, so the element's
+world matches a commit's bit for bit relative to that parent world, and
+composed geometry agrees to f32 rounding. Past the domain's end — its first
+animation's end — the two need not agree: an animation's contribution can be
+replaced by the base value there, which only a commit knows, so the compositor
+holds the domain's last instant until the commit of the finish restyle is
+adopted — at least one frame, since that commit follows an asynchronous
+`BeginFrame`. Transitions do not export: while a curve covers an element the
+main thread gets no ticks, so a transition that a later restyle retargets or
+reverses would read its progress at a stale instant and jump.
 
 ## Native and Wasm spawning
 

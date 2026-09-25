@@ -1022,50 +1022,15 @@ mod tests {
     const SCROLLED: Option<u32> = Some(0);
     const ANIMATED: Option<u32> = Some(1);
 
-    /// The animation slot table [`SPACES`] indexes: slot 0 slides when
-    /// `moves`, and only fades otherwise.
+    /// The animation slot table [`SPACES`] indexes: slot 0 carries a
+    /// transform track when `moves`.
     fn slots(moves: bool) -> Vec<AnimationSlot> {
-        use crate::visual::curves::{
-            CompositeCurve, DirectionState, Easing, Iterations, Track, TrackPoint, TransformOp,
-            TransformTrack,
-        };
-        fn track<V>(from: V, to: V) -> Track<V> {
-            let point = |percentage, value| TrackPoint {
-                percentage,
-                value,
-                easing: Easing::Linear,
-            };
-            Track {
-                points: vec![point(0.0, from), point(1.0, to)],
-            }
-        }
-        let direction = DirectionState {
-            reversed: false,
-            alternates: false,
-        };
-        let transform = moves.then(|| {
-            TransformTrack::new(
-                track(
-                    vec![TransformOp::TranslateX(0.0)],
-                    vec![TransformOp::TranslateX(8.0)],
-                ),
-                direction,
-                Affine::IDENTITY,
-                Affine::IDENTITY,
-            )
-            .expect("matched lists")
-        });
+        use crate::visual::curves::{CompositeCurve, TransformTrack};
+        use crate::visual::reach::Reach;
+        let transform = moves.then(|| TransformTrack::with_reach(Reach::still()));
         vec![AnimationSlot {
             node: crate::NodeId::from_bits(1).expect("a handle's bits"),
-            curve: CompositeCurve {
-                started_at: 0.0,
-                duration: 1.0,
-                iterations: Iterations::Infinite,
-                direction,
-                expires_at: None,
-                opacity: (!moves).then(|| track(1.0, 0.5)),
-                transform,
-            },
+            curve: CompositeCurve::inert(transform),
         }]
     }
 

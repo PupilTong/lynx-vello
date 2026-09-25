@@ -10,13 +10,28 @@
 //! Every item `late` shows inside the viewport must also be one `early`'s
 //! culled walk encodes, inside the rect of every group holding it: an encode
 //! and a group rect serve their curves' whole domain.
+//!
+//! Before any geometry, the values themselves: `early`'s curves sample a
+//! property at `t` exactly when `late`'s cascade takes it from the
+//! animations origin, every sampled `opacity` and `transform` value is
+//! bit-equal to the one `late` committed, and the world a sampled transform
+//! folds to is `late`'s bit for bit relative to the parent's committed world.
+//! Composed geometry agrees to f32 rounding. At `early` itself every delta is
+//! the identity and every alpha the committed opacity. Past a curve's end
+//! the frame hands back and the curve holds its last instant, which is all it
+//! claims there. Timings are binary fractions, so a chain of main-thread
+//! ticks and the sampler's one step from the commit accumulate the same
+//! start times; for other durations they can differ in the last bit.
 
 use euclid::default::Vector2D;
+use stylo::properties::animated_properties::{AnimationValue, AnimationValueMap};
+use stylo::properties::{LonghandId, OwnedPropertyDeclarationId, PropertyDeclarationId};
+use stylo::rule_tree::CascadeOrigin;
 
 use crate::paint::convert::item_affine;
 use crate::test_common::Doc;
 use crate::vello::kurbo::{Affine, Point, Rect};
-use crate::visual::{CommittedFrame, ScrollSlot};
+use crate::visual::{CommittedFrame, PaintItemKind, ScrollSlot, SpaceKind};
 use crate::{FontBlob, NodeId, Point2D};
 
 const AHEM: &[u8] = include_bytes!("../../../hughie/tests/fixtures/Ahem.ttf");
@@ -45,8 +60,15 @@ const CURVES: [&str; 4] = ["translate", "rotate", "scale", "opacity"];
 const EARLY: f64 = 0.1;
 const LATER: [f64; 3] = [0.35, 0.8, 1.05];
 
-/// Composed positions agree to this many CSS px.
+/// Group rects hold composed positions to this many CSS px.
 const TOLERANCE: f64 = 1e-3;
+
+/// How far apart two composed positions near `magnitude` CSS px may be: the
+/// worlds agree bit for bit, so what is left is the f32 rounding of each
+/// frame's own bake, a couple of ulps of the coordinate.
+fn composed_tolerance(magnitude: f64) -> f64 {
+    1e-6 + 2.0 * f64::from(f32::EPSILON) * magnitude
+}
 
 /// One fixture: its document, the scroll offsets both frames compose at, the
 /// number of curves it exports, elements the hit sweep must reach, and
@@ -58,6 +80,17 @@ struct Fixture {
     exported: usize,
     probes: Vec<NodeId>,
     culls: bool,
+    /// Main-thread ticks, each rendered, between the restyles and `early`.
+    ticks: Vec<f64>,
+    /// When `early` is committed.
+    early: f64,
+    /// The instants `early` is composed at.
+    later: Vec<f64>,
+    /// Inline styles set once the timeline has started, each followed by a
+    /// render and a tick at 0: how restyled animation lists start.
+    restyles: Vec<(NodeId, String)>,
+    /// The animations the first slot's curve must carry.
+    entries: Option<usize>,
 }
 
 impl Fixture {
@@ -74,6 +107,11 @@ impl Fixture {
             exported: 1,
             probes: Vec::new(),
             culls: false,
+            ticks: Vec::new(),
+            early: EARLY,
+            later: LATER.to_vec(),
+            restyles: Vec::new(),
+            entries: None,
         }
     }
 
@@ -101,13 +139,22 @@ impl Fixture {
     }
 
     /// Commits `early` with every curve running, then checks it against a
-    /// fresh commit at each of [`LATER`].
+    /// fresh commit at each of the later instants.
     fn check(mut self, label: &str) {
         let dom = &mut self.doc.dom;
         dom.render();
         dom.advance_animations(0.0);
+        for (node, css) in std::mem::take(&mut self.restyles) {
+            dom.set_inline_style(node, &css);
+            dom.render();
+            dom.advance_animations(0.0);
+        }
+        for &now in &self.ticks {
+            dom.advance_animations(now);
+            dom.render();
+        }
         assert!(
-            dom.advance_animations(EARLY).needs_next_frame,
+            dom.advance_animations(self.early).needs_next_frame,
             "{label}: the fixture animates"
         );
         dom.render();
@@ -121,13 +168,26 @@ impl Fixture {
             !early.needs_main_ticks(),
             "{label}: nothing is left to main-thread ticks"
         );
+        if let Some(entries) = self.entries {
+            assert_eq!(
+                early.animation_slots()[0].curve.animations.len(),
+                entries,
+                "{label}: the curve's animations"
+            );
+        }
+        self.compare_commit_instant(&early, label);
         let encoded = crate::paint::walker::encoded_items(&self.doc.dom, &early.order);
         assert!(
             !self.culls || encoded.contains(&false),
             "{label}: early's walk culls something"
         );
         let rects = crate::paint::walker::layer_rects(&self.doc.dom, &early.order);
-        for t in LATER {
+        let expiry = early
+            .animation_slots()
+            .iter()
+            .filter_map(|slot| slot.curve.expires_at)
+            .reduce(f64::min);
+        for t in std::iter::once(self.early).chain(self.later.clone()) {
             self.doc.dom.advance_animations(t);
             self.doc.dom.render();
             let late = self
@@ -136,10 +196,160 @@ impl Fixture {
                 .committed_frame()
                 .expect("a frame is committed");
             let label = format!("{label} at t = {t}");
+            assert_eq!(
+                early.animation_boundary_passed(t),
+                expiry.is_some_and(|end| t >= end),
+                "{label}: the hand-back instant"
+            );
+            if early.animation_boundary_passed(t) {
+                // The main thread's commit takes over from here; until it is
+                // adopted each curve holds its domain's last instant.
+                assert!(late.animation_slots().len() <= self.exported, "{label}");
+                Self::compare_hold(&early, t, &label);
+                continue;
+            }
+            self.compare_values(&early, &late, t, &label);
             self.compare_geometry(&early, &late, t, &label);
             self.compare_hits(&early, &late, t, &label);
             self.compare_coverage(&encoded, &late, &label);
             self.compare_groups(&rects, &early, &late, t, &label);
+        }
+    }
+
+    /// Whether `node`'s committed style takes `property` from the animations
+    /// origin: whether the main thread's cascade sampled an animation for it.
+    fn animated_by_cascade(&self, node: NodeId, property: LonghandId) -> bool {
+        let dom = &self.doc.dom;
+        let style = dom
+            .paint_style(node)
+            .expect("an animated element is styled");
+        let guard = dom.style_engine().shared_lock().read();
+        style.rules().self_and_ancestors().any(|rule| {
+            rule.cascade_level().origin() == CascadeOrigin::Animations
+                && rule.style_source().is_some_and(|source| {
+                    source
+                        .read(&guard)
+                        .contains(PropertyDeclarationId::Longhand(property))
+                })
+        })
+    }
+
+    /// At the commit instant every curve composes the committed frame: an
+    /// identity delta and the committed opacity.
+    fn compare_commit_instant(&self, early: &CommittedFrame, label: &str) {
+        let mut values = AnimationValueMap::default();
+        for slot in early.animation_slots() {
+            let sample = slot.sample(Some(self.early), &mut values);
+            let error = sample
+                .delta
+                .as_coeffs()
+                .iter()
+                .zip(Affine::IDENTITY.as_coeffs())
+                .map(|(got, want)| (got - want).abs())
+                .fold(0.0, f64::max);
+            assert!(
+                error <= 1e-12,
+                "{label}: {:?} commits a delta {:?}",
+                slot.node,
+                sample.delta
+            );
+            let committed = self
+                .doc
+                .dom
+                .paint_style(slot.node)
+                .expect("an animated element is styled")
+                .get_effects()
+                .opacity;
+            if let Some(alpha) = sample.alpha {
+                assert_eq!(
+                    alpha.to_bits(),
+                    committed.clamp(0.0, 1.0).to_bits(),
+                    "{label}: {:?} commits alpha {alpha}",
+                    slot.node,
+                );
+            }
+        }
+    }
+
+    /// Past its domain's end a curve holds the domain's last instant.
+    fn compare_hold(early: &CommittedFrame, t: f64, label: &str) {
+        let (mut held, mut last) = (AnimationValueMap::default(), AnimationValueMap::default());
+        for slot in early.animation_slots() {
+            let Some(end) = slot.curve.expires_at else {
+                continue;
+            };
+            if t < end {
+                continue;
+            }
+            slot.curve.values_at(t, &mut held);
+            slot.curve.values_at(end.next_down(), &mut last);
+            assert_eq!(
+                held, last,
+                "{label}: {:?} holds its last instant",
+                slot.node
+            );
+        }
+    }
+
+    /// `early`'s curves sample a property at `t` exactly when `late`'s
+    /// cascade animated it, every sampled value is the one `late`
+    /// committed, bit for bit, and a sampled transform folds to `late`'s
+    /// world exactly relative to the parent's committed world.
+    fn compare_values(&self, early: &CommittedFrame, late: &CommittedFrame, t: f64, label: &str) {
+        let mut values = AnimationValueMap::default();
+        for slot in early.animation_slots() {
+            let label = format!("{label}: {:?}", slot.node);
+            slot.curve.values_at(t, &mut values);
+            for property in [LonghandId::Opacity, LonghandId::Transform] {
+                let sampled = values.contains_key(&OwnedPropertyDeclarationId::Longhand(property));
+                assert_eq!(
+                    sampled,
+                    self.animated_by_cascade(slot.node, property),
+                    "{label}: whether {property:?} is animated",
+                );
+                assert!(!sampled || slot.curve.animates(property), "{label}");
+            }
+            let style = self
+                .doc
+                .dom
+                .paint_style(slot.node)
+                .expect("an animated element is styled");
+            if let Some(sampled) =
+                values.get(&OwnedPropertyDeclarationId::Longhand(LonghandId::Opacity))
+            {
+                let committed = AnimationValue::from_computed_values(
+                    PropertyDeclarationId::Longhand(LonghandId::Opacity),
+                    style,
+                );
+                assert_eq!(Some(sampled), committed.as_ref(), "{label}: opacity");
+            }
+            let Some(AnimationValue::Transform(sampled)) =
+                values.get(&OwnedPropertyDeclarationId::Longhand(LonghandId::Transform))
+            else {
+                continue;
+            };
+            assert_eq!(sampled, &style.get_box().transform, "{label}: transform");
+            let track = slot.curve.transform.as_ref().expect("a transform track");
+            let own = |frame: &CommittedFrame| {
+                let item = frame
+                    .order
+                    .items()
+                    .iter()
+                    .find(|item| item.node == slot.node && item.kind == PaintItemKind::ElementBox)
+                    .expect("the element paints its box");
+                (item.space, item.transform)
+            };
+            // An ancestor's curve moves the parent world the track holds
+            // still; the geometry comparison covers that composition.
+            let movers = super::space::path(early.order.spaces(), own(early).0)
+                .filter(|kind| {
+                    matches!(kind, SpaceKind::Animation(index)
+                        if early.animation_slots()[*index as usize].curve.transform.is_some())
+                })
+                .count();
+            if movers == 1 {
+                assert_eq!(track.world(sampled), own(late).1, "{label}: world");
+            }
         }
     }
 
@@ -259,8 +469,8 @@ impl Fixture {
             };
             let box_ = [0.0, 0.0, f64::from(a.size.width), f64::from(a.size.height)];
             assert_same_box(
-                early_samples.css(a.space) * a_local,
-                late_samples.css(b.space) * b_local,
+                (early_samples.css(a.space), a_local),
+                (late_samples.css(b.space), b_local),
                 box_,
                 &format!("{label}: item {:?} {:?}", a.node, a.kind),
             );
@@ -284,8 +494,8 @@ impl Fixture {
                 f64::from(rect.origin.y + rect.size.height),
             ];
             assert_same_box(
-                early_samples.css(a.space) * a_local,
-                late_samples.css(b.space) * b_local,
+                (early_samples.css(a.space), a_local),
+                (late_samples.css(b.space), b_local),
                 box_,
                 &format!("{label}: clip of {:?}", a.node),
             );
@@ -293,6 +503,11 @@ impl Fixture {
 
         for (index, slot) in (0_u32..).zip(early.animation_slots()) {
             let Some(alpha) = early_animations.get(index).alpha else {
+                assert!(
+                    !self.animated_by_cascade(slot.node, LonghandId::Opacity),
+                    "{label}: {:?} animates opacity but samples no alpha",
+                    slot.node
+                );
                 continue;
             };
             let committed = self
@@ -302,8 +517,10 @@ impl Fixture {
                 .expect("an animated element is styled")
                 .get_effects()
                 .opacity;
-            assert!(
-                (alpha - committed).abs() < 1e-4,
+            // Paint clamps the committed opacity.
+            assert_eq!(
+                alpha.to_bits(),
+                committed.clamp(0.0, 1.0).to_bits(),
                 "{label}: sampled opacity {alpha}, committed {committed}",
             );
         }
@@ -352,13 +569,25 @@ impl Fixture {
     }
 }
 
-/// `a` and `b` put `box_`'s corners within [`TOLERANCE`] of each other.
-fn assert_same_box(a: Affine, b: Affine, [x0, y0, x1, y1]: [f64; 4], label: &str) {
+/// `a` and `b`, each a space's map after a baked local map, put `box_`'s
+/// corners within [`composed_tolerance`] of each other, at the magnitude
+/// either bake rounded them at.
+fn assert_same_box(
+    (a_space, a_local): (Affine, Affine),
+    (b_space, b_local): (Affine, Affine),
+    [x0, y0, x1, y1]: [f64; 4],
+    label: &str,
+) {
+    let (a, b) = (a_space * a_local, b_space * b_local);
     for corner in [(x0, y0), (x1, y0), (x0, y1), (x1, y1)] {
         let corner = Point::new(corner.0, corner.1);
         let distance = (a * corner - b * corner).hypot();
+        let magnitude = [a_local * corner, b_local * corner, b * corner]
+            .into_iter()
+            .map(|point| point.to_vec2().hypot())
+            .fold(0.0, f64::max);
         assert!(
-            distance < TOLERANCE,
+            distance < composed_tolerance(magnitude),
             "{label}: corner {corner:?} composes {:?}, committed {:?}",
             a * corner,
             b * corner,
@@ -692,8 +921,8 @@ fn a_ticker_in_a_shrinking_clipped_toast_composes_as_committed() {
 /// card's committed transform contains the box, so it moves with the curve;
 /// under an opacity curve it escapes the card and stays put, fading inside
 /// the card's group. The card's base transform is `none`; the curves start
-/// at the identity function because the exporter refuses a `none` keyframe,
-/// so an exported transform curve always commits a non-empty list and the
+/// at an identity function, so an exported transform curve here always
+/// commits a non-empty list and the
 /// `animates_transform` bit is not observable here (the delay case in
 /// `visual/tests.rs` covers it). (`position: static` is outside the Lynx
 /// grammar and the UA makes every `view` relative, so an absolute box never
@@ -739,4 +968,335 @@ fn a_fixed_box_inside_an_animated_card_composes_as_committed() {
             .0
             .check(&format!("fixed box in an animated card, {curve}"));
     }
+}
+
+/// A card running `animation` beside `css`, composed at `later`.
+fn card(css: &str, animation: &str, later: &[f64]) -> (Fixture, NodeId) {
+    let mut fixture = Fixture::new(&format!(
+        ".card {{ width: 120px; height: 80px; margin: 60px 0 0 80px; font-size: 20px;
+                  background-color: teal; }} {css}"
+    ));
+    let root = fixture.doc.root;
+    let card = fixture.el(root, "view.card");
+    fixture
+        .doc
+        .set_inline(card, &format!("animation: {animation}"));
+    fixture.probes = vec![card];
+    fixture.later = later.to_vec();
+    (fixture, card)
+}
+
+/// Mid-segment instants, keyframe and iteration boundaries of a 1 s curve.
+const GRID: [f64; 7] = [0.25, 0.5, 0.75, 1.0, 1.375, 2.0, 2.625];
+
+/// Two opacity animations: the later one in the set's order wins, as the
+/// cascade inserts them.
+#[test]
+fn the_later_of_two_opacity_animations_wins_as_committed() {
+    let (mut fixture, _) = card(
+        "@keyframes dim { from { opacity: 0.4; } to { opacity: 0.9; } }",
+        "opacity 1s linear infinite, dim 0.5s ease-in infinite",
+        &GRID,
+    );
+    fixture.entries = Some(2);
+    fixture.check("two opacity animations");
+}
+
+/// Timing functions stylo evaluates and the old exporter refused.
+#[test]
+fn step_and_square_bezier_easings_compose_as_committed() {
+    for easing in ["steps(4, jump-both)", "square-bezier(0.3, 1.4)"] {
+        let (fixture, _) = card("", &format!("translate 1s {easing} infinite"), &GRID);
+        fixture.check(&format!("easing {easing}"));
+    }
+}
+
+/// An interior keyframe with its own timing function: running forward, a
+/// segment eases by its lower keyframe's function; running reversed, by its
+/// upper keyframe's, so the overshooting ease moves from the second half to
+/// the first on alternate iterations.
+#[test]
+fn an_interior_keyframe_easing_composes_as_committed() {
+    for direction in ["normal", "alternate"] {
+        let (fixture, _) = card(
+            "@keyframes bend { from { transform: translate(0px, 0px); }
+                              50% { transform: translate(60px, 20px);
+                                    animation-timing-function: cubic-bezier(.2, 1.4, .6, -.4); }
+                              to { transform: translate(120px, 40px); } }",
+            &format!("bend 1s linear infinite {direction}"),
+            &[0.25, 0.5, 0.625, 0.75, 1.125, 1.25, 1.5, 1.625, 1.875],
+        );
+        fixture.check(&format!("interior keyframe easing, {direction}"));
+    }
+}
+
+/// `%` resolves against the border box and `em` against the font size the
+/// keyframes were computed with.
+#[test]
+fn relative_lengths_compose_as_committed() {
+    let (fixture, _) = card(
+        "@keyframes shift { from { transform: translate(0px, 0px); }
+                            to { transform: translate(50%, 1em); } }",
+        "shift 1s linear infinite",
+        &GRID,
+    );
+    fixture.check("% and em");
+}
+
+/// Lists stylo interpolates by matrix decomposition or by padding:
+/// mismatched functions, `none` against a list, and `matrix()` keyframes.
+#[test]
+fn mismatched_and_matrix_lists_compose_as_committed() {
+    for keyframes in [
+        "from { transform: translateX(20px); } to { transform: rotate(90deg); }",
+        "from { transform: none; } to { transform: translateX(100px) rotate(45deg); }",
+        "from { transform: matrix(1, 0, 0, 1, 0, 0); }
+         to { transform: matrix(1.2, 0.3, -0.2, 0.9, 40, 10); }",
+    ] {
+        let (fixture, _) = card(
+            &format!("@keyframes swap {{ {keyframes} }}"),
+            "swap 1s linear infinite",
+            &GRID,
+        );
+        fixture.check(keyframes);
+    }
+}
+
+/// A delayed animation filling backwards exports while still pending — the
+/// driver anchored it — showing its first keyframe, not the base value,
+/// until it starts.
+#[test]
+fn a_backwards_filled_delay_composes_as_committed() {
+    let (mut fixture, _) = card(
+        "@keyframes enter { from { transform: translate(30px, 10px); }
+                            to { transform: translate(120px, 40px); } }",
+        "enter 1s linear 0.5s infinite backwards",
+        &[0.25, 0.5, 0.75, 1.5, 1.625],
+    );
+    fixture.entries = Some(1);
+    fixture.check("backwards-filled delay");
+}
+
+/// A delayed animation without a backwards fill exports while pending too:
+/// before its start nothing contributes, so the committed base value is
+/// what both sides show; it runs once, and past its end the frame hands
+/// back while the curve holds its last instant.
+#[test]
+fn an_unfilled_delay_composes_as_committed() {
+    let (mut fixture, _) = card(
+        "@keyframes enter { from { transform: translate(30px, 10px); }
+                            to { transform: translate(120px, 40px); } }",
+        "enter 1s linear 0.5s 1",
+        &[0.25, 0.5, 0.75, 1.25, 1.5, 2.0],
+    );
+    fixture.entries = Some(1);
+    fixture.check("unfilled delay");
+}
+
+/// An alternating curve crosses several iteration boundaries between the
+/// commit and each sample.
+#[test]
+fn an_alternate_reverse_curve_crosses_iterations_as_committed() {
+    let (fixture, _) = card(
+        "",
+        "rotate 0.25s ease-out infinite alternate-reverse",
+        &[0.125, 0.25, 0.5, 0.625, 1.0, 1.1875, 2.25],
+    );
+    fixture.check("alternate-reverse");
+}
+
+/// A finished animation holding its end value beside a running one on the
+/// same property: the driver puts the held one back last, so it wins. It
+/// does so after the traversal of the tick the animation finishes on, whose
+/// commit still takes the running one; a tick in between lets `early` commit
+/// the order the curve clones.
+#[test]
+fn a_held_animation_beside_a_running_one_composes_as_committed() {
+    let (mut fixture, _) = card(
+        "@keyframes settle { from { transform: translateX(0px); }
+                             to { transform: translateX(60px); } }",
+        "settle 0.25s linear forwards, rotate 1s linear infinite",
+        &[0.625, 1.0, 1.5],
+    );
+    fixture.ticks = vec![0.375];
+    fixture.early = 0.5;
+    fixture.entries = Some(2);
+    fixture.check("held beside running");
+}
+
+/// A held `opacity` and a running `transform`: two animations contributing
+/// different properties, both sampled.
+#[test]
+fn a_held_fade_beside_a_running_turn_composes_as_committed() {
+    let (mut fixture, _) = card(
+        "@keyframes dim { from { opacity: 1; } to { opacity: 0.4; } }",
+        "dim 0.25s linear forwards, rotate 1s linear infinite",
+        &[0.625, 1.0, 1.5],
+    );
+    fixture.early = 0.5;
+    fixture.entries = Some(2);
+    fixture.check("held fade beside running turn");
+}
+
+/// `animation-name: translate` restyled to `translate, opacity`: servo's
+/// `maybe_start_animations` returns after updating the first, so `opacity`
+/// never starts — on the main thread, and so in the curve.
+#[test]
+fn a_restyled_animation_list_mirrors_servo_as_committed() {
+    let (mut fixture, card) = card("", "translate 1s linear infinite", &GRID);
+    fixture.restyles.push((
+        card,
+        "animation: translate 1s linear infinite, opacity 1s linear infinite".into(),
+    ));
+    fixture.entries = Some(1);
+    fixture.check("restyled list");
+}
+
+/// A paused animation beside a running one: the paused one holds its
+/// progress on both sides.
+#[test]
+fn a_paused_animation_composes_as_committed() {
+    let (mut fixture, _) = card(
+        "",
+        "translate 1s linear infinite paused, opacity 1s linear infinite running",
+        &GRID,
+    );
+    fixture.entries = Some(2);
+    fixture.check("paused beside running");
+}
+
+/// A card moving along an `offset-path` while its transform animates: the
+/// motion-path sample is one of the fold's constant factors.
+#[test]
+fn a_transform_curve_on_a_motion_path_composes_as_committed() {
+    for curve in ["translate", "rotate", "scale"] {
+        let (fixture, _) = card(
+            r#".card { offset-path: path("M 0 0 L 200 100"); offset-distance: 40%;
+                       offset-rotate: auto; }"#,
+            &format!("{curve} 1s linear infinite"),
+            &GRID,
+        );
+        fixture.check(&format!("motion path, {curve}"));
+    }
+}
+
+/// A planar curve on a child of a `perspective` parent: the parent's
+/// perspective is a constant factor, and a planar list stays planar under it.
+#[test]
+fn a_planar_curve_under_a_perspective_parent_composes_as_committed() {
+    for curve in CURVES {
+        let mut fixture = Fixture::new(
+            ".stage { width: 400px; height: 300px; margin: 40px 0 0 60px; perspective: 100px; }
+             .card { width: 120px; height: 80px; margin: 40px 0 0 80px; background-color: teal; }",
+        );
+        let root = fixture.doc.root;
+        let stage = fixture.el(root, "view.stage");
+        let card = fixture.el(stage, "view.card");
+        fixture.animate(card, curve);
+        fixture.probes = vec![card];
+        fixture.later = GRID.to_vec();
+        fixture.check(&format!("under perspective, {curve}"));
+    }
+}
+
+/// Commits `fixture` at [`EARLY`] after its restyles, without checking it.
+fn commit_early(fixture: &mut Fixture) -> std::sync::Arc<CommittedFrame> {
+    let dom = &mut fixture.doc.dom;
+    dom.render();
+    dom.advance_animations(0.0);
+    for (node, css) in std::mem::take(&mut fixture.restyles) {
+        dom.set_inline_style(node, &css);
+        dom.render();
+        dom.advance_animations(0.0);
+    }
+    assert!(dom.advance_animations(EARLY).needs_next_frame);
+    dom.commit()
+}
+
+/// What the painter could not reproduce stays on the main thread: an
+/// `!important` transform the animation cannot move, a transition — on a
+/// property other than `opacity` and `transform`, or on `opacity` beside a
+/// `transform` animation — and keyframes some interpolation takes out of
+/// the plane: `matrix3d` with a perspective term, and `rotateX` under a
+/// perspective parent.
+#[test]
+fn what_the_painter_cannot_reproduce_refuses_the_export() {
+    let keyframes = "@keyframes persp {
+                         from { transform: matrix3d(1,0,0,0, 0,1,0,0, 0,0,1,-0.002, 0,0,0,1); }
+                         to { transform: matrix3d(1,0,0,0, 0,1,0,0, 0,0,1,-0.004, 0,0,0,1); } }
+                     @keyframes tilt { from { transform: rotateX(0deg); }
+                                       to { transform: rotateX(40deg); } }";
+    for (css, animation, restyle) in [
+        (
+            ".card { transform: translateY(5px) !important; }",
+            "translate 1s linear infinite",
+            None,
+        ),
+        (
+            ".card { transition: width 1s linear, transform 1s linear; }",
+            "translate 1s linear infinite",
+            Some("animation: translate 1s linear infinite; width: 200px;"),
+        ),
+        (
+            ".card { transition: opacity 1s linear; }",
+            "none",
+            Some("opacity: 0.3; animation: rotate 1s linear infinite;"),
+        ),
+        ("", "persp 1s linear infinite", None),
+        (
+            ".stage { perspective: 100px; }",
+            "tilt 1s linear infinite",
+            None,
+        ),
+    ] {
+        let mut fixture = Fixture::new(&format!(
+            ".stage {{ width: 400px; height: 300px; }}
+             .card {{ width: 120px; height: 80px; margin: 60px 0 0 80px;
+                      background-color: teal; }} {keyframes} {css}"
+        ));
+        let root = fixture.doc.root;
+        let stage = fixture.el(root, "view.stage");
+        let card = fixture.el(stage, "view.card");
+        fixture
+            .doc
+            .set_inline(card, &format!("animation: {animation}"));
+        fixture
+            .restyles
+            .extend(restyle.map(|css| (card, css.to_owned())));
+        let frame = commit_early(&mut fixture);
+        assert!(
+            frame.animation_slots().is_empty(),
+            "{css} {animation}: refused"
+        );
+        assert!(
+            frame.needs_main_ticks(),
+            "{css} {animation}: ticks on the main thread"
+        );
+    }
+}
+
+/// A row sheared by `skewX` keyframes has no reach, so the fading group
+/// holding it cannot bound it: the row stays on the main thread while the
+/// group's own fade exports.
+#[test]
+fn a_row_without_a_reach_inside_a_fading_group_refuses_the_export() {
+    let mut fixture = Fixture::new(
+        ".group { width: 300px; height: 200px; margin: 60px 0 0 80px; padding: 20px;
+                  background-color: navy; }
+         .row { width: 200px; height: 40px; background-color: teal; }
+         @keyframes shear { from { transform: skewX(0deg); } to { transform: skewX(20deg); } }",
+    );
+    let root = fixture.doc.root;
+    let group = fixture.el(root, "view.group");
+    let row = fixture.el(group, "view.row");
+    fixture.animate(group, "opacity");
+    fixture.animate(row, "shear");
+    let frame = commit_early(&mut fixture);
+    let exported: Vec<NodeId> = frame
+        .animation_slots()
+        .iter()
+        .map(|slot| slot.node)
+        .collect();
+    assert_eq!(exported, [group], "only the group's fade exports");
+    assert!(frame.needs_main_ticks(), "the row ticks on the main thread");
 }

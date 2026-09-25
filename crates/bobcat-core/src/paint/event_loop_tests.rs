@@ -1177,6 +1177,30 @@ fn an_exported_curve_stops_asking_for_main_thread_ticks() {
     );
 }
 
+/// The tick that anchors a delayed animation changes no style, yet it
+/// settles the animation's start, so it commits: the frame it publishes
+/// carries the curve and frees the main thread for the whole delay.
+#[test]
+fn the_tick_anchoring_a_delayed_animation_commits_its_curve() {
+    let mut engine = booted_animated(
+        "view { width: 100px; height: 100px; background-color: red;
+                    animation: fade 1s linear 5s infinite both; }
+             @keyframes fade { from { opacity: 1; } to { opacity: 0; } }",
+    );
+    assert!(
+        !engine
+            .published_frame()
+            .expect("the boot flush published")
+            .has_exported_curves(),
+        "an unanchored delay does not export"
+    );
+
+    synchronized_tick(&mut engine, 0.1);
+    let frame = engine.published_frame().expect("the anchoring committed");
+    assert!(frame.has_exported_curves(), "the anchored delay exports");
+    assert!(!frame.needs_main_ticks());
+}
+
 /// A transparent tap target sliding by an exported curve draws nothing, so
 /// the compose program names no curve; a tap still finds it where the curve
 /// carries it at the tap's clock reading, not where it was committed.
