@@ -85,7 +85,7 @@ pub(crate) fn install(
             }
         })?;
         match source {
-            LoadedSource::Entry { source, url } => Ok(RequiredSource {
+            LoadedSource::Module { source, url } => Ok(RequiredSource {
                 kind: kind_of(&url),
                 url,
                 text: source,

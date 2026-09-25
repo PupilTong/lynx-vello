@@ -464,7 +464,7 @@ completion for a live view reports a resource failure, including when a worker
 exits before answering. Other views and their group remain alive; the last
 group/view handle joins the group's threads.
 
-Source requests select an entry or stylesheet payload and carry a specifier;
+Source requests select a module or stylesheet payload and carry a specifier;
 the fetcher owns base URL and transport policy. That call, the optional
 `preload_source` hint, `request_image`, `service_images` and the `FrameImages`
 supertrait are the whole protocol. Every method is synchronous — no transport

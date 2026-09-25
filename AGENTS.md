@@ -434,7 +434,7 @@ value parse per declaration — the floor, because the wire format keeps
 attribute selectors and functional pseudo-classes as text and stylo builds
 specified values only through its value parsers. Decoding a container stays
 embedder work: core owns the `PreparsedStyleSheet` vocabulary, the embedder
-fills it. Source requests select a stylesheet or entry payload and carry a
+fills it. Source requests select a stylesheet or module payload and carry a
 specifier; the fetcher supplies the base URL and transport policy. The protocol
 also offers the optional `preload_source` hint,
 `request_image`/`service_images` and the `FrameImages` supertrait: every method

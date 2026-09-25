@@ -78,7 +78,7 @@ pub(crate) fn install(
         let id = futures.register(async move {
             match answer.await {
                 Ok(Ok(LoadedSource::Fetched)) => Ok(HostValue::Undefined),
-                Ok(Ok(LoadedSource::Entry { .. })) => {
+                Ok(Ok(LoadedSource::Module { .. })) => {
                     Err("the fetcher returned a script".to_owned())
                 }
                 Ok(Ok(LoadedSource::StyleSheet(_))) => {

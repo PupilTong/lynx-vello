@@ -109,7 +109,7 @@ impl WorkerFactory {
                     // The built-in background script is this thread's own, so
                     // it answers its own request rather than asking a host
                     // that has no bytes for it.
-                    script.complete(Ok(LoadedSource::Entry {
+                    script.complete(Ok(LoadedSource::Module {
                         source,
                         url: BTS_MODULE_SPECIFIER.to_owned(),
                     }));

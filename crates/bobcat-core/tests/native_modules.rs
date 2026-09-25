@@ -64,8 +64,7 @@ impl ResourceFetcher for Entries {
         // is the same string in every case: this page has no stylesheets and
         // no fonts, so a specifier it does not know is refused below.
         let specifier = match &request {
-            SourceRequest::Entry(url)
-            | SourceRequest::Module(url)
+            SourceRequest::Module(url)
             | SourceRequest::StyleSheet(url)
             | SourceRequest::Font { url }
             | SourceRequest::Fetch { url } => url.clone(),
@@ -83,7 +82,7 @@ impl ResourceFetcher for Entries {
                 .into())
             },
             |source| {
-                Ok(LoadedSource::Entry {
+                Ok(LoadedSource::Module {
                     source: source.to_owned(),
                     url: specifier.clone(),
                 })

@@ -223,7 +223,7 @@ impl FetcherDouble {
     pub fn load_source(&self, request: SourceRequest) -> Result<LoadedSource, LynxViewError> {
         let (specifier, style_sheet, base_url) = match request {
             SourceRequest::StyleSheet(url) => (url, true, None),
-            SourceRequest::Entry(url) | SourceRequest::Module(url) => (url, false, None),
+            SourceRequest::Module(url) => (url, false, None),
             // This double serves one payload, which is not a font. Refusing
             // the request is what a host with no fonts does.
             SourceRequest::Font { url } => {
@@ -286,7 +286,7 @@ impl FetcherDouble {
         Ok(if style_sheet {
             LoadedSource::StyleSheet(StyleSheetSource::Text(source))
         } else {
-            LoadedSource::Entry { source, url }
+            LoadedSource::Module { source, url }
         })
     }
 }

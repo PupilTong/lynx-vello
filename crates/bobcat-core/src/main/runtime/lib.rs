@@ -1380,7 +1380,7 @@ await Promise.resolve().then(() => __FlushElementTree());
         self.complete_entry(
             js_runtime,
             source_name,
-            Ok(LoadedSource::Entry {
+            Ok(LoadedSource::Module {
                 source: source.to_owned(),
                 url: source_name.to_owned(),
             }),
@@ -1431,7 +1431,7 @@ await Promise.resolve().then(() => __FlushElementTree());
         self.complete_entry(
             js_runtime,
             source_name,
-            Ok(LoadedSource::Entry {
+            Ok(LoadedSource::Module {
                 source: source.to_owned(),
                 url: source_name.to_owned(),
             }),
@@ -1495,7 +1495,7 @@ await Promise.resolve().then(() => __FlushElementTree());
             })
         })?;
         let loaded = match answered {
-            Ok(LoadedSource::Entry { source, url }) => Ok((url, entry_module_source(&source))),
+            Ok(LoadedSource::Module { source, url }) => Ok((url, entry_module_source(&source))),
             Ok(_) => Err(format!("the MTS entry {requested} is not a script")),
             Err(error) => Err(format!("loading the MTS entry {requested}: {error}")),
         };
@@ -1595,7 +1595,7 @@ await Promise.resolve().then(() => __FlushElementTree());
     ) -> Result<(), MainThreadError> {
         use crate::resource::LoadedSource;
         let loaded = match source {
-            Ok(LoadedSource::Entry { source, url }) => Ok((url, source)),
+            Ok(LoadedSource::Module { source, url }) => Ok((url, source)),
             Ok(LoadedSource::StyleSheet(_)) => {
                 Err("a module request returned a stylesheet".to_owned())
             }

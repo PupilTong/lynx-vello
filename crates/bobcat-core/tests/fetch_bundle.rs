@@ -178,8 +178,8 @@ impl ResourceFetcher for Files {
                     Err(missing(url))
                 }
             }
-            SourceRequest::Entry(url) | SourceRequest::Module(url) => Files::script(url)
-                .map(|source| LoadedSource::Entry {
+            SourceRequest::Module(url) => Files::script(url)
+                .map(|source| LoadedSource::Module {
                     source,
                     url: url.clone(),
                 })

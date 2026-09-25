@@ -33,6 +33,10 @@ use crate::view::{
 /// seconds on some machines and nothing on others.
 const PATIENCE: Duration = Duration::from_secs(30);
 
+/// The URL every [`TestViewSpec`] view names its entry by, and the one
+/// module URL an [`InlineFetcher`] answers with its entry script.
+const ENTRY: &str = "app:///main.js";
+
 /// One author stylesheet, in whichever of the two forms a host has it.
 pub(crate) enum TestSheet {
     Text(String),
@@ -41,6 +45,7 @@ pub(crate) enum TestSheet {
 
 /// A host whose whole resource system is the strings it was built with.
 pub(crate) struct InlineFetcher {
+    /// The script served for [`ENTRY`]; every other module is missing.
     entry: String,
     sheets: FxHashMap<String, TestSheet>,
     /// The faces this host serves an `@font-face` `src` from, by URL. A URL
@@ -65,7 +70,7 @@ impl dom::FrameImages for InlineFetcher {
 impl ResourceFetcher for InlineFetcher {
     fn request_source(&self, request: SourceRequest, completion: SourceCompletion) {
         let answer = match request {
-            SourceRequest::Entry(url) => Ok(LoadedSource::Entry {
+            SourceRequest::Module(url) if url == ENTRY => Ok(LoadedSource::Module {
                 source: self.entry.clone(),
                 url,
             }),
@@ -82,7 +87,7 @@ impl ResourceFetcher for InlineFetcher {
                 || Err(missing(&url)),
                 |blob| Ok(LoadedSource::Font(blob.clone())),
             ),
-            // This double serves no plain fetch either.
+            // This double serves no module but the entry, and no plain fetch.
             SourceRequest::Module(url) | SourceRequest::Fetch { url } => Err(missing(&url)),
             SourceRequest::Worker { specifier, .. } => Err(missing(&specifier)),
         };
@@ -252,7 +257,7 @@ impl TestViewSpec {
         let sources = ViewSources {
             style_sheets: sheets.iter().map(|(url, _)| url.clone()).collect(),
             ..ViewSources::new(
-                "app:///main.js",
+                ENTRY,
                 crate::ScreenMetrics::for_viewport(width, height, 1.0),
             )
         };

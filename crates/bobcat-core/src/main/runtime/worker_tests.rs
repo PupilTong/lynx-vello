@@ -226,7 +226,7 @@ impl Pair {
                 && let Some(ViewNotice::RequestSource { completion, .. }) =
                     self.deferred_notices.remove(position)
             {
-                completion.complete(Ok(LoadedSource::Entry {
+                completion.complete(Ok(LoadedSource::Module {
                     source: source.to_owned(),
                     url: url.to_owned(),
                 }));
@@ -258,7 +258,7 @@ impl Pair {
     }
 
     fn answer(&mut self, source: &str) {
-        self.source().complete(Ok(LoadedSource::Entry {
+        self.source().complete(Ok(LoadedSource::Module {
             source: source.into(),
             url: "app:///nested/worker.js".into(),
         }));
@@ -1358,7 +1358,7 @@ fn dropping_the_view_cancels_io_without_keeping_the_worker_thread_alive() {
         completion.is_cancelled(),
         "nobody is waiting for this script any more"
     );
-    completion.complete(Ok(LoadedSource::Entry {
+    completion.complete(Ok(LoadedSource::Module {
         source: "throw Error('cancelled worker ran');".into(),
         url: "app:///late.js".into(),
     }));
@@ -2174,7 +2174,7 @@ fn disposal_remains_deliverable_while_the_bts_entry_is_loading() {
     assert!(messages.last().unwrap().contains("disposed"));
     assert!(pair.finish().is_empty());
     assert!(completion.is_cancelled());
-    completion.complete(Ok(LoadedSource::Entry {
+    completion.complete(Ok(LoadedSource::Module {
         source: "postMessage('late-module');".into(),
         url: "app:///pending.js".into(),
     }));

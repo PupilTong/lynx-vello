@@ -369,7 +369,7 @@ async fn metrics_that_arrive_before_the_document_are_what_it_is_created_at() {
             .expect("pending completion")
             .take()
             .expect("the entry fetch is outstanding");
-        completion.complete(Ok(bobcat_core::resource::LoadedSource::Entry {
+        completion.complete(Ok(bobcat_core::resource::LoadedSource::Module {
             source: "globalThis.renderPage = function () {
                __SetInlineStyles(__CreatePage('card', 0), 'background-color:rgb(255,0,0)');
              };"
@@ -570,7 +570,7 @@ async fn a_pending_view_does_not_block_a_sibling_in_the_same_group() {
         let completion = fetcher.pending.lock().unwrap().take().unwrap();
         drop(pending);
         assert!(completion.is_cancelled());
-        completion.complete(Ok(bobcat_core::resource::LoadedSource::Entry {
+        completion.complete(Ok(bobcat_core::resource::LoadedSource::Module {
             source: "throw new Error('late source must not run')".into(),
             url: "app:///late.js".into(),
         }));
@@ -610,7 +610,7 @@ impl bobcat_core::FrameImages for TwoScriptFetcher {
 impl ResourceFetcher for TwoScriptFetcher {
     fn request_source(&self, request: SourceRequest, completion: SourceCompletion) {
         if matches!(request, SourceRequest::Worker { .. }) {
-            completion.complete(Ok(bobcat_core::resource::LoadedSource::Entry {
+            completion.complete(Ok(bobcat_core::resource::LoadedSource::Module {
                 source: self.worker.to_owned(),
                 url: "app:///worker.js".to_owned(),
             }));

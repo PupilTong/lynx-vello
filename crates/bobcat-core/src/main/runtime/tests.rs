@@ -4059,7 +4059,7 @@ fn requested_module(
 
 /// One `require` answered, from whichever URL the host says it found it at.
 fn module_source(source: &str, url: &str) -> crate::resource::LoadedSource {
-    crate::resource::LoadedSource::Entry {
+    crate::resource::LoadedSource::Module {
         source: source.to_owned(),
         url: url.to_owned(),
     }

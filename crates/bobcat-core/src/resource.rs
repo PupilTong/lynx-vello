@@ -36,7 +36,7 @@ pub trait ResourceFetcher: dom::FrameImages {
     ///
     /// **A view's startup sources are requested before it runs at all**:
     /// every author stylesheet in the order the view listed them and then the
-    /// entry are handed over together inside
+    /// entry, as a [`SourceRequest::Module`], are handed over together inside
     /// [`LynxGroup::create_lynx_view`](crate::LynxGroup::create_lynx_view),
     /// on the embedder's own thread, before it returns — this fetcher is
     /// built earlier in that same call, out of the builder the embedder
@@ -160,14 +160,15 @@ impl<T: ResourceFetcher + ?Sized> ResourceFetcher for Rc<T> {
 #[derive(Debug)]
 pub enum SourceRequest {
     StyleSheet(String),
-    Entry(String),
     /// A worker script resolved against the creating view's entry URL.
-    /// Complete with `LoadedSource::Entry`; the result goes to its worker.
+    /// Complete with `LoadedSource::Module`; the result goes to its worker.
     Worker {
         specifier: String,
         base_url: String,
     },
-    /// A normalized module URL, loaded after an import discovers it.
+    /// The view's entry, or a normalized module URL loaded after an import
+    /// or a synchronous load discovers it. Complete with
+    /// [`LoadedSource::Module`].
     Module(String),
     /// Fetch `url` and keep it, the way an image source is fetched,
     /// answering only that the fetch is over.
@@ -198,13 +199,13 @@ pub enum StyleSheetSource {
     Text(String),
 }
 
-/// A loaded source. `Entry` carries JavaScript for a main entry, imported
-/// module or worker script, including its final response URL. The completion
-/// routes it to the runtime that requested it.
+/// A loaded source. `Module` carries JavaScript for an entry, an import, a
+/// worker script or a synchronously loaded script, including its final
+/// response URL. The completion routes it to the runtime that requested it.
 #[derive(Clone, Debug)]
 pub enum LoadedSource {
     StyleSheet(StyleSheetSource),
-    Entry {
+    Module {
         source: String,
         url: String,
     },
@@ -394,7 +395,7 @@ mod completion_tests {
     }
 
     fn source() -> LoadedSource {
-        LoadedSource::Entry {
+        LoadedSource::Module {
             source: String::new(),
             url: "app:///main.js".into(),
         }

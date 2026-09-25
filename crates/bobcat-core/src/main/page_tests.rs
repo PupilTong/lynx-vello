@@ -71,7 +71,7 @@ async fn open_realm(page: &Rc<Page>, entry: &str, url: &str) {
 /// pin here that is not about the loading itself wants.
 fn answered_entry(entry: &str, url: &str, token: &CancellationToken) -> StartupSource {
     let (completion, answer) = SourceCompletion::new(token.clone());
-    completion.complete(Ok(LoadedSource::Entry {
+    completion.complete(Ok(LoadedSource::Module {
         source: entry.to_owned(),
         url: url.to_owned(),
     }));
@@ -220,7 +220,7 @@ impl Harness {
             .collect();
         let entry_url = std::mem::take(&mut sources.entry);
         let entry = StartupSource {
-            answer: request(SourceRequest::Entry(entry_url.clone()), &mut outstanding),
+            answer: request(SourceRequest::Module(entry_url.clone()), &mut outstanding),
             url: entry_url,
         };
         let attached = AttachedView {
@@ -298,7 +298,7 @@ impl Harness {
     /// Answers one outstanding source request, whichever it is.
     fn answer(&mut self, url: &str, source: &str) {
         let (_, completion) = self.sources.pop().expect("a source request is outstanding");
-        completion.complete(Ok(LoadedSource::Entry {
+        completion.complete(Ok(LoadedSource::Module {
             source: source.to_owned(),
             url: url.to_owned(),
         }));
@@ -1801,7 +1801,7 @@ fn a_view_on_a_runtime_that_was_never_built_fails_its_startup() {
         assert!(
             matches!(
                 requests.as_slice(),
-                [SourceRequest::Entry(url)] if url == "app:///main.js"
+                [SourceRequest::Module(url)] if url == "app:///main.js"
             ),
             "only the startup entry was asked for: {requests:?}"
         );
@@ -2260,15 +2260,18 @@ async fn classed_box_size(harness: &mut Harness) -> (f32, f32) {
 }
 
 /// Answers the entry request with [`CLASSED_BOX`], leaving every stylesheet
-/// request where it is.
+/// request where it is. The entry is picked out by its URL, since it is a
+/// module request like any import the view has made.
 fn answer_classed_entry(harness: &mut Harness) {
     let entry = harness
         .sources
         .iter()
-        .position(|(request, _)| matches!(request, SourceRequest::Entry(_)))
+        .position(
+            |(request, _)| matches!(request, SourceRequest::Module(url) if url == "app:///main.js"),
+        )
         .expect("the entry request is outstanding");
     let (_, completion) = harness.sources.remove(entry);
-    completion.complete(Ok(LoadedSource::Entry {
+    completion.complete(Ok(LoadedSource::Module {
         source: CLASSED_BOX.to_owned(),
         url: "app:///main.js".to_owned(),
     }));

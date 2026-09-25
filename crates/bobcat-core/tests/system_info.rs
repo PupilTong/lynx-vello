@@ -61,8 +61,7 @@ impl bobcat_core::FrameImages for Entries {
 impl ResourceFetcher for Entries {
     fn request_source(&self, request: SourceRequest, completion: SourceCompletion) {
         let specifier = match &request {
-            SourceRequest::Entry(url)
-            | SourceRequest::Module(url)
+            SourceRequest::Module(url)
             | SourceRequest::StyleSheet(url)
             | SourceRequest::Font { url }
             | SourceRequest::Fetch { url } => url.clone(),
@@ -85,7 +84,7 @@ impl ResourceFetcher for Entries {
                 .into())
             },
             |source| {
-                Ok(LoadedSource::Entry {
+                Ok(LoadedSource::Module {
                     source: source.to_owned(),
                     url: specifier.clone(),
                 })

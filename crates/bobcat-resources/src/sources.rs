@@ -113,9 +113,7 @@ pub(crate) fn request(resources: &Resources, request: SourceRequest, completion:
     }
     let (specifier, kind, base_url) = match request {
         SourceRequest::StyleSheet(url) => (url, SourceKind::StyleSheet, resources.base_url()),
-        SourceRequest::Entry(url) | SourceRequest::Module(url) => {
-            (url, SourceKind::Script, resources.base_url())
-        }
+        SourceRequest::Module(url) => (url, SourceKind::Script, resources.base_url()),
         SourceRequest::Font { url } => (url, SourceKind::Font, resources.base_url()),
         SourceRequest::Fetch { url } => (url, SourceKind::Fetch, resources.base_url()),
         SourceRequest::Worker {
@@ -330,7 +328,7 @@ fn prepare(
             Ok(if style_sheet {
                 LoadedSource::StyleSheet(StyleSheetSource::Text(source))
             } else {
-                LoadedSource::Entry { source, url }
+                LoadedSource::Module { source, url }
             })
         })
 }

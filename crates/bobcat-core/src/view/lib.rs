@@ -752,7 +752,7 @@ impl LynxGroup {
             answer: request_startup_source(
                 &*fetcher,
                 &cancel,
-                SourceRequest::Entry(entry_url.clone()),
+                SourceRequest::Module(entry_url.clone()),
             ),
             url: entry_url,
         };

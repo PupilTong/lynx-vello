@@ -908,7 +908,7 @@ fn worker_script(
     >,
 ) -> Result<(String, String), String> {
     match answer {
-        Ok(Ok(LoadedSource::Entry { source, url })) => Ok((source, url)),
+        Ok(Ok(LoadedSource::Module { source, url })) => Ok((source, url)),
         Ok(Ok(LoadedSource::StyleSheet(_))) => {
             Err("the fetcher returned a stylesheet for a worker".to_owned())
         }
@@ -1042,7 +1042,7 @@ mod tests {
         let (events, events_rx) = mpsc::unbounded_channel();
         let (messages, messages_rx) = mpsc::unbounded_channel();
         let (script, script_rx) = oneshot::channel();
-        let _ = script.send(Ok(LoadedSource::Entry {
+        let _ = script.send(Ok(LoadedSource::Module {
             source,
             url: format!("app:///worker{key}.js"),
         }));
