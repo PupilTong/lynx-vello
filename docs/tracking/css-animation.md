@@ -139,11 +139,13 @@ concretely, so the tables above are read as "the target" and this section as
   element whose one running animation moves only `opacity`/`transform` — with
   context-free keyframe values (numbers, absolute lengths, angles),
   `linear`/`cubic-bezier` easing, matched transform lists, both track ends
-  declared, no transitions, and nothing structural in the way (no enclosing
-  composited group, no scroll container or overflow clip in the animated
-  subtree, no individual transforms/motion path/perspective, a 2D invertible
-  world) — is re-expressed as an `AnimationSlot` curve on the committed
-  frame. Sampling mirrors stylo's `get_property_declaration_at_time` exactly
+  declared, no transitions, and, for a `transform` track, nothing structural
+  in the way (an enclosing composited group bounds the element wherever its
+  curve carries it, by a still clip or the viewport; the element's extent fits
+  three viewports; no individual transforms/motion path/perspective; a 2D
+  invertible world) — is re-expressed as an `AnimationSlot` curve on the
+  committed frame. Clips, scroll containers and sticky boxes inside or around
+  the animated subtree do not refuse it. Sampling mirrors stylo's `get_property_declaration_at_time` exactly
   (interval pick, FROM-keyframe timing function, `1/(200×segment)` bezier
   tolerance, iteration/direction emulation), so the compositor's frames and
   the next commit's restyle land on the same values. Composition retargets

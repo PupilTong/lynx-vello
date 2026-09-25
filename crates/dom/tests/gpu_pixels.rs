@@ -873,6 +873,319 @@ fn a_sliding_blurred_card_stays_inside_its_ancestors_clip() {
     );
 }
 
+/// Bakes `frame`'s filter entries and composes it at `now`, the way an
+/// embedder's painter draws one frame.
+fn compose_at(
+    gpu: &mut dom::render::gpu::Headless,
+    frame: &dom::CommittedFrame,
+    now: Option<f64>,
+    (width, height): (u32, u32),
+) -> Vec<u8> {
+    let filtered: Vec<Option<dom::vello::peniko::ImageData>> = gpu
+        .prepare_filters(frame, &[], &|_| None, 0, now)
+        .expect("the filter bakes render")
+        .to_vec();
+    let mut scene = Scene::new();
+    frame.compose_into(&mut scene, &[], &filtered, &|_| None, now);
+    gpu.render(&scene, &[], width, height, Color::WHITE)
+        .expect("headless render")
+}
+
+/// Every channel of `a` within `slack` of `b`'s.
+fn assert_pixels_match(a: &[u8], b: &[u8], slack: u8, label: &str) {
+    assert_eq!(a.len(), b.len(), "{label}: sizes");
+    let worst = a
+        .iter()
+        .zip(b)
+        .map(|(a, b)| a.abs_diff(*b))
+        .max()
+        .unwrap_or(0);
+    assert!(worst <= slack, "{label}: channels differ by up to {worst}");
+}
+
+/// A child sliding out of a still `opacity: 0.5` parent, composed later than
+/// its commit, draws where a fresh commit at that instant draws it: the
+/// parent's group rect holds the whole slide, not the child's committed box.
+#[test]
+fn a_child_sliding_out_of_a_still_opacity_group_composes_as_committed() {
+    let mut gpu = headless("a_child_sliding_out_of_a_still_opacity_group_composes_as_committed");
+    let mut doc = Doc::with_css_sized(
+        "page { display: flex; width: 200px; height: 100px; }
+         .group { display: flex; margin: 20px; width: 60px; height: 60px; opacity: 0.5; }
+         .card { display: flex; flex-shrink: 0; width: 40px; height: 40px;
+                 background-color: #000000; animation: slide 1s linear infinite; }
+         @keyframes slide { from { transform: translateX(0px); }
+                            to { transform: translateX(100px); } }",
+        200.0,
+        100.0,
+    );
+    let root = doc.root;
+    let group = doc.el(root, "group");
+    doc.el(group, "card");
+    doc.dom.render();
+    doc.dom.advance_animations(0.0);
+    doc.dom.advance_animations(0.1);
+    doc.dom.render();
+    let early = doc
+        .dom
+        .committed_frame()
+        .expect("render leaves a committed frame retained");
+    assert!(
+        early.has_live_curves(),
+        "the slide exports inside the group"
+    );
+
+    // Committed at x = 30..70 inside the group's 20..80; at 0.6 s the card
+    // spans x = 80..120, wholly past the group's box.
+    let composed = compose_at(&mut gpu, &early, Some(0.6), (200, 100));
+    doc.dom.advance_animations(0.6);
+    doc.dom.render();
+    let late = doc
+        .dom
+        .committed_frame()
+        .expect("render leaves a committed frame retained");
+    assert_ne!(early.commit_id(), late.commit_id(), "a fresh commit");
+    let committed = compose_at(&mut gpu, &late, None, (200, 100));
+    assert!(
+        luma(&committed, 200, 100, 40) < 160,
+        "the fresh commit draws the half-faded card past its parent's box ({})",
+        luma(&committed, 200, 100, 40),
+    );
+    assert_pixels_match(&composed, &committed, 2, "composed at 0.6 s");
+}
+
+/// A blurred group with a sliding child beside a still blurred box, composed
+/// at two instants of one commit: the second re-bakes the sliding group
+/// alone, and both frames draw what fresh commits at those instants draw.
+#[test]
+fn a_blurred_group_with_a_sliding_child_composes_as_committed_beside_a_still_blur() {
+    let mut gpu =
+        headless("a_blurred_group_with_a_sliding_child_composes_as_committed_beside_a_still_blur");
+    let mut doc = Doc::with_css_sized(
+        "page { display: flex; width: 200px; height: 100px; }
+         .still { display: flex; flex-shrink: 0; margin: 20px 0px 0px 10px; width: 30px;
+                  height: 30px; background-color: #000000; filter: blur(2px); }
+         .group { display: flex; flex-shrink: 0; margin: 20px; width: 50px; height: 50px;
+                  filter: blur(2px); }
+         .card { display: flex; flex-shrink: 0; width: 30px; height: 30px;
+                 background-color: #000000; animation: slide 1s linear infinite; }
+         @keyframes slide { from { transform: translateX(0px); }
+                            to { transform: translateX(100px); } }",
+        200.0,
+        100.0,
+    );
+    let root = doc.root;
+    doc.el(root, "still");
+    let group = doc.el(root, "group");
+    doc.el(group, "card");
+    doc.dom.render();
+    doc.dom.advance_animations(0.0);
+    doc.dom.advance_animations(0.1);
+    doc.dom.render();
+    gpu.forget_filters();
+    let early = doc
+        .dom
+        .committed_frame()
+        .expect("render leaves a committed frame retained");
+    let groups = early.filter_groups();
+    assert_eq!(groups.len(), 2, "two blurred groups");
+    assert!(
+        !groups[0].samples_animations() && groups[1].samples_animations(),
+        "only the group holding the slide samples the timeline",
+    );
+
+    // Both instants of `early` first: a later commit's bakes would replace
+    // its textures.
+    let instants = [0.4, 0.6];
+    let composed = instants.map(|now| compose_at(&mut gpu, &early, Some(now), (200, 100)));
+    for (now, composed) in instants.into_iter().zip(composed) {
+        doc.dom.advance_animations(now);
+        doc.dom.render();
+        let late = doc
+            .dom
+            .committed_frame()
+            .expect("render leaves a committed frame retained");
+        let committed = compose_at(&mut gpu, &late, None, (200, 100));
+        assert!(
+            luma(&committed, 200, 25, 35) < 128,
+            "the still box is drawn at {now} s ({})",
+            luma(&committed, 200, 25, 35),
+        );
+        assert_pixels_match(&composed, &committed, 3, &format!("composed at {now} s"));
+    }
+}
+
+/// One element with both `filter: blur()` and `backdrop-filter` beside a
+/// sliding card, composed at two instants of one commit: the second re-bakes
+/// the backdrop, and the blur group that draws it with it, so both frames
+/// draw what fresh commits at those instants draw.
+#[test]
+fn a_blurred_backdrop_beside_a_sliding_card_composes_as_committed() {
+    let mut gpu = headless("a_blurred_backdrop_beside_a_sliding_card_composes_as_committed");
+    let mut doc = Doc::with_css_sized(
+        "page { display: flex; position: relative; width: 200px; height: 100px; }
+         .card { display: flex; position: absolute; left: 0px; top: 20px; width: 30px;
+                 height: 60px; background-color: #000000; animation: slide 1s linear infinite; }
+         .frost { display: flex; position: absolute; left: 60px; top: 10px; width: 130px;
+                  height: 80px; background-color: rgba(255, 255, 255, 0.2);
+                  backdrop-filter: blur(3px); filter: blur(1px); }
+         @keyframes slide { from { transform: translateX(0px); }
+                            to { transform: translateX(200px); } }",
+        200.0,
+        100.0,
+    );
+    let root = doc.root;
+    doc.el(root, "card");
+    doc.el(root, "frost");
+    doc.dom.render();
+    doc.dom.advance_animations(0.0);
+    doc.dom.advance_animations(0.1);
+    doc.dom.render();
+    gpu.forget_filters();
+    let early = doc
+        .dom
+        .committed_frame()
+        .expect("render leaves a committed frame retained");
+    let groups = early.filter_groups();
+    assert_eq!(groups.len(), 2, "a blur group and a backdrop");
+    assert!(
+        groups.iter().all(dom::FilterGroup::samples_animations),
+        "both sample the timeline: the backdrop reads the slide, the group draws the backdrop",
+    );
+
+    // Both instants of `early` first: a later commit's bakes would replace
+    // its textures. The card spans x = 80..110 at 0.4 s and 120..150 at
+    // 0.6 s, both under the element.
+    let instants = [0.4, 0.6];
+    let composed = instants.map(|now| compose_at(&mut gpu, &early, Some(now), (200, 100)));
+    for (now, composed) in instants.into_iter().zip(composed) {
+        doc.dom.advance_animations(now);
+        doc.dom.render();
+        let late = doc
+            .dom
+            .committed_frame()
+            .expect("render leaves a committed frame retained");
+        let committed = compose_at(&mut gpu, &late, None, (200, 100));
+        assert_pixels_match(&composed, &committed, 3, &format!("composed at {now} s"));
+    }
+}
+
+/// A card fading by an exported curve, committed while its opacity reads 1,
+/// is the Backdrop Root of the `backdrop-filter` box inside it: composed
+/// later, the box filters the card alone, as a fresh commit at that instant
+/// does, and not the red page behind the card.
+#[test]
+fn a_backdrop_inside_a_fading_card_composes_as_committed() {
+    let mut gpu = headless("a_backdrop_inside_a_fading_card_composes_as_committed");
+    let mut doc = Doc::with_css_sized(
+        "page { display: flex; position: relative; width: 200px; height: 100px; }
+         .under { display: flex; position: absolute; left: 0px; top: 0px; width: 200px;
+                  height: 100px; background-color: #ff0000; }
+         .card { display: flex; position: absolute; left: 20px; top: 20px; width: 120px;
+                 height: 60px; background-color: #0000ff; animation: fade 1s linear infinite; }
+         .frost { display: flex; margin: 10px; width: 60px; height: 40px;
+                  backdrop-filter: blur(3px); }
+         @keyframes fade { 0%, 20% { opacity: 1; } 100% { opacity: 0.3; } }",
+        200.0,
+        100.0,
+    );
+    let root = doc.root;
+    doc.el(root, "under");
+    let card = doc.el(root, "card");
+    doc.el(card, "frost");
+    doc.dom.render();
+    doc.dom.advance_animations(0.0);
+    doc.dom.advance_animations(0.1);
+    doc.dom.render();
+    gpu.forget_filters();
+    let early = doc
+        .dom
+        .committed_frame()
+        .expect("render leaves a committed frame retained");
+    assert!(early.has_live_curves(), "the fade exports");
+    let groups = early.filter_groups();
+    assert_eq!(groups.len(), 1, "one backdrop");
+    assert!(
+        !groups[0].samples_animations(),
+        "the backdrop reads the card alone, which fades with it",
+    );
+
+    let composed = compose_at(&mut gpu, &early, Some(0.6), (200, 100));
+    doc.dom.advance_animations(0.6);
+    doc.dom.render();
+    let late = doc
+        .dom
+        .committed_frame()
+        .expect("render leaves a committed frame retained");
+    assert_ne!(early.commit_id(), late.commit_id(), "a fresh commit");
+    let committed = compose_at(&mut gpu, &late, None, (200, 100));
+    assert_pixels_match(&composed, &committed, 3, "composed at 0.6 s");
+}
+
+/// The same element over a scroller, composed at a second offset of one
+/// commit: the cache re-bakes the backdrop and the group drawing it, so the
+/// frame is the one a cold bake at that offset draws.
+#[test]
+fn a_blurred_backdrop_over_a_scroller_re_bakes_with_it() {
+    use dom::Vector2D;
+
+    let mut gpu = headless("a_blurred_backdrop_over_a_scroller_re_bakes_with_it");
+    let mut doc = Doc::with_css_sized(
+        "page { display: flex; position: relative; width: 128px; height: 128px; }
+         .scroller { display: flex; flex-direction: column; overflow: scroll;
+                     width: 128px; height: 128px; }
+         .stripe { display: flex; flex-shrink: 0; width: 128px; height: 24px;
+                   background-color: #000000; }
+         .gap { display: flex; flex-shrink: 0; width: 128px; height: 24px; }
+         .box { display: flex; position: fixed; left: 16px; top: 40px;
+                width: 96px; height: 48px; backdrop-filter: blur(4px); filter: blur(1px); }",
+        128.0,
+        128.0,
+    );
+    let root = doc.root;
+    let scroller = doc.el(root, "scroller");
+    for class in ["stripe", "gap", "stripe", "gap", "stripe", "gap"] {
+        doc.el(scroller, class);
+    }
+    doc.el(root, "box");
+    doc.dom.render();
+    let frame = doc
+        .dom
+        .committed_frame()
+        .expect("render leaves a committed frame retained");
+    assert_eq!(
+        frame.filter_groups().len(),
+        2,
+        "a blur group and a backdrop"
+    );
+
+    let draw = |gpu: &mut dom::render::gpu::Headless, generation: u64, offset: f32| {
+        let offset_of = |_: &dom::ScrollSlot| Some(Vector2D::new(0.0, offset));
+        let filtered: Vec<Option<dom::vello::peniko::ImageData>> = gpu
+            .prepare_filters(&frame, &[], &offset_of, generation, None)
+            .expect("the entries bake")
+            .to_vec();
+        assert!(filtered.iter().all(Option::is_some), "both entries baked");
+        let mut scene = Scene::new();
+        frame.compose_into(&mut scene, &[], &filtered, &offset_of, None);
+        gpu.render(&scene, &[], 128, 128, Color::WHITE)
+            .expect("headless render")
+    };
+    gpu.forget_filters();
+    let first = draw(&mut gpu, 0, 0.0);
+    let warm = draw(&mut gpu, 1, 12.0);
+    gpu.forget_filters();
+    let cold = draw(&mut gpu, 1, 12.0);
+    assert_pixels_match(&warm, &cold, 2, "the second offset");
+    let moved = (44..=84_u32)
+        .filter(|&y| (luma(&first, 128, 64, y) - luma(&cold, 128, 64, y)).abs() > 12)
+        .count();
+    assert!(
+        moved >= 8,
+        "and the offsets draw different backdrops ({moved} rows differ)"
+    );
+}
+
 /// A blurred child inside a blurred parent renders, and blurs more than
 /// either blur alone.
 ///

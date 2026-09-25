@@ -214,28 +214,28 @@ pub(crate) struct TransformTrack {
     pub(crate) pre_inverse: Affine,
     /// The inverse of the committed transform the frame was baked at.
     pub(crate) committed_inverse: Affine,
-    /// Where the delta can carry content over the curve's domain; `None`
-    /// when a scale range reaches 0 and nothing bounds it.
-    pub(crate) reach: Option<Reach>,
+    /// Where the delta can carry content over the curve's domain.
+    pub(crate) reach: Reach,
 }
 
 impl TransformTrack {
     /// `track`, run in `direction`, on an element whose world is
     /// `pre·L·origin⁻¹`, baked at `L = committed`. Both maps are invertible.
+    /// `None` for unmatched lists, which the exporter never admits.
     pub(crate) fn new(
         track: Track<TransformList>,
         direction: DirectionState,
         pre: Affine,
         committed: Affine,
-    ) -> Self {
-        let reach = Reach::of(&track, direction, pre, committed);
-        Self {
+    ) -> Option<Self> {
+        let reach = Reach::of(&track, direction, pre, committed)?;
+        Some(Self {
             track,
             pre,
             pre_inverse: pre.inverse(),
             committed_inverse: committed.inverse(),
             reach,
-        }
+        })
     }
 }
 
@@ -578,15 +578,18 @@ mod tests {
             },
             expires_at: Some(1.0),
             opacity: None,
-            transform: Some(TransformTrack::new(
-                track,
-                DirectionState {
-                    reversed: false,
-                    alternates: false,
-                },
-                Affine::IDENTITY,
-                committed,
-            )),
+            transform: Some(
+                TransformTrack::new(
+                    track,
+                    DirectionState {
+                        reversed: false,
+                        alternates: false,
+                    },
+                    Affine::IDENTITY,
+                    committed,
+                )
+                .expect("matched"),
+            ),
         };
         // At the commit instant the delta is the identity.
         let at_commit = curve.sample(0.25).delta;
@@ -612,28 +615,31 @@ mod tests {
             },
             expires_at: Some(1.0),
             opacity: None,
-            transform: Some(TransformTrack::new(
-                Track {
-                    points: vec![
-                        TrackPoint {
-                            percentage: 0.0,
-                            value: vec![TransformOp::Rotate(0.0)],
-                            easing: Easing::Linear,
-                        },
-                        TrackPoint {
-                            percentage: 1.0,
-                            value: vec![TransformOp::Rotate(180.0)],
-                            easing: Easing::Linear,
-                        },
-                    ],
-                },
-                DirectionState {
-                    reversed: false,
-                    alternates: false,
-                },
-                pre,
-                Affine::IDENTITY,
-            )),
+            transform: Some(
+                TransformTrack::new(
+                    Track {
+                        points: vec![
+                            TrackPoint {
+                                percentage: 0.0,
+                                value: vec![TransformOp::Rotate(0.0)],
+                                easing: Easing::Linear,
+                            },
+                            TrackPoint {
+                                percentage: 1.0,
+                                value: vec![TransformOp::Rotate(180.0)],
+                                easing: Easing::Linear,
+                            },
+                        ],
+                    },
+                    DirectionState {
+                        reversed: false,
+                        alternates: false,
+                    },
+                    pre,
+                    Affine::IDENTITY,
+                )
+                .expect("matched"),
+            ),
         };
         let half_turn = curve.sample(1.0).delta;
         let moved = half_turn * crate::vello::kurbo::Point::new(50.0, 0.0);

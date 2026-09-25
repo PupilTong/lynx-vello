@@ -180,6 +180,10 @@ consequential choice about whether to follow the spec or the quirk.
     wrapper reads through that wrapper to the content behind it, where a browser would stop at
     it. That is the ruled trade — no layer per `will-change` element — and
     `crates/dom/src/paint/walker.rs`'s `a_backdrops_range_begins_at_its_backdrop_root` pins it.
+    The one `will-change` that is honored is the one Web Animations implies for a running
+    `opacity` animation whose curve is exported: that element already paints a group, and it
+    roots at every reading, 1 included
+    (`an_exported_fade_roots_a_backdrop_while_it_reads_1`).
   - **`isolation: isolate` is not a Backdrop Root**, which is the spec's own list rather than a
     deviation: filter-effects-2 does not name `isolation`. It is called out here only because
     `visual::stacking::needs_group_rendering` *does* open a layer for it, which is why the walker

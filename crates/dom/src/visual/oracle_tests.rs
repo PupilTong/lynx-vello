@@ -8,13 +8,14 @@
 //! committed again as `late`, and `early` sampled at `Some(t)` is compared
 //! with `late` sampled at `None` — the reference involves no curve at all.
 //! Every item `late` shows inside the viewport must also be one `early`'s
-//! culled walk encodes: an encode serves its curves' whole domain.
+//! culled walk encodes, inside the rect of every group holding it: an encode
+//! and a group rect serve their curves' whole domain.
 
 use euclid::default::Vector2D;
 
 use crate::paint::convert::item_affine;
 use crate::test_common::Doc;
-use crate::vello::kurbo::{Affine, Point};
+use crate::vello::kurbo::{Affine, Point, Rect};
 use crate::visual::{CommittedFrame, ScrollSlot};
 use crate::{FontBlob, NodeId, Point2D};
 
@@ -125,6 +126,7 @@ impl Fixture {
             !self.culls || encoded.contains(&false),
             "{label}: early's walk culls something"
         );
+        let rects = crate::paint::walker::layer_rects(&self.doc.dom, &early.order);
         for t in LATER {
             self.doc.dom.advance_animations(t);
             self.doc.dom.render();
@@ -137,6 +139,66 @@ impl Fixture {
             self.compare_geometry(&early, &late, t, &label);
             self.compare_hits(&early, &late, t, &label);
             self.compare_coverage(&encoded, &late, &label);
+            self.compare_groups(&rects, &early, &late, t, &label);
+        }
+    }
+
+    /// Every grid point inside the viewport where `late` shows an item lies
+    /// inside `early`'s rect of every group holding that item, composed at
+    /// `t`.
+    fn compare_groups(
+        &self,
+        rects: &[Rect],
+        early: &CommittedFrame,
+        late: &CommittedFrame,
+        t: f64,
+        label: &str,
+    ) {
+        let offset_of = self.offset_of();
+        let early_animations = early.order.sample_animations(Some(t));
+        let early_stickies = early.order.sample_stickies(1.0, &offset_of);
+        let early_samples =
+            early
+                .order
+                .space_samples(&early_animations, &early_stickies, 1.0, &offset_of);
+        let late_animations = late.order.sample_animations(None);
+        let late_stickies = late.order.sample_stickies(1.0, &offset_of);
+        let late_samples =
+            late.order
+                .space_samples(&late_animations, &late_stickies, 1.0, &offset_of);
+        let layers = early.order.layers();
+        for (index, item) in late.order.items().iter().enumerate() {
+            let groups: Vec<(Affine, Rect)> = layers
+                .iter()
+                .zip(rects)
+                .filter(|(layer, _)| layer.items.contains(&index))
+                .map(|(layer, rect)| (early_samples.css(layer.space).inverse(), *rect))
+                .collect();
+            if groups.is_empty() {
+                continue;
+            }
+            // The whole 800 × 600 viewport, 7 px apart.
+            for row in 0_u16..86 {
+                for column in 0_u16..115 {
+                    let point = Point2D::new(f32::from(column) * 7.0, f32::from(row) * 7.0);
+                    if late.order.item_hit(item, point, &late_samples).is_none() {
+                        continue;
+                    }
+                    for (unmap, rect) in &groups {
+                        let local = *unmap * Point::new(f64::from(point.x), f64::from(point.y));
+                        assert!(
+                            local.x >= rect.x0 - TOLERANCE
+                                && local.x <= rect.x1 + TOLERANCE
+                                && local.y >= rect.y0 - TOLERANCE
+                                && local.y <= rect.y1 + TOLERANCE,
+                            "{label}: {:?} {:?} shows at {point:?}, outside its group's \
+                             rect {rect:?} at {local:?}",
+                            item.node,
+                            item.kind,
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -490,4 +552,138 @@ fn a_shrinking_card_in_a_scrolled_list_encodes_every_row_it_shows() {
     fixture.probes = vec![rows[27]];
     fixture.culls = true;
     fixture.check("shrinking card in a scrolled list");
+}
+
+/// A card sliding, turning or growing out of the static group holding it,
+/// with a `<text>` inside it: the group's rect holds every place the card
+/// can show.
+#[test]
+fn an_animated_card_inside_an_opacity_group_composes_as_committed() {
+    for curve in CURVES {
+        let mut fixture = Fixture::new(
+            ".group { width: 160px; height: 120px; margin: 60px 0 0 80px; padding: 10px;
+                      opacity: 0.5; background-color: navy; }
+             .card { width: 120px; height: 80px; background-color: teal; }
+             .label { width: 90px; height: 20px; font-family: Ahem; font-size: 20px; }",
+        );
+        let root = fixture.doc.root;
+        let group = fixture.el(root, "view.group");
+        let card = fixture.el(group, "view.card");
+        let label = fixture.el(card, "text.label");
+        fixture.text(label, "hellohello");
+        fixture.animate(card, curve);
+        fixture.probes = vec![group, card, label];
+        fixture.check(&format!("card in an opacity group, {curve}"));
+    }
+}
+
+/// The same inside a blurred group, whose rect is also its bake's.
+#[test]
+fn an_animated_card_inside_a_blurred_group_composes_as_committed() {
+    for curve in CURVES {
+        let mut fixture = Fixture::new(
+            ".group { width: 160px; height: 120px; margin: 60px 0 0 80px; padding: 10px;
+                      filter: blur(3px); background-color: navy; }
+             .card { width: 120px; height: 80px; background-color: teal; }",
+        );
+        let root = fixture.doc.root;
+        let group = fixture.el(root, "view.group");
+        let card = fixture.el(group, "view.card");
+        fixture.animate(card, curve);
+        fixture.probes = vec![group, card];
+        fixture.check(&format!("card in a blurred group, {curve}"));
+    }
+}
+
+/// A fading card — a group its own opacity curve forces — holding an
+/// animated child: two exports, the inner one inside the outer's group.
+#[test]
+fn an_animated_child_of_a_fading_card_composes_as_committed() {
+    for curve in CURVES {
+        let mut fixture = Fixture::new(
+            ".outer { width: 160px; height: 120px; margin: 80px 0 0 120px; padding: 10px;
+                      background-color: navy; }
+             .inner { width: 120px; height: 80px; background-color: teal; }",
+        );
+        let root = fixture.doc.root;
+        let outer = fixture.el(root, "view.outer");
+        let inner = fixture.el(outer, "view.inner");
+        fixture.animate(outer, "opacity");
+        fixture.animate(inner, curve);
+        fixture.exported = 2;
+        fixture.probes = vec![outer, inner];
+        fixture.check(&format!("child of a fading card, {curve}"));
+    }
+}
+
+/// A `backdrop-filter` panel with an animated sibling behind it, one in
+/// front of it, and an animated child of its own.
+#[test]
+fn a_backdrop_among_animated_boxes_composes_as_committed() {
+    for curve in CURVES {
+        let mut fixture = Fixture::new(
+            ".behind { width: 200px; height: 120px; margin: 40px 0 0 60px; flex-shrink: 0;
+                       background-color: orange; }
+             .glass { position: absolute; left: 120px; top: 100px; width: 220px; height: 160px;
+                      padding: 20px; backdrop-filter: blur(4px);
+                      background-color: rgba(255, 255, 255, 0.3); }
+             .inner { width: 100px; height: 60px; background-color: teal; }
+             .front { position: absolute; left: 300px; top: 220px; width: 120px; height: 80px;
+                      background-color: navy; }",
+        );
+        let root = fixture.doc.root;
+        let behind = fixture.el(root, "view.behind");
+        let glass = fixture.el(root, "view.glass");
+        let inner = fixture.el(glass, "view.inner");
+        let front = fixture.el(root, "view.front");
+        for id in [behind, inner, front] {
+            fixture.animate(id, curve);
+        }
+        fixture.exported = 3;
+        fixture.probes = vec![behind, glass, inner, front];
+        fixture.check(&format!("backdrop among animated boxes, {curve}"));
+    }
+}
+
+/// A group committed mostly off the viewport's left edge that slides in by
+/// its own curve: its rect is the viewport pulled back through the slide,
+/// which must hold every place the slide later shows it.
+#[test]
+fn a_group_sliding_in_from_off_the_viewport_composes_as_committed() {
+    for effect in ["opacity: 0.5;", "filter: blur(3px);"] {
+        let mut fixture = Fixture::new(&format!(
+            ".card {{ width: 200px; height: 120px; margin: 80px 0 0 100px; flex-shrink: 0;
+                      background-color: teal; {effect} }}
+             @keyframes enter {{ from {{ transform: translateX(-280px); }}
+                                 to {{ transform: translateX(200px); }} }}"
+        ));
+        let root = fixture.doc.root;
+        let card = fixture.el(root, "view.card");
+        fixture.animate(card, "enter");
+        fixture.probes = vec![card];
+        fixture.check(&format!("group sliding in, {effect}"));
+    }
+}
+
+/// A blurred `overflow: hidden` toast shrinking toward `scale(0)` holding a
+/// sliding ticker: no viewport pulls back through the toast's curve, and
+/// the toast's own clip holds the ticker's slide.
+#[test]
+fn a_ticker_in_a_shrinking_clipped_toast_composes_as_committed() {
+    let mut fixture = Fixture::new(
+        ".toast { width: 300px; height: 60px; margin: 100px 0 0 200px; overflow: hidden;
+                  filter: blur(2px); background-color: navy; }
+         .ticker { width: 1000px; height: 20px; flex-shrink: 0; background-color: teal; }
+         @keyframes dismiss { from { transform: scale(1); } to { transform: scale(0); } }
+         @keyframes tick { from { transform: translateX(0px); }
+                           to { transform: translateX(-600px); } }",
+    );
+    let root = fixture.doc.root;
+    let toast = fixture.el(root, "view.toast");
+    let ticker = fixture.el(toast, "view.ticker");
+    fixture.animate(toast, "dismiss");
+    fixture.animate(ticker, "tick");
+    fixture.exported = 2;
+    fixture.probes = vec![toast, ticker];
+    fixture.check("ticker in a shrinking clipped toast");
 }
