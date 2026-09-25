@@ -13,6 +13,7 @@ const invokeNativeModule = rstest.fn();
 rstest.mockRequire("bobcat-internal:worker", () => ({
   postWorkerMessage: rstest.fn(),
   closeWorker: rstest.fn(),
+  workerName: () => "",
   invokeNativeModule,
 }));
 rstest.mockRequire("bobcat:lynx-modules", () => lynxModules);

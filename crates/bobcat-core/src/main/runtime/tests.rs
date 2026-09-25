@@ -442,7 +442,7 @@ fn each_worker_starts_with_the_role_its_specifier_names() {
     let Ok(WorkerCommand::Start(background)) = workers.try_recv() else {
         panic!("`new Worker('bobcat:bts')` sent no Start")
     };
-    assert!(matches!(background.role, WorkerRole::Background));
+    assert!(matches!(background.role, WorkerRole::Background(_)));
     assert_eq!(
         first.workers.source_of(background.key),
         Some(ScriptSource::Background)
@@ -450,7 +450,7 @@ fn each_worker_starts_with_the_role_its_specifier_names() {
     let Ok(WorkerCommand::Start(dedicated)) = workers.try_recv() else {
         panic!("`new Worker('./w.js')` sent no Start")
     };
-    assert!(matches!(dedicated.role, WorkerRole::Dedicated));
+    assert!(matches!(dedicated.role, WorkerRole::Dedicated { .. }));
     assert_eq!(
         first.workers.source_of(dedicated.key),
         Some(ScriptSource::Worker(WorkerId::from(dedicated.key)))

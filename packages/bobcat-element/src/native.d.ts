@@ -186,6 +186,18 @@ interface BobcatWorkerNative {
    */
   closeWorker(): void;
   /**
+   * The worker's `self.name`, as its constructor named it: empty when it
+   * named none. `bobcat:worker` reads it as it is evaluated. Answers once:
+   * the string is handed over, not kept.
+   */
+  workerName(): string;
+  /**
+   * The view's BTS entry URL, already absolute, which `bobcat:bts` imports
+   * once the BTS is initialized. `undefined` in a BTS whose view named no
+   * entry and in a plain `Worker`. Answers once, like `workerName`.
+   */
+  backgroundEntry(): string | undefined;
+  /**
    * Hands one `NativeModules.<module>.<method>(...)` call to the embedder's
    * module of that name, and returns at once: a module answers through the
    * callbacks among its arguments, never through a result.
@@ -431,5 +443,7 @@ interface Require {
 declare module "bobcat-internal:worker" {
   export const postWorkerMessage: BobcatWorkerNative["postWorkerMessage"];
   export const closeWorker: BobcatWorkerNative["closeWorker"];
+  export const workerName: BobcatWorkerNative["workerName"];
+  export const backgroundEntry: BobcatWorkerNative["backgroundEntry"];
   export const invokeNativeModule: BobcatWorkerNative["invokeNativeModule"];
 }

@@ -1053,12 +1053,18 @@ since `QuickJS` binds a runtime to one thread, no path runs from a worker realm
 to a `LynxDocument` and no value of either runtime can be named by the other.
 One realm per live worker, and the group's workers take turns. **One task per
 live worker, and a worker's whole state is that task**: a `WorkerStart` carries
-its key, its name, its role (`WorkerRole::Background` for `bobcat:bts`,
-`Dedicated` for a script URL, which `createWorker` decides from the specifier
-before it sends the `Start`), the one-shot its script will arrive on, the
-receiving end of its message channel, the sender its events go back on — the
-creating MTS realm's `WorkerEvent` channel — and the Worker's own cancellation
-token. MTS routes events through weak references to JS Worker objects; their
+its key, its name, its role — which `createWorker` decides from the specifier
+before it sends the `Start`, and which carries what that role starts from:
+`WorkerRole::Background` for `bobcat:bts`, with the view's BTS entry, or
+`Dedicated` for a script URL, with that URL and the one-shot its script will
+arrive on — the receiving end of its message channel, the sender its events go
+back on — the creating MTS realm's `WorkerEvent` channel — and the Worker's own
+cancellation token. The worker's realm opens as its `Start` is served, the way
+a view's opens as that view's first job, and evaluates a root module,
+`bobcat:worker-boot`: `import "bobcat:worker"; import "bobcat:timers";`, then
+`await import(<script URL>)` for a plain Worker or `import "bobcat:bts";` for
+the BTS. A runtime that never came up fails the worker there, without waiting
+for its script. MTS routes events through weak references to JS Worker objects; their
 finalizers and explicit `terminate()` release sending handles, and releasing
 the MTS realm closes its remaining senders. Apart from those handles, the
 realm's `WorkerOwner` records each key's public `ScriptSource` (`Background`,
@@ -1068,9 +1074,10 @@ before it is started has a source too; `WorkerThrew` and `WorkerEnded` carry
 it, and a key without one reports neither — so a trap that reaches a worker
 after its own end was delivered is reported to no one. Host functions
 reference the channel owner weakly, so queued finalizers cannot keep a
-released realm's workers or group thread alive. The script wait is a `biased` select over the message
-channel first and that token behind it, so a `terminate` landing in the same
-instant as the script wins and a worker told to stop never boots. The timer machinery both
+released realm's workers or group thread alive. The worker's message consumer
+waits for a plain Worker's script in a `biased` select with the message channel
+first, so a `terminate` landing in the same instant as the script wins and a
+worker told to stop never runs its script. The timer machinery both
 realm kinds run on — the schedule, the two host members, the firing loop — is
 `crate::timers` beside `crate::clock`, owned by neither thread.
 
@@ -1093,7 +1100,13 @@ synchronous `SyntaxError`. The `Start` goes out before the host is asked for
 anything, the script is requested as a `SourceRequest::Module` of the joined
 URL, and the host is handed the far end of the one-shot that already rode
 to `bobcat-workers` inside that `Start`, so the script reaches the worker
-without a main-thread turn. Every concurrent worker request is preserved.
+without a main-thread turn. The worker completes it, under the request URL
+its root module imports and from the response URL, as a module of its own
+realm: the worker's own epilogue never asks for that URL again, and posted
+messages wait until the root module has finished. `self.name` is set by
+`bobcat:worker` from the host member `workerName` as it is evaluated, so a
+module the script imports statically reads it too. Every concurrent worker
+request is preserved.
 Worker entry/import requests use the Worker's cancellation scope, and host
 release does not cancel it ahead of JS disposal. Once the MTS realm is
 released, closing its senders ends remaining Workers, including after failed
@@ -1106,8 +1119,11 @@ transport and lifetime boundaries.
 
 **After the MTS entry import settles, whether the entry succeeded or threw,
 boot creates a BTS Worker** named
-`lynx-bg` through that same class, using the engine entry `bobcat:bts`, which
-installs its JS initializer from `bobcat:bts-runtime` and returns. Its first
+`lynx-bg` through that same class, using the engine specifier `bobcat:bts`.
+That is a registered module (`bts.ts`) the BTS realm's root module imports: it
+reads the view's BTS entry once through the host member `backgroundEntry`,
+installs its JS initializer from `bobcat:bts-runtime` and returns, with no
+top-level `await`, so the first message is delivered. Its first
 Worker message supplies initial data and starts the optional
 `ViewSources.background_entry` import. MTS JavaScript owns BTS disposal: send
 `dispose`, await `disposed`, then terminate its Worker. BTS calls the current
@@ -1116,9 +1132,10 @@ MTS disposal Promise also handles repeated destroy notifications, and disposal
 bypasses an unfinished BTS entry import. Object observers follow web-core: a
 plain object registered with a JS `FinalizationRegistry` that directly invokes
 its callback (`docs/destruction-runtime.md`). Raw BTS application entries
-explicitly import their bindings from `bobcat:bts-runtime`; neither runtime
-installs `globalThis.lynx`. XML uses this identical startup path, and the
-bootstrap contains no application source and does not fetch it in advance. A
+explicitly import their bindings from `bobcat:bts-runtime`, `lynx` included;
+neither runtime installs `globalThis.lynx`. XML uses this identical startup
+path, and the bootstrap contains no application source and does not fetch it in
+advance. A
 worker carries a `HostOutbox` (`WorkerStart.sources`) that sends module
 requests directly to the view's resource host. ESM completion and timers
 continue during entry TLA; posted messages wait for entry settlement, and each
@@ -1194,7 +1211,8 @@ The private `MainThreadRuntime` registers the native QuickJS ESM
 `packages/bobcat-element/src/native.d.ts` is the authoritative enumeration: a
 `declare module "bobcat-internal:host"` block for the MTS realm and
 `"bobcat-internal:worker"` for a worker's, which carries `postWorkerMessage`,
-`closeWorker` and `invokeNativeModule` and nothing else. The MTS members group as the document's own
+`closeWorker`, `invokeNativeModule` and the one-shot `workerName` and
+`backgroundEntry` and nothing else. The MTS members group as the document's own
 life, tree vocabulary over numeric `NodeId`s, attributes and style, selector
 queries, the commit, the event-name edges, timers, the page-data triple handed
 over once as plain JSON and processor-name strings the realm alone reads, the
@@ -1259,10 +1277,15 @@ realm with a `ReferenceError` and is never sent to a fetcher.
 `import` of it always finds its source and never reaches a fetcher. The
 reserved prefixes do not cover it, though: a `require` of it in a realm that
 has not imported it still goes to the host's synchronous loader, which asks
-the fetcher for it. `bobcat:bts` is the BTS Worker's engine entry,
-`bobcat:boot` the MTS boot module's own specifier. A worker's own script
-is *inlined* into the one module its realm evaluates, as `ENTRY_PREAMBLE`
-carries the MTS entry, and never registered on the runtime. The Element module
+the fetcher for it. `bobcat:bts` is the BTS Worker's engine entry, a
+registered module like the rest; `bobcat:boot` is the MTS boot module's own
+specifier and `bobcat:worker-boot` a worker realm's root module's, both
+evaluated once per realm and never registered. A worker's own script is not
+written into its root module: the root imports it by the request URL, and the
+worker completes that import from the answer `createWorker` asked for, under
+the request URL, as a module of its own realm — the way a view completes its
+MTS entry — so it is never registered on the runtime, keeps its own line
+numbers, and runs with its response URL as `import.meta.url`. The Element module
 imports native operations directly from `bobcat-internal:host`; no host object
 and no element member is installed on `globalThis`.
 
@@ -1978,7 +2001,7 @@ browser WebGPU completion is Promise-driven.
 
 The dependency-free TypeScript sources of the ESMs `bobcat-core` preloads into
 its QuickJS realms, one file per module. Both of a group's runtimes register
-all eighteen, as `esm.rs`'s `BUILTIN_MODULES` lists them in the order of
+all nineteen, as `esm.rs`'s `BUILTIN_MODULES` lists them in the order of
 `src/tsconfig.json`'s `paths` (a unit test holds the two equal):
 `src/lynx-modules.ts` as `bobcat:lynx-modules`, `src/global-event-emitter.ts`
 as `bobcat:global-event-emitter`, `src/selector-query.ts` as
@@ -2002,8 +2025,11 @@ and the `__BobcatBeginFrame` a vsync calls in any realm that asked for one),
 three runtime constants of `SystemInfo` are written),
 `src/cross-thread-context.ts` as
 `bobcat:cross-thread-context`, `src/worker.ts` as the `Worker` class under
-`bobcat-internal`, `src/worker-runtime.ts` as `bobcat:worker` and
-`src/background-thread-runtime.ts` as `bobcat:bts-runtime`. They are
+`bobcat-internal`, `src/worker-runtime.ts` as `bobcat:worker`,
+`src/background-thread-runtime.ts` as `bobcat:bts-runtime` and `src/bts.ts` as
+`bobcat:bts` (the BTS bootstrap a BTS realm's root module imports: it hands
+`bobcat:bts-runtime` the loader of the view's BTS entry, which it reads once
+from the host member `backgroundEntry`). They are
 registered per runtime, because a source is runtime-wide and no value crosses
 between two runtimes; which of them a realm can link is decided by the host
 modules it declares, not by the table. `src/native.d.ts` declares the two

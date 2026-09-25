@@ -37,6 +37,7 @@ use smallvec::SmallVec;
 use tokio::sync::watch;
 
 use super::quickjs::{ScriptEngine, ScriptRuntime};
+use crate::background::BackgroundStart;
 use crate::clock::ClockInstant;
 use crate::esm::{
     ANIMATION_FRAME_MODULE_SPECIFIER, BTS_MODULE_SPECIFIER, ELEMENT_MODULE_SPECIFIER,
@@ -261,10 +262,10 @@ impl DocumentIngredients {
 /// [`reload`](crate::LynxView::reload) reach the realm through
 /// `ToMain::PageUpdate` instead, and never touch any of this. The four strings
 /// below `background_entry` become one-shot host members the realm alone reads,
-/// `entry` is written into the boot module's source, `background_entry` is
-/// spliced into the BTS Worker's boot script by `WorkerFactory::install`, and
-/// `sheets` go to the document slot, which the first `__FlushElementTree`
-/// settles them out of. The entry's source is not here: its answer is a task
+/// `entry` is written into the boot module's source, `background_entry` goes
+/// to `WorkerFactory::install`, which hands it to the BTS Worker in its
+/// `Start`, and `sheets` go to the document slot, which the first
+/// `__FlushElementTree` settles them out of. The entry's source is not here: its answer is a task
 /// of the view's owner, which completes the module boot imports the entry as.
 pub(crate) struct RealmStartup {
     /// The answers to the author stylesheet requests `create_lynx_view` made,
@@ -280,7 +281,9 @@ pub(crate) struct RealmStartup {
     /// WHATWG serialization. Boot imports the entry by this string.
     pub(crate) entry: String,
     /// The BTS entry `bobcat:bts` imports, if the view named one: always an
-    /// absolute URL `create_lynx_view` resolved, like [`Self::entry`].
+    /// absolute URL `create_lynx_view` resolved, like [`Self::entry`]. It
+    /// reaches the BTS realm in the `Start` boot's `new Worker("bobcat:bts")`
+    /// sends, as [`BackgroundStart::entry`].
     pub(crate) background_entry: Option<String>,
     /// The host's processor name, page data and global props, as the strings
     /// it passed in. `bobcat:runtime` parses the data and props as JSON and
@@ -821,8 +824,11 @@ impl MainThreadRuntime {
                     .map_err(MainThreadError::into_script_error)?;
                 install_startup_strings(engine, js_runtime, startup_strings(&mut startup))
                     .map_err(MainThreadError::into_script_error)?;
+                let background = BackgroundStart {
+                    entry: startup.background_entry.take(),
+                };
                 workers
-                    .install(engine, js_runtime, outbox, startup.background_entry.take())
+                    .install(engine, js_runtime, outbox, background)
                     .map_err(|error| context_of("installing Worker", error))
             },
         )

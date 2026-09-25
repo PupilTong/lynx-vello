@@ -8,8 +8,8 @@ use std::rc::Rc;
 
 use quickjs_rust_bridge::HostValue;
 
-use crate::background::WorkerKey;
-use crate::esm::{TIMER_MODULE_SPECIFIER, WORKER_MODULE_SPECIFIER};
+use crate::background::{WorkerKey, WorkerRole};
+use crate::esm::{BTS_MODULE_SPECIFIER, TIMER_MODULE_SPECIFIER, WORKER_MODULE_SPECIFIER};
 use crate::link::{HostOutbox, ViewNotice};
 use crate::main::quickjs::{ScriptEngine, ScriptRuntime};
 use crate::script::ScriptError;
@@ -24,37 +24,51 @@ pub(super) const WORKER_DELIVER_EXPORT: &str = "__BobcatDeliverWorkerMessage";
 /// Called on `bobcat:worker` with one native module callback's answer.
 pub(super) const WORKER_MODULE_CALLBACK_EXPORT: &str = "__BobcatNativeModuleCallback";
 
-/// Every worker entry gets the same global scope, timers and name before its
-/// own script. Any other bindings are installed by that script's imports.
+/// The root module of a worker realm: what the realm evaluates as it opens,
+/// under [`WORKER_BOOT_SPECIFIER`](crate::esm::WORKER_BOOT_SPECIFIER), and
+/// whose evaluation is the worker's boot.
 ///
-/// The script is *inlined* rather than registered and imported, the same way
-/// `ENTRY_PREAMBLE` carries the MTS entry. A module that is only evaluated
-/// belongs to the realm that evaluated it and is never named on the runtime,
-/// so two views that resolve one URL to different bytes cannot collide, and a
-/// worker leaves no registration behind. The static imports run before
-/// anything in the body, which is what puts the global scope and the timer
-/// globals in place first; `name` is written between them and the script
-/// because `self.name` is readable from a worker's top level.
+/// Every worker's root starts with the same two imports, which put the global
+/// scope — its `name` included — and the timer globals in place before
+/// anything of the worker's own runs. Then its role: a dedicated worker's
+/// root imports its script by the URL it was requested by, and a BTS's root
+/// imports the registered module `bobcat:bts`, the whole BTS bootstrap.
 ///
-/// The cost is the entry's cost: the preamble shifts the script's line
-/// numbers by the lines above it. The module still carries the script's own
-/// resolved URL, so a stack trace names the right file.
-pub(super) fn worker_boot_source(name: &str, script: &str) -> String {
-    let name = serde_json::to_string(name)
-        .expect("serializing a Rust string as a JavaScript string cannot fail");
+/// The script is not written into the root. The worker's own task completes
+/// the module the root's `import` asks for, from the answer to the request
+/// `createWorker` made and under that request's name, the way a view's own
+/// task completes its MTS entry. A module completed in a realm is that realm's
+/// own source and is never named on the runtime, so two views that answer one
+/// URL with different bytes each run their own, and a worker leaves no
+/// registration behind. The script keeps its own line numbers, and its
+/// `import.meta.url` is the response URL.
+pub(super) fn worker_boot_source(role: &WorkerRole) -> String {
+    let role = match role {
+        WorkerRole::Background(_) => format!(r#"import "{BTS_MODULE_SPECIFIER}";"#),
+        WorkerRole::Dedicated { url, .. } => {
+            let url = serde_json::to_string(url)
+                .expect("serializing a Rust string as a JavaScript string cannot fail");
+            format!("await import({url});")
+        }
+    };
     format!(
         r#"import "{WORKER_MODULE_SPECIFIER}";
 import "{TIMER_MODULE_SPECIFIER}";
-globalThis.name = {name};
-{script}"#
+{role}
+"#
     )
 }
 
 /// Installs a worker realm's own host module, `bobcat-internal:worker`: the
-/// three members that are a worker's whole outward surface beyond the core
+/// members that are a worker's whole outward surface beyond the core
 /// [`crate::realm::open_realm`] installed under `bobcat-internal:host`. The
-/// BTS and a plain `Worker` get the same three. Answers with the flag
-/// `closeWorker` sets.
+/// BTS and a plain `Worker` get the same members; a plain `Worker`'s
+/// `backgroundEntry` answers `undefined`. Answers with the flag `closeWorker`
+/// sets.
+///
+/// `workerName` and `backgroundEntry` each hand their string over once and
+/// keep nothing, as an MTS realm's page data members do: `bobcat:worker`
+/// reads the name, and `bobcat:bts` the entry, as each is evaluated.
 ///
 /// There is no document member here and no way to add one: this realm is on
 /// another runtime, on another thread, and the document is neither `Send` nor
@@ -66,9 +80,26 @@ pub(super) fn install_worker_members(
     js_runtime: &mut ScriptRuntime,
     key: WorkerKey,
     host: &HostOutbox,
+    name: String,
+    background_entry: Option<String>,
     mut post: impl FnMut(HostValue) + 'static,
 ) -> Result<Rc<Cell<bool>>, ScriptError> {
     install_native_modules(engine, js_runtime, key, host)?;
+
+    for (member, mut value) in [
+        ("workerName", Some(name)),
+        ("backgroundEntry", background_entry),
+    ] {
+        engine.register_host_module_function(
+            js_runtime,
+            WORKER_HOST_MODULE_SPECIFIER,
+            member,
+            0,
+            Box::new(move |_arguments| {
+                Ok(value.take().map_or(HostValue::Undefined, HostValue::String))
+            }),
+        )?;
+    }
 
     engine.register_host_module_function(
         js_runtime,

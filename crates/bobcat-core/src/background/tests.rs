@@ -18,8 +18,8 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use super::{
-    WorkerCommand, WorkerEvent, WorkerHome, WorkerKey, WorkerMessage, WorkerPayload, WorkerRole,
-    WorkerStart, wire_json,
+    BackgroundStart, WorkerCommand, WorkerEvent, WorkerHome, WorkerKey, WorkerMessage,
+    WorkerPayload, WorkerRole, WorkerStart, wire_json, wire_value,
 };
 use crate::clock::ClockInstant;
 use crate::link::{HostOutbox, ViewNotice, block_on_deadline, detached_base};
@@ -149,13 +149,50 @@ impl Group {
             .send(command);
     }
 
-    /// Names one worker on a view, without answering its script yet. The
-    /// realm's other half of a construction — asking the host to fetch — is
-    /// what the test does by hand in [`Self::answer`].
+    /// Names one dedicated worker on a view, without answering its script
+    /// yet. Its script is requested by a URL made from its key, which is what
+    /// the realm's root module imports it by. The realm's other half of a
+    /// construction — asking the host to fetch — is what the test does by
+    /// hand in [`Self::answer`].
     fn construct(&mut self, view: usize, name: &str) -> WorkerKey {
+        let url = format!("app:///requested/{}.js", self.next_key.get());
+        self.construct_requesting(view, name, &url)
+    }
+
+    /// The same, over a request URL of the test's own.
+    fn construct_requesting(&mut self, view: usize, name: &str, url: &str) -> WorkerKey {
+        let (script, awaiting) = oneshot::channel();
+        let key = self.start_worker(
+            view,
+            name,
+            WorkerRole::Dedicated {
+                url: url.to_owned(),
+                script: awaiting,
+            },
+        );
+        self.scripts.insert(key, script);
+        key
+    }
+
+    /// Names one BTS on a view, started over `entry` the way boot's
+    /// `new Worker("bobcat:bts")` starts one. Nothing is answered for it:
+    /// its root module imports the registered `bobcat:bts`, which asks the
+    /// host for the entry once an `initialize` message arrives.
+    fn construct_background(&mut self, view: usize, entry: Option<&str>) -> WorkerKey {
+        self.start_worker(
+            view,
+            "lynx-bg",
+            WorkerRole::Background(BackgroundStart {
+                entry: entry.map(str::to_owned),
+            }),
+        )
+    }
+
+    /// Sends one `Start` for `role` on a view, and keeps the sending end of
+    /// the new worker's message channel.
+    fn start_worker(&mut self, view: usize, name: &str, role: WorkerRole) -> WorkerKey {
         let key = WorkerKey::new(self.next_key.get());
         self.next_key.set(key.get() + 1);
-        let (script, awaiting) = oneshot::channel();
         let (messages, incoming) = mpsc::unbounded_channel();
         let token = CancellationToken::new();
         let sources = HostOutbox::new(
@@ -168,19 +205,18 @@ impl Group {
         self.tell(WorkerCommand::Start(WorkerStart {
             key,
             name: name.to_owned(),
-            role: WorkerRole::Dedicated,
-            script: awaiting,
+            role,
             messages: incoming,
             events: self.views[view].events.clone(),
             token,
             sources,
         }));
         self.views[view].messages.insert(key, messages);
-        self.scripts.insert(key, script);
         key
     }
 
-    /// The host's half: one script, answered.
+    /// The host's half: one script, answered from the response URL `url`,
+    /// which is the module's URL whatever it was requested by.
     fn answer(&mut self, key: WorkerKey, url: &str, source: &str) {
         let _ = self
             .scripts
@@ -362,6 +398,99 @@ fn what_is_posted_before_the_script_arrives_is_delivered_in_order() {
     assert_eq!(group.message(0), wire("second"));
 }
 
+/// `self.name` is set by `bobcat:worker` as it is evaluated, which is before
+/// any module of the worker's own script is: the root module imports it
+/// first. So a module the script imports statically reads the name at its
+/// own top level.
+#[test]
+fn a_module_the_script_imports_statically_reads_the_workers_name() {
+    let mut group = Group::new();
+    let key = group.construct(0, "named");
+    group.answer(
+        key,
+        "app:///w.js",
+        "import { seen } from './seen.js';\npostMessage(seen);",
+    );
+    let (url, completion) = group.views[0].source();
+    assert_eq!(url, "app:///seen.js");
+    completion.complete(Ok(LoadedSource::Module {
+        source: "export const seen = self.name;".to_owned(),
+        url,
+    }));
+    assert_eq!(group.message(0), wire("named"));
+}
+
+/// The script is completed under the name it was requested by, which is what
+/// the root module's `import` waits on, and it runs as the module of the
+/// response URL: its `import.meta.url`. A fetcher that answered from another
+/// URL, as a redirect does, changes neither, and the request `createWorker`
+/// made is the only one: the worker's own epilogue never asks for the script.
+#[test]
+fn a_script_answered_from_another_url_runs_as_that_url_and_is_asked_for_once() {
+    let mut group = Group::new();
+    let key = group.construct_requesting(0, "", "app:///worker.js");
+    group.answer(
+        key,
+        "https://cdn.test/redirected/worker.js",
+        "postMessage(import.meta.url);",
+    );
+    assert_eq!(
+        group.message(0),
+        wire("https://cdn.test/redirected/worker.js")
+    );
+    assert!(group.views[0].sources.try_recv().is_err());
+}
+
+/// Once the script has arrived, the consumer goes on waiting for the root
+/// module to finish without the script's arm: a script still waiting in an
+/// import leaves that module unfinished, and a post and a `Terminate` that
+/// arrive meanwhile are read as before — the post held, the `Terminate`
+/// ending the worker — and the answered one-shot is not polled a second time.
+#[test]
+fn a_post_and_a_terminate_while_the_answered_script_still_imports_end_the_worker() {
+    let mut group = Group::new();
+    let key = group.construct(0, "");
+    group.answer(
+        key,
+        "app:///w.js",
+        "onmessage = (event) => postMessage(event.data);\nawait import('./held.js');",
+    );
+    let (url, held) = group.views[0].source();
+    assert_eq!(url, "app:///held.js");
+    group.post(key, "queued");
+    group.terminate(key);
+    held.complete(Ok(LoadedSource::Module {
+        source: String::new(),
+        url,
+    }));
+    // Neither the post nor a failure: the worker ended without delivering
+    // what it held, and its thread did not trap.
+    group.quiet();
+}
+
+/// A BTS is started over the registered module `bobcat:bts`, which reads the
+/// view's BTS entry from the host as it is evaluated and imports it only once
+/// the first `initialize` message arrives. The entry is asked for by this
+/// worker as any import is, and it runs under the name the view gave it.
+#[test]
+fn a_bts_imports_its_entry_through_bobcat_bts_once_initialized() {
+    let mut group = Group::new();
+    let key = group.construct_background(0, Some("app:///bts.js"));
+    group.send(
+        key,
+        WorkerMessage::Post(wire_value(r#"({bobcat: "runtime", method: "initialize"})"#)),
+    );
+    let (url, completion) = group.views[0].source();
+    assert_eq!(url, "app:///bts.js");
+    completion.complete(Ok(LoadedSource::Module {
+        source: "import { lynx } from 'bobcat:bts-runtime';\n\
+                 postMessage([self.name, typeof lynx.getNativeApp, import.meta.url].join(' '));"
+            .to_owned(),
+        url,
+    }));
+    assert_eq!(group.message(0), wire("lynx-bg function app:///bts.js"));
+}
+
 #[test]
 fn a_script_that_cannot_be_fetched_fails_its_worker_and_nothing_else() {
     let mut group = Group::new();
@@ -406,8 +535,13 @@ fn a_trapped_worker_thread_fails_every_live_worker() {
     // One worker per view, each still waiting for its script.
     let first = group.construct(0, "");
     let second = group.construct(1, "");
-    // This one's boot job waits on a load until the test answers it, and no
-    // other job runs meanwhile.
+    // Up and reading its messages before the wait below begins, so the
+    // `Terminate` it is sent during that wait is read.
+    let ended = group.construct(1, "");
+    group.answer(ended, "app:///ended.js", "postMessage('up');");
+    assert_eq!(group.message(1), wire("up"));
+    // This one's script job waits on a load until the test answers it, and
+    // no other job runs meanwhile.
     let parked = group.construct(2, "");
     group.answer(
         parked,
@@ -418,12 +552,12 @@ createRequire(import.meta.url)('./held.cjs');",
     let (url, held) = group.views[2].source();
     // Ended by a `Terminate` its task reads during that wait. Its task is not
     // joined before the trap: the job that reclaims its realm is queued
-    // behind the waiting one. Its boot task dropping the script's receiver is
-    // what shows it has ended.
-    let ended = group.construct(1, "");
+    // behind the waiting one. Its message consumer dropping the receiving
+    // end of its channel is what shows it has ended.
+    let messages = group.views[1].messages[&ended].clone();
     group.terminate(ended);
     let deadline = ClockInstant::now() + PATIENCE;
-    while !group.scripts[&ended].is_closed() {
+    while !messages.is_closed() {
         assert!(
             ClockInstant::now() < deadline,
             "the terminated worker ended"
@@ -567,10 +701,10 @@ fn two_views_over_one_url_each_run_their_own_bytes() {
     // Every view has its own `ResourceFetcher`, so one URL can resolve to two
     // different scripts in one group. Each worker must run the bytes its own
     // view answered with — which nothing has to arrange, because a worker's
-    // script is evaluated into its realm rather than registered on the
+    // script is completed into its realm rather than registered on the
     // runtime under a name a second view could reach.
-    let first = group.construct(0, "");
-    let second = group.construct(1, "");
+    let first = group.construct_requesting(0, "", "app:///shared.js");
+    let second = group.construct_requesting(1, "", "app:///shared.js");
     group.answer(first, "app:///shared.js", "postMessage(\"first view\");");
     assert_eq!(group.message(0), wire("first view"));
     group.answer(second, "app:///shared.js", "postMessage(\"second view\");");
@@ -848,7 +982,13 @@ fn a_worker_realm_declares_these_host_members() {
         "testFuture",
         "waitFuture",
     ];
-    let worker = ["closeWorker", "invokeNativeModule", "postWorkerMessage"];
+    let worker = [
+        "backgroundEntry",
+        "closeWorker",
+        "invokeNativeModule",
+        "postWorkerMessage",
+        "workerName",
+    ];
     assert_eq!(
         group.message(0),
         wire(&format!("{} / {}", host.join(","), worker.join(",")))

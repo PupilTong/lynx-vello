@@ -2229,7 +2229,7 @@ fn a_bts_worker_that_fails_reports_worker_ended_and_leaves_boot_alone() {
             .await;
         let background = harness.background_worker();
         assert!(
-            matches!(background.role, WorkerRole::Background),
+            matches!(background.role, WorkerRole::Background(_)),
             "boot's worker starts as the background thread"
         );
         // Boot is already settled when the failure arrives: it is the MTS

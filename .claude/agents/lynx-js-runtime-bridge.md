@@ -39,8 +39,13 @@ and `bobcat-workers` (every Worker realm, including the BTS).
   `createWorker`/`sendWorkerMessage`/`terminateWorker`; `tree/` is the Lynx
   element policy layer (page root, UA sheet, `<text>`, `<image>`, scrollers).
 - `crates/bobcat-core/src/background/` — the `bobcat-workers` thread and worker
-  realm scopes. `view/` holds `LynxGroup`, `LynxView`, `ViewSources` and
-  `create_lynx_view`; `paint/` the `Painter`; `link.rs` the per-view channels;
+  realm scopes. A worker realm opens as its `Start` is served and evaluates the
+  root module `bobcat:worker-boot` (`bobcat:worker`, `bobcat:timers`, then
+  `await import(<script URL>)` or `import "bobcat:bts"` by `WorkerRole`), and
+  the worker's `consume_messages` completes a plain Worker's script under the
+  request URL from the answer `createWorker` asked for. `view/` holds
+  `LynxGroup`, `LynxView`, `ViewSources` and `create_lynx_view`; `paint/` the
+  `Painter`; `link.rs` the per-view channels;
   `lifetime.rs` the `CancellationToken`, `serve_clock` and `run_job`;
   `realm.rs` (`open_realm`, the one constructor both threads open a realm
   with: it installs the core every realm has under `bobcat-internal:host` —
@@ -67,6 +72,8 @@ and `bobcat-workers` (every Worker realm, including the BTS).
   `__FlushElementTree`, and `__SetCSSId`, accepted and ignored),
   `main-thread-runtime.ts` (`bobcat:runtime`), `worker.ts` (the W3C `Worker`),
   `worker-runtime.ts`, `background-thread-runtime.ts` (`bobcat:bts-runtime`),
+  `bts.ts` (`bobcat:bts` — the BTS bootstrap a BTS realm's root module
+  imports; it reads the view's BTS entry once from `backgroundEntry`),
   `cross-thread-context.ts`, `event-target.ts` (with `reportException`, the
   realm's installed exception reporter), `animation-frame.ts`
   (`bobcat:animation-frame` — every realm's `requestAnimationFrame`, frame

@@ -18,11 +18,12 @@ use tokio_util::sync::CancellationToken;
 
 use super::quickjs::{ScriptEngine, ScriptRuntime};
 use crate::background::{
-    WorkerCommand, WorkerEvent, WorkerKey, WorkerMessage, WorkerPayload, WorkerRole, WorkerStart,
+    BackgroundStart, WorkerCommand, WorkerEvent, WorkerKey, WorkerMessage, WorkerPayload,
+    WorkerRole, WorkerStart,
 };
-use crate::esm::{BTS_ENTRY_PREAMBLE, BTS_MODULE_SPECIFIER, HOST_MODULE_SPECIFIER};
+use crate::esm::{BTS_MODULE_SPECIFIER, HOST_MODULE_SPECIFIER};
 use crate::link::{ViewNotice, ViewOutbox};
-use crate::resource::{LoadedSource, SourceCompletion, SourceRequest};
+use crate::resource::{SourceCompletion, SourceRequest};
 use crate::script::ScriptError;
 use crate::threads::platform_script_error;
 use crate::view::ScriptSource;
@@ -52,13 +53,14 @@ impl WorkerFactory {
 
     /// Installs the three members a realm creates and drives workers through,
     /// and hands back the owner they share and the channel everything they say
-    /// arrives on.
+    /// arrives on. `background` is what each `new Worker("bobcat:bts")` of the
+    /// realm is started with.
     pub(super) fn install(
         &self,
         engine: &mut ScriptEngine,
         runtime: &mut ScriptRuntime,
         outbox: ViewOutbox,
-        background_entry: Option<String>,
+        background: BackgroundStart,
     ) -> Result<(Rc<WorkerOwner>, mpsc::UnboundedReceiver<WorkerEvent>), ScriptError> {
         let (events, incoming) = mpsc::unbounded_channel();
         // The MTS runtime owns the channels. Host functions borrow that owner
@@ -78,7 +80,9 @@ impl WorkerFactory {
             "createWorker",
             3,
             Box::new(move |arguments| {
-                let creator = creator.upgrade().ok_or("the creating realm has been released")?;
+                let creator = creator
+                    .upgrade()
+                    .ok_or("the creating realm has been released")?;
                 let specifier = string(arguments, 0)?;
                 let name = string(arguments, 1)?.to_owned();
                 // Where the specifier resolves from: the MTS entry's response
@@ -106,49 +110,44 @@ impl WorkerFactory {
                     .next
                     .set(id.checked_add(1).ok_or("worker ids exhausted")?);
                 let key = WorkerKey::new(id);
-                // The specifier has already said which kind of worker this is,
-                // and the source is recorded before anything is sent, so a
-                // worker that fails at once below has one too.
-                let role = if url.is_some() {
-                    WorkerRole::Dedicated
-                } else {
-                    WorkerRole::Background
+                // Each worker's own end signal, which its script request is
+                // cancelled with as well.
+                let token = CancellationToken::new();
+                // The specifier has already said which kind of worker this is.
+                // A dedicated worker's script is asked for here, on the thread
+                // whose realm constructed it; the BTS's is the registered
+                // module `bobcat:bts`, which asks for nothing.
+                let (role, request) = match url {
+                    None => (WorkerRole::Background(background.clone()), None),
+                    Some(url) => {
+                        let (completion, script) = SourceCompletion::new(token.clone());
+                        (
+                            WorkerRole::Dedicated {
+                                url: url.clone(),
+                                script,
+                            },
+                            Some((url, completion)),
+                        )
+                    }
                 };
+                // The source is recorded before anything is sent, so a worker
+                // that fails at once below has one too.
                 creator.sources.borrow_mut().insert(key, role.source(key));
                 // A worker that has already failed is still a worker to the
                 // script that named it: its `error` event arrives with the
                 // `Failed` the owner queued, and nothing is asked of the host.
-                let Some(script) = creator.start(key, name, role) else {
-                    return Ok(HostValue::String(id.to_string()));
-                };
-                let Some(url) = url else {
-                    let mut source = BTS_ENTRY_PREAMBLE.to_owned();
-                    source.push_str("import { __BobcatStartBTS } from \"bobcat:bts-runtime\";\n__BobcatStartBTS(async () => {\n");
-                    if let Some(background) = &background_entry {
-                        let background = serde_json::to_string(background)
-                            .expect("a string is JSON serializable");
-                        source.push_str("\nawait import(");
-                        source.push_str(&background);
-                        source.push_str(");\n");
-                    }
-                    source.push_str("});\n");
-                    // The built-in background script is this thread's own, so
-                    // it answers its own request rather than asking a host
-                    // that has no bytes for it.
-                    script.complete(Ok(LoadedSource::Module {
-                        source,
-                        url: BTS_MODULE_SPECIFIER.to_owned(),
-                    }));
-                    return Ok(HostValue::String(id.to_string()));
-                };
-                // The answer travels to the worker task without another turn
-                // here: what the host is handed is the far end of the
-                // one-shot that already rode to `bobcat-workers` with the
-                // `Start` above.
-                creator.outbox.notify(ViewNotice::RequestSource {
-                    request: SourceRequest::Module(url),
-                    completion: script,
-                });
+                if creator.start(key, name, role, token)
+                    && let Some((url, completion)) = request
+                {
+                    // The answer travels to the worker task without another
+                    // turn here: what the host is handed is the far end of
+                    // the one-shot that already rode to `bobcat-workers` with
+                    // the `Start` above.
+                    creator.outbox.notify(ViewNotice::RequestSource {
+                        request: SourceRequest::Module(url),
+                        completion,
+                    });
+                }
                 Ok(HostValue::String(id.to_string()))
             }),
         )?;
@@ -208,22 +207,26 @@ pub(super) struct WorkerOwner {
 }
 
 impl WorkerOwner {
-    /// Names one worker on `bobcat-workers` and hands back the right to
-    /// answer its script.
+    /// Names one worker on `bobcat-workers`, under its own `token`.
     ///
     /// Source requests share this worker's own token. Neither a source
     /// completion nor a Worker inherits the view's cancellation token.
     ///
-    /// `None` is a worker thread that has trapped, or one whose inbox is
+    /// `false` is a worker thread that has trapped, or one whose inbox is
     /// closed: the worker fails at once, as one whose script could not be
     /// fetched does. Its `Failed` is queued on this realm's own channel and
     /// reaches the script as an `error` event, and nothing is sent to the
-    /// thread or kept in `live`.
-    fn start(&self, key: WorkerKey, name: String, role: WorkerRole) -> Option<SourceCompletion> {
+    /// thread or kept in `live`. The caller then asks the host for nothing,
+    /// and the answer the role carried is dropped with it.
+    fn start(
+        &self,
+        key: WorkerKey,
+        name: String,
+        role: WorkerRole,
+        token: CancellationToken,
+    ) -> bool {
         if !self.factory.trapped.load(Ordering::Acquire) {
             let (messages, incoming) = mpsc::unbounded_channel();
-            let token = CancellationToken::new();
-            let (script, awaiting) = SourceCompletion::new(token.clone());
             let sources = self.outbox.host_outbox(token.clone());
             self.outbox.notify(ViewNotice::WorkerCreated {
                 key,
@@ -236,7 +239,6 @@ impl WorkerOwner {
                     key,
                     name,
                     role,
-                    script: awaiting,
                     messages: incoming,
                     events: self.events.clone(),
                     token,
@@ -247,7 +249,7 @@ impl WorkerOwner {
             // view sweeps it.
             if started.is_ok() {
                 self.live.borrow_mut().insert(key, messages);
-                return Some(script);
+                return true;
             }
         }
         let _ = self.events.send(WorkerEvent {
@@ -256,7 +258,7 @@ impl WorkerOwner {
                 "the worker thread has ended".to_owned(),
             )),
         });
-        None
+        false
     }
 
     fn post(&self, key: WorkerKey, message: WorkerMessage) {

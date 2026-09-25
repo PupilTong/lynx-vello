@@ -183,25 +183,32 @@ QuickJS ESM graph — an MTS realm, on bobcat-main's runtime
                       └──▶ the document created above
 
 QuickJS ESM graph — a worker realm, on bobcat-workers' runtime
-  bobcat:worker-boot (one per live worker, evaluated, never registered)
+  bobcat:worker-boot (the root module: one per live worker, evaluated as the
+    │                 realm opens at its Start, never registered)
     ├──▶ bobcat:worker (packages/bobcat-element/src/worker-runtime.ts)
-    │     ├── the global scope: self, postMessage, close, name, onmessage,
-    │     │   console (no requestAnimationFrame)
+    │     ├── the global scope: self, postMessage, close, name (read from
+    │     │   workerName as it is evaluated), onmessage, console (no
+    │     │   requestAnimationFrame)
     │     ├──▶ bobcat:event-target
     │     ├──▶ bobcat:diagnostics ──▶ bobcat-internal:host (reportScriptError,
     │     │                             logScriptMessage), the global console
     │     └──▶ bobcat-internal:worker (postWorkerMessage, closeWorker,
-    │                                   invokeNativeModule)
+    │                                   invokeNativeModule, workerName)
     ├──▶ bobcat:timers ──▶ bobcat-internal:host (setTimer, clearTimer only)
-    └── the worker's entry source
-          └── bobcat:bts (bootstrap)
-                ├──▶ bobcat:bts-runtime exports lynx
-                │     ├──▶ bobcat:diagnostics (console, lynx.reportError; the
-                │     │     console export is the global one)
-                │     └──▶ bobcat:cross-thread-context ──▶ bobcat:event-target
-                └──▶ await import(BTS entry) when configured
-                      HostOutbox → view resource host → worker completion
-  Both runtimes register the same eighteen built-ins (esm.rs BUILTIN_MODULES),
+    ├──▶ await import("<script URL>")   a plain Worker: completed by the
+    │     │                             worker's consume_messages task, under
+    │     │                             the request URL, from the answer to
+    │     │                             the request createWorker made
+    │     └── the script, with import.meta.url = its response URL
+    └──▶ bobcat:bts                     the BTS: a registered module (bts.ts)
+          ├──▶ bobcat-internal:worker (backgroundEntry)
+          ├──▶ bobcat:bts-runtime exports lynx
+          │     ├──▶ bobcat:diagnostics (console, lynx.reportError; the
+          │     │     console export is the global one)
+          │     └──▶ bobcat:cross-thread-context ──▶ bobcat:event-target
+          └──▶ await import(BTS entry) once `initialize` arrives, when
+                configured: HostOutbox → view resource host → worker completion
+  Both runtimes register the same nineteen built-ins (esm.rs BUILTIN_MODULES),
   and a realm's host modules decide which of them link. Here bobcat:element,
   bobcat:runtime and bobcat-internal fail at link with a SyntaxError: they
   import bobcat-internal:host members only an MTS realm has. In an MTS realm
@@ -731,7 +738,8 @@ cannot fail on what the same build's writer produced.
 
 ```text
 main realm: new Worker(url)
-  ├── WorkerStart { key, name, role, script: oneshot receiver,
+  ├── WorkerStart { key, name,
+  │                 role: Dedicated { url, script: oneshot receiver },
   │                 messages: mpsc receiver, events: this view's sender }
   │        ────────────────────────────────▶ bobcat-workers: one task per worker
   └── ViewNotice::RequestSource ──▶ LynxView::pump ──▶ request_source
@@ -753,13 +761,19 @@ synchronous `SyntaxError`. Fetching and UTF-8 validation remain fetcher
 policy. Multiple worker requests are
 preserved without coalescing. The `WorkerStart` is sent before the host is
 asked to fetch, so messages posted during loading queue against an existing
-key — the worker's task holds them until its scope exists, which is what HTML
-does. The completion answers the worker's task directly: it needs no
-main-thread turn and cannot be held behind a long main-thread script. A worker
-told to terminate before its script arrives never boots, because that wait is
-a `biased` select with the message channel first; behind that arm the same
-wait watches the worker's own cancellation token. That scope is independent
-of the view, so its cancellation cannot race ahead of JS disposal.
+key. The worker's realm opens as its `Start` is served, with the view's realm
+as the model: its root module imports `bobcat:worker` and `bobcat:timers`,
+then `await import(<script URL>)`, and the request that import makes is never
+sent again. The completion answers the worker's own message consumer
+directly: it needs no main-thread turn and cannot be held behind a long
+main-thread script. The consumer completes the module under the request URL,
+from the response URL, and holds what is posted until the root module has
+finished, which is what HTML does. A runtime that never came up fails the
+worker at its `Start`, without waiting for the answer. A worker told to
+terminate before its script arrives never runs it, because the consumer's
+wait for the script is a `biased` select with the message channel first. The
+worker's token is independent of the view, so its cancellation cannot race
+ahead of JS disposal.
 
 Worker keys are allocated once per group on main and never reused. A worker's
 whole state is its own task; `bobcat-main` keeps two things per worker. One is
@@ -816,17 +830,19 @@ sent to the host by the BTS realm itself.
 Each MTS boot starts one BTS Worker named `lynx-bg` once its entry import has
 settled, whether the entry succeeded or threw.
 Boot constructs it through the same `bobcat-internal` class, using the reserved
-module `bobcat:bts`. All workers use the same scope and protocol. BTS `lynx`
-is an ESM export from `bobcat:bts-runtime`; neither MTS nor BTS sets
-`globalThis.lynx`. The bootstrap uses
-`import { lynx } from "bobcat:bts-runtime"`; raw BTS applications explicitly
-import the bindings they need. The application imports its bindings without
-creating a dependency back to the bootstrap that starts it.
-Main answers the built-in `bobcat:bts` source itself, on the one-shot that
-rode to `bobcat-workers` inside the `Start`, rather than asking a host that has
-no bytes for it. When `ViewSources.background_entry` is
-configured, the bootstrap passes an `async () => { await import(entry); }`
-loader to its JS initializer and returns. The first `postMessage` initializes
+specifier `bobcat:bts`, which is what tells the BTS apart. All workers use the
+same scope and protocol. BTS `lynx` is an ESM export from `bobcat:bts-runtime`;
+neither MTS nor BTS sets `globalThis.lynx`. BTS applications explicitly import
+the bindings they need, `lynx` included, without creating a dependency back to
+the bootstrap that starts them.
+`bobcat:bts` is a registered module (`packages/bobcat-element/src/bts.ts`)
+that the BTS realm's root module imports in place of a script, so nothing is
+fetched to start the BTS. Its `Start` carries `WorkerRole::Background` with
+the view's `background_entry`, which `bobcat:bts` reads once through the
+host member `backgroundEntry`. When an entry is configured, the bootstrap
+passes an `async () => { await import(entry); }` loader to its JS initializer
+and returns, without a top-level `await`, so the root module finishes and
+the first message is delivered. The first `postMessage` initializes
 BTS inputs before that loader runs; later messages wait on its Promise. XML
 takes exactly this path. Without an entry, the same initialization message
 supplies the Context and app/native-app environment, then BTS acknowledges it.
@@ -834,7 +850,8 @@ supplies the Context and app/native-app environment, then BTS acknowledges it.
 Workers use the same asynchronous ESM loader as main. Each discovered module
 gets a source completion on the view's existing host channel; its final response
 URL becomes the base for dependencies. A per-worker boot watch gates posted
-messages until the Worker bootstrap settles. The BTS runtime separately holds
+messages until the worker's root module — for a plain Worker, its script —
+settles. The BTS runtime separately holds
 its messages on the application import Promise; completions and timers continue.
 Cancellation follows the worker's own token; source completions never travel
 through the MTS realm. Handled import failures leave the worker usable; a BTS

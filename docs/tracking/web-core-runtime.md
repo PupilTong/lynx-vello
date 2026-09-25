@@ -85,11 +85,13 @@ The engine now exposes `import { Worker } from "bobcat-internal"` on the main
 realm. Construction sends one `WorkerStart` from the view's task on
 `bobcat-main` to `bobcat-workers`, which spawns **one task per worker realm**;
 that message carries everything the worker will ever be given — its key, its
-name, a one-shot for its script, the receiving end of its message channel, and
-the sender its events go back on, which is the creating view's own channel.
-The script is loaded through the view's fetcher and answers that one-shot
-directly, without a main-thread turn. Early messages queue in the worker's own
-task until its scope exists, a terminate that arrives before the script wins
+name, its role with a one-shot for its script, the receiving end of its message
+channel, and the sender its events go back on, which is the creating view's own
+channel. The worker's realm opens as that message is served, and its root
+module imports the script by its URL. The script is loaded through the view's
+fetcher and answers that one-shot directly, without a main-thread turn; the
+worker completes the import from it. Early messages queue in the worker's own
+task until the script has run, a terminate that arrives before the script wins
 over it, and parent message/error listeners and termination are supported. This is the worker transport needed
 under the BTS integration above; it does not yet install the ReactLynx BTS
 bootstrap or RPC ports. The Context MVP below builds on it. Its event/lifetime model follows
@@ -100,19 +102,20 @@ termination recorded in `../runtime-architecture.md`.
 ## Bobcat BTS Context MVP (2026-09-09)
 
 After it awaits the import of the entry by its URL, boot creates a BTS Worker on the group's
-existing `bobcat-workers` thread with `new Worker("bobcat:bts")`; that one's
-script is answered by `bobcat-main` itself, on the same one-shot, because the
-bootstrap is the engine's own source and no host has bytes for it. Every worker uses the
-same scope; BTS bindings belong to that JavaScript entry, with no worker kind
-in the protocol. `ViewSources.background_entry` selects an optional raw
-module; native/browser XML adapters supply the background section's URL.
-The `bobcat:bts` bootstrap imports `lynx` from `bobcat:bts-runtime` and
-then awaits an import of that entry. The application entry receives the same
-named import as a preamble, matching MTS's strategy; `globalThis.lynx` stays
-absent on both sides. Application source is neither prefetched nor included in the
-Worker script. Application module loading through ResourceFetcher is explicitly
-deferred, so unpreloaded entries currently report an import error. Without an
-entry, the built-in BTS environment still starts. Compiled BTS bundle manifests
+existing `bobcat-workers` thread with `new Worker("bobcat:bts")`. Its `Start`
+carries no script: `bobcat:bts` is a registered module, the engine's own
+source, which the BTS realm's root module imports, and the `Start` carries the
+view's BTS entry for it instead. Every worker uses the same scope; the BTS
+differs only in what its root module imports. `ViewSources.background_entry`
+selects an optional raw module; native/browser XML adapters supply the
+background section's URL. The `bobcat:bts` bootstrap hands `bobcat:bts-runtime`
+a loader that imports that entry once the first message has initialized the
+runtime. The application entry imports its bindings, `lynx` included, from
+`bobcat:bts-runtime`, as a card's compiled bodies do through their chunk
+preamble; `globalThis.lynx` stays absent on both sides. Application source is
+neither prefetched nor included in the bootstrap. The entry is loaded through
+the view's ResourceFetcher like any other worker import. Without an entry, the
+built-in BTS environment still starts. Compiled BTS bundle manifests
 also require Lynx Core's module/init shell and remain pending.
 
 The implemented pair is MTS `lynx.getJSContext()` ↔ BTS `lynx.getCoreContext()`.

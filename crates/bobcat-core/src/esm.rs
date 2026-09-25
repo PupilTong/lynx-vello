@@ -91,7 +91,9 @@ pub(crate) const GLOBAL_EVENT_MODULE_SPECIFIER: &str = "bobcat:global-event-emit
 /// Lynx's typed asynchronous Context channel, shared by MTS and BTS.
 pub(crate) const CONTEXT_MODULE_SPECIFIER: &str = "bobcat:cross-thread-context";
 
-/// The built-in BTS bootstrap, loaded like any other Worker script.
+/// The BTS bootstrap, and the `new Worker` specifier that names a view's
+/// background thread: a registered module a BTS realm's root module imports,
+/// which hands `bobcat:bts-runtime` the loader of the view's BTS entry.
 pub(crate) const BTS_MODULE_SPECIFIER: &str = "bobcat:bts";
 
 /// The Element PAPI: the named exports an MTS entry builds and edits its
@@ -108,6 +110,12 @@ pub(crate) const WORKER_CLASS_MODULE_SPECIFIER: &str = "bobcat-internal";
 
 /// The worker realm's global-scope module.
 pub(crate) const WORKER_MODULE_SPECIFIER: &str = "bobcat:worker";
+
+/// The name a worker realm's root module is evaluated under: once per worker,
+/// as the realm opens, and never registered, the way `bobcat:boot` is an MTS
+/// realm's. A dedicated worker's `import` of its script is resolved against
+/// it, and the script's URL is absolute, so it resolves to itself.
+pub(crate) const WORKER_BOOT_SPECIFIER: &str = "bobcat:worker-boot";
 
 /// The compiler factory ABI: what the BTS runtime's `lynx.requireModule` and
 /// its companions load a bundle body through.
@@ -153,10 +161,6 @@ pub const MTS_CHUNK_PREAMBLE: &str = mts_chunk_preamble!();
 
 /// BTS bindings live separately from the bootstrap that awaits the app entry.
 pub(crate) const BTS_RUNTIME_MODULE_SPECIFIER: &str = "bobcat:bts-runtime";
-
-/// Named imports prepended to a BTS application entry, as for MTS. The
-/// bootstrap uses the same import to initialize the Context before the app.
-pub(crate) const BTS_ENTRY_PREAMBLE: &str = "import { lynx } from \"bobcat:bts-runtime\";\n";
 
 /// Named imports prepended to one *bundle body* before it is registered as a
 /// module: every name web-core's `createBundleInitReturnObj` puts in a chunk
@@ -230,6 +234,7 @@ pub(crate) const BUILTIN_MODULES: &[BuiltinModule] = &[
     builtin_module!(WORKER_CLASS_MODULE_SPECIFIER, "worker"),
     builtin_module!(WORKER_MODULE_SPECIFIER, "worker-runtime"),
     builtin_module!(BTS_RUNTIME_MODULE_SPECIFIER, "background-thread-runtime"),
+    builtin_module!(BTS_MODULE_SPECIFIER, "bts"),
 ];
 
 /// Builds one of a group's two `QuickJS` runtimes: every built-in module

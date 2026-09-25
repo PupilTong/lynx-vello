@@ -8,6 +8,7 @@ import {
   closeWorker,
   invokeNativeModule,
   postWorkerMessage,
+  workerName,
 } from "bobcat-internal:worker";
 import { console } from "bobcat:diagnostics";
 
@@ -26,7 +27,10 @@ import { console } from "bobcat:diagnostics";
 // `message` event and the EventTarget surface under it — including its rule
 // that a listener which throws is reported here (through `reportError`) and
 // the listeners behind it still run. `console` is `bobcat:diagnostics`'s, so
-// what it prints reaches the embedder from this realm directly. Not here:
+// what it prints reaches the embedder from this realm directly. `name` is
+// read from the host as this module is evaluated, which is before any module
+// of the worker's own script is, so a module the script imports statically
+// reads it at its top level too. Not here:
 // `requestAnimationFrame` (a worker script imports it from
 // `bobcat:animation-frame`, and `bobcat:bts-runtime` also gives it as an
 // export and a `lynx` member; it is never a global), `importScripts` (this
@@ -40,10 +44,12 @@ import { console } from "bobcat:diagnostics";
 
 /**
  * The worker realm's global scope once this module has run: an `EventTarget`
- * whose own members include `self`, `console`, `postMessage` and `close`.
+ * whose own members include `self`, `name`, `console`, `postMessage` and
+ * `close`.
  */
 export interface WorkerGlobalScope extends EventTarget {
   self: WorkerGlobalScope;
+  name: string;
   console: typeof console;
   postMessage(message: unknown, transfer?: unknown): undefined;
   close(): undefined;
@@ -92,6 +98,9 @@ Object.defineProperty(scope, "self", {
   writable: true,
   value: scope,
 });
+
+// What the constructor named this worker, as a plain property of the global.
+scope.name = workerName();
 
 // A namespace property, as WebIDL defines one for `console` on every global:
 // writable and configurable, and not enumerable.
