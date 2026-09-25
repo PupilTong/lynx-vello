@@ -4,6 +4,12 @@ inputs:
   fixtures:
     description: Build source fixtures before compiling Rust tests or benchmarks.
     default: 'false'
+  corpus:
+    description: >-
+      Build the web-core end-to-end corpus, which only the conformance suite in
+      `crates/bobcat-source/tests/web_core_e2e.rs` reads. Minutes of work for
+      hundreds of cards, so only the job that runs tests asks for it.
+    default: 'false'
 runs:
   using: composite
   steps:
@@ -18,3 +24,7 @@ runs:
       if: inputs.fixtures == 'true'
       shell: bash
       run: pnpm --filter reactlynx-test-fixtures build
+    - name: Build the web-core end-to-end corpus
+      if: inputs.corpus == 'true'
+      shell: bash
+      run: pnpm --filter web-core-e2e-fixtures build

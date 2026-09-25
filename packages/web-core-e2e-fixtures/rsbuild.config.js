@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import { pluginReactLynx } from '@lynx-js/react-rsbuild-plugin';
 import { defineConfig } from '@rsbuild/core';
@@ -12,9 +13,12 @@ import { groups, groupOf } from './groups.js';
 // 3.9 and above compile against `lynx.fetchBundle` rather than the legacy
 // `__QueryComponent` path this engine does not implement.
 const ENGINE_VERSION = '4.1.0';
-// Cards resolve their own assets against this at runtime, so it has to match
-// the static server the census runs (`.github/scripts/web-core-census.py`).
-const ASSET_PREFIX = `http://localhost:${process.env['PORT'] ?? 3080}/dist`;
+// Cards resolve their own bitmaps and fonts against this at runtime. Upstream
+// points it at its dev server; here it is this directory on disk, which the
+// engine's resource transport reads directly, so nothing has to be served for
+// a card to find its own assets. `dist/` is never committed, so an absolute
+// path baked into a bundle belongs to the machine that built it.
+const ASSET_PREFIX = pathToFileURL(path.join(import.meta.dirname, 'dist')).href;
 // Built from `external-libs/greeting` upstream, which is not vendored here, so
 // the card that fetches it cannot be built yet. Its source is kept all the
 // same: the gap is the library, not the case.
