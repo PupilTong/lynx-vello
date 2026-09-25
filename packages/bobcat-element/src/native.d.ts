@@ -219,15 +219,18 @@ declare module "bobcat-internal:host" {
   export function reportScriptError(level: string, message: string): void;
   export function logScriptMessage(level: string, message: string): void;
   /**
-   * Starts one worker over the script `url` names, resolved against `baseUrl`
-   * — the page entry's response URL, which the realm holds and the host does
-   * not — and answers the key its other members name it by.
+   * Starts one worker over the script `url` names and answers the key its
+   * other members name it by.
+   *
+   * The host joins `url` to `baseUrl` — the page entry's response URL, which
+   * the realm holds — by URL rules, and does not keep the base. A `url` that
+   * does not resolve starts nothing and answers `null`.
    */
   export function createWorker(
     url: string,
     name: string,
     baseUrl: string,
-  ): string;
+  ): string | null;
   /**
    * Posts one message to that worker. Any value the host boundary carries; a
    * value the engine's serializer refuses throws at this call.
@@ -291,8 +294,9 @@ declare module "bobcat-internal:host" {
   /**
    * Loads the source at `url` and compiles it, before returning.
    *
-   * Resolution, caching and the `module` object are none of its business: it
-   * takes an already-resolved URL and answers the compiled source, and
+   * Caching and the `module` object are none of its business: a relative
+   * `url` is resolved by the host against the view's base URL by URL rules,
+   * an absolute one is taken as it is, and it answers the compiled source;
    * `bobcat:module` is Node's algorithm written over it. The source text never
    * becomes a value in this realm.
    *

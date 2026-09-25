@@ -7,8 +7,8 @@ runtime by `Painter::attach`. The document, Element-PAPI tree, script realm,
 and the commit/publish protocol are implementation state. An embedder supplies
 only capabilities and OS facts:
 
-- a `ViewSources` — the required base URL the view's entries resolve
-  against, page config, owned font bytes, an optional default font
+- a `ViewSources` — the required base URL the view's entries and every
+  realm's synchronous loads resolve against, page config, owned font bytes, an optional default font
   family, author stylesheet URLs, the one entry MTS
   module URL, optional `init_data` and `global_props` JSON text, and the
   required `screen` metrics `SystemInfo` reports — and,
@@ -363,10 +363,12 @@ entry and the BTS entry are resolved first, against `ViewSources::base_url` by
 URL rules (so `main.js`, `./main.js` and `/main.js` are all relative URLs), and
 replaced by the WHATWG serialization of the result: a base that is not an
 absolute URL, or an entry that does not resolve against it, is a zero-fetch,
-synchronous `EngineError::InvalidUrl` naming the string that failed. The base
-itself is not handed to the fetcher, which resolves stylesheets, fonts and
-fetches against a base of its own; every embedder in this workspace gives it
-the same one. Fonts
+synchronous `EngineError::InvalidUrl` naming the string that failed. The
+parsed base then crosses to `bobcat-main` in the attachment, and every realm of
+the view resolves its synchronous loads against it. The base itself is not
+handed to the fetcher, which resolves stylesheets, fonts and fetches against a
+base of its own; an embedder must give it the same one, and every embedder in
+this workspace does. Fonts
 and the default family come next, validated against a `dom::TextContext` of
 their own: they are a text context's business, no document exists yet, and an
 unknown default family is therefore a zero-fetch, synchronous
@@ -394,7 +396,8 @@ web-core. The first failure to reach the realm ends the view, and later ones
 are not reported.
 
 Either way the fetcher resolves the URL — a stylesheet's against its own base;
-the entry's is already absolute — fetches bytes and validates UTF-8, or
+the entry's, like every script request's, is already absolute — fetches bytes
+and validates UTF-8, or
 supplies a pre-parsed stylesheet. Completion consumes the handle and answers
 the one-shot minted with the request, which wakes whichever task was awaiting
 that source — a stylesheet or entry on `bobcat-main`, a worker script on
@@ -475,8 +478,12 @@ completion for a live view reports a resource failure, including when a worker
 exits before answering. Other views and their group remain alive; the last
 group/view handle joins the group's threads.
 
-Source requests select a module or stylesheet payload and carry a specifier;
-the fetcher owns base URL and transport policy. That call, the optional
+Source requests select a module or stylesheet payload. A
+`SourceRequest::Module` — the entry, an import, a worker script or a
+synchronous load — carries an absolute URL Rust resolved, in its WHATWG
+serialization; a stylesheet, font or fetch carries the URL as it was named,
+and the fetcher resolves it against its own base, which must equal
+`ViewSources::base_url`. The fetcher owns transport policy. That call, the optional
 `preload_source` hint, `request_image`, `service_images` and the `FrameImages`
 supertrait are the whole protocol. Every method is synchronous — no transport
 future crosses this interface, and core
@@ -684,16 +691,22 @@ main realm: new Worker(url)
   │                 messages: mpsc receiver, events: this view's sender }
   │        ────────────────────────────────▶ bobcat-workers: one task per worker
   └── ViewNotice::RequestSource ──▶ LynxView::pump ──▶ request_source
-                                     │ SourceRequest::Worker {specifier, base_url}
+                                     │ SourceRequest::Module(url joined to __Card__)
                                      └── SourceCompletion answers the oneshot
                                          that already rode inside the Start
 main realm: postMessage / terminate ───────────────▶ that worker's own task
 main realm: Worker message/error handler ◀── WorkerEvent { key, payload }
 ```
 
-The base URL is the creating view's resolved entry URL, which the realm holds
-as `__Card__` and passes as `createWorker`'s third argument; resolution, fetching
-and UTF-8 validation remain fetcher policy. Multiple worker requests are
+The script URL is resolved in Rust, before anything is started: `createWorker`
+tells the built-in `bobcat:bts` apart first (it parses as an absolute URL of its
+own), then joins any other URL by URL rules — not import-specifier rules, so
+`worker.js` and `?v=2` are relative URLs — to the creating view's entry
+response URL, which the realm holds as `__Card__` and passes as the third
+argument; Rust does not keep it. A URL that does not resolve allocates no key,
+sends no `Start` and requests nothing, and `new Worker` throws HTML's
+synchronous `SyntaxError`. Fetching and UTF-8 validation remain fetcher
+policy. Multiple worker requests are
 preserved without coalescing. The `WorkerStart` is sent before the host is
 asked to fetch, so messages posted during loading queue against an existing
 key — the worker's task holds them until its scope exists, which is what HTML
@@ -906,8 +919,10 @@ are outside this JavaScript-module path.
 eviction, `require.resolve` — is JavaScript in it. Two host members on
 `bobcat-internal:host` carry what is not: `resolveModuleUrl(base, specifier)`,
 the same normalizer an `import` resolves through, and
-`loadModuleSync(url, parameters)`, which requests the same
-`SourceRequest::Module` and answers the source compiled — the wrapper function
+`loadModuleSync(url, parameters)`, which resolves `url` against the view's
+`ViewSources::base_url` by URL rules — in every realm of the view, a worker's
+included, and an absolute URL resolves to itself — requests the result as the
+same `SourceRequest::Module` and answers the source compiled — the wrapper function
 of a CommonJS file, or the parsed value of a JSON one — so source text never
 becomes a value in the realm. That load parks the job it runs in on the answer
 the way stylesheet adoption does: the engine thread's tasks keep running, no
@@ -1011,8 +1026,9 @@ stylesheets, in listed order, before it styles the document. The entry's `import
 nothing: a task of the view completes that name from the answer
 `create_lynx_view` already asked for, answered from its response URL. That
 task calls `__BobcatInitEntry` with the response URL before it completes the
-module, so `__Card__` is that URL before the entry's body runs, and a `new Worker` specifier
-resolves against it — the realm passes it to `createWorker` as the base. An
+module, so `__Card__` is that URL before the entry's body runs, and a `new Worker` URL
+resolves against it — the realm passes it to `createWorker`, and Rust joins
+the two by URL rules. An
 entry that could not be loaded rejects the import, which fails the boot.
 
 The retained argument survives entry initialization replacing `lynx.__initData`.

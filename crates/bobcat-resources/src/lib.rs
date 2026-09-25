@@ -121,7 +121,12 @@ impl DiskCacheConfig {
 /// configuration for a desktop host with no disk cache.
 #[derive(Clone, Debug)]
 pub struct ResourcesConfig {
-    /// What relative specifiers resolve against — the page's own URL.
+    /// What relative stylesheet, font, fetch and image URLs resolve against
+    /// — the page's own URL. A script request arrives already resolved
+    /// against the view's
+    /// [`ViewSources::base_url`](bobcat_core::ViewSources::base_url), so this
+    /// must be that same base: a lazy container is fetched, and its sections
+    /// registered, by this one, and each section is loaded by the view's.
     pub base_url: Option<Url>,
     /// The memory tier's budget for decoded bitmaps. Best-effort: the frame
     /// being drawn is never evicted, and a single bitmap larger than the
@@ -289,8 +294,10 @@ impl Registrar {
     }
 }
 
-/// What a [`ResourceFetcher::fetch_probe`] reads, and the base every
-/// specifier resolves against.
+/// What a [`ResourceFetcher::fetch_probe`] reads, and the base the
+/// stylesheets, fonts, fetches and images this system is asked for resolve
+/// against. Scripts arrive resolved against the view's base, which is why the
+/// two must be equal.
 ///
 /// Its own `Arc` rather than a field of [`Shared`] for one reason: the probe
 /// is called from `bobcat-main` and `bobcat-workers` while the fetcher itself
@@ -794,12 +801,20 @@ impl Resources {
         self.shared.transports.registry.clear();
     }
 
-    /// What relative specifiers resolve against.
+    /// What relative stylesheet, font, fetch and image URLs resolve against.
+    /// A script request is resolved already, against the view's
+    /// [`ViewSources::base_url`](bobcat_core::ViewSources::base_url), which
+    /// this must equal.
     #[must_use]
     pub fn base_url(&self) -> Option<Url> {
         self.shared.fetches.base_url()
     }
 
+    /// Moves the base [`Self::base_url`] reads. Set it before
+    /// [`LynxGroup::create_lynx_view`](bobcat_core::LynxGroup::create_lynx_view),
+    /// to the view's own base: a base moved after that no longer equals the
+    /// view's, and a lazy container's sections would then be registered
+    /// under URLs the view's realms never load.
     pub fn set_base_url(&self, base_url: Option<Url>) {
         self.shared.fetches.set_base_url(base_url);
     }

@@ -224,7 +224,7 @@ async fn group_task(context: Rc<GroupContext>, mut attach: mpsc::UnboundedReceiv
                 Some(GroupCommand::Attach(attachment)) => {
                     let ViewAttachment {
                         viewport, sources, text_context, startup, native_modules, commands,
-                        metrics, notices, frames, cancel, fetch_probe,
+                        metrics, notices, frames, cancel, fetch_probe, base_url,
                     } = *attachment;
                     let outbox = ViewOutbox::new(
                         notices,
@@ -232,6 +232,7 @@ async fn group_task(context: Rc<GroupContext>, mut attach: mpsc::UnboundedReceiv
                         Arc::clone(&context.requester),
                         cancel.clone(),
                         fetch_probe,
+                        base_url,
                     );
                     #[cfg(all(target_arch = "wasm32", panic = "abort"))]
                     threads::add_script_panic_reporter({

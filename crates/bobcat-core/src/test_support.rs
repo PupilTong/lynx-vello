@@ -89,7 +89,6 @@ impl ResourceFetcher for InlineFetcher {
             ),
             // This double serves no module but the entry, and no plain fetch.
             SourceRequest::Module(url) | SourceRequest::Fetch { url } => Err(missing(&url)),
-            SourceRequest::Worker { specifier, .. } => Err(missing(&specifier)),
         };
         completion.complete(answer);
     }

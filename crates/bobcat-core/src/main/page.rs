@@ -966,7 +966,8 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
     let _cancel = cancel.clone().drop_guard();
     let ViewSources {
         // Spent on the embedder's thread, where `create_lynx_view` resolved
-        // `entry` and `background_entry` against it.
+        // `entry` and `background_entry` against it. Its parsed form rides in
+        // `outbox`, for the realms' synchronous loads.
         base_url: _,
         config,
         // Spent on the embedder's thread: the fonts and the default family

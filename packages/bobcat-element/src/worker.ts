@@ -1,7 +1,8 @@
 import { EventTarget, installEventHandler } from "bobcat:event-target";
-// The entry's own response URL, which the entry's preamble names before its
-// body runs; a live binding, read at each construction. `bobcat:runtime`
-// imports this module for its type alone, so the import below is no cycle.
+// The entry's own response URL, which `__BobcatInitEntry` names before the
+// entry's body runs; a live binding, read at each construction.
+// `bobcat:runtime` imports this module for its type alone, so the import
+// below is no cycle.
 import { __Card__ } from "bobcat:runtime";
 import {
   createWorker,
@@ -66,10 +67,17 @@ export class Worker extends EventTarget {
       throw new TypeError("Bobcat workers support only module scripts");
     }
     const name = options?.name === undefined ? "" : String(options.name);
-    // A relative specifier resolves against the page's entry, as a browser's
-    // resolves against the document that constructs the worker. The host keeps
-    // no base URL of its own.
-    this.#key = createWorker(url, name, __Card__);
+    // A relative URL resolves against the page's entry, as a browser's
+    // resolves against the document that constructs the worker: the host
+    // joins the two by URL rules and keeps no base URL of its own. One that
+    // does not resolve is HTML's `SyntaxError`: the host answers `null` for
+    // it rather than throwing, because every error a host member throws is
+    // an `InternalError`, and the class is this realm's to choose.
+    const key = createWorker(url, name, __Card__);
+    if (key === null) {
+      throw new SyntaxError(`Worker script URL \`${url}\` does not resolve against \`${__Card__}\``);
+    }
+    this.#key = key;
     this.onmessage = null;
     this.onerror = null;
     installEventHandler(this, "message");

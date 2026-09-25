@@ -19,7 +19,9 @@ use super::*;
 use crate::background::{WorkerCommand, WorkerMessage, WorkerStart};
 use crate::esm::build_runtime;
 use crate::jobs::{JsThread, JsThreadHandle};
-use crate::link::{DetachedView, InputEventPayload, PageUpdate, ViewNotice, detached_outbox};
+use crate::link::{
+    DetachedView, InputEventPayload, PageUpdate, ViewNotice, detached_base, detached_outbox,
+};
 use crate::main::WorkerFactory;
 use crate::main::runtime::bound_metrics;
 use crate::main::tree::PageConfig;
@@ -209,8 +211,15 @@ impl Harness {
         // test is: the entries are resolved by the same function, and the
         // startup sources are requested before the view's task exists, so
         // they are outstanding from the first turn and the sheets are
-        // answered in whatever order the test likes.
-        resolve_startup_urls(&mut sources).expect("a harness names URLs that resolve");
+        // answered in whatever order the test likes. The detached outbox
+        // resolves synchronous loads against `app:///`, so the view names
+        // that base too.
+        let base = resolve_startup_urls(&mut sources).expect("a harness names URLs that resolve");
+        assert_eq!(
+            base,
+            *detached_base(),
+            "a harness view's base is its outbox's"
+        );
         let mut outstanding = Vec::new();
         let request = |request: SourceRequest, outstanding: &mut Vec<_>| {
             let (completion, answer) = SourceCompletion::new(view.token.clone());

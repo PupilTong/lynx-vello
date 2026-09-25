@@ -77,12 +77,27 @@ impl WorkerFactory {
             3,
             Box::new(move |arguments| {
                 let creator = creator.upgrade().ok_or("the creating realm has been released")?;
-                let specifier = string(arguments, 0)?.to_owned();
+                let specifier = string(arguments, 0)?;
                 let name = string(arguments, 1)?.to_owned();
                 // Where the specifier resolves from: the MTS entry's response
                 // URL, which the realm holds as `__Card__` and hands over with
-                // every construction. Nothing on this side remembers it.
-                let base_url = string(arguments, 2)?.to_owned();
+                // every construction. Rust joins the specifier to it by URL
+                // rules and still does not remember it.
+                let base_url = string(arguments, 2)?;
+                // The built-in background script is told apart before any
+                // join, because `bobcat:bts` parses as an absolute URL of its
+                // own. A specifier that does not resolve starts nothing: no
+                // id, no `Start`, no request, and `null` back, which the realm
+                // throws as a `SyntaxError`.
+                let url = if specifier == BTS_MODULE_SPECIFIER {
+                    None
+                } else {
+                    let Ok(url) = url::Url::parse(base_url).and_then(|base| base.join(specifier))
+                    else {
+                        return Ok(HostValue::Null);
+                    };
+                    Some(String::from(url))
+                };
                 let id = creator.factory.next.get();
                 creator
                     .factory
@@ -95,7 +110,7 @@ impl WorkerFactory {
                 let Some(script) = creator.start(key, name) else {
                     return Ok(HostValue::String(id.to_string()));
                 };
-                if specifier == BTS_MODULE_SPECIFIER {
+                let Some(url) = url else {
                     let mut source = BTS_ENTRY_PREAMBLE.to_owned();
                     source.push_str("import { __BobcatStartBTS } from \"bobcat:bts-runtime\";\n__BobcatStartBTS(async () => {\n");
                     if let Some(background) = &background_entry {
@@ -114,16 +129,13 @@ impl WorkerFactory {
                         url: BTS_MODULE_SPECIFIER.to_owned(),
                     }));
                     return Ok(HostValue::String(id.to_string()));
-                }
+                };
                 // The answer travels to the worker task without another turn
                 // here: what the host is handed is the far end of the
                 // one-shot that already rode to `bobcat-workers` with the
                 // `Start` above.
                 creator.outbox.notify(ViewNotice::RequestSource {
-                    request: SourceRequest::Worker {
-                        specifier,
-                        base_url,
-                    },
+                    request: SourceRequest::Module(url),
                     completion: script,
                 });
                 Ok(HostValue::String(id.to_string()))

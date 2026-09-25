@@ -418,8 +418,9 @@ targets and the facade does no thread arithmetic of its own.
 
 #### Resource protocol, stylesheets and ESM loading
 
-`ResourceFetcher::request_source` owns URL resolution, fetching and UTF-8
-validation. Its concrete, non-cloneable `SourceCompletion` holds one end of the
+`ResourceFetcher::request_source` owns fetching, UTF-8 validation and the
+resolution of every URL a script request does not already carry resolved.
+Its concrete, non-cloneable `SourceCompletion` holds one end of the
 one-shot minted with the request and answers whichever task awaits it, so the
 host never learns which; no resource Future, poll loop, callback trait object
 or resource waker lives in core. Main's lifecycle notifications wake the host
@@ -438,8 +439,12 @@ value parse per declaration — the floor, because the wire format keeps
 attribute selectors and functional pseudo-classes as text and stylo builds
 specified values only through its value parsers. Decoding a container stays
 embedder work: core owns the `PreparsedStyleSheet` vocabulary, the embedder
-fills it. Source requests select a stylesheet or module payload and carry a
-specifier; the fetcher supplies the base URL and transport policy. The protocol
+fills it. Source requests select a stylesheet or module payload. A
+`SourceRequest::Module` — an entry, an import, a worker script or a
+synchronous load — carries an absolute URL Rust already resolved; a
+stylesheet, font or fetch carries the URL as it was named, and the fetcher
+resolves it against its own base, which the embedder keeps equal to
+`ViewSources::base_url`. The fetcher supplies the transport policy. The protocol
 also offers the optional `preload_source` hint,
 `request_image`/`service_images` and the `FrameImages` supertrait: every method
 is synchronous, so no resource future crosses it, and core names none of a
@@ -540,8 +545,11 @@ and neither entry preamble carries it. Node's algorithm — the cache, the
 It is written over two host members on `bobcat-internal:host`, which both realm
 kinds have: `resolveModuleUrl(base, specifier)`, the normalizer `import`
 resolves through, so a `require` and an `import` name a module by the same URL;
-and `loadModuleSync(url, parameters)`, which asks the host for that URL through
-the same `SourceRequest::Module` and answers the source *compiled* — the
+and `loadModuleSync(url, parameters)`, which resolves that URL against the
+view's `ViewSources::base_url` by URL rules (in every realm of the view, a
+Worker's included; an absolute URL resolves to itself), asks the host for the
+result through the same `SourceRequest::Module` and answers the source
+*compiled* — the
 wrapper function of a CommonJS file, the parsed value of a JSON one, or the
 namespace object of an ES module, linked and evaluated — so source text never
 becomes a JavaScript value. That load parks the job it runs
@@ -786,9 +794,9 @@ creates its document, initializes MTS inputs, retains the host render argument,
 then awaits the entry. The task that completes the entry calls
 `__BobcatInitEntry` with the entry's response URL before it completes the
 module, so `__Card__` is that URL before the entry's body runs, and a
-`new Worker` specifier resolves against it,
-which the realm hands `createWorker(url, name, baseUrl)` — the host keeps no base
-URL of its own. Boot then processes that argument and posts
+`new Worker` URL resolves against it: the realm hands it to
+`createWorker(url, name, baseUrl)`, and Rust joins the two by URL rules and
+keeps no base URL of its own. Boot then processes that argument and posts
 the result plus host props and SystemInfo as the first BTS Worker message,
 before rendering. The BTS bootstrap returns after installing a JS receiver, and
 that message initializes its inputs before importing the entry. Later internal
@@ -1015,10 +1023,13 @@ references survive, while a function, `Symbol`, `Map`, `Set`, `RegExp`,
 `postMessage` call; transfer lists remain pending. External ESM imports load
 through the view's resource fetcher and support TLA. `main/workers.rs` installs
 its three native operations — `createWorker`, `sendWorkerMessage`,
-`terminateWorker` — before entry boot. The `Start` goes out before the host is
-asked for anything, `SourceRequest::Worker` carries the entry's resolved URL as
-its base — the `__Card__` the realm passes as `createWorker`'s third argument,
-since the host keeps no base URL of its own — and the host is handed the far end of the one-shot that already rode
+`terminateWorker` — before entry boot. `createWorker` tells the built-in
+`bobcat:bts` apart first, then joins any other script URL by URL rules to the
+`__Card__` the realm passes as its third argument (Rust keeps no base URL of
+its own); a URL that does not resolve starts nothing and `new Worker` throws a
+synchronous `SyntaxError`. The `Start` goes out before the host is asked for
+anything, the script is requested as a `SourceRequest::Module` of the joined
+URL, and the host is handed the far end of the one-shot that already rode
 to `bobcat-workers` inside that `Start`, so the script reaches the worker
 without a main-thread turn. Every concurrent worker request is preserved.
 Worker entry/import requests use the Worker's cancellation scope, and host
@@ -1486,7 +1497,9 @@ libcurl loaded at runtime with `libloading` on macOS and Linux (no build-time
 link, no bundled HTTP or TLS stack; a host without it gets a precise
 `Unavailable`), and the Render Worker's `fetch` in the browser.
 
-**The `FetchIndex`**: the base URL every specifier resolves against, and the
+**The `FetchIndex`**: the base URL stylesheet, font, fetch and image URLs
+resolve against (script requests arrive resolved against the view's
+`ViewSources::base_url`, which this must equal), and the
 set of URLs a plain `SourceRequest::Fetch` has **completed successfully** for,
 written after the container installer ran. It is behind an `Arc` of its own
 rather than inside the shared state, because `ViewResources::fetch_probe()`

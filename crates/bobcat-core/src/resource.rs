@@ -28,6 +28,14 @@ use crate::style::PreparsedStyleSheet;
 /// any executor its IO needs. Images are reported through
 /// [`ImageReports`](dom::ImageReports), then read during composition.
 ///
+/// **A fetcher's base URL must be the view's
+/// [`ViewSources::base_url`](crate::ViewSources::base_url).** Scripts reach it
+/// already resolved against that base, while the stylesheets, fonts and plain
+/// fetches it is asked for are resolved against its own. With two different
+/// bases, a lazy container's sections would be registered under the URL the
+/// fetcher resolved the container's fetch to and loaded by the URL the realm
+/// resolved its section load to, and the two would not meet.
+///
 /// Every protocol method is synchronous: it starts work and returns. Core therefore holds no
 /// resource future and polls none, and nothing here names a host's transport, caches or
 /// codecs: whatever surface those have belongs to the host's own crate.
@@ -156,19 +164,18 @@ impl<T: ResourceFetcher + ?Sized> ResourceFetcher for Rc<T> {
     }
 }
 
-/// One source requested by the document owner. Resolution belongs to the fetcher.
+/// One source requested by the document owner.
+///
+/// A [`Self::Module`] carries an absolute URL the engine already resolved,
+/// in its WHATWG serialization. [`Self::StyleSheet`], [`Self::Font`] and
+/// [`Self::Fetch`] carry the URL as the view, the document or the realm named
+/// it, and the fetcher resolves it against its own base.
 #[derive(Debug)]
 pub enum SourceRequest {
     StyleSheet(String),
-    /// A worker script resolved against the creating view's entry URL.
-    /// Complete with `LoadedSource::Module`; the result goes to its worker.
-    Worker {
-        specifier: String,
-        base_url: String,
-    },
-    /// The view's entry, or a normalized module URL loaded after an import
-    /// or a synchronous load discovers it. Complete with
-    /// [`LoadedSource::Module`].
+    /// The URL of an entry, an import, a worker script or a synchronous
+    /// load. Complete with [`LoadedSource::Module`]; the result goes to the
+    /// realm or worker that asked.
     Module(String),
     /// Fetch `url` and keep it, the way an image source is fetched,
     /// answering only that the fetch is over.
@@ -176,7 +183,7 @@ pub enum SourceRequest {
     /// What the fetcher makes of the bytes is its own — the reference
     /// fetcher, given a container installer, registers a Lynx container's
     /// sections beside it — and nothing about them comes back. Resolution is
-    /// the fetcher's, as for every request.
+    /// the fetcher's, as for `StyleSheet` and `Font`.
     ///
     /// Complete with [`LoadedSource::Fetched`].
     Fetch {

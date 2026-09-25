@@ -68,7 +68,6 @@ impl ResourceFetcher for Entries {
             | SourceRequest::StyleSheet(url)
             | SourceRequest::Font { url }
             | SourceRequest::Fetch { url } => url.clone(),
-            SourceRequest::Worker { specifier, .. } => specifier.clone(),
         };
         completion.complete(Self::source(&specifier).map_or_else(
             || {

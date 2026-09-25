@@ -631,7 +631,10 @@ impl bobcat_core::FrameImages for TwoScriptFetcher {
 
 impl ResourceFetcher for TwoScriptFetcher {
     fn request_source(&self, request: SourceRequest, completion: SourceCompletion) {
-        if matches!(request, SourceRequest::Worker { .. }) {
+        // The entry is a `Module` request too, so the worker script is told
+        // apart by the URL Rust joined `./worker.js` to: the entry's response
+        // URL is `app:///main.js`.
+        if matches!(&request, SourceRequest::Module(url) if url == "app:///worker.js") {
             completion.complete(Ok(bobcat_core::resource::LoadedSource::Module {
                 source: self.worker.to_owned(),
                 url: "app:///worker.js".to_owned(),

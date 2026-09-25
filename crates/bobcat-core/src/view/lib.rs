@@ -443,20 +443,25 @@ impl StyleThreads {
 /// [`Self::fonts`] and [`Self::default_font_family`] become the view's text
 /// context, and [`Self::style_sheets`] and [`Self::entry`] become the
 /// requests `create_lynx_view` hands the fetcher before it returns. What
-/// crosses of them is the built context and the answers. The rest crosses as
-/// it stands, and the view's task on `bobcat-main` stages the document inputs
-/// out of it.
+/// crosses of them is the parsed base, the built context and the answers. The
+/// rest crosses as it stands, and the view's task on `bobcat-main` stages the
+/// document inputs out of it.
 #[derive(Debug)]
 pub struct ViewSources {
     /// The absolute URL this view's relative URLs resolve against, by URL
     /// rules rather than import-specifier rules: `main.js`, `./main.js` and
     /// `/main.js` are all relative URLs. A directory base needs its trailing
     /// `/`, since `app:///page` resolves `main.js` to `app:///main.js`.
+    /// `create_lynx_view` resolves the entries against it, and every realm of
+    /// the view — MTS, BTS and each Worker — resolves the URL of a
+    /// synchronous load (`loadModuleSync`) against it.
     ///
     /// It is not handed to the fetcher, which resolves the stylesheets, fonts
     /// and fetches it is asked for against a base of its own. An embedder
     /// that installs lazy containers must give its fetcher this same base, so
-    /// that a container's URL resolves alike on both sides.
+    /// that a container's URL resolves alike on both sides: the container is
+    /// fetched and its sections registered by the fetcher's resolution, and
+    /// each section is loaded by the realm's.
     pub base_url: String,
     pub config: PageConfig,
     pub fonts: Vec<FontBlob>,
@@ -726,8 +731,9 @@ impl LynxGroup {
         }
         // The entries' URLs, before the fetcher exists for the same reason as
         // the fonts below: a URL that does not resolve refuses the view
-        // before anything is requested.
-        resolve_startup_urls(&mut sources)?;
+        // before anything is requested. The parsed base goes on to every
+        // realm of the view, which resolves its synchronous loads against it.
+        let base_url = Arc::new(resolve_startup_urls(&mut sources)?);
         // The fonts next, and before the fetcher exists: a view whose
         // containers cannot serve the family it named will never render, and
         // the requests below go out in this same call, so a check made
@@ -808,6 +814,7 @@ impl LynxGroup {
                 frames,
                 cancel: cancel.clone(),
                 fetch_probe: fetcher.fetch_probe(),
+                base_url,
             })))
             .map_err(|_| EngineError::Thread {
                 name: "script",
@@ -1311,6 +1318,9 @@ pub(crate) struct ViewAttachment {
     /// of this view asks before making a fetch. `None` for a host that gave
     /// none.
     pub(crate) fetch_probe: Option<crate::resource::FetchProbe>,
+    /// [`ViewSources::base_url`], parsed by `create_lynx_view`: what every
+    /// realm of this view resolves a synchronous load's URL against.
+    pub(crate) base_url: Arc<url::Url>,
 }
 
 /// The answers to the requests [`LynxGroup::create_lynx_view`] made on the

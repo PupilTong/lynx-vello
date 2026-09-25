@@ -65,7 +65,6 @@ impl ResourceFetcher for Entries {
             | SourceRequest::StyleSheet(url)
             | SourceRequest::Font { url }
             | SourceRequest::Fetch { url } => url.clone(),
-            SourceRequest::Worker { specifier, .. } => specifier.clone(),
         };
         let source = match specifier.as_str() {
             MAIN_URL => Some(MAIN_ENTRY),

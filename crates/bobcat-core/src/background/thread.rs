@@ -1057,7 +1057,13 @@ mod tests {
             WorkerKey::new(key),
             events,
             token.clone(),
-            HostOutbox::new(sources, std::sync::Arc::new(crate::NoWakeup), token, None),
+            HostOutbox::new(
+                sources,
+                std::sync::Arc::new(crate::NoWakeup),
+                token,
+                None,
+                crate::link::detached_base(),
+            ),
             thread.clone(),
         );
         worker.spawn(boot_worker(
@@ -1169,7 +1175,13 @@ mod tests {
                     messages: incoming,
                     events,
                     token: token.clone(),
-                    sources: HostOutbox::new(notices, Arc::new(crate::NoWakeup), token, None),
+                    sources: HostOutbox::new(
+                        notices,
+                        Arc::new(crate::NoWakeup),
+                        token,
+                        None,
+                        crate::link::detached_base(),
+                    ),
                 }))
                 .expect("the loop is serving");
 

@@ -146,7 +146,6 @@ impl ResourceFetcher for Files {
             | SourceRequest::StyleSheet(url)
             | SourceRequest::Font { url }
             | SourceRequest::Fetch { url } => url.clone(),
-            SourceRequest::Worker { specifier, .. } => specifier.clone(),
         };
         completion.complete((self.source)(&specifier).map_or_else(
             || {

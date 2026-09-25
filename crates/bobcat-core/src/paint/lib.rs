@@ -896,6 +896,7 @@ impl Painter {
                     tokio_util::sync::CancellationToken::new(),
                     // No fetcher, so nothing to probe.
                     None,
+                    crate::link::detached_base(),
                 ),
                 notices: notice_receiver,
             },

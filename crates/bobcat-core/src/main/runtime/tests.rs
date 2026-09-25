@@ -4171,6 +4171,69 @@ fn a_require_that_cannot_load_throws_and_leaves_the_realm_usable() {
     }
 }
 
+/// A synchronous load's URL is resolved against the view's base URL — the
+/// detached outbox's `app:///` — by URL rules before it is requested, not
+/// against the module that made the load: a rooted and a relative lazy
+/// container name reach the fetcher as one absolute URL.
+#[test]
+fn a_sync_load_resolves_against_the_views_base() {
+    let (mut js, mut runtime, _elements, far) = runtime_over_watching_names(ingredients());
+    let mut notices = far.0.notices;
+    let host = std::thread::spawn(move || {
+        for (expected, source) in [
+            ("app:///lazy.bundle/x.js", "module.exports = 'x';"),
+            ("app:///lazy.bundle/y.js", "module.exports = 'y';"),
+        ] {
+            let (url, completion) = requested_module(&mut notices);
+            assert_eq!(url, expected);
+            completion.complete(Ok(module_source(source, &url)));
+        }
+    });
+    runtime
+        .evaluate_module(
+            &mut js,
+            r"
+        import { lynx } from 'bobcat:runtime';
+        const rooted = lynx.loadScript('x', {bundleName: '/lazy.bundle'});
+        const relative = lynx.loadScript('y', {bundleName: 'lazy.bundle'});
+        if (rooted !== 'x' || relative !== 'y') throw Error(`${rooted} ${relative}`);
+    ",
+            "app:///nested/load.js",
+            "loading sections through the host",
+        )
+        .unwrap();
+    host.join().unwrap();
+}
+
+/// A fetch is not resolved by the engine: the fetcher gets the string the
+/// realm wrote and resolves it against its own base.
+#[test]
+fn a_fetch_reaches_the_fetcher_as_the_realm_wrote_it() {
+    let (mut js, mut runtime, _elements, mut far) = runtime_over_watching_names(ingredients());
+    runtime
+        .evaluate_module(
+            &mut js,
+            r"
+        import { lynx } from 'bobcat:runtime';
+        globalThis.handle = lynx.fetchBundle('/lazy.bundle');
+    ",
+            "app:///nested/fetch.js",
+            "fetching a container",
+        )
+        .unwrap();
+    let url = loop {
+        match far.0.notices.try_recv().expect("the fetch was requested") {
+            ViewNotice::RequestSource {
+                request: crate::resource::SourceRequest::Fetch { url },
+                ..
+            } => break url,
+            ViewNotice::RequestSource { request, .. } => panic!("expected a fetch: {request:?}"),
+            _ => {}
+        }
+    };
+    assert_eq!(url, "/lazy.bundle");
+}
+
 /// A name under an engine prefix is answered from the runtime's built-ins and
 /// this realm's host modules, and from nothing else. One that is neither
 /// fails in the realm with a `ReferenceError`, through an `import` or a

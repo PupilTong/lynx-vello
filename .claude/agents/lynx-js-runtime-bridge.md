@@ -97,8 +97,10 @@ Landed and not to be regressed:
   that module from the pre-issued answer (with the entry preamble prepended
   and the response URL as its `import.meta.url`), the entry's own request
   never reaches the fetcher, that task names the entry (`__BobcatInitEntry`
-  with the response URL) before completing it, and a worker resolves against
-  the entry URL JavaScript holds. The only two things boot waits on are both
+  with the response URL) before completing it, and a Worker's script URL is
+  joined in Rust, by URL rules, to the entry URL JavaScript holds and hands to
+  `createWorker` (one that does not resolve starts nothing and throws a
+  synchronous `SyntaxError`). The only two things boot waits on are both
   inside its first `__FlushElementTree`: every listed author sheet, success or
   failure, mounted in listed order before the document is styled (a failed
   one is `StartupFailed(Script)` naming it), then the painter binding. Until
@@ -126,7 +128,9 @@ Landed and not to be regressed:
   `TimerFailed`, the walk continues, a repeating timer stays armed.
 - `bobcat:module` is Node's algorithm in `packages/bobcat-element`, over two
   host members on `bobcat-internal:host`: `resolveModuleUrl(base, specifier)`,
-  the normalizer an `import` uses, and `loadModuleSync(url, parameters)`, whose
+  the normalizer an `import` uses, and `loadModuleSync(url, parameters)`, which
+  resolves `url` against the view's `ViewSources::base_url` by URL rules in
+  every realm (`require.rs`, through the `HostOutbox`), and whose
   bridge half compiles the source (in the given wrapper parameter list, named
   by the response URL) or JSON-parses it **before** evaluating the compiled
   script. Do not move the cache, the `module` object or resolution back into

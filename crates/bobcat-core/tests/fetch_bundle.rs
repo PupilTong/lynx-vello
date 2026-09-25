@@ -185,7 +185,6 @@ impl ResourceFetcher for Files {
                 })
                 .ok_or_else(|| missing(url)),
             SourceRequest::Font { url } => Err(missing(url)),
-            SourceRequest::Worker { specifier, .. } => Err(missing(specifier)),
         };
         completion.complete(answer);
     }
