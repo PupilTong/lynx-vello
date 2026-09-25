@@ -94,8 +94,9 @@ RESET semantics, rerendering and component state; Rust sends a command and
 JavaScript invokes the framework's current hook.
 
 Accepting a command does not validate its JSON. Malformed data fails when MTS
-parses it, before any lifecycle hook or Worker message, and follows the existing
-script-failure path: `pump` reports `ScriptRunError` and the view ends.
+parses it, before any lifecycle hook or Worker message, and is reported as a
+`ScriptRunError`. The view goes on: the rest of the burst the command arrived
+in still applies, and a later update that parses is applied as usual.
 
 Global props merge literal top-level keys; nested objects are replaced and dots
 in a key stay literal. MTS keeps the host-provided values as JSON text independently

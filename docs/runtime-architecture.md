@@ -441,14 +441,35 @@ that flush is parked no other job of the group runs, as for any synchronous
 host member; the sheets were requested inside `create_lynx_view`, so the wait
 is for IO already in flight, and the painter's construction overlaps it.
 
-Failures are reported by where they happen. An entry that fails to load
-completes the entry's module with an error, which boot's `import` throws, so the
-embedder is told `StartupFailed(LynxViewError::Script(..))` carrying the URL
-and the host's reason. A sheet that fails to load, or that the fetcher answered
-with something other than a stylesheet, makes `__FlushElementTree` throw
-`loading stylesheet <url>: <reason>`: boot's own flush rejects boot, so the
-embedder is told `StartupFailed(LynxViewError::Script(..))` naming the sheet,
-and a flush the card makes itself throws to the card. What Rust
+Failures are reported by where they happen. An entry that fails to load is
+read as such by `load_entry` before any of it runs, and the embedder is told
+`StartupFailed` carrying the fetcher's own error; an answer that is not a
+script is `StartupFailed(LynxViewError::Script(..))` naming the URL. Neither
+completes the entry's module: the view has ended. A sheet that fails to load,
+or that the fetcher answered with something other than a stylesheet, makes
+`__FlushElementTree` throw `loading stylesheet <url>: <reason>`: boot's own
+flush rejects boot, so the embedder is told
+`StartupFailed(LynxViewError::Script(..))` naming the sheet — after a
+`ScriptRunError` with the same message, from the entry whose checkpoint
+returned that rejection — and a flush the card makes itself throws to the
+card. `DocumentSlot` keeps the first listed sheet that failed and throws it
+from every later settle, so a card that settled the listed sheets first, by
+an `adoptStyleSheet` or its own flush inside the entry's evaluation, and
+caught the failure still leaves boot's own flush to fail the boot with it.
+
+**An entry that throws does not fail the boot.** The entry is app code: boot
+imports it inside a `try`/`catch` whose `catch` raises the error again as a
+rejection nothing handles, so the checkpoint of the entry that ran the
+`catch` reports it once — `ScriptRunError` from `load_entry`, `load_module`
+or `settle_future`, `TimerFailed` or `ListenerFailed` where the entry's
+top-level `await` resumed in a timer or a worker event — and boot goes on to
+connect the BTS, render and flush, so `ScriptFinished` still follows its
+flush. A native MTS whose top-level script throws also goes on to render the
+page. What fails boot's own evaluation is the engine's code alone:
+`bobcat:runtime` reading page data that is not JSON, the document's
+construction, connecting the BTS, and the flush. `processData` and render
+hook failures never reach it either: `main-thread-runtime.ts` catches them
+and reports a `ScriptReported`. What Rust
 keeps for itself is `DocumentIngredients` — the create-time viewport, the
 `PageConfig`, the validated text context and the group's style pool — which
 `MainThreadRuntime::new` puts in the realm's `DocumentSlot`.
@@ -459,8 +480,12 @@ encoding, realm or boot failure exactly once through `LynxView::pump` — a font
 failure is not among them, having already refused the construction.
 A failed view asks its host for nothing more, sources and images alike.
 Its resolved entry URL is the module specifier.
-`ScriptRunError` reports fatal runtime failure; listener and timer failures stay
-non-fatal. Every main notification requests a host turn through `EventRequester`.
+`ScriptRunError` reports main-thread app code that threw, or a host call into
+the realm that failed, during boot or after it; like listener and timer
+failures, it is non-fatal and the realm goes on. `Panicked` reports an engine
+panic and, with `StartupFailed`, is what `EngineEvent::is_fatal` names: the
+two events that end a view. Every main notification requests a host turn
+through `EventRequester`.
 
 Dropping a loading view cancels its `CancellationToken`, detaches its image
 inbox, and then closes its command channel; boot never enters QuickJS after the
@@ -564,7 +589,7 @@ worker are both built from `lifetime.rs`'s `Lifetime`: the `JoinSet` holding
 that object's tasks, the `CancellationToken` that ends them, a thread-local
 latch, and the deadline and checkpoint generation that object's one
 `serve_clock` task reads. `Page::end` — the command channel closing, a cancelled
-load, a fatal failure, a panic in any task — sets the latch synchronously,
+load, a startup failure, a panic in any task — sets the latch synchronously,
 cancels the token, withdraws the armed deadline, and acknowledges whatever
 `BeginFrame` was pending so a blocked painter is released. Every entry point
 returns at once when the latch is set; the owner, whose one wait is the token
@@ -573,8 +598,8 @@ another thread onto that latch, aborts and awaits every task of the view — whi
 is what makes it the last owner of the page — and drops the realm. Why a view
 ended is recorded nowhere: what the embedder was told is whatever was reported
 before the end, and a release is the token having been cancelled from outside. A
-panic is the one end that still owes a report, and the payload rides the
-`JoinError` the set yields.
+panic is the one end that still owes a report, `Panicked`, and the payload rides
+the `JoinError` the set yields.
 
 ## Public and private boundaries
 
@@ -750,7 +775,8 @@ the next listener, through `lynx.reportError` and the host's
 the worker global's `reportError`, hence the parent `Worker`'s `error` event
 and a nonfatal `WorkerFailed`, in a worker realm.
 
-Each successful MTS entry import now starts one BTS Worker named `lynx-bg`.
+Each MTS boot starts one BTS Worker named `lynx-bg` once its entry import has
+settled, whether the entry succeeded or threw.
 Boot constructs it through the same `bobcat-internal` class, using the reserved
 module `bobcat:bts`. All workers use the same scope and protocol. BTS `lynx`
 is an ESM export from `bobcat:bts-runtime`; neither MTS nor BTS sets
@@ -992,8 +1018,10 @@ rejection leaves the realm usable.
 Boot stays pending while top-level await needs resources or timers. A host
 `LynxView::pump` keeps the resources moving; the timers need nothing from a
 host, because the view's task waits its own realm's deadlines out.
-The boot promise tracks only MTS evaluation. Its rejection sends `StartupFailed`;
-`ScriptFinished` is published after it fulfills and boot's first flush commits.
+The boot promise tracks only MTS evaluation, and only the engine's own code
+rejects it: the entry's import is caught inside boot. Its rejection sends
+`StartupFailed`; `ScriptFinished` is published after it fulfills and boot's
+first flush commits.
 Imports started after boot use the same loading path. Dropping a view cancels
 its completion handles and releases its suspended continuations.
 

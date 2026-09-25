@@ -403,7 +403,7 @@ without a Rust panic. An unexpected internal panic remains fatal. Nothing
 unwinds, so a one-time, process-wide panic hook reports it before the Worker
 aborts, and both engine Workers register with it: each reporter names its own
 thread. A panic on the Lynx-main Worker reaches every view on it as a
-`ScriptRunError`. A panic on the worker-realm Worker reaches the creator of
+`Panicked`, which ends the view. A panic on the worker-realm Worker reaches the creator of
 every worker still on it as that worker's `Failed`, and sets a flag the
 Lynx-main Worker reads before each `Start`, so a `new Worker` constructed after
 the trap fails at once with an `error` event instead of being sent to a thread

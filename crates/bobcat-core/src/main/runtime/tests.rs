@@ -4754,7 +4754,7 @@ fn one_mts_future_times_out_then_settles_as_a_promise_and_refuses_a_later_wait()
             match event {
                 crate::EngineEvent::ConsoleMessage { message, .. } => logged.push(message),
                 crate::EngineEvent::StartupFailed(error) => panic!("boot failed: {error}"),
-                crate::EngineEvent::ScriptRunError(error) => {
+                crate::EngineEvent::ScriptRunError(error) | crate::EngineEvent::Panicked(error) => {
                     panic!("the realm failed: {}", error.message)
                 }
                 _ => {}

@@ -72,22 +72,15 @@ struct ModuleNamespace {
 ///
 /// A group opens one of these per view on one runtime, so everything the
 /// runtime owns is shared: the heap, the atom table, the promise-job queue,
-/// the execution limits. Everything a *failure* is made of is not, and lives
-/// here, so one view's broken script cannot be reported to another's.
+/// the execution limits. Everything a *failure* is made of is not: a
+/// checkpoint run through this realm reports this realm's rejections alone,
+/// so one view's broken script cannot be reported to another's.
 ///
 /// Created on the thread that will own it — the engine-owned Lynx main
 /// thread — and never moved off it, which is why nothing here is `Send`.
 pub(crate) struct ScriptEngine {
     realm: quickjs::Context,
     module_namespaces: HashMap<String, ModuleNamespace>,
-    /// A checkpoint error raised beside a failure this realm's caller was
-    /// already reporting, kept for the next entry into *this* realm.
-    ///
-    /// It lives here rather than on the runtime because it is one realm's
-    /// failure: parked runtime-wide it would be handed to whichever realm
-    /// entered next, and a sibling view would fail for something it could
-    /// not have caused. Held here it also dies with the realm that owns it.
-    deferred_checkpoint_error: Option<ScriptError>,
     evaluation: Option<quickjs::Value>,
 }
 
@@ -97,9 +90,9 @@ pub(crate) struct ScriptEngine {
 /// one atom table, one promise-job queue, one set of execution limits. The
 /// queue is one of those facts, and no checkpoint ever leaves work in it:
 /// every checkpoint runs it dry, whichever realm queued the jobs. A
-/// *failure* is not a runtime-wide fact and does not live here: it belongs
-/// to the realm that raised it, which is where it waits — on
-/// [`ScriptEngine`].
+/// *failure* is not a runtime-wide fact: a rejection belongs to the realm
+/// that raised it, and only a checkpoint run through that realm's
+/// [`ScriptEngine`] reports it.
 pub(crate) struct ScriptRuntime {
     runtime: quickjs::Runtime,
     config: QuickJsConfig,
@@ -160,7 +153,6 @@ impl ScriptRuntime {
         Ok(ScriptEngine {
             realm,
             module_namespaces: HashMap::new(),
-            deferred_checkpoint_error: None,
             evaluation: None,
         })
     }
@@ -234,11 +226,6 @@ impl ScriptEngine {
     /// Ends one entry into this realm: the checkpoint runs whether the entry
     /// succeeded or not, because the jobs it queued are due either way.
     ///
-    /// A checkpoint error raised beside a failure the caller is already
-    /// reporting has nobody to return it to, so it waits for the next entry
-    /// into this realm — the realm that raised it. The first one waits; a
-    /// second is dropped, since one report of a wedged realm is the report.
-    ///
     /// An entry that ends in a failure reports one, and drops whatever
     /// rejections this realm still has queued behind it: one throw rejects
     /// its module's evaluation promise and everything awaiting it, and
@@ -247,6 +234,14 @@ impl ScriptEngine {
     /// still answers the next message, which is what HTML says it does.
     /// Pending *jobs* are not dropped — they are still due, and this entry's
     /// own checkpoint runs them before the caller hears the failure.
+    ///
+    /// A checkpoint error raised beside a failure the caller is already
+    /// reporting is one of those rejections: the checkpoint still runs, and
+    /// its error is dropped with the rest. Nothing is kept for the next entry
+    /// into this realm. A failure does not end the realm, so that entry is an
+    /// ordinary operation — a module completion, a future settle — and
+    /// refusing it in order to report an older error would leave whatever it
+    /// was resuming pending for good.
     fn finish_operation<T>(
         &mut self,
         runtime: &mut ScriptRuntime,
@@ -262,10 +257,7 @@ impl ScriptEngine {
                 }
             },
             Err(primary_error) => {
-                if let Err(checkpoint_error) = self.checkpoint(runtime, phase) {
-                    self.deferred_checkpoint_error
-                        .get_or_insert(checkpoint_error);
-                }
+                let _ = self.checkpoint(runtime, phase);
                 self.discard_leftover_rejections(runtime);
                 Err(primary_error)
             }
@@ -298,17 +290,6 @@ impl ScriptEngine {
         Ok(executed)
     }
 
-    /// Reports what the previous entry left owing before this one starts:
-    /// this realm's parked checkpoint error. There is nothing else to hand
-    /// back — the job queue is the runtime's and every checkpoint runs it
-    /// dry, so no entry inherits an unfinished one.
-    fn take_deferred_checkpoint_error(&mut self) -> Result<(), ScriptError> {
-        match self.deferred_checkpoint_error.take() {
-            Some(error) => Err(error),
-            None => Ok(()),
-        }
-    }
-
     /// Runs a collection now, so a dead handle's finalizer reaches the
     /// document before the batch it belongs to ends.
     ///
@@ -319,7 +300,6 @@ impl ScriptEngine {
         &mut self,
         runtime: &mut ScriptRuntime,
     ) -> Result<(), ScriptError> {
-        self.take_deferred_checkpoint_error()?;
         runtime.runtime.run_gc();
         self.checkpoint(runtime, ScriptErrorPhase::CollectGarbage)
             .map(|_| ())
@@ -350,7 +330,6 @@ impl ScriptEngine {
         result: Result<(&str, &str), &str>,
     ) -> Result<(), ScriptError> {
         const PHASE: ScriptErrorPhase = ScriptErrorPhase::ExecuteModule;
-        self.take_deferred_checkpoint_error()?;
         let result = match result {
             Ok((url, _)) if url.contains('\0') => Err(format!(
                 "module '{name}': the response URL contains a NUL byte"
@@ -451,7 +430,6 @@ impl ScriptEngine {
         arity: u8,
         mut callback: HostCallback,
     ) -> Result<(), ScriptError> {
-        self.take_deferred_checkpoint_error()?;
         self.realm
             .register_host_module_function(
                 module_specifier,
@@ -478,7 +456,6 @@ impl ScriptEngine {
     where
         F: FnMut(&str) -> Result<quickjs::RequiredSource, String> + 'static,
     {
-        self.take_deferred_checkpoint_error()?;
         self.realm
             .register_synchronous_loader(module_specifier, export_name, load)
             .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterHostModuleFunction))
@@ -495,7 +472,6 @@ impl ScriptEngine {
         source_name: &str,
     ) -> Result<(), ScriptError> {
         const PHASE: ScriptErrorPhase = ScriptErrorPhase::Execute;
-        self.take_deferred_checkpoint_error()?;
         let result = self
             .realm
             .evaluate(
@@ -541,7 +517,6 @@ impl ScriptEngine {
         source_name: &str,
     ) -> Result<(), ScriptError> {
         const PHASE: ScriptErrorPhase = ScriptErrorPhase::ExecuteModule;
-        self.take_deferred_checkpoint_error()?;
         let evaluation = self
             .realm
             .evaluate(
@@ -578,7 +553,6 @@ impl ScriptEngine {
         export_name: &str,
         arguments: &[quickjs::HostArgument<'_>],
     ) -> Result<bool, ScriptError> {
-        self.take_deferred_checkpoint_error()?;
         let result = self.invoke_module_export(module_specifier, export_name, arguments)?;
         // The checkpoint runs through `finish_operation`, never inline:
         // draining the job queue while this call is still on the stack would
@@ -602,7 +576,6 @@ impl ScriptEngine {
         export_name: &str,
         arguments: &[quickjs::HostArgument<'_>],
     ) -> Result<bool, ScriptError> {
-        self.take_deferred_checkpoint_error()?;
         match self.invoke_module_export(module_specifier, export_name, arguments)? {
             Ok(called) => Ok(called),
             failed @ Err(_) => {
@@ -673,10 +646,6 @@ impl fmt::Debug for ScriptEngine {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ScriptEngine")
-            .field(
-                "deferred_checkpoint_error",
-                &self.deferred_checkpoint_error.is_some(),
-            )
             .finish_non_exhaustive()
     }
 }
@@ -1102,34 +1071,31 @@ mod tests {
     }
 
     #[test]
-    fn a_checkpoint_error_beside_a_primary_one_is_reported_before_the_next_script() {
+    fn a_checkpoint_error_beside_a_primary_one_is_dropped() {
         let (mut runtime, mut engine) = engine();
         let primary = engine
             .execute_script(
                 &mut runtime,
-                "Promise.reject(new Error('deferred')); throw new Error('primary')",
+                "Promise.reject(new Error('beside')); throw new Error('primary')",
                 "app:///both.js",
             )
             .expect_err("the script's own exception wins");
         assert_eq!(primary.message.as_ref(), "Error: primary");
 
-        let deferred = engine
+        engine
             .execute_script(
                 &mut runtime,
                 "globalThis.reentered = true",
                 "app:///after.js",
             )
-            .expect_err("the deferred checkpoint error is reported first");
-        assert_eq!(deferred.kind, ScriptErrorKind::Exception);
-        assert_eq!(deferred.message.as_ref(), "Error: deferred");
-
+            .expect("the next script is not handed the rejection beside the failure");
         engine
             .execute_script(
                 &mut runtime,
-                "if (typeof reentered !== 'undefined') throw new Error('the script ran anyway')",
+                "if (reentered !== true) throw new Error('the next script never ran')",
                 "app:///verify.js",
             )
-            .expect("the refused script never entered JavaScript");
+            .expect("and it ran its own code");
     }
 
     #[test]
@@ -1244,33 +1210,6 @@ mod tests {
                 "reentry.js",
             )
             .expect("every job the failing script queued still ran, and ran first");
-    }
-
-    #[test]
-    fn a_deferred_checkpoint_error_waits_for_its_own_realm() {
-        // The parking case, across realms: the first realm's script fails
-        // *and* its checkpoint does, so the checkpoint's error has nobody to
-        // return it to. It waits for that realm, not for whoever enters next.
-        let (mut runtime, mut first) = engine();
-        let mut second = runtime.create_realm().expect("a second view's realm");
-
-        let primary = first
-            .execute_script(
-                &mut runtime,
-                "Promise.reject(new Error('deferred')); throw new Error('primary')",
-                "app:///first.js",
-            )
-            .expect_err("the script's own exception wins");
-        assert_eq!(primary.message.as_ref(), "Error: primary");
-
-        second
-            .execute_script(&mut runtime, "globalThis.answer = 42", "app:///second.js")
-            .expect("the sibling realm runs, holding none of that");
-
-        let deferred = first
-            .execute_script(&mut runtime, "globalThis.again = true", "app:///after.js")
-            .expect_err("the realm that deferred it is the realm that hears it");
-        assert_eq!(deferred.message.as_ref(), "Error: deferred");
     }
 
     #[test]

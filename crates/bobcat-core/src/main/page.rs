@@ -121,7 +121,6 @@
 
 use std::cell::{Cell, RefCell};
 use std::future::{Future, poll_fn};
-use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 
 use tokio::sync::{mpsc, watch};
@@ -136,7 +135,7 @@ use crate::clock::ClockInstant;
 use crate::lifetime::{EndOnUnwind, Lifetime, Settles, run_job, serve_clock};
 use crate::link::{SourceAnswer, ToMain, ViewOutbox};
 use crate::resource::{LoadedSource, SourceRequest, unanswered_source};
-use crate::threads::panicked;
+use crate::threads::{panicked, platform_script_error};
 use crate::view::{
     EngineEvent, LynxViewError, StartupSource, StartupSources, ViewSources, Viewport,
 };
@@ -206,11 +205,12 @@ pub(super) struct Page {
     /// reads, and the two numbers this realm's clock task waits on — the
     /// deadline it armed and the generation its own last entry recorded.
     lifetime: Lifetime,
-    /// Whether this view has already been told why it failed. The first report
-    /// wins, so one failure is one `StartupFailed` or one `ScriptRunError`. A
-    /// panic is not gated here — it has a latch of its own on the lifetime,
-    /// because a task that traps after a startup failure is still a fact the
-    /// embedder is owed.
+    /// Whether this view has already been told why it could not start. Only a
+    /// `StartupFailed` goes through it, and the first one wins, so one failure
+    /// is one report. Every other script failure is reported where it happens
+    /// and leaves the view running. A panic is not gated here either — it has
+    /// a latch of its own on the lifetime, because a task that traps after a
+    /// startup failure is still a fact the embedder is owed.
     reported: Cell<bool>,
     /// How many times the epilogue has run, for the tests that count the
     /// wakes a page answers.
@@ -287,7 +287,10 @@ impl Page {
         self.lifetime.ended()
     }
 
-    /// Reports one fatal failure and ends the view, in that order and once.
+    /// Reports one startup failure and ends the view, in that order and once.
+    ///
+    /// `event` is always a `StartupFailed`: that is the one failure of a
+    /// view's script that ends it, and a panic is [`Self::trapped`]'s.
     ///
     /// It touches no realm borrow, so an operation may call it from inside
     /// [`Self::enter`]: the epilogue that follows sees the end and does
@@ -462,7 +465,7 @@ impl Page {
     ///
     /// A handler that panics is the view's panic, as a lifecycle callback's
     /// already is: [`run_job`] catches it, [`Self::trapped`] reports the
-    /// `ScriptRunError` and the view ends. There is no per-change
+    /// `Panicked` and the view ends. There is no per-change
     /// `catch_unwind` — a panicking handler leaves the document unspecified,
     /// which is `dom`'s own recorded contract for one, and delivering the
     /// rest of the batch into it would be worse than stopping.
@@ -527,11 +530,10 @@ impl Page {
     /// already reported a startup failure and then traps still says so.
     fn trapped(&self, payload: &(dyn std::any::Any + Send)) {
         if self.lifetime.report_panic() {
-            self.outbox
-                .engine_event(EngineEvent::ScriptRunError(panicked(
-                    "the Lynx main thread panicked",
-                    payload,
-                )));
+            self.outbox.engine_event(EngineEvent::from_panic(panicked(
+                "the Lynx main thread panicked",
+                payload,
+            )));
         }
         self.end();
     }
@@ -582,6 +584,11 @@ impl Page {
     }
 
     /// Applies one command to a view whose realm exists, including during boot.
+    ///
+    /// A command whose script fails is reported and the burst goes on, boot
+    /// finished or not: the failure is the app's, and the realm is still
+    /// there for the next command. A panic is the view's, as anywhere else in
+    /// an entry: [`run_job`] catches it and [`Self::trapped`] reports it.
     fn apply_command(
         &self,
         runtime: &mut MainThreadRuntime,
@@ -592,7 +599,8 @@ impl Page {
             ToMain::PageUpdate(update) => {
                 // All host lifecycle commands passed LynxView's MTS-boot gate.
                 if let Err(error) = runtime.apply_page_update(js, &update) {
-                    self.fail(EngineEvent::ScriptRunError(error.into_script_error()));
+                    self.outbox
+                        .engine_event(EngineEvent::ScriptRunError(error.into_script_error()));
                 }
             }
             ToMain::DispatchEvent {
@@ -600,20 +608,15 @@ impl Page {
                 name,
                 payload,
             } => {
-                // A listener that panics is not fatal to the view: the
-                // payload is dropped, the rest of the burst applies, and the
-                // epilogue still runs.
-                let dispatched = catch_unwind(AssertUnwindSafe(|| {
-                    runtime.dispatch_input_event(js, target, name, &payload)
-                }));
-                if let Ok(Err(error)) = dispatched {
+                if let Err(error) = runtime.dispatch_input_event(js, target, name, &payload) {
                     self.outbox
                         .engine_event(EngineEvent::ListenerFailed(error.into_script_error()));
                 }
             }
             ToMain::Vsync(milliseconds) => {
                 if let Err(error) = runtime.vsync(js, milliseconds) {
-                    self.fail(EngineEvent::ScriptRunError(error.into_script_error()));
+                    self.outbox
+                        .engine_event(EngineEvent::ScriptRunError(error.into_script_error()));
                 }
             }
             ToMain::BeginFrame { now, seq } => {
@@ -1118,49 +1121,82 @@ async fn consume_metrics(page: Rc<Page>, mut metrics: watch::Receiver<Option<Vie
 /// made already, in which case this is what resumes it, or not yet, in which
 /// case the import finds the module in the registry.
 ///
-/// What fails here fails the boot: a load the fetcher could not make is
-/// completed as an error naming the URL, which rejects boot's import, and a
-/// realm that refuses the completion is reported the way [`load_module`]
-/// reports one.
+/// The entry is read here, before any of it runs, so an entry that cannot be
+/// loaded fails the boot: a load the fetcher could not make is reported as
+/// the fetcher's own error, and an answer that is not a script as a `Script`
+/// error naming the URL, each as `StartupFailed`. The module is not completed
+/// then — the view has ended, and boot's `import` of it is released with the
+/// realm. The entry's *evaluation* is the app's code: boot catches what it
+/// throws, so a failure there, or in a module it imports, is reported as
+/// `ScriptRunError` and boot goes on past it. The rest of boot runs in this
+/// same entry, and a failure of the engine's own boot code there — most often
+/// a listed sheet boot's flush could not load — is reported twice, with one
+/// message: this entry reports the rejection its checkpoint returned as
+/// `ScriptRunError`, and the epilogue then reports boot's failure as
+/// `StartupFailed`. Naming the entry, which is engine code too, fails the
+/// boot from here directly.
 ///
 /// Except where the embedder released the view meanwhile. Completing the entry
 /// evaluates it and runs the rest of boot, and an entry that adopts a
 /// stylesheet, like boot's own flush waiting for the listed sheets or the
 /// binding, parks inside that evaluation on a wait whose first arm is the
-/// view's token, so a release makes the evaluation throw. That is the end of a view nobody is
-/// watching rather than a failure of it, and is not reported.
+/// view's token, so a release makes the evaluation throw; a release also
+/// drops the answer's completion, which fails the load. Either is the end of a
+/// view nobody is watching rather than a failure of it, and is not reported.
 async fn load_entry(page: Rc<Page>, entry: StartupSource) {
     let StartupSource { url, answer } = entry;
-    let answered = await_source(answer).await;
+    let answered = await_source(answer)
+        .await
+        .and_then(|source| entry_script(&url, source));
     let completing = Rc::clone(&page);
     page.enter(move |runtime, js| {
-        if let Err(error) = runtime.complete_entry(js, &url, answered) {
-            if completing.outbox.is_cancelled() {
+        let completed = answered
+            .and_then(|(response_url, source)| runtime.complete_entry(js, &response_url, &source));
+        match completed {
+            Ok(Ok(())) => {}
+            _ if completing.outbox.is_cancelled() => {
                 completing.end();
-                return;
             }
-            completing.fail(EngineEvent::StartupFailed(error.into_script_error().into()));
+            Ok(Err(error)) => completing
+                .outbox
+                .engine_event(EngineEvent::ScriptRunError(error.into_script_error())),
+            Err(error) => completing.fail(EngineEvent::StartupFailed(error)),
         }
     })
     .await;
 }
 
+/// The script an answer to the entry request carries — its response URL and
+/// its source — or, for an answer of another kind, the startup failure that
+/// is: a `Script` error naming `url`, the URL the entry was requested by.
+fn entry_script(url: &str, answer: LoadedSource) -> Result<(String, String), LynxViewError> {
+    let kind = match answer {
+        LoadedSource::Module { source, url } => return Ok((url, source)),
+        LoadedSource::StyleSheet(_) => "stylesheet",
+        LoadedSource::Font(_) => "font",
+        LoadedSource::Fetched => "plain fetch",
+    };
+    Err(LynxViewError::Script(platform_script_error(format!(
+        "the fetcher returned a {kind} for {url}"
+    ))))
+}
+
 /// One resource load an import produced.
 ///
-/// An import that cannot be completed is fatal to whatever was awaiting it,
-/// so the failure ends the view — reported as a startup failure while boot is
-/// still outstanding, and as a run failure once it has been reported.
+/// The load's outcome is the module's: a load that failed completes the
+/// module with an error, which rejects the import in the realm, where the
+/// code that made it can catch it. What the completion itself returns — the
+/// realm refusing it, or a rejection the code it resumed left unhandled — is
+/// reported as `ScriptRunError`, whether boot has finished or not, and the
+/// view goes on: the import is the app's, and so is whatever awaited it.
 async fn load_module(page: Rc<Page>, url: String, answer: SourceAnswer) {
     let source = await_source(answer).await;
     let completing = Rc::clone(&page);
     page.enter(move |runtime, js| {
         if let Err(error) = runtime.complete_module(js, &url, source) {
-            let error = error.into_script_error();
-            completing.fail(if completing.boot_reported.get() {
-                EngineEvent::ScriptRunError(error)
-            } else {
-                EngineEvent::StartupFailed(error.into())
-            });
+            completing
+                .outbox
+                .engine_event(EngineEvent::ScriptRunError(error.into_script_error()));
         }
     })
     .await;
@@ -1168,23 +1204,17 @@ async fn load_module(page: Rc<Page>, url: String, answer: SourceAnswer) {
 
 /// One future a `.then` asked this realm to settle.
 ///
-/// Its shape is [`load_module`]'s, and so is what a failure costs: nothing in
-/// the realm is waiting for a settle that cannot be delivered, but the failure
-/// is the realm refusing a call rather than the operation failing — which is
-/// fatal to whatever the Promise was holding up. Reported as a startup failure
-/// while boot is still outstanding, and as a run failure once it has been
-/// reported.
+/// Its shape is [`load_module`]'s, and so is what a failure costs: the realm
+/// refusing the settle, or the code it resumed failing, is reported as
+/// `ScriptRunError`, whether boot has finished or not, and the view goes on.
 async fn settle_future(page: Rc<Page>, id: u32, future: crate::future::HostFuture) {
     let outcome = future.await;
     let settling = Rc::clone(&page);
     page.enter(move |runtime, js| {
         if let Err(error) = runtime.deliver_future(js, id, outcome) {
-            let error = error.into_script_error();
-            settling.fail(if settling.boot_reported.get() {
-                EngineEvent::ScriptRunError(error)
-            } else {
-                EngineEvent::StartupFailed(error.into())
-            });
+            settling
+                .outbox
+                .engine_event(EngineEvent::ScriptRunError(error.into_script_error()));
         }
     })
     .await;
@@ -1255,9 +1285,12 @@ async fn consume_worker_events(page: Rc<Page>) {
         let delivered = page
             .enter(move |runtime, js| runtime.dispatch_worker_event(js, key, payload))
             .await;
-        // A configured BTS entry can reject the boot promise in this checkpoint.
-        // The epilogue reports that as StartupFailed and ends the view; only an
-        // error that leaves the view running is a listener failure.
+        // Boot can settle inside this entry, when the MTS entry's top-level
+        // await was waiting on this worker. If boot's own code then failed,
+        // the entry's epilogue, which ran before this answer, has reported
+        // that as StartupFailed and ended the view, and this error is the
+        // same failure. Any other error leaves the view running and is the
+        // listener's, the entry's own throw included.
         if let Some(Err(error)) = delivered
             && !page.ended()
         {

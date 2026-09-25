@@ -95,7 +95,9 @@ Landed and not to be regressed:
   rules before any request; a failure is the construction error
   `EngineError::InvalidUrl`), a task of the view completes
   that module from the pre-issued answer (with the entry preamble prepended
-  and the response URL as its `import.meta.url`), the entry's own request
+  and the response URL as its `import.meta.url`; an answer that failed is
+  `StartupFailed` carrying the fetcher's own error, and the module is never
+  completed), the entry's own request
   never reaches the fetcher, that task names the entry (`__BobcatInitEntry`
   with the response URL) before completing it, and a Worker's script URL is
   joined in Rust, by URL rules, to the entry URL JavaScript holds and hands to
@@ -103,11 +105,24 @@ Landed and not to be regressed:
   synchronous `SyntaxError`). The only two things boot waits on are both
   inside its first `__FlushElementTree`: every listed author sheet, success or
   failure, mounted in listed order before the document is styled (a failed
-  one is `StartupFailed(Script)` naming it), then the painter binding. Until
+  one is `StartupFailed(Script)` naming it, also where app code settled it
+  first and caught the error: `DocumentSlot` keeps the first failure and
+  throws it from every later settle), then the painter binding. Until
   the sheets have settled the epilogue's `commit_if_dirty` skips rather than
   waits, so no frame is published without them.
   `consume_messages` on `bobcat-workers` never awaits the deliveries it
   queued, because `Terminate` is in band behind them.
+- **Only `StartupFailed` and `Panicked` end a view** (`EngineEvent::is_fatal`,
+  which `LynxView::pump` ends a view on). Boot imports the entry inside a
+  `try`/`catch` that raises what it caught again as an unhandled rejection, so
+  an entry that throws is a `ScriptRunError` and boot still connects the BTS,
+  renders and flushes; only the engine's own boot code fails boot's
+  evaluation. `ScriptRunError`, `ListenerFailed` and `TimerFailed` are named
+  by the kind of entry the failure happened in, during boot or after it, and
+  none of them ends the view. Every panic reaches the embedder as `Panicked`
+  through `EngineEvent::from_panic`; an input dispatch is not caught on its
+  own. A checkpoint error beside a failure an entry is already reporting is
+  dropped with the other leftover rejections, never kept for the next entry.
 - The BTS is a `Worker` named `lynx-bg` on the group's `bobcat-workers` runtime.
   A BTS failure is a nonfatal `EngineEvent::WorkerFailed` — never
   `StartupFailed`, never view teardown. `ScriptFinished` means MTS boot settled

@@ -128,6 +128,7 @@ async fn resource_completion_reaches_main_without_another_painter_turn() {
             match event {
                 EngineEvent::ScriptFinished => finished = true,
                 EngineEvent::StartupFailed(error) => panic!("boot failed: {error}"),
+                EngineEvent::Panicked(error) => panic!("the engine panicked: {error}"),
                 _ => {}
             }
         }
@@ -488,11 +489,12 @@ async fn an_unresolvable_url_fails_construction_without_fetching() {
 /// inside `create_lynx_view`, so the host has resolved all three before the
 /// view's own boot has read any of them, and every one of them fails here.
 /// What stops at the first failure is the *reading*. The entry is read first:
-/// boot imports it before it renders, and the listed sheets are read only by
-/// boot's first `__FlushElementTree`, which a boot whose entry failed never
-/// reaches. So one `StartupFailed` is reported — a `Script` error, because
-/// what the embedder is told is the exception boot's `import` threw, naming
-/// the entry and the reason — and the sheets' answers are dropped unread.
+/// the view's entry task reads its answer before boot can go on to render,
+/// and the listed sheets are read only by boot's first `__FlushElementTree`,
+/// which a boot whose entry failed never reaches. So one `StartupFailed` is
+/// reported — the fetcher's own `Resource` error, which is what the entry
+/// task was answered with, naming the entry as its locator and the reason in
+/// its message — and the sheets' answers are dropped unread.
 #[tokio::test]
 async fn a_resolution_failure_is_one_event_whatever_else_failed() {
     let fetcher = Rc::new(FetcherDouble::new(Vec::new()).resolving_to("not a URL"));
@@ -516,13 +518,14 @@ async fn a_resolution_failure_is_one_event_whatever_else_failed() {
         "creation hands over both sheets and the entry, before any turn"
     );
     let error = wait_for_script(&mut view).expect_err("the entry cannot be resolved");
+    let bobcat_core::LynxViewError::Resource(error) = error else {
+        panic!("the fetcher's own error: {error}");
+    };
+    assert_eq!(error.locator.as_deref(), Some("app:///main.js"), "{error}");
     assert!(
-        matches!(error, bobcat_core::LynxViewError::Script(_)),
+        error.to_string().contains("relative URL without a base"),
         "{error}"
     );
-    let message = error.to_string();
-    assert!(message.contains("app:///main.js"), "{message}");
-    assert!(message.contains("relative URL without a base"), "{message}");
     assert_eq!(
         fetcher.resolve_count(),
         3,

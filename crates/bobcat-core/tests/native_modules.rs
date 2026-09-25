@@ -24,6 +24,7 @@ const SCREEN: bobcat_core::ScreenMetrics =
 const MAIN_URL: &str = "app:///main.js";
 const BACKGROUND_URL: &str = "app:///background.js";
 const UNDECLARED_URL: &str = "app:///undeclared.js";
+const ON_EVENT_URL: &str = "app:///on-event.js";
 
 /// A minimal main-thread entry: a card with one element, so boot finishes.
 const MAIN_ENTRY: &str = r"
@@ -53,6 +54,7 @@ impl Entries {
             MAIN_URL => Some(MAIN_ENTRY),
             BACKGROUND_URL => Some(BACKGROUND_ENTRY),
             UNDECLARED_URL => Some(UNDECLARED_ENTRY),
+            ON_EVENT_URL => Some(ON_EVENT_ENTRY),
             _ => None,
         }
     }
@@ -75,7 +77,7 @@ impl ResourceFetcher for Entries {
                     kind: ResourceErrorKind::NotFound,
                     phase: ResourceErrorPhase::Resolve,
                     locator: Some(Arc::from(specifier.as_str())),
-                    message: "this host serves three entries".into(),
+                    message: "this host serves four entries".into(),
                     retry: RetryAdvice::Never,
                 }
                 .into())
@@ -128,6 +130,17 @@ let undeclared;
 lynx.getApp().NativeModules.Echo.echo({ note: 'hello' }, function (method, echoed) {
   console.log('echoed ' + method + ' ' + JSON.stringify(echoed)
     + ', released ' + (undeclared.deref() === undefined));
+});
+";
+
+/// A background entry that makes its call only when the host sends it the
+/// `call` global event, so the call comes after whatever the host did first.
+const ON_EVENT_ENTRY: &str = r"
+import { console, lynx } from 'bobcat:bts-runtime';
+lynx.getJSModule('GlobalEventEmitter').addListener('call', () => {
+  lynx.getApp().NativeModules.Echo.echo({ note: 'after' }, function (method, echoed) {
+    console.log('echoed ' + method + ' ' + JSON.stringify(echoed));
+  });
 });
 ";
 
@@ -323,6 +336,61 @@ async fn an_injected_module_answers_a_background_call_on_the_embedders_own_threa
         [std::thread::current().id()],
         "a module is invoked on the thread that pumps its view"
     );
+}
+
+/// A script failure after boot leaves the view running, and its native
+/// modules with it: a page update the main-thread realm fails is reported as a
+/// `ScriptRunError`, and a background call made after it is still answered.
+///
+/// A failure that ended the view would have cleared the table `pump` answers
+/// a call through, so the callback would never have arrived.
+#[tokio::test]
+async fn a_script_failure_after_boot_leaves_native_module_calls_answered() {
+    let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Sequential)
+        .await
+        .expect("the group starts");
+    let echo = Rc::new(Echo::new("Echo"));
+    let mut view = group
+        .create_lynx_view(
+            32.0,
+            24.0,
+            1.0,
+            |_reports| Entries,
+            vec![Box::new(Shared(Rc::clone(&echo))) as Box<dyn NativeModule>],
+            sources(ON_EVENT_URL),
+        )
+        .expect("the view is built");
+    let mut painter = Painter::new(DrawTarget::Offscreen, 32.0, 24.0, 1.0)
+        .await
+        .expect("the painter is built");
+    painter.attach(&view).expect("a fresh view takes a painter");
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut failed = false;
+    while !failed {
+        for event in view.pump() {
+            match event {
+                EngineEvent::ScriptFinished => view
+                    .update_data("not JSON".to_owned(), String::new())
+                    .expect("a booted view accepts a data update"),
+                EngineEvent::ScriptRunError(_) => failed = true,
+                event if event.is_fatal() => panic!("the view failed: {event:?}"),
+                _ => {}
+            }
+        }
+        assert!(Instant::now() < deadline, "the update never failed");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(view.is_ready(), "the failure did not end the view");
+
+    view.send_global_event("call", "[]".to_owned())
+        .expect("the view still takes page updates");
+    assert_eq!(
+        first_console_message(&mut view),
+        r#"echoed echo [{"note":"after"},null]"#,
+        "the call made after the failure was answered"
+    );
+    assert_eq!(echo.named.borrow().as_slice(), ["echo"]);
 }
 
 #[tokio::test]

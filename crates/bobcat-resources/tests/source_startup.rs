@@ -69,6 +69,7 @@ fn boot(
             match event {
                 EngineEvent::ScriptFinished => return Ok(()),
                 EngineEvent::StartupFailed(error) => return Err(error),
+                EngineEvent::Panicked(error) => return Err(error.into()),
                 _ => {}
             }
         }
@@ -141,10 +142,11 @@ async fn text_and_preparsed_sheets_keep_cascade_order() {
 /// A decoding failure keeps the resolved URL, which is what a card's author
 /// needs to find the file.
 ///
-/// The entry is read by the boot module's `import`, and a listed stylesheet by
-/// boot's first `__FlushElementTree`, so either failure reaches the embedder
-/// as the exception boot threw rather than as the fetcher's own error. What
-/// has to survive that is the resolved URL.
+/// The entry's answer is read by the view's entry task before any of it
+/// runs, so its failure reaches the embedder as the fetcher's own
+/// `InvalidScriptEncoding`. A listed stylesheet is read by boot's first
+/// `__FlushElementTree`, so its failure reaches the embedder as the exception
+/// that flush threw. What has to survive either is the resolved URL.
 #[tokio::test]
 async fn source_utf8_errors_keep_the_resolved_url() {
     for stylesheet in [false, true] {
@@ -169,7 +171,14 @@ async fn source_utf8_errors_keep_the_resolved_url() {
         };
         let (mut view, _painter) = view(&group, &resources, sources).await;
         let error = boot(&mut view, &receiver).unwrap_err();
-        assert!(matches!(error, LynxViewError::Script(_)), "{error}");
+        if stylesheet {
+            assert!(matches!(error, LynxViewError::Script(_)), "{error}");
+        } else {
+            assert!(
+                matches!(error, LynxViewError::InvalidScriptEncoding { .. }),
+                "{error}"
+            );
+        }
         let message = error.to_string();
         assert!(message.contains("app:///invalid.bin"), "{message}");
         assert!(view.pump().is_empty(), "failure arrives once");
@@ -178,10 +187,10 @@ async fn source_utf8_errors_keep_the_resolved_url() {
 
 /// A view whose entry cannot be loaded fails, and its group goes on serving.
 ///
-/// The failing view's boot reads its entry inside its own realm, so the read
-/// is a job of the group's one queue; what keeps a sibling from waiting on it
-/// is that the read *ends* — a resolution failure is an answer, and the
-/// exception it throws finishes the job.
+/// The failing view's entry task reads the answer in a job of the group's one
+/// queue; what keeps a sibling from waiting on it is that the read *ends* — a
+/// resolution failure is an answer, and reporting it, the fetcher's own
+/// error, finishes the job.
 #[tokio::test]
 async fn missing_source_fails_without_blocking_sibling_startup() {
     let (group, resources, receiver) = setup().await;
@@ -194,10 +203,15 @@ async fn missing_source_fails_without_blocking_sibling_startup() {
     // `app:` is a plausible scheme that nothing registered and no transport
     // serves, so resolution is where the load stops.
     match boot(&mut failed, &receiver) {
-        Err(LynxViewError::Script(error)) => {
-            let message = error.to_string();
-            assert!(message.contains("missing.js"), "{message}");
-            assert!(message.contains("UnsupportedScheme"), "{message}");
+        Err(LynxViewError::Resource(error)) => {
+            assert!(
+                error
+                    .locator
+                    .as_deref()
+                    .is_some_and(|locator| locator.contains("missing.js")),
+                "{error:?}"
+            );
+            assert!(error.to_string().contains("UnsupportedScheme"), "{error}");
         }
         outcome => panic!("unexpected outcome for a missing source: {outcome:?}"),
     }
@@ -488,8 +502,11 @@ async fn dynamic_import_loads_relative_static_dependencies_and_waits_for_top_lev
     assert_eq!(&screenshot.pixels[offset..offset + 4], &[0, 0, 255, 255]);
 }
 
+/// An import that fails rejects its promise, where the entry can catch it.
+/// One the entry does not catch is the app's failure rather than the boot's:
+/// it is reported as a `ScriptRunError`, and boot still finishes.
 #[tokio::test]
-async fn import_failures_reject_promises_and_only_uncaught_startup_failures_end_boot() {
+async fn import_failures_reject_promises_and_an_uncaught_one_is_reported_before_boot_finishes() {
     for caught in [true, false] {
         let (group, resources, receiver) = setup().await;
         let source = if caught {
@@ -524,13 +541,36 @@ async fn import_failures_reject_promises_and_only_uncaught_startup_failures_end_
             ViewSources::new("app:///", "app:///main.js", SCREEN),
         )
         .await;
-        let outcome = boot(&mut view, &receiver);
         if caught {
-            outcome.unwrap();
-        } else {
-            let error = outcome.unwrap_err();
-            assert!(error.to_string().contains("missing.js"), "{error:?}");
+            boot(&mut view, &receiver).unwrap();
+            continue;
         }
+        // `boot` passes over a `ScriptRunError`, which is what this branch is
+        // about, so the events are collected here instead.
+        let mut events = Vec::new();
+        while !events
+            .iter()
+            .any(|event| matches!(event, EngineEvent::ScriptFinished))
+        {
+            receiver
+                .recv_timeout(Duration::from_secs(20))
+                .expect("startup wakes the host");
+            events.extend(view.pump().into_iter().filter(|event| {
+                event.is_fatal()
+                    || matches!(
+                        event,
+                        EngineEvent::ScriptRunError(_) | EngineEvent::ScriptFinished
+                    )
+            }));
+        }
+        let [
+            EngineEvent::ScriptRunError(error),
+            EngineEvent::ScriptFinished,
+        ] = events.as_slice()
+        else {
+            panic!("one ScriptRunError, then ScriptFinished: {events:?}");
+        };
+        assert!(error.message.contains("missing.js"), "{error}");
     }
 }
 
@@ -641,6 +681,7 @@ async fn imports_started_after_boot_can_commit_a_later_frame() {
                     EngineEvent::StartupFailed(_)
                         | EngineEvent::ScriptRunError(_)
                         | EngineEvent::TimerFailed(_)
+                        | EngineEvent::Panicked(_)
                 ),
                 "{event:?}"
             );

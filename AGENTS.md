@@ -326,7 +326,9 @@ rather than a turn later — and then requests each stylesheet in the order the
 view listed them, followed by the entry module, on the embedder's thread,
 before it returns. Only the built text context and the answering one-shots
 cross to `bobcat-main`. The entry's is read by a task of the view's owner as it
-arrives, which completes the module boot imports the entry by its URL. The
+arrives, which completes the module boot imports the entry by its URL; an
+entry the fetcher could not load fails the startup with the fetcher's own
+error, before any of it runs. The
 sheets' go to the realm's `DocumentSlot`, and **boot's first
 `__FlushElementTree` waits for every listed sheet, success or failure, before
 the document enters the style pipeline**, mounting them in listed order — so
@@ -334,7 +336,13 @@ the cascade order between several listed sheets is the listed order, and no
 frame is published without them. A sheet that failed to load, or that the
 fetcher answered with something else, makes that flush throw
 `loading stylesheet <url>: <reason>`, which fails the boot with
-`StartupFailed(LynxViewError::Script(..))` naming the sheet. The realm itself opens
+`StartupFailed(LynxViewError::Script(..))` naming the sheet; the entry that
+resumed boot has reported the same rejection just before, as a
+`ScriptRunError` with the same message. App code can settle the listed sheets
+first — an `adoptStyleSheet` or a `__FlushElementTree` inside the entry's
+evaluation — and catch the failure, so `DocumentSlot` keeps the first one and
+every later settle throws it again: boot's own flush still fails the boot with
+it, and the epilogue's implicit commit stays off. The realm itself opens
 immediately, before any answer has arrived, so the fetcher's IO,
 the whole of boot and the first frame's encode all overlap the painter the
 embedder builds next, and `LynxView::pump` services every *later* request — imports,
@@ -765,16 +773,28 @@ with the entry preamble prepended and the fetcher's response URL as its
 flush) runs in the job that completes it; the entry's own request never reaches
 the fetcher. The listed sheets are mounted by that flush, in listed order, as
 above. Success is `ScriptFinished`; a font, realm or boot failure is
-`StartupFailed`. An entry that cannot be loaded is `LynxViewError::Script`,
-because boot's `import` is what threw, naming the URL and the host's reason; a
-sheet that cannot be loaded, or that the fetcher answered with something else,
-is `LynxViewError::Script` too, because boot's `__FlushElementTree` is what
-threw, naming the sheet and the reason. That
-failure stays the failing view's and is
-reported once: an entry that throws under boot's top-level `await` rejects
-through the promise-job queue the group's realms share, and what it leaves
-there reaches neither the next view nor the failing realm's own next entry.
-Queued *jobs* still run, and the next checkpoint finishes them. A checkpoint
+`StartupFailed`. An entry that cannot be loaded is the fetcher's own error,
+because `load_entry` reads the answer before any of the entry runs and then
+does not complete the module; an answer that is not a script is a
+`LynxViewError::Script` naming the URL. A sheet that cannot be loaded, or that
+the fetcher answered with something else, is `LynxViewError::Script`, because
+boot's `__FlushElementTree` is what threw, naming the sheet and the reason.
+**An entry that throws does not fail the boot**: the entry is app code, and
+boot wraps its `import` in a `try`/`catch` that raises what it caught again as
+a rejection nothing handles. The checkpoint of the entry into the realm that
+ran the catch reports it — `ScriptRunError` from `load_entry`, `load_module`
+or `settle_future`, and `TimerFailed` or `ListenerFailed` where the entry's
+top-level `await` resumed in a timer or a worker event — and boot goes on to
+connect the BTS, render and flush, so `ScriptFinished` still follows its
+flush, as a native MTS still renders a page whose script threw. What fails
+boot's own evaluation is the engine's code alone: page data that is not JSON,
+the document's construction, connecting the BTS, and the flush. A failure
+stays the failing view's and is reported once: an entry reports the one
+rejection its checkpoint returned and drops the rest it left in the
+promise-job queue the group's realms share, a checkpoint error beside a
+failure it is already reporting included, so none of them reaches the next
+view or the failing realm's own next entry. Queued *jobs* still run, and the
+next checkpoint finishes them. A checkpoint
 drains that queue until it is empty, as a browser's microtask checkpoint does:
 there is no per-checkpoint job budget and no incomplete checkpoint for a later
 entry to resume. Because the queue is the runtime's, a view has to notice a
@@ -911,15 +931,23 @@ target and IO primitives, and relay OS facts in
 and `LynxView::pump`); they never start or steer the pipeline. Engine events are
 enqueued and wake the host through the group's `EventRequester` for the next
 `LynxView::pump`: `ScriptFinished` (entry-module boot), `StartupFailed`
-(source/configuration/boot failure), `ScriptRunError` (a fatal script-runtime
-failure in later owner-thread work), `ListenerFailed` (a listener that threw
-during event delivery) and `TimerFailed` (a `setTimeout` or `setInterval`
-callback that threw when it came due) — the last two separate because neither
-is fatal: the walk continues, a repeating timer stays armed, and later events
-and timers are delivered as normal. `EngineEvent::is_fatal` names the events
-that end the view (`StartupFailed` and `ScriptRunError`); `LynxView::pump`
-ends a view on exactly those, and an embedder asks it rather than matching
-variants. A frame the engine wants drawn rides the same wakeup, and the
+(source/configuration/boot failure), `ScriptRunError` (main-thread app code
+that threw, or a host call into the realm that failed — the entry's
+evaluation, a module load, a `Future` settle, a page update, an animation
+frame — during boot or after it), `ListenerFailed` (a listener that threw
+during event delivery), `TimerFailed` (a `setTimeout` or `setInterval`
+callback that threw when it came due) and `Panicked` (the engine panicked
+while it served the view). The three script failures are separate by the
+kind of entry they happened in, also where the code that failed was a
+continuation that entry resumed, and none of them is fatal: the realm goes
+on, the walk continues, a repeating timer stays armed, and later events and
+timers are delivered as normal. `EngineEvent::is_fatal` names the events that
+end the view (`StartupFailed` and `Panicked`); `LynxView::pump` ends a view on
+exactly those, and an embedder asks it rather than matching variants. Every
+panic is reported through one constructor, `EngineEvent::from_panic`, from
+`Page::trapped` (a job or a task of the view, an input dispatch included),
+`finish_view` (the group thread reaping the view's task) and the Wasm panic
+hook. A frame the engine wants drawn rides the same wakeup, and the
 `Painter::pump` answering it draws it.
 
 **A host takes two turns per wakeup, and they are different calls.**
@@ -1049,7 +1077,8 @@ and errors to the owning realm; worker errors also produce nonfatal
 `EngineEvent::WorkerFailed`. See `docs/runtime-architecture.md` for the
 transport and lifetime boundaries.
 
-**After the MTS entry import succeeds, boot creates a BTS Worker** named
+**After the MTS entry import settles, whether the entry succeeded or threw,
+boot creates a BTS Worker** named
 `lynx-bg` through that same class, using the engine entry `bobcat:bts`, which
 installs its JS initializer from `bobcat:bts-runtime` and returns. Its first
 Worker message supplies initial data and starts the optional

@@ -58,7 +58,9 @@ A listener throw stops that emission; later Worker messages still run.
 
 `LynxView::is_ready()` becomes true when `pump()` observes `ScriptFinished`,
 which means MTS boot finished: the entry module evaluated, its top-level await
-settled, and its first flush committed. The BTS Worker's state — still
+settled, and its first flush committed. An entry that threw finishes boot too:
+its failure is reported first, as a nonfatal `ScriptRunError`, and boot goes on
+to render and flush. The BTS Worker's state — still
 importing its entry, its entry threw, or it ended — is no part of that, so a
 BTS entry whose top-level await never settles does not keep the view from
 becoming ready.
@@ -131,8 +133,9 @@ Native reference paths in the read-only `lynx/` checkout:
 JS tests cover Context values/validation, emitter mutations and diagnostic
 formatting/forwarding. Real QuickJS tests exercise both realms and the actual
 Worker channel, including recovery after errors. Public view tests cover
-readiness observed through `pump()`, startup failure, early-event refusal without
-replay, and refusal after cancellation. Page-owner and runtime tests verify that
+readiness observed through `pump()`, startup failure, an entry that throws and
+still becomes ready, early-event refusal without replay, and refusal after
+cancellation. Page-owner and runtime tests verify that
 MTS boot alone settles readiness, and that a BTS failure reports one
 `WorkerFailed` and still publishes `ScriptFinished`, without a `StartupFailed`
 or a listener failure.

@@ -76,6 +76,7 @@ fn a_view_runs_its_own_timers_with_no_host_call_behind_them() {
                 EngineEvent::ScriptFinished => booted = true,
                 EngineEvent::StartupFailed(error) => panic!("the view did not boot: {error}"),
                 EngineEvent::ScriptRunError(error) => panic!("the entry failed: {error}"),
+                EngineEvent::Panicked(error) => panic!("the engine panicked: {error}"),
                 _ => {}
             }
         }
@@ -156,6 +157,7 @@ fn a_view_boots_and_publishes_before_the_host_takes_a_turn() {
                 EngineEvent::ScriptFinished => booted = true,
                 EngineEvent::StartupFailed(error) => panic!("the view did not boot: {error}"),
                 EngineEvent::ScriptRunError(error) => panic!("the entry failed: {error}"),
+                EngineEvent::Panicked(error) => panic!("the engine panicked: {error}"),
                 _ => {}
             }
         }
@@ -243,10 +245,14 @@ fn global_events_require_observed_readiness_and_rejected_events_are_not_replayed
     ));
 }
 
+/// A listed sheet the host has nothing for fails boot's own flush, which is
+/// a startup failure: the view never becomes ready, and refuses page updates
+/// from the first turn to the last.
 #[test]
 fn failed_startup_never_makes_a_view_ready() {
-    let mut view =
-        TestViewSpec::new("throw Error('cannot start');").create_view(Arc::new(NoWakeup));
+    let mut view = TestViewSpec::new("__CreatePage();")
+        .with_missing_style_sheet()
+        .create_view(Arc::new(NoWakeup));
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let events = view.pump();
@@ -255,15 +261,63 @@ fn failed_startup_never_makes_a_view_ready() {
             view.send_global_event("event", "[]".into()),
             Err(EngineError::NotReady)
         ));
-        if events
-            .iter()
-            .any(|event| matches!(event, EngineEvent::StartupFailed(_)))
-        {
+        if let Some(error) = events.iter().find_map(|event| match event {
+            EngineEvent::StartupFailed(error) => Some(error),
+            _ => None,
+        }) {
+            assert!(matches!(error, LynxViewError::Script(_)), "{error}");
             break;
         }
         assert!(Instant::now() < deadline, "startup never failed");
         std::thread::yield_now();
     }
+}
+
+/// An entry that throws is the app's failure, not the view's: it is reported
+/// as a `ScriptRunError`, and boot goes on to render and flush, so the view
+/// becomes ready after it and takes page updates.
+///
+/// The view has a painter, and the loop is this test's own rather than
+/// `wait_for_boot`, which fails on the `ScriptRunError` this test waits for:
+/// boot's first flush parks until a painter binds the view, and
+/// `ScriptFinished` follows that flush.
+#[test]
+fn an_entry_that_throws_is_reported_and_the_view_still_becomes_ready() {
+    let mut engine = TestViewSpec::new(
+        r"
+        globalThis.renderPage = function () {
+          __AppendElement(__CreatePage('card', 0), __CreateView(0));
+        };
+        throw Error('the entry threw');
+        ",
+    )
+    .create(Arc::new(NoWakeup));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut events = Vec::new();
+    while !events
+        .iter()
+        .any(|event| matches!(event, EngineEvent::ScriptFinished))
+    {
+        events.extend(engine.pump());
+        assert!(
+            Instant::now() < deadline,
+            "the view never booted: {events:?}"
+        );
+        std::thread::yield_now();
+    }
+    let [
+        EngineEvent::ScriptRunError(error),
+        EngineEvent::ScriptFinished,
+    ] = events.as_slice()
+    else {
+        panic!("one ScriptRunError, then ScriptFinished: {events:?}");
+    };
+    assert!(error.message.contains("the entry threw"), "{error}");
+    assert!(engine.view.is_ready());
+    engine
+        .view
+        .send_global_event("event", "[]".into())
+        .expect("a ready view takes page updates");
 }
 
 /// [`EngineEvent::is_fatal`] is what [`LynxView::pump`] ends a view on, so its
@@ -277,7 +331,8 @@ fn only_fatal_events_end_the_view() {
             EngineEvent::StartupFailed(LynxViewError::Script(error())),
             true,
         ),
-        (EngineEvent::ScriptRunError(error()), true),
+        (EngineEvent::ScriptRunError(error()), false),
+        (EngineEvent::Panicked(error()), true),
         (EngineEvent::ListenerFailed(error()), false),
         (EngineEvent::TimerFailed(error()), false),
         (EngineEvent::WorkerFailed(error()), false),
