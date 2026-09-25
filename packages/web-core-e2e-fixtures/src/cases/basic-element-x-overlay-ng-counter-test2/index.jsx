@@ -23,7 +23,7 @@ function Template({ len, color, cnt, onTap, show }) {
           bindtap={onTap}
         >
           <text>
-            <x-text>{`点击该方块，使计数 + ${cnt}`}</x-text>
+            <text>{`点击该方块，使计数 + ${cnt}`}</text>
           </text>
         </view>
       </view>

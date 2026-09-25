@@ -30,6 +30,15 @@ consequential choice about whether to follow the spec or the quirk.
   algorithm** (reuse stylo/Servo's existing stacking-context logic) —
   apps relying on Lynx's actual buggy z-index behavior may render
   differently, and that's intentional.
+- **`justify-content: start | end` resolve against the writing mode
+  (user, 2026-09-25)** — Lynx's own value table aliases them to `flex-start`
+  and `flex-end` (`css_defines/58-justify-content.json` gives `start` the
+  align-type `flex-start`), and web-core inherits that through the browser
+  only because its containers are always left-to-right. css-align-3 defines
+  them as flow-relative instead, so they follow `direction` and the axis's
+  reversal rather than the flex line. **Decision: implement and test the W3C
+  meaning.** The difference is visible only on a reversed container or under
+  `direction: rtl`, where `start` sits at the opposite end from `flex-start`.
 - **`overflow`/`overflow-x`/`overflow-y` default** — Lynx defaults to
   `hidden`; CSS defaults to `visible`. **Decision: match Lynx's default**,
   not CSS's — this is a values/defaults divergence, not an algorithm one,

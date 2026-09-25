@@ -14,14 +14,14 @@ function App() {
         gradient
       </text>
       <text style='font-size: 30px; '>
-        <x-text style='color: linear-gradient(green, yellow);'>
+        <text style='color: linear-gradient(green, yellow);'>
           inline-gradient
-        </x-text>
+        </text>
       </text>
       <text style='font-size: 30px; color: linear-gradient(green, yellow);'>
-        <x-text>
+        <text>
           inline-inherit-gradient
-        </x-text>
+        </text>
       </text>
     </view>
   );
