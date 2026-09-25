@@ -11,8 +11,8 @@ function App() {
       </view>
       <view style='display:flex;'>
         <text>
-          <x-text style='font-size: 20px;'>hello world</x-text>
-          <x-text style='font-size: 30px'>111</x-text>
+          <text style='font-size: 20px;'>hello world</text>
+          <text style='font-size: 30px'>111</text>
         </text>
       </view>
     </view>
