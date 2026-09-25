@@ -225,11 +225,12 @@ different time origin than the Worker's own `performance.now()`.
 **The frame's one reading.** `draw` and `tick` each call
 `FrameClock::now_seconds` exactly once and pass that `f64` to everything the
 frame resolves — `service_gesture_clock` for armed `longpress` deadlines on
-the painting side, and the `BeginFrame` command that carries the same
-reading to the main thread's `advance_animations` — so a gesture and an
-animation in the same frame cannot disagree about when the frame is. Input
-arrival is the one other reading, taken in `dispatch_input` at the moment the
-event arrives.
+the painting side, and the frame post that carries the same reading to the
+main thread's `advance_animations` — so a gesture and an animation in the
+same frame cannot disagree about when the frame is. Input arrival is the one
+other reading, taken in `dispatch_input` at the moment the event arrives.
+Every pass also writes its reading into the view's scroll mailbox as the
+painter's clock, which every job on the main thread starts at (below).
 
 **Where the reading is taken.** A window frame is `WindowGraphics::acquire`,
 then `render_to_target`, then `present`. Acquiring first is deliberate: under
@@ -247,28 +248,45 @@ and samples immediately.
 the instant, not the document.
 
 Advancing an animation runs where the document is — the Lynx main thread,
-its only home. A window painter's draw sends one `BeginFrame { now, seq }`
-command per frame while the latest committed frame reports an animation it
-cannot compose alone (see "Composite animations compose; the rest tick");
-an offscreen `tick` sends one on every call. The view's command consumer
-advances the timeline — a Stylo animation-only traversal of just the
-animating elements, no JavaScript involved — and commits what changed. The
-`seq` is what an offscreen `tick` waits on: the
-epilogue publishes the newest serviced sequence number on the view's watch
-after the commit it implies, so a host blocked on that number is woken by the
-frame rather than by the acknowledgement. The published frame's
-`animations_active` flag is what keeps the loop sustained: `owes_frame` keeps
-answering yes, the embedder keeps taking a turn per display frame, and each
-one that owes the main thread a tick sends `BeginFrame`, until a commit reports
-the timeline idle. Starting and cancelling animations belong to the style
-flush the main thread already runs at `__FlushElementTree`.
+its only home. A window painter's draw posts one frame request,
+`FramePost { now, seq }`, into the view's `ScrollMailbox` per frame while the
+latest committed frame reports an animation it cannot compose alone (see
+"Composite animations compose; the rest tick"); an offscreen `tick` posts one
+on every call. Posts coalesce — the latest `now`, the greatest `seq` — and one
+payload-free `ToMain::Posted` marker in the command FIFO stands for all of
+them until main takes them, so a main thread inside a long job accumulates
+nothing. At the marker the page takes the post, and after the last command of
+that burst it advances the timeline once — a Stylo animation-only traversal
+of just the animating elements, no JavaScript involved — and commits what
+changed. The `seq` is what an offscreen `tick` waits on: the epilogue
+publishes the newest serviced sequence number on the view's watch after the
+commit it implies, so a host blocked on that number is woken by the frame
+rather than by the acknowledgement. The published frame's `animations_active`
+flag is what keeps the loop sustained: `owes_frame` keeps answering yes, the
+embedder keeps taking a turn per display frame, and each one that owes the
+main thread a tick posts a frame, until a commit reports the timeline idle.
+Starting and cancelling animations belong to the style flush the main thread
+already runs at `__FlushElementTree`.
 
-Because that is the whole supply of timeline readings, an idle page's timeline
-stands still: the flush that creates an animation reads whatever the last
-`BeginFrame` left, which may be many seconds old. So the flush only arms an
-animation — the first `BeginFrame` after it is what starts it, and the driver
-shifts the pending start time onto that frame's reading (see
-`crates/dom/src/style/animation.rs`). A tap that starts a four-second animation
+**Every job starts at the painter's clock.** `Page::enter` reads the clock the
+painter last wrote into the mailbox — lock-free, an `AtomicU64` of the `f64`
+bits — and calls `Document::sync_animation_clock` before the job's operation
+runs: the timeline moves to that instant (never back) and every live
+animation and transition is promoted at an anchored start, iterated and
+ended, with nothing re-cascaded and nothing committed; the next tick
+re-cascades whatever moved. A sync that ends one re-cascades the ended
+element at once, because the end changes what a commit shows. This is
+HTML's order — timelines are current before a task's style change events —
+and it is what lets a restyle while an exported curve covers the element (a
+transition retargeted or reversed, `animation-play-state: paused`) compute
+from the instant the painter showed rather than from the last frame main
+ticked, which may be arbitrarily old.
+
+A fresh `Pending` start is still not anchored by the flush that creates it:
+the first frame after it is what starts it, and the driver shifts the pending
+start time onto that frame's reading (see
+`crates/dom/src/style/animation.rs`); a job's sync carries the start with the
+clock rather than anchoring it. A tap that starts a four-second animation
 after ten idle seconds plays all four seconds.
 
 `bobcat-core` deliberately does not re-export `dom`. The lower-layer crates
@@ -491,14 +509,15 @@ consumer reads it with `while let Some(x) = rx.recv().await`.
 
 Every one of them reaches the realm through `Page::enter`, the one JavaScript
 execution boundary. It queues a job and answers with what that job returned. The
-job runs one synchronous operation under the borrows of the shared runtime and
-the realm, and then the epilogue, in this order — due timers first, because
+job first moves the document's animation clock to the painter's (see
+"Animation timeline"), then runs one synchronous operation under the borrows of
+the shared runtime and the realm, and then the epilogue, in this order — due timers first, because
 whatever just ran may have armed or cleared one and its mutation should ride the
 same frame; the commit next, so the frame exists before anything implying it;
 then the two batches of engine-decided events that commit may have left owing —
 `contentvisibilityautostatechange` and an `<image>`'s `load`/`error`, each
 posted as one fresh entry rather than run here, so a handler's own mutation
-gets a commit of its own — the boot report, the `BeginFrame` acknowledgement,
+gets a commit of its own — the boot report, the frame-post acknowledgement,
 the module requests that entry produced, the next timer deadline republished
 only when it moved, and finally the checkpoint generation as of this entry. `Page::settle` is the
 epilogue alone, for a wake that carries no operation of its own.
@@ -508,13 +527,20 @@ realm it would enter does not exist until it returns; the disposal exchange in
 the view has already ended. A command opens a burst: the rest of what is already
 queued goes with it, bounded by the length the count was taken from, so a host's
 whole round of input is one entry, one commit and one acknowledgement rather
-than one of each per command. The consumer awaits that burst's job before
-reading the channel again, so what arrives meanwhile is one later burst.
+than one of each per command. A `ToMain::Posted` marker in the burst adopts
+the painter's scroll offsets where it stands. The frame post it took carries
+a fence — how many commands the view had been sent before the post — and is
+applied once, after the last command of the first burst that has applied that
+many, so the events a painter pass dispatched and the host's own updates run
+before the frame its acknowledgement implies, even when the marker was
+collected ahead of them. The consumer awaits that burst's job
+before reading the channel again, so what arrives meanwhile is one later
+burst.
 
 **Nothing of a view is served outside a job.** Opening the realm is that
 view's first job, queued before its own tasks exist, so a burst that arrived
 before the realm did is a job queued behind it and finds a document. The cost
-is that a `BeginFrame` is acknowledged by a job too: while any job of the group
+is that a frame post is acknowledged by a job too: while any job of the group
 is parked — an entry's `adoptStyleSheet` or `require` among them — the
 acknowledgement waits with it. Boot parks for its startup sources only
 inside its first flush, on the listed author sheets that have not arrived; the
@@ -534,7 +560,8 @@ latch, and the deadline and checkpoint generation that object's one
 `serve_clock` task reads. `Page::end` — the command channel closing, a cancelled
 load, a fatal failure, a panic in any task — sets the latch synchronously,
 cancels the token, withdraws the armed deadline, and acknowledges whatever
-`BeginFrame` was pending so a blocked painter is released. Every entry point
+frame post was pending so a blocked painter is released; what the mailbox
+still holds is dropped with the page. Every entry point
 returns at once when the latch is set; the owner, whose one wait is the token
 versus the next task to finish, then mirrors a cancellation that came from
 another thread onto that latch, aborts and awaits every task of the view — which
@@ -1217,11 +1244,21 @@ and two receiving ends, and the task serving that view holds the others. A
 sibling's traffic is not on this path at all, so no message names its view and
 no receiver has to defer one.
 
-- `ToMain`, an mpsc FIFO in: `DispatchEvent`, `BeginFrame { now, seq }`,
-  `Refill { offsets }`, `ImageEvents`. A FIFO because the order two commands
-  arrive in is what they mean. `LynxView` holds the one strong sender, inside
-  the seat an attached `Painter` holds only a `Weak` of, so a painter can never
-  keep a released view's task alive.
+- `ToMain`, an mpsc FIFO in: `PageUpdate`, `DispatchEvent`, `Vsync`, `Posted`,
+  `ImageEvents`. A FIFO because the order two commands arrive in is what they
+  mean. `LynxView` holds the one strong sender, inside the seat an attached
+  `Painter` holds only a `Weak` of, so a painter can never keep a released
+  view's task alive.
+- `ScrollMailbox` on the same seat, main holding an `Arc` of its own: what the
+  painter *posts* rather than sends — the latest offset per scroll container
+  (with where it came to rest, if it did), one coalesced frame post
+  (`FramePost { now, seq }`: the latest `now`, the greatest `seq`), and the
+  painter's clock. The first post since main's last take sends the one
+  payload-free `ToMain::Posted` marker; later ones ride it. So the painter never
+  waits for main and a busy main accumulates one entry per container, not one
+  message per frame. A `std::sync::Mutex` guards the posts (never held across
+  a wait or a send, and main's side is one swap), and the clock is an
+  `AtomicU64` read lock-free at the start of every job.
 - `watch<Option<Viewport>>` on the same seat, written by the attached painter:
   the device metrics, which are observed state rather than history and are
   deliberately not a command — an unbound flush parks the job it runs in on
@@ -1231,7 +1268,7 @@ no receiver has to defer one.
   what a host must *act* on rides here.
 - `watch<Published>`, read by any observer and by the painter in particular:
   the newest committed frame, the listener-name set, and the newest serviced
-  `BeginFrame`. Observed state rather than history — a painter wants the latest
+  frame post. Observed state rather than history — a painter wants the latest
   and never the ones it slept through.
 
 One typed wakeup goes back to the embedder alongside them, and a view's worker
@@ -1276,13 +1313,16 @@ the thread that created the LynxGroup (AppKit main, or a Render Worker)
   Painter — attached to that view; everything below runs inside the
   embedder's own calls:
     input routing + gesture recognition (against the adopted frame)
-    scroll/dispatch/BeginFrame
+    scroll intents, dispatch, frame posts
     compose: upload scene, acquire, present
     capture, offscreen ticks
   ── ToMain mpsc ──▶                  ◀── ViewNotice mpsc ──
+  ── ScrollMailbox ──▶
+      (offsets per container, one frame post, the clock;
+       the first post since a take queues the Posted marker)
   ── watch<Option<Viewport>> ──▶      ◀── watch<Published> ──
       (the painter's metrics;               (frame, listener names,
-       the first write binds)                newest serviced BeginFrame)
+       the first write binds)                newest serviced frame post)
                                       ◀── EventRequester wakeup ──
       Lynx main thread — the group's, shared by every view in it
                     (one task per wait; one runtime, one style pool)
@@ -1310,14 +1350,15 @@ browser, where `wgpu`'s handles are not `Send` under shared memory and an
 shape, and the Render Worker is simply the thread that constructs both.
 
 A commit writes its frame into the watch, over whatever the painting side has
-not read; the listener-name set and the newest serviced `BeginFrame` sit in
+not read; the listener-name set and the newest serviced frame post sit in
 the same `Published` value, while lifecycle events and resource asks ride the
 `ViewNotice` FIFO in order. Frames stay off that FIFO deliberately: a queue of
 them would retain every intermediate scene, while a watch bounds the frames in
 flight at one however far the main thread runs ahead. The painter adopts one
 snapshot per pass — `poll_link`, run first by every entry point — and reads the
 name replica, the pending-redraw bit, and the frame out of it for the rest of
-that pass, so composing, hit-testing, and refilling take no lock at all. The
+that pass, so composing and hit-testing take no lock at all; the only lock a
+pass takes is the mailbox's, to post, and only when it has something to post. The
 snapshot is *taken* rather than only read when the watch reports a change: a
 completed `changed()` has already marked the value seen, so a flag alone would
 skip exactly the state an offscreen wait was woken for. `Receiver::has_changed`
@@ -1338,7 +1379,7 @@ The view's own goodbye is its command channel closing, which is what its
 command consumer ends the view on.
 
 Every entry into a realm — input dispatches, scrolls, resource updates,
-`BeginFrame` ticks, a module completion, a timer coming due, a metrics change,
+frame posts, a module completion, a timer coming due, a metrics change,
 a sibling's checkpoint — ends with a commit when anything went stale, which is
 what makes the recorded contract true: script must flush after mutating, and
 nothing guarantees the tree is *not* flushed at other times. A half-applied
@@ -1347,11 +1388,14 @@ operation rather than inside it. A windowed painter
 never waits on the main thread and never skips a frame: it always has the
 latest adopted frame to compose and hit-test, however busy that thread is.
 `Painter::tick` is the one call that does wait on it, and only an offscreen
-painter has one — a host with no display to pace against asks for a frame and
-waits out the `BeginFrame` acknowledgement, with a deadline, and ends early if
-the view's task has gone.
+painter has one — a host with no display to pace against posts a frame and
+waits out that post's acknowledgement, with a deadline, and ends early if the
+view's task has gone. A post that sends no marker, because one is already
+queued, still answers its own sequence number, and its fence holds it back
+until main has applied every command sent before it, so the acknowledgement
+the wait takes implies them and the wait is deterministic.
 
-## Scroll composes; a refill recommits
+## Scroll composes; main adopts at the marker
 
 The frame is baked *unscrolled*: the walker's layer-stack pushes become a
 compose program tagged with the compose space each shape rides — its path of
@@ -1362,8 +1406,8 @@ those offsets would have produced. A user scroll therefore never waits for a
 commit — or the main thread at all. The painting side arbitrates
 consumption against the published slot table, keeps the consumed offsets as
 *scroll intents*, and recomposes and re-hit-tests at those offsets
-immediately; between refills the intents *are* the offsets, and no per-event
-command exists. When a frame publishes, an intent the frame's own offset
+immediately; the intents are what the screen shows, and main learns them from
+the mailbox (below), never from a per-event command. When a frame publishes, an intent the frame's own offset
 already equals has served its purpose and drops; the rest re-clamp to the
 new bounds. The arbitration is `dom`'s own chain walk (`drive_chain`) over
 each slot's published policy — `overscroll-behavior` fences the reach, the
@@ -1385,22 +1429,62 @@ the position its whole travel would settle on. A slot published with
 a drag stretches it on the rubber band, a fling overshoots at the overshoot
 decay, and once nothing holds it a bounce back per frame brings it home on
 the critically damped spring. A drag's first step stops whatever is moving
-on its chain and takes over. None of this leaves the painter: the router
-decides what it always did, no event is involved, nothing recommits — a
-stretch composes the edge's own content, asks for no refill, and the
-writeback the next refill carries is clamped by the document.
+on its chain and takes over. The router decides what it always did, no
+event is involved, and nothing waits on the main thread — a stretch composes
+the edge's own content, and what the painter posts for it is the edge, since
+every posted offset is clamped to the committed range.
 
-The encode is windowed: each slot's fragments cover one scrollport past its
-committed offset per scrollable axis (`ENCODE_WINDOW_SCROLLPORTS`). When an
-intent moves past half its remaining window headroom, the engine sends one
-`Refill` per committed frame carrying the offsets the screen is showing;
-the main thread writes them into the document, marks the paint stale, and
-its next commit re-bakes the windows centered on them — no script
-involvement anywhere. The refill write-back is the only way a user scroll
-reaches the document, so between refills document-side offset reads lag the
-screen; a future script-facing scroll API must either dirty the paint or
-publish its offsets, since the compositor only knows what crossed the
-channel.
+Every writer of an intent — a chain step, a fling step, a bounce back, a
+settle, a snap on adoption, a rebase's re-clamp — goes through one write that
+records the container among the pass's changed ones (and a drag's release
+records every container it let go). `publish_scroll` posts them: at the top of
+every send of the pass, of the frame post and of the `Vsync` delivery, and at
+the end of `dispatch_input`, `draw` and `tick`. An entry carries the clamped
+offset, the pass's clock, and a `rest` when nothing holds, flings or bounces
+the container any more — a drag let go without a fling, a spent fling, a
+landed bounce, a snap after a commit. A pass with nothing changed and no
+frame to post takes no lock.
+
+At the marker main takes the whole mailbox in one swap, writes each offset
+into the document with `scroll_to` — which recommits at once for an offset
+past the committed window — and, when the committed slot finds the offset
+`recenter_due` (past half the window's remaining headroom toward an edge,
+the rule beside `encode_window`), marks the windows stale once, so the entry's
+commit re-bakes them centered on it; no script involvement anywhere. A
+document-side read — `boundingClientRect` included — sees the offset from
+the marker on. The encode is windowed: each slot's fragments cover one
+scrollport past its committed offset per scrollable axis
+(`ENCODE_WINDOW_SCROLLPORTS`). A committed frame indexes its slots by node at
+commit, so neither the painter's lookups nor main's check scan the table.
+
+### Ordering guarantees
+
+- A command never reaches main ahead of the scroll state of its own pass: the
+  publish precedes every send, and either the marker is already queued ahead of
+  the command or the publish queues it now.
+- Main may see state *newer* than an event it is dispatching: the take at the
+  first marker adopts every post made since, including a later pass's. That is
+  a browser's behaviour too: offsets sync at the frame.
+- The marker precedes its pass's `Vsync` (rAF): HTML runs the scroll steps
+  before the animation frame callbacks.
+- A frame post is applied after the last command of the first burst that
+  reaches its fence, the count of commands sent before it. So the events a
+  pass dispatched, and a `PageUpdate` or image report the host sent first,
+  run before that frame, and an animation a listener starts begins on it,
+  even when main collected the marker in an earlier burst than those
+  commands.
+- The offscreen `tick` stays deterministic: post, mark, wait for
+  `begin_frame_serviced(seq)`, which the fence makes imply every command sent
+  before the tick. `tick` delivers its `Vsync` before its frame post, as it
+  always has, so its rAF callbacks run before that post's frame work.
+- Reattaching a painter (unchanged): a new painter shows the committed
+  `slot.offset`, which can be behind the document when an adoption inside the
+  window never committed.
+- Programmatic scrolls on the document side (`scroll-initial-target`, a snap
+  or chain the document runs) can be overwritten by a later post; per-slot
+  epochs belong to the script-facing scroll API. Scroll events, a wheel's
+  quiet period and `scrollend` on detach are not implemented: a detaching
+  painter drops what it had not posted.
 
 ### One render path: a scroll frame recomposes the committed fragments
 
@@ -1556,12 +1640,12 @@ driver keeps them as two node bits and relayouts positioned descendants only
 when the transform bit flips, so paint order and containment are the same on
 both sides of a hand-over between the compositor and the main thread.
 
-A window painter's `BeginFrame` narrows accordingly: it is sent per frame only
+A window painter's frame post narrows accordingly: it is made per frame only
 while the committed frame reports `needs_main_ticks` — something animating
 that could not export — and, once a finite curve runs past its end, per frame
 until the commit of its finish restyle is adopted. There an infinite exported
 animation involves the main thread zero times per frame. An offscreen `tick`
-does not narrow: it sends `BeginFrame` and waits on it every call, so a
+does not narrow: it posts a frame and waits on it every call, so a
 headless host ticks the main thread each frame. An animation **frozen** by
 css-contain-2 §4 narrows it all the way to nothing: an element in a skipped
 subtree (`content-visibility: hidden`, or a non-relevant
@@ -1570,7 +1654,7 @@ reports neither `animations_active` nor `needs_main_ticks` for it and
 `owes_frame`/`is_animating` stay false — a page whose only animations are
 frozen is idle, and the host stops reading its display clock for it entirely.
 The reveal — a style change, or the relevance flip the commit itself makes —
-reactivates it in that same commit, and the first `BeginFrame` after it is
+reactivates it in that same commit, and the first frame post after it is
 where the animation resumes, from exactly the progress the freeze found (the
 driver carries its start times by every interval it slept through; see
 `crates/dom/src/style/animation.rs`). The reveal's commit ticks it on the main
@@ -1588,9 +1672,15 @@ animation's end — the two need not agree: an animation's contribution can be
 replaced by the base value there, which only a commit knows, so the compositor
 holds the domain's last instant until the commit of the finish restyle is
 adopted — at least one frame, since that commit follows an asynchronous
-`BeginFrame`. Transitions do not export: while a curve covers an element the
-main thread gets no ticks, so a transition that a later restyle retargets or
-reverses would read its progress at a stale instant and jump.
+frame post. Pending and running transitions export beside the animations —
+inserted after them, so a transition wins its property as the `Transitions`
+origin does, and ending the domain at `start_time + duration` — because every
+job syncs main's clock to the painter's before it runs: a restyle that
+retargets or reverses one while a curve covers the element reads its progress
+at the instant the painter showed, not at the last tick. A `transform`
+transition's reach is unbounded for now (the fork keeps a transition's timing
+function private), so the extent budget bounds its encode and a composited
+group around it refuses it.
 
 ## Native and Wasm spawning
 
@@ -1715,7 +1805,7 @@ create/append/drop/flush DOM API is exposed to JavaScript.
    presents. `LynxView::pump` then services the host's resource system and
    hands back the lifecycle events. While the latest frame reports an
    animation it cannot compose alone, each painter turn
-   sends the main thread one `BeginFrame` carrying that reading, and the loop
+   posts the main thread one frame request carrying that reading, and the loop
    sustains without any JavaScript and without waking anyone: `owes_frame`
    answers yes, and the embedder takes the next turn at its own display frame
    — a `CVDisplayLink` on the window's monitor natively, `requestAnimationFrame`

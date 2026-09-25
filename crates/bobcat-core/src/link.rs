@@ -11,20 +11,33 @@
 //! because the order two of them arrive in is what they mean. What comes back
 //! is split: lifecycle events and resource asks are a FIFO for the same
 //! reason, while the frame, the listener names and the newest serviced
-//! `BeginFrame` are *observed state* — a painter wants the latest and never
+//! frame post are *observed state* — a painter wants the latest and never
 //! the ones it slept through, which is what [`Published`] on a watch is.
 //!
-//! The painter's device metrics are observed state in the other direction,
-//! and [`ViewSeat::metrics`] is the watch that carries them. They are not a
+//! The painter's own state crosses the same way in the other direction. Its
+//! scroll offsets and its frame requests are posted into the view's
+//! [`ScrollMailbox`], which keeps the latest per scroll container and one
+//! coalesced frame post; one payload-free [`ToMain::Posted`] marker in the
+//! command FIFO says there is something to take, and at most one is ever
+//! queued. So a main thread inside a long job accumulates nothing, and the
+//! painter never waits for it. A frame post is fenced by the count of
+//! commands sent before it ([`CommandSender`]), so main applies it behind
+//! them wherever the marker stands. The painter's clock rides beside them,
+//! read lock-free at the start of every job.
+//!
+//! The painter's device metrics are observed state too, and
+//! [`ViewSeat::metrics`] is the watch that carries them. They are not a
 //! command: a flush before any painter has bound parks the job it runs in,
 //! and no other job runs while one is parked, so a command carrying them
 //! would never be read.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::hash_map::Entry;
 use std::future::Future;
 use std::pin::pin;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread;
 
@@ -132,13 +145,10 @@ pub(crate) enum ToMain {
         payload: InputEventPayload,
     },
     Vsync(f64),
-    BeginFrame {
-        now: f64,
-        seq: u64,
-    },
-    Refill {
-        offsets: Vec<(NodeId, Vector2D<f32>)>,
-    },
+    /// The view's [`ScrollMailbox`] holds something to take: scroll offsets,
+    /// a frame post, or both. Queued once per take, however many passes the
+    /// painter posts meanwhile.
+    Posted,
     /// The host's image reports: completed or failed loads. No variant can
     /// carry pixels, which is what makes "`ImageData` never crosses a
     /// channel" a property of the type.
@@ -279,7 +289,7 @@ pub(crate) struct Published {
     /// and its last removal — which is rare enough that the whole set is
     /// cheaper than a protocol for the difference.
     pub(crate) listeners: Arc<FxHashSet<Arc<str>>>,
-    /// The newest `BeginFrame` the view has serviced.
+    /// The newest frame post the view has serviced.
     pub(crate) begin_frame_serviced: u64,
 }
 
@@ -312,6 +322,163 @@ impl RouterHost for Published {
 
     fn has_listener(&self, name: &str) -> bool {
         self.listeners.contains(name)
+    }
+}
+
+/// One scroll container's state as the painter last posted it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ScrollEntry {
+    /// The offset, clamped to the committed range: a `contain-bounce`
+    /// stretch posts its edge.
+    pub(crate) offset: Vector2D<f32>,
+    /// The painter clock of the pass that posted it, in seconds.
+    pub(crate) at: f64,
+    /// Where the container came to rest, if it did since the last take: a
+    /// drag let go without a fling, a fling spent, a bounce back landed, a
+    /// snap after a commit. Kept across later posts until taken.
+    pub(crate) rest: Option<Vector2D<f32>>,
+}
+
+/// The painter's frame request: its clock reading, the sequence number
+/// main acknowledges once the frame it implies is committed, and the
+/// command FIFO position it stands at.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct FramePost {
+    pub(crate) now: f64,
+    pub(crate) seq: u64,
+    /// How many commands were sent before the post ([`CommandSender::sent`]).
+    /// Main applies the frame only once it has applied that many, so the
+    /// acknowledgement implies every command sent ahead of it — even when
+    /// the marker that carries the post is older than some of them.
+    pub(crate) fence: u64,
+}
+
+impl FramePost {
+    /// Two posts main has not applied, as one: the latest clock, the
+    /// greatest sequence and the greatest fence.
+    #[must_use]
+    pub(crate) fn merge(self, later: Self) -> Self {
+        Self {
+            now: later.now,
+            seq: self.seq.max(later.seq),
+            fence: self.fence.max(later.fence),
+        }
+    }
+}
+
+/// The painter's state as main adopts it: the latest per scroll container,
+/// one coalesced frame post, and the painter's clock.
+///
+/// The painter posts from its own thread and never waits for main; main
+/// takes the whole of it when it services the [`ToMain::Posted`] marker the
+/// first post since the last take sent. Neither side holds the lock across
+/// a wait or a send, and main's side is one swap, because the painter posts
+/// while it holds a swap-chain image.
+#[derive(Default)]
+pub(crate) struct ScrollMailbox {
+    posted: Mutex<Posted>,
+    /// The painter's latest clock reading, as `f64` bits.
+    clock: AtomicU64,
+}
+
+#[derive(Default)]
+struct Posted {
+    scrolled: FxHashMap<NodeId, ScrollEntry>,
+    frame: Option<FramePost>,
+    /// A marker is in the command FIFO and has not been taken.
+    armed: bool,
+}
+
+impl ScrollMailbox {
+    /// Merges one pass's posts: an entry overwrites its container's, keeping
+    /// an untaken `rest`, and frame posts coalesce ([`FramePost::merge`]). `true` when the caller
+    /// must send the marker — the first post since the last take.
+    pub(crate) fn post(
+        &self,
+        entries: impl IntoIterator<Item = (NodeId, ScrollEntry)>,
+        frame: Option<FramePost>,
+    ) -> bool {
+        let mut posted = lock(&self.posted);
+        for (node, entry) in entries {
+            match posted.scrolled.entry(node) {
+                Entry::Occupied(mut held) => {
+                    let rest = entry.rest.or(held.get().rest);
+                    *held.get_mut() = ScrollEntry { rest, ..entry };
+                }
+                Entry::Vacant(vacant) => {
+                    vacant.insert(entry);
+                }
+            }
+        }
+        if let Some(frame) = frame {
+            posted.frame = Some(posted.frame.map_or(frame, |held| held.merge(frame)));
+        }
+        !std::mem::replace(&mut posted.armed, true)
+    }
+
+    /// Takes everything posted since the last take: the entries swap into
+    /// `spare`, which must be empty and keeps its capacity for the next
+    /// take, and the frame post comes back. The next post sends a marker
+    /// again.
+    pub(crate) fn take(&self, spare: &mut FxHashMap<NodeId, ScrollEntry>) -> Option<FramePost> {
+        debug_assert!(spare.is_empty(), "the last take was spent");
+        let mut posted = lock(&self.posted);
+        std::mem::swap(&mut posted.scrolled, spare);
+        posted.armed = false;
+        posted.frame.take()
+    }
+
+    /// Records the painter's clock reading, in seconds.
+    pub(crate) fn set_clock(&self, now: f64) {
+        self.clock.store(now.to_bits(), Ordering::Relaxed);
+    }
+
+    /// The painter's latest clock reading, in seconds on the view's timeline:
+    /// zero before any painter drew.
+    pub(crate) fn clock(&self) -> f64 {
+        f64::from_bits(self.clock.load(Ordering::Relaxed))
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|error| panic!("a view's scroll mailbox is poisoned: {error}"))
+}
+
+/// The command FIFO's sending end, counting what it sends: the count at a
+/// frame post is that post's [`FramePost::fence`].
+///
+/// Every sender of a view's commands — the painter, the view's own host
+/// calls — sends through the seat's one instance, on the embedder's thread.
+pub(crate) struct CommandSender {
+    sender: mpsc::UnboundedSender<ToMain>,
+    sent: Cell<u64>,
+}
+
+impl CommandSender {
+    pub(crate) const fn new(sender: mpsc::UnboundedSender<ToMain>) -> Self {
+        Self {
+            sender,
+            sent: Cell::new(0),
+        }
+    }
+
+    /// Queues `command` behind everything sent before it. Counted whether
+    /// or not the view's task still reads: a closed channel has no main to
+    /// fence.
+    pub(crate) fn send(&self, command: ToMain) -> Result<(), mpsc::error::SendError<ToMain>> {
+        self.sent.set(self.sent.get() + 1);
+        self.sender.send(command)
+    }
+
+    /// How many commands have been sent.
+    pub(crate) fn sent(&self) -> u64 {
+        self.sent.get()
+    }
+
+    pub(crate) fn is_closed(&self) -> bool {
+        self.sender.is_closed()
     }
 }
 
@@ -361,7 +528,7 @@ impl FrameDemand {
         self.main || self.workers.values().any(|(_, pending)| *pending)
     }
 
-    pub(crate) fn dispatch(&mut self, milliseconds: f64, main: &mpsc::UnboundedSender<ToMain>) {
+    pub(crate) fn dispatch(&mut self, milliseconds: f64, main: &CommandSender) {
         if std::mem::take(&mut self.main) {
             let _ = main.send(ToMain::Vsync(milliseconds));
         }
@@ -394,7 +561,7 @@ pub(crate) struct ViewSeat {
     /// The view's own strong sender. Closing it is the goodbye that ends the
     /// view's task, which is why the seat dies with the view rather than with
     /// whatever a painter is holding.
-    pub(crate) commands: mpsc::UnboundedSender<ToMain>,
+    pub(crate) commands: CommandSender,
     /// The device metrics an attached painter names, which is the one thing
     /// that crosses to the view outside the command FIFO.
     ///
@@ -409,6 +576,10 @@ pub(crate) struct ViewSeat {
     /// of it. A clone of the view's own handle, so the store is released when
     /// the view drops both — seat first, by declaration order there.
     pub(crate) images: Rc<dyn FrameImages>,
+    /// Where the painter posts its scroll offsets, its frame requests and its
+    /// clock. Main holds a clone of its own: the seat never leaves this
+    /// thread.
+    pub(crate) scroll: Arc<ScrollMailbox>,
 }
 
 /// The view task's sending end: what the runtime, the tree and the listener
@@ -594,7 +765,7 @@ impl ViewObserver {
         self.published.frame.clone()
     }
 
-    /// The newest `BeginFrame` the view has acknowledged.
+    /// The newest frame post the view has acknowledged.
     #[cfg(test)]
     pub(crate) fn begin_frame_serviced(&mut self) -> u64 {
         self.sync();

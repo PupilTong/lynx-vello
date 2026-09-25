@@ -53,7 +53,9 @@ use self::graphics::{FrameAcquisition, WindowGraphics};
 use self::inertia::{Axis, BounceBack, ChainOutcome, DragTrack, Fling};
 use self::motion::{Motion, resolve_elastic_step, stretch_of, unwind_stretch};
 use crate::clock::ClockInstant;
-use crate::link::{InputEventPayload, Published, ToMain, ViewSeat, block_on_deadline};
+use crate::link::{
+    FramePost, InputEventPayload, Published, ScrollEntry, ToMain, ViewSeat, block_on_deadline,
+};
 use crate::main::tree::Viewport;
 use crate::resource::ResourceFetcher;
 #[cfg(not(target_arch = "wasm32"))]
@@ -147,6 +149,8 @@ mod clock_tests {
 #[cfg(test)]
 pub(crate) struct FarEnd {
     pub(crate) commands: mpsc::UnboundedReceiver<ToMain>,
+    /// Main's handle on the seat's scroll mailbox.
+    pub(crate) scroll: Arc<crate::link::ScrollMailbox>,
     /// The seat a live view holds: its command sender and its resource
     /// system. Without it here the painter's `Weak` would not upgrade, and the
     /// painter would detach itself on its first turn.
@@ -365,7 +369,6 @@ pub struct Painter {
     /// of the target's bake cache. Kept here so its capacity outlives a
     /// frame.
     composed_filters: Vec<Option<ImageData>>,
-    refill_requested_for: Option<u64>,
     /// The pixels this commit draws, read out of the attached view's store.
     images: images::PainterImages,
     thread_bound: PhantomData<Rc<()>>,
@@ -405,6 +408,12 @@ pub(super) struct ScrollIntents {
     bounce_backs: SmallVec<[BounceBack; 2]>,
     /// The drags in progress, for their release velocity; see [`inertia`].
     drags: FxHashMap<PointerId, DragTrack>,
+    /// The containers whose live offset changed, or whose hold a drag let
+    /// go, since the last publish; see [`Painter::publish_scroll`]. Bounded
+    /// by the containers one pass touches.
+    changed: SmallVec<[NodeId; 2]>,
+    /// The entries the last publish posted, kept for their capacity.
+    posting: SmallVec<[(NodeId, ScrollEntry); 2]>,
 }
 
 impl ScrollIntents {
@@ -413,12 +422,13 @@ impl ScrollIntents {
             return;
         }
         self.rebased_commit = Some(frame.commit_id());
+        let changed = &mut self.changed;
         self.offsets.retain(|node, offset| {
             let Some(slot) = frame.slot_of(*node) else {
                 return false;
             };
             let slot = &frame.scroll_slots()[slot as usize];
-            *offset = Vector2D::new(
+            let clamped = Vector2D::new(
                 clamp_intent_axis(
                     offset.x,
                     slot.max_offset.x,
@@ -432,6 +442,10 @@ impl ScrollIntents {
                     slot.bounce.y,
                 ),
             );
+            if clamped != *offset {
+                *offset = clamped;
+                note_changed(changed, *node);
+            }
             *offset != slot.offset
         });
         self.gesture_origins
@@ -467,7 +481,7 @@ impl ScrollIntents {
         let offset = self.offsets.get(&slot.node).copied().unwrap_or(slot.offset);
         let settled = settle_stretch_aware(offset, offset, slot, snap_x, snap_y);
         if settled != offset {
-            self.offsets.insert(slot.node, settled);
+            self.write(slot.node, settled);
             self.generation += 1;
         }
     }
@@ -489,12 +503,14 @@ impl ScrollIntents {
             let Some(index) = frame.slot_of(node) else {
                 continue;
             };
+            // Let go whether or not it moves now, so its rest is posted.
+            note_changed(&mut self.changed, node);
             let slot = &frame.scroll_slots()[index as usize];
             let (snap_x, snap_y) = frame.snap_axes(slot);
             let offset = self.offsets.get(&node).copied().unwrap_or(slot.offset);
             let settled = settle_stretch_aware(origin, offset, slot, snap_x, snap_y);
             if settled != offset {
-                self.offsets.insert(node, settled);
+                self.write(node, settled);
                 self.generation += 1;
             }
         }
@@ -570,7 +586,7 @@ impl ScrollIntents {
                         .entry((pointer, slot.node))
                         .or_insert(offset);
                 }
-                self.offsets.insert(slot.node, moved);
+                self.write(slot.node, moved);
                 if stretch_of(applied, axis.of(slot.max_offset)) != 0.0 {
                     axis.raise(&mut stretched);
                 }
@@ -602,7 +618,7 @@ impl ScrollIntents {
                         .entry((pointer, slot.node))
                         .or_insert(offset);
                 }
-                self.offsets.insert(slot.node, step.applied);
+                self.write(slot.node, step.applied);
             }
             step.absorbed
         });
@@ -623,38 +639,56 @@ impl ScrollIntents {
         self.offsets.get(&node).copied()
     }
 
-    fn refill_due(&self, frame: &CommittedFrame) -> bool {
-        self.offsets.iter().any(|(node, offset)| {
-            frame.slot_of(*node).is_some_and(|index| {
-                let slot = &frame.scroll_slots()[index as usize];
-                let (low, high) = slot.encode_window();
-                // A stretch is composed from the edge's own content: it
-                // asks for no refill of its own.
-                let pending = Vector2D::new(
-                    clamp_scroll_axis(offset.x, slot.max_offset.x),
-                    clamp_scroll_axis(offset.y, slot.max_offset.y),
-                );
-                axis_refill_due(pending.x, slot.offset.x, low.x, high.x)
-                    || axis_refill_due(pending.y, slot.offset.y, low.y, high.y)
-            })
-        })
+    /// The one write of a live offset, which records the container for the
+    /// next publish.
+    pub(super) fn write(&mut self, node: NodeId, offset: Vector2D<f32>) {
+        self.offsets.insert(node, offset);
+        note_changed(&mut self.changed, node);
     }
 
-    fn writeback(&self) -> Vec<(NodeId, Vector2D<f32>)> {
-        self.offsets
-            .iter()
-            .map(|(node, offset)| (*node, *offset))
-            .collect()
+    /// Hands the changed containers to `post` as main adopts them — clamped
+    /// to the committed range, and `rest` where nothing holds, flings or
+    /// bounces them — and forgets them. A container `frame` no longer carries
+    /// is dropped. Both buffers keep their capacity.
+    fn drain_changed(
+        &mut self,
+        frame: Option<&CommittedFrame>,
+        at: f64,
+    ) -> smallvec::Drain<'_, [(NodeId, ScrollEntry); 2]> {
+        let mut posting = std::mem::take(&mut self.posting);
+        if let Some(frame) = frame {
+            for &node in &self.changed {
+                let Some(index) = frame.slot_of(node) else {
+                    continue;
+                };
+                let slot = &frame.scroll_slots()[index as usize];
+                let live = self.offsets.get(&node).copied().unwrap_or(slot.offset);
+                let offset = Vector2D::new(
+                    clamp_scroll_axis(live.x, slot.max_offset.x),
+                    clamp_scroll_axis(live.y, slot.max_offset.y),
+                );
+                let moving =
+                    self.is_held(node) || self.is_flinging(frame, node) || self.is_bouncing(node);
+                posting.push((
+                    node,
+                    ScrollEntry {
+                        offset,
+                        at,
+                        rest: (!moving).then_some(offset),
+                    },
+                ));
+            }
+        }
+        self.changed.clear();
+        self.posting = posting;
+        self.posting.drain(..)
     }
 }
 
-fn axis_refill_due(pending: f32, committed: f32, low: f32, high: f32) -> bool {
-    if pending < committed {
-        pending - low < (committed - low) / 2.0
-    } else if pending > committed {
-        high - pending < (high - committed) / 2.0
-    } else {
-        false
+/// Records `node` once among the containers a pass changed.
+fn note_changed(changed: &mut SmallVec<[NodeId; 2]>, node: NodeId) {
+    if !changed.contains(&node) {
+        changed.push(node);
     }
 }
 
@@ -835,7 +869,6 @@ impl Painter {
             composed: None,
             composed_scene: Scene::new(),
             composed_filters: Vec::new(),
-            refill_requested_for: None,
             images: images::PainterImages::default(),
             thread_bound: PhantomData,
         }
@@ -873,11 +906,13 @@ impl Painter {
         let (notices, notice_receiver) = mpsc::unbounded_channel();
         let (frames, frame_receiver) = watch::channel(Published::default());
         let viewport = Viewport::new(width, height);
+        let scroll = Arc::new(crate::link::ScrollMailbox::default());
         let seat = Rc::new(ViewSeat {
             frame_demand: RefCell::default(),
-            commands,
+            commands: crate::link::CommandSender::new(commands),
             metrics: watch::channel(Some(viewport)).0,
             images: Rc::new(dom::NoImages),
+            scroll: Arc::clone(&scroll),
         });
         let mut painter = Self::without_output(width, height, 1.0);
         painter.seat = Rc::downgrade(&seat);
@@ -886,6 +921,7 @@ impl Painter {
             painter,
             FarEnd {
                 commands: command_receiver,
+                scroll,
                 seat,
                 outbox: crate::link::ViewOutbox::new(
                     notices,
@@ -952,7 +988,7 @@ impl Painter {
             return Err(EngineError::PainterAttached);
         }
         let frames = view.frames();
-        // A `BeginFrame` a previous attachment sent and main has not
+        // A frame post a previous attachment sent and main has not
         // acknowledged yet could otherwise satisfy this attachment's first
         // sequence one frame early. Starting past whatever has been
         // serviced costs at most one extra turn on the next tick.
@@ -1019,9 +1055,12 @@ impl Painter {
     ///
     /// Not what the target holds — that is [`Self::forget_target`], and it
     /// survives a detach, because so do the pixels on screen.
+    ///
+    /// What the intents had not published yet is dropped with them: nothing
+    /// on main acts on a container coming to rest yet (a `scrollend` on
+    /// detach is the scroll events' to decide).
     fn forget_view(&mut self) {
         self.published = Published::default();
-        self.refill_requested_for = None;
         self.scroll_intents = ScrollIntents::default();
         self.gesture = GestureRouter::default();
         self.images.forget();
@@ -1112,12 +1151,38 @@ impl Painter {
         self.frames = None;
     }
 
-    /// Sends one command to the attached view's task. A detached painter, or
-    /// one whose view has ended, says nothing; it goes on showing what it
-    /// last drew.
-    fn send(&self, command: ToMain) {
+    /// Sends one command to the attached view's task, publishing this pass's
+    /// scroll state first. A detached painter, or one whose view has ended,
+    /// says nothing; it goes on showing what it last drew.
+    fn send(&mut self, now: f64, command: ToMain) {
+        self.publish_scroll(now, None);
         if let Some(seat) = self.seat.upgrade() {
             let _ = seat.commands.send(command);
+        }
+    }
+
+    /// Posts what this pass changed into the view's mailbox, with `frame`
+    /// when the pass asks main for one, and sends the marker when the post
+    /// is the first since main's last take. Every send of a pass runs this
+    /// first, so a command never reaches main ahead of the scroll state of
+    /// its own pass, and every pass ends with it.
+    ///
+    /// Records the pass's clock either way; takes no lock when there is
+    /// nothing to post.
+    fn publish_scroll(&mut self, now: f64, frame: Option<FramePost>) {
+        let Some(seat) = self.seat.upgrade() else {
+            self.scroll_intents.changed.clear();
+            return;
+        };
+        seat.scroll.set_clock(now);
+        if self.scroll_intents.changed.is_empty() && frame.is_none() {
+            return;
+        }
+        let entries = self
+            .scroll_intents
+            .drain_changed(self.published.frame.as_deref(), now);
+        if seat.scroll.post(entries, frame) {
+            let _ = seat.commands.send(ToMain::Posted);
         }
     }
 
@@ -1167,24 +1232,10 @@ impl Painter {
         self.gesture
             .on_input(&event, target, at, &self.published, &mut decisions);
         self.execute_decisions(&mut decisions, published.as_deref(), at);
-        if let Some(frame) = &published {
-            self.maybe_request_refill(frame);
-        }
+        self.publish_scroll(at, None);
         if self.gesture.needs_frame() || self.scroll_intents.generation != generation {
             self.refresh();
         }
-    }
-
-    fn maybe_request_refill(&mut self, frame: &CommittedFrame) {
-        if self.refill_requested_for == Some(frame.commit_id())
-            || !self.scroll_intents.refill_due(frame)
-        {
-            return;
-        }
-        self.refill_requested_for = Some(frame.commit_id());
-        self.send(ToMain::Refill {
-            offsets: self.scroll_intents.writeback(),
-        });
     }
 
     /// Executes one pass's decisions in order.
@@ -1242,16 +1293,19 @@ impl Painter {
             if !self.published.listeners.contains(event.name) {
                 continue;
             }
-            self.send(ToMain::DispatchEvent {
-                target: event.target,
-                name: event.name,
-                payload: InputEventPayload {
-                    position: event.position,
-                    wheel: event.wheel,
-                    touches: event.touches,
-                    timestamp,
+            self.send(
+                at_seconds,
+                ToMain::DispatchEvent {
+                    target: event.target,
+                    name: event.name,
+                    payload: InputEventPayload {
+                        position: event.position,
+                        wheel: event.wheel,
+                        touches: event.touches,
+                        timestamp,
+                    },
                 },
-            });
+            );
         }
     }
 
@@ -1374,7 +1428,10 @@ impl Painter {
         }
     }
 
-    fn deliver_vsync(&self, now: f64) {
+    /// Delivers the script frame requests, after this pass's scroll state:
+    /// HTML runs the scroll steps before the animation frame callbacks.
+    fn deliver_vsync(&mut self, now: f64) {
+        self.publish_scroll(now, None);
         if let Some(seat) = self.seat.upgrade() {
             seat.frame_demand
                 .borrow_mut()
@@ -1382,20 +1439,33 @@ impl Painter {
         }
     }
 
+    /// Posts a frame request for main when one is due — something animates
+    /// on main, a curve passed its end, or `always` — beside this pass's
+    /// scroll state, and answers its sequence number: the number
+    /// [`Self::wait_begin_frame`] waits on, whether or not this post had to
+    /// send a marker. `None` when nothing was posted or the view's task is
+    /// gone.
     pub(super) fn begin_frame(&mut self, now: f64, always: bool) -> Option<u64> {
         let main_ticks_due = self
             .frame()
             .is_some_and(|frame| frame.needs_main_ticks() || frame.animation_boundary_passed(now));
         let seat = self.seat.upgrade()?;
-        if !main_ticks_due && !always {
+        if seat.commands.is_closed() {
             return None;
         }
-        self.begin_frames_sent += 1;
-        let seq = self.begin_frames_sent;
-        seat.commands
-            .send(ToMain::BeginFrame { now, seq })
-            .ok()
-            .map(|()| seq)
+        // Behind every command already sent: main applies the post only
+        // once it has applied them.
+        let fence = seat.commands.sent();
+        let post = (main_ticks_due || always).then(|| {
+            self.begin_frames_sent += 1;
+            FramePost {
+                now,
+                seq: self.begin_frames_sent,
+                fence,
+            }
+        });
+        self.publish_scroll(now, post);
+        post.map(|post| post.seq)
     }
 
     /// Composes `frame` at `key` and renders it into the draw target,
@@ -1488,9 +1558,11 @@ impl Painter {
         };
         let now = self.clock.now_seconds();
         self.tick_gestures(now);
-        let _ = self.begin_frame(now, false);
+        // Before the post, so a commit adopted this turn cannot re-snap an
+        // offset after its state went out. The post is the pass's last
+        // publish: nothing below moves an offset.
         self.scroll_intents.rebase(&frame);
-        self.maybe_request_refill(&frame);
+        let _ = self.begin_frame(now, false);
         let key: ComposeKey = (frame.commit_id(), self.scroll_intents.generation);
         let animation_now = frame.has_live_curves().then_some(now);
         self.render_frame(&frame, key, animation_now, false)?;
@@ -1606,16 +1678,22 @@ impl Painter {
         }
         let now = self.clock.now_seconds();
         self.service_gesture_clock(now);
+        if let Some(frame) = self.frame().cloned() {
+            self.scroll_intents.rebase(&frame);
+        }
         self.deliver_vsync(now);
         if let Some(seq) = self.begin_frame(now, true) {
             let _ = self.wait_begin_frame(seq, BEGIN_FRAME_TIMEOUT);
         }
         self.poll_link();
         let Some(frame) = self.frame().cloned() else {
+            self.publish_scroll(now, None);
             return Ok(false);
         };
+        // The wait may have adopted a newer commit. What this rebase changes
+        // is the pass's last publish; no send of the pass follows it.
         self.scroll_intents.rebase(&frame);
-        self.maybe_request_refill(&frame);
+        self.publish_scroll(now, None);
         let key: ComposeKey = (frame.commit_id(), self.scroll_intents.generation);
         let animation_now = frame.has_live_curves().then_some(now);
         let rendered = self.render_frame(&frame, key, animation_now, force)?;
@@ -1632,7 +1710,7 @@ impl Painter {
         Ok(rendered)
     }
 
-    /// Waits for the attached view to acknowledge a particular `BeginFrame`,
+    /// Waits for the attached view to acknowledge a particular frame post,
     /// adopting everything it publishes on the way.
     ///
     /// The one blocking wait a host's own thread makes on `bobcat-main`, and

@@ -119,12 +119,21 @@ pub(crate) fn build<T: Sync>(
     builder.scratch.scroll_stickies.clear();
     builder.scratch.assert_settled();
 
+    let mut slot_index = buffers.slot_index;
+    debug_assert!(slot_index.is_empty(), "a recycled index is emptied");
+    slot_index.extend(builder.slots.iter().enumerate().map(|(index, slot)| {
+        (
+            slot.node,
+            u32::try_from(index).expect("a frame cannot hold 2^32 scroll containers"),
+        )
+    }));
     (
         PaintOrder {
             items: builder.items,
             clips: builder.clips,
             layers: builder.layers,
             slots: builder.slots,
+            slot_index,
             animations: builder.animations,
             stickies: builder.stickies,
             spaces: builder.spaces,

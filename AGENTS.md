@@ -261,15 +261,16 @@ on the runtime-wide checkpoint generation; a `Worker` realm on `bobcat-workers`
 has the same shape minus the document. Nothing is spawned per input: one
 consumer reads each ordered stream with `while let Some(x) = rx.recv().await`.
 Every task reaches the realm through one boundary, `main/page.rs`'s
-`Page::enter`, which queues a job that runs one synchronous operation under the
-borrows of the shared runtime and the realm and then that operation's epilogue,
-in this order: the timers that came due, the commit, the boot report once, the
-`BeginFrame` acknowledgement, the module requests entry produced, the next timer
+`Page::enter`, which queues a job that syncs the document's animation clock to
+the painter's, runs one synchronous operation under the borrows of the shared
+runtime and the realm and then that operation's epilogue, in this order: the
+timers that came due, the commit, the boot report once, the frame-post
+acknowledgement, the module requests entry produced, the next timer
 deadline, and the checkpoint generation as of this entry. `Page::settle` is the
 epilogue alone, for a wake carrying no operation. **Nothing of a view is
 served outside a job**: opening its realm is the view's first job, queued
 before any of its tasks is spawned, so a burst that arrived before the realm
-did is a job queued behind it and finds a document — and a `BeginFrame` is
+did is a job queued behind it and finds a document — and a frame post is
 acknowledged by a job like everything else, so while any job of the group is
 parked the acknowledgement waits with it. A `bobcat-workers` consumer never awaits the deliveries it
 queued, because `Terminate` is in band behind them: it queues one job per
@@ -280,16 +281,19 @@ A view owns its channels end to end, all `tokio::sync` and none addressed.
 Three cross that link: a `ToMain` mpsc carrying commands in; a `ViewNotice`
 mpsc carrying lifecycle events and resource asks back; and one
 `watch<Published>` carrying what an observer wants the *latest* of — the newest
-committed frame, the listener-name set, and the newest serviced `BeginFrame`.
+committed frame, the listener-name set, and the newest serviced frame post.
 Commands are a FIFO because their arrival order is what they mean; a frame is
 not. `ToMain` carries a `PageUpdate` (the data, global-prop, global-event and
 reload commands a host accepted after observing MTS boot, in host FIFO order),
 a `DispatchEvent` (one event's type and target, plus the payload the router
 decided as values: the position, the wheel delta, the timestamp and — for the
 four touch events — its touch points), a `Vsync` (the display-frame reading a realm that called
-`requestScriptFrame` asked for), a `BeginFrame` (a timeline reading plus the
-sequence number the acknowledgement reports), a `Refill` (the scroll offsets
-the painter moved past a slot's encode window, written back), and `ImageEvents`
+`requestScriptFrame` asked for), `Posted` (payload-free: the view's
+`ScrollMailbox` holds the painter's latest offset per scroll container and one
+coalesced frame post — a timeline reading, the sequence number the
+acknowledgement reports, and a fence: the count of commands sent before it,
+which main applies first — and at most one marker is queued per take), and
+`ImageEvents`
 (completed or failed host loads — no variant can carry pixels, which makes
 "`ImageData` never crosses a channel" a property of the type). The painter's
 device metrics are **not** a command: they ride a
@@ -866,7 +870,7 @@ seat whose view is gone needs no `detach`. Attaching drops everything derived
 from the previous view — adopted snapshot, scroll intents, gesture arena,
 resolved pixels, the target's compose key, since commit ids restart at one
 per document — rebases the frame clock onto the view's timeline
-epoch, seeds the `BeginFrame` sequence past what has been serviced, and writes
+epoch, seeds the frame-post sequence past what has been serviced, and writes
 its metrics into the seat's watch: **the painter owns device metrics**, and
 that write is also what binds the view. Detaching resets the same minus the
 target and leaves the watch alone, so the last frame stays up and capturable
@@ -881,11 +885,11 @@ gestures, compositor scrolling, composition and presentation inside the
 embedder's own calls; vsync touches the OS only there. Commands needing the
 live tree go to `bobcat-main`, which answers by publishing a later frame, so a
 long JavaScript task cannot stop scrolling or re-presentation; only commits
-publish, so a half-applied batch is unobservable. Scroll offsets stay on the
-painter between refills and a scroll recomposes the retained frame without a
-commit; when an offset leaves its `ScrollSlot::encode_window` the painter sends
-`ToMain::Refill { offsets }` and the main thread answers with a recentered
-commit. Embedders provide input, device metrics, OS initialization, a draw
+publish, so a half-applied batch is unobservable. A scroll recomposes the
+retained frame without a commit; the painter posts its offsets into the view's
+`ScrollMailbox`, main adopts them at the marker with `scroll_to`, and recommits
+only past a slot's `ScrollSlot::encode_window` or when the committed slot finds
+the offset `recenter_due`. Embedders provide input, device metrics, OS initialization, a draw
 target and IO primitives, and relay OS facts in
 (`Painter::{dispatch_input, resize, set_occluded, refresh, pump, tick, capture}`
 and `LynxView::pump`); they never start or steer the pipeline. Engine events are

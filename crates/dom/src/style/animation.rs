@@ -11,7 +11,7 @@
 //!
 //! The tick needs nothing but `&mut Document`. In the Bobcat runtime the
 //! document's owner thread runs it — the Lynx main thread once the script
-//! starts, on a per-frame `BeginFrame` command that carries the presenting
+//! starts, on the per-frame frame post that carries the presenting
 //! side's clock reading — so advancing an animation costs no script and no
 //! DOM mutation; starting and stopping an animation rides the style flush
 //! the same thread already runs. Elements whose animated
@@ -20,12 +20,14 @@
 //! [`StyleDamage::needs_relayout`] reports.
 //!
 //! This crate owns no clock (see [`crate::input`]): `now` is a parameter. The
-//! timeline therefore only moves in [`Document::advance_animations`], and the
-//! presenting side is free to stop calling it — an idle page sends no frame,
-//! and an animation an exported curve already covers is sampled on the
-//! painting side instead. The flush that creates an animation consequently
-//! reads whatever time the last tick left behind, which can be arbitrarily far
-//! in the past.
+//! timeline therefore only moves in [`Document::advance_animations`] and
+//! [`Document::sync_animation_clock`], and the presenting side is free to
+//! stop ticking — an idle page sends no frame, and an animation an exported
+//! curve already covers is sampled on the painting side instead. The Bobcat
+//! runtime syncs the clock to the painter's at the start of every job, so a
+//! flush reads the painter's latest instant; a host that does not reads
+//! whatever time the last tick left behind, which can be arbitrarily far in
+//! the past.
 //!
 //! So a created animation is not anchored to the timeline by its flush. Web
 //! Animations resolves a pending animation's start time at the first frame
@@ -224,6 +226,20 @@ struct Stepped {
     /// styles they produce, so a step that moved one owes the next frame a
     /// commit even if no style changed with it.
     moved: bool,
+    /// Whether an animation or transition finished, which ends its
+    /// contribution or its side effects.
+    finished: bool,
+}
+
+/// Which of the two passes over the timeline a step is.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pass {
+    /// A frame: anchors fresh starts and re-cascades everything that moves.
+    Tick,
+    /// A job's start ([`Document::sync_animation_clock`]): moves the clock
+    /// and the states only. A fresh `Pending` start is carried rather than
+    /// anchored, so the next frame still anchors it at that frame.
+    Sync,
 }
 
 /// One animation or transition the driver has already anchored to the
@@ -269,6 +285,9 @@ struct Step<'a> {
     /// Whether this element's start times take [`Self::shift`] whatever their
     /// state, which is what holds a frozen animation's progress still.
     carry: bool,
+    /// Which pass this is: a sync anchors no fresh `Pending` start.
+    pass: Pass,
+    finished: bool,
     anchored: &'a FxHashSet<AnchoredAnimation>,
     pending: &'a mut FxHashSet<AnchoredAnimation>,
 }
@@ -293,6 +312,13 @@ impl Step<'_> {
         !self.skipped && (fresh || self.carry)
     }
 
+    /// Whether this step leaves a `Pending` start as it found it apart from
+    /// the shift: a fresh one under [`Pass::Sync`], which the next frame
+    /// anchors.
+    const fn defers(&self, fresh: bool) -> bool {
+        fresh && matches!(self.pass, Pass::Sync)
+    }
+
     /// Advances one element's `@keyframes` animations, collecting the ones
     /// that finished with a fill mode that keeps their last value. Answers
     /// whether any of them changed state.
@@ -314,6 +340,9 @@ impl Step<'_> {
                 if self.shifts_pending(fresh) {
                     animation.started_at += self.shift;
                 }
+                if self.defers(fresh) {
+                    continue;
+                }
                 if !self.skipped && animation.started_at <= self.now {
                     animation.state = AnimationState::Running;
                     moved = true;
@@ -334,6 +363,7 @@ impl Step<'_> {
             if animation.state == AnimationState::Running && animation.has_ended(self.now) {
                 animation.state = AnimationState::Finished;
                 moved = true;
+                self.finished = true;
                 if matches!(
                     animation.fill_mode,
                     AnimationFillMode::Forwards | AnimationFillMode::Both
@@ -361,14 +391,19 @@ impl Step<'_> {
                 if self.shifts_pending(fresh) {
                     transition.start_time += self.shift;
                 }
+                if self.defers(fresh) {
+                    continue;
+                }
                 if !self.skipped && transition.start_time <= self.now {
                     transition.state = AnimationState::Running;
                     moved = true;
                 } else {
+                    moved |= self.settles(fresh);
                     self.pending.insert(entry);
                 }
             } else if self.carry {
                 transition.start_time += self.shift;
+                moved |= self.settles(false);
             }
             if self.skipped {
                 continue;
@@ -376,6 +411,7 @@ impl Step<'_> {
             if transition.state == AnimationState::Running && transition.has_ended(self.now) {
                 transition.state = AnimationState::Finished;
                 moved = true;
+                self.finished = true;
             }
         }
         moved
@@ -436,6 +472,9 @@ pub(crate) struct AnimationDriver {
     /// cancelled or replaced, so the driver puts them back after each
     /// traversal.
     held: Vec<(NodeId, Animation)>,
+    /// Elements whose states a [`Document::sync_animation_clock`] moved
+    /// without re-cascading them, which the next tick re-cascades.
+    owed: FxHashSet<NodeId>,
 }
 
 impl AnimationDriver {
@@ -451,6 +490,19 @@ impl AnimationDriver {
         self.anchored.contains(&AnchoredAnimation {
             set: set.clone(),
             what: AnchoredKind::Keyframes(name.clone()),
+        })
+    }
+
+    /// Whether the pending transition of `property` in set `set` is anchored
+    /// to the timeline, so the next tick leaves its start alone.
+    pub(crate) fn transition_anchored(
+        &self,
+        set: &AnimationSetKey,
+        property: PropertyDeclarationId<'_>,
+    ) -> bool {
+        self.anchored.contains(&AnchoredAnimation {
+            set: set.clone(),
+            what: AnchoredKind::Transition(property.to_owned()),
         })
     }
 
@@ -503,6 +555,7 @@ impl AnimationDriver {
         self.marked.retain(|marked| !ids.contains(marked));
         self.carried.retain(|carried| !ids.contains(carried));
         self.held.retain(|(id, _)| !ids.contains(id));
+        self.owed.retain(|owed| !ids.contains(owed));
         self.anchored
             .retain(|entry| !ids.iter().any(|id| id.arena_key() == entry.set.node.0));
         let mut sets = self.sets.sets.write();
@@ -527,6 +580,14 @@ impl AnimationDriver {
 }
 
 impl<T: Sync> Document<T> {
+    /// The timeline's current instant, in seconds: the reading of the last
+    /// [`Self::advance_animations`] or [`Self::sync_animation_clock`], which
+    /// is what a style flush starts and retargets animations at.
+    #[must_use]
+    pub fn animation_clock(&self) -> f64 {
+        self.animations().now()
+    }
+
     /// Whether any animation or transition still needs frames.
     ///
     /// Animations frozen by css-contain-2 §4 — the ones in a subtree whose
@@ -605,7 +666,7 @@ impl<T: Sync> Document<T> {
 
     /// Whether anything animating is *not* covered by one of `frame`'s
     /// exported curves — those elements still need per-frame ticks on this
-    /// thread, so the presenting side keeps sending `BeginFrame`s.
+    /// thread, so the presenting side keeps sending frame posts.
     ///
     /// Every exported element has exactly one set, found by key, so counting
     /// the covered sets answers without scanning the slots per set.
@@ -658,16 +719,60 @@ impl<T: Sync> Document<T> {
     /// standing still. That step promotes, iterates, ends and hints nothing,
     /// so it leaves the timeline exactly as idle as it found it.
     pub fn advance_animations(&mut self, now: f64) -> AnimationTick {
+        self.step_timeline(now, Pass::Tick)
+    }
+
+    /// Moves the timeline to `now` at the start of a job, before any script
+    /// or flush in it runs, so a restyle inside the job — a transition
+    /// retargeted or reversed, `animation-play-state` paused, any
+    /// `animation-*` change — computes from the current instant rather than
+    /// from the last frame this thread ticked. HTML's order: animations are
+    /// updated before the style change events of a task.
+    ///
+    /// The cheap half of [`Self::advance_animations`]: the clock moves (never
+    /// back), and every live animation and transition is promoted at an
+    /// anchored start, iterated and ended, but nothing is re-cascaded and
+    /// nothing is committed. Elements a flush then restyles cascade at `now`;
+    /// the others keep their committed values, and the next tick re-cascades
+    /// the ones whose state moved. A fresh `Pending` start is carried, not
+    /// anchored, so the next frame anchors it as before.
+    ///
+    /// One exception: a step that ends an animation or transition runs the
+    /// tick's re-cascade for the elements whose state moved, because an end
+    /// changes what a commit shows — the side effects go, and the element
+    /// has no curve any more — and a commit in this job would otherwise
+    /// publish the ended state over the cascade of an earlier instant.
+    pub fn sync_animation_clock(&mut self, now: f64) {
+        let _ = self.step_timeline(now, Pass::Sync);
+    }
+
+    fn step_timeline(&mut self, now: f64, pass: Pass) -> AnimationTick {
         let was_active = self.animations().is_active();
-        if !was_active && !self.animations().has_frozen_animations() {
-            self.animations_mut().now = now;
+        let owed = pass == Pass::Tick && !self.animations().owed.is_empty();
+        if !was_active && !self.animations().has_frozen_animations() && !owed {
+            let driver = self.animations_mut();
+            driver.now = driver.now.max(now);
             return AnimationTick::default();
         }
         let previous = self.animations().now;
         let now = now.max(previous);
+        if pass == Pass::Sync && now <= previous {
+            return AnimationTick::default();
+        }
         self.animations_mut().now = now;
 
-        let Stepped { hinted, moved } = self.step_animation_states(now, now - previous);
+        let Stepped {
+            mut hinted,
+            mut moved,
+            finished,
+        } = self.step_animation_states(now, now - previous, pass);
+        if pass == Pass::Sync && !finished {
+            self.animations_mut().owed.extend(hinted);
+            return AnimationTick::default();
+        }
+        let owed = std::mem::take(&mut self.animations_mut().owed);
+        moved |= !owed.is_empty();
+        hinted.extend(owed);
         if hinted.is_empty() {
             let relayout = self.sync_animation_state();
             // If the timeline was active on entry and this step ended it, the
@@ -934,7 +1039,7 @@ impl<T: Sync> Document<T> {
     /// that survives the host having stopped ticking a fully frozen page.
     /// Carry and anchor are exclusive by construction: a `Pending` animation
     /// takes `shift` once, from whichever of the two claims it.
-    fn step_animation_states(&mut self, now: f64, shift: f64) -> Stepped {
+    fn step_animation_states(&mut self, now: f64, shift: f64, pass: Pass) -> Stepped {
         let handle = self.animations().context_handle();
         let mut anchored = std::mem::take(&mut self.animations_mut().anchored);
         let mut pending = std::mem::take(&mut self.animations_mut().anchored_spare);
@@ -962,6 +1067,8 @@ impl<T: Sync> Document<T> {
                 // skipped, and once more on the tick that finds it revealed,
                 // for the interval the reveal happened somewhere inside.
                 carry: skipped || was_frozen.contains(&id),
+                pass,
+                finished: false,
                 anchored: &anchored,
                 pending: &mut pending,
             };
@@ -971,6 +1078,7 @@ impl<T: Sync> Document<T> {
             let mut moved = step.animations(id, key, &mut set.animations, &mut held);
             moved |= step.transitions(key, &mut set.transitions);
             stepped.moved |= moved;
+            stepped.finished |= step.finished;
             set.clear_canceled_animations();
             if set.is_empty() {
                 return false;
@@ -978,7 +1086,10 @@ impl<T: Sync> Document<T> {
             // A frozen element is deliberately not hinted: its sampled values
             // cannot have moved, and re-cascading it every frame is exactly
             // the work skipping contents exists to avoid.
-            if !skipped && (set.needs_animation_ticks() || moved) {
+            // A sync hints only what moved: the rest re-cascades at the next
+            // tick as it would have.
+            let ticks = pass == Pass::Tick && set.needs_animation_ticks();
+            if !skipped && (ticks || moved) {
                 stepped.hinted.push(id);
             }
             true
@@ -1167,6 +1278,9 @@ impl<T: Sync> Document<T> {
 
 #[cfg(test)]
 mod tests {
+    use stylo::dom::OpaqueNode;
+    use stylo::servo::animation::{AnimationSetKey, AnimationState};
+
     use crate::test_common::Doc;
     use crate::tree::document::tests::device;
     use crate::{Document, NodeId, StylesheetOrigin};
@@ -1393,6 +1507,139 @@ mod tests {
                 "{animation}: the transition ticks"
             );
         }
+    }
+
+    /// The card's `transform` as its committed style holds it.
+    fn transform_of(doc: &Doc, id: NodeId) -> String {
+        format!("{:?}", doc.style(id).get_box().transform)
+    }
+
+    /// The first animation of `id`'s set: its state and its start.
+    fn first_animation(doc: &Doc, id: NodeId) -> (AnimationState, f64) {
+        let handle = doc.dom.animations().context_handle();
+        let sets = handle.sets.read();
+        let key = AnimationSetKey::new_for_non_pseudo(OpaqueNode(id.arena_key()));
+        let animation = &sets.get(&key).expect("the card animates").animations[0];
+        (animation.state.clone(), animation.started_at)
+    }
+
+    /// A job's clock sync moves the timeline and the states — through an
+    /// iteration boundary, here — but re-cascades nothing and owes no
+    /// commit; the next tick re-cascades what moved.
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "the clock is set to exact readings, never computed"
+    )]
+    fn a_clock_sync_steps_states_without_a_recascade() {
+        let (mut doc, card) = animated_card("animation: slide 1s linear 3");
+        doc.dom.advance_animations(0.0);
+        doc.dom.render();
+        let committed = transform_of(&doc, card);
+        for now in [0.5, 1.25] {
+            doc.dom.sync_animation_clock(now);
+            assert_eq!(doc.dom.animations().now(), now, "the clock moved");
+            assert!(!doc.dom.needs_render(), "no commit is owed at {now}s");
+            assert_eq!(
+                transform_of(&doc, card),
+                committed,
+                "no re-cascade at {now}s"
+            );
+        }
+        assert_eq!(first_animation(&doc, card).0, AnimationState::Running);
+        doc.dom.sync_animation_clock(1.0);
+        assert_eq!(
+            doc.dom.animations().now(),
+            1.25,
+            "the clock never goes back"
+        );
+
+        let tick = doc.dom.advance_animations(1.25);
+        assert!(
+            tick.restyled > 0,
+            "the tick re-cascades what the sync moved"
+        );
+        assert!(doc.dom.needs_render());
+        assert_ne!(transform_of(&doc, card), committed);
+    }
+
+    /// A sync leaves the next tick owing what it would have owed without
+    /// it: a sync that iterates an animation onto a sample equal to the
+    /// committed one moves its state, and the tick that follows commits for
+    /// that move although its own step moves nothing and no style changes.
+    #[test]
+    fn a_tick_after_a_clock_sync_owes_the_commit_the_sync_deferred() {
+        for synced in [false, true] {
+            let (mut doc, _) = animated_card("animation: slide 1s linear 3");
+            doc.dom.advance_animations(0.0);
+            doc.dom.advance_animations(0.25);
+            doc.dom.render();
+            if synced {
+                doc.dom.sync_animation_clock(1.25);
+                assert!(!doc.dom.needs_render(), "the sync owes nothing yet");
+            }
+            let tick = doc.dom.advance_animations(1.25);
+            assert_eq!(tick.restyled, 0, "the sample at 1.25 equals 0.25's");
+            assert!(
+                doc.dom.needs_render(),
+                "the iteration owes a commit (synced: {synced})"
+            );
+        }
+    }
+
+    /// The timeline never runs backwards, idle or not: a frame post older
+    /// than the clock a job synced to leaves the clock where it was.
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "the clock is set to exact readings, never computed"
+    )]
+    fn an_idle_tick_behind_a_sync_keeps_the_clock() {
+        let (mut doc, _) = animated_card("");
+        doc.dom.sync_animation_clock(1.012);
+        doc.dom.advance_animations(1.0);
+        assert_eq!(doc.dom.animation_clock(), 1.012);
+    }
+
+    /// A sync that ends an animation flips its bits, so the commit it owes
+    /// must not show the ended state over an earlier instant's cascade: the
+    /// ended element is re-cascaded at once.
+    #[test]
+    fn a_clock_sync_that_ends_an_animation_recascades_it() {
+        let (mut doc, card) = animated_card("animation: slide 1s linear");
+        doc.dom.advance_animations(0.0);
+        doc.dom.advance_animations(0.5);
+        doc.dom.render();
+        let running = transform_of(&doc, card);
+        doc.dom.sync_animation_clock(1.5);
+        assert_eq!(animates(&doc, card), (false, false), "the bit flipped");
+        assert!(doc.dom.needs_render(), "the flip owes a commit");
+        assert_ne!(transform_of(&doc, card), running, "the end re-cascaded");
+        assert!(!doc.dom.has_active_animations());
+    }
+
+    /// A fresh pending start is carried by a sync, not anchored: the next
+    /// tick still anchors it at that tick's reading.
+    #[test]
+    fn a_clock_sync_leaves_a_fresh_start_to_the_next_tick() {
+        let (mut doc, card) = animated_card("");
+        doc.dom.advance_animations(0.0);
+        doc.dom.sync_animation_clock(0.2);
+        doc.set_inline(card, "animation: slide 1s linear");
+        doc.flush();
+        assert_eq!(first_animation(&doc, card), (AnimationState::Pending, 0.2));
+        doc.dom.sync_animation_clock(0.5);
+        assert_eq!(
+            first_animation(&doc, card),
+            (AnimationState::Pending, 0.5),
+            "carried to the clock, not started"
+        );
+        doc.dom.advance_animations(0.75);
+        assert_eq!(
+            first_animation(&doc, card),
+            (AnimationState::Running, 0.75),
+            "anchored at the tick"
+        );
     }
 
     /// The finishing tick must republish even when the final style equals the

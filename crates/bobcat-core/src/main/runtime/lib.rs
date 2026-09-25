@@ -709,7 +709,7 @@ pub(crate) struct MainThreadRuntime {
     /// `fetchResource` included.
     futures: Rc<crate::future::FutureTable>,
     /// The newest reading of the view's timeline this side has been handed —
-    /// a `BeginFrame`'s `now` or a vsync's, both in milliseconds off the same
+    /// a frame post's `now` or a vsync's, both in milliseconds off the same
     /// epoch, the view's construction.
     ///
     /// The timeline is read on the painting side, where the frame clock is, so
@@ -968,6 +968,27 @@ impl MainThreadRuntime {
         called.map(|_| ()).and(finished)
     }
 
+    /// Moves the document's animation clock to the painter's at the start of
+    /// an entry; see [`dom::Document::sync_animation_clock`].
+    pub(crate) fn sync_animation_clock(&mut self, now: f64) {
+        self.slot
+            .borrow_mut()
+            .document_mut()
+            .sync_animation_clock(now);
+    }
+
+    /// The document's animation clock, for the tests that pin what an entry
+    /// starts at.
+    #[cfg(test)]
+    pub(crate) fn animation_clock(&self) -> f64 {
+        self.slot
+            .borrow()
+            .document
+            .as_ref()
+            .expect(DOCUMENT_EXISTS)
+            .animation_clock()
+    }
+
     /// Advances the animation timeline to the painting side's clock
     /// reading. Whether anything changed is the next commit's business.
     pub(crate) fn begin_frame(&mut self, now: f64) {
@@ -998,18 +1019,31 @@ impl MainThreadRuntime {
             .map_err(|error| MainThreadError::from_engine("delivering animation callbacks", error))
     }
 
-    /// Writes the painting side's scroll offsets into the document and
-    /// repaints: the commit this entry's epilogue makes bakes windows
-    /// re-centered on them. This is the only way a user scroll reaches the
-    /// document — between refills the offsets live on the painting side
-    /// alone.
-    pub(crate) fn refill_scroll_windows(&mut self, offsets: &[(dom::NodeId, dom::Vector2D<f32>)]) {
+    /// Writes the painter's scroll offsets into the document, which is how a
+    /// user scroll reaches it. An offset inside the committed encode window
+    /// commits nothing; one that has used half the window's headroom toward
+    /// an edge ([`dom::ScrollSlot::recenter_due`]) asks this entry's commit
+    /// to bake windows re-centered on it, and one past the window already
+    /// did inside `scroll_to`.
+    pub(crate) fn adopt_scroll_offsets(
+        &mut self,
+        entries: impl Iterator<Item = (dom::NodeId, crate::link::ScrollEntry)>,
+    ) {
         let mut slot = self.slot.borrow_mut();
         let document = slot.document_mut();
-        for (node, offset) in offsets {
-            document.scroll_to(*node, *offset);
+        let frame = document.committed_frame();
+        let mut recenter = false;
+        for (node, entry) in entries {
+            document.scroll_to(node, entry.offset);
+            recenter |= frame.as_ref().is_some_and(|frame| {
+                frame.slot_of(node).is_some_and(|index| {
+                    frame.scroll_slots()[index as usize].recenter_due(entry.offset)
+                })
+            });
         }
-        document.note_scroll_windows_stale();
+        if recenter {
+            document.note_scroll_windows_stale();
+        }
     }
 
     /// Applies the painting side's image reports, queueing the `load`s and

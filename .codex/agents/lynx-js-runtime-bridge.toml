@@ -75,7 +75,7 @@ Landed and not to be regressed:
   `require`) blocks JavaScript alone: tasks keep running, no other job does,
   and jobs queued meanwhile run in FIFO order afterwards. Nothing of a view is
   served outside a job: opening its realm is the view's first job, so a burst
-  that arrived earlier is queued behind it, and a `BeginFrame` acknowledgement
+  that arrived earlier is queued behind it, and a frame-post acknowledgement
   waits out whatever job of the group is parked. Boot parks for its entry
   not at all: it imports the entry by its URL, a task of the view completes
   that module from the pre-issued answer (with the entry preamble prepended

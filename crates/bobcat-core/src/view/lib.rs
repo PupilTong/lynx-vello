@@ -25,7 +25,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::background::WorkerHome;
 use crate::clock::ClockInstant;
-use crate::link::{Published, SourceAnswer, ToMain, ViewNotice, ViewSeat};
+use crate::link::{Published, ScrollMailbox, SourceAnswer, ToMain, ViewNotice, ViewSeat};
 #[cfg(target_arch = "wasm32")]
 pub use crate::main::configure_wasm_workers;
 use crate::main::tree::PageConfig;
@@ -713,6 +713,7 @@ impl LynxGroup {
         // this view yet" is: the document works at the create-time viewport
         // until then, and its first `__FlushElementTree` parks on this.
         let (metrics, metric_receiver) = watch::channel(None);
+        let scroll = Arc::new(ScrollMailbox::default());
         // The sink comes first and the store is built *from* it, so a store
         // without its report channel is unrepresentable and the two are paired
         // by construction. That pairing is per view: a host whose registry
@@ -765,6 +766,7 @@ impl LynxGroup {
                 native_modules: crate::native_module::encode_table(&table),
                 commands: command_receiver,
                 metrics: metric_receiver,
+                scroll: Arc::clone(&scroll),
                 notices,
                 frames,
                 cancel: cancel.clone(),
@@ -781,9 +783,10 @@ impl LynxGroup {
             // reference to it.
             seat: Rc::new(ViewSeat {
                 frame_demand: RefCell::default(),
-                commands,
+                commands: crate::link::CommandSender::new(commands),
                 metrics,
                 images: Rc::clone(&fetcher) as Rc<dyn FrameImages>,
+                scroll,
             }),
             notices: notice_receiver,
             frames: frame_receiver,
@@ -1245,6 +1248,8 @@ pub(crate) struct ViewAttachment {
     /// The reading end of the seat's metrics watch: what an attached painter
     /// names, `None` until one does.
     pub(crate) metrics: watch::Receiver<Option<Viewport>>,
+    /// Main's handle on the seat's scroll mailbox.
+    pub(crate) scroll: Arc<ScrollMailbox>,
     pub(crate) notices: mpsc::UnboundedSender<ViewNotice>,
     pub(crate) frames: watch::Sender<Published>,
     /// The view's end signal, minted on the embedder's thread. The task that

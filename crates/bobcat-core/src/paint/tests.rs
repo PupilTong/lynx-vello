@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::{FarEnd, Painter, ToMain};
+use crate::link::{FramePost, ScrollEntry, ScrollMailbox};
 use crate::main::tree::{ImageOutcomes, LynxDocument, PageConfig, Viewport, new_document};
 use crate::resource::SourceRequest;
 use crate::test_support::TestViewSpec;
@@ -33,11 +34,14 @@ fn script_frame_demand_waits_for_host_vsync_even_before_the_first_commit() {
     assert!(painter.is_animating());
     painter.pump().unwrap();
     painter.begin_frame(1.0, true);
-    assert!(matches!(
-        main.commands.try_recv().unwrap(),
-        ToMain::BeginFrame { .. }
-    ));
+    assert!(matches!(main.commands.try_recv().unwrap(), ToMain::Posted));
     assert!(main.commands.try_recv().is_err());
+    assert!(
+        main.scroll
+            .take(&mut rustc_hash::FxHashMap::default())
+            .is_some(),
+        "the marker stands for a frame post"
+    );
 
     painter.vsync();
     assert!(matches!(
@@ -102,7 +106,7 @@ fn frame_size_rejects_unbounded_targets() {
 }
 
 /// One poll applies every kind of thing that reaches the painting side — a
-/// listener edge, a `BeginFrame` acknowledgement, and the redraw a new frame
+/// listener edge, a frame post acknowledgement, and the redraw a new frame
 /// asks for — and applies each of them exactly once.
 #[test]
 fn one_poll_adopts_every_kind_of_published_state() {
@@ -406,11 +410,9 @@ fn a_poll_adopts_arrived_edges_in_order_and_does_not_block() {
     );
 }
 
-/// A scroll decision crosses nothing: it lands in the painting side's
-/// intents, which are the offsets composition shows, and the main
-/// thread hears about scrolling only when a refill writes offsets back.
-/// With no published frame there is no geometry to consume against, so
-/// the decision evaporates entirely.
+/// A scroll decision with no published frame has no geometry to consume
+/// against, so it evaporates entirely: no intent, nothing posted, no
+/// marker.
 #[test]
 fn a_scroll_decision_sends_no_command() {
     use super::gesture::{InputDecision, InputDecisions};
@@ -424,9 +426,10 @@ fn a_scroll_decision_sends_no_command() {
         delta: dom::Vector2D::new(0.0, 5.0),
     });
     painter.execute_decisions(&mut decisions, None, 0.0);
+    painter.publish_scroll(0.0, None);
     assert!(
         main.commands.try_recv().is_err(),
-        "a windowed scroll never crosses the command channel"
+        "nothing moved, so nothing crosses"
     );
     assert!(painter.scroll_intents.offsets.is_empty());
 }
@@ -655,7 +658,7 @@ fn an_offscreen_wait_takes_only_its_own_acknowledgement_and_ends_with_its_view()
         .expect("the view's task is listening");
     assert!(matches!(
         first_end.commands.blocking_recv(),
-        Some(ToMain::BeginFrame { .. })
+        Some(ToMain::Posted)
     ));
 
     second_end.outbox.begin_frame_serviced(seq);
@@ -670,7 +673,7 @@ fn an_offscreen_wait_takes_only_its_own_acknowledgement_and_ends_with_its_view()
         "and its own satisfies it without blocking"
     );
 
-    // A `BeginFrame` nobody will service: the view is gone, so nothing will
+    // A frame post nobody will service: the view is gone, so nothing will
     // acknowledge it, and waiting the ten seconds out would be ten seconds of
     // a host's own thread.
     drop(first_end);
@@ -683,5 +686,425 @@ fn an_offscreen_wait_takes_only_its_own_acknowledgement_and_ends_with_its_view()
     assert!(
         !first.is_attached(),
         "and the released view detached the painter"
+    );
+}
+
+/// A frame over one 200px column scroller of 1000px content at the origin,
+/// its style extended by `css`, and the scroller.
+fn scrolling_frame(css: &str) -> (Arc<dom::CommittedFrame>, dom::NodeId) {
+    let mut document = document();
+    let root = document.document_element().id();
+    let scroller = document.create_element("view", ());
+    document.set_inline_style(
+        scroller,
+        &format!(
+            "display:flex;flex-direction:column;overflow:scroll;width:200px;height:200px;{css}"
+        ),
+    );
+    document.append_child(root, scroller);
+    let filler = document.create_element("view", ());
+    document.set_inline_style(filler, "flex-shrink:0;width:200px;height:1000px");
+    document.append_child(scroller, filler);
+    let frame = document.commit();
+    assert!(frame.slot_of(scroller).is_some(), "the scroller has a slot");
+    (frame, scroller)
+}
+
+/// A detached painter that has adopted [`scrolling_frame`], at clock 0.
+fn scrolling(css: &str) -> (Painter, FarEnd, dom::NodeId) {
+    let (mut painter, main) = detached();
+    let (frame, scroller) = scrolling_frame(css);
+    main.outbox.publish_frame(frame);
+    painter.poll_link();
+    painter.clock.pin(0.0);
+    (painter, main, scroller)
+}
+
+fn touch(painter: &mut Painter, phase: dom::input::PointerPhase, y: f32) {
+    painter.dispatch_input(dom::input::InputEvent::pointer(
+        dom::Point2D::new(100.0, y),
+        1,
+        dom::input::PointerKind::Touch,
+        phase,
+    ));
+}
+
+/// How many markers the FIFO holds; anything else in it fails.
+fn markers(main: &mut FarEnd) -> usize {
+    std::iter::from_fn(|| main.commands.try_recv().ok())
+        .map(|command| assert!(matches!(command, ToMain::Posted), "only markers"))
+        .count()
+}
+
+/// What main takes at a marker.
+fn take(main: &FarEnd) -> (Vec<(dom::NodeId, ScrollEntry)>, Option<FramePost>) {
+    let mut spare = rustc_hash::FxHashMap::default();
+    let frame = main.scroll.take(&mut spare);
+    (spare.into_iter().collect(), frame)
+}
+
+/// A drag posts its container once and sends one marker; however many steps
+/// follow before main takes, the entry is overwritten and no second marker
+/// queues. A take re-arms it.
+#[test]
+fn a_drag_queues_one_marker_until_main_takes() {
+    use dom::input::PointerPhase::{Down, Move};
+
+    let (mut painter, mut main, scroller) = scrolling("");
+    touch(&mut painter, Down, 150.0);
+    touch(&mut painter, Move, 120.0);
+    assert_eq!(markers(&mut main), 1, "the first step sends the marker");
+    for step in 1..=10_u8 {
+        touch(&mut painter, Move, 120.0 - f32::from(step));
+    }
+    assert_eq!(markers(&mut main), 0, "later steps ride the same marker");
+
+    let (entries, frame) = take(&main);
+    let live = painter
+        .scroll_intents
+        .offset_for(scroller)
+        .expect("the drag moved the scroller");
+    assert_eq!(frame, None);
+    assert_eq!(
+        entries,
+        [(
+            scroller,
+            ScrollEntry {
+                offset: live,
+                at: 0.0,
+                rest: None,
+            }
+        )],
+        "one entry at the latest offset, held by the finger"
+    );
+
+    touch(&mut painter, Move, 100.0);
+    assert_eq!(markers(&mut main), 1, "the take re-armed the marker");
+}
+
+/// A drag let go without a fling comes to rest where it stands.
+#[test]
+fn a_drag_released_without_a_fling_posts_its_rest() {
+    use dom::input::PointerPhase::{Down, Move, Up};
+
+    let (mut painter, main, scroller) = scrolling("");
+    touch(&mut painter, Down, 150.0);
+    touch(&mut painter, Move, 120.0);
+    let _ = take(&main);
+    // Every step at one clock reading: no velocity to fling with.
+    touch(&mut painter, Up, 120.0);
+    let (entries, _) = take(&main);
+    let offset = painter
+        .scroll_intents
+        .offset_for(scroller)
+        .expect("the drag moved the scroller");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries[0].1.rest,
+        Some(offset),
+        "at rest where it was let go"
+    );
+}
+
+/// A fling posts its steps without a rest, and its last one with it.
+#[test]
+fn a_spent_fling_posts_its_rest() {
+    use dom::input::PointerPhase::{Down, Move, Up};
+
+    let (mut painter, main, scroller) = scrolling("");
+    for (at, phase, y) in [
+        (0.0, Down, 190.0),
+        (0.016, Move, 170.0),
+        (0.032, Move, 150.0),
+        (0.048, Move, 130.0),
+        (0.05, Up, 130.0),
+    ] {
+        painter.clock.pin(at);
+        touch(&mut painter, phase, y);
+    }
+    let (entries, _) = take(&main);
+    assert!(
+        entries.iter().all(|(_, entry)| entry.rest.is_none()),
+        "the release flings"
+    );
+    let mut moving = 0;
+    for frame in 1..600_u16 {
+        let now = 0.05 + f64::from(frame) / 60.0;
+        painter.service_gesture_clock(now);
+        painter.publish_scroll(now, None);
+        let (entries, _) = take(&main);
+        let Some((_, entry)) = entries.into_iter().find(|(node, _)| *node == scroller) else {
+            continue;
+        };
+        assert_eq!(
+            entry.at.to_bits(),
+            now.to_bits(),
+            "stamped with the pass's clock"
+        );
+        if let Some(rest) = entry.rest {
+            assert!(moving > 0, "the fling moved before it rested");
+            assert_eq!(Some(rest), painter.scroll_intents.offset_for(scroller));
+            return;
+        }
+        moving += 1;
+    }
+    panic!("the fling never came to rest");
+}
+
+/// A `contain-bounce` stretch is the painter's alone: what it posts is the
+/// edge the stretch stands past.
+#[test]
+fn a_stretched_offset_posts_clamped() {
+    use dom::input::PointerPhase::{Down, Move};
+
+    let (mut painter, main, scroller) = scrolling("overscroll-behavior:contain-bounce");
+    touch(&mut painter, Down, 50.0);
+    touch(&mut painter, Move, 150.0);
+    let live = painter
+        .scroll_intents
+        .offset_for(scroller)
+        .expect("the drag stretched the scroller");
+    assert!(live.y < 0.0, "stretched past the start, got {live:?}");
+    let (entries, _) = take(&main);
+    assert_eq!(entries[0].1.offset, dom::Vector2D::zero());
+}
+
+/// Frame posts coalesce to the latest clock and the greatest sequence, and
+/// every post answers its own sequence number whether or not it sent the
+/// marker.
+#[test]
+fn frame_posts_coalesce_to_the_latest_clock_and_greatest_sequence() {
+    let (mut painter, mut main) = detached();
+    assert_eq!(painter.begin_frame(1.0, true), Some(1));
+    assert_eq!(painter.begin_frame(2.0, true), Some(2));
+    assert_eq!(markers(&mut main), 1, "one marker for both");
+    assert_eq!(
+        take(&main).1,
+        Some(FramePost {
+            now: 2.0,
+            seq: 2,
+            fence: 1
+        }),
+        "fenced behind the first post's marker"
+    );
+    assert_eq!(
+        main.scroll.clock().to_bits(),
+        2.0_f64.to_bits(),
+        "the clock rode along"
+    );
+    assert_eq!(painter.begin_frame(3.0, true), Some(3));
+    assert_eq!(markers(&mut main), 1, "the take re-armed the marker");
+}
+
+/// A tap decided in the same pass as a scroll step reaches main behind the
+/// marker, so its listener never sees a document older than its pass.
+#[test]
+fn a_dispatch_in_a_scrolling_pass_follows_the_marker() {
+    use super::gesture::{EmitEvent, InputDecision, InputDecisions, TAP_EVENT, TouchPoints};
+
+    let (mut painter, mut main, scroller) = scrolling("");
+    main.outbox.listener_edge(Arc::from(TAP_EVENT), true);
+    painter.poll_link();
+    let frame = painter.frame().cloned().expect("a frame is adopted");
+    let mut decisions = InputDecisions::new();
+    decisions.push(InputDecision::Scroll {
+        pointer: None,
+        from: scroller,
+        delta: dom::Vector2D::new(0.0, 30.0),
+    });
+    decisions.push(InputDecision::Emit(EmitEvent {
+        name: TAP_EVENT,
+        target: scroller,
+        position: dom::Point2D::new(1.0, 1.0),
+        wheel: None,
+        touches: TouchPoints::new(),
+    }));
+    painter.execute_decisions(&mut decisions, Some(&frame), 0.5);
+    assert!(matches!(main.commands.try_recv(), Ok(ToMain::Posted)));
+    assert!(matches!(
+        main.commands.try_recv(),
+        Ok(ToMain::DispatchEvent { .. })
+    ));
+    assert_eq!(take(&main).0[0].1.offset, dom::Vector2D::new(0.0, 30.0));
+}
+
+/// The animation frame callbacks run after the scroll state of their pass:
+/// HTML's scroll steps before `requestAnimationFrame`. In `tick`'s order —
+/// an offset moves, then the vsync is delivered — the vsync's own send
+/// publishes the move ahead of it.
+#[test]
+fn a_vsync_follows_the_marker_of_its_pass() {
+    use super::gesture::{InputDecision, InputDecisions};
+
+    let (mut painter, mut main, scroller) = scrolling("");
+    main.seat.frame_demand.borrow_mut().set(None, true);
+    let frame = painter.frame().cloned().expect("a frame is adopted");
+    let mut decisions = InputDecisions::new();
+    decisions.push(InputDecision::Scroll {
+        pointer: None,
+        from: scroller,
+        delta: dom::Vector2D::new(0.0, 30.0),
+    });
+    painter.execute_decisions(&mut decisions, Some(&frame), 0.5);
+    assert!(main.commands.try_recv().is_err(), "nothing sent yet");
+    painter.deliver_vsync(0.5);
+    assert!(matches!(main.commands.try_recv(), Ok(ToMain::Posted)));
+    assert!(matches!(main.commands.try_recv(), Ok(ToMain::Vsync(_))));
+    assert_eq!(take(&main).0[0].1.offset, dom::Vector2D::new(0.0, 30.0));
+}
+
+/// A frame post that rides a marker already queued is fenced behind the
+/// commands sent after that marker: main applies it only once it has
+/// applied them, so the acknowledgement implies the tap below.
+#[test]
+fn a_frame_post_is_fenced_behind_every_command_sent_before_it() {
+    use super::gesture::{EmitEvent, InputDecision, InputDecisions, TAP_EVENT, TouchPoints};
+
+    let (mut painter, mut main, scroller) = scrolling("");
+    main.outbox.listener_edge(Arc::from(TAP_EVENT), true);
+    painter.poll_link();
+    let frame = painter.frame().cloned().expect("a frame is adopted");
+    let mut decisions = InputDecisions::new();
+    decisions.push(InputDecision::Scroll {
+        pointer: None,
+        from: scroller,
+        delta: dom::Vector2D::new(0.0, 30.0),
+    });
+    decisions.push(InputDecision::Emit(EmitEvent {
+        name: TAP_EVENT,
+        target: scroller,
+        position: dom::Point2D::new(1.0, 1.0),
+        wheel: None,
+        touches: TouchPoints::new(),
+    }));
+    painter.execute_decisions(&mut decisions, Some(&frame), 0.5);
+    let sent = main.seat.commands.sent();
+    assert_eq!(painter.begin_frame(0.5, true), Some(1));
+    assert!(matches!(main.commands.try_recv(), Ok(ToMain::Posted)));
+    assert!(matches!(
+        main.commands.try_recv(),
+        Ok(ToMain::DispatchEvent { .. })
+    ));
+    assert!(
+        main.commands.try_recv().is_err(),
+        "the post rides the queued marker"
+    );
+    assert_eq!(
+        take(&main).1.map(|post| post.fence),
+        Some(sent),
+        "behind the marker and the tap"
+    );
+}
+
+/// Posts that land before one take merge to the latest clock and the
+/// greatest sequence and fence, whatever order they arrive in: a painter
+/// reattached behind an untaken post restarts below its sequence.
+#[test]
+fn a_frame_post_merge_keeps_the_greatest_sequence() {
+    let mailbox = ScrollMailbox::default();
+    assert!(mailbox.post(
+        [],
+        Some(FramePost {
+            now: 2.0,
+            seq: 5,
+            fence: 7
+        })
+    ));
+    assert!(!mailbox.post(
+        [],
+        Some(FramePost {
+            now: 3.0,
+            seq: 4,
+            fence: 6
+        })
+    ));
+    assert_eq!(
+        mailbox.take(&mut rustc_hash::FxHashMap::default()),
+        Some(FramePost {
+            now: 3.0,
+            seq: 5,
+            fence: 7
+        })
+    );
+}
+
+/// An untaken `rest` survives the posts that follow it: a drag let go and
+/// touched again before main takes still reports where it came to rest.
+#[test]
+fn an_untaken_rest_survives_a_later_post() {
+    use dom::input::PointerPhase::{Down, Move, Up};
+
+    let (mut painter, main, scroller) = scrolling("");
+    touch(&mut painter, Down, 150.0);
+    touch(&mut painter, Move, 120.0);
+    touch(&mut painter, Up, 120.0);
+    let released = painter
+        .scroll_intents
+        .offset_for(scroller)
+        .expect("the drag moved the scroller");
+    touch(&mut painter, Down, 120.0);
+    touch(&mut painter, Move, 100.0);
+    let live = painter
+        .scroll_intents
+        .offset_for(scroller)
+        .expect("the second drag moved the scroller");
+    assert_ne!(live, released);
+    let (entries, _) = take(&main);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].1.offset, live, "the latest offset");
+    assert_eq!(entries[0].1.rest, Some(released), "and the untaken rest");
+}
+
+/// A commit that grows the content under a bounce back lands the stretched
+/// offset in range, which ends the bounce back without a step: the offset
+/// the document held clamped is posted again, at rest.
+#[test]
+fn a_bounce_back_a_commit_ends_posts_its_rest() {
+    let mut document = document();
+    let root = document.document_element().id();
+    let scroller = document.create_element("view", ());
+    document.set_inline_style(
+        scroller,
+        "display:flex;flex-direction:column;overflow:scroll;width:200px;height:200px;\
+         overscroll-behavior:contain-bounce",
+    );
+    document.append_child(root, scroller);
+    let filler = document.create_element("view", ());
+    document.set_inline_style(filler, "flex-shrink:0;width:200px;height:1000px");
+    document.append_child(scroller, filler);
+    let (mut painter, main) = detached();
+    main.outbox.publish_frame(document.commit());
+    painter.poll_link();
+    let frame = painter.frame().cloned().expect("a frame is adopted");
+
+    // Stretched 40px past the end, and let go: the bounce back starts.
+    let stretched = dom::Vector2D::new(0.0, 840.0);
+    painter.scroll_intents.write(scroller, stretched);
+    painter.scroll_intents.start_bounce_backs(&frame, 0.0);
+    assert!(painter.scroll_intents.is_bouncing(scroller));
+    painter.publish_scroll(0.0, None);
+    let (entries, _) = take(&main);
+    assert_eq!(entries[0].1.offset, dom::Vector2D::new(0.0, 800.0));
+    assert_eq!(entries[0].1.rest, None, "still bouncing");
+
+    document.set_inline_style(filler, "flex-shrink:0;width:200px;height:1200px");
+    main.outbox.publish_frame(document.commit());
+    painter.poll_link();
+    let grown = painter.frame().cloned().expect("the new frame is adopted");
+    painter.scroll_intents.rebase(&grown);
+    assert!(!painter.scroll_intents.is_bouncing(scroller));
+    painter.publish_scroll(0.016, None);
+    let (entries, _) = take(&main);
+    assert_eq!(
+        entries,
+        [(
+            scroller,
+            ScrollEntry {
+                offset: stretched,
+                at: 0.016,
+                rest: Some(stretched),
+            }
+        )],
+        "posted in range, at rest"
     );
 }

@@ -358,9 +358,10 @@ async fn metrics_that_arrive_before_the_document_are_what_it_is_created_at() {
         painter
             .resize(400.0, 800.0, 2.0)
             .expect("resize while loading");
-        // A `BeginFrame` behind it, waited out: commands are a FIFO and the
-        // loading task acknowledges this one itself, so the acknowledgement is
-        // proof that the resize ahead of it has already been staged — which is
+        // A frame post behind it, waited out: its marker rides the command
+        // FIFO and the loading task acknowledges it itself, so the
+        // acknowledgement is proof that the resize ahead of it has already
+        // been staged — which is
         // what lets the entry arrive afterwards rather than racing it.
         painter.tick(false).expect("tick while loading");
         let completion = fetcher
