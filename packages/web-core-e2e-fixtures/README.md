@@ -20,8 +20,20 @@ scope decision, will not. Upstream's own `dist/` is built without an
 this engine has no intention of serving. Compiled here at `4.1.0`, the same
 sources exercise the path it does.
 
-Everything else about the corpus is upstream's: the cards, their CSS and their
-assets are copied without edits.
+The cards, their CSS and their assets are otherwise upstream's, with two
+rewrites applied to the vendored text by user ruling on 2026-09-25:
+
+- **`direction: lynx-rtl` becomes `direction: rtl`** (24 files). `lynx-rtl` is
+  a value the fork's grammar rejects, so upstream's own spelling left every
+  right-to-left case testing nothing here. The standard value is what this
+  engine implements.
+- **`<x-text>` becomes `<text>`** (5 files). `x-text` is web-core's DOM name
+  for the Lynx tag; written literally in JSX it reaches this engine as a tag
+  no sheet has a rule for, and the run disappears. `<x-textarea>` is a
+  different tag and is untouched.
+
+Both are recorded here rather than absorbed silently, because a re-sync from
+upstream will bring the original spellings back.
 
 ## Building
 

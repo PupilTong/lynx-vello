@@ -11,9 +11,9 @@ function App() {
         ellipsize-mode='tail'
       >
         I am bold
-        <x-text style='font-size: 24px; color: red;'>
+        <text style='font-size: 24px; color: red;'>
           and red
-        </x-text>
+        </text>
         longlonglonglonglonglonglonglonglong text
         longlonglonglonglonglonglonglonglong
       </text>

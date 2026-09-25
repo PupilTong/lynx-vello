@@ -11,10 +11,10 @@ function App() {
       </view>
       <view>
         <text>
-          <x-text style='font-size: 20px;display:none;'>
+          <text style='font-size: 20px;display:none;'>
             hello world
-          </x-text>
-          <x-text style='font-size: 30px;display:none;'>111</x-text>
+          </text>
+          <text style='font-size: 30px;display:none;'>111</text>
         </text>
       </view>
     </view>
