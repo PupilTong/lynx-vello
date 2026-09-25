@@ -16,13 +16,17 @@
 //!    an opacity group is grouped but not clipped by the group's ancestors)
 //!    and keeps group blend layers from opening inside a clip layer
 //!    (vello [#1198](https://github.com/linebender/vello/issues/1198) —
-//!    re-pushing intersecting clips is idempotent, so correctness is
-//!    unaffected). The precise #1198 invariant maintained crate-wide: a
-//!    blend layer's *immediate* enclosing layer is always a real
-//!    (isolating) layer, never a clip layer — clip layers share their
-//!    parent's buffer, so a blend directly inside one reads pixels outside
-//!    the clip. Fragment painters that need a blend under an item clip
-//!    (inset shadows) interpose their own full `SrcOver` layer first.
+//!    re-pushing intersecting clips is idempotent). The one visible cost: a
+//!    group's own layers sit outside its ancestors' clips, so ink a group
+//!    effect adds past its content — a blur's 3σ margin, a filtered
+//!    backdrop's border box — is not cut by them (recorded in
+//!    `docs/tracking/deviations.md`). The precise #1198 invariant
+//!    maintained crate-wide: a blend layer's *immediate* enclosing layer is
+//!    always a real (isolating) layer, never a clip layer — clip layers
+//!    share their parent's buffer, so a blend directly inside one reads
+//!    pixels outside the clip. Fragment painters that need a blend under an
+//!    item clip (inset shadows) interpose their own full `SrcOver` layer
+//!    first.
 //! 2. **Group scopes** ([`crate::visual::RenderLayer`]) — a stacking context with group effects
 //!    pushes, outermost to innermost: the effect layer (blend mode + `opacity` alpha, clipped to
 //!    the group's prepass-computed content bounds), a `clip-path` layer (a full `push_layer`, not a
@@ -54,7 +58,8 @@
 //! - **Only the encode is skipped.** Scope open and close are driven by item index, and the group
 //!   bounds `plan_frame` produces are computed from every item, culled or not. Narrowing a group's
 //!   bounds by the cull decision would move the `push_layer` rect and change the encoding of
-//!   content nothing is culling.
+//!   content nothing is culling. A scope with no encoded item and no backdrop opens nothing, since
+//!   it draws nothing — which also keeps its space and curves out of the program.
 //! - **Culling needs a proof, uncertainty paints.** An item is discarded only when its box,
 //!   inflated by a reach that bounds every fragment painter, maps entirely outside the admitted
 //!   region under the exact matrix the painter would have used — `plan_frame` hands that matrix to
@@ -103,7 +108,9 @@ use crate::vello::Scene;
 use crate::vello::kurbo::{Affine, Point, Rect};
 use crate::vello::peniko::{BlendMode, Compose, Fill, Mix};
 use crate::visual::space::{self, SpaceKind, nearest_scroll, nearest_sticky};
-use crate::visual::{AutoBox, ClipNode, PaintItem, PaintItemKind, PaintOrder, RenderLayer, Space};
+use crate::visual::{
+    AnimationSlot, AutoBox, ClipNode, PaintItem, PaintItemKind, PaintOrder, RenderLayer, Space,
+};
 
 /// Where one walk's output goes.
 ///
@@ -270,10 +277,10 @@ impl WalkSink<'_> {
         }
     }
 
-    fn pop_filter(&mut self, spaces: &[Space]) {
+    fn pop_filter(&mut self, spaces: &[Space], slots: &[AnimationSlot]) {
         match self {
             Self::Monolithic(..) => {}
-            Self::Compose(assembly) => assembly.pop_filter(spaces),
+            Self::Compose(assembly) => assembly.pop_filter(spaces, slots),
         }
     }
 
@@ -300,10 +307,11 @@ impl WalkSink<'_> {
         entry: FilterGroup,
         ops: std::ops::Range<u32>,
         spaces: &[Space],
+        slots: &[AnimationSlot],
     ) -> bool {
         match self {
             Self::Monolithic(..) => false,
-            Self::Compose(assembly) => assembly.push_backdrop(entry, ops, spaces),
+            Self::Compose(assembly) => assembly.push_backdrop(entry, ops, spaces, slots),
         }
     }
 }
@@ -1001,6 +1009,9 @@ fn open_scope<T>(
     let layer = &frame.layers()[layer_index];
     let space = layer.space;
     let base = scratch.scopes.last().map_or(0, |scope| scope.base);
+    // The scope opens outside its ancestors' clips; its items re-push them
+    // inside it. Ink the scope itself adds past its content is therefore
+    // not cut by them (a recorded deviation, docs/tracking/deviations.md).
     pop_clips_to(sink, scratch, base);
 
     let style = document
@@ -1076,7 +1087,7 @@ fn open_scope<T>(
     if let Some((root_start, end)) = backdrop_end
         && let Some(entry) = backdrop_entry(style, layer, space, scale, ratio)
     {
-        sink.push_backdrop(entry, root_start..end, frame.spaces());
+        sink.push_backdrop(entry, root_start..end, frame.spaces(), frame.animations());
     }
 
     // A current `opacity` animation roots at every reading, 1 included,
@@ -1326,7 +1337,7 @@ fn close_scope<T>(sink: &mut WalkSink<'_>, scratch: &mut Scratch, painting: Pain
         );
     }
     if scope.blurred {
-        sink.pop_filter(frame.spaces());
+        sink.pop_filter(frame.spaces(), frame.animations());
     }
     if let Some((list, plan)) = &plan {
         filters::apply(
@@ -2950,6 +2961,44 @@ mod tests {
             group.rect,
         );
         assert!(group.samples_animations(), "and follows the slide");
+    }
+
+    /// A blurred card re-pushes its clipping ancestor's clip inside its bake.
+    /// Its own slide moves it across that clip, so the bake samples the
+    /// instant; its own fade applies where the texture is drawn and leaves
+    /// every baked pixel as committed, so the bake does not.
+    #[test]
+    fn a_blurred_card_samples_the_timeline_only_when_its_curve_moves_it() {
+        let samples = |keyframes: &str| {
+            let mut doc = Doc::with_css(&format!(
+                "{PAGE} .frame {{ display: flex; position: absolute; width: 200px;
+                                  height: 200px; overflow: clip; }}
+                 .card {{ display: flex; width: 50px; height: 50px; background-color: navy;
+                          filter: blur(2px); animation: k 1s linear infinite; }}
+                 @keyframes k {{ {keyframes} }}"
+            ));
+            let frame = doc.el(doc.root, "view.frame");
+            doc.el(frame, "view.card");
+            run_animations(&mut doc);
+            assert_eq!(
+                doc.dom.build_paint_order().animations().len(),
+                1,
+                "the curve exports"
+            );
+            let (finished, _) = compose(&mut doc);
+            let [group] = &finished.filter_groups[..] else {
+                panic!("one filter entry, got {:?}", finished.filter_groups);
+            };
+            group.samples_animations()
+        };
+        assert!(
+            samples("from { transform: translateX(0px); } to { transform: translateX(100px); }"),
+            "a slide moves the card across the frame's clip",
+        );
+        assert!(
+            !samples("from { opacity: 1; } to { opacity: 0.5; }"),
+            "a fade bakes once",
+        );
     }
 
     /// A blurred group whose child shrinks to 0.4 carries the ink of that

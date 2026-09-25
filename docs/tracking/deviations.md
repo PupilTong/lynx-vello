@@ -109,7 +109,10 @@ consequential choice about whether to follow the spec or the quirk.
   `contain` property at all) and no component-boundary-scoped containing
   block either. **Decision: implement the real CSS algorithm** — viewport
   by default, re-anchored to the nearest qualifying ancestor when one
-  exists — not Lynx's unconditional escape-to-root. (Scroll-offset
+  exists — not Lynx's unconditional escape-to-root. An element with a current
+  `transform` animation qualifies whatever its committed value, since
+  web-animations-1 treats it as `will-change: transform`; web-core leaves
+  that to the browser, which applies it. (Scroll-offset
   exclusion, on the other hand, is achieved structurally — the fixed
   element's native view is simply never mounted inside any scrollable
   ancestor — and that part already matches the *observable* CSS behavior of
@@ -152,9 +155,24 @@ consequential choice about whether to follow the spec or the quirk.
   filter list through stylo's own engine. `filter` is never exported as a
   composite curve, so an animated blur recommits and re-bakes every tick —
   accepted, and recorded in `crates/dom/src/paint/painter.rs`'s v1 limits
-  together with the two approximations the offscreen implementation carries
-  (one isotropic σ under a non-uniform scale or skew, and an area budget past
-  which a group renders *unblurred*).
+  together with the approximations the offscreen implementation carries (one
+  isotropic σ under a non-uniform scale or skew, an area budget past which a
+  group renders *unblurred*, several `blur()` functions folded into one, and
+  blur ink past an ancestor's clip, below).
+
+  **A blurred group's ink is not clipped by its ancestors' overflow clips.**
+  CSS clips a descendant's filter output by an ancestor's `overflow` clip, so
+  a blurred box inside an `overflow: hidden`/`clip` ancestor stops at the
+  ancestor's edge. Here a group scope opens *outside* the clips of its
+  ancestors: `open_scope` in `crates/dom/src/paint/walker.rs` pops the clip
+  stack to the enclosing scope's base before pushing the group's layers, and
+  the group's items re-push their whole clip chains inside it (which is what
+  gives a fixed descendant its escape and keeps vello's blend layers out of
+  clip layers). The content is therefore cut by the ancestor's clip before the
+  blur, and the up-to-3σ ink the blur spreads past that edge is not cut after
+  it. The difference is confined to a band of 3σ outside an ancestor's clip
+  edge; `opacity`, blend, `clip-path` and `mask` groups put no ink outside
+  their content and are unaffected.
 - **`backdrop-filter`** — Lynx has the property nowhere: no handler, no
   property ID, no wire enum entry, and `web-core` therefore never emits one.
   We expose it anyway with filter-effects-2 W3C semantics (user decision,
@@ -213,6 +231,11 @@ consequential choice about whether to follow the spec or the quirk.
     `MAX_FILTER_AREA`), consumed in program order; an element past it draws no backdrop at all, so
     what shows is the **unfiltered** backdrop underneath. The same fallback covers a consumer with
     no GPU.
+  - **An ancestor's overflow clip does not clip the filtered backdrop** — open, not ruled. The
+    `PushBackdrop` op sits in the element's group scope before any of its items, and that scope
+    opens outside its ancestors' clips (the `filter: blur()` entry above), so the filtered backdrop
+    fills the element's whole border box, including the part an `overflow: hidden`/`clip`
+    ancestor hides.
 - **`background-clip: border-area`** — a genuine Lynx-only value with no CSS
   equivalent (distinct from `border-box`); needs its own behavioral
   spec-mining rather than mapping to any standard box.

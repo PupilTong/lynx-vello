@@ -316,10 +316,10 @@ impl CommittedFrame {
     /// otherwise, where every relative map in its range is time-independent.
     /// A `backdrop-filter` entry's range is a prefix of the frame, so it can
     /// hold other elements' exported curves; a `filter: blur()` group's holds
-    /// the curves of its own content, and its ancestors' clips, which its own
-    /// element's curve moves it across. After the replay a backdrop pops the
-    /// layers the range left open and draws its pre-blur passes over the
-    /// whole bake rect, so neither lands inside a clip.
+    /// the curves of its own content, and its ancestors' clips, which its
+    /// own element's transform curve moves it across. After the replay a
+    /// backdrop pops the layers the range left open and draws its pre-blur
+    /// passes over the whole bake rect, so neither lands inside a clip.
     ///
     /// `filtered` must already hold the textures of every entry this one's
     /// range draws — bake in order of increasing `ops.end`.
@@ -480,8 +480,10 @@ impl CommittedFrame {
     }
 
     /// Whether any exported curve has run past its domain at `now`: the cue
-    /// to send one `BeginFrame` so the main thread runs the finish restyle
-    /// and commits the animation's end state.
+    /// to send `BeginFrame` — each frame, until a commit without the passed
+    /// curve is adopted — so the main thread runs the finish restyle and
+    /// commits the animation's end state. Until then the compositor draws
+    /// the curve's end value, whatever its fill mode.
     ///
     /// Read off the commit's own minimum expiry, because the compositor asks
     /// this on every input, draw, capture and tick.

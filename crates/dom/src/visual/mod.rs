@@ -26,12 +26,12 @@
 //! non-structural mutations, which is exactly what lets an event landing
 //! between a scroll and its repaint hit the content the user was shown.
 //!
-//! Scroll offsets ([`crate::scroll`]) are baked into the frame rather than
-//! surfaced beside it: a scroll container's contents are translated as they
-//! are collected, so painting and hit testing both see scrolled geometry with
-//! no separate scroll state, and the private painter needs none either.
-//! The price is that scrolling invalidates the frame like any other visual
-//! mutation — which it must anyway, since scrolled content has to repaint.
+//! The frame is built unscrolled, unstuck and at committed transforms. Scroll
+//! offsets ([`crate::scroll`]), sticky shifts and exported animation curves
+//! are nodes of its compose space tree ([`space`]), applied at composition
+//! and inverted by hit testing, so a scroll inside its encode window or a
+//! frame of an exported animation recomposes the retained frame instead of
+//! rebuilding it.
 //!
 //! Invariants this module relies on (verified against the layout host):
 //! - `Layout.location` is border-box-relative to the **box parent**'s border box for every box —
@@ -60,7 +60,8 @@
 //!   `RenderLayer` boundaries for the private painter to composite; they still do not affect hit
 //!   testing (a `clip-path` that clips painting away does not clip the hit region yet).
 //!   `backdrop-filter` reaches the cascade, the stacking-context predicate, the group layer and the
-//!   fixed/absolute containing-block rule; the backdrop bake itself is not painted yet.
+//!   fixed/absolute containing-block rule; its backdrop is baked by the painter
+//!   ([`crate::paint::compose`]).
 //! - Motion paths (motion-1) are composed into the matrix between the individual transforms and the
 //!   transform list: `path()`, `circle()`, `ellipse()`, and `inset()` — the shapes the fork parses,
 //!   with the coord box fixed to the border box. The anchor is always `transform-origin`

@@ -14,23 +14,27 @@
 //! pixel-perfect):
 //!
 //! - `filter: blur()` bakes the group offscreen and blurs it on the GPU (`render/blur.rs`), which
-//!   costs four recorded approximations: sigma is isotropic, scaled by the arithmetic mean of the
+//!   costs five recorded approximations: sigma is isotropic, scaled by the arithmetic mean of the
 //!   two singular values of the group's local-to-viewport linear map, so a non-uniform scale or a
 //!   skew gets one sigma where the spec's filter region is anisotropic; `filter` is never exported
 //!   as a composite curve, so an animated blur recommits and re-bakes every tick; the bakes share a
-//!   device-pixel area budget and a group past it renders *unblurred* rather than not at all; and
-//!   several `blur()` functions in one list fold into the first by variance addition. Color filters
-//!   use blend-composite approximations; factors above one are only partially expressible.
+//!   device-pixel area budget and a group past it renders *unblurred* rather than not at all;
+//!   several `blur()` functions in one list fold into the first by variance addition; and the group
+//!   opens outside its ancestors' clips, so an ancestor's `overflow` clip cuts the content before
+//!   the blur but not the 3σ ink after it. Color filters use blend-composite approximations;
+//!   factors above one are only partially expressible.
 //! - `backdrop-filter` bakes the same way, over the prefix of the frame painted before the element
-//!   inside its nearest Backdrop Root, and carries every one of those approximations plus five of
+//!   inside its nearest Backdrop Root, and carries every one of those approximations plus six of
 //!   its own: `will-change` roots are not honored, so a `backdrop-filter` element inside a
 //!   `will-change: opacity` wrapper sees through it (ruled; `isolation: isolate` is not in the
 //!   spec's Backdrop Root list at all, and is absent from the fork's grammar besides); the mirror
 //!   edge mode applies at the element's axis-aligned *device* bounding box, so a rotated element
 //!   mirrors at its bbox rather than at its rotated border box — which is what Chromium does; items
 //!   the walk culled are absent from the crop of an element straddling the viewport; there is no
-//!   composite curve; and an element past the shared area budget draws no backdrop at all, leaving
-//!   the *unfiltered* backdrop showing. `docs/tracking/deviations.md` records the set.
+//!   composite curve; an element past the shared area budget draws no backdrop at all, leaving the
+//!   *unfiltered* backdrop showing; and the element's scope opens outside its ancestors' clips, so
+//!   the filtered backdrop fills the part of its border box an ancestor's `overflow` clip hides.
+//!   `docs/tracking/deviations.md` records the set.
 //! - Perspective-projected items use the affine map agreeing with the true projection at three
 //!   border-box corners because Vello transforms are affine; hit testing remains projectively
 //!   exact.
