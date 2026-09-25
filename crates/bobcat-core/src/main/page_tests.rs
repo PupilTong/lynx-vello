@@ -18,7 +18,10 @@ use tokio_util::sync::CancellationToken;
 use super::*;
 use crate::background::{WorkerCommand, WorkerMessage, WorkerStart};
 use crate::jobs::{JsThread, JsThreadHandle};
-use crate::link::{DetachedView, InputEventPayload, PageUpdate, ViewNotice, detached_outbox};
+use crate::link::{
+    CommandSender, DetachedView, FramePost, InputEventPayload, PageUpdate, ScrollEntry,
+    ScrollMailbox, ViewNotice, detached_outbox,
+};
 use crate::main::WorkerFactory;
 use crate::main::runtime::{bound_metrics, install_shared_modules};
 use crate::main::tree::PageConfig;
@@ -132,11 +135,13 @@ fn ingredients() -> DocumentIngredients {
 struct Harness {
     workers: mpsc::UnboundedReceiver<WorkerCommand>,
     background: Option<WorkerStart>,
-    commands: mpsc::UnboundedSender<ToMain>,
+    commands: CommandSender,
     /// The painter's end of the view's metrics watch. Bound at
     /// [`CREATE_VIEWPORT`] unless the test asked for a view nothing has
     /// bound, which is what [`Harness::unbound`] is for.
     metrics: watch::Sender<Option<Viewport>>,
+    /// The painter's end of the view's scroll mailbox.
+    scroll: Arc<ScrollMailbox>,
     view: DetachedView,
     events: Vec<EngineEvent>,
     sources: Vec<(SourceRequest, SourceCompletion)>,
@@ -191,6 +196,7 @@ impl Harness {
         let (outbox, view) = detached_outbox(Arc::new(NoWakeup));
         let (commands, incoming) = mpsc::unbounded_channel();
         let (metrics, metric_receiver) = watch::channel(bound);
+        let scroll = Arc::new(ScrollMailbox::default());
         // What `create_lynx_view` does on the embedder's thread, which this
         // test is: the startup sources are requested before the view's task
         // exists, so they are outstanding from the first turn and the
@@ -221,20 +227,28 @@ impl Harness {
             native_modules: String::new(),
             commands: incoming,
             metrics: metric_receiver,
+            scroll: Arc::clone(&scroll),
             cancel: view.token.clone(),
         };
         let owner = task::spawn_local(serve_view(context, attached, outbox));
         Self {
             workers,
             background: None,
-            commands,
+            commands: CommandSender::new(commands),
             metrics,
+            scroll,
             view,
             events: Vec::new(),
             sources: outstanding,
             preloads: Vec::new(),
             owner,
         }
+    }
+
+    /// Posts a frame request the way a painter does: into the mailbox, with
+    /// the marker when it is the first post since main's last take.
+    fn post_frame(&self, now: f64, seq: u64) -> Result<(), mpsc::error::SendError<ToMain>> {
+        post_frame(&self.scroll, &self.commands, now, seq)
     }
 
     /// Lets every ready task of the view run, collecting whatever it said.
@@ -437,6 +451,22 @@ async fn answer_disposal(background: &mut WorkerStart) {
     panic!("Worker channel closed before dispose");
 }
 
+/// A painter's frame post into `scroll`, fenced behind everything already
+/// sent, and the marker it sends when the post is the first since main's
+/// last take.
+fn post_frame(
+    scroll: &ScrollMailbox,
+    commands: &CommandSender,
+    now: f64,
+    seq: u64,
+) -> Result<(), mpsc::error::SendError<ToMain>> {
+    let fence = commands.sent();
+    if scroll.post([], Some(FramePost { now, seq, fence })) {
+        commands.send(ToMain::Posted)?;
+    }
+    Ok(())
+}
+
 /// One page over the token that ends it, with the test holding the owner's
 /// tail rather than a task running it.
 ///
@@ -458,6 +488,8 @@ struct OwnedPage {
     /// from the start: none of these pins is about the binding, and an
     /// unbound page's first flush would park.
     _metrics: watch::Sender<Option<Viewport>>,
+    /// The painter's end of the page's scroll mailbox.
+    scroll: Arc<ScrollMailbox>,
 }
 
 impl OwnedPage {
@@ -466,7 +498,14 @@ impl OwnedPage {
         let token = view.token.clone();
         let (commands, incoming) = mpsc::unbounded_channel();
         let (metrics, metric_receiver) = watch::channel(Some(CREATE_VIEWPORT));
-        let page = Page::new(context, outbox, metric_receiver, token.clone());
+        let scroll = Arc::new(ScrollMailbox::default());
+        let page = Page::new(
+            context,
+            outbox,
+            metric_receiver,
+            Arc::clone(&scroll),
+            token.clone(),
+        );
         page.spawn(consume_commands(Rc::clone(&page), incoming));
         Self {
             page,
@@ -474,7 +513,23 @@ impl OwnedPage {
             token,
             _commands: commands,
             _metrics: metrics,
+            scroll,
         }
+    }
+
+    /// Posts `offset` for `scroller` the way a painter does and applies the
+    /// marker as one burst.
+    async fn scroll_to(&self, scroller: dom::NodeId, offset: dom::Vector2D<f32>) {
+        let entry = ScrollEntry {
+            offset,
+            at: 0.0,
+            rest: Some(offset),
+        };
+        assert!(
+            self.scroll.post([(scroller, entry)], None),
+            "a marker is due"
+        );
+        self.page.apply(vec![ToMain::Posted]).await;
     }
 
     /// Opens the realm over `entry` and turns until its first frame is
@@ -676,7 +731,7 @@ fn whole_path(row: usize, skipped: bool) -> Vec<String> {
 ///
 /// A probe rather than JavaScript because an engine component is not
 /// script-reachable at all — there is no PAPI for one, and that is the point.
-/// Returns the scroller, which is what a `Refill` has to name.
+/// Returns the scroller, which is what a posted offset has to name.
 async fn build_scrolling_rows(page: &Rc<Page>, log: &Log) -> dom::NodeId {
     let (answer, built) = std::sync::mpsc::channel();
     let log = Arc::clone(log);
@@ -773,11 +828,11 @@ fn a_commit_delivers_its_state_changes_in_an_entry_of_its_own() {
     });
 }
 
-/// A refill past the encode window re-determines every row, and the two
-/// directions are one batch: one entry behind the refill's own, one delivery
-/// per row that changed, each exactly once.
+/// A posted offset past the encode window re-determines every row, and the
+/// two directions are one batch: one entry behind the marker's own, one
+/// delivery per row that changed, each exactly once.
 #[test]
-fn a_refill_delivers_both_directions_in_the_entry_after_its_commit() {
+fn a_scroll_past_the_window_delivers_both_directions_in_the_entry_after_its_commit() {
     on_a_js_thread(|thread| async move {
         let (context, _workers) = group(&thread);
         let mut owned = OwnedPage::new(context);
@@ -789,15 +844,12 @@ fn a_refill_delivers_both_directions_in_the_entry_after_its_commit() {
         let settled = owned.page.epilogue_count();
 
         owned
-            .page
-            .apply(vec![ToMain::Refill {
-                offsets: vec![(scroller, dom::Vector2D::new(0.0, 150.0))],
-            }])
+            .scroll_to(scroller, dom::Vector2D::new(0.0, 150.0))
             .await;
         assert_eq!(
             owned.page.epilogue_count(),
             settled + 2,
-            "the refill was one entry and the deliveries its commit decided \
+            "the marker was one entry and the deliveries its commit decided \
              were another",
         );
 
@@ -813,6 +865,179 @@ fn a_refill_delivers_both_directions_in_the_entry_after_its_commit() {
         );
         assert_eq!(take(&log), expected);
         assert!(!js_heard(&owned.page).await);
+    });
+}
+
+/// A box whose `tap` listener starts an `opacity` transition and flushes.
+const TRANSITION_ON_TAP: &str = r"
+globalThis.renderPage = function () {
+  const page = __CreatePage('card', 0);
+  const box = __CreateView(0);
+  __AppendElement(page, box);
+  __SetInlineStyles(box, 'width:10px;height:10px;opacity:1;transition:opacity 1s linear');
+  __AddEventListener(box, 'tap', () => {
+    __SetInlineStyles(box, 'width:10px;height:10px;opacity:0.5;transition:opacity 1s linear');
+    __FlushElementTree();
+  });
+};
+";
+
+/// The page element's first child, through a probe.
+async fn first_box(page: &Rc<Page>) -> dom::NodeId {
+    let (target, found) = std::sync::mpsc::channel();
+    page.apply(vec![ToMain::Probe(Box::new(move |document| {
+        let root = document.document_element().id();
+        let _ = target.send(document.get(root).expect("the page is live").child_ids()[0]);
+    }))])
+    .await;
+    found.try_recv().expect("the probe ran")
+}
+
+fn tap(target: dom::NodeId) -> ToMain {
+    ToMain::DispatchEvent {
+        target,
+        name: "tap",
+        payload: InputEventPayload::default(),
+    }
+}
+
+/// A painter pass dispatches its events before it posts its frame, and main
+/// keeps that order however the marker and the events share a burst: the
+/// frame post is applied after the last command of a burst that reached its
+/// fence. So a transition a
+/// listener starts is anchored by that same frame, and its commit already
+/// exports it.
+#[test]
+fn a_burst_runs_its_listeners_before_the_frame_it_posted() {
+    on_a_js_thread(|thread| async move {
+        let (context, _workers) = group(&thread);
+        let mut owned = OwnedPage::new(context);
+        owned.boot(TRANSITION_ON_TAP).await;
+        let target = first_box(&owned.page).await;
+        let fence = owned.page.applied.get();
+        assert!(owned.scroll.post(
+            [],
+            Some(FramePost {
+                now: 0.5,
+                seq: 1,
+                fence
+            })
+        ));
+        owned.page.apply(vec![ToMain::Posted, tap(target)]).await;
+        let frame = owned.view.published.frame().expect("a frame is published");
+        assert_eq!(
+            frame.animation_slots().len(),
+            1,
+            "the frame anchored the transition the listener started"
+        );
+        assert_eq!(owned.view.published.begin_frame_serviced(), 1);
+    });
+}
+
+/// A frame post rides a marker that can be older than commands sent before
+/// the post — main collected a burst holding only the marker, and a tap
+/// queued behind it before the painter posted. The post waits for them: it
+/// is applied, and acknowledged, only after the burst that holds the tap.
+#[test]
+fn a_frame_post_waits_for_the_commands_sent_before_it() {
+    on_a_js_thread(|thread| async move {
+        let (context, _workers) = group(&thread);
+        let mut owned = OwnedPage::new(context);
+        owned.boot(TRANSITION_ON_TAP).await;
+        let target = first_box(&owned.page).await;
+        let serviced = owned.view.published.begin_frame_serviced();
+        // The marker is sent first, the tap second, then the post.
+        let fence = owned.page.applied.get() + 2;
+        assert!(owned.scroll.post(
+            [],
+            Some(FramePost {
+                now: 0.5,
+                seq: serviced + 1,
+                fence
+            })
+        ));
+        owned.page.apply(vec![ToMain::Posted]).await;
+        assert_eq!(
+            owned.view.published.begin_frame_serviced(),
+            serviced,
+            "not acknowledged ahead of the tap sent before it"
+        );
+        owned.page.apply(vec![tap(target)]).await;
+        assert_eq!(owned.view.published.begin_frame_serviced(), serviced + 1);
+        let frame = owned.view.published.frame().expect("a frame is published");
+        assert_eq!(
+            frame.animation_slots().len(),
+            1,
+            "the frame anchored the transition the tap's listener started"
+        );
+    });
+}
+
+/// Two frame posts the painter made before main took either are one frame:
+/// `begin_frame` runs once, at the later post's clock, and the greater
+/// sequence number is acknowledged.
+#[test]
+fn two_frame_posts_before_a_take_are_one_frame_at_the_latest_clock() {
+    on_a_js_thread(|thread| async move {
+        let (context, _workers) = group(&thread);
+        let mut owned = OwnedPage::new(context);
+        owned.boot(TRANSITION_ON_TAP).await;
+        let target = first_box(&owned.page).await;
+        owned.page.apply(vec![tap(target)]).await;
+
+        let fence = owned.page.applied.get();
+        assert!(owned.scroll.post(
+            [],
+            Some(FramePost {
+                now: 0.25,
+                seq: 3,
+                fence
+            })
+        ));
+        assert!(
+            !owned.scroll.post(
+                [],
+                Some(FramePost {
+                    now: 0.5,
+                    seq: 5,
+                    fence
+                })
+            ),
+            "the first post's marker stands for both"
+        );
+        owned.page.apply(vec![ToMain::Posted]).await;
+        assert_eq!(owned.view.published.begin_frame_serviced(), 5);
+        let frame = owned.view.published.frame().expect("a frame is published");
+        assert_eq!(frame.animation_slots().len(), 1, "the frame anchored it");
+        assert!(
+            !frame.animation_boundary_passed(1.375) && frame.animation_boundary_passed(1.5),
+            "anchored at 0.5, the later post's clock, so it ends at 1.5"
+        );
+    });
+}
+
+/// Every job starts at the painter's clock, before its operation runs: an
+/// entry reads the timeline there, and so does a due timer's settle — the
+/// epilogue alone — which the later, older clock below cannot rewind.
+#[test]
+fn a_job_entered_at_the_painter_clock_sees_the_timeline_there() {
+    on_a_js_thread(|thread| async move {
+        let (context, _workers) = group(&thread);
+        let mut owned = OwnedPage::new(context);
+        owned.boot(ONE_BOX).await;
+        let clock = |page: &Rc<Page>| page.enter(|runtime, _| runtime.animation_clock());
+
+        owned.scroll.set_clock(2.5);
+        assert_eq!(clock(&owned.page).await, Some(2.5));
+
+        owned.scroll.set_clock(3.0);
+        assert_eq!(Page::settle(&owned.page).await, Some(()));
+        owned.scroll.set_clock(1.0);
+        assert_eq!(
+            clock(&owned.page).await,
+            Some(3.0),
+            "the timer's job moved the timeline, and nothing moves it back"
+        );
     });
 }
 
@@ -871,8 +1096,7 @@ fn a_burst_of_commands_is_one_commit_and_one_acknowledgement() {
                 .expect("the view is still serving");
         }
         harness
-            .commands
-            .send(ToMain::BeginFrame { now: 0.0, seq: 7 })
+            .post_frame(0.0, 7)
             .expect("the view is still serving");
 
         harness
@@ -1394,7 +1618,7 @@ fn a_module_completion_commits_with_no_command_behind_it() {
 /// reported once, and the end reaches every task of the view — the owner
 /// returns, which closes the command channel, and the workers the view
 /// created are told to stop. A command that arrives behind the end is dropped
-/// whole, `BeginFrame` included.
+/// whole, frame post included.
 #[test]
 fn a_fatal_module_failure_ends_every_task_of_the_view() {
     on_a_js_thread(|thread| async move {
@@ -1427,9 +1651,7 @@ fn a_fatal_module_failure_ends_every_task_of_the_view() {
         // acknowledged whatever was pending, and what arrives after it is
         // dropped rather than served. A send the closing has already overtaken
         // says the same thing.
-        let _ = harness
-            .commands
-            .send(ToMain::BeginFrame { now: 0.0, seq: 9 });
+        let _ = harness.post_frame(0.0, 9);
         answer_disposal(&mut background).await;
         harness
             .until("the view's owner never returned", |harness| {
@@ -1487,6 +1709,7 @@ fn a_siblings_checkpoint_makes_a_parked_page_settle() {
             Rc::clone(&context),
             outbox,
             bound_metrics(CREATE_VIEWPORT),
+            Arc::default(),
             view.token.clone(),
         );
         open_realm(&page, ONE_BOX, "app:///main.js").await;
@@ -1538,6 +1761,7 @@ fn a_pages_own_entries_never_wake_its_clock_task() {
             Rc::clone(&context),
             outbox,
             bound_metrics(CREATE_VIEWPORT),
+            Arc::default(),
             view.token.clone(),
         );
         // The listener is what makes the dispatch below a real entry into
@@ -1641,7 +1865,7 @@ fn a_task_that_traps_ends_the_view_before_a_sibling_runs() {
     });
 }
 
-/// The end acknowledges whatever `BeginFrame` was applied and not yet
+/// The end acknowledges whatever frame post was applied and not yet
 /// answered, and withdraws the deadline the realm had armed — both of them on
 /// the owner's own turn, because a release cancels the token from another
 /// thread and nothing on this one has run since.
@@ -1671,7 +1895,7 @@ fn the_end_acknowledges_the_begin_frame_a_painter_is_blocked_on() {
         assert_eq!(
             owned.view.published.begin_frame_serviced(),
             11,
-            "the end acknowledged the pending BeginFrame"
+            "the end acknowledged the pending frame post"
         );
         assert!(
             owned.page.armed_deadline().is_none(),
@@ -2083,7 +2307,7 @@ fn a_disposal_reply_queued_with_view_release_is_not_discarded() {
 /// Boot's `import` of the entry stays pending while the entry is
 /// outstanding: the answer is awaited on a task of this view's owner, and the
 /// job boot ran in has already returned. So this view's realm is live with a
-/// document in it, its `BeginFrame` is acknowledged by a job of its own, and
+/// document in it, its frame post is acknowledged by a job of its own, and
 /// the task completing the entry's module when the answer arrives is what
 /// finishes the boot.
 #[test]
@@ -2096,10 +2320,7 @@ fn an_outstanding_entry_leaves_the_view_serving() {
                 !h.sources.is_empty()
             })
             .await;
-        harness
-            .commands
-            .send(ToMain::BeginFrame { now: 0.0, seq: 7 })
-            .expect("the view is serving");
+        harness.post_frame(0.0, 7).expect("the view is serving");
         harness
             .until(
                 "the acknowledgement never came while the entry was in flight",
@@ -2262,7 +2483,7 @@ fn author_sheets_cascade_in_listed_order_and_boot_waits_for_all_of_them() {
 ///
 /// The entry is answered and the sheet is withheld, so boot runs to its own
 /// `__FlushElementTree` and parks there. While it is parked the view publishes
-/// no frame and reports no `ScriptFinished`, and a `BeginFrame` sent meanwhile
+/// no frame and reports no `ScriptFinished`, and a frame post sent meanwhile
 /// is a job queued behind the parked one, so it is acknowledged only after the
 /// sheet's answer arrives. Once it does, the frame boot publishes is styled
 /// by the sheet, and `ScriptFinished` follows it.
@@ -2287,10 +2508,7 @@ fn boot_publishes_nothing_until_a_withheld_sheet_arrives() {
         harness
             .until("boot never reached its flush", started_background)
             .await;
-        harness
-            .commands
-            .send(ToMain::BeginFrame { now: 0.0, seq: 4 })
-            .expect("the view is serving");
+        harness.post_frame(0.0, 4).expect("the view is serving");
         for _ in 0..8 {
             harness.turn().await;
         }
@@ -2305,7 +2523,7 @@ fn boot_publishes_nothing_until_a_withheld_sheet_arrives() {
         assert_eq!(
             harness.view.published.begin_frame_serviced(),
             0,
-            "the BeginFrame is a job behind the parked flush"
+            "the frame post is a job behind the parked flush"
         );
 
         harness.answer_style_sheet_at("app:///a.css", ".box{width:10px;height:20px}");
@@ -2320,7 +2538,7 @@ fn boot_publishes_nothing_until_a_withheld_sheet_arrives() {
         );
         assert!(harness.startup_failure().is_none());
         harness
-            .until("the BeginFrame was never acknowledged", |h| {
+            .until("the frame post was never acknowledged", |h| {
                 h.view.published.begin_frame_serviced() == 4
             })
             .await;
@@ -2396,11 +2614,11 @@ fn a_listed_sheet_that_fails_to_load_fails_the_boot_naming_it() {
 /// - the scheduler keeps running, so a second view B attaches, its own tasks start and its startup
 ///   sources are answered — the routing a load needs is a task's, not a job's;
 /// - nothing of B's reaches its realm: B's own `open_realm` is a job, and jobs are one FIFO, so B
-///   has no document and its `BeginFrame` is not acknowledged either. That is the cost of the
-///   loading phase having gone: an acknowledgement now waits for the queue, and what bounds it is
-///   that the only wait boot itself makes is for sources the view already asked for;
+///   has no document and its frame post is not acknowledged either. That is the cost of the loading
+///   phase having gone: an acknowledgement now waits for the queue, and what bounds it is that the
+///   only wait boot itself makes is for sources the view already asked for;
 /// - once A's answer arrives the queue drains in order, B opens its realm, boots, and answers the
-///   `BeginFrame` that was queued behind it.
+///   frame post that was queued behind it.
 #[test]
 fn a_synchronous_adoption_parks_javascript_and_leaves_a_siblings_tasks_running() {
     on_a_js_thread(|thread| async move {
@@ -2433,10 +2651,7 @@ fn a_synchronous_adoption_parks_javascript_and_leaves_a_siblings_tasks_running()
             .await;
         loading.answer_style_sheet(".box{width:10px}");
         loading.answer("app:///b.js", ONE_BOX);
-        loading
-            .commands
-            .send(ToMain::BeginFrame { now: 0.0, seq: 4 })
-            .expect("B is still serving");
+        loading.post_frame(0.0, 4).expect("B is still serving");
         for _ in 0..8 {
             loading.turn().await;
         }
@@ -2464,7 +2679,7 @@ fn a_synchronous_adoption_parks_javascript_and_leaves_a_siblings_tasks_running()
             .until("B never booted once the queue drained", |h| h.finished())
             .await;
         loading
-            .until("B's BeginFrame was never acknowledged", |h| {
+            .until("B's frame post was never acknowledged", |h| {
                 h.view.published.begin_frame_serviced() == 4
             })
             .await;

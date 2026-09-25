@@ -209,8 +209,9 @@ async fn booted_with_sheet_sources(
 ///
 /// The view's turn comes first in every round. It is the one call that
 /// services the resource protocol at all, and the image reports it sends ride
-/// the same command FIFO the tick's `BeginFrame` then follows — so the
-/// acknowledgement the tick waits for implies a commit that saw them.
+/// the command FIFO ahead of the tick's frame post, whose fence holds it back
+/// until main has applied them — so the acknowledgement the tick waits for
+/// implies a commit that saw them.
 fn settle(
     view: &mut LynxView<Rc<FetcherDouble>>,
     painter: &mut Painter,

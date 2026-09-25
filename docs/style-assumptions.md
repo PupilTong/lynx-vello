@@ -155,8 +155,8 @@ the semantics are stylo's.** Everything below refines that sentence.
     `transform`/`opacity`/`filter` is the per-frame interpolation and
     rasterization, and what they throttle is the per-frame *restyle* — never
     the cascade. So: every animated property cascades, and the per-frame work
-    runs on the document's owner thread (the Lynx main thread, on a
-    `BeginFrame` tick with no JavaScript involved), as a stylo animation-only
+    runs on the document's owner thread (the Lynx main thread, on the
+    painter's frame post with no JavaScript involved), as a stylo animation-only
     traversal over just the animating elements, with no selector matching and
     no layout for properties that cannot move a box. **Throttling follows
     composite export.** A browser can skip the per-frame restyle because a
@@ -514,7 +514,9 @@ and §D.16 with what the wire format actually permits.)*
       *undetermined* and skips, matching the spec's "determined in the next rendering update".
       - **The margin is the painter's encode window** (`ScrollSlot::encode_window`,
         `ENCODE_WINDOW_SCROLLPORTS = 1.0`), which is exactly the region the walk's culling
-        admits and the compositor may scroll to without a new commit. The relevance test is the
+        admits and the compositor may scroll to without a new commit; the main thread, adopting
+        the painter's posted offsets, recommits to re-center it once an offset has used half the
+        headroom toward an edge (`ScrollSlot::recenter_due`). The relevance test is the
         walker's own `CullPlan::admits_border_box`, so "relevant wherever its contents could
         paint" holds by construction rather than by agreement. Anything undecidable — a singular
         transform, a non-finite bound, an item on a chain a sampled animation delta moves —

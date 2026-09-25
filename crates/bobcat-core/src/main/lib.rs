@@ -145,7 +145,7 @@ pub fn configure_wasm_workers(worker_script_url: String) -> Result<(), EngineErr
 ///
 /// Nothing announces its exit: dropping every view's notice sender closes
 /// those channels, which is the same fact — and the one a painter blocked on
-/// a `BeginFrame` is already waiting on.
+/// a frame post is already waiting on.
 pub(crate) fn spawn_group(
     style_threads: StyleThreads,
     link: GroupLink,
@@ -241,7 +241,7 @@ async fn group_task(context: Rc<GroupContext>, mut attach: mpsc::UnboundedReceiv
                 Some(GroupCommand::Attach(attachment)) => {
                     let ViewAttachment {
                         viewport, sources, text_context, startup, native_modules, commands,
-                        metrics, notices, frames, cancel, fetch_probe,
+                        metrics, scroll, notices, frames, cancel, fetch_probe,
                     } = *attachment;
                     let outbox = ViewOutbox::new(
                         notices,
@@ -259,7 +259,7 @@ async fn group_task(context: Rc<GroupContext>, mut attach: mpsc::UnboundedReceiv
                     });
                     let view = AttachedView {
                         viewport, sources, text_context, startup, native_modules, commands,
-                        metrics, cancel,
+                        metrics, scroll, cancel,
                     };
                     let handle = views.spawn_local(page::serve_view(
                         Rc::clone(&context),
@@ -331,6 +331,9 @@ struct AttachedView {
     /// command: an unbound `__FlushElementTree` parks the job it runs in on
     /// this, and no other job runs while one is parked.
     metrics: watch::Receiver<Option<Viewport>>,
+    /// What the painter posts its scroll offsets, frame requests and clock
+    /// into; see [`crate::link::ScrollMailbox`].
+    scroll: Arc<crate::link::ScrollMailbox>,
     /// This view's end signal, minted on the embedder's thread. It is what the
     /// view's owner waits on, what its own end cancels, and the parent of the
     /// token every worker its realm creates carries.

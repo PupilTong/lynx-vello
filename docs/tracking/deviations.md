@@ -48,7 +48,8 @@ consequential choice about whether to follow the spec or the quirk.
   axis, `hidden` counts and `clip` does not, and the containing block limits
   movement. Grid items use their grid area. The immutable frame carries the
   constraints, so live scrolling needs no layout or commit while the frame's
-  encode window covers the new offset. List `sticky-top`/`sticky-bottom`
+  encode window covers the new offset and the offset main adopts is not yet
+  `recenter_due`. List `sticky-top`/`sticky-bottom`
   attribute rules remain a separate component integration task.
 - **`overflow: auto` omitted** — CSS has it; this engine does not.
   **Decision (user, 2026-07-29): leave it out.** Nothing here paints

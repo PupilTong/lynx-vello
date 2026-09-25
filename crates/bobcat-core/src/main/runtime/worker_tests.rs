@@ -2319,7 +2319,8 @@ impl Pair {
     fn frame(&mut self, milliseconds: f64) {
         self.pump_host();
         let (commands, mut incoming) = mpsc::unbounded_channel();
-        self.frame_demand.dispatch(milliseconds, &commands);
+        self.frame_demand
+            .dispatch(milliseconds, &crate::link::CommandSender::new(commands));
         while let Ok(crate::link::ToMain::Vsync(milliseconds)) = incoming.try_recv() {
             self.runtime
                 .as_mut()
@@ -2440,6 +2441,7 @@ fn bts_animation_frames_continue_while_an_mts_callback_is_blocked() {
     let mut events = std::mem::replace(&mut pair.events, mpsc::unbounded_channel().1);
     pair.pump_host();
     let (main_commands, mut incoming) = mpsc::unbounded_channel();
+    let main_commands = crate::link::CommandSender::new(main_commands);
     pair.frame_demand.dispatch(1000.0, &main_commands);
     let mut frames = std::mem::take(&mut pair.frame_demand);
     let mut notices = std::mem::replace(&mut pair.view.notices, mpsc::unbounded_channel().1);

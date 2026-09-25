@@ -143,7 +143,7 @@ impl Lifetime {
     /// Starts one more task of this object.
     ///
     /// The future is taken as it is. What a panic in it costs the object is
-    /// the *owner's* business — a `BeginFrame` to acknowledge — so the guard
+    /// the *owner's* business — a frame post to acknowledge — so the guard
     /// that ends the object during the unwind is [`EndOnUnwind`], which the
     /// owner's own `spawn` wraps the future in: it holds the object, where
     /// anything stored here would be an `Rc` cycle through the object that
@@ -391,7 +391,7 @@ pub(crate) async fn serve_clock<S: Settles>(
 /// Ends the object if the task it guards is unwinding.
 ///
 /// It holds the object rather than its [`Lifetime`] because what an end owes is
-/// the object's — a view's pending `BeginFrame` acknowledgement — and because a
+/// the object's — a view's pending frame post acknowledgement — and because a
 /// guard the lifetime stored would be an `Rc` cycle through the object that
 /// holds the lifetime. The payload is not reachable from a `Drop`, so the report
 /// stays the owner's, out of the `JoinError` the lifetime yields; what runs here

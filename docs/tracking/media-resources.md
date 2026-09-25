@@ -140,7 +140,7 @@ generally. Neither detail is JSON: a `load` crosses as the `DETAIL_SIZE` kind
 and two numbers, an `error` as `DETAIL_EMPTY` and none, on the same one
 `__BobcatDispatchEvent` export a routed input event uses; see
 [dom-events.md](dom-events.md). Their `timestamp` is the newest reading of the
-view's timeline the main thread has been handed — a `BeginFrame`'s `now` or a
+view's timeline the main thread has been handed — a frame post's `now` or a
 vsync's — because the timeline is read on the painting side, where the frame
 clock is, and a source settles between frames. Same clock, same epoch, one
 frame of staleness at most; before the first frame it is the time origin. Events fire for

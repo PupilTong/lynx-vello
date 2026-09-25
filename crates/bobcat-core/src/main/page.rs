@@ -35,8 +35,10 @@
 //! Every one of those tasks reaches the realm through [`Page::enter`], which
 //! queues one job and answers with what it returned. The job runs one
 //! synchronous operation and then settles what that operation left owing: due
-//! timers, the commit, the boot report, the `BeginFrame` acknowledgement, the
-//! module requests the entry produced, the next timer deadline.
+//! timers, the commit, the boot report, the frame-post acknowledgement, the
+//! module requests the entry produced, the next timer deadline. Before the
+//! operation it moves the document's animation clock to the painter's, so
+//! whatever the operation restyles computes from the current instant.
 //! [`Settles::settle`] is the epilogue alone, for a wake that carries no
 //! operation of its own. [`Page::open_realm`] is a job too, and the only one
 //! that does not go through `enter`, because the realm it would enter does not
@@ -54,8 +56,14 @@
 //! Jobs are one FIFO for the whole thread and each of them is synchronous, so
 //! entries never interleave: each stream is consumed in order by its one
 //! consumer, and a burst of commands is one entry, one commit and one
-//! acknowledgement. Module completions, timer wakes and a sibling's checkpoint
-//! are independent tasks and may queue an entry between any two bursts.
+//! acknowledgement. A [`ToMain::Posted`] marker in a burst adopts the
+//! painter's scroll offsets where it stands, and the frame the painter
+//! posted is applied once, after the last command of the first burst that
+//! has applied every command sent before the post (its
+//! [`FramePost::fence`]), so the events a painter pass dispatched and the
+//! host's own updates run before the frame an acknowledgement implies. Module completions,
+//! timer wakes and a sibling's checkpoint are independent tasks and may queue
+//! an entry between any two bursts.
 //!
 //! # The end
 //!
@@ -123,7 +131,10 @@ use std::cell::{Cell, RefCell};
 use std::future::{Future, poll_fn};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
+use std::sync::Arc;
 
+use dom::NodeId;
+use rustc_hash::FxHashMap;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
@@ -134,7 +145,7 @@ use crate::background::WorkerEvent;
 #[cfg(test)]
 use crate::clock::ClockInstant;
 use crate::lifetime::{EndOnUnwind, Lifetime, Settles, run_job, serve_clock};
-use crate::link::{SourceAnswer, ToMain, ViewOutbox};
+use crate::link::{FramePost, ScrollEntry, ScrollMailbox, SourceAnswer, ToMain, ViewOutbox};
 use crate::resource::{LoadedSource, SourceRequest, unanswered_source};
 use crate::threads::panicked;
 use crate::view::{
@@ -178,9 +189,22 @@ pub(super) struct Page {
     /// The same inbox serves ordinary events and the final JS disposal RPC.
     /// The owner takes it only after the ordinary consumer has been reaped.
     worker_events: RefCell<Option<mpsc::UnboundedReceiver<WorkerEvent>>>,
-    /// The newest `BeginFrame` sequence applied and not yet acknowledged.
+    /// What the painter posts into: its scroll offsets, its frame requests
+    /// and its clock. Taken at a [`ToMain::Posted`] marker; the clock is read
+    /// at the start of every entry.
+    scroll: Arc<ScrollMailbox>,
+    /// The entries the last take swapped out, drained and kept for their
+    /// capacity.
+    scrolled: RefCell<FxHashMap<NodeId, ScrollEntry>>,
+    /// The frame post a marker took and not yet applied: applied once, after
+    /// the last command of the first burst that reaches its fence.
+    frame_due: Cell<Option<FramePost>>,
+    /// How many commands this view has been sent and has applied, counted
+    /// the way [`crate::link::CommandSender`] counts them.
+    applied: Cell<u64>,
+    /// The newest frame-post sequence taken and not yet acknowledged.
     ///
-    /// Acknowledged in the epilogue rather than where it is applied: a host
+    /// Acknowledged in the epilogue rather than where it is taken: a host
     /// blocked on this number is waiting for the frame it implies, which the
     /// epilogue's commit is what publishes.
     pending_begin_frame: Cell<Option<u64>>,
@@ -225,6 +249,7 @@ impl Page {
         context: Rc<GroupContext>,
         outbox: ViewOutbox,
         metrics: watch::Receiver<Option<Viewport>>,
+        scroll: Arc<ScrollMailbox>,
         token: CancellationToken,
     ) -> Rc<Self> {
         let lifetime = Lifetime::new(token, context.thread.clone());
@@ -234,6 +259,10 @@ impl Page {
             realm: RefCell::new(None),
             metrics,
             worker_events: RefCell::new(None),
+            scroll,
+            scrolled: RefCell::default(),
+            frame_due: Cell::new(None),
+            applied: Cell::new(0),
             pending_begin_frame: Cell::new(None),
             boot_reported: Cell::new(false),
             content_visibility_posted: Cell::new(false),
@@ -277,7 +306,8 @@ impl Page {
         // A painter blocked in `wait_begin_frame` is released rather than
         // timed out: the frame it was waiting for will never come. The deadline
         // the realm had armed is withdrawn by the lifetime's own end above.
-        if let Some(seq) = self.pending_begin_frame.take() {
+        let due = self.frame_due.take().map(|frame| frame.seq);
+        if let Some(seq) = self.pending_begin_frame.take().max(due) {
             self.outbox.begin_frame_serviced(seq);
         }
         true
@@ -336,6 +366,9 @@ impl Page {
         let js = &mut *self.context.js.borrow_mut();
         let mut realm = self.realm.borrow_mut();
         let runtime = realm.as_deref_mut()?;
+        // HTML's order: the timelines are current before anything this job
+        // runs restyles.
+        runtime.sync_animation_clock(self.scroll.clock());
         let value = operation(runtime, js);
         self.epilogue(runtime, js);
         Some(value)
@@ -357,7 +390,7 @@ impl Page {
     /// 4. **The `<image>` `load`s and `error`s** this entry settled — posted as an entry of their
     ///    own too: see [`Self::post_image_outcomes`].
     /// 5. **The boot report**, once, so the frame exists before the event that implies it.
-    /// 6. **The `BeginFrame` acknowledgement**, for the same reason: a host blocked on the sequence
+    /// 6. **The frame-post acknowledgement**, for the same reason: a host blocked on the sequence
     ///    number is blocked on that frame.
     /// 7. **The module requests** this entry produced, each spawned as a load of its own, and
     ///    beside them the futures a `.then` asked this realm to settle asynchronously, each spawned
@@ -538,10 +571,11 @@ impl Page {
     ///
     /// Total over every state a page can be in. A live page takes the whole
     /// burst inside one [`Self::enter`]; a page that has ended drops the
-    /// burst, `BeginFrame` included, because the end has already acknowledged
-    /// the pending one. There is no third state a task can observe: the job
-    /// that opens the realm is the first of the view, so a burst that arrived
-    /// before it is queued behind it and finds a document.
+    /// burst, a marker included — what the mailbox holds is dropped with the
+    /// page, and the end has already acknowledged the pending frame post.
+    /// There is no third state a task can observe: the job that opens the
+    /// realm is the first of the view, so a burst that arrived before it is
+    /// queued behind it and finds a document.
     ///
     /// The burst's job reads the view's token as it starts. The token is what
     /// the *embedder* cancelled, and a job start is a wake boundary rather
@@ -560,6 +594,7 @@ impl Page {
         // Taken here rather than in the job, because what the seam spawns has
         // to trap the way any other task of this view does, rather than into
         // the `catch_unwind` an entry runs under.
+        let count = commands.len() as u64;
         #[cfg(test)]
         let commands = self.take_test_seams(commands);
         let page = Rc::clone(self);
@@ -574,8 +609,36 @@ impl Page {
                 }
                 page.apply_command(runtime, js, command);
             }
+            page.applied.set(page.applied.get() + count);
+            // Once, after the last command of a burst that reached the
+            // post's fence: every command sent before the post has run, so
+            // the events a pass dispatched and the host's updates are in
+            // the frame the acknowledgement implies, and an animation a
+            // listener armed starts on that frame.
+            if let Some(frame) = page.frame_due.get()
+                && frame.fence <= page.applied.get()
+                && !page.ended()
+            {
+                page.frame_due.set(None);
+                let pending = page.pending_begin_frame.get().unwrap_or(0);
+                page.pending_begin_frame.set(Some(frame.seq.max(pending)));
+                runtime.begin_frame(frame.now);
+            }
         })
         .await;
+    }
+
+    /// Takes what the painter posted: the scroll offsets go into the document
+    /// at once, and the frame post is kept for the end of the burst that
+    /// reaches its fence.
+    fn adopt_posted(&self, runtime: &mut MainThreadRuntime) {
+        let mut scrolled = self.scrolled.borrow_mut();
+        if let Some(frame) = self.scroll.take(&mut scrolled) {
+            let due = self.frame_due.get();
+            self.frame_due
+                .set(Some(due.map_or(frame, |due| due.merge(frame))));
+        }
+        runtime.adopt_scroll_offsets(scrolled.drain());
     }
 
     /// Applies one command to a view whose realm exists, including during boot.
@@ -613,12 +676,7 @@ impl Page {
                     self.fail(EngineEvent::ScriptRunError(error.into_script_error()));
                 }
             }
-            ToMain::BeginFrame { now, seq } => {
-                runtime.begin_frame(now);
-                let pending = self.pending_begin_frame.get().unwrap_or(0);
-                self.pending_begin_frame.set(Some(seq.max(pending)));
-            }
-            ToMain::Refill { offsets } => runtime.refill_scroll_windows(&offsets),
+            ToMain::Posted => self.adopt_posted(runtime),
             ToMain::ImageEvents(events) => runtime.apply_image_events(&events),
             #[cfg(test)]
             ToMain::Probe(probe) => runtime.with_document(probe),
@@ -751,7 +809,7 @@ impl Page {
     /// The wait is the lifetime's — the end, or the next task of the view to
     /// finish. [`Self::end`] after it is what mirrors a cancellation that came
     /// from another thread onto this thread's latch, and what acknowledges a
-    /// pending `BeginFrame` so a blocked painter is released. The reap is what
+    /// pending frame post so a blocked painter is released. The reap is what
     /// makes this the last owner of the page: a task holds an `Rc` of it until
     /// its future is dropped.
     ///
@@ -892,7 +950,7 @@ impl Page {
         self.epilogues.get()
     }
 
-    /// Leaves a `BeginFrame` applied and unacknowledged, which is the state a
+    /// Leaves a frame post taken and unacknowledged, which is the state a
     /// painter blocked on that sequence number leaves a view in.
     #[cfg(test)]
     pub(super) fn arm_begin_frame_for_test(&self, seq: u64) {
@@ -943,6 +1001,7 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
         native_modules,
         commands,
         metrics,
+        scroll,
         cancel,
     } = view;
     // On every exit path, ordinary or trapped: a host still holding one of
@@ -973,7 +1032,7 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
     let StartupSources { sheets, entry } = startup;
     // What boot imports the entry by, and so what `load_entry` completes.
     let entry_url = entry.url.clone();
-    let page = Page::new(context, outbox, metrics.clone(), cancel);
+    let page = Page::new(context, outbox, metrics.clone(), scroll, cancel);
     // Queued before the first task of this view is spawned, so it is the first
     // job of the view and nothing it owns can be served ahead of it. Nothing
     // is waited for here: the realm opens now and boot creates the document
