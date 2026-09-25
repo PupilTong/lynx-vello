@@ -72,9 +72,9 @@ the `Worker`'s `error` event and a nonfatal `WorkerThrew` from
 still takes messages. An animation-frame, `queueMicrotask` or
 `lynx.fetchBundle` callback of the BTS that throws is reported the same way.
 A BTS that ends without being told to — its realm could not be built, or the
-worker thread trapped — is a nonfatal `WorkerEnded` from the same source. No
-BTS failure ends the view, and neither does a `lynx.reportError` of any
-level.
+worker thread trapped — is a nonfatal `WorkerEnded` from the same source,
+once: a trap after that end was delivered is reported to no one. No BTS
+failure ends the view, and neither does a `lynx.reportError` of any level.
 Worker ESM loading is part of this layer: the bootstrap's application import
 requests its source from the view fetcher, including XML background entries.
 The first Worker message initializes BTS before that import; later messages

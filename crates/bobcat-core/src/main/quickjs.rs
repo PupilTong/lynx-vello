@@ -5,12 +5,15 @@
 //! everything the runtime needs and the bridge deliberately leaves open: when
 //! the promise-job queue is drained, which realm a drained failure is
 //! reported to, how a bridge failure becomes
-//! a sanitized [`ScriptError`], and how a module namespace caches the atoms an
-//! export is looked up by.
+//! a sanitized [`ScriptError`], that a host function's panic is resumed as a
+//! panic once the entry that called it ends, and how a module namespace
+//! caches the atoms an export is looked up by.
 
+use std::any::Any;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
+use std::panic::{self, AssertUnwindSafe};
 use std::rc::Rc;
 use std::sync::Arc;
 #[cfg(test)]
@@ -28,6 +31,16 @@ use crate::script::{ScriptError, ScriptErrorKind, ScriptErrorPhase, ScriptSource
 /// handle and no DOM identity ever crosses as itself.
 pub(crate) type HostCallback =
     Box<dyn FnMut(&[quickjs::HostValue]) -> Result<quickjs::HostValue, String> + 'static>;
+
+/// The first panic a host function of one realm raised, kept until the
+/// operation that reached it ends.
+///
+/// The bridge cannot let a panic unwind through `QuickJS`'s C frames, so it
+/// turns one into an exception, which the script may catch. The payload is
+/// kept here instead of being lost, and the realm's next checkpoint resumes
+/// it: a host function that panics fails the entry it was called in as a
+/// panic, whatever the script did with the exception it was shown.
+type HostPanic = Rc<RefCell<Option<Box<dyn Any + Send>>>>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct QuickJsConfig {
@@ -82,6 +95,10 @@ pub(crate) struct ScriptEngine {
     realm: quickjs::Context,
     module_namespaces: HashMap<String, ModuleNamespace>,
     evaluation: Option<quickjs::Value>,
+    /// Per realm, like a rejection: a sibling's checkpoint may run this
+    /// realm's promise jobs, and a panic one of them raised is this realm's
+    /// to resume, not the sibling's.
+    host_panic: HostPanic,
 }
 
 /// The `QuickJS` runtime a group's realms share.
@@ -154,6 +171,7 @@ impl ScriptRuntime {
             realm,
             module_namespaces: HashMap::new(),
             evaluation: None,
+            host_panic: HostPanic::default(),
         })
     }
 
@@ -276,6 +294,12 @@ impl ScriptEngine {
     /// The jobs are the runtime's and all of them run, whichever realm
     /// queued them. The *rejections* reported are this realm's alone: a
     /// sibling's stays queued until that sibling's own next checkpoint.
+    ///
+    /// Every entry that runs this realm's JavaScript ends here, so this is
+    /// also where a panic one of its host functions raised during the entry
+    /// is resumed, after the drain: the caller's entry unwinds, and the
+    /// thread reports it as that entry's panic. Like a rejection, a panic a
+    /// sibling's checkpoint ran into waits for this realm's own.
     fn checkpoint(
         &mut self,
         runtime: &mut ScriptRuntime,
@@ -286,6 +310,9 @@ impl ScriptEngine {
         // queue, and every sibling has to settle what its own realm owes
         // whether or not the drain got through it.
         runtime.mark_checkpoint();
+        if let Some(payload) = self.host_panic.take() {
+            panic::resume_unwind(payload);
+        }
         let executed = drained.map_err(|error| map_quickjs_error(error, phase))?;
         Ok(executed)
     }
@@ -422,6 +449,10 @@ impl ScriptEngine {
     /// The runtime is taken but not read: `QuickJS` is not reentrant, and the
     /// exclusive borrow is how a caller proves no other realm on this runtime
     /// is mid-entry while this one is furnished.
+    ///
+    /// A callback that panics throws "the host function panicked" into the
+    /// script, and the panic itself is resumed by the checkpoint that ends
+    /// the entry: see [`HostPanic`].
     pub(crate) fn register_host_module_function(
         &mut self,
         _runtime: &mut ScriptRuntime,
@@ -430,12 +461,18 @@ impl ScriptEngine {
         arity: u8,
         mut callback: HostCallback,
     ) -> Result<(), ScriptError> {
+        let host_panic = Rc::clone(&self.host_panic);
         self.realm
             .register_host_module_function(
                 module_specifier,
                 export_name,
                 u32::from(arity),
-                move |arguments| callback(arguments).map_err(quickjs::HostFunctionError::new),
+                move |arguments| {
+                    keep_host_panic(&host_panic, "the host function panicked", || {
+                        callback(arguments)
+                    })
+                    .map_err(quickjs::HostFunctionError::new)
+                },
             )
             .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterHostModuleFunction))
     }
@@ -445,19 +482,23 @@ impl ScriptEngine {
     /// source, and the text never becomes a JavaScript value.
     ///
     /// The runtime is taken for the same reason
-    /// [`Self::register_host_module_function`] takes it.
+    /// [`Self::register_host_module_function`] takes it, and a loader that
+    /// panics is treated the way a host function that panics is.
     pub(crate) fn register_synchronous_loader<F>(
         &mut self,
         _runtime: &mut ScriptRuntime,
         module_specifier: &str,
         export_name: &str,
-        load: F,
+        mut load: F,
     ) -> Result<(), ScriptError>
     where
         F: FnMut(&str) -> Result<quickjs::RequiredSource, String> + 'static,
     {
+        let host_panic = Rc::clone(&self.host_panic);
         self.realm
-            .register_synchronous_loader(module_specifier, export_name, load)
+            .register_synchronous_loader(module_specifier, export_name, move |url| {
+                keep_host_panic(&host_panic, "the require loader panicked", || load(url))
+            })
             .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterHostModuleFunction))
     }
 
@@ -610,6 +651,22 @@ impl ScriptEngine {
             })
             .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::CallModuleExport)))
     }
+}
+
+/// Runs one call the realm made into Rust, keeping the payload of a panic in
+/// `host_panic` and answering the script with `message` in its place.
+///
+/// Only the first panic of an entry is kept: a second one is what the script
+/// ran into after the first, and the checkpoint resumes one.
+fn keep_host_panic<T>(
+    host_panic: &HostPanic,
+    message: &str,
+    call: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    panic::catch_unwind(AssertUnwindSafe(call)).unwrap_or_else(|payload| {
+        host_panic.borrow_mut().get_or_insert(payload);
+        Err(message.to_owned())
+    })
 }
 
 /// URL identity is shared by static and dynamic imports. Bare names are
@@ -1248,6 +1305,84 @@ mod tests {
                 "verify.js",
             )
             .expect("the very next entry sees every job already done");
+    }
+
+    /// Gives `engine` one host function, `explode`, that panics.
+    fn install_a_panicking_host_function(runtime: &mut ScriptRuntime, engine: &mut ScriptEngine) {
+        engine
+            .register_host_module_function(
+                runtime,
+                "bobcat-internal:test",
+                "explode",
+                0,
+                Box::new(|_| panic!("a host bug")),
+            )
+            .expect("register");
+    }
+
+    #[test]
+    fn a_host_function_that_panics_fails_its_entry_as_that_panic_even_when_caught() {
+        let (mut runtime, mut engine) = engine();
+        install_a_panicking_host_function(&mut runtime, &mut engine);
+        let unwound = panic::catch_unwind(AssertUnwindSafe(|| {
+            engine.execute_module(
+                &mut runtime,
+                "import { explode } from 'bobcat-internal:test';
+                 try { explode(); } catch (error) { globalThis.seen = error.message; }",
+                "app:///explode.js",
+            )
+        }))
+        .expect_err("the entry unwinds with the host function's panic");
+        assert_eq!(
+            crate::threads::panic_message(unwound.as_ref()),
+            "a host bug"
+        );
+
+        // The script was shown an exception, and caught it; the panic was
+        // resumed once, and the next entry is an ordinary one.
+        engine
+            .execute_script(
+                &mut runtime,
+                "if (seen !== 'the host function panicked') throw new Error(String(seen))",
+                "app:///verify.js",
+            )
+            .expect("the script saw the bridge's exception, and nothing is resumed twice");
+    }
+
+    #[test]
+    fn a_host_panic_a_siblings_checkpoint_ran_into_is_resumed_by_its_own_realm() {
+        let (mut runtime, mut first) = engine();
+        let mut second = runtime.create_realm().expect("a second view's realm");
+        install_a_panicking_host_function(&mut runtime, &mut first);
+        runtime
+            .register_module_source(
+                "app:///arm.js",
+                "import { explode } from 'bobcat-internal:test';
+                 export function arm() { Promise.resolve().then(() => explode()); }",
+            )
+            .expect("register the first view's module");
+        first
+            .execute_module(&mut runtime, "import 'app:///arm.js';", "bobcat:boot-first")
+            .expect("load the first view's module");
+        // Queued without a checkpoint of its own, so the sibling's entry below
+        // is what runs the job.
+        assert!(
+            first
+                .call_module_export_before_operation(&mut runtime, "app:///arm.js", "arm", &[])
+                .expect("arm the job")
+        );
+
+        second
+            .execute_script(&mut runtime, "globalThis.fine = true", "app:///second.js")
+            .expect("the sibling that ran the job is not the realm that panicked");
+        let unwound = panic::catch_unwind(AssertUnwindSafe(|| {
+            first.execute_script(&mut runtime, "void 0", "app:///first.js")
+        }))
+        .expect_err("the realm whose host function panicked resumes it at its next checkpoint");
+        assert_eq!(
+            crate::threads::panic_message(unwound.as_ref()),
+            "a host bug"
+        );
     }
 
     #[test]

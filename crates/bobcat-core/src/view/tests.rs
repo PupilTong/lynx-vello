@@ -296,7 +296,7 @@ fn an_entry_that_throws_is_reported_and_the_view_still_becomes_ready() {
     let mut events = Vec::new();
     while !events
         .iter()
-        .any(|event| matches!(event, EngineEvent::ScriptFinished))
+        .any(|event| matches!(event, EngineEvent::ScriptFinished) || event.is_fatal())
     {
         events.extend(engine.pump());
         assert!(

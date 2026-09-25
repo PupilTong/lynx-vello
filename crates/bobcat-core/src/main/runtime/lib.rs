@@ -442,9 +442,10 @@ impl DocumentSlot {
     /// first [`Self::flush`] mounts them, which is the first point at which
     /// the document is styled.
     ///
-    /// The construction is caught, because a panic that crosses the bridge is
-    /// erased into "the host function panicked" and this is the one host
-    /// member that runs the UA cascade behind a single call.
+    /// The construction is caught, because this is the one host member that
+    /// runs the UA cascade behind a single call: a panic in it is reported
+    /// naming the phase that panicked, as the construction failure it is,
+    /// where any other host member's panic ends the view as `Panicked`.
     fn create_document(&mut self, config: PageConfig) -> Result<(), String> {
         let Some(ingredients) = self.ingredients.take() else {
             return Err("the realm already created its document".to_owned());
@@ -687,9 +688,9 @@ impl DocumentSlot {
 
 /// Runs one phase of document construction, naming it if it panics.
 ///
-/// Without this the realm is told "the host function panicked", which is the
-/// bridge's answer for every host member and says nothing about which of the
-/// document's several pipelines gave way.
+/// Without this the panic would end the view as `Panicked`, which is what
+/// any host member's panic does, carrying the panic's own message and nothing
+/// about which of the document's several pipelines panicked.
 fn construction_phase<T>(phase: &str, work: impl FnOnce() -> T) -> Result<T, String> {
     catch_unwind(AssertUnwindSafe(work)).map_err(|payload| {
         format!(

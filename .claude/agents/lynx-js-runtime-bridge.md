@@ -125,8 +125,11 @@ Landed and not to be regressed:
   by the kind of entry the failure happened in, during boot or after it, and
   none of them ends the view. Every panic reaches the embedder as `Panicked`
   through `EngineEvent::from_panic`; an input dispatch is not caught on its
-  own. A checkpoint error beside a failure an entry is already reporting is
-  dropped with the other leftover rejections, never kept for the next entry.
+  own, and a host member's panic is kept by `ScriptEngine` and resumed at the
+  realm's next checkpoint, so a script that catches the bridge's "the host
+  function panicked" does not stop it. A checkpoint error beside a failure an
+  entry is already reporting is dropped with the other leftover rejections,
+  never kept for the next entry.
 - The BTS is a `Worker` named `lynx-bg` on the group's `bobcat-workers` runtime.
   A BTS failure is a nonfatal `EngineEvent::WorkerThrew` (it threw and still
   runs) or `WorkerEnded` (it ended without being told to) from

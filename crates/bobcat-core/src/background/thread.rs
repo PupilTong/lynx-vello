@@ -387,8 +387,10 @@ impl Worker {
     ///
     /// One report per worker whichever of the owner's two waits saw the panic
     /// first, and not gated by [`Self::reported`]: a worker that already
-    /// reported a failed script and then traps is still a `Failed` the
-    /// creating view is owed.
+    /// reported a failed script and then traps still sends this `Failed`.
+    /// The creating realm drops it if it has already delivered that first
+    /// one, though: delivering a worker's end removes the key's source, and a
+    /// key without a source is reported to no one.
     fn trapped(&self, payload: &(dyn std::any::Any + Send)) {
         if self.lifetime.report_panic() {
             let _ = self.events.send(WorkerEvent {
@@ -406,7 +408,9 @@ impl Worker {
     /// operation that trapped, or a thread that is over. The whole body runs
     /// under [`run_job`]'s `catch_unwind`, because a job runs in this thread's
     /// top loop rather than inside a task that could catch it: a panic here
-    /// would otherwise take the thread down instead of this one worker.
+    /// would otherwise take the thread down instead of this one worker. A
+    /// host function of the worker's realm that panics is caught there too,
+    /// once the realm's checkpoint resumes its panic.
     fn enter<T, O>(self: &Rc<Self>, operation: O) -> impl Future<Output = Option<T>> + use<T, O>
     where
         T: 'static,

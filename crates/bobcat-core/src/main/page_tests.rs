@@ -844,7 +844,9 @@ fn a_refill_delivers_both_directions_in_the_entry_after_its_commit() {
 /// The host's page data rides from the view's sources to its realm as the
 /// text it was given, and is parsed there before the entry loads: the entry
 /// sees the global props as it evaluates, and `processData` gets the init
-/// data. Each side checks its own, so a swap anywhere on the way fails boot.
+/// data. Each side checks its own by throwing, and neither throw ends boot —
+/// the entry's is a `ScriptRunError`, and the processor's is caught and
+/// reported as a `ScriptReported` — so the test fails on either event.
 #[test]
 fn page_data_reaches_the_realm_it_was_given_to() {
     on_a_js_thread(|thread| async move {
@@ -869,6 +871,21 @@ fn page_data_reaches_the_realm_it_was_given_to() {
                 ",
             )
             .await;
+        let failures: Vec<_> = harness
+            .events
+            .iter()
+            .filter(|event| {
+                event.is_fatal()
+                    || matches!(
+                        event,
+                        EngineEvent::ScriptRunError(_) | EngineEvent::ScriptReported { .. }
+                    )
+            })
+            .collect();
+        assert!(
+            failures.is_empty(),
+            "the page data reached the realm as given: {failures:?}"
+        );
     });
 }
 
@@ -2790,6 +2807,100 @@ fn a_listed_sheet_that_app_code_settles_first_still_fails_the_boot() {
             );
         });
     }
+}
+
+/// An entry whose top-level `await` a worker event resumes, and which then
+/// throws, is reported as that entry's failure — `ListenerFailed`, the kind of
+/// the entry it threw in — before boot's own failure in the same entry.
+///
+/// The listed sheet is refused, so boot's flush, which runs in that entry
+/// right after the entry's throw, fails the boot. The entry reports the first
+/// rejection its checkpoint returned, which is the entry's own throw, and
+/// only then does its epilogue report boot's failure as `StartupFailed`.
+#[test]
+fn an_entry_a_worker_event_resumes_reports_its_throw_before_boots_failure() {
+    on_a_js_thread(|thread| async move {
+        let (context, workers) = group(&thread);
+        let mut harness = Harness::serving(
+            context,
+            workers,
+            ViewSources {
+                style_sheets: vec!["app:///a.css".to_owned()],
+                ..ViewSources::new("app:///", "app:///main.js", SCREEN)
+            },
+        );
+        harness
+            .until("the view never asked for its stylesheet", |h| {
+                h.wants_a_style_sheet()
+            })
+            .await;
+        harness.refuse_style_sheet();
+        harness.answer(
+            "app:///main.js",
+            r"
+            import { Worker } from 'bobcat-internal';
+            const worker = new Worker('./worker.js');
+            await new Promise(resolve => { worker.onmessage = resolve; });
+            throw Error('the entry threw');
+            ",
+        );
+        // The entry's own `Worker`, whose script this test never answers:
+        // the message below is the only thing it says.
+        let mut worker = None;
+        harness
+            .until("the entry never started its Worker", |h| {
+                if let Ok(WorkerCommand::Start(start)) = h.workers.try_recv() {
+                    worker = Some(start);
+                }
+                worker.is_some()
+            })
+            .await;
+        let worker = worker.expect("the entry's Worker started");
+        worker
+            .events
+            .send(crate::background::WorkerEvent {
+                key: worker.key,
+                payload: crate::background::WorkerPayload::Message(crate::background::wire_value(
+                    "'ready'",
+                )),
+            })
+            .unwrap();
+        harness
+            .until("the sheet failure never reached the embedder", |h| {
+                h.startup_failure().is_some()
+            })
+            .await;
+        harness.turn().await;
+
+        let failures: Vec<_> = harness
+            .events
+            .iter()
+            .filter(|event| {
+                event.is_fatal()
+                    || matches!(
+                        event,
+                        EngineEvent::ListenerFailed(_)
+                            | EngineEvent::ScriptRunError(_)
+                            | EngineEvent::ScriptFinished
+                    )
+            })
+            .collect();
+        let [
+            EngineEvent::ListenerFailed(thrown),
+            EngineEvent::StartupFailed(LynxViewError::Script(error)),
+        ] = failures.as_slice()
+        else {
+            panic!(
+                "one ListenerFailed, then one Script startup failure, got {:?}",
+                harness.events
+            );
+        };
+        assert!(thrown.message.contains("the entry threw"), "{thrown}");
+        assert!(
+            error.message.contains("loading stylesheet app:///a.css"),
+            "{error}"
+        );
+    });
 }
 
 /// What a synchronous adoption stops and what it does not.

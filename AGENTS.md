@@ -705,8 +705,9 @@ enableCssSelector, enableJSDataProcessor)`, which reads four
 `DocumentIngredients` that never reach the realm: the create-time viewport, the
 validated text context and the group's style pool. It never waits: **the view's
 author sheets are not mounted here** but by the first `__FlushElementTree`
-(below). The construction runs under a catch, because the bridge erases
-a panic into "the host function panicked". A missing or non-boolean switch and
+(below). The construction runs under a catch, so a panic in it fails the
+boot naming the phase that panicked, where any other host member's panic ends
+the view as `Panicked`. A missing or non-boolean switch and
 a second construction both throw, which fails the boot; the second one is
 refused whichever module asks, because the ingredients are spent. The realm
 holds what it built in the private `DocumentSlot` every tree member borrows; that `Rc<RefCell<…>>` exists only so same-thread native QuickJS
@@ -963,8 +964,14 @@ those, and an embedder asks it rather than matching variants. Every panic is
 reported through one constructor, `EngineEvent::from_panic`, from
 `Page::trapped` (a job or a task of the view, an input dispatch included),
 `finish_view` (the group thread reaping the view's task) and the Wasm panic
-hook. A frame the engine wants drawn rides the same wakeup, and the
-`Painter::pump` answering it draws it.
+hook. A host member that panics is among them: `ScriptEngine` catches the
+panic before the bridge would turn it into the exception "the host function
+panicked", shows the script that exception, and resumes the panic at the
+realm's next checkpoint, normally the one that ends the entry that called the
+member, so catching the exception does not stop it and the view ends as it
+does on Wasm. A worker's host member that panics ends that worker the same
+way (`WorkerEnded`). A frame the engine wants drawn rides the same wakeup, and
+the `Painter::pump` answering it draws it.
 
 **A host takes two turns per wakeup, and they are different calls.**
 `LynxView::pump` alone advances the resource protocol past the startup sources
@@ -1058,9 +1065,10 @@ realm's `WorkerOwner` records each key's public `ScriptSource` (`Background`,
 or `Worker(WorkerId)`) from the moment the key is allocated until
 `terminate()` or delivery of the worker's own end, so a worker that fails
 before it is started has a source too; `WorkerThrew` and `WorkerEnded` carry
-it, and a key without one reports neither. Host functions reference the channel
-owner weakly, so queued finalizers cannot keep a released realm's workers or
-group thread alive. The script wait is a `biased` select over the message
+it, and a key without one reports neither — so a trap that reaches a worker
+after its own end was delivered is reported to no one. Host functions
+reference the channel owner weakly, so queued finalizers cannot keep a
+released realm's workers or group thread alive. The script wait is a `biased` select over the message
 channel first and that token behind it, so a `terminate` landing in the same
 instant as the script wins and a worker told to stop never boots. The timer machinery both
 realm kinds run on — the schedule, the two host members, the firing loop — is

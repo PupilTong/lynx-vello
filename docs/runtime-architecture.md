@@ -492,7 +492,12 @@ Its resolved entry URL is the module specifier.
 the realm that failed, during boot or after it; like listener and timer
 failures, it is non-fatal and the realm goes on. `Panicked` reports an engine
 panic and, with `StartupFailed`, is what `EngineEvent::is_fatal` names: the
-two events that end a view. Every main notification requests a host turn
+two events that end a view. A host member that panics is an engine panic too:
+the bridge cannot unwind through `QuickJS`, so `ScriptEngine` keeps the panic,
+the script is shown the exception "the host function panicked", and the
+realm's next checkpoint — normally the one that ends the entry that called
+the member — resumes the panic, whether or not the script caught that
+exception. Every main notification requests a host turn
 through `EventRequester`.
 
 Dropping a loading view cancels its `CancellationToken`, detaches its image
@@ -786,9 +791,11 @@ realm's JS dispatches the `Worker`'s `error` event, so `preventDefault()` there
 does not suppress them. A key without a source reports neither: a worker the
 script stopped with `terminate()`, or whose `Worker` object was collected, is
 reported to no one, as the JS dispatch drops its events too, and a `close()`
-is no event at all. The source table is kept apart from `live`, so a worker
-created after the trap, which never entered `live`, still reports its
-`WorkerEnded`. A private JS close notification lets MTS disposal finish when
+is no event at all. Delivering a worker's own end removes its source too, so
+a worker reports its end once: a trap that reaches a worker after its
+`Failed` or `Closed` was delivered is reported to no one. The source table is
+kept apart from `live`, so a worker created after the trap, which never
+entered `live`, still reports its `WorkerEnded`. A private JS close notification lets MTS disposal finish when
 BTS already closed or failed.
 MTS keeps its Worker reference after that Worker ends; a post to an ended
 Worker is dropped by the host, as a browser drops `postMessage` to a terminated
@@ -1146,8 +1153,9 @@ a `LynxDocument` out of them plus the `DocumentIngredients` that never reached
 the realm: the create-time viewport, the validated `dom::TextContext` and the
 group's `StylePool`. It never waits and mounts no author stylesheet; the first
 `__FlushElementTree` mounts those, in listed order. The construction runs
-under a catch, because the bridge erases a panic into "the host function
-panicked" and this member runs the UA cascade behind one call. A missing or
+under a catch, because this member runs the UA cascade behind one call: a
+panic in it fails the boot naming the phase that panicked, where any other
+host member's panic ends the view as `Panicked`. A missing or
 non-boolean switch and a realm that already has a document both throw, and the
 throw rejects the boot module's own `new Document(config)`, which fails the
 boot and ends the view — so nothing asks again, and the embedder is told

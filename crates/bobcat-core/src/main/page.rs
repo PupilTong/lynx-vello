@@ -313,10 +313,12 @@ impl Page {
     /// it is the view's first, so nothing of the view's can run ahead of it.
     ///
     /// The operation *and* the whole epilogue run under one `catch_unwind`
-    /// inside [`run_job`], because the bridge erases a panic into "the host
-    /// function panicked", a panic on this thread is the view's failure rather
-    /// than the group's, and a job runs in the thread's top loop rather than
-    /// inside a task that could catch it.
+    /// inside [`run_job`], because a panic on this thread is the view's
+    /// failure rather than the group's, and a job runs in the thread's top
+    /// loop rather than inside a task that could catch it. A host function
+    /// that panics is one of these panics too: the script is shown an
+    /// exception, and the realm's checkpoint resumes the panic when the
+    /// operation that called it ends.
     fn enter<T, O>(self: &Rc<Self>, operation: O) -> impl Future<Output = Option<T>> + use<T, O>
     where
         T: 'static,
@@ -1282,21 +1284,21 @@ async fn consume_worker_events(page: Rc<Page>) {
         let Some(WorkerEvent { key, payload }) = event else {
             return;
         };
-        let delivered = page
-            .enter(move |runtime, js| runtime.dispatch_worker_event(js, key, payload))
-            .await;
-        // Boot can settle inside this entry, when the MTS entry's top-level
-        // await was waiting on this worker. If boot's own code then failed,
-        // the entry's epilogue, which ran before this answer, has reported
-        // that as StartupFailed and ended the view, and this error is the
-        // same failure. Any other error leaves the view running and is the
-        // listener's, the entry's own throw included.
-        if let Some(Err(error)) = delivered
-            && !page.ended()
-        {
-            page.outbox
-                .engine_event(EngineEvent::ListenerFailed(error.into_script_error()));
-        }
+        // Reported inside the entry, before its epilogue, as every other kind
+        // of entry reports its failure. Boot can settle in here, when the MTS
+        // entry's top-level await was waiting on this worker, and the error
+        // is then the first rejection of the ones boot left: the entry's own
+        // throw where it threw, or boot's own failure, which the epilogue goes
+        // on to report as StartupFailed too.
+        let delivering = Rc::clone(&page);
+        page.enter(move |runtime, js| {
+            if let Err(error) = runtime.dispatch_worker_event(js, key, payload) {
+                delivering
+                    .outbox
+                    .engine_event(EngineEvent::ListenerFailed(error.into_script_error()));
+            }
+        })
+        .await;
     }
 }
 

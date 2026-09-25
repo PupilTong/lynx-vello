@@ -55,10 +55,18 @@ async fn view(
     (view, painter)
 }
 
+/// Pumps until boot settles, and answers with the first failure it reported.
+///
+/// A fatal event ends the wait at once. A `ScriptRunError` does not, because
+/// boot goes on past one: it is the answer only if nothing fatal follows it,
+/// so a failure of boot's own code, which comes right after a
+/// `ScriptRunError` with the same message, is still read as the
+/// `StartupFailed` it is.
 fn boot(
     view: &mut LynxView<ViewResources>,
     receiver: &flume::Receiver<()>,
 ) -> Result<(), LynxViewError> {
+    let mut script_error = None;
     loop {
         // The engine waits its own realm timers out, so the only reason to
         // stop waiting here is a wakeup — or the generous hang budget.
@@ -67,9 +75,12 @@ fn boot(
             .expect("startup wakes the host");
         for event in view.pump() {
             match event {
-                EngineEvent::ScriptFinished => return Ok(()),
+                EngineEvent::ScriptFinished => return script_error.map_or(Ok(()), Err),
                 EngineEvent::StartupFailed(error) => return Err(error),
                 EngineEvent::Panicked(error) => return Err(error.into()),
+                EngineEvent::ScriptRunError(error) => {
+                    script_error.get_or_insert(error.into());
+                }
                 _ => {}
             }
         }
@@ -549,12 +560,13 @@ async fn import_failures_reject_promises_and_an_uncaught_one_is_reported_before_
             boot(&mut view, &receiver).unwrap();
             continue;
         }
-        // `boot` passes over a `ScriptRunError`, which is what this branch is
-        // about, so the events are collected here instead.
+        // `boot` would answer with the `ScriptRunError` this branch is about
+        // and say nothing of the order of the events around it, so the events
+        // are collected here instead.
         let mut events = Vec::new();
         while !events
             .iter()
-            .any(|event| matches!(event, EngineEvent::ScriptFinished))
+            .any(|event| matches!(event, EngineEvent::ScriptFinished) || event.is_fatal())
         {
             receiver
                 .recv_timeout(Duration::from_secs(20))
@@ -622,6 +634,9 @@ async fn sibling_views_can_import_the_same_urls_with_independent_module_instance
             match event {
                 EngineEvent::ScriptFinished => finished += 1,
                 EngineEvent::StartupFailed(error) => panic!("sibling failed: {error}"),
+                EngineEvent::ScriptRunError(error) | EngineEvent::Panicked(error) => {
+                    panic!("sibling failed: {error}")
+                }
                 _ => {}
             }
         }
