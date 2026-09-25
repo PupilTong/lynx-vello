@@ -29,6 +29,7 @@ body {
 
 button,
 input,
+select,
 textarea,
 canvas {
   font: inherit;
@@ -42,6 +43,7 @@ a {
 button:focus-visible,
 a:focus-visible,
 input:focus-visible,
+select:focus-visible,
 textarea:focus-visible {
   outline: 2px solid #c8f560;
   outline-offset: 3px;
@@ -253,6 +255,7 @@ h3 {
   grid-template-columns: minmax(0, 1fr);
 }
 
+.source-panel,
 .upload-panel,
 .editor-panel,
 .preview-panel {
@@ -261,11 +264,83 @@ h3 {
   margin: 0;
 }
 
+.source-panel {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  border-right: 1px solid #2b313d;
+}
+
+.canvas-tools {
+  padding: 16px 20px;
+  border-bottom: 1px solid #2b313d;
+  background: #151922;
+}
+
+.frame-rate-row,
+.navigation-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.frame-rate-row {
+  margin-bottom: 14px;
+}
+
+.frame-rate-method {
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.frame-rate-value {
+  color: #c8f560;
+  font-size: 1.4rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+
+.navigation-controls {
+  display: grid;
+  grid-template-columns: 36px 36px minmax(0, 1fr);
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.navigation-controls button,
+.navigation-controls select {
+  min-width: 0;
+  min-height: 36px;
+  border: 1px solid #39404d;
+  border-radius: 8px;
+  color: #f6f0e8;
+  background: #1b202a;
+  cursor: pointer;
+}
+
+.navigation-controls select {
+  width: 100%;
+  padding: 6px 10px;
+  font-size: 0.78rem;
+  text-overflow: ellipsis;
+}
+
+.navigation-controls button:enabled:hover,
+.navigation-controls select:enabled:hover {
+  border-color: #c8f560;
+}
+
+.navigation-controls :disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
 .upload-panel,
 .editor-panel {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
-  border-right: 1px solid #2b313d;
   background: #10141b;
 }
 
@@ -651,8 +726,7 @@ h3 {
     height: auto;
   }
 
-  .editor-panel,
-  .upload-panel {
+  .source-panel {
     border-right: 0;
     border-bottom: 1px solid #2b313d;
   }

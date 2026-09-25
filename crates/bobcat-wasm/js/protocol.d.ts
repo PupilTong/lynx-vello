@@ -64,6 +64,7 @@ export interface InitMessage {
    * like the fonts.
    */
   nativeModules: Record<string, string[]>
+  measureFrameRate: boolean
   /**
    * The screen `SystemInfo` reports, in physical pixels: `screen.availWidth`
    * and `screen.availHeight` multiplied by `devicePixelRatio`, which is
@@ -217,6 +218,7 @@ export type ResponseMessage =
     }
 
 export type RenderWorkerMessage =
+  | { type: 'bobcat-frame-rate'; fps: number | null }
   | ErrorMessage
   | NativeModuleCallMessage
   | ReadyMessage
