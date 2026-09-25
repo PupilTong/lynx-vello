@@ -439,8 +439,8 @@ fn asked_for_a_worker(notices: &[ViewNotice]) -> bool {
 }
 
 /// Whether any notice asks the host for a source, whatever it is. The BTS
-/// asks for none in these tests: its root module imports the registered
-/// `bobcat:bts`, and the test's worker thread serves the BTS entry itself.
+/// asks for none in these tests: the engine supplies its boot script, and the
+/// test's worker thread serves the BTS entry itself.
 fn asked_the_host(notices: &[ViewNotice]) -> bool {
     notices
         .iter()
