@@ -742,7 +742,9 @@ async fn boot_worker(
     ));
 }
 
-/// The painter's message is processed on this worker's event loop.
+/// The painter's message is processed on this worker's event loop, by
+/// `bobcat:animation-frame`: the module that filed the callbacks, whether the
+/// BTS runtime or the worker's own script imported it.
 ///
 /// Queued rather than awaited, for the reason [`consume_messages`] queues
 /// everything: the consumer has to go on reading, so that a `Terminate` behind
@@ -752,7 +754,7 @@ fn deliver_vsync(worker: &Rc<Worker>, milliseconds: f64) {
     drop(worker.enter(move |realm, js| {
         if let Err(error) = realm.core.engine.call_module_export(
             js,
-            crate::esm::BTS_RUNTIME_MODULE_SPECIFIER,
+            crate::esm::ANIMATION_FRAME_MODULE_SPECIFIER,
             "__BobcatBeginFrame",
             &[HostArgument::Number(milliseconds)],
         ) {

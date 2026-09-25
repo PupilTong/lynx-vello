@@ -27,9 +27,10 @@ import { console } from "bobcat:diagnostics";
 // that a listener which throws is reported here (through `reportError`) and
 // the listeners behind it still run. `console` is `bobcat:diagnostics`'s, so
 // what it prints reaches the embedder from this realm directly. Not here:
-// `requestAnimationFrame` (only `bobcat:bts-runtime` has one, as an export and
-// a `lynx` member rather than a global), `importScripts` (this realm loads
-// ESM, so a worker script uses `import`), `location`, `navigator`,
+// `requestAnimationFrame` (a worker script imports it from
+// `bobcat:animation-frame`, and `bobcat:bts-runtime` also gives it as an
+// export and a `lynx` member; it is never a global), `importScripts` (this
+// realm loads ESM, so a worker script uses `import`), `location`, `navigator`,
 // `fetch`, `XMLHttpRequest`, `MessagePort`, `messageerror` (the reader cannot
 // fail on what the same build's writer produced), `onerror` (an uncaught
 // exception in here is reported at the parent `Worker` and to the embedder,

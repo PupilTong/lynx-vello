@@ -201,7 +201,7 @@ QuickJS ESM graph — a worker realm, on bobcat-workers' runtime
                 │     └──▶ bobcat:cross-thread-context ──▶ bobcat:event-target
                 └──▶ await import(BTS entry) when configured
                       HostOutbox → view resource host → worker completion
-  Both runtimes register the same sixteen built-ins (esm.rs BUILTIN_MODULES),
+  Both runtimes register the same eighteen built-ins (esm.rs BUILTIN_MODULES),
   and a realm's host modules decide which of them link. Here bobcat:element,
   bobcat:runtime and bobcat-internal fail at link with a SyntaxError: they
   import bobcat-internal:host members only an MTS realm has. In an MTS realm

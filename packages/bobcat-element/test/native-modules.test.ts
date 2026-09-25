@@ -26,6 +26,10 @@ rstest.mockRequire("bobcat:event-target", () => eventTarget);
 rstest.mockRequire("bobcat:cross-thread-context", () => crossThreadContext);
 rstest.mockRequire("bobcat:timers", () => ({}));
 rstest.mockRequire("bobcat:element", () => ({ __BobcatQueryNodes: rstest.fn() }));
+import * as animationFrame from "../src/animation-frame.ts";
+import * as systemInfo from "../src/system-info.ts";
+rstest.mockRequire("bobcat:animation-frame", () => animationFrame);
+rstest.mockRequire("bobcat:system-info", () => systemInfo);
 // The worker realm's global scope, as the BTS runtime imports it — the real
 // module, because the transport under test lives in it. Answered lazily: the
 // mock registrations are hoisted above this file's own bindings, and both

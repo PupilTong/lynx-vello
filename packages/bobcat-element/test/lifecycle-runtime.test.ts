@@ -6,11 +6,18 @@ import type * as mtsRuntime from "../src/main-thread-runtime.ts";
 import type { Worker } from "../src/worker.ts";
 import * as selectorQuery from "../src/selector-query.ts";
 import type * as lynxModules from "../src/lynx-modules.ts";
+import type * as animationFrame from "../src/animation-frame.ts";
+import * as systemInfo from "../src/system-info.ts";
 // Answered lazily, as `bobcat:worker` is in native-modules.test.ts: the modules
-// table imports `bobcat-internal:host`, whose replacement below is built out of
-// this file's own bindings, so it may not be required above them.
+// table and the animation-frame module import `bobcat-internal:host`, whose
+// replacement below is built out of this file's own bindings, so neither may
+// be required above them. Both runtimes import the one animation-frame
+// instance here, where each realm has its own.
 let moduleTable: typeof lynxModules;
+let animationFrames: typeof animationFrame;
 rstest.mockRequire("bobcat:lynx-modules", () => moduleTable);
+rstest.mockRequire("bobcat:animation-frame", () => animationFrames);
+rstest.mockRequire("bobcat:system-info", () => systemInfo);
 import * as globalEventEmitter from "../src/global-event-emitter.ts";
 rstest.mockRequire("bobcat:global-event-emitter", () => globalEventEmitter);
 rstest.mockRequire("bobcat:selector-query", () => selectorQuery);
@@ -159,6 +166,7 @@ beforeAll(async () => {
   futures = await import("../src/future.ts");
   bundleFetches = await import("../src/bundle-fetch.ts");
   moduleTable = await import("../src/lynx-modules.ts");
+  animationFrames = await import("../src/animation-frame.ts");
   mts = await import("../src/main-thread-runtime.ts");
   mts.__BobcatInitEntry("https://example.test/page/main.js?version=2#entry");
   scope.emptyLepusMethod = () => undefined;
@@ -348,41 +356,16 @@ describe("MTS/BTS lifecycle runtime", () => {
     delete scope.reportError;
   });
 
-  it("runs MTS frames with cancellation, nested requests and errors kept on their own frame", () => {
-    requestScriptFrame.mockClear();
-    const calls: [string, number][] = [];
-    let cancelled = 0;
-    mts.lynx.requestAnimationFrame(time => {
-      calls.push(["first", time]);
-      mts.lynx.cancelAnimationFrame(cancelled);
-      mts.lynx.requestAnimationFrame(time => calls.push(["nested", time]));
-      throw undefined;
-    });
-    cancelled = mts.lynx.requestAnimationFrame(() => { throw Error("cancelled callback ran"); });
-    mts.lynx.requestAnimationFrame(time => calls.push(["third", time]));
-    expect(requestScriptFrame.mock.calls).toEqual([[true]]);
-    mts.__BobcatBeginFrame(1250);
-    expect(calls).toEqual([["first", 1250], ["third", 1250]]);
-    expect(reportedErrors).toHaveBeenLastCalledWith("error", "undefined");
-    expect(requestScriptFrame).toHaveBeenLastCalledWith(true);
-    mts.__BobcatBeginFrame(1500);
-    expect(calls).toEqual([["first", 1250], ["third", 1250], ["nested", 1500]]);
-    expect(requestScriptFrame.mock.calls).toEqual([[true], [true]]);
-  });
-
-  it("coalesces each realm's frame demand and withdraws it when the last callback is cancelled", async () => {
+  it("asks the host for a frame through requestScriptFrame from both runtimes' lynx", async () => {
+    // What each frame does is `bobcat:animation-frame`'s, and
+    // animation-frame.test.ts pins it; this pins that both runtimes hand
+    // `lynx.requestAnimationFrame` to it.
     for (const runtime of [mts, await import("../src/background-thread-runtime.ts")]) {
+      expect(runtime.lynx.requestAnimationFrame).toBe(animationFrames.requestAnimationFrame);
+      expect(runtime.lynx.cancelAnimationFrame).toBe(animationFrames.cancelAnimationFrame);
       requestScriptFrame.mockClear();
-      const callback = rstest.fn();
-      const first = runtime.lynx.requestAnimationFrame(callback);
-      const last = runtime.lynx.requestAnimationFrame(callback);
-      expect(requestScriptFrame.mock.calls).toEqual([[true]]);
-      runtime.lynx.cancelAnimationFrame(first);
-      expect(requestScriptFrame.mock.calls).toEqual([[true]]);
-      runtime.lynx.cancelAnimationFrame(last);
-      expect(requestScriptFrame.mock.calls).toEqual([[true], [false]]);
-      runtime.__BobcatBeginFrame(1750);
-      expect(callback).not.toHaveBeenCalled();
+      const id = runtime.lynx.requestAnimationFrame(() => undefined);
+      runtime.lynx.cancelAnimationFrame(id);
       expect(requestScriptFrame.mock.calls).toEqual([[true], [false]]);
     }
   });

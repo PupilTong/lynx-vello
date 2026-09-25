@@ -41,7 +41,8 @@ import { __BobcatQueryNodes } from "bobcat:element";
 import * as elementPAPI from "bobcat:element";
 import type { NodeQueryRequest } from "bobcat:selector-query";
 import "bobcat:timers";
-import { requestScriptFrame } from "bobcat-internal:host";
+import { cancelAnimationFrame, clearAnimationFrames, requestAnimationFrame } from "bobcat:animation-frame";
+import { createSystemInfo } from "bobcat:system-info";
 import { initialProcessor as getInitialProcessor, globalProps, initData, loadModuleSync, nativeModuleTable, preloadStyleSheet, adoptStyleSheet } from "bobcat-internal:host";
 import { reportError as _ReportError, console } from "bobcat:diagnostics";
 import { sectionURL, styleSheetURL as sectionStyleSheetURL } from "bobcat:section-url";
@@ -157,28 +158,6 @@ let backgroundWorker: Worker | undefined;
 // The BTS Worker ended — it closed itself, its script failed, or its thread
 // trapped. Only disposal reads it: nothing can reply from an ended Worker.
 let backgroundEnded = false;
-const animationCallbacks = new Map<number, (milliseconds: number) => void>();
-let nextAnimationId = 1;
-let frameRequested = false;
-function updateFrameRequest() {
-  const pending = animationCallbacks.size > 0;
-  if (pending === frameRequested) return;
-  frameRequested = pending;
-  requestScriptFrame(pending);
-}
-export function __BobcatBeginFrame(milliseconds: number) {
-  frameRequested = false;
-  const mainIds = Array.from(animationCallbacks.keys());
-  for (const id of mainIds) {
-    const callback = animationCallbacks.get(id);
-    animationCallbacks.delete(id);
-    if (callback) {
-      try { callback(milliseconds); }
-      catch (error) { _ReportError(error); }
-    }
-  }
-  updateFrameRequest();
-}
 let backgroundDisposal: Promise<void> | undefined;
 let acknowledgeDisposal: (() => void) | undefined;
 let pendingBackgroundMessages: ToBackground[] = [];
@@ -294,8 +273,7 @@ function disposeBackground(): Promise<void> {
   if (backgroundDisposal) return backgroundDisposal;
   const worker = backgroundWorker;
   pendingBackgroundMessages = [];
-  animationCallbacks.clear();
-  updateFrameRequest();
+  clearAnimationFrames();
   // An ended Worker gets no `dispose`: nothing over there could run it, and
   // no acknowledgement could come back. Terminating it again is a no-op.
   const ended = worker === undefined || backgroundEnded;
@@ -419,7 +397,7 @@ export function __BobcatInitializeMTS(options: {
   hostGlobalPropsJson = JSON.stringify("globalProps" in options ? options.globalProps : __globalProps);
   __globalProps = JSON.parse(hostGlobalPropsJson);
   lynx.__globalProps = __globalProps;
-  SystemInfo = Object.freeze({platform: "headless", runtimeType: "quickjs", lynxSdkVersion: "4.1.0", ...options.systemInfo});
+  SystemInfo = createSystemInfo(options.systemInfo);
   lynx.SystemInfo = SystemInfo;
   initialProcessor = options.processorName ?? hostInitialProcessor;
   jsDataProcessor = options.enableJSDataProcessor === true;
@@ -693,17 +671,8 @@ export const lynx = {
   setInterval: timers.setInterval,
   clearTimeout: timers.clearTimeout,
   clearInterval: timers.clearInterval,
-  requestAnimationFrame(callback: (milliseconds: number) => void) {
-    if (typeof callback !== "function") throw new TypeError("requestAnimationFrame requires a function");
-    const id = nextAnimationId++;
-    animationCallbacks.set(id, callback);
-    updateFrameRequest();
-    return id;
-  },
-  cancelAnimationFrame(id: number) {
-    animationCallbacks.delete(id);
-    updateFrameRequest();
-  },
+  requestAnimationFrame,
+  cancelAnimationFrame,
   SystemInfo,
   __initData: {} as unknown,
   __globalProps,
