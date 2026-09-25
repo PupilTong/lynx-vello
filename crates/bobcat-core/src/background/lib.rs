@@ -105,14 +105,23 @@ impl WorkerKey {
 
 /// One worker to start: everything it will ever be given, in one message.
 ///
-/// No URL and no state: the thread that fetches is the one that answers, its
-/// answer carries the resolved URL the module is named by, and everything
-/// else a worker has — what is posted to it, what it says back — is a channel
-/// that arrives with it.
+/// No URL and no state. What it says about the worker is its key, its name
+/// and its role, which the creating realm decided before sending it. The
+/// thread that fetches is the one that answers, its answer carries the
+/// resolved URL the module is named by, and everything else a worker has —
+/// what is posted to it, what it says back — is a channel that arrives with
+/// it.
 pub(crate) struct WorkerStart {
     pub(crate) key: WorkerKey,
     /// The worker's `self.name`, empty when the constructor named none.
     pub(crate) name: String,
+    /// Whether this is the view's background thread or a `Worker` over a
+    /// script URL.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "nothing on the worker thread reads the role yet")
+    )]
+    pub(crate) role: WorkerRole,
     /// Its script, answered by whichever thread owns the creating view's
     /// fetcher. A `Start` for the built-in background context arrives with
     /// this already answered.
@@ -126,6 +135,20 @@ pub(crate) struct WorkerStart {
     pub(crate) token: CancellationToken,
     /// Sources and frame demand reach the host directly, under this worker's lifetime.
     pub(crate) sources: crate::link::HostOutbox,
+}
+
+/// Which of the two kinds of worker a [`WorkerStart`] is for.
+///
+/// The creating realm tells them apart by the `new Worker` specifier alone,
+/// before it allocates a key or sends anything: `bobcat:bts` is the built-in
+/// background script, and any other specifier is a URL.
+pub(crate) enum WorkerRole {
+    /// The view's background thread (BTS), which boot creates as
+    /// `new Worker("bobcat:bts")`.
+    Background,
+    /// A `Worker` whose script is fetched from the URL its specifier
+    /// resolves to.
+    Dedicated,
 }
 
 /// Everything the worker thread is ever told.

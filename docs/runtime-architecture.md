@@ -687,7 +687,7 @@ cannot fail on what the same build's writer produced.
 
 ```text
 main realm: new Worker(url)
-  ├── WorkerStart { key, name, script: oneshot receiver,
+  ├── WorkerStart { key, name, role, script: oneshot receiver,
   │                 messages: mpsc receiver, events: this view's sender }
   │        ────────────────────────────────▶ bobcat-workers: one task per worker
   └── ViewNotice::RequestSource ──▶ LynxView::pump ──▶ request_source
@@ -718,11 +718,16 @@ wait watches the worker's own cancellation token. That scope is independent
 of the view, so its cancellation cannot race ahead of JS disposal.
 
 Worker keys are allocated once per group on main and never reused. A worker's
-whole state is its own task; `bobcat-main` keeps nothing per worker but the
-sending end of its message channel, and only while that worker runs — a worker
-that closed itself or failed is forgotten where the realm learns of it, when
-that event is dispatched. MTS keeps `WeakRef<Worker>` values for event routing;
-a JS `FinalizationRegistry` releases an unreachable Worker's sending handle.
+whole state is its own task; `bobcat-main` keeps two things per worker. One is
+the sending end of its message channel, and only while that worker runs — a
+worker that closed itself or failed is forgotten where the realm learns of it,
+when that event is dispatched. The other is its `ScriptSource` (`Background`
+for `bobcat:bts`, `Worker(WorkerId)` for a script URL), recorded when the key
+is allocated, before the `Start` carrying its `WorkerRole` is sent, and removed
+at `terminate()` or at that same dispatch; a worker that fails before it is
+started, and so never had a channel here, has one too. MTS keeps
+`WeakRef<Worker>` values for event routing; a JS `FinalizationRegistry`
+releases an unreachable Worker's sending handle.
 A reachable Worker survives collection. Explicit `terminate()` uses the same
 release path and unregisters its finalizer. Both stop the context between tasks
 and discard queued messages without interrupting synchronous JavaScript.

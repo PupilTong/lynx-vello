@@ -1,13 +1,13 @@
 use tokio::sync::mpsc;
 
 use super::*;
-use crate::background::{WorkerCommand, WorkerEvent};
+use crate::background::{WorkerCommand, WorkerEvent, WorkerRole};
 use crate::esm::build_runtime;
 use crate::jobs::JsThread;
 use crate::link::{DetachedView, detached_outbox};
 use crate::main::tree::{PageConfig, Viewport};
 use crate::main::workers::WorkerFactory;
-use crate::view::NoWakeup;
+use crate::view::{NoWakeup, ScriptSource, WorkerId};
 
 /// The handle a packed id names. A handle carries a generation as well as
 /// an arena key, so a test spells one the way script sees it — and for a
@@ -419,6 +419,42 @@ struct GroupFarEnds {
     worker_events: Vec<mpsc::UnboundedReceiver<WorkerEvent>>,
     /// The engine thread both realms were opened with, held for their life.
     thread: Option<Rc<JsThread>>,
+}
+
+/// A realm tells its two kinds of worker apart by the specifier alone, before
+/// it sends either `Start`: `bobcat:bts` is the background thread, and a
+/// script URL is a dedicated `Worker`. The source it records under each key
+/// says the same.
+#[test]
+fn each_worker_starts_with_the_role_its_specifier_names() {
+    let (mut js, mut first, _second, mut ends) = two_view_group();
+    first
+        .run_main_thread_script(
+            &mut js,
+            r"
+            import { Worker } from 'bobcat-internal';
+            globalThis.workers = [new Worker('bobcat:bts'), new Worker('./w.js')];
+            ",
+            "app:///roles.js",
+        )
+        .expect("the entry constructs both workers");
+    let workers = ends.workers.as_mut().expect("the group's worker inbox");
+    let Ok(WorkerCommand::Start(background)) = workers.try_recv() else {
+        panic!("`new Worker('bobcat:bts')` sent no Start")
+    };
+    assert!(matches!(background.role, WorkerRole::Background));
+    assert_eq!(
+        first.workers.source_of(background.key),
+        Some(ScriptSource::Background)
+    );
+    let Ok(WorkerCommand::Start(dedicated)) = workers.try_recv() else {
+        panic!("`new Worker('./w.js')` sent no Start")
+    };
+    assert!(matches!(dedicated.role, WorkerRole::Dedicated));
+    assert_eq!(
+        first.workers.source_of(dedicated.key),
+        Some(ScriptSource::Worker(WorkerId::from(dedicated.key)))
+    );
 }
 
 /// The host's page data reaches the realm it was given to as plain strings,

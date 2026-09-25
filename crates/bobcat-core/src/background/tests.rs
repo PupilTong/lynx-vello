@@ -18,8 +18,8 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use super::{
-    WorkerCommand, WorkerEvent, WorkerHome, WorkerKey, WorkerMessage, WorkerPayload, WorkerStart,
-    wire_json,
+    WorkerCommand, WorkerEvent, WorkerHome, WorkerKey, WorkerMessage, WorkerPayload, WorkerRole,
+    WorkerStart, wire_json,
 };
 use crate::clock::ClockInstant;
 use crate::link::{HostOutbox, ViewNotice, block_on_deadline, detached_base};
@@ -168,6 +168,7 @@ impl Group {
         self.tell(WorkerCommand::Start(WorkerStart {
             key,
             name: name.to_owned(),
+            role: WorkerRole::Dedicated,
             script: awaiting,
             messages: incoming,
             events: self.views[view].events.clone(),

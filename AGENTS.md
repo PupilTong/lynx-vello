@@ -916,8 +916,11 @@ failure in later owner-thread work), `ListenerFailed` (a listener that threw
 during event delivery) and `TimerFailed` (a `setTimeout` or `setInterval`
 callback that threw when it came due) — the last two separate because neither
 is fatal: the walk continues, a repeating timer stays armed, and later events
-and timers are delivered as normal. A frame the engine wants drawn rides the
-same wakeup, and the `Painter::pump` answering it draws it.
+and timers are delivered as normal. `EngineEvent::is_fatal` names the events
+that end the view (`StartupFailed` and `ScriptRunError`); `LynxView::pump`
+ends a view on exactly those, and an embedder asks it rather than matching
+variants. A frame the engine wants drawn rides the same wakeup, and the
+`Painter::pump` answering it draws it.
 
 **A host takes two turns per wakeup, and they are different calls.**
 `LynxView::pump` alone advances the resource protocol past the startup sources
@@ -999,16 +1002,22 @@ since `QuickJS` binds a runtime to one thread, no path runs from a worker realm
 to a `LynxDocument` and no value of either runtime can be named by the other.
 One realm per live worker, and the group's workers take turns. **One task per
 live worker, and a worker's whole state is that task**: a `WorkerStart` carries
-its key, its name, the one-shot its script will arrive on, the receiving end of
-its message channel, the sender its events go back on — the creating MTS
-realm's `WorkerEvent` channel — and the Worker's own cancellation token. MTS
-routes events through weak references to JS Worker objects; their finalizers
-and explicit `terminate()` release sending handles, and releasing the MTS realm
-closes its remaining senders. Host functions reference the channel owner
-weakly, so queued finalizers cannot keep a released realm's workers or group
-thread alive. The script wait is a `biased` select over the message channel
-first and that token behind it, so a `terminate` landing in the same instant as
-the script wins and a worker told to stop never boots. The timer machinery both
+its key, its name, its role (`WorkerRole::Background` for `bobcat:bts`,
+`Dedicated` for a script URL, which `createWorker` decides from the specifier
+before it sends the `Start`), the one-shot its script will arrive on, the
+receiving end of its message channel, the sender its events go back on — the
+creating MTS realm's `WorkerEvent` channel — and the Worker's own cancellation
+token. MTS routes events through weak references to JS Worker objects; their
+finalizers and explicit `terminate()` release sending handles, and releasing
+the MTS realm closes its remaining senders. Apart from those handles, the
+realm's `WorkerOwner` records each key's public `ScriptSource` (`Background`,
+or `Worker(WorkerId)`) from the moment the key is allocated until
+`terminate()` or delivery of the worker's own end, so a worker that fails
+before it is started has a source too. Host functions reference the channel
+owner weakly, so queued finalizers cannot keep a released realm's workers or
+group thread alive. The script wait is a `biased` select over the message
+channel first and that token behind it, so a `terminate` landing in the same
+instant as the script wins and a worker told to stop never boots. The timer machinery both
 realm kinds run on — the schedule, the two host members, the firing loop — is
 `crate::timers` beside `crate::clock`, owned by neither thread.
 

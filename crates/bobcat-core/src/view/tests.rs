@@ -265,3 +265,38 @@ fn failed_startup_never_makes_a_view_ready() {
         std::thread::yield_now();
     }
 }
+
+/// [`EngineEvent::is_fatal`] is what [`LynxView::pump`] ends a view on, so its
+/// set is fixed here one variant at a time.
+#[test]
+fn only_fatal_events_end_the_view() {
+    let error = || crate::threads::platform_script_error("failed".to_owned());
+    let events = [
+        (EngineEvent::ScriptFinished, false),
+        (
+            EngineEvent::StartupFailed(LynxViewError::Script(error())),
+            true,
+        ),
+        (EngineEvent::ScriptRunError(error()), true),
+        (EngineEvent::ListenerFailed(error()), false),
+        (EngineEvent::TimerFailed(error()), false),
+        (EngineEvent::WorkerFailed(error()), false),
+        (
+            EngineEvent::ScriptReported {
+                level: "error".to_owned(),
+                message: "reported".to_owned(),
+            },
+            false,
+        ),
+        (
+            EngineEvent::ConsoleMessage {
+                level: "log".to_owned(),
+                message: "logged".to_owned(),
+            },
+            false,
+        ),
+    ];
+    for (event, fatal) in events {
+        assert_eq!(event.is_fatal(), fatal, "{event:?}");
+    }
+}

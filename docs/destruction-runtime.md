@@ -10,7 +10,9 @@ app receiver and no arguments. A throw is reported through `lynx.reportError`;
 the handler still replies after an ordinary `await` boundary, like web-worker-rpc.
 It does not await asynchronous work returned by the framework's synchronous
 hook. Ordinary BTS messages, timers and imports continue until MTS terminates
-it. There is no native app hook, BTS role flag, or special promise-job drain.
+it. There is no native app hook or special promise-job drain, and the exchange
+does not read the BTS worker's `WorkerRole`: the role says which kind of worker
+a `Start` is for, and disposal is the same message exchange either way.
 
 Disposal remains deliverable during an unfinished BTS entry import, cleaning up
 any hook already installed. Unlike web-core's readiness wait, this cannot wait

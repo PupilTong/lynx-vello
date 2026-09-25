@@ -642,6 +642,7 @@ async fn serve_worker(js: SharedRuntime, start: WorkerStart, thread: JsThreadHan
     let WorkerStart {
         key,
         name,
+        role: _,
         script,
         messages,
         events,
@@ -993,6 +994,7 @@ mod tests {
     //! count the epilogues each of them ran.
 
     use super::*;
+    use crate::background::WorkerRole;
 
     /// How many times the test lets every ready task run before it gives up on
     /// something happening. A hang detector rather than a schedule: everything
@@ -1171,6 +1173,7 @@ mod tests {
                 .send(WorkerCommand::Start(WorkerStart {
                     key: WorkerKey::new(2),
                     name: String::new(),
+                    role: WorkerRole::Dedicated,
                     script,
                     messages: incoming,
                     events,

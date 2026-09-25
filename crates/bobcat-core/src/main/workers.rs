@@ -18,13 +18,14 @@ use tokio_util::sync::CancellationToken;
 
 use super::quickjs::{ScriptEngine, ScriptRuntime};
 use crate::background::{
-    WorkerCommand, WorkerEvent, WorkerKey, WorkerMessage, WorkerPayload, WorkerStart,
+    WorkerCommand, WorkerEvent, WorkerKey, WorkerMessage, WorkerPayload, WorkerRole, WorkerStart,
 };
 use crate::esm::{BTS_ENTRY_PREAMBLE, BTS_MODULE_SPECIFIER, HOST_MODULE_SPECIFIER};
 use crate::link::{ViewNotice, ViewOutbox};
 use crate::resource::{LoadedSource, SourceCompletion, SourceRequest};
 use crate::script::ScriptError;
 use crate::threads::platform_script_error;
+use crate::view::{ScriptSource, WorkerId};
 
 /// Issued on bobcat-main, once per group. No cross-thread allocator or lock:
 /// the one thing it reads across threads is the worker thread's trap flag.
@@ -68,6 +69,7 @@ impl WorkerFactory {
             outbox,
             events,
             live: RefCell::default(),
+            sources: RefCell::default(),
         });
         let creator = Rc::downgrade(&owner);
         engine.register_host_module_function(
@@ -104,10 +106,19 @@ impl WorkerFactory {
                     .next
                     .set(id.checked_add(1).ok_or("worker ids exhausted")?);
                 let key = WorkerKey::new(id);
+                // The specifier has already said which kind of worker this is,
+                // and the source is recorded before anything is sent, so a
+                // worker that fails at once below has one too.
+                let (role, source) = if url.is_some() {
+                    (WorkerRole::Dedicated, ScriptSource::Worker(WorkerId::from(key)))
+                } else {
+                    (WorkerRole::Background, ScriptSource::Background)
+                };
+                creator.sources.borrow_mut().insert(key, source);
                 // A worker that has already failed is still a worker to the
                 // script that named it: its `error` event arrives with the
                 // `Failed` the owner queued, and nothing is asked of the host.
-                let Some(script) = creator.start(key, name) else {
+                let Some(script) = creator.start(key, name, role) else {
                     return Ok(HostValue::String(id.to_string()));
                 };
                 let Some(url) = url else {
@@ -188,6 +199,12 @@ pub(super) struct WorkerOwner {
     /// removes it; a worker which closed itself is forgotten on delivery.
     /// Dropping this map closes the remaining channels without a stop sweep.
     live: RefCell<FxHashMap<WorkerKey, mpsc::UnboundedSender<WorkerMessage>>>,
+    /// The source of each worker whose key the script still holds. Kept
+    /// apart from `live`: an entry is made when the key is allocated, before
+    /// the `Start` is sent, so a worker that failed at once and never entered
+    /// `live` has one too. It is removed where the script lets go of the key:
+    /// `terminate()`, or delivery of the worker's own end.
+    sources: RefCell<FxHashMap<WorkerKey, ScriptSource>>,
 }
 
 impl WorkerOwner {
@@ -202,7 +219,7 @@ impl WorkerOwner {
     /// fetched does. Its `Failed` is queued on this realm's own channel and
     /// reaches the script as an `error` event, and nothing is sent to the
     /// thread or kept in `live`.
-    fn start(&self, key: WorkerKey, name: String) -> Option<SourceCompletion> {
+    fn start(&self, key: WorkerKey, name: String, role: WorkerRole) -> Option<SourceCompletion> {
         if !self.factory.trapped.load(Ordering::Acquire) {
             let (messages, incoming) = mpsc::unbounded_channel();
             let token = CancellationToken::new();
@@ -218,6 +235,7 @@ impl WorkerOwner {
                 .send(WorkerCommand::Start(WorkerStart {
                     key,
                     name,
+                    role,
                     script: awaiting,
                     messages: incoming,
                     events: self.events.clone(),
@@ -256,7 +274,12 @@ impl WorkerOwner {
     /// message, and reading it ends the worker at once — which discards the
     /// deliveries queued ahead of it that have not run, the way HTML's
     /// "terminate a worker" discards its queued tasks.
+    ///
+    /// Its source goes too: the script has let go of the key, so whatever the
+    /// worker says after this is dropped before it reaches a `Worker` object,
+    /// and a `terminate()` is reported to no one.
     fn terminate(&self, key: WorkerKey) {
+        self.sources.borrow_mut().remove(&key);
         if let Some(messages) = self.live.borrow_mut().remove(&key) {
             let _ = messages.send(WorkerMessage::Terminate);
         }
@@ -282,6 +305,17 @@ impl WorkerOwner {
     /// either way: there is nothing left listening on it.
     pub(super) fn forget(&self, key: WorkerKey) {
         self.live.borrow_mut().remove(&key);
+        self.sources.borrow_mut().remove(&key);
+    }
+
+    /// Which realm the worker under `key` is, while the script still holds
+    /// that key.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "no worker event names its source yet")
+    )]
+    pub(super) fn source_of(&self, key: WorkerKey) -> Option<ScriptSource> {
+        self.sources.borrow().get(&key).copied()
     }
 
     /// How many workers this realm still has running.

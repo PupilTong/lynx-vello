@@ -23,7 +23,7 @@ use dom::{FontBlob, FrameImages, ImageInbox, StylePool};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
-use crate::background::WorkerHome;
+use crate::background::{WorkerHome, WorkerKey};
 use crate::clock::ClockInstant;
 use crate::link::{Published, SourceAnswer, ToMain, ViewNotice, ViewSeat};
 #[cfg(target_arch = "wasm32")]
@@ -332,6 +332,61 @@ pub enum EngineEvent {
     ScriptReported { level: String, message: String },
     /// A realm's console output, delivered to the embedder that owns the view.
     ConsoleMessage { level: String, message: String },
+}
+
+impl EngineEvent {
+    /// Whether this event ends the view: [`LynxView::pump`] ends it on
+    /// exactly these, and every other event leaves it running. An embedder
+    /// that stops on a failed view asks this rather than matching variants.
+    #[must_use]
+    pub const fn is_fatal(&self) -> bool {
+        matches!(self, Self::StartupFailed(_) | Self::ScriptRunError(_))
+    }
+}
+
+/// The realm of a view that a script event came from.
+///
+/// A view runs script in three kinds of realm: its main-thread realm, its
+/// background thread (BTS), which boot creates as a built-in `Worker`, and
+/// each `Worker` its main-thread script constructs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ScriptSource {
+    /// The view's main-thread realm.
+    Main,
+    /// The view's background thread.
+    Background,
+    /// A `Worker` the view's main-thread script constructed.
+    Worker(WorkerId),
+}
+
+impl fmt::Display for ScriptSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Main => formatter.write_str("main"),
+            Self::Background => formatter.write_str("background"),
+            Self::Worker(id) => write!(formatter, "worker {id}"),
+        }
+    }
+}
+
+/// Names one `Worker` for the life of its group.
+///
+/// Opaque: ids are compared, hashed and printed, and nothing else. No two
+/// workers of one group share an id, including one that has ended. The
+/// printed form is the key the constructing realm's `Worker` object holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct WorkerId(u64);
+
+impl From<WorkerKey> for WorkerId {
+    fn from(key: WorkerKey) -> Self {
+        Self(key.get())
+    }
+}
+
+impl fmt::Display for WorkerId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}", self.0)
+    }
 }
 
 /// One captured frame: tightly packed RGBA8 pixels at size.
@@ -1095,10 +1150,7 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
                     // A fatal event ends the view the same way its release
                     // does, and by the same signal: the token this view was
                     // built with, which its own task is waiting on.
-                    if matches!(
-                        event,
-                        EngineEvent::StartupFailed(_) | EngineEvent::ScriptRunError(_)
-                    ) {
+                    if event.is_fatal() {
                         self.state = ViewState::Failed;
                         *self.seat.frame_demand.borrow_mut() = crate::link::FrameDemand::default();
                         self.cancel.cancel();
