@@ -42,11 +42,12 @@
 //! module requests and future settles the entry produced, the `@font-face`
 //! loads, the next timer deadline. [`Settles::settle`] is the epilogue alone,
 //! for a wake that carries no operation of its own.
-//! [`Page::open_realm`] is a job too, and the only one that does not go
-//! through `enter`, because the realm it would enter does not exist until it
-//! returns; the disposal exchange the page runs before [`owner::run_owner`]
-//! releases its realm is the other exception, running after the view has
-//! ended and so past the latch and the epilogue.
+//! [`Page::open_realm`] is a job too, and the one before the realm exists
+//! that does not go through `enter`, because the realm it would enter does
+//! not exist until it returns. After the end, the disposal exchange the page
+//! runs as its `before_release` hook and the release of its realm in
+//! [`owner::run_owner`] are [`owner::after_end`] jobs, which run past the
+//! latch and the epilogue.
 //!
 //! The epilogue's steps, and their order, are the driver's
 //! ([`crate::realm::owner`]). What the driver is told about a page is the
@@ -60,8 +61,11 @@
 //! What a failure is reported as, and whether it ends the view, is the MTS
 //! table in [`policy`], read by the scene the failure happened in: every
 //! report here goes through [`policy::report`], except the disposal's, which
-//! is the table's Disposal row, and an entry the fetcher could not load, which
-//! is the Open row over the fetcher's own error.
+//! is the table's Disposal row, and the Open failures [`load_entry`] meets —
+//! an entry the fetcher could not load, one it answered with something other
+//! than a script or from a URL that is not absolute, and naming the entry —
+//! which are each already a `LynxViewError` and are sent as `StartupFailed`
+//! as they are, through [`owner::terminal`].
 //!
 //! Nothing of this view's is served outside a job. [`Page::open_realm`] is the
 //! *first* job of every view, queued before any of those tasks is spawned, so
@@ -1055,9 +1059,11 @@ async fn consume_metrics(page: Rc<Page>, mut metrics: watch::Receiver<Option<Vie
 /// view nobody is watching rather than a failure of it, and is not reported.
 async fn load_entry(page: Rc<Page>, entry: StartupSource) {
     let StartupSource { url, answer } = entry;
-    let answered = owner::module_answer(&url, owner::await_source(answer).await).and_then(
-        |(response, source)| absolute_response(&url, response).map(|response| (response, source)),
-    );
+    let answered = owner::await_source(answer).await.and_then(|answer| {
+        owner::module_answer(&url, answer)
+            .and_then(|(response, source)| Ok((absolute_response(&url, response)?, source)))
+            .map_err(|reason| LynxViewError::Script(platform_script_error(reason)))
+    });
     let completing = Rc::clone(&page);
     owner::enter(&page, move |runtime, js| {
         let completed = answered
@@ -1066,28 +1072,30 @@ async fn load_entry(page: Rc<Page>, entry: StartupSource) {
             Ok(Ok(())) => {}
             _ if completing.outbox.is_cancelled() => owner::end(&completing),
             Ok(Err(error)) => policy::report(&completing, Scene::Boot, error.into_script_error()),
-            // The Open row, over an error that need not be a script's: a load
-            // the fetcher could not make is reported as the fetcher's own
-            // error, which `StartupFailed` carries as it is.
+            // The Open row's event, sent without the row: a load the fetcher
+            // could not make, an answer that is not a script or is from a URL
+            // that is not absolute, and naming the entry are each already a
+            // `LynxViewError` — the first the fetcher's own — which
+            // `StartupFailed` carries as it is.
             Err(error) => owner::terminal(&completing, EngineEvent::StartupFailed(error)),
         }
     })
     .await;
 }
 
-/// The entry's response URL, which must be an absolute URL, or the startup
-/// failure that is: a `Script` error naming `url`, the URL the entry was
-/// requested by, and the response URL.
+/// The entry's response URL, which must be an absolute URL, or why it is
+/// not, naming `url`, the URL the entry was requested by, and the response
+/// URL.
 ///
 /// It becomes `__Card__`, the base every `new Worker` URL is joined to by URL
 /// rules, and a join to a base that does not parse fails for every
 /// specifier, boot's own `bobcat:bts` included.
-fn absolute_response(url: &str, response: String) -> Result<String, LynxViewError> {
+fn absolute_response(url: &str, response: String) -> Result<String, String> {
     match url::Url::parse(&response) {
         Ok(_) => Ok(response),
-        Err(_) => Err(LynxViewError::Script(platform_script_error(format!(
+        Err(_) => Err(format!(
             "the fetcher answered {url} from {response:?}, which is not an absolute URL"
-        )))),
+        )),
     }
 }
 

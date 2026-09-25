@@ -633,6 +633,52 @@ fn a_script_that_cannot_be_fetched_fails_its_worker_and_nothing_else() {
     assert_eq!(group.next(0).key, key);
 }
 
+/// A script the fetcher answered with something other than a script ends its
+/// worker the same way, and the message says what the fetcher returned for
+/// which URL, and nothing else.
+#[test]
+fn a_script_answered_with_a_font_fails_its_worker_naming_the_answer() {
+    let mut group = Group::new();
+    let doomed = group.construct_requesting(0, "", "app:///font-worker.js");
+    let _ = group
+        .scripts
+        .remove(&doomed)
+        .expect("the worker is waiting")
+        .send(Ok(LoadedSource::Font(dom::FontBlob::from_static(
+            b"not a script",
+        ))));
+    let event = group.next(0);
+    assert_eq!(event.key, doomed);
+    let WorkerPayload::Failed(error) = event.payload else {
+        panic!("a script that is not one leaves no worker")
+    };
+    assert_eq!(
+        &*error.message,
+        "loading the worker's script: the fetcher returned a font for app:///font-worker.js"
+    );
+}
+
+/// An import the fetcher answered with something other than a script is
+/// rejected with the module's name and what the fetcher returned for it, and
+/// nothing else.
+#[test]
+fn an_import_answered_with_a_stylesheet_is_rejected_naming_the_answer() {
+    let mut group = Group::new();
+    group.start(
+        "import 'bobcat:worker'; import 'bobcat:timers'; \
+         import('./dep.js').catch(error => postMessage(error.message));",
+    );
+    let (url, completion) = group.views[0].source();
+    assert_eq!(url, "app:///dep.js");
+    completion.complete(Ok(LoadedSource::StyleSheet(
+        crate::resource::StyleSheetSource::Text(String::new()),
+    )));
+    assert_eq!(
+        wire_json(&group.message(0)),
+        r#""module 'app:///dep.js': the fetcher returned a stylesheet for app:///dep.js""#
+    );
+}
+
 /// A worker whose URL is an engine name is loaded by its realm's own loader
 /// alone: `createWorker` asks the host nothing for such a URL, so its `Start`
 /// carries no script and nothing waits for one. A registered built-in is the

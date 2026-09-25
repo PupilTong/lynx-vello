@@ -800,11 +800,14 @@ async fn consume_messages(
                 .await
             }, if script.is_some() => {
                 script = None;
-                match owner::module_answer(&worker.entry, answered) {
+                let loaded = answered
+                    .map_err(|error| error.to_string())
+                    .and_then(|answer| owner::module_answer(&worker.entry, answer));
+                match loaded {
                     Ok((url, source)) => complete_script(&worker, url, source),
-                    Err(error) => {
+                    Err(reason) => {
                         let error = platform_script_error(format!(
-                            "loading the worker's script: {error}"
+                            "loading the worker's script: {reason}"
                         ));
                         policy::report(&worker, Scene::Open, error);
                         return;
@@ -1445,6 +1448,117 @@ mod tests {
             assert!(
                 next(&mut started.events).await.is_none(),
                 "a post queued behind a terminate is discarded, not delivered"
+            );
+        });
+    }
+
+    /// Starts a worker whose script arms a zero-delay timer running `callback`
+    /// and one more timer that never comes due, waits until the callback is
+    /// parked in the `require` of `app:///never.cjs` it ends with, and
+    /// terminates the worker there. Answers with the worker once the
+    /// terminate has ended it.
+    ///
+    /// The `require` is the synchronous wait: tasks go on running inside it,
+    /// so the consumer reads the `Terminate` and ends the worker while the
+    /// timer's callback is still on the stack. The end makes the `require`
+    /// throw, into the callback's own `catch`.
+    async fn terminated_inside_a_timer(thread: &JsThreadHandle, callback: &str) -> Started {
+        let js = worker_runtime();
+        let mut started = start_running(
+            &js,
+            thread,
+            1,
+            format!(
+                r"import 'bobcat:worker'; import 'bobcat:timers';
+                import {{ createRequire }} from 'bobcat:module';
+                const require = createRequire(import.meta.url);
+                setTimeout(() => {{}}, 60000);
+                setTimeout(() => {{
+                    {callback}
+                    try {{ require('./never.cjs'); }} catch {{}}
+                }}, 0);
+                "
+            ),
+        );
+        let Some(crate::link::ViewNotice::RequestSource {
+            request,
+            completion,
+        }) = next(&mut started.sources).await
+        else {
+            panic!("the timer's require asked its host for a module");
+        };
+        assert!(
+            matches!(&request, SourceRequest::Module(url) if url == "app:///never.cjs"),
+            "the require is the timer's"
+        );
+        started
+            .messages
+            .send(WorkerMessage::Terminate)
+            .expect("the worker is serving");
+        assert!(
+            until(|| started.worker.ended()).await,
+            "the terminate ended the worker while its timer's callback was parked"
+        );
+        assert!(
+            completion.is_cancelled(),
+            "the require's request is cancelled with the worker"
+        );
+        started
+    }
+
+    /// Every module request that reaches the host from here on, once every
+    /// ready task has had its turns.
+    async fn requests_from_now_on(started: &mut Started) -> Vec<SourceRequest> {
+        let mut requests = Vec::new();
+        until(|| {
+            while let Ok(notice) = started.sources.try_recv() {
+                if let crate::link::ViewNotice::RequestSource { request, .. } = notice {
+                    requests.push(request);
+                }
+            }
+            false
+        })
+        .await;
+        requests
+    }
+
+    /// A worker that ended while a due timer's callback was parked on a
+    /// synchronous wait is over when that callback returns: the epilogue it
+    /// returns into asks the host for none of the imports the callback
+    /// started, reports nothing, and re-arms none of the timers the end
+    /// withdrew.
+    #[test]
+    fn a_worker_ended_inside_a_timer_callback_asks_for_nothing_after_it() {
+        on_a_js_thread(|thread| async move {
+            let mut started =
+                terminated_inside_a_timer(&thread, "import('./later.js').catch(() => {});").await;
+            let requests = requests_from_now_on(&mut started).await;
+            assert!(
+                requests.is_empty(),
+                "an ended worker's epilogue asks the host for nothing: {requests:?}"
+            );
+            assert!(
+                next(&mut started.events).await.is_none(),
+                "an ended worker reports nothing"
+            );
+            assert_eq!(
+                started.worker.lifetime.armed_deadline(),
+                None,
+                "the deadline the end withdrew stays withdrawn"
+            );
+        });
+    }
+
+    /// A `close()` a timer's callback made before its worker was terminated
+    /// is not reported: the terminate ended the worker first, and an ended
+    /// worker's epilogue does not reach the step that reports `Closed`.
+    #[test]
+    fn a_close_made_before_a_terminate_inside_a_timer_callback_is_not_reported() {
+        on_a_js_thread(|thread| async move {
+            let mut started = terminated_inside_a_timer(&thread, "close();").await;
+            assert!(
+                next(&mut started.events).await.is_none(),
+                "a worker its creator terminated does not report `Closed`"
             );
         });
     }

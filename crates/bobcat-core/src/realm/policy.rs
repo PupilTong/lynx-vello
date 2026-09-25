@@ -23,18 +23,21 @@
 //!
 //! - [`Scene::Open`]: the realm, its entry, or the engine's own startup code could not be made
 //!   ready. MTS: `Page::open_realm` (a runtime that was never built, the realm's construction,
-//!   boot's own module), the entry's failed or non-script answer in `load_entry`, and a rejection
-//!   of boot's own module seen by the epilogue — boot's own `__FlushElementTree` failing on a
-//!   listed sheet included. Worker: a runtime that was never built or a realm that could not be
-//!   opened in `Worker::boot`, and a dedicated worker's failed or non-script script answer in
+//!   boot's own module), the entry's failed or non-script answer, an answer from a URL that is not
+//!   absolute, and naming the entry in `load_entry`, and a rejection of boot's own module seen by
+//!   the epilogue — boot's own `__FlushElementTree` failing on a listed sheet included. Worker: a
+//!   runtime that was never built or a realm that could not be opened in `Worker::boot`, and a
+//!   failed or non-script answer to the request `createWorker` made for the worker's script, in
 //!   `consume_messages`. Each caller names what failed — the epilogue by the owner's
-//!   `BOOT_REJECTION` context — so neither row adds a context. The MTS entry's answer is the one
-//!   Open failure not reported through [`report`]: what failed there is the fetcher's own error, a
-//!   `LynxViewError` that `load_entry` hands to `StartupFailed` as it is, where the row takes a
-//!   script's error and converts it.
+//!   `BOOT_REJECTION` context — so neither row adds a context. The Open failures `load_entry` meets
+//!   are not reported through [`report`]: an entry the fetcher could not load, one it answered with
+//!   something other than a script or from a URL that is not absolute, and naming the entry are
+//!   each already a `LynxViewError` — the first the fetcher's own — which `load_entry` hands to
+//!   `StartupFailed` as it is, through [`owner::terminal`], where the row takes a script's error
+//!   and converts it.
 //! - [`Scene::Boot`]: the app's startup code threw. MTS: the entry's evaluation, a module it
 //!   imports included, as `load_entry` completes it. Worker: the load of the root module in
-//!   `Worker::boot`, and a dedicated worker's script as `complete_script` completes it.
+//!   `Worker::boot`, and a script the host was asked for as `complete_script` completes it.
 //! - [`Scene::Module`]: completing a module an import was waiting for, in the driver's
 //!   `load_module`.
 //! - [`Scene::Future`]: handing a future its outcome, in the driver's `settle_future`.

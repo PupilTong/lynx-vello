@@ -641,16 +641,17 @@ posts are the page's `after_timers` hook, `ScriptFinished` its `on_booted`, the
 acknowledgement its `after_boot` and the font loads its `after_settles`.
 `Settles::settle` is the epilogue alone, for a wake that carries no operation
 of its own; `Settles` is one blanket impl over every `RealmOwner`.
-`Page::open_realm` is a job too and the only one outside `enter`, because the
-realm it would enter does not exist until it returns; it runs the first
-epilogue itself once it has stored the realm. The disposal exchange the page
-runs as its `before_release` hook is the other, running past the latch and the
-epilogue because the view has already ended. A command opens a burst: the rest
-of what is already queued goes with it, bounded by the length the count was
-taken from, so a host's whole round of input is one entry, one commit and one
-acknowledgement rather than one of each per command. The consumer awaits that
-burst's job before reading the channel again, so what arrives meanwhile is one
-later burst.
+`Page::open_realm` is a job too, and the one before the realm exists that does
+not go through `enter`, because the realm it would enter does not exist until
+it returns; it runs the first epilogue itself once it has stored the realm.
+After the end, the disposal exchange the page runs as its `before_release`
+hook and the release of the realm are `after_end` jobs, which run past the
+latch and the epilogue because the view has already ended. A command opens a
+burst: the rest of what is already queued goes with it, bounded by the length
+the count was taken from, so a host's whole round of input is one entry, one
+commit and one acknowledgement rather than one of each per command. The
+consumer awaits that burst's job before reading the channel again, so what
+arrives meanwhile is one later burst.
 
 **Nothing of a view is served outside a job.** Opening the realm is that
 view's first job, queued before its own tasks exist, so a burst that arrived
@@ -800,7 +801,7 @@ the other two — adds to the driver.
 | Role host members | on `bobcat-internal:host`: the document, tree, attribute, readback, stylesheet (`preloadStyleSheet`, `adoptStyleSheet`), event-name, startup-string and `Worker` members | `bobcat-internal:worker`: `postWorkerMessage`, `closeWorker`, `workerName`, `backgroundEntry`, `pixelRatio`/`pixelWidth`/`pixelHeight` | the same members; `backgroundEntry` and the three screen members answer `undefined` |
 | Startup strings | `initData`, `globalProps` and `initialProcessor`, one-shot members `bobcat:runtime` reads as it is evaluated | none: the `initialize` message carries `initData`, `updateData`, `processorName`, `cacheData` and `globalProps`, as the MTS realm processed them | none |
 | `SystemInfo` | `ViewSources::screen`, written into the boot module as three number literals: a `bobcat:runtime` export and `lynx.SystemInfo` | the same screen, `BackgroundStart::screen` in its `WorkerStart`, read through the three screen members: a `bobcat:bts-runtime` export, `lynx.SystemInfo` and a global `SystemInfo` | no screen: a `bobcat:bts-runtime` it imports reports the runtime constants alone |
-| `NativeModules` | `bobcat-internal:native-modules` (`invokeNativeModule`, `nativeModuleTable`) with an empty table; `NativeModules` is `undefined` | the same host module with the view's module table, `BackgroundStart::native_modules`, which `bobcat:bts-runtime` builds `NativeModules` from | the same host module with an empty table |
+| `NativeModules` | `bobcat-internal:native-modules` (`invokeNativeModule`, `nativeModuleTable`) with an empty table; `NativeModules` is `undefined`, and there is no native module API over the transport (see `docs/tracking/deviations.md`) | the same host module with the view's module table, `BackgroundStart::native_modules`, which `bobcat:bts-runtime` builds `NativeModules` from | the same host module with an empty table |
 | `console` | a module binding: `bobcat:runtime` re-exports the `console` of `bobcat:diagnostics` | the global `console` `bobcat:worker` installs; `bobcat:bts-runtime` exports the same object | the global `console` `bobcat:worker` installs |
 | Creates Workers | yes: `createWorker`, `sendWorkerMessage`, `terminateWorker`, and the `bobcat-internal` class over them | no | no |
 | Frame demand key, `ScriptSource` | `None`, `Main` | the worker's key, `Background` | the worker's key, `Worker(WorkerId)` |
@@ -868,50 +869,71 @@ The epilogue's steps and their order are the contract, for both owners:
    the realm's timers and then the end of the batch they ran, which runs the
    collection their removals may have made due; on a worker none once its
    script has called `close()`;
-3. `after_timers`: on a page the commit — skipped while a listed sheet is
+3. nothing more, for an owner that ended while those callbacks ran: a
+   callback parked on a synchronous wait lets the thread's tasks run, and a
+   `Terminate`, a release or a panic in another task of the owner may end it
+   there. The callbacks of the batch after that one still run, and what they
+   threw is still reported;
+4. `after_timers`: on a page the commit — skipped while a listed sheet is
    outstanding or has failed — and the posted content-visibility and
    `<image>` deliveries; on a worker a `close()`, which ends it with `Closed`
    through `terminal`;
-4. nothing more, for an owner that step ended;
-5. the boot report, until the root module has settled: a root module that
+5. nothing more, for an owner that step ended;
+6. the boot report, until the root module has settled: a root module that
    finished is marked and `on_booted` runs, which sends `ScriptFinished` on a
    page, while a worker's mark releases the posts its consumer held; a root
    module that rejected is marked, and reported under the page's
    `BOOT_REJECTION` scene on a page — a worker's `BOOT_REJECTION` names none,
    because the entry the rejection happened in has already reported it;
-6. nothing more, for an owner that report ended;
-7. `after_boot`: on a page the `BeginFrame` acknowledgement, after both the
+7. nothing more, for an owner that report ended;
+8. `after_boot`: on a page the `BeginFrame` acknowledgement, after both the
    commit and the boot report;
-8. the module requests the operation left, each asked of the host through the
+9. the module requests the operation left, each asked of the host through the
    owner's `HostOutbox` and spawned as a `load_module`, except the one
    `entry_name` names — the MTS entry, which `load_entry` answers, or a plain
    `Worker`'s script, which `consume_messages` answers;
-9. the futures a `.then` asked the realm to settle, each spawned as a
-   `settle_future`;
-10. `after_settles`: on a page one `load_font_face` per `@font-face` rule the
+10. the futures a `.then` asked the realm to settle, each spawned as a
+    `settle_future`;
+11. `after_settles`: on a page one `load_font_face` per `@font-face` rule the
     sheets mounted by the operation declared;
-11. the next timer deadline, republished only when it moved;
-12. the checkpoint generation, last, so it names the generation this entry ran
+12. the next timer deadline, republished only when it moved;
+13. the checkpoint generation, last, so it names the generation this entry ran
     the shared job queue up to, which is what `serve_clock` compares a bump
     against to tell this owner's entries from a sibling's.
 
-The only collection the engine forces is the MTS realm's: a batch of document
-operations that crossed `REMOVALS_PER_COLLECTION` removals ends with one, in
-the call that ran the batch — the timer batch of step 2 is one such call, and
-an event dispatch or a page update is another. The epilogue has no collection
-step of its own.
+Each "nothing more" skips every later step, not only the reports: an owner
+that has ended asks the host for nothing, spawns nothing and re-arms no timer
+deadline its end withdrew. A worker its creator terminated while a timer's
+callback was parked therefore does not report the `Closed` of a `close()` that
+callback made first.
+
+The engine forces a collection in two cases, and the epilogue has no
+collection step of its own. On the MTS realm, a batch of document operations
+that crossed `REMOVALS_PER_COLLECTION` removals ends with one, in the call that
+ran the batch — the timer batch of step 2 is one such call, and an event
+dispatch or a page update is another. And freeing any realm's QuickJS context,
+which releasing an MTS realm, a BTS or a plain `Worker` does, is followed by a
+collection of the whole runtime that realm was on: the bridge's
+`qjs_context_free` runs it, because a realm's global object is cyclic and only
+a collection reaches its finalizers. That collection covers every realm on the
+runtime, so releasing one view or worker also collects what the other realms
+on that runtime left unreachable. The worker runtime has no removal-driven
+trigger: between two realm releases it is collected only on QuickJS's own
+allocation pressure.
 
 `load_module` waits for its answer outside any job and reads it with
 `module_answer`, the one reading of an answer to a module request, which
 `load_entry` and a plain `Worker`'s `consume_messages` use too: a script is its
-response URL and its source, a failed load is the fetcher's own error, and an
-answer of another kind is a `Script` error `the fetcher returned a <kind> for
-<url>`. A completion the fetcher dropped without answering is
-`unanswered_source()`'s failure, through `await_source`. It then enters the
-realm and completes the module under the name the import asked for: from the
-response URL, which becomes the module's `import.meta.url` and the base of its
-own imports, or with `module '<url>': <error>`, which rejects the import in
-the realm. `ScriptEngine::complete_module` replaces a NUL in that text with
+response URL and its source, and an answer of another kind is the text `the
+fetcher returned a <kind> for <url>`. A failed load is the fetcher's own error,
+which `module_answer` does not read: an import and a plain `Worker`'s script
+carry its text, and `load_entry` carries the `LynxViewError` itself and makes
+the text of an answer of another kind a `Script` error. A completion the
+fetcher dropped without answering is `unanswered_source()`'s failure, through
+`await_source`. `load_module` then enters the realm and completes the module
+under the name the import asked for: from the response URL, which becomes the
+module's `import.meta.url` and the base of its own imports, or with
+`module '<url>': <reason>`, which rejects the import in the realm. `ScriptEngine::complete_module` replaces a NUL in that text with
 U+FFFD and fails a response URL that contains one, because the bridge would
 refuse either without completing the module. `settle_future` waits for its
 operation and enters the realm to hand the outcome over. What either entry
@@ -974,7 +996,7 @@ The worker table, whose events go to the realm that created the worker:
 
 The MTS realm that created the worker reports an `Errored` to the host as
 `WorkerThrew` and a `Failed` as `WorkerEnded` (see the worker errors below),
-and neither is fatal to the view. `close()` is not a failure: step 3 of the
+and neither is fatal to the view. `close()` is not a failure: step 4 of the
 epilogue reports `Closed` through `terminal`, so it shares the terminal latch
 with `Failed`, and the first of the two is the one sent.
 
@@ -1013,19 +1035,10 @@ entry it ran in if it does not catch it; `DocumentSlot` keeps that first
 failure and throws it again from boot's own flush, which fails the boot the
 same way.
 
-**Not part of this construction.**
-
-- The worker runtime is never made to collect. The forced collection above is
-  the MTS realm's, driven by document removals; the BTS and every plain
-  `Worker` are collected only on QuickJS's own allocation pressure.
-- A bundle's paths map to URLs as before, and the two realms still differ: the
-  MTS names the page's own chunks under its entry's URL (`bobcat:section-url`),
-  and the BTS resolves a path of a registered container beside that
-  container's template URL (`bobcat:lynx-modules`).
-- No worker realm creates a Worker: the `Worker` members are the MTS realm's
-  alone.
-- The MTS realm has the native module transport and no API over it:
-  `NativeModules` there is `undefined` (see `docs/tracking/deviations.md`).
+**Bundle paths.** The MTS realm and the BTS name a bundle's paths by
+different rules: the MTS realm names the page's own chunks under its entry's
+URL (`bobcat:section-url`), and the BTS resolves a path of a registered
+container beside that container's template URL (`bobcat:lynx-modules`).
 
 ### Workers, modules and the boot module
 

@@ -70,7 +70,6 @@ use crate::link::{HostOutbox, SourceAnswer};
 use crate::main::quickjs::{ScriptRuntime, SharedRuntime};
 use crate::resource::{LoadedSource, SourceRequest, unanswered_source};
 use crate::script::ScriptError;
-use crate::threads::platform_script_error;
 use crate::view::LynxViewError;
 
 /// What a realm-owning object supplies to the driver: where its runtime, its
@@ -129,8 +128,8 @@ pub(crate) trait RealmOwner: Sized + 'static {
     fn run_due_timers(realm: &mut Self::Realm, js: &mut ScriptRuntime) -> Vec<ScriptError>;
 
     /// What this owner's role settles right after the due timers, before the
-    /// boot report. It may end the owner, and the [`epilogue`] stops there
-    /// when it does.
+    /// boot report, for an owner those timers' callbacks did not end. It may
+    /// end the owner, and the [`epilogue`] stops there when it does.
     fn after_timers(_owner: &Rc<Self>, _realm: &mut Self::Realm) {}
 
     /// Whether the realm's root module has already been seen to finish.
@@ -297,26 +296,34 @@ pub(crate) fn enter_now<O: RealmOwner, T>(
 /// 3. **Due timers.** A timer that has come due runs before the role's next step, so on a page its
 ///    mutation rides the same commit as whatever else this entry changed. Each callback that threw
 ///    is reported under [`Scene::Timer`].
-/// 4. **[`RealmOwner::after_timers`]**: a page's commit and the deliveries it posts; a worker's
+/// 4. **Nothing more, for an owner that ended while those callbacks ran**: a callback parked on a
+///    synchronous wait lets the thread's tasks run, and one of them may end the owner — a
+///    `Terminate` its consumer read, a release, a panic in another of its tasks. The callbacks of
+///    the batch after that one still run, and what they threw is still reported.
+/// 5. **[`RealmOwner::after_timers`]**: a page's commit and the deliveries it posts; a worker's
 ///    `close()`, which ends it.
-/// 5. **Nothing more, for an owner that step ended.**
-/// 6. **The boot report**, until the realm's root module has settled: a finished module is marked
+/// 6. **Nothing more, for an owner that step ended.**
+/// 7. **The boot report**, until the realm's root module has settled: a finished module is marked
 ///    and reported through [`RealmOwner::on_booted`], after the commit, so the frame exists before
 ///    the event that implies it; a rejected one is marked and, where [`RealmOwner::BOOT_REJECTION`]
 ///    names a scene, reported under it.
-/// 7. **Nothing more, for an owner that report ended.**
-/// 8. **[`RealmOwner::after_boot`]**: a page's `BeginFrame` acknowledgement, after both the commit
+/// 8. **Nothing more, for an owner that report ended.**
+/// 9. **[`RealmOwner::after_boot`]**: a page's `BeginFrame` acknowledgement, after both the commit
 ///    and the boot report, because a host blocked on that sequence number is blocked on the frame.
-/// 9. **The module requests** this entry produced, each asked of the host and spawned as a
-///    [`load_module`] of its own — except the one [`RealmOwner::entry_name`] names, which the role
-///    answers itself.
-/// 10. **The futures** a `.then` asked this realm to settle, each spawned as a [`settle_future`] of
+/// 10. **The module requests** this entry produced, each asked of the host and spawned as a
+///     [`load_module`] of its own — except the one [`RealmOwner::entry_name`] names, which the role
+///     answers itself.
+/// 11. **The futures** a `.then` asked this realm to settle, each spawned as a [`settle_future`] of
 ///     its own.
-/// 11. **[`RealmOwner::after_settles`]**: a page's `@font-face` loads.
-/// 12. **The next timer deadline**, republished only when it moved.
-/// 13. **The checkpoint generation**, last, so it names the generation this entry ran the shared
+/// 12. **[`RealmOwner::after_settles`]**: a page's `@font-face` loads.
+/// 13. **The next timer deadline**, republished only when it moved.
+/// 14. **The checkpoint generation**, last, so it names the generation this entry ran the shared
 ///     job queue up to: the clock task compares a bump against it to tell this owner's own entries
 ///     from a sibling's.
+///
+/// Every step after an end is skipped, not only the reports: an owner that has
+/// ended asks the host for nothing, spawns nothing and re-arms no deadline its
+/// end withdrew.
 fn epilogue<O: RealmOwner>(owner: &Rc<O>, realm: &mut O::Realm, js: &mut ScriptRuntime) {
     let lifetime = owner.lifetime();
     if lifetime.ended() {
@@ -326,6 +333,9 @@ fn epilogue<O: RealmOwner>(owner: &Rc<O>, realm: &mut O::Realm, js: &mut ScriptR
     lifetime.count_epilogue();
     for error in O::run_due_timers(realm, js) {
         policy::report(owner, Scene::Timer, error);
+    }
+    if lifetime.ended() {
+        return;
     }
     O::after_timers(owner, realm);
     if lifetime.ended() {
@@ -387,8 +397,11 @@ fn epilogue<O: RealmOwner>(owner: &Rc<O>, realm: &mut O::Realm, js: &mut ScriptR
 /// asked for; the URL the fetcher answered from is the module's own URL — its
 /// `import.meta.url`, and the base its own imports resolve against.
 async fn load_module<O: RealmOwner>(owner: Rc<O>, url: String, answer: SourceAnswer) {
-    let loaded = module_answer(&url, await_source(answer).await)
-        .map_err(|error| format!("module '{url}': {error}"));
+    let loaded = await_source(answer)
+        .await
+        .map_err(|error| error.to_string())
+        .and_then(|answer| module_answer(&url, answer))
+        .map_err(|reason| format!("module '{url}': {reason}"));
     let completing = Rc::clone(&owner);
     enter(&owner, move |realm, js| {
         let loaded = loaded
@@ -434,25 +447,25 @@ pub(crate) async fn await_source(
 }
 
 /// The script an answer to the module request `requested` carries — the URL
-/// the fetcher answered from, and the source — or why there is none.
+/// the fetcher answered from, and the source — or, for an answer of another
+/// kind, the text `the fetcher returned a <kind> for <requested>`.
 ///
 /// The one reading of such an answer, for every module a realm imports and
-/// for the entry a role completes itself. A failed load is the fetcher's own
-/// error, as it is; an answer of another kind is a `Script` error naming
-/// `requested` and the kind.
+/// for the entry a role completes itself. A load that failed is not read
+/// here: an import and a plain `Worker`'s script pass the fetcher's own error
+/// on as its text, and the MTS entry passes it on as the `LynxViewError` it
+/// is and makes this text a `Script` error.
 pub(crate) fn module_answer(
     requested: &str,
-    answered: Result<LoadedSource, LynxViewError>,
-) -> Result<(String, String), LynxViewError> {
-    let kind = match answered? {
+    answer: LoadedSource,
+) -> Result<(String, String), String> {
+    let kind = match answer {
         LoadedSource::Module { source, url } => return Ok((url, source)),
         LoadedSource::StyleSheet(_) => "stylesheet",
         LoadedSource::Font(_) => "font",
         LoadedSource::Fetched => "plain fetch",
     };
-    Err(LynxViewError::Script(platform_script_error(format!(
-        "the fetcher returned a {kind} for {requested}"
-    ))))
+    Err(format!("the fetcher returned a {kind} for {requested}"))
 }
 
 /// One job against `owner`'s realm after the owner has ended: no latch, and
@@ -548,10 +561,10 @@ mod tests {
     fn a_script_answer_is_its_response_url_and_its_source() {
         let answered = module_answer(
             REQUESTED,
-            Ok(LoadedSource::Module {
+            LoadedSource::Module {
                 source: "export {};".to_owned(),
                 url: "app:///redirected.js".to_owned(),
-            }),
+            },
         );
         let Ok((url, source)) = answered else {
             panic!("a script answer is read as one: {answered:?}");
@@ -561,9 +574,10 @@ mod tests {
     }
 
     /// Every answer that is not a script is refused the same way, naming the
-    /// request and the kind it was answered with.
+    /// request and the kind it was answered with, and nothing else: the text
+    /// is what an import is rejected with and what a worker's `Failed` says.
     #[test]
-    fn an_answer_of_another_kind_is_a_script_error_naming_the_request() {
+    fn an_answer_of_another_kind_is_refused_naming_the_request_and_the_kind() {
         for (answer, kind) in [
             (
                 LoadedSource::StyleSheet(StyleSheetSource::Text(String::new())),
@@ -575,25 +589,12 @@ mod tests {
             ),
             (LoadedSource::Fetched, "plain fetch"),
         ] {
-            let answered = module_answer(REQUESTED, Ok(answer));
-            let Err(LynxViewError::Script(error)) = answered else {
-                panic!("a {kind} is not a script: {answered:?}");
-            };
+            let answered = module_answer(REQUESTED, answer);
             assert_eq!(
-                &*error.message,
-                format!("the fetcher returned a {kind} for {REQUESTED}")
+                answered,
+                Err(format!("the fetcher returned a {kind} for {REQUESTED}"))
             );
         }
-    }
-
-    /// A failed load is the fetcher's own error, not one worded here.
-    #[test]
-    fn a_failed_load_is_the_fetchers_own_error() {
-        let answered = module_answer(REQUESTED, Err(unanswered_source().into()));
-        let Err(LynxViewError::Resource(error)) = answered else {
-            panic!("the fetcher's error is passed on as it is: {answered:?}");
-        };
-        assert_eq!(error.message, unanswered_source().message);
     }
 
     /// A completion dropped without ever sending, which a cancelled one is,
