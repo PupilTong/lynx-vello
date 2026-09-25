@@ -30,6 +30,16 @@ rstest.mockRequire("bobcat:cross-thread-context", () => crossThreadContext);
 // transport to exist, because `callNativeModule` is what its method wrappers
 // close over.
 rstest.mockRequire("bobcat:worker", () => ({ callNativeModule: rstest.fn() }));
+// The worker realm's host members the BTS runtime reads as it evaluates: no
+// screen and no modules, which is what a plain `Worker` is handed.
+rstest.mockRequire("bobcat-internal:worker", () => ({
+  pixelRatio: () => undefined,
+  pixelWidth: () => undefined,
+  pixelHeight: () => undefined,
+}));
+rstest.mockRequire("bobcat-internal:native-modules", () => ({ nativeModuleTable: () => "" }));
+import * as record from "../src/record.ts";
+rstest.mockRequire("bobcat:record", () => record);
 rstest.mockRequire("bobcat:timers", () => ({}));
 import type * as sectionUrl from "../src/section-url.ts";
 import type * as bundleFetch from "../src/bundle-fetch.ts";
@@ -61,7 +71,6 @@ rstest.mockRequire("bobcat-internal:host", () => ({
   initialProcessor: () => "",
   initData: () => undefined,
   globalProps: () => undefined,
-  nativeModuleTable: () => "",
   // The two members every synchronous load is written over, stood in for as
   // in lynx-modules.test.ts: Node's own `URL`, and `new Function` for the
   // wrapper the engine compiles a body in.
@@ -383,7 +392,13 @@ describe("MTS/BTS lifecycle runtime", () => {
     mts.__BobcatPublishEvent("component", "second", { value: 3 });
     contextEvent.data = 2;
     mts.__BobcatConnectBackground(worker as unknown as Worker, {seed: 1});
-    expect(toBackground.shift()).toMatchObject({bobcat: "runtime", method: "initialize", updateData: {seed: 1}});
+    // The page's data and nothing else: the BTS reads its screen and its
+    // native modules from its own host modules.
+    const initialize = toBackground.shift()!;
+    expect(initialize).toMatchObject({bobcat: "runtime", method: "initialize", updateData: {seed: 1}});
+    expect(Object.keys(initialize).sort()).toEqual([
+      "bobcat", "cacheData", "globalProps", "initData", "method", "processorName", "updateData",
+    ]);
     expect(toBackground.map((message) => message.method ?? message.type)).toEqual([
       "publishEvent", "custom", "publicComponentEvent",
     ]);
@@ -1119,7 +1134,7 @@ it("reports a BTS entry that throws and keeps taking messages after it", async (
   // The entry's rejection must not stop the message behind it: both are
   // delivered before either settles, as the Worker queue delivers them.
   const initializing = receiveInBackground({data: {
-    bobcat: "runtime", method: "initialize", updateData: {}, systemInfo: {},
+    bobcat: "runtime", method: "initialize", updateData: {},
   }});
   const delivering = receiveInBackground({data: {
     bobcat: "runtime", method: "sendGlobalEvent", name: "after-failure", args: [1],

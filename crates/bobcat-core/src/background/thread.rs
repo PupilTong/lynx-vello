@@ -558,7 +558,7 @@ impl Worker {
     fn boot(
         self: &Rc<Self>,
         name: String,
-        background_entry: Option<String>,
+        background: Option<BackgroundStart>,
         root: &str,
     ) -> Option<watch::Receiver<u64>> {
         // A worker whose lifetime already ended opens nothing.
@@ -592,7 +592,7 @@ impl Worker {
                                 key,
                                 &self.sources,
                                 name,
-                                background_entry,
+                                background,
                                 move |data| {
                                     let _ = events.send(WorkerEvent {
                                         key,
@@ -737,8 +737,9 @@ async fn serve_worker(js: SharedRuntime, start: WorkerStart, thread: JsThreadHan
 /// the worker's first job, then start the waits a live worker has.
 ///
 /// The role decides the root module and what the realm is given: a BTS gets
-/// its entry for `bobcat:bts` to import, and a dedicated worker's answer goes
-/// to [`consume_messages`], which completes the script the root module is
+/// its entry for `bobcat:bts` to import and the screen and module table for
+/// `bobcat:bts-runtime` to read, and a dedicated worker's answer goes to
+/// [`consume_messages`], which completes the script the root module is
 /// waiting in the import of.
 async fn boot_worker(
     worker: Rc<Worker>,
@@ -747,17 +748,15 @@ async fn boot_worker(
     messages: mpsc::UnboundedReceiver<WorkerMessage>,
 ) {
     let root = worker_boot_source(&role);
-    let (background_entry, script) = match role {
-        WorkerRole::Background(BackgroundStart { entry }) => (entry, None),
+    let (background, script) = match role {
+        WorkerRole::Background(background) => (Some(background), None),
         WorkerRole::Dedicated { script, .. } => (None, Some(script)),
     };
     // The boot job runs the first epilogue itself, so the first deadline has
     // already been published by the time this returns — and that epilogue
     // may have ended the worker.
-    let Some(checkpoints) = run_job(&worker, move |worker| {
-        worker.boot(name, background_entry, &root)
-    })
-    .await
+    let Some(checkpoints) =
+        run_job(&worker, move |worker| worker.boot(name, background, &root)).await
     else {
         return;
     };

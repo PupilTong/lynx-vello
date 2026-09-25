@@ -1776,9 +1776,28 @@ fn an_unparseable_worker_url_throws_syntax_error_and_starts_nothing() {
     assert!(pair.events.try_recv().is_err(), "and fails nothing");
 }
 
+/// A plain `Worker` may import the BTS runtime, and sees what a worker that
+/// is not the BTS is started with: the view here was built with a screen and
+/// a native module, and the worker reports neither — `SystemInfo` is the
+/// runtime constants alone, and `NativeModules` is empty.
 #[test]
 fn an_ordinary_worker_can_install_bts_through_its_own_import() {
-    let mut pair = Pair::new(
+    let mut pair = Pair::unbooted_with_data(
+        None,
+        RealmStartup {
+            screen: crate::ScreenMetrics {
+                pixel_ratio: 3.0,
+                pixel_width: 1170.0,
+                pixel_height: 2532.0,
+            },
+            native_modules: crate::native_module::encode_table(&vec![(
+                "Echo".to_owned(),
+                vec!["ping".to_owned()],
+            )]),
+            ..RealmStartup::default()
+        },
+    );
+    pair.boot(
         r"
         import { Worker } from 'bobcat-internal';
         globalThis.result = null;
@@ -1786,20 +1805,23 @@ fn an_ordinary_worker_can_install_bts_through_its_own_import() {
         worker.onmessage = event => result = event.data;
         worker.postMessage({type: 'request', data: 42});
         ",
-    );
+    )
+    .unwrap();
     pair.answer(
         r"
-        import { lynx } from 'bobcat:bts-runtime';
+        import { lynx, NativeModules, SystemInfo } from 'bobcat:bts-runtime';
         if ('lynx' in globalThis) throw Error('BTS lynx leaked into globals');
         const core = lynx.getCoreContext();
         core.addEventListener('request', event => {
-            core.dispatchEvent({type: 'reply', data: [name, event.data]});
+            core.dispatchEvent({type: 'reply', data: [
+                name, event.data, Object.keys(SystemInfo), Object.keys(NativeModules),
+            ]});
         });
         ",
     );
     pair.deliver();
     pair.check(
-        "if (JSON.stringify(result) !== '{\"type\":\"reply\",\"data\":[\"ordinary\",42],\"origin\":\"JSContext\"}') throw Error(JSON.stringify(result));",
+        "if (JSON.stringify(result) !== '{\"type\":\"reply\",\"data\":[\"ordinary\",42,[\"platform\",\"runtimeType\",\"lynxSdkVersion\"],[]],\"origin\":\"JSContext\"}') throw Error(JSON.stringify(result));",
     );
 }
 

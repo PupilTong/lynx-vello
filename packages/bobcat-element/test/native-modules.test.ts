@@ -14,8 +14,19 @@ rstest.mockRequire("bobcat-internal:worker", () => ({
   postWorkerMessage: rstest.fn(),
   closeWorker: rstest.fn(),
   workerName: () => "",
+  pixelRatio: () => undefined,
+  pixelWidth: () => undefined,
+  pixelHeight: () => undefined,
   invokeNativeModule,
 }));
+// The table a BTS whose view was built with one module, `Foo`, declaring one
+// method, `bar`, is handed: the BTS runtime builds `NativeModules` out of it
+// as it evaluates.
+rstest.mockRequire("bobcat-internal:native-modules", () => ({
+  nativeModuleTable: () => "3:Foo3:bar",
+}));
+import * as record from "../src/record.ts";
+rstest.mockRequire("bobcat:record", () => record);
 rstest.mockRequire("bobcat:lynx-modules", () => lynxModules);
 import * as sectionUrl from "../src/section-url.ts";
 import * as future from "../src/future.ts";
@@ -49,7 +60,6 @@ rstest.mockRequire("bobcat-internal:host", () => ({
   initialProcessor: () => "",
   initData: () => undefined,
   globalProps: () => undefined,
-  nativeModuleTable: () => "",
   // The modules table imports both; every suite below serves registered
   // sources, so nothing here reaches an external load.
   resolveModuleUrl: () => { throw new Error("no module resolution in this suite"); },
@@ -185,9 +195,10 @@ describe("NativeModules transport", () => {
 });
 
 describe("the BTS NativeModules object", () => {
-  it("carries exactly the methods the embedder declared", () => {
-    bts.__BobcatInitializeBTS({ nativeModules: { Foo: ["bar"] } });
+  it("carries exactly the methods the embedder declared, as it evaluated", () => {
+    // Built out of the host's table before anything initialized the runtime.
     const modules = bts.lynx.getApp().NativeModules as Record<string, Record<string, Function>>;
+    expect(Object.keys(modules)).toEqual(["Foo"]);
     invokeNativeModule.mockClear();
     expect(modules["Foo"]!["bar"]!("x")).toBeUndefined();
     expect(lastInvocation().slice(1)).toEqual(["Foo", "bar", '["x"]', ""]);

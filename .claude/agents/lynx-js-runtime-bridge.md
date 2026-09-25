@@ -43,7 +43,12 @@ and `bobcat-workers` (every Worker realm, including the BTS).
   root module `bobcat:worker-boot` (`bobcat:worker`, `bobcat:timers`, then
   `await import(<script URL>)` or `import "bobcat:bts"` by `WorkerRole`), and
   the worker's `consume_messages` completes a plain Worker's script under the
-  request URL from the answer `createWorker` asked for. `view/` holds
+  request URL from the answer `createWorker` asked for. A BTS's `Start`
+  carries `BackgroundStart` (entry, screen, native module table), which its
+  realm answers through `bobcat-internal:worker` (`backgroundEntry`,
+  `pixelRatio`/`pixelWidth`/`pixelHeight`) and
+  `bobcat-internal:native-modules` (`nativeModuleTable`); a plain Worker
+  declares the same members and reads no screen and an empty table. `view/` holds
   `LynxGroup`, `LynxView`, `ViewSources` and `create_lynx_view`; `paint/` the
   `Painter`; `link.rs` the per-view channels;
   `lifetime.rs` the `CancellationToken`, `serve_clock` and `run_job`;
@@ -79,7 +84,9 @@ and `bobcat-workers` (every Worker realm, including the BTS).
   (`bobcat:animation-frame` — every realm's `requestAnimationFrame`, frame
   demand and `__BobcatBeginFrame`, which both vsync paths call),
   `system-info.ts` (`bobcat:system-info` — `createSystemInfo`, the one place
-  the three runtime constants are written), `diagnostics.ts`
+  the three runtime constants are written), `record.ts` (`bobcat:record` —
+  `splitRecord`, the one reader of the host's `<utf16Length>:<text>`
+  records), `diagnostics.ts`
   (`bobcat:diagnostics` — every realm's `console` and `reportError`, the one
   `printable` and the `lynx.reportError` level rule), `timers.ts`, `future.ts`
   (`bobcat:future` — the `Future` class), `module.ts`

@@ -3,8 +3,9 @@
 //! physical pixels, which it names explicitly.
 //!
 //! Asserted over a real group, a real BTS Worker and a real fetcher, because
-//! the three numbers are written into the MTS boot module and reach the BTS
-//! realm only through the `initialize` message MTS sends it.
+//! the three numbers take two paths: they are written into the MTS boot
+//! module, and they reach the BTS realm in the `Start` that creates it, where
+//! `bobcat:bts-runtime` reads them from its host module as it is evaluated.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -35,8 +36,8 @@ globalThis.renderPage = function () {
 };
 ";
 
-/// The BTS entry: the same object, as the `initialize` message MTS sent it
-/// carried the numbers.
+/// The BTS entry: the same three numbers, which `bobcat:bts-runtime` read
+/// from the BTS realm's host module before this entry was imported.
 const BACKGROUND_ENTRY: &str = r"
 import { console, SystemInfo } from 'bobcat:bts-runtime';
 console.log('bts ' + SystemInfo.pixelRatio + ' ' + SystemInfo.pixelWidth + ' ' +
@@ -179,6 +180,28 @@ async fn both_realms_report_the_screen_the_embedder_measured() {
     .await;
     assert_eq!(main_thread, "3 1170 2532");
     assert_eq!(background, "3 1170 2532");
+}
+
+/// A ratio an `f32` cannot hold exactly reads the same in both realms: the
+/// MTS boot module is written with the number's shortest decimal, and the
+/// BTS is handed the number that decimal reads as, not the `f32`'s own
+/// value (`1.100000023841858`).
+#[tokio::test]
+async fn both_realms_report_a_ratio_an_f32_cannot_hold_as_the_same_number() {
+    let (main_thread, background) = printed(
+        1.0,
+        ScreenMetrics {
+            pixel_ratio: 1.1,
+            pixel_width: 1287.0,
+            pixel_height: 2785.0,
+        },
+        "app:///",
+        MAIN_URL,
+        BACKGROUND_URL,
+    )
+    .await;
+    assert_eq!(main_thread, "1.1 1287 2785");
+    assert_eq!(background, "1.1 1287 2785");
 }
 
 #[tokio::test]
