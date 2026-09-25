@@ -333,7 +333,10 @@ impl Page {
         // Both borrows are held for the whole entry, a synchronous wait inside
         // the operation included. Nothing else can want them: only a job takes
         // either, and no other job runs until this one returns.
-        let js = &mut *self.context.js.borrow_mut();
+        let mut js = self.context.js.borrow_mut();
+        let Ok(js) = js.as_mut() else {
+            return None;
+        };
         let mut realm = self.realm.borrow_mut();
         let runtime = realm.as_deref_mut()?;
         let value = operation(runtime, js);
@@ -653,7 +656,9 @@ impl Page {
     /// so a boot that finished synchronously is reported in this same stretch.
     ///
     /// The [`RealmStartup`] is everything that realm is opened with, and
-    /// opening spends it.
+    /// opening spends it. A group whose runtime could not be built opens no
+    /// realm: the view fails its startup with the runtime's error, and the
+    /// startup — the answers to its listed sheets included — is dropped.
     fn open_realm(self: &Rc<Self>, ingredients: DocumentIngredients, startup: RealmStartup) {
         // A view that has already ended builds no realm and runs no entry:
         // its tasks are about to be reclaimed, and the ingredients go with the
@@ -662,8 +667,13 @@ impl Page {
             return;
         }
         let opened = {
-            let js = &mut *self.context.js.borrow_mut();
-            self.build_realm(js, ingredients, startup)
+            let mut js = self.context.js.borrow_mut();
+            match js.as_mut() {
+                // The runtime failed once, for every view that will ever
+                // attach to this group. Each hears the same reason.
+                Err(error) => Some(Err(LynxViewError::Script(error.clone()))),
+                Ok(js) => self.build_realm(js, ingredients, startup),
+            }
         };
         match opened {
             // Nobody is listening for this view any more, so there is nobody
@@ -844,14 +854,19 @@ impl Page {
     /// to commit, report or re-arm — so it is the disposal exchange and the
     /// release that use it, and nothing else. The realm is still in
     /// [`Self::realm`] throughout, which is what puts the release behind
-    /// whatever job is holding it.
+    /// whatever job is holding it. On a runtime that was never built, which
+    /// opened no realm, the operation does not run and the answer is `None`,
+    /// as for a job that never ran.
     fn after_end<T, O>(self: &Rc<Self>, operation: O) -> impl Future<Output = Option<T>> + use<T, O>
     where
         T: 'static,
         O: FnOnce(&mut Option<Box<MainThreadRuntime>>, &mut ScriptRuntime) -> T + 'static,
     {
         run_job(self, move |page| {
-            let js = &mut *page.context.js.borrow_mut();
+            let mut js = page.context.js.borrow_mut();
+            let Ok(js) = js.as_mut() else {
+                return None;
+            };
             Some(operation(&mut page.realm.borrow_mut(), js))
         })
     }

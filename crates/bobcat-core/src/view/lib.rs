@@ -299,10 +299,11 @@ pub enum EngineEvent {
     /// `LynxView::pump` records the view as ready before returning this
     /// notification.
     ScriptFinished,
-    /// Source loading, document configuration, or entry boot failed. The
-    /// view's fonts are not among them: an unknown default family is refused
-    /// by [`LynxGroup::create_lynx_view`] itself, before any source is
-    /// requested.
+    /// Source loading, document configuration, or entry boot failed, or the
+    /// group's script runtime could not be built, which fails every view the
+    /// group serves. The view's fonts are not among them: an unknown default
+    /// family is refused by [`LynxGroup::create_lynx_view`] itself, before
+    /// any source is requested.
     StartupFailed(LynxViewError),
     /// The script runtime failed fatally during owner-thread work after startup.
     /// Boot failures arrive as [`EngineEvent::StartupFailed`].
@@ -552,19 +553,21 @@ impl fmt::Debug for LynxGroup {
 
 impl LynxGroup {
     /// Starts this group's two threads — `bobcat-main` and `bobcat-workers` —
-    /// and waits until the script runtime and style pool `bobcat-main` shares
-    /// out are up.
+    /// and waits until the style pool `bobcat-main` shares out is up.
     ///
     /// All of it is ready before views attach. A thread or a style worker that
     /// cannot start fails the group here, rather than whichever view or
-    /// `Worker` happened to ask for it first.
+    /// `Worker` happened to ask for it first. A `QuickJS` runtime that cannot
+    /// be built does not: it fails what asks it for a realm instead, with its
+    /// own error. Every view created from the group reports
+    /// [`EngineEvent::StartupFailed`] when `bobcat-main`'s runtime is the one,
+    /// and every `Worker` fails when it is `bobcat-workers`'.
     ///
     /// # Errors
     ///
     /// [`LynxViewError::Engine`] if `bobcat-main`, `bobcat-workers` or a style
     /// worker will not start — asking for more workers than Stylo indexes is
-    /// one such refusal — and [`LynxViewError::Script`] if the shared
-    /// `QuickJS` runtime cannot be created.
+    /// one such refusal.
     pub async fn new<R: EventRequester>(
         event_requester: Arc<R>,
         style_threads: StyleThreads,
@@ -599,7 +602,7 @@ impl LynxGroup {
         };
         match started.await {
             Ok(Ok(())) => Ok(group),
-            Ok(Err(error)) => Err(error),
+            Ok(Err(error)) => Err(error.into()),
             Err(_) => Err(EngineError::Thread {
                 name: "script",
                 message: "the Lynx main thread ended before it reported startup".to_owned(),

@@ -26,9 +26,6 @@ use crate::resource::{LoadedSource, SourceCompletion, SourceRequest};
 use crate::script::ScriptError;
 use crate::threads::platform_script_error;
 
-pub(super) const MODULE: &str = "bobcat-internal";
-pub(super) const SOURCE: &str = crate::esm::runtime_source!("worker");
-
 /// Issued on bobcat-main, once per group. No cross-thread allocator or lock:
 /// the one thing it reads across threads is the worker thread's trap flag.
 #[derive(Clone)]

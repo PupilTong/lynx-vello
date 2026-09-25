@@ -39,11 +39,8 @@ use tokio::sync::watch;
 use super::quickjs::{ScriptEngine, ScriptRuntime};
 use crate::clock::ClockInstant;
 use crate::esm::{
-    BTS_MODULE_SPECIFIER, BUNDLE_FETCH_MODULE_SOURCE, BUNDLE_FETCH_MODULE_SPECIFIER,
-    CONTEXT_MODULE_SOURCE, CONTEXT_MODULE_SPECIFIER, EVENT_TARGET_MODULE_SPECIFIER,
-    EVENT_TARGET_SOURCE, FUTURE_MODULE_SOURCE, FUTURE_MODULE_SPECIFIER, HOST_MODULE_SPECIFIER,
-    REQUIRE_MODULE_SOURCE, REQUIRE_MODULE_SPECIFIER, SECTION_URL_MODULE_SOURCE,
-    SECTION_URL_MODULE_SPECIFIER, TIMER_MODULE_SOURCE, TIMER_MODULE_SPECIFIER,
+    BTS_MODULE_SPECIFIER, ELEMENT_MODULE_SPECIFIER, HOST_MODULE_SPECIFIER,
+    RUNTIME_MODULE_SPECIFIER, TIMER_MODULE_SPECIFIER, WORKER_CLASS_MODULE_SPECIFIER,
 };
 use crate::link::{InputEventPayload, ViewNotice, ViewOutbox};
 use crate::main::tree::{ImageOutcomes, LynxDocument, PageConfig, new_document};
@@ -53,8 +50,6 @@ use crate::timers::{TimerState, install_timer_members, run_due_timers};
 use crate::view::{LynxViewError, ScreenMetrics, StartupSource, Viewport};
 
 const BOOT_MODULE_SPECIFIER: &str = "bobcat:boot";
-const ELEMENT_MODULE_SPECIFIER: &str = "bobcat:element";
-const RUNTIME_MODULE_SPECIFIER: &str = "bobcat:runtime";
 const EVENT_DISPATCH_EXPORT: &str = "__BobcatDispatchEvent";
 
 /// What an element's own image source settling is called. Both are web-core's
@@ -133,9 +128,6 @@ impl EventDetail<'_> {
 /// Declarations one `__SetInlineStyles` record carries without touching the
 /// heap. Compiled `ReactLynx` records are a handful of properties.
 const INLINE_DECLARATIONS: usize = 16;
-
-const ELEMENT_PAPI_SOURCE: &str = crate::esm::runtime_source!("element-papi");
-const RUNTIME_MODULE_SOURCE: &str = crate::esm::runtime_source!("main-thread-runtime");
 
 mod style_sheets;
 
@@ -899,7 +891,7 @@ impl MainThreadRuntime {
             .engine
             .call_module_export(
                 js_runtime,
-                super::workers::MODULE,
+                WORKER_CLASS_MODULE_SPECIFIER,
                 "__BobcatDispatchWorkerEvent",
                 &[
                     HostArgument::String(&key),
@@ -1683,56 +1675,6 @@ await Promise.resolve().then(() => __FlushElementTree());
         let finished = self.finish_batch(js_runtime, result.is_ok());
         result.and(finished)
     }
-}
-
-/// Registers the source modules every realm on one runtime shares.
-///
-/// Their specifiers are fixed, so registering them per realm would refuse the
-/// second realm on a runtime — a runtime holds one source per name and
-/// compiles it into a module per realm, which is exactly what views share.
-pub(crate) fn install_shared_modules(
-    js_runtime: &mut ScriptRuntime,
-) -> Result<(), MainThreadError> {
-    js_runtime
-        .register_module_source(super::workers::MODULE, super::workers::SOURCE)
-        .map_err(|error| MainThreadError::from_engine("registering Worker", error))?;
-    js_runtime
-        .register_module_source(EVENT_TARGET_MODULE_SPECIFIER, EVENT_TARGET_SOURCE)
-        .map_err(|error| {
-            MainThreadError::from_engine("registering the EventTarget module", error)
-        })?;
-    js_runtime
-        .register_module_source(CONTEXT_MODULE_SPECIFIER, CONTEXT_MODULE_SOURCE)
-        .map_err(|error| MainThreadError::from_engine("registering the Context module", error))?;
-    js_runtime
-        .register_module_source(RUNTIME_MODULE_SPECIFIER, RUNTIME_MODULE_SOURCE)
-        .map_err(|error| {
-            MainThreadError::from_engine("registering the Bobcat runtime module", error)
-        })?;
-    js_runtime
-        .register_module_source(ELEMENT_MODULE_SPECIFIER, ELEMENT_PAPI_SOURCE)
-        .map_err(|error| {
-            MainThreadError::from_engine("registering the Element PAPI module", error)
-        })?;
-    js_runtime
-        .register_module_source(TIMER_MODULE_SPECIFIER, TIMER_MODULE_SOURCE)
-        .map_err(|error| MainThreadError::from_engine("registering the timer module", error))?;
-    js_runtime
-        .register_module_source(FUTURE_MODULE_SPECIFIER, FUTURE_MODULE_SOURCE)
-        .map_err(|error| MainThreadError::from_engine("registering the Future module", error))?;
-    js_runtime
-        .register_module_source(SECTION_URL_MODULE_SPECIFIER, SECTION_URL_MODULE_SOURCE)
-        .map_err(|error| {
-            MainThreadError::from_engine("registering the section URL module", error)
-        })?;
-    js_runtime
-        .register_module_source(BUNDLE_FETCH_MODULE_SPECIFIER, BUNDLE_FETCH_MODULE_SOURCE)
-        .map_err(|error| {
-            MainThreadError::from_engine("registering the bundle fetch module", error)
-        })?;
-    js_runtime
-        .register_module_source(REQUIRE_MODULE_SPECIFIER, REQUIRE_MODULE_SOURCE)
-        .map_err(|error| MainThreadError::from_engine("registering the require module", error))
 }
 
 fn install_bobcat(

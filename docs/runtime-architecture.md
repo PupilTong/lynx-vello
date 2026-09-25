@@ -333,7 +333,9 @@ ResourceFetcher; MTS top-level await is part of startup readiness, and the BTS
 entry's is not. Compiled
 bundle factories still need the module/init shell from a later stack layer.
 
-`LynxGroup::new` awaits the shared script runtime and style pool.
+`LynxGroup::new` awaits the shared style pool. A script runtime that
+`build_runtime` could not build does not fail the group: each view reports it
+as `StartupFailed` when its realm would open, and each `Worker` as `Failed`.
 `create_lynx_view` sends the view's half of its link to the group's thread and
 builds the host's fetcher on the calling thread. It is synchronous — nothing it
 builds can block — and returns a loading view. Attachment, native-module and
@@ -1680,8 +1682,9 @@ create/append/drop/flush DOM API is exposed to JavaScript.
 
 1. `LynxGroup::new` starts both of the group's threads — `bobcat-workers`
    first, then `bobcat-main`, which is handed one sender on it — and waits for
-   `bobcat-main`'s report that the group's QuickJS runtime and Stylo pool are
-   built. `create_lynx_view` validates the fonts and default family into a
+   `bobcat-main`'s report that the group's Stylo pool is built; its QuickJS
+   runtime is built first, and one that failed is each view's
+   `StartupFailed` rather than the group's error. `create_lynx_view` validates the fonts and default family into a
    `dom::TextContext`, creates the view's link, builds the per-view
    `ResourceFetcher` on the calling thread, hands that fetcher each author
    stylesheet in the order the view listed them and then the entry, sends the far half of the

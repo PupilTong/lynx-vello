@@ -51,16 +51,16 @@ use tokio_util::sync::CancellationToken;
 #[cfg(target_arch = "wasm32")]
 use wasm_thread::Builder as ThreadBuilder;
 
-use self::quickjs::ScriptRuntime;
-use self::runtime::install_shared_modules;
+use self::quickjs::{SharedRuntime, mark_checkpoint_later};
 pub(crate) use self::workers::WorkerFactory;
 use crate::background::WorkerCommand;
+use crate::esm::{MAIN_THREAD_MODULES, build_runtime};
 use crate::jobs::{JsThread, JsThreadHandle};
 use crate::link::{ToMain, ViewOutbox};
 use crate::threads::{self, ThreadJoin};
 use crate::view::{
-    EngineError, EngineEvent, EventRequester, GroupCommand, LynxViewError, StartupSources,
-    StyleThreads, ViewAttachment, ViewSources, Viewport,
+    EngineError, EngineEvent, EventRequester, GroupCommand, StartupSources, StyleThreads,
+    ViewAttachment, ViewSources, Viewport,
 };
 
 /// The main thread's end of its group's link.
@@ -69,8 +69,10 @@ pub(crate) struct GroupLink {
     pub(crate) attach: mpsc::UnboundedReceiver<GroupCommand>,
     /// The one event loop every view in this group wakes.
     pub(crate) requester: Arc<dyn EventRequester>,
-    /// How this thread's own startup went, answered exactly once.
-    pub(crate) ready: oneshot::Sender<Result<(), LynxViewError>>,
+    /// How this thread's own startup went, answered exactly once. Only the
+    /// style pool can fail it: a script runtime that could not be built is
+    /// each view's startup failure rather than the group's.
+    pub(crate) ready: oneshot::Sender<Result<(), EngineError>>,
     /// What this thread is given of `bobcat-workers`: the right to send it
     /// messages, and the flag below. The thread itself is the group's,
     /// started before this one and joined after it.
@@ -83,11 +85,10 @@ pub(crate) struct GroupLink {
 
 /// What every view on this thread shares.
 struct GroupContext {
-    /// Shared rather than owned by the group task, and borrowed only inside a
-    /// job: an entry holds it for its whole length, a synchronous wait
-    /// included, which is safe because no other job runs until that one
-    /// returns and no task ever takes it.
-    js: Rc<RefCell<ScriptRuntime>>,
+    /// The runtime every view's realm is opened on, or why it could not be
+    /// built. In that case each view that attaches fails its startup with
+    /// that error, and the group itself stays up.
+    js: SharedRuntime,
     style_pool: Option<Rc<StylePool>>,
     requester: Arc<dyn EventRequester>,
     workers: WorkerFactory,
@@ -128,7 +129,9 @@ pub fn configure_wasm_workers(worker_script_url: String) -> Result<(), EngineErr
 }
 
 /// Starts one group's Lynx main thread, which builds the script runtime and
-/// the style pool its views share before adopting the first of them.
+/// the style pool its views share before adopting the first of them. Only the
+/// pool failing fails the group: a runtime that could not be built is kept,
+/// and fails each view that attaches.
 ///
 /// Nothing announces its exit: dropping every view's notice sender closes
 /// those channels, which is the same fact — and the one a painter blocked on
@@ -169,22 +172,14 @@ fn run_group(style_threads: StyleThreads, link: GroupLink) {
     // one pool because they cannot traverse at once — the single thread that
     // drives them both is already inside whichever traversal is running.
     //
-    // Both are ready before group construction returns and any view
-    // attaches.
-    let started = ScriptRuntime::new()
-        .map_err(LynxViewError::from)
-        .and_then(|mut runtime| {
-            install_shared_modules(&mut runtime)
-                .map_err(|error| error.into_script_error().into())
-                .map(|()| runtime)
-        })
-        .and_then(|runtime| {
-            build_style_pool(style_threads.resolve())
-                .map_err(LynxViewError::from)
-                .map(|pool| (runtime, pool.map(Rc::new)))
-        });
-    let (js_runtime, style_pool) = match started {
-        Ok(started) => started,
+    // Both are built before group construction returns and any view
+    // attaches, and only the pool can fail it: a runtime that could not be
+    // built is kept as its error, which every view that attaches reports as
+    // its own startup failure — as `bobcat-workers` keeps its own runtime's
+    // error for each of its workers.
+    let js_runtime = build_runtime(MAIN_THREAD_MODULES);
+    let style_pool = match build_style_pool(style_threads.resolve()) {
+        Ok(pool) => pool.map(Rc::new),
         Err(error) => {
             let _ = ready.send(Err(error));
             return;
@@ -298,11 +293,7 @@ fn finish_view(
             error.into_panic().as_ref(),
         )));
     }
-    // A job rather than a call: this runs in `group_task`, which is a task,
-    // and the shared runtime belongs to whichever job holds it. Nothing waits
-    // for the bump, so the answer is dropped.
-    let js = Rc::clone(&context.js);
-    drop(context.thread.run(move || js.borrow().mark_checkpoint()));
+    mark_checkpoint_later(&context.js, &context.thread);
 }
 
 /// One view, minus the ends its outbox already took.

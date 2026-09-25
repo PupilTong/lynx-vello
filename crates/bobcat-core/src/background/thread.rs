@@ -52,25 +52,19 @@ use tokio::task::{self, JoinError, JoinSet};
 use tokio_util::sync::CancellationToken;
 
 use super::scope::{
-    WORKER_DELIVER_EXPORT, WORKER_MODULE_CALLBACK_EXPORT, WORKER_MODULE_SPECIFIER,
-    install_worker_members, install_worker_modules, worker_boot_source,
+    WORKER_DELIVER_EXPORT, WORKER_MODULE_CALLBACK_EXPORT, install_worker_members,
+    worker_boot_source,
 };
 use super::{WorkerCommand, WorkerEvent, WorkerKey, WorkerMessage, WorkerPayload, WorkerStart};
+use crate::esm::{WORKER_MODULE_SPECIFIER, WORKER_MODULES, build_runtime};
 use crate::jobs::{JsThread, JsThreadHandle};
 use crate::lifetime::{EndOnUnwind, Lifetime, Settles, run_job, serve_clock};
 use crate::link::{HostOutbox, SourceAnswer};
-use crate::main::quickjs::{ScriptEngine, ScriptRuntime};
+use crate::main::quickjs::{ScriptEngine, ScriptRuntime, SharedRuntime, mark_checkpoint_later};
 use crate::resource::{LoadedSource, SourceRequest};
 use crate::script::ScriptError;
 use crate::threads::{panicked, platform_script_error};
 use crate::timers::{TimerState, run_due_timers};
-
-/// The runtime every worker realm on this thread is opened on.
-///
-/// A runtime that could not be built is not fatal to the group: it is the
-/// failure of every worker that would have run on it, and each hears about it
-/// when it is asked for.
-type WorkerRuntime = Rc<RefCell<Result<ScriptRuntime, ScriptError>>>;
 
 /// Who each live worker task reports to: its worker's key and the creating
 /// view's channel. Kept by [`serve_workers`], and read by
@@ -79,9 +73,11 @@ type Reporters = Rc<RefCell<FxHashMap<task::Id, (WorkerKey, mpsc::UnboundedSende
 
 /// The thread's whole body.
 pub(super) fn run(commands: mpsc::UnboundedReceiver<WorkerCommand>, trapped: &Arc<AtomicBool>) {
-    let runtime = ScriptRuntime::new()
-        .and_then(|mut runtime| install_worker_modules(&mut runtime).map(|()| runtime));
-    serve(Rc::new(RefCell::new(runtime)), commands, trapped);
+    serve(
+        Rc::new(RefCell::new(build_runtime(WORKER_MODULES))),
+        commands,
+        trapped,
+    );
 }
 
 /// Preloads a fixture through the existing runtime API for Context tests.
@@ -92,8 +88,7 @@ pub(super) fn run_with_entry(
     trapped: &Arc<AtomicBool>,
 ) {
     let (source, url) = entry;
-    let mut runtime = ScriptRuntime::new().unwrap();
-    install_worker_modules(&mut runtime).unwrap();
+    let mut runtime = build_runtime(WORKER_MODULES).unwrap();
     let source = format!("{}{source}", crate::esm::BTS_ENTRY_PREAMBLE);
     runtime.register_module_source(&url, &source).unwrap();
     serve(Rc::new(RefCell::new(Ok(runtime))), commands, trapped);
@@ -108,7 +103,7 @@ pub(super) fn run_with_entry(
 /// `panic = "abort"` nothing unwinds and nothing is caught, so on wasm the
 /// panic hook reports it instead, through the same function.
 fn serve(
-    js: WorkerRuntime,
+    js: SharedRuntime,
     commands: mpsc::UnboundedReceiver<WorkerCommand>,
     trapped: &Arc<AtomicBool>,
 ) {
@@ -150,7 +145,7 @@ fn serve(
 
 /// Starts a task per worker, and finishes each one that ends.
 async fn serve_workers(
-    js: WorkerRuntime,
+    js: SharedRuntime,
     mut commands: mpsc::UnboundedReceiver<WorkerCommand>,
     thread: JsThreadHandle,
     reporters: Reporters,
@@ -192,7 +187,7 @@ async fn serve_workers(
 /// its jobs is caught by [`run_job`], and the task that queued that job then
 /// returns normally.
 fn finish_worker_task(
-    js: &WorkerRuntime,
+    js: &SharedRuntime,
     thread: &JsThreadHandle,
     finished: Result<(task::Id, ()), JoinError>,
     reporters: &Reporters,
@@ -216,15 +211,7 @@ fn finish_worker_task(
             payload: WorkerPayload::Failed(error),
         });
     }
-    // A job rather than a call: this runs in `serve_workers`, which is a task,
-    // and the shared runtime belongs to whichever job holds it. Nothing waits
-    // for the bump, so the answer is dropped.
-    let js = Rc::clone(js);
-    drop(thread.run(move || {
-        if let Ok(js) = &*js.borrow() {
-            js.mark_checkpoint();
-        }
-    }));
+    mark_checkpoint_later(js, thread);
 }
 
 /// The whole thread is over: the flag `bobcat-main` reads before each `Start`
@@ -280,7 +267,7 @@ enum WorkerState {
 /// posted to it and fires what it armed, and both of those settle the same
 /// things afterwards.
 struct Worker {
-    js: WorkerRuntime,
+    js: SharedRuntime,
     key: WorkerKey,
     /// Where this worker reports, which is the creating view's own channel.
     events: mpsc::UnboundedSender<WorkerEvent>,
@@ -305,7 +292,7 @@ struct Worker {
 
 impl Worker {
     fn new(
-        js: WorkerRuntime,
+        js: SharedRuntime,
         key: WorkerKey,
         events: mpsc::UnboundedSender<WorkerEvent>,
         token: CancellationToken,
@@ -610,7 +597,7 @@ impl Settles for Worker {
 
 /// One worker's whole life on this thread: build it, start its boot, wait for
 /// the end, reclaim. Task lifetime and nothing else.
-async fn serve_worker(js: WorkerRuntime, start: WorkerStart, thread: JsThreadHandle) {
+async fn serve_worker(js: SharedRuntime, start: WorkerStart, thread: JsThreadHandle) {
     let WorkerStart {
         key,
         name,
@@ -1065,13 +1052,13 @@ mod tests {
     ///
     /// The script does nothing, because what most of these pins are about is
     /// which task ran rather than what the script said.
-    fn start(js: &WorkerRuntime, thread: &JsThreadHandle, key: u64) -> Started {
+    fn start(js: &SharedRuntime, thread: &JsThreadHandle, key: u64) -> Started {
         start_running(js, thread, key, String::new())
     }
 
     /// The same, over a script of the test's own.
     fn start_running(
-        js: &WorkerRuntime,
+        js: &SharedRuntime,
         thread: &JsThreadHandle,
         key: u64,
         source: String,
@@ -1112,9 +1099,8 @@ mod tests {
     }
 
     /// One worker runtime, furnished the way [`run`] furnishes this thread's.
-    fn worker_runtime() -> WorkerRuntime {
-        let mut js = ScriptRuntime::new().expect("a QuickJS runtime");
-        install_worker_modules(&mut js).expect("the worker modules register");
+    fn worker_runtime() -> SharedRuntime {
+        let js = build_runtime(WORKER_MODULES).expect("the worker runtime builds");
         Rc::new(RefCell::new(Ok(js)))
     }
 

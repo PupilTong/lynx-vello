@@ -17,13 +17,13 @@ use dom::event::EventSteps;
 use tokio::sync::{mpsc, watch};
 
 use crate::background::{WorkerCommand, WorkerEvent};
+use crate::esm::{MAIN_THREAD_MODULES, build_runtime};
 use crate::jobs::JsThread;
 use crate::link::{DetachedView, InputEventPayload, detached_outbox};
 use crate::main::WorkerFactory;
 use crate::main::quickjs::ScriptRuntime;
 use crate::main::runtime::{
     DocumentIngredients, MainThreadRuntime, RealmStartup, entry_module_source,
-    install_shared_modules,
 };
 use crate::main::tree::{LynxDocument, PageConfig, Viewport};
 use crate::view::NoWakeup;
@@ -79,8 +79,8 @@ impl ScriptHarness {
             style_pool: None,
         };
         let (outbox, view) = detached_outbox(Arc::new(NoWakeup));
-        let mut js_runtime = ScriptRuntime::new().expect("the benchmark runtime starts");
-        install_shared_modules(&mut js_runtime).expect("the shared modules register");
+        let mut js_runtime =
+            build_runtime(MAIN_THREAD_MODULES).expect("the benchmark runtime builds");
         let (workers, inbox) = mpsc::unbounded_channel();
         let thread = JsThread::new();
         let (runtime, worker_events) = MainThreadRuntime::new(

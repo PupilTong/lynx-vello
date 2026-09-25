@@ -7,6 +7,7 @@ use tokio::sync::mpsc;
 
 use super::*;
 use crate::background::{WorkerEvent, WorkerHome, WorkerPayload};
+use crate::esm::{MAIN_THREAD_MODULES, build_runtime};
 use crate::jobs::JsThread;
 use crate::link::{DetachedView, ViewNotice, block_on_deadline, detached_outbox};
 use crate::main::workers::WorkerFactory;
@@ -173,8 +174,7 @@ impl Pair {
         };
         let (outbox, view) = detached_outbox(Arc::new(NoWakeup));
         let cancel = view.token.clone();
-        let mut js = ScriptRuntime::new().unwrap();
-        install_shared_modules(&mut js).unwrap();
+        let mut js = build_runtime(MAIN_THREAD_MODULES).unwrap();
         let ingredients =
             DocumentIngredients::for_test(crate::view::Viewport::new(32.0, 24.0), config);
         let thread = JsThread::new();

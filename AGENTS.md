@@ -236,8 +236,11 @@ turning the view's `ImageReports` into its `ResourceFetcher`; both go to
 
 **A view is built from a group, never on its own**: `LynxGroup::new` takes the
 lifecycle wakeup and `StyleThreads`, starts `bobcat-workers` then `bobcat-main`
-(handed one sender on it), and awaits the QuickJS runtime and Stylo pool every
-view in that group shares.
+(handed one sender on it), and awaits the Stylo pool every view in that group
+shares. Each thread builds its QuickJS runtime with `esm.rs`'s `build_runtime`
+and keeps an `Err` instead of failing the group: every view then fails its
+startup with it (`StartupFailed(LynxViewError::Script(..))`), and every
+`Worker` on a failed worker runtime ends with `Failed`.
 
 **Both engine threads are a `jobs.rs` `JsThread`: a tokio `current_thread`
 runtime with a `LocalSet`, plus a FIFO of jobs its top loop runs between two
@@ -1130,9 +1133,10 @@ preconditions before entering `dom`, returning misuse as a JavaScript exception
 batch may present once its evaluation ends — web-core's visibility model.
 
 Beside the host module, each runtime registers a fixed set of built-in ESM
-sources in QuickJS's loader: `install_shared_modules` for `bobcat-main`,
-`install_worker_modules` for `bobcat-workers`, the specifiers in `esm.rs`, and
-the per-runtime lists with their TypeScript sources in the
+sources in QuickJS's loader: `build_runtime` over `MAIN_THREAD_MODULES` for
+`bobcat-main` and over `WORKER_MODULES` for `bobcat-workers`, both tables and
+the specifiers in `esm.rs`, and the per-runtime lists with their TypeScript
+sources in the
 `packages/bobcat-element` section below. The worker list is deliberately
 different, so importing `bobcat:element` or `bobcat:runtime` there fails to
 resolve rather than failing late. `bobcat:bts` is the BTS Worker's engine

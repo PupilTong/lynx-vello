@@ -2,6 +2,7 @@ use tokio::sync::mpsc;
 
 use super::*;
 use crate::background::{WorkerCommand, WorkerEvent};
+use crate::esm::{MAIN_THREAD_MODULES, build_runtime};
 use crate::jobs::JsThread;
 use crate::link::{DetachedView, detached_outbox};
 use crate::main::tree::{PageConfig, Viewport};
@@ -336,8 +337,7 @@ fn runtime_over_watching_names(
     PublishedNames,
 ) {
     let (outbox, far_end) = detached_outbox(Arc::new(NoWakeup));
-    let mut js_runtime = ScriptRuntime::new().expect("the test runtime starts");
-    install_shared_modules(&mut js_runtime).expect("the shared modules register");
+    let mut js_runtime = build_runtime(MAIN_THREAD_MODULES).expect("the test runtime builds");
     let (workers, inbox) = mpsc::unbounded_channel();
     let thread = JsThread::new();
     let viewport = ingredients.viewport;
@@ -382,8 +382,7 @@ fn two_view_group_with(
     MainThreadRuntime,
     GroupFarEnds,
 ) {
-    let mut js_runtime = ScriptRuntime::new().expect("the test runtime starts");
-    install_shared_modules(&mut js_runtime).expect("the shared modules register");
+    let mut js_runtime = build_runtime(MAIN_THREAD_MODULES).expect("the test runtime builds");
     let mut views = Vec::new();
     let mut ends = GroupFarEnds::default();
     let (workers, inbox) = mpsc::unbounded_channel();

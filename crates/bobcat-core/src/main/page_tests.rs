@@ -17,12 +17,15 @@ use tokio_util::sync::CancellationToken;
 
 use super::*;
 use crate::background::{WorkerCommand, WorkerMessage, WorkerStart};
+use crate::esm::{MAIN_THREAD_MODULES, build_runtime};
 use crate::jobs::{JsThread, JsThreadHandle};
 use crate::link::{DetachedView, InputEventPayload, PageUpdate, ViewNotice, detached_outbox};
 use crate::main::WorkerFactory;
-use crate::main::runtime::{bound_metrics, install_shared_modules};
+use crate::main::runtime::bound_metrics;
 use crate::main::tree::PageConfig;
 use crate::resource::{SourceCompletion, SourceRequest};
+use crate::script::ScriptError;
+use crate::threads::platform_script_error;
 use crate::view::{NoWakeup, ScreenMetrics, StartupSource, StartupSources};
 
 /// How many times the harness lets every ready task run before it gives up on
@@ -81,11 +84,18 @@ fn answered_entry(entry: &str, url: &str, token: &CancellationToken) -> StartupS
 /// One group's shared runtime, with the test holding the worker thread's end
 /// of the factory so a `Start` is observable and no worker ever boots.
 fn group(thread: &JsThreadHandle) -> (Rc<GroupContext>, mpsc::UnboundedReceiver<WorkerCommand>) {
-    let mut js = ScriptRuntime::new().expect("a QuickJS runtime");
-    install_shared_modules(&mut js).expect("the shared modules register");
+    let js = build_runtime(MAIN_THREAD_MODULES).expect("the group's runtime builds");
+    group_over(thread, Ok(js))
+}
+
+/// The same group over `runtime`, which may be one that was never built.
+fn group_over(
+    thread: &JsThreadHandle,
+    runtime: Result<ScriptRuntime, ScriptError>,
+) -> (Rc<GroupContext>, mpsc::UnboundedReceiver<WorkerCommand>) {
     let (workers, commands) = mpsc::unbounded_channel();
     let context = GroupContext {
-        js: Rc::new(RefCell::new(js)),
+        js: Rc::new(RefCell::new(runtime)),
         style_pool: None,
         requester: Arc::new(NoWakeup),
         workers: WorkerFactory::new(workers, Arc::default()),
@@ -1512,7 +1522,12 @@ fn a_siblings_checkpoint_makes_a_parked_page_settle() {
         let settled = page.epilogue_count();
 
         // Exactly what `finish_view` does when a sibling's task ends.
-        context.js.borrow().mark_checkpoint();
+        context
+            .js
+            .borrow()
+            .as_ref()
+            .expect("the group's runtime was built")
+            .mark_checkpoint();
         for _ in 0..TURNS {
             if page.epilogue_count() > settled {
                 break;
@@ -1523,6 +1538,37 @@ fn a_siblings_checkpoint_makes_a_parked_page_settle() {
             page.epilogue_count(),
             settled + 1,
             "the bump nobody's entry produced is the one that wakes this page"
+        );
+    });
+}
+
+/// `finish_view` announces a checkpoint whenever a view task ends, as a job.
+/// On a runtime that was never built there is no realm to wake, and that job
+/// does nothing rather than trapping the thread.
+#[test]
+fn finishing_a_task_on_a_failed_runtime_marks_nothing() {
+    on_a_js_thread(|thread| async move {
+        let (context, _workers) =
+            group_over(&thread, Err(platform_script_error("injected".to_owned())));
+        let mut tasks = task::JoinSet::new();
+        tasks.spawn_local(async {});
+        let finished = tasks
+            .join_next_with_id()
+            .await
+            .expect("the task was spawned");
+
+        crate::main::finish_view(&context, finished, &mut rustc_hash::FxHashMap::default());
+        for _ in 0..8 {
+            task::yield_now().await;
+        }
+
+        // Jobs are one FIFO, so a job answered after it is one the bump's job
+        // ran ahead of — and a job that panicked would have unwound this
+        // thread instead.
+        assert_eq!(
+            thread.run(|| ()).await,
+            Some(()),
+            "the queue ran past the bump"
         );
     });
 }
@@ -1725,6 +1771,47 @@ fn a_burst_queued_behind_a_release_is_never_applied() {
 /// latch a startup failure spends is not the one a panic goes through: the
 /// lifetime holds a latch of its own for the payload-bearing report, so a view
 /// that failed and then trapped says both.
+/// A group whose runtime could not be built still serves its views: each
+/// one fails its startup with that runtime's error, and opens nothing — no
+/// document, no BTS `Start`, and no request past the ones `create_lynx_view`
+/// already made.
+#[test]
+fn a_view_on_a_runtime_that_was_never_built_fails_its_startup() {
+    on_a_js_thread(|thread| async move {
+        let (context, workers) =
+            group_over(&thread, Err(platform_script_error("injected".to_owned())));
+        let mut harness = Harness::new(context, workers);
+        harness
+            .until("the view never finished", |h| h.owner.is_finished())
+            .await;
+        // Whatever the view said before its owner returned.
+        harness.turn().await;
+
+        let failures: Vec<_> = harness
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                EngineEvent::StartupFailed(error) => Some(error),
+                _ => None,
+            })
+            .collect();
+        let [LynxViewError::Script(error)] = failures.as_slice() else {
+            panic!("one Script startup failure, got {:?}", harness.events);
+        };
+        assert!(error.message.contains("injected"), "{error}");
+        assert!(!harness.finished());
+        assert!(harness.workers.try_recv().is_err(), "no worker was started");
+        let requests: Vec<_> = harness.sources.iter().map(|(request, _)| request).collect();
+        assert!(
+            matches!(
+                requests.as_slice(),
+                [SourceRequest::Entry(url)] if url == "app:///main.js"
+            ),
+            "only the startup entry was asked for: {requests:?}"
+        );
+    });
+}
+
 #[test]
 fn a_view_that_already_failed_still_reports_a_task_that_traps() {
     on_a_js_thread(|thread| async move {

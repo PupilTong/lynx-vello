@@ -67,6 +67,7 @@ use tokio::sync::mpsc;
 
 use super::*;
 use crate::background::{WorkerCommand, WorkerEvent, WorkerHome};
+use crate::esm::{MAIN_THREAD_MODULES, build_runtime};
 use crate::jobs::JsThread;
 use crate::link::{DetachedView, block_on_deadline, detached_outbox};
 use crate::main::tree::{PageConfig, Viewport};
@@ -141,8 +142,7 @@ fn runtime_over(
     ingredients: DocumentIngredients,
 ) -> (ScriptRuntime, MainThreadRuntime, DocumentProbe) {
     let (outbox, _far_end) = detached_outbox(Arc::new(NoWakeup));
-    let mut js_runtime = ScriptRuntime::new().expect("the test runtime starts");
-    install_shared_modules(&mut js_runtime).expect("the shared modules register");
+    let mut js_runtime = build_runtime(MAIN_THREAD_MODULES).expect("the test runtime builds");
     let (workers, inbox) = mpsc::unbounded_channel();
     let thread = JsThread::new();
     let (runtime, worker_events) = MainThreadRuntime::new(
@@ -210,8 +210,7 @@ fn background_pair(main: &str, background: &str) -> BackgroundPair {
     let home =
         WorkerHome::with_entry_for_test((background.to_owned(), "test:bts-entry".to_owned()));
     let (outbox, view) = detached_outbox(Arc::new(NoWakeup));
-    let mut js = ScriptRuntime::new().expect("the test runtime starts");
-    install_shared_modules(&mut js).expect("the shared modules register");
+    let mut js = build_runtime(MAIN_THREAD_MODULES).expect("the test runtime builds");
     let mut text = dom::TextContext::new();
     assert_eq!(text.register_fonts(dom::FontBlob::from_static(AHEM)), 1);
     let mut ingredients =

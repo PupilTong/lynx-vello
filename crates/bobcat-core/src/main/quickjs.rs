@@ -8,6 +8,7 @@
 //! a sanitized [`ScriptError`], and how a module namespace caches the atoms an
 //! export is looked up by.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
@@ -17,6 +18,7 @@ use std::time::Duration;
 
 use quickjs_rust_bridge as quickjs;
 
+use crate::jobs::JsThreadHandle;
 use crate::script::{ScriptError, ScriptErrorKind, ScriptErrorPhase, ScriptSourceLocation};
 
 /// A leaf host callback Bobcat installs in the realm.
@@ -182,6 +184,36 @@ impl ScriptRuntime {
             .register_module_source(specifier, source)
             .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterModule))
     }
+}
+
+/// The runtime every realm on one engine thread is opened on, as that
+/// thread's tasks and jobs share it.
+///
+/// Shared rather than owned by any one task, and borrowed only inside a job:
+/// an entry holds it for its whole length, a synchronous wait included, which
+/// is safe because no other job runs until that one returns and no task ever
+/// takes it.
+///
+/// A runtime that could not be built is not fatal to the group: it is the
+/// failure of every view or worker that would have run on it, and each hears
+/// about it when it asks for a realm.
+pub(crate) type SharedRuntime = Rc<RefCell<Result<ScriptRuntime, ScriptError>>>;
+
+/// Announces a checkpoint nobody ran, from a task: a task on `thread` ended
+/// part-way through, so whatever it left in the shared job queue is now a
+/// sibling realm's to finish.
+///
+/// A job rather than a call, because the caller is a task and the shared
+/// runtime belongs to whichever job holds it. Nothing waits for the bump, so
+/// the answer is dropped. A runtime that was never built has no realm to
+/// wake, and is left alone.
+pub(crate) fn mark_checkpoint_later(js: &SharedRuntime, thread: &JsThreadHandle) {
+    let js = Rc::clone(js);
+    drop(thread.run(move || {
+        if let Ok(js) = &*js.borrow() {
+            js.mark_checkpoint();
+        }
+    }));
 }
 
 impl ScriptEngine {
@@ -600,7 +632,7 @@ impl ScriptEngine {
 /// `import` does, and the realm runtime that implements it asks through the
 /// host member [`crate::require`] installs over this.
 pub(crate) fn normalize_module_url(base: &str, specifier: &str) -> Result<String, String> {
-    if specifier == super::workers::MODULE
+    if specifier == crate::esm::WORKER_CLASS_MODULE_SPECIFIER
         || specifier.starts_with("bobcat:")
         || specifier.starts_with("bobcat-internal:")
     {
