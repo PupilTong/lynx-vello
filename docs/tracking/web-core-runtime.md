@@ -104,9 +104,11 @@ termination recorded in `../runtime-architecture.md`.
 After it awaits the import of the entry by its URL, boot creates a BTS Worker on the group's
 existing `bobcat-workers` thread with `new Worker("bobcat:bts")`. Its `Start`
 carries no script: `bobcat:bts` is a registered module, the engine's own
-source, which the BTS realm's root module imports, and the `Start` carries the
-view's BTS entry for it instead. Every worker uses the same scope; the BTS
-differs only in what its root module imports. `ViewSources.background_entry`
+source, which the BTS realm's root module imports by that URL, and the `Start`
+carries the view's BTS entry for it instead. The BTS is a dedicated worker
+whose URL is `bobcat:bts`: every worker uses the same scope and the same root
+module, and the BTS differs only in its URL and the view's data its `Start`
+carries. `ViewSources.background_entry`
 selects an optional raw module; native/browser XML adapters supply the
 background section's URL. The `bobcat:bts` bootstrap hands `bobcat:bts-runtime`
 a loader that imports that entry once the first message has initialized the

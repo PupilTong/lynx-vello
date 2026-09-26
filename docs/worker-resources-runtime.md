@@ -12,13 +12,15 @@ source text to JavaScript callbacks.
 own cancellation token, which no view token is a parent of. Discovered imports
 use `SourceRequest::Module` on the view's existing notice channel.
 `LynxView::pump` calls `ResourceFetcher::request_source`; the concrete
-`SourceCompletion` answers the requesting worker directly. A plain Worker's
-script is the one request the worker does not make itself: `createWorker`
-makes it on the creating view's thread and the `Start` carries the answer's
-receiving end, in `WorkerRole::Dedicated`. The worker's realm opens as its
-`Start` is served, its root module imports the script by the request URL,
-and the worker completes that module from the answer, under the request URL,
-without asking again. A `Module` request
+`SourceCompletion` answers the requesting worker directly. A worker's script is
+the one request the worker does not make itself: `createWorker` makes it on
+the creating view's thread and the `Start` carries the answer's receiving end,
+in `WorkerStart::script`. The worker's realm opens as its `Start` is served,
+its root module imports the script by the request URL, and the worker
+completes that module from the answer, under the request URL, without asking
+again. A URL that is an engine name, the BTS's `bobcat:bts` among them, is
+never requested: `WorkerStart::script` is `None`, and the realm's own loader
+loads it. A `Module` request
 arrives absolute: an import is normalized against its importer's response URL,
 a worker script is joined to the creating view's entry URL, and a synchronous
 load is resolved against the view's `ViewSources::base_url`, which the

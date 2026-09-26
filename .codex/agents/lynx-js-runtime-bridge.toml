@@ -35,16 +35,20 @@ and `bobcat-workers` (every Worker realm, including the BTS).
   `createWorker`/`sendWorkerMessage`/`terminateWorker`; `tree/` is the Lynx
   element policy layer (page root, UA sheet, `<text>`, `<image>`, scrollers).
 - `crates/bobcat-core/src/background/` — the `bobcat-workers` thread and worker
-  realm scopes. A worker realm opens as its `Start` is served and evaluates the
-  root module `bobcat:worker-boot` (`bobcat:worker`, `bobcat:timers`, then
-  `await import(<script URL>)` or `import "bobcat:bts"` by `WorkerRole`), and
-  the worker's `consume_messages` completes a plain Worker's script under the
-  request URL from the answer `createWorker` asked for. A BTS's `Start`
-  carries `BackgroundStart` (entry, screen, native module table), which its
-  realm answers through `bobcat-internal:worker` (`backgroundEntry`,
+  realm scopes. There is one kind of worker: the BTS is the dedicated worker
+  whose URL is `bobcat:bts`. A worker realm opens as its `Start` is served and
+  evaluates the root module `bobcat:worker-boot` (`bobcat:worker`,
+  `bobcat:timers`, then `await import(<URL>)`, the same for every worker), and
+  the worker's `consume_messages` completes the script under the request URL
+  from the answer `createWorker` asked for; a URL under
+  `ENGINE_MODULE_PREFIXES` is never requested, and the realm's own loader
+  loads it. `createWorker` decides from the URL alone: only `bobcat:bts` gets
+  `BackgroundStart` (entry, screen, native module table) and
+  `ScriptSource::Background`, which its realm answers through
+  `bobcat-internal:worker` (`backgroundEntry`,
   `pixelRatio`/`pixelWidth`/`pixelHeight`) and
-  `bobcat-internal:native-modules` (`nativeModuleTable`); a plain Worker
-  declares the same members and reads no screen and an empty table.
+  `bobcat-internal:native-modules` (`nativeModuleTable`); a worker at any
+  other URL declares the same members and reads no screen and an empty table.
   `native_module.rs` — the `NativeModule` seam and the transport every realm
   kind shares: `install` gives each realm `bobcat-internal:native-modules`
   (`invokeNativeModule`, and the one-shot table: the view's in a BTS, empty in
