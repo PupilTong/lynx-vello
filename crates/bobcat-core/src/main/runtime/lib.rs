@@ -37,6 +37,7 @@ use smallvec::SmallVec;
 use tokio::sync::watch;
 
 use super::quickjs::{ScriptEngine, ScriptRuntime};
+#[cfg(test)]
 use crate::clock::ClockInstant;
 use crate::esm::{
     ANIMATION_FRAME_MODULE_SPECIFIER, BTS_MODULE_SPECIFIER, ELEMENT_MODULE_SPECIFIER,
@@ -45,7 +46,8 @@ use crate::esm::{
 };
 use crate::link::{InputEventPayload, ViewNotice, ViewOutbox};
 use crate::main::tree::{ImageOutcomes, LynxDocument, PageConfig, new_document};
-use crate::realm::{RealmCore, context_of, open_realm, string_argument};
+use crate::realm::policy::context_of;
+use crate::realm::{RealmCore, open_realm, string_argument};
 use crate::script::ScriptError;
 use crate::timers::run_due_timers;
 use crate::view::{LynxViewError, ScreenMetrics, ScriptSource, StartupSource, Viewport};
@@ -855,6 +857,13 @@ impl MainThreadRuntime {
         ))
     }
 
+    /// The realm and the two tables its core members write to, for the
+    /// driver in [`crate::realm::owner`]: its epilogue, and the module loads
+    /// and future settles that epilogue spawns.
+    pub(crate) fn core(&mut self) -> &mut RealmCore {
+        &mut self.core
+    }
+
     /// How many of this realm's workers are still running, which is how many
     /// `Terminate`s releasing it would send.
     #[cfg(test)]
@@ -1297,7 +1306,10 @@ impl MainThreadRuntime {
             .dispatch_content_visibility_changes();
     }
 
-    /// When the earliest armed timer comes due, if one is armed.
+    /// When the earliest armed timer comes due, if one is armed, for a test
+    /// that drives this realm's timers itself. The page's epilogue reads the
+    /// same table through the realm's core.
+    #[cfg(test)]
     pub(crate) fn next_timer_deadline(&mut self) -> Option<ClockInstant> {
         self.core.timers.next_deadline()
     }
@@ -1625,23 +1637,6 @@ await Promise.resolve().then(() => __FlushElementTree());
             .map_err(booting))
     }
 
-    /// The futures this realm asked to settle asynchronously — a `.then` on a
-    /// `Future` — since the last entry. Each is a task for the view's owner.
-    pub(crate) fn take_future_settles(&mut self) -> Vec<(u32, crate::future::HostFuture)> {
-        self.core.futures.take_settle_requests()
-    }
-
-    /// Hands one settled future back to the realm that asked for it.
-    pub(crate) fn deliver_future(
-        &mut self,
-        js_runtime: &mut ScriptRuntime,
-        id: u32,
-        outcome: crate::future::Outcome,
-    ) -> Result<(), MainThreadError> {
-        crate::future::deliver(&mut self.core.engine, js_runtime, id, outcome)
-            .map_err(|error| MainThreadError::from_engine("settling a future", error))
-    }
-
     /// The `@font-face` rules the sheets mounted so far declared and this
     /// realm has not reported before. Empty until a sheet is mounted.
     pub(crate) fn take_font_face_requests(&mut self) -> Vec<dom::FontFaceRequest> {
@@ -1684,35 +1679,6 @@ await Promise.resolve().then(() => __FlushElementTree());
             .engine
             .module_finished()
             .map_err(|error| MainThreadError::from_engine("disposing the MTS realm", error))
-    }
-
-    pub(crate) fn complete_module(
-        &mut self,
-        js_runtime: &mut ScriptRuntime,
-        name: &str,
-        source: Result<crate::resource::LoadedSource, crate::LynxViewError>,
-    ) -> Result<(), MainThreadError> {
-        use crate::resource::LoadedSource;
-        let loaded = match source {
-            Ok(LoadedSource::Module { source, url }) => Ok((url, source)),
-            Ok(LoadedSource::StyleSheet(_)) => {
-                Err("a module request returned a stylesheet".to_owned())
-            }
-            Ok(LoadedSource::Font(_)) => Err("a module request returned a font".to_owned()),
-            Ok(LoadedSource::Fetched) => Err("a module request returned a plain fetch".to_owned()),
-            Err(error) => Err(format!("module '{name}': {error}")),
-        };
-        self.core
-            .engine
-            .complete_module(
-                js_runtime,
-                name,
-                loaded
-                    .as_ref()
-                    .map(|(url, source)| (url.as_str(), source.as_str()))
-                    .map_err(String::as_str),
-            )
-            .map_err(|error| MainThreadError::from_engine("loading an imported module", error))
     }
 
     fn collect_garbage(&mut self, js_runtime: &mut ScriptRuntime) -> Result<(), MainThreadError> {

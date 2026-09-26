@@ -20,8 +20,10 @@
 //! - [`consume_metrics`], which settles the page once per change of the painter's metrics, so a
 //!   resize with no JavaScript behind it still commits;
 //! - one [`load_entry`] for its MTS entry, entering the realm when its answer arrives;
-//! - one [`load_module`] future per resource load an import produced;
-//! - one [`settle_future`] per host-backed `Future` a `.then` asked this realm to settle;
+//! - one [`owner::load_module`] per resource load an import produced, and one
+//!   [`owner::settle_future`] per host-backed `Future` a `.then` asked this realm to settle, each
+//!   spawned by the driver's epilogue;
+//! - one [`load_font_face`] per `@font-face` rule a mounted sheet declared;
 //! - [`consume_worker_events`], the one ordered consumer of this view's workers;
 //! - [`serve_clock`], which owns this realm's one pinned sleep and watches the runtime-wide
 //!   checkpoint generation for a sibling's entry into JavaScript.
@@ -32,17 +34,38 @@
 //!
 //! # One boundary into JavaScript
 //!
-//! Every one of those tasks reaches the realm through [`Page::enter`], which
-//! queues one job and answers with what it returned. The job runs one
-//! synchronous operation and then settles what that operation left owing: due
+//! Every one of those tasks reaches the realm through [`owner::enter`], the
+//! driver a view shares with every worker, which queues one job and answers
+//! with what it returned. The job runs one synchronous operation and then the
+//! driver's epilogue, which settles what that operation left owing: due
 //! timers, the commit, the boot report, the `BeginFrame` acknowledgement, the
-//! module requests the entry produced, the next timer deadline.
-//! [`Settles::settle`] is the epilogue alone, for a wake that carries no
-//! operation of its own. [`Page::open_realm`] is a job too, and the only one
-//! that does not go through `enter`, because the realm it would enter does not
-//! exist until it returns; the disposal exchange in [`Page::run_owner`] is the
-//! other exception, running after the view has ended and so past the latch and
-//! the epilogue.
+//! module requests and future settles the entry produced, the `@font-face`
+//! loads, the next timer deadline. [`Settles::settle`] is the epilogue alone,
+//! for a wake that carries no operation of its own.
+//! [`Page::open_realm`] is a job too, and the one before the realm exists
+//! that does not go through `enter`, because the realm it would enter does
+//! not exist until it returns. After the end, the disposal exchange the page
+//! runs as its `before_release` hook and the release of its realm in
+//! [`owner::run_owner`] are [`owner::after_end`] jobs, which run past the
+//! latch and the epilogue.
+//!
+//! The epilogue's steps, and their order, are the driver's
+//! ([`crate::realm::owner`]). What the driver is told about a page is the
+//! page's [`RealmOwner`] impl: where the realm, the runtime and the host are,
+//! that its reports are engine events, the epilogue steps only a page has —
+//! the commit and the deliveries it posts, `ScriptFinished`, the `BeginFrame`
+//! acknowledgement, the `@font-face` loads — and the two things only a page
+//! owes — the `BeginFrame` acknowledgement at the end, and the JavaScript
+//! disposal before the release.
+//!
+//! What a failure is reported as, and whether it ends the view, is the MTS
+//! table in [`policy`], read by the scene the failure happened in: every
+//! report here goes through [`policy::report`], except the disposal's, which
+//! is the table's Disposal row, and the Open failures [`load_entry`] meets —
+//! an entry the fetcher could not load, one it answered with something other
+//! than a script or from a URL that is not absolute, and naming the entry —
+//! which are each already a `LynxViewError` and are sent as `StartupFailed`
+//! as they are, through [`owner::terminal`].
 //!
 //! Nothing of this view's is served outside a job. [`Page::open_realm`] is the
 //! *first* job of every view, queued before any of those tasks is spawned, so
@@ -121,22 +144,26 @@
 //! the only things boot waits on.
 
 use std::cell::{Cell, RefCell};
-use std::future::{Future, poll_fn};
+use std::future::poll_fn;
 use std::rc::Rc;
 
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
-use super::quickjs::ScriptRuntime;
+use super::quickjs::{ScriptRuntime, SharedRuntime};
 use super::runtime::{DocumentIngredients, MainThreadRuntime, RealmStartup};
 use super::{AttachedView, GroupContext};
 use crate::background::WorkerEvent;
 #[cfg(test)]
 use crate::clock::ClockInstant;
-use crate::lifetime::{EndOnUnwind, Lifetime, Settles, run_job, serve_clock};
-use crate::link::{SourceAnswer, ToMain, ViewOutbox};
-use crate::resource::{LoadedSource, SourceRequest, unanswered_source};
-use crate::threads::{panicked, platform_script_error};
+use crate::lifetime::{Lifetime, Settles, run_job, serve_clock};
+use crate::link::{HostOutbox, ToMain, ViewOutbox};
+use crate::realm::RealmCore;
+use crate::realm::owner::{self, RealmOwner};
+use crate::realm::policy::{self, Row, Scene};
+use crate::resource::{LoadedSource, SourceRequest};
+use crate::script::ScriptError;
+use crate::threads::platform_script_error;
 use crate::view::{
     EngineEvent, LynxViewError, StartupSource, StartupSources, ViewSources, Viewport,
 };
@@ -152,6 +179,9 @@ pub(super) struct Page {
     /// pool, the wakeup, and the factory that names workers.
     context: Rc<GroupContext>,
     outbox: ViewOutbox,
+    /// What this view's realm asks the host through, over the view's own
+    /// token: the module requests the epilogue makes.
+    host: HostOutbox,
     /// This view's realm, from the moment [`Page::open_realm`] returns: `None`
     /// only before that first job has run, and again once the realm could not
     /// be opened or the owner has released it. It is the only thing that
@@ -182,7 +212,8 @@ pub(super) struct Page {
     ///
     /// Acknowledged in the epilogue rather than where it is applied: a host
     /// blocked on this number is waiting for the frame it implies, which the
-    /// epilogue's commit is what publishes.
+    /// epilogue's commit is what publishes. The end acknowledges it too,
+    /// because that frame will then never come.
     pending_begin_frame: Cell<Option<u64>>,
     boot_reported: Cell<bool>,
     /// Whether an entry that will deliver `dom`'s queued
@@ -203,20 +234,10 @@ pub(super) struct Page {
     /// runs between the post and it would otherwise post one more.
     image_outcomes_posted: Cell<bool>,
     /// Every task of this view, the token that ends them, the latch this thread
-    /// reads, and the two numbers this realm's clock task waits on — the
-    /// deadline it armed and the generation its own last entry recorded.
+    /// reads, the latches its `StartupFailed` and its `Panicked` go through,
+    /// and the two numbers this realm's clock task waits on — the deadline it
+    /// armed and the generation its own last entry recorded.
     lifetime: Lifetime,
-    /// Whether this view has already been told why it could not start. Only a
-    /// `StartupFailed` goes through it, and the first one wins, so one failure
-    /// is one report. Every other script failure is reported where it happens
-    /// and leaves the view running. A panic is not gated here either — it has
-    /// a latch of its own on the lifetime, because a task that traps after a
-    /// startup failure is still a fact the embedder is owed.
-    reported: Cell<bool>,
-    /// How many times the epilogue has run, for the tests that count the
-    /// wakes a page answers.
-    #[cfg(test)]
-    epilogues: Cell<u64>,
 }
 
 impl Page {
@@ -229,9 +250,11 @@ impl Page {
         token: CancellationToken,
     ) -> Rc<Self> {
         let lifetime = Lifetime::new(token, context.thread.clone());
+        let host = outbox.host_outbox(outbox.token().clone());
         Rc::new(Self {
             context,
             outbox,
+            host,
             realm: RefCell::new(None),
             metrics,
             worker_events: RefCell::new(None),
@@ -240,202 +263,20 @@ impl Page {
             content_visibility_posted: Cell::new(false),
             image_outcomes_posted: Cell::new(false),
             lifetime,
-            reported: Cell::new(false),
-            #[cfg(test)]
-            epilogues: Cell::new(0),
         })
-    }
-
-    /// Starts one more task of this view.
-    ///
-    /// A panic anywhere in the task ends the view: the guard's `Drop` runs
-    /// during the unwind, before tokio's task harness catches it, so a sibling
-    /// task polled before the owner already finds [`Self::ended`] true — and
-    /// the acknowledgement and the withdrawn deadline that [`Self::end`] owes
-    /// have already happened. The report is the owner's, out of the payload
-    /// the lifetime hands it.
-    fn spawn(self: &Rc<Self>, future: impl Future<Output = ()> + 'static) {
-        let guard = EndOnUnwind::new(self);
-        self.lifetime.spawn(async move {
-            let _guard = guard;
-            future.await;
-        });
-    }
-
-    /// Ends this view, once. `true` for the call that did it.
-    ///
-    /// Synchronous, because the latch is what makes an end immediate:
-    /// [`Self::enter`], [`Self::apply`] and every timer wake return at once
-    /// when it is set, and the owner's abort only reclaims the tasks.
-    ///
-    /// The owner calls it after its wait too, which is how a cancellation that
-    /// arrived from another thread reaches the latch: nothing but this thread
-    /// writes it.
-    fn end(&self) -> bool {
-        if !self.lifetime.end() {
-            return false;
-        }
-        // A painter blocked in `wait_begin_frame` is released rather than
-        // timed out: the frame it was waiting for will never come. The deadline
-        // the realm had armed is withdrawn by the lifetime's own end above.
-        if let Some(seq) = self.pending_begin_frame.take() {
-            self.outbox.begin_frame_serviced(seq);
-        }
-        true
     }
 
     fn ended(&self) -> bool {
         self.lifetime.ended()
     }
 
-    /// Reports one startup failure and ends the view, in that order and once.
-    ///
-    /// `event` is always a `StartupFailed`: that is the one failure of a
-    /// view's script that ends it, and a panic is [`Self::trapped`]'s.
-    ///
-    /// It touches no realm borrow, so an operation may call it from inside
-    /// [`Self::enter`]: the epilogue that follows sees the end and does
-    /// nothing, which is what keeps one failure one report.
-    fn fail(&self, event: EngineEvent) {
-        if !self.reported.replace(true) {
-            self.outbox.engine_event(event);
-        }
-        self.end();
-    }
-
-    /// Queues one synchronous operation against the live realm, which settles
-    /// what it owes, and answers with what it returned.
-    ///
-    /// This is the one way into JavaScript. `None` is a realm that is not
-    /// live, a view that has ended, an operation that trapped, or a thread
-    /// that is over; either way nothing of the operation is observable here.
-    /// A realm that is not live is one that could not be opened, and a view
-    /// whose realm could not be opened has already ended: the job that opens
-    /// it is the view's first, so nothing of the view's can run ahead of it.
-    ///
-    /// The operation *and* the whole epilogue run under one `catch_unwind`
-    /// inside [`run_job`], because a panic on this thread is the view's
-    /// failure rather than the group's, and a job runs in the thread's top
-    /// loop rather than inside a task that could catch it. A host function
-    /// that panics is one of these panics too: the script is shown an
-    /// exception, and the realm's checkpoint resumes the panic when the
-    /// operation that called it ends.
-    fn enter<T, O>(self: &Rc<Self>, operation: O) -> impl Future<Output = Option<T>> + use<T, O>
-    where
-        T: 'static,
-        O: FnOnce(&mut MainThreadRuntime, &mut ScriptRuntime) -> T + 'static,
-    {
-        run_job(self, move |page| page.enter_now(operation))
-    }
-
-    /// The body of one entry, as the job runs it.
-    fn enter_now<T>(
-        self: &Rc<Self>,
-        operation: impl FnOnce(&mut MainThreadRuntime, &mut ScriptRuntime) -> T,
-    ) -> Option<T> {
-        if self.ended() {
-            return None;
-        }
-        // Both borrows are held for the whole entry, a synchronous wait inside
-        // the operation included. Nothing else can want them: only a job takes
-        // either, and no other job runs until this one returns.
-        let mut js = self.context.js.borrow_mut();
-        let Ok(js) = js.as_mut() else {
-            return None;
-        };
-        let mut realm = self.realm.borrow_mut();
-        let runtime = realm.as_deref_mut()?;
-        let value = operation(runtime, js);
-        self.epilogue(runtime, js);
-        Some(value)
-    }
-
-    /// Everything one entry into this realm leaves owing.
-    ///
-    /// The order is the contract:
-    ///
-    /// 1. **Due timers.** A timer that has come due runs before the commit, so its mutation rides
-    ///    the same frame as whatever else this entry changed. A zero-delay timer armed during boot
-    ///    therefore fires inside boot's own epilogue and adds no commit of its own.
-    /// 2. **The commit**, which is what publishes the frame and the image sources the walk
-    ///    discovered — skipped while any listed author sheet is outstanding, because the first
-    ///    `__FlushElementTree` is what waits for them and a commit without them would publish an
-    ///    unstyled frame.
-    /// 3. **The `contentvisibilityautostatechange` deliveries** that commit decided — posted as an
-    ///    entry of their own, never run here: see [`Self::post_content_visibility_changes`].
-    /// 4. **The `<image>` `load`s and `error`s** this entry settled — posted as an entry of their
-    ///    own too: see [`Self::post_image_outcomes`].
-    /// 5. **The boot report**, once, so the frame exists before the event that implies it.
-    /// 6. **The `BeginFrame` acknowledgement**, for the same reason: a host blocked on the sequence
-    ///    number is blocked on that frame.
-    /// 7. **The module requests** this entry produced, each spawned as a load of its own, and
-    ///    beside them the futures a `.then` asked this realm to settle asynchronously, each spawned
-    ///    as a wait of its own.
-    /// 8. **The next timer deadline**, republished only when it moved.
-    /// 9. **The checkpoint generation**, so the clock task can tell this page's own bumps from a
-    ///    sibling's.
-    fn epilogue(self: &Rc<Self>, runtime: &mut MainThreadRuntime, js: &mut ScriptRuntime) {
-        if self.ended() {
-            return;
-        }
-        #[cfg(test)]
-        self.epilogues.set(self.epilogues.get() + 1);
-        for failure in runtime.run_due_timers(js) {
-            self.outbox.engine_event(EngineEvent::TimerFailed(failure));
-        }
-        runtime.commit_if_dirty();
-        if runtime.has_pending_content_visibility_changes()
-            && !self.content_visibility_posted.replace(true)
-        {
-            self.post_content_visibility_changes();
-        }
-        if runtime.has_image_outcomes() && !self.image_outcomes_posted.replace(true) {
-            self.post_image_outcomes();
-        }
-        if !self.boot_reported.get() {
-            // MTS boot alone: the entry module evaluated and its first flush
-            // committed. The BTS Worker's own state is not part of it.
-            match runtime.main_module_finished() {
-                Ok(false) => {}
-                Ok(true) => {
-                    self.boot_reported.set(true);
-                    self.outbox.engine_event(EngineEvent::ScriptFinished);
-                }
-                Err(error) => {
-                    self.fail(EngineEvent::StartupFailed(error.into_script_error().into()));
-                    return;
-                }
-            }
-        }
+    /// Acknowledges the newest `BeginFrame` applied and not yet acknowledged,
+    /// if there is one: in the epilogue once the frame it implies is
+    /// committed, and at the end, because that frame will then never come.
+    fn acknowledge_begin_frame(&self) {
         if let Some(seq) = self.pending_begin_frame.take() {
             self.outbox.begin_frame_serviced(seq);
         }
-        while let Some(url) = runtime.take_module_request() {
-            // The entry's own request is answered by `load_entry`, a task of
-            // this view since it was served, from the answer
-            // `create_lynx_view` already asked for: completing it is what
-            // resumes the import this request stands for, and it must never
-            // reach the fetcher a second time.
-            if runtime.entry_module_name().is_ok_and(|entry| entry == url) {
-                continue;
-            }
-            let answer = self
-                .outbox
-                .request_source(SourceRequest::Module(url.clone()));
-            self.spawn(load_module(Rc::clone(self), url, answer));
-        }
-        for (id, future) in runtime.take_future_settles() {
-            self.spawn(settle_future(Rc::clone(self), id, future));
-        }
-        // Every path that mounts author CSS — the listed sheets the first
-        // `__FlushElementTree` mounts, `adoptStyleSheet`, and any rules a
-        // card appends — runs inside an entry, so draining here is what
-        // covers them all with one call site rather than one per mount.
-        for request in runtime.take_font_face_requests() {
-            self.spawn(load_font_face(Rc::clone(self), request));
-        }
-        self.lifetime.arm_deadline(runtime.next_timer_deadline());
-        self.lifetime.record_checkpoint(js.checkpoint_generation());
     }
 
     /// Queues the entry that delivers one commit's
@@ -444,7 +285,7 @@ impl Page {
     /// and waits for nothing.
     ///
     /// The spec dispatches the event "by posting a task at the time when the
-    /// state change occurs", and this is that post: [`Self::enter`] queues
+    /// state change occurs", and this is that post: [`owner::enter`] queues
     /// its job at the call rather than at the first poll of the future it
     /// answers with, so dropping that future leaves one fresh entry behind
     /// every job already queued — with an epilogue of its own, so a handler
@@ -455,7 +296,7 @@ impl Page {
     /// **Nothing here enters JavaScript.** The listeners are the engine's own
     /// components, the walk is `dom`'s, and this entry is a job only because
     /// *when* it runs is the whole point. It still goes through
-    /// [`Self::enter`] rather than a bare job, because everything that
+    /// [`owner::enter`] rather than a bare job, because everything that
     /// touches this view's document does: one boundary, one epilogue, one
     /// end latch.
     ///
@@ -467,14 +308,14 @@ impl Page {
     /// again, because nothing is delivered after the end.
     ///
     /// A handler that panics is the view's panic, as a lifecycle callback's
-    /// already is: [`run_job`] catches it, [`Self::trapped`] reports the
+    /// already is: [`run_job`] catches it, [`owner::trapped`] reports the
     /// `Panicked` and the view ends. There is no per-change
     /// `catch_unwind` — a panicking handler leaves the document unspecified,
     /// which is `dom`'s own recorded contract for one, and delivering the
     /// rest of the batch into it would be worse than stopping.
     fn post_content_visibility_changes(self: &Rc<Self>) {
         let page = Rc::clone(self);
-        drop(self.enter(move |runtime, _js| {
+        drop(owner::enter(self, move |runtime, _js| {
             // Cleared before the walk, not after: what a handler's own
             // mutation leaves for this entry's epilogue to commit is a batch
             // of its own, and it owes an entry of its own too.
@@ -516,36 +357,19 @@ impl Page {
     /// of its own.
     fn post_image_outcomes(self: &Rc<Self>) {
         let page = Rc::clone(self);
-        drop(self.enter(move |runtime, js| {
+        drop(owner::enter(self, move |runtime, js| {
             page.image_outcomes_posted.set(false);
             for failure in runtime.dispatch_image_outcomes(js) {
-                page.outbox
-                    .engine_event(EngineEvent::ListenerFailed(failure.into_script_error()));
+                policy::report(&page, Scene::Listener, failure.into_script_error());
             }
         }));
-    }
-
-    /// Reports a panic as the failing view's, and ends the view.
-    ///
-    /// One report per view whichever path saw the panic first — this thread
-    /// catching one inside [`Self::enter`], or the owner reaping a task that
-    /// trapped — and it is not gated by [`Self::fail`]'s latch: a view that
-    /// already reported a startup failure and then traps still says so.
-    fn trapped(&self, payload: &(dyn std::any::Any + Send)) {
-        if self.lifetime.report_panic() {
-            self.outbox.engine_event(EngineEvent::from_panic(panicked(
-                "the Lynx main thread panicked",
-                payload,
-            )));
-        }
-        self.end();
     }
 
     /// Applies one burst of commands: one entry, one commit, one
     /// acknowledgement.
     ///
     /// Total over every state a page can be in. A live page takes the whole
-    /// burst inside one [`Self::enter`]; a page that has ended drops the
+    /// burst inside one [`owner::enter`]; a page that has ended drops the
     /// burst, `BeginFrame` included, because the end has already acknowledged
     /// the pending one. There is no third state a task can observe: the job
     /// that opens the realm is the first of the view, so a burst that arrived
@@ -571,9 +395,9 @@ impl Page {
         #[cfg(test)]
         let commands = self.take_test_seams(commands);
         let page = Rc::clone(self);
-        self.enter(move |runtime, js| {
+        owner::enter(self, move |runtime, js| {
             if page.outbox.is_cancelled() {
-                page.end();
+                owner::end(&page);
                 return;
             }
             for command in commands {
@@ -590,10 +414,13 @@ impl Page {
     ///
     /// A command whose script fails is reported and the burst goes on, boot
     /// finished or not: the failure is the app's, and the realm is still
-    /// there for the next command. A panic is the view's, as anywhere else in
-    /// an entry: [`run_job`] catches it and [`Self::trapped`] reports it.
+    /// there for the next command. What it is reported as is the MTS table's
+    /// row for the kind of command — a page update and a native module's
+    /// answer are host calls, an input event a listener's, a vsync a frame's.
+    /// A panic is the view's, as anywhere else in an entry: [`run_job`]
+    /// catches it and [`owner::trapped`] reports it.
     fn apply_command(
-        &self,
+        self: &Rc<Self>,
         runtime: &mut MainThreadRuntime,
         js: &mut ScriptRuntime,
         command: ToMain,
@@ -602,8 +429,7 @@ impl Page {
             ToMain::PageUpdate(update) => {
                 // All host lifecycle commands passed LynxView's MTS-boot gate.
                 if let Err(error) = runtime.apply_page_update(js, &update) {
-                    self.outbox
-                        .engine_event(EngineEvent::ScriptRunError(error.into_script_error()));
+                    policy::report(self, Scene::HostCall, error.into_script_error());
                 }
             }
             ToMain::DispatchEvent {
@@ -612,14 +438,12 @@ impl Page {
                 payload,
             } => {
                 if let Err(error) = runtime.dispatch_input_event(js, target, name, &payload) {
-                    self.outbox
-                        .engine_event(EngineEvent::ListenerFailed(error.into_script_error()));
+                    policy::report(self, Scene::Listener, error.into_script_error());
                 }
             }
             ToMain::Vsync(milliseconds) => {
                 if let Err(error) = runtime.vsync(js, milliseconds) {
-                    self.outbox
-                        .engine_event(EngineEvent::ScriptRunError(error.into_script_error()));
+                    policy::report(self, Scene::Frame, error.into_script_error());
                 }
             }
             ToMain::BeginFrame { now, seq } => {
@@ -636,8 +460,7 @@ impl Page {
                 if let Err(error) =
                     runtime.deliver_module_callback(js, call, index, arguments.as_deref())
                 {
-                    self.outbox
-                        .engine_event(EngineEvent::ScriptRunError(error.into_script_error()));
+                    policy::report(self, Scene::HostCall, error.into_script_error());
                 }
             }
             ToMain::ImageEvents(events) => runtime.apply_image_events(&events),
@@ -660,7 +483,7 @@ impl Page {
     /// queued behind this one, and finds a document.
     ///
     /// A job like every other entry, and the one that does not go through
-    /// [`Self::enter`], because the realm it would enter does not exist until
+    /// [`owner::enter`], because the realm it would enter does not exist until
     /// it returns. It holds the shared runtime
     /// for the whole stretch, as an entry does — an entry already completed
     /// runs inside it, and may adopt a stylesheet and wait — but takes and
@@ -689,17 +512,15 @@ impl Page {
             match js.as_mut() {
                 // The runtime failed once, for every view that will ever
                 // attach to this group. Each hears the same reason.
-                Err(error) => Some(Err(LynxViewError::Script(error.clone()))),
+                Err(error) => Some(Err(error.clone())),
                 Ok(js) => self.build_realm(js, ingredients, startup),
             }
         };
         match opened {
             // Nobody is listening for this view any more, so there is nobody
             // to report to.
-            None => {
-                self.end();
-            }
-            Some(Err(error)) => self.fail(EngineEvent::StartupFailed(error)),
+            None => owner::end(self),
+            Some(Err(error)) => policy::report(self, Scene::Open, error),
             // The latch can have flipped while the entry was inside a
             // synchronous wait: a task ran during it and ended the view, and
             // the owner may already be past its reap and have taken the worker
@@ -710,19 +531,18 @@ impl Page {
             Some(Ok(_)) if self.ended() => {}
             Some(Ok((worker_events, checkpoints))) => {
                 *self.worker_events.borrow_mut() = Some(worker_events);
-                self.spawn(consume_worker_events(Rc::clone(self)));
-                self.spawn(serve_clock(
-                    Rc::clone(self),
-                    self.lifetime.deadlines(),
-                    checkpoints,
-                ));
+                owner::spawn(self, consume_worker_events(Rc::clone(self)));
+                owner::spawn(
+                    self,
+                    serve_clock(Rc::clone(self), self.lifetime.deadlines(), checkpoints),
+                );
                 // The first epilogue, inline: this is already job context and
                 // the borrows the stretch above held are released, so a boot
                 // that finished synchronously reports in this same stretch
                 // rather than a queue trip later. It is what publishes the
                 // boot's `ScriptFinished` and spawns the module requests its
                 // entry left.
-                let _ = self.enter_now(|_, _| ());
+                let _ = owner::enter_now(self, |_, _| ());
             }
         }
     }
@@ -744,7 +564,7 @@ impl Page {
                 mpsc::UnboundedReceiver<WorkerEvent>,
                 tokio::sync::watch::Receiver<u64>,
             ),
-            LynxViewError,
+            ScriptError,
         >,
     > {
         let (mut runtime, worker_events) = match MainThreadRuntime::new(
@@ -757,7 +577,7 @@ impl Page {
             startup,
         ) {
             Ok(opened) => opened,
-            Err(error) => return Some(Err(error.into_script_error().into())),
+            Err(error) => return Some(Err(error.into_script_error())),
         };
         if self.outbox.is_cancelled() {
             return None;
@@ -766,7 +586,7 @@ impl Page {
             if self.outbox.is_cancelled() {
                 return None;
             }
-            return Some(Err(error.into_script_error().into()));
+            return Some(Err(error.into_script_error()));
         }
         let checkpoints = js.checkpoints();
         self.lifetime.record_checkpoint(js.checkpoint_generation());
@@ -774,43 +594,8 @@ impl Page {
         Some(Ok((worker_events, checkpoints)))
     }
 
-    /// This view's whole tail: wait, end, reclaim, dispose, release the realm.
-    ///
-    /// The wait is the lifetime's — the end, or the next task of the view to
-    /// finish. [`Self::end`] after it is what mirrors a cancellation that came
-    /// from another thread onto this thread's latch, and what acknowledges a
-    /// pending `BeginFrame` so a blocked painter is released. The reap is what
-    /// makes this the last owner of the page: a task holds an `Rc` of it until
-    /// its future is dropped.
-    ///
-    /// What follows is jobs, every one of them awaited. That is what keeps the
-    /// release from landing on a realm that is under a live JavaScript stack:
-    /// a job of this view's that is parked on a synchronous wait is ahead of
-    /// the release in the one FIFO, so the release cannot begin until it has
-    /// returned.
-    async fn run_owner(self: &Rc<Self>) {
-        self.lifetime
-            .serve(&mut |payload| self.trapped(payload.as_ref()))
-            .await;
-        self.end();
-        self.lifetime
-            .reap(&mut |payload| self.trapped(payload.as_ref()))
-            .await;
-        // The view has ended, but its MTS realm remains alive to exchange
-        // disposal messages. No view token cancels its Workers first.
-        let events = self.worker_events.borrow_mut().take();
-        if let Some(mut events) = events
-            && let Err(error) = self.dispose(&mut events).await
-        {
-            self.outbox
-                .engine_event(EngineEvent::ListenerFailed(error.into_script_error()));
-        }
-        // The realm owns the remaining Worker handles. Releasing it drops
-        // their channels naturally; there is no Rust termination sweep.
-        self.after_end(|realm, _| *realm = None).await;
-    }
-
-    /// The JavaScript disposal exchange, as a run of jobs the owner awaits.
+    /// The JavaScript disposal exchange, as a run of [`owner::after_end`] jobs
+    /// the owner awaits.
     ///
     /// Two jobs per event rather than three: the first starts the disposal and
     /// answers whether it has already finished, and each delivery answers the
@@ -823,18 +608,16 @@ impl Page {
         self: &Rc<Self>,
         events: &mut mpsc::UnboundedReceiver<WorkerEvent>,
     ) -> Result<(), super::runtime::MainThreadError> {
-        let Some(started) = self
-            .after_end(|realm, js| {
-                let runtime = realm.as_deref_mut()?;
-                Some(
-                    runtime
-                        .begin_dispose(js)
-                        .and_then(|()| runtime.disposal_finished()),
-                )
-            })
-            .await
-            .flatten()
-        else {
+        let Some(started) = owner::after_end(self, |realm, js| {
+            let runtime = realm.as_deref_mut()?;
+            Some(
+                runtime
+                    .begin_dispose(js)
+                    .and_then(|()| runtime.disposal_finished()),
+            )
+        })
+        .await
+        .flatten() else {
             return Ok(());
         };
         if started? {
@@ -844,49 +627,22 @@ impl Page {
             let Some(WorkerEvent { key, payload }) = events.recv().await else {
                 return Ok(());
             };
-            let Some((delivered, finished)) = self
-                .after_end(move |realm, js| {
-                    let runtime = realm.as_deref_mut()?;
-                    let delivered = runtime.dispatch_worker_event(js, key, payload);
-                    Some((delivered, runtime.disposal_finished()))
-                })
-                .await
-                .flatten()
-            else {
+            let Some((delivered, finished)) = owner::after_end(self, move |realm, js| {
+                let runtime = realm.as_deref_mut()?;
+                let delivered = runtime.dispatch_worker_event(js, key, payload);
+                Some((delivered, runtime.disposal_finished()))
+            })
+            .await
+            .flatten() else {
                 return Ok(());
             };
             if let Err(error) = delivered {
-                self.outbox
-                    .engine_event(EngineEvent::ListenerFailed(error.into_script_error()));
+                self.send(policy::main_thread_disposal().event_for(error.into_script_error()));
             }
             if finished? {
                 return Ok(());
             }
         }
-    }
-
-    /// One job against this view's realm after the view has ended: no latch,
-    /// and no epilogue.
-    ///
-    /// The view is over by the time any of these runs — there is nothing left
-    /// to commit, report or re-arm — so it is the disposal exchange and the
-    /// release that use it, and nothing else. The realm is still in
-    /// [`Self::realm`] throughout, which is what puts the release behind
-    /// whatever job is holding it. On a runtime that was never built, which
-    /// opened no realm, the operation does not run and the answer is `None`,
-    /// as for a job that never ran.
-    fn after_end<T, O>(self: &Rc<Self>, operation: O) -> impl Future<Output = Option<T>> + use<T, O>
-    where
-        T: 'static,
-        O: FnOnce(&mut Option<Box<MainThreadRuntime>>, &mut ScriptRuntime) -> T + 'static,
-    {
-        run_job(self, move |page| {
-            let mut js = page.context.js.borrow_mut();
-            let Ok(js) = js.as_mut() else {
-                return None;
-            };
-            Some(operation(&mut page.realm.borrow_mut(), js))
-        })
     }
 
     /// Takes the one command that is not the realm's out of a burst.
@@ -903,13 +659,31 @@ impl Page {
                 rest.push(command);
                 continue;
             };
-            self.spawn(async { panic!("a task of the view trapped") });
+            owner::spawn(self, async { panic!("a task of the view trapped") });
             let page = Rc::clone(self);
-            self.spawn(async move {
+            owner::spawn(self, async move {
                 let _ = recorder.send(page.ended());
             });
         }
         rest
+    }
+
+    /// [`owner::spawn`], for a test that starts a task of this view's itself.
+    #[cfg(test)]
+    fn spawn(self: &Rc<Self>, future: impl std::future::Future<Output = ()> + 'static) {
+        owner::spawn(self, future);
+    }
+
+    /// [`owner::terminal`], for a test that fails this view itself.
+    #[cfg(test)]
+    fn fail(self: &Rc<Self>, event: EngineEvent) {
+        owner::terminal(self, event);
+    }
+
+    /// [`owner::run_owner`], for a test that runs this view's tail itself.
+    #[cfg(test)]
+    async fn run_owner(self: &Rc<Self>) {
+        owner::run_owner(self).await;
     }
 
     /// How many tasks this view still has, for a test that pins an end
@@ -922,7 +696,7 @@ impl Page {
     /// How many times the epilogue has run.
     #[cfg(test)]
     pub(super) fn epilogue_count(&self) -> u64 {
-        self.epilogues.get()
+        self.lifetime.epilogue_count()
     }
 
     /// Leaves a `BeginFrame` applied and unacknowledged, which is the state a
@@ -940,25 +714,148 @@ impl Page {
     }
 }
 
-/// What this view's clock task, its unwind guard and its jobs reach it
-/// through.
-impl Settles for Page {
+/// What the driver in [`owner`] is told about a view: where its realm, its
+/// runtime and its host are, that its reports are engine events, and what a
+/// page adds to the epilogue, the end and the release — the commit and the
+/// deliveries it posts, the boot report, the `BeginFrame` acknowledgement,
+/// the `@font-face` loads, and the JavaScript disposal before the release.
+impl RealmOwner for Page {
+    type Realm = MainThreadRuntime;
+    type Event = EngineEvent;
+
+    /// A rejection of boot's own module is the engine's code failing, not
+    /// the app's: boot catches what the entry's evaluation throws (see
+    /// [`MainThreadRuntime::run_boot_module`]), so what rejects it is
+    /// `bobcat:runtime`, the document's construction, connecting the BTS, or
+    /// boot's own flush — a listed sheet that could not be loaded included.
+    /// It fails the view's startup.
+    const BOOT_REJECTION: Option<(Scene, Option<&'static str>)> =
+        Some((Scene::Open, Some("booting the MTS entry")));
+
     fn lifetime(&self) -> &Lifetime {
         &self.lifetime
     }
 
-    /// The epilogue alone, for a wake that carries no operation of its own —
-    /// a timer deadline, or a sibling's checkpoint.
-    fn settle(owner: &Rc<Self>) -> impl Future<Output = Option<()>> {
-        owner.enter(|_, _| ())
+    fn runtime(&self) -> &SharedRuntime {
+        &self.context.js
     }
 
-    fn end(owner: &Rc<Self>) {
-        owner.end();
+    fn realm(&self) -> &RefCell<Option<Box<MainThreadRuntime>>> {
+        &self.realm
     }
 
-    fn trapped(owner: &Rc<Self>, payload: &(dyn std::any::Any + Send)) {
-        owner.trapped(payload);
+    fn core(runtime: &mut MainThreadRuntime) -> &mut RealmCore {
+        runtime.core()
+    }
+
+    fn host(&self) -> &HostOutbox {
+        &self.host
+    }
+
+    fn send(&self, event: EngineEvent) {
+        self.outbox.engine_event(event);
+    }
+
+    /// The MTS table: what could not be made ready fails the view's startup
+    /// and ends it, and everything else is the app's failure, reported while
+    /// the view goes on.
+    fn row(scene: Scene) -> Row<EngineEvent> {
+        policy::main_thread(scene)
+    }
+
+    fn panic_row() -> Row<EngineEvent> {
+        policy::main_thread_panic()
+    }
+
+    /// The realm's own due timers, and the collection the removals they made
+    /// may have made due. A zero-delay timer armed during boot therefore
+    /// fires inside boot's own epilogue and adds no commit of its own.
+    fn run_due_timers(runtime: &mut MainThreadRuntime, js: &mut ScriptRuntime) -> Vec<ScriptError> {
+        runtime.run_due_timers(js)
+    }
+
+    /// The commit, which is what publishes the frame and the image sources
+    /// the walk discovered — skipped while any listed author sheet is
+    /// outstanding, because the first `__FlushElementTree` is what waits for
+    /// them and a commit without them would publish an unstyled frame. Then
+    /// the `contentvisibilityautostatechange` deliveries that commit decided
+    /// and the `<image>` `load`s and `error`s this entry settled, each posted
+    /// as an entry of its own and never run here: see
+    /// [`Page::post_content_visibility_changes`] and
+    /// [`Page::post_image_outcomes`].
+    fn after_timers(page: &Rc<Self>, runtime: &mut MainThreadRuntime) {
+        runtime.commit_if_dirty();
+        if runtime.has_pending_content_visibility_changes()
+            && !page.content_visibility_posted.replace(true)
+        {
+            page.post_content_visibility_changes();
+        }
+        if runtime.has_image_outcomes() && !page.image_outcomes_posted.replace(true) {
+            page.post_image_outcomes();
+        }
+    }
+
+    fn booted(&self) -> bool {
+        self.boot_reported.get()
+    }
+
+    fn mark_booted(&self) {
+        self.boot_reported.set(true);
+    }
+
+    /// MTS boot alone: the entry module evaluated and boot's first flush
+    /// committed. The BTS Worker's own state is not part of it.
+    fn on_booted(&self) {
+        self.outbox.engine_event(EngineEvent::ScriptFinished);
+    }
+
+    /// The `BeginFrame` acknowledgement, after the commit and the boot
+    /// report: a host blocked on the sequence number is blocked on the frame
+    /// it implies.
+    fn after_boot(&self) {
+        self.acknowledge_begin_frame();
+    }
+
+    /// The entry's own request is answered by [`load_entry`], a task of this
+    /// view since it was served, from the answer `create_lynx_view` already
+    /// asked for.
+    fn entry_name(&self, runtime: &MainThreadRuntime) -> Option<String> {
+        runtime.entry_module_name().ok()
+    }
+
+    /// One `@font-face` load per rule this entry's sheets declared. Every
+    /// path that mounts author CSS — the listed sheets the first
+    /// `__FlushElementTree` mounts, `adoptStyleSheet`, and any rules a card
+    /// appends — runs inside an entry, so draining here is what covers them
+    /// all with one call site rather than one per mount.
+    fn after_settles(page: &Rc<Self>, runtime: &mut MainThreadRuntime) {
+        for request in runtime.take_font_face_requests() {
+            owner::spawn(page, load_font_face(Rc::clone(page), request));
+        }
+    }
+
+    /// A painter blocked in `wait_begin_frame` is released rather than timed
+    /// out: the frame it was waiting for will never come. The deadline the
+    /// realm had armed is withdrawn by the lifetime's own end.
+    fn on_end(&self) {
+        self.acknowledge_begin_frame();
+    }
+
+    /// The JavaScript disposal: the view has ended, but its MTS realm remains
+    /// alive to exchange disposal messages with the BTS over the worker inbox,
+    /// which is taken only now that its ordinary consumer has been reaped. No
+    /// view token cancels its Workers first.
+    ///
+    /// The release that follows drops the realm, and with it the remaining
+    /// Worker handles, whose channels close with them: there is no Rust
+    /// termination sweep.
+    async fn before_release(page: &Rc<Self>) {
+        let events = page.worker_events.borrow_mut().take();
+        if let Some(mut events) = events
+            && let Err(error) = page.dispose(&mut events).await
+        {
+            page.send(policy::main_thread_disposal().event_for(error.into_script_error()));
+        }
     }
 }
 
@@ -1039,10 +936,10 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
     // rest of its startup: boot's first flush waits for each, in listed
     // order, and they need no task of their own because the fetcher answers
     // them without one.
-    page.spawn(load_entry(Rc::clone(&page), entry));
-    page.spawn(consume_commands(Rc::clone(&page), commands));
-    page.spawn(consume_metrics(Rc::clone(&page), metrics));
-    page.run_owner().await;
+    owner::spawn(&page, load_entry(Rc::clone(&page), entry));
+    owner::spawn(&page, consume_commands(Rc::clone(&page), commands));
+    owner::spawn(&page, consume_metrics(Rc::clone(&page), metrics));
+    owner::run_owner(&page).await;
 }
 
 /// The one ordered consumer of this view's command stream.
@@ -1078,7 +975,7 @@ async fn consume_commands(page: Rc<Page>, mut commands: mpsc::UnboundedReceiver<
         // boundary is not a synchronous stretch another thread could flip it
         // in the middle of.
         if page.outbox.is_cancelled() {
-            page.end();
+            owner::end(&page);
             return;
         }
         let queued = commands.len();
@@ -1093,7 +990,7 @@ async fn consume_commands(page: Rc<Page>, mut commands: mpsc::UnboundedReceiver<
     }
     // The embedder released this view. Everything it owns goes with the
     // tasks the owner is about to reclaim.
-    page.end();
+    owner::end(&page);
 }
 
 /// The one consumer of this view's metrics watch: one settle per change.
@@ -1108,7 +1005,7 @@ async fn consume_commands(page: Rc<Page>, mut commands: mpsc::UnboundedReceiver<
 /// one receiver alone: the document's clone and this one are independent
 /// readers of the same state.
 ///
-/// While the page is still loading [`Page::enter`] answers `None` at once and
+/// While the page is still loading [`owner::enter`] answers `None` at once and
 /// nothing happens, which is right — a document that does not exist yet reads
 /// the watch when it is created.
 async fn consume_metrics(page: Rc<Page>, mut metrics: watch::Receiver<Option<Viewport>>) {
@@ -1128,7 +1025,7 @@ async fn consume_metrics(page: Rc<Page>, mut metrics: watch::Receiver<Option<Vie
 /// The view's MTS entry: the answer to the request `create_lynx_view` made,
 /// completed into the realm as the module boot imports by the entry's URL.
 ///
-/// A task like [`load_module`], and for the same reason: the answer may take
+/// A task like [`owner::load_module`], and for the same reason: the answer may take
 /// as long as the fetcher likes, and waiting for it on a task parks nothing —
 /// no job of this view's, no job of a sibling's. Its entry into the realm is
 /// queued behind `open_realm`, the view's first job, so the realm it completes
@@ -1136,11 +1033,12 @@ async fn consume_metrics(page: Rc<Page>, mut metrics: watch::Receiver<Option<Vie
 /// made already, in which case this is what resumes it, or not yet, in which
 /// case the import finds the module in the registry.
 ///
-/// The entry is read here, before any of it runs, so an entry that cannot be
-/// loaded fails the boot: a load the fetcher could not make is reported as
-/// the fetcher's own error, and an answer that is not a script, or a script
-/// whose response URL is not an absolute URL, as a `Script` error naming the
-/// URL, each as `StartupFailed`. The module is not completed
+/// The entry is read here, before any of it runs, by
+/// [`owner::module_answer`] as every import's answer is, so an entry that
+/// cannot be loaded fails the boot: a load the fetcher could not make is
+/// reported as the fetcher's own error, and an answer that is not a script,
+/// or a script whose response URL is not an absolute URL, as a `Script` error
+/// naming the URL, each as `StartupFailed`. The module is not completed
 /// then — the view has ended, and boot's `import` of it is released with the
 /// realm. The entry's *evaluation* is the app's code: boot catches what it
 /// throws, so a failure there, or in a module it imports, is reported as
@@ -1161,94 +1059,44 @@ async fn consume_metrics(page: Rc<Page>, mut metrics: watch::Receiver<Option<Vie
 /// view nobody is watching rather than a failure of it, and is not reported.
 async fn load_entry(page: Rc<Page>, entry: StartupSource) {
     let StartupSource { url, answer } = entry;
-    let answered = await_source(answer)
-        .await
-        .and_then(|source| entry_script(&url, source));
+    let answered = owner::await_source(answer).await.and_then(|answer| {
+        owner::module_answer(&url, answer)
+            .and_then(|(response, source)| Ok((absolute_response(&url, response)?, source)))
+            .map_err(|reason| LynxViewError::Script(platform_script_error(reason)))
+    });
     let completing = Rc::clone(&page);
-    page.enter(move |runtime, js| {
+    owner::enter(&page, move |runtime, js| {
         let completed = answered
             .and_then(|(response_url, source)| runtime.complete_entry(js, &response_url, &source));
         match completed {
             Ok(Ok(())) => {}
-            _ if completing.outbox.is_cancelled() => {
-                completing.end();
-            }
-            Ok(Err(error)) => completing
-                .outbox
-                .engine_event(EngineEvent::ScriptRunError(error.into_script_error())),
-            Err(error) => completing.fail(EngineEvent::StartupFailed(error)),
+            _ if completing.outbox.is_cancelled() => owner::end(&completing),
+            Ok(Err(error)) => policy::report(&completing, Scene::Boot, error.into_script_error()),
+            // The Open row's event, sent without the row: a load the fetcher
+            // could not make, an answer that is not a script or is from a URL
+            // that is not absolute, and naming the entry are each already a
+            // `LynxViewError` — the first the fetcher's own — which
+            // `StartupFailed` carries as it is.
+            Err(error) => owner::terminal(&completing, EngineEvent::StartupFailed(error)),
         }
     })
     .await;
 }
 
-/// The script an answer to the entry request carries — its response URL and
-/// its source — or, for an answer of another kind, the startup failure that
-/// is: a `Script` error naming `url`, the URL the entry was requested by.
+/// The entry's response URL, which must be an absolute URL, or why it is
+/// not, naming `url`, the URL the entry was requested by, and the response
+/// URL.
 ///
-/// A response URL that is not an absolute URL is a failure of the same kind.
 /// It becomes `__Card__`, the base every `new Worker` URL is joined to by URL
 /// rules, and a join to a base that does not parse fails for every
 /// specifier, boot's own `bobcat:bts` included.
-fn entry_script(url: &str, answer: LoadedSource) -> Result<(String, String), LynxViewError> {
-    let kind = match answer {
-        LoadedSource::Module {
-            source,
-            url: response,
-        } => {
-            return match url::Url::parse(&response) {
-                Ok(_) => Ok((response, source)),
-                Err(_) => Err(LynxViewError::Script(platform_script_error(format!(
-                    "the fetcher answered {url} from {response:?}, which is not an absolute URL"
-                )))),
-            };
-        }
-        LoadedSource::StyleSheet(_) => "stylesheet",
-        LoadedSource::Font(_) => "font",
-        LoadedSource::Fetched => "plain fetch",
-    };
-    Err(LynxViewError::Script(platform_script_error(format!(
-        "the fetcher returned a {kind} for {url}"
-    ))))
-}
-
-/// One resource load an import produced.
-///
-/// The load's outcome is the module's: a load that failed completes the
-/// module with an error, which rejects the import in the realm, where the
-/// code that made it can catch it. What the completion itself returns — the
-/// realm refusing it, or a rejection the code it resumed left unhandled — is
-/// reported as `ScriptRunError`, whether boot has finished or not, and the
-/// view goes on: the import is the app's, and so is whatever awaited it.
-async fn load_module(page: Rc<Page>, url: String, answer: SourceAnswer) {
-    let source = await_source(answer).await;
-    let completing = Rc::clone(&page);
-    page.enter(move |runtime, js| {
-        if let Err(error) = runtime.complete_module(js, &url, source) {
-            completing
-                .outbox
-                .engine_event(EngineEvent::ScriptRunError(error.into_script_error()));
-        }
-    })
-    .await;
-}
-
-/// One future a `.then` asked this realm to settle.
-///
-/// Its shape is [`load_module`]'s, and so is what a failure costs: the realm
-/// refusing the settle, or the code it resumed failing, is reported as
-/// `ScriptRunError`, whether boot has finished or not, and the view goes on.
-async fn settle_future(page: Rc<Page>, id: u32, future: crate::future::HostFuture) {
-    let outcome = future.await;
-    let settling = Rc::clone(&page);
-    page.enter(move |runtime, js| {
-        if let Err(error) = runtime.deliver_future(js, id, outcome) {
-            settling
-                .outbox
-                .engine_event(EngineEvent::ScriptRunError(error.into_script_error()));
-        }
-    })
-    .await;
+fn absolute_response(url: &str, response: String) -> Result<String, String> {
+    match url::Url::parse(&response) {
+        Ok(_) => Ok(response),
+        Err(_) => Err(format!(
+            "the fetcher answered {url} from {response:?}, which is not an absolute URL"
+        )),
+    }
 }
 
 /// One `@font-face` rule's sources, tried in author order until one loads.
@@ -1288,8 +1136,10 @@ async fn load_font_face(page: Rc<Page>, request: dom::FontFaceRequest) {
     };
     // The entry's own epilogue commits: registering a face invalidates the
     // layout of every run that names it.
-    page.enter(move |runtime, _| runtime.register_font_face(&family, blob))
-        .await;
+    owner::enter(&page, move |runtime, _| {
+        runtime.register_font_face(&family, blob);
+    })
+    .await;
 }
 
 /// The one ordered consumer of everything this view's workers say.
@@ -1320,24 +1170,13 @@ async fn consume_worker_events(page: Rc<Page>) {
         // throw where it threw, or boot's own failure, which the epilogue goes
         // on to report as StartupFailed too.
         let delivering = Rc::clone(&page);
-        page.enter(move |runtime, js| {
+        owner::enter(&page, move |runtime, js| {
             if let Err(error) = runtime.dispatch_worker_event(js, key, payload) {
-                delivering
-                    .outbox
-                    .engine_event(EngineEvent::ListenerFailed(error.into_script_error()));
+                policy::report(&delivering, Scene::Listener, error.into_script_error());
             }
         })
         .await;
     }
-}
-
-/// Waits for one source the host was already asked for. A fetcher that
-/// dropped the request without answering is a failed load, not a wait
-/// forever.
-async fn await_source(answer: SourceAnswer) -> Result<LoadedSource, LynxViewError> {
-    answer
-        .await
-        .unwrap_or_else(|_| Err(unanswered_source().into()))
 }
 
 /// Asks the host for one source and waits for it. A fetcher that dropped the
@@ -1346,7 +1185,7 @@ async fn request_source(
     outbox: &ViewOutbox,
     request: SourceRequest,
 ) -> Result<LoadedSource, LynxViewError> {
-    await_source(outbox.request_source(request)).await
+    owner::await_source(outbox.request_source(request)).await
 }
 
 #[cfg(test)]

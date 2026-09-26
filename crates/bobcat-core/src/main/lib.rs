@@ -57,10 +57,11 @@ use crate::background::WorkerCommand;
 use crate::esm::build_runtime;
 use crate::jobs::{JsThread, JsThreadHandle};
 use crate::link::{ToMain, ViewOutbox};
-use crate::threads::{self, ThreadJoin};
+use crate::realm::policy;
+use crate::threads::ThreadJoin;
 use crate::view::{
-    EngineError, EngineEvent, EventRequester, GroupCommand, StartupSources, StyleThreads,
-    ViewAttachment, ViewSources, Viewport,
+    EngineError, EventRequester, GroupCommand, StartupSources, StyleThreads, ViewAttachment,
+    ViewSources, Viewport,
 };
 
 /// The main thread's end of its group's link.
@@ -160,7 +161,7 @@ fn run_group(style_threads: StyleThreads, link: GroupLink) {
         workers_trapped,
     } = link;
     #[cfg(all(target_arch = "wasm32", panic = "abort"))]
-    threads::install_script_panic_hook();
+    crate::threads::install_script_panic_hook();
 
     // Both the runtime and the pool are the group's, not any view's. A group
     // opens one realm per view on that runtime, which is why the modules its
@@ -235,11 +236,11 @@ async fn group_task(context: Rc<GroupContext>, mut attach: mpsc::UnboundedReceiv
                         base_url,
                     );
                     #[cfg(all(target_arch = "wasm32", panic = "abort"))]
-                    threads::add_script_panic_reporter({
+                    crate::threads::add_script_panic_reporter({
                         let outbox = outbox.clone();
                         Box::new(move |detail| {
-                            outbox.engine_event(EngineEvent::from_panic(
-                                threads::platform_script_error(format!(
+                            outbox.engine_event((policy::main_thread_panic().event)(
+                                crate::threads::platform_script_error(format!(
                                     "the Lynx main thread {detail}"
                                 )),
                             ));
@@ -289,10 +290,8 @@ fn finish_view(
         },
     };
     if let Some((outbox, error)) = trapped {
-        outbox.engine_event(EngineEvent::from_panic(threads::panicked(
-            "the Lynx main thread panicked",
-            error.into_panic().as_ref(),
-        )));
+        outbox
+            .engine_event(policy::main_thread_panic().event_for_panic(error.into_panic().as_ref()));
     }
     mark_checkpoint_later(&context.js, &context.thread);
 }

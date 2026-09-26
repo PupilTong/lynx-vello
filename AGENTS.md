@@ -213,25 +213,28 @@ migration and parser resource bounds.
 ### crates/bobcat-core
 
 The unified native runtime core. Source layout follows the ownership
-boundaries. `main/` is everything on the Lynx main thread: `page.rs`'s one
-realm entry point, `quickjs.rs`'s script engine, `runtime/` for realm
-integration, `workers.rs` for the `Worker` class, `tree/` for Lynx page policy.
+boundaries. `main/` is everything on the Lynx main thread: `page.rs`'s view
+page and what it adds to the realm driver, `quickjs.rs`'s script engine,
+`runtime/` for realm integration, `workers.rs` for the `Worker` class, `tree/`
+for Lynx page policy.
 `background/` is the `bobcat-workers` thread and its worker realms. `view/` is
 the public view facade, `paint/` the `Painter` with its `gesture.rs` input
 router, `motion.rs` scroll kinematics (lynx-ui's rubber band, fling decay
 and bounce back) with `inertia.rs` running them over the scroll intents,
 `images.rs` image protocol and `graphics.rs` GPU target. `link.rs` is
 the one channel set a view spans its two threads with, `jobs.rs` the engine
-thread itself — its scheduler and its job queue — `lifetime.rs` the view's
-task set, `realm.rs` the one constructor every realm is opened with
-(`open_realm`, which installs the `RealmCore` members and then the host
-modules its caller passes), `timers.rs` and `clock.rs`/`alarm.rs` the timer
-machinery both realm kinds share, `future.rs` the per-realm table the `Future`
-class is written over, `fetch.rs` the one member a realm fetches a URL
-through, `esm.rs` the built-in module table both runtimes register
-(`BUILTIN_MODULES`), `build_runtime` that registers it, and the engine's
-module names and reserved prefixes, `script.rs` the
-sanitized error a failure is reported with, `style.rs` the
+thread itself — its scheduler and its job queue — `lifetime.rs` the task set,
+token and latches a view and a worker are both built from, `realm/` the one
+constructor every realm is opened with (`mod.rs`'s `open_realm`, which
+installs the `RealmCore` members and then the host modules its caller
+passes), the one driver a view's page and a worker share (`owner.rs`) and the
+table per realm kind their failures are reported by (`policy.rs`), `timers.rs`
+and `clock.rs`/`alarm.rs` the timer machinery both realm kinds share,
+`future.rs` the per-realm table the `Future` class is written over, `fetch.rs`
+the one member a realm fetches a URL through, `esm.rs` the built-in module
+table both runtimes register (`BUILTIN_MODULES`), `build_runtime` that
+registers it, and the engine's module names and reserved prefixes, `script.rs`
+the sanitized error a failure is reported with, `style.rs` the
 `PreparsedStyleSheet` vocabulary, `resource.rs` the host protocol, and
 `threads.rs` the two engine threads.
 
@@ -277,29 +280,38 @@ waiting one returns, so an entry may hold the shared runtime and its realm
 across its own wait.
 
 Each asynchronous wait is a task of its own. A view's tasks are its owner
-(`serve_view`, whose one wait is the view's end), one task per listed author
-stylesheet and one for the entry, each entering the realm when its answer
-arrives, one ordered consumer of the command channel, one ordered consumer of its workers' events,
-one future per resource load an import produced, and one clock task
+(`serve_view`, whose one wait is the view's end), one task for the entry,
+entering the realm when its answer arrives (the listed author stylesheets have
+none: boot's first `__FlushElementTree` waits for them), one ordered consumer
+of the command channel, one of the painter's metrics, one ordered consumer of
+its workers' events, one future per resource load an import produced, per
+`Future` a `.then` asked to settle and per `@font-face` rule, and one clock task
 (`lifetime.rs`'s `serve_clock`) waiting on its realm's next timer deadline and
 on the runtime-wide checkpoint generation; a `Worker` realm on `bobcat-workers`
 has the same shape minus the document. Nothing is spawned per input: one
 consumer reads each ordered stream with `while let Some(x) = rx.recv().await`.
-Every task reaches the realm through one boundary, `main/page.rs`'s
-`Page::enter`, which queues a job that runs one synchronous operation under the
-borrows of the shared runtime and the realm and then that operation's epilogue,
-in this order: the timers that came due, the commit, the boot report once, the
-`BeginFrame` acknowledgement, the module requests entry produced, the next timer
-deadline, and the checkpoint generation as of this entry. `Page::settle` is the
-epilogue alone, for a wake carrying no operation. **Nothing of a view is
-served outside a job**: opening its realm is the view's first job, queued
-before any of its tasks is spawned, so a burst that arrived before the realm
-did is a job queued behind it and finds a document — and a `BeginFrame` is
-acknowledged by a job like everything else, so while any job of the group is
-parked the acknowledgement waits with it. A `bobcat-workers` consumer never awaits the deliveries it
-queued, because `Terminate` is in band behind them: it queues one job per
-message and ends the worker the moment it reads one, which is what releases a
-job parked on a synchronous wait and discards the posts queued ahead of it.
+Every task reaches the realm through one boundary, the realm driver's `enter`
+(`realm/owner.rs`), which a view's page and every worker share: it queues a job
+that runs one synchronous operation under the borrows of the shared runtime and
+the realm and then that operation's epilogue. The epilogue is one function;
+what only one role has is a hook of that owner's `RealmOwner` impl at a fixed
+step. For a page the order is: the timers that came due, the commit (and the
+content-visibility and `<image>` deliveries it posts as entries of their own),
+the boot report once, the `BeginFrame` acknowledgement, the module requests the
+operation left, the future settles, the `@font-face` loads, the next timer
+deadline, and the checkpoint generation as of this entry. `Settles::settle` is
+the epilogue alone, for a wake carrying no operation. What a failure is
+reported as, and whether it ends the view or the worker, is the realm kind's
+table in `realm/policy.rs`, read by the scene the failure happened in.
+**Nothing of a view is served outside a job**: opening its realm is the view's
+first job, queued before any of its tasks is spawned, so a burst that arrived
+before the realm did is a job queued behind it and finds a document — and a
+`BeginFrame` is acknowledged by a job like everything else, so while any job
+of the group is parked the acknowledgement waits with it. A `bobcat-workers`
+consumer never awaits the deliveries it queued, because `Terminate` is in band
+behind them: it queues one job per message and ends the worker the moment it
+reads one, which is what releases a job parked on a synchronous wait and
+discards the posts queued ahead of it.
 
 A view owns its channels end to end, all `tokio::sync` and none addressed.
 Three cross that link: a `ToMain` mpsc carrying commands in; a `ViewNotice`
@@ -1006,17 +1018,18 @@ script still holds that worker's key: never after `terminate()`, and never for
 `close()`. `EngineEvent::is_fatal` names the events that end the view
 (`StartupFailed` and `Panicked`); `LynxView::pump` ends a view on exactly
 those, and an embedder asks it rather than matching variants. Every panic is
-reported through one constructor, `EngineEvent::from_panic`, from
-`Page::trapped` (a job or a task of the view, an input dispatch included),
-`finish_view` (the group thread reaping the view's task) and the Wasm panic
-hook. A host member that panics is among them: `ScriptEngine` catches the
-panic before the bridge would turn it into the exception "the host function
-panicked", shows the script that exception, and resumes the panic at the
-realm's next checkpoint, normally the one that ends the entry that called the
-member, so catching the exception does not stop it and the view ends as it
-does on Wasm. A worker's host member that panics ends that worker the same
-way (`WorkerEnded`). A frame the engine wants drawn rides the same wakeup, and
-the `Painter::pump` answering it draws it.
+reported through one constructor, `EngineEvent::from_panic`, which the MTS
+table's Panic row in `realm/policy.rs` names, from the driver's `trapped` (a
+job or a task of the view, an input dispatch included), `finish_view` (the
+group thread reaping the view's task) and the Wasm panic hook. A host member
+that panics is among them: `ScriptEngine` catches the panic before the bridge
+would turn it into the exception "the host function panicked", shows the
+script that exception, and resumes the panic at the realm's next checkpoint,
+normally the one that ends the entry that called the member, so catching the
+exception does not stop it and the view ends as it does on Wasm. A worker's
+host member that panics ends that worker the same way (`WorkerEnded`). A frame
+the engine wants drawn rides the same wakeup, and the `Painter::pump`
+answering it draws it.
 
 **A host takes two turns per wakeup, and they are different calls.**
 `LynxView::pump` alone advances the resource protocol past the startup sources
@@ -1314,8 +1327,8 @@ that is ever updated — `LynxView::update_data`, `update_global_props` and
 `reload` reach the realm through `ToMain::PageUpdate` and never touch it.
 
 Every realm, MTS or worker, is opened by the one constructor
-`realm::open_realm` (`crates/bobcat-core/src/realm.rs`). It creates the realm,
-enables module loading and installs the core every realm has under
+`realm::open_realm` (`crates/bobcat-core/src/realm/mod.rs`). It creates the
+realm, enables module loading and installs the core every realm has under
 `bobcat-internal:host`: `requestScriptFrame`, `setTimer`/`clearTimer`,
 `waitFuture`/`takeFuture`/`settleFuture`, `fetchResource`,
 `resolveModuleUrl`/`loadModuleSync`, and the diagnostics pair

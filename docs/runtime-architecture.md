@@ -44,6 +44,12 @@ crates/bobcat-core/src/
                        the outbox the main side publishes on
   lifetime.rs          what a view and a worker are made of alike: their tasks,
                        the token that ends them, and the owner's wait
+  realm/mod.rs         open_realm, the one constructor every realm is opened
+                       with, and the core every realm gets from it
+  realm/owner.rs       the one driver a view's page and a worker share: the
+                       entry boundary, the epilogue, module loads, future
+                       settles, the end and the release
+  realm/policy.rs      what a failure is reported as: one table per realm kind
   clock.rs             the one clock realm timers are armed against, and
                        `sleep_until`, which picks a waiter by target
   alarm.rs             wasm32 only: the bobcat-alarm thread that serves those
@@ -55,9 +61,9 @@ crates/bobcat-core/src/
   paint/graphics.rs    window GPU state
   main/lib.rs          bobcat-main: the thread, the group task, and the style
                        pool and script runtime a group shares
-  main/page.rs         one view's page: its tasks — boot, commands, module
-                       loads, worker events, timers, checkpoints — and the one
-                       boundary they enter JavaScript through
+  main/page.rs         one view's page: its tasks — the entry, commands,
+                       metrics, worker events, fonts, timers, checkpoints —
+                       and what a page adds to the realm driver
   main/quickjs.rs      owner-thread-bound QuickJS adapter
   main/runtime/lib.rs  realm/DOM integration, the document slot, the one member
                        that creates it and the tree members that drive it
@@ -600,35 +606,52 @@ A view is a set of tasks on that `LocalSet`, one per thing it can wait for, and
 tokio owns the polling, parking and waking. `serve_view` is the owner and has
 exactly one wait of its own — the view's end; it queues the realm-opening job
 before it spawns anything and waits for none of the view's sources;
-`consume_commands` is the
-one ordered consumer of the command channel; `consume_worker_events` is the one
-ordered consumer of this view's workers; one `load_module` future runs per
-resource load an import produced; `serve_clock` owns the realm's one pinned
-sleep and watches the runtime-wide checkpoint generation.
-Nothing is spawned per input: an ordered stream stays serial because one
-consumer reads it with `while let Some(x) = rx.recv().await`.
+`load_entry` completes the entry when its answer arrives; `consume_commands` is
+the one ordered consumer of the command channel; `consume_metrics` settles the
+page once per change of the painter's metrics; `consume_worker_events` is the
+one ordered consumer of this view's workers; the epilogue spawns one
+`load_module` per resource load an import produced, one `settle_future` per
+`Future` a `.then` asked the realm to settle, and one `load_font_face` per
+`@font-face` rule a mounted sheet declared; `serve_clock` owns the realm's one
+pinned sleep and watches the runtime-wide checkpoint generation. Nothing is
+spawned per input: an ordered stream stays serial because one consumer reads it
+with `while let Some(x) = rx.recv().await`.
 
-Every one of them reaches the realm through `Page::enter`, the one JavaScript
-execution boundary. It queues a job and answers with what that job returned. The
-job runs one synchronous operation under the borrows of the shared runtime and
-the realm, and then the epilogue, in this order — due timers first, because
-whatever just ran may have armed or cleared one and its mutation should ride the
-same frame; the commit next, so the frame exists before anything implying it;
-then the two batches of engine-decided events that commit may have left owing —
-`contentvisibilityautostatechange` and an `<image>`'s `load`/`error`, each
-posted as one fresh entry rather than run here, so a handler's own mutation
-gets a commit of its own — the boot report, the `BeginFrame` acknowledgement,
-the module requests that entry produced, the next timer deadline republished
-only when it moved, and finally the checkpoint generation as of this entry. `Page::settle` is the
-epilogue alone, for a wake that carries no operation of its own.
-`Page::open_realm` is a job too and the only one outside `enter`, because the
-realm it would enter does not exist until it returns; the disposal exchange in
-`Page::run_owner` is the other, running past the latch and the epilogue because
-the view has already ended. A command opens a burst: the rest of what is already
-queued goes with it, bounded by the length the count was taken from, so a host's
-whole round of input is one entry, one commit and one acknowledgement rather
-than one of each per command. The consumer awaits that burst's job before
-reading the channel again, so what arrives meanwhile is one later burst.
+Every one of them reaches the realm through `enter` in `realm/owner.rs`, the
+one JavaScript execution boundary, which a view's page shares with every worker
+(see [Realm construction and driving](#realm-construction-and-driving)). It
+queues a job and answers with what that job returned. The job runs one
+synchronous operation under the borrows of the shared runtime and the realm,
+and then the epilogue. The epilogue is one function for both kinds of owner:
+the steps both have are written in it once, and what only a page has is a hook
+of the page's `RealmOwner` impl, run at a fixed place among them. For a page
+the order is — due timers first, because whatever just ran may have armed or
+cleared one and its mutation should ride the same frame (the page's hook also
+ends the batch those callbacks ran, which runs the collection their removals
+may have made due); the commit next, so the frame exists before anything
+implying it; then the two batches of engine-decided events that commit may have
+left owing — `contentvisibilityautostatechange` and an `<image>`'s
+`load`/`error`, each posted as one fresh entry rather than run here, so a
+handler's own mutation gets a commit of its own — the boot report, the
+`BeginFrame` acknowledgement, the module requests the operation left other than
+the MTS entry's own, the futures it asked to settle, the `@font-face` loads its
+sheets declared, the next timer deadline republished only when it moved, and
+finally the checkpoint generation as of this entry. The commit and the two
+posts are the page's `after_timers` hook, `ScriptFinished` its `on_booted`, the
+acknowledgement its `after_boot` and the font loads its `after_settles`.
+`Settles::settle` is the epilogue alone, for a wake that carries no operation
+of its own; `Settles` is one blanket impl over every `RealmOwner`.
+`Page::open_realm` is a job too, and the one before the realm exists that does
+not go through `enter`, because the realm it would enter does not exist until
+it returns; it runs the first epilogue itself once it has stored the realm.
+After the end, the disposal exchange the page runs as its `before_release`
+hook and the release of the realm are `after_end` jobs, which run past the
+latch and the epilogue because the view has already ended. A command opens a
+burst: the rest of what is already queued goes with it, bounded by the length
+the count was taken from, so a host's whole round of input is one entry, one
+commit and one acknowledgement rather than one of each per command. The
+consumer awaits that burst's job before reading the channel again, so what
+arrives meanwhile is one later burst.
 
 **Nothing of a view is served outside a job.** Opening the realm is that
 view's first job, queued before its own tasks exist, so a burst that arrived
@@ -655,19 +678,27 @@ drain the queue itself.
 An end is one signal rather than a message anything has to race. A view and a
 worker are both built from `lifetime.rs`'s `Lifetime`: the `JoinSet` holding
 that object's tasks, the `CancellationToken` that ends them, a thread-local
-latch, and the deadline and checkpoint generation that object's one
-`serve_clock` task reads. `Page::end` — the command channel closing, a cancelled
-load, a startup failure, a panic in any task — sets the latch synchronously,
-cancels the token, withdraws the armed deadline, and acknowledges whatever
-`BeginFrame` was pending so a blocked painter is released. Every entry point
-returns at once when the latch is set; the owner, whose one wait is the token
-versus the next task to finish, then mirrors a cancellation that came from
-another thread onto that latch, aborts and awaits every task of the view — which
-is what makes it the last owner of the page — and drops the realm. Why a view
-ended is recorded nowhere: what the embedder was told is whatever was reported
-before the end, and a release is the token having been cancelled from outside. A
-panic is the one end that still owes a report, `Panicked`, and the payload rides
-the `JoinError` the set yields.
+latch, two report latches, and the deadline and checkpoint generation that
+object's one `serve_clock` task reads. The driver's `end` — the command channel
+closing, a cancelled load, a startup failure, a panic in any task — sets the
+latch synchronously, cancels the token and withdraws the armed deadline, and
+the call that did so then runs the owner's `on_end` hook: a page's
+acknowledges whatever `BeginFrame` was pending, so a painter blocked on it is
+released rather than left waiting for a frame that will never come. That holds
+for every way a view ends, a `StartupFailed` or a `Panicked` as much as a
+release. Every entry point returns at once when the latch is set; the owner
+(`run_owner` in `realm/owner.rs`), whose one wait is the token versus the next
+task to finish, then mirrors a cancellation that came from another thread onto
+that latch, aborts and awaits every task of the view — which is what makes it
+the last owner of the page — runs the page's JavaScript disposal, and drops the
+realm in a job of its own. Why a view ended is recorded nowhere: what the
+embedder was told is whatever was reported before the end, and a release is the
+token having been cancelled from outside. A report that ends the object — a
+view's `StartupFailed`, a worker's `Failed` or `Closed` — goes through the
+driver's `terminal` and the lifetime's terminal latch, so the first is the only
+one sent. A panic is the one end that owes a report whatever was reported
+before it, `Panicked`, through a panic latch of its own that the terminal latch
+does not gate, and the payload rides the `JoinError` the set yields.
 
 ## Public and private boundaries
 
@@ -749,6 +780,278 @@ an MTS realm and, for a worker realm, the one its `WorkerStart` carries:
 both runtimes register
 every built-in module, these host modules are also what decides which
 built-ins a realm can link.
+
+### Realm construction and driving
+
+There are two kinds of realm: a view's MTS realm on `bobcat-main`, and one
+worker realm per `new Worker` on `bobcat-workers`. The BTS is a worker realm:
+boot creates it as `new Worker("bobcat:bts")`, and the URL `bobcat:bts` is all
+that sets it apart from any other worker (see
+[Workers, modules and the boot module](#workers-modules-and-the-boot-module)).
+Both kinds are opened by `realm::open_realm` (`realm/mod.rs`), driven by the
+one driver in `realm/owner.rs`, and report their failures through the tables
+in `realm/policy.rs`. What differs between them is what the opening call is
+passed and what the realm's owner — a `Page` (`main/page.rs`) for the MTS
+realm, a `Worker` (`background/thread.rs`) for a worker realm — adds to the
+driver. The worker column names where the URL `bobcat:bts` makes a
+difference.
+
+| | MTS realm | worker realm |
+| --- | --- | --- |
+| Opened by | `Page::open_realm`, the view's first job | `Worker::boot`, the worker's first job, queued as its `Start` is served |
+| Root module | `bobcat:boot`, which Rust generates: the page configuration, the screen and the BTS entry's URL as literals, the `Document`, `try { await import(<entry URL>) } catch`, then the BTS, the render and the first flush | the module at its URL itself, loaded the way `import(<URL>)` loads one, with nothing written around it and no global scope installed first. The BTS's URL is `bobcat:bts`, which imports `bobcat:worker` and `bobcat:timers` first; a script at any other URL imports them itself when it uses them |
+| Entry completed by | `load_entry`, from the answer `create_lynx_view` asked for | `consume_messages`, from the answer to the request `createWorker` made. A URL under the engine prefixes is not requested: the realm's own loader loads it. `bobcat:bts` is such a URL, and it imports the BTS entry the `initialize` message names once that message has arrived, as an ordinary import |
+| Core members on `bobcat-internal:host` | `requestScriptFrame`, `setTimer`/`clearTimer`, `waitFuture`/`takeFuture`/`settleFuture`, `fetchResource`, `resolveModuleUrl`/`loadModuleSync`, `reportScriptError`/`logScriptMessage` | the same |
+| Host members of its kind | on `bobcat-internal:host`: the document, tree, attribute, readback, stylesheet (`preloadStyleSheet`, `adoptStyleSheet`), event-name, startup-string and `Worker` members | `bobcat-internal:worker`: `postWorkerMessage`, `closeWorker`, `workerName`, the same members at every URL |
+| Startup strings | `initData`, `globalProps`, `initialProcessor` and `nativeModuleTable`, one-shot members `bobcat:runtime` reads as it is evaluated | none. The `initialize` message the MTS realm's `__BobcatConnectBackground` posts to the BTS carries `initData`, `updateData`, `processorName`, `cacheData` and `globalProps` as the MTS realm processed them, the BTS entry's URL, the MTS realm's `SystemInfo` and the view's native module table. A worker at any other URL is posted no `initialize` |
+| `SystemInfo` | `ViewSources::screen`, written into the boot module as three number literals: a `bobcat:runtime` export and `lynx.SystemInfo` | the BTS's is the MTS realm's own, from `initialize`: `bobcat:bts-runtime` builds its export, `lynx.SystemInfo` and a global `SystemInfo` out of it before the BTS entry is imported, so both realms report the numbers boot's literals read as. A worker at any other URL is posted no `initialize`, and a `bobcat:bts-runtime` it imports reports the runtime constants alone |
+| `NativeModules` | `bobcat-internal:native-modules` with `invokeNativeModule` alone; `NativeModules` is `undefined`, and there is no native module API over the transport (see `docs/tracking/deviations.md`). The view's module table is the startup member `nativeModuleTable`, which `bobcat:runtime` posts to the BTS unread | the same host module. The BTS's table is the one `initialize` carries, which `bobcat:bts-runtime` builds `NativeModules` from before the BTS entry is imported; a worker at any other URL is posted none, and its `NativeModules` is empty |
+| `console` | a module binding: `bobcat:runtime` re-exports the `console` of `bobcat:diagnostics` | the global `console` `bobcat:worker` installs; `bobcat:bts-runtime` exports the same object |
+| Creates Workers | yes: `createWorker`, `sendWorkerMessage`, `terminateWorker`, and the `bobcat-internal` class over them | no |
+| Frame demand key, `ScriptSource` | `None`, `Main` | the worker's key; `Background` for `bobcat:bts`, `Worker(WorkerId)` for any other URL |
+
+The native module transport is the same in every realm. A call names the realm
+that made it, and `LynxView::pump` answers it through the view's command FIFO
+(`ToMain::ModuleCallback`) for the MTS realm and through the worker's inbox for
+a worker. Only the BTS is posted a table that names modules, so the
+`NativeModules` of a worker at any other URL, if it imports
+`bobcat:bts-runtime`, is an empty object. `pump` checks the module and method a
+call names against the view's modules, not against the caller's table, so code
+in any other worker or in the MTS realm that imports the internal module
+`bobcat:native-modules` directly can still call a module the view has.
+
+**One built-in table.** Both runtimes are built by `esm.rs`'s `build_runtime`,
+which registers the same twenty-one built-ins, `BUILTIN_MODULES`, and reserves
+the two engine prefixes `bobcat:` and `bobcat-internal:` on the runtime. The
+host modules a realm declares decide which built-ins it can link: importing a
+host module the realm does not declare fails with a `ReferenceError`, and
+importing a member its host module lacks fails at link with a `SyntaxError`. A
+name under either prefix that no runtime registered and no realm declared fails
+where it was asked for — an `import`, or a `require` through `loadModuleSync` —
+with a `ReferenceError` (`module '<name>' is not preloaded`), in the bridge's
+own loader, and is never sent to the fetcher. `bobcat-internal`, the `Worker`
+class, has no colon and is covered by neither prefix; both runtimes register
+it, so it is never fetched either. The prefixes are the module loader's check,
+and `createWorker`'s: it does not ask the host for a `new Worker` URL under
+them, and the realm loads that URL as the worker's root module through the
+loader, which loads a registered name such as `bobcat:bts` and refuses an
+unregistered one as above. The startup requests `create_lynx_view` makes,
+stylesheets, fonts and fetches are not checked.
+
+**The driver.** An owner supplies the driver a `RealmOwner` impl: where its
+`Lifetime`, its runtime, its realm and its `HostOutbox` are, where its reports
+go (an `EngineEvent` to the host for a page, a `WorkerPayload` to the creating
+realm for a worker), which table its failures are read from, and the hooks
+below. The functions in `realm/owner.rs` are the rest, written once:
+
+- `spawn` starts a task of the owner under a guard that ends the owner if the
+  task unwinds;
+- `enter` queues one job and answers with what its operation returned, and
+  `enter_now` is that job's body: it returns `None` for an owner that has
+  ended, borrows the shared runtime (`None` for a runtime that was never
+  built), borrows the realm (`None` before it opened or after its release),
+  runs the operation, and then the epilogue;
+- `end` sets the lifetime's latch once, and the call that set it runs the
+  owner's `on_end` hook: the `BeginFrame` acknowledgement for a page, nothing
+  for a worker;
+- `terminal` sends an event that ends the owner through the lifetime's
+  terminal latch and then ends it, and `trapped` sends the table's Panic row
+  through the panic latch and then ends it;
+- `run_owner` is the owner task's tail: the lifetime's wait, `end`, the reap
+  of every task, the owner's `before_release` hook — the page's JavaScript
+  disposal, nothing for a worker — and a job that releases the realm;
+- `after_end` is a job against the realm after the end, with no latch and no
+  epilogue, which `before_release` and the release run as.
+
+`Settles`, which `serve_clock`, the unwind guard and `run_job` in
+`lifetime.rs` are written over, is one blanket impl over every `RealmOwner`.
+
+The epilogue's steps and their order are the contract, for both owners:
+
+1. nothing, for an owner that has ended — by its operation, or by a task
+   that ran during a synchronous wait inside it;
+2. the due timers, each callback that threw reported under Timer: on a page
+   the realm's timers and then the end of the batch they ran, which runs the
+   collection their removals may have made due; on a worker none once its
+   script has called `close()`;
+3. nothing more, for an owner that ended while those callbacks ran: a
+   callback parked on a synchronous wait lets the thread's tasks run, and a
+   `Terminate`, a release or a panic in another task of the owner may end it
+   there. The callbacks of the batch after that one still run, and what they
+   threw is still reported;
+4. `after_timers`: on a page the commit — skipped while a listed sheet is
+   outstanding or has failed — and the posted content-visibility and
+   `<image>` deliveries; on a worker a `close()`, which ends it with `Closed`
+   through `terminal`;
+5. nothing more, for an owner that step ended;
+6. the boot report, until the root module has settled: a root module that
+   finished is marked and `on_booted` runs, which sends `ScriptFinished` on a
+   page, while a worker's mark releases the posts its consumer held; a root
+   module that rejected is marked, and reported under the page's
+   `BOOT_REJECTION` scene on a page — a worker's `BOOT_REJECTION` names none,
+   because the entry the rejection happened in has already reported it;
+7. nothing more, for an owner that report ended;
+8. `after_boot`: on a page the `BeginFrame` acknowledgement, after both the
+   commit and the boot report;
+9. the module requests the operation left, each asked of the host through the
+   owner's `HostOutbox` and spawned as a `load_module`, except the one
+   `entry_name` names — the MTS entry, which `load_entry` answers, or a
+   worker's script, which `consume_messages` answers from the request
+   `createWorker` made (a worker whose URL is an engine name makes no such
+   request, because its realm's loader loads that root module);
+10. the futures a `.then` asked the realm to settle, each spawned as a
+    `settle_future`;
+11. `after_settles`: on a page one `load_font_face` per `@font-face` rule the
+    sheets mounted by the operation declared;
+12. the next timer deadline, republished only when it moved;
+13. the checkpoint generation, last, so it names the generation this entry ran
+    the shared job queue up to, which is what `serve_clock` compares a bump
+    against to tell this owner's entries from a sibling's.
+
+Each "nothing more" skips every later step, not only the reports: an owner
+that has ended asks the host for nothing, spawns nothing and re-arms no timer
+deadline its end withdrew. A worker its creator terminated while a timer's
+callback was parked therefore does not report the `Closed` of a `close()` that
+callback made first.
+
+The engine forces a collection in two cases, and the epilogue has no
+collection step of its own. On the MTS realm, a batch of document operations
+that crossed `REMOVALS_PER_COLLECTION` removals ends with one, in the call that
+ran the batch — the timer batch of step 2 is one such call, and an event
+dispatch or a page update is another. And freeing any realm's QuickJS context,
+which releasing an MTS realm or any worker realm does, is followed by a
+collection of the whole runtime that realm was on: the bridge's
+`qjs_context_free` runs it, because a realm's global object is cyclic and only
+a collection reaches its finalizers. That collection covers every realm on the
+runtime, so releasing one view or worker also collects what the other realms
+on that runtime left unreachable. The worker runtime has no removal-driven
+trigger: between two realm releases it is collected only on QuickJS's own
+allocation pressure.
+
+`load_module` waits for its answer outside any job and reads it with
+`module_answer`, the one reading of an answer to a module request, which
+`load_entry` and a worker's `consume_messages` use too: a script is its
+response URL and its source, and an answer of another kind is the text `the
+fetcher returned a <kind> for <url>`. A failed load is the fetcher's own error,
+which `module_answer` does not read: an import and a worker's script carry its
+text, and `load_entry` carries the `LynxViewError` itself and makes the text
+of an answer of another kind a `Script` error. `load_entry` alone also refuses
+a script answered from a response URL that is not an absolute URL, as a
+`Script` error naming both URLs, because the entry's response URL becomes
+`__Card__`, the base every `new Worker` URL is joined to. A completion the
+fetcher dropped without answering is `unanswered_source()`'s failure, through
+`await_source`. `load_module` then enters the realm and completes the module
+under the name the import asked for: from the response URL, which becomes the
+module's `import.meta.url` and the base of its own imports, or with
+`module '<url>': <reason>`, which rejects the import in the realm. `ScriptEngine::complete_module` replaces a NUL in that text with
+U+FFFD and fails a response URL that contains one, because the bridge would
+refuse either without completing the module. `settle_future` waits for its
+operation and enters the realm to hand the outcome over. What either entry
+returns is reported under Module or Future.
+
+A panic that unwinds an owner's own task — `serve_view` or `serve_worker` — or
+a whole engine thread is not the driver's to report, because the `Rc` of the
+owner that task held is dropped with it. The thread reports it from its own
+table of who to tell: `finish_view` and, on Wasm, the panic hook on
+`bobcat-main`; `finish_worker_task`, `report_thread_trap` and, on Wasm, the
+panic hook on `bobcat-workers`. `report_thread_trap` is the whole thread
+trapping: it sets the flag `bobcat-main` reads before each `Start` and sends
+`Failed` to the creator of every worker still live there. Each of these builds
+its event with the Panic row of its realm kind's table, the row `trapped`
+reports through.
+
+**Failure reports.** What a failure is reported as is looked up by the scene it
+happened in, in the owner's realm kind's table. `policy::report` reads the
+row: a row that ends the owner reports through `terminal`, and any other is
+sent as it is. The Panic row of each table is a function of its own, and so is
+the MTS table's Disposal row, so nothing that takes a scene can produce
+either. A row's prefix is written before the failure's message as
+`<prefix>: <message>`; where it is "none" the caller has already named what
+failed.
+
+The MTS table, whose events go to the view's host:
+
+| Scene | Event | Ends the view | Prefix | Reported by |
+| --- | --- | --- | --- | --- |
+| Open | `StartupFailed` | yes | none | `Page::open_realm`: a runtime that was never built, the realm's construction (`opening the MTS realm`), boot's own module (`booting the MTS entry`); `load_entry`, for an entry the fetcher could not load, one it answered with something other than a script or from a URL that is not absolute, and naming the entry (`booting the MTS entry`), each a `LynxViewError` that `StartupFailed` carries as it is, through `terminal` rather than through the row; the epilogue, for a rejection of boot's own module, as `booting the MTS entry` |
+| Boot | `ScriptRunError` | no | none | `load_entry`: the entry's evaluation, a module it imports included |
+| Module | `ScriptRunError` | no | `loading an imported module` | `load_module` |
+| Future | `ScriptRunError` | no | `settling a future` | `settle_future` |
+| Timer | `TimerFailed` | no | none | the epilogue |
+| Listener | `ListenerFailed` | no | none | an input event (`ToMain::DispatchEvent`), a batch of `<image>` outcomes, what a worker said (`consume_worker_events`) |
+| Frame | `ScriptRunError` | no | none | `ToMain::Vsync` |
+| HostCall | `ScriptRunError` | no | none | `ToMain::PageUpdate`, `ToMain::ModuleCallback` |
+| Disposal | `ListenerFailed` | no: the view has already ended | none | the page's `before_release`, the JavaScript disposal |
+| Panic | `Panicked`, through `EngineEvent::from_panic` | yes, through the panic latch | `the Lynx main thread panicked` | `trapped`, `finish_view`, the Wasm panic hook |
+
+`EngineEvent::is_fatal` names exactly `StartupFailed` and `Panicked`, which
+`LynxView::pump` ends a view on, and a unit test pins that an MTS row ends the
+view exactly when its event is fatal. `processData` and render hook failures
+are in neither table: `main-thread-runtime.ts` catches them and reports a
+`ScriptReported` diagnostic, and boot goes on.
+
+The worker table, whose events go to the realm that created the worker:
+
+| Scene | Payload | Ends the worker | Prefix | Reported by |
+| --- | --- | --- | --- | --- |
+| Open | `Failed` | yes | none | `Worker::boot`: a runtime that was never built, a realm that could not be opened; `consume_messages`, for a script the fetcher could not load or answered with something other than a script, as `loading the worker's script` |
+| Boot | `Errored` | no | `running the worker's script` | `Worker::boot`, for the load of the root module; `complete_script`, for a script the host was asked for |
+| Module | `Errored` | no | `loading an imported worker module` | `load_module` |
+| Future | `Errored` | no | `settling a worker's future` | `settle_future` |
+| Timer | `Errored` | no | `running a worker's timer callback` | the epilogue |
+| Listener | `Errored` | no | `delivering a message to a worker` | a posted message |
+| Frame | `Errored` | no | `running animation callbacks` | a vsync, through `bobcat:animation-frame` |
+| HostCall | `Errored` | no | `running a native module callback` | a native module's answer |
+| Panic | `Failed` | yes, through the panic latch | `the worker thread panicked` | `trapped`, `finish_worker_task`, `report_thread_trap`, the Wasm panic hook |
+
+The MTS realm that created the worker reports an `Errored` to the host as
+`WorkerThrew` and a `Failed` as `WorkerEnded` (see the worker errors below),
+and neither is fatal to the view. `close()` is not a failure: step 4 of the
+epilogue reports `Closed` through `terminal`, so it shares the terminal latch
+with `Failed`, and the first of the two is the one sent.
+
+The epilogue reports the rejection of a root module on the MTS realm alone,
+as Open, the page's `BOOT_REJECTION`, because the root modules are different
+code. The MTS boot module is the engine's: it catches what the entry's
+evaluation throws, and `main-thread-runtime.ts` catches what `processData` and
+the render hooks throw, so what rejects it is `bobcat:runtime` reading page
+data that is not JSON, the document's construction, connecting the BTS, or
+boot's own flush — something the engine could not make ready, which is what
+Open means in both tables. A worker's root module is the module at its URL,
+and a worker's `BOOT_REJECTION` names no scene. Only the host holds that
+load's promise, so a checkpoint of the realm reports its rejection as it
+reports every rejection nothing handles: the checkpoint that ends the entry
+the load settled in reports it under that entry's row — Boot for the boot job
+and the script's completion, Module for a module the script imports, Timer
+for a timer — or drops it with the other leftovers of the one failure that
+entry reported. The epilogue reads the load only to learn that it has
+settled, so a failure of the root module is reported once, and the worker
+goes on running, as HTML's "run a worker" leaves it. For the BTS that module
+is `bobcat:bts`, which imports nothing of the app's as it is evaluated: the
+BTS entry is imported later, by the loader `bobcat:bts` hands
+`bobcat:bts-runtime`, once `initialize` has arrived, and what the entry throws
+is reported through the worker global's `reportError`, not as a rejection of
+the root module.
+
+A listed stylesheet has no row of its own. The listed sheets are settled by
+boot's first `__FlushElementTree`, one at a time in listed order, and nothing
+is committed before them. A sheet that failed to load, or that the fetcher
+answered with something else, makes that flush throw `loading stylesheet
+<url>: <reason>`, which rejects boot's own module: the Open row, a
+`StartupFailed(LynxViewError::Script(..))` naming the sheet, and the view ends
+without a `ScriptFinished`. A card that settles the listed sheets first — an
+`adoptStyleSheet` or a `__FlushElementTree` of its own inside the entry's
+evaluation — sees the failure thrown to it, reported under the row of the
+entry it ran in if it does not catch it; `DocumentSlot` keeps that first
+failure and throws it again from boot's own flush, which fails the boot the
+same way.
+
+**Bundle paths.** The MTS realm and the BTS name a bundle's paths by
+different rules: the MTS realm names the page's own chunks under its entry's
+URL (`bobcat:section-url`), and the BTS resolves a path of a registered
+container beside that container's template URL (`bobcat:lynx-modules`).
+
+### Workers, modules and the boot module
 
 The main realm can explicitly import `Worker` from `bobcat-internal`:
 
@@ -1197,7 +1500,9 @@ __BobcatInitializeMTS({
   systemInfo: screenMetrics,
 });
 let data = lynx.__initData;
-await import("app:///main.js"); // the entry's URL, as the view named it
+// the entry's URL, as the view named it; what the entry throws is raised
+// again as a rejection nothing handles, and boot goes on
+try { await import("app:///main.js"); } catch (error) { void Promise.reject(error); }
 const { Worker } = await import("bobcat-internal");
 data = __BobcatProcessInitData(data);
 __BobcatConnectBackground(new Worker("bobcat:bts", { name: "lynx-bg" }), data);
@@ -1216,7 +1521,9 @@ task calls `__BobcatInitEntry` with the response URL before it completes the
 module, so `__Card__` is that URL before the entry's body runs, and a `new Worker` URL
 resolves against it — the realm passes it to `createWorker`, and Rust joins
 the two by URL rules. An
-entry that could not be loaded rejects the import, which fails the boot.
+entry that could not be loaded is never completed: `load_entry` fails the
+boot with `StartupFailed` before any of it runs, and the import is released
+with the realm.
 
 The retained argument survives entry initialization replacing `lynx.__initData`.
 Processing, the BTS snapshot and MTS render run synchronously. Boot then awaits

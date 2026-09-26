@@ -10,10 +10,11 @@
 //! differing only in what they were named after. What is left of that here is
 //! one [`Lifetime`]: a [`JoinSet`] the owner consumes continuously, a
 //! [`CancellationToken`] every thread can read, the latch that says whether
-//! *this* thread has ended the object, the two numbers its clock task reads —
-//! the deadline this realm armed and the generation its own last entry ran the
-//! shared job queue up to — and the handle on the engine thread its tasks are
-//! spawned onto and its entries are queued on.
+//! *this* thread has ended the object, the two latches that keep the report
+//! that ended it and the report of a panic to one each, the two numbers its
+//! clock task reads — the deadline this realm armed and the generation its
+//! own last entry ran the shared job queue up to — and the handle on the
+//! engine thread its tasks are spawned onto and its entries are queued on.
 //!
 //! # Tasks and entries
 //!
@@ -21,7 +22,8 @@
 //! [`crate::jobs`] describes, queued by whichever task decided one was owed and
 //! awaited by it: [`run_job`] is the one way one is queued, and
 //! [`Settles::settle`] the epilogue-only entry a wake that carries no operation
-//! runs.
+//! runs. What an entry, an end and a release do with the realm is
+//! [`crate::realm::owner`]'s, written over this once for both kinds of owner.
 //!
 //! # The token
 //!
@@ -51,15 +53,16 @@
 //! latch can flip at a wait point inside an entry, and only there. The
 //! epilogue that follows the wait sees the end and does nothing, exactly as it
 //! already does for an operation that reported a failure of its own. `end`,
-//! `fail` and their callers touch no realm borrow, which is what keeps them
+//! `terminal` and their callers touch no realm borrow, which is what keeps them
 //! callable from a task at any time.
 //!
 //! # What ended the object
 //!
 //! Nothing records it. Both reason enums are gone, because nothing read them:
 //! what the embedder was told is what was *reported* before the end — a
-//! view's `StartupFailed`, a worker's `Failed` or `Closed` — and what it was
-//! not told is a release, which is the token having been cancelled from
+//! view's `StartupFailed`, a worker's `Failed` or `Closed`, the first of which
+//! is the only one [`Lifetime::report_terminal`] lets through — and what it
+//! was not told is a release, which is the token having been cancelled from
 //! outside. Any other script failure is not an end at all: it is reported and
 //! the object goes on. A panic is the one end that still owes a report — a
 //! view's is `Panicked` — and the payload is always available for it: the set
@@ -72,7 +75,9 @@
 //! views and `serve_workers`'s workers, each with a side map naming who to
 //! report a trapped task to. Those are the *thread's* tasks rather than one
 //! realm's: nothing about them has an end signal, an entry boundary or an
-//! epilogue, so they stay where they are.
+//! epilogue, so they stay where they are. What such a report sends is still
+//! the realm kind's: the event is built by the Panic row of its table in
+//! [`crate::realm::policy`], the row an owner's own panic is reported through.
 
 use std::any::Any;
 use std::cell::{Cell, RefCell};
@@ -104,9 +109,16 @@ pub(crate) struct Lifetime {
     /// The end as this thread knows it. See the module doc: this is what an
     /// entry checks, and the token is not.
     ended: Cell<bool>,
+    /// The latch the one report that ends the object goes through: a view's
+    /// `StartupFailed`, a worker's `Failed` or `Closed`.
+    ///
+    /// The first report wins, so one failure is one report and a worker's
+    /// `Failed` and `Closed` cannot both arrive. Every other script failure
+    /// is reported where it happens and leaves the object running.
+    terminal_reported: Cell<bool>,
     /// The latch the one payload-bearing panic report goes through.
     ///
-    /// Separate from the owner's own report latch, which a `StartupFailed` or
+    /// Separate from [`Self::terminal_reported`], which a `StartupFailed` or
     /// a worker's `Failed` has already spent by the time a task traps: a panic
     /// is reported whatever else was reported before it, and exactly once.
     /// [`Self::serve`], [`Self::reap`] and a panic the owner caught inside its
@@ -120,6 +132,10 @@ pub(crate) struct Lifetime {
     own_checkpoint: Cell<u64>,
     /// The engine thread this object's tasks run on and its jobs queue on.
     thread: JsThreadHandle,
+    /// How many times the object's epilogue has run, for the tests that count
+    /// the wakes a view or a worker answers.
+    #[cfg(test)]
+    epilogues: Cell<u64>,
 }
 
 impl Lifetime {
@@ -128,10 +144,13 @@ impl Lifetime {
             tasks: RefCell::new(JoinSet::new()),
             token,
             ended: Cell::new(false),
+            terminal_reported: Cell::new(false),
             panic_reported: Cell::new(false),
             deadline: watch::channel(None).0,
             own_checkpoint: Cell::new(0),
             thread,
+            #[cfg(test)]
+            epilogues: Cell::new(0),
         }
     }
 
@@ -145,10 +164,10 @@ impl Lifetime {
     ///
     /// The future is taken as it is. What a panic in it costs the object is
     /// the *owner's* business — a `BeginFrame` to acknowledge — so the guard
-    /// that ends the object during the unwind is [`EndOnUnwind`], which the
-    /// owner's own `spawn` wraps the future in: it holds the object, where
-    /// anything stored here would be an `Rc` cycle through the object that
-    /// holds this.
+    /// that ends the object during the unwind is [`EndOnUnwind`], which
+    /// [`crate::realm::owner::spawn`] wraps the future in: it holds the
+    /// object, where anything stored here would be an `Rc` cycle through the
+    /// object that holds this.
     ///
     /// The set is named explicitly rather than read out of the ambient
     /// context, because this is also called from an epilogue — which is job
@@ -216,10 +235,28 @@ impl Lifetime {
         &self.token
     }
 
+    /// Whether this is the first report that ends the object. `true` exactly
+    /// once, for whichever end was reported first.
+    pub(crate) fn report_terminal(&self) -> bool {
+        !self.terminal_reported.replace(true)
+    }
+
     /// Whether this is the first panic report of the object's life. `true`
     /// exactly once, for whichever of the owner's paths saw the panic first.
     pub(crate) fn report_panic(&self) -> bool {
         !self.panic_reported.replace(true)
+    }
+
+    /// Counts one run of the object's epilogue.
+    #[cfg(test)]
+    pub(crate) fn count_epilogue(&self) {
+        self.epilogues.set(self.epilogues.get() + 1);
+    }
+
+    /// How many times the object's epilogue has run.
+    #[cfg(test)]
+    pub(crate) fn epilogue_count(&self) -> u64 {
+        self.epilogues.get()
     }
 
     /// The owner's one wait: the end, or the next task to finish.
@@ -276,11 +313,12 @@ impl Lifetime {
 /// they serve: its [`Lifetime`], the epilogue a wake that carries no operation
 /// runs, the end, and how a panic in one of its jobs is reported.
 ///
-/// Implemented by the view's `Page` and the worker's `Worker`, which is every
-/// realm-owning object there is. All four are associated functions over an `Rc`
-/// rather than methods, so an implementor can keep inherent ones of the same
-/// names: those are what its own tasks call, and these are what the generic
-/// helpers here call.
+/// Implemented once, by a blanket impl over every
+/// [`RealmOwner`](crate::realm::owner::RealmOwner) beside the driver functions
+/// it forwards to: the view's `Page` and the worker's `Worker`, which is every
+/// realm-owning object there is. The last three are associated functions over
+/// an `Rc` rather than methods, because every caller here holds the object
+/// that way and the settle queues a job, which needs one.
 pub(crate) trait Settles: Sized + 'static {
     fn lifetime(&self) -> &Lifetime;
 

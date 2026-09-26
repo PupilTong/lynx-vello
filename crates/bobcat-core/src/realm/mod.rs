@@ -1,4 +1,4 @@
-//! Opening a realm, on either engine thread.
+//! Opening a realm, on either engine thread, and driving it once it is open.
 //!
 //! Every realm is opened by [`open_realm`]: a view's MTS realm on
 //! `bobcat-main`, and the BTS and every plain `Worker` on `bobcat-workers`.
@@ -17,12 +17,21 @@
 //! realm: the key its display-frame demand is reported under — `None` for a
 //! view's MTS realm and the worker's own key for a worker realm — and the
 //! [`ScriptSource`] its diagnostics name.
+//!
+//! Once a realm is open, its owner — a view's page or a worker — drives it
+//! through [`owner`]: the tasks, the one job per entry, the epilogue with the
+//! module loads and future settles it spawns, the end and the release are
+//! written there once for both threads. What a failure in either kind of
+//! realm is reported as is [`policy`]'s: one table per realm kind.
+
+pub(crate) mod owner;
+pub(crate) mod policy;
 
 use std::rc::Rc;
-use std::sync::Arc;
 
 use quickjs_rust_bridge::HostValue;
 
+use self::policy::context_of;
 use crate::background::WorkerKey;
 use crate::esm::HOST_MODULE_SPECIFIER;
 use crate::future::FutureTable;
@@ -179,11 +188,4 @@ pub(crate) fn string_argument<'a>(
         None | Some(HostValue::Undefined | HostValue::Null) => Ok(""),
         _ => Err(format!("{function} expects a string for argument {index}")),
     }
-}
-
-/// Prefixes a failure with what the host was doing, in the format
-/// `MainThreadError` gives the errors that reach an embedder through a view.
-pub(crate) fn context_of(context: &str, mut error: ScriptError) -> ScriptError {
-    error.message = Arc::from(format!("{context}: {}", error.message));
-    error
 }
