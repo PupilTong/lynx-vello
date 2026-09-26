@@ -198,9 +198,14 @@ async fn public_updates_require_mts_boot_then_preserve_order() {
             .iter()
             .any(|message| message == "mts update 9 false true")
     );
-    assert!(seen.messages.ends_with(&[
-        "bts reload 9".to_owned(),
-        "bts first-screen 9".to_owned(),
-        "bts callback".to_owned(),
-    ]));
+    // The BTS logs to the host itself, so its lines keep their own order but
+    // have none relative to the main thread's.
+    assert!(
+        seen.messages
+            .iter()
+            .filter(|message| message.starts_with("bts "))
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .ends_with(&["bts reload 9", "bts first-screen 9", "bts callback"])
+    );
 }

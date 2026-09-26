@@ -31,7 +31,7 @@ returns; the first Worker message supplies inputs before the application entry
 imports. Later messages wait on that import Promise and are delivered in order
 once it settles,
 success or failure. An entry that throws is reported
-through `reportError` as a nonfatal `WorkerFailed` and leaves BTS running. The
+through `reportError` as a nonfatal `WorkerThrew` and leaves BTS running. The
 view's readiness is MTS boot finishing and does not involve BTS at all, so an
 entry whose top-level await never settles delays messages to BTS but not
 readiness.

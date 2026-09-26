@@ -238,7 +238,7 @@ async fn group_task(context: Rc<GroupContext>, mut attach: mpsc::UnboundedReceiv
                     threads::add_script_panic_reporter({
                         let outbox = outbox.clone();
                         Box::new(move |detail| {
-                            outbox.engine_event(EngineEvent::ScriptRunError(
+                            outbox.engine_event(EngineEvent::from_panic(
                                 threads::platform_script_error(format!(
                                     "the Lynx main thread {detail}"
                                 )),
@@ -289,7 +289,7 @@ fn finish_view(
         },
     };
     if let Some((outbox, error)) = trapped {
-        outbox.engine_event(EngineEvent::ScriptRunError(threads::panicked(
+        outbox.engine_event(EngineEvent::from_panic(threads::panicked(
             "the Lynx main thread panicked",
             error.into_panic().as_ref(),
         )));

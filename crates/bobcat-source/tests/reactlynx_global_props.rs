@@ -162,8 +162,8 @@ impl PropsView {
                 match event {
                     EngineEvent::ScriptFinished => {}
                     EngineEvent::ConsoleMessage { message, .. } => self.messages.push(message),
-                    EngineEvent::ScriptReported { level, message }
-                        if self.development && level == "warning"
+                    EngineEvent::ScriptReported { level, message, .. }
+                        if self.development && level == "warn"
                             && message.contains("WebSocket is not found. Please use Lynx >= 2.16 or consider using a polyfill.") =>
                     {
                         self.missing_websocket_warnings += 1;

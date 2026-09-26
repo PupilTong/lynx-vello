@@ -700,6 +700,10 @@ async fn named_lepus_chunks_load_and_run_on_every_call() {
             match event {
                 bobcat_core::EngineEvent::ScriptFinished => return,
                 bobcat_core::EngineEvent::StartupFailed(error) => panic!("{error}"),
+                // The entry's checks are its throws, and a throw is not the
+                // boot's failure but this.
+                bobcat_core::EngineEvent::ScriptRunError(error)
+                | bobcat_core::EngineEvent::Panicked(error) => panic!("{error}"),
                 bobcat_core::EngineEvent::ScriptReported { message, .. } => panic!("{message}"),
                 _ => {}
             }
@@ -760,6 +764,9 @@ async fn named_css_is_loaded_by_url_after_native_web_conversion() {
                     match event {
                         EngineEvent::ScriptFinished => booted = true,
                         EngineEvent::StartupFailed(error) => panic!("{error}"),
+                        EngineEvent::ScriptRunError(error) | EngineEvent::Panicked(error) => {
+                            panic!("{error}")
+                        }
                         EngineEvent::ScriptReported { message, .. } => panic!("{message}"),
                         _ => {}
                     }

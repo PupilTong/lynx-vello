@@ -16,7 +16,7 @@ use tokio::task;
 use tokio_util::sync::CancellationToken;
 
 use super::*;
-use crate::background::{WorkerCommand, WorkerMessage, WorkerStart};
+use crate::background::{WorkerCommand, WorkerMessage, WorkerRole, WorkerStart};
 use crate::esm::build_runtime;
 use crate::jobs::{JsThread, JsThreadHandle};
 use crate::link::{
@@ -844,7 +844,9 @@ fn a_refill_delivers_both_directions_in_the_entry_after_its_commit() {
 /// The host's page data rides from the view's sources to its realm as the
 /// text it was given, and is parsed there before the entry loads: the entry
 /// sees the global props as it evaluates, and `processData` gets the init
-/// data. Each side checks its own, so a swap anywhere on the way fails boot.
+/// data. Each side checks its own by throwing, and neither throw ends boot —
+/// the entry's is a `ScriptRunError`, and the processor's is caught and
+/// reported as a `ScriptReported` — so the test fails on either event.
 #[test]
 fn page_data_reaches_the_realm_it_was_given_to() {
     on_a_js_thread(|thread| async move {
@@ -869,6 +871,21 @@ fn page_data_reaches_the_realm_it_was_given_to() {
                 ",
             )
             .await;
+        let failures: Vec<_> = harness
+            .events
+            .iter()
+            .filter(|event| {
+                event.is_fatal()
+                    || matches!(
+                        event,
+                        EngineEvent::ScriptRunError(_) | EngineEvent::ScriptReported { .. }
+                    )
+            })
+            .collect();
+        assert!(
+            failures.is_empty(),
+            "the page data reached the realm as given: {failures:?}"
+        );
     });
 }
 
@@ -1415,18 +1432,17 @@ fn a_module_completion_commits_with_no_command_behind_it() {
     });
 }
 
-/// An import that cannot be completed is fatal to whatever awaited it: it is
-/// reported once, and the end reaches every task of the view — the owner
-/// returns, which closes the command channel, and the workers the view
-/// created are told to stop. A command that arrives behind the end is dropped
-/// whole, `BeginFrame` included.
+/// An import that fails is the app's failure, not the view's: the rejection
+/// it leaves unhandled is reported once, as a `ScriptRunError`, and the view
+/// goes on — a `BeginFrame` sent after it is acknowledged, a command still
+/// commits, and neither the view's token nor its BTS is ended.
 #[test]
-fn a_fatal_module_failure_ends_every_task_of_the_view() {
+fn a_failed_module_is_reported_once_and_the_view_goes_on() {
     on_a_js_thread(|thread| async move {
         let (context, workers) = group(&thread);
         let mut harness = Harness::new(context, workers);
         let booted = harness
-            .boot(&format!("{ONE_BOX}\nimport('app:///dep.js');"))
+            .boot(&format!("{ONE_BOX_WITH_UPDATE}\nimport('app:///dep.js');"))
             .await;
         let mut background = harness.background_worker();
         assert!(
@@ -1448,30 +1464,26 @@ fn a_fatal_module_failure_ends_every_task_of_the_view() {
                     .any(|event| matches!(event, EngineEvent::ScriptRunError(_)))
             })
             .await;
-        // Exactly one command behind the end, which has nowhere to go: the end
-        // acknowledged whatever was pending, and what arrives after it is
-        // dropped rather than served. A send the closing has already overtaken
-        // says the same thing.
-        let _ = harness
-            .commands
-            .send(ToMain::BeginFrame { now: 0.0, seq: 9 });
-        answer_disposal(&mut background).await;
         harness
-            .until("the view's owner never returned", |harness| {
-                harness.owner.is_finished()
+            .commands
+            .send(ToMain::BeginFrame { now: 0.0, seq: 9 })
+            .expect("the view is still serving");
+        harness
+            .until(
+                "the BeginFrame after the failure was never acknowledged",
+                |h| h.view.published.begin_frame_serviced() == 9,
+            )
+            .await;
+        harness
+            .commands
+            .send(update_command(1))
+            .expect("the view is still serving");
+        harness
+            .until("the update after the failure never committed", |h| {
+                h.view.published.commit() > Some(booted)
             })
             .await;
 
-        assert_ne!(
-            harness.view.published.begin_frame_serviced(),
-            9,
-            "the command behind the end was never served"
-        );
-        assert_eq!(
-            harness.view.published.commit(),
-            Some(booted),
-            "and nothing committed after the failure"
-        );
         assert_eq!(
             harness
                 .events
@@ -1479,19 +1491,149 @@ fn a_fatal_module_failure_ends_every_task_of_the_view() {
                 .filter(|event| matches!(event, EngineEvent::ScriptRunError(_)))
                 .count(),
             1,
-            "one failure is reported once"
+            "one failure is reported once: {:?}",
+            harness.events
         );
         assert!(
-            !harness
+            !harness.view.token.is_cancelled(),
+            "the failure did not end the view"
+        );
+        while let Ok(message) = background.messages.try_recv() {
+            assert!(
+                !matches!(message, WorkerMessage::Terminate),
+                "the failure did not end the BTS"
+            );
+        }
+    });
+}
+
+/// A page update the realm fails is reported and the burst goes on: the
+/// update behind it in the same burst is applied, and the burst is still one
+/// commit.
+#[test]
+fn a_page_update_that_fails_is_reported_and_the_next_one_applies() {
+    on_a_js_thread(|thread| async move {
+        let (context, _workers) = group(&thread);
+        let mut owned = OwnedPage::new(context);
+        let booted = owned.boot(ONE_BOX_WITH_UPDATE).await;
+        owned
+            .page
+            .apply(vec![
+                ToMain::PageUpdate(PageUpdate::Data {
+                    data: "not JSON".into(),
+                    processor_name: String::new(),
+                    reset: false,
+                }),
+                update_command(2),
+                ToMain::Probe(Box::new(|document| {
+                    let node = document.document_element().children().next().unwrap();
+                    assert_eq!(node.attribute("data-value"), Some("2"));
+                })),
+            ])
+            .await;
+
+        assert!(
+            !owned.page.ended(),
+            "the failed update did not end the view"
+        );
+        assert_eq!(owned.view.published.commit(), Some(booted + 1));
+        let failures: Vec<_> = owned
+            .events()
+            .into_iter()
+            .filter(|event| event.is_fatal() || matches!(event, EngineEvent::ScriptRunError(_)))
+            .collect();
+        assert!(
+            matches!(failures.as_slice(), [EngineEvent::ScriptRunError(_)]),
+            "one ScriptRunError and nothing fatal: {failures:?}"
+        );
+    });
+}
+
+/// A failure while boot is still outstanding is not a startup failure: an
+/// animation callback that leaves a rejection behind during boot is reported
+/// as a `ScriptRunError`, and boot then finishes, once.
+///
+/// The entry holds boot open with a top-level await on a `Future`, which
+/// settles on its own clock a second after the entry ran; the `Vsync` is sent
+/// as soon as the entry has asked for its frame, well inside that second.
+#[test]
+fn a_frame_that_fails_during_boot_is_reported_and_boot_still_finishes_once() {
+    on_a_js_thread(|thread| async move {
+        let (context, workers) = group(&thread);
+        let mut harness = Harness::new(context, workers);
+        harness
+            .until("the view never asked for its entry", |h| {
+                !h.sources.is_empty()
+            })
+            .await;
+        harness.answer(
+            "app:///main.js",
+            &format!(
+                "{ONE_BOX}
+import {{ Future }} from 'bobcat:future';
+import {{ testFuture }} from 'bobcat-internal:host';
+lynx.requestAnimationFrame(() => Promise.reject(new Error('the frame failed')));
+console.log('armed');
+await new Future(testFuture(1000, 'settled', false));
+"
+            ),
+        );
+        harness
+            .until("the entry never asked for its frame", |h| {
+                h.events.iter().any(|event| {
+                    matches!(event, EngineEvent::ConsoleMessage { message, .. } if message == "armed")
+                })
+            })
+            .await;
+        harness
+            .commands
+            .send(ToMain::Vsync(16.0))
+            .expect("the view is serving");
+        harness
+            .until("the failed frame was never reported", |h| {
+                h.events
+                    .iter()
+                    .any(|event| matches!(event, EngineEvent::ScriptRunError(_)))
+            })
+            .await;
+        assert!(
+            !harness.finished(),
+            "boot was still outstanding when the frame failed"
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !harness.finished() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "boot never finished: {:?}",
+                harness.events
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            harness.turn().await;
+        }
+        harness.background = Some(harness.background_worker());
+        for _ in 0..8 {
+            harness.turn().await;
+        }
+        let failures: Vec<_> = harness
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                EngineEvent::ScriptRunError(error) => Some(error.message.to_string()),
+                _ if event.is_fatal() => panic!("boot failed: {event:?}"),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert!(failures[0].contains("the frame failed"), "{}", failures[0]);
+        assert_eq!(
+            harness
                 .events
                 .iter()
-                .skip_while(|event| !matches!(event, EngineEvent::ScriptRunError(_)))
-                .any(|event| matches!(event, EngineEvent::ScriptFinished)),
-            "and nothing claims the entry finished after it"
-        );
-        assert!(
-            matches!(background.messages.try_recv(), Ok(WorkerMessage::Terminate)),
-            "the realm going takes the workers it created with it"
+                .filter(|event| matches!(event, EngineEvent::ScriptFinished))
+                .count(),
+            1,
+            "boot finished once"
         );
     });
 }
@@ -1688,7 +1830,7 @@ fn a_task_that_traps_ends_the_view_before_a_sibling_runs() {
             .events
             .iter()
             .filter_map(|event| match event {
-                EngineEvent::ScriptRunError(error) => Some(error.message.to_string()),
+                EngineEvent::Panicked(error) => Some(error.message.to_string()),
                 _ => None,
             })
             .collect();
@@ -1698,6 +1840,43 @@ fn a_task_that_traps_ends_the_view_before_a_sibling_runs() {
                 && reports[0].contains("a task of the view trapped"),
             "the report carries the payload: {}",
             reports[0]
+        );
+    });
+}
+
+/// A panic inside an entry is the view's, whatever the entry was doing:
+/// [`run_job`] catches it, one `Panicked` is reported, and the view ends. A
+/// panicking input dispatch takes this same path: nothing inside a burst
+/// catches a panic any more.
+#[test]
+fn a_command_that_panics_is_reported_once_as_panicked_and_ends_the_view() {
+    on_a_js_thread(|thread| async move {
+        let (context, _workers) = group(&thread);
+        let mut owned = OwnedPage::new(context);
+        owned.boot(ONE_BOX).await;
+        let booted = owned.events();
+        assert!(
+            !booted.iter().any(EngineEvent::is_fatal),
+            "the page booted: {booted:?}"
+        );
+
+        owned
+            .page
+            .apply(vec![ToMain::Probe(Box::new(|_| {
+                panic!("a command of the view panicked");
+            }))])
+            .await;
+
+        assert!(owned.page.ended(), "the panic ended the view");
+        assert!(owned.token.is_cancelled());
+        let events = owned.events();
+        let [EngineEvent::Panicked(error)] = events.as_slice() else {
+            panic!("one Panicked and nothing else: {events:?}");
+        };
+        assert!(
+            error.message.contains("the Lynx main thread panicked")
+                && error.message.contains("a command of the view panicked"),
+            "the report carries the payload: {error}"
         );
     });
 }
@@ -1782,6 +1961,49 @@ fn a_burst_queued_behind_a_release_is_never_applied() {
     });
 }
 
+/// An entry the fetcher could not load fails the view's startup with the
+/// fetcher's own error, reported once and before any of the entry ran:
+/// nothing is committed after it, and boot never reports that it finished.
+///
+/// The realm opens, and its first epilogue commits the empty document boot
+/// created, before the entry's answer is read; that commit is the one the
+/// view is left with.
+#[test]
+fn an_entry_that_fails_to_load_fails_the_startup_with_the_fetchers_error() {
+    on_a_js_thread(|thread| async move {
+        let (context, workers) = group(&thread);
+        let mut harness = Harness::new(context, workers);
+        harness
+            .until("the realm never opened", |h| {
+                !h.sources.is_empty() && h.view.published.commit().is_some()
+            })
+            .await;
+        let opened = harness.view.published.commit();
+        harness.refuse();
+        harness
+            .until("the view never ended", |h| h.owner.is_finished())
+            .await;
+        harness.turn().await;
+
+        let failures: Vec<_> = harness
+            .events
+            .iter()
+            .filter(|event| event.is_fatal() || matches!(event, EngineEvent::ScriptRunError(_)))
+            .collect();
+        let [EngineEvent::StartupFailed(LynxViewError::Resource(error))] = failures.as_slice()
+        else {
+            panic!("one Resource startup failure, got {:?}", harness.events);
+        };
+        assert_eq!(error.to_string(), unanswered_source().to_string());
+        assert!(!harness.finished());
+        assert_eq!(
+            harness.view.published.commit(),
+            opened,
+            "nothing was committed after the failure"
+        );
+    });
+}
+
 /// A group whose runtime could not be built still serves its views: each
 /// one fails its startup with that runtime's error, and opens nothing — no
 /// document, no BTS `Start`, and no request past the ones `create_lynx_view`
@@ -1858,7 +2080,7 @@ fn a_view_that_already_failed_still_reports_a_task_that_traps() {
         let reports: Vec<_> = events
             .iter()
             .filter_map(|event| match event {
-                EngineEvent::ScriptRunError(error) => Some(error.message.to_string()),
+                EngineEvent::Panicked(error) => Some(error.message.to_string()),
                 _ => None,
             })
             .collect();
@@ -1990,7 +2212,7 @@ lynx.getJSContext().addEventListener('flood', () => {
 }
 
 #[test]
-fn a_bts_worker_that_fails_reports_worker_failed_and_leaves_boot_alone() {
+fn a_bts_worker_that_fails_reports_worker_ended_and_leaves_boot_alone() {
     on_a_js_thread(|thread| async move {
         let (context, workers) = group(&thread);
         let mut sources = ViewSources::new("app:///", "app:///main.js", SCREEN);
@@ -2006,6 +2228,10 @@ fn a_bts_worker_that_fails_reports_worker_failed_and_leaves_boot_alone() {
             })
             .await;
         let background = harness.background_worker();
+        assert!(
+            matches!(background.role, WorkerRole::Background),
+            "boot's worker starts as the background thread"
+        );
         // Boot is already settled when the failure arrives: it is the MTS
         // entry's own, and the BTS Worker is no part of it.
         harness
@@ -2029,9 +2255,15 @@ fn a_bts_worker_that_fails_reports_worker_failed_and_leaves_boot_alone() {
             .unwrap();
         harness
             .until("the BTS failure was never reported", |h| {
-                h.events
-                    .iter()
-                    .any(|e| matches!(e, EngineEvent::WorkerFailed(_)))
+                h.events.iter().any(|e| {
+                    matches!(
+                        e,
+                        EngineEvent::WorkerEnded {
+                            source: crate::ScriptSource::Background,
+                            ..
+                        }
+                    )
+                })
             })
             .await;
         assert!(
@@ -2042,10 +2274,15 @@ fn a_bts_worker_that_fails_reports_worker_failed_and_leaves_boot_alone() {
             .events
             .iter()
             .filter_map(|event| match event {
-                EngineEvent::WorkerFailed(error) => Some(error.to_string()),
+                EngineEvent::WorkerEnded {
+                    source: crate::ScriptSource::Background,
+                    error,
+                } => Some(error.to_string()),
                 EngineEvent::StartupFailed(_)
                 | EngineEvent::ListenerFailed(_)
-                | EngineEvent::ScriptRunError(_) => {
+                | EngineEvent::ScriptRunError(_)
+                | EngineEvent::WorkerThrew { .. }
+                | EngineEvent::WorkerEnded { .. } => {
                     panic!("BTS startup failure was misreported: {event:?}")
                 }
                 _ => None,
@@ -2492,6 +2729,180 @@ fn a_listed_sheet_that_fails_to_load_fails_the_boot_naming_it() {
     });
 }
 
+/// A listed sheet that app code settles first still fails the boot.
+///
+/// The entry's `adoptStyleSheet` settles the listed sheets ahead of its own,
+/// so it is the first to meet `a.css` failing, and the error is thrown to the
+/// entry. Whether the entry catches it or not, the failure is kept and boot's
+/// own flush throws it again: exactly one `StartupFailed` naming the sheet,
+/// no `ScriptFinished`, and nothing published.
+///
+/// Before it, one `ScriptRunError` with the same message: the entry that
+/// completed the module reports the one rejection its checkpoint returned —
+/// the entry's own throw where it was not caught, and boot's rejection where
+/// it was — and drops the rest.
+#[test]
+fn a_listed_sheet_that_app_code_settles_first_still_fails_the_boot() {
+    for caught in [false, true] {
+        on_a_js_thread(move |thread| async move {
+            let (context, workers) = group(&thread);
+            let mut harness = Harness::serving(
+                context,
+                workers,
+                ViewSources {
+                    style_sheets: vec!["app:///a.css".to_owned()],
+                    ..ViewSources::new("app:///", "app:///main.js", SCREEN)
+                },
+            );
+            harness
+                .until("the view never asked for its stylesheet", |h| {
+                    h.wants_a_style_sheet()
+                })
+                .await;
+            harness.refuse_style_sheet();
+            let adoption = "__AdoptStyleSheet(__LoadStyleSheet('CSS', '__Card__'));";
+            let entry = if caught {
+                format!("{ONE_BOX}\ntry {{ {adoption} }} catch {{}}")
+            } else {
+                format!("{ONE_BOX}\n{adoption}")
+            };
+            harness.answer("app:///main.js", &entry);
+            harness
+                .until("the sheet failure never reached the embedder", |h| {
+                    h.startup_failure().is_some()
+                })
+                .await;
+            harness.turn().await;
+
+            let failures: Vec<_> = harness
+                .events
+                .iter()
+                .filter(|event| {
+                    event.is_fatal()
+                        || matches!(
+                            event,
+                            EngineEvent::ScriptRunError(_) | EngineEvent::ScriptFinished
+                        )
+                })
+                .collect();
+            let [
+                EngineEvent::ScriptRunError(reported),
+                EngineEvent::StartupFailed(LynxViewError::Script(error)),
+            ] = failures.as_slice()
+            else {
+                panic!(
+                    "caught: {caught}: one ScriptRunError, then one Script startup failure, \
+                     got {:?}",
+                    harness.events
+                );
+            };
+            assert!(
+                error.message.contains("loading stylesheet app:///a.css"),
+                "{error}"
+            );
+            assert_eq!(reported.message, error.message, "caught: {caught}");
+            assert!(
+                harness.view.published.commit().is_none(),
+                "nothing was published without the sheet"
+            );
+        });
+    }
+}
+
+/// An entry whose top-level `await` a worker event resumes, and which then
+/// throws, is reported as that entry's failure — `ListenerFailed`, the kind of
+/// the entry it threw in — before boot's own failure in the same entry.
+///
+/// The listed sheet is refused, so boot's flush, which runs in that entry
+/// right after the entry's throw, fails the boot. The entry reports the first
+/// rejection its checkpoint returned, which is the entry's own throw, and
+/// only then does its epilogue report boot's failure as `StartupFailed`.
+#[test]
+fn an_entry_a_worker_event_resumes_reports_its_throw_before_boots_failure() {
+    on_a_js_thread(|thread| async move {
+        let (context, workers) = group(&thread);
+        let mut harness = Harness::serving(
+            context,
+            workers,
+            ViewSources {
+                style_sheets: vec!["app:///a.css".to_owned()],
+                ..ViewSources::new("app:///", "app:///main.js", SCREEN)
+            },
+        );
+        harness
+            .until("the view never asked for its stylesheet", |h| {
+                h.wants_a_style_sheet()
+            })
+            .await;
+        harness.refuse_style_sheet();
+        harness.answer(
+            "app:///main.js",
+            r"
+            import { Worker } from 'bobcat-internal';
+            const worker = new Worker('./worker.js');
+            await new Promise(resolve => { worker.onmessage = resolve; });
+            throw Error('the entry threw');
+            ",
+        );
+        // The entry's own `Worker`, whose script this test never answers:
+        // the message below is the only thing it says.
+        let mut worker = None;
+        harness
+            .until("the entry never started its Worker", |h| {
+                if let Ok(WorkerCommand::Start(start)) = h.workers.try_recv() {
+                    worker = Some(start);
+                }
+                worker.is_some()
+            })
+            .await;
+        let worker = worker.expect("the entry's Worker started");
+        worker
+            .events
+            .send(crate::background::WorkerEvent {
+                key: worker.key,
+                payload: crate::background::WorkerPayload::Message(crate::background::wire_value(
+                    "'ready'",
+                )),
+            })
+            .unwrap();
+        harness
+            .until("the sheet failure never reached the embedder", |h| {
+                h.startup_failure().is_some()
+            })
+            .await;
+        harness.turn().await;
+
+        let failures: Vec<_> = harness
+            .events
+            .iter()
+            .filter(|event| {
+                event.is_fatal()
+                    || matches!(
+                        event,
+                        EngineEvent::ListenerFailed(_)
+                            | EngineEvent::ScriptRunError(_)
+                            | EngineEvent::ScriptFinished
+                    )
+            })
+            .collect();
+        let [
+            EngineEvent::ListenerFailed(thrown),
+            EngineEvent::StartupFailed(LynxViewError::Script(error)),
+        ] = failures.as_slice()
+        else {
+            panic!(
+                "one ListenerFailed, then one Script startup failure, got {:?}",
+                harness.events
+            );
+        };
+        assert!(thrown.message.contains("the entry threw"), "{thrown}");
+        assert!(
+            error.message.contains("loading stylesheet app:///a.css"),
+            "{error}"
+        );
+    });
+}
+
 /// What a synchronous adoption stops and what it does not.
 ///
 /// View A's entry adopts a stylesheet and the test withholds the answer, so
@@ -2603,6 +3014,14 @@ fn releasing_a_view_whose_job_is_waiting_ends_the_wait_and_releases_its_realm() 
             .await;
 
         harness.view.token.cancel();
+        // Boot catches what the released wait threw in its entry and goes on
+        // to connect the BTS, whose disposal the owner then waits for.
+        harness
+            .until("boot never went on to start the BTS", |h| {
+                !h.workers.is_empty()
+            })
+            .await;
+        harness.background = Some(harness.background_worker());
         harness
             .until("the released view's owner never returned", |h| {
                 h.owner.is_finished()
@@ -2624,7 +3043,9 @@ fn releasing_a_view_whose_job_is_waiting_ends_the_wait_and_releases_its_realm() 
         assert!(
             !harness.events.iter().any(|event| matches!(
                 event,
-                EngineEvent::StartupFailed(_) | EngineEvent::ScriptRunError(_)
+                EngineEvent::StartupFailed(_)
+                    | EngineEvent::ScriptRunError(_)
+                    | EngineEvent::Panicked(_)
             )),
             "a release is not a failure, so nothing is reported"
         );

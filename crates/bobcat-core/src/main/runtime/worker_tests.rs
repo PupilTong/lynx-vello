@@ -383,20 +383,41 @@ fn collect_host_notices(
     }
 }
 
-/// Whether any notice reports a worker failure with this message.
+/// Whether any notice reports a worker failure with this message: a throw
+/// or an end, from any worker.
 fn worker_failed(notices: &[ViewNotice], message: &str) -> bool {
     notices.iter().any(|notice| {
-        matches!(notice, ViewNotice::Engine(crate::EngineEvent::WorkerFailed(error))
-            if error.message.contains(message))
+        matches!(notice, ViewNotice::Engine(
+            crate::EngineEvent::WorkerThrew { error, .. }
+            | crate::EngineEvent::WorkerEnded { error, .. }
+        ) if error.message.contains(message))
     })
 }
 
-/// Every worker failure a batch of notices carries.
+/// Every worker failure a batch of notices carries, throws and ends alike.
 fn worker_failures(notices: Vec<ViewNotice>) -> Vec<crate::script::ScriptError> {
     notices
         .into_iter()
         .filter_map(|notice| match notice {
-            ViewNotice::Engine(crate::EngineEvent::WorkerFailed(error)) => Some(error),
+            ViewNotice::Engine(
+                crate::EngineEvent::WorkerThrew { error, .. }
+                | crate::EngineEvent::WorkerEnded { error, .. },
+            ) => Some(error),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every worker event a batch of notices carries, in order, for a test that
+/// asks which of the two each one is and which worker it names.
+fn worker_events(notices: Vec<ViewNotice>) -> Vec<crate::EngineEvent> {
+    notices
+        .into_iter()
+        .filter_map(|notice| match notice {
+            ViewNotice::Engine(
+                event @ (crate::EngineEvent::WorkerThrew { .. }
+                | crate::EngineEvent::WorkerEnded { .. }),
+            ) => Some(event),
             _ => None,
         })
         .collect()
@@ -415,6 +436,15 @@ fn asked_for_a_worker(notices: &[ViewNotice]) -> bool {
             } if url == WORKER_URL
         )
     })
+}
+
+/// Whether any notice asks the host for a source, whatever it is. The BTS
+/// asks for none in these tests: the engine supplies its boot script, and the
+/// test's worker thread serves the BTS entry itself.
+fn asked_the_host(notices: &[ViewNotice]) -> bool {
+    notices
+        .iter()
+        .any(|notice| matches!(notice, ViewNotice::RequestSource { .. }))
 }
 
 #[test]
@@ -611,7 +641,9 @@ fn lifecycle_hooks_and_bts_snapshots_precede_queued_mts_jobs() {
         assert!(!pair.notices().iter().any(|notice| matches!(
             notice,
             ViewNotice::Engine(
-                crate::EngineEvent::ScriptReported { .. } | crate::EngineEvent::WorkerFailed(_)
+                crate::EngineEvent::ScriptReported { .. }
+                    | crate::EngineEvent::WorkerThrew { .. }
+                    | crate::EngineEvent::WorkerEnded { .. }
             )
         )));
     }
@@ -735,7 +767,9 @@ fn initial_processor_preserves_its_string_and_reads_the_page_config_switch() {
         assert!(!pair.notices().iter().any(|notice| matches!(
             notice,
             ViewNotice::Engine(
-                crate::EngineEvent::ScriptReported { .. } | crate::EngineEvent::WorkerFailed(_)
+                crate::EngineEvent::ScriptReported { .. }
+                    | crate::EngineEvent::WorkerThrew { .. }
+                    | crate::EngineEvent::WorkerEnded { .. }
             )
         )));
     }
@@ -1334,17 +1368,169 @@ fn a_worker_created_after_its_thread_trapped_fails_without_starting() {
         .unwrap()
         .dispatch_worker_event(&mut pair.js, event.key, event.payload)
         .unwrap();
-    let failures = worker_failures(pair.notices());
-    assert_eq!(failures.len(), 1);
+    let events = worker_events(pair.notices());
+    let [
+        crate::EngineEvent::WorkerEnded {
+            source: crate::ScriptSource::Worker(_),
+            error,
+        },
+    ] = events.as_slice()
+    else {
+        panic!("one WorkerEnded from the worker: {events:?}");
+    };
     assert!(
-        failures[0].message.contains("the worker thread has ended"),
+        error.message.contains("the worker thread has ended"),
         "{}",
-        failures[0].message
+        error.message
     );
     pair.check(
         "if (errors.length !== 1 || !errors[0].includes('the worker thread has ended')) throw Error(JSON.stringify(errors));",
     );
     assert_eq!(pair.live_workers(), 1, "only the built-in BTS remains");
+}
+
+/// A view whose workers are all created after `bobcat-workers` trapped hears
+/// one `WorkerEnded` for each, named by its source: the `Worker` its entry
+/// constructs, then the BTS boot creates once that entry has settled.
+#[test]
+fn a_view_booted_after_its_worker_thread_trapped_hears_each_worker_end() {
+    let mut pair = Pair::unbooted(None);
+    pair.home
+        .as_ref()
+        .unwrap()
+        .trapped()
+        .store(true, std::sync::atomic::Ordering::Release);
+    pair.boot(
+        r"
+        import { Worker } from 'bobcat-internal';
+        globalThis.worker = new Worker('./worker.js');
+    ",
+    )
+    .unwrap();
+    pair.deliver();
+    pair.deliver();
+    let notices = pair.notices();
+    assert!(
+        !asked_the_host(&notices),
+        "each worker failed at once and asked the host for nothing"
+    );
+    let events = worker_events(notices);
+    let [
+        crate::EngineEvent::WorkerEnded {
+            source: crate::ScriptSource::Worker(_),
+            ..
+        },
+        crate::EngineEvent::WorkerEnded {
+            source: crate::ScriptSource::Background,
+            ..
+        },
+    ] = events.as_slice()
+    else {
+        panic!("one WorkerEnded for the Worker, then one for the BTS: {events:?}");
+    };
+    assert_eq!(pair.live_workers(), 0);
+}
+
+/// Whatever entry of the BTS's threw, the realm is still running: the
+/// embedder hears a throw rather than an end, from the background thread.
+#[test]
+fn a_bts_that_throws_reports_worker_threw_from_the_background() {
+    let mut pair = Pair::with_background("__CreatePage();", Some("throw Error('BTS threw');"));
+    let event = pair.next_event().expect("the BTS reports its throw");
+    assert!(
+        matches!(event.payload, WorkerPayload::Errored(_)),
+        "a throw is an ordinary worker error"
+    );
+    pair.runtime
+        .as_mut()
+        .unwrap()
+        .dispatch_worker_event(&mut pair.js, event.key, event.payload)
+        .unwrap();
+    let events = worker_events(pair.notices());
+    let [
+        crate::EngineEvent::WorkerThrew {
+            source: crate::ScriptSource::Background,
+            error,
+        },
+    ] = events.as_slice()
+    else {
+        panic!("one WorkerThrew from the BTS: {events:?}");
+    };
+    assert!(error.message.contains("BTS threw"), "{}", error.message);
+    assert_eq!(pair.live_workers(), 1, "the BTS that threw still runs");
+}
+
+/// A `Worker` is named by the key its `Worker` object holds: the printed
+/// `WorkerId` is the key string the realm routed the event by, and the
+/// `error` event reaching that object is what shows the realm holds it.
+#[test]
+fn a_worker_is_named_by_the_key_its_worker_object_holds() {
+    let mut pair = Pair::new(
+        r"
+        import { Worker } from 'bobcat-internal';
+        globalThis.errors = [];
+        globalThis.worker = new Worker('./worker.js');
+        worker.onerror = e => errors.push(e.message);
+    ",
+    );
+    pair.answer("throw Error('worker threw');");
+    let event = pair.next_event().expect("the worker reports its throw");
+    let key = event.key.get().to_string();
+    pair.runtime
+        .as_mut()
+        .unwrap()
+        .dispatch_worker_event(&mut pair.js, event.key, event.payload)
+        .unwrap();
+    let events = worker_events(pair.notices());
+    let [
+        crate::EngineEvent::WorkerThrew {
+            source: crate::ScriptSource::Worker(id),
+            error,
+        },
+    ] = events.as_slice()
+    else {
+        panic!("one WorkerThrew from the worker: {events:?}");
+    };
+    assert_eq!(id.to_string(), key);
+    assert!(error.message.contains("worker threw"), "{}", error.message);
+    pair.check(
+        "if (errors.length !== 1 || !errors[0].includes('worker threw')) throw Error(JSON.stringify(errors));",
+    );
+}
+
+/// A worker its script has stopped is reported to no one: an error or an end
+/// that arrives after `terminate()` reaches neither the `Worker` object nor
+/// the embedder.
+#[test]
+fn a_worker_failure_arriving_after_terminate_is_reported_to_no_one() {
+    let mut pair = Pair::new(
+        r"
+        import { Worker } from 'bobcat-internal';
+        globalThis.errors = [];
+        globalThis.worker = new Worker('./worker.js');
+        worker.onerror = e => errors.push(e.message);
+    ",
+    );
+    pair.answer("postMessage('started');");
+    let started = pair.next_event().expect("the worker answered");
+    pair.check("worker.terminate();");
+    for payload in [
+        WorkerPayload::Errored(crate::threads::platform_script_error(
+            "thrown after terminate".to_owned(),
+        )),
+        WorkerPayload::Failed(crate::threads::platform_script_error(
+            "ended after terminate".to_owned(),
+        )),
+    ] {
+        pair.runtime
+            .as_mut()
+            .unwrap()
+            .dispatch_worker_event(&mut pair.js, started.key, payload)
+            .unwrap();
+    }
+    let events = worker_events(pair.notices());
+    assert!(events.is_empty(), "{events:?}");
+    pair.check("if (errors.length !== 0) throw Error(JSON.stringify(errors));");
 }
 
 #[test]
@@ -1654,7 +1840,7 @@ fn background_starts_only_after_the_awaited_main_entry_finishes() {
     );
     pair.check("if (!connected) throw Error('BTS was not connected');");
     pair.deliver();
-    assert!(!asked_for_a_worker(&pair.notices()));
+    assert!(!asked_the_host(&pair.notices()));
 }
 
 #[test]
@@ -1737,27 +1923,49 @@ fn an_omitted_background_entry_boots_without_host_io() {
     pair.deliver();
     pair.check("if (answer !== 'barrier') throw Error('worker barrier failed');");
     let notices = pair.notices();
-    assert!(!asked_for_a_worker(&notices));
+    assert!(!asked_the_host(&notices));
     assert!(worker_failures(notices).is_empty());
 }
 
+/// A main entry that rejects is app code that failed, and boot goes on past
+/// it: boot finishes, the BTS is connected, and the event the entry sent
+/// before it rejected reaches the BTS once the BTS entry has run. The seam
+/// still returns the entry's rejection, which a view reports without ending.
 #[test]
-fn a_rejected_main_entry_never_starts_its_background_context() {
-    let mut pair = Pair::unbooted(Some("throw Error('BTS must not run');"));
+fn a_rejected_main_entry_still_connects_its_background_context() {
+    let mut pair = Pair::unbooted(Some(
+        r"
+        const core = lynx.getCoreContext();
+        core.addEventListener('queued', event => core.dispatchEvent({type: 'reply', data: event.data}));
+    ",
+    ));
     let error = pair
         .boot(
             r"
-            lynx.getJSContext().dispatchEvent({type: 'queued', data: 1});
+            globalThis.results = [];
+            const context = lynx.getJSContext();
+            context.addEventListener('reply', event => results.push(event.data));
+            context.dispatchEvent({type: 'queued', data: 1});
             await Promise.resolve();
             throw Error('main entry rejected');
         ",
         )
         .unwrap_err();
     assert!(error.to_string().contains("main entry rejected"));
-    assert!(!asked_for_a_worker(&pair.notices()));
-    drop(pair.runtime.take());
-    drop(pair.home.take());
-    assert!(pair.events.try_recv().is_err());
+    assert!(
+        pair.runtime
+            .as_mut()
+            .unwrap()
+            .main_module_finished()
+            .unwrap(),
+        "boot finished past the rejected entry"
+    );
+    assert_eq!(pair.live_workers(), 1, "boot connected the BTS");
+    pair.deliver();
+    pair.check("if (JSON.stringify(results) !== '[1]') throw Error(JSON.stringify(results));");
+    let notices = pair.notices();
+    assert!(!asked_the_host(&notices));
+    assert!(worker_failures(notices).is_empty());
 }
 
 #[test]
@@ -1817,7 +2025,9 @@ fn bts_node_queries_read_real_nodes_and_retain_native_tokens_and_statuses() {
     ");
     assert!(!pair.notices().iter().any(|notice| matches!(
         notice,
-        ViewNotice::Engine(crate::EngineEvent::WorkerFailed(_))
+        ViewNotice::Engine(
+            crate::EngineEvent::WorkerThrew { .. } | crate::EngineEvent::WorkerEnded { .. }
+        )
     )));
 }
 
@@ -1856,7 +2066,9 @@ fn bts_native_props_mutate_the_document_before_the_next_query() {
     ");
     assert!(!pair.notices().iter().any(|notice| matches!(
         notice,
-        ViewNotice::Engine(crate::EngineEvent::WorkerFailed(_))
+        ViewNotice::Engine(
+            crate::EngineEvent::WorkerThrew { .. } | crate::EngineEvent::WorkerEnded { .. }
+        )
     )));
 }
 
@@ -1913,8 +2125,12 @@ fn bts_invoke_measures_the_committed_tree_and_keeps_its_node_resolution_codes() 
     assert!(worker_failures(pair.notices()).is_empty());
 }
 
+/// Every realm sends its own console output and `lynx.reportError`s to the
+/// view's host, named by its source: the BTS's reach the embedder without a
+/// message to the main-thread realm, and a level is spelled as the console
+/// method. The BTS's global `console` is the object its module exports.
 #[test]
-fn diagnostics_cross_the_worker_channel_and_keep_both_realms_usable() {
+fn each_realm_reports_its_own_diagnostics_with_its_source() {
     let mut pair = Pair::with_background(
         r"
         __CreatePage();
@@ -1926,47 +2142,198 @@ fn diagnostics_cross_the_worker_channel_and_keep_both_realms_usable() {
         Some(
             r"
         import {console} from 'bobcat:bts-runtime';
+        if (globalThis.console !== console) throw Error('the global console is another object');
         lynx.reportError(new Error('BTS fatal label'), {level:'fatal'});
         console.warn('BTS', [1,2]);
         lynx.getCoreContext().dispatchEvent({type:'alive', data:undefined});
         ",
         ),
     );
-    for _ in 0..3 {
-        pair.deliver();
-    }
+    // The Context event is the one worker event: the BTS's diagnostics were
+    // sent to the host before it, and not through this realm.
+    pair.deliver();
     pair.check("if (!alive) throw Error('a diagnostic stopped delivery');");
     let diagnostics: Vec<_> = pair
         .notices()
         .into_iter()
         .filter_map(|notice| match notice {
-            ViewNotice::Engine(crate::EngineEvent::ScriptReported { level, message }) => {
-                Some((true, level, message))
-            }
-            ViewNotice::Engine(crate::EngineEvent::ConsoleMessage { level, message }) => {
-                Some((false, level, message))
-            }
-            ViewNotice::Engine(crate::EngineEvent::WorkerFailed(error)) => panic!("{error}"),
+            ViewNotice::Engine(crate::EngineEvent::ScriptReported {
+                source,
+                level,
+                message,
+            }) => Some((source, true, level, message)),
+            ViewNotice::Engine(crate::EngineEvent::ConsoleMessage {
+                source,
+                level,
+                message,
+            }) => Some((source, false, level, message)),
+            ViewNotice::Engine(
+                crate::EngineEvent::WorkerThrew { error, .. }
+                | crate::EngineEvent::WorkerEnded { error, .. },
+            ) => panic!("{error}"),
             _ => None,
         })
         .collect();
-    assert_eq!(diagnostics.len(), 4);
-    assert_eq!(
-        (diagnostics[0].0, diagnostics[0].1.as_str()),
-        (true, "warning")
+    assert_eq!(diagnostics.len(), 4, "{diagnostics:?}");
+    // In each realm's own order; the two realms' are in none between them.
+    let from = |wanted: crate::ScriptSource| {
+        diagnostics
+            .iter()
+            .filter(|(source, ..)| *source == wanted)
+            .map(|(_, reported, level, message)| (*reported, level.as_str(), message.as_str()))
+            .collect::<Vec<_>>()
+    };
+    let main = from(crate::ScriptSource::Main);
+    assert_eq!(main.len(), 2, "{main:?}");
+    assert_eq!((main[0].0, main[0].1), (true, "warn"));
+    assert!(main[0].2.contains("MTS warning"));
+    assert!(main[0].2.contains("app:///nested/main.js"));
+    assert_eq!(main[1], (false, "info", "MTS {\"value\":1}"));
+    let background = from(crate::ScriptSource::Background);
+    assert_eq!(background.len(), 2, "{background:?}");
+    assert_eq!((background[0].0, background[0].1), (true, "fatal"));
+    assert!(background[0].2.contains("BTS fatal label"));
+    assert_eq!(background[1], (false, "warn", "BTS [1,2]"));
+}
+
+/// A plain `Worker` has a global `console`, not enumerable, whose output
+/// reaches the embedder from the worker itself, named by the key its
+/// `Worker` object holds. It has no `requestAnimationFrame`.
+#[test]
+fn a_workers_global_console_reports_from_the_worker() {
+    let mut pair = Pair::new(
+        r"
+        import { Worker } from 'bobcat-internal';
+        globalThis.worker = new Worker('./worker.js');
+    ",
     );
-    assert!(diagnostics[0].2.contains("MTS warning"));
-    assert!(diagnostics[0].2.contains("app:///nested/main.js"));
-    assert_eq!(
-        diagnostics[1],
-        (false, "info".into(), "MTS {\"value\":1}".into())
+    pair.answer(
+        r"
+        if (typeof requestAnimationFrame !== 'undefined') throw Error('a Worker has requestAnimationFrame');
+        if (Object.keys(globalThis).includes('console')) throw Error('the global console is enumerable');
+        console.log('from the worker', {value:1});
+        postMessage('logged');
+    ",
     );
-    assert_eq!(
-        (diagnostics[2].0, diagnostics[2].1.as_str()),
-        (true, "fatal")
+    let event = pair.next_event().expect("the worker's script ran");
+    match &event.payload {
+        WorkerPayload::Message(value) if posted(value, "logged") => {}
+        WorkerPayload::Errored(error) | WorkerPayload::Failed(error) => panic!("{error}"),
+        _ => panic!("the worker posts that it logged"),
+    }
+    let key = event.key.get().to_string();
+    let logged: Vec<_> = pair
+        .notices()
+        .into_iter()
+        .filter_map(|notice| match notice {
+            ViewNotice::Engine(crate::EngineEvent::ConsoleMessage {
+                source,
+                level,
+                message,
+            }) => Some((source, level, message)),
+            _ => None,
+        })
+        .collect();
+    let [(crate::ScriptSource::Worker(id), level, message)] = logged.as_slice() else {
+        panic!("one console message from the worker: {logged:?}");
+    };
+    assert_eq!(id.to_string(), key);
+    assert_eq!(level, "log");
+    assert_eq!(message, "from the worker {\"value\":1}");
+}
+
+/// A BTS animation-frame callback or `queueMicrotask` callback that throws is
+/// an uncaught exception of the worker realm, as it is in a browser worker:
+/// each is one `WorkerThrew` from the background thread, and neither is a
+/// `ScriptReported`.
+#[test]
+fn a_throwing_bts_frame_or_microtask_callback_is_a_worker_throw() {
+    let mut pair = Pair::with_background(
+        "__CreatePage();",
+        Some(&format!(
+            r"
+            lynx.requestAnimationFrame(() => {{ throw Error('frame callback threw'); }});
+            lynx.queueMicrotask(() => {{ throw Error('microtask threw'); }});
+            postMessage('{BTS_ENTRY_RAN}');
+        "
+        )),
     );
-    assert!(diagnostics[2].2.contains("BTS fatal label"));
-    assert_eq!(diagnostics[3], (false, "warn".into(), "BTS [1,2]".into()));
+    // The marker is posted before the microtask runs, so the microtask's
+    // throw is the event behind it.
+    pair.await_background_entry();
+    pair.deliver();
+    pair.frame(1000.0);
+    pair.deliver();
+    let notices = pair.notices();
+    assert!(
+        !notices.iter().any(|notice| matches!(
+            notice,
+            ViewNotice::Engine(crate::EngineEvent::ScriptReported { .. })
+        )),
+        "a callback's throw is not a report"
+    );
+    let events = worker_events(notices);
+    let [
+        crate::EngineEvent::WorkerThrew {
+            source: crate::ScriptSource::Background,
+            error: microtask,
+        },
+        crate::EngineEvent::WorkerThrew {
+            source: crate::ScriptSource::Background,
+            error: frame,
+        },
+    ] = events.as_slice()
+    else {
+        panic!("two WorkerThrew from the BTS: {events:?}");
+    };
+    assert!(microtask.message.contains("microtask threw"), "{microtask}");
+    assert!(
+        frame.message.starts_with("running animation callbacks: ")
+            && frame.message.contains("frame callback threw"),
+        "{frame}"
+    );
+    assert_eq!(pair.live_workers(), 1, "the BTS still runs");
+}
+
+/// A misused BTS `SelectorQuery` still reports through `lynx.reportError`: a
+/// `ScriptReported` from the background thread, and no worker throw.
+#[test]
+fn a_misused_bts_selector_query_is_reported_from_the_background() {
+    let mut pair = Pair::with_background(
+        "__CreatePage();",
+        Some(&format!(
+            r"
+            const late = lynx.createSelectorQuery().select('#x').fields({{id:true}}).selectReactRef('ref');
+            if (late !== undefined) throw Error('a late selectReactRef answered a node');
+            postMessage('{BTS_ENTRY_RAN}');
+        "
+        )),
+    );
+    pair.await_background_entry();
+    let notices = pair.notices();
+    assert!(
+        !worker_failed(&notices, ""),
+        "a misuse is not a worker throw"
+    );
+    let reports: Vec<_> = notices
+        .into_iter()
+        .filter_map(|notice| match notice {
+            ViewNotice::Engine(crate::EngineEvent::ScriptReported {
+                source,
+                level,
+                message,
+            }) => Some((source, level, message)),
+            _ => None,
+        })
+        .collect();
+    let [(crate::ScriptSource::Background, level, message)] = reports.as_slice() else {
+        panic!("one report from the BTS: {reports:?}");
+    };
+    assert_eq!(level, "error");
+    assert!(
+        message.contains("selectReactRef() should be called before any other"),
+        "{message}"
+    );
 }
 
 #[test]
@@ -2801,6 +3168,41 @@ fn serve_bundle_path(pair: &mut Pair, template: &bobcat_source::web::WebTemplate
     );
 }
 
+/// Dispatches what the view's workers say until the host's notices hold the
+/// React fixture's mount line for `seed`, and answers with every notice read
+/// on the way, the line's own batch included.
+///
+/// The host is read before each dispatch, because the BTS logs to the host
+/// itself: the line can arrive with no worker event behind it. A turn with
+/// nothing to read and nothing to dispatch waits a moment.
+fn await_react_mount(pair: &mut Pair, seed: u8) -> Vec<ViewNotice> {
+    let mounted = format!("reload-mount {seed} retained 1");
+    let deadline = ClockInstant::now() + PATIENCE;
+    let mut read = Vec::new();
+    loop {
+        assert!(ClockInstant::now() < deadline, "React effect did not mount");
+        let notices = pair.notices();
+        let done = notices.iter().any(|notice| {
+            matches!(notice,
+            ViewNotice::Engine(crate::EngineEvent::ConsoleMessage { message, .. })
+            if *message == mounted)
+        });
+        read.extend(notices);
+        if done {
+            return read;
+        }
+        match pair.events.try_recv() {
+            Ok(event) => pair
+                .runtime
+                .as_mut()
+                .unwrap()
+                .dispatch_worker_event(&mut pair.js, event.key, event.payload)
+                .unwrap(),
+            Err(_) => std::thread::sleep(Duration::from_millis(1)),
+        }
+    }
+}
+
 fn verify_react_teardown(reload: bool, development: bool) {
     const BUNDLE_URL: &str = "app:///nested/card.lynx.bundle";
 
@@ -2859,42 +3261,45 @@ fn verify_react_teardown(reload: bool, development: bool) {
         }
         // Complete actual hydration and its patch acknowledgement, so the
         // fixture's useEffect and GlobalEventEmitter listener have mounted.
-        let deadline = ClockInstant::now() + PATIENCE;
-        loop {
-            assert!(ClockInstant::now() < deadline, "React effect did not mount");
-            pair.deliver();
-            let notices = pair.notices();
-            assert!(!worker_failed(&notices, ""));
-            for notice in &notices {
-                if let ViewNotice::Engine(crate::EngineEvent::ScriptReported { level, message }) =
-                    notice
-                {
-                    assert!(development && level == "warning"
-                        && message.contains("WebSocket is not found. Please use Lynx >= 2.16 or consider using a polyfill."),
-                        "unexpected React report: {message}");
-                    missing_websocket_warnings += 1;
-                }
-            }
-            if notices.iter().any(|notice| {
-                matches!(notice,
-                ViewNotice::Engine(crate::EngineEvent::ConsoleMessage { message, .. })
-                if message == &format!("reload-mount {seed} retained 1"))
-            }) {
-                break;
+        let notices = await_react_mount(&mut pair, *seed);
+        assert!(!worker_failed(&notices, ""));
+        for notice in &notices {
+            if let ViewNotice::Engine(crate::EngineEvent::ScriptReported {
+                level, message, ..
+            }) = notice
+            {
+                assert!(development && level == "warn"
+                    && message.contains("WebSocket is not found. Please use Lynx >= 2.16 or consider using a polyfill."),
+                    "unexpected React report: {message}");
+                missing_websocket_warnings += 1;
             }
         }
     }
     assert_eq!(missing_websocket_warnings, usize::from(development));
     pair.cancel.cancel();
-    let events = pair.dispose();
-    let cleanups = events
+    pair.dispose();
+    // The cleanup logs from the BTS itself, before the `disposed` reply the
+    // disposal above waited for, so the host already has it.
+    let notices = pair.notices();
+    assert!(
+        !notices.iter().any(|notice| matches!(
+            notice,
+            ViewNotice::Engine(crate::EngineEvent::ScriptReported {
+                source: crate::ScriptSource::Background,
+                ..
+            })
+        )),
+        "the BTS reported an error during disposal"
+    );
+    let cleanups = notices
         .iter()
-        .filter_map(|event| {
-            let message: serde_json::Value = serde_json::from_str(event).unwrap();
-            assert_ne!(message["method"], "reportError", "{event}");
-            (message["method"] == "console")
-                .then(|| message["message"].as_str().unwrap().to_owned())
-                .filter(|message| message.starts_with("reload-cleanup "))
+        .filter_map(|notice| match notice {
+            ViewNotice::Engine(crate::EngineEvent::ConsoleMessage {
+                source: crate::ScriptSource::Background,
+                message,
+                ..
+            }) if message.starts_with("reload-cleanup ") => Some(message.as_str()),
+            _ => None,
         })
         .collect::<Vec<_>>();
     assert_eq!(

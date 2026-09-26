@@ -66,6 +66,11 @@ pub(crate) const FUTURE_MODULE_SPECIFIER: &str = "bobcat:future";
 /// it is written over is the two host members [`crate::require`] installs.
 pub(crate) const REQUIRE_MODULE_SPECIFIER: &str = "bobcat:module";
 
+/// A realm's `console` and `reportError`: the one value formatting and the one
+/// `lynx.reportError` level rule every realm kind reports with, over the two
+/// members [`crate::realm`] installs in every realm's core.
+pub(crate) const DIAGNOSTICS_MODULE_SPECIFIER: &str = "bobcat:diagnostics";
+
 /// The `EventTarget` a view's `lynx.getEngine()` and a worker's global scope
 /// are both built on.
 pub(crate) const EVENT_TARGET_MODULE_SPECIFIER: &str = "bobcat:event-target";
@@ -206,6 +211,7 @@ pub(crate) const BUILTIN_MODULES: &[BuiltinModule] = &[
     builtin_module!(REQUIRE_MODULE_SPECIFIER, "module"),
     builtin_module!(SECTION_URL_MODULE_SPECIFIER, "section-url"),
     builtin_module!(BUNDLE_FETCH_MODULE_SPECIFIER, "bundle-fetch"),
+    builtin_module!(DIAGNOSTICS_MODULE_SPECIFIER, "diagnostics"),
     builtin_module!(EVENT_TARGET_MODULE_SPECIFIER, "event-target"),
     builtin_module!(CONTEXT_MODULE_SPECIFIER, "cross-thread-context"),
     builtin_module!(WORKER_CLASS_MODULE_SPECIFIER, "worker"),

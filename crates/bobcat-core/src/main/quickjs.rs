@@ -5,12 +5,15 @@
 //! everything the runtime needs and the bridge deliberately leaves open: when
 //! the promise-job queue is drained, which realm a drained failure is
 //! reported to, how a bridge failure becomes
-//! a sanitized [`ScriptError`], and how a module namespace caches the atoms an
-//! export is looked up by.
+//! a sanitized [`ScriptError`], that a host function's panic is resumed as a
+//! panic once the entry that called it ends, and how a module namespace
+//! caches the atoms an export is looked up by.
 
+use std::any::Any;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
+use std::panic::{self, AssertUnwindSafe};
 use std::rc::Rc;
 use std::sync::Arc;
 #[cfg(test)]
@@ -28,6 +31,16 @@ use crate::script::{ScriptError, ScriptErrorKind, ScriptErrorPhase, ScriptSource
 /// handle and no DOM identity ever crosses as itself.
 pub(crate) type HostCallback =
     Box<dyn FnMut(&[quickjs::HostValue]) -> Result<quickjs::HostValue, String> + 'static>;
+
+/// The first panic a host function of one realm raised, kept until the
+/// operation that reached it ends.
+///
+/// The bridge cannot let a panic unwind through `QuickJS`'s C frames, so it
+/// turns one into an exception, which the script may catch. The payload is
+/// kept here instead of being lost, and the realm's next checkpoint resumes
+/// it: a host function that panics fails the entry it was called in as a
+/// panic, whatever the script did with the exception it was shown.
+type HostPanic = Rc<RefCell<Option<Box<dyn Any + Send>>>>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct QuickJsConfig {
@@ -72,23 +85,20 @@ struct ModuleNamespace {
 ///
 /// A group opens one of these per view on one runtime, so everything the
 /// runtime owns is shared: the heap, the atom table, the promise-job queue,
-/// the execution limits. Everything a *failure* is made of is not, and lives
-/// here, so one view's broken script cannot be reported to another's.
+/// the execution limits. Everything a *failure* is made of is not: a
+/// checkpoint run through this realm reports this realm's rejections alone,
+/// so one view's broken script cannot be reported to another's.
 ///
 /// Created on the thread that will own it — the engine-owned Lynx main
 /// thread — and never moved off it, which is why nothing here is `Send`.
 pub(crate) struct ScriptEngine {
     realm: quickjs::Context,
     module_namespaces: HashMap<String, ModuleNamespace>,
-    /// A checkpoint error raised beside a failure this realm's caller was
-    /// already reporting, kept for the next entry into *this* realm.
-    ///
-    /// It lives here rather than on the runtime because it is one realm's
-    /// failure: parked runtime-wide it would be handed to whichever realm
-    /// entered next, and a sibling view would fail for something it could
-    /// not have caused. Held here it also dies with the realm that owns it.
-    deferred_checkpoint_error: Option<ScriptError>,
     evaluation: Option<quickjs::Value>,
+    /// Per realm, like a rejection: a sibling's checkpoint may run this
+    /// realm's promise jobs, and a panic one of them raised is this realm's
+    /// to resume, not the sibling's.
+    host_panic: HostPanic,
 }
 
 /// The `QuickJS` runtime a group's realms share.
@@ -97,9 +107,9 @@ pub(crate) struct ScriptEngine {
 /// one atom table, one promise-job queue, one set of execution limits. The
 /// queue is one of those facts, and no checkpoint ever leaves work in it:
 /// every checkpoint runs it dry, whichever realm queued the jobs. A
-/// *failure* is not a runtime-wide fact and does not live here: it belongs
-/// to the realm that raised it, which is where it waits — on
-/// [`ScriptEngine`].
+/// *failure* is not a runtime-wide fact: a rejection belongs to the realm
+/// that raised it, and only a checkpoint run through that realm's
+/// [`ScriptEngine`] reports it.
 pub(crate) struct ScriptRuntime {
     runtime: quickjs::Runtime,
     config: QuickJsConfig,
@@ -160,8 +170,8 @@ impl ScriptRuntime {
         Ok(ScriptEngine {
             realm,
             module_namespaces: HashMap::new(),
-            deferred_checkpoint_error: None,
             evaluation: None,
+            host_panic: HostPanic::default(),
         })
     }
 
@@ -234,11 +244,6 @@ impl ScriptEngine {
     /// Ends one entry into this realm: the checkpoint runs whether the entry
     /// succeeded or not, because the jobs it queued are due either way.
     ///
-    /// A checkpoint error raised beside a failure the caller is already
-    /// reporting has nobody to return it to, so it waits for the next entry
-    /// into this realm — the realm that raised it. The first one waits; a
-    /// second is dropped, since one report of a wedged realm is the report.
-    ///
     /// An entry that ends in a failure reports one, and drops whatever
     /// rejections this realm still has queued behind it: one throw rejects
     /// its module's evaluation promise and everything awaiting it, and
@@ -247,6 +252,14 @@ impl ScriptEngine {
     /// still answers the next message, which is what HTML says it does.
     /// Pending *jobs* are not dropped — they are still due, and this entry's
     /// own checkpoint runs them before the caller hears the failure.
+    ///
+    /// A checkpoint error raised beside a failure the caller is already
+    /// reporting is one of those rejections: the checkpoint still runs, and
+    /// its error is dropped with the rest. Nothing is kept for the next entry
+    /// into this realm. A failure does not end the realm, so that entry is an
+    /// ordinary operation — a module completion, a future settle — and
+    /// refusing it in order to report an older error would leave whatever it
+    /// was resuming pending for good.
     fn finish_operation<T>(
         &mut self,
         runtime: &mut ScriptRuntime,
@@ -262,10 +275,7 @@ impl ScriptEngine {
                 }
             },
             Err(primary_error) => {
-                if let Err(checkpoint_error) = self.checkpoint(runtime, phase) {
-                    self.deferred_checkpoint_error
-                        .get_or_insert(checkpoint_error);
-                }
+                let _ = self.checkpoint(runtime, phase);
                 self.discard_leftover_rejections(runtime);
                 Err(primary_error)
             }
@@ -284,6 +294,12 @@ impl ScriptEngine {
     /// The jobs are the runtime's and all of them run, whichever realm
     /// queued them. The *rejections* reported are this realm's alone: a
     /// sibling's stays queued until that sibling's own next checkpoint.
+    ///
+    /// Every entry that runs this realm's JavaScript ends here, so this is
+    /// also where a panic one of its host functions raised during the entry
+    /// is resumed, after the drain: the caller's entry unwinds, and the
+    /// thread reports it as that entry's panic. Like a rejection, a panic a
+    /// sibling's checkpoint ran into waits for this realm's own.
     fn checkpoint(
         &mut self,
         runtime: &mut ScriptRuntime,
@@ -294,19 +310,11 @@ impl ScriptEngine {
         // queue, and every sibling has to settle what its own realm owes
         // whether or not the drain got through it.
         runtime.mark_checkpoint();
+        if let Some(payload) = self.host_panic.take() {
+            panic::resume_unwind(payload);
+        }
         let executed = drained.map_err(|error| map_quickjs_error(error, phase))?;
         Ok(executed)
-    }
-
-    /// Reports what the previous entry left owing before this one starts:
-    /// this realm's parked checkpoint error. There is nothing else to hand
-    /// back — the job queue is the runtime's and every checkpoint runs it
-    /// dry, so no entry inherits an unfinished one.
-    fn take_deferred_checkpoint_error(&mut self) -> Result<(), ScriptError> {
-        match self.deferred_checkpoint_error.take() {
-            Some(error) => Err(error),
-            None => Ok(()),
-        }
     }
 
     /// Runs a collection now, so a dead handle's finalizer reaches the
@@ -319,7 +327,6 @@ impl ScriptEngine {
         &mut self,
         runtime: &mut ScriptRuntime,
     ) -> Result<(), ScriptError> {
-        self.take_deferred_checkpoint_error()?;
         runtime.runtime.run_gc();
         self.checkpoint(runtime, ScriptErrorPhase::CollectGarbage)
             .map(|_| ())
@@ -350,7 +357,6 @@ impl ScriptEngine {
         result: Result<(&str, &str), &str>,
     ) -> Result<(), ScriptError> {
         const PHASE: ScriptErrorPhase = ScriptErrorPhase::ExecuteModule;
-        self.take_deferred_checkpoint_error()?;
         let result = match result {
             Ok((url, _)) if url.contains('\0') => Err(format!(
                 "module '{name}': the response URL contains a NUL byte"
@@ -443,6 +449,10 @@ impl ScriptEngine {
     /// The runtime is taken but not read: `QuickJS` is not reentrant, and the
     /// exclusive borrow is how a caller proves no other realm on this runtime
     /// is mid-entry while this one is furnished.
+    ///
+    /// A callback that panics throws "the host function panicked" into the
+    /// script, and the panic itself is resumed by the checkpoint that ends
+    /// the entry: see [`HostPanic`].
     pub(crate) fn register_host_module_function(
         &mut self,
         _runtime: &mut ScriptRuntime,
@@ -451,13 +461,18 @@ impl ScriptEngine {
         arity: u8,
         mut callback: HostCallback,
     ) -> Result<(), ScriptError> {
-        self.take_deferred_checkpoint_error()?;
+        let host_panic = Rc::clone(&self.host_panic);
         self.realm
             .register_host_module_function(
                 module_specifier,
                 export_name,
                 u32::from(arity),
-                move |arguments| callback(arguments).map_err(quickjs::HostFunctionError::new),
+                move |arguments| {
+                    keep_host_panic(&host_panic, "the host function panicked", || {
+                        callback(arguments)
+                    })
+                    .map_err(quickjs::HostFunctionError::new)
+                },
             )
             .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterHostModuleFunction))
     }
@@ -467,20 +482,23 @@ impl ScriptEngine {
     /// source, and the text never becomes a JavaScript value.
     ///
     /// The runtime is taken for the same reason
-    /// [`Self::register_host_module_function`] takes it.
+    /// [`Self::register_host_module_function`] takes it, and a loader that
+    /// panics is treated the way a host function that panics is.
     pub(crate) fn register_synchronous_loader<F>(
         &mut self,
         _runtime: &mut ScriptRuntime,
         module_specifier: &str,
         export_name: &str,
-        load: F,
+        mut load: F,
     ) -> Result<(), ScriptError>
     where
         F: FnMut(&str) -> Result<quickjs::RequiredSource, String> + 'static,
     {
-        self.take_deferred_checkpoint_error()?;
+        let host_panic = Rc::clone(&self.host_panic);
         self.realm
-            .register_synchronous_loader(module_specifier, export_name, load)
+            .register_synchronous_loader(module_specifier, export_name, move |url| {
+                keep_host_panic(&host_panic, "the require loader panicked", || load(url))
+            })
             .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterHostModuleFunction))
     }
 
@@ -495,7 +513,6 @@ impl ScriptEngine {
         source_name: &str,
     ) -> Result<(), ScriptError> {
         const PHASE: ScriptErrorPhase = ScriptErrorPhase::Execute;
-        self.take_deferred_checkpoint_error()?;
         let result = self
             .realm
             .evaluate(
@@ -541,7 +558,6 @@ impl ScriptEngine {
         source_name: &str,
     ) -> Result<(), ScriptError> {
         const PHASE: ScriptErrorPhase = ScriptErrorPhase::ExecuteModule;
-        self.take_deferred_checkpoint_error()?;
         let evaluation = self
             .realm
             .evaluate(
@@ -578,7 +594,6 @@ impl ScriptEngine {
         export_name: &str,
         arguments: &[quickjs::HostArgument<'_>],
     ) -> Result<bool, ScriptError> {
-        self.take_deferred_checkpoint_error()?;
         let result = self.invoke_module_export(module_specifier, export_name, arguments)?;
         // The checkpoint runs through `finish_operation`, never inline:
         // draining the job queue while this call is still on the stack would
@@ -602,7 +617,6 @@ impl ScriptEngine {
         export_name: &str,
         arguments: &[quickjs::HostArgument<'_>],
     ) -> Result<bool, ScriptError> {
-        self.take_deferred_checkpoint_error()?;
         match self.invoke_module_export(module_specifier, export_name, arguments)? {
             Ok(called) => Ok(called),
             failed @ Err(_) => {
@@ -639,6 +653,22 @@ impl ScriptEngine {
     }
 }
 
+/// Runs one call the realm made into Rust, keeping the payload of a panic in
+/// `host_panic` and answering the script with `message` in its place.
+///
+/// Only the first panic of an entry is kept: a second one is what the script
+/// ran into after the first, and the checkpoint resumes one.
+fn keep_host_panic<T>(
+    host_panic: &HostPanic,
+    message: &str,
+    call: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    panic::catch_unwind(AssertUnwindSafe(call)).unwrap_or_else(|payload| {
+        host_panic.borrow_mut().get_or_insert(payload);
+        Err(message.to_owned())
+    })
+}
+
 /// URL identity is shared by static and dynamic imports. Bare names are
 /// reserved for the built-ins; transport and response policy stay with the host.
 ///
@@ -673,10 +703,6 @@ impl fmt::Debug for ScriptEngine {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ScriptEngine")
-            .field(
-                "deferred_checkpoint_error",
-                &self.deferred_checkpoint_error.is_some(),
-            )
             .finish_non_exhaustive()
     }
 }
@@ -1102,34 +1128,31 @@ mod tests {
     }
 
     #[test]
-    fn a_checkpoint_error_beside_a_primary_one_is_reported_before_the_next_script() {
+    fn a_checkpoint_error_beside_a_primary_one_is_dropped() {
         let (mut runtime, mut engine) = engine();
         let primary = engine
             .execute_script(
                 &mut runtime,
-                "Promise.reject(new Error('deferred')); throw new Error('primary')",
+                "Promise.reject(new Error('beside')); throw new Error('primary')",
                 "app:///both.js",
             )
             .expect_err("the script's own exception wins");
         assert_eq!(primary.message.as_ref(), "Error: primary");
 
-        let deferred = engine
+        engine
             .execute_script(
                 &mut runtime,
                 "globalThis.reentered = true",
                 "app:///after.js",
             )
-            .expect_err("the deferred checkpoint error is reported first");
-        assert_eq!(deferred.kind, ScriptErrorKind::Exception);
-        assert_eq!(deferred.message.as_ref(), "Error: deferred");
-
+            .expect("the next script is not handed the rejection beside the failure");
         engine
             .execute_script(
                 &mut runtime,
-                "if (typeof reentered !== 'undefined') throw new Error('the script ran anyway')",
+                "if (reentered !== true) throw new Error('the next script never ran')",
                 "app:///verify.js",
             )
-            .expect("the refused script never entered JavaScript");
+            .expect("and it ran its own code");
     }
 
     #[test]
@@ -1247,33 +1270,6 @@ mod tests {
     }
 
     #[test]
-    fn a_deferred_checkpoint_error_waits_for_its_own_realm() {
-        // The parking case, across realms: the first realm's script fails
-        // *and* its checkpoint does, so the checkpoint's error has nobody to
-        // return it to. It waits for that realm, not for whoever enters next.
-        let (mut runtime, mut first) = engine();
-        let mut second = runtime.create_realm().expect("a second view's realm");
-
-        let primary = first
-            .execute_script(
-                &mut runtime,
-                "Promise.reject(new Error('deferred')); throw new Error('primary')",
-                "app:///first.js",
-            )
-            .expect_err("the script's own exception wins");
-        assert_eq!(primary.message.as_ref(), "Error: primary");
-
-        second
-            .execute_script(&mut runtime, "globalThis.answer = 42", "app:///second.js")
-            .expect("the sibling realm runs, holding none of that");
-
-        let deferred = first
-            .execute_script(&mut runtime, "globalThis.again = true", "app:///after.js")
-            .expect_err("the realm that deferred it is the realm that hears it");
-        assert_eq!(deferred.message.as_ref(), "Error: deferred");
-    }
-
-    #[test]
     fn a_checkpoint_drains_every_queued_job_in_one_entry() {
         // A checkpoint is a browser's microtask checkpoint: it runs the
         // queue dry, however long it is, and jobs a job queues are part of
@@ -1309,6 +1305,84 @@ mod tests {
                 "verify.js",
             )
             .expect("the very next entry sees every job already done");
+    }
+
+    /// Gives `engine` one host function, `explode`, that panics.
+    fn install_a_panicking_host_function(runtime: &mut ScriptRuntime, engine: &mut ScriptEngine) {
+        engine
+            .register_host_module_function(
+                runtime,
+                "bobcat-internal:test",
+                "explode",
+                0,
+                Box::new(|_| panic!("a host bug")),
+            )
+            .expect("register");
+    }
+
+    #[test]
+    fn a_host_function_that_panics_fails_its_entry_as_that_panic_even_when_caught() {
+        let (mut runtime, mut engine) = engine();
+        install_a_panicking_host_function(&mut runtime, &mut engine);
+        let unwound = panic::catch_unwind(AssertUnwindSafe(|| {
+            engine.execute_module(
+                &mut runtime,
+                "import { explode } from 'bobcat-internal:test';
+                 try { explode(); } catch (error) { globalThis.seen = error.message; }",
+                "app:///explode.js",
+            )
+        }))
+        .expect_err("the entry unwinds with the host function's panic");
+        assert_eq!(
+            crate::threads::panic_message(unwound.as_ref()),
+            "a host bug"
+        );
+
+        // The script was shown an exception, and caught it; the panic was
+        // resumed once, and the next entry is an ordinary one.
+        engine
+            .execute_script(
+                &mut runtime,
+                "if (seen !== 'the host function panicked') throw new Error(String(seen))",
+                "app:///verify.js",
+            )
+            .expect("the script saw the bridge's exception, and nothing is resumed twice");
+    }
+
+    #[test]
+    fn a_host_panic_a_siblings_checkpoint_ran_into_is_resumed_by_its_own_realm() {
+        let (mut runtime, mut first) = engine();
+        let mut second = runtime.create_realm().expect("a second view's realm");
+        install_a_panicking_host_function(&mut runtime, &mut first);
+        runtime
+            .register_module_source(
+                "app:///arm.js",
+                "import { explode } from 'bobcat-internal:test';
+                 export function arm() { Promise.resolve().then(() => explode()); }",
+            )
+            .expect("register the first view's module");
+        first
+            .execute_module(&mut runtime, "import 'app:///arm.js';", "bobcat:boot-first")
+            .expect("load the first view's module");
+        // Queued without a checkpoint of its own, so the sibling's entry below
+        // is what runs the job.
+        assert!(
+            first
+                .call_module_export_before_operation(&mut runtime, "app:///arm.js", "arm", &[])
+                .expect("arm the job")
+        );
+
+        second
+            .execute_script(&mut runtime, "globalThis.fine = true", "app:///second.js")
+            .expect("the sibling that ran the job is not the realm that panicked");
+        let unwound = panic::catch_unwind(AssertUnwindSafe(|| {
+            first.execute_script(&mut runtime, "void 0", "app:///first.js")
+        }))
+        .expect_err("the realm whose host function panicked resumes it at its next checkpoint");
+        assert_eq!(
+            crate::threads::panic_message(unwound.as_ref()),
+            "a host bug"
+        );
     }
 
     #[test]

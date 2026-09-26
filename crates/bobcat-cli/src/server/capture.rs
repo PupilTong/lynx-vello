@@ -477,36 +477,64 @@ fn check_events(view: &mut LynxView<ViewResources>, url: &Url) -> Result<bool, C
     let mut finished = false;
     for event in view.pump() {
         match event {
+            // The view has ended, so the capture fails with it.
+            event if event.is_fatal() => return Err(fatal_failure(event, url)),
             EngineEvent::ScriptFinished => finished = true,
-            EngineEvent::StartupFailed(source) => {
-                return Err(CaptureFailure::StartView {
-                    url: url.clone(),
-                    source: Box::new(source),
-                });
-            }
+            // Not fatal: the view and its realms go on, so the page is still
+            // captured and each of these is only logged.
             EngineEvent::ScriptRunError(error) => {
-                return Err(CaptureFailure::Script {
-                    url: url.clone(),
-                    message: error.to_string(),
-                });
+                eprintln!("bobcat-server: script failed: {error}");
             }
             EngineEvent::ListenerFailed(error) => {
                 eprintln!("bobcat-server: event listener failed: {error}");
             }
-            EngineEvent::WorkerFailed(error) => {
-                eprintln!("bobcat-server: worker failed: {error}");
-            }
-            EngineEvent::ScriptReported { level, message }
-            | EngineEvent::ConsoleMessage { level, message } => {
-                eprintln!("bobcat-server: [{level}] {message}");
-            }
             EngineEvent::TimerFailed(error) => {
                 eprintln!("bobcat-server: timer callback failed: {error}");
+            }
+            EngineEvent::WorkerThrew { source, error } => {
+                eprintln!("bobcat-server: [{source}] worker threw: {error}");
+            }
+            EngineEvent::WorkerEnded { source, error } => {
+                eprintln!("bobcat-server: [{source}] worker ended: {error}");
+            }
+            EngineEvent::ScriptReported {
+                source,
+                level,
+                message,
+            }
+            | EngineEvent::ConsoleMessage {
+                source,
+                level,
+                message,
+            } => {
+                eprintln!("bobcat-server: [{source}] [{level}] {message}");
             }
             _ => eprintln!("bobcat-server: ignored an unknown engine event"),
         }
     }
     Ok(finished)
+}
+
+/// The failure a capture ends with on an event for which
+/// [`EngineEvent::is_fatal`] holds. A view that could not start keeps its own
+/// error; any other fatal event, an engine panic, is a script failure.
+fn fatal_failure(event: EngineEvent, url: &Url) -> CaptureFailure {
+    match event {
+        EngineEvent::StartupFailed(source) => CaptureFailure::StartView {
+            url: url.clone(),
+            source: Box::new(source),
+        },
+        EngineEvent::Panicked(error) => CaptureFailure::Script {
+            url: url.clone(),
+            message: error.to_string(),
+        },
+        // A fatal event a later engine adds fails the capture as well, named
+        // by its debug form.
+        event => CaptureFailure::Script {
+            url: url.clone(),
+            message: format!("{event:?}"),
+        },
+    }
 }
 
 #[cfg(test)]

@@ -128,6 +128,7 @@ async fn resource_completion_reaches_main_without_another_painter_turn() {
             match event {
                 EngineEvent::ScriptFinished => finished = true,
                 EngineEvent::StartupFailed(error) => panic!("boot failed: {error}"),
+                EngineEvent::Panicked(error) => panic!("the engine panicked: {error}"),
                 _ => {}
             }
         }
@@ -488,11 +489,12 @@ async fn an_unresolvable_url_fails_construction_without_fetching() {
 /// inside `create_lynx_view`, so the host has resolved all three before the
 /// view's own boot has read any of them, and every one of them fails here.
 /// What stops at the first failure is the *reading*. The entry is read first:
-/// boot imports it before it renders, and the listed sheets are read only by
-/// boot's first `__FlushElementTree`, which a boot whose entry failed never
-/// reaches. So one `StartupFailed` is reported — a `Script` error, because
-/// what the embedder is told is the exception boot's `import` threw, naming
-/// the entry and the reason — and the sheets' answers are dropped unread.
+/// the view's entry task reads its answer before boot can go on to render,
+/// and the listed sheets are read only by boot's first `__FlushElementTree`,
+/// which a boot whose entry failed never reaches. So one `StartupFailed` is
+/// reported — the fetcher's own `Resource` error, which is what the entry
+/// task was answered with, naming the entry as its locator and the reason in
+/// its message — and the sheets' answers are dropped unread.
 #[tokio::test]
 async fn a_resolution_failure_is_one_event_whatever_else_failed() {
     let fetcher = Rc::new(FetcherDouble::new(Vec::new()).resolving_to("not a URL"));
@@ -516,13 +518,14 @@ async fn a_resolution_failure_is_one_event_whatever_else_failed() {
         "creation hands over both sheets and the entry, before any turn"
     );
     let error = wait_for_script(&mut view).expect_err("the entry cannot be resolved");
+    let bobcat_core::LynxViewError::Resource(error) = error else {
+        panic!("the fetcher's own error: {error}");
+    };
+    assert_eq!(error.locator.as_deref(), Some("app:///main.js"), "{error}");
     assert!(
-        matches!(error, bobcat_core::LynxViewError::Script(_)),
+        error.to_string().contains("relative URL without a base"),
         "{error}"
     );
-    let message = error.to_string();
-    assert!(message.contains("app:///main.js"), "{message}");
-    assert!(message.contains("relative URL without a base"), "{message}");
     assert_eq!(
         fetcher.resolve_count(),
         3,
@@ -651,10 +654,11 @@ const WORKER_ENTRY: &str = "import { Worker } from 'bobcat-internal';
      globalThis.worker = new Worker('./worker.js');
      globalThis.renderPage = function () { __CreatePage('card', 0); };";
 
-/// Pumps until a worker of this view reports a failure carrying `message`,
+/// Pumps until a worker of this view reports a throw carrying `message`,
 /// which for the test below is its interval callback throwing: proof that the
 /// worker booted and that its timer is armed and firing, rather than that some
-/// other worker of the view's went wrong.
+/// other worker of the view's went wrong. A throw rather than an end, because
+/// the worker that threw is still running.
 ///
 /// A fraction of [`HANG_BUDGET`], because this runs inside the thread the
 /// budget is watching: a worker that never boots has to fail here, naming the
@@ -667,12 +671,16 @@ fn wait_for_worker_error<F: ResourceFetcher + 'static>(
     let deadline = std::time::Instant::now() + HANG_BUDGET / 4;
     loop {
         for event in view.pump() {
-            if let EngineEvent::WorkerFailed(error) = event {
-                assert!(
-                    error.to_string().contains(message),
-                    "unexpected worker failure: {error}"
-                );
-                return;
+            match event {
+                EngineEvent::WorkerThrew { error, .. } => {
+                    assert!(
+                        error.to_string().contains(message),
+                        "unexpected worker failure: {error}"
+                    );
+                    return;
+                }
+                EngineEvent::WorkerEnded { error, .. } => panic!("the worker ended: {error}"),
+                _ => {}
             }
         }
         assert!(
@@ -701,7 +709,7 @@ fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
 ///
 /// That is all this checks. The worker arms an interval that throws, which is
 /// what makes its liveness observable from the embedder: every tick is a
-/// nonfatal `WorkerFailed`, so reaching the drops means a worker is running
+/// nonfatal `WorkerThrew`, so reaching the drops means a worker is running
 /// and would go on running. Why its task then ends — the `Terminate` its realm
 /// sends, or the channel closing behind that message — is not something the
 /// two joins returning can tell apart.

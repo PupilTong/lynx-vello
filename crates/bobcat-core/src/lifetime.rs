@@ -58,12 +58,13 @@
 //!
 //! Nothing records it. Both reason enums are gone, because nothing read them:
 //! what the embedder was told is what was *reported* before the end — a
-//! `StartupFailed`, a `ScriptRunError`, a worker's `Failed` or `Closed` — and
-//! what it was not told is a release, which is the token having been cancelled
-//! from outside. A panic is the one end that still owes a report, and the
-//! payload is always available for it: the set holds a finished task until the
-//! owner joins it, so the `JoinError` reaches the owner rather than being
-//! pruned away before it could.
+//! view's `StartupFailed`, a worker's `Failed` or `Closed` — and what it was
+//! not told is a release, which is the token having been cancelled from
+//! outside. Any other script failure is not an end at all: it is reported and
+//! the object goes on. A panic is the one end that still owes a report — a
+//! view's is `Panicked` — and the payload is always available for it: the set
+//! holds a finished task until the owner joins it, so the `JoinError` reaches
+//! the owner rather than being pruned away before it could.
 //!
 //! # What is not here
 //!

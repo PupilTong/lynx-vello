@@ -145,17 +145,19 @@ async fn the_requested_entry_url_is_preserved_in_errors() {
 
 /// Invalid UTF-8 is a startup failure event, before the entry reaches the VM.
 ///
-/// The boot module is what reads the entry, so what the embedder is told is
-/// the exception that reading threw — a `Script` error rather than the
-/// fetcher's own `InvalidScriptEncoding` — and the message is what still has
-/// to name the URL and the reason.
+/// The view's entry task reads the fetcher's answer before any of the entry
+/// runs, so what the embedder is told is the fetcher's own
+/// `InvalidScriptEncoding`, naming the URL and the reason.
 #[tokio::test]
 async fn script_bytes_are_strict_utf8_at_the_view_boundary() {
     let (mut view, _painter) = view(&[0xff, 0xfe], "app:///invalid.js")
         .await
         .expect("loading view");
     let error = wait_for_script(&mut view).expect_err("invalid UTF-8 must not reach the VM");
-    assert!(matches!(error, LynxViewError::Script(_)), "{error}");
+    assert!(
+        matches!(error, LynxViewError::InvalidScriptEncoding { .. }),
+        "{error}"
+    );
     let message = error.to_string();
     assert!(message.contains("app:///invalid.js"), "{message}");
     assert!(message.contains("UTF-8"), "{message}");

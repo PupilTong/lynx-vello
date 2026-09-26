@@ -9,6 +9,7 @@ import { SelectorQuery, type SendQuery } from "bobcat:selector-query";
 import { createLynxModules } from "bobcat:lynx-modules";
 import { type BundleHandle, createBundleFetches } from "bobcat:bundle-fetch";
 import { GlobalEventEmitter } from "bobcat:global-event-emitter";
+import { console, reportError } from "bobcat:diagnostics";
 import type { TimerGlobals } from "bobcat:timers";
 
 const timers = globalThis as unknown as TimerGlobals;
@@ -308,6 +309,11 @@ function receiveMessage(message: FromMainThread): void | Promise<void> {
 async function dispose() {
   animationCallbacks.clear();
   updateFrameRequest();
+  // `lynx.reportError`, not the global scope's. That one is reported when this
+  // entry's checkpoint returns its rejection, after the `disposed` reply below
+  // has been posted, and the main thread terminates this Worker on that reply,
+  // so the report would reach no one. This one reaches the host during the
+  // call.
   try { app.callDestroyLifetimeFun?.call(app); }
   catch (error) { lynx.reportError(error); }
   // Match web-worker-rpc's await boundary before replying. This does not
@@ -321,17 +327,6 @@ export let SystemInfo: Readonly<Record<string, unknown>> = Object.freeze({
   platform: "headless", runtimeType: "quickjs", lynxSdkVersion: "4.1.0",
 });
 
-function printable(value: unknown): string {
-  if (value instanceof Error) {
-    const summary = String(value);
-    return value.stack?.includes(summary) ? value.stack
-      : value.stack ? `${summary}\n${value.stack}` : summary;
-  }
-  if (typeof value === "string") return value;
-  try { return JSON.stringify(value) ?? String(value); }
-  catch { return String(value); }
-}
-
 let frameRequested = false;
 function updateFrameRequest() {
   const pending = animationCallbacks.size > 0;
@@ -342,6 +337,9 @@ function updateFrameRequest() {
 
 // Called while handling the painter's Vsync message. Callback IDs
 // and errors stay on BTS; no MTS message or acknowledgement participates.
+// A callback that throws is an uncaught exception of this worker realm, as it
+// is in a browser worker: the global scope's `reportError` reports it at the
+// parent `Worker` and to the embedder, and the frame's other callbacks run.
 export function __BobcatBeginFrame(milliseconds: number) {
   frameRequested = false;
   const ids = Array.from(animationCallbacks.keys());
@@ -350,18 +348,16 @@ export function __BobcatBeginFrame(milliseconds: number) {
     animationCallbacks.delete(id);
     if (callback) {
       try { callback(milliseconds); }
-      catch (error) { lynx.reportError(error); }
+      catch (error) { scope.reportError(error); }
     }
   }
   updateFrameRequest();
 }
 
-export const console = Object.fromEntries(
-  ["log", "info", "debug", "warn", "error"].map(level => [level,
-    (...args: unknown[]) => scope.postMessage({ bobcat: "runtime", method: "console", level,
-      message: args.map(printable).join(" ") }),
-  ]),
-);
+// The realm's one console, which `bobcat:worker` also installs as the global
+// `console`: a raw BTS entry's import and a bundle body's preamble binding
+// name the same object as the global.
+export { console };
 
 // The bundle's base URL is registered before the app-service entry loads.
 export const lynx = {
@@ -372,8 +368,9 @@ export const lynx = {
   Promise: globalThis.Promise,
   queueMicrotask(callback: () => void) {
     if (typeof callback !== "function") throw new TypeError("queueMicrotask requires a function");
+    // A callback that throws is reported the way an uncaught exception is.
     void Promise.resolve().then(() => {
-      try { callback(); } catch (error) { lynx.reportError(error); }
+      try { callback(); } catch (error) { scope.reportError(error); }
     });
   },
   requestAnimationFrame(callback: (milliseconds: number) => void) {
@@ -409,12 +406,9 @@ export const lynx = {
   __globalProps: {} as unknown,
   getJSModule: app.getJSModule,
   registerModule: app.registerModule,
-  reportError(error: unknown, options?: {level?: string}) {
-    const level = options?.level;
-    scope.postMessage({ bobcat: "runtime", method: "reportError",
-      level: level === "warning" || level === "fatal" ? level : "error",
-      message: printable(error) });
-  },
+  // A leveled diagnostic, reported by this realm directly: no `error` event,
+  // and nothing sent to the main thread.
+  reportError,
 
   createSelectorQuery(component?: string) { return new SelectorQuery(sendQuery, error => lynx.reportError(error), component); },
   getApp() {
@@ -447,7 +441,7 @@ export const lynx = {
  * than inside it. MTS is the other way round; see `bundle-fetch.ts`.
  */
 const bundleFetches = createBundleFetches({
-  report: error => { lynx.reportError(error); },
+  report: error => { scope.reportError(error); },
   later: run => { lynx.setTimeout(run, 0); },
 });
 

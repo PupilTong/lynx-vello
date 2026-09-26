@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it, rstest } from "@rstest/core";
+import { afterAll, beforeAll, describe, expect, it, rstest } from "@rstest/core";
 import * as eventTarget from "../src/event-target.ts";
 import * as crossThreadContext from "../src/cross-thread-context.ts";
 import type * as btsRuntime from "../src/background-thread-runtime.ts";
@@ -19,6 +19,7 @@ rstest.mockRequire("bobcat:lynx-modules", () => lynxModules);
 import * as sectionUrl from "../src/section-url.ts";
 import * as future from "../src/future.ts";
 import * as bundleFetch from "../src/bundle-fetch.ts";
+import * as diagnostics from "../src/diagnostics.ts";
 rstest.mockRequire("bobcat:global-event-emitter", () => globalEventEmitter);
 rstest.mockRequire("bobcat:selector-query", () => selectorQuery);
 rstest.mockRequire("bobcat:event-target", () => eventTarget);
@@ -33,6 +34,7 @@ rstest.mockRequire("bobcat:worker", () => worker);
 rstest.mockRequire("bobcat:section-url", () => sectionUrl);
 rstest.mockRequire("bobcat:future", () => future);
 rstest.mockRequire("bobcat:bundle-fetch", () => bundleFetch);
+rstest.mockRequire("bobcat:diagnostics", () => diagnostics);
 rstest.mockRequire("bobcat-internal:host", () => ({
   requestScriptFrame: rstest.fn(),
   reportScriptError: rstest.fn(),
@@ -75,12 +77,19 @@ interface TestScope {
 const scope = globalThis as unknown as TestScope;
 let worker: typeof workerRuntime;
 let bts: typeof btsRuntime;
+// The real worker scope defines the realm's own `console` on the global it
+// runs against, which here is Node's: this is Node's, put back afterwards.
+const nodeConsole = Object.getOwnPropertyDescriptor(globalThis, "console")!;
 
 beforeAll(async () => {
   scope.postMessage = () => undefined;
   scope.addEventListener = () => undefined;
   worker = await import("../src/worker-runtime.ts");
   bts = await import("../src/background-thread-runtime.ts");
+});
+
+afterAll(() => {
+  Object.defineProperty(globalThis, "console", nodeConsole);
 });
 
 /** The most recent call the host was handed. */

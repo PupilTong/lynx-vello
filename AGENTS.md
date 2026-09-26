@@ -326,7 +326,9 @@ rather than a turn later — and then requests each stylesheet in the order the
 view listed them, followed by the entry module, on the embedder's thread,
 before it returns. Only the built text context and the answering one-shots
 cross to `bobcat-main`. The entry's is read by a task of the view's owner as it
-arrives, which completes the module boot imports the entry by its URL. The
+arrives, which completes the module boot imports the entry by its URL; an
+entry the fetcher could not load fails the startup with the fetcher's own
+error, before any of it runs. The
 sheets' go to the realm's `DocumentSlot`, and **boot's first
 `__FlushElementTree` waits for every listed sheet, success or failure, before
 the document enters the style pipeline**, mounting them in listed order — so
@@ -334,7 +336,13 @@ the cascade order between several listed sheets is the listed order, and no
 frame is published without them. A sheet that failed to load, or that the
 fetcher answered with something else, makes that flush throw
 `loading stylesheet <url>: <reason>`, which fails the boot with
-`StartupFailed(LynxViewError::Script(..))` naming the sheet. The realm itself opens
+`StartupFailed(LynxViewError::Script(..))` naming the sheet; the entry that
+resumed boot has reported the same rejection just before, as a
+`ScriptRunError` with the same message. App code can settle the listed sheets
+first — an `adoptStyleSheet` or a `__FlushElementTree` inside the entry's
+evaluation — and catch the failure, so `DocumentSlot` keeps the first one and
+every later settle throws it again: boot's own flush still fails the boot with
+it, and the epilogue's implicit commit stays off. The realm itself opens
 immediately, before any answer has arrived, so the fetcher's IO,
 the whole of boot and the first frame's encode all overlap the painter the
 embedder builds next, and `LynxView::pump` services every *later* request — imports,
@@ -697,8 +705,9 @@ enableCssSelector, enableJSDataProcessor)`, which reads four
 `DocumentIngredients` that never reach the realm: the create-time viewport, the
 validated text context and the group's style pool. It never waits: **the view's
 author sheets are not mounted here** but by the first `__FlushElementTree`
-(below). The construction runs under a catch, because the bridge erases
-a panic into "the host function panicked". A missing or non-boolean switch and
+(below). The construction runs under a catch, so a panic in it fails the
+boot naming the phase that panicked, where any other host member's panic ends
+the view as `Panicked`. A missing or non-boolean switch and
 a second construction both throw, which fails the boot; the second one is
 refused whichever module asks, because the ingredients are spent. The realm
 holds what it built in the private `DocumentSlot` every tree member borrows; that `Rc<RefCell<…>>` exists only so same-thread native QuickJS
@@ -765,16 +774,28 @@ with the entry preamble prepended and the fetcher's response URL as its
 flush) runs in the job that completes it; the entry's own request never reaches
 the fetcher. The listed sheets are mounted by that flush, in listed order, as
 above. Success is `ScriptFinished`; a font, realm or boot failure is
-`StartupFailed`. An entry that cannot be loaded is `LynxViewError::Script`,
-because boot's `import` is what threw, naming the URL and the host's reason; a
-sheet that cannot be loaded, or that the fetcher answered with something else,
-is `LynxViewError::Script` too, because boot's `__FlushElementTree` is what
-threw, naming the sheet and the reason. That
-failure stays the failing view's and is
-reported once: an entry that throws under boot's top-level `await` rejects
-through the promise-job queue the group's realms share, and what it leaves
-there reaches neither the next view nor the failing realm's own next entry.
-Queued *jobs* still run, and the next checkpoint finishes them. A checkpoint
+`StartupFailed`. An entry that cannot be loaded is the fetcher's own error,
+because `load_entry` reads the answer before any of the entry runs and then
+does not complete the module; an answer that is not a script is a
+`LynxViewError::Script` naming the URL. A sheet that cannot be loaded, or that
+the fetcher answered with something else, is `LynxViewError::Script`, because
+boot's `__FlushElementTree` is what threw, naming the sheet and the reason.
+**An entry that throws does not fail the boot**: the entry is app code, and
+boot wraps its `import` in a `try`/`catch` that raises what it caught again as
+a rejection nothing handles. The checkpoint of the entry into the realm that
+ran the catch reports it — `ScriptRunError` from `load_entry`, `load_module`
+or `settle_future`, and `TimerFailed` or `ListenerFailed` where the entry's
+top-level `await` resumed in a timer or a worker event — and boot goes on to
+connect the BTS, render and flush, so `ScriptFinished` still follows its
+flush, as a native MTS still renders a page whose script threw. What fails
+boot's own evaluation is the engine's code alone: page data that is not JSON,
+the document's construction, connecting the BTS, and the flush. A failure
+stays the failing view's and is reported once: an entry reports the one
+rejection its checkpoint returned and drops the rest it left in the
+promise-job queue the group's realms share, a checkpoint error beside a
+failure it is already reporting included, so none of them reaches the next
+view or the failing realm's own next entry. Queued *jobs* still run, and the
+next checkpoint finishes them. A checkpoint
 drains that queue until it is empty, as a browser's microtask checkpoint does:
 there is no per-checkpoint job budget and no incomplete checkpoint for a later
 entry to resume. Because the queue is the runtime's, a view has to notice a
@@ -856,9 +877,13 @@ by `is_ready()`. Global events require that observed MTS boot and otherwise
 return `EngineError::NotReady`; rejected events are never queued or replayed,
 accepted ones retain host FIFO order. Internal pre-connection MTS messages
 still wait for Worker construction. `ScriptReported` and `ConsoleMessage` are
-nonfatal host notices, their BTS path ordinary Worker postMessage delivery with
-JS-side dispatch. `lynx.getEngine()` returns one stable, realm-local
-`EventTarget` whose listeners never cross the host boundary. Render, update,
+nonfatal host notices that every realm — MTS, BTS or a `Worker` — sends to
+the view's host itself through its `HostOutbox`, each carrying the realm's
+`ScriptSource`; the BTS's do not pass through MTS as Worker messages. One
+realm's arrive in the order it made them, and they have no order relative to
+another realm's or to the worker events. `lynx.getEngine()` returns one
+stable, realm-local `EventTarget` whose listeners never cross the host
+boundary. Render, update,
 component removal and global-prop events carry argument arrays, taking
 precedence over legacy global hooks; listeners receive the engine as `this`,
 with no `origin` field. The MTS `getCoreContext` and `getNative` sinks retain
@@ -911,13 +936,42 @@ target and IO primitives, and relay OS facts in
 and `LynxView::pump`); they never start or steer the pipeline. Engine events are
 enqueued and wake the host through the group's `EventRequester` for the next
 `LynxView::pump`: `ScriptFinished` (entry-module boot), `StartupFailed`
-(source/configuration/boot failure), `ScriptRunError` (a fatal script-runtime
-failure in later owner-thread work), `ListenerFailed` (a listener that threw
-during event delivery) and `TimerFailed` (a `setTimeout` or `setInterval`
-callback that threw when it came due) — the last two separate because neither
-is fatal: the walk continues, a repeating timer stays armed, and later events
-and timers are delivered as normal. A frame the engine wants drawn rides the
-same wakeup, and the `Painter::pump` answering it draws it.
+(source/configuration/boot failure), `ScriptRunError` (main-thread app code
+that threw, or a host call into the realm that failed — the entry's
+evaluation, a module load, a `Future` settle, a page update, an animation
+frame — during boot or after it), `ListenerFailed` (a listener that threw
+during event delivery), `TimerFailed` (a `setTimeout` or `setInterval`
+callback that threw when it came due), `WorkerThrew` (code in a worker's
+realm threw, BTS included, and the worker still runs), `WorkerEnded` (a
+worker ended without being told to: its script could not be loaded, its realm
+could not be built, or the worker thread trapped), `Panicked` (the engine
+panicked while it served the view), and the two diagnostics, `ScriptReported`
+(a `lynx.reportError`, at level `"warn"`, `"error"` or `"fatal"`) and
+`ConsoleMessage` (at the console method's name), each carrying the
+`ScriptSource` of the realm that made it; a `"fatal"` report is a diagnostic
+like the others and ends nothing. The three script failures are separate by
+the kind of entry they happened in, also where the code that failed was a
+continuation that entry resumed, and none of them is fatal: the realm goes
+on, the walk continues, a repeating timer stays armed, and later events and
+timers are delivered as normal. The two worker events are not fatal either;
+each carries the worker's `ScriptSource` (`Background` or `Worker(WorkerId)`),
+is reported before the creating realm's `Worker` object dispatches its `error`
+event, so no listener there suppresses it, and is reported only while the
+script still holds that worker's key: never after `terminate()`, and never for
+`close()`. `EngineEvent::is_fatal` names the events that end the view
+(`StartupFailed` and `Panicked`); `LynxView::pump` ends a view on exactly
+those, and an embedder asks it rather than matching variants. Every panic is
+reported through one constructor, `EngineEvent::from_panic`, from
+`Page::trapped` (a job or a task of the view, an input dispatch included),
+`finish_view` (the group thread reaping the view's task) and the Wasm panic
+hook. A host member that panics is among them: `ScriptEngine` catches the
+panic before the bridge would turn it into the exception "the host function
+panicked", shows the script that exception, and resumes the panic at the
+realm's next checkpoint, normally the one that ends the entry that called the
+member, so catching the exception does not stop it and the view ends as it
+does on Wasm. A worker's host member that panics ends that worker the same
+way (`WorkerEnded`). A frame the engine wants drawn rides the same wakeup, and
+the `Painter::pump` answering it draws it.
 
 **A host takes two turns per wakeup, and they are different calls.**
 `LynxView::pump` alone advances the resource protocol past the startup sources
@@ -999,16 +1053,24 @@ since `QuickJS` binds a runtime to one thread, no path runs from a worker realm
 to a `LynxDocument` and no value of either runtime can be named by the other.
 One realm per live worker, and the group's workers take turns. **One task per
 live worker, and a worker's whole state is that task**: a `WorkerStart` carries
-its key, its name, the one-shot its script will arrive on, the receiving end of
-its message channel, the sender its events go back on — the creating MTS
-realm's `WorkerEvent` channel — and the Worker's own cancellation token. MTS
-routes events through weak references to JS Worker objects; their finalizers
-and explicit `terminate()` release sending handles, and releasing the MTS realm
-closes its remaining senders. Host functions reference the channel owner
-weakly, so queued finalizers cannot keep a released realm's workers or group
-thread alive. The script wait is a `biased` select over the message channel
-first and that token behind it, so a `terminate` landing in the same instant as
-the script wins and a worker told to stop never boots. The timer machinery both
+its key, its name, its role (`WorkerRole::Background` for `bobcat:bts`,
+`Dedicated` for a script URL, which `createWorker` decides from the specifier
+before it sends the `Start`), the one-shot its script will arrive on, the
+receiving end of its message channel, the sender its events go back on — the
+creating MTS realm's `WorkerEvent` channel — and the Worker's own cancellation
+token. MTS routes events through weak references to JS Worker objects; their
+finalizers and explicit `terminate()` release sending handles, and releasing
+the MTS realm closes its remaining senders. Apart from those handles, the
+realm's `WorkerOwner` records each key's public `ScriptSource` (`Background`,
+or `Worker(WorkerId)`) from the moment the key is allocated until
+`terminate()` or delivery of the worker's own end, so a worker that fails
+before it is started has a source too; `WorkerThrew` and `WorkerEnded` carry
+it, and a key without one reports neither — so a trap that reaches a worker
+after its own end was delivered is reported to no one. Host functions
+reference the channel owner weakly, so queued finalizers cannot keep a
+released realm's workers or group thread alive. The script wait is a `biased` select over the message
+channel first and that token behind it, so a `terminate` landing in the same
+instant as the script wins and a worker told to stop never boots. The timer machinery both
 realm kinds run on — the schedule, the two host members, the firing loop — is
 `crate::timers` beside `crate::clock`, owned by neither thread.
 
@@ -1036,11 +1098,14 @@ Worker entry/import requests use the Worker's cancellation scope, and host
 release does not cancel it ahead of JS disposal. Once the MTS realm is
 released, closing its senders ends remaining Workers, including after failed
 boot; Rust has no Worker termination sweep. A `WorkerEvent` delivers messages
-and errors to the owning realm; worker errors also produce nonfatal
-`EngineEvent::WorkerFailed`. See `docs/runtime-architecture.md` for the
+and errors to the owning realm; a worker's `Errored` also produces a nonfatal
+`EngineEvent::WorkerThrew` and its `Failed` a nonfatal
+`EngineEvent::WorkerEnded`, each naming the worker by the `ScriptSource` its
+`WorkerOwner` recorded. See `docs/runtime-architecture.md` for the
 transport and lifetime boundaries.
 
-**After the MTS entry import succeeds, boot creates a BTS Worker** named
+**After the MTS entry import settles, whether the entry succeeded or threw,
+boot creates a BTS Worker** named
 `lynx-bg` through that same class, using the engine entry `bobcat:bts`, which
 installs its JS initializer from `bobcat:bts-runtime` and returns. Its first
 Worker message supplies initial data and starts the optional
@@ -1074,9 +1139,15 @@ DOM listener options. The shared `bobcat:event-target` EventTarget every
 Context, `Worker` and engine target extends follows the DOM's inner-invoke
 rule: a listener that throws is reported and the walk continues with the next —
 in the MTS realm through `lynx.reportError` and the host's `reportScriptError`,
-as a nonfatal `ScriptReported`; in a worker realm through the worker global's
-`reportError`, reaching the parent `Worker`'s `error` event and a nonfatal
-`WorkerFailed`. Origins identify the sending CoreContext or JSContext. MTS
+as a nonfatal `ScriptReported` from `ScriptSource::Main`; in a worker realm
+through the worker global's `reportError`, reaching the parent `Worker`'s
+`error` event and a nonfatal `WorkerThrew`. The BTS reports an animation-frame,
+`queueMicrotask` or `lynx.fetchBundle` callback that throws the same way, as an
+uncaught exception of its realm. Only its disposal hook's throw and a misused
+`SelectorQuery` go through `lynx.reportError`, as a `ScriptReported` from
+`ScriptSource::Background`; the hook's has to, because it must reach the host
+before the `disposed` reply lets MTS terminate the Worker. Origins identify
+the sending CoreContext or JSContext. MTS
 queues payload references until the Worker is connected; Worker postMessage
 takes the structured-clone snapshot above for early and connected sends alike,
 and `toJSON` is never consulted. Do not add a custom codec or a deep clone on
@@ -1097,10 +1168,11 @@ committed. The BTS Worker's state is no part of it, so a BTS entry whose
 top-level await never settles does not keep the view from becoming ready. A BTS
 entry that throws is reported like any worker script: `reportError` in the
 worker realm surfaces it at the `Worker`'s `error` event and as a nonfatal
-`WorkerFailed`; the BTS keeps running and still takes messages, and no BTS
-failure ends the view. MTS keeps its Worker reference after that Worker ends; a
-post to an ended Worker is dropped by the host, and the pre-connection FIFO
-holds only what the MTS entry sends before boot constructs the Worker.
+`WorkerThrew` from `ScriptSource::Background`; the BTS keeps running and still
+takes messages, and no BTS failure ends the view. MTS keeps its Worker
+reference after that Worker ends; a post to an ended Worker is dropped by the
+host, and the pre-connection FIFO holds only what the MTS entry sends before
+boot constructs the Worker.
 
 BTS also exposes stable `getApp()` and `getNativeApp()` objects. The current
 app hooks receive `OnLifecycleEvent`, `publishEvent`, `publicComponentEvent`
@@ -1138,13 +1210,17 @@ Every realm, MTS or worker, is opened by the one constructor
 `realm::open_realm` (`crates/bobcat-core/src/realm.rs`). It creates the realm,
 enables module loading and installs the core every realm has under
 `bobcat-internal:host`: `requestScriptFrame`, `setTimer`/`clearTimer`,
-`waitFuture`/`takeFuture`/`settleFuture`, `fetchResource`, and
-`resolveModuleUrl`/`loadModuleSync`. Every other host module is a parameter
-of that call: `MainThreadRuntime::new` passes the document, stylesheet,
-startup-string, diagnostics, event-name and `Worker` members, and a worker
-passes `bobcat-internal:worker`. The constructor has no role field; the one
-thing it is told about a realm is the key its display-frame demand is
-reported under, `None` for MTS and the worker's key for a worker. What it
+`waitFuture`/`takeFuture`/`settleFuture`, `fetchResource`,
+`resolveModuleUrl`/`loadModuleSync`, and the diagnostics pair
+`reportScriptError`/`logScriptMessage`, which send `ScriptReported` and
+`ConsoleMessage` through the realm's own `HostOutbox`. Every other host module
+is a parameter of that call: `MainThreadRuntime::new` passes the document,
+stylesheet, startup-string, event-name and `Worker` members, and a worker
+passes `bobcat-internal:worker`. The constructor has no role field; it is told
+two things about a realm: the key its display-frame demand is reported under,
+`None` for MTS and the worker's key for a worker, and the `ScriptSource` its
+diagnostics carry, `Main` for MTS and, for a worker, the one its `WorkerRole`
+and key give (`Background` or `Worker(WorkerId)`). What it
 answers with, `RealmCore { engine, timers, futures }`, is the first field of
 both `MainThreadRuntime` and the worker thread's `WorkerRealm`.
 
@@ -1597,22 +1673,26 @@ and that turn ends in `about_to_wait`, taking both turns in order —
 and returns what the realm had to say. Winit's `RedrawRequested` is not
 relayed. Drawing there coalesces a turn's events into one frame and keeps the
 vsync wait out of winit's proxy-event drain, which iterates until empty. The
-painter goes first deliberately: the pixels a fatal script error left behind
-reach the screen on the turn that reports it. The loop always waits — a realm
-timer is not its deadline to keep — and what wakes it for a *frame* is the
-window's own display: while `Painter::owes_frame` holds, a `CVDisplayLink` on
-the window's monitor posts one wakeup per refresh and stops when nothing is
+painter goes first deliberately: the frame a view committed before a fatal
+event reaches the screen on the turn that reports it. The loop always waits —
+a realm timer is not its deadline to keep — and what wakes it for a *frame* is
+the window's own display: while `Painter::owes_frame` holds, a `CVDisplayLink`
+on the window's monitor posts one wakeup per refresh and stops when nothing is
 owed.
 
 It renders one page: one group, one `create_lynx_view` given the author CSS and
-entry MTS URL as a `ViewSources`, any group, resource or TLA boot failure
-reported as `CliError::StartView`, and the preserved `ScriptFinished` edge and
-any later `ScriptRunError` consumed through `view.pump()`. Headed mode builds
-its painter over the window; headless builds one over `DrawTarget::Offscreen`
-and relays synthetic vsync ticks into `Painter::tick`, whether a tick becomes
-GPU work being the engine's decision. Fields drop in the order `vsync, painter,
-view, …, window`, so the display link stops before what it wakes goes away and
-the surface is released before the last window handle.
+entry MTS URL as a `ViewSources`, and the preserved `ScriptFinished` edge
+consumed through `view.pump()`. Only an event for which `EngineEvent::is_fatal`
+holds ends the run: `StartupFailed`, like a group or view construction
+failure, as `CliError::StartView`, and any other fatal event (`Panicked`) as
+`CliError::Script`. Every other event is printed to standard error and the run
+goes on: `ScriptRunError`, `ListenerFailed`, `TimerFailed`, `WorkerThrew` and
+`WorkerEnded`, and the realms' diagnostics as `[{source}] [{level}] {message}`.
+Headed mode builds its painter over the window; headless builds one over
+`DrawTarget::Offscreen` and relays synthetic vsync ticks into `Painter::tick`,
+whether a tick becomes GPU work being the engine's decision. Fields drop in the
+order `vsync, painter, view, …, window`, so the display link stops before what
+it wakes goes away and the surface is released before the last window handle.
 
 Its resource system is `bobcat-resources`: the decoded input's scripts and
 stylesheet registered under `bobcat-memory://` URLs, the input's own `file://`
@@ -1681,7 +1761,12 @@ main thread, QuickJS runtime and Stylo pool; no runtime is shared across jobs.
 BMP encoding runs on Tokio's blocking pool after the view is gone, so it cannot
 retain the view or hold the GPU lane. Queue saturation and an unavailable
 worker are 503, input/render failures 422, encoding failures 500, and
-capture/upload timeouts 408. A worker panic makes `/health` unavailable and
+capture/upload timeouts 408. Of the engine's events, only one for which
+`EngineEvent::is_fatal` holds fails a capture with 422: `StartupFailed` as a
+start failure, `Panicked` as a script failure. A `ScriptRunError`, a BTS or
+`Worker` realm's `WorkerThrew` or `WorkerEnded`, a listener or timer failure
+and the realms' diagnostics are written to standard error and the page is
+still captured. A capture-thread panic makes `/health` unavailable and
 initiates graceful server shutdown.
 
 Remote template/ZIP downloads follow UI Judge's public HTTP(S), no-credentials,
@@ -1893,7 +1978,7 @@ browser WebGPU completion is Promise-driven.
 
 The dependency-free TypeScript sources of the ESMs `bobcat-core` preloads into
 its QuickJS realms, one file per module. Both of a group's runtimes register
-all fifteen, as `esm.rs`'s `BUILTIN_MODULES` lists them in the order of
+all sixteen, as `esm.rs`'s `BUILTIN_MODULES` lists them in the order of
 `src/tsconfig.json`'s `paths` (a unit test holds the two equal):
 `src/lynx-modules.ts` as `bobcat:lynx-modules`, `src/global-event-emitter.ts`
 as `bobcat:global-event-emitter`, `src/selector-query.ts` as
@@ -1901,7 +1986,12 @@ as `bobcat:global-event-emitter`, `src/selector-query.ts` as
 `src/main-thread-runtime.ts` as `bobcat:runtime`, `src/timers.ts` as
 `bobcat:timers`, `src/future.ts` as `bobcat:future`, `src/module.ts` as
 `bobcat:module`, `src/section-url.ts` as `bobcat:section-url`,
-`src/bundle-fetch.ts` as `bobcat:bundle-fetch`, `src/event-target.ts` as
+`src/bundle-fetch.ts` as `bobcat:bundle-fetch`, `src/diagnostics.ts` as
+`bobcat:diagnostics` (every realm's `console` and `reportError`: the one value
+formatting and the `lynx.reportError` level rule, over the core's diagnostics
+pair; `bobcat:worker` also installs its `console` on a worker's global, so a
+plain `Worker` has a global `console` and still no `requestAnimationFrame`),
+`src/event-target.ts` as
 `bobcat:event-target`, `src/cross-thread-context.ts` as
 `bobcat:cross-thread-context`, `src/worker.ts` as the `Worker` class under
 `bobcat-internal`, `src/worker-runtime.ts` as `bobcat:worker` and
@@ -1993,7 +2083,7 @@ The JavaScript layer deliberately does not validate handles: a foreign handle
 resolves to `undefined`, which the private native boundary rejects as a
 JavaScript error before entering `dom`. Native access is limited to named
 imports from the native `bobcat-internal:host` ESM; the realm has no
-`globalThis.bobcat`, no `console`, and no DOM. Named exports are the only
+`globalThis.bobcat`, no global `console`, and no DOM. Named exports are the only
 Element-PAPI surface for transformed MTS entries; a local named Lepus chunk
 receives the same names as the parameters of the body it is compiled as.
 Rstest imports

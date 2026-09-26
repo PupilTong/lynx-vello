@@ -83,7 +83,7 @@ use wasm_thread::Builder as ThreadBuilder;
 use crate::resource::LoadedSource;
 use crate::script::ScriptError;
 use crate::threads::ThreadJoin;
-use crate::view::{EngineError, LynxViewError};
+use crate::view::{EngineError, LynxViewError, ScriptSource, WorkerId};
 
 /// Names one `Worker` for the life of its group.
 ///
@@ -105,14 +105,19 @@ impl WorkerKey {
 
 /// One worker to start: everything it will ever be given, in one message.
 ///
-/// No URL and no state: the thread that fetches is the one that answers, its
-/// answer carries the resolved URL the module is named by, and everything
-/// else a worker has — what is posted to it, what it says back — is a channel
-/// that arrives with it.
+/// No URL and no state. What it says about the worker is its key, its name
+/// and its role, which the creating realm decided before sending it. The
+/// thread that fetches is the one that answers, its answer carries the
+/// resolved URL the module is named by, and everything else a worker has —
+/// what is posted to it, what it says back — is a channel that arrives with
+/// it.
 pub(crate) struct WorkerStart {
     pub(crate) key: WorkerKey,
     /// The worker's `self.name`, empty when the constructor named none.
     pub(crate) name: String,
+    /// Whether this is the view's background thread or a `Worker` over a
+    /// script URL, which is what the worker's diagnostics are named by.
+    pub(crate) role: WorkerRole,
     /// Its script, answered by whichever thread owns the creating view's
     /// fetcher. A `Start` for the built-in background context arrives with
     /// this already answered.
@@ -124,8 +129,35 @@ pub(crate) struct WorkerStart {
     pub(crate) events: mpsc::UnboundedSender<WorkerEvent>,
     /// This worker's end signal, independent of its creating view's token.
     pub(crate) token: CancellationToken,
-    /// Sources and frame demand reach the host directly, under this worker's lifetime.
+    /// Sources, frame demand and diagnostics reach the host directly, under
+    /// this worker's lifetime.
     pub(crate) sources: crate::link::HostOutbox,
+}
+
+/// Which of the two kinds of worker a [`WorkerStart`] is for.
+///
+/// The creating realm tells them apart by the `new Worker` specifier alone,
+/// before it allocates a key or sends anything: `bobcat:bts` is the built-in
+/// background script, and any other specifier is a URL.
+pub(crate) enum WorkerRole {
+    /// The view's background thread (BTS), which boot creates as
+    /// `new Worker("bobcat:bts")`.
+    Background,
+    /// A `Worker` whose script is fetched from the URL its specifier
+    /// resolves to.
+    Dedicated,
+}
+
+impl WorkerRole {
+    /// The [`ScriptSource`] that events about the worker `key` names are
+    /// reported under: the view's background thread, or the `Worker` with
+    /// that key.
+    pub(crate) fn source(&self, key: WorkerKey) -> ScriptSource {
+        match self {
+            Self::Background => ScriptSource::Background,
+            Self::Dedicated => ScriptSource::Worker(WorkerId::from(key)),
+        }
+    }
 }
 
 /// Everything the worker thread is ever told.
@@ -169,13 +201,19 @@ pub(crate) enum WorkerPayload {
     /// One value, primitive or structured clone, from the worker's
     /// `postMessage`.
     Message(HostValue),
-    /// Something in the worker threw and it is still running — a timer
-    /// callback, which HTML reports at the worker and then at its parent
-    /// without ending either.
+    /// Something in the worker's realm threw and the worker is still
+    /// running, whichever entry into the realm it was: its script, a message
+    /// delivered to it, a timer, animation or native module callback, a
+    /// module it imported, a `Future` it awaited. HTML reports such an
+    /// exception at the worker and then at its parent without ending either.
+    /// The creating realm reports it as `EngineEvent::WorkerThrew`.
     Errored(ScriptError),
-    /// The worker's script could not be fetched, its realm could not be
-    /// built, or the thread it runs on has trapped. The realm is gone with it;
-    /// nothing more will ever arrive under this key.
+    /// The worker's script could not be fetched or was not a script, its
+    /// realm could not be built, or the thread it runs on has trapped —
+    /// while it ran, or before it was started, in which case the creating
+    /// realm queued this itself and nothing was sent to that thread. The
+    /// realm is gone with it; nothing more will ever arrive under this key.
+    /// The creating realm reports it as `EngineEvent::WorkerEnded`.
     Failed(ScriptError),
     /// The worker ended itself with `close()`.
     Closed,

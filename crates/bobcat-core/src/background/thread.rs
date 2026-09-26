@@ -66,6 +66,7 @@ use crate::resource::{LoadedSource, SourceRequest};
 use crate::script::ScriptError;
 use crate::threads::{panicked, platform_script_error};
 use crate::timers::run_due_timers;
+use crate::view::ScriptSource;
 
 /// Who each worker task reports to: its worker's key and the creating view's
 /// channel, beside the worker's own token. Kept by [`serve_workers`] until it
@@ -294,6 +295,9 @@ enum WorkerState {
 struct Worker {
     js: SharedRuntime,
     key: WorkerKey,
+    /// What this worker's realm is named by in the diagnostics it reports:
+    /// the background thread, or the `Worker` its key names.
+    source: ScriptSource,
     /// Where this worker reports, which is the creating view's own channel.
     events: mpsc::UnboundedSender<WorkerEvent>,
     state: RefCell<WorkerState>,
@@ -319,6 +323,7 @@ impl Worker {
     fn new(
         js: SharedRuntime,
         key: WorkerKey,
+        source: ScriptSource,
         events: mpsc::UnboundedSender<WorkerEvent>,
         token: CancellationToken,
         sources: HostOutbox,
@@ -327,6 +332,7 @@ impl Worker {
         Rc::new(Self {
             js,
             key,
+            source,
             events,
             state: RefCell::new(WorkerState::Loading),
             lifetime: Lifetime::new(token, thread),
@@ -381,8 +387,10 @@ impl Worker {
     ///
     /// One report per worker whichever of the owner's two waits saw the panic
     /// first, and not gated by [`Self::reported`]: a worker that already
-    /// reported a failed script and then traps is still a `Failed` the
-    /// creating view is owed.
+    /// reported a failed script and then traps still sends this `Failed`.
+    /// The creating realm drops it if it has already delivered that first
+    /// one, though: delivering a worker's end removes the key's source, and a
+    /// key without a source is reported to no one.
     fn trapped(&self, payload: &(dyn std::any::Any + Send)) {
         if self.lifetime.report_panic() {
             let _ = self.events.send(WorkerEvent {
@@ -400,7 +408,9 @@ impl Worker {
     /// operation that trapped, or a thread that is over. The whole body runs
     /// under [`run_job`]'s `catch_unwind`, because a job runs in this thread's
     /// top loop rather than inside a task that could catch it: a panic here
-    /// would otherwise take the thread down instead of this one worker.
+    /// would otherwise take the thread down instead of this one worker. A
+    /// host function of the worker's realm that panics is caught there too,
+    /// once the realm's checkpoint resumes its panic.
     fn enter<T, O>(self: &Rc<Self>, operation: O) -> impl Future<Output = Option<T>> + use<T, O>
     where
         T: 'static,
@@ -523,6 +533,7 @@ impl Worker {
                         &self.sources,
                         self.lifetime.thread().clone(),
                         Some(self.key),
+                        self.source,
                         |engine, js| {
                             let events = self.events.clone();
                             let key = self.key;
@@ -642,13 +653,14 @@ async fn serve_worker(js: SharedRuntime, start: WorkerStart, thread: JsThreadHan
     let WorkerStart {
         key,
         name,
+        role,
         script,
         messages,
         events,
         token,
         sources,
     } = start;
-    let worker = Worker::new(js, key, events, token, sources, thread);
+    let worker = Worker::new(js, key, role.source(key), events, token, sources, thread);
     worker.spawn(boot_worker(Rc::clone(&worker), name, script, messages));
     worker.run_owner().await;
 }
@@ -993,6 +1005,7 @@ mod tests {
     //! count the epilogues each of them ran.
 
     use super::*;
+    use crate::background::WorkerRole;
 
     /// How many times the test lets every ready task run before it gives up on
     /// something happening. A hang detector rather than a schedule: everything
@@ -1055,6 +1068,7 @@ mod tests {
         let worker = Worker::new(
             Rc::clone(js),
             WorkerKey::new(key),
+            WorkerRole::Dedicated.source(WorkerKey::new(key)),
             events,
             token.clone(),
             HostOutbox::new(
@@ -1171,6 +1185,7 @@ mod tests {
                 .send(WorkerCommand::Start(WorkerStart {
                     key: WorkerKey::new(2),
                     name: String::new(),
+                    role: WorkerRole::Dedicated,
                     script,
                     messages: incoming,
                     events,

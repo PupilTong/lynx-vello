@@ -40,8 +40,10 @@ and `bobcat-workers` (every Worker realm, including the BTS).
   `lifetime.rs` the `CancellationToken`, `serve_clock` and `run_job`;
   `realm.rs` (`open_realm`, the one constructor both threads open a realm
   with: it installs the core every realm has under `bobcat-internal:host` —
-  frame demand, timers, `Future`, `fetchResource`, `require` — then runs the
-  caller's own host modules, passed as a parameter, and answers with
+  frame demand, timers, `Future`, `fetchResource`, `require`, and the
+  diagnostics pair `reportScriptError`/`logScriptMessage`, which report with
+  the `ScriptSource` the caller names — then runs the caller's own host
+  modules, passed as a parameter, and answers with
   `RealmCore { engine, timers, futures }`);
   `timers.rs`, `clock.rs`/`alarm.rs`, `future.rs` (the per-realm `FutureTable`
   and `waitFuture`/`takeFuture`/`settleFuture`), `esm.rs` (`BUILTIN_MODULES`,
@@ -61,7 +63,9 @@ and `bobcat-workers` (every Worker realm, including the BTS).
   `__FlushElementTree`, and `__SetCSSId`, accepted and ignored),
   `main-thread-runtime.ts` (`bobcat:runtime`), `worker.ts` (the W3C `Worker`),
   `worker-runtime.ts`, `background-thread-runtime.ts` (`bobcat:bts-runtime`),
-  `cross-thread-context.ts`, `event-target.ts`, `timers.ts`, `future.ts`
+  `cross-thread-context.ts`, `event-target.ts`, `diagnostics.ts`
+  (`bobcat:diagnostics` — every realm's `console` and `reportError`, the one
+  `printable` and the `lynx.reportError` level rule), `timers.ts`, `future.ts`
   (`bobcat:future` — the `Future` class), `module.ts`
   (`bobcat:module` — Node's `require` algorithm), `selector-query.ts`,
   `global-event-emitter.ts`, `lynx-modules.ts` (the compiler factory ABI,
@@ -91,7 +95,9 @@ Landed and not to be regressed:
   rules before any request; a failure is the construction error
   `EngineError::InvalidUrl`), a task of the view completes
   that module from the pre-issued answer (with the entry preamble prepended
-  and the response URL as its `import.meta.url`), the entry's own request
+  and the response URL as its `import.meta.url`; an answer that failed is
+  `StartupFailed` carrying the fetcher's own error, and the module is never
+  completed), the entry's own request
   never reaches the fetcher, that task names the entry (`__BobcatInitEntry`
   with the response URL) before completing it, and a Worker's script URL is
   joined in Rust, by URL rules, to the entry URL JavaScript holds and hands to
@@ -99,15 +105,47 @@ Landed and not to be regressed:
   synchronous `SyntaxError`). The only two things boot waits on are both
   inside its first `__FlushElementTree`: every listed author sheet, success or
   failure, mounted in listed order before the document is styled (a failed
-  one is `StartupFailed(Script)` naming it), then the painter binding. Until
+  one is `StartupFailed(Script)` naming it, also where app code settled it
+  first and caught the error: `DocumentSlot` keeps the first failure and
+  throws it from every later settle), then the painter binding. Until
   the sheets have settled the epilogue's `commit_if_dirty` skips rather than
   waits, so no frame is published without them.
   `consume_messages` on `bobcat-workers` never awaits the deliveries it
   queued, because `Terminate` is in band behind them.
+- **Only `StartupFailed` and `Panicked` end a view** (`EngineEvent::is_fatal`,
+  which `LynxView::pump` ends a view on). Boot imports the entry inside a
+  `try`/`catch` that raises what it caught again as an unhandled rejection, so
+  an entry that throws is a `ScriptRunError` and boot still connects the BTS,
+  renders and flushes; only the engine's own boot code fails boot's
+  evaluation. `ScriptRunError`, `ListenerFailed` and `TimerFailed` are named
+  by the kind of entry the failure happened in, during boot or after it, and
+  none of them ends the view. Every panic reaches the embedder as `Panicked`
+  through `EngineEvent::from_panic`; an input dispatch is not caught on its
+  own, and a host member's panic is kept by `ScriptEngine` and resumed at the
+  realm's next checkpoint, so a script that catches the bridge's "the host
+  function panicked" does not stop it. A checkpoint error beside a failure an
+  entry is already reporting is dropped with the other leftover rejections,
+  never kept for the next entry.
 - The BTS is a `Worker` named `lynx-bg` on the group's `bobcat-workers` runtime.
-  A BTS failure is a nonfatal `EngineEvent::WorkerFailed` — never
-  `StartupFailed`, never view teardown. `ScriptFinished` means MTS boot settled
-  and says nothing about the BTS.
+  A BTS failure is a nonfatal `EngineEvent::WorkerThrew` (it threw and still
+  runs) or `WorkerEnded` (it ended without being told to) from
+  `ScriptSource::Background` — never `StartupFailed`, never view teardown.
+  `ScriptFinished` means MTS boot settled and says nothing about the BTS.
+- A worker event names its worker by the `ScriptSource` the realm's
+  `WorkerOwner` recorded when it allocated the key, and is reported before the
+  JS `error` event. A key the script let go of (`terminate()`, collection)
+  has no source and reports nothing; `close()` reports nothing.
+- Every realm reports its own diagnostics: `bobcat:diagnostics` is written
+  over the core pair, which sends `ScriptReported`/`ConsoleMessage` with the
+  realm's `ScriptSource` through the realm's own `HostOutbox`. Nothing is
+  relayed through MTS as a Worker message, so a realm's diagnostics are
+  ordered only among themselves. `ScriptReported.level` is `"warn"`,
+  `"error"` or `"fatal"`, and `"fatal"` ends nothing. A worker's global
+  `console` is the module's (the BTS export is the same object); a plain
+  `Worker` has no `requestAnimationFrame`. A BTS animation-frame,
+  `queueMicrotask` or `fetchBundle` callback that throws is an uncaught
+  exception (`WorkerThrew`); only the dispose hook and a misused
+  `SelectorQuery` use `lynx.reportError`.
 - Cross-thread messages are QuickJS structured clones. A refused value
   (function, `Symbol`, `Map`, `Set`, `RegExp`, `Error`, `DataView`, accessor)
   **throws synchronously at the send**. Do not add a custom codec, a deep

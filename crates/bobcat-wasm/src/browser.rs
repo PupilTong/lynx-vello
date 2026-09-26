@@ -637,9 +637,12 @@ impl BobcatRenderer {
     /// own rate. Nothing is re-armed here: the signal carries facts from the
     /// Lynx main thread, and a frame is not one of them.
     ///
-    /// A fatal error is reported after the turn, never instead of it: the
-    /// frame a failed script did commit still reaches the canvas, with nobody
-    /// left to ask for another.
+    /// Only an event for which [`EngineEvent::is_fatal`] holds, or a draw
+    /// target that failed, fails this call; every other failure is written
+    /// to the console and the page keeps running. A fatal event is reported
+    /// after the turn, never instead of it: the frame the view committed
+    /// before it still reaches the canvas, with nobody left to ask for
+    /// another.
     #[wasm_bindgen(js_name = pump)]
     pub fn pump(&mut self) -> Result<bool, JsValue> {
         self.ensure_running()?;
@@ -647,8 +650,8 @@ impl BobcatRenderer {
         // publishes re-arms it and the Worker comes back for it.
         self.events.take();
         let mut fatal = None;
-        // The painter first: the pixels a fatal script error left behind
-        // reach the canvas on the turn that reports it, with nobody left to
+        // The painter first: the frame a view committed before a fatal event
+        // reaches the canvas on the turn that reports it, with nobody left to
         // ask for another frame. A draw target that failed cannot be reached
         // again, so it is reported once and the painter draws nothing after.
         if let Some(painter) = self.painter.as_mut()
@@ -669,23 +672,41 @@ impl BobcatRenderer {
                     self.script_finished = true;
                     boot_finished = true;
                 }
-                EngineEvent::StartupFailed(error) if fatal.is_none() => {
-                    fatal = Some(js_error(error));
+                // The view has ended. The first failure is the one reported.
+                event if event.is_fatal() && fatal.is_none() => {
+                    fatal = Some(fatal_error(event));
                 }
-                // The first failure is the one reported.
-                EngineEvent::ScriptRunError(error) if fatal.is_none() => {
-                    fatal = Some(js_error(error));
-                }
-                EngineEvent::ListenerFailed(error)
-                | EngineEvent::TimerFailed(error)
-                | EngineEvent::WorkerFailed(error) => {
+                // Not fatal: the view and its realms go on, so each of these
+                // is written to the console and the page keeps running.
+                EngineEvent::ScriptRunError(error)
+                | EngineEvent::ListenerFailed(error)
+                | EngineEvent::TimerFailed(error) => {
                     console_error(&js_error(error));
                 }
-                EngineEvent::ScriptReported { level, message } => {
-                    console_error(&JsValue::from_str(&format!("[{level}] {message}")));
+                EngineEvent::WorkerThrew { source, error } => {
+                    console_error(&js_error(format!("[{source}] worker threw: {error}")));
                 }
-                EngineEvent::ConsoleMessage { level, message } => {
-                    let message = JsValue::from_str(&format!("[{level}] {message}"));
+                EngineEvent::WorkerEnded { source, error } => {
+                    console_error(&js_error(format!("[{source}] worker ended: {error}")));
+                }
+                EngineEvent::ScriptReported {
+                    source,
+                    level,
+                    message,
+                } => {
+                    let message = JsValue::from_str(&format!("[{source}] [{level}] {message}"));
+                    if level == "warn" {
+                        console_warn(&message);
+                    } else {
+                        console_error(&message);
+                    }
+                }
+                EngineEvent::ConsoleMessage {
+                    source,
+                    level,
+                    message,
+                } => {
+                    let message = JsValue::from_str(&format!("[{source}] [{level}] {message}"));
                     match level.as_str() {
                         "error" => console_error(&message),
                         "warn" => console_warn(&message),
@@ -1082,4 +1103,15 @@ fn set_canvas_size(canvas: &OffscreenCanvas, size: FrameSize) {
 
 fn js_error(error: impl fmt::Display) -> JsValue {
     js_sys::Error::new(&error.to_string()).into()
+}
+
+/// The error [`BobcatRenderer::pump`] fails with on an event for which
+/// [`EngineEvent::is_fatal`] holds: the error the event carries, or, for a
+/// fatal event a later engine adds, its debug form.
+fn fatal_error(event: EngineEvent) -> JsValue {
+    match event {
+        EngineEvent::StartupFailed(error) => js_error(error),
+        EngineEvent::Panicked(error) => js_error(error),
+        event => js_error(format!("{event:?}")),
+    }
 }

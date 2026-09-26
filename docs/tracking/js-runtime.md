@@ -5,7 +5,8 @@
 Bobcat now implements the MTS `getJSContext()` / BTS `getCoreContext()` pair
 for typed asynchronous events over the existing Worker transport. Native Context
 semantics, BTS GlobalEventEmitter, host global events and console/reportError
-forwarding are implemented; see [events and diagnostics](../events-diagnostics-runtime.md).
+delivery, which every realm makes to the host itself with its source, are
+implemented; see [events and diagnostics](../events-diagnostics-runtime.md).
 See
 [BTS Context MVP](web-core-runtime.md#bobcat-bts-context-mvp-2026-09-09) for
 the web-core/native distinction, startup queues and remaining scope.

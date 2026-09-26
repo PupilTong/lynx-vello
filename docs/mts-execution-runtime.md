@@ -49,8 +49,13 @@ checkpoint continues to report unhandled rejections and enforce its deadline,
 and runs the runtime's queued jobs until the queue is empty, as a browser's
 microtask checkpoint does: no job budget bounds it, and there is no incomplete
 checkpoint for the next entry into the realm to resume instead of running its
-own operation. Entry-module and flush failures still fail boot. Later dirty
-mutations retain the existing page epilogue's commit behavior.
+own operation. Only a flush failure fails boot, the listed sheets it settles
+included: a listed sheet that failed is kept, so the flush throws it even where
+app code met it first and caught it. The entry's own evaluation, and a module
+it imports, fail without failing boot: boot imports the entry inside a
+`try`/`catch` that raises the error again as an unhandled rejection, which is
+reported as `ScriptRunError`, and boot goes on to the render and this flush.
+Later dirty mutations retain the existing page epilogue's commit behavior.
 
 Named cross-thread calls continue to await through Worker `postMessage` RPC.
 Neither boot scheduling nor local chunk loading changes that boundary.

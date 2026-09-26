@@ -19,6 +19,9 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+use bobcat_core::EngineEvent;
+use bobcat_core::script::{ScriptError, ScriptErrorKind, ScriptErrorPhase};
+
 mod args;
 mod command;
 mod headless;
@@ -94,6 +97,28 @@ pub enum CliError {
 impl CliError {
     pub(crate) fn arguments(message: impl Into<String>) -> Self {
         Self::Arguments(message.into())
+    }
+
+    /// The error a run ends with on an event for which
+    /// [`EngineEvent::is_fatal`] holds. A view that could not start keeps its
+    /// own error; any other fatal event, an engine panic, is a script error.
+    fn from_fatal_event(input: &str, event: EngineEvent) -> Self {
+        let input = input.to_owned();
+        match event {
+            EngineEvent::StartupFailed(source) => Self::StartView { input, source },
+            EngineEvent::Panicked(source) => Self::Script { input, source },
+            // A fatal event a later engine adds ends the run as well, named
+            // by its debug form.
+            event => Self::Script {
+                input,
+                source: ScriptError {
+                    kind: ScriptErrorKind::Other,
+                    phase: ScriptErrorPhase::Execute,
+                    message: format!("{event:?}").into(),
+                    location: None,
+                },
+            },
+        }
     }
 
     #[must_use]

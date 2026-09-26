@@ -44,11 +44,10 @@ use crate::esm::{
 };
 use crate::link::{InputEventPayload, ViewNotice, ViewOutbox};
 use crate::main::tree::{ImageOutcomes, LynxDocument, PageConfig, new_document};
-use crate::realm::{RealmCore, context_of, open_realm};
-use crate::resource::LoadedSource;
+use crate::realm::{RealmCore, context_of, open_realm, string_argument};
 use crate::script::ScriptError;
 use crate::timers::run_due_timers;
-use crate::view::{LynxViewError, ScreenMetrics, StartupSource, Viewport};
+use crate::view::{LynxViewError, ScreenMetrics, ScriptSource, StartupSource, Viewport};
 
 const BOOT_MODULE_SPECIFIER: &str = "bobcat:boot";
 const EVENT_DISPATCH_EXPORT: &str = "__BobcatDispatchEvent";
@@ -345,6 +344,17 @@ struct DocumentSlot {
     /// order. Non-empty is what keeps [`Self::commit_if_dirty`] from running
     /// the pipeline, so no frame is committed without them.
     sheets: Vec<StartupSource>,
+    /// The error the first listed sheet that failed to settle threw, which
+    /// every later settle throws again.
+    ///
+    /// A failed sheet leaves [`Self::sheets`] like any other, so without this
+    /// only the first settle would see the failure — and that can be app
+    /// code's, an `adoptStyleSheet` or a `__FlushElementTree` inside the
+    /// entry's evaluation, which may catch it. Kept here, it reaches boot's
+    /// own flush as well, which fails the boot with it whatever the app did.
+    /// Like an outstanding sheet, it keeps [`Self::commit_if_dirty`] from
+    /// committing.
+    failed_sheet: Option<String>,
     document: Option<LynxDocument>,
     /// The device metrics an attached painter names, `None` until one binds.
     ///
@@ -398,6 +408,7 @@ impl DocumentSlot {
         Rc::new(RefCell::new(Self {
             ingredients: Some(ingredients),
             sheets,
+            failed_sheet: None,
             document: None,
             metrics,
             bound: false,
@@ -431,9 +442,10 @@ impl DocumentSlot {
     /// first [`Self::flush`] mounts them, which is the first point at which
     /// the document is styled.
     ///
-    /// The construction is caught, because a panic that crosses the bridge is
-    /// erased into "the host function panicked" and this is the one host
-    /// member that runs the UA cascade behind a single call.
+    /// The construction is caught, because this is the one host member that
+    /// runs the UA cascade behind a single call: a panic in it is reported
+    /// naming the phase that panicked, as the construction failure it is,
+    /// where any other host member's panic ends the view as `Panicked`.
     fn create_document(&mut self, config: PageConfig) -> Result<(), String> {
         let Some(ingredients) = self.ingredients.take() else {
             return Err("the realm already created its document".to_owned());
@@ -509,7 +521,8 @@ impl DocumentSlot {
     /// not arrived, in listed order, each mounted as it is read. A sheet that
     /// failed to load, or that the fetcher answered with something else, is
     /// an error naming its URL, which `__FlushElementTree` throws — boot's own
-    /// flush fails the boot with it. A frame is never committed without the
+    /// flush fails the boot with it, also where app code settled the sheet
+    /// first and caught the error. A frame is never committed without the
     /// sheets, because a frame styled without them would be published and
     /// then restyled.
     ///
@@ -569,18 +582,27 @@ impl DocumentSlot {
     /// Mounts every listed author sheet not mounted yet, in listed order,
     /// waiting inside the job for each answer that has not arrived.
     ///
-    /// A sheet is taken off the front of the list before it is read, so a
-    /// failure consumes that sheet alone: the error is thrown to the caller
-    /// of `__FlushElementTree`, and a later flush goes on with the sheets
-    /// behind it.
+    /// A sheet is taken off the front of the list before it is read. The
+    /// first one that fails ends the settling: its error is thrown to the
+    /// caller — `__FlushElementTree` or `adoptStyleSheet` — and kept in
+    /// [`Self::failed_sheet`], so every later call throws it again rather
+    /// than going on with the sheets behind it.
     fn settle_sheets(&mut self, thread: &crate::jobs::JsThreadHandle) -> Result<(), String> {
+        if let Some(error) = &self.failed_sheet {
+            return Err(error.clone());
+        }
         if self.sheets.is_empty() {
             return Ok(());
         }
         let token = self.outbox.token().clone();
         while !self.sheets.is_empty() {
             let StartupSource { url, answer } = self.sheets.remove(0);
-            style_sheets::settle_style_sheet(self.document_mut(), thread, &token, &url, answer)?;
+            if let Err(error) =
+                style_sheets::settle_style_sheet(self.document_mut(), thread, &token, &url, answer)
+            {
+                self.failed_sheet = Some(error.clone());
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -592,14 +614,15 @@ impl DocumentSlot {
     ///
     /// It never waits: the epilogue runs after every entry, and parking here
     /// would stop the group on any of them. So while any listed author sheet
-    /// is still outstanding it does nothing at all: a commit without the
-    /// sheets would publish an unstyled frame, and waiting for them is the
-    /// first [`Self::flush`]'s. Nothing is lost by skipping — boot's own
-    /// `__FlushElementTree` is what commits the first frame, and it settles
-    /// the sheets before it does. What it commits before the binding is held
-    /// for whichever flush or binding publishes next.
+    /// is still outstanding, or one has failed, it does nothing at all: a
+    /// commit without the sheets would publish an unstyled frame, and waiting
+    /// for them is the first [`Self::flush`]'s. Nothing is lost by skipping —
+    /// boot's own `__FlushElementTree` is what commits the first frame, and
+    /// it settles the sheets before it does, or fails the boot. What it
+    /// commits before the binding is held for whichever flush or binding
+    /// publishes next.
     fn commit_if_dirty(&mut self) {
-        if !self.sheets.is_empty() {
+        if !self.sheets.is_empty() || self.failed_sheet.is_some() {
             return;
         }
         self.adopt_metrics();
@@ -665,9 +688,9 @@ impl DocumentSlot {
 
 /// Runs one phase of document construction, naming it if it panics.
 ///
-/// Without this the realm is told "the host function panicked", which is the
-/// bridge's answer for every host member and says nothing about which of the
-/// document's several pipelines gave way.
+/// Without this the panic would end the view as `Panicked`, which is what
+/// any host member's panic does, carrying the panic's own message and nothing
+/// about which of the document's several pipelines panicked.
 fn construction_phase<T>(phase: &str, work: impl FnOnce() -> T) -> Result<T, String> {
     catch_unwind(AssertUnwindSafe(work)).map_err(|payload| {
         format!(
@@ -789,6 +812,7 @@ impl MainThreadRuntime {
             &host,
             thread.clone(),
             None,
+            ScriptSource::Main,
             |engine, js_runtime| {
                 install_bobcat(engine, js_runtime, &slot, &outbox, thread.clone())
                     .map_err(MainThreadError::into_script_error)?;
@@ -831,6 +855,11 @@ impl MainThreadRuntime {
     ) -> Result<(), MainThreadError> {
         use crate::background::WorkerPayload;
         let failed = matches!(payload, WorkerPayload::Failed(_));
+        // Read before `forget` below removes it. `None` is a key the script
+        // has already let go of, through `terminate()` or the collection of
+        // its `Worker` object: what that worker still says reaches neither a
+        // `Worker` object nor the embedder.
+        let source = self.workers.source_of(key);
         // A worker that closed itself, or whose script or realm failed, has
         // ended: this is where the realm learns it, and so where the right to
         // tell it to stop stops being worth keeping.
@@ -847,7 +876,11 @@ impl MainThreadRuntime {
                 let kind = if failed { "failed" } else { "error" };
                 let data = HostValue::String(error.message.to_string());
                 let location = error.location.clone();
-                self.workers.report_failure(error);
+                // Before the `Worker` object's `error` event below, so no
+                // listener of it decides whether the embedder hears of this.
+                if let Some(source) = source {
+                    self.workers.report_failure(source, failed, error);
+                }
                 (kind, data, location)
             }
         };
@@ -1275,6 +1308,15 @@ impl MainThreadRuntime {
     /// runs through to its own flush here; one still outstanding leaves the
     /// import pending, and the rest of boot runs in the job that completes it.
     ///
+    /// **The entry is the app's code, and the rest is the engine's.** Boot
+    /// catches what the entry's import throws — the entry's evaluation, or a
+    /// module it imports — and raises it again as a rejection nothing
+    /// handles, so the checkpoint of the entry that ran the catch reports it,
+    /// once, and boot goes on to connect the BTS, render and flush. What
+    /// fails boot's evaluation is therefore the engine's own code alone:
+    /// `bobcat:runtime` reading the page data, the document's construction,
+    /// connecting the BTS, and the flush, the listed sheets included.
+    ///
     /// The only literals written into it are the screen's three numbers, the
     /// page configuration's four switches and the entry's URL — facts Rust
     /// owns, written as primitives rather than as JSON the realm would parse
@@ -1334,7 +1376,12 @@ let data = lynx.__initData;
 // opened, answered from the response URL the fetcher gave, so this import
 // asks the fetcher for nothing, and names that URL as `__Card__` before the
 // entry's body runs.
-await import({entry});
+//
+// The entry is app code. What its evaluation throws is raised again as a
+// rejection nothing handles, which the checkpoint of this entry into the
+// realm reports, and boot goes on past it: the BTS is connected, the page
+// rendered and flushed, as a native MTS renders a page whose script threw.
+try {{ await import({entry}); }} catch (error) {{ void Promise.reject(error); }}
 const {{ Worker }} = await import("bobcat-internal");
 data = __BobcatProcessInitData(data);
 __BobcatConnectBackground(new Worker("{BTS_MODULE_SPECIFIER}", {{ name: "lynx-bg" }}), data);
@@ -1362,9 +1409,12 @@ await Promise.resolve().then(() => __FlushElementTree());
     /// would with a fetcher's answer, which runs the rest of boot: the same
     /// module, the same members and the same order a view boots in.
     ///
-    /// The result is boot's: an error if it failed, whether before the import
-    /// or in the entry, and `Ok` once it settled or while it still waits for a
-    /// resource or a timer.
+    /// The result is the first failure: boot's own before its import, the
+    /// entry's evaluation — which a view reports without failing its boot —
+    /// or boot's own after it; and `Ok` once boot settled or while it still
+    /// waits for a resource or a timer. Naming the entry is the engine's own
+    /// code and does not fail for an entry named by an absolute URL, which
+    /// every caller of this seam uses.
     pub(crate) fn run_main_thread_script(
         &mut self,
         js_runtime: &mut ScriptRuntime,
@@ -1377,14 +1427,8 @@ await Promise.resolve().then(() => __FlushElementTree());
         // never sends to a fetcher; it is answered below.
         let requested = self.take_module_request();
         debug_assert_eq!(requested, self.entry_module_name().ok());
-        self.complete_entry(
-            js_runtime,
-            source_name,
-            Ok(LoadedSource::Module {
-                source: source.to_owned(),
-                url: source_name.to_owned(),
-            }),
-        )?;
+        self.complete_entry(js_runtime, source_name, source)
+            .expect("naming an entry by an absolute URL does not fail")?;
         let finished = self.main_module_finished().map(|_| ());
         let collected = self.finish_batch(js_runtime, finished.is_ok());
         finished.and(collected)
@@ -1403,7 +1447,7 @@ await Promise.resolve().then(() => __FlushElementTree());
     pub(crate) fn run_main_thread_script_over_sheets(
         &mut self,
         js_runtime: &mut ScriptRuntime,
-        sheets: Vec<(&str, LoadedSource)>,
+        sheets: Vec<(&str, crate::resource::LoadedSource)>,
         source: &str,
         source_name: &str,
     ) -> Result<(), MainThreadError> {
@@ -1428,14 +1472,8 @@ await Promise.resolve().then(() => __FlushElementTree());
         // The one request boot left is its entry, which the view's owner
         // never sends to a fetcher.
         assert_eq!(self.take_module_request(), self.entry_module_name().ok());
-        self.complete_entry(
-            js_runtime,
-            source_name,
-            Ok(LoadedSource::Module {
-                source: source.to_owned(),
-                url: source_name.to_owned(),
-            }),
-        )
+        self.complete_entry(js_runtime, source_name, source)
+            .expect("naming an entry by an absolute URL does not fail")
     }
 
     /// The next module an import in this realm is waiting for, if any.
@@ -1455,26 +1493,33 @@ await Promise.resolve().then(() => __FlushElementTree());
         super::quickjs::normalize_module_url(BOOT_MODULE_SPECIFIER, &self.entry)
     }
 
-    /// Completes the module boot imports the entry as, from the answer to the
-    /// entry request `create_lynx_view` made.
+    /// Completes the module boot imports the entry as, from the script the
+    /// fetcher answered the entry request `create_lynx_view` made with: its
+    /// response URL and its source. An answer that is not a script never gets
+    /// here — it fails the view's startup before any of it runs.
     ///
     /// The module is the one [`Self::entry_module_name`] names — the name
     /// boot's `import` asks for, the request URL, which is also the name its
-    /// errors and stack frames carry — completed like any other import: a
-    /// script answer is the entry with the entry preamble prepended, answered
-    /// from the fetcher's response URL. That URL is the base its own relative
-    /// imports resolve against and its `import.meta.url`. A load that failed,
-    /// and an answer that is not a script, complete the module with an error
-    /// naming the URL the view asked for and the reason, which rejects boot's
-    /// `import` and so fails the boot with that message.
+    /// errors and stack frames carry — completed like any other import: the
+    /// entry with the entry preamble prepended, answered from the fetcher's
+    /// response URL. That URL is the base its own relative imports resolve
+    /// against and its `import.meta.url`.
     ///
-    /// **The entry is named here.** Before a script answer is completed, the
+    /// **The entry is named here.** Before the script is completed, the
     /// response URL — the fetcher's, so a redirect is already applied — is
     /// handed to `bobcat:runtime`'s `__BobcatInitEntry`, which makes it
     /// `__Card__`: this page's own container URL for the body, for every chunk
     /// and stylesheet it names by `__Card__`, and for the base URL a
     /// `new Worker` specifier resolves against. A chunk is never named: it
     /// would overwrite `__Card__` with its own URL.
+    ///
+    /// Two failures, one inside the other. The outer one is the engine's own
+    /// code — the entry's module name, and the call that names it — and fails
+    /// the view's startup. The inner one is the completion and its
+    /// checkpoint, which is where what the entry's evaluation threw arrives:
+    /// boot catches it and raises it again unhandled (see
+    /// [`Self::run_boot_module`]), so it is the app's failure, reported
+    /// without ending the view.
     ///
     /// Boot has run first: `bobcat:runtime` is one of its static imports, so
     /// it is instantiated by the time this is called, and boot's `import` of
@@ -1485,48 +1530,36 @@ await Promise.resolve().then(() => __FlushElementTree());
     pub(crate) fn complete_entry(
         &mut self,
         js_runtime: &mut ScriptRuntime,
-        requested: &str,
-        answered: Result<LoadedSource, LynxViewError>,
-    ) -> Result<(), MainThreadError> {
+        url: &str,
+        source: &str,
+    ) -> Result<Result<(), MainThreadError>, LynxViewError> {
         let booting = |error| MainThreadError::from_engine("booting the MTS entry", error);
+        let starting = |error| LynxViewError::Script(booting(error).into_script_error());
         let name = self.entry_module_name().map_err(|message| {
-            booting(ScriptError {
+            starting(ScriptError {
                 kind: crate::script::ScriptErrorKind::ModuleLoad,
                 phase: crate::script::ScriptErrorPhase::ExecuteModule,
-                message: format!("the MTS entry {requested}: {message}").into(),
+                message: format!("the MTS entry {}: {message}", self.entry).into(),
                 location: None,
             })
         })?;
-        let loaded = match answered {
-            Ok(LoadedSource::Module { source, url }) => Ok((url, entry_module_source(&source))),
-            Ok(_) => Err(format!("the MTS entry {requested} is not a script")),
-            Err(error) => Err(format!("loading the MTS entry {requested}: {error}")),
-        };
         // Without a checkpoint of its own: the completion below drains the
         // queue for both, so naming the entry wakes no sibling realm between
         // them.
-        if let Ok((url, _)) = &loaded {
-            self.core
-                .engine
-                .call_module_export_before_operation(
-                    js_runtime,
-                    RUNTIME_MODULE_SPECIFIER,
-                    "__BobcatInitEntry",
-                    &[HostArgument::String(url)],
-                )
-                .map_err(booting)?;
-        }
         self.core
             .engine
-            .complete_module(
+            .call_module_export_before_operation(
                 js_runtime,
-                &name,
-                loaded
-                    .as_ref()
-                    .map(|(url, source)| (url.as_str(), source.as_str()))
-                    .map_err(String::as_str),
+                RUNTIME_MODULE_SPECIFIER,
+                "__BobcatInitEntry",
+                &[HostArgument::String(url)],
             )
-            .map_err(booting)
+            .map_err(starting)?;
+        Ok(self
+            .core
+            .engine
+            .complete_module(js_runtime, &name, Ok((url, &entry_module_source(source))))
+            .map_err(booting))
     }
 
     /// The futures this realm asked to settle asynchronously — a `.then` on a
@@ -1667,19 +1700,6 @@ fn install_bobcat(
     outbox: &ViewOutbox,
     thread: crate::jobs::JsThreadHandle,
 ) -> Result<(), MainThreadError> {
-    for (name, is_error) in [("reportScriptError", true), ("logScriptMessage", false)] {
-        let reporting = outbox.clone();
-        install(engine, js_runtime, name, 2, move |arguments| {
-            let level = string_argument(name, arguments, 0)?.to_owned();
-            let message = string_argument(name, arguments, 1)?.to_owned();
-            reporting.engine_event(if is_error {
-                crate::EngineEvent::ScriptReported { level, message }
-            } else {
-                crate::EngineEvent::ConsoleMessage { level, message }
-            });
-            Ok(HostValue::Undefined)
-        })?;
-    }
     install_host_module(engine, js_runtime, handle, thread)?;
     install_event_members(engine, js_runtime, outbox)
 }
@@ -2364,20 +2384,6 @@ fn boolean_argument(function: &str, arguments: &[HostValue], index: usize) -> Re
     match *argument(arguments, index) {
         HostValue::Boolean(value) => Ok(value),
         _ => Err(format!("{function} expects a boolean for argument {index}")),
-    }
-}
-
-/// A timer id, which the realm only ever passes back after the host handed
-/// it one.
-fn string_argument<'a>(
-    function: &str,
-    arguments: &'a [HostValue],
-    index: usize,
-) -> Result<&'a str, String> {
-    match argument(arguments, index) {
-        HostValue::String(value) => Ok(value),
-        HostValue::Undefined | HostValue::Null => Ok(""),
-        _ => Err(format!("{function} expects a string for argument {index}")),
     }
 }
 

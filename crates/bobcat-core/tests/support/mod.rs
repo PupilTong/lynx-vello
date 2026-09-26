@@ -72,7 +72,9 @@ pub fn wait_for_script<F: ResourceFetcher + 'static>(
         for event in view.pump() {
             match event {
                 EngineEvent::ScriptFinished => return Ok(()),
-                EngineEvent::ScriptRunError(error) => return Err(error.into()),
+                EngineEvent::ScriptRunError(error) | EngineEvent::Panicked(error) => {
+                    return Err(error.into());
+                }
                 EngineEvent::StartupFailed(error) => return Err(error),
                 _ => {}
             }

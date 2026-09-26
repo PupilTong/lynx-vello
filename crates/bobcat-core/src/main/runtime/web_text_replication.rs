@@ -72,7 +72,7 @@ use crate::jobs::JsThread;
 use crate::link::{DetachedView, block_on_deadline, detached_outbox};
 use crate::main::tree::{PageConfig, Viewport};
 use crate::main::workers::WorkerFactory;
-use crate::resource::StyleSheetSource;
+use crate::resource::{LoadedSource, StyleSheetSource};
 use crate::view::NoWakeup;
 
 /// Solid em squares, so a run's advance is its glyph count times its font

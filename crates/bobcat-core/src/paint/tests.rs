@@ -518,7 +518,9 @@ fn a_booted_view_commits_and_publishes() {
         if let Some(event) = engine.pump().into_iter().find(|event| {
             matches!(
                 event,
-                EngineEvent::ScriptFinished | EngineEvent::ScriptRunError(_)
+                EngineEvent::ScriptFinished
+                    | EngineEvent::ScriptRunError(_)
+                    | EngineEvent::Panicked(_)
             )
         }) {
             break event;

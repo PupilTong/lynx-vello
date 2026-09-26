@@ -665,7 +665,8 @@ async fn a_flush_after_the_painter_detached_does_not_park() {
                 bobcat_core::EngineEvent::ConsoleMessage { message, .. } => {
                     flushed = Some(message);
                 }
-                bobcat_core::EngineEvent::ScriptRunError(error) => {
+                bobcat_core::EngineEvent::ScriptRunError(error)
+                | bobcat_core::EngineEvent::Panicked(error) => {
                     panic!("the update failed: {}", error.message)
                 }
                 _ => {}

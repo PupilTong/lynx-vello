@@ -37,10 +37,13 @@ const PATIENCE: Duration = Duration::from_secs(30);
 /// module URL an [`InlineFetcher`] answers with its entry script.
 const ENTRY: &str = "app:///main.js";
 
-/// One author stylesheet, in whichever of the two forms a host has it.
+/// One author stylesheet, in whichever of the two forms a host has it, or
+/// one the view lists and the host does not have.
 pub(crate) enum TestSheet {
     Text(String),
     Preparsed(Arc<PreparsedStyleSheet>),
+    /// Answered with the not-found error an unknown URL gets.
+    Missing,
 }
 
 /// A host whose whole resource system is the strings it was built with.
@@ -81,7 +84,7 @@ impl ResourceFetcher for InlineFetcher {
                 Some(TestSheet::Preparsed(sheet)) => Ok(LoadedSource::StyleSheet(
                     StyleSheetSource::Preparsed(Arc::clone(sheet)),
                 )),
-                None => Err(missing(&url)),
+                Some(TestSheet::Missing) | None => Err(missing(&url)),
             },
             SourceRequest::Font { url } => self.fonts.get(&url).map_or_else(
                 || Err(missing(&url)),
@@ -215,6 +218,15 @@ impl TestViewSpec {
         self
     }
 
+    /// One author sheet the view lists and this host has nothing for, which
+    /// fails the view's startup: boot's own `__FlushElementTree` throws the
+    /// not-found error the host answers it with.
+    pub(crate) fn with_missing_style_sheet(mut self) -> Self {
+        let url = format!("app:///sheet-{}.css", self.sheets.len());
+        self.sheets.push((url, TestSheet::Missing));
+        self
+    }
+
     /// A painter that renders into a texture of its own, for a test that
     /// reads pixels back.
     pub(crate) fn offscreen(mut self, width: f32, height: f32) -> Self {
@@ -314,6 +326,7 @@ pub(crate) fn wait_for_boot(engine: &mut TestEngine) {
                 }
                 EngineEvent::StartupFailed(error) => panic!("the view did not boot: {error}"),
                 EngineEvent::ScriptRunError(error) => panic!("the entry module failed: {error}"),
+                EngineEvent::Panicked(error) => panic!("the engine panicked: {error}"),
                 _ => {}
             }
         }

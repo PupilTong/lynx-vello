@@ -169,9 +169,9 @@ interface BobcatNative {
  * The native functions a worker realm gets instead of the document, under
  * `bobcat-internal:worker`. Its `bobcat-internal:host` carries only the
  * members every realm is opened with — `requestScriptFrame`, the timer pair,
- * the `Future` members, `fetchResource`, `resolveModuleUrl` and
- * `loadModuleSync` — and none of the document members, because a worker has
- * no tree to mutate.
+ * the `Future` members, `fetchResource`, `resolveModuleUrl`,
+ * `loadModuleSync`, `reportScriptError` and `logScriptMessage` — and none of
+ * the document members, because a worker has no tree to mutate.
  */
 interface BobcatWorkerNative {
   /**
@@ -216,7 +216,17 @@ declare module "bobcat-internal:host" {
   export function requestScriptFrame(pending: boolean): void;
   export function preloadStyleSheet(url: string): void;
   export function adoptStyleSheet(url: string): void;
+  /**
+   * Reports one diagnostic to the embedder as `EngineEvent::ScriptReported`,
+   * named by this realm. `bobcat:diagnostics` passes `"warn"`, `"error"` or
+   * `"fatal"` as `level`. The host sends it itself and relays it through no
+   * other realm; nothing is thrown and nothing ends.
+   */
   export function reportScriptError(level: string, message: string): void;
+  /**
+   * The same for console output, as `EngineEvent::ConsoleMessage`: `level` is
+   * the console method's name.
+   */
   export function logScriptMessage(level: string, message: string): void;
   /**
    * Starts one worker over the script `url` names and answers the key its

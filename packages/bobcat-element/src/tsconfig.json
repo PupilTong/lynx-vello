@@ -1,9 +1,11 @@
 {
   "$schema": "https://www.schemastore.org/tsconfig",
   // The modules `bobcat-core` strips and preloads into its QuickJS realms:
-  // ES2023 with no DOM, no `console` and no Node globals. `paths` resolves
-  // each specifier core registers to the file it registers under it; the two
-  // native modules have no source and are declared in `native.d.ts`.
+  // ES2023 with no DOM and no Node globals. There is no ambient `console`
+  // either: a module that logs imports `bobcat:diagnostics`'s, which is also
+  // the one `bobcat:worker` installs on a worker realm's global. `paths`
+  // resolves each specifier core registers to the file it registers under it;
+  // the two native modules have no source and are declared in `native.d.ts`.
   "extends": "../../../tsconfig.base.json",
   "compilerOptions": {
     "lib": ["es2023"],
@@ -19,6 +21,7 @@
       "bobcat:module": ["./module.ts"],
       "bobcat:section-url": ["./section-url.ts"],
       "bobcat:bundle-fetch": ["./bundle-fetch.ts"],
+      "bobcat:diagnostics": ["./diagnostics.ts"],
       "bobcat:event-target": ["./event-target.ts"],
       "bobcat:cross-thread-context": ["./cross-thread-context.ts"],
       "bobcat-internal": ["./worker.ts"],

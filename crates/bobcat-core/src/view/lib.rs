@@ -23,7 +23,7 @@ use dom::{FontBlob, FrameImages, ImageInbox, StylePool};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
-use crate::background::WorkerHome;
+use crate::background::{WorkerHome, WorkerKey};
 use crate::clock::ClockInstant;
 use crate::link::{Published, SourceAnswer, ToMain, ViewNotice, ViewSeat};
 #[cfg(target_arch = "wasm32")]
@@ -272,12 +272,14 @@ pub enum EngineError {
 /// URL, font, native-module and attachment errors directly; loading and boot
 /// report through [`EngineEvent::StartupFailed`] on the returned view.
 ///
-/// **A startup source that fails to load reports as `Script`.** The boot
-/// module is what reads a view's stylesheets and its entry, so what reaches
-/// the embedder is the exception that reading threw, carrying the URL and the
-/// host's own reason in its message. The three source variants below are what
-/// a *fetcher* answers a request with, which is where they are produced and
-/// where they read as themselves.
+/// **An entry that fails to load reports as the fetcher's own error.** The
+/// view's entry task reads the fetcher's answer before any script runs, so a
+/// load that failed reaches the embedder as the error the fetcher answered
+/// with, and an answer that is not a script as a `Script` error naming the
+/// entry's URL. **A listed stylesheet that fails to load reports as
+/// `Script`**: boot's own `__FlushElementTree` is what reads the listed
+/// sheets, so what reaches the embedder is the exception that flush threw,
+/// carrying the URL and the host's own reason in its message.
 #[derive(Clone, Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum LynxViewError {
@@ -288,8 +290,10 @@ pub enum LynxViewError {
     #[error(transparent)]
     Script(#[from] ScriptError),
     /// What a fetcher answers a source request with when the bytes are not
-    /// UTF-8. A realm reads it as the text of the exception its own read
-    /// threw, never as this variant.
+    /// UTF-8. The view's entry task reports this answer to the entry as it
+    /// is, as [`EngineEvent::StartupFailed`]; any other script load reads it
+    /// as the text of the exception its own read threw, never as this
+    /// variant.
     #[error("script `{url}` is not valid UTF-8: {message}")]
     InvalidScriptEncoding { url: String, message: String },
     /// The same for a stylesheet.
@@ -303,35 +307,184 @@ pub enum EngineEvent {
     /// MTS boot completed: the entry module evaluated — its top-level await
     /// settled — and its first flush committed. The BTS Worker plays no part
     /// in it: it may still be importing its entry, may have thrown (reported
-    /// separately as [`EngineEvent::WorkerFailed`]), or may have ended.
+    /// separately as [`EngineEvent::WorkerThrew`]), or may have ended
+    /// ([`EngineEvent::WorkerEnded`]).
     /// `LynxView::pump` records the view as ready before returning this
     /// notification.
+    ///
+    /// An entry that throws does not stop it: the entry is the app's code,
+    /// so its failure is reported first, as [`EngineEvent::ScriptRunError`],
+    /// and boot goes on to connect the BTS, render and flush, which is what
+    /// this still follows.
     ScriptFinished,
-    /// Source loading, document configuration, or entry boot failed, or the
-    /// group's script runtime could not be built, which fails every view the
-    /// group serves. The view's URLs and fonts are not among them: a base URL
-    /// or entry that does not resolve and an unknown default family are
-    /// refused by [`LynxGroup::create_lynx_view`] itself, before any source
-    /// is requested.
+    /// The view could not start. Fatal: the view ends. Exactly four causes:
+    ///
+    /// - the view's realm could not be opened — the group's script runtime could not be built,
+    ///   which fails every view the group serves, or the realm's own construction failed;
+    /// - the entry could not be loaded: the fetcher's own error, or a `Script` error naming the
+    ///   entry's URL for an answer that is not a script;
+    /// - a listed stylesheet could not be loaded, or was answered with something other than a
+    ///   stylesheet. Boot's own `__FlushElementTree` is what reads the listed sheets, so this
+    ///   always arrives before [`EngineEvent::ScriptFinished`], as the `Script` error that flush
+    ///   threw, naming the sheet — also when app code met the failure first and caught it;
+    /// - the engine's own boot code failed: page data that is not JSON, the document's
+    ///   construction, connecting the BTS, or boot's own flush.
+    ///
+    /// A failure of boot's own code after the entry's import — most often a
+    /// listed sheet's — arrives right after an
+    /// [`EngineEvent::ScriptRunError`] with the same message: the entry into
+    /// the realm that resumed boot reports the rejection its checkpoint
+    /// returned before boot's failure is reported as this.
+    ///
+    /// The view's URLs and fonts are not among them: a base URL or entry that
+    /// does not resolve and an unknown default family are refused by
+    /// [`LynxGroup::create_lynx_view`] itself, before any source is
+    /// requested.
     StartupFailed(LynxViewError),
-    /// The script runtime failed fatally during owner-thread work after startup.
-    /// Boot failures arrive as [`EngineEvent::StartupFailed`].
+    /// App code in the view's main-thread realm threw, or a host call into
+    /// it failed: the entry's evaluation or a module it imports, a module
+    /// load or a `Future` settle, a page update, an animation frame. Not
+    /// fatal, whether boot has finished or not: the realm goes on, and so
+    /// does whatever entry it was in.
+    ///
+    /// Reported by the kind of entry the failure happened in: a timer
+    /// callback's is [`EngineEvent::TimerFailed`] and a listener's
+    /// [`EngineEvent::ListenerFailed`], also where the code that failed was
+    /// the continuation of an import or `await` those entries resumed.
     ScriptRunError(ScriptError),
+    /// The engine panicked while it served this view. Fatal: the view ends.
+    ///
+    /// Not a script failure: it is a bug in the engine, reported with the
+    /// panic's own message.
+    Panicked(ScriptError),
     /// A listener threw while an event was being delivered to it.
     ListenerFailed(ScriptError),
     /// A `setTimeout` or `setInterval` callback threw when it came due.
     /// Not fatal either: only the timer that threw is affected, a repeating
     /// one stays armed, and the realm goes on.
     TimerFailed(ScriptError),
-    /// A worker failed to load or threw, the BTS Worker included. The owning
-    /// view remains usable.
-    WorkerFailed(ScriptError),
+    /// Code in a worker's realm threw, and the worker is still running: its
+    /// script, a message delivered to it, a timer, animation or native module
+    /// callback, a module it imported or a `Future` it awaited. The BTS
+    /// Worker included. Not fatal: HTML reports such an exception at the
+    /// worker and then at the creating realm's `Worker` object without ending
+    /// either, and the owning view remains usable.
+    ///
+    /// `source` is [`ScriptSource::Background`] or a
+    /// [`ScriptSource::Worker`]. Both worker events are reported before the
+    /// creating realm's `Worker` object dispatches its `error` event, so a
+    /// listener there, `preventDefault()` included, has no effect on them.
+    /// Neither is reported for a worker its script has already let go of,
+    /// through `terminate()` or the collection of its `Worker` object, and a
+    /// worker that ends itself with `close()` reports neither.
+    WorkerThrew {
+        source: ScriptSource,
+        error: ScriptError,
+    },
+    /// A worker ended without being told to: its script could not be fetched
+    /// or was not a script, its realm could not be built, or the thread
+    /// workers run on has trapped, including before this worker was started.
+    /// Nothing more arrives from it. Not fatal: the owning view remains
+    /// usable, and a view whose BTS Worker ended goes on without a BTS.
+    ///
+    /// Reported under the same rules as [`EngineEvent::WorkerThrew`].
+    WorkerEnded {
+        source: ScriptSource,
+        error: ScriptError,
+    },
     /// An application reported an error through `lynx.reportError`, or the
     /// runtime reported a recoverable operation failure.
     /// Reporting does not throw into its caller or end the view.
-    ScriptReported { level: String, message: String },
+    ///
+    /// `level` is `"warn"`, `"error"` or `"fatal"`: `lynx.reportError`'s
+    /// `'warning'` spelled as the console method, its `'fatal'` as it is, and
+    /// `"error"` for `'error'`, for a level it does not know and for none.
+    /// The engine does nothing more for `"fatal"` than for the other two: the
+    /// view and the realm that reported it go on.
+    ///
+    /// The realm that reported it sends it to the view's host itself, and
+    /// `source` names that realm: a report of the BTS or of a `Worker` does
+    /// not pass through the main-thread realm. One realm's diagnostics arrive
+    /// in the order it made them. Two realms' diagnostics have no order
+    /// between them, and a worker's diagnostics have none relative to its
+    /// [`EngineEvent::WorkerThrew`] and [`EngineEvent::WorkerEnded`], which
+    /// the creating realm reports.
+    ScriptReported {
+        source: ScriptSource,
+        level: String,
+        message: String,
+    },
     /// A realm's console output, delivered to the embedder that owns the view.
-    ConsoleMessage { level: String, message: String },
+    /// `level` is the name of the console method that was called: `"log"`,
+    /// `"info"`, `"debug"`, `"warn"` or `"error"`. Reported under the same
+    /// rules as [`EngineEvent::ScriptReported`].
+    ConsoleMessage {
+        source: ScriptSource,
+        level: String,
+        message: String,
+    },
+}
+
+impl EngineEvent {
+    /// Whether this event ends the view: [`LynxView::pump`] ends it on
+    /// exactly these, and every other event leaves it running. An embedder
+    /// that stops on a failed view asks this rather than matching variants.
+    #[must_use]
+    pub const fn is_fatal(&self) -> bool {
+        matches!(self, Self::StartupFailed(_) | Self::Panicked(_))
+    }
+
+    /// The event a caught panic is reported as, whichever place caught it: a
+    /// job or a task of the view's, the group thread reaping the view's task,
+    /// or the panic hook under `panic = "abort"`.
+    pub(crate) const fn from_panic(error: ScriptError) -> Self {
+        Self::Panicked(error)
+    }
+}
+
+/// The realm of a view that a script event came from.
+///
+/// A view runs script in three kinds of realm: its main-thread realm, its
+/// background thread (BTS), which boot creates as a built-in `Worker`, and
+/// each `Worker` its main-thread script constructs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ScriptSource {
+    /// The view's main-thread realm.
+    Main,
+    /// The view's background thread.
+    Background,
+    /// A `Worker` the view's main-thread script constructed.
+    Worker(WorkerId),
+}
+
+impl fmt::Display for ScriptSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Main => formatter.write_str("main"),
+            Self::Background => formatter.write_str("background"),
+            Self::Worker(id) => write!(formatter, "worker {id}"),
+        }
+    }
+}
+
+/// Names one `Worker` for the life of its group.
+///
+/// Opaque: ids are compared, hashed and printed, and nothing else. No two
+/// workers of one group share an id, including one that has ended. The
+/// printed form is the key the constructing realm's `Worker` object holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct WorkerId(u64);
+
+impl From<WorkerKey> for WorkerId {
+    fn from(key: WorkerKey) -> Self {
+        Self(key.get())
+    }
+}
+
+impl fmt::Display for WorkerId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}", self.0)
+    }
 }
 
 /// One captured frame: tightly packed RGBA8 pixels at size.
@@ -480,8 +633,9 @@ pub struct ViewSources {
     /// Neither MTS evaluation nor [`EngineEvent::ScriptFinished`] waits for it:
     /// a host update accepted while the BTS entry is still importing is
     /// forwarded to the Worker, which queues it behind that import. An entry
-    /// that throws is reported as [`EngineEvent::WorkerFailed`], like any
-    /// worker script, and leaves the view and the BTS Worker running.
+    /// that throws is reported as [`EngineEvent::WorkerThrew`] from
+    /// [`ScriptSource::Background`], like any worker script, and leaves the
+    /// view and the BTS Worker running.
     pub background_entry: Option<String>,
     /// Initial page data, as JSON text. The engine hands it to the view's
     /// realm unread, as a plain string; `bobcat:runtime` parses it there and
@@ -925,8 +1079,9 @@ enum ViewState {
 impl<F> LynxView<F> {
     /// Whether pump has observed successful MTS boot — the entry module
     /// evaluated and its first flush committed — and this view has not ended.
-    /// The BTS Worker's own state is not part of it. Keep calling pump while
-    /// loading.
+    /// An entry that threw still boots the view, once its failure has been
+    /// reported as [`EngineEvent::ScriptRunError`]. The BTS Worker's own
+    /// state is not part of it. Keep calling pump while loading.
     #[must_use]
     pub fn is_ready(&self) -> bool {
         self.state == ViewState::Ready && !self.cancel.is_cancelled()
@@ -1095,10 +1250,7 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
                     // A fatal event ends the view the same way its release
                     // does, and by the same signal: the token this view was
                     // built with, which its own task is waiting on.
-                    if matches!(
-                        event,
-                        EngineEvent::StartupFailed(_) | EngineEvent::ScriptRunError(_)
-                    ) {
+                    if event.is_fatal() {
                         self.state = ViewState::Failed;
                         *self.seat.frame_demand.borrow_mut() = crate::link::FrameDemand::default();
                         self.cancel.cancel();
@@ -1348,8 +1500,8 @@ pub(crate) struct StartupSources {
 /// The URL travels beside the answer because it is what a failure is named
 /// by: a sheet whose load failed makes `__FlushElementTree` throw
 /// `loading stylesheet <url>: <reason>` with the listed string, which fails
-/// boot's own flush, and an entry whose load failed rejects boot's `import`
-/// with a message naming the resolved URL.
+/// boot's own flush, and an entry answered with something other than a
+/// script fails the startup with a message naming the resolved URL.
 pub(crate) struct StartupSource {
     pub(crate) url: String,
     pub(crate) answer: SourceAnswer,

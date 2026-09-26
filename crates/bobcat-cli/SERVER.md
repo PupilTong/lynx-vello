@@ -99,8 +99,14 @@ Axum accepts HTTP requests concurrently. An eight-item bounded queue feeds
 one dedicated capture thread; each capture owns a fresh group, a view with its
 resource registry, and an offscreen painter attached to that view. BMP encoding runs on Tokio's blocking pool.
 A full/unavailable queue returns `503`; invalid multipart or ZIP input returns
-`400`; page/render failures return `422`; capture/upload timeouts return `408`;
+`400`; a page source that cannot be loaded, a view that cannot start, an engine
+panic and render failures return `422`; capture/upload timeouts return `408`;
 BMP encoding failures return `500`. Errors use `{"error":{"message":"…"}}`.
+Only the engine events that end a view (`EngineEvent::is_fatal`) fail a
+capture. A script error that leaves the view running — an entry or later
+main-thread code that throws (`ScriptRunError`), a worker exception or a worker
+that ended, a listener or timer callback that throws — is written to the
+server's standard error, and the page is still captured.
 
 Remote URLs follow UI Judge's download policy: HTTP(S) only, no credentials,
 no redirects, and public addresses only, with DNS results pinned for the

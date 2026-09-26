@@ -324,8 +324,8 @@ async fn wait_pixel(
                     observed.booted = true;
                 }
                 EngineEvent::ConsoleMessage { message, .. } => observed.messages.push(message),
-                EngineEvent::ScriptReported { level, message }
-                    if observed.expect_missing_websocket && level == "warning"
+                EngineEvent::ScriptReported { level, message, .. }
+                    if observed.expect_missing_websocket && level == "warn"
                         && message.contains("WebSocket is not found. Please use Lynx >= 2.16 or consider using a polyfill.") =>
                 {
                     // The unmodified default HMR client detects the absent

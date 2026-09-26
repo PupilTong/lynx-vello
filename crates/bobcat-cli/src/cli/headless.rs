@@ -217,35 +217,38 @@ fn check_script(view: &mut LynxView<ViewResources>, input: &str) -> Result<bool,
     let mut finished = false;
     for event in view.pump() {
         match event {
+            // The view has ended, so the run ends with it.
+            event if event.is_fatal() => return Err(CliError::from_fatal_event(input, event)),
             EngineEvent::ScriptFinished => finished = true,
-            EngineEvent::StartupFailed(source) => {
-                return Err(CliError::StartView {
-                    input: input.to_owned(),
-                    source,
-                });
+            // Not fatal: the view and its realms go on, so each of these is
+            // reported the way a browser console reports one rather than by
+            // stopping the run.
+            EngineEvent::ScriptRunError(error) => {
+                eprintln!("script failed: {error}");
             }
-            EngineEvent::ScriptRunError(source) => {
-                return Err(CliError::Script {
-                    input: input.to_owned(),
-                    source,
-                });
-            }
-            // Not fatal: the walk went on and the realm is still usable, so
-            // this is reported the way a browser console reports one rather
-            // than by stopping the run.
             EngineEvent::ListenerFailed(error) => {
                 eprintln!("event listener failed: {error}");
             }
-            // The same standing: only that one timer's turn was lost.
-            EngineEvent::WorkerFailed(error) => {
-                eprintln!("worker failed: {error}");
-            }
-            EngineEvent::ScriptReported { level, message }
-            | EngineEvent::ConsoleMessage { level, message } => {
-                eprintln!("[{level}] {message}");
-            }
             EngineEvent::TimerFailed(error) => {
                 eprintln!("timer callback failed: {error}");
+            }
+            EngineEvent::WorkerThrew { source, error } => {
+                eprintln!("[{source}] worker threw: {error}");
+            }
+            EngineEvent::WorkerEnded { source, error } => {
+                eprintln!("[{source}] worker ended: {error}");
+            }
+            EngineEvent::ScriptReported {
+                source,
+                level,
+                message,
+            }
+            | EngineEvent::ConsoleMessage {
+                source,
+                level,
+                message,
+            } => {
+                eprintln!("[{source}] [{level}] {message}");
             }
             _ => {}
         }

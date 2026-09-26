@@ -3,7 +3,8 @@
 // The JS Context and lifecycle/event calls reach this view's BTS Worker.
 // This realm has no `NativeModules` of its own — Lepus has none — and only
 // carries the embedder's module table to the BTS Worker, which does.
-// Diagnostics reach the view's host; global
+// Diagnostics reach the view's host through `bobcat:diagnostics`, as every
+// realm's do, and the BTS Worker's own reach it without this realm; global
 // events reach BTS through the same Worker FIFO as Context messages. This
 // realm never waits on the BTS: a BTS that closed itself, failed, or trapped
 // leaves the view running, and later messages go to its Worker all the same,
@@ -41,7 +42,8 @@ import * as elementPAPI from "bobcat:element";
 import type { NodeQueryRequest } from "bobcat:selector-query";
 import "bobcat:timers";
 import { requestScriptFrame } from "bobcat-internal:host";
-import { initialProcessor as getInitialProcessor, globalProps, initData, loadModuleSync, nativeModuleTable, reportScriptError, logScriptMessage, preloadStyleSheet, adoptStyleSheet } from "bobcat-internal:host";
+import { initialProcessor as getInitialProcessor, globalProps, initData, loadModuleSync, nativeModuleTable, preloadStyleSheet, adoptStyleSheet } from "bobcat-internal:host";
+import { reportError as _ReportError, console } from "bobcat:diagnostics";
 import { sectionURL, styleSheetURL as sectionStyleSheetURL } from "bobcat:section-url";
 import { type BundleHandle, createBundleFetches } from "bobcat:bundle-fetch";
 import type { Worker } from "bobcat-internal";
@@ -50,8 +52,10 @@ import type { TimerGlobals } from "bobcat:timers";
 const timers = globalThis as unknown as TimerGlobals;
 
 // This realm reports a listener exception the way it reports any other script
-// error: through the host's `reportScriptError`. Installed as this module
-// evaluates, before anything here can dispatch.
+// error: through `_ReportError`, over the host's `reportScriptError`.
+// Installed as this module evaluates, before anything here can dispatch; the
+// import is what makes that possible, because `bobcat:diagnostics` has
+// evaluated before this module starts.
 installExceptionReporter(_ReportError);
 
 /**
@@ -74,10 +78,10 @@ type LepusMethodCall = {
 
 /**
  * What the BTS Worker sends this realm: a named call, a node query, or a
- * Context event's public fields, which carry no `bobcat` tag.
+ * Context event's public fields, which carry no `bobcat` tag. Its diagnostics
+ * are not among them: the BTS realm reports those to the host itself.
  */
 type FromBackground = LepusMethodCall | NodeQueryRequest
-  | { bobcat: "runtime"; method: "reportError" | "console"; level: string; message: string }
   | { bobcat: "runtime"; method: "disposed" }
   | { bobcat: "runtime"; method: "reloadFromJS"; data?: unknown; id?: number }
   | (ContextEvent & { bobcat?: never });
@@ -259,10 +263,6 @@ export function __BobcatConnectBackground(worker: Worker, data: unknown) {
             sendToBackground({bobcat: "runtime", method: "reloadResult", id: message.id});
           });
         }
-      } else if (message.method === "reportError") {
-        reportScriptError(message.level, message.message);
-      } else if (message.method === "console") {
-        logScriptMessage(message.level, message.message);
       }
     } else {
       jsContext.receive(message);
@@ -526,28 +526,9 @@ export function _AddEventListener() {
   return undefined;
 }
 
-export function _ReportError(error?: unknown, options?: {level?: string}) {
-  const level = options?.level;
-  reportScriptError(level === "warning" || level === "fatal" ? level : "error", printable(error));
-}
-
-function printable(value: unknown): string {
-  if (value instanceof Error) {
-    const summary = String(value);
-    return value.stack?.includes(summary) ? value.stack
-      : value.stack ? `${summary}\n${value.stack}` : summary;
-  }
-  if (typeof value === "string") return value;
-  try { return JSON.stringify(value) ?? String(value); }
-  catch { return String(value); }
-}
-
-export const console = Object.fromEntries(
-  ["log", "info", "debug", "warn", "error"].map(level => [level,
-    (...args: unknown[]) => logScriptMessage(level, args.map(printable).join(" ")),
-  ]),
-);
-
+// Every realm's diagnostics, under the names an MTS entry imports them by:
+// `lynx.reportError` below is `_ReportError` too.
+export { _ReportError, console };
 
 export function _SetSourceMapRelease() {
   return undefined;
