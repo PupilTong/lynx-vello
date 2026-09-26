@@ -537,10 +537,10 @@ impl RealmOwner for Worker {
     /// entry, or drops it with the other leftovers of the one failure that
     /// entry reported. So a failure of the root module is reported once,
     /// whichever job it is in, and the worker stays up, as HTML's "run a
-    /// worker" leaves it. A BTS's root module, `bobcat:bts`, imports
-    /// registered modules only: its entry is imported later, once
-    /// `initialize` has arrived, and what the entry throws reaches the worker
-    /// global's `reportError` instead.
+    /// worker" leaves it. For the BTS the root module is `bobcat:bts`, which
+    /// imports nothing of the app's as it is evaluated: the BTS entry is
+    /// imported later, once `initialize` has arrived, and what the entry
+    /// throws reaches the worker global's `reportError` instead.
     const BOOT_REJECTION: Option<(Scene, Option<&'static str>)> = None;
 
     fn lifetime(&self) -> &Lifetime {

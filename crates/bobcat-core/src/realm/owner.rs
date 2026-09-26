@@ -452,9 +452,9 @@ pub(crate) async fn await_source(
 ///
 /// The one reading of such an answer, for every module a realm imports and
 /// for the entry a role completes itself. A load that failed is not read
-/// here: an import and a plain `Worker`'s script pass the fetcher's own error
-/// on as its text, and the MTS entry passes it on as the `LynxViewError` it
-/// is and makes this text a `Script` error.
+/// here: an import and a worker's script pass the fetcher's own error on as
+/// its text, and the MTS entry passes it on as the `LynxViewError` it is and
+/// makes this text a `Script` error.
 pub(crate) fn module_answer(
     requested: &str,
     answer: LoadedSource,

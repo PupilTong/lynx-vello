@@ -783,38 +783,42 @@ built-ins a realm can link.
 
 ### Realm construction and driving
 
-There are three kinds of realm: a view's MTS realm on `bobcat-main`, the
-view's BTS on `bobcat-workers`, and one plain `Worker` realm per `new Worker`,
-also on `bobcat-workers`. All three are opened by `realm::open_realm`
-(`realm/mod.rs`), driven by the one driver in `realm/owner.rs`, and report
-their failures through the tables in `realm/policy.rs`. What differs between
-them is what the opening call is passed and what the realm's owner — a `Page`
-(`main/page.rs`) for the MTS realm, a `Worker` (`background/thread.rs`) for
-the other two — adds to the driver.
+There are two kinds of realm: a view's MTS realm on `bobcat-main`, and one
+worker realm per `new Worker` on `bobcat-workers`. The BTS is a worker realm:
+boot creates it as `new Worker("bobcat:bts")`, and the URL `bobcat:bts` is all
+that sets it apart from any other worker (see
+[Workers, modules and the boot module](#workers-modules-and-the-boot-module)).
+Both kinds are opened by `realm::open_realm` (`realm/mod.rs`), driven by the
+one driver in `realm/owner.rs`, and report their failures through the tables
+in `realm/policy.rs`. What differs between them is what the opening call is
+passed and what the realm's owner — a `Page` (`main/page.rs`) for the MTS
+realm, a `Worker` (`background/thread.rs`) for a worker realm — adds to the
+driver. The worker column names where the URL `bobcat:bts` makes a
+difference.
 
-| | MTS realm | BTS | plain `Worker` |
-| --- | --- | --- | --- |
-| Opened by | `Page::open_realm`, the view's first job | `Worker::boot`, the worker's first job, queued as its `Start` is served | `Worker::boot`, as for the BTS |
-| Root module | `bobcat:boot`, which Rust generates: the page configuration and the screen as literals, the `Document`, `try { await import(<entry URL>) } catch`, then the BTS, the render and the first flush | `bobcat:bts` itself, the module at its URL, which imports `bobcat:worker` and `bobcat:timers` first | the script at its URL itself, with nothing written around it; it imports `bobcat:worker` and `bobcat:timers` itself when it uses them |
-| Entry completed by | `load_entry`, from the answer `create_lynx_view` asked for | no entry of its own at boot: `bobcat:bts` imports the view's `background_entry` once `initialize` has arrived, as an ordinary import | `consume_messages`, from the answer to the request `createWorker` made |
-| Core members on `bobcat-internal:host` | `requestScriptFrame`, `setTimer`/`clearTimer`, `waitFuture`/`takeFuture`/`settleFuture`, `fetchResource`, `resolveModuleUrl`/`loadModuleSync`, `reportScriptError`/`logScriptMessage` | the same | the same |
-| Role host members | on `bobcat-internal:host`: the document, tree, attribute, readback, stylesheet (`preloadStyleSheet`, `adoptStyleSheet`), event-name, startup-string and `Worker` members | `bobcat-internal:worker`: `postWorkerMessage`, `closeWorker`, `workerName`, `backgroundEntry`, `pixelRatio`/`pixelWidth`/`pixelHeight` | the same members; `backgroundEntry` and the three screen members answer `undefined` |
-| Startup strings | `initData`, `globalProps` and `initialProcessor`, one-shot members `bobcat:runtime` reads as it is evaluated | none: the `initialize` message carries `initData`, `updateData`, `processorName`, `cacheData` and `globalProps`, as the MTS realm processed them | none |
-| `SystemInfo` | `ViewSources::screen`, written into the boot module as three number literals: a `bobcat:runtime` export and `lynx.SystemInfo` | the same screen, `BackgroundStart::screen` in its `WorkerStart`, read through the three screen members: a `bobcat:bts-runtime` export, `lynx.SystemInfo` and a global `SystemInfo` | no screen: a `bobcat:bts-runtime` it imports reports the runtime constants alone |
-| `NativeModules` | `bobcat-internal:native-modules` (`invokeNativeModule`, `nativeModuleTable`) with an empty table; `NativeModules` is `undefined`, and there is no native module API over the transport (see `docs/tracking/deviations.md`) | the same host module with the view's module table, `BackgroundStart::native_modules`, which `bobcat:bts-runtime` builds `NativeModules` from | the same host module with an empty table |
-| `console` | a module binding: `bobcat:runtime` re-exports the `console` of `bobcat:diagnostics` | the global `console` `bobcat:worker` installs; `bobcat:bts-runtime` exports the same object | the global `console` `bobcat:worker` installs |
-| Creates Workers | yes: `createWorker`, `sendWorkerMessage`, `terminateWorker`, and the `bobcat-internal` class over them | no | no |
-| Frame demand key, `ScriptSource` | `None`, `Main` | the worker's key, `Background` | the worker's key, `Worker(WorkerId)` |
+| | MTS realm | worker realm |
+| --- | --- | --- |
+| Opened by | `Page::open_realm`, the view's first job | `Worker::boot`, the worker's first job, queued as its `Start` is served |
+| Root module | `bobcat:boot`, which Rust generates: the page configuration and the screen as literals, the `Document`, `try { await import(<entry URL>) } catch`, then the BTS, the render and the first flush | the module at its URL itself, loaded the way `import(<URL>)` loads one, with nothing written around it and no global scope installed first. The BTS's URL is `bobcat:bts`, which imports `bobcat:worker` and `bobcat:timers` first; a script at any other URL imports them itself when it uses them |
+| Entry completed by | `load_entry`, from the answer `create_lynx_view` asked for | `consume_messages`, from the answer to the request `createWorker` made. A URL under the engine prefixes is not requested: the realm's own loader loads it. `bobcat:bts` is such a URL, and it imports the view's `background_entry` once `initialize` has arrived, as an ordinary import |
+| Core members on `bobcat-internal:host` | `requestScriptFrame`, `setTimer`/`clearTimer`, `waitFuture`/`takeFuture`/`settleFuture`, `fetchResource`, `resolveModuleUrl`/`loadModuleSync`, `reportScriptError`/`logScriptMessage` | the same |
+| Host members of its kind | on `bobcat-internal:host`: the document, tree, attribute, readback, stylesheet (`preloadStyleSheet`, `adoptStyleSheet`), event-name, startup-string and `Worker` members | `bobcat-internal:worker`: `postWorkerMessage`, `closeWorker`, `workerName`, `backgroundEntry`, `pixelRatio`/`pixelWidth`/`pixelHeight`; `backgroundEntry` and the three screen members answer `undefined` at any URL but `bobcat:bts` |
+| Startup strings | `initData`, `globalProps` and `initialProcessor`, one-shot members `bobcat:runtime` reads as it is evaluated | none. The BTS's `initialize` message carries `initData`, `updateData`, `processorName`, `cacheData` and `globalProps`, as the MTS realm processed them |
+| `SystemInfo` | `ViewSources::screen`, written into the boot module as three number literals: a `bobcat:runtime` export and `lynx.SystemInfo` | the BTS's is the same screen, `BackgroundStart::screen` in its `WorkerStart`, read through the three screen members: a `bobcat:bts-runtime` export, `lynx.SystemInfo` and a global `SystemInfo`. At any other URL there is no screen, and a `bobcat:bts-runtime` the worker imports reports the runtime constants alone |
+| `NativeModules` | `bobcat-internal:native-modules` (`invokeNativeModule`, `nativeModuleTable`) with an empty table; `NativeModules` is `undefined`, and there is no native module API over the transport (see `docs/tracking/deviations.md`) | the same host module. The BTS's table is the view's module table, `BackgroundStart::native_modules`, which `bobcat:bts-runtime` builds `NativeModules` from; at any other URL the table is empty |
+| `console` | a module binding: `bobcat:runtime` re-exports the `console` of `bobcat:diagnostics` | the global `console` `bobcat:worker` installs; `bobcat:bts-runtime` exports the same object |
+| Creates Workers | yes: `createWorker`, `sendWorkerMessage`, `terminateWorker`, and the `bobcat-internal` class over them | no |
+| Frame demand key, `ScriptSource` | `None`, `Main` | the worker's key; `Background` for `bobcat:bts`, `Worker(WorkerId)` for any other URL |
 
-The native module transport is the same in all three. A call names the realm
+The native module transport is the same in every realm. A call names the realm
 that made it, and `LynxView::pump` answers it through the view's command FIFO
 (`ToMain::ModuleCallback`) for the MTS realm and through the worker's inbox for
-a worker. Only the BTS is given a table that names modules, so a plain
-`Worker`'s `NativeModules`, if it imports `bobcat:bts-runtime`, is an empty
-object. `pump` checks the module and method a call names against the view's
-modules, not against the caller's table, so code in a plain `Worker` or the MTS
-realm that imports the internal module `bobcat:native-modules` directly can
-still call a module the view has.
+a worker. Only the BTS is given a table that names modules, so the
+`NativeModules` of a worker at any other URL, if it imports
+`bobcat:bts-runtime`, is an empty object. `pump` checks the module and method a
+call names against the view's modules, not against the caller's table, so code
+in any other worker or in the MTS realm that imports the internal module
+`bobcat:native-modules` directly can still call a module the view has.
 
 **One built-in table.** Both runtimes are built by `esm.rs`'s `build_runtime`,
 which registers the same twenty-one built-ins, `BUILTIN_MODULES`, and reserves
@@ -827,11 +831,12 @@ where it was asked for — an `import`, or a `require` through `loadModuleSync` 
 with a `ReferenceError` (`module '<name>' is not preloaded`), in the bridge's
 own loader, and is never sent to the fetcher. `bobcat-internal`, the `Worker`
 class, has no colon and is covered by neither prefix; both runtimes register
-it, so it is never fetched either. The prefixes are the module loader's check
-alone: the startup requests `create_lynx_view` makes, stylesheets, fonts and
-fetches are not checked, and `createWorker` still asks the host for a
-`new Worker` URL under them, which the realm then loads through the loader
-as the worker's root module.
+it, so it is never fetched either. The prefixes are the module loader's check,
+and `createWorker`'s: it does not ask the host for a `new Worker` URL under
+them, and the realm loads that URL as the worker's root module through the
+loader, which loads a registered name such as `bobcat:bts` and refuses an
+unregistered one as above. The startup requests `create_lynx_view` makes,
+stylesheets, fonts and fetches are not checked.
 
 **The driver.** An owner supplies the driver a `RealmOwner` impl: where its
 `Lifetime`, its runtime, its realm and its `HostOutbox` are, where its reports
@@ -890,8 +895,10 @@ The epilogue's steps and their order are the contract, for both owners:
    commit and the boot report;
 9. the module requests the operation left, each asked of the host through the
    owner's `HostOutbox` and spawned as a `load_module`, except the one
-   `entry_name` names — the MTS entry, which `load_entry` answers, or a plain
-   `Worker`'s script, which `consume_messages` answers;
+   `entry_name` names — the MTS entry, which `load_entry` answers, or a
+   worker's script, which `consume_messages` answers from the request
+   `createWorker` made (a worker whose URL is an engine name makes no such
+   request, because its realm's loader loads that root module);
 10. the futures a `.then` asked the realm to settle, each spawned as a
     `settle_future`;
 11. `after_settles`: on a page one `load_font_face` per `@font-face` rule the
@@ -912,7 +919,7 @@ collection step of its own. On the MTS realm, a batch of document operations
 that crossed `REMOVALS_PER_COLLECTION` removals ends with one, in the call that
 ran the batch — the timer batch of step 2 is one such call, and an event
 dispatch or a page update is another. And freeing any realm's QuickJS context,
-which releasing an MTS realm, a BTS or a plain `Worker` does, is followed by a
+which releasing an MTS realm or any worker realm does, is followed by a
 collection of the whole runtime that realm was on: the bridge's
 `qjs_context_free` runs it, because a realm's global object is cyclic and only
 a collection reaches its finalizers. That collection covers every realm on the
@@ -923,12 +930,15 @@ allocation pressure.
 
 `load_module` waits for its answer outside any job and reads it with
 `module_answer`, the one reading of an answer to a module request, which
-`load_entry` and a plain `Worker`'s `consume_messages` use too: a script is its
+`load_entry` and a worker's `consume_messages` use too: a script is its
 response URL and its source, and an answer of another kind is the text `the
 fetcher returned a <kind> for <url>`. A failed load is the fetcher's own error,
-which `module_answer` does not read: an import and a plain `Worker`'s script
-carry its text, and `load_entry` carries the `LynxViewError` itself and makes
-the text of an answer of another kind a `Script` error. A completion the
+which `module_answer` does not read: an import and a worker's script carry its
+text, and `load_entry` carries the `LynxViewError` itself and makes the text
+of an answer of another kind a `Script` error. `load_entry` alone also refuses
+a script answered from a response URL that is not an absolute URL, as a
+`Script` error naming both URLs, because the entry's response URL becomes
+`__Card__`, the base every `new Worker` URL is joined to. A completion the
 fetcher dropped without answering is `unanswered_source()`'s failure, through
 `await_source`. `load_module` then enters the realm and completes the module
 under the name the import asked for: from the response URL, which becomes the
@@ -963,7 +973,7 @@ The MTS table, whose events go to the view's host:
 
 | Scene | Event | Ends the view | Prefix | Reported by |
 | --- | --- | --- | --- | --- |
-| Open | `StartupFailed` | yes | none | `Page::open_realm`: a runtime that was never built, the realm's construction (`opening the MTS realm`), boot's own module (`booting the MTS entry`); `load_entry`, for an entry the fetcher could not load, one it answered with something other than a script, and naming the entry (`booting the MTS entry`), each a `LynxViewError` that `StartupFailed` carries as it is, through `terminal` rather than through the row; the epilogue, for a rejection of boot's own module, as `booting the MTS entry` |
+| Open | `StartupFailed` | yes | none | `Page::open_realm`: a runtime that was never built, the realm's construction (`opening the MTS realm`), boot's own module (`booting the MTS entry`); `load_entry`, for an entry the fetcher could not load, one it answered with something other than a script or from a URL that is not absolute, and naming the entry (`booting the MTS entry`), each a `LynxViewError` that `StartupFailed` carries as it is, through `terminal` rather than through the row; the epilogue, for a rejection of boot's own module, as `booting the MTS entry` |
 | Boot | `ScriptRunError` | no | none | `load_entry`: the entry's evaluation, a module it imports included |
 | Module | `ScriptRunError` | no | `loading an imported module` | `load_module` |
 | Future | `ScriptRunError` | no | `settling a future` | `settle_future` |
@@ -985,7 +995,7 @@ The worker table, whose events go to the realm that created the worker:
 | Scene | Payload | Ends the worker | Prefix | Reported by |
 | --- | --- | --- | --- | --- |
 | Open | `Failed` | yes | none | `Worker::boot`: a runtime that was never built, a realm that could not be opened; `consume_messages`, for a script the fetcher could not load or answered with something other than a script, as `loading the worker's script` |
-| Boot | `Errored` | no | `running the worker's script` | `Worker::boot`, for the load of the root module; `complete_script`, for a plain `Worker`'s script |
+| Boot | `Errored` | no | `running the worker's script` | `Worker::boot`, for the load of the root module; `complete_script`, for a script the host was asked for |
 | Module | `Errored` | no | `loading an imported worker module` | `load_module` |
 | Future | `Errored` | no | `settling a worker's future` | `settle_future` |
 | Timer | `Errored` | no | `running a worker's timer callback` | the epilogue |
@@ -1016,11 +1026,12 @@ and the script's completion, Module for a module the script imports, Timer
 for a timer — or drops it with the other leftovers of the one failure that
 entry reported. The epilogue reads the load only to learn that it has
 settled, so a failure of the root module is reported once, and the worker
-goes on running, as HTML's "run a worker" leaves it. The BTS's root module,
-`bobcat:bts`, imports registered modules only; its entry is imported later,
-by the loader `bobcat:bts` hands `bobcat:bts-runtime`, once `initialize` has
-arrived, and what the entry throws is reported through the worker global's
-`reportError`, not as a rejection of the root module.
+goes on running, as HTML's "run a worker" leaves it. For the BTS that module
+is `bobcat:bts`, which imports nothing of the app's as it is evaluated: the
+BTS entry is imported later, by the loader `bobcat:bts` hands
+`bobcat:bts-runtime`, once `initialize` has arrived, and what the entry throws
+is reported through the worker global's `reportError`, not as a rejection of
+the root module.
 
 A listed stylesheet has no row of its own. The listed sheets are settled by
 boot's first `__FlushElementTree`, one at a time in listed order, and nothing
