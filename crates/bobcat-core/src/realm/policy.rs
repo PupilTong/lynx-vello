@@ -65,10 +65,10 @@
 //! the script's completion, Module for a module it imports, Timer for a
 //! timer — or drops it with the other leftovers of the one failure that
 //! entry reported, and the epilogue reads the load only to learn that it has
-//! settled. A BTS's root module, `bobcat:bts`, imports registered modules
-//! only, and its entry is imported later, outside the root module. In both
-//! tables, Boot is the app's startup code throwing, and Open is something
-//! the engine could not make ready.
+//! settled. For the BTS that module is `bobcat:bts`, which imports nothing of
+//! the app's as it is evaluated: the BTS entry is imported later, outside the
+//! root module. In both tables, Boot is the app's startup code throwing, and
+//! Open is something the engine could not make ready.
 //!
 //! A listed stylesheet has no row of its own. It is settled by the first
 //! `__FlushElementTree`: boot's own, whose failure rejects boot and is
