@@ -189,7 +189,9 @@ interface BobcatWorkerNative {
   /**
    * The worker's `self.name`, as its constructor named it: empty when it
    * named none. `bobcat:worker` reads it as it is evaluated. Answers once:
-   * the string is handed over, not kept.
+   * the string is handed over, not kept. The host takes the read as
+   * `bobcat:worker` having run in this realm, and delivers a posted message
+   * only to a realm in which it has.
    */
   workerName(): string;
 }

@@ -15,10 +15,13 @@ use `SourceRequest::Module` on the view's existing notice channel.
 `SourceCompletion` answers the requesting worker directly. A worker's script is
 the one request the worker does not make itself: `createWorker` makes it on
 the creating view's thread and the `Start` carries the answer's receiving end,
-in `WorkerStart::script`. The worker's realm opens as its `Start` is served,
-its root module imports the script by the request URL, and the worker
-completes that module from the answer, under the request URL, without asking
-again. A URL that is an engine name, the BTS's `bobcat:bts` among them, is
+in `WorkerStart::script`. The worker's realm opens as its `Start` is served
+and loads the script as its root module, by the request URL, the way an
+`import()` of that URL would, and the worker completes that module from the
+answer, under the request URL, without asking again. Nothing is written
+around the script and no global scope is installed before it: a script that
+wants `postMessage` or `setTimeout` imports `bobcat:worker` or
+`bobcat:timers` itself. A URL that is an engine name, the BTS's `bobcat:bts` among them, is
 never requested: `WorkerStart::script` is `None`, and the realm's own loader
 loads it. A `Module` request
 arrives absolute: an import is normalized against its importer's response URL,
@@ -31,13 +34,14 @@ The Worker uses the same asynchronous QuickJS ESM loader as main. Imports share
 one evaluation and namespace per normalized URL in each realm. Response URLs
 provide the base for dependencies, the script's own included. Imports and
 timers continue during the script's top-level await; posted messages wait until
-the root module, and with it the script, has settled. Worker termination or
+the root module, which is the script, has settled. Worker termination or
 view release cancels outstanding completions and discards late results.
 
 Raw XML background entries use this path and import their runtime bindings,
 `lynx` included, from `bobcat:bts-runtime`. The BTS starts from nothing
-fetched: its root module imports the registered bootstrap `bobcat:bts`, which
-installs a JS initializer and returns; the first Worker message, `initialize`,
+fetched: its root module is the registered bootstrap `bobcat:bts`, which
+imports the worker's global scope and timers, installs a JS initializer and
+returns; the first Worker message, `initialize`,
 supplies inputs, the BTS entry's URL among them, before the application entry
 imports. Later messages wait on that import Promise and are delivered in order
 once it settles,

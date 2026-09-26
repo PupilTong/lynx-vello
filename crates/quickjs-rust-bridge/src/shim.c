@@ -1832,6 +1832,24 @@ void qjs_context_resume_module_loads(QjsContext *context) {
     context->runtime->evaluation_depth -= 1;
 }
 
+/* Loads one module as the root of a graph, the way an `import()` of it
+   would, and answers the promise QuickJS settles with its namespace.
+
+   The name is its own base, so it normalizes from itself. A graph whose
+   every source this realm already has is linked and evaluated under this
+   call, which is why the call raises the evaluation depth as a resumed
+   import does. A source it lacks, the root's own included, is deferred as
+   any import's is: it becomes a request, and resuming the loads once it has
+   been completed is what goes on to link and evaluate the graph. */
+QjsValue *qjs_context_load_module(QjsContext *context, const char *name) {
+    JSValue promise;
+
+    context->runtime->evaluation_depth += 1;
+    promise = JS_LoadModule(context->raw, name, name);
+    context->runtime->evaluation_depth -= 1;
+    return qjs_box(context->raw, promise);
+}
+
 void qjs_runtime_run_gc(QjsRuntime *runtime) {
     JS_RunGC(runtime->raw);
 }

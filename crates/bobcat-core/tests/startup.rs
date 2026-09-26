@@ -747,7 +747,8 @@ fn dropping_the_group_joins_both_of_its_threads() {
                                 Rc::new(TwoScriptFetcher {
                                     base: FetcherDouble::new(WORKER_ENTRY.as_bytes().to_vec())
                                         .resolving_to("app:///main.js"),
-                                    worker: "setInterval(() => { throw new Error('tick'); }, 10);",
+                                    worker: "import 'bobcat:worker'; import 'bobcat:timers'; \
+                                             setInterval(() => { throw new Error('tick'); }, 10);",
                                 })
                             },
                             Vec::new(),

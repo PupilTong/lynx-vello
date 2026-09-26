@@ -1006,7 +1006,10 @@ fn posting_a_function_to_a_worker_throws_in_the_poster_and_sends_nothing() {
         worker.postMessage('fine');
         ",
     );
-    pair.answer("onmessage = event => postMessage(event.data);");
+    pair.answer(
+        "import 'bobcat:worker'; import 'bobcat:timers'; \
+         onmessage = event => postMessage(event.data);",
+    );
     pair.deliver();
     pair.check(
         r#"
@@ -1254,7 +1257,7 @@ fn constructor_creates_distinct_contexts_and_queues_messages_in_order() {
     );
     for _ in 0..2 {
         pair.answer(
-            r"
+            r"import 'bobcat:worker'; import 'bobcat:timers';
             if (typeof globalThis.counter !== 'undefined') throw Error('shared context');
             if (typeof globalThis.lynx !== 'undefined') throw Error('ordinary worker has BTS globals');
             globalThis.counter = 0;
@@ -1286,7 +1289,7 @@ fn terminate_discards_events_already_queued_on_main() {
         worker.onmessage = () => { throw Error('late delivery'); };
     ",
     );
-    pair.answer("postMessage('already queued');");
+    pair.answer("import 'bobcat:worker'; import 'bobcat:timers'; postMessage('already queued');");
     // Waiting for the worker's response proves it has run before terminate.
     let event = pair.next_event().expect("the worker answered");
     pair.check("worker.terminate(); worker.terminate(); worker.postMessage('ignored');");
@@ -1313,7 +1316,10 @@ fn worker_errors_reach_parent_and_leave_both_realms_usable() {
         worker.postMessage('ping');
     ",
     );
-    pair.answer("onmessage = e => postMessage(e.data); throw Error('worker boom');");
+    pair.answer(
+        "import 'bobcat:worker'; import 'bobcat:timers'; \
+         onmessage = e => postMessage(e.data); throw Error('worker boom');",
+    );
     let mut event = pair.next_event().expect("worker error");
     let WorkerPayload::Errored(error) = &mut event.payload else {
         panic!("expected a recoverable worker error");
@@ -1492,7 +1498,7 @@ fn a_worker_is_named_by_the_key_its_worker_object_holds() {
         worker.onerror = e => errors.push(e.message);
     ",
     );
-    pair.answer("throw Error('worker threw');");
+    pair.answer("import 'bobcat:worker'; import 'bobcat:timers'; throw Error('worker threw');");
     let event = pair.next_event().expect("the worker reports its throw");
     let key = event.key.get().to_string();
     pair.runtime
@@ -1530,7 +1536,7 @@ fn a_worker_failure_arriving_after_terminate_is_reported_to_no_one() {
         worker.onerror = e => errors.push(e.message);
     ",
     );
-    pair.answer("postMessage('started');");
+    pair.answer("import 'bobcat:worker'; import 'bobcat:timers'; postMessage('started');");
     let started = pair.next_event().expect("the worker answered");
     pair.check("worker.terminate();");
     for payload in [
@@ -1571,7 +1577,9 @@ fn dropping_the_view_cancels_io_without_keeping_the_worker_thread_alive() {
         "nobody is waiting for this script any more"
     );
     completion.complete(Ok(LoadedSource::Module {
-        source: "throw Error('cancelled worker ran');".into(),
+        source:
+            "import 'bobcat:worker'; import 'bobcat:timers'; throw Error('cancelled worker ran');"
+                .into(),
         url: "app:///late.js".into(),
     }));
     assert!(pair.events.try_recv().is_err());
@@ -1584,7 +1592,10 @@ fn releasing_a_realm_ends_a_worker_that_would_never_end_on_its_own() {
     let mut pair = Pair::new(
         "import { Worker } from 'bobcat-internal'; globalThis.worker = new Worker('./worker.js');",
     );
-    pair.answer("setInterval(() => postMessage('tick'), 1);");
+    pair.answer(
+        "import 'bobcat:worker'; import 'bobcat:timers'; \
+         setInterval(() => postMessage('tick'), 1);",
+    );
     // The first tick proves the realm booted and its interval is running, so
     // what the drop below has to stop is a live worker.
     pair.next_event().expect("the worker's interval fires");
@@ -1620,7 +1631,7 @@ fn a_worker_that_closes_itself_is_forgotten_by_the_realm() {
     let mut pair = Pair::new(
         "import { Worker } from 'bobcat-internal'; globalThis.worker = new Worker('./worker.js');",
     );
-    pair.answer("close();");
+    pair.answer("import 'bobcat:worker'; import 'bobcat:timers'; close();");
     // Boot creates the BTS worker beside the entry's own, so the realm has
     // two of them and this close accounts for exactly one.
     assert_eq!(pair.live_workers(), 2, "the entry's worker and lynx-bg");
@@ -1653,8 +1664,8 @@ fn terminating_before_fetch_prevents_the_context_from_starting() {
         alive.onmessage = e => answer = e.data;
     ",
     );
-    pair.answer("postMessage('cancelled');");
-    pair.answer("postMessage('alive');");
+    pair.answer("import 'bobcat:worker'; import 'bobcat:timers'; postMessage('cancelled');");
+    pair.answer("import 'bobcat:worker'; import 'bobcat:timers'; postMessage('alive');");
     pair.deliver();
     pair.check(
         "if (answer !== 'alive') throw Error('termination did not discard the pending script');",
@@ -1671,7 +1682,7 @@ fn worker_close_keeps_its_last_message_and_disables_future_posts() {
         worker.onmessage = e => answer = e.data;
     ",
     );
-    pair.answer("postMessage('last'); close();");
+    pair.answer("import 'bobcat:worker'; import 'bobcat:timers'; postMessage('last'); close();");
     pair.deliver();
     pair.deliver();
     pair.check("if (answer !== 'last') throw Error('lost final message'); worker.postMessage('ignored'); worker.terminate();");
@@ -1739,7 +1750,7 @@ fn a_workers_script_is_requested_once() {
         worker.onmessage = event => seen.push(event.data);
     ",
     );
-    pair.answer("postMessage('ran');");
+    pair.answer("import 'bobcat:worker'; import 'bobcat:timers'; postMessage('ran');");
     // The worker's boot epilogue ran before its script did, so anything it
     // asked for is on the notice channel by the time the script's message is.
     pair.deliver();
@@ -1814,7 +1825,7 @@ fn an_ordinary_worker_can_install_bts_through_its_own_import() {
     )
     .unwrap();
     pair.answer(
-        r"
+        r"import 'bobcat:worker'; import 'bobcat:timers';
         import { lynx, NativeModules, SystemInfo } from 'bobcat:bts-runtime';
         if ('lynx' in globalThis) throw Error('BTS lynx leaked into globals');
         const core = lynx.getCoreContext();
@@ -2039,7 +2050,10 @@ fn an_omitted_background_entry_boots_without_host_io() {
     // for nothing: its root module imports the registered `bobcat:bts`, and
     // the view named no entry. So an ordinary worker that replies proves the
     // thread served both.
-    pair.answer("onmessage = event => postMessage(event.data);");
+    pair.answer(
+        "import 'bobcat:worker'; import 'bobcat:timers'; \
+         onmessage = event => postMessage(event.data);",
+    );
     pair.deliver();
     pair.check("if (answer !== 'barrier') throw Error('worker barrier failed');");
     let notices = pair.notices();
@@ -2333,7 +2347,7 @@ fn a_workers_global_console_reports_from_the_worker() {
     ",
     );
     pair.answer(
-        r"
+        r"import 'bobcat:worker'; import 'bobcat:timers';
         if (typeof requestAnimationFrame !== 'undefined') throw Error('a Worker has requestAnimationFrame');
         if (Object.keys(globalThis).includes('console')) throw Error('the global console is enumerable');
         console.log('from the worker', {value:1});
@@ -2765,7 +2779,8 @@ fn unreachable_mts_worker_is_collected_without_releasing_the_view() {
     ",
     );
     pair.answer(
-        "onmessage = e => postMessage(e.data); setInterval(() => {}, 1000); postMessage('ready');",
+        "import 'bobcat:worker'; import 'bobcat:timers'; \
+         onmessage = e => postMessage(e.data); setInterval(() => {}, 1000); postMessage('ready');",
     );
     pair.deliver();
     pair.runtime
@@ -2822,7 +2837,9 @@ fn a_message_for_a_collected_worker_handle_is_dropped() {
         }
     ",
     );
-    pair.answer("onmessage = () => postMessage('answer');");
+    pair.answer(
+        "import 'bobcat:worker'; import 'bobcat:timers'; onmessage = () => postMessage('answer');",
+    );
     let event = pair.next_event().expect("the worker answers");
     // QuickJS discovers the cycle in one collection and processes its weak
     // registrations in the next, so the handle is released by the second.
@@ -2863,7 +2880,9 @@ fn a_named_worker_survives_a_collection_and_still_delivers() {
         }
     ",
     );
-    pair.answer("onmessage = () => postMessage('answer');");
+    pair.answer(
+        "import 'bobcat:worker'; import 'bobcat:timers'; onmessage = () => postMessage('answer');",
+    );
     let event = pair.next_event().expect("the worker answers");
     for _ in 0..2 {
         pair.runtime
@@ -2912,7 +2931,7 @@ fn ordinary_worker_does_not_acquire_app_teardown_by_importing_bts_or_using_its_n
     ",
     );
     pair.answer(
-        r"
+        r"import 'bobcat:worker'; import 'bobcat:timers';
         import {lynx} from 'bobcat:bts-runtime';
         lynx.getApp().callDestroyLifetimeFun = () => postMessage('cleanup');
         postMessage('ready');
@@ -2979,7 +2998,7 @@ fn a_plain_worker_gets_a_frame_from_the_shared_animation_frame_module() {
     ",
     );
     pair.answer(
-        r"
+        r"import 'bobcat:worker'; import 'bobcat:timers';
         import {requestAnimationFrame} from 'bobcat:animation-frame';
         requestAnimationFrame(time => postMessage(`frame ${time}`));
         postMessage('requested');
@@ -3009,7 +3028,10 @@ fn a_plain_worker_cannot_import_the_transport_from_the_global_scope_module() {
         globalThis.worker = new Worker('./worker.js');
     ",
     );
-    pair.answer("import { callNativeModule } from 'bobcat:worker'; postMessage('linked');");
+    pair.answer(
+        "import 'bobcat:worker'; import 'bobcat:timers'; \
+         import { callNativeModule } from 'bobcat:worker'; postMessage('linked');",
+    );
     let event = pair.next_event().expect("the script's link failure");
     let WorkerPayload::Errored(error) = &event.payload else {
         panic!("a link failure is an ordinary worker error");

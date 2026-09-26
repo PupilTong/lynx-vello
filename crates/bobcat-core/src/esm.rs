@@ -115,9 +115,10 @@ pub(crate) const GLOBAL_EVENT_MODULE_SPECIFIER: &str = "bobcat:global-event-emit
 pub(crate) const CONTEXT_MODULE_SPECIFIER: &str = "bobcat:cross-thread-context";
 
 /// The URL of a view's background thread, and the BTS bootstrap: the BTS is
-/// the worker at this URL, and its realm's root module imports it as every
-/// worker's root imports its URL. A registered module, which hands
-/// `bobcat:bts-runtime` the loader of the view's BTS entry.
+/// the worker at this URL, and this module is its realm's root module, as
+/// every worker's root module is the module at its URL. A registered module,
+/// which imports the worker global scope and the timer globals itself and
+/// hands `bobcat:bts-runtime` the loader of the view's BTS entry.
 pub(crate) const BTS_MODULE_SPECIFIER: &str = "bobcat:bts";
 
 /// The Element PAPI: the named exports an MTS entry builds and edits its
@@ -132,22 +133,12 @@ pub(crate) const RUNTIME_MODULE_SPECIFIER: &str = "bobcat:runtime";
 /// which the module normalizer passes through by name.
 pub(crate) const WORKER_CLASS_MODULE_SPECIFIER: &str = "bobcat-internal";
 
-/// The worker realm's global-scope module.
+/// The worker realm's global-scope module: `self`, `postMessage`,
+/// `onmessage` and the rest, and the export a posted message is delivered
+/// through. The engine installs it nowhere: a worker's script imports it, as
+/// `bobcat:bts` does, and a realm in which it never ran has nothing that
+/// receives a message.
 pub(crate) const WORKER_MODULE_SPECIFIER: &str = "bobcat:worker";
-
-/// The name a worker realm's root module is evaluated under: once per worker,
-/// as the realm opens, and never registered, the way `bobcat:boot` is an MTS
-/// realm's. A worker's `import` of its script is resolved against it, and the
-/// script's URL is absolute, so it resolves to itself.
-///
-/// Inside the worker's realm the name is the root module itself, which
-/// `QuickJS` finds among the realm's loaded modules before the loader is
-/// asked, so no `ReferenceError` refuses it. A worker constructed over this
-/// URL imports its own root while that root is still evaluating, so it never
-/// finishes its boot: it reports nothing and holds what is posted to it until
-/// it is terminated. Nothing guards against this: app code has no reason to
-/// name an engine module.
-pub(crate) const WORKER_BOOT_SPECIFIER: &str = "bobcat:worker-boot";
 
 /// The compiler factory ABI: what the BTS runtime's `lynx.requireModule` and
 /// its companions load a bundle body through.

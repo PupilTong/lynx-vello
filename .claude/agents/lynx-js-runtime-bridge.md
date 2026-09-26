@@ -40,14 +40,23 @@ and `bobcat-workers` (every Worker realm, including the BTS).
   element policy layer (page root, UA sheet, `<text>`, `<image>`, scrollers).
 - `crates/bobcat-core/src/background/` — the `bobcat-workers` thread and worker
   realm scopes. There is one kind of worker: the BTS is the dedicated worker
-  whose URL is `bobcat:bts`. A worker realm opens as its `Start` is served and
-  evaluates the root module `bobcat:worker-boot` (`bobcat:worker`,
-  `bobcat:timers`, then `await import(<URL>)`, the same for every worker), and
-  the worker's `consume_messages` completes the script under the request URL
-  from the answer `createWorker` asked for; a URL under
-  `ENGINE_MODULE_PREFIXES` is never requested, and the realm's own loader
-  loads it. `createWorker` decides from the URL alone, and only the source:
-  `bobcat:bts` is `ScriptSource::Background`, every other URL
+  whose URL is `bobcat:bts`. A worker realm opens as its `Start` is served,
+  and its root module is the module at its URL, loaded the way `import(<URL>)`
+  loads one (`ScriptEngine::load_root_module` over the bridge's
+  `Context::load_module`) with nothing written around it: the BTS's root is
+  `bobcat:bts` itself, a plain worker's its script, which the worker's
+  `consume_messages` completes under the request URL from the answer
+  `createWorker` asked for; a URL under `ENGINE_MODULE_PREFIXES` is never
+  requested, and the realm's own loader loads it. The engine installs no
+  global scope: `bobcat:bts` imports `bobcat:worker` and `bobcat:timers`
+  itself, a plain worker script imports them when it uses them (one that
+  does not and uses them throws a `ReferenceError`, unguarded), and a post
+  to a realm in which `bobcat:worker` has not run is dropped with nothing
+  reported. "Has run" is `WorkerFlags::scope_installed`, set by
+  `bobcat:worker`'s read of `workerName`, never an instance check: a module
+  a failed or pending graph compiled is never linked, and reading its
+  namespace crashes QuickJS. `createWorker` decides from the URL alone, and
+  only the source: `bobcat:bts` is `ScriptSource::Background`, every other URL
   `Worker(id)`; every `Start` is otherwise built the same way. The BTS's data
   — its entry URL, the MTS realm's own `SystemInfo` and the view's native
   module table — reaches it in the `initialize` message
@@ -88,8 +97,9 @@ and `bobcat-workers` (every Worker realm, including the BTS).
   `__FlushElementTree`, and `__SetCSSId`, accepted and ignored),
   `main-thread-runtime.ts` (`bobcat:runtime`), `worker.ts` (the W3C `Worker`),
   `worker-runtime.ts`, `background-thread-runtime.ts` (`bobcat:bts-runtime`),
-  `bts.ts` (`bobcat:bts` — the BTS bootstrap a BTS realm's root module
-  imports; it imports the BTS entry the `initialize` message names),
+  `bts.ts` (`bobcat:bts` — the BTS bootstrap and a BTS realm's root module;
+  it imports `bobcat:worker` and `bobcat:timers` first, then the BTS entry
+  the `initialize` message names),
   `cross-thread-context.ts`, `event-target.ts` (with `reportException`, the
   realm's installed exception reporter), `animation-frame.ts`
   (`bobcat:animation-frame` — every realm's `requestAnimationFrame`, frame
@@ -178,7 +188,8 @@ Landed and not to be regressed:
   relayed through MTS as a Worker message, so a realm's diagnostics are
   ordered only among themselves. `ScriptReported.level` is `"warn"`,
   `"error"` or `"fatal"`, and `"fatal"` ends nothing. A worker's global
-  `console` is the module's (the BTS export is the same object); a plain
+  `console`, installed by `bobcat:worker` in a realm whose script imports
+  it, is the module's (the BTS export is the same object); a plain
   `Worker` has no global `requestAnimationFrame` and imports
   `bobcat:animation-frame`'s. A BTS animation-frame,
   `queueMicrotask` or `fetchBundle` callback that throws is an uncaught

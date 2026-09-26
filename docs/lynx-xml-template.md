@@ -550,9 +550,11 @@ that script, and construct the XML page with the fixed `false`/`false`/`true`
 display/overflow/selector defaults unless the browser host deliberately
 overrides them. Both paths register a present background body and pass its URL
 to the view. Once the main-thread entry import finishes, core starts the page's
-BTS worker with `new Worker("bobcat:bts")`. That bootstrap initializes the
-Context and awaits an import of the optional background entry URL, which the
-worker requests through the view's ResourceFetcher, where the registered body
+BTS worker with `new Worker("bobcat:bts")`. That bootstrap is the worker's
+root module, as a worker's root module is the module at its URL: it imports
+the worker's global scope and timers itself, initializes the Context and
+awaits an import of the optional background entry URL, which the worker
+requests through the view's ResourceFetcher, where the registered body
 answers it. Omitting the body leaves the worker running only the built-in BTS
 runtime; a present empty body is an entry module with nothing in it.
 

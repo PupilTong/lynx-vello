@@ -1086,10 +1086,25 @@ Worker's own cancellation token. There is no worker kind: the BTS is the
 dedicated worker whose URL is `bobcat:bts`, and nothing of the view's data is
 in its `Start`: that reaches it in the `initialize` message. The
 worker's realm opens as its `Start` is served, the way a view's opens as that
-view's first job, and evaluates a root module, `bobcat:worker-boot`, of one
-form for every worker: `import "bobcat:worker"; import "bobcat:timers";
-await import(<URL>);`, so the BTS's root imports `bobcat:bts`. A runtime that
-never came up fails the worker there, without waiting for its script.
+view's first job, and **a worker's root module is the module at its URL**:
+the realm loads that module as its root, the way `import(<URL>)` loads one
+(`ScriptEngine::load_root_module` over the bridge's `Context::load_module`),
+with nothing written around it, so the BTS's root module is `bobcat:bts`
+itself and a plain worker's is its fetched script. A runtime that never came
+up fails the worker there, without waiting for its script. **The engine
+installs no global scope in a worker realm.** `bobcat:bts` begins with
+`import "bobcat:worker"; import "bobcat:timers";`, and a plain worker script
+that wants `self`, `postMessage`, `onmessage`, `close`, `name` or `console`
+imports `bobcat:worker`, and one that wants the timer globals imports
+`bobcat:timers`; a script that uses them without the import throws a
+`ReferenceError`, and nothing guards against it (only the BTS and tests
+construct a plain `Worker`). A post is delivered through `bobcat:worker`, so
+a realm in which that module has not run drops what is posted, reporting
+nothing. The test is the module having *run*, which the worker thread learns
+from `bobcat:worker`'s one read of `workerName`
+(`WorkerFlags::scope_installed`), not the realm having an instance of it: a
+graph that failed to load or is still loading leaves its modules compiled but
+never linked, and reading the namespace of such a module crashes QuickJS.
 MTS routes events through weak references to JS Worker objects; their
 finalizers and explicit `terminate()` release sending handles, and releasing
 the MTS realm closes its remaining senders. Apart from those handles, the
@@ -1109,12 +1124,6 @@ worker whose first job is still queued behind another realm's parked job. A
 worker whose URL is an engine name has no script answer to wait for: the
 realm's own loader loads a registered name, and refuses any other with a local
 `ReferenceError`, which the worker reports as `WorkerThrew` and keeps running.
-The exception is `bobcat:worker-boot`, the name the root module itself is
-evaluated under: QuickJS finds the root among the realm's loaded modules, so
-the root's import of it waits on its own evaluation, and that worker never
-finishes its boot, reports nothing and holds what is posted to it until it is
-terminated. App code has no reason to name an engine module, and nothing
-guards against it.
 The timer machinery both
 realm kinds run on — the schedule, the two host members, the firing loop — is
 `crate::timers` beside `crate::clock`, owned by neither thread.
@@ -1139,13 +1148,13 @@ a URL outside `ENGINE_MODULE_PREFIXES` the script is then requested as a
 `SourceRequest::Module` of the joined URL, and the host is handed the far end
 of the one-shot that already rode to `bobcat-workers` inside that `Start`, so
 the script reaches the worker without a main-thread turn; an engine name is
-never requested. The worker completes it, under the request URL
-its root module imports and from the response URL, as a module of its own
+never requested. The worker completes it, under the request URL its realm
+loads as its root module and from the response URL, as a module of its own
 realm: the worker's own epilogue never asks for that URL again, and posted
 messages wait until the root module has finished. `self.name` is set by
 `bobcat:worker` from the host member `workerName` as it is evaluated, so a
-module the script imports statically reads it too. Every concurrent worker
-request is preserved.
+module the script imports statically after it reads it too. Every concurrent
+worker request is preserved.
 Worker entry/import requests use the Worker's cancellation scope, and host
 release does not cancel it ahead of JS disposal. Once the MTS realm is
 released, closing its senders ends remaining Workers, including after failed
@@ -1161,8 +1170,9 @@ boot creates a BTS Worker** named
 `lynx-bg` through that same class, using the engine URL `bobcat:bts`. The BTS
 is a dedicated worker like any other, started the same way: its URL is what
 makes `createWorker` name it `ScriptSource::Background`, and nothing else in
-Rust tells it apart. That URL is a registered module (`bts.ts`) the BTS
-realm's root module imports: it installs its JS initializer from
+Rust tells it apart. That URL is a registered module (`bts.ts`) and the BTS
+realm's root module: it imports `bobcat:worker` and `bobcat:timers` (the
+BTS's global scope and timers), installs its JS initializer from
 `bobcat:bts-runtime` and returns, with no top-level `await`, so the first
 message is delivered. That message, `initialize`, which
 `__BobcatConnectBackground` posts as boot connects the Worker, carries the
@@ -1333,14 +1343,13 @@ realm with a `ReferenceError` and is never sent to a fetcher.
 reserved prefixes do not cover it, though: a `require` of it in a realm that
 has not imported it still goes to the host's synchronous loader, which asks
 the fetcher for it. `bobcat:bts` is the BTS Worker's URL, a registered module
-like the rest; `bobcat:boot` is the MTS boot module's own specifier and
-`bobcat:worker-boot` a worker realm's root module's, both evaluated once per
-realm and never registered. A worker's own script is not written into its root
-module: the root imports it by the request URL, and for a URL outside the
-engine prefixes the worker completes that import from the answer
-`createWorker` asked for, under
-the request URL, as a module of its own realm — the way a view completes its
-MTS entry — so it is never registered on the runtime, keeps its own line
+like the rest; `bobcat:boot` is the MTS boot module's own specifier, evaluated
+once per realm and never registered. A worker realm has no module of the
+engine's own around its script: its root module is the module at its URL,
+loaded by that URL, and for a URL outside the engine prefixes the worker
+completes that load from the answer `createWorker` asked for, under the
+request URL, as a module of its own realm — the way a view completes its MTS
+entry — so it is never registered on the runtime, keeps its own line
 numbers, and runs with its response URL as `import.meta.url`. The Element module
 imports native operations directly from `bobcat-internal:host`; no host object
 and no element member is installed on `globalThis`.
@@ -1558,7 +1567,11 @@ one throw rejects a module's evaluation promise and everything awaiting it.
 It owns the QuickJS C build and the narrow unsafe FFI shim, realm/value
 lifetime and affinity checks, exact ECMAScript string conversion, exception
 sanitization, pending-job pump, synchronous preloaded source/native-module
-loader, loaded-module namespace access, and module-evaluation Promise state.
+loader, loaded-module namespace access, and module-evaluation Promise state,
+and one root-module load (`Context::load_module`): QuickJS's `JS_LoadModule`
+of one name with the name as its own base, which evaluates a graph whose
+sources the realm has under the call and otherwise defers the load as an
+`import()` does, answering the promise the load settles.
 It also owns one synchronous load-and-compile entry, which is what a realm's
 `require` is written over: `register_synchronous_loader` exports a
 `loadModuleSync(url, parameters)` on a native module, backed by a host `FnMut`
@@ -2089,9 +2102,10 @@ threads call with an answer), `src/cross-thread-context.ts` as
 `bobcat:cross-thread-context`, `src/worker.ts` as the `Worker` class under
 `bobcat-internal`, `src/worker-runtime.ts` as `bobcat:worker`,
 `src/background-thread-runtime.ts` as `bobcat:bts-runtime` and `src/bts.ts` as
-`bobcat:bts` (the BTS bootstrap a BTS realm's root module imports: it hands
-`bobcat:bts-runtime` the loader of the view's BTS entry, which imports the
-URL the `initialize` message names). They are
+`bobcat:bts` (the BTS bootstrap and a BTS realm's root module: it imports
+`bobcat:worker` and `bobcat:timers` itself and hands `bobcat:bts-runtime` the
+loader of the view's BTS entry, which imports the URL the `initialize`
+message names). They are
 registered per runtime, because a source is runtime-wide and no value crosses
 between two runtimes; which of them a realm can link is decided by the host
 modules it declares, not by the table. `src/native.d.ts` declares the three

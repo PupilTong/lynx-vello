@@ -1,9 +1,11 @@
 import { clearTimer, setTimer } from "bobcat-internal:host";
 
 // The realm's half of `setTimeout`, `setInterval`, `clearTimeout`, and
-// `clearInterval`, preloaded as the `bobcat:timers` ESM. Every realm this
-// engine builds has it: the views' main-thread realms on one runtime, and
-// each worker realm on the group's worker runtime.
+// `clearInterval`, preloaded as the `bobcat:timers` ESM. Both runtimes this
+// engine builds register it: a view's main-thread realm imports it through
+// its boot module, and a worker realm through its own script, which is where
+// `bobcat:bts` imports it for the BTS. A worker script that imports neither
+// it nor a module that does has no timer globals.
 //
 // These four are bare globals rather than named exports, because that is how
 // a card reaches them: a compiled main-thread chunk calls `setTimeout` as a
