@@ -1314,11 +1314,11 @@ consequential choice about whether to follow the spec or the quirk.
   ReactLynx sets it to `undefined` there. web-core's MTS has no native module
   path at all. **Decision: web-core's surface for now, with the transport in
   place** (user ruling): no MTS API is built yet, and `NativeModules` stays
-  `undefined`. The MTS realm declares `bobcat-internal:native-modules` with an
-  empty table, `bobcat:native-modules` links there, and `LynxView::pump`
-  answers a call it makes through the view's command FIFO
-  (`ToMain::ModuleCallback`), so the native API can be added later without a
-  second reply path.
+  `undefined`. The MTS realm declares `bobcat-internal:native-modules`, whose
+  one member is `invokeNativeModule`, `bobcat:native-modules` links there,
+  and `LynxView::pump` answers a call it makes through the view's command
+  FIFO (`ToMain::ModuleCallback`), so the native API can be added later
+  without a second reply path.
 - **`lynx.reportError(error, {level: 'fatal'})` is reported and nothing more**
   — lynx-core's `reportError` maps `'fatal'` to `LynxErrorLevel.Fatal`
   (`lynx.ts`), and native's `App::ReportException` then sets the BTS app state

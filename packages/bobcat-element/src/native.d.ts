@@ -155,6 +155,15 @@ interface BobcatNative {
   initData(): string | undefined;
   /** The view's global props, handed over like `initData`. */
   globalProps(): string | undefined;
+  /**
+   * The native modules the embedder injected when the view was built, as one
+   * record payload: a flat sequence of `<utf16Length>:<text>` fields, two per
+   * module — its `NativeModules` key, then its method names joined with
+   * commas, empty for a module that declared none. Empty for a view built with
+   * no modules at all. This realm has no `NativeModules` and posts the record
+   * unread to its BTS Worker in `initialize`. Answers once, like `initData`.
+   */
+  nativeModuleTable(): string;
 }
 
 /**
@@ -183,21 +192,6 @@ interface BobcatWorkerNative {
    * the string is handed over, not kept.
    */
   workerName(): string;
-  /**
-   * The view's BTS entry URL, already absolute, which `bobcat:bts` imports
-   * once the BTS is initialized. `undefined` in a BTS whose view named no
-   * entry and in a plain `Worker`. Answers once, like `workerName`.
-   */
-  backgroundEntry(): string | undefined;
-  /**
-   * The screen the view's `SystemInfo` reports, as three numbers: physical
-   * pixels per CSS pixel, and the screen's width and height in physical
-   * pixels. The view's own numbers in a BTS, the ones its MTS boot module
-   * reports; `undefined` in a plain `Worker`, which reports no screen.
-   */
-  pixelRatio(): number | undefined;
-  pixelWidth(): number | undefined;
-  pixelHeight(): number | undefined;
 }
 
 declare module "bobcat-internal:host" {
@@ -265,6 +259,7 @@ declare module "bobcat-internal:host" {
   export const clearTimer: BobcatNative["clearTimer"];
   export const initData: BobcatNative["initData"];
   export const globalProps: BobcatNative["globalProps"];
+  export const nativeModuleTable: BobcatNative["nativeModuleTable"];
   /**
    * Fetches `url` the way an image is fetched and answers the id of a
    * `bobcat:future` that settles when the fetch is over: fulfilled with
@@ -421,18 +416,15 @@ declare module "bobcat-internal:worker" {
   export const postWorkerMessage: BobcatWorkerNative["postWorkerMessage"];
   export const closeWorker: BobcatWorkerNative["closeWorker"];
   export const workerName: BobcatWorkerNative["workerName"];
-  export const backgroundEntry: BobcatWorkerNative["backgroundEntry"];
-  export const pixelRatio: BobcatWorkerNative["pixelRatio"];
-  export const pixelWidth: BobcatWorkerNative["pixelWidth"];
-  export const pixelHeight: BobcatWorkerNative["pixelHeight"];
 }
 
 /**
  * The embedder's native modules as a realm reaches them. Every realm kind
- * declares this module, the MTS realm included: a BTS's table lists the
- * modules its view was built with, and the MTS realm's and a plain
- * `Worker`'s list none. `bobcat:native-modules` is the transport written over
- * `invokeNativeModule`.
+ * declares this module with the same one member, the MTS realm included.
+ * Which modules a realm's `NativeModules` names is not here: the MTS realm
+ * reads the view's table from `bobcat-internal:host` and posts it to its BTS
+ * Worker in `initialize`. `bobcat:native-modules` is the transport written
+ * over `invokeNativeModule`.
  */
 declare module "bobcat-internal:native-modules" {
   /**
@@ -459,13 +451,4 @@ declare module "bobcat-internal:native-modules" {
     args: string,
     callbacks: string,
   ): void;
-  /**
-   * The modules as one record payload: a flat sequence of
-   * `<utf16Length>:<text>` fields, two per module — its `NativeModules` key,
-   * then its method names joined with commas, empty for a module that
-   * declared none. Empty for a view built with no modules at all, in the MTS
-   * realm and in a plain `Worker`. Answers once: the string is handed over,
-   * not kept.
-   */
-  export function nativeModuleTable(): string;
 }

@@ -35,10 +35,10 @@ globalThis.renderPage = function () {
 ";
 
 /// A main-thread entry that calls `Echo` through the transport itself, as
-/// its top level runs: the MTS realm's `NativeModules` is `undefined`, and
-/// its table is empty, but `bobcat:native-modules` links there and the view
-/// answers the call back to this realm. The card is the one [`MAIN_ENTRY`]
-/// renders.
+/// its top level runs: the MTS realm's `NativeModules` is `undefined`, since
+/// the view's table is only posted to the BTS, but `bobcat:native-modules`
+/// links there and the view answers the call back to this realm. The card is
+/// the one [`MAIN_ENTRY`] renders.
 const MAIN_CALLER_ENTRY: &str = r"
 import { callNativeModule } from 'bobcat:native-modules';
 if (NativeModules !== undefined) throw Error('the MTS NativeModules is undefined');

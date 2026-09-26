@@ -33,14 +33,6 @@ rstest.mockRequire("bobcat:worker", () => ({}));
 // transport to exist, because `callNativeModule` is what its method wrappers
 // close over.
 rstest.mockRequire("bobcat:native-modules", () => ({ callNativeModule: rstest.fn() }));
-// The worker realm's host members the BTS runtime reads as it evaluates: no
-// screen and no modules, which is what a plain `Worker` is handed.
-rstest.mockRequire("bobcat-internal:worker", () => ({
-  pixelRatio: () => undefined,
-  pixelWidth: () => undefined,
-  pixelHeight: () => undefined,
-}));
-rstest.mockRequire("bobcat-internal:native-modules", () => ({ nativeModuleTable: () => "" }));
 import * as record from "../src/record.ts";
 rstest.mockRequire("bobcat:record", () => record);
 rstest.mockRequire("bobcat:timers", () => ({}));
@@ -65,7 +57,9 @@ const preloadStyleSheet = rstest.fn();
 const adoptStyleSheet = rstest.fn();
 const reportedErrors = rstest.fn();
 const consoleMessages = rstest.fn();
-// The runtime reads the view's page data as it evaluates; this view has none.
+// The runtime reads the view's page data and native module table as it
+// evaluates; this view has no page data and one module, `Echo`, declaring one
+// method, `ping`.
 rstest.mockRequire("bobcat-internal:host", () => ({
   requestScriptFrame,
   reportScriptError: reportedErrors,
@@ -74,6 +68,7 @@ rstest.mockRequire("bobcat-internal:host", () => ({
   initialProcessor: () => "",
   initData: () => undefined,
   globalProps: () => undefined,
+  nativeModuleTable: () => "4:Echo4:ping",
   // The two members every synchronous load is written over, stood in for as
   // in lynx-modules.test.ts: Node's own `URL`, and `new Function` for the
   // wrapper the engine compiles a body in.
@@ -394,13 +389,20 @@ describe("MTS/BTS lifecycle runtime", () => {
     mts.lynx.getJSContext().dispatchEvent(contextEvent);
     mts.__BobcatPublishEvent("component", "second", { value: 3 });
     contextEvent.data = 2;
-    mts.__BobcatConnectBackground(worker as unknown as Worker, {seed: 1});
-    // The page's data and nothing else: the BTS reads its screen and its
-    // native modules from its own host modules.
+    mts.__BobcatConnectBackground(worker as unknown as Worker, {seed: 1},
+      "https://example.test/page/background.js");
+    // Everything the BTS starts with: the page's data, the entry boot named,
+    // this realm's own `SystemInfo` and the host's module table, unread.
     const initialize = toBackground.shift()!;
-    expect(initialize).toMatchObject({bobcat: "runtime", method: "initialize", updateData: {seed: 1}});
+    expect(initialize).toMatchObject({
+      bobcat: "runtime", method: "initialize", updateData: {seed: 1},
+      entry: "https://example.test/page/background.js",
+      nativeModuleTable: "4:Echo4:ping",
+    });
+    expect(initialize["systemInfo"]).toEqual(mts.SystemInfo);
     expect(Object.keys(initialize).sort()).toEqual([
-      "bobcat", "cacheData", "globalProps", "initData", "method", "processorName", "updateData",
+      "bobcat", "cacheData", "entry", "globalProps", "initData", "method",
+      "nativeModuleTable", "processorName", "systemInfo", "updateData",
     ]);
     expect(toBackground.map((message) => message.method ?? message.type)).toEqual([
       "publishEvent", "custom", "publicComponentEvent",

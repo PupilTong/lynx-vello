@@ -37,7 +37,6 @@ use smallvec::SmallVec;
 use tokio::sync::watch;
 
 use super::quickjs::{ScriptEngine, ScriptRuntime};
-use crate::background::BackgroundStart;
 use crate::clock::ClockInstant;
 use crate::esm::{
     ANIMATION_FRAME_MODULE_SPECIFIER, BTS_MODULE_SPECIFIER, ELEMENT_MODULE_SPECIFIER,
@@ -261,14 +260,14 @@ impl DocumentIngredients {
 /// [`update_global_props`](crate::LynxView::update_global_props) and
 /// [`reload`](crate::LynxView::reload) reach the realm through
 /// `ToMain::PageUpdate` instead, and never touch any of this. The three
-/// page-data strings become one-shot host members the realm alone reads,
-/// `entry` and `screen` are written into the boot module's source,
-/// `background_entry`, `native_modules` and a copy of `screen` go to
-/// `WorkerFactory::install`, which hands them to the BTS Worker in its
-/// `Start`, and `sheets` go to the document slot, which the first
-/// `__FlushElementTree` settles them out of. The entry's source is not here:
-/// its answer is a task of the view's owner, which completes the module boot
-/// imports the entry as.
+/// page-data strings and `native_modules` become one-shot host members the
+/// realm alone reads, `entry`, `background_entry` and `screen` are written
+/// into the boot module's source, and `sheets` go to the document slot,
+/// which the first `__FlushElementTree` settles them out of. The BTS is
+/// handed its share by this realm's script, in the `initialize` message boot
+/// posts to it: the BTS entry, this realm's own `SystemInfo` and the module
+/// table. The entry's source is not here: its answer is a task of the view's
+/// owner, which completes the module boot imports the entry as.
 pub(crate) struct RealmStartup {
     /// The answers to the author stylesheet requests `create_lynx_view` made,
     /// in the order the view listed them, which is their cascade order. The
@@ -277,18 +276,17 @@ pub(crate) struct RealmStartup {
     pub(crate) sheets: Vec<StartupSource>,
     /// The screen the realm's `SystemInfo` reports, as the embedder named it
     /// in [`ViewSources::screen`](crate::ViewSources::screen). The BTS's
-    /// `SystemInfo` reports the same one: it reaches that realm in the
-    /// `Start` boot's `new Worker("bobcat:bts")` sends, as
-    /// [`BackgroundStart::screen`].
+    /// `SystemInfo` reports the same numbers: boot posts this realm's own
+    /// `SystemInfo` to the BTS in its `initialize` message.
     pub(crate) screen: ScreenMetrics,
     /// The view's MTS entry, [`ViewSources::entry`](crate::ViewSources::entry)
     /// as `create_lynx_view` resolved it: always an absolute URL, in its
     /// WHATWG serialization. Boot imports the entry by this string.
     pub(crate) entry: String,
     /// The BTS entry `bobcat:bts` imports, if the view named one: always an
-    /// absolute URL `create_lynx_view` resolved, like [`Self::entry`]. It
-    /// reaches the BTS realm in the `Start` boot's `new Worker("bobcat:bts")`
-    /// sends, as [`BackgroundStart::entry`].
+    /// absolute URL `create_lynx_view` resolved, like [`Self::entry`]. Boot
+    /// writes it into its own source and posts it to the BTS in the
+    /// `initialize` message.
     pub(crate) background_entry: Option<String>,
     /// The host's processor name, page data and global props, as the strings
     /// it passed in. `bobcat:runtime` parses the data and props as JSON and
@@ -298,10 +296,10 @@ pub(crate) struct RealmStartup {
     pub(crate) global_props: Option<String>,
     /// The embedder's modules as one `<utf16Length>:<text>` record, two fields
     /// per module: its name, then its method names joined with commas. Empty
-    /// for a view built with none. This realm does not read it: it reaches
-    /// the BTS realm in the `Start` boot's `new Worker("bobcat:bts")` sends,
-    /// as [`BackgroundStart::native_modules`], and `bobcat:bts-runtime`
-    /// builds `NativeModules` out of it.
+    /// for a view built with none. This realm reads it once, as the host
+    /// member `nativeModuleTable`, and posts it unread to the BTS in the
+    /// `initialize` message, where `bobcat:bts-runtime` builds
+    /// `NativeModules` out of it.
     pub(crate) native_modules: String,
 }
 
@@ -759,6 +757,10 @@ pub(crate) struct MainThreadRuntime {
     /// the same reason as [`Self::screen`], and read again by
     /// [`Self::complete_entry`] and [`Self::entry_module_name`].
     entry: String,
+    /// The BTS entry, which boot writes into its own module source and hands
+    /// to the BTS in the `initialize` message. Held for the same reason as
+    /// [`Self::screen`]; `None` is a view that named none.
+    background_entry: Option<String>,
 }
 
 impl fmt::Debug for MainThreadRuntime {
@@ -773,9 +775,9 @@ impl MainThreadRuntime {
     /// Opens one view's realm through [`crate::realm::open_realm`], which
     /// installs the core every realm has, and installs this realm's own host
     /// members — the document and host module, the stylesheet members, the
-    /// startup strings, the native module members with an empty table and
-    /// the `Worker` bindings — handing back the one channel everything this
-    /// view's workers say arrives on.
+    /// startup strings, the native module member and the `Worker` bindings —
+    /// handing back the one channel everything this view's workers say
+    /// arrives on.
     ///
     /// A realm has its `Worker` members from the moment it exists: there is no
     /// state in which it is missing them, and so no order between furnishing
@@ -785,12 +787,12 @@ impl MainThreadRuntime {
     /// this call does not make.
     ///
     /// Opening spends the startup: the strings become one-shot members read
-    /// later by the boot module, the screen and the page configuration are
-    /// kept for the boot module's own source, and the author sheets' answers
-    /// go to the document slot for the first `__FlushElementTree` to settle.
-    /// Nothing here waits for any of them, and the entry is not part of it,
-    /// which is what lets a realm open while its own sources are still in
-    /// flight.
+    /// later by the boot module, the screen, the BTS entry and the page
+    /// configuration are kept for the boot module's own source, and the
+    /// author sheets' answers go to the document slot for the first
+    /// `__FlushElementTree` to settle. Nothing here waits for any of them, and
+    /// the entry is not part of it, which is what lets a realm open while its
+    /// own sources are still in flight.
     pub(crate) fn new(
         js_runtime: &mut ScriptRuntime,
         ingredients: DocumentIngredients,
@@ -832,18 +834,13 @@ impl MainThreadRuntime {
                     .map_err(MainThreadError::into_script_error)?;
                 install_startup_strings(engine, js_runtime, startup_strings(&mut startup))
                     .map_err(MainThreadError::into_script_error)?;
-                // An empty table: the view's modules are the BTS's, and what
-                // this realm has is the transport, which is what lets a
-                // later MTS API answer calls through it.
-                crate::native_module::install(engine, js_runtime, &host, None, String::new())
+                // The transport alone: the view's modules are the BTS's, and
+                // this realm has no `NativeModules`. What the transport is
+                // here for is a later MTS API answering calls through it.
+                crate::native_module::install(engine, js_runtime, &host, None)
                     .map_err(|error| context_of("installing the native module members", error))?;
-                let background = BackgroundStart {
-                    entry: startup.background_entry.take(),
-                    screen: startup.screen,
-                    native_modules: std::mem::take(&mut startup.native_modules),
-                };
                 workers
-                    .install(engine, js_runtime, outbox, background)
+                    .install(engine, js_runtime, outbox)
                     .map_err(|error| context_of("installing Worker", error))
             },
         )
@@ -857,6 +854,7 @@ impl MainThreadRuntime {
                 screen: startup.screen,
                 config,
                 entry: startup.entry,
+                background_entry: startup.background_entry,
             },
             incoming,
         ))
@@ -1357,13 +1355,18 @@ impl MainThreadRuntime {
     /// connecting the BTS, and the flush, the listed sheets included.
     ///
     /// The only literals written into it are the screen's three numbers, the
-    /// page configuration's four switches and the entry's URL — facts Rust
-    /// owns, written as primitives rather than as JSON the realm would parse
-    /// and hand back. The URL is written as a JSON string literal, which is
-    /// the one quoting that is also a JavaScript string literal.
+    /// page configuration's four switches, the entry's URL and the BTS
+    /// entry's — facts Rust owns, written as primitives rather than as JSON
+    /// the realm would parse and hand back. Each URL is written as a JSON
+    /// string literal, which is the one quoting that is also a JavaScript
+    /// string literal, and a view that named no BTS entry writes `undefined`.
     /// `SystemInfo` describes the screen the page is shown on, which this
     /// view's viewport is not; the switches are what the realm builds its
     /// document with and what `enableJSDataProcessor` tells the MTS runtime.
+    /// The BTS entry is not this realm's to import: boot hands it to
+    /// `__BobcatConnectBackground`, which posts it to the BTS in the
+    /// `initialize` message beside this realm's `SystemInfo` and the view's
+    /// native module table.
     pub(crate) fn run_boot_module(
         &mut self,
         js_runtime: &mut ScriptRuntime,
@@ -1380,6 +1383,10 @@ impl MainThreadRuntime {
             enable_js_data_processor,
         } = self.config;
         let entry = serde_json::to_string(&self.entry).expect("a string serializes");
+        let background_entry = self.background_entry.as_ref().map_or_else(
+            || "undefined".to_owned(),
+            |url| serde_json::to_string(url).expect("a string serializes"),
+        );
         let boot = format!(
             r#"import {{ lynx, __BobcatConnectBackground, __BobcatInitializeMTS, __BobcatProcessInitData, __BobcatRenderPage }} from "{RUNTIME_MODULE_SPECIFIER}";
 import {{ Document, __FlushElementTree }} from "{ELEMENT_MODULE_SPECIFIER}";
@@ -1423,7 +1430,9 @@ let data = lynx.__initData;
 try {{ await import({entry}); }} catch (error) {{ void Promise.reject(error); }}
 const {{ Worker }} = await import("bobcat-internal");
 data = __BobcatProcessInitData(data);
-__BobcatConnectBackground(new Worker("{BTS_MODULE_SPECIFIER}", {{ name: "lynx-bg" }}), data);
+// The BTS's own entry, by the URL the view named it by, is the BTS's to
+// import: it travels in the `initialize` message this call posts.
+__BobcatConnectBackground(new Worker("{BTS_MODULE_SPECIFIER}", {{ name: "lynx-bg" }}), data, {background_entry});
 
 // Queue the flush after jobs already scheduled by the lifecycle hooks.
 __BobcatRenderPage(data);
@@ -1942,20 +1951,21 @@ fn install_document_members(
     Ok(())
 }
 
-/// Installs `initData`, `globalProps` and `initialProcessor`, handing the
-/// realm the original strings. Missing initial data or props become
-/// `undefined`.
+/// Installs `initData`, `globalProps`, `initialProcessor` and
+/// `nativeModuleTable`, handing the realm the original strings. Missing
+/// initial data or props become `undefined`.
 ///
 /// Each hands its string over once and keeps nothing. `bobcat:runtime` parses
-/// the initial data and props and uses the processor name as a plain string.
-/// All three answer before a document exists.
+/// the initial data and props, uses the processor name as a plain string,
+/// and posts the module table unread to the BTS in the `initialize` message.
+/// All four answer before a document exists.
 ///
 /// The strings are *moved* in rather than copied: each is handed over once and
 /// never read again, so the move says what the lifetime is.
 fn install_startup_strings(
     engine: &mut ScriptEngine,
     js_runtime: &mut ScriptRuntime,
-    strings: [(&'static str, Option<String>); 3],
+    strings: [(&'static str, Option<String>); 4],
 ) -> Result<(), MainThreadError> {
     for (name, mut value) in strings {
         install(engine, js_runtime, name, 0, move |_arguments| {
@@ -1965,15 +1975,19 @@ fn install_startup_strings(
     Ok(())
 }
 
-/// The three strings this realm answers once, in the order they are
+/// The four strings this realm answers once, in the order they are
 /// installed, taken out of the startup that is being spent.
-fn startup_strings(startup: &mut RealmStartup) -> [(&'static str, Option<String>); 3] {
+fn startup_strings(startup: &mut RealmStartup) -> [(&'static str, Option<String>); 4] {
     [
         ("initData", startup.init_data.take()),
         ("globalProps", startup.global_props.take()),
         (
             "initialProcessor",
             Some(std::mem::take(&mut startup.initial_processor)),
+        ),
+        (
+            "nativeModuleTable",
+            Some(std::mem::take(&mut startup.native_modules)),
         ),
     ]
 }

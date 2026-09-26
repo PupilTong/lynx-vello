@@ -84,11 +84,11 @@ the screen, the BTS entry, the page data, the processor name and the module
 table — into one `RealmStartup` that opens the realm. The entry's answer is
 not part of it: it is a task of the view (`load_entry`) that enters the realm
 when its answer arrives. **Nothing waits for any of it before the realm
-opens.** The page configuration and the screen are written into the boot
-module as literals; the sheets' answers go to the realm's `DocumentSlot`, in
-listed order, and boot's first `__FlushElementTree` waits for each and mounts
-it before the document is styled; the entry completes the module boot imports
-it as, by its URL. `LynxView::update_data`,
+opens.** The page configuration, the screen and the BTS entry are written
+into the boot module as literals; the sheets' answers go to the realm's
+`DocumentSlot`, in listed order, and boot's first `__FlushElementTree` waits
+for each and mounts it before the document is styled; the entry completes the
+module boot imports it as, by its URL. `LynxView::update_data`,
 `update_global_props` and `reload` reach the realm through `ToMain::PageUpdate`
 afterwards and never touch any of it.
 
@@ -103,15 +103,14 @@ device_pixel_ratio)` of its capture size explicitly (`pixel_ratio` is that
 ratio, and the two sizes are the CSS size multiplied by it), and nothing in
 the engine derives one on a host's behalf. It reaches the boot module as three
 JavaScript number literals; nothing updates it afterwards, so a painter that
-binds at other metrics leaves it alone. The BTS realm gets the same three
-numbers in its `WorkerStart`, as `BackgroundStart::screen`, and
-`bobcat:bts-runtime` reads them from the `bobcat-internal:worker` members
-`pixelRatio`, `pixelWidth` and `pixelHeight` as it is evaluated, before any
-message arrives. Each member answers the number the boot module's literal
-reads as, so a ratio an `f32` cannot hold exactly is the same number in both
-realms. A worker at any URL other than `bobcat:bts` that imports
-`bobcat:bts-runtime` is started without a screen: the three members answer
-`undefined`, and its `SystemInfo` is the runtime constants alone.
+binds at other metrics leaves it alone. The BTS realm gets the MTS realm's
+own `SystemInfo`: `__BobcatConnectBackground` posts it to the BTS in the
+`initialize` message, and `bobcat:bts-runtime` builds its `SystemInfo` out of
+it before it imports the BTS entry. The numbers are the ones the boot
+module's literals read as, so a ratio an `f32` cannot hold exactly is the same
+number in both realms. A worker at any URL other than `bobcat:bts` that
+imports `bobcat:bts-runtime` is posted no `initialize`, and its `SystemInfo`
+is the runtime constants alone.
 
 `ViewSources::init_data` and `global_props` are optional JSON text, and Rust
 never reads it. `MainThreadRuntime::new` puts each behind a
@@ -121,20 +120,25 @@ it evaluates and parses them: the global props become `__globalProps` and
 `lynx.__globalProps`, and the init data becomes `__BobcatInitData`, which boot
 hands to `processData`. A value that was not given arrives as `undefined` and
 is `{}` there, as in web-core. Text that is not JSON fails boot with
-`StartupFailed`, naming the input, before the entry runs. The background
-thread does not receive either value yet.
+`StartupFailed`, naming the input, before the entry runs. The BTS receives
+both from the MTS realm, in the `initialize` message: the global props as the
+MTS realm holds them, and the init data as `processData` returned it.
 
-The embedder's native modules reach the BTS realm in its `WorkerStart` as
-well. `LynxGroup::create_lynx_view` reads each module's `name()` and
+The embedder's native modules reach the BTS realm in the `initialize` message
+as well. `LynxGroup::create_lynx_view` reads each module's `name()` and
 `methods()` once and encodes them as one length-prefixed record;
-`MainThreadRuntime::new` hands it, unread, to the BTS Worker's `WorkerStart`
-as `BackgroundStart::native_modules`. Every worker realm declares the host
-module `bobcat-internal:native-modules`, whose one-shot `nativeModuleTable`
-answers that record in the BTS and an empty one in every other worker, and
-`bobcat:bts-runtime` builds `NativeModules` out of it as it is evaluated. The
-`initialize` message carries the page's data only. The MTS realm declares the
-same host module with an empty table, so the transport `bobcat:native-modules`
-links in every realm kind. The modules
+`MainThreadRuntime::new` puts it behind the one-shot `bobcat-internal:host`
+member `nativeModuleTable`, beside `initData` and `globalProps`.
+`bobcat:runtime` reads it as it evaluates and never decodes it:
+`__BobcatConnectBackground` posts it to the BTS in `initialize`, and
+`bobcat:bts-runtime` builds `NativeModules` out of it before it imports the
+BTS entry. So `initialize` carries the page's data, the BTS entry's URL, the
+MTS realm's `SystemInfo` and this record, and the BTS's `WorkerStart` carries
+none of the view's data: it differs from any other worker's only in its URL
+and its `ScriptSource`. A plain `Worker` is posted no `initialize`, so its
+`NativeModules` is empty. Every realm kind declares the host module
+`bobcat-internal:native-modules`, with `invokeNativeModule` alone, so the
+transport `bobcat:native-modules` links in each. The modules
 themselves never leave the embedder's thread: a call arrives back as
 `ViewNotice::NativeModuleCall` — the calling realm (`None` for the MTS realm,
 the worker's key for a worker), the call's text and the indices of its
@@ -226,33 +230,30 @@ QuickJS ESM graph — a worker realm, on bobcat-workers' runtime
           │                             refused there with a ReferenceError;
           │                             never requested
           └── bobcat:bts                the BTS: a registered module (bts.ts)
-                ├──▶ bobcat-internal:worker (backgroundEntry)
-                ├──▶ bobcat:bts-runtime exports lynx
-                │     ├──▶ bobcat-internal:worker (pixelRatio, pixelWidth,
-                │     │     pixelHeight: SystemInfo's screen)
-                │     ├──▶ bobcat-internal:native-modules (nativeModuleTable,
-                │     │     read through bobcat:record into NativeModules)
+                ├──▶ bobcat:bts-runtime exports lynx; the `initialize`
+                │     message fills SystemInfo and NativeModules (its table
+                │     read through bobcat:record) before the entry is imported
                 │     ├──▶ bobcat:native-modules (callNativeModule, the
                 │     │     transport each NativeModules method calls) ──▶
                 │     │     bobcat-internal:native-modules (invokeNativeModule)
                 │     ├──▶ bobcat:diagnostics (console, lynx.reportError; the
                 │     │     console export is the global one)
                 │     └──▶ bobcat:cross-thread-context ──▶ bobcat:event-target
-                └──▶ await import(BTS entry) once `initialize` arrives, when
-                      configured: HostOutbox → view resource host → worker
-                      completion
+                └──▶ await import(the entry URL `initialize` names), when
+                      the view named one: HostOutbox → view resource host →
+                      worker completion
   Both runtimes register the same twenty-one built-ins (esm.rs BUILTIN_MODULES),
   and a realm's host modules decide which of them link. Here bobcat:element,
   bobcat:runtime and bobcat-internal fail at link with a SyntaxError: they
   import bobcat-internal:host members only an MTS realm has. In an MTS realm
   bobcat:worker, bobcat:bts-runtime and bobcat:bts fail to load with a
-  ReferenceError: they import bobcat-internal:worker, which it does not
-  declare.
+  ReferenceError: they import bobcat-internal:worker, the last two through
+  bobcat:worker, which it does not declare.
   bobcat:native-modules links in both: every realm kind declares
-  bobcat-internal:native-modules, the MTS realm with an empty table. Any other
-  bobcat: or bobcat-internal: name, one no runtime registered and no realm
-  declared, fails its import or require in the realm with a ReferenceError
-  and is never sent to the fetcher.
+  bobcat-internal:native-modules. Any other bobcat: or bobcat-internal: name,
+  one no runtime registered and no realm declared, fails its import or
+  require in the realm with a ReferenceError and is never sent to the
+  fetcher.
 
 bobcat-cli ──▶ bobcat-source + winit
 bobcat-wasm ──▶ bobcat-source + wasm-bindgen + wasm_thread
@@ -730,11 +731,11 @@ message to the main-thread realm. The realm's other
 host modules are a parameter of the same call: the document, stylesheet,
 startup and `Worker` members for an MTS realm, `bobcat-internal:worker` for a
 worker realm, and `bobcat-internal:native-modules` for both, which
-`native_module::install` installs with the realm's own table: empty in an MTS
-realm and in every worker but the BTS. The constructor names no realm kind. It
-is told two things: the key the realm's display-frame demand is reported
-under, `None` for an MTS realm and the worker's key for a worker realm, and
-the `ScriptSource` its `ScriptReported` and `ConsoleMessage` carry, `Main` for
+`native_module::install` installs with the same one member in each. The
+constructor names no realm kind. It is told two things: the key the realm's
+display-frame demand is reported under, `None` for an MTS realm and the
+worker's key for a worker realm, and the `ScriptSource` its `ScriptReported`
+and `ConsoleMessage` carry, `Main` for
 an MTS realm and, for a worker realm, the one its `WorkerStart` carries:
 `Background` for the URL `bobcat:bts`, otherwise `Worker(WorkerId)`. Since
 both runtimes register
@@ -782,7 +783,6 @@ cannot fail on what the same build's writer produced.
 main realm: new Worker(url)
   ├── WorkerStart { key, name, url (joined to __Card__),
   │                 script: oneshot receiver (None for an engine name),
-  │                 background: the view's data (only for bobcat:bts),
   │                 source: Background (bobcat:bts) or Worker(id),
   │                 messages: mpsc receiver, events: this view's sender }
   │        ────────────────────────────────▶ bobcat-workers: one task per worker
@@ -802,10 +802,11 @@ which the realm holds as `__Card__` and passes as the third argument; Rust
 does not keep it. A URL that does not resolve allocates no key, sends no
 `Start` and requests nothing, and `new Worker` throws HTML's synchronous
 `SyntaxError`. There is one kind of worker. The BTS is the dedicated worker
-whose URL is `bobcat:bts`, and the URL alone decides the three things that
+whose URL is `bobcat:bts`, and the URL alone decides the two things that
 differ between workers: only a URL outside `ENGINE_MODULE_PREFIXES` is
-requested from the host, only `bobcat:bts` is started with the view's data
-(`BackgroundStart`), and only `bobcat:bts` is named `ScriptSource::Background`.
+requested from the host, and only `bobcat:bts` is named
+`ScriptSource::Background`. No `Start` carries the view's data: the MTS realm
+posts it to the BTS in the `initialize` message.
 Fetching and UTF-8 validation remain fetcher policy. Multiple worker requests
 are preserved without coalescing. The `WorkerStart` is sent before the host is
 asked to fetch, so messages posted during loading queue against an existing
@@ -898,18 +899,20 @@ the bindings they need, `lynx` included, without creating a dependency back to
 the bootstrap that starts them.
 `bobcat:bts` is a registered module (`packages/bobcat-element/src/bts.ts`)
 that the BTS realm's root module imports by its URL, as every worker's root
-imports its script, so nothing is fetched to start the BTS. Its `Start`
-carries `BackgroundStart` with the view's `background_entry`, which
-`bobcat:bts` reads once through the host member `backgroundEntry`, and the
-view's screen and native module table,
-which `bobcat:bts-runtime` reads as it is evaluated. When an entry is
-configured, the bootstrap
-passes an `async () => { await import(entry); }` loader to its JS initializer
-and returns, without a top-level `await`, so the root module finishes and
-the first message is delivered. The first `postMessage` initializes
-BTS inputs before that loader runs; later messages wait on its Promise. XML
-takes exactly this path. Without an entry, the same initialization message
-supplies the Context and app/native-app environment, then BTS acknowledges it.
+imports its script, so nothing is fetched to start the BTS, and its `Start`
+is built like any other worker's. The bootstrap passes a loader,
+`async ({ entry }) => { if (entry !== undefined) await import(entry); }`, to
+its JS initializer and returns, without a top-level `await`, so the root
+module finishes and the first message is delivered. That message is the
+`initialize` the MTS realm's `__BobcatConnectBackground` posts: the page's
+data, the view's `background_entry` (which boot's source names as a JSON
+literal, `undefined` when the view named none), the MTS realm's own
+`SystemInfo`, and the view's native module table as the record the MTS
+startup member `nativeModuleTable` answered. It initializes BTS inputs,
+`SystemInfo` and `NativeModules` included, before the loader runs; later
+messages wait on its Promise. XML takes exactly this path. Without an entry,
+the same initialization message supplies the Context and app/native-app
+environment, then BTS acknowledges it.
 
 Workers use the same asynchronous ESM loader as main. Each discovered module
 gets a source completion on the view's existing host channel; its final response

@@ -5,8 +5,6 @@ import "bobcat:worker";
 import "bobcat:timers";
 import { callNativeModule } from "bobcat:native-modules";
 import type { WorkerGlobalScope } from "bobcat:worker";
-import { pixelHeight, pixelRatio, pixelWidth } from "bobcat-internal:worker";
-import { nativeModuleTable } from "bobcat-internal:native-modules";
 import { splitRecord } from "bobcat:record";
 import {
   type ContextEvent,
@@ -35,16 +33,17 @@ type AppHook = (...args: unknown[]) => unknown;
 const emitter = new GlobalEventEmitter();
 const jsModules = new Map<string, unknown>([["GlobalEventEmitter", emitter]]);
 // The embedder's `NativeModule`s, as the objects a card calls: one property
-// per module the view was built with, built as this module is evaluated out
-// of the table the host hands this realm, which is empty in a plain `Worker`.
-// A module the host does not have is `undefined` — web-core's answer, a
-// missing key on the object `createNativeModules` builds, where native
+// per module the view was built with, filled in by `__BobcatInitializeBTS`
+// out of the table the `initialize` message carries, before the entry
+// imports. A plain `Worker` is posted no `initialize`, so its object stays
+// empty. A module the host does not have is `undefined` — web-core's answer,
+// a missing key on the object `createNativeModules` builds, where native
 // answers `null`.
 //
 // The property name `nativeModuleProxy` stays although nothing is a Proxy any
 // more: it is the name ReactLynx reads (`nativeApp.nativeModuleProxy
 // .LynxUIMethodModule`), and renaming it would only break that lookup.
-const nativeModules: Record<string, object> = nativeModulesFromTable(nativeModuleTable());
+const nativeModules: Record<string, object> = {};
 const app: {
   NativeModules: object;
   _apiList: object;
@@ -95,7 +94,7 @@ let nextCallbackId = 1;
  * `bobcat: "runtime"`, or a Context event's public fields, which carry no tag.
  */
 type FromMainThread =
-  | ({ bobcat: "runtime"; method: "initialize" } & BackgroundData)
+  | ({ bobcat: "runtime"; method: "initialize" } & InitializeOptions)
   | {
       bobcat: "runtime";
       method: "publishEvent" | "publicComponentEvent" | "updateGlobalProps" | "updateCardData" | "onAppReload" | "processCardConfig";
@@ -236,17 +235,22 @@ coreContext.connect((event) => scope.postMessage({ type: event.type, data: event
 // message supplies inputs; ordinary messages wait for the entry's imports to
 // settle, whether they finished or threw. Nothing outside this realm waits on
 // that: the view is ready once MTS has booted, whatever becomes of the BTS.
-let startBackground: ((options: BackgroundData) => Promise<void>) | undefined;
+let startBackground: ((options: InitializeOptions) => Promise<void>) | undefined;
 let entryReady: Promise<void> | undefined;
 
 function noop() {
   return undefined;
 }
 
-export function __BobcatStartBTS(loadEntry: () => Promise<unknown>) {
+/**
+ * Arms this realm as the BTS: the first `initialize` message initializes it
+ * and then calls `loadEntry` with that message, which is where `bobcat:bts`
+ * reads the entry's URL from.
+ */
+export function __BobcatStartBTS(loadEntry: (options: InitializeOptions) => Promise<unknown>) {
   startBackground = async options => {
     __BobcatInitializeBTS(options);
-    await loadEntry();
+    await loadEntry(options);
   };
 }
 
@@ -326,17 +330,12 @@ async function dispose() {
   scope.postMessage({ bobcat: "runtime", method: "disposed" });
 }
 
-// The runtime constants and the screen the view names, as the host hands this
-// realm its three numbers. A plain `Worker` that imports this module is handed
-// none, and reports the constants alone. The raw BTS environment has the same
-// object as a global, beside this export and `lynx.SystemInfo`.
-const screenPixelRatio = pixelRatio();
-export const SystemInfo = createSystemInfo(screenPixelRatio === undefined ? undefined : {
-  pixelRatio: screenPixelRatio,
-  pixelWidth: pixelWidth(),
-  pixelHeight: pixelHeight(),
-});
-Object.assign(scope, { SystemInfo });
+// The runtime constants until `initialize` hands this realm the MTS realm's
+// own `SystemInfo`, screen included. A plain `Worker` that imports this module
+// is posted no `initialize`, and reports the constants alone. The raw BTS
+// environment has the same object as a global, beside this export and
+// `lynx.SystemInfo`.
+export let SystemInfo = createSystemInfo();
 
 // The realm's one console, which `bobcat:worker` also installs as the global
 // `console`: a raw BTS entry's import and a bundle body's preamble binding
@@ -465,12 +464,7 @@ export function __BobcatRegisterBundle(templateUrl?: string, entry?: string) {
   modules.registerTemplateUrl(templateUrl, entry);
 }
 
-/**
- * What the main thread's `initialize` message opens this realm with: the
- * page's data, its global props and the processor name. The screen and the
- * embedder's modules are not among them: this realm reads both from its host
- * modules as it is evaluated.
- */
+/** The page's data, its global props and the processor name. */
 interface BackgroundData {
   initData?: unknown;
   updateData?: unknown;
@@ -479,16 +473,36 @@ interface BackgroundData {
   cacheData?: unknown[];
 }
 
-export function __BobcatInitializeBTS(options: BackgroundData) {
+/**
+ * What the main thread's `initialize` message opens this realm with: the
+ * page's data, the BTS entry's URL — already absolute, `undefined` for a view
+ * that named none — the MTS realm's own `SystemInfo`, and the embedder's
+ * modules as the record the host wrote, two fields per module.
+ */
+interface InitializeOptions extends BackgroundData {
+  entry?: string;
+  systemInfo?: Record<string, unknown>;
+  nativeModuleTable?: string;
+}
+
+export function __BobcatInitializeBTS(options: InitializeOptions) {
   const params = options;
   app._params = { initData:params.initData ?? null, updateData:params.updateData, processorName:params.processorName ?? "", cacheData:params.cacheData ?? [] };
   lynx.__initData = Object.hasOwn(params, "updateData") ? params.updateData : params.initData;
   lynx.__globalProps = params.globalProps || {};
+  // Into the one object `NativeModules`, `app.NativeModules` and
+  // `nativeModuleProxy` all name.
+  Object.assign(nativeModules, nativeModulesFromTable(params.nativeModuleTable ?? ""));
+  SystemInfo = createSystemInfo(params.systemInfo);
+  lynx.SystemInfo = SystemInfo;
+  // Keep the raw BTS environment consistent with its module binding.
+  Object.assign(scope, { SystemInfo });
 }
 
 /**
- * The `NativeModules` object out of the host's module table: two record
- * fields per module, its name and then its method names joined with commas.
+ * The `NativeModules` members out of the module table `initialize` carries,
+ * as the host wrote it: two record fields per module, its name and then its
+ * method names joined with commas.
  *
  * Every declared method, and nothing else: a method a module did not declare
  * is `undefined`, which is what native answers for one its module does not

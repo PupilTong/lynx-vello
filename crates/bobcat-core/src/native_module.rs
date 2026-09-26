@@ -18,8 +18,10 @@
 //! `bobcat-internal:native-modules`, and every realm kind can be answered: a
 //! callback goes back to the view's MTS realm through its command FIFO and to
 //! a worker realm through that worker's inbox (`ModuleReply`). Which modules
-//! a realm is told about is data: the BTS is handed the view's table, and the
-//! MTS realm and a plain `Worker` an empty one.
+//! a `NativeModules` object names is data: the MTS realm reads the view's
+//! table as one of its startup members and posts it to its BTS in the
+//! `initialize` message. A plain `Worker` is posted no table, and the MTS
+//! realm has no `NativeModules`.
 
 use quickjs_rust_bridge::{HostArgument, HostValue};
 use tokio::sync::mpsc;
@@ -271,15 +273,15 @@ impl ModuleReply {
 }
 
 /// Installs a realm's `bobcat-internal:native-modules`: `invokeNativeModule`,
-/// the one member a call reaches the embedder through, and
-/// `nativeModuleTable`, which hands `table` over once and keeps nothing.
+/// the one member a call reaches the embedder through.
 ///
-/// Every realm kind installs both (the MTS realm, the BTS and a plain
+/// Every realm kind installs it (the MTS realm, the BTS and a plain
 /// `Worker`), so `bobcat:native-modules` links in each. `caller` is what a
 /// call names its realm by, and so which channel [`LynxView::pump`] answers
 /// it through: `None` for a view's MTS realm, the worker's key for a worker.
-/// `table` is the record [`encode_table`] wrote: the view's in a BTS, and
-/// empty in the MTS realm and a plain `Worker`.
+/// Which modules exist is not this member's to say: the table is the MTS
+/// realm's startup member `nativeModuleTable`, which reaches the BTS in its
+/// `initialize` message.
 ///
 /// Everything crosses as text, because everything here is JavaScript's: the
 /// arguments are the realm's own JSON, and the function arguments are named
@@ -295,7 +297,6 @@ pub(crate) fn install(
     js_runtime: &mut ScriptRuntime,
     host: &HostOutbox,
     caller: Option<WorkerKey>,
-    table: String,
 ) -> Result<(), ScriptError> {
     const NAME: &str = "bobcat-internal:native-modules.invokeNativeModule";
     let host = host.clone();
@@ -327,16 +328,6 @@ pub(crate) fn install(
                 callbacks,
             });
             Ok(HostValue::Undefined)
-        }),
-    )?;
-    let mut table = Some(table);
-    engine.register_host_module_function(
-        js_runtime,
-        NATIVE_MODULES_HOST_SPECIFIER,
-        "nativeModuleTable",
-        0,
-        Box::new(move |_arguments| {
-            Ok(table.take().map_or(HostValue::Undefined, HostValue::String))
         }),
     )
 }
@@ -412,9 +403,10 @@ fn call_id(arguments: &[HostValue]) -> Result<u64, String> {
 /// already refused where the view was constructed.
 pub(crate) type NativeModuleTable = Vec<(String, Vec<String>)>;
 
-/// Encodes a module table as the `<utf16Length>:<text>` record a realm's
-/// `nativeModuleTable` answers and `bobcat:bts-runtime` decodes, two fields
-/// per module: the name, then the comma-joined method list.
+/// Encodes a module table as the `<utf16Length>:<text>` record an MTS
+/// realm's `nativeModuleTable` answers, which the realm posts to its BTS
+/// unread and `bobcat:bts-runtime` decodes, two fields per module: the name,
+/// then the comma-joined method list.
 ///
 /// The same format `attributeNames` answers in, for the same reason — the
 /// length is in UTF-16 code units, so `String.prototype.slice` reads each

@@ -1782,10 +1782,10 @@ fn an_unparseable_worker_url_throws_syntax_error_and_starts_nothing() {
     assert!(pair.events.try_recv().is_err(), "and fails nothing");
 }
 
-/// A plain `Worker` may import the BTS runtime, and sees what a worker that
-/// is not the BTS is started with: the view here was built with a screen and
-/// a native module, and the worker reports neither — `SystemInfo` is the
-/// runtime constants alone, and `NativeModules` is empty.
+/// A plain `Worker` may import the BTS runtime, and is posted no
+/// `initialize`: the view here was built with a screen and a native module,
+/// and the worker reports neither — `SystemInfo` is the runtime constants
+/// alone, and `NativeModules` is empty.
 #[test]
 fn an_ordinary_worker_can_install_bts_through_its_own_import() {
     let mut pair = Pair::unbooted_with_data(
@@ -1828,6 +1828,54 @@ fn an_ordinary_worker_can_install_bts_through_its_own_import() {
     pair.deliver();
     pair.check(
         "if (JSON.stringify(result) !== '{\"type\":\"reply\",\"data\":[\"ordinary\",42,[\"platform\",\"runtimeType\",\"lynxSdkVersion\"],[]],\"origin\":\"JSContext\"}') throw Error(JSON.stringify(result));",
+    );
+}
+
+/// The BTS reports the MTS realm's own `SystemInfo`, which boot posts to it
+/// in `initialize`, so the two serialize alike, a ratio an `f32` cannot hold
+/// included. `NativeModules` is built out of the module table the same
+/// message carries before the BTS entry is imported, so the entry's top level
+/// already finds the view's module on it.
+#[test]
+fn the_bts_reports_the_mts_system_info_and_has_its_native_modules_before_its_entry() {
+    let mut pair = Pair::unbooted_with_data(
+        Some(
+            r"
+        import { lynx, NativeModules, SystemInfo } from 'bobcat:bts-runtime';
+        lynx.getCoreContext().dispatchEvent({type: 'reply', data: [
+            JSON.stringify(SystemInfo), Object.keys(NativeModules), typeof NativeModules.Echo.ping,
+        ]});
+        ",
+        ),
+        RealmStartup {
+            screen: crate::ScreenMetrics {
+                pixel_ratio: 1.1,
+                pixel_width: 1287.0,
+                pixel_height: 2785.0,
+            },
+            native_modules: crate::native_module::encode_table(&vec![(
+                "Echo".to_owned(),
+                vec!["ping".to_owned()],
+            )]),
+            ..RealmStartup::default()
+        },
+    );
+    pair.boot(
+        r"
+        globalThis.mtsSystemInfo = JSON.stringify(SystemInfo);
+        globalThis.results = [];
+        lynx.getJSContext().addEventListener('reply', e => results.push(e.data));
+        ",
+    )
+    .unwrap();
+    pair.deliver();
+    pair.check(
+        r#"
+        const [system, modules, ping] = results[0];
+        if (system !== mtsSystemInfo) throw Error(system + ' !== ' + mtsSystemInfo);
+        if (JSON.parse(system).pixelRatio !== 1.1) throw Error(system);
+        if (JSON.stringify(modules) !== '["Echo"]' || ping !== 'function') throw Error(JSON.stringify(results));
+        "#,
     );
 }
 

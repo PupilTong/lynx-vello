@@ -18,8 +18,8 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use super::{
-    BackgroundStart, WorkerCommand, WorkerEvent, WorkerHome, WorkerKey, WorkerMessage,
-    WorkerPayload, WorkerStart, wire_json, wire_value,
+    WorkerCommand, WorkerEvent, WorkerHome, WorkerKey, WorkerMessage, WorkerPayload, WorkerStart,
+    wire_json, wire_value,
 };
 use crate::clock::ClockInstant;
 use crate::esm::{BTS_MODULE_SPECIFIER, WORKER_BOOT_SPECIFIER};
@@ -28,7 +28,7 @@ use crate::resource::{
     LoadedSource, ResourceError, ResourceErrorKind, ResourceErrorPhase, RetryAdvice,
     SourceCompletion, SourceRequest,
 };
-use crate::{ScreenMetrics, ScriptSource, WorkerId};
+use crate::{ScriptSource, WorkerId};
 
 impl WorkerHome {
     pub(crate) fn with_entry_for_test(entry: (String, String)) -> Self {
@@ -164,7 +164,7 @@ impl Group {
     /// The same, over a request URL of the test's own.
     fn construct_requesting(&mut self, view: usize, name: &str, url: &str) -> WorkerKey {
         let (script, awaiting) = oneshot::channel();
-        let key = self.start_worker(view, name, url, Some(awaiting), None, Vec::new());
+        let key = self.start_worker(view, name, url, Some(awaiting), Vec::new());
         self.scripts.insert(key, script);
         key
     }
@@ -173,34 +173,22 @@ impl Group {
     /// `createWorker` asks the host nothing for: its `Start` carries no
     /// script, and the realm's own loader loads the name or refuses it.
     fn construct_engine_name(&mut self, view: usize, url: &str) -> WorkerKey {
-        self.start_worker(view, "", url, None, None, Vec::new())
+        self.start_worker(view, "", url, None, Vec::new())
     }
 
-    /// Names one BTS on a view, started over `background` the way boot's
+    /// Names one BTS on a view, started the way boot's
     /// `new Worker("bobcat:bts")` starts one. Nothing is answered for it:
     /// its root module imports the registered `bobcat:bts`, which asks the
-    /// host for the entry once an `initialize` message arrives.
-    fn construct_background(&mut self, view: usize, background: BackgroundStart) -> WorkerKey {
-        self.construct_background_after(view, background, Vec::new())
+    /// host for the entry an `initialize` message names once one arrives.
+    fn construct_background(&mut self, view: usize) -> WorkerKey {
+        self.construct_background_after(view, Vec::new())
     }
 
     /// The same, with `posted` already waiting in the new worker's message
     /// channel when its `Start` is sent, which is the earliest any message
     /// can reach a worker.
-    fn construct_background_after(
-        &mut self,
-        view: usize,
-        background: BackgroundStart,
-        posted: Vec<WorkerMessage>,
-    ) -> WorkerKey {
-        self.start_worker(
-            view,
-            "lynx-bg",
-            BTS_MODULE_SPECIFIER,
-            None,
-            Some(background),
-            posted,
-        )
+    fn construct_background_after(&mut self, view: usize, posted: Vec<WorkerMessage>) -> WorkerKey {
+        self.start_worker(view, "lynx-bg", BTS_MODULE_SPECIFIER, None, posted)
     }
 
     /// Sends one `Start` on a view with what `createWorker` would have
@@ -212,7 +200,6 @@ impl Group {
         name: &str,
         url: &str,
         script: Option<SourceAnswer>,
-        background: Option<BackgroundStart>,
         posted: Vec<WorkerMessage>,
     ) -> WorkerKey {
         let key = WorkerKey::new(self.next_key.get());
@@ -239,7 +226,6 @@ impl Group {
             name: name.to_owned(),
             url: url.to_owned(),
             script,
-            background,
             source,
             messages: incoming,
             events: self.views[view].events.clone(),
@@ -503,24 +489,19 @@ fn a_post_and_a_terminate_while_the_answered_script_still_imports_end_the_worker
     group.quiet();
 }
 
-/// A BTS is started over the registered module `bobcat:bts`, which reads the
-/// view's BTS entry from the host as it is evaluated and imports it only once
-/// the first `initialize` message arrives. The entry is asked for by this
-/// worker as any import is, and it runs under the name the view gave it.
+/// A BTS is started over the registered module `bobcat:bts`, which imports
+/// the view's BTS entry only once the first `initialize` message arrives, by
+/// the URL that message names. The entry is asked for by this worker as any
+/// import is, and it runs under the name the view gave it.
 #[test]
 fn a_bts_imports_its_entry_through_bobcat_bts_once_initialized() {
     let mut group = Group::new();
-    let key = group.construct_background(
-        0,
-        BackgroundStart {
-            entry: Some("app:///bts.js".to_owned()),
-            screen: ScreenMetrics::for_viewport(32.0, 24.0, 1.0),
-            native_modules: String::new(),
-        },
-    );
+    let key = group.construct_background(0);
     group.send(
         key,
-        WorkerMessage::Post(wire_value(r#"({bobcat: "runtime", method: "initialize"})"#)),
+        WorkerMessage::Post(wire_value(
+            r#"({bobcat: "runtime", method: "initialize", entry: "app:///bts.js"})"#,
+        )),
     );
     let (url, completion) = group.views[0].source();
     assert_eq!(url, "app:///bts.js");
@@ -547,13 +528,8 @@ fn an_initialize_posted_before_the_bts_starts_waits_for_bobcat_bts() {
     let mut group = Group::new();
     group.construct_background_after(
         0,
-        BackgroundStart {
-            entry: Some("app:///bts.js".to_owned()),
-            screen: ScreenMetrics::for_viewport(32.0, 24.0, 1.0),
-            native_modules: String::new(),
-        },
         vec![WorkerMessage::Post(wire_value(
-            r#"({bobcat: "runtime", method: "initialize"})"#,
+            r#"({bobcat: "runtime", method: "initialize", entry: "app:///bts.js"})"#,
         ))],
     );
     let (url, completion) = group.views[0].source();
@@ -565,12 +541,12 @@ fn an_initialize_posted_before_the_bts_starts_waits_for_bobcat_bts() {
     assert_eq!(group.message(0), wire("entry ran"));
 }
 
-/// A BTS's `SystemInfo` and `NativeModules` come from the `Start` that
-/// created it: `bobcat:bts-runtime` reads the screen and the module table
-/// from the realm's host modules as it is evaluated. The `initialize` message
-/// carries neither, and the entry it lets through sees both.
+/// A BTS's `SystemInfo` and `NativeModules` come from the `initialize`
+/// message, not from its `Start`: `bobcat:bts-runtime` fills both in before
+/// it imports the entry that message names, so the entry's own top level
+/// already reads them, through each name the runtime gives them.
 #[test]
-fn a_bts_reads_its_screen_and_native_modules_from_its_start() {
+fn a_bts_reads_its_screen_and_native_modules_from_initialize() {
     let mut group = Group::new();
     let table = vec![
         (
@@ -579,23 +555,15 @@ fn a_bts_reads_its_screen_and_native_modules_from_its_start() {
         ),
         ("Bare".to_owned(), Vec::new()),
     ];
-    let key = group.construct_background(
-        0,
-        BackgroundStart {
-            entry: Some("app:///bts.js".to_owned()),
-            screen: ScreenMetrics {
-                pixel_ratio: 3.0,
-                pixel_width: 1170.0,
-                pixel_height: 2532.0,
-            },
-            native_modules: crate::native_module::encode_table(&table),
-        },
-    );
+    let key = group.construct_background(0);
+    let table = serde_json::to_string(&crate::native_module::encode_table(&table)).unwrap();
     group.send(
         key,
-        WorkerMessage::Post(wire_value(
-            r#"({bobcat: "runtime", method: "initialize", updateData: {}})"#,
-        )),
+        WorkerMessage::Post(wire_value(&format!(
+            r#"({{bobcat: "runtime", method: "initialize", updateData: {{}}, entry: "app:///bts.js",
+                systemInfo: {{platform: "headless", pixelRatio: 3, pixelWidth: 1170, pixelHeight: 2532}},
+                nativeModuleTable: {table}}})"#
+        ))),
     );
     let (url, completion) = group.views[0].source();
     completion.complete(Ok(LoadedSource::Module {
@@ -606,9 +574,11 @@ fn a_bts_reads_its_screen_and_native_modules_from_its_start() {
                 SystemInfo.pixelWidth,
                 SystemInfo.pixelHeight,
                 lynx.SystemInfo === SystemInfo && globalThis.SystemInfo === SystemInfo,
+                Object.isFrozen(SystemInfo),
                 Object.keys(NativeModules),
                 Object.keys(NativeModules.Echo),
                 Object.keys(NativeModules.Bare),
+                lynx.getApp().NativeModules === NativeModules,
             ]);
         "
         .to_owned(),
@@ -616,7 +586,7 @@ fn a_bts_reads_its_screen_and_native_modules_from_its_start() {
     }));
     assert_eq!(
         wire_json(&group.message(0)),
-        r#"[3,1170,2532,true,["Echo","Bare"],["ping","pong"],[]]"#
+        r#"[3,1170,2532,true,true,["Echo","Bare"],["ping","pong"],[],true]"#
     );
 }
 
@@ -1159,16 +1129,8 @@ fn a_worker_realm_declares_these_host_members() {
         "testFuture",
         "waitFuture",
     ];
-    let worker = [
-        "backgroundEntry",
-        "closeWorker",
-        "pixelHeight",
-        "pixelRatio",
-        "pixelWidth",
-        "postWorkerMessage",
-        "workerName",
-    ];
-    let native_modules = ["invokeNativeModule", "nativeModuleTable"];
+    let worker = ["closeWorker", "postWorkerMessage", "workerName"];
+    let native_modules = ["invokeNativeModule"];
     assert_eq!(
         group.message(0),
         wire(&format!(

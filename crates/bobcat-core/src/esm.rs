@@ -52,10 +52,10 @@ macro_rules! builtin_module {
 pub(crate) const HOST_MODULE_SPECIFIER: &str = "bobcat-internal:host";
 
 /// The native module a realm reaches the embedder's native modules through,
-/// which every realm kind declares: `invokeNativeModule` and the one-shot
-/// module table, which is the view's table in a BTS and an empty one in the
-/// MTS realm and a plain `Worker`. [`crate::native_module::install`] is what
-/// installs it.
+/// which every realm kind declares: `invokeNativeModule`, and nothing else.
+/// The view's module table is not here: it is the MTS realm's startup member
+/// `nativeModuleTable`, which the MTS realm posts to its BTS in `initialize`.
+/// [`crate::native_module::install`] is what installs it.
 pub(crate) const NATIVE_MODULES_HOST_SPECIFIER: &str = "bobcat-internal:native-modules";
 
 /// The timer runtime: the realm's half of `setTimeout` and its three
@@ -94,8 +94,8 @@ pub(crate) const ANIMATION_FRAME_MODULE_SPECIFIER: &str = "bobcat:animation-fram
 pub(crate) const SYSTEM_INFO_MODULE_SPECIFIER: &str = "bobcat:system-info";
 
 /// The one reader of the `<utf16Length>:<text>` records the host writes: the
-/// Element PAPI's attribute and style answers, and a worker realm's native
-/// module table.
+/// Element PAPI's attribute and style answers, and the native module table
+/// the BTS is posted in `initialize`.
 pub(crate) const RECORD_MODULE_SPECIFIER: &str = "bobcat:record";
 
 /// The native module transport, for every realm kind: `callNativeModule`,

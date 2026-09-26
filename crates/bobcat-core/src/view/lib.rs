@@ -628,8 +628,9 @@ pub struct ViewSources {
     pub entry: String,
     /// Optional URL of the BTS application module the engine's `bobcat:bts`
     /// bootstrap imports, resolved against [`Self::base_url`] like
-    /// [`Self::entry`]. The BTS is started with it and imports it once its
-    /// first message has initialized it. The view always starts a BTS context;
+    /// [`Self::entry`]. The MTS realm posts it to the BTS in the BTS's first
+    /// message, `initialize`, and the BTS imports it once that message has
+    /// initialized it. The view always starts a BTS context;
     /// without this it runs only the built-in environment. The entry and its
     /// imports load through the view's resource fetcher.
     /// Neither MTS evaluation nor [`EngineEvent::ScriptFinished`] waits for it:
@@ -1462,7 +1463,8 @@ pub(crate) struct ViewAttachment {
     pub(crate) startup: StartupSources,
     /// The embedder's native modules as the BTS realm hears about them: one
     /// `<utf16Length>:<text>` record of names and comma-joined method lists,
-    /// which the MTS realm hands to its BTS Worker in that worker's `Start`.
+    /// which the MTS realm reads as a startup member and posts to its BTS
+    /// Worker in the `initialize` message.
     /// The modules themselves stay on the view, on the embedder's thread.
     pub(crate) native_modules: String,
     pub(crate) commands: mpsc::UnboundedReceiver<ToMain>,

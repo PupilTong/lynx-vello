@@ -55,10 +55,7 @@ use tokio::task::{self, JoinError, JoinSet};
 use tokio_util::sync::CancellationToken;
 
 use super::scope::{WORKER_DELIVER_EXPORT, install_worker_members, worker_boot_source};
-use super::{
-    BackgroundStart, WorkerCommand, WorkerEvent, WorkerKey, WorkerMessage, WorkerPayload,
-    WorkerStart,
-};
+use super::{WorkerCommand, WorkerEvent, WorkerKey, WorkerMessage, WorkerPayload, WorkerStart};
 use crate::esm::{WORKER_BOOT_SPECIFIER, WORKER_MODULE_SPECIFIER, build_runtime};
 use crate::jobs::{JsThread, JsThreadHandle};
 use crate::lifetime::{EndOnUnwind, Lifetime, Settles, run_job, serve_clock};
@@ -555,12 +552,7 @@ impl Worker {
     /// A job like every other entry, and the one that does not go through
     /// [`Self::enter`], because the realm it would enter does not exist until
     /// it returns. [`boot_worker`] is what queues it.
-    fn boot(
-        self: &Rc<Self>,
-        name: String,
-        background: Option<BackgroundStart>,
-        root: &str,
-    ) -> Option<watch::Receiver<u64>> {
+    fn boot(self: &Rc<Self>, name: String, root: &str) -> Option<watch::Receiver<u64>> {
         // A worker whose lifetime already ended opens nothing.
         if self.ended() {
             return None;
@@ -592,7 +584,6 @@ impl Worker {
                                 key,
                                 &self.sources,
                                 name,
-                                background,
                                 move |data| {
                                     let _ = events.send(WorkerEvent {
                                         key,
@@ -725,7 +716,6 @@ async fn serve_worker(js: SharedRuntime, start: WorkerStart, thread: JsThreadHan
         name,
         url,
         script,
-        background,
         source,
         messages,
         events,
@@ -733,14 +723,7 @@ async fn serve_worker(js: SharedRuntime, start: WorkerStart, thread: JsThreadHan
         sources,
     } = start;
     let worker = Worker::new(js, key, &url, source, events, token, sources, thread);
-    worker.spawn(boot_worker(
-        Rc::clone(&worker),
-        name,
-        url,
-        script,
-        background,
-        messages,
-    ));
+    worker.spawn(boot_worker(Rc::clone(&worker), name, url, script, messages));
     worker.run_owner().await;
 }
 
@@ -748,12 +731,10 @@ async fn serve_worker(js: SharedRuntime, start: WorkerStart, thread: JsThreadHan
 /// realm and evaluates its root module, start its message consumer beside
 /// that job, and once the job has run start the clock a live worker has.
 ///
-/// Every worker's root module imports its `url`. `background`, the BTS's
-/// data, goes to the realm's host modules: the entry for `bobcat:bts` to
-/// import, and the screen and module table for `bobcat:bts-runtime` to read.
-/// `script`, the answer to the request `createWorker` made when it made one,
-/// goes to [`consume_messages`], which completes the script the root module
-/// is waiting in the import of.
+/// Every worker's root module imports its `url`, the BTS's `bobcat:bts`
+/// included. `script`, the answer to the request `createWorker` made when it
+/// made one, goes to [`consume_messages`], which completes the script the
+/// root module is waiting in the import of.
 ///
 /// The consumer does not wait for the boot job. That job can sit in the
 /// queue behind a sibling's job parked on a synchronous wait, which runs no
@@ -766,11 +747,10 @@ async fn boot_worker(
     name: String,
     url: String,
     script: Option<SourceAnswer>,
-    background: Option<BackgroundStart>,
     messages: mpsc::UnboundedReceiver<WorkerMessage>,
 ) {
     let root = worker_boot_source(&url);
-    let booted = run_job(&worker, move |worker| worker.boot(name, background, &root));
+    let booted = run_job(&worker, move |worker| worker.boot(name, &root));
     worker.spawn(consume_messages(Rc::clone(&worker), messages, script));
     // The boot job runs the first epilogue itself, so the first deadline has
     // already been published by the time this returns — and that epilogue
@@ -1183,7 +1163,6 @@ mod tests {
             String::new(),
             url,
             Some(script_rx),
-            None,
             messages_rx,
         ));
         Started {
@@ -1383,7 +1362,6 @@ mod tests {
             name: String::new(),
             url: format!("app:///worker{}.js", key.get()),
             script: Some(script),
-            background: None,
             source: ScriptSource::Worker(crate::view::WorkerId::from(key)),
             messages,
             events,

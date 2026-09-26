@@ -422,13 +422,14 @@ struct GroupFarEnds {
 }
 
 /// A realm starts every worker the same way, from the URL its specifier joins
-/// to. The BTS is the worker whose URL is `bobcat:bts`: it alone is started
-/// with the view's data and named `Background`. The host is asked for a
+/// to. The BTS is the worker whose URL is `bobcat:bts`: it alone is named
+/// `Background`, and nothing else in its `Start` differs, since the view's
+/// data reaches it in the `initialize` message. The host is asked for a
 /// worker's script only when its URL is not an engine name, so neither
 /// `bobcat:bts` nor `bobcat:timers` is requested. The source recorded under
 /// each key is the one its `Start` carries.
 #[test]
-fn every_worker_starts_from_its_url_and_only_bobcat_bts_gets_the_views_data() {
+fn every_worker_starts_from_its_url_and_only_bobcat_bts_is_named_background() {
     let (mut js, mut first, _second, mut ends) = two_view_group();
     first
         .run_main_thread_script(
@@ -453,16 +454,16 @@ fn every_worker_starts_from_its_url_and_only_bobcat_bts_gets_the_views_data() {
     };
     let (background, fetched, engine) = (start(), start(), start());
     assert_eq!(background.url, "bobcat:bts");
-    assert!(background.background.is_some() && background.script.is_none());
+    assert!(background.script.is_none());
     assert_eq!(background.source, ScriptSource::Background);
     assert_eq!(fetched.url, "app:///w.js");
-    assert!(fetched.background.is_none() && fetched.script.is_some());
+    assert!(fetched.script.is_some());
     assert_eq!(
         fetched.source,
         ScriptSource::Worker(WorkerId::from(fetched.key))
     );
     assert_eq!(engine.url, "bobcat:timers");
-    assert!(engine.background.is_none() && engine.script.is_none());
+    assert!(engine.script.is_none());
     assert_eq!(
         engine.source,
         ScriptSource::Worker(WorkerId::from(engine.key))
@@ -4353,8 +4354,8 @@ fn a_fetch_reaches_the_fetcher_as_the_realm_wrote_it() {
 /// this realm's host modules, and from nothing else. One that is neither
 /// fails in the realm with a `ReferenceError`, through an `import` or a
 /// `require`, and never reaches the host: `bobcat:worker` and `bobcat:bts` are
-/// registered, but each imports `bobcat-internal:worker`, which an MTS realm
-/// does not declare.
+/// registered, but each imports `bobcat-internal:worker` — `bobcat:bts`
+/// through `bobcat:worker` — which an MTS realm does not declare.
 /// `bobcat:lynx-modules`, `bobcat:selector-query` and
 /// `bobcat:global-event-emitter` import nothing an MTS realm lacks, so they
 /// load here as well.
@@ -4412,8 +4413,9 @@ fn an_engine_name_nothing_answers_fails_in_the_realm_without_a_request() {
 /// `bobcat-internal:native-modules` export, which is what decides the
 /// built-ins it can link. Written down so that a change to either set is a
 /// change to these lists. A namespace lists its exports sorted by name;
-/// `testFuture` is the test build's own producer. The native module members
-/// are the ones a worker realm has too.
+/// `testFuture` is the test build's own producer. The native module member
+/// is the one a worker realm has too; the module table is a startup member
+/// under `bobcat-internal:host`, which only this realm kind has.
 #[test]
 fn an_mts_realm_declares_these_host_members() {
     let expected = [
@@ -4439,6 +4441,7 @@ fn an_mts_realm_declares_these_host_members() {
         "listenerNameOpened",
         "loadModuleSync",
         "logScriptMessage",
+        "nativeModuleTable",
         "parentNode",
         "preloadStyleSheet",
         "queryElementIds",
@@ -4463,7 +4466,7 @@ fn an_mts_realm_declares_these_host_members() {
         "waitFuture",
     ]
     .join(",");
-    let native_modules = ["invokeNativeModule", "nativeModuleTable"].join(",");
+    let native_modules = "invokeNativeModule";
     let (mut js, mut runtime, _elements) = runtime();
     runtime
         .evaluate_module(

@@ -46,17 +46,17 @@ and `bobcat-workers` (every Worker realm, including the BTS).
   the worker's `consume_messages` completes the script under the request URL
   from the answer `createWorker` asked for; a URL under
   `ENGINE_MODULE_PREFIXES` is never requested, and the realm's own loader
-  loads it. `createWorker` decides from the URL alone: only `bobcat:bts` gets
-  `BackgroundStart` (entry, screen, native module table) and
-  `ScriptSource::Background`, which its realm answers through
-  `bobcat-internal:worker` (`backgroundEntry`,
-  `pixelRatio`/`pixelWidth`/`pixelHeight`) and
-  `bobcat-internal:native-modules` (`nativeModuleTable`); a worker at any
-  other URL declares the same members and reads no screen and an empty table.
+  loads it. `createWorker` decides from the URL alone, and only the source:
+  `bobcat:bts` is `ScriptSource::Background`, every other URL
+  `Worker(id)`; every `Start` is otherwise built the same way. The BTS's data
+  — its entry URL, the MTS realm's own `SystemInfo` and the view's native
+  module table — reaches it in the `initialize` message
+  `__BobcatConnectBackground` posts, beside the page data: the MTS boot
+  module is written with the BTS entry as a literal, and the table is the MTS
+  startup member `nativeModuleTable`. A plain Worker is posted none of it.
   `native_module.rs` — the `NativeModule` seam and the transport every realm
   kind shares: `install` gives each realm `bobcat-internal:native-modules`
-  (`invokeNativeModule`, and the one-shot table: the view's in a BTS, empty in
-  the MTS realm and a plain Worker), a call names its caller (`None` for the
+  (`invokeNativeModule` alone), a call names its caller (`None` for the
   MTS realm), and `ModuleReply` answers it through the view's command FIFO
   (`ToMain::ModuleCallback`) or the worker's inbox; `deliver` calls
   `bobcat:native-modules` in the realm that made the call. `view/` holds
@@ -89,7 +89,7 @@ and `bobcat-workers` (every Worker realm, including the BTS).
   `main-thread-runtime.ts` (`bobcat:runtime`), `worker.ts` (the W3C `Worker`),
   `worker-runtime.ts`, `background-thread-runtime.ts` (`bobcat:bts-runtime`),
   `bts.ts` (`bobcat:bts` — the BTS bootstrap a BTS realm's root module
-  imports; it reads the view's BTS entry once from `backgroundEntry`),
+  imports; it imports the BTS entry the `initialize` message names),
   `cross-thread-context.ts`, `event-target.ts` (with `reportException`, the
   realm's installed exception reporter), `animation-frame.ts`
   (`bobcat:animation-frame` — every realm's `requestAnimationFrame`, frame

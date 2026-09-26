@@ -309,7 +309,8 @@ struct AttachedView {
     startup: StartupSources,
     /// The embedder's native modules, as the BTS realm is told about them:
     /// the record `create_lynx_view` encoded out of their names and methods,
-    /// which the MTS realm hands to its BTS Worker in that worker's `Start`.
+    /// which the MTS realm reads as a startup member and posts to its BTS
+    /// Worker in the `initialize` message.
     native_modules: String,
     commands: mpsc::UnboundedReceiver<ToMain>,
     /// The metrics an attached painter names, `None` until one binds. Not a
