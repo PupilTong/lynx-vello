@@ -16,7 +16,7 @@ use tokio::task;
 use tokio_util::sync::CancellationToken;
 
 use super::*;
-use crate::background::{WorkerCommand, WorkerMessage, WorkerRole, WorkerStart};
+use crate::background::{WorkerCommand, WorkerMessage, WorkerStart};
 use crate::esm::build_runtime;
 use crate::jobs::{JsThread, JsThreadHandle};
 use crate::link::{
@@ -2229,7 +2229,8 @@ fn a_bts_worker_that_fails_reports_worker_ended_and_leaves_boot_alone() {
             .await;
         let background = harness.background_worker();
         assert!(
-            matches!(background.role, WorkerRole::Background(_)),
+            background.url == crate::esm::BTS_MODULE_SPECIFIER
+                && background.source == crate::ScriptSource::Background,
             "boot's worker starts as the background thread"
         );
         // Boot is already settled when the failure arrives: it is the MTS

@@ -101,8 +101,8 @@
 //! - **a realm's clock** — one [`serve_clock`] per live realm, a view's and a worker's alike,
 //!   waiting on its deadline, the re-arm that moves it, and a sibling's checkpoint;
 //! - **a worker's message consumer** — one `consume_messages` per worker, waiting on what is
-//!   posted, termination included, versus a dedicated worker's script while it is outstanding,
-//!   versus the worker's root module finishing until it has;
+//!   posted, termination included, versus the worker's script while it is outstanding, versus the
+//!   worker's root module finishing until it has;
 //! - **the painter's metrics** — one [`consume_metrics`] per view, waiting on the end versus the
 //!   next value the view's seat publishes.
 //!

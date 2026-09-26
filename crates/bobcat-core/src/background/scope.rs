@@ -8,8 +8,8 @@ use std::rc::Rc;
 
 use quickjs_rust_bridge::HostValue;
 
-use crate::background::{BackgroundStart, WorkerKey, WorkerRole};
-use crate::esm::{BTS_MODULE_SPECIFIER, TIMER_MODULE_SPECIFIER, WORKER_MODULE_SPECIFIER};
+use crate::background::{BackgroundStart, WorkerKey};
+use crate::esm::{TIMER_MODULE_SPECIFIER, WORKER_MODULE_SPECIFIER};
 use crate::link::HostOutbox;
 use crate::main::quickjs::{ScriptEngine, ScriptRuntime};
 use crate::script::ScriptError;
@@ -28,33 +28,28 @@ pub(super) const WORKER_DELIVER_EXPORT: &str = "__BobcatDeliverWorkerMessage";
 /// under [`WORKER_BOOT_SPECIFIER`](crate::esm::WORKER_BOOT_SPECIFIER), and
 /// whose evaluation is the worker's boot.
 ///
-/// Every worker's root starts with the same two imports, which put the global
+/// Every worker's root has the one form: two imports, which put the global
 /// scope — its `name` included — and the timer globals in place before
-/// anything of the worker's own runs. Then its role: a dedicated worker's
-/// root imports its script by the URL it was requested by, and a BTS's root
-/// imports the registered module `bobcat:bts`, the whole BTS bootstrap.
+/// anything of the worker's own runs, and then an `import` of the worker's
+/// script by its `url`. The BTS's `url` is `bobcat:bts`, so its root imports
+/// that registered module, the whole BTS bootstrap, the same way.
 ///
-/// The script is not written into the root. The worker's own task completes
-/// the module the root's `import` asks for, from the answer to the request
-/// `createWorker` made and under that request's name, the way a view's own
-/// task completes its MTS entry. A module completed in a realm is that realm's
-/// own source and is never named on the runtime, so two views that answer one
-/// URL with different bytes each run their own, and a worker leaves no
-/// registration behind. The script keeps its own line numbers, and its
-/// `import.meta.url` is the response URL.
-pub(super) fn worker_boot_source(role: &WorkerRole) -> String {
-    let role = match role {
-        WorkerRole::Background(_) => format!(r#"import "{BTS_MODULE_SPECIFIER}";"#),
-        WorkerRole::Dedicated { url, .. } => {
-            let url = serde_json::to_string(url)
-                .expect("serializing a Rust string as a JavaScript string cannot fail");
-            format!("await import({url});")
-        }
-    };
+/// The script is not written into the root. A URL that is an engine name is
+/// the realm's own loader's to load or refuse. For any other, the worker's
+/// own task completes the module the root's `import` asks for, from the
+/// answer to the request `createWorker` made and under that request's name,
+/// the way a view's own task completes its MTS entry. A module completed in a
+/// realm is that realm's own source and is never named on the runtime, so two
+/// views that answer one URL with different bytes each run their own, and a
+/// worker leaves no registration behind. The script keeps its own line
+/// numbers, and its `import.meta.url` is the response URL.
+pub(super) fn worker_boot_source(url: &str) -> String {
+    let url = serde_json::to_string(url)
+        .expect("serializing a Rust string as a JavaScript string cannot fail");
     format!(
         r#"import "{WORKER_MODULE_SPECIFIER}";
 import "{TIMER_MODULE_SPECIFIER}";
-{role}
+await import({url});
 "#
     )
 }
@@ -62,11 +57,11 @@ import "{TIMER_MODULE_SPECIFIER}";
 /// Installs a worker realm's own host modules, `bobcat-internal:worker` and
 /// `bobcat-internal:native-modules`: the members that are a worker's whole
 /// outward surface beyond the core [`crate::realm::open_realm`] installed
-/// under `bobcat-internal:host`. The BTS and a plain `Worker` get the same
-/// members. A BTS's members answer with its `background` data; a plain
-/// `Worker` has none, so its `backgroundEntry` and three screen members
-/// answer `undefined` and its `nativeModuleTable` an empty table. Answers
-/// with the flag `closeWorker` sets.
+/// under `bobcat-internal:host`. Every worker gets the same members. The
+/// BTS's members answer with its `background` data; a worker at any other URL
+/// has none, so its `backgroundEntry` and three screen members answer
+/// `undefined` and its `nativeModuleTable` an empty table. Answers with the
+/// flag `closeWorker` sets.
 ///
 /// `bobcat-internal:native-modules` is [`crate::native_module::install`]'s,
 /// the one every realm kind is given; a call a worker makes names the

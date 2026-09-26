@@ -40,22 +40,24 @@
 //!               ──── Post / Terminate ──▶ the worker's own task
 //!               ◀─────── WorkerEvent ────
 //!
-//!   host        ──── a dedicated worker's script ──▶ the worker's own task
+//!   host        ──── a worker's script ──▶ the worker's own task
 //! ```
 //!
 //! Each worker owns its cancellation token. The MTS Worker object's explicit
 //! termination or JS finalizer sends `Terminate`; releasing its realm closes
 //! the sender. A view's cancellation does not race ahead of JS app cleanup.
 //!
-//! A dedicated worker's *answer* deliberately skips `bobcat-main`: the thread
+//! A worker's script *answer* deliberately skips `bobcat-main`: the thread
 //! that owns a view's [`ResourceFetcher`](crate::resource::ResourceFetcher) is
 //! its painter, and routing the script through the main thread would queue a
 //! worker's script behind whatever synchronous JavaScript that thread is in
 //! the middle of. The ask rides the link the realm already has, because `new
 //! Worker(...)` runs on `bobcat-main` anyway; what the host is handed is the
 //! far end of a one-shot whose receiving end already travelled here inside
-//! the `Start`, so no ordering between the two has to be arranged. The BTS
-//! has no such answer: its script is the registered module `bobcat:bts`.
+//! the `Start`, so no ordering between the two has to be arranged. A worker
+//! whose URL is an engine name has no such answer, the BTS's `bobcat:bts`
+//! among them: the host is never asked for one, and the realm's own loader
+//! loads it.
 //!
 //! # What is shared, and where it lives
 //!
@@ -84,7 +86,7 @@ use wasm_thread::Builder as ThreadBuilder;
 use crate::link::SourceAnswer;
 use crate::script::ScriptError;
 use crate::threads::ThreadJoin;
-use crate::view::{EngineError, ScreenMetrics, ScriptSource, WorkerId};
+use crate::view::{EngineError, ScreenMetrics, ScriptSource};
 
 /// Names one `Worker` for the life of its group.
 ///
@@ -106,20 +108,37 @@ impl WorkerKey {
 
 /// One worker to start: everything it will ever be given, in one message.
 ///
-/// No state. What it says about the worker is its key, its name and its
-/// role, which the creating realm decided before sending it and which carries
-/// what that role needs: a dedicated worker's script URL and the answer to
-/// the request for it, or the BTS's entry, screen and native module table.
-/// Everything else a worker has — what is posted to it, what it says back —
-/// is a channel that arrives with it.
+/// No state. What it says about the worker is what the creating realm
+/// decided from its URL before sending it: the URL itself, the answer to the
+/// request for its script when the host was asked for one, the view's data
+/// when the URL is `bobcat:bts`, and the source its diagnostics are named
+/// by. The BTS is the dedicated worker whose URL is `bobcat:bts`, and those
+/// last two fields are all that set it apart. Everything else a worker has —
+/// what is posted to it, what it says back — is a channel that arrives with
+/// it.
 pub(crate) struct WorkerStart {
     pub(crate) key: WorkerKey,
     /// The worker's `self.name`, empty when the constructor named none.
     pub(crate) name: String,
-    /// Whether this is the view's background thread or a `Worker` over a
-    /// script URL, which is what the worker's diagnostics are named by and
-    /// what its realm's root module imports.
-    pub(crate) role: WorkerRole,
+    /// The worker's script URL: the `new Worker` specifier joined to the
+    /// creating entry's response URL by URL rules, which leaves an absolute
+    /// URL such as `bobcat:bts` as it is. The realm's root module imports
+    /// the script by it.
+    pub(crate) url: String,
+    /// The answer to the request for [`Self::url`], from whichever thread
+    /// owns the creating view's fetcher. `None` for a URL under
+    /// [`ENGINE_MODULE_PREFIXES`](crate::esm::ENGINE_MODULE_PREFIXES), which
+    /// the host is never asked for: the realm's own loader loads it, or
+    /// refuses it with a `ReferenceError`.
+    pub(crate) script: Option<SourceAnswer>,
+    /// The view's data, for the worker whose URL is `bobcat:bts`; `None` for
+    /// every other worker, whose host modules answer with no entry, no screen
+    /// and an empty native module table.
+    pub(crate) background: Option<BackgroundStart>,
+    /// What the worker's diagnostics are named by: `Background` for the
+    /// worker whose URL is `bobcat:bts`, and `Worker` with its key for every
+    /// other. The creating realm records the same value under the key.
+    pub(crate) source: ScriptSource,
     /// What the MTS Worker object posts. Its finalizer or explicit terminate
     /// sends `Terminate`; releasing the MTS realm closes the channel.
     pub(crate) messages: mpsc::UnboundedReceiver<WorkerMessage>,
@@ -132,38 +151,14 @@ pub(crate) struct WorkerStart {
     pub(crate) sources: crate::link::HostOutbox,
 }
 
-/// Which of the two kinds of worker a [`WorkerStart`] is for, with what that
-/// kind is started from.
-///
-/// The creating realm tells them apart by the `new Worker` specifier alone,
-/// before it allocates a key or sends anything: `bobcat:bts` is the built-in
-/// background script, and any other specifier is a URL.
-pub(crate) enum WorkerRole {
-    /// The view's background thread (BTS), which boot creates as
-    /// `new Worker("bobcat:bts")`. Its realm's root module imports the
-    /// registered module `bobcat:bts`, so nothing is fetched to start it,
-    /// and its realm's host modules answer with the view's data.
-    Background(BackgroundStart),
-    /// A `Worker` whose script is fetched from the URL its specifier
-    /// resolves to. The creating realm has already asked its host for it.
-    Dedicated {
-        /// The script's URL, the specifier joined to the creating entry's
-        /// response URL by URL rules. The realm's root module imports the
-        /// script by it.
-        url: String,
-        /// The answer to the request for `url`, from whichever thread owns
-        /// the creating view's fetcher.
-        script: SourceAnswer,
-    },
-}
-
-/// What a BTS is started with beyond what every worker is.
+/// What the worker whose URL is `bobcat:bts` is started with beyond what
+/// every worker is.
 ///
 /// Cloned into each `Start` for `bobcat:bts`: a card that constructs a
 /// second one gets the same data. `bobcat:bts-runtime` reads the screen and
 /// the module table from the realm's host modules as it is evaluated, so a
-/// plain `Worker` that imports it reads what a `Start` without this answers:
-/// no screen and an empty table.
+/// worker at any other URL that imports it reads what a `Start` without this
+/// answers: no screen and an empty table.
 #[derive(Clone)]
 pub(crate) struct BackgroundStart {
     /// The view's BTS entry, which `bobcat:bts` imports once the BTS is
@@ -182,19 +177,14 @@ pub(crate) struct BackgroundStart {
     pub(crate) native_modules: String,
 }
 
-impl WorkerRole {
-    /// The [`ScriptSource`] that events about the worker `key` names are
-    /// reported under: the view's background thread, or the `Worker` with
-    /// that key.
-    pub(crate) fn source(&self, key: WorkerKey) -> ScriptSource {
-        match self {
-            Self::Background(_) => ScriptSource::Background,
-            Self::Dedicated { .. } => ScriptSource::Worker(WorkerId::from(key)),
-        }
-    }
-}
-
 /// Everything the worker thread is ever told.
+#[cfg_attr(
+    test,
+    expect(
+        clippy::large_enum_variant,
+        reason = "the one small variant exists only in the test build"
+    )
+)]
 pub(crate) enum WorkerCommand {
     /// A realm constructed a `Worker`.
     Start(WorkerStart),

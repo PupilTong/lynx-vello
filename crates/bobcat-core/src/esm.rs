@@ -114,9 +114,10 @@ pub(crate) const GLOBAL_EVENT_MODULE_SPECIFIER: &str = "bobcat:global-event-emit
 /// Lynx's typed asynchronous Context channel, shared by MTS and BTS.
 pub(crate) const CONTEXT_MODULE_SPECIFIER: &str = "bobcat:cross-thread-context";
 
-/// The BTS bootstrap, and the `new Worker` specifier that names a view's
-/// background thread: a registered module a BTS realm's root module imports,
-/// which hands `bobcat:bts-runtime` the loader of the view's BTS entry.
+/// The URL of a view's background thread, and the BTS bootstrap: the BTS is
+/// the worker at this URL, and its realm's root module imports it as every
+/// worker's root imports its URL. A registered module, which hands
+/// `bobcat:bts-runtime` the loader of the view's BTS entry.
 pub(crate) const BTS_MODULE_SPECIFIER: &str = "bobcat:bts";
 
 /// The Element PAPI: the named exports an MTS entry builds and edits its
@@ -136,8 +137,8 @@ pub(crate) const WORKER_MODULE_SPECIFIER: &str = "bobcat:worker";
 
 /// The name a worker realm's root module is evaluated under: once per worker,
 /// as the realm opens, and never registered, the way `bobcat:boot` is an MTS
-/// realm's. A dedicated worker's `import` of its script is resolved against
-/// it, and the script's URL is absolute, so it resolves to itself.
+/// realm's. A worker's `import` of its script is resolved against it, and the
+/// script's URL is absolute, so it resolves to itself.
 pub(crate) const WORKER_BOOT_SPECIFIER: &str = "bobcat:worker-boot";
 
 /// The compiler factory ABI: what the BTS runtime's `lynx.requireModule` and

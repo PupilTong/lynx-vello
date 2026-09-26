@@ -1,7 +1,7 @@
 use tokio::sync::mpsc;
 
 use super::*;
-use crate::background::{WorkerCommand, WorkerEvent, WorkerRole};
+use crate::background::{WorkerCommand, WorkerEvent};
 use crate::esm::build_runtime;
 use crate::jobs::JsThread;
 use crate::link::{DetachedView, detached_outbox};
@@ -421,39 +421,64 @@ struct GroupFarEnds {
     thread: Option<Rc<JsThread>>,
 }
 
-/// A realm tells its two kinds of worker apart by the specifier alone, before
-/// it sends either `Start`: `bobcat:bts` is the background thread, and a
-/// script URL is a dedicated `Worker`. The source it records under each key
-/// says the same.
+/// A realm starts every worker the same way, from the URL its specifier joins
+/// to. The BTS is the worker whose URL is `bobcat:bts`: it alone is started
+/// with the view's data and named `Background`. The host is asked for a
+/// worker's script only when its URL is not an engine name, so neither
+/// `bobcat:bts` nor `bobcat:timers` is requested. The source recorded under
+/// each key is the one its `Start` carries.
 #[test]
-fn each_worker_starts_with_the_role_its_specifier_names() {
+fn every_worker_starts_from_its_url_and_only_bobcat_bts_gets_the_views_data() {
     let (mut js, mut first, _second, mut ends) = two_view_group();
     first
         .run_main_thread_script(
             &mut js,
             r"
             import { Worker } from 'bobcat-internal';
-            globalThis.workers = [new Worker('bobcat:bts'), new Worker('./w.js')];
+            globalThis.workers = [
+                new Worker('bobcat:bts'), new Worker('./w.js'), new Worker('bobcat:timers'),
+            ];
             ",
-            "app:///roles.js",
+            "app:///workers.js",
         )
-        .expect("the entry constructs both workers");
+        .expect("the entry constructs the three workers");
     let workers = ends.workers.as_mut().expect("the group's worker inbox");
-    let Ok(WorkerCommand::Start(background)) = workers.try_recv() else {
-        panic!("`new Worker('bobcat:bts')` sent no Start")
+    // The entry's three, in the order it constructed them. Boot's own BTS
+    // follows them, once the entry has run.
+    let mut start = || {
+        let Ok(WorkerCommand::Start(start)) = workers.try_recv() else {
+            panic!("each `new Worker` sent one Start")
+        };
+        start
     };
-    assert!(matches!(background.role, WorkerRole::Background(_)));
+    let (background, fetched, engine) = (start(), start(), start());
+    assert_eq!(background.url, "bobcat:bts");
+    assert!(background.background.is_some() && background.script.is_none());
+    assert_eq!(background.source, ScriptSource::Background);
+    assert_eq!(fetched.url, "app:///w.js");
+    assert!(fetched.background.is_none() && fetched.script.is_some());
     assert_eq!(
-        first.workers.source_of(background.key),
-        Some(ScriptSource::Background)
+        fetched.source,
+        ScriptSource::Worker(WorkerId::from(fetched.key))
     );
-    let Ok(WorkerCommand::Start(dedicated)) = workers.try_recv() else {
-        panic!("`new Worker('./w.js')` sent no Start")
-    };
-    assert!(matches!(dedicated.role, WorkerRole::Dedicated { .. }));
+    assert_eq!(engine.url, "bobcat:timers");
+    assert!(engine.background.is_none() && engine.script.is_none());
     assert_eq!(
-        first.workers.source_of(dedicated.key),
-        Some(ScriptSource::Worker(WorkerId::from(dedicated.key)))
+        engine.source,
+        ScriptSource::Worker(WorkerId::from(engine.key))
+    );
+    for start in [&background, &fetched, &engine] {
+        assert_eq!(first.workers.source_of(start.key), Some(start.source));
+    }
+    let mut requested = Vec::new();
+    while let Ok(notice) = ends.views[0].notices.try_recv() {
+        if let ViewNotice::RequestSource { request, .. } = notice {
+            requested.push(request);
+        }
+    }
+    assert!(
+        matches!(requested.as_slice(), [crate::resource::SourceRequest::Module(url)] if url == "app:///w.js"),
+        "only the script at a URL that is not an engine name is requested"
     );
 }
 

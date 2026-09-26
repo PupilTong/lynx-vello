@@ -19,15 +19,16 @@ use url::Url;
 
 use super::{
     BackgroundStart, WorkerCommand, WorkerEvent, WorkerHome, WorkerKey, WorkerMessage,
-    WorkerPayload, WorkerRole, WorkerStart, wire_json, wire_value,
+    WorkerPayload, WorkerStart, wire_json, wire_value,
 };
-use crate::ScreenMetrics;
 use crate::clock::ClockInstant;
-use crate::link::{HostOutbox, ViewNotice, block_on_deadline, detached_base};
+use crate::esm::BTS_MODULE_SPECIFIER;
+use crate::link::{HostOutbox, SourceAnswer, ViewNotice, block_on_deadline, detached_base};
 use crate::resource::{
     LoadedSource, ResourceError, ResourceErrorKind, ResourceErrorPhase, RetryAdvice,
     SourceCompletion, SourceRequest,
 };
+use crate::{ScreenMetrics, ScriptSource, WorkerId};
 
 impl WorkerHome {
     pub(crate) fn with_entry_for_test(entry: (String, String)) -> Self {
@@ -150,9 +151,9 @@ impl Group {
             .send(command);
     }
 
-    /// Names one dedicated worker on a view, without answering its script
-    /// yet. Its script is requested by a URL made from its key, which is what
-    /// the realm's root module imports it by. The realm's other half of a
+    /// Names one worker on a view, without answering its script yet. Its
+    /// script is requested by a URL made from its key, which is what the
+    /// realm's root module imports it by. The realm's other half of a
     /// construction — asking the host to fetch — is what the test does by
     /// hand in [`Self::answer`].
     fn construct(&mut self, view: usize, name: &str) -> WorkerKey {
@@ -163,16 +164,16 @@ impl Group {
     /// The same, over a request URL of the test's own.
     fn construct_requesting(&mut self, view: usize, name: &str, url: &str) -> WorkerKey {
         let (script, awaiting) = oneshot::channel();
-        let key = self.start_worker(
-            view,
-            name,
-            WorkerRole::Dedicated {
-                url: url.to_owned(),
-                script: awaiting,
-            },
-        );
+        let key = self.start_worker(view, name, url, Some(awaiting), None, Vec::new());
         self.scripts.insert(key, script);
         key
+    }
+
+    /// Names one worker on a view over a URL that is an engine name, which
+    /// `createWorker` asks the host nothing for: its `Start` carries no
+    /// script, and the realm's own loader loads the name or refuses it.
+    fn construct_engine_name(&mut self, view: usize, url: &str) -> WorkerKey {
+        self.start_worker(view, "", url, None, None, Vec::new())
     }
 
     /// Names one BTS on a view, started over `background` the way boot's
@@ -180,15 +181,51 @@ impl Group {
     /// its root module imports the registered `bobcat:bts`, which asks the
     /// host for the entry once an `initialize` message arrives.
     fn construct_background(&mut self, view: usize, background: BackgroundStart) -> WorkerKey {
-        self.start_worker(view, "lynx-bg", WorkerRole::Background(background))
+        self.construct_background_after(view, background, Vec::new())
     }
 
-    /// Sends one `Start` for `role` on a view, and keeps the sending end of
-    /// the new worker's message channel.
-    fn start_worker(&mut self, view: usize, name: &str, role: WorkerRole) -> WorkerKey {
+    /// The same, with `posted` already waiting in the new worker's message
+    /// channel when its `Start` is sent, which is the earliest any message
+    /// can reach a worker.
+    fn construct_background_after(
+        &mut self,
+        view: usize,
+        background: BackgroundStart,
+        posted: Vec<WorkerMessage>,
+    ) -> WorkerKey {
+        self.start_worker(
+            view,
+            "lynx-bg",
+            BTS_MODULE_SPECIFIER,
+            None,
+            Some(background),
+            posted,
+        )
+    }
+
+    /// Sends one `Start` on a view with what `createWorker` would have
+    /// decided for `url`, and keeps the sending end of the new worker's
+    /// message channel, into which `posted` is sent first.
+    fn start_worker(
+        &mut self,
+        view: usize,
+        name: &str,
+        url: &str,
+        script: Option<SourceAnswer>,
+        background: Option<BackgroundStart>,
+        posted: Vec<WorkerMessage>,
+    ) -> WorkerKey {
         let key = WorkerKey::new(self.next_key.get());
         self.next_key.set(key.get() + 1);
         let (messages, incoming) = mpsc::unbounded_channel();
+        for message in posted {
+            let _ = messages.send(message);
+        }
+        let source = if url == BTS_MODULE_SPECIFIER {
+            ScriptSource::Background
+        } else {
+            ScriptSource::Worker(WorkerId::from(key))
+        };
         let token = CancellationToken::new();
         let sources = HostOutbox::new(
             self.views[view].notices.clone(),
@@ -200,7 +237,10 @@ impl Group {
         self.tell(WorkerCommand::Start(WorkerStart {
             key,
             name: name.to_owned(),
-            role,
+            url: url.to_owned(),
+            script,
+            background,
+            source,
             messages: incoming,
             events: self.views[view].events.clone(),
             token,
@@ -493,6 +533,38 @@ fn a_bts_imports_its_entry_through_bobcat_bts_once_initialized() {
     assert_eq!(group.message(0), wire("lynx-bg function app:///bts.js"));
 }
 
+/// The BTS's root module imports `bobcat:bts` as every worker's root imports
+/// its URL, with an `await import`. The realm's own loader answers that
+/// import, so the root module finishes inside the job that opens the realm,
+/// before any job that delivers a post, and the worker holds what is posted
+/// until then in any case. So an `initialize` already waiting in the channel
+/// when the BTS's `Start` is sent, the earliest any message can arrive, is
+/// delivered only once `bobcat:bts` has handed `bobcat:bts-runtime` the
+/// function it starts the BTS with: the BTS asks for its entry and runs it.
+/// Delivered any earlier, it would reach a realm with no listener for it.
+#[test]
+fn an_initialize_posted_before_the_bts_starts_waits_for_bobcat_bts() {
+    let mut group = Group::new();
+    group.construct_background_after(
+        0,
+        BackgroundStart {
+            entry: Some("app:///bts.js".to_owned()),
+            screen: ScreenMetrics::for_viewport(32.0, 24.0, 1.0),
+            native_modules: String::new(),
+        },
+        vec![WorkerMessage::Post(wire_value(
+            r#"({bobcat: "runtime", method: "initialize"})"#,
+        ))],
+    );
+    let (url, completion) = group.views[0].source();
+    assert_eq!(url, "app:///bts.js");
+    completion.complete(Ok(LoadedSource::Module {
+        source: "postMessage('entry ran');".to_owned(),
+        url,
+    }));
+    assert_eq!(group.message(0), wire("entry ran"));
+}
+
 /// A BTS's `SystemInfo` and `NativeModules` come from the `Start` that
 /// created it: `bobcat:bts-runtime` reads the screen and the module table
 /// from the realm's host modules as it is evaluated. The `initialize` message
@@ -579,20 +651,19 @@ fn a_script_that_cannot_be_fetched_fails_its_worker_and_nothing_else() {
     assert_eq!(group.next(0).key, key);
 }
 
-/// A script URL that is an engine name is resolved by the realm's own loader,
-/// so the root module finishes without the host's answer: a registered
-/// built-in links and runs, and a name nothing registered is refused in the
-/// realm with a `ReferenceError`. The host is still asked for that URL, as
-/// for every script, and its answer is still read after that module has
-/// finished: one that is not a script ends the worker with `Failed`, as it
-/// does for any other URL.
+/// A worker whose URL is an engine name is loaded by its realm's own loader
+/// alone: `createWorker` asks the host nothing for such a URL, so its `Start`
+/// carries no script and nothing waits for one. A registered built-in links
+/// and runs. A name nothing registered is refused in the realm with a
+/// `ReferenceError`, which the worker reports as something it threw, and it
+/// goes on running like a worker whose script threw.
 #[test]
-fn a_worker_named_by_an_engine_url_still_ends_on_the_hosts_failed_answer() {
+fn a_worker_named_by_an_engine_url_is_loaded_by_its_realm_without_the_host() {
     let mut group = Group::new();
-    let registered = group.construct_requesting(0, "", "bobcat:timers");
-    let refused = group.construct_requesting(1, "", "bobcat:nope");
-    // Its root module has finished by the time this is reported.
-    let event = group.next(1);
+    group.views.push(View::new());
+    let registered = group.construct_engine_name(1, "bobcat:timers");
+    let refused = group.construct_engine_name(2, "bobcat:nope");
+    let event = group.next(2);
     assert_eq!(event.key, refused);
     let WorkerPayload::Errored(error) = event.payload else {
         panic!("a refused import is something the realm threw")
@@ -602,30 +673,28 @@ fn a_worker_named_by_an_engine_url_still_ends_on_the_hosts_failed_answer() {
         "{}",
         error.message
     );
-    for (view, key) in [(0, registered), (1, refused)] {
-        let _ = group
-            .scripts
-            .remove(&key)
-            .expect("the host has not answered yet")
-            .send(Err(ResourceError {
-                kind: ResourceErrorKind::UnsupportedScheme,
-                phase: ResourceErrorPhase::Resolve,
-                locator: None,
-                message: "no transport serves `bobcat:` URLs".into(),
-                retry: RetryAdvice::Never,
-            }
-            .into()));
-        let event = group.next(view);
-        assert_eq!(event.key, key);
-        let WorkerPayload::Failed(error) = event.payload else {
-            panic!("a script that never arrived leaves no worker")
-        };
+    // A full round of the thread later, neither worker has reported anything
+    // more, its end included, and neither asked its host for anything.
+    group.quiet();
+    for view in [1, 2] {
         assert!(
-            error.message.contains("loading the worker's script")
-                && error.message.contains("no transport serves"),
-            "{}",
-            error.message
+            group.views[view].incoming.try_recv().is_err(),
+            "the worker reported nothing more"
         );
+        assert!(
+            group.views[view].sources.try_recv().is_err(),
+            "the worker asked its host for nothing"
+        );
+    }
+    // Each is still running until it is told to stop: its task still holds
+    // its view's event sender, and lets go of it once terminated.
+    for (view, key) in [(1, registered), (2, refused)] {
+        assert!(
+            group.views[view].events.strong_count() > 1,
+            "the worker is still running"
+        );
+        group.terminate(key);
+        group.wait_for_workers_to_end(view, PATIENCE, "the terminated worker ended");
     }
 }
 
