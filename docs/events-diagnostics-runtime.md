@@ -106,10 +106,11 @@ and column as primitive binding arguments and creates the Worker error event
 in JS; Rust builds no diagnostic envelope of its own.
 
 Every realm has `console.log/info/debug/warn/error` and `lynx.reportError`,
-and they are one module, `bobcat:diagnostics`, in all three realm kinds. MTS
-entries receive `console` and `_ReportError` through their injected ESM
-import. The BTS exports `console` from `bobcat:bts-runtime`, where a raw BTS
-entry imports it and a bundle body's preamble binds it. A worker realm whose
+and they are one module, `bobcat:diagnostics`, in all three realm kinds. A
+card's MTS entry receives `console` and `_ReportError` through the ESM import
+`bobcat-source` prepends to its body (`MTS_CHUNK_PREAMBLE`). The BTS exports
+`console` from `bobcat:bts-runtime`, where a raw BTS entry imports it and a
+card body's `BTS_CHUNK_PREAMBLE` binds it. A worker realm whose
 script imports `bobcat:worker` — the BTS's `bobcat:bts` does — also has
 `console` on its global, installed by that module as WebIDL installs a
 namespace: writable, configurable and not enumerable. The engine installs it

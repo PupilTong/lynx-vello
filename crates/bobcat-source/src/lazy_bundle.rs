@@ -42,8 +42,9 @@
 //! section's name:
 //!
 //! - a **`main-thread`** section is an MTS body, so its module carries [`MTS_CHUNK_PREAMBLE`] — the
-//!   bindings a card's entry has — and `export default` in front of it, because a `.lynx.bundle`'s
-//!   body is one expression and what `ReactLynx` calls is that expression's value
+//!   bindings a card's entry has, which [`mts_entry_source`](crate::mts_entry_source) puts in front
+//!   of a page's root — and `export default` in front of it, because a `.lynx.bundle`'s body is one
+//!   expression and what `ReactLynx` calls is that expression's value
 //!   (`lynx.loadScript('main-thread', …)(entry)`);
 //! - a **`.json`** body is a value, registered verbatim, its own URL telling the loader to parse
 //!   it;
@@ -276,7 +277,7 @@ mod tests {
     /// The MTS body is the entry's own binding list plus `export default`, and
     /// all of it is one physical line, so the body keeps its line numbering.
     #[test]
-    fn a_main_thread_body_is_the_entry_preamble_and_a_default_export() {
+    fn a_main_thread_body_is_the_mts_preamble_and_a_default_export() {
         let source = section_module_source(BundleTarget::Lynx, "/main-thread", "(function (e) {})");
         assert!(source.starts_with(MTS_CHUNK_PREAMBLE));
         assert!(source.ends_with("export default (function (e) {})"));

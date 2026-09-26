@@ -67,8 +67,10 @@ resource system, **verbatim**, at a resource URL of its own —
 `<entry URL path>/<name>.js`, the chunk name percent-encoded the way a named
 stylesheet section's is (`named_chunk_url`), any `?`/`#` suffix of the entry
 URL kept. Nothing is prepended to it and nothing imports it. The root MTS
-script is the container's own text: no import prefix, no registration call, no
-table.
+script is the container's own text behind one line of imports,
+`MTS_CHUNK_PREAMBLE`, which `bobcat-source` writes in front of every card body
+it registers for this realm, on the body's own first line: no import of a
+chunk, no registration call, no table.
 
 `__LoadLepusChunk(path, options)` does the rest, in JavaScript
 (`main-thread-runtime.ts`):
@@ -92,7 +94,7 @@ native's `TemplateEntry` does (`core/renderer/template_entry.cc`,
 and the ESM module map never sees a chunk, because a chunk is not a module.
 
 A chunk does not share the entry module's lexical scope. The host compiles it
-as a **function body**, whose parameters are the bindings the entry preamble
+as a **function body**, whose parameters are the bindings `MTS_CHUNK_PREAMBLE`
 gives the entry — every `bobcat:element` export, and the `bobcat:runtime`
 names `__Card__`, `lynx`, `console`, `SystemInfo`, `__globalProps`,
 `NativeModules`, `_AddEventListener`, `_ReportError`, `_SetSourceMapRelease`,
@@ -104,10 +106,13 @@ what native does, where a chunk is a separate script evaluated in the same
 context. A `var` at a chunk's top level is local to that call and declares no
 global, and an `import` could not appear in a function body at all.
 
-The entry preamble is the chunk list and nothing more. Boot imports the entry
-by the URL the view named it by, and a task of the view completes that module
-from the pre-issued answer, answered from the fetcher's response URL, so
-`import.meta.url` is the fetcher's answer, redirect included. Before it
+`MTS_CHUNK_PREAMBLE` is the chunk list and nothing more, and the engine adds
+nothing to the entry: a card's entry carries the list because `bobcat-source`
+registered it that way, and an entry that is not a card's body imports what it
+uses itself. Boot imports the entry by the URL the view named it by, and a
+task of the view completes that module from the pre-issued answer as the
+fetcher gave it, from the fetcher's response URL, so `import.meta.url` is the
+fetcher's answer, redirect included. Before it
 completes the module, `MainThreadRuntime::complete_entry` calls
 `bobcat:runtime`'s `__BobcatInitEntry` with that response URL, which names
 `__Card__` the entry's response URL before the entry body runs. Nothing calls

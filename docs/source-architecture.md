@@ -58,8 +58,11 @@ CSS into a restricted binary CSS model would lose source capabilities.
 The two registration paths share parsing and URL mapping while retaining
 explicit host policies. Native XML uses strict UTF-8 and private memory URLs,
 while browser XML uses already replacement-decoded text and final-response
-fragments. Both paths register the optional background body and pass its URL
-as `ViewSources.background_entry`. Core starts the page's BTS worker after
+fragments. Both paths register the main-thread body behind
+`MTS_CHUNK_PREAMBLE` and the optional background body as the `CommonJS` chunk
+web-core runs it as, behind `BTS_CHUNK_PREAMBLE`, each on the body's own first
+line, because the engine adds nothing to an entry; and they pass the
+background body's URL as `ViewSources.background_entry`. Core starts the page's BTS worker after
 the MTS entry import completes, and the MTS realm posts it that URL in its
 first message, `initialize`. Its `bobcat:bts` bootstrap initializes
 `lynx.getCoreContext()` and awaits an import of that URL, which the worker

@@ -98,21 +98,20 @@ async fn public_updates_require_mts_boot_then_preserve_order() {
           console.log('mts props ' + props.theme);
         };
       </script><script thread="background">
-        import {lynx as backgroundLynx, console as backgroundConsole} from 'bobcat:bts-runtime';
-        if (backgroundLynx.SystemInfo.pixelRatio !== 1 || backgroundLynx.SystemInfo.pixelWidth !== 100 || backgroundLynx.SystemInfo.pixelHeight !== 100)
+        if (lynx.SystemInfo.pixelRatio !== 1 || lynx.SystemInfo.pixelWidth !== 100 || lynx.SystemInfo.pixelHeight !== 100)
           throw Error('BTS system info');
-        const app = backgroundLynx.getApp();
+        const app = lynx.getApp();
         if (app._params.initData !== null || app._params.processorName !== '' || app._params.cacheData.length)
           throw Error('initial data slots');
-        if (app._params.updateData !== backgroundLynx.__initData || backgroundLynx.__initData.finished || backgroundLynx.__globalProps.theme !== 'light')
+        if (app._params.updateData !== lynx.__initData || lynx.__initData.finished || lynx.__globalProps.theme !== 'light')
           throw Error('initial snapshot');
-        backgroundConsole.log('bts initial ' + backgroundLynx.__initData.count);
-        app.OnLifecycleEvent = ([name, count]) => backgroundConsole.log('bts ' + name + ' ' + count);
-        app.updateCardData = (data, options) => backgroundConsole.log('bts update ' + data.count + ' ' + options.type);
-        app.updateGlobalProps = props => backgroundConsole.log('bts props ' + props.theme + ' ' + props.keep);
-        app.onAppReload = data => backgroundConsole.log('bts reload ' + data.count);
-        backgroundLynx.getJSModule('GlobalEventEmitter').addListener('reload-from-bts', () => {
-          backgroundLynx.reload({count:9}, () => backgroundConsole.log('bts callback'));
+        console.log('bts initial ' + lynx.__initData.count);
+        app.OnLifecycleEvent = ([name, count]) => console.log('bts ' + name + ' ' + count);
+        app.updateCardData = (data, options) => console.log('bts update ' + data.count + ' ' + options.type);
+        app.updateGlobalProps = props => console.log('bts props ' + props.theme + ' ' + props.keep);
+        app.onAppReload = data => console.log('bts reload ' + data.count);
+        lynx.getJSModule('GlobalEventEmitter').addListener('reload-from-bts', () => {
+          lynx.reload({count:9}, () => console.log('bts callback'));
         });
       </script></lynx>
     "#).unwrap();

@@ -144,43 +144,43 @@ pub(crate) const WORKER_MODULE_SPECIFIER: &str = "bobcat:worker";
 /// its companions load a bundle body through.
 pub(crate) const LYNX_MODULES_SPECIFIER: &str = "bobcat:lynx-modules";
 
-/// The literal [`MTS_CHUNK_PREAMBLE`] is, as a macro, so that
-/// `main::runtime`'s `ENTRY_PREAMBLE` can `concat!` onto it: `concat!` takes
-/// literals and a `const` is not one.
-macro_rules! mts_chunk_preamble {
-    () => {
-        concat!(
-            "import { __Card__, lynx, console, SystemInfo, __globalProps, NativeModules, ",
-            "_AddEventListener, _ReportError, _SetSourceMapRelease, __OnLifecycleEvent, ",
-            "__LoadLepusChunk, __LoadStyleSheet, __AdoptStyleSheet } from \"bobcat:runtime\"; ",
-            "import { __CreatePage, __CreateElement, __CreateWrapperElement, __CreateText, ",
-            "__CreateImage, __CreateView, __CreateScrollView, __CreateRawText, __CreateList, ",
-            "__AppendElement, __InsertElementBefore, __RemoveElement, __ReplaceElement, ",
-            "__ReplaceElements, __SwapElement, __SetClasses, __SetID, __GetID, __GetTag, ",
-            "__GetChildren, __GetAttributeByName, __GetAttributeNames, __GetElementUniqueID, ",
-            "__SetDataset, __GetDataset, __AddDataset, __SetInlineStyles, __AddInlineStyle, ",
-            "__SetCSSId, __SetAttribute, __UpdateListCallbacks, __AddEvent, __GetEvent, ",
-            "__GetEvents, __SetEvents, __AddEventListener, __RemoveEventListener, ",
-            "__StopPropagation, __StopImmediatePropagation, __GetPageElement, __QuerySelector, ",
-            "__QuerySelectorAll, __InvokeUIMethod, __GetComputedStyleByKey, __FlushElementTree ",
-            "} from \"bobcat:element\"; ",
-        )
-    };
-}
-pub(crate) use mts_chunk_preamble;
-
-/// Named imports prepended to one *MTS chunk body* before it is registered as
-/// a module: every binding `main::runtime`'s `ENTRY_PREAMBLE` gives a card's
-/// entry, which is what a lazy container's `main-thread` section expects to
-/// find in scope.
+/// Named imports prepended to one card's *MTS body* before it is registered
+/// as a module: every binding a card's main-thread script expects to find in
+/// scope, as imports of [`RUNTIME_MODULE_SPECIFIER`] and
+/// [`ELEMENT_MODULE_SPECIFIER`]. web-core's main-thread wrapper also carries a
+/// `//# allFunctionsCalledOnLoad` line, a V8 eager-compilation hint that
+/// `QuickJS`'s parser ignores, so it is not reproduced here.
 ///
 /// One physical line, deliberately: the body follows it on the same line, so
-/// every line of the body keeps the number it had in the container. The entry
-/// preamble is built from the same literal, so the two lists cannot drift.
+/// every line of the body keeps the number it had in the container.
 ///
-/// `bobcat-source`'s lazy-container installer is what prepends it; it lives
-/// here because the names are this realm's.
-pub const MTS_CHUNK_PREAMBLE: &str = mts_chunk_preamble!();
+/// The names are this realm's, which is why the list lives here.
+/// `bobcat-source` is what prepends it, to every card body it registers for
+/// this realm: a page's root Lepus script, an XML page's main-thread script
+/// and a lazy container's `main-thread` section. The engine adds nothing to
+/// an entry: it loads every entry as the fetcher answered it, so a
+/// main-thread script that is not a card's body imports what it uses itself.
+///
+/// The list does not name the entry: `MainThreadRuntime::complete_entry`
+/// hands the entry's response URL to `__BobcatInitEntry` before the body
+/// runs, so no such statement is compiled into every body this is prepended
+/// to.
+pub const MTS_CHUNK_PREAMBLE: &str = concat!(
+    "import { __Card__, lynx, console, SystemInfo, __globalProps, NativeModules, ",
+    "_AddEventListener, _ReportError, _SetSourceMapRelease, __OnLifecycleEvent, ",
+    "__LoadLepusChunk, __LoadStyleSheet, __AdoptStyleSheet } from \"bobcat:runtime\"; ",
+    "import { __CreatePage, __CreateElement, __CreateWrapperElement, __CreateText, ",
+    "__CreateImage, __CreateView, __CreateScrollView, __CreateRawText, __CreateList, ",
+    "__AppendElement, __InsertElementBefore, __RemoveElement, __ReplaceElement, ",
+    "__ReplaceElements, __SwapElement, __SetClasses, __SetID, __GetID, __GetTag, ",
+    "__GetChildren, __GetAttributeByName, __GetAttributeNames, __GetElementUniqueID, ",
+    "__SetDataset, __GetDataset, __AddDataset, __SetInlineStyles, __AddInlineStyle, ",
+    "__SetCSSId, __SetAttribute, __UpdateListCallbacks, __AddEvent, __GetEvent, ",
+    "__GetEvents, __SetEvents, __AddEventListener, __RemoveEventListener, ",
+    "__StopPropagation, __StopImmediatePropagation, __GetPageElement, __QuerySelector, ",
+    "__QuerySelectorAll, __InvokeUIMethod, __GetComputedStyleByKey, __FlushElementTree ",
+    "} from \"bobcat:element\"; ",
+);
 
 /// BTS bindings live separately from the bootstrap that awaits the app entry.
 pub(crate) const BTS_RUNTIME_MODULE_SPECIFIER: &str = "bobcat:bts-runtime";
@@ -196,8 +196,13 @@ pub(crate) const BTS_RUNTIME_MODULE_SPECIFIER: &str = "bobcat:bts-runtime";
 /// One physical line, deliberately: the body follows it on the same line, so
 /// every line of the body keeps the number it had in the container.
 ///
-/// `bobcat-source`'s `PageSource` is what prepends it, as a page's bodies are
-/// its to register; it lives here because the names are this realm's.
+/// The names are this realm's, which is why the list lives here.
+/// `bobcat-source` is what prepends it, to every card body it registers for
+/// this realm: a container's manifest paths and string custom sections, and
+/// an XML page's background-thread script. The engine adds nothing to a
+/// worker's script or to the BTS entry: it loads each as the fetcher answered
+/// it, so a background script that is not a card's body imports what it uses
+/// itself.
 pub const BTS_CHUNK_PREAMBLE: &str = concat!(
     "import { lynx, lynxCoreInject, NativeModules, console, SystemInfo, Card, Component, ",
     "nativeAppId, Behavior, LynxJSBI, setTimeout, setInterval, clearTimeout, clearInterval, ",

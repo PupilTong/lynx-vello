@@ -83,7 +83,7 @@ fn sheet(color: &str) -> PreparsedStyleSheet {
 
 fn fetcher(entry_url: &str, color: &str) -> Rc<FetcherDouble> {
     Rc::new(
-        FetcherDouble::new(page_script().into_bytes())
+        FetcherDouble::card(page_script())
             .resolving_to(entry_url)
             .with_preparsed_style_sheet(sheet(color)),
     )

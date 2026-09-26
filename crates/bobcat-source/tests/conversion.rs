@@ -624,10 +624,10 @@ async fn named_lepus_chunks_load_and_run_on_every_call() {
             let _ = self.0.send(());
         }
     }
-    // A chunk shares `globalThis` and the entry preamble's own runtime and
-    // PAPI bindings with the entry — as the parameters of the function body
-    // the host compiled it as — but not the entry's lexical scope, and not
-    // its own `var`s, which are local to each call.
+    // A chunk shares `globalThis` and the runtime and PAPI bindings
+    // `MTS_CHUNK_PREAMBLE` gives the entry — as the parameters of the function
+    // body the host compiled it as — but not the entry's lexical scope, and
+    // not its own `var`s, which are local to each call.
     let native = native_bundle(vec![custom_section(vec![
         CustomSection::source(
             "entry__main-thread",

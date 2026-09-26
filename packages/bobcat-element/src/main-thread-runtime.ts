@@ -19,8 +19,10 @@
 // The one local delivery path is `lynx.getEngine()`:
 // its stable EventTarget retains realm-local listeners so `bobcat:boot` can
 // dispatch `__RenderPage` when an entry has no legacy `globalThis.renderPage`.
-// None of these bindings is installed on `globalThis`; the entry receives them
-// only through the import declarations Bobcat prepends to its source.
+// None of these bindings is installed on `globalThis`. A card's entry receives
+// them only through the import declarations `bobcat-source` prepends to its
+// body (`MTS_CHUNK_PREAMBLE`), and any other entry through its own imports:
+// the engine adds nothing to an entry.
 //
 // The host's page data arrives through `bobcat-internal:host` as the strings
 // the view was given, and is parsed here as this module evaluates.
@@ -50,7 +52,7 @@ import {
 import { __BobcatQueryNodes } from "bobcat:element";
 // The whole PAPI as one namespace, for the binding list a named Lepus
 // chunk is called with: the export names are this module's only source of
-// truth for what the entry preamble imports.
+// truth for what `MTS_CHUNK_PREAMBLE` imports.
 import * as elementPAPI from "bobcat:element";
 import type { NodeQueryRequest } from "bobcat:selector-query";
 import "bobcat:timers";
@@ -506,8 +508,8 @@ export function __OnLifecycleEvent(data: unknown) {
 }
 
 /**
- * What a named Lepus chunk is called with: every binding the entry preamble
- * gives the entry, as a parameter of its own.
+ * What a named Lepus chunk is called with: every binding `MTS_CHUNK_PREAMBLE`
+ * gives a card's entry, as a parameter of its own.
  *
  * Ordered, because the parameter list the chunk is compiled with and the
  * arguments it is applied to are both this list. Each value is read at the
@@ -556,9 +558,9 @@ type ChunkBody = (...bindings: unknown[]) => unknown;
  * is no chunk cache here.
  *
  * A chunk does not share the entry's lexical scope. What it has is this
- * realm's `globalThis` and `CHUNK_BINDINGS` — the same values the entry
- * preamble imports — as the parameters of the function body it was compiled
- * as. A `var` at its top level is therefore local to that call.
+ * realm's `globalThis` and `CHUNK_BINDINGS` — the same values
+ * `MTS_CHUNK_PREAMBLE` imports — as the parameters of the function body it
+ * was compiled as. A `var` at its top level is therefore local to that call.
  *
  * The answer is native's: `false` for a chunk this page does not carry and for
  * a different component entry, and `true` for a chunk that was found — even

@@ -21,7 +21,7 @@ import { createSystemInfo } from "bobcat:system-info";
 
 const timers = globalThis as unknown as TimerGlobals;
 
-// The bobcat:bts bootstrap and the BTS application's entry preamble import
+// The bobcat:bts bootstrap and every card body's `BTS_CHUNK_PREAMBLE` import
 // this runtime. Like MTS, lynx is a module binding, never a global property.
 // The bootstrap installs a message receiver, then returns so Worker messages
 // can initialize the runtime before the application entry is imported.
@@ -434,10 +434,12 @@ export const lynxCoreInject = {tt: app};
 export const globDynamicComponentEntry = "__Card__";
 Object.assign(scope, {globDynamicComponentEntry});
 
-// The rest of web-core's chunk parameter list, as module exports: `PageSource`
-// prepends `BTS_CHUNK_PREAMBLE` to every bundle body it registers, and that
-// preamble imports these names from here. Each is the value the old wrapper's
-// argument list carried, so a body sees exactly what it saw before.
+// The rest of web-core's chunk parameter list, as module exports:
+// `bobcat-source` prepends `BTS_CHUNK_PREAMBLE` to every card body it
+// registers for this realm — a container's bodies and an XML page's
+// background-thread script — and that preamble imports these names from here.
+// Each is the value the old wrapper's argument list carried, so a body sees
+// exactly what it saw before.
 export const NativeModules = nativeModules;
 export const Card = app.Card;
 export const Component = app.Component;
