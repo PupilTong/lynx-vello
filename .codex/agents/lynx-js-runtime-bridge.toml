@@ -49,9 +49,9 @@ and `bobcat-workers` (every Worker realm, including the BTS).
   does not and uses them throws a `ReferenceError`, unguarded), and a post
   to a realm in which `bobcat:worker` has not run is dropped with nothing
   reported. "Has run" is `WorkerFlags::scope_installed`, set by
-  `bobcat:worker`'s read of `workerName`, never an instance check: a module
-  a failed or pending graph compiled is never linked, and reading its
-  namespace crashes QuickJS. `createWorker` decides from the URL alone, and
+  `bobcat:worker`'s read of `workerName`, its last statement, never an
+  instance check: a module a failed or pending graph compiled is never
+  linked, and reading its namespace crashes QuickJS. `createWorker` decides from the URL alone, and
   only the source: `bobcat:bts` is `ScriptSource::Background`, every other URL
   `Worker(id)`; every `Start` is otherwise built the same way. The BTS's data
   — its entry URL, the MTS realm's own `SystemInfo` and the view's native
@@ -138,7 +138,7 @@ Landed and not to be regressed:
   rules before any request; a failure is the construction error
   `EngineError::InvalidUrl`), a task of the view completes
   that module from the pre-issued answer (as the fetcher answered it, with
-  nothing prepended: `bobcat-source` registers a card's root behind
+  nothing prepended: `bobcat-source` registers a card's root prefixed with
   `MTS_CHUNK_PREAMBLE`, on the body's own first line; and the response URL
   as its `import.meta.url`; an answer that failed is
   `StartupFailed` carrying the fetcher's own error, and the module is never

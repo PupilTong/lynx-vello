@@ -627,8 +627,9 @@ pub struct ViewSources {
     /// the entry's `import.meta.url`.
     ///
     /// The entry is the module the fetcher answers, with nothing added to it.
-    /// A card's MTS body is registered behind [`crate::MTS_CHUNK_PREAMBLE`]
-    /// by `bobcat-source`; any other entry imports what it uses itself.
+    /// A card's MTS body is registered prefixed with
+    /// [`crate::MTS_CHUNK_PREAMBLE`] by `bobcat-source`; any other entry
+    /// imports what it uses itself.
     pub entry: String,
     /// Optional URL of the BTS application module the engine's `bobcat:bts`
     /// bootstrap imports, resolved against [`Self::base_url`] like

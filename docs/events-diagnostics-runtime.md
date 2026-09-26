@@ -113,8 +113,8 @@ card's MTS entry receives `console` and `_ReportError` through the ESM import
 card body's `BTS_CHUNK_PREAMBLE` binds it. A worker realm whose
 script imports `bobcat:worker` — the BTS's `bobcat:bts` does — also has
 `console` on its global, installed by that module as WebIDL installs a
-namespace: writable, configurable and not enumerable. The engine installs it
-in no realm of its own accord. It is the same object the BTS module exports.
+namespace: writable, configurable and not enumerable. The engine itself
+installs it in no realm. It is the same object the BTS module exports.
 A plain `Worker` has no global `requestAnimationFrame`; it imports one from
 `bobcat:animation-frame`, the module `bobcat:bts-runtime` also takes its
 export and `lynx` member from. The MTS realm adds no global `console`.

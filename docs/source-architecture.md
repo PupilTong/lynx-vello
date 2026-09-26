@@ -58,10 +58,10 @@ CSS into a restricted binary CSS model would lose source capabilities.
 The two registration paths share parsing and URL mapping while retaining
 explicit host policies. Native XML uses strict UTF-8 and private memory URLs,
 while browser XML uses already replacement-decoded text and final-response
-fragments. Both paths register the main-thread body behind
+fragments. Both paths register the main-thread body prefixed with
 `MTS_CHUNK_PREAMBLE` and the optional background body as the `CommonJS` chunk
-web-core runs it as, behind `BTS_CHUNK_PREAMBLE`, each on the body's own first
-line, because the engine adds nothing to an entry; and they pass the
+web-core runs it as, prefixed with `BTS_CHUNK_PREAMBLE`, each on the body's
+own first line, because the engine adds nothing to an entry; and they pass the
 background body's URL as `ViewSources.background_entry`. Core starts the page's BTS worker after
 the MTS entry import completes, and the MTS realm posts it that URL in its
 first message, `initialize`. Its `bobcat:bts` bootstrap initializes
@@ -69,9 +69,20 @@ first message, `initialize`. Its `bobcat:bts` bootstrap initializes
 requests through the view's ResourceFetcher like any other import. An absent background body leaves the BTS worker with its
 built-in runtime only. Browser PageConfig remains host-owned.
 
-This raw-module path does not execute binary templates' `manifest` scripts.
-Those scripts use Lynx Core's chunk initialization protocol, including
-`lynxCoreInject`, `init` and `requireModule`, which remains pending.
+Every card-body wrapper `bobcat-source` writes — `mts_entry_source`,
+`bts_module_source` and a lazy container's `main-thread` section — is one
+physical line with the body's first line on it. An error in a body therefore
+reports the line it has in the container, and on any line after the first
+the column too. On the body's first line the column is offset by the
+prefix's length, which for a minified body written on one line is every
+column it has.
+
+This XML path carries no binary template, so it has no `manifest` scripts. A
+binary template's are registered by `PageSource` as ES modules beside the
+input URL, and the BTS boot script it writes starts the card with
+`lynx.requireModule('/app-service.js')` when the container carries that path,
+which initializes the `{init}` object the body answers with: Lynx Core's
+chunk initialization protocol, in `bobcat:lynx-modules`.
 
 ## API and dependencies
 

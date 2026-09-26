@@ -222,7 +222,7 @@ QuickJS ESM graph — a worker realm, on bobcat-workers' runtime
     └── bobcat:bts                the BTS: a registered module (bts.ts)
           ├──▶ bobcat:worker (packages/bobcat-element/src/worker-runtime.ts)
           │     ├── the global scope: self, postMessage, close, name (read
-          │     │   from workerName as it is evaluated), onmessage, console
+          │     │   from workerName in its last statement), onmessage, console
           │     │   (no requestAnimationFrame)
           │     ├──▶ bobcat:event-target
           │     ├──▶ bobcat:diagnostics ──▶ bobcat-internal:host
@@ -847,14 +847,15 @@ that wants `self`, `postMessage`, `onmessage`, `close`, `name` or `console`
 writes `import "bobcat:worker";`, and one that wants `setTimeout` and its
 companions `import "bobcat:timers";`. A script that uses them without the
 import throws a `ReferenceError`, reported as `WorkerThrew` like any other
-throw; nothing guards against that, since only the BTS and tests construct a
-plain `Worker`. What is posted is delivered through `bobcat:worker`, so a
-realm in which that module has not run has nothing that receives a message:
-the post is dropped and nothing is reported. The test is the module having
-run, which the host learns from its read of `workerName`, and not the realm
-having an instance of it: a graph that failed to load, or is still loading,
-leaves its modules compiled but never linked, and the namespace of such a
-module cannot be read.
+throw; nothing guards against that. The engine itself constructs only the
+BTS; a plain `Worker` comes from MTS code that imports `bobcat-internal`, or
+from tests. What is posted is delivered through `bobcat:worker`, so a realm
+in which that module has not run has nothing that receives a message: the
+post is dropped and nothing is reported. The test is the module having run,
+which the host learns from its read of `workerName`, the module's last
+statement, and not the realm having an instance of it: a graph that failed
+to load, or is still loading, leaves its modules compiled but never linked,
+and the namespace of such a module cannot be read.
 
 Worker keys are allocated once per group on main and never reused. A worker's
 whole state is its own task; `bobcat-main` keeps two things per worker. One is
@@ -879,8 +880,13 @@ Worker errors still produce a nonfatal host event, one of two. A worker's
 `Errored` — something its realm ran threw, whichever entry it was, and the
 worker still runs — is `EngineEvent::WorkerThrew`; its `Failed` — its script
 could not be loaded, its realm could not be built, or `bobcat-workers`
-trapped, before or after it was started — is `EngineEvent::WorkerEnded`. Both
-carry the `ScriptSource` recorded for the key, which `dispatch_worker_event`
+trapped, before or after it was started — is `EngineEvent::WorkerEnded`. A
+failure of a worker's root module — a throw at its top level, a dependency
+that could not be loaded or that threw, a rejected top-level await — is one
+`Errored`, reported by the entry it happened in (the boot job, the completion
+of the script or of a module it imports, a timer); the worker's own read of
+the root module's load only learns that the load has settled. The two events
+both carry the `ScriptSource` recorded for the key, which `dispatch_worker_event`
 reads before it forgets an ended worker, and both are reported before the
 realm's JS dispatches the `Worker`'s `error` event, so `preventDefault()` there
 does not suppress them. A key without a source reports neither: a worker the
@@ -913,9 +919,13 @@ settled, whether the entry succeeded or threw.
 Boot constructs it through the same `bobcat-internal` class, using the engine
 URL `bobcat:bts`, which is what tells the BTS apart. All workers use the same
 protocol, and each one's root module is the module at its URL. BTS `lynx` is an ESM export from
-`bobcat:bts-runtime`; neither MTS nor BTS sets `globalThis.lynx`. BTS applications explicitly import
-the bindings they need, `lynx` included, without creating a dependency back to
-the bootstrap that starts them.
+`bobcat:bts-runtime`; neither MTS nor BTS sets `globalThis.lynx`. A BTS
+application has the bindings it needs, `lynx` included, as imports of
+`bobcat:bts-runtime`, without a dependency back to the bootstrap that starts
+it. A card body — a compiled bundle's body, or an XML page's background-thread
+script — has them from the `BTS_CHUNK_PREAMBLE` `bobcat-source` prefixed it
+with, and must not import any of them itself (a second binding is a
+`SyntaxError`); a raw entry imports them explicitly.
 `bobcat:bts` is a registered module (`packages/bobcat-element/src/bts.ts`)
 that is the BTS realm's root module, as every worker's root module is the
 module at its URL, so nothing is fetched to start the BTS, and its `Start`

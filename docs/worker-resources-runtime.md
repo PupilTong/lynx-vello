@@ -37,8 +37,12 @@ timers continue during the script's top-level await; posted messages wait until
 the root module, which is the script, has settled. Worker termination or
 view release cancels outstanding completions and discards late results.
 
-Raw XML background entries use this path and import their runtime bindings,
-`lynx` included, from `bobcat:bts-runtime`. The BTS starts from nothing
+A BTS entry uses this path. An XML page's background-thread script is a card
+body: `bobcat-source` registered it after `BTS_CHUNK_PREAMBLE`, so it has
+`lynx` and the rest of that list without importing them, and must not import
+any of them (a second binding of one is a `SyntaxError`). A raw BTS entry,
+which no source front end wrote, imports its runtime bindings, `lynx`
+included, from `bobcat:bts-runtime` itself. The BTS starts from nothing
 fetched: its root module is the registered bootstrap `bobcat:bts`, which
 imports the worker's global scope and timers, installs a JS initializer and
 returns; the first Worker message, `initialize`,
@@ -158,7 +162,8 @@ bodies, being Lepus chunks — a chunk is a plain script resource the MTS realm
 loads on demand, not a module anything imports.
 
 **What a body becomes.** One physical line of preamble, so the body keeps its
-own line numbering. The preamble is `BTS_CHUNK_PREAMBLE`
+own line numbering; only a column on the body's first line is offset, by the
+prefix's length. The preamble is `BTS_CHUNK_PREAMBLE`
 (`crates/bobcat-core/src/esm.rs`): every name web-core's chunk wrapper would
 have had as a parameter (`createChunkLoading.ts`
 `createBundleInitReturnObj`) — the ones this realm has a value for imported

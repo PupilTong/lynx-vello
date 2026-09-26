@@ -118,7 +118,7 @@ the same kind of `Start`, and the BTS differs only in its URL and the source
 its diagnostics are named by. `ViewSources.background_entry`
 selects an optional module; native/browser XML adapters supply the
 background section's URL, where `bobcat-source` registered the section as the
-`CommonJS` chunk web-core runs it as, behind `BTS_CHUNK_PREAMBLE`. The MTS
+`CommonJS` chunk web-core runs it as, prefixed with `BTS_CHUNK_PREAMBLE`. The MTS
 realm posts that URL to the BTS in the
 first message, `initialize`, beside the page data, its own `SystemInfo` and
 the view's native module table. The `bobcat:bts` bootstrap hands
@@ -130,8 +130,11 @@ body or an XML background script — through the `BTS_CHUNK_PREAMBLE`
 `globalThis.lynx` stays absent on both sides. Application source is
 neither prefetched nor included in the bootstrap. The entry is loaded through
 the view's ResourceFetcher like any other worker import. Without an entry, the
-built-in BTS environment still starts. Compiled BTS bundle manifests
-also require Lynx Core's module/init shell and remain pending.
+built-in BTS environment still starts. A compiled bundle's BTS entry is the
+boot script `bobcat-source` writes: it registers the container's URL and
+`lynx.requireModule`s its `/app-service.js`, and `bobcat:lynx-modules`
+initializes the `{init}` object that body answers with, as lynx-core's
+`_$executeInit` does.
 
 The implemented pair is MTS `lynx.getJSContext()` ↔ BTS `lynx.getCoreContext()`.
 This is a Lynx-only protocol, despite the `dispatchEvent` name:

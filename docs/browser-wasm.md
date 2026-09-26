@@ -131,10 +131,10 @@ raw XML loader. Rust's `bobcat-source::xml` parser validates and extracts the se
 the Render Worker. The source uses `<lynx engine-version="...">` and
 `<script thread="main">` / `<script thread="background">`; legacy
 attribute spellings are rejected. Both scripts are registered the way
-`bobcat-source` registers every card body: the main-thread script behind
-`MTS_CHUNK_PREAMBLE`, and the background-thread script as the `CommonJS`
-chunk web-core runs it as, behind `BTS_CHUNK_PREAMBLE`, each on the body's own
-first line. A present stylesheet is registered as CSS
+`bobcat-source` registers every card body: the main-thread script prefixed
+with `MTS_CHUNK_PREAMBLE`, and the background-thread script as the `CommonJS`
+chunk web-core runs it as, prefixed with `BTS_CHUNK_PREAMBLE`, each on the
+body's own first line. A present stylesheet is registered as CSS
 text and mounted as the view's one sheet by boot's first flush, before anything is styled;
 the returned Promise uses the same engine-event completion path as `load`. The
 exported `LYNX_XML_PAGE_CONFIG` supplies the source format's fixed

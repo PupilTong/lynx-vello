@@ -136,7 +136,7 @@ mod style_sheets;
 /// [`crate::esm::MTS_CHUNK_PREAMBLE`], then the body on the preamble's own
 /// line, so the body's first line is the module's first.
 ///
-/// Only the seams with no fetcher behind them write an entry this way —
+/// Only the seams without a fetcher write an entry this way —
 /// [`MainThreadRuntime::run_main_thread_script`] and the crate's own test
 /// hosts. A view completes its entry with what the fetcher answered.
 pub(crate) fn card_entry(body: &str) -> String {
@@ -1445,9 +1445,8 @@ await Promise.resolve().then(() => __FlushElementTree());
         )
     }
 
-    /// Boots a realm over a card's MTS body as its entry, without a fetcher
-    /// behind it — the seam this crate's own tests and benchmarks drive boot
-    /// through.
+    /// Boots a realm over a card's MTS body as its entry, without a fetcher —
+    /// the seam this crate's own tests and benchmarks drive boot through.
     ///
     /// `source` is the body as a container carries it, and the entry is that
     /// body the way `bobcat-source` registers a card's root script:

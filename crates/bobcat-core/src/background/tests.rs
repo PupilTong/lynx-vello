@@ -800,8 +800,10 @@ fn a_throw_at_a_scripts_top_level_is_reported_at_its_own_url_and_line() {
 ///
 /// The script's one statement is an `import()` nothing awaits, whose request
 /// is how the test knows the script has finished: the worker's epilogue
-/// reads the root module's load before it sends that request, so the post
-/// below is delivered at once rather than held.
+/// reads the root module's load, and so marks it finished, before it sends
+/// that request. The post below reaches the realm after that either way —
+/// at once, or held until the message consumer has seen the load finish —
+/// and is dropped there.
 #[test]
 fn a_worker_whose_script_imports_no_global_scope_drops_what_is_posted() {
     let mut group = Group::new();
@@ -833,7 +835,8 @@ fn a_worker_whose_script_imports_no_global_scope_drops_what_is_posted() {
 /// leaves `bobcat:worker` compiled into the realm but never linked and never
 /// run, and a module in that state has no namespace that can be read. So a
 /// post to that worker is dropped, as a post to one whose script never
-/// imported the module is; the failed load is the only thing reported.
+/// imported the module is; the failed load is the only thing reported, and
+/// it is reported once.
 #[test]
 fn a_worker_whose_graph_failed_before_its_scope_ran_drops_what_is_posted() {
     let mut group = Group::new();
@@ -862,16 +865,121 @@ fn a_worker_whose_graph_failed_before_its_scope_ran_drops_what_is_posted() {
     assert!(error.message.contains("404"), "{}", error.message);
     group.post(key, "dropped");
     group.quiet();
-    // The load's failure may be reported twice, by the completion that
-    // failed it and by the read of the root module's load; nothing else is.
-    while let Ok(event) = group.views[2].incoming.try_recv() {
-        let WorkerPayload::Errored(error) = event.payload else {
-            panic!("the post reached nothing and reported nothing")
-        };
-        assert!(error.message.contains("404"), "{}", error.message);
-    }
+    assert!(
+        group.views[2].incoming.try_recv().is_err(),
+        "the failed load was reported once, and the post reached nothing"
+    );
     group.terminate(key);
     group.wait_for_workers_to_end(2, PATIENCE, "the terminated worker ended");
+}
+
+/// A root module whose graph fails in a job after its own completion — the
+/// job that answers a module the script imports — is reported once, by that
+/// job, named by what it was doing. The epilogue's read of the root module's
+/// load after it only learns that the load has settled. Two ways a graph
+/// fails there: a dependency the host could not load, and a dependency that
+/// throws as it is evaluated.
+#[test]
+fn a_root_whose_dependency_fails_is_reported_once() {
+    let mut group = Group::new();
+    group.views.push(View::new());
+    group.views.push(View::new());
+    let missing = group.construct(2, "");
+    group.answer(
+        missing,
+        "app:///needs-missing.js",
+        "import 'bobcat:worker'; import './missing.js';",
+    );
+    let (url, completion) = group.views[2].source();
+    assert_eq!(url, "app:///missing.js");
+    completion.complete(Err(ResourceError {
+        kind: ResourceErrorKind::NotFound,
+        phase: ResourceErrorPhase::ReceiveHeaders,
+        locator: None,
+        message: "404".into(),
+        retry: RetryAdvice::Never,
+    }
+    .into()));
+
+    let throwing = group.construct(3, "");
+    group.answer(
+        throwing,
+        "app:///needs-thrower.js",
+        "import 'bobcat:worker'; import './thrower.js';",
+    );
+    let (url, completion) = group.views[3].source();
+    assert_eq!(url, "app:///thrower.js");
+    completion.complete(Ok(LoadedSource::Module {
+        source: "throw new Error('the dependency threw');".into(),
+        url: "app:///thrower.js".into(),
+    }));
+
+    for (view, key, expected) in [(2, missing, "404"), (3, throwing, "the dependency threw")] {
+        let event = group.next(view);
+        assert_eq!(event.key, key);
+        let WorkerPayload::Errored(error) = event.payload else {
+            panic!("a graph that fails is something the realm threw")
+        };
+        assert!(error.message.contains(expected), "{}", error.message);
+    }
+    group.quiet();
+    for view in [2, 3] {
+        assert!(
+            group.views[view].incoming.try_recv().is_err(),
+            "the failure was reported once"
+        );
+    }
+    group.terminate(missing);
+    group.terminate(throwing);
+    group.wait_for_workers_to_end(2, PATIENCE, "the terminated worker ended");
+    group.wait_for_workers_to_end(3, PATIENCE, "the terminated worker ended");
+}
+
+/// The engine writes no global scope into a worker realm, so a script that
+/// uses `postMessage` without importing `bobcat:worker` has no such binding:
+/// its first line throws a `ReferenceError`, reported at the script's own URL
+/// and line as something the worker threw. The worker goes on running, with
+/// nothing in it that receives a post, until it is terminated, and its end
+/// reports nothing.
+#[test]
+fn a_script_that_uses_the_global_scope_without_importing_it_throws_a_reference_error() {
+    let mut group = Group::new();
+    group.views.push(View::new());
+    let key = group.construct_requesting(2, "", "app:///unscoped.js");
+    group.answer(
+        key,
+        "app:///unscoped.js",
+        "postMessage('reached');\nonmessage = (event) => postMessage(event.data);",
+    );
+    let event = group.next(2);
+    assert_eq!(event.key, key);
+    let WorkerPayload::Errored(error) = event.payload else {
+        panic!("a use of a binding nothing declared is something the realm threw")
+    };
+    assert!(
+        error.message.contains("ReferenceError") && error.message.contains("postMessage"),
+        "{}",
+        error.message
+    );
+    let location = error.location.expect("the throw has a location");
+    assert_eq!(location.source.as_deref(), Some("app:///unscoped.js"));
+    assert_eq!(location.line, Some(1));
+    group.post(key, "dropped");
+    group.quiet();
+    assert!(
+        group.views[2].incoming.try_recv().is_err(),
+        "the throw was reported once, and the post reached nothing"
+    );
+    assert!(
+        group.views[2].events.strong_count() > 1,
+        "the worker is still running"
+    );
+    group.terminate(key);
+    group.wait_for_workers_to_end(2, PATIENCE, "the terminated worker ended");
+    assert!(
+        group.views[2].incoming.try_recv().is_err(),
+        "its end reported nothing"
+    );
 }
 
 #[test]
@@ -1333,23 +1441,13 @@ fn a_rejected_worker_tla_is_reported_and_leaves_the_message_queue_usable() {
             .into(),
         url: "app:///rejected.js".into(),
     }));
-    let mut reported = false;
-    loop {
-        match group.next(0).payload {
-            WorkerPayload::Errored(error) => {
-                // The existing engine exposes both checkpoint failures and
-                // entry rejection; neither may poison later message delivery.
-                assert!(error.message.contains("TLA failed"), "{error}");
-                reported = true;
-            }
-            WorkerPayload::Message(value) => {
-                assert!(reported, "TLA rejection must be reported");
-                assert_eq!(value, wire("queued"));
-                break;
-            }
-            _ => panic!("a rejected entry must leave its worker usable"),
-        }
-    }
+    // Reported once, by the timer entry the rejection happened in, and then
+    // the held post is delivered: the failure does not poison delivery.
+    let WorkerPayload::Errored(error) = group.next(0).payload else {
+        panic!("TLA rejection must be reported")
+    };
+    assert!(error.message.contains("TLA failed"), "{error}");
+    assert_eq!(group.message(0), wire("queued"));
     group.quiet();
 }
 

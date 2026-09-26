@@ -185,10 +185,12 @@ a `root` for binary page inputs.
 **The import wrappers of a card's bodies are this crate's.** The engine adds
 nothing to a script, so every card body `bobcat-source` registers carries the
 names its realm gives a card, on the body's own first line, so every line of
-the body keeps its number: an MTS body — a container's root Lepus script, an
-XML main-thread script — behind `bobcat_core::MTS_CHUNK_PREAMBLE`
-(`mts_entry_source`), and a BTS body behind `bobcat_core::BTS_CHUNK_PREAMBLE`
-in the shape its compiler calls for (`bts_module_source`). An XML
+the body keeps its number (a column on the body's first line is offset by the
+prefix's length): an MTS body — a container's root Lepus script, an XML
+main-thread script — prefixed with `bobcat_core::MTS_CHUNK_PREAMBLE`
+(`mts_entry_source`), and a BTS body prefixed with
+`bobcat_core::BTS_CHUNK_PREAMBLE` in the shape its compiler calls for
+(`bts_module_source`). An XML
 background-thread script is a `.web.bundle`'s `CommonJS` shape, because
 web-core runs it as its bundle's `/app-service.js`, through its chunk wrapper.
 A named Lepus chunk is registered verbatim, since the realm compiles it as a
@@ -1116,12 +1118,14 @@ installs no global scope in a worker realm.** `bobcat:bts` begins with
 that wants `self`, `postMessage`, `onmessage`, `close`, `name` or `console`
 imports `bobcat:worker`, and one that wants the timer globals imports
 `bobcat:timers`; a script that uses them without the import throws a
-`ReferenceError`, and nothing guards against it (only the BTS and tests
-construct a plain `Worker`). A post is delivered through `bobcat:worker`, so
-a realm in which that module has not run drops what is posted, reporting
-nothing. The test is the module having *run*, which the worker thread learns
-from `bobcat:worker`'s one read of `workerName`
-(`WorkerFlags::scope_installed`), not the realm having an instance of it: a
+`ReferenceError`, and nothing guards against it (the engine itself
+constructs only the BTS; a plain `Worker` comes from MTS code that imports
+`bobcat-internal`, or from tests). A post is delivered through
+`bobcat:worker`, so a realm in which that module has not run drops what is
+posted, reporting nothing. The test is the module having *run*, which the
+worker thread learns from `bobcat:worker`'s one read of `workerName`, its last
+statement (`WorkerFlags::scope_installed`), not the realm having an instance
+of it: a
 graph that failed to load or is still loading leaves its modules compiled but
 never linked, and reading the namespace of such a module crashes QuickJS.
 MTS routes events through weak references to JS Worker objects; their
@@ -1209,20 +1213,25 @@ app hook, reports any throw and replies after an ordinary Promise boundary. The
 MTS disposal Promise also handles repeated destroy notifications, and disposal
 bypasses an unfinished BTS entry import. Object observers follow web-core: a
 plain object registered with a JS `FinalizationRegistry` that directly invokes
-its callback (`docs/destruction-runtime.md`). Raw BTS application entries
-explicitly import their bindings from `bobcat:bts-runtime`, `lynx` included;
-neither runtime installs `globalThis.lynx`. XML uses this identical startup
-path, and the bootstrap contains no application source and does not fetch it in
-advance. A
+its callback (`docs/destruction-runtime.md`). A raw BTS application entry
+imports its bindings from `bobcat:bts-runtime` itself, `lynx` included. An XML
+page's background-thread script is a card body instead: `bobcat-source`
+registered it after `BTS_CHUNK_PREAMBLE`, so it has `lynx` and the rest of that
+list without importing them, and must not import any of them (a second binding
+is a `SyntaxError`). Neither runtime installs `globalThis.lynx`. XML uses this
+identical startup path, and the bootstrap contains no application source and
+does not fetch it in advance. A
 worker carries a `HostOutbox` (`WorkerStart.sources`) that sends module
 requests directly to the view's resource host. ESM completion and timers
 continue during entry TLA; posted messages wait for entry settlement, and each
 completion shares its worker's cancellation token. ReactLynx compiled module
-execution and lazy-bundle APIs remain a later layer over this transport;
-bypassing `lynx_core.js` does not require its `requestScript`/`readScript`
-source-text interfaces (`docs/worker-resources-runtime.md`). Without an entry,
-only the built-in environment runs, and all workers use the same scope and
-protocol.
+execution (`lynx.requireModule` and the `{init}` factory ABI in
+`bobcat:lynx-modules`) and the lazy-bundle APIs (`lynx.fetchBundle`,
+`lynx.loadScript`) are a layer over this transport; bypassing `lynx_core.js`
+does not require its `requestScript`/`readScript` source-text interfaces
+(`docs/worker-resources-runtime.md`). Without an entry, only the built-in
+environment runs. All workers use the same protocol; a worker's scope is what
+its script imports.
 
 MTS `lynx.getJSContext()` and this BTS Context are stable
 `CrossThreadContext extends EventTarget` instances returned directly by
@@ -2000,7 +2009,7 @@ package's `js/image-decoder.ts`, over a `MessageChannel` whose Worker end the
 facade hands to `BobcatRenderer::create` at init. `loadLynxXml(url)` fetches an
 XML envelope once, decodes it with the web loader's replacement-mode UTF-8
 behavior, parses it with `bobcat-source::xml`, registers any raw stylesheet
-and its main-thread body — behind `MTS_CHUNK_PREAMBLE`, as `bobcat-source`
+and its main-thread body — prefixed with `MTS_CHUNK_PREAMBLE`, as `bobcat-source`
 registers every card body — and hands them to the same `load`; both are
 repeatable. The exported `LYNX_XML_PAGE_CONFIG` names the source format's
 fixed page defaults, which a host may still deliberately override. The optional background body is
