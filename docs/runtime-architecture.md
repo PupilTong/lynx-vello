@@ -495,8 +495,11 @@ is for IO already in flight, and the painter's construction overlaps it.
 Failures are reported by where they happen. An entry that fails to load is
 read as such by `load_entry` before any of it runs, and the embedder is told
 `StartupFailed` carrying the fetcher's own error; an answer that is not a
-script is `StartupFailed(LynxViewError::Script(..))` naming the URL. Neither
-completes the entry's module: the view has ended. A sheet that fails to load,
+script, or a script whose response URL is not an absolute URL, is
+`StartupFailed(LynxViewError::Script(..))` naming the URL. That response URL
+becomes `__Card__`, the base every `new Worker` URL is joined to, boot's
+`bobcat:bts` included. Neither completes the entry's module: the view has
+ended. A sheet that fails to load,
 or that the fetcher answered with something other than a stylesheet, makes
 `__FlushElementTree` throw `loading stylesheet <url>: <reason>`: boot's own
 flush rejects boot, so the embedder is told
@@ -824,7 +827,12 @@ worker and cancels its fetch at once; the job then opens nothing. A URL that
 is an engine name has no answer to wait for: the host is never asked for it,
 and the realm's own loader loads a registered name such as `bobcat:bts` or
 `bobcat:timers`, or refuses any other with a `ReferenceError`, which the
-worker reports as `WorkerThrew` and keeps running. The worker's token is
+worker reports as `WorkerThrew` and keeps running. The exception is
+`bobcat:worker-boot`, the name the root module itself is evaluated under:
+QuickJS finds the root among the realm's loaded modules, so the root's import
+of it waits on its own evaluation, and that worker never finishes its boot,
+reports nothing and holds what is posted to it until it is terminated. App
+code has no reason to name an engine module, and nothing guards against it. The worker's token is
 independent of the view, so its cancellation cannot race ahead of JS
 disposal.
 

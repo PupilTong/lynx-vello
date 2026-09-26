@@ -219,6 +219,11 @@ pub enum LoadedSource {
     StyleSheet(StyleSheetSource),
     Module {
         source: String,
+        /// The response URL, after any redirect, which must be an absolute
+        /// URL: it is the script's `import.meta.url` and the base its own
+        /// relative imports resolve against. The entry's is also `__Card__`,
+        /// the base every `new Worker` URL is joined to, and an entry
+        /// answered from one that is not absolute fails the view's startup.
         url: String,
     },
     /// One `@font-face` source's bytes, unvalidated: a font file is binary,

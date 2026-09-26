@@ -87,11 +87,13 @@ impl WorkerFactory {
                 let name = string(arguments, 1)?.to_owned();
                 // Where the specifier resolves from: the MTS entry's response
                 // URL, which the realm holds as `__Card__` and hands over with
-                // every construction. Rust joins the specifier to it by URL
-                // rules and still does not remember it. An absolute URL joins
-                // to itself, `bobcat:bts` included. A specifier that does not
-                // resolve starts nothing: no id, no `Start`, no request, and
-                // `null` back, which the realm throws as a `SyntaxError`.
+                // every construction. It is absolute: an entry answered from
+                // one that is not fails the view's startup before it runs.
+                // Rust joins the specifier to it by URL rules and still does
+                // not remember it. An absolute URL joins to itself,
+                // `bobcat:bts` included. A specifier that does not resolve
+                // starts nothing: no id, no `Start`, no request, and `null`
+                // back, which the realm throws as a `SyntaxError`.
                 let base_url = string(arguments, 2)?;
                 let Ok(url) = url::Url::parse(base_url).and_then(|base| base.join(specifier))
                 else {

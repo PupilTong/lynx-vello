@@ -1138,8 +1138,9 @@ async fn consume_metrics(page: Rc<Page>, mut metrics: watch::Receiver<Option<Vie
 ///
 /// The entry is read here, before any of it runs, so an entry that cannot be
 /// loaded fails the boot: a load the fetcher could not make is reported as
-/// the fetcher's own error, and an answer that is not a script as a `Script`
-/// error naming the URL, each as `StartupFailed`. The module is not completed
+/// the fetcher's own error, and an answer that is not a script, or a script
+/// whose response URL is not an absolute URL, as a `Script` error naming the
+/// URL, each as `StartupFailed`. The module is not completed
 /// then — the view has ended, and boot's `import` of it is released with the
 /// realm. The entry's *evaluation* is the app's code: boot catches what it
 /// throws, so a failure there, or in a module it imports, is reported as
@@ -1184,9 +1185,24 @@ async fn load_entry(page: Rc<Page>, entry: StartupSource) {
 /// The script an answer to the entry request carries — its response URL and
 /// its source — or, for an answer of another kind, the startup failure that
 /// is: a `Script` error naming `url`, the URL the entry was requested by.
+///
+/// A response URL that is not an absolute URL is a failure of the same kind.
+/// It becomes `__Card__`, the base every `new Worker` URL is joined to by URL
+/// rules, and a join to a base that does not parse fails for every
+/// specifier, boot's own `bobcat:bts` included.
 fn entry_script(url: &str, answer: LoadedSource) -> Result<(String, String), LynxViewError> {
     let kind = match answer {
-        LoadedSource::Module { source, url } => return Ok((url, source)),
+        LoadedSource::Module {
+            source,
+            url: response,
+        } => {
+            return match url::Url::parse(&response) {
+                Ok(_) => Ok((response, source)),
+                Err(_) => Err(LynxViewError::Script(platform_script_error(format!(
+                    "the fetcher answered {url} from {response:?}, which is not an absolute URL"
+                )))),
+            };
+        }
         LoadedSource::StyleSheet(_) => "stylesheet",
         LoadedSource::Font(_) => "font",
         LoadedSource::Fetched => "plain fetch",

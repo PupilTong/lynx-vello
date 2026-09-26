@@ -139,6 +139,14 @@ pub(crate) const WORKER_MODULE_SPECIFIER: &str = "bobcat:worker";
 /// as the realm opens, and never registered, the way `bobcat:boot` is an MTS
 /// realm's. A worker's `import` of its script is resolved against it, and the
 /// script's URL is absolute, so it resolves to itself.
+///
+/// Inside the worker's realm the name is the root module itself, which
+/// `QuickJS` finds among the realm's loaded modules before the loader is
+/// asked, so no `ReferenceError` refuses it. A worker constructed over this
+/// URL imports its own root while that root is still evaluating, so it never
+/// finishes its boot: it reports nothing and holds what is posted to it until
+/// it is terminated. Nothing guards against this: app code has no reason to
+/// name an engine module.
 pub(crate) const WORKER_BOOT_SPECIFIER: &str = "bobcat:worker-boot";
 
 /// The compiler factory ABI: what the BTS runtime's `lynx.requireModule` and

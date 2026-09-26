@@ -22,7 +22,7 @@ use super::{
     WorkerPayload, WorkerStart, wire_json, wire_value,
 };
 use crate::clock::ClockInstant;
-use crate::esm::BTS_MODULE_SPECIFIER;
+use crate::esm::{BTS_MODULE_SPECIFIER, WORKER_BOOT_SPECIFIER};
 use crate::link::{HostOutbox, SourceAnswer, ViewNotice, block_on_deadline, detached_base};
 use crate::resource::{
     LoadedSource, ResourceError, ResourceErrorKind, ResourceErrorPhase, RetryAdvice,
@@ -656,13 +656,17 @@ fn a_script_that_cannot_be_fetched_fails_its_worker_and_nothing_else() {
 /// carries no script and nothing waits for one. A registered built-in links
 /// and runs. A name nothing registered is refused in the realm with a
 /// `ReferenceError`, which the worker reports as something it threw, and it
-/// goes on running like a worker whose script threw.
+/// goes on running like a worker whose script threw. The root module's own
+/// name is not refused: the root's import of it is the root itself, still
+/// evaluating, so that worker never finishes its boot and reports nothing.
 #[test]
 fn a_worker_named_by_an_engine_url_is_loaded_by_its_realm_without_the_host() {
     let mut group = Group::new();
     group.views.push(View::new());
+    group.views.push(View::new());
     let registered = group.construct_engine_name(1, "bobcat:timers");
     let refused = group.construct_engine_name(2, "bobcat:nope");
+    let own_root = group.construct_engine_name(3, WORKER_BOOT_SPECIFIER);
     let event = group.next(2);
     assert_eq!(event.key, refused);
     let WorkerPayload::Errored(error) = event.payload else {
@@ -673,10 +677,10 @@ fn a_worker_named_by_an_engine_url_is_loaded_by_its_realm_without_the_host() {
         "{}",
         error.message
     );
-    // A full round of the thread later, neither worker has reported anything
-    // more, its end included, and neither asked its host for anything.
+    // A full round of the thread later, no worker has reported anything
+    // more, its end included, and none asked its host for anything.
     group.quiet();
-    for view in [1, 2] {
+    for view in [1, 2, 3] {
         assert!(
             group.views[view].incoming.try_recv().is_err(),
             "the worker reported nothing more"
@@ -688,7 +692,7 @@ fn a_worker_named_by_an_engine_url_is_loaded_by_its_realm_without_the_host() {
     }
     // Each is still running until it is told to stop: its task still holds
     // its view's event sender, and lets go of it once terminated.
-    for (view, key) in [(1, registered), (2, refused)] {
+    for (view, key) in [(1, registered), (2, refused), (3, own_root)] {
         assert!(
             group.views[view].events.strong_count() > 1,
             "the worker is still running"

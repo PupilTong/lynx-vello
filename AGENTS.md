@@ -794,8 +794,10 @@ the fetcher. The listed sheets are mounted by that flush, in listed order, as
 above. Success is `ScriptFinished`; a font, realm or boot failure is
 `StartupFailed`. An entry that cannot be loaded is the fetcher's own error,
 because `load_entry` reads the answer before any of the entry runs and then
-does not complete the module; an answer that is not a script is a
-`LynxViewError::Script` naming the URL. A sheet that cannot be loaded, or that
+does not complete the module; an answer that is not a script, or a script
+whose response URL is not an absolute URL, is a `LynxViewError::Script`
+naming the URL. That response URL becomes `__Card__`, the base every
+`new Worker` URL is joined to, boot's `bobcat:bts` included. A sheet that cannot be loaded, or that
 the fetcher answered with something else, is `LynxViewError::Script`, because
 boot's `__FlushElementTree` is what threw, naming the sheet and the reason.
 **An entry that throws does not fail the boot**: the entry is app code, and
@@ -1105,6 +1107,12 @@ worker whose first job is still queued behind another realm's parked job. A
 worker whose URL is an engine name has no script answer to wait for: the
 realm's own loader loads a registered name, and refuses any other with a local
 `ReferenceError`, which the worker reports as `WorkerThrew` and keeps running.
+The exception is `bobcat:worker-boot`, the name the root module itself is
+evaluated under: QuickJS finds the root among the realm's loaded modules, so
+the root's import of it waits on its own evaluation, and that worker never
+finishes its boot, reports nothing and holds what is posted to it until it is
+terminated. App code has no reason to name an engine module, and nothing
+guards against it.
 The timer machinery both
 realm kinds run on — the schedule, the two host members, the firing loop — is
 `crate::timers` beside `crate::clock`, owned by neither thread.

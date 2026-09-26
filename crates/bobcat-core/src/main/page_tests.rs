@@ -2004,6 +2004,46 @@ fn an_entry_that_fails_to_load_fails_the_startup_with_the_fetchers_error() {
     });
 }
 
+/// An entry answered from a response URL that is not an absolute URL fails
+/// the startup naming both URLs, before any of the entry runs. That URL
+/// would be `__Card__`, the base every `new Worker` URL is joined to, boot's
+/// own `bobcat:bts` included, so nothing past it could start: no BTS `Start`
+/// is sent and nothing is reported as the app's.
+#[test]
+fn an_entry_answered_from_a_url_that_is_not_absolute_fails_the_startup_naming_it() {
+    on_a_js_thread(|thread| async move {
+        let (context, workers) = group(&thread);
+        let mut harness = Harness::new(context, workers);
+        harness
+            .until("the view never asked for its entry", |h| {
+                !h.sources.is_empty()
+            })
+            .await;
+        harness.answer("main.js", "globalThis.ran = true;");
+        harness
+            .until("the view never ended", |h| h.owner.is_finished())
+            .await;
+        harness.turn().await;
+
+        let failures: Vec<_> = harness
+            .events
+            .iter()
+            .filter(|event| event.is_fatal() || matches!(event, EngineEvent::ScriptRunError(_)))
+            .collect();
+        let [EngineEvent::StartupFailed(LynxViewError::Script(error))] = failures.as_slice() else {
+            panic!("one Script startup failure, got {:?}", harness.events);
+        };
+        assert!(
+            error.message.contains("app:///main.js")
+                && error.message.contains("\"main.js\"")
+                && error.message.contains("not an absolute URL"),
+            "{error}"
+        );
+        assert!(!harness.finished());
+        assert!(harness.workers.try_recv().is_err(), "no worker was started");
+    });
+}
+
 /// A group whose runtime could not be built still serves its views: each
 /// one fails its startup with that runtime's error, and opens nothing — no
 /// document, no BTS `Start`, and no request past the ones `create_lynx_view`
