@@ -61,7 +61,7 @@ impl Destination {
 }
 
 /// Preloading is a best-effort hint. Only stylesheet caching is needed here;
-/// other source kinds continue to use their existing module/worker loaders.
+/// other source kinds are loaded when they are requested.
 pub(crate) fn preload(resources: &Resources, request: SourceRequest) {
     if let SourceRequest::StyleSheet(specifier) = request
         && let Ok(url) = resources
@@ -111,37 +111,16 @@ pub(crate) fn request(resources: &Resources, request: SourceRequest, completion:
     if completion.is_cancelled() {
         return;
     }
-    let (specifier, kind, base_url) = match request {
-        SourceRequest::StyleSheet(url) => (url, SourceKind::StyleSheet, resources.base_url()),
-        SourceRequest::Entry(url) | SourceRequest::Module(url) => {
-            (url, SourceKind::Script, resources.base_url())
-        }
-        SourceRequest::Font { url } => (url, SourceKind::Font, resources.base_url()),
-        SourceRequest::Fetch { url } => (url, SourceKind::Fetch, resources.base_url()),
-        SourceRequest::Worker {
-            specifier,
-            base_url,
-        } => {
-            let base = match Url::parse(&base_url) {
-                Ok(base) => base,
-                Err(error) => {
-                    completion.complete(Err(error::Failure::new(
-                        ResourceErrorKind::InvalidUrl,
-                        ResourceErrorPhase::Resolve,
-                        format!("invalid worker base URL: {error}"),
-                    )
-                    .into_error(Some(base_url.into()))
-                    .into()));
-                    return;
-                }
-            };
-            (specifier, SourceKind::Script, Some(base))
-        }
+    let (specifier, kind) = match request {
+        SourceRequest::StyleSheet(url) => (url, SourceKind::StyleSheet),
+        SourceRequest::Module(url) => (url, SourceKind::Script),
+        SourceRequest::Font { url } => (url, SourceKind::Font),
+        SourceRequest::Fetch { url } => (url, SourceKind::Fetch),
     };
     let url = match resources
         .shared
         .transports
-        .resolve(&specifier, base_url.as_ref())
+        .resolve(&specifier, resources.base_url().as_ref())
     {
         Ok(url) => url,
         Err(failure) => {
@@ -330,7 +309,7 @@ fn prepare(
             Ok(if style_sheet {
                 LoadedSource::StyleSheet(StyleSheetSource::Text(source))
             } else {
-                LoadedSource::Entry { source, url }
+                LoadedSource::Module { source, url }
             })
         })
 }

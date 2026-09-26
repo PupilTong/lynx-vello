@@ -189,19 +189,14 @@ impl FetcherDouble {
     ///
     /// `resolve_to` overrides the answer, so a test can point every source at
     /// one URL or at something that is not a URL at all.
-    fn resolve(&self, specifier: &str, base_url: Option<&Url>) -> Result<Url, ResourceError> {
+    fn resolve(&self, specifier: &str) -> Result<Url, ResourceError> {
         self.resolves.fetch_add(1, Ordering::Relaxed);
         let text = self
             .resolve_to
             .lock()
             .expect("resolve override")
             .clone()
-            .unwrap_or_else(|| {
-                base_url.map_or_else(
-                    || format!("https://example.test/{specifier}"),
-                    |base| base.join(specifier).expect("test source URL").to_string(),
-                )
-            });
+            .unwrap_or_else(|| format!("https://example.test/{specifier}"));
         Url::parse(&text).map_err(|error| ResourceError {
             kind: ResourceErrorKind::InvalidUrl,
             phase: ResourceErrorPhase::Resolve,
@@ -221,9 +216,9 @@ impl FetcherDouble {
 
     /// Resolves and serves one source out of memory, inline.
     pub fn load_source(&self, request: SourceRequest) -> Result<LoadedSource, LynxViewError> {
-        let (specifier, style_sheet, base_url) = match request {
-            SourceRequest::StyleSheet(url) => (url, true, None),
-            SourceRequest::Entry(url) | SourceRequest::Module(url) => (url, false, None),
+        let (specifier, style_sheet) = match request {
+            SourceRequest::StyleSheet(url) => (url, true),
+            SourceRequest::Module(url) => (url, false),
             // This double serves one payload, which is not a font. Refusing
             // the request is what a host with no fonts does.
             SourceRequest::Font { url } => {
@@ -247,16 +242,8 @@ impl FetcherDouble {
                 }
                 .into());
             }
-            SourceRequest::Worker {
-                specifier,
-                base_url,
-            } => (
-                specifier,
-                false,
-                Some(Url::parse(&base_url).expect("entry URL")),
-            ),
         };
-        let url = self.resolve(&specifier, base_url.as_ref())?.to_string();
+        let url = self.resolve(&specifier)?.to_string();
         let bytes = if style_sheet {
             self.style_sheet_fetches.fetch_add(1, Ordering::Relaxed);
             if let Some(sheet) = self.style_sheet.clone() {
@@ -286,7 +273,7 @@ impl FetcherDouble {
         Ok(if style_sheet {
             LoadedSource::StyleSheet(StyleSheetSource::Text(source))
         } else {
-            LoadedSource::Entry { source, url }
+            LoadedSource::Module { source, url }
         })
     }
 }

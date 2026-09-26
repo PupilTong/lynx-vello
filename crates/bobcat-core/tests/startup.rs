@@ -92,7 +92,7 @@ async fn resource_completion_reaches_main_without_another_painter_turn() {
         1.0,
         DrawTarget::Offscreen,
         |_reports| fetcher,
-        ViewSources::new("app:///main.js", SCREEN),
+        ViewSources::new("app:///", "app:///main.js", SCREEN),
     )
     .await
     .expect("startup completes");
@@ -278,7 +278,7 @@ async fn dropping_loading_view_cancels_resource_and_reaps_main_body() {
         1.0,
         DrawTarget::Offscreen,
         |_reports| fetcher,
-        ViewSources::new("app:///main.js", SCREEN),
+        ViewSources::new("app:///", "app:///main.js", SCREEN),
     )
     .await
     .expect("creation returns a loading view even when the fetch never answers");
@@ -344,7 +344,7 @@ async fn metrics_that_arrive_before_the_document_are_what_it_is_created_at() {
             1.0,
             DrawTarget::Offscreen,
             |_| Rc::clone(&fetcher),
-            ViewSources::new("app:///main.js", SCREEN),
+            ViewSources::new("app:///", "app:///main.js", SCREEN),
         )
         .await
         .expect("creation returns a loading view");
@@ -369,7 +369,7 @@ async fn metrics_that_arrive_before_the_document_are_what_it_is_created_at() {
             .expect("pending completion")
             .take()
             .expect("the entry fetch is outstanding");
-        completion.complete(Ok(bobcat_core::resource::LoadedSource::Entry {
+        completion.complete(Ok(bobcat_core::resource::LoadedSource::Module {
             source: "globalThis.renderPage = function () {
                __SetInlineStyles(__CreatePage('card', 0), 'background-color:rgb(255,0,0)');
              };"
@@ -410,7 +410,7 @@ async fn an_unknown_font_family_fails_construction_without_fetching() {
             |_| fetcher.clone(),
             ViewSources {
                 default_font_family: Some("no-such-family".to_owned()),
-                ..ViewSources::new("app:///main.js", SCREEN)
+                ..ViewSources::new("app:///", "app:///main.js", SCREEN)
             },
         )
         .await
@@ -430,31 +430,53 @@ async fn an_unknown_font_family_fails_construction_without_fetching() {
     .await;
 }
 
-/// Boot imports the entry by the URL the view named it by, so that URL has to
-/// be absolute: a bare name is refused by the module normalizer, and the
-/// refusal rejects boot's `import` and fails the boot with the loader's own
-/// message. The fetcher answers the entry all the same, and nothing it answers
-/// can complete an import the realm already refused.
+/// A view's URLs are resolved inside `create_lynx_view`, ahead of the
+/// startup requests, so a base that is not a URL and an entry or BTS entry
+/// that does not resolve against it are construction failures of the same
+/// kind as an unknown font family: no view, and nothing asked of the host.
+/// Each error names the string that failed.
 #[tokio::test]
-async fn a_bare_entry_name_fails_the_boot() {
+async fn an_unresolvable_url_fails_construction_without_fetching() {
     hang_budget(async {
-        let (mut view, _painter) = solo_view(
-            Arc::new(NoWakeup),
-            32.0,
-            24.0,
-            1.0,
-            DrawTarget::Offscreen,
-            |_| FetcherDouble::new(b"globalThis.renderPage = () => {};".to_vec()),
-            ViewSources::new("main.js", SCREEN),
-        )
-        .await
-        .expect("the entry name is not checked where the view is built");
-        let error = wait_for_script(&mut view).expect_err("a bare entry name fails the boot");
-        let message = error.to_string();
-        assert!(
-            message.contains("bare module specifier 'main.js' is not supported"),
-            "{message}"
-        );
+        let cases = [
+            (
+                "not a URL",
+                ViewSources::new("not a URL", "main.js", SCREEN),
+            ),
+            ("http://[", ViewSources::new("app:///", "http://[", SCREEN)),
+            (
+                "http://[",
+                ViewSources {
+                    background_entry: Some("http://[".to_owned()),
+                    ..ViewSources::new("app:///", "main.js", SCREEN)
+                },
+            ),
+        ];
+        for (unresolvable, sources) in cases {
+            let fetcher = Rc::new(FetcherDouble::new(Vec::new()));
+            let error = solo_view(
+                Arc::new(NoWakeup),
+                32.0,
+                24.0,
+                1.0,
+                DrawTarget::Offscreen,
+                |_| fetcher.clone(),
+                sources,
+            )
+            .await
+            .expect_err("an unresolvable URL is refused where the view is built");
+            assert!(
+                matches!(
+                    error,
+                    bobcat_core::LynxViewError::Engine(
+                        bobcat_core::EngineError::InvalidUrl { ref url, .. }
+                    ) if url == unresolvable
+                ),
+                "{error}"
+            );
+            assert_eq!(fetcher.resolve_count(), 0);
+            assert_eq!(fetcher.fetch_count(), 0);
+        }
     })
     .await;
 }
@@ -483,7 +505,7 @@ async fn a_resolution_failure_is_one_event_whatever_else_failed() {
         |_| fetcher.clone(),
         ViewSources {
             style_sheets: vec!["first.css".into(), "second.css".into()],
-            ..ViewSources::new("app:///main.js", SCREEN)
+            ..ViewSources::new("app:///", "app:///main.js", SCREEN)
         },
     )
     .await
@@ -541,7 +563,7 @@ async fn a_pending_view_does_not_block_a_sibling_in_the_same_group() {
                 1.0,
                 |_| Rc::clone(&fetcher),
                 Vec::new(),
-                ViewSources::new("app:///pending.js", SCREEN),
+                ViewSources::new("app:///", "app:///pending.js", SCREEN),
             )
             .expect("pending view");
         // Issued inside the construction above, so the fetcher is already
@@ -557,7 +579,7 @@ async fn a_pending_view_does_not_block_a_sibling_in_the_same_group() {
                 1.0,
                 |_| FetcherDouble::new(Vec::new()),
                 Vec::new(),
-                ViewSources::new("app:///sibling.js", SCREEN),
+                ViewSources::new("app:///", "app:///sibling.js", SCREEN),
             )
             .expect("sibling view");
         let mut sibling_painter = bobcat_core::Painter::new(DrawTarget::Offscreen, 32.0, 24.0, 1.0)
@@ -570,7 +592,7 @@ async fn a_pending_view_does_not_block_a_sibling_in_the_same_group() {
         let completion = fetcher.pending.lock().unwrap().take().unwrap();
         drop(pending);
         assert!(completion.is_cancelled());
-        completion.complete(Ok(bobcat_core::resource::LoadedSource::Entry {
+        completion.complete(Ok(bobcat_core::resource::LoadedSource::Module {
             source: "throw new Error('late source must not run')".into(),
             url: "app:///late.js".into(),
         }));
@@ -609,8 +631,11 @@ impl bobcat_core::FrameImages for TwoScriptFetcher {
 
 impl ResourceFetcher for TwoScriptFetcher {
     fn request_source(&self, request: SourceRequest, completion: SourceCompletion) {
-        if matches!(request, SourceRequest::Worker { .. }) {
-            completion.complete(Ok(bobcat_core::resource::LoadedSource::Entry {
+        // The entry is a `Module` request too, so the worker script is told
+        // apart by the URL Rust joined `./worker.js` to: the entry's response
+        // URL is `app:///main.js`.
+        if matches!(&request, SourceRequest::Module(url) if url == "app:///worker.js") {
+            completion.complete(Ok(bobcat_core::resource::LoadedSource::Module {
                 source: self.worker.to_owned(),
                 url: "app:///worker.js".to_owned(),
             }));
@@ -718,7 +743,7 @@ fn dropping_the_group_joins_both_of_its_threads() {
                                 })
                             },
                             Vec::new(),
-                            ViewSources::new("app:///main.js", SCREEN),
+                            ViewSources::new("app:///", "app:///main.js", SCREEN),
                         )
                         .expect("the view is created");
                     // Boot's first flush waits for a painter to bind the

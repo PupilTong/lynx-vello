@@ -243,6 +243,14 @@ pub enum EngineError {
     /// is never built and never fetches.
     #[error("no registered or system font family is named `{0}`")]
     UnknownFontFamily(String),
+    /// A view's [`base_url`](ViewSources::base_url) is not an absolute URL,
+    /// or its entry or BTS entry does not resolve against it; `url` is the
+    /// string that failed. A construction failure of the same kind as
+    /// [`Self::UnknownFontFamily`]: [`LynxGroup::create_lynx_view`] resolves
+    /// the entries before it builds the fetcher, so a view that fails this is
+    /// never built and requests nothing.
+    #[error("cannot resolve `{url}`: {message}")]
+    InvalidUrl { url: String, message: String },
     #[error("this painter presents into a window; `tick` advances an offscreen one")]
     NotOffscreen,
     /// One view has at most one interactive painter, and one painter observes
@@ -261,7 +269,7 @@ pub enum EngineError {
 }
 
 /// A view construction or startup failure. Construction reports target,
-/// font, native-module and attachment errors directly; loading and boot
+/// URL, font, native-module and attachment errors directly; loading and boot
 /// report through [`EngineEvent::StartupFailed`] on the returned view.
 ///
 /// **A startup source that fails to load reports as `Script`.** The boot
@@ -301,9 +309,10 @@ pub enum EngineEvent {
     ScriptFinished,
     /// Source loading, document configuration, or entry boot failed, or the
     /// group's script runtime could not be built, which fails every view the
-    /// group serves. The view's fonts are not among them: an unknown default
-    /// family is refused by [`LynxGroup::create_lynx_view`] itself, before
-    /// any source is requested.
+    /// group serves. The view's URLs and fonts are not among them: a base URL
+    /// or entry that does not resolve and an unknown default family are
+    /// refused by [`LynxGroup::create_lynx_view`] itself, before any source
+    /// is requested.
     StartupFailed(LynxViewError),
     /// The script runtime failed fatally during owner-thread work after startup.
     /// Boot failures arrive as [`EngineEvent::StartupFailed`].
@@ -429,26 +438,43 @@ impl StyleThreads {
 /// one: the host's fetcher belongs to the view, is passed to
 /// [`LynxGroup::create_lynx_view`] separately, and stays on that thread.
 ///
-/// Four of these fields are spent where the value is handed over rather than
-/// crossing to `bobcat-main`: [`Self::fonts`] and
-/// [`Self::default_font_family`] become the view's text context, and
-/// [`Self::style_sheets`] and [`Self::entry`] become the requests
-/// `create_lynx_view` hands the fetcher before it returns. What crosses of
-/// them is the built context and the answers. The rest crosses as it stands,
-/// and the view's task on `bobcat-main` stages the document inputs out of it.
+/// Five of these fields are spent where the value is handed over rather than
+/// crossing to `bobcat-main`: [`Self::base_url`] resolves the entries,
+/// [`Self::fonts`] and [`Self::default_font_family`] become the view's text
+/// context, and [`Self::style_sheets`] and [`Self::entry`] become the
+/// requests `create_lynx_view` hands the fetcher before it returns. What
+/// crosses of them is the parsed base, the built context and the answers. The
+/// rest crosses as it stands, and the view's task on `bobcat-main` stages the
+/// document inputs out of it.
 #[derive(Debug)]
 pub struct ViewSources {
+    /// The absolute URL this view's relative URLs resolve against, by URL
+    /// rules rather than import-specifier rules: `main.js`, `./main.js` and
+    /// `/main.js` are all relative URLs. A directory base needs its trailing
+    /// `/`, since `app:///page` resolves `main.js` to `app:///main.js`.
+    /// `create_lynx_view` resolves the entries against it, and every realm of
+    /// the view — MTS, BTS and each Worker — resolves the URL of a
+    /// synchronous load (`loadModuleSync`) against it.
+    ///
+    /// It is not handed to the fetcher, which resolves the stylesheets and
+    /// fetches it is asked for against a base of its own. An embedder
+    /// that installs lazy containers must give its fetcher this same base, so
+    /// that a container's URL resolves alike on both sides: the container is
+    /// fetched and its sections registered by the fetcher's resolution, and
+    /// each section is loaded by the realm's.
+    pub base_url: String,
     pub config: PageConfig,
     pub fonts: Vec<FontBlob>,
     pub default_font_family: Option<String>,
     pub style_sheets: Vec<String>,
-    /// The MTS entry, as an absolute URL. The fetcher is asked for it by this
-    /// string, and the realm's boot module imports it by the same string, so
-    /// a name the module normalizer refuses — a bare `main.js` — fails the
-    /// boot with that refusal. The fetcher may answer from another URL, which
-    /// becomes the entry's `import.meta.url`.
+    /// The MTS entry's URL, which may be relative: `create_lynx_view`
+    /// resolves it against [`Self::base_url`], and both the fetcher's request
+    /// and the realm's boot import name the result, in its WHATWG
+    /// serialization. The fetcher may answer from another URL, which becomes
+    /// the entry's `import.meta.url`.
     pub entry: String,
-    /// Optional BTS application module specifier imported by `bobcat:bts`.
+    /// Optional URL of the BTS application module `bobcat:bts` imports,
+    /// resolved against [`Self::base_url`] like [`Self::entry`].
     /// The view always starts a BTS context; without this it runs only the
     /// built-in environment. Its imports load through the view's resource fetcher.
     /// Neither MTS evaluation nor [`EngineEvent::ScriptFinished`] waits for it:
@@ -481,11 +507,17 @@ pub struct ViewSources {
 }
 
 impl ViewSources {
-    /// The sources of a view over `entry`, reporting `screen` as its
-    /// `SystemInfo`, with every other field at its default.
+    /// The sources of a view over `entry`, resolved against `base_url`,
+    /// reporting `screen` as its `SystemInfo`, with every other field at its
+    /// default.
     #[must_use]
-    pub fn new(entry: impl Into<String>, screen: ScreenMetrics) -> Self {
+    pub fn new(
+        base_url: impl Into<String>,
+        entry: impl Into<String>,
+        screen: ScreenMetrics,
+    ) -> Self {
         Self {
+            base_url: base_url.into(),
             config: PageConfig::default(),
             fonts: Vec::new(),
             default_font_family: None,
@@ -637,9 +669,12 @@ impl LynxGroup {
     ///
     /// **The view's startup sources are handed to the fetcher here**, on this
     /// thread and before this returns: each author stylesheet in cascade
-    /// order, then the entry module. The fetcher is built in this same call,
-    /// resolves and loads on whatever executor it owns, and answers the
-    /// one-shot each request was minted with — so its IO and `bobcat-main`'s
+    /// order, by the string the view listed it by, then the entry module, by
+    /// its URL resolved against [`ViewSources::base_url`]. The BTS entry is
+    /// resolved here too, and requested later by the BTS Worker's import. The
+    /// fetcher is built in this same call, resolves the stylesheets and loads
+    /// on whatever executor it owns, and answers the one-shot each request
+    /// was minted with — so its IO and `bobcat-main`'s
     /// boot run while the embedder builds this view's painter, which is what
     /// it does next. Every *later* request rides an ordinary
     /// [`LynxView::pump`] turn instead: imports, adopted stylesheets, worker
@@ -664,11 +699,13 @@ impl LynxGroup {
     /// # Errors
     ///
     /// [`LynxViewError`] if two native modules answer to one name, if the
-    /// default font family is one neither this view's containers nor the
-    /// platform provides ([`EngineError::UnknownFontFamily`]), or if the
-    /// group's main thread cannot accept the attachment. Both of the first
-    /// two are decided before the fetcher is built and before anything is
-    /// requested, so a view that fails either one fetches nothing.
+    /// base URL is not an absolute URL or the entry or BTS entry does not
+    /// resolve against it ([`EngineError::InvalidUrl`]), if the default font
+    /// family is one neither this view's containers nor the platform provides
+    /// ([`EngineError::UnknownFontFamily`]), or if the group's main thread
+    /// cannot accept the attachment. All of the first three are decided
+    /// before the fetcher is built and before anything is requested, so a
+    /// view that fails any one of them fetches nothing.
     pub fn create_lynx_view<F, B>(
         &self,
         width: f32,
@@ -692,6 +729,11 @@ impl LynxGroup {
             }
             table.push((name.to_owned(), module.methods()));
         }
+        // The entries' URLs, before the fetcher exists for the same reason as
+        // the fonts below: a URL that does not resolve refuses the view
+        // before anything is requested. The parsed base goes on to every
+        // realm of the view, which resolves its synchronous loads against it.
+        let base_url = Arc::new(resolve_startup_urls(&mut sources)?);
         // The fonts next, and before the fetcher exists: a view whose
         // containers cannot serve the family it named will never render, and
         // the requests below go out in this same call, so a check made
@@ -752,7 +794,7 @@ impl LynxGroup {
             answer: request_startup_source(
                 &*fetcher,
                 &cancel,
-                SourceRequest::Entry(entry_url.clone()),
+                SourceRequest::Module(entry_url.clone()),
             ),
             url: entry_url,
         };
@@ -760,8 +802,8 @@ impl LynxGroup {
             .attach
             .send(GroupCommand::Attach(Box::new(ViewAttachment {
                 viewport,
-                // What is left of the view's sources: the fonts, the sheets
-                // and the entry were spent above.
+                // What is left of the view's sources: the base URL, the
+                // fonts, the sheets and the entry were spent above.
                 sources,
                 text_context,
                 startup: StartupSources { sheets, entry },
@@ -772,6 +814,7 @@ impl LynxGroup {
                 frames,
                 cancel: cancel.clone(),
                 fetch_probe: fetcher.fetch_probe(),
+                base_url,
             })))
             .map_err(|_| EngineError::Thread {
                 name: "script",
@@ -1275,6 +1318,9 @@ pub(crate) struct ViewAttachment {
     /// of this view asks before making a fetch. `None` for a host that gave
     /// none.
     pub(crate) fetch_probe: Option<crate::resource::FetchProbe>,
+    /// [`ViewSources::base_url`], parsed by `create_lynx_view`: what every
+    /// realm of this view resolves a synchronous load's URL against.
+    pub(crate) base_url: Arc<url::Url>,
 }
 
 /// The answers to the requests [`LynxGroup::create_lynx_view`] made on the
@@ -1293,13 +1339,17 @@ pub(crate) struct StartupSources {
     pub(crate) entry: StartupSource,
 }
 
-/// One startup source: the URL the view named it by, and the answer to the
-/// request [`LynxGroup::create_lynx_view`] already made for it.
+/// One startup source: the URL it was requested by, and the answer to the
+/// request [`LynxGroup::create_lynx_view`] already made for it. For the entry
+/// that URL is the one `create_lynx_view` resolved against
+/// [`ViewSources::base_url`]; for a sheet it is the string the view listed,
+/// which the fetcher resolves.
 ///
 /// The URL travels beside the answer because it is what a failure is named
-/// by: a sheet whose load failed makes `__FlushElementTree` throw a message
-/// naming it, which fails boot's own flush, and an entry whose load failed
-/// rejects boot's `import` with a message naming the URL.
+/// by: a sheet whose load failed makes `__FlushElementTree` throw
+/// `loading stylesheet <url>: <reason>` with the listed string, which fails
+/// boot's own flush, and an entry whose load failed rejects boot's `import`
+/// with a message naming the resolved URL.
 pub(crate) struct StartupSource {
     pub(crate) url: String,
     pub(crate) answer: SourceAnswer,
@@ -1319,6 +1369,35 @@ fn request_startup_source<F: ResourceFetcher>(
     let (completion, answer) = SourceCompletion::new(cancel.clone());
     fetcher.request_source(request, completion);
     answer
+}
+
+/// Resolves a view's entry and BTS entry against its base URL, by URL rules,
+/// and replaces each with the serialization of the result. Returns the
+/// parsed base.
+///
+/// Run in `create_lynx_view` before the fetcher is built, so a URL that does
+/// not resolve is a construction failure that requested nothing. Each
+/// [`EngineError::InvalidUrl`] names the string that failed: the base when
+/// it is not an absolute URL, otherwise the entry that does not resolve.
+pub(crate) fn resolve_startup_urls(sources: &mut ViewSources) -> Result<url::Url, EngineError> {
+    let invalid = |url: &str, error: url::ParseError| EngineError::InvalidUrl {
+        url: url.to_owned(),
+        message: error.to_string(),
+    };
+    let base =
+        url::Url::parse(&sources.base_url).map_err(|error| invalid(&sources.base_url, error))?;
+    let resolve = |entry: &mut String| -> Result<(), EngineError> {
+        *entry = base
+            .join(entry)
+            .map_err(|error| invalid(entry, error))?
+            .into();
+        Ok(())
+    };
+    resolve(&mut sources.entry)?;
+    if let Some(background_entry) = &mut sources.background_entry {
+        resolve(background_entry)?;
+    }
+    Ok(base)
 }
 
 /// Registers a view's fonts and selects its default family, before any

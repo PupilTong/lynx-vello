@@ -28,6 +28,18 @@ use crate::style::PreparsedStyleSheet;
 /// any executor its IO needs. Images are reported through
 /// [`ImageReports`](dom::ImageReports), then read during composition.
 ///
+/// **A fetcher's base URL must be the view's
+/// [`ViewSources::base_url`](crate::ViewSources::base_url).** Every script
+/// request reaches it absolute: the entry, the BTS entry and every
+/// synchronous load resolved against that base, a worker script against the
+/// entry's response URL and an import against its importer's. The
+/// stylesheets and plain fetches it is asked for carry the URL as it was
+/// named, and it resolves them against its own base by URL rules. A lazy
+/// container is fetched, and its sections registered, by the fetcher's
+/// resolution, and each section is loaded synchronously by the realm's: with
+/// two different bases, the URL a section is registered under and the URL
+/// the realm requests it by would differ.
+///
 /// Every protocol method is synchronous: it starts work and returns. Core therefore holds no
 /// resource future and polls none, and nothing here names a host's transport, caches or
 /// codecs: whatever surface those have belongs to the host's own crate.
@@ -36,7 +48,7 @@ pub trait ResourceFetcher: dom::FrameImages {
     ///
     /// **A view's startup sources are requested before it runs at all**:
     /// every author stylesheet in the order the view listed them and then the
-    /// entry are handed over together inside
+    /// entry, as a [`SourceRequest::Module`], are handed over together inside
     /// [`LynxGroup::create_lynx_view`](crate::LynxGroup::create_lynx_view),
     /// on the embedder's own thread, before it returns — this fetcher is
     /// built earlier in that same call, out of the builder the embedder
@@ -156,18 +168,19 @@ impl<T: ResourceFetcher + ?Sized> ResourceFetcher for Rc<T> {
     }
 }
 
-/// One source requested by the document owner. Resolution belongs to the fetcher.
+/// One source requested by the document owner.
+///
+/// A [`Self::Module`] carries an absolute URL the engine already resolved,
+/// in its WHATWG serialization, and a [`Self::Font`] the absolute URL the
+/// document resolved. [`Self::StyleSheet`] and [`Self::Fetch`] carry the URL
+/// as the view or the realm named it, and the fetcher resolves it against its
+/// own base.
 #[derive(Debug)]
 pub enum SourceRequest {
     StyleSheet(String),
-    Entry(String),
-    /// A worker script resolved against the creating view's entry URL.
-    /// Complete with `LoadedSource::Entry`; the result goes to its worker.
-    Worker {
-        specifier: String,
-        base_url: String,
-    },
-    /// A normalized module URL, loaded after an import discovers it.
+    /// The URL of an entry, an import, a worker script or a synchronous
+    /// load. Complete with [`LoadedSource::Module`]; the result goes to the
+    /// realm or worker that asked.
     Module(String),
     /// Fetch `url` and keep it, the way an image source is fetched,
     /// answering only that the fetch is over.
@@ -175,7 +188,7 @@ pub enum SourceRequest {
     /// What the fetcher makes of the bytes is its own — the reference
     /// fetcher, given a container installer, registers a Lynx container's
     /// sections beside it — and nothing about them comes back. Resolution is
-    /// the fetcher's, as for every request.
+    /// the fetcher's, as for `StyleSheet`.
     ///
     /// Complete with [`LoadedSource::Fetched`].
     Fetch {
@@ -198,13 +211,13 @@ pub enum StyleSheetSource {
     Text(String),
 }
 
-/// A loaded source. `Entry` carries JavaScript for a main entry, imported
-/// module or worker script, including its final response URL. The completion
-/// routes it to the runtime that requested it.
+/// A loaded source. `Module` carries JavaScript for an entry, an import, a
+/// worker script or a synchronously loaded script, including its final
+/// response URL. The completion routes it to the runtime that requested it.
 #[derive(Clone, Debug)]
 pub enum LoadedSource {
     StyleSheet(StyleSheetSource),
-    Entry {
+    Module {
         source: String,
         url: String,
     },
@@ -394,7 +407,7 @@ mod completion_tests {
     }
 
     fn source() -> LoadedSource {
-        LoadedSource::Entry {
+        LoadedSource::Module {
             source: String::new(),
             url: "app:///main.js".into(),
         }

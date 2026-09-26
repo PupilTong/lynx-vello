@@ -965,6 +965,10 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
     // for a turn of its own. Workers retain their independent lifetimes.
     let _cancel = cancel.clone().drop_guard();
     let ViewSources {
+        // Spent on the embedder's thread, where `create_lynx_view` resolved
+        // `entry` and `background_entry` against it. Its parsed form rides in
+        // `outbox`, for the realms' synchronous loads.
+        base_url: _,
         config,
         // Spent on the embedder's thread: the fonts and the default family
         // became `text_context` above, and these two became the requests

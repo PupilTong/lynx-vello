@@ -95,7 +95,7 @@ async fn booted() -> (LynxView<Rc<FetcherDouble>>, Painter) {
         |_reports| fetcher,
         ViewSources {
             style_sheets: vec![STYLE_URL.to_owned()],
-            ..ViewSources::new(SCRIPT_URL, SCREEN)
+            ..ViewSources::new("app:///", SCRIPT_URL, SCREEN)
         },
     )
     .await

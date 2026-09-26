@@ -121,7 +121,15 @@ impl DiskCacheConfig {
 /// configuration for a desktop host with no disk cache.
 #[derive(Clone, Debug)]
 pub struct ResourcesConfig {
-    /// What relative specifiers resolve against — the page's own URL.
+    /// What relative stylesheet, fetch and image URLs resolve against, by
+    /// URL rules — the page's own URL. A font URL arrives absolute, as the
+    /// document resolved it, and so does every script URL: an entry or a
+    /// synchronous load resolved against the view's
+    /// [`ViewSources::base_url`](bobcat_core::ViewSources::base_url), a
+    /// worker script against the entry's response URL and an import against
+    /// its importer's. This must be that same view base: a lazy container is
+    /// fetched, and its sections registered, by this one, and each section is
+    /// loaded synchronously by the view's.
     pub base_url: Option<Url>,
     /// The memory tier's budget for decoded bitmaps. Best-effort: the frame
     /// being drawn is never evicted, and a single bitmap larger than the
@@ -289,8 +297,11 @@ impl Registrar {
     }
 }
 
-/// What a [`ResourceFetcher::fetch_probe`] reads, and the base every
-/// specifier resolves against.
+/// What a [`ResourceFetcher::fetch_probe`] reads, and the base the relative
+/// stylesheets, fetches and images this system is asked for resolve against.
+/// An entry or a synchronous load, which is how a lazy container's section
+/// is loaded, arrives resolved against the view's base, which is why the two
+/// must be equal.
 ///
 /// Its own `Arc` rather than a field of [`Shared`] for one reason: the probe
 /// is called from `bobcat-main` and `bobcat-workers` while the fetcher itself
@@ -339,18 +350,14 @@ impl FetchIndex {
     }
 
     /// Whether a fetch of `specifier` has already completed, resolving it the
-    /// way a request would: an absolute URL as itself, anything else against
-    /// the current base. A specifier that resolves to nothing was never
-    /// fetched, so it is simply `false`.
+    /// way a request would: joined to the current base by URL rules, or
+    /// parsed on its own when there is no base. A specifier that resolves to
+    /// nothing was never fetched, so it is simply `false`.
     ///
     /// The base is read here rather than captured once, because
     /// [`Resources::set_base_url`] can move it.
     fn contains(&self, specifier: &str) -> bool {
-        let base = self.base_url();
-        let Ok(url) = Url::parse(specifier).or_else(|_| {
-            base.ok_or(url::ParseError::RelativeUrlWithoutBase)
-                .and_then(|base| base.join(specifier))
-        }) else {
+        let Ok(url) = transport::join(specifier, self.base_url().as_ref()) else {
             return false;
         };
         self.fetched
@@ -794,12 +801,23 @@ impl Resources {
         self.shared.transports.registry.clear();
     }
 
-    /// What relative specifiers resolve against.
+    /// What relative stylesheet, fetch and image URLs resolve against. It
+    /// must equal the view's
+    /// [`ViewSources::base_url`](bobcat_core::ViewSources::base_url), which
+    /// an entry or a synchronous load arrives resolved against. Every other
+    /// script URL arrives absolute as well, a worker script resolved against
+    /// the entry's response URL and an import against its importer's, and so
+    /// does a font URL, as the document resolved it.
     #[must_use]
     pub fn base_url(&self) -> Option<Url> {
         self.shared.fetches.base_url()
     }
 
+    /// Moves the base [`Self::base_url`] reads. Set it before
+    /// [`LynxGroup::create_lynx_view`](bobcat_core::LynxGroup::create_lynx_view),
+    /// to the view's own base: a base moved after that no longer equals the
+    /// view's, and a lazy container's sections would then be registered
+    /// under URLs the view's realms never load.
     pub fn set_base_url(&self, base_url: Option<Url>) {
         self.shared.fetches.set_base_url(base_url);
     }

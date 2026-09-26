@@ -74,7 +74,7 @@ pub(super) fn settle_style_sheet(
 ) -> Result<(), String> {
     let sheet = match wait_for_source(thread, token, answer) {
         Ok(LoadedSource::StyleSheet(sheet)) => Ok(sheet),
-        Ok(LoadedSource::Entry { .. }) => Err("the fetcher returned a script".to_owned()),
+        Ok(LoadedSource::Module { .. }) => Err("the fetcher returned a script".to_owned()),
         Ok(LoadedSource::Font(_)) => Err("the fetcher returned a font".to_owned()),
         Ok(LoadedSource::Fetched) => Err("the fetcher returned a plain fetch".to_owned()),
         Err(reason) => Err(reason),

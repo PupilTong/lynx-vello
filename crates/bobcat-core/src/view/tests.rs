@@ -33,7 +33,7 @@ fn dropping_the_view_ends_its_task_and_cancels_its_sources() {
         completion.is_cancelled(),
         "the flag is set before the view releases the host's fetcher"
     );
-    completion.complete(Ok(LoadedSource::Entry {
+    completion.complete(Ok(LoadedSource::Module {
         source: "throw new Error('a cancelled source must not run')".into(),
         url: "app:///late.js".into(),
     }));

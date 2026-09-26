@@ -115,9 +115,11 @@ export function createLynxModules(app: ModuleValue, lynx: ModuleValue, console: 
    * *under* that URL: `sectionURL` writes exactly the string the installer
    * registered them at (`named_chunk_url` in
    * `crates/bobcat-source/src/page.rs`), which is also what MTS's `chunkURL`
-   * writes for the same container. Nothing is resolved: the string stays as
-   * it is, rooted or relative, because the fetcher resolved the container's
-   * own request from the same string and will resolve these the same way.
+   * writes for the same container. Nothing is resolved here: the string stays
+   * as it is, rooted or relative. The host resolves the section's load
+   * against the view's base URL, the fetcher resolved the container's fetch
+   * against its own, and the embedder keeps the two bases equal, so both
+   * name one URL.
    */
   function bodyUrl(path: string, entry: string): string {
     const template = templateUrls.get(entry);

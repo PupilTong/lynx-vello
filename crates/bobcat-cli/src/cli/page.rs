@@ -99,7 +99,8 @@ mod tests {
     }
 
     /// The extracted sources reach the reference resource system under their
-    /// private memory URLs, and the input URL is the base for the rest.
+    /// private memory URLs, and the input URL is the base for the rest: the
+    /// fetcher's and the view's alike.
     #[test]
     fn the_program_registers_its_sources_with_the_resource_system() {
         let program = Program::from_bytes(
@@ -109,6 +110,12 @@ mod tests {
         .expect("valid XML program");
         let resources = program.resources_with(None, || {});
         assert_eq!(resources.base_url(), Some(input_url()));
+        // The view resolves against the base the fetcher was given.
+        let screen = ScreenMetrics::for_viewport(32.0, 24.0, 1.0);
+        assert_eq!(
+            Some(program.sources(screen).base_url),
+            resources.base_url().map(String::from)
+        );
         assert!(resources.unregister("bobcat-memory://lynx-xml/main-thread.js"));
         assert!(resources.unregister("bobcat-memory://lynx-xml/style.css"));
         assert!(!resources.unregister("bobcat-memory://lynx-xml/app-service.js"));

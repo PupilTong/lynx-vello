@@ -17,6 +17,14 @@
 //!   one, or the namespace of an ES module, linked and evaluated. The text never becomes a
 //!   JavaScript value, and the compile names the response URL.
 //!
+//! The URL is resolved against the view's
+//! [`ViewSources::base_url`](crate::ViewSources::base_url) by URL rules before
+//! it is requested, in every realm of the view, so a rooted or relative
+//! section URL a realm builds reaches the fetcher absolute. A URL that does
+//! not resolve throws as a failed load does. An absolute URL — which is what
+//! `require` and every import hand over, already normalized — resolves to
+//! itself.
+//!
 //! An ES module is linked *inline*: every `import` in it, and in what it
 //! imports, reaches this same closure as a [`SourceRequest::Module`] of its
 //! own and parks its own job, recursively, while the module that imports it
@@ -48,7 +56,8 @@ use crate::script::ScriptError;
 /// Resolves a specifier against a base URL, the way an `import` in a module at
 /// that base resolves it.
 const RESOLVE_EXPORT: &str = "resolveModuleUrl";
-/// Loads and compiles one already-resolved URL, synchronously.
+/// Loads and compiles one URL, resolved against the view's base,
+/// synchronously.
 const LOAD_EXPORT: &str = "loadModuleSync";
 
 pub(crate) fn install(
@@ -74,7 +83,8 @@ pub(crate) fn install(
         // This receiver lives only for this call, as a stylesheet's does:
         // caching and in-flight sharing are the fetcher's, and the realm's
         // own cache is what makes a URL loaded at most once anyway.
-        let answer = sources.request(SourceRequest::Module(url.to_owned()));
+        let url = sources.resolve(url)?;
+        let answer = sources.request(SourceRequest::Module(url));
         let source = thread.wait(async {
             tokio::select! {
                 biased;
@@ -85,7 +95,7 @@ pub(crate) fn install(
             }
         })?;
         match source {
-            LoadedSource::Entry { source, url } => Ok(RequiredSource {
+            LoadedSource::Module { source, url } => Ok(RequiredSource {
                 kind: kind_of(&url),
                 url,
                 text: source,

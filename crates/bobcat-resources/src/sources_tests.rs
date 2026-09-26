@@ -332,7 +332,7 @@ async fn an_installed_container_answers_the_module_requests_it_registered() {
         Ok(LoadedSource::Fetched)
     ));
 
-    let Ok(LoadedSource::Entry { source, url }) = result(load(
+    let Ok(LoadedSource::Module { source, url }) = result(load(
         &resources,
         "app:///lazy-bundle/child.bundle/x.js",
         SourceKind::Script,

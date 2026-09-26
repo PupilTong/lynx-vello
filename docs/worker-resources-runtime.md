@@ -12,9 +12,12 @@ source text to JavaScript callbacks.
 own cancellation token, which no view token is a parent of. Discovered imports
 use `SourceRequest::Module` on the view's existing notice channel.
 `LynxView::pump` calls `ResourceFetcher::request_source`; the concrete
-`SourceCompletion` answers the requesting worker directly. Resolution,
-transport, UTF-8 validation, and the final response URL belong to the fetcher.
-MTS does not route resource replies.
+`SourceCompletion` answers the requesting worker directly. A `Module` request
+arrives absolute: an import is normalized against its importer's response URL,
+a worker script is joined to the creating view's entry URL, and a synchronous
+load is resolved against the view's `ViewSources::base_url`, which the
+worker's `HostOutbox` carries. Transport, UTF-8 validation, and the final
+response URL belong to the fetcher. MTS does not route resource replies.
 
 The Worker uses the same asynchronous QuickJS ESM loader as main. Imports share
 one evaluation and namespace per normalized URL in each realm. Response URLs
@@ -224,7 +227,8 @@ container is `bobcat-core`'s business. It exists in both realm kinds, because
 either thread's half of a ReactLynx `lazy()` may be the one that asks.
 
 **The request.** `SourceRequest::Fetch { url }` carries the string the card
-passed; resolution is the fetcher's, as it is for every request. A host
+passed; resolution is the fetcher's, against its own base, as it is for a
+stylesheet. A host
 answers `LoadedSource::Fetched` — which carries nothing — once the fetch is
 over, or fails the request. Core never learns what came back, and there is no
 `Bundle` request, no installed set and no record JSON anywhere in it: the one
@@ -247,7 +251,16 @@ its named stylesheet `CSS` at `<url path>/index.css`. That is
 `named_chunk_url`/`named_style_url` in `crates/bobcat-source/src/page.rs` and
 `packages/bobcat-element/src/section-url.ts` on the realm side, which MTS's
 `chunkURL`/`styleSheetURL` and BTS's `bodyUrl` both go through. One leading
-`/` is stripped first, so either spelling of a name is one URL. A
+`/` is stripped first, so either spelling of a name is one URL. The realms
+write that URL as the container was named, rooted or relative, and load it
+through `loadModuleSync`, which resolves it against the view's
+`ViewSources::base_url` in Rust. The container's fetch — and so the URLs the
+installer registers its sections at — and a `__LoadStyleSheet('CSS')` of its
+`index.css` are resolved by the fetcher against its own base. The URL a
+section is registered under and the URL a realm loads it by are equal only
+because the embedder gives its fetcher the view's base: every embedder
+in this workspace does, the CLI and the server through `PageSource`'s input
+URL and the browser through `load_sources`. A
 `main-thread` section becomes an MTS module — `MTS_CHUNK_PREAMBLE`, the entry's
 own binding list, then `export default <the body>` — and everything else the
 BTS module `bts_module_source` already wrote. The container's *own* StyleInfo

@@ -622,7 +622,7 @@ fn a_views_published_state_is_independent_of_a_siblings() {
     second_end.outbox.listener_edge(Arc::from("tap"), true);
     let _asked = second_end
         .outbox
-        .request_source(SourceRequest::Entry("second.js".into()));
+        .request_source(SourceRequest::Module("app:///second.js".into()));
     first_end.outbox.publish_frame(document().commit());
 
     // The first painter's poll sees exactly its own view's frame, and none of

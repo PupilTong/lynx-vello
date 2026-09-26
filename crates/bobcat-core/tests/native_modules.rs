@@ -64,12 +64,10 @@ impl ResourceFetcher for Entries {
         // is the same string in every case: this page has no stylesheets and
         // no fonts, so a specifier it does not know is refused below.
         let specifier = match &request {
-            SourceRequest::Entry(url)
-            | SourceRequest::Module(url)
+            SourceRequest::Module(url)
             | SourceRequest::StyleSheet(url)
             | SourceRequest::Font { url }
             | SourceRequest::Fetch { url } => url.clone(),
-            SourceRequest::Worker { specifier, .. } => specifier.clone(),
         };
         completion.complete(Self::source(&specifier).map_or_else(
             || {
@@ -83,7 +81,7 @@ impl ResourceFetcher for Entries {
                 .into())
             },
             |source| {
-                Ok(LoadedSource::Entry {
+                Ok(LoadedSource::Module {
                     source: source.to_owned(),
                     url: specifier.clone(),
                 })
@@ -256,7 +254,7 @@ impl NativeModule for Twin {
 }
 
 fn sources(background: &str) -> ViewSources {
-    let mut sources = ViewSources::new(MAIN_URL, SCREEN);
+    let mut sources = ViewSources::new("app:///", MAIN_URL, SCREEN);
     sources.background_entry = Some(background.to_owned());
     sources
 }

@@ -13,6 +13,13 @@
 //! is evaluated here; the realm loads a section afterwards, synchronously,
 //! through the same loader a `require` uses.
 //!
+//! Those URLs are equal only while the two bases are. The container's URL,
+//! and so every URL registered under it, is resolved by the fetcher against
+//! its own base; a section load is resolved by the engine against the view's
+//! [`ViewSources::base_url`](bobcat_core::ViewSources::base_url). An embedder
+//! therefore gives its fetcher the view's base: the CLI, the server and the
+//! browser name a [`PageSource`](crate::PageSource)'s input URL as both.
+//!
 //! # The URL rule
 //!
 //! One rule, and it is [`named_chunk_url`]'s: every body of a container at

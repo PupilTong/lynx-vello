@@ -142,12 +142,10 @@ impl Files {
 impl ResourceFetcher for Files {
     fn request_source(&self, request: SourceRequest, completion: SourceCompletion) {
         let specifier = match &request {
-            SourceRequest::Entry(url)
-            | SourceRequest::Module(url)
+            SourceRequest::Module(url)
             | SourceRequest::StyleSheet(url)
             | SourceRequest::Font { url }
             | SourceRequest::Fetch { url } => url.clone(),
-            SourceRequest::Worker { specifier, .. } => specifier.clone(),
         };
         completion.complete((self.source)(&specifier).map_or_else(
             || {
@@ -161,7 +159,7 @@ impl ResourceFetcher for Files {
                 .into())
             },
             |source| {
-                Ok(LoadedSource::Entry {
+                Ok(LoadedSource::Module {
                     source: source.to_owned(),
                     url: specifier.clone(),
                 })
@@ -179,7 +177,7 @@ async fn logs_of(
     let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Sequential)
         .await
         .expect("the group starts");
-    let mut sources = ViewSources::new(main, SCREEN);
+    let mut sources = ViewSources::new("app:///", main, SCREEN);
     sources.background_entry = Some(background.to_owned());
     let mut view = group
         .create_lynx_view(

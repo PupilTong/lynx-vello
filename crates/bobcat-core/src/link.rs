@@ -35,6 +35,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
+use url::Url;
 
 use crate::background::{WorkerKey, WorkerMessage};
 use crate::clock::ClockInstant;
@@ -60,6 +61,10 @@ pub(crate) struct HostOutbox {
     /// rides here because a Worker realm needs it too, and it is `Send +
     /// Sync` for the same reason.
     probe: Option<FetchProbe>,
+    /// The view's [`ViewSources::base_url`](crate::ViewSources::base_url),
+    /// which a synchronous load's URL is resolved against before it is
+    /// requested. The same for every realm of the view, a Worker's included.
+    base: Arc<Url>,
 }
 
 impl HostOutbox {
@@ -68,13 +73,24 @@ impl HostOutbox {
         requester: Arc<dyn EventRequester>,
         token: CancellationToken,
         probe: Option<FetchProbe>,
+        base: Arc<Url>,
     ) -> Self {
         Self {
             notices,
             requester,
             token,
             probe,
+            base,
         }
+    }
+
+    /// `url` resolved against the view's base by URL rules, in its WHATWG
+    /// serialization. An absolute URL resolves to itself.
+    pub(crate) fn resolve(&self, url: &str) -> Result<String, String> {
+        self.base
+            .join(url)
+            .map(String::from)
+            .map_err(|error| format!("cannot resolve `{url}` against `{}`: {error}", self.base))
     }
 
     /// Whether this view's fetcher can answer "already fetched" at all, and
@@ -238,8 +254,8 @@ pub(crate) enum ViewNotice {
     PreloadSource(SourceRequest),
     /// Sources the last paint walk met that the store has not been asked for.
     RequestImages(Vec<Arc<str>>),
-    /// One source — a stylesheet, the entry, an imported module or a worker
-    /// script — and the right to answer it. Whoever holds the receiving end
+    /// One source — a stylesheet, an imported module or a worker script —
+    /// and the right to answer it. Whoever holds the receiving end
     /// is the destination, which is why the host never learns which.
     RequestSource {
         request: SourceRequest,
@@ -434,6 +450,9 @@ pub(crate) struct ViewOutbox {
     /// This view's fetcher's `fetch_probe`, taken on the embedder's thread at
     /// construction and handed to every realm of the view.
     probe: Option<FetchProbe>,
+    /// This view's base URL, parsed on the embedder's thread at construction
+    /// and handed to every realm of the view.
+    base: Arc<Url>,
 }
 
 impl ViewOutbox {
@@ -443,6 +462,7 @@ impl ViewOutbox {
         requester: Arc<dyn EventRequester>,
         token: CancellationToken,
         probe: Option<FetchProbe>,
+        base: Arc<Url>,
     ) -> Self {
         Self {
             notices,
@@ -450,6 +470,7 @@ impl ViewOutbox {
             requester,
             token,
             probe,
+            base,
         }
     }
 
@@ -464,6 +485,7 @@ impl ViewOutbox {
             Arc::clone(&self.requester),
             token,
             self.probe.clone(),
+            Arc::clone(&self.base),
         )
     }
 
@@ -631,6 +653,14 @@ pub(crate) struct DetachedView {
     pub(crate) token: CancellationToken,
 }
 
+/// The base URL of a view with no `ViewSources`: `app:///`.
+///
+/// What a detached outbox resolves synchronous loads against. The URLs its
+/// callers load are under `app:///` or `bench:///`, or are absolute already.
+pub(crate) fn detached_base() -> Arc<Url> {
+    Arc::new(Url::parse("app:///").expect("`app:///` is an absolute URL"))
+}
+
 /// One view's publishing end and the far end that reads it, with no thread
 /// between them.
 pub(crate) fn detached_outbox(requester: Arc<dyn EventRequester>) -> (ViewOutbox, DetachedView) {
@@ -640,7 +670,14 @@ pub(crate) fn detached_outbox(requester: Arc<dyn EventRequester>) -> (ViewOutbox
     (
         // No probe: a detached view has no fetcher, so every fetch is a
         // request and none settles synchronously.
-        ViewOutbox::new(notices, frames, requester, token.clone(), None),
+        ViewOutbox::new(
+            notices,
+            frames,
+            requester,
+            token.clone(),
+            None,
+            detached_base(),
+        ),
         DetachedView {
             notices: notice_receiver,
             published: ViewObserver {

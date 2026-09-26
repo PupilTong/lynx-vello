@@ -15,13 +15,14 @@ use quickjs_rust_bridge::HostValue;
 use rustc_hash::FxHashMap;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
+use url::Url;
 
 use super::{
     WorkerCommand, WorkerEvent, WorkerHome, WorkerKey, WorkerMessage, WorkerPayload, WorkerStart,
     wire_json,
 };
 use crate::clock::ClockInstant;
-use crate::link::{HostOutbox, ViewNotice, block_on_deadline};
+use crate::link::{HostOutbox, ViewNotice, block_on_deadline, detached_base};
 use crate::resource::{
     LoadedSource, ResourceError, ResourceErrorKind, ResourceErrorPhase, RetryAdvice,
     SourceCompletion, SourceRequest,
@@ -66,6 +67,9 @@ struct View {
     token: CancellationToken,
     notices: mpsc::UnboundedSender<ViewNotice>,
     sources: mpsc::UnboundedReceiver<ViewNotice>,
+    /// This view's base URL, which every worker it constructs resolves its
+    /// synchronous loads against: `app:///` unless a test names another.
+    base: Arc<Url>,
 }
 
 impl View {
@@ -79,6 +83,7 @@ impl View {
             token: CancellationToken::new(),
             notices,
             sources,
+            base: detached_base(),
         }
     }
 
@@ -158,6 +163,7 @@ impl Group {
             Arc::new(crate::NoWakeup),
             token.clone(),
             None,
+            Arc::clone(&self.views[view].base),
         );
         self.tell(WorkerCommand::Start(WorkerStart {
             key,
@@ -179,7 +185,7 @@ impl Group {
             .scripts
             .remove(&key)
             .expect("the worker is still waiting for its script")
-            .send(Ok(LoadedSource::Entry {
+            .send(Ok(LoadedSource::Module {
                 source: source.to_owned(),
                 url: url.to_owned(),
             }));
@@ -424,7 +430,7 @@ createRequire(import.meta.url)('./held.cjs');",
         std::thread::sleep(Duration::from_millis(1));
     }
     group.tell(WorkerCommand::Panic);
-    held.complete(Ok(LoadedSource::Entry {
+    held.complete(Ok(LoadedSource::Module {
         source: String::new(),
         url,
     }));
@@ -610,14 +616,14 @@ fn imported_worker_graph_uses_response_urls_and_queues_messages_until_entry_fini
     group.post(worker, "first");
     let (url, completion) = group.views[0].source();
     assert_eq!(url, "app:///dep.js");
-    completion.complete(Ok(LoadedSource::Entry {
+    completion.complete(Ok(LoadedSource::Module {
         source: "export { value } from './leaf.js';".to_owned(),
         url: "https://example.test/redirected/dep.js".to_owned(),
     }));
     let (url, completion) = group.views[0].source();
     assert_eq!(url, "https://example.test/redirected/leaf.js");
     group.post(worker, "second");
-    completion.complete(Ok(LoadedSource::Entry {
+    completion.complete(Ok(LoadedSource::Module {
         source: "export const value = 42;".to_owned(),
         url,
     }));
@@ -643,20 +649,20 @@ fn a_worker_requires_commonjs_and_json_against_its_own_response_url() {
     );
     let (url, completion) = group.views[0].source();
     assert_eq!(url, "app:///lib/answer.cjs");
-    completion.complete(Ok(LoadedSource::Entry {
+    completion.complete(Ok(LoadedSource::Module {
         source: "exports.answer = require('./deep.cjs').answer + 1;\nexports.dir = __dirname;"
             .to_owned(),
         url: "https://cdn.test/lib/answer.cjs".to_owned(),
     }));
     let (url, completion) = group.views[0].source();
     assert_eq!(url, "https://cdn.test/lib/deep.cjs");
-    completion.complete(Ok(LoadedSource::Entry {
+    completion.complete(Ok(LoadedSource::Module {
         source: "exports.answer = 41;".to_owned(),
         url,
     }));
     let (url, completion) = group.views[0].source();
     assert_eq!(url, "app:///config.json");
-    completion.complete(Ok(LoadedSource::Entry {
+    completion.complete(Ok(LoadedSource::Module {
         source: r#"{"name": "card"}"#.to_owned(),
         url,
     }));
@@ -684,7 +690,7 @@ fn a_bts_bundle_requires_a_chunk_beside_its_template_url() {
     );
     let (url, completion) = group.views[0].source();
     assert_eq!(url, "https://cdn.test/app/chunk.js");
-    completion.complete(Ok(LoadedSource::Entry {
+    completion.complete(Ok(LoadedSource::Module {
         source: "module.exports = { answer: 42 };".to_owned(),
         url,
     }));
@@ -717,7 +723,7 @@ fn a_registered_bundle_body_answers_through_its_modules_default_export() {
     );
     let (url, completion) = group.views[0].source();
     assert_eq!(url, "https://cdn.test/app/app-service.js");
-    completion.complete(Ok(LoadedSource::Entry {
+    completion.complete(Ok(LoadedSource::Module {
         source: format!(
             "{}export default {{init: ({{tt}}) => ({{\
              card: typeof tt.define, entry: globalThis.globDynamicComponentEntry, \
@@ -731,6 +737,29 @@ fn a_registered_bundle_body_answers_through_its_modules_default_export() {
         wire(r#"{"card":"function","entry":"__Card__","runtime":"function"}"#),
         "the body's module default-exported the object the card starts from"
     );
+}
+
+/// A synchronous load in a worker resolves against its view's base URL, not
+/// against the worker's own script URL: the base a view's MTS realm resolves
+/// its loads against too, and the one its fetcher registered a lazy
+/// container's sections under.
+#[test]
+fn a_worker_sync_load_resolves_against_the_views_base_not_its_own_url() {
+    let mut group = Group::new();
+    group.views[0].base = Arc::new(Url::parse("https://cdn.test/page/").unwrap());
+    group.start(
+        r"
+        import { lynx } from 'bobcat:bts-runtime';
+        postMessage(lynx.loadScript('x', {bundleName: 'lazy.bundle'}));
+    ",
+    );
+    let (url, completion) = group.views[0].source();
+    assert_eq!(url, "https://cdn.test/page/lazy.bundle/x.js");
+    completion.complete(Ok(LoadedSource::Module {
+        source: "module.exports = 'section x';".to_owned(),
+        url,
+    }));
+    assert_eq!(group.message(0), wire("section x"));
 }
 
 #[test]
@@ -862,7 +891,7 @@ fn a_rejected_worker_tla_is_reported_and_leaves_the_message_queue_usable() {
     );
     group.post(worker, "queued");
     let (_, completion) = group.views[0].source();
-    completion.complete(Ok(LoadedSource::Entry {
+    completion.complete(Ok(LoadedSource::Module {
         source: "await new Promise(resolve => setTimeout(resolve, 1)); throw Error('TLA failed');"
             .into(),
         url: "app:///rejected.js".into(),

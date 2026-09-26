@@ -25,6 +25,10 @@ const PATIENCE: Duration = Duration::from_secs(30);
 /// frame requested says so in the entry itself.
 const BTS_ENTRY_RAN: &str = "bts-entry-ran";
 
+/// The URL a `new Worker('./worker.js')` asks the host for: the specifier
+/// joined by URL rules to the entry's URL, `app:///nested/main.js`.
+const WORKER_URL: &str = "app:///nested/worker.js";
+
 /// Whether the worker posted exactly this string.
 ///
 /// A string crosses the transport as itself rather than inside an encoding,
@@ -226,7 +230,7 @@ impl Pair {
                 && let Some(ViewNotice::RequestSource { completion, .. }) =
                     self.deferred_notices.remove(position)
             {
-                completion.complete(Ok(LoadedSource::Entry {
+                completion.complete(Ok(LoadedSource::Module {
                     source: source.to_owned(),
                     url: url.to_owned(),
                 }));
@@ -238,7 +242,8 @@ impl Pair {
     }
 
     /// The next source request the realm made, which for these tests is
-    /// always a worker script.
+    /// always a worker script: `./worker.js`, which Rust joined to the
+    /// entry's URL `app:///nested/main.js`.
     fn source(&mut self) -> SourceCompletion {
         self.pump_host();
         loop {
@@ -249,8 +254,8 @@ impl Pair {
             } = notice
             {
                 assert!(
-                    matches!(request, SourceRequest::Worker { specifier, base_url }
-                    if specifier == "./worker.js" && base_url == "app:///nested/main.js")
+                    matches!(&request, SourceRequest::Module(url) if url == WORKER_URL),
+                    "{request:?}"
                 );
                 return completion;
             }
@@ -258,9 +263,9 @@ impl Pair {
     }
 
     fn answer(&mut self, source: &str) {
-        self.source().complete(Ok(LoadedSource::Entry {
+        self.source().complete(Ok(LoadedSource::Module {
             source: source.into(),
-            url: "app:///nested/worker.js".into(),
+            url: WORKER_URL.into(),
         }));
     }
 
@@ -397,15 +402,17 @@ fn worker_failures(notices: Vec<ViewNotice>) -> Vec<crate::script::ScriptError> 
         .collect()
 }
 
-/// Whether any notice asks the host for a worker's script.
+/// Whether any notice asks the host for the script of a `./worker.js`
+/// worker. Worker scripts are `Module` requests like imports, so the URL is
+/// what tells them apart.
 fn asked_for_a_worker(notices: &[ViewNotice]) -> bool {
     notices.iter().any(|notice| {
         matches!(
             notice,
             ViewNotice::RequestSource {
-                request: SourceRequest::Worker { .. },
+                request: SourceRequest::Module(url),
                 ..
-            }
+            } if url == WORKER_URL
         )
     })
 }
@@ -1358,7 +1365,7 @@ fn dropping_the_view_cancels_io_without_keeping_the_worker_thread_alive() {
         completion.is_cancelled(),
         "nobody is waiting for this script any more"
     );
-    completion.complete(Ok(LoadedSource::Entry {
+    completion.complete(Ok(LoadedSource::Module {
         source: "throw Error('cancelled worker ran');".into(),
         url: "app:///late.js".into(),
     }));
@@ -1483,6 +1490,66 @@ fn unsupported_worker_options_fail_before_requesting_a_context() {
     pair.check(
         "if (typeof globalThis.Worker !== 'undefined') throw Error('Worker leaked into globals');",
     );
+}
+
+/// A worker's script URL is joined to the entry's URL by URL rules, not by
+/// import-specifier rules: a bare `worker.js` is a relative URL, and a
+/// query-only URL keeps the entry's path.
+#[test]
+fn a_worker_url_joins_the_entry_url_by_url_rules() {
+    let mut pair = Pair::new(
+        r"
+        import { Worker } from 'bobcat-internal';
+        globalThis.workers = [new Worker('worker.js'), new Worker('?v=2')];
+    ",
+    );
+    let requested: Vec<String> = pair
+        .notices()
+        .into_iter()
+        .filter_map(|notice| match notice {
+            ViewNotice::RequestSource {
+                request: SourceRequest::Module(url),
+                ..
+            } => Some(url),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        requested,
+        ["app:///nested/worker.js", "app:///nested/main.js?v=2"]
+    );
+}
+
+/// A script URL that does not resolve is HTML's synchronous `SyntaxError`,
+/// and nothing is started: no worker is announced to the view, nothing is
+/// asked of the host, and the realm holds no new worker. The script catches
+/// the exception, so nothing here depends on how an uncaught one is reported.
+#[test]
+fn an_unparseable_worker_url_throws_syntax_error_and_starts_nothing() {
+    let mut pair = Pair::new("");
+    // The built-in BTS the boot started, announced and held from here on.
+    pair.notices();
+    let live = pair.live_workers();
+    pair.check(
+        r"
+        import { Worker } from 'bobcat-internal';
+        let caught = null;
+        try { new Worker('http://['); } catch (error) { caught = error; }
+        if (caught?.name !== 'SyntaxError') throw Error(`expected a SyntaxError: ${caught}`);
+        if (!caught.message.includes('http://[')) throw Error(caught.message);
+    ",
+    );
+    while let Ok(notice) = pair.view.notices.try_recv() {
+        assert!(
+            !matches!(
+                notice,
+                ViewNotice::WorkerCreated { .. } | ViewNotice::RequestSource { .. }
+            ),
+            "a worker whose URL does not resolve starts nothing"
+        );
+    }
+    assert_eq!(pair.live_workers(), live);
+    assert!(pair.events.try_recv().is_err(), "and fails nothing");
 }
 
 #[test]
@@ -2174,7 +2241,7 @@ fn disposal_remains_deliverable_while_the_bts_entry_is_loading() {
     assert!(messages.last().unwrap().contains("disposed"));
     assert!(pair.finish().is_empty());
     assert!(completion.is_cancelled());
-    completion.complete(Ok(LoadedSource::Entry {
+    completion.complete(Ok(LoadedSource::Module {
         source: "postMessage('late-module');".into(),
         url: "app:///pending.js".into(),
     }));

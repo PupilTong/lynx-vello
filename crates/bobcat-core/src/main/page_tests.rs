@@ -19,14 +19,16 @@ use super::*;
 use crate::background::{WorkerCommand, WorkerMessage, WorkerStart};
 use crate::esm::build_runtime;
 use crate::jobs::{JsThread, JsThreadHandle};
-use crate::link::{DetachedView, InputEventPayload, PageUpdate, ViewNotice, detached_outbox};
+use crate::link::{
+    DetachedView, InputEventPayload, PageUpdate, ViewNotice, detached_base, detached_outbox,
+};
 use crate::main::WorkerFactory;
 use crate::main::runtime::bound_metrics;
 use crate::main::tree::PageConfig;
 use crate::resource::{SourceCompletion, SourceRequest};
 use crate::script::ScriptError;
 use crate::threads::platform_script_error;
-use crate::view::{NoWakeup, ScreenMetrics, StartupSource, StartupSources};
+use crate::view::{NoWakeup, ScreenMetrics, StartupSource, StartupSources, resolve_startup_urls};
 
 /// How many times the harness lets every ready task run before it gives up on
 /// something happening. A hang detector rather than a schedule: everything
@@ -71,7 +73,7 @@ async fn open_realm(page: &Rc<Page>, entry: &str, url: &str) {
 /// pin here that is not about the loading itself wants.
 fn answered_entry(entry: &str, url: &str, token: &CancellationToken) -> StartupSource {
     let (completion, answer) = SourceCompletion::new(token.clone());
-    completion.complete(Ok(LoadedSource::Entry {
+    completion.complete(Ok(LoadedSource::Module {
         source: entry.to_owned(),
         url: url.to_owned(),
     }));
@@ -158,7 +160,11 @@ struct Harness {
 
 impl Harness {
     fn new(context: Rc<GroupContext>, workers: mpsc::UnboundedReceiver<WorkerCommand>) -> Self {
-        Self::serving(context, workers, ViewSources::new("app:///main.js", SCREEN))
+        Self::serving(
+            context,
+            workers,
+            ViewSources::new("app:///", "app:///main.js", SCREEN),
+        )
     }
 
     /// A view no painter has bound, which is where its first
@@ -168,7 +174,7 @@ impl Harness {
         Self::binding(
             context,
             workers,
-            ViewSources::new("app:///main.js", SCREEN),
+            ViewSources::new("app:///", "app:///main.js", SCREEN),
             None,
         )
     }
@@ -202,9 +208,18 @@ impl Harness {
         let (commands, incoming) = mpsc::unbounded_channel();
         let (metrics, metric_receiver) = watch::channel(bound);
         // What `create_lynx_view` does on the embedder's thread, which this
-        // test is: the startup sources are requested before the view's task
-        // exists, so they are outstanding from the first turn and the
-        // sheets are answered in whatever order the test likes.
+        // test is: the entries are resolved by the same function, and the
+        // startup sources are requested before the view's task exists, so
+        // they are outstanding from the first turn and the sheets are
+        // answered in whatever order the test likes. The detached outbox
+        // resolves synchronous loads against `app:///`, so the view names
+        // that base too.
+        let base = resolve_startup_urls(&mut sources).expect("a harness names URLs that resolve");
+        assert_eq!(
+            base,
+            *detached_base(),
+            "a harness view's base is its outbox's"
+        );
         let mut outstanding = Vec::new();
         let request = |request: SourceRequest, outstanding: &mut Vec<_>| {
             let (completion, answer) = SourceCompletion::new(view.token.clone());
@@ -220,7 +235,7 @@ impl Harness {
             .collect();
         let entry_url = std::mem::take(&mut sources.entry);
         let entry = StartupSource {
-            answer: request(SourceRequest::Entry(entry_url.clone()), &mut outstanding),
+            answer: request(SourceRequest::Module(entry_url.clone()), &mut outstanding),
             url: entry_url,
         };
         let attached = AttachedView {
@@ -298,7 +313,7 @@ impl Harness {
     /// Answers one outstanding source request, whichever it is.
     fn answer(&mut self, url: &str, source: &str) {
         let (_, completion) = self.sources.pop().expect("a source request is outstanding");
-        completion.complete(Ok(LoadedSource::Entry {
+        completion.complete(Ok(LoadedSource::Module {
             source: source.to_owned(),
             url: url.to_owned(),
         }));
@@ -840,7 +855,7 @@ fn page_data_reaches_the_realm_it_was_given_to() {
             ViewSources {
                 init_data: Some(r#"{"boxes": 2}"#.to_owned()),
                 global_props: Some(r#"{"theme": "dark"}"#.to_owned()),
-                ..ViewSources::new("app:///main.js", SCREEN)
+                ..ViewSources::new("app:///", "app:///main.js", SCREEN)
             },
         );
         harness
@@ -1801,7 +1816,7 @@ fn a_view_on_a_runtime_that_was_never_built_fails_its_startup() {
         assert!(
             matches!(
                 requests.as_slice(),
-                [SourceRequest::Entry(url)] if url == "app:///main.js"
+                [SourceRequest::Module(url)] if url == "app:///main.js"
             ),
             "only the startup entry was asked for: {requests:?}"
         );
@@ -1867,7 +1882,7 @@ fn script_finished_is_published_once_without_any_bts_acknowledgement() {
     // nothing at all — and the view is ready anyway, exactly once.
     on_a_js_thread(|thread| async move {
         let (context, workers) = group(&thread);
-        let mut sources = ViewSources::new("app:///main.js", SCREEN);
+        let mut sources = ViewSources::new("app:///", "app:///main.js", SCREEN);
         sources.background_entry = Some("app:///background.js".into());
         let mut harness = Harness::serving(context, workers, sources);
         harness
@@ -1978,7 +1993,7 @@ lynx.getJSContext().addEventListener('flood', () => {
 fn a_bts_worker_that_fails_reports_worker_failed_and_leaves_boot_alone() {
     on_a_js_thread(|thread| async move {
         let (context, workers) = group(&thread);
-        let mut sources = ViewSources::new("app:///main.js", SCREEN);
+        let mut sources = ViewSources::new("app:///", "app:///main.js", SCREEN);
         sources.background_entry = Some("app:///background.js".into());
         let mut harness = Harness::serving(context, workers, sources);
         harness
@@ -2260,15 +2275,18 @@ async fn classed_box_size(harness: &mut Harness) -> (f32, f32) {
 }
 
 /// Answers the entry request with [`CLASSED_BOX`], leaving every stylesheet
-/// request where it is.
+/// request where it is. The entry is picked out by its URL, since it is a
+/// module request like any import the view has made.
 fn answer_classed_entry(harness: &mut Harness) {
     let entry = harness
         .sources
         .iter()
-        .position(|(request, _)| matches!(request, SourceRequest::Entry(_)))
+        .position(
+            |(request, _)| matches!(request, SourceRequest::Module(url) if url == "app:///main.js"),
+        )
         .expect("the entry request is outstanding");
     let (_, completion) = harness.sources.remove(entry);
-    completion.complete(Ok(LoadedSource::Entry {
+    completion.complete(Ok(LoadedSource::Module {
         source: CLASSED_BOX.to_owned(),
         url: "app:///main.js".to_owned(),
     }));
@@ -2306,7 +2324,7 @@ fn author_sheets_cascade_in_listed_order_and_boot_waits_for_all_of_them() {
             workers,
             ViewSources {
                 style_sheets: vec!["app:///a.css".to_owned(), "app:///b.css".to_owned()],
-                ..ViewSources::new("app:///main.js", SCREEN)
+                ..ViewSources::new("app:///", "app:///main.js", SCREEN)
             },
         );
         harness
@@ -2362,7 +2380,7 @@ fn boot_publishes_nothing_until_a_withheld_sheet_arrives() {
             workers,
             ViewSources {
                 style_sheets: vec!["app:///a.css".to_owned()],
-                ..ViewSources::new("app:///main.js", SCREEN)
+                ..ViewSources::new("app:///", "app:///main.js", SCREEN)
             },
         );
         harness
@@ -2432,7 +2450,7 @@ fn a_listed_sheet_that_fails_to_load_fails_the_boot_naming_it() {
             workers,
             ViewSources {
                 style_sheets: vec!["app:///a.css".to_owned()],
-                ..ViewSources::new("app:///main.js", SCREEN)
+                ..ViewSources::new("app:///", "app:///main.js", SCREEN)
             },
         );
         harness
@@ -2507,7 +2525,7 @@ fn a_synchronous_adoption_parks_javascript_and_leaves_a_siblings_tasks_running()
             context,
             ViewSources {
                 style_sheets: vec!["app:///b.css".to_owned()],
-                ..ViewSources::new("app:///b.js", SCREEN)
+                ..ViewSources::new("app:///", "app:///b.js", SCREEN)
             },
         );
         // Both of B's startup requests are outstanding from its construction,

@@ -4059,7 +4059,7 @@ fn requested_module(
 
 /// One `require` answered, from whichever URL the host says it found it at.
 fn module_source(source: &str, url: &str) -> crate::resource::LoadedSource {
-    crate::resource::LoadedSource::Entry {
+    crate::resource::LoadedSource::Module {
         source: source.to_owned(),
         url: url.to_owned(),
     }
@@ -4169,6 +4169,123 @@ fn a_require_that_cannot_load_throws_and_leaves_the_realm_usable() {
             )
             .unwrap();
     }
+}
+
+/// A synchronous load's URL is resolved against the view's base URL — the
+/// detached outbox's `app:///` — by URL rules before it is requested, not
+/// against the module that made the load: a rooted and a relative lazy
+/// container name reach the fetcher as one absolute URL.
+#[test]
+fn a_sync_load_resolves_against_the_views_base() {
+    let (mut js, mut runtime, _elements, far) = runtime_over_watching_names(ingredients());
+    let mut notices = far.0.notices;
+    let host = std::thread::spawn(move || {
+        for (expected, source) in [
+            ("app:///lazy.bundle/x.js", "module.exports = 'x';"),
+            ("app:///lazy.bundle/y.js", "module.exports = 'y';"),
+        ] {
+            let (url, completion) = requested_module(&mut notices);
+            assert_eq!(url, expected);
+            completion.complete(Ok(module_source(source, &url)));
+        }
+    });
+    runtime
+        .evaluate_module(
+            &mut js,
+            r"
+        import { lynx } from 'bobcat:runtime';
+        const rooted = lynx.loadScript('x', {bundleName: '/lazy.bundle'});
+        const relative = lynx.loadScript('y', {bundleName: 'lazy.bundle'});
+        if (rooted !== 'x' || relative !== 'y') throw Error(`${rooted} ${relative}`);
+    ",
+            "app:///nested/load.js",
+            "loading sections through the host",
+        )
+        .unwrap();
+    host.join().unwrap();
+}
+
+/// A synchronous load whose URL does not resolve against the view's base
+/// throws in the realm, as a failed load does, and is never requested.
+#[test]
+fn a_sync_load_that_does_not_resolve_throws_without_a_request() {
+    let (mut js, mut runtime, _elements, far) = runtime_over_watching_names(ingredients());
+    let mut notices = far.0.notices;
+    let (finished, mut finish) = tokio::sync::oneshot::channel::<()>();
+    // Every source request that reaches this thread is recorded and its
+    // completion dropped, which fails that load: a URL that was requested
+    // fails the assertion below instead of leaving the realm waiting for an
+    // answer. Dropping `finished` ends the loop.
+    let host = std::thread::spawn(move || {
+        let deadline = ClockInstant::now() + std::time::Duration::from_secs(10);
+        let mut requested = Vec::new();
+        loop {
+            let notice = crate::link::block_on_deadline(
+                async {
+                    tokio::select! {
+                        notice = notices.recv() => notice,
+                        _ = &mut finish => None,
+                    }
+                },
+                deadline,
+            )
+            .flatten();
+            match notice {
+                Some(ViewNotice::RequestSource { request, .. }) => requested.push(request),
+                Some(_) => {}
+                None => break requested,
+            }
+        }
+    });
+    runtime
+        .evaluate_module(
+            &mut js,
+            r"
+        import { lynx } from 'bobcat:runtime';
+        let failure;
+        try { lynx.loadScript('x', {bundleName: 'http://['}); } catch (error) { failure = error; }
+        if (failure?.name !== 'Error' || !failure.message.includes('http://[/x.js'))
+            throw Error(`${failure}`);
+    ",
+            "app:///nested/load.js",
+            "loading a section whose URL does not resolve",
+        )
+        .unwrap();
+    drop(finished);
+    let requested = host.join().unwrap();
+    assert!(
+        requested.is_empty(),
+        "an unresolvable URL reached the host: {requested:?}"
+    );
+}
+
+/// A fetch is not resolved by the engine: the fetcher gets the string the
+/// realm wrote and resolves it against its own base.
+#[test]
+fn a_fetch_reaches_the_fetcher_as_the_realm_wrote_it() {
+    let (mut js, mut runtime, _elements, mut far) = runtime_over_watching_names(ingredients());
+    runtime
+        .evaluate_module(
+            &mut js,
+            r"
+        import { lynx } from 'bobcat:runtime';
+        globalThis.handle = lynx.fetchBundle('/lazy.bundle');
+    ",
+            "app:///nested/fetch.js",
+            "fetching a container",
+        )
+        .unwrap();
+    let url = loop {
+        match far.0.notices.try_recv().expect("the fetch was requested") {
+            ViewNotice::RequestSource {
+                request: crate::resource::SourceRequest::Fetch { url },
+                ..
+            } => break url,
+            ViewNotice::RequestSource { request, .. } => panic!("expected a fetch: {request:?}"),
+            _ => {}
+        }
+    };
+    assert_eq!(url, "/lazy.bundle");
 }
 
 /// A name under an engine prefix is answered from the runtime's built-ins and
