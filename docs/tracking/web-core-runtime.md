@@ -89,10 +89,14 @@ name, its URL, a one-shot for its script unless that URL is an engine name
 such as `bobcat:bts`, the source its diagnostics are named by, the receiving
 end of its message channel, and the sender its events go back on, which is the
 creating view's own channel. The
-worker's realm opens as that message is served, and its root module imports
-the script by its URL. The script is loaded through the view's fetcher and
+worker's realm opens as that message is served and loads the module at its
+URL as its root module, the way an `import()` of the URL would; nothing is
+written around the script. The script is loaded through the view's fetcher and
 answers that one-shot directly, without a main-thread turn; the worker
-completes the import from it. Early messages queue in the worker's own
+completes the root module from it. The engine installs no global scope: a
+worker script imports `bobcat:worker` for `self`, `postMessage` and
+`onmessage`, and `bobcat:timers` for the timer globals, and a message posted
+to a realm in which `bobcat:worker` never ran is dropped without a report. Early messages queue in the worker's own
 task until the script has run, a terminate that arrives before the script wins
 over it, and parent message/error listeners and termination are supported. This is the worker transport needed
 under the BTS integration above; it does not yet install the ReactLynx BTS
@@ -106,10 +110,12 @@ termination recorded in `../runtime-architecture.md`.
 After it awaits the import of the entry by its URL, boot creates a BTS Worker on the group's
 existing `bobcat-workers` thread with `new Worker("bobcat:bts")`. Its `Start`
 carries no script: `bobcat:bts` is a registered module, the engine's own
-source, which the BTS realm's root module imports by that URL. The BTS is a
-dedicated worker whose URL is `bobcat:bts`: every worker uses the same scope,
-the same root module and the same `Start`, and the BTS differs only in its URL
-and the source its diagnostics are named by. `ViewSources.background_entry`
+source, and it is the BTS realm's root module, as every worker's root module
+is the module at its URL. It imports `bobcat:worker` and `bobcat:timers`
+itself, which is where the BTS's global scope and timers come from. The BTS
+is a dedicated worker whose URL is `bobcat:bts`: every worker is started from
+the same kind of `Start`, and the BTS differs only in its URL and the source
+its diagnostics are named by. `ViewSources.background_entry`
 selects an optional raw module; native/browser XML adapters supply the
 background section's URL. The MTS realm posts that URL to the BTS in the
 first message, `initialize`, beside the page data, its own `SystemInfo` and

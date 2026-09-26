@@ -20,7 +20,9 @@
 //! its loader, inspect their namespaces, and inspect a module-evaluation
 //! `Promise` after driving the runtime's pending-job queue. Opt-in asynchronous
 //! loading exposes missing source requests and resumes the original imports
-//! after completion; URL normalization and IO remain the caller's policy.
+//! after completion; URL normalization and IO remain the caller's policy. A
+//! realm can also load one module by name as the root of a graph, the way an
+//! `import()` of it would, and hold the promise that load settles.
 //!
 //! The host-function boundary carries primitives plus opaque structured
 //! clones: anything that is not a primitive is serialized by `QuickJS` itself
@@ -1537,6 +1539,41 @@ mod implementation {
             guard.finish(Ok(()), ErrorPhase::Evaluate)
         }
 
+        /// Loads the module `name` as the root of a module graph, the way
+        /// `import(name)` loads one, and answers the promise that load
+        /// settles: fulfilled with the module's namespace once its graph has
+        /// evaluated, rejected with whatever failed to load, link or
+        /// evaluate.
+        ///
+        /// `name` is its own base, so it normalizes from itself: an absolute
+        /// URL, or a name the normalizer passes through, names itself. A
+        /// graph whose every source this realm already has — a registered
+        /// module, a completed one — is linked and evaluated during this
+        /// call. Any other waits exactly as an `import` does: each source the
+        /// realm lacks, the root's own included, becomes a
+        /// [`Self::take_module_request`], and the load goes on once
+        /// [`Self::complete_module`] has answered it and
+        /// [`Self::resume_module_loads`] has run. Nothing here drains the
+        /// job queue, and nothing handles the promise: a rejection nothing
+        /// awaits is reported by the next drain, as a rejected module
+        /// evaluation is.
+        pub fn load_module(&mut self, name: &str) -> Result<Value, Error> {
+            self.reclaim();
+            let name = CString::new(name).map_err(|_| {
+                Error::bridge(
+                    ErrorKind::InvalidInput,
+                    ErrorPhase::Evaluate,
+                    "module name contains a NUL byte",
+                )
+            })?;
+            let guard = self.begin();
+            // SAFETY: the name lives through the call, which copies it; a
+            // module body the load evaluates runs under the guard.
+            let raw = unsafe { ffi::qjs_context_load_module(self.raw().as_ptr(), name.as_ptr()) };
+            let result = self.value_or_exception(raw, ErrorPhase::Evaluate);
+            guard.finish(result, ErrorPhase::Evaluate)
+        }
+
         pub fn global_object(&self) -> Result<Value, Error> {
             self.construct(ErrorPhase::ConstructValue, |context| unsafe {
                 ffi::qjs_global_object(context)
@@ -2967,6 +3004,131 @@ mod implementation {
                 if (answer !== 42) throw Error('answer ' + answer);
             "#,
             );
+        }
+
+        /// The text of a string value, for the root-load tests.
+        fn string_of(value: &Value) -> String {
+            String::from_utf16(&value.to_utf16().unwrap()).unwrap()
+        }
+
+        /// A root whose every source the realm already has is loaded during
+        /// the call: its body has run by the time the call returns, nothing
+        /// is requested, and the load settles with its namespace once the
+        /// jobs have drained. A registered module knows the name it was
+        /// registered under as its `import.meta.url`.
+        #[test]
+        fn a_registered_root_evaluates_during_its_load() {
+            let (mut runtime, mut realm) = import_test_realm();
+            runtime
+                .register_module_source(
+                    "bobcat:root",
+                    "globalThis.ran = true;\nexport const url = import.meta.url;",
+                )
+                .unwrap();
+            let load = realm.load_module("bobcat:root").unwrap();
+            import_eval(
+                &mut realm,
+                "if (globalThis.ran !== true) throw Error('the root did not run');",
+            );
+            runtime.drain_pending_jobs(&realm).unwrap();
+            assert!(realm.take_module_request().is_none());
+            let namespace = realm
+                .settled_promise_result(&load)
+                .unwrap()
+                .expect("the load settled with the namespace");
+            let url = realm.property(&namespace, "url").unwrap();
+            assert_eq!(string_of(&url), "bobcat:root");
+        }
+
+        /// A root the realm has no source for waits as an `import` of it
+        /// would: its own name is the request, and completing it — from a
+        /// response URL of its own — and resuming the loads evaluates it. The
+        /// response URL is its `import.meta.url`.
+        #[test]
+        fn a_root_without_a_source_is_requested_and_resumed_by_its_completion() {
+            let (mut runtime, mut realm) = import_test_realm();
+            let load = realm.load_module("app:///worker.js").unwrap();
+            runtime.drain_pending_jobs(&realm).unwrap();
+            assert!(
+                realm.settled_promise_result(&load).unwrap().is_none(),
+                "the load waits for its source"
+            );
+            assert_eq!(
+                realm.take_module_request().as_deref(),
+                Some("app:///worker.js")
+            );
+            assert!(realm.take_module_request().is_none());
+            realm
+                .complete_module(
+                    "app:///worker.js",
+                    Ok((
+                        "https://cdn.test/worker.js",
+                        "export const url = import.meta.url;",
+                    )),
+                )
+                .unwrap();
+            realm.resume_module_loads().unwrap();
+            runtime.drain_pending_jobs(&realm).unwrap();
+            let namespace = realm
+                .settled_promise_result(&load)
+                .unwrap()
+                .expect("the completed root evaluated");
+            let url = realm.property(&namespace, "url").unwrap();
+            assert_eq!(string_of(&url), "https://cdn.test/worker.js");
+        }
+
+        /// A root that throws at its top level rejects its load, and nothing
+        /// awaits that promise, so the drain after it reports the throw — at
+        /// the line it is on, under the name the root was loaded by.
+        #[test]
+        fn a_root_that_throws_rejects_its_load_and_the_drain_reports_it() {
+            let (mut runtime, mut realm) = import_test_realm();
+            realm
+                .complete_module(
+                    "app:///throws.js",
+                    Ok((
+                        "app:///throws.js",
+                        "export const before = 1;\nthrow new Error('boom');",
+                    )),
+                )
+                .unwrap();
+            let load = realm.load_module("app:///throws.js").unwrap();
+            let reported = runtime
+                .drain_pending_jobs(&realm)
+                .expect_err("nothing awaits the load");
+            assert_eq!(reported.message, "boom");
+            let location = reported.location.expect("the throw has a location");
+            assert_eq!(location.source.as_deref(), Some("app:///throws.js"));
+            assert_eq!(location.line, Some(2));
+            let rejected = realm
+                .settled_promise_result(&load)
+                .expect_err("the load rejected");
+            assert_eq!(rejected.message, "boom");
+        }
+
+        /// The graph a load evaluates is on the stack while it runs, as a
+        /// resumed import's is, so a `require` of the root from its own body
+        /// is refused rather than re-entering the body that asked.
+        #[test]
+        fn a_root_that_requires_itself_while_it_loads_is_refused() {
+            let source = "import { loadModuleSync } from 'bobcat:module';\n\
+                          loadModuleSync('app:///cycle.mjs', 'unread');";
+            let (mut runtime, mut realm, _host) =
+                loader_realm(RequireHost::default().module("app:///cycle.mjs", source));
+            realm
+                .complete_module("app:///cycle.mjs", Ok(("app:///cycle.mjs", source)))
+                .unwrap();
+            let load = realm.load_module("app:///cycle.mjs").unwrap();
+            let reported = runtime
+                .drain_pending_jobs(&realm)
+                .expect_err("the refused require rejects the load");
+            assert!(
+                reported.message.contains("app:///cycle.mjs")
+                    && reported.message.contains("still evaluating"),
+                "{}",
+                reported.message
+            );
+            assert!(realm.settled_promise_result(&load).is_err());
         }
 
         /// The specifier these tests register the synchronous loader under.

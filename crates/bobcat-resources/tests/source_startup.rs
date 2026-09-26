@@ -343,7 +343,10 @@ async fn workers_load_relative_to_entry_and_route_back_to_their_own_views() {
         resources
             .register(
                 "app:///nested/worker.js",
-                format!("onmessage = () => postMessage({{name, color: '{color}'}});"),
+                format!(
+                    "import 'bobcat:worker'; import 'bobcat:timers'; \
+                     onmessage = () => postMessage({{name, color: '{color}'}});"
+                ),
                 Some("text/javascript"),
             )
             .unwrap();

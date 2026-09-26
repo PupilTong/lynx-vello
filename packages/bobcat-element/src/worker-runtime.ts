@@ -12,13 +12,19 @@ import {
 import { console } from "bobcat:diagnostics";
 
 // The `bobcat:worker` ESM: one worker realm's global scope, preloaded on the
-// group's worker runtime and imported for its effect before the worker's own
-// script.
+// group's worker runtime and imported for its effect by the worker's own
+// script. The engine installs it in no realm: a worker's root module is the
+// module at its URL, and nothing is evaluated before it. `bobcat:bts`, the
+// BTS's root module, imports it as its first import, and a plain worker script
+// that wants `postMessage` or `onmessage` writes `import "bobcat:worker";`. A
+// realm in which this module never ran has no global scope, and the host drops
+// a message posted to it: nothing there could receive one.
 //
 // It plays the part `DedicatedWorkerGlobalScope` plays in HTML, and it is a
 // module rather than a set of exports for the same reason `bobcat:timers` is:
 // a worker script reaches `self`, `postMessage`, `close` and `onmessage` as
-// free variables, the way it would in a browser.
+// free variables, the way it would in a browser, once it has imported this
+// module.
 //
 // # What is here and what is not
 //
@@ -28,8 +34,9 @@ import { console } from "bobcat:diagnostics";
 // the listeners behind it still run. `console` is `bobcat:diagnostics`'s, so
 // what it prints reaches the embedder from this realm directly. `name` is
 // read from the host as this module is evaluated, which is before any module
-// of the worker's own script is, so a module the script imports statically
-// reads it at its top level too. Not here:
+// the script imports after it is, so such a module reads it at its top level
+// too. That read is also how the host learns this module has run, and so that
+// the realm has a scope a posted message can be delivered to. Not here:
 // `requestAnimationFrame` (a worker script imports it from
 // `bobcat:animation-frame`, and `bobcat:bts-runtime` also gives it as an
 // export and a `lynx` member; it is never a global), `importScripts` (this

@@ -54,9 +54,9 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::{self, JoinError, JoinSet};
 use tokio_util::sync::CancellationToken;
 
-use super::scope::{WORKER_DELIVER_EXPORT, install_worker_members, worker_boot_source};
+use super::scope::{WORKER_DELIVER_EXPORT, install_worker_members};
 use super::{WorkerCommand, WorkerEvent, WorkerKey, WorkerMessage, WorkerPayload, WorkerStart};
-use crate::esm::{WORKER_BOOT_SPECIFIER, WORKER_MODULE_SPECIFIER, build_runtime};
+use crate::esm::{WORKER_MODULE_SPECIFIER, build_runtime};
 use crate::jobs::{JsThread, JsThreadHandle};
 use crate::lifetime::{EndOnUnwind, Lifetime, Settles, run_job, serve_clock};
 use crate::link::{HostOutbox, SourceAnswer};
@@ -266,11 +266,14 @@ fn report_thread_trap(trapped: &AtomicBool, reporters: &Reporters, error: &Scrip
 
 /// One live worker on this thread: its realm and everything that realm owns.
 ///
-/// `core` is what [`realm::open_realm`] builds for every realm; `closing` is
-/// the one piece of state the worker's own host module,
-/// `bobcat-internal:worker`, adds to it.
+/// `core` is what [`realm::open_realm`] builds for every realm; the two flags
+/// are the state the worker's own host module, `bobcat-internal:worker`, adds
+/// to it.
 struct WorkerRealm {
     core: RealmCore,
+    /// Set as `bobcat:worker` runs in this realm: whether the realm has the
+    /// global scope a posted message is delivered to.
+    scope_installed: Rc<Cell<bool>>,
     /// Set by the native `closeWorker` export. A flag rather than a direct
     /// teardown because it is written from inside the realm it would tear
     /// down: the task reads it once the call that set it has returned.
@@ -303,14 +306,14 @@ struct Worker {
     /// What this worker's realm is named by in the diagnostics it reports:
     /// the background thread, or the `Worker` its key names.
     source: ScriptSource,
-    /// The name the root module's `import` of the worker's script asks the
-    /// realm for: the script's URL, normalized the way the module loader
-    /// normalizes a specifier imported from `bobcat:worker-boot`, which for
-    /// that absolute URL is the identity. The epilogue never asks the host
-    /// for it, because `createWorker` already has, and [`consume_messages`]
-    /// completes it under this name from that answer. An engine name, such
-    /// as the BTS's `bobcat:bts`, never becomes a request at all: the
-    /// realm's own loader loads it.
+    /// The name the realm loads as its root module: the script's URL,
+    /// normalized the way the module loader normalizes it from itself, which
+    /// for the absolute URL or engine name `createWorker` joined is the
+    /// identity. The root is the module at this name and nothing else. The
+    /// epilogue never asks the host for it, because `createWorker` already
+    /// has, and [`consume_messages`] completes it under this name from that
+    /// answer. An engine name, such as the BTS's `bobcat:bts`, never becomes
+    /// a request at all: the realm's own loader loads it.
     entry: String,
     /// Where this worker reports, which is the creating view's own channel.
     events: mpsc::UnboundedSender<WorkerEvent>,
@@ -349,11 +352,10 @@ impl Worker {
         sources: HostOutbox,
         thread: JsThreadHandle,
     ) -> Rc<Self> {
-        // A URL the loader refused would fail the root module's import with
-        // the loader's own message and ask for nothing; the name its answer is
-        // then completed under is one nothing imports.
-        let entry =
-            normalize_module_url(WORKER_BOOT_SPECIFIER, url).unwrap_or_else(|_| url.to_owned());
+        // A URL the loader refused would fail the root's load with the
+        // loader's own message and ask for nothing; the name its answer is
+        // then completed under is one nothing loads.
+        let entry = normalize_module_url(url, url).unwrap_or_else(|_| url.to_owned());
         Rc::new(Self {
             js,
             key,
@@ -509,8 +511,8 @@ impl Worker {
         while let Some(url) = realm.core.engine.take_module_request() {
             // The worker's script is answered by `consume_messages` from the
             // answer to the request `createWorker` made: completing it is
-            // what resumes the root module's import, and it must never reach
-            // the fetcher a second time.
+            // what resumes the load of the root module, which is the script
+            // itself, and it must never reach the fetcher a second time.
             if url == self.entry {
                 continue;
             }
@@ -527,19 +529,25 @@ impl Worker {
         self.lifetime.record_checkpoint(js.checkpoint_generation());
     }
 
-    /// Opens this worker's realm and evaluates its root module in it, and
-    /// answers with the checkpoint receiver its clock task will watch. `None`
-    /// is what leaves no worker at all — a runtime that never came up, a
-    /// realm that could not be created or furnished, or a worker that ended
-    /// before it booted.
+    /// Opens this worker's realm and starts the load of its root module in
+    /// it, and answers with the checkpoint receiver its clock task will
+    /// watch. `None` is what leaves no worker at all — a runtime that never
+    /// came up, a realm that could not be created or furnished, or a worker
+    /// that ended before it booted.
+    ///
+    /// The root module is the module at the worker's URL, loaded as an
+    /// `import()` of it would be: the engine writes nothing around it and
+    /// installs no global scope first. `bobcat:bts` imports `bobcat:worker`
+    /// and `bobcat:timers` itself, and so does any worker script that wants
+    /// `postMessage` or `setTimeout`.
     ///
     /// The worker's first job, queued as its `Start` is served, the way a
     /// view's realm opens as that view's first job. Nothing is waited for
-    /// first: the root module waits in its `import` for a script the host was
-    /// asked for, which [`consume_messages`] completes once it arrives, and
-    /// the realm's own loader answers an engine name such as the BTS's
-    /// `bobcat:bts` at once. So a runtime that never came up fails the worker
-    /// here, whether or not its script has been answered.
+    /// first: the load waits for a script the host was asked for, which
+    /// [`consume_messages`] completes once it arrives, and the realm's own
+    /// loader answers an engine name such as the BTS's `bobcat:bts` at once,
+    /// which then evaluates inside this job. So a runtime that never came up
+    /// fails the worker here, whether or not its script has been answered.
     ///
     /// The script's *own* outcome is not among the failures: by the time it
     /// runs the realm is built, so a script that throws on load is reported
@@ -552,7 +560,7 @@ impl Worker {
     /// A job like every other entry, and the one that does not go through
     /// [`Self::enter`], because the realm it would enter does not exist until
     /// it returns. [`boot_worker`] is what queues it.
-    fn boot(self: &Rc<Self>, name: String, root: &str) -> Option<watch::Receiver<u64>> {
+    fn boot(self: &Rc<Self>, name: String) -> Option<watch::Receiver<u64>> {
         // A worker whose lifetime already ended opens nothing.
         if self.ended() {
             return None;
@@ -593,14 +601,13 @@ impl Worker {
                             )
                         },
                     )
-                    .map(|(core, closing)| WorkerRealm { core, closing })
+                    .map(|(core, flags)| WorkerRealm {
+                        core,
+                        scope_installed: flags.scope_installed,
+                        closing: flags.closing,
+                    })
                     .map(|mut realm| {
-                        if let Err(error) =
-                            realm
-                                .core
-                                .engine
-                                .start_module(js, root, WORKER_BOOT_SPECIFIER)
-                        {
+                        if let Err(error) = realm.core.engine.load_root_module(js, &self.entry) {
                             // Nothing to clean up after: a throw at this module's
                             // top level rejects through the runtime's shared job
                             // queue, and what it leaves there is this realm's — it
@@ -608,10 +615,10 @@ impl Worker {
                             // realm to be entered on this runtime.
                             report(&self.events, self.key, "running the worker's script", error);
                         }
-                        // Both under the borrow the root module ran under, so
-                        // a sibling's bump between this boot and the clock
-                        // task's first poll is neither lost nor mistaken for
-                        // this worker's own.
+                        // Both under the borrow the root module's load ran
+                        // under, so a sibling's bump between this boot and
+                        // the clock task's first poll is neither lost nor
+                        // mistaken for this worker's own.
                         let checkpoints = js.checkpoints();
                         self.lifetime.record_checkpoint(js.checkpoint_generation());
                         (realm, checkpoints)
@@ -624,11 +631,11 @@ impl Worker {
                 *self.state.borrow_mut() = WorkerState::Live(realm);
                 // The first epilogue, inline: this is already job context and
                 // the borrows the stretch above held are released, so what
-                // the root module left owing is settled here rather than a
-                // queue trip later. A root whose import is an engine name has
+                // the root module's load left owing is settled here rather
+                // than a queue trip later. A root that is an engine name has
                 // finished, which for the BTS is what lets `initialize`
-                // through; one whose script the host was asked for waits in
-                // that import, which this does not ask the host for again.
+                // through; one whose script the host was asked for waits for
+                // that script, which this does not ask the host for again.
                 let _ = self.enter_now(|_, _| ());
                 Some(checkpoints)
             }
@@ -671,9 +678,9 @@ impl Worker {
         matches!(&*self.state.borrow(), WorkerState::Live(_))
     }
 
-    /// Whether this worker's root module has finished — the module at its
-    /// URL included — for a test that has to wait for that rather than for
-    /// the realm, which is up before a fetched script has arrived.
+    /// Whether this worker's root module — the module at its URL — has
+    /// finished, for a test that has to wait for that rather than for the
+    /// realm, which is up before a fetched script has arrived.
     #[cfg(test)]
     fn is_booted(&self) -> bool {
         *self.boot_finished.borrow()
@@ -723,18 +730,18 @@ async fn serve_worker(js: SharedRuntime, start: WorkerStart, thread: JsThreadHan
         sources,
     } = start;
     let worker = Worker::new(js, key, &url, source, events, token, sources, thread);
-    worker.spawn(boot_worker(Rc::clone(&worker), name, url, script, messages));
+    worker.spawn(boot_worker(Rc::clone(&worker), name, script, messages));
     worker.run_owner().await;
 }
 
 /// The worker's boot future: queue the worker's first job, which opens its
-/// realm and evaluates its root module, start its message consumer beside
-/// that job, and once the job has run start the clock a live worker has.
+/// realm and loads its root module, start its message consumer beside that
+/// job, and once the job has run start the clock a live worker has.
 ///
-/// Every worker's root module imports its `url`, the BTS's `bobcat:bts`
-/// included. `script`, the answer to the request `createWorker` made when it
-/// made one, goes to [`consume_messages`], which completes the script the
-/// root module is waiting in the import of.
+/// Every worker's root module is the module at its URL, the BTS's
+/// `bobcat:bts` included. `script`, the answer to the request `createWorker`
+/// made when it made one, goes to [`consume_messages`], which completes the
+/// root module the load is waiting for.
 ///
 /// The consumer does not wait for the boot job. That job can sit in the
 /// queue behind a sibling's job parked on a synchronous wait, which runs no
@@ -745,12 +752,10 @@ async fn serve_worker(js: SharedRuntime, start: WorkerStart, thread: JsThreadHan
 async fn boot_worker(
     worker: Rc<Worker>,
     name: String,
-    url: String,
     script: Option<SourceAnswer>,
     messages: mpsc::UnboundedReceiver<WorkerMessage>,
 ) {
-    let root = worker_boot_source(&url);
-    let booted = run_job(&worker, move |worker| worker.boot(name, &root));
+    let booted = run_job(&worker, move |worker| worker.boot(name));
     worker.spawn(consume_messages(Rc::clone(&worker), messages, script));
     // The boot job runs the first epilogue itself, so the first deadline has
     // already been published by the time this returns — and that epilogue
@@ -841,13 +846,11 @@ fn deliver_module_callback(worker: &Rc<Worker>, call: u64, index: u32, arguments
 /// Returning drops the script's receiving end, which is what cancels that
 /// fetch.
 ///
-/// The script's answer is read whenever it arrives, and it is what the root
-/// module waits for. There is none for a URL that is an engine name, the
+/// The script's answer is read whenever it arrives, and it is the root module
+/// the load waits for. There is none for a URL that is an engine name, the
 /// BTS's `bobcat:bts` or `new Worker("bobcat:timers")` alike: `createWorker`
 /// asks the host for nothing, and the realm's own loader loads the name or
-/// refuses it, so the root module finishes without one. The root's own name,
-/// [`WORKER_BOOT_SPECIFIER`], is the one engine name that is neither: that
-/// root never finishes, so what is posted to such a worker stays held.
+/// refuses it, so the root module finishes without one.
 async fn consume_messages(
     worker: Rc<Worker>,
     mut messages: mpsc::UnboundedReceiver<WorkerMessage>,
@@ -904,15 +907,21 @@ async fn consume_messages(
 }
 
 /// Queues the completion of the worker's script, from the answer to the
-/// request `createWorker` made for it, under the name the root module's
-/// `import` asked for. The response URL is the module's URL: its
-/// `import.meta.url`, and the base its own imports resolve against.
+/// request `createWorker` made for it, under the name the realm's load of its
+/// root module asked for. The script is that root module. The response URL is
+/// the module's URL: its `import.meta.url`, and the base its own imports
+/// resolve against.
 ///
-/// The root module's evaluation is read once more in the same job. A script
-/// that throws at its top level rejects that evaluation, and the
-/// completion's checkpoint already reports the rejection; reading it here
-/// clears it, so the epilogue does not report it a second time. Only the
-/// first of the two errors is reported.
+/// A module completed in a realm is that realm's own source and is never
+/// named on the runtime, so two views that answer one URL with different
+/// bytes each run their own, and a worker leaves no registration behind.
+/// Nothing is written around the script, so it keeps its own line numbers.
+///
+/// The root module's load is read once more in the same job. A script that
+/// throws at its top level rejects that load, and the completion's checkpoint
+/// already reports the rejection; reading it here clears it, so the epilogue
+/// does not report it a second time. Only the first of the two errors is
+/// reported.
 fn complete_script(worker: &Rc<Worker>, url: String, source: String) {
     let completing = Rc::clone(worker);
     drop(worker.enter(move |realm, js| {
@@ -1022,6 +1031,24 @@ fn deliver(
     if realm.closing.get() {
         return;
     }
+    // No global scope, so nothing in this realm receives a message: the
+    // engine installs `bobcat:worker` in no realm, and this one's script
+    // never imported it, or imported it in a module graph that has not run.
+    // The message is dropped, and nothing is reported: a realm with no
+    // `onmessage` to call has nothing to report either. The module having
+    // *run* is the test, not the realm having an instance of it: a graph that
+    // failed to load, or is still loading, leaves its modules compiled but
+    // never linked, and reading the namespace of such a module crashes
+    // `QuickJS`. A module that has run was linked first.
+    //
+    // Nothing else this thread delivers needs the test. A frame, a due
+    // timer, a native module's answer and a future's settle each answer a
+    // host member that `bobcat:animation-frame`, `bobcat:timers`,
+    // `bobcat:native-modules` or `bobcat:future` called while it ran, so the
+    // module each is delivered to has run. A post alone arrives unasked.
+    if !realm.scope_installed.get() {
+        return;
+    }
     let delivered = realm.core.engine.call_module_export(
         js_runtime,
         WORKER_MODULE_SPECIFIER,
@@ -1087,6 +1114,11 @@ mod tests {
     /// here is on one thread and cooperative.
     const TURNS: usize = 512;
 
+    /// The script [`start`] answers with: what a worker script that wants
+    /// `postMessage`, `onmessage` and the timer globals imports, and nothing
+    /// else.
+    const GLOBAL_SCOPE: &str = "import 'bobcat:worker'; import 'bobcat:timers';";
+
     /// Runs one test body as the `main` task of a [`JsThread`], which is the
     /// shape this thread itself runs: the body's turns are scheduler turns, and
     /// the jobs the workers queue run between them.
@@ -1114,10 +1146,12 @@ mod tests {
 
     /// Starts one worker on `js`, with its script already answered.
     ///
-    /// The script does nothing, because what most of these pins are about is
-    /// which task ran rather than what the script said.
+    /// The script imports the worker's global scope and does nothing else,
+    /// because what most of these pins are about is which task ran rather
+    /// than what the script said. The import is what makes a post to it
+    /// enter JavaScript: a realm without that scope drops what is posted.
     fn start(js: &SharedRuntime, thread: &JsThreadHandle, key: u64) -> Started {
-        start_running(js, thread, key, String::new())
+        start_running(js, thread, key, GLOBAL_SCOPE.to_owned())
     }
 
     /// The same, over a script of the test's own.
@@ -1161,7 +1195,6 @@ mod tests {
         worker.spawn(boot_worker(
             Rc::clone(&worker),
             String::new(),
-            url,
             Some(script_rx),
             messages_rx,
         ));
@@ -1235,12 +1268,13 @@ mod tests {
     /// task returns normally — so its ending settles every other realm on
     /// the runtime once, the way a view task's ending does on `bobcat-main`.
     ///
-    /// The task that ends runs no JavaScript past its root module: its realm
-    /// opens and evaluates that module as its `Start` is served, which
-    /// settles the parked worker as well, and the count is taken only once
-    /// that has stopped moving. Its script never arrives, and a `Terminate`
-    /// ends it while its root module waits in the import. So the one settle
-    /// counted is the ending's and nothing else's.
+    /// The task that ends runs no JavaScript of its own: its realm opens and
+    /// starts the load of its root module as its `Start` is served, which
+    /// runs a checkpoint that settles the parked worker as well, and the
+    /// count is taken only once that has stopped moving. Its script, which is
+    /// that root module, never arrives, and a `Terminate` ends it while the
+    /// load waits for it. So the one settle counted is the ending's and
+    /// nothing else's.
     #[test]
     fn a_finished_worker_task_makes_a_parked_sibling_settle() {
         on_a_js_thread(|thread| async move {
@@ -1270,10 +1304,10 @@ mod tests {
                 )))
                 .expect("the loop is serving");
 
-            // Parked: whatever the `Start` set off — the second realm's root
-            // module ran a checkpoint over the queue both realms share — has
-            // settled, and a settle that finds nothing due enters no
-            // JavaScript, so the count stops moving.
+            // Parked: whatever the `Start` set off — the load of the second
+            // realm's root module ran a checkpoint over the queue both realms
+            // share — has settled, and a settle that finds nothing due enters
+            // no JavaScript, so the count stops moving.
             let mut settled = first.worker.epilogue_count();
             for _ in 0..TURNS {
                 for _ in 0..8 {
@@ -1427,8 +1461,8 @@ mod tests {
             let mut first = start(&js, &thread, 1);
             let mut second = start(&js, &thread, 2);
             // Booted rather than live: `execute` evaluates a module of its
-            // own, which would take the place of a root module whose import
-            // of the script is still outstanding.
+            // own, which would take the place of a root module whose load is
+            // still outstanding.
             for _ in 0..TURNS {
                 if first.worker.is_booted() && second.worker.is_booted() {
                     break;
@@ -1532,7 +1566,7 @@ mod tests {
                 &js,
                 &thread,
                 1,
-                r"
+                r"import 'bobcat:worker'; import 'bobcat:timers';
                 import { createRequire } from 'bobcat:module';
                 const require = createRequire(import.meta.url);
                 onmessage = event => {

@@ -109,13 +109,14 @@ Every realm has `console.log/info/debug/warn/error` and `lynx.reportError`,
 and they are one module, `bobcat:diagnostics`, in all three realm kinds. MTS
 entries receive `console` and `_ReportError` through their injected ESM
 import. The BTS exports `console` from `bobcat:bts-runtime`, where a raw BTS
-entry imports it and a bundle body's preamble binds it. A worker realm, the
-BTS included, also has `console` on its global, installed by `bobcat:worker`
-as WebIDL installs a namespace: writable, configurable and not enumerable. It
-is the same object the BTS module exports. A plain `Worker` has no global
-`requestAnimationFrame`; it imports one from `bobcat:animation-frame`, the
-module `bobcat:bts-runtime` also takes its export and `lynx` member from. The
-MTS realm adds no global `console`.
+entry imports it and a bundle body's preamble binds it. A worker realm whose
+script imports `bobcat:worker` — the BTS's `bobcat:bts` does — also has
+`console` on its global, installed by that module as WebIDL installs a
+namespace: writable, configurable and not enumerable. The engine installs it
+in no realm of its own accord. It is the same object the BTS module exports.
+A plain `Worker` has no global `requestAnimationFrame`; it imports one from
+`bobcat:animation-frame`, the module `bobcat:bts-runtime` also takes its
+export and `lynx` member from. The MTS realm adds no global `console`.
 
 The module is written over two members every realm's core has under
 `bobcat-internal:host`, `reportScriptError(level, message)` and

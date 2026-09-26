@@ -9,7 +9,6 @@ use std::rc::Rc;
 use quickjs_rust_bridge::HostValue;
 
 use crate::background::WorkerKey;
-use crate::esm::{TIMER_MODULE_SPECIFIER, WORKER_MODULE_SPECIFIER};
 use crate::link::HostOutbox;
 use crate::main::quickjs::{ScriptEngine, ScriptRuntime};
 use crate::script::ScriptError;
@@ -25,34 +24,19 @@ const WORKER_HOST_MODULE_SPECIFIER: &str = "bobcat-internal:worker";
 /// Called on `bobcat:worker`, in a worker realm, with one message value.
 pub(super) const WORKER_DELIVER_EXPORT: &str = "__BobcatDeliverWorkerMessage";
 
-/// The root module of a worker realm: what the realm evaluates as it opens,
-/// under [`WORKER_BOOT_SPECIFIER`](crate::esm::WORKER_BOOT_SPECIFIER), and
-/// whose evaluation is the worker's boot.
-///
-/// Every worker's root has the one form: two imports, which put the global
-/// scope — its `name` included — and the timer globals in place before
-/// anything of the worker's own runs, and then an `import` of the worker's
-/// script by its `url`. The BTS's `url` is `bobcat:bts`, so its root imports
-/// that registered module, the whole BTS bootstrap, the same way.
-///
-/// The script is not written into the root. A URL that is an engine name is
-/// the realm's own loader's to load or refuse. For any other, the worker's
-/// own task completes the module the root's `import` asks for, from the
-/// answer to the request `createWorker` made and under that request's name,
-/// the way a view's own task completes its MTS entry. A module completed in a
-/// realm is that realm's own source and is never named on the runtime, so two
-/// views that answer one URL with different bytes each run their own, and a
-/// worker leaves no registration behind. The script keeps its own line
-/// numbers, and its `import.meta.url` is the response URL.
-pub(super) fn worker_boot_source(url: &str) -> String {
-    let url = serde_json::to_string(url)
-        .expect("serializing a Rust string as a JavaScript string cannot fail");
-    format!(
-        r#"import "{WORKER_MODULE_SPECIFIER}";
-import "{TIMER_MODULE_SPECIFIER}";
-await import({url});
-"#
-    )
+/// What a worker realm's own members report back to the thread: two flags,
+/// each written from inside the realm the thread acts on and read by the
+/// thread once the call that set it has returned.
+pub(super) struct WorkerFlags {
+    /// Set as `bobcat:worker` is evaluated, which is when it reads
+    /// `workerName`: whether this realm has the global scope a posted message
+    /// is delivered to. The engine installs that scope in no realm, so it is
+    /// set only in a realm whose script imported the module, `bobcat:bts`
+    /// among them, and only once the module has run.
+    pub(super) scope_installed: Rc<Cell<bool>>,
+    /// Set by `closeWorker`. A flag, not a teardown: the call runs inside the
+    /// realm it would tear down.
+    pub(super) closing: Rc<Cell<bool>>,
 }
 
 /// Installs a worker realm's own host modules, `bobcat-internal:worker` and
@@ -60,7 +44,7 @@ await import({url});
 /// outward surface beyond the core [`crate::realm::open_realm`] installed
 /// under `bobcat-internal:host`. Every worker gets the same members, the BTS
 /// included: what sets the BTS apart is data the MTS realm posts to it, not
-/// anything installed here. Answers with the flag `closeWorker` sets.
+/// anything installed here. Answers with the flags the members set.
 ///
 /// `bobcat-internal:native-modules` is [`crate::native_module::install`]'s,
 /// the one every realm kind is given; a call a worker makes names the
@@ -69,7 +53,9 @@ await import({url});
 ///
 /// `workerName` hands its string over once and keeps nothing, as an MTS
 /// realm's page data members do: `bobcat:worker` reads it as it is
-/// evaluated.
+/// evaluated, and nothing else of the engine's does. So the read is also how
+/// the thread learns that the module has run in this realm, which is what
+/// [`WorkerFlags::scope_installed`] records.
 ///
 /// There is no document member here and no way to add one: this realm is on
 /// another runtime, on another thread, and the document is neither `Send` nor
@@ -83,16 +69,21 @@ pub(super) fn install_worker_members(
     host: &HostOutbox,
     name: String,
     mut post: impl FnMut(HostValue) + 'static,
-) -> Result<Rc<Cell<bool>>, ScriptError> {
+) -> Result<WorkerFlags, ScriptError> {
     crate::native_module::install(engine, js_runtime, host, Some(key))?;
 
     let mut name = Some(name);
+    let scope_installed = Rc::new(Cell::new(false));
+    let installed = Rc::clone(&scope_installed);
     engine.register_host_module_function(
         js_runtime,
         WORKER_HOST_MODULE_SPECIFIER,
         "workerName",
         0,
-        Box::new(move |_arguments| Ok(name.take().map_or(HostValue::Undefined, HostValue::String))),
+        Box::new(move |_arguments| {
+            installed.set(true);
+            Ok(name.take().map_or(HostValue::Undefined, HostValue::String))
+        }),
     )?;
 
     engine.register_host_module_function(
@@ -124,5 +115,8 @@ pub(super) fn install_worker_members(
             Ok(HostValue::Undefined)
         }),
     )?;
-    Ok(closing)
+    Ok(WorkerFlags {
+        scope_installed,
+        closing,
+    })
 }

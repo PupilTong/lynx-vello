@@ -122,8 +122,8 @@ pub(crate) struct WorkerStart {
     pub(crate) name: String,
     /// The worker's script URL: the `new Worker` specifier joined to the
     /// creating entry's response URL by URL rules, which leaves an absolute
-    /// URL such as `bobcat:bts` as it is. The realm's root module imports
-    /// the script by it.
+    /// URL such as `bobcat:bts` as it is. The realm's root module is the
+    /// module at this URL, loaded by it.
     pub(crate) url: String,
     /// The answer to the request for [`Self::url`], from whichever thread
     /// owns the creating view's fetcher. `None` for a URL under
