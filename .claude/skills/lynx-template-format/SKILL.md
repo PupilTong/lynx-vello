@@ -74,11 +74,13 @@ feature flags — every embedder, Wasm included, gets all three parsers.
 
 Registering a card's bodies includes their import wrappers, because the engine
 loads every entry as the fetcher answered it: an MTS body (a container's root
-Lepus script, an XML main-thread script) goes behind `MTS_CHUNK_PREAMBLE`
-(`mts_entry_source`), a BTS body behind `BTS_CHUNK_PREAMBLE`
-(`bts_module_source`; an XML background-thread script takes the `.web.bundle`
-`CommonJS` shape), each on the body's own first line. A named Lepus chunk and
-a `.json` body stay verbatim.
+Lepus script, an XML main-thread script) is prefixed with
+`MTS_CHUNK_PREAMBLE` (`mts_entry_source`), a BTS body with
+`BTS_CHUNK_PREAMBLE` (`bts_module_source`; an XML background-thread script
+takes the `.web.bundle` `CommonJS` shape), each on the body's own first line,
+so a line of the body keeps its number and a column on its first line is
+offset by the prefix's length. A named Lepus chunk and a `.json` body stay
+verbatim.
 
 ## Full specs
 

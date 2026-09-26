@@ -33,10 +33,11 @@ import { console } from "bobcat:diagnostics";
 // that a listener which throws is reported here (through `reportError`) and
 // the listeners behind it still run. `console` is `bobcat:diagnostics`'s, so
 // what it prints reaches the embedder from this realm directly. `name` is
-// read from the host as this module is evaluated, which is before any module
-// the script imports after it is, so such a module reads it at its top level
-// too. That read is also how the host learns this module has run, and so that
-// the realm has a scope a posted message can be delivered to. Not here:
+// read from the host in this module's last statement, which runs before any
+// module the script imports after this one is evaluated, so such a module
+// reads it at its top level too. The read is last because it is also how the
+// host learns that this whole module has run, and so that the realm has a
+// scope a posted message can be delivered to. Not here:
 // `requestAnimationFrame` (a worker script imports it from
 // `bobcat:animation-frame`, and `bobcat:bts-runtime` also gives it as an
 // export and a `lynx` member; it is never a global), `importScripts` (this
@@ -105,9 +106,6 @@ Object.defineProperty(scope, "self", {
   value: scope,
 });
 
-// What the constructor named this worker, as a plain property of the global.
-scope.name = workerName();
-
 // A namespace property, as WebIDL defines one for `console` on every global:
 // writable and configurable, and not enumerable.
 Object.defineProperty(scope, "console", {
@@ -153,3 +151,8 @@ Object.assign(scope, {
 // Installed after `Object.assign` defines it: a listener exception in this
 // realm is reported the way an uncaught one is, and the dispatch continues.
 installExceptionReporter(scope.reportError);
+
+// What the constructor named this worker, as a plain property of the global.
+// The module's last statement: the host takes this read as the whole module
+// having run, and delivers a posted message to this realm only after it.
+scope.name = workerName();

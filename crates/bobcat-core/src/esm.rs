@@ -154,7 +154,7 @@ pub(crate) const LYNX_MODULES_SPECIFIER: &str = "bobcat:lynx-modules";
 /// One physical line, deliberately: the body follows it on the same line, so
 /// every line of the body keeps the number it had in the container.
 ///
-/// The names are this realm's, which is why the list lives here.
+/// The names are this realm's, so the list is defined here.
 /// `bobcat-source` is what prepends it, to every card body it registers for
 /// this realm: a page's root Lepus script, an XML page's main-thread script
 /// and a lazy container's `main-thread` section. The engine adds nothing to
@@ -196,7 +196,7 @@ pub(crate) const BTS_RUNTIME_MODULE_SPECIFIER: &str = "bobcat:bts-runtime";
 /// One physical line, deliberately: the body follows it on the same line, so
 /// every line of the body keeps the number it had in the container.
 ///
-/// The names are this realm's, which is why the list lives here.
+/// The names are this realm's, so the list is defined here.
 /// `bobcat-source` is what prepends it, to every card body it registers for
 /// this realm: a container's manifest paths and string custom sections, and
 /// an XML page's background-thread script. The engine adds nothing to a

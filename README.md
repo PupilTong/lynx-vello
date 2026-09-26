@@ -83,9 +83,11 @@ boundary: an input that reaches an unimplemented main-thread global or Element
 PAPI member exits with that precise runtime error. Bundle `StyleInfo` is
 lowered through the pre-parsed stylesheet contract, while a Lynx XML `<style>`
 body uses the raw CSS-text arm. After the MTS entry imports, a BTS Worker starts
-with the optional raw XML background script. MTS `lynx.getJSContext()` and BTS
-`lynx.getCoreContext()` exchange typed events through `dispatchEvent({type, data})`.
-Compiled BTS bundles still require the pending Lynx Core module/init shell.
+with the page's background entry: an XML page's optional background script, or
+the boot script that `lynx.requireModule`s a compiled bundle's
+`/app-service.js` and initializes the `{init}` object it answers with. MTS
+`lynx.getJSContext()` and BTS `lynx.getCoreContext()` exchange typed events
+through `dispatchEvent({type, data})`.
 
 ## Running the screenshot server
 

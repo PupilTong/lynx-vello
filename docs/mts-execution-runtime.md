@@ -67,10 +67,10 @@ resource system, **verbatim**, at a resource URL of its own —
 `<entry URL path>/<name>.js`, the chunk name percent-encoded the way a named
 stylesheet section's is (`named_chunk_url`), any `?`/`#` suffix of the entry
 URL kept. Nothing is prepended to it and nothing imports it. The root MTS
-script is the container's own text behind one line of imports,
-`MTS_CHUNK_PREAMBLE`, which `bobcat-source` writes in front of every card body
-it registers for this realm, on the body's own first line: no import of a
-chunk, no registration call, no table.
+script is the container's own text after one line of imports,
+`MTS_CHUNK_PREAMBLE`, which `bobcat-source` prefixes to every card body it
+registers for this realm, on the body's own first line: no import of a chunk,
+no registration call, no table.
 
 `__LoadLepusChunk(path, options)` does the rest, in JavaScript
 (`main-thread-runtime.ts`):

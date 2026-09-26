@@ -1549,13 +1549,16 @@ mod implementation {
         /// URL, or a name the normalizer passes through, names itself. A
         /// graph whose every source this realm already has — a registered
         /// module, a completed one — is linked and evaluated during this
-        /// call. Any other waits exactly as an `import` does: each source the
-        /// realm lacks, the root's own included, becomes a
-        /// [`Self::take_module_request`], and the load goes on once
-        /// [`Self::complete_module`] has answered it and
-        /// [`Self::resume_module_loads`] has run. Nothing here drains the
-        /// job queue, and nothing handles the promise: a rejection nothing
-        /// awaits is reported by the next drain, as a rejected module
+        /// call. What happens to a graph missing a source depends on
+        /// [`Self::enable_module_loading`]. With loading enabled the load
+        /// waits as an `import` does: each source the realm lacks, the
+        /// root's own included, becomes a [`Self::take_module_request`], and
+        /// the load goes on once [`Self::complete_module`] has answered it
+        /// and [`Self::resume_module_loads`] has run. Without it the loader
+        /// refuses the missing source at once with a `ReferenceError` (`module
+        /// '<name>' is not preloaded`), which rejects the load. Nothing here
+        /// drains the job queue, and nothing handles the promise: a rejection
+        /// nothing awaits is reported by the next drain, as a rejected module
         /// evaluation is.
         pub fn load_module(&mut self, name: &str) -> Result<Value, Error> {
             self.reclaim();
@@ -3075,6 +3078,29 @@ mod implementation {
                 .expect("the completed root evaluated");
             let url = realm.property(&namespace, "url").unwrap();
             assert_eq!(string_of(&url), "https://cdn.test/worker.js");
+        }
+
+        /// Without module loading enabled, a root the realm has no source for
+        /// is refused at once rather than requested: the loader rejects the
+        /// load as not preloaded, and the drain after it reports that.
+        #[test]
+        fn a_root_without_a_source_is_refused_where_module_loading_is_not_enabled() {
+            let mut runtime = Runtime::new().unwrap();
+            let mut realm = runtime.create_context().unwrap();
+            let load = realm.load_module("app:///worker.js").unwrap();
+            let reported = runtime
+                .drain_pending_jobs(&realm)
+                .expect_err("nothing awaits the load");
+            assert_eq!(reported.name.as_deref(), Some("ReferenceError"));
+            assert!(
+                reported
+                    .message
+                    .contains("'app:///worker.js' is not preloaded"),
+                "{}",
+                reported.message
+            );
+            assert!(realm.take_module_request().is_none());
+            assert!(realm.settled_promise_result(&load).is_err());
         }
 
         /// A root that throws at its top level rejects its load, and nothing

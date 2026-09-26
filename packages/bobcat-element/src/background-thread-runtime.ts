@@ -47,11 +47,11 @@ const nativeModules: Record<string, object> = {};
 const app: {
   NativeModules: object;
   _apiList: object;
-  // Four names web-core's chunk preamble binds off the app object
+  // Names web-core's chunk wrapper passes off the app object
   // (`createBundleInitReturnObj`). Nothing in this realm ever sets one — a
   // card's `Card`/`Component` come from lynx-core, which this engine does not
-  // run — so each stays `undefined`, which is what the old wrapper's
-  // arguments carried too.
+  // run — so each stays `undefined`, and so does the export
+  // `BTS_CHUNK_PREAMBLE` imports it by.
   Card?: unknown;
   Component?: unknown;
   nativeAppId?: unknown;
@@ -438,8 +438,8 @@ Object.assign(scope, {globDynamicComponentEntry});
 // `bobcat-source` prepends `BTS_CHUNK_PREAMBLE` to every card body it
 // registers for this realm — a container's bodies and an XML page's
 // background-thread script — and that preamble imports these names from here.
-// Each is the value the old wrapper's argument list carried, so a body sees
-// exactly what it saw before.
+// Each is this realm's value for the parameter of that name web-core's chunk
+// wrapper passes (`createBundleInitReturnObj`).
 export const NativeModules = nativeModules;
 export const Card = app.Card;
 export const Component = app.Component;

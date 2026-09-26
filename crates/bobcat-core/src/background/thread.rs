@@ -271,8 +271,8 @@ fn report_thread_trap(trapped: &AtomicBool, reporters: &Reporters, error: &Scrip
 /// to it.
 struct WorkerRealm {
     core: RealmCore,
-    /// Set as `bobcat:worker` runs in this realm: whether the realm has the
-    /// global scope a posted message is delivered to.
+    /// Set as `bobcat:worker` finishes running in this realm: whether the
+    /// realm has the global scope a posted message is delivered to.
     scope_installed: Rc<Cell<bool>>,
     /// Set by the native `closeWorker` export. A flag rather than a direct
     /// teardown because it is written from inside the realm it would tear
@@ -497,13 +497,17 @@ impl Worker {
             return;
         }
         if !*self.boot_finished.borrow() {
-            let finished = match realm.core.engine.module_finished() {
-                Ok(finished) => finished,
-                Err(error) => {
-                    report(&self.events, self.key, "running the worker's script", error);
-                    true
-                }
-            };
+            // Read to learn whether the root module's load has settled, and
+            // for nothing else: a rejected load is not reported here. Only the
+            // host holds that load's promise, so nothing in the realm can
+            // handle its rejection, and a checkpoint of this realm reports it
+            // as it reports every rejection nothing handles. The checkpoint
+            // that ends the entry the load settled in — the boot job, the
+            // completion of the script or of a module it imports, a timer —
+            // reports it named by that entry, or drops it with the other
+            // leftovers of the one failure that entry reported. So a failure
+            // of the root module is reported once, whichever job it is in.
+            let finished = realm.core.engine.module_finished().unwrap_or(true);
             if finished {
                 self.boot_finished.send_replace(true);
             }
@@ -917,11 +921,11 @@ async fn consume_messages(
 /// bytes each run their own, and a worker leaves no registration behind.
 /// Nothing is written around the script, so it keeps its own line numbers.
 ///
-/// The root module's load is read once more in the same job. A script that
-/// throws at its top level rejects that load, and the completion's checkpoint
-/// already reports the rejection; reading it here clears it, so the epilogue
-/// does not report it a second time. Only the first of the two errors is
-/// reported.
+/// A script that throws at its top level rejects the root module's load, and
+/// the completion's checkpoint reports that rejection as this entry's
+/// failure. The epilogue's read of the load after it only learns that the
+/// load has settled (see [`Worker::epilogue`]), so the throw is reported
+/// once.
 fn complete_script(worker: &Rc<Worker>, url: String, source: String) {
     let completing = Rc::clone(worker);
     drop(worker.enter(move |realm, js| {
@@ -930,8 +934,7 @@ fn complete_script(worker: &Rc<Worker>, url: String, source: String) {
                 .core
                 .engine
                 .complete_module(js, &completing.entry, Ok((&url, &source)));
-        let finished = realm.core.engine.module_finished();
-        if let Some(error) = completed.err().or_else(|| finished.err()) {
+        if let Err(error) = completed {
             report(
                 &completing.events,
                 completing.key,
@@ -1036,16 +1039,18 @@ fn deliver(
     // never imported it, or imported it in a module graph that has not run.
     // The message is dropped, and nothing is reported: a realm with no
     // `onmessage` to call has nothing to report either. The module having
-    // *run* is the test, not the realm having an instance of it: a graph that
-    // failed to load, or is still loading, leaves its modules compiled but
-    // never linked, and reading the namespace of such a module crashes
-    // `QuickJS`. A module that has run was linked first.
+    // *run* to its last statement, which reads `workerName`, is the test, not
+    // the realm having an instance of it: a graph that failed to load, or is
+    // still loading, leaves its modules compiled but never linked, and
+    // reading the namespace of such a module crashes `QuickJS`. A module that
+    // has run was linked first.
     //
     // Nothing else this thread delivers needs the test. A frame, a due
     // timer, a native module's answer and a future's settle each answer a
     // host member that `bobcat:animation-frame`, `bobcat:timers`,
     // `bobcat:native-modules` or `bobcat:future` called while it ran, so the
-    // module each is delivered to has run. A post alone arrives unasked.
+    // module each is delivered to has run. A post is the one delivery no
+    // module's call requested.
     if !realm.scope_installed.get() {
         return;
     }

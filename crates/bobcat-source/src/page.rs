@@ -25,11 +25,12 @@
 //! and loaded — through the same synchronous host loader a `require` uses — by
 //! `__LoadLepusChunk`, which builds that URL itself and runs the chunk again
 //! on every call, as native's `TemplateEntry` does. The root script is the
-//! container's own text behind the one line of imports below: neither an
+//! container's own text after the one line of imports below: neither an
 //! import of a chunk nor a call registering one is prefixed to it.
 //!
 //! Every card body registered here is wrapped in a preamble, one physical
-//! line long so the body keeps its own line numbering. This crate is what
+//! line long so the body keeps its own line numbering; only a column on the
+//! body's first line is offset, by the preamble's length. This crate is what
 //! wraps it, because the engine adds nothing to a script: it loads each as the
 //! fetcher answered it. A body is wrapped in the list of names its realm
 //! gives a card, which `bobcat-core` keeps:
@@ -316,7 +317,7 @@ impl PageSource {
         // is prefixed to it and nothing imports it: the realm asks the host
         // for that URL at the call, and compiles what comes back as a function
         // body. The root is the entry, a module, and so the container's own
-        // text behind the imports a card's MTS body is given.
+        // text after the imports a card's MTS body is given.
         let lepus_chunks: Vec<(Url, Arc<str>)> = template
             .lepus_code
             .iter()
@@ -614,7 +615,12 @@ pub enum BundleTarget {
 /// Both shapes answer through the module's **default export**, which is the
 /// one thing `bobcat:lynx-modules` reads, and both keep the body starting on
 /// the line it started on: every prefix is one physical line, and only the
-/// `CommonJS` suffix adds one, after the body.
+/// `CommonJS` suffix adds one, after the body. So an error reports the line
+/// it had in the container, and on any line after the first the column too.
+/// On the body's first line the column is offset by the prefix's length —
+/// [`bobcat_core::BTS_CHUNK_PREAMBLE`] and then `export default ` or the
+/// `CommonJS` declarations — which for a minified body written on one line
+/// is every column it has.
 ///
 /// - [`BundleTarget::Lynx`]: `export default <body>`. The body is one expression, so what native
 ///   would have kept as its script's completion value — normally the `{init}` object the compiler's
@@ -663,9 +669,12 @@ pub fn bts_module_source(target: BundleTarget, body: &str) -> String {
 ///
 /// The preamble is one physical line and the body starts on it, as in
 /// [`bts_module_source`], so every line of the body keeps the number it had
-/// in the container. A body's leading `"use strict"` stops being a directive
-/// prologue, because something precedes it. Nothing is lost: a module is
-/// strict already.
+/// in the container, and an error on any line after the first reports the
+/// column it had there too. An error on the body's first line reports a
+/// column offset by the preamble's length, which for a minified body written
+/// on one line is every column it has. A body's leading `"use strict"` stops
+/// being a directive prologue, because something precedes it. Nothing is
+/// lost: a module is strict already.
 #[must_use]
 pub fn mts_entry_source(body: &str) -> String {
     let mut source = String::with_capacity(bobcat_core::MTS_CHUNK_PREAMBLE.len() + body.len());
@@ -1295,7 +1304,7 @@ mod tests {
             )],
             "a chunk is registered verbatim: no preamble, nothing to import"
         );
-        // The root is the container's own text behind `MTS_CHUNK_PREAMBLE`.
+        // The root is the container's own text after `MTS_CHUNK_PREAMBLE`.
         // Nothing else is prefixed to it: not an import of a chunk, not a call
         // registering one.
         assert_eq!(page.script.as_ref(), mts_entry_source("export {};"));

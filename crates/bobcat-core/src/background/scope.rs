@@ -28,11 +28,11 @@ pub(super) const WORKER_DELIVER_EXPORT: &str = "__BobcatDeliverWorkerMessage";
 /// each written from inside the realm the thread acts on and read by the
 /// thread once the call that set it has returned.
 pub(super) struct WorkerFlags {
-    /// Set as `bobcat:worker` is evaluated, which is when it reads
-    /// `workerName`: whether this realm has the global scope a posted message
+    /// Set as `bobcat:worker` reads `workerName`, which is that module's last
+    /// statement: whether this realm has the global scope a posted message
     /// is delivered to. The engine installs that scope in no realm, so it is
     /// set only in a realm whose script imported the module, `bobcat:bts`
-    /// among them, and only once the module has run.
+    /// among them, and only once the whole module has run.
     pub(super) scope_installed: Rc<Cell<bool>>,
     /// Set by `closeWorker`. A flag, not a teardown: the call runs inside the
     /// realm it would tear down.
@@ -52,10 +52,10 @@ pub(super) struct WorkerFlags {
 /// inbox.
 ///
 /// `workerName` hands its string over once and keeps nothing, as an MTS
-/// realm's page data members do: `bobcat:worker` reads it as it is
-/// evaluated, and nothing else of the engine's does. So the read is also how
-/// the thread learns that the module has run in this realm, which is what
-/// [`WorkerFlags::scope_installed`] records.
+/// realm's page data members do: `bobcat:worker` reads it as the last
+/// statement it evaluates, and nothing else of the engine's reads it. So the
+/// read is also how the thread learns that the whole module has run in this
+/// realm, which is what [`WorkerFlags::scope_installed`] records.
 ///
 /// There is no document member here and no way to add one: this realm is on
 /// another runtime, on another thread, and the document is neither `Send` nor
