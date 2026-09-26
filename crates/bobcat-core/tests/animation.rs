@@ -77,7 +77,7 @@ fn slider_sheet() -> PreparsedStyleSheet {
 }
 
 fn resources(sheet: PreparsedStyleSheet) -> FetcherDouble {
-    FetcherDouble::new(SLIDER_SCRIPT.as_bytes().to_vec())
+    FetcherDouble::card(SLIDER_SCRIPT)
         .resolving_to(SCRIPT_URL)
         .with_preparsed_style_sheet(sheet)
 }

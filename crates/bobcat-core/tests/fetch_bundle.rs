@@ -132,7 +132,8 @@ impl Files {
     /// is the one rule `named_chunk_url` and `section-url.ts` share.
     fn script(url: &str) -> Option<String> {
         Some(match url {
-            MAIN_URL => MAIN_ENTRY.to_owned(),
+            // A card's MTS body, as `bobcat-source` registers a card's root.
+            MAIN_URL => format!("{}{MAIN_ENTRY}", bobcat_core::MTS_CHUNK_PREAMBLE),
             BACKGROUND_URL => BACKGROUND_ENTRY.to_owned(),
             "app:///lazy.bundle/main-thread.js" => format!(
                 "{}export default (function (entry) {{ return 'loaded ' + entry; }})",

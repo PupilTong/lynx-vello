@@ -111,7 +111,9 @@ impl Pair {
 
     /// Waits for the next native-module call the BTS realm made, and
     /// assembles it out of the reply handle this test registered from
-    /// `WorkerCreated` — which is exactly what `LynxView::pump` does.
+    /// `WorkerCreated` — which is exactly what `LynxView::pump` does. The
+    /// command sender stands in for the view's own, which only a call the
+    /// MTS realm made is answered through.
     fn module_call(&mut self) -> (String, crate::native_module::ModuleCall) {
         let deadline = ClockInstant::now() + PATIENCE;
         loop {
@@ -122,7 +124,7 @@ impl Pair {
                 .position(|notice| matches!(notice, ViewNotice::NativeModuleCall { .. }));
             if let Some(position) = waiting
                 && let Some(ViewNotice::NativeModuleCall {
-                    worker,
+                    caller,
                     call,
                     module,
                     method,
@@ -130,9 +132,10 @@ impl Pair {
                     callbacks,
                 }) = self.deferred_notices.remove(position)
             {
+                let (commands, _) = mpsc::unbounded_channel();
                 let reply = self
                     .frame_demand
-                    .sender(worker)
+                    .reply(caller, &commands)
                     .expect("the worker announced itself before it called");
                 return (
                     module,
@@ -452,6 +455,7 @@ fn bts_entry_receives_processed_initial_data_before_it_installs_app_hooks() {
     let mut pair = Pair::unbooted_with_data(
         Some(
             r"
+        import { lynx } from 'bobcat:bts-runtime';
         const params = lynx.getApp()._params;
         if (params.initData !== null || !Array.isArray(params.cacheData) || params.cacheData.length) throw Error('native initial slots');
         const data = params.updateData;
@@ -562,6 +566,7 @@ fn lifecycle_hooks_and_bts_snapshots_precede_queued_mts_jobs() {
         let mut pair = Pair::unbooted_with_data(
             Some(
                 r"
+            import { lynx } from 'bobcat:bts-runtime';
             const app = lynx.getApp();
             const reply = (kind, data) => lynx.getCoreContext().dispatchEvent({type:'reply', data:[kind,data]});
             reply('initial', app._params.updateData);
@@ -654,6 +659,7 @@ fn global_props_initialize_bts_before_hooks_and_notify_before_mts_events() {
     let mut pair = Pair::unbooted_with_data(
         Some(
             r"
+        import { lynx } from 'bobcat:bts-runtime';
         const props=lynx.__globalProps;
         if (props.seed!==1 || props.keep!==1 || props.nested.value!==2) throw Error('BTS initial props');
         lynx.getApp().updateGlobalProps=data=>{
@@ -727,6 +733,7 @@ fn initial_processor_preserves_its_string_and_reads_the_page_config_switch() {
         let mut pair = Pair::unbooted_with_config(
             Some(&format!(
                 r"
+                import {{ lynx }} from 'bobcat:bts-runtime';
                 const params=lynx.getApp()._params;
                 if (params.processorName !== {expected_name} || params.updateData.value !== {expected_value}) throw Error('BTS processor parameters');
                 lynx.getCoreContext().dispatchEvent({{type:'reply',data:params.updateData.value}});
@@ -787,6 +794,7 @@ fn initial_processor_non_tables_and_exceptions_preserve_host_data_in_both_realms
         let mut pair = Pair::unbooted_with_data(
             Some(
                 r"
+            import { lynx } from 'bobcat:bts-runtime';
             const params = lynx.getApp()._params;
         if (params.initData !== null || !Array.isArray(params.cacheData) || params.cacheData.length) throw Error('native initial slots');
         const data = params.updateData;
@@ -836,6 +844,7 @@ fn engine_render_delivers_lifecycle_to_the_current_background_app_hook() {
         ",
         Some(
             r"
+        import { lynx } from 'bobcat:bts-runtime';
         const app = lynx.getApp();
         app.OnLifecycleEvent = function(data) {
             if (this !== app) throw Error('wrong app receiver');
@@ -883,6 +892,7 @@ fn string_handlers_reach_background_with_event_snapshots() {
         ",
         Some(
             r"
+        import { lynx } from 'bobcat:bts-runtime';
         const app = lynx.getApp();
         app.publishEvent = function(name, event) {
             if (this !== app) throw Error('wrong publish receiver');
@@ -947,6 +957,7 @@ fn context_events_carry_structured_values_in_both_directions() {
         ",
         Some(
             r"
+        import { lynx } from 'bobcat:bts-runtime';
         const core = lynx.getCoreContext();
         core.addEventListener('request', event => {
             const d = event.data;
@@ -995,7 +1006,10 @@ fn posting_a_function_to_a_worker_throws_in_the_poster_and_sends_nothing() {
         worker.postMessage('fine');
         ",
     );
-    pair.answer("onmessage = event => postMessage(event.data);");
+    pair.answer(
+        "import 'bobcat:worker'; import 'bobcat:timers'; \
+         onmessage = event => postMessage(event.data);",
+    );
     pair.deliver();
     pair.check(
         r#"
@@ -1024,6 +1038,7 @@ fn a_published_dom_event_carries_values_only_and_no_propagation_methods() {
         ",
         Some(
             r"
+        import { lynx } from 'bobcat:bts-runtime';
         lynx.getApp().publishEvent = (name, event) => {
             lynx.getCoreContext().dispatchEvent({ type: 'reply', data: {
                 keys: Object.keys(event).sort().join(','),
@@ -1077,6 +1092,7 @@ fn publish_hooks_install_lazily_and_component_ids_stay_opaque() {
         ",
         Some(
             r"
+        import { lynx } from 'bobcat:bts-runtime';
         const app = lynx.getApp();
         const core = lynx.getCoreContext();
         const reply = data => core.dispatchEvent({ type: 'reply', data });
@@ -1118,6 +1134,7 @@ fn a_late_publish_hook_failure_does_not_discard_later_queued_events() {
         ",
         Some(
             r"
+        import { lynx } from 'bobcat:bts-runtime';
         const core = lynx.getCoreContext();
         core.addEventListener('install', () => {
             lynx.getApp().publishEvent = name => {
@@ -1150,6 +1167,7 @@ fn lepus_calls_return_async_results_to_the_matching_background_callback() {
         ",
         Some(
             r"
+        import { lynx } from 'bobcat:bts-runtime';
         const native = lynx.getNativeApp();
         if (native !== lynx.getNativeApp()) throw Error('unstable native app');
         let calls = 0;
@@ -1190,6 +1208,7 @@ fn lepus_failures_report_without_success_callbacks_and_leave_bts_usable() {
         ",
         Some(
             r"
+        import { lynx } from 'bobcat:bts-runtime';
         const core = lynx.getCoreContext();
         lynx.getNativeApp().callLepusMethod('failSync', {}, () => {
             core.dispatchEvent({ type: 'reply', data: 'unexpected callback' });
@@ -1238,7 +1257,7 @@ fn constructor_creates_distinct_contexts_and_queues_messages_in_order() {
     );
     for _ in 0..2 {
         pair.answer(
-            r"
+            r"import 'bobcat:worker'; import 'bobcat:timers';
             if (typeof globalThis.counter !== 'undefined') throw Error('shared context');
             if (typeof globalThis.lynx !== 'undefined') throw Error('ordinary worker has BTS globals');
             globalThis.counter = 0;
@@ -1270,7 +1289,7 @@ fn terminate_discards_events_already_queued_on_main() {
         worker.onmessage = () => { throw Error('late delivery'); };
     ",
     );
-    pair.answer("postMessage('already queued');");
+    pair.answer("import 'bobcat:worker'; import 'bobcat:timers'; postMessage('already queued');");
     // Waiting for the worker's response proves it has run before terminate.
     let event = pair.next_event().expect("the worker answered");
     pair.check("worker.terminate(); worker.terminate(); worker.postMessage('ignored');");
@@ -1297,7 +1316,10 @@ fn worker_errors_reach_parent_and_leave_both_realms_usable() {
         worker.postMessage('ping');
     ",
     );
-    pair.answer("onmessage = e => postMessage(e.data); throw Error('worker boom');");
+    pair.answer(
+        "import 'bobcat:worker'; import 'bobcat:timers'; \
+         onmessage = e => postMessage(e.data); throw Error('worker boom');",
+    );
     let mut event = pair.next_event().expect("worker error");
     let WorkerPayload::Errored(error) = &mut event.payload else {
         panic!("expected a recoverable worker error");
@@ -1359,8 +1381,11 @@ fn a_worker_created_after_its_thread_trapped_fails_without_starting() {
         "a worker that failed at once asks the host for nothing"
     );
     let event = pair.next_event().expect("the worker's failure");
+    let (commands, _) = mpsc::unbounded_channel();
     assert!(
-        pair.frame_demand.sender(event.key).is_none(),
+        pair.frame_demand
+            .reply(Some(event.key), &commands)
+            .is_none(),
         "the view never heard of the worker"
     );
     pair.runtime
@@ -1473,7 +1498,7 @@ fn a_worker_is_named_by_the_key_its_worker_object_holds() {
         worker.onerror = e => errors.push(e.message);
     ",
     );
-    pair.answer("throw Error('worker threw');");
+    pair.answer("import 'bobcat:worker'; import 'bobcat:timers'; throw Error('worker threw');");
     let event = pair.next_event().expect("the worker reports its throw");
     let key = event.key.get().to_string();
     pair.runtime
@@ -1511,7 +1536,7 @@ fn a_worker_failure_arriving_after_terminate_is_reported_to_no_one() {
         worker.onerror = e => errors.push(e.message);
     ",
     );
-    pair.answer("postMessage('started');");
+    pair.answer("import 'bobcat:worker'; import 'bobcat:timers'; postMessage('started');");
     let started = pair.next_event().expect("the worker answered");
     pair.check("worker.terminate();");
     for payload in [
@@ -1552,7 +1577,9 @@ fn dropping_the_view_cancels_io_without_keeping_the_worker_thread_alive() {
         "nobody is waiting for this script any more"
     );
     completion.complete(Ok(LoadedSource::Module {
-        source: "throw Error('cancelled worker ran');".into(),
+        source:
+            "import 'bobcat:worker'; import 'bobcat:timers'; throw Error('cancelled worker ran');"
+                .into(),
         url: "app:///late.js".into(),
     }));
     assert!(pair.events.try_recv().is_err());
@@ -1565,7 +1592,10 @@ fn releasing_a_realm_ends_a_worker_that_would_never_end_on_its_own() {
     let mut pair = Pair::new(
         "import { Worker } from 'bobcat-internal'; globalThis.worker = new Worker('./worker.js');",
     );
-    pair.answer("setInterval(() => postMessage('tick'), 1);");
+    pair.answer(
+        "import 'bobcat:worker'; import 'bobcat:timers'; \
+         setInterval(() => postMessage('tick'), 1);",
+    );
     // The first tick proves the realm booted and its interval is running, so
     // what the drop below has to stop is a live worker.
     pair.next_event().expect("the worker's interval fires");
@@ -1601,7 +1631,7 @@ fn a_worker_that_closes_itself_is_forgotten_by_the_realm() {
     let mut pair = Pair::new(
         "import { Worker } from 'bobcat-internal'; globalThis.worker = new Worker('./worker.js');",
     );
-    pair.answer("close();");
+    pair.answer("import 'bobcat:worker'; import 'bobcat:timers'; close();");
     // Boot creates the BTS worker beside the entry's own, so the realm has
     // two of them and this close accounts for exactly one.
     assert_eq!(pair.live_workers(), 2, "the entry's worker and lynx-bg");
@@ -1634,8 +1664,8 @@ fn terminating_before_fetch_prevents_the_context_from_starting() {
         alive.onmessage = e => answer = e.data;
     ",
     );
-    pair.answer("postMessage('cancelled');");
-    pair.answer("postMessage('alive');");
+    pair.answer("import 'bobcat:worker'; import 'bobcat:timers'; postMessage('cancelled');");
+    pair.answer("import 'bobcat:worker'; import 'bobcat:timers'; postMessage('alive');");
     pair.deliver();
     pair.check(
         "if (answer !== 'alive') throw Error('termination did not discard the pending script');",
@@ -1652,7 +1682,7 @@ fn worker_close_keeps_its_last_message_and_disables_future_posts() {
         worker.onmessage = e => answer = e.data;
     ",
     );
-    pair.answer("postMessage('last'); close();");
+    pair.answer("import 'bobcat:worker'; import 'bobcat:timers'; postMessage('last'); close();");
     pair.deliver();
     pair.deliver();
     pair.check("if (answer !== 'last') throw Error('lost final message'); worker.postMessage('ignored'); worker.terminate();");
@@ -1706,6 +1736,31 @@ fn a_worker_url_joins_the_entry_url_by_url_rules() {
     );
 }
 
+/// A plain `Worker`'s script is asked for once, by the realm that constructed
+/// it. The worker's root module imports the script by the same URL, and the
+/// worker's own epilogue does not ask the host for it again: the answer to the
+/// first request is what completes that import.
+#[test]
+fn a_workers_script_is_requested_once() {
+    let mut pair = Pair::new(
+        r"
+        import { Worker } from 'bobcat-internal';
+        globalThis.seen = [];
+        globalThis.worker = new Worker('./worker.js');
+        worker.onmessage = event => seen.push(event.data);
+    ",
+    );
+    pair.answer("import 'bobcat:worker'; import 'bobcat:timers'; postMessage('ran');");
+    // The worker's boot epilogue ran before its script did, so anything it
+    // asked for is on the notice channel by the time the script's message is.
+    pair.deliver();
+    pair.check(r#"if (JSON.stringify(seen) !== '["ran"]') throw Error(JSON.stringify(seen));"#);
+    assert!(
+        !asked_for_a_worker(&pair.notices()),
+        "the worker asked for its own script a second time"
+    );
+}
+
 /// A script URL that does not resolve is HTML's synchronous `SyntaxError`,
 /// and nothing is started: no worker is announced to the view, nothing is
 /// asked of the host, and the realm holds no new worker. The script catches
@@ -1738,9 +1793,28 @@ fn an_unparseable_worker_url_throws_syntax_error_and_starts_nothing() {
     assert!(pair.events.try_recv().is_err(), "and fails nothing");
 }
 
+/// A plain `Worker` may import the BTS runtime, and is posted no
+/// `initialize`: the view here was built with a screen and a native module,
+/// and the worker reports neither — `SystemInfo` is the runtime constants
+/// alone, and `NativeModules` is empty.
 #[test]
 fn an_ordinary_worker_can_install_bts_through_its_own_import() {
-    let mut pair = Pair::new(
+    let mut pair = Pair::unbooted_with_data(
+        None,
+        RealmStartup {
+            screen: crate::ScreenMetrics {
+                pixel_ratio: 3.0,
+                pixel_width: 1170.0,
+                pixel_height: 2532.0,
+            },
+            native_modules: crate::native_module::encode_table(&vec![(
+                "Echo".to_owned(),
+                vec!["ping".to_owned()],
+            )]),
+            ..RealmStartup::default()
+        },
+    );
+    pair.boot(
         r"
         import { Worker } from 'bobcat-internal';
         globalThis.result = null;
@@ -1748,20 +1822,71 @@ fn an_ordinary_worker_can_install_bts_through_its_own_import() {
         worker.onmessage = event => result = event.data;
         worker.postMessage({type: 'request', data: 42});
         ",
-    );
+    )
+    .unwrap();
     pair.answer(
-        r"
-        import { lynx } from 'bobcat:bts-runtime';
+        r"import 'bobcat:worker'; import 'bobcat:timers';
+        import { lynx, NativeModules, SystemInfo } from 'bobcat:bts-runtime';
         if ('lynx' in globalThis) throw Error('BTS lynx leaked into globals');
         const core = lynx.getCoreContext();
         core.addEventListener('request', event => {
-            core.dispatchEvent({type: 'reply', data: [name, event.data]});
+            core.dispatchEvent({type: 'reply', data: [
+                name, event.data, Object.keys(SystemInfo), Object.keys(NativeModules),
+            ]});
         });
         ",
     );
     pair.deliver();
     pair.check(
-        "if (JSON.stringify(result) !== '{\"type\":\"reply\",\"data\":[\"ordinary\",42],\"origin\":\"JSContext\"}') throw Error(JSON.stringify(result));",
+        "if (JSON.stringify(result) !== '{\"type\":\"reply\",\"data\":[\"ordinary\",42,[\"platform\",\"runtimeType\",\"lynxSdkVersion\"],[]],\"origin\":\"JSContext\"}') throw Error(JSON.stringify(result));",
+    );
+}
+
+/// The BTS reports the MTS realm's own `SystemInfo`, which boot posts to it
+/// in `initialize`, so the two serialize alike, a ratio an `f32` cannot hold
+/// included. `NativeModules` is built out of the module table the same
+/// message carries before the BTS entry is imported, so the entry's top level
+/// already finds the view's module on it.
+#[test]
+fn the_bts_reports_the_mts_system_info_and_has_its_native_modules_before_its_entry() {
+    let mut pair = Pair::unbooted_with_data(
+        Some(
+            r"
+        import { lynx, NativeModules, SystemInfo } from 'bobcat:bts-runtime';
+        lynx.getCoreContext().dispatchEvent({type: 'reply', data: [
+            JSON.stringify(SystemInfo), Object.keys(NativeModules), typeof NativeModules.Echo.ping,
+        ]});
+        ",
+        ),
+        RealmStartup {
+            screen: crate::ScreenMetrics {
+                pixel_ratio: 1.1,
+                pixel_width: 1287.0,
+                pixel_height: 2785.0,
+            },
+            native_modules: crate::native_module::encode_table(&vec![(
+                "Echo".to_owned(),
+                vec!["ping".to_owned()],
+            )]),
+            ..RealmStartup::default()
+        },
+    );
+    pair.boot(
+        r"
+        globalThis.mtsSystemInfo = JSON.stringify(SystemInfo);
+        globalThis.results = [];
+        lynx.getJSContext().addEventListener('reply', e => results.push(e.data));
+        ",
+    )
+    .unwrap();
+    pair.deliver();
+    pair.check(
+        r#"
+        const [system, modules, ping] = results[0];
+        if (system !== mtsSystemInfo) throw Error(system + ' !== ' + mtsSystemInfo);
+        if (JSON.parse(system).pixelRatio !== 1.1) throw Error(system);
+        if (JSON.stringify(modules) !== '["Echo"]' || ping !== 'function') throw Error(JSON.stringify(results));
+        "#,
     );
 }
 
@@ -1792,6 +1917,7 @@ fn background_contexts_exchange_native_events_and_flush_early_payload_references
     ",
         Some(
             r"
+        import { lynx } from 'bobcat:bts-runtime';
         import { EventTarget } from 'bobcat:event-target';
         export const ready = await Promise.resolve(true);
         if ('lynx' in globalThis) throw Error('BTS lynx leaked into globals');
@@ -1836,7 +1962,9 @@ fn background_starts_only_after_the_awaited_main_entry_finishes() {
         await Promise.resolve();
         finished = true;
         ",
-        Some("lynx.getCoreContext().dispatchEvent({ type: 'ready', data: undefined });"),
+        Some(
+            "import { lynx } from 'bobcat:bts-runtime'; lynx.getCoreContext().dispatchEvent({ type: 'ready', data: undefined });",
+        ),
     );
     pair.check("if (!connected) throw Error('BTS was not connected');");
     pair.deliver();
@@ -1854,6 +1982,7 @@ fn context_post_message_delivers_message_events_in_both_directions() {
         ",
         Some(
             r"
+        import { lynx } from 'bobcat:bts-runtime';
         const core = lynx.getCoreContext();
         core.addEventListener('message', e => {
             if (e.origin !== 'CoreContext') throw Error('wrong origin');
@@ -1878,6 +2007,7 @@ fn background_listener_failure_is_nonfatal_and_later_context_events_still_arrive
     ",
         Some(
             r"
+        import { lynx } from 'bobcat:bts-runtime';
         const core = lynx.getCoreContext();
         core.addEventListener('request', event => {
             if (event.data === 0) throw Error('BTS listener boom');
@@ -1916,10 +2046,14 @@ fn an_omitted_background_entry_boots_without_host_io() {
         worker.postMessage('barrier');
     ",
     );
-    // The built-in BTS worker is started before this one and answers its own
-    // script without the host, so an ordinary worker that replies proves the
+    // The built-in BTS worker is started before this one and asks the host
+    // for nothing: its root module imports the registered `bobcat:bts`, and
+    // the view named no entry. So an ordinary worker that replies proves the
     // thread served both.
-    pair.answer("onmessage = event => postMessage(event.data);");
+    pair.answer(
+        "import 'bobcat:worker'; import 'bobcat:timers'; \
+         onmessage = event => postMessage(event.data);",
+    );
     pair.deliver();
     pair.check("if (answer !== 'barrier') throw Error('worker barrier failed');");
     let notices = pair.notices();
@@ -1935,6 +2069,7 @@ fn an_omitted_background_entry_boots_without_host_io() {
 fn a_rejected_main_entry_still_connects_its_background_context() {
     let mut pair = Pair::unbooted(Some(
         r"
+        import { lynx } from 'bobcat:bts-runtime';
         const core = lynx.getCoreContext();
         core.addEventListener('queued', event => core.dispatchEvent({type: 'reply', data: event.data}));
     ",
@@ -1988,6 +2123,7 @@ fn bts_node_queries_read_real_nodes_and_retain_native_tokens_and_statuses() {
     ",
         Some(
             r"
+        import { lynx } from 'bobcat:bts-runtime';
         void (async () => {
         const read = (nodes, fields) => new Promise(resolve => nodes.fields(fields, (data, status) => resolve({data,status})).exec());
         const query = lynx.createSelectorQuery();
@@ -2044,6 +2180,7 @@ fn bts_native_props_mutate_the_document_before_the_next_query() {
     ",
         Some(
             r"
+        import { lynx } from 'bobcat:bts-runtime';
         const query = lynx.createSelectorQuery();
         const props = {width:'20px', 'background-color':'green', role:'changed'};
         query.select('#item').setNativeProps(props).exec();
@@ -2093,6 +2230,7 @@ fn bts_invoke_measures_the_committed_tree_and_keeps_its_node_resolution_codes() 
         ",
         Some(
             r"
+        import { lynx } from 'bobcat:bts-runtime';
         void (async () => {
             const query = lynx.createSelectorQuery();
             const invoke = nodes => new Promise(resolve => nodes.invoke({
@@ -2141,6 +2279,7 @@ fn each_realm_reports_its_own_diagnostics_with_its_source() {
         ",
         Some(
             r"
+        import { lynx } from 'bobcat:bts-runtime';
         import {console} from 'bobcat:bts-runtime';
         if (globalThis.console !== console) throw Error('the global console is another object');
         lynx.reportError(new Error('BTS fatal label'), {level:'fatal'});
@@ -2208,7 +2347,7 @@ fn a_workers_global_console_reports_from_the_worker() {
     ",
     );
     pair.answer(
-        r"
+        r"import 'bobcat:worker'; import 'bobcat:timers';
         if (typeof requestAnimationFrame !== 'undefined') throw Error('a Worker has requestAnimationFrame');
         if (Object.keys(globalThis).includes('console')) throw Error('the global console is enumerable');
         console.log('from the worker', {value:1});
@@ -2252,6 +2391,7 @@ fn a_throwing_bts_frame_or_microtask_callback_is_a_worker_throw() {
         "__CreatePage();",
         Some(&format!(
             r"
+            import {{ lynx }} from 'bobcat:bts-runtime';
             lynx.requestAnimationFrame(() => {{ throw Error('frame callback threw'); }});
             lynx.queueMicrotask(() => {{ throw Error('microtask threw'); }});
             postMessage('{BTS_ENTRY_RAN}');
@@ -2303,6 +2443,7 @@ fn a_misused_bts_selector_query_is_reported_from_the_background() {
         "__CreatePage();",
         Some(&format!(
             r"
+            import {{ lynx }} from 'bobcat:bts-runtime';
             const late = lynx.createSelectorQuery().select('#x').fields({{id:true}}).selectReactRef('ref');
             if (late !== undefined) throw Error('a late selectReactRef answered a node');
             postMessage('{BTS_ENTRY_RAN}');
@@ -2346,6 +2487,7 @@ fn host_global_events_reach_the_bts_emitter_in_order_after_a_listener_throws() {
         ",
         Some(
             r"
+        import { lynx } from 'bobcat:bts-runtime';
         const emitter = lynx.getJSModule('GlobalEventEmitter');
         if (emitter !== lynx.getApp().GlobalEventEmitter) throw Error('emitter identity');
         emitter.addListener('host-event', function (value, extra) {
@@ -2403,7 +2545,7 @@ fn a_throwing_bts_entry_reports_at_the_worker_and_leaves_bts_running() {
 globalThis.results = [];
 lynx.getJSContext().addEventListener('reply', e => results.push(e.data));",
         Some(
-            r"lynx.getJSModule('GlobalEventEmitter').addListener('host-event', value => lynx.getCoreContext().dispatchEvent({type:'reply', data:value}));
+            r"import { lynx } from 'bobcat:bts-runtime'; lynx.getJSModule('GlobalEventEmitter').addListener('host-event', value => lynx.getCoreContext().dispatchEvent({type:'reply', data:value}));
 throw Error('BTS entry failed');",
         ),
     );
@@ -2521,6 +2663,7 @@ fn mts_disposal_calls_the_current_bts_hook_once_before_js_terminates_the_worker(
             "lynx.getJSContext().addEventListener('repeat-dispose', () => lynx.getEngine().dispatchEvent({type:'__DestroyLifetime'}));",
             Some(&format!(
                 r"
+                import {{ lynx }} from 'bobcat:bts-runtime';
                 const app = lynx.getApp();
                 app.callDestroyLifetimeFun = () => postMessage('stale-hook');
                 app.callDestroyLifetimeFun = function(...args) {{
@@ -2582,6 +2725,7 @@ fn disposal_remains_deliverable_while_the_bts_entry_is_loading() {
         "",
         Some(
             r"
+        import { lynx } from 'bobcat:bts-runtime';
         lynx.getApp().callDestroyLifetimeFun = () => postMessage('cleanup');
         await import('app:///pending.js');
         postMessage('late-entry');
@@ -2635,7 +2779,8 @@ fn unreachable_mts_worker_is_collected_without_releasing_the_view() {
     ",
     );
     pair.answer(
-        "onmessage = e => postMessage(e.data); setInterval(() => {}, 1000); postMessage('ready');",
+        "import 'bobcat:worker'; import 'bobcat:timers'; \
+         onmessage = e => postMessage(e.data); setInterval(() => {}, 1000); postMessage('ready');",
     );
     pair.deliver();
     pair.runtime
@@ -2692,7 +2837,9 @@ fn a_message_for_a_collected_worker_handle_is_dropped() {
         }
     ",
     );
-    pair.answer("onmessage = () => postMessage('answer');");
+    pair.answer(
+        "import 'bobcat:worker'; import 'bobcat:timers'; onmessage = () => postMessage('answer');",
+    );
     let event = pair.next_event().expect("the worker answers");
     // QuickJS discovers the cycle in one collection and processes its weak
     // registrations in the next, so the handle is released by the second.
@@ -2733,7 +2880,9 @@ fn a_named_worker_survives_a_collection_and_still_delivers() {
         }
     ",
     );
-    pair.answer("onmessage = () => postMessage('answer');");
+    pair.answer(
+        "import 'bobcat:worker'; import 'bobcat:timers'; onmessage = () => postMessage('answer');",
+    );
     let event = pair.next_event().expect("the worker answers");
     for _ in 0..2 {
         pair.runtime
@@ -2782,7 +2931,7 @@ fn ordinary_worker_does_not_acquire_app_teardown_by_importing_bts_or_using_its_n
     ",
     );
     pair.answer(
-        r"
+        r"import 'bobcat:worker'; import 'bobcat:timers';
         import {lynx} from 'bobcat:bts-runtime';
         lynx.getApp().callDestroyLifetimeFun = () => postMessage('cleanup');
         postMessage('ready');
@@ -2815,6 +2964,7 @@ fn vsync_can_resume_mts_and_bts_entries_awaiting_their_first_frame() {
         "globalThis.firstFrame = await new Promise(resolve => lynx.requestAnimationFrame(resolve));",
         Some(
             r"
+            import { lynx } from 'bobcat:bts-runtime';
             const time = await new Promise(resolve => {
                 lynx.requestAnimationFrame(resolve);
                 globalThis.postMessage('waiting for vsync');
@@ -2836,12 +2986,78 @@ fn vsync_can_resume_mts_and_bts_entries_awaiting_their_first_frame() {
     assert!(worker_failures(pair.notices()).is_empty());
 }
 
+/// A plain `Worker` that imports `bobcat:animation-frame` and nothing of the
+/// BTS gets its frame: a vsync is delivered to the realm's own animation-frame
+/// module, not to a runtime module only the BTS imports.
+#[test]
+fn a_plain_worker_gets_a_frame_from_the_shared_animation_frame_module() {
+    let mut pair = Pair::new(
+        r"
+        import {Worker} from 'bobcat-internal';
+        globalThis.worker = new Worker('./worker.js');
+    ",
+    );
+    pair.answer(
+        r"import 'bobcat:worker'; import 'bobcat:timers';
+        import {requestAnimationFrame} from 'bobcat:animation-frame';
+        requestAnimationFrame(time => postMessage(`frame ${time}`));
+        postMessage('requested');
+    ",
+    );
+    // The demand is sent before the message behind it, so the frame below
+    // finds it registered.
+    assert!(matches!(pair.next_event().unwrap().payload,
+        WorkerPayload::Message(ref value) if posted(value, "requested")));
+    pair.frame(1250.0);
+    assert!(matches!(pair.next_event().unwrap().payload,
+        WorkerPayload::Message(ref value) if posted(value, "frame 1250")));
+    assert!(worker_failures(pair.notices()).is_empty());
+    pair.check("worker.terminate();");
+    assert!(pair.finish().is_empty());
+}
+
+/// The native module transport is `bobcat:native-modules`, and the global
+/// scope module exports none of it: a plain `Worker` whose script imports
+/// `callNativeModule` from `bobcat:worker` fails at link, as an ordinary
+/// worker error, and runs nothing.
+#[test]
+fn a_plain_worker_cannot_import_the_transport_from_the_global_scope_module() {
+    let mut pair = Pair::new(
+        r"
+        import {Worker} from 'bobcat-internal';
+        globalThis.worker = new Worker('./worker.js');
+    ",
+    );
+    pair.answer(
+        "import 'bobcat:worker'; import 'bobcat:timers'; \
+         import { callNativeModule } from 'bobcat:worker'; postMessage('linked');",
+    );
+    let event = pair.next_event().expect("the script's link failure");
+    let WorkerPayload::Errored(error) = &event.payload else {
+        panic!("a link failure is an ordinary worker error");
+    };
+    assert!(
+        error.message.contains("SyntaxError") && error.message.contains("callNativeModule"),
+        "{}",
+        error.message
+    );
+    pair.check("worker.terminate();");
+    assert!(
+        !pair.finish().iter().any(|event| matches!(
+            event.payload,
+            WorkerPayload::Message(ref value) if posted(value, "linked")
+        )),
+        "a script that failed to link ran nothing"
+    );
+}
+
 #[test]
 fn animation_callbacks_use_display_timestamps_and_defer_nested_requests() {
     let mut pair = Pair::with_background(
         "globalThis.frames = []; lynx.getJSContext().addEventListener('frame', e => frames.push(e.data));",
         Some(
             r"
+            import { lynx } from 'bobcat:bts-runtime';
             const send = (label, time) => lynx.getCoreContext().dispatchEvent({type:'frame', data:[label,time]});
             lynx.requestAnimationFrame(time => {
                 send('first', time);
@@ -2884,6 +3100,7 @@ fn animation_callbacks_use_display_timestamps_and_defer_nested_requests() {
 fn bts_animation_frames_continue_while_an_mts_callback_is_blocked() {
     let mut pair = Pair::unbooted(Some(
         r"
+        import { lynx } from 'bobcat:bts-runtime';
         function frame(time) {
             lynx.requestAnimationFrame(frame);
             globalThis.postMessage({frame:time});
@@ -2969,6 +3186,7 @@ fn mts_animation_frames_continue_while_a_bts_callback_is_busy() {
         } lynx.requestAnimationFrame(frame);",
         Some(
             r"
+            import { lynx } from 'bobcat:bts-runtime';
             lynx.requestAnimationFrame(() => {
                 globalThis.postMessage('busy');
                 const until = Date.now() + 4000;
@@ -3037,7 +3255,7 @@ fn a_compiled_react_list_receives_its_cells_and_a_tap_edits_them() {
     let bytes = fixtures::fixture("react-list").page;
     let template = bobcat_source::native::decode(bytes).unwrap();
     let background = format!(
-        "import {{__BobcatRegisterBundle}} from 'bobcat:bts-runtime';\n\
+        "import {{lynx, __BobcatRegisterBundle}} from 'bobcat:bts-runtime';\n\
          __BobcatRegisterBundle({url});\n\
          lynx.requireModule('/app-service.js');",
         url = serde_json::to_string(BUNDLE_URL).unwrap(),
@@ -3216,11 +3434,8 @@ fn verify_react_teardown(reload: bool, development: bool) {
     // own URL as the base every path of it resolves against, then the
     // `requireModule` that loads and starts the card. Nothing of the
     // container's bodies is in it.
-    //
-    // `lynx` is the test entry preamble's own import; only the registration
-    // is named here, as `PageSource`'s own boot script names it.
     let background = format!(
-        "import {{__BobcatRegisterBundle}} from 'bobcat:bts-runtime';\n\
+        "import {{lynx, __BobcatRegisterBundle}} from 'bobcat:bts-runtime';\n\
          __BobcatRegisterBundle({url});\n\
          lynx.requireModule('/app-service.js');",
         url = serde_json::to_string(BUNDLE_URL).unwrap(),
@@ -3325,6 +3540,7 @@ fn a_background_module_call_reaches_the_embedder_and_its_callback_answers_the_re
         lynx.getJSContext().addEventListener('reply', e => results.push(e.data));
         ",
         r"
+        import { lynx } from 'bobcat:bts-runtime';
         const answered = lynx.getApp().NativeModules.Echo.ping(1, {x:1}, (...args) => {
             lynx.getCoreContext().dispatchEvent({ type: 'reply', data: args });
         }, 's');
@@ -3360,6 +3576,7 @@ fn a_callback_released_uninvoked_never_runs_and_fails_nothing() {
         lynx.getJSContext().addEventListener('reply', e => results.push(e.data));
         ",
         r"
+        import { lynx } from 'bobcat:bts-runtime';
         const core = lynx.getCoreContext();
         const modules = lynx.getApp().NativeModules;
         modules.Echo.ping(() => core.dispatchEvent({ type: 'reply', data: 'released' }));
@@ -3389,6 +3606,7 @@ fn a_module_the_view_lacks_and_a_method_it_did_not_declare_are_both_undefined() 
         "",
         &format!(
             r"
+            import {{ lynx }} from 'bobcat:bts-runtime';
             const modules = lynx.getApp().NativeModules;
             if (modules.Missing !== undefined) throw Error('an absent module is undefined');
             if (modules.Echo.nope !== undefined) throw Error('an undeclared method is undefined');
@@ -3406,7 +3624,7 @@ fn a_module_the_view_lacks_and_a_method_it_did_not_declare_are_both_undefined() 
 fn a_callback_for_a_worker_that_has_ended_says_so_and_invoking_it_does_nothing() {
     let mut pair = Pair::with_native_modules(
         "",
-        r"lynx.getApp().NativeModules.Echo.ping(() => postMessage('unreachable'));",
+        r"import { lynx } from 'bobcat:bts-runtime'; lynx.getApp().NativeModules.Echo.ping(() => postMessage('unreachable'));",
         &[("Echo", &["ping"])],
     );
     let (_, call) = pair.module_call();

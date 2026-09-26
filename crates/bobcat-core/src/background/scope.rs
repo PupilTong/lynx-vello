@@ -9,52 +9,53 @@ use std::rc::Rc;
 use quickjs_rust_bridge::HostValue;
 
 use crate::background::WorkerKey;
-use crate::esm::{TIMER_MODULE_SPECIFIER, WORKER_MODULE_SPECIFIER};
-use crate::link::{HostOutbox, ViewNotice};
+use crate::link::HostOutbox;
 use crate::main::quickjs::{ScriptEngine, ScriptRuntime};
 use crate::script::ScriptError;
 
-/// The worker realm's own host module. A worker realm declares two: this one,
-/// with the members only a worker has, and `bobcat-internal:host`, which
+/// The worker realm's own host module. A worker realm declares three: this
+/// one, with the members only a worker has; `bobcat-internal:host`, which
 /// carries the core [`crate::realm::open_realm`] installs in every realm and
-/// none of the MTS realm's document members.
+/// none of the MTS realm's document members; and
+/// [`NATIVE_MODULES_HOST_SPECIFIER`](crate::esm::NATIVE_MODULES_HOST_SPECIFIER),
+/// which every realm kind declares, with the member a native module call
+/// reaches the embedder through.
 const WORKER_HOST_MODULE_SPECIFIER: &str = "bobcat-internal:worker";
 /// Called on `bobcat:worker`, in a worker realm, with one message value.
 pub(super) const WORKER_DELIVER_EXPORT: &str = "__BobcatDeliverWorkerMessage";
-/// Called on `bobcat:worker` with one native module callback's answer.
-pub(super) const WORKER_MODULE_CALLBACK_EXPORT: &str = "__BobcatNativeModuleCallback";
 
-/// Every worker entry gets the same global scope, timers and name before its
-/// own script. Any other bindings are installed by that script's imports.
-///
-/// The script is *inlined* rather than registered and imported, the same way
-/// `ENTRY_PREAMBLE` carries the MTS entry. A module that is only evaluated
-/// belongs to the realm that evaluated it and is never named on the runtime,
-/// so two views that resolve one URL to different bytes cannot collide, and a
-/// worker leaves no registration behind. The static imports run before
-/// anything in the body, which is what puts the global scope and the timer
-/// globals in place first; `name` is written between them and the script
-/// because `self.name` is readable from a worker's top level.
-///
-/// The cost is the entry's cost: the preamble shifts the script's line
-/// numbers by the lines above it. The module still carries the script's own
-/// resolved URL, so a stack trace names the right file.
-pub(super) fn worker_boot_source(name: &str, script: &str) -> String {
-    let name = serde_json::to_string(name)
-        .expect("serializing a Rust string as a JavaScript string cannot fail");
-    format!(
-        r#"import "{WORKER_MODULE_SPECIFIER}";
-import "{TIMER_MODULE_SPECIFIER}";
-globalThis.name = {name};
-{script}"#
-    )
+/// What a worker realm's own members report back to the thread: two flags,
+/// each written from inside the realm the thread acts on and read by the
+/// thread once the call that set it has returned.
+pub(super) struct WorkerFlags {
+    /// Set as `bobcat:worker` reads `workerName`, which is that module's last
+    /// statement: whether this realm has the global scope a posted message
+    /// is delivered to. The engine installs that scope in no realm, so it is
+    /// set only in a realm whose script imported the module, `bobcat:bts`
+    /// among them, and only once the whole module has run.
+    pub(super) scope_installed: Rc<Cell<bool>>,
+    /// Set by `closeWorker`. A flag, not a teardown: the call runs inside the
+    /// realm it would tear down.
+    pub(super) closing: Rc<Cell<bool>>,
 }
 
-/// Installs a worker realm's own host module, `bobcat-internal:worker`: the
-/// three members that are a worker's whole outward surface beyond the core
-/// [`crate::realm::open_realm`] installed under `bobcat-internal:host`. The
-/// BTS and a plain `Worker` get the same three. Answers with the flag
-/// `closeWorker` sets.
+/// Installs a worker realm's own host modules, `bobcat-internal:worker` and
+/// `bobcat-internal:native-modules`: the members that are a worker's whole
+/// outward surface beyond the core [`crate::realm::open_realm`] installed
+/// under `bobcat-internal:host`. Every worker gets the same members, the BTS
+/// included: what sets the BTS apart is data the MTS realm posts to it, not
+/// anything installed here. Answers with the flags the members set.
+///
+/// `bobcat-internal:native-modules` is [`crate::native_module::install`]'s,
+/// the one every realm kind is given; a call a worker makes names the
+/// worker's `key`, which is how the view answers it through the worker's
+/// inbox.
+///
+/// `workerName` hands its string over once and keeps nothing, as an MTS
+/// realm's page data members do: `bobcat:worker` reads it as the last
+/// statement it evaluates, and nothing else of the engine's reads it. So the
+/// read is also how the thread learns that the whole module has run in this
+/// realm, which is what [`WorkerFlags::scope_installed`] records.
 ///
 /// There is no document member here and no way to add one: this realm is on
 /// another runtime, on another thread, and the document is neither `Send` nor
@@ -66,9 +67,24 @@ pub(super) fn install_worker_members(
     js_runtime: &mut ScriptRuntime,
     key: WorkerKey,
     host: &HostOutbox,
+    name: String,
     mut post: impl FnMut(HostValue) + 'static,
-) -> Result<Rc<Cell<bool>>, ScriptError> {
-    install_native_modules(engine, js_runtime, key, host)?;
+) -> Result<WorkerFlags, ScriptError> {
+    crate::native_module::install(engine, js_runtime, host, Some(key))?;
+
+    let mut name = Some(name);
+    let scope_installed = Rc::new(Cell::new(false));
+    let installed = Rc::clone(&scope_installed);
+    engine.register_host_module_function(
+        js_runtime,
+        WORKER_HOST_MODULE_SPECIFIER,
+        "workerName",
+        0,
+        Box::new(move |_arguments| {
+            installed.set(true);
+            Ok(name.take().map_or(HostValue::Undefined, HostValue::String))
+        }),
+    )?;
 
     engine.register_host_module_function(
         js_runtime,
@@ -99,85 +115,8 @@ pub(super) fn install_worker_members(
             Ok(HostValue::Undefined)
         }),
     )?;
-    Ok(closing)
-}
-
-/// Installs the one member `NativeModules.<module>.<method>(...)` reaches the
-/// embedder through.
-///
-/// Everything crosses as text, because everything here is JavaScript's: the
-/// arguments are the realm's own JSON, and the function arguments are named by
-/// the indices they occupied rather than carried. Nothing is built here but
-/// the notice itself — the view assembles the call, because the handle a
-/// callback answers through is the one the view already registered for this
-/// worker. It rides the channel a source request uses, so a view that has
-/// ended assembles nothing and the realm's functions are released.
-fn install_native_modules(
-    engine: &mut ScriptEngine,
-    js_runtime: &mut ScriptRuntime,
-    key: WorkerKey,
-    host: &HostOutbox,
-) -> Result<(), ScriptError> {
-    const NAME: &str = "bobcat-internal:worker.invokeNativeModule";
-    let host = host.clone();
-    engine.register_host_module_function(
-        js_runtime,
-        WORKER_HOST_MODULE_SPECIFIER,
-        "invokeNativeModule",
-        5,
-        Box::new(move |arguments| {
-            let call = call_id(arguments)?;
-            let module = string(arguments, 1)?.to_owned();
-            let method = string(arguments, 2)?.to_owned();
-            let call_arguments = string(arguments, 3)?.to_owned();
-            let callbacks = string(arguments, 4)?
-                .split(',')
-                .filter(|index| !index.is_empty())
-                .map(|index| {
-                    index
-                        .parse()
-                        .map_err(|_| format!("{NAME} expects argument indices for argument 4"))
-                })
-                .collect::<Result<Vec<u32>, _>>()?;
-            host.notify(ViewNotice::NativeModuleCall {
-                worker: key,
-                call,
-                module,
-                method,
-                arguments: call_arguments,
-                callbacks,
-            });
-            Ok(HostValue::Undefined)
-        }),
-    )
-}
-
-fn string(arguments: &[HostValue], index: usize) -> Result<&str, String> {
-    match arguments.get(index) {
-        Some(HostValue::String(value)) => Ok(value),
-        _ => Err(format!(
-            "bobcat-internal:worker.invokeNativeModule expects string argument {index}"
-        )),
-    }
-}
-
-/// The call number the realm minted, which it counts up from one and spells
-/// as a number.
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "the checks below leave a whole, representable call number"
-)]
-fn call_id(arguments: &[HostValue]) -> Result<u64, String> {
-    match arguments.first() {
-        Some(&HostValue::Number(value))
-            if value.is_finite() && value >= 0.0 && value.fract() == 0.0 =>
-        {
-            Ok(value as u64)
-        }
-        _ => Err(
-            "bobcat-internal:worker.invokeNativeModule expects a call number for argument 0"
-                .to_owned(),
-        ),
-    }
+    Ok(WorkerFlags {
+        scope_installed,
+        closing,
+    })
 }

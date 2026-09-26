@@ -19,11 +19,11 @@
 //! The thread is started by `LynxGroup::new`, beside `bobcat-main` rather
 //! than by it, and joined by the group handle's drop once `bobcat-main` has
 //! returned. It is a runtime environment of the group's own: `bobcat-main`
-//! holds one sender on it and speaks three messages — start a context with
-//! its script, post to one, stop one — and hears events back. A thread that
-//! will not start is a failure to build the *group*, named there, rather than
-//! a failure of whichever worker happened to be first — which is what lets
-//! everything below it be a plain channel send. The one state `bobcat-main`
+//! holds one sender on it and speaks three messages — start a context, post
+//! to one, stop one — and hears events back. A thread that will not start is
+//! a failure to build the *group*, named there, rather than a failure of
+//! whichever worker happened to be first — which is what lets everything
+//! below it be a plain channel send. The one state `bobcat-main`
 //! consults is whether this thread has trapped: a trap reports `Failed` to
 //! the creator of every worker still on it and sets a flag, and a `Worker`
 //! constructed after that fails at once rather than being sent here.
@@ -40,21 +40,24 @@
 //!               ──── Post / Terminate ──▶ the worker's own task
 //!               ◀─────── WorkerEvent ────
 //!
-//!   host        ──── the script ────────▶ the worker's own task
+//!   host        ──── a worker's script ──▶ the worker's own task
 //! ```
 //!
 //! Each worker owns its cancellation token. The MTS Worker object's explicit
 //! termination or JS finalizer sends `Terminate`; releasing its realm closes
 //! the sender. A view's cancellation does not race ahead of JS app cleanup.
 //!
-//! A worker's *answer* deliberately skips `bobcat-main`: the thread that owns
-//! a view's [`ResourceFetcher`](crate::resource::ResourceFetcher) is its
-//! painter, and routing the script through the main thread would queue a
-//! worker's boot behind whatever synchronous JavaScript that thread is in the
-//! middle of. The ask rides the link the realm already has, because `new
+//! A worker's script *answer* deliberately skips `bobcat-main`: the thread
+//! that owns a view's [`ResourceFetcher`](crate::resource::ResourceFetcher) is
+//! its painter, and routing the script through the main thread would queue a
+//! worker's script behind whatever synchronous JavaScript that thread is in
+//! the middle of. The ask rides the link the realm already has, because `new
 //! Worker(...)` runs on `bobcat-main` anyway; what the host is handed is the
 //! far end of a one-shot whose receiving end already travelled here inside
-//! the `Start`, so no ordering between the two has to be arranged.
+//! the `Start`, so no ordering between the two has to be arranged. A worker
+//! whose URL is an engine name has no such answer, the BTS's `bobcat:bts`
+//! among them: the host is never asked for one, and the realm's own loader
+//! loads it.
 //!
 //! # What is shared, and where it lives
 //!
@@ -75,15 +78,15 @@ use std::sync::atomic::AtomicBool;
 use std::thread::Builder as ThreadBuilder;
 
 use quickjs_rust_bridge::HostValue;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 #[cfg(target_arch = "wasm32")]
 use wasm_thread::Builder as ThreadBuilder;
 
-use crate::resource::LoadedSource;
+use crate::link::SourceAnswer;
 use crate::script::ScriptError;
 use crate::threads::ThreadJoin;
-use crate::view::{EngineError, LynxViewError, ScriptSource, WorkerId};
+use crate::view::{EngineError, ScriptSource};
 
 /// Names one `Worker` for the life of its group.
 ///
@@ -105,23 +108,33 @@ impl WorkerKey {
 
 /// One worker to start: everything it will ever be given, in one message.
 ///
-/// No URL and no state. What it says about the worker is its key, its name
-/// and its role, which the creating realm decided before sending it. The
-/// thread that fetches is the one that answers, its answer carries the
-/// resolved URL the module is named by, and everything else a worker has —
-/// what is posted to it, what it says back — is a channel that arrives with
-/// it.
+/// No state. What it says about the worker is what the creating realm
+/// decided from its URL before sending it: the URL itself, the answer to the
+/// request for its script when the host was asked for one, and the source
+/// its diagnostics are named by. The BTS is the dedicated worker whose URL
+/// is `bobcat:bts`, and its source is all that sets its `Start` apart: the
+/// view's data reaches it in the `initialize` message the MTS realm posts to
+/// it, as any other message does. Everything else a worker has — what is
+/// posted to it, what it says back — is a channel that arrives with it.
 pub(crate) struct WorkerStart {
     pub(crate) key: WorkerKey,
     /// The worker's `self.name`, empty when the constructor named none.
     pub(crate) name: String,
-    /// Whether this is the view's background thread or a `Worker` over a
-    /// script URL, which is what the worker's diagnostics are named by.
-    pub(crate) role: WorkerRole,
-    /// Its script, answered by whichever thread owns the creating view's
-    /// fetcher. A `Start` for the built-in background context arrives with
-    /// this already answered.
-    pub(crate) script: oneshot::Receiver<Result<LoadedSource, LynxViewError>>,
+    /// The worker's script URL: the `new Worker` specifier joined to the
+    /// creating entry's response URL by URL rules, which leaves an absolute
+    /// URL such as `bobcat:bts` as it is. The realm's root module is the
+    /// module at this URL, loaded by it.
+    pub(crate) url: String,
+    /// The answer to the request for [`Self::url`], from whichever thread
+    /// owns the creating view's fetcher. `None` for a URL under
+    /// [`ENGINE_MODULE_PREFIXES`](crate::esm::ENGINE_MODULE_PREFIXES), which
+    /// the host is never asked for: the realm's own loader loads it, or
+    /// refuses it with a `ReferenceError`.
+    pub(crate) script: Option<SourceAnswer>,
+    /// What the worker's diagnostics are named by: `Background` for the
+    /// worker whose URL is `bobcat:bts`, and `Worker` with its key for every
+    /// other. The creating realm records the same value under the key.
+    pub(crate) source: ScriptSource,
     /// What the MTS Worker object posts. Its finalizer or explicit terminate
     /// sends `Terminate`; releasing the MTS realm closes the channel.
     pub(crate) messages: mpsc::UnboundedReceiver<WorkerMessage>,
@@ -132,32 +145,6 @@ pub(crate) struct WorkerStart {
     /// Sources, frame demand and diagnostics reach the host directly, under
     /// this worker's lifetime.
     pub(crate) sources: crate::link::HostOutbox,
-}
-
-/// Which of the two kinds of worker a [`WorkerStart`] is for.
-///
-/// The creating realm tells them apart by the `new Worker` specifier alone,
-/// before it allocates a key or sends anything: `bobcat:bts` is the built-in
-/// background script, and any other specifier is a URL.
-pub(crate) enum WorkerRole {
-    /// The view's background thread (BTS), which boot creates as
-    /// `new Worker("bobcat:bts")`.
-    Background,
-    /// A `Worker` whose script is fetched from the URL its specifier
-    /// resolves to.
-    Dedicated,
-}
-
-impl WorkerRole {
-    /// The [`ScriptSource`] that events about the worker `key` names are
-    /// reported under: the view's background thread, or the `Worker` with
-    /// that key.
-    pub(crate) fn source(&self, key: WorkerKey) -> ScriptSource {
-        match self {
-            Self::Background => ScriptSource::Background,
-            Self::Dedicated => ScriptSource::Worker(WorkerId::from(key)),
-        }
-    }
 }
 
 /// Everything the worker thread is ever told.

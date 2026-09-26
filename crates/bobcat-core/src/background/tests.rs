@@ -18,15 +18,17 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use super::{
-    WorkerCommand, WorkerEvent, WorkerHome, WorkerKey, WorkerMessage, WorkerPayload, WorkerRole,
-    WorkerStart, wire_json,
+    WorkerCommand, WorkerEvent, WorkerHome, WorkerKey, WorkerMessage, WorkerPayload, WorkerStart,
+    wire_json, wire_value,
 };
 use crate::clock::ClockInstant;
-use crate::link::{HostOutbox, ViewNotice, block_on_deadline, detached_base};
+use crate::esm::BTS_MODULE_SPECIFIER;
+use crate::link::{HostOutbox, SourceAnswer, ViewNotice, block_on_deadline, detached_base};
 use crate::resource::{
     LoadedSource, ResourceError, ResourceErrorKind, ResourceErrorPhase, RetryAdvice,
     SourceCompletion, SourceRequest,
 };
+use crate::{ScriptSource, WorkerId};
 
 impl WorkerHome {
     pub(crate) fn with_entry_for_test(entry: (String, String)) -> Self {
@@ -149,14 +151,68 @@ impl Group {
             .send(command);
     }
 
-    /// Names one worker on a view, without answering its script yet. The
-    /// realm's other half of a construction — asking the host to fetch — is
-    /// what the test does by hand in [`Self::answer`].
+    /// Names one worker on a view, without answering its script yet. Its
+    /// script is requested by a URL made from its key, which is the name the
+    /// realm loads it by as its root module. The realm's other half of a
+    /// construction — asking the host to fetch — is what the test does by
+    /// hand in [`Self::answer`].
     fn construct(&mut self, view: usize, name: &str) -> WorkerKey {
+        let url = format!("app:///requested/{}.js", self.next_key.get());
+        self.construct_requesting(view, name, &url)
+    }
+
+    /// The same, over a request URL of the test's own.
+    fn construct_requesting(&mut self, view: usize, name: &str, url: &str) -> WorkerKey {
+        let (script, awaiting) = oneshot::channel();
+        let key = self.start_worker(view, name, url, Some(awaiting), Vec::new());
+        self.scripts.insert(key, script);
+        key
+    }
+
+    /// Names one worker on a view over a URL that is an engine name, which
+    /// `createWorker` asks the host nothing for: its `Start` carries no
+    /// script, and the realm's own loader loads the name or refuses it.
+    fn construct_engine_name(&mut self, view: usize, url: &str) -> WorkerKey {
+        self.start_worker(view, "", url, None, Vec::new())
+    }
+
+    /// Names one BTS on a view, started the way boot's
+    /// `new Worker("bobcat:bts")` starts one. Nothing is answered for it:
+    /// its root module is the registered `bobcat:bts`, which asks the host
+    /// for the entry an `initialize` message names once one arrives.
+    fn construct_background(&mut self, view: usize) -> WorkerKey {
+        self.construct_background_after(view, Vec::new())
+    }
+
+    /// The same, with `posted` already waiting in the new worker's message
+    /// channel when its `Start` is sent, which is the earliest any message
+    /// can reach a worker.
+    fn construct_background_after(&mut self, view: usize, posted: Vec<WorkerMessage>) -> WorkerKey {
+        self.start_worker(view, "lynx-bg", BTS_MODULE_SPECIFIER, None, posted)
+    }
+
+    /// Sends one `Start` on a view with what `createWorker` would have
+    /// decided for `url`, and keeps the sending end of the new worker's
+    /// message channel, into which `posted` is sent first.
+    fn start_worker(
+        &mut self,
+        view: usize,
+        name: &str,
+        url: &str,
+        script: Option<SourceAnswer>,
+        posted: Vec<WorkerMessage>,
+    ) -> WorkerKey {
         let key = WorkerKey::new(self.next_key.get());
         self.next_key.set(key.get() + 1);
-        let (script, awaiting) = oneshot::channel();
         let (messages, incoming) = mpsc::unbounded_channel();
+        for message in posted {
+            let _ = messages.send(message);
+        }
+        let source = if url == BTS_MODULE_SPECIFIER {
+            ScriptSource::Background
+        } else {
+            ScriptSource::Worker(WorkerId::from(key))
+        };
         let token = CancellationToken::new();
         let sources = HostOutbox::new(
             self.views[view].notices.clone(),
@@ -168,19 +224,20 @@ impl Group {
         self.tell(WorkerCommand::Start(WorkerStart {
             key,
             name: name.to_owned(),
-            role: WorkerRole::Dedicated,
-            script: awaiting,
+            url: url.to_owned(),
+            script,
+            source,
             messages: incoming,
             events: self.views[view].events.clone(),
             token,
             sources,
         }));
         self.views[view].messages.insert(key, messages);
-        self.scripts.insert(key, script);
         key
     }
 
-    /// The host's half: one script, answered.
+    /// The host's half: one script, answered from the response URL `url`,
+    /// which is the module's URL whatever it was requested by.
     fn answer(&mut self, key: WorkerKey, url: &str, source: &str) {
         let _ = self
             .scripts
@@ -274,7 +331,11 @@ impl Group {
     /// overtake this message to make the assertion pass by accident.
     fn quiet(&mut self) {
         let probe = self.construct(0, "");
-        self.answer(probe, "app:///probe.js", "postMessage(\"probe\");");
+        self.answer(
+            probe,
+            "app:///probe.js",
+            "import 'bobcat:worker'; import 'bobcat:timers'; postMessage(\"probe\");",
+        );
         let event = self.next(0);
         assert_eq!(event.key, probe, "something else was still to be reported");
         let expected = wire("probe");
@@ -300,7 +361,8 @@ fn a_worker_answers_what_the_group_posts_and_carries_the_name_it_was_given() {
     group.answer(
         key,
         "app:///w.js",
-        "onmessage = (event) => postMessage(`${name}:${event.data}`);",
+        "import 'bobcat:worker'; import 'bobcat:timers'; \
+         onmessage = (event) => postMessage(`${name}:${event.data}`);",
     );
     group.post(key, "ping");
     assert_eq!(group.message(0), wire("counter:ping"));
@@ -315,7 +377,8 @@ fn a_worker_answers_what_the_group_posts_and_carries_the_name_it_was_given() {
 fn a_structured_value_survives_a_round_trip_through_two_worker_realms() {
     let mut group = Group::new();
     group.start(
-        "const value = { tag: 'payload', missing: undefined, nan: NaN,
+        "import 'bobcat:worker'; import 'bobcat:timers'; \
+         const value = { tag: 'payload', missing: undefined, nan: NaN,
   at: new Date(1700000000123), bytes: new Uint8Array([1, 2, 255]),
   big: 9007199254740993n };
 value.self = value;
@@ -328,7 +391,7 @@ postMessage(value);",
     );
 
     let echo = group.start(
-        "addEventListener('message', (event) => {
+        "import 'bobcat:worker'; import 'bobcat:timers'; addEventListener('message', (event) => {
   const d = event.data;
   postMessage([
     typeof d, d.tag, 'missing' in d, d.missing === undefined, Number.isNaN(d.nan),
@@ -356,10 +419,186 @@ fn what_is_posted_before_the_script_arrives_is_delivered_in_order() {
     group.answer(
         key,
         "app:///w.js",
-        "onmessage = (event) => postMessage(event.data);",
+        "import 'bobcat:worker'; import 'bobcat:timers'; \
+         onmessage = (event) => postMessage(event.data);",
     );
     assert_eq!(group.message(0), wire("first"));
     assert_eq!(group.message(0), wire("second"));
+}
+
+/// `self.name` is set by `bobcat:worker` as it is evaluated, which is before
+/// any module the script imports after it is: the script imports it first.
+/// So a module the script imports statically reads the name at its own top
+/// level.
+#[test]
+fn a_module_the_script_imports_statically_reads_the_workers_name() {
+    let mut group = Group::new();
+    let key = group.construct(0, "named");
+    group.answer(
+        key,
+        "app:///w.js",
+        "import 'bobcat:worker'; import 'bobcat:timers'; \
+         import { seen } from './seen.js';\npostMessage(seen);",
+    );
+    let (url, completion) = group.views[0].source();
+    assert_eq!(url, "app:///seen.js");
+    completion.complete(Ok(LoadedSource::Module {
+        source: "export const seen = self.name;".to_owned(),
+        url,
+    }));
+    assert_eq!(group.message(0), wire("named"));
+}
+
+/// The script is completed under the name it was requested by, which is the
+/// name the realm's load of its root module waits on, and it runs as the
+/// module of the response URL: its `import.meta.url`. A fetcher that answered
+/// from another URL, as a redirect does, changes neither, and the request
+/// `createWorker` made is the only one: the worker's own epilogue never asks
+/// for the script.
+#[test]
+fn a_script_answered_from_another_url_runs_as_that_url_and_is_asked_for_once() {
+    let mut group = Group::new();
+    let key = group.construct_requesting(0, "", "app:///worker.js");
+    group.answer(
+        key,
+        "https://cdn.test/redirected/worker.js",
+        "import 'bobcat:worker'; import 'bobcat:timers'; postMessage(import.meta.url);",
+    );
+    assert_eq!(
+        group.message(0),
+        wire("https://cdn.test/redirected/worker.js")
+    );
+    assert!(group.views[0].sources.try_recv().is_err());
+}
+
+/// Once the script has arrived, the consumer goes on waiting for the root
+/// module to finish without the script's arm: a script still waiting in an
+/// import leaves that module unfinished, and a post and a `Terminate` that
+/// arrive meanwhile are read as before — the post held, the `Terminate`
+/// ending the worker — and the answered one-shot is not polled a second time.
+#[test]
+fn a_post_and_a_terminate_while_the_answered_script_still_imports_end_the_worker() {
+    let mut group = Group::new();
+    let key = group.construct(0, "");
+    group.answer(
+        key,
+        "app:///w.js",
+        "import 'bobcat:worker'; import 'bobcat:timers'; \
+         onmessage = (event) => postMessage(event.data);\nawait import('./held.js');",
+    );
+    let (url, held) = group.views[0].source();
+    assert_eq!(url, "app:///held.js");
+    group.post(key, "queued");
+    group.terminate(key);
+    held.complete(Ok(LoadedSource::Module {
+        source: String::new(),
+        url,
+    }));
+    // Neither the post nor a failure: the worker ended without delivering
+    // what it held, and its thread did not trap.
+    group.quiet();
+}
+
+/// A BTS is started over the registered module `bobcat:bts`, which imports
+/// the view's BTS entry only once the first `initialize` message arrives, by
+/// the URL that message names. The entry is asked for by this worker as any
+/// import is, and it runs under the name the view gave it.
+#[test]
+fn a_bts_imports_its_entry_through_bobcat_bts_once_initialized() {
+    let mut group = Group::new();
+    let key = group.construct_background(0);
+    group.send(
+        key,
+        WorkerMessage::Post(wire_value(
+            r#"({bobcat: "runtime", method: "initialize", entry: "app:///bts.js"})"#,
+        )),
+    );
+    let (url, completion) = group.views[0].source();
+    assert_eq!(url, "app:///bts.js");
+    completion.complete(Ok(LoadedSource::Module {
+        source: "import { lynx } from 'bobcat:bts-runtime';\n\
+                 postMessage([self.name, typeof lynx.getNativeApp, import.meta.url].join(' '));"
+            .to_owned(),
+        url,
+    }));
+    assert_eq!(group.message(0), wire("lynx-bg function app:///bts.js"));
+}
+
+/// The BTS's root module is `bobcat:bts`, as every worker's root module is
+/// the module at its URL. The realm's own loader loads that registered
+/// module, so the root module finishes inside the job that opens the realm,
+/// before any job that delivers a post, and the worker holds what is posted
+/// until then in any case. So an `initialize` already waiting in the channel
+/// when the BTS's `Start` is sent, the earliest any message can arrive, is
+/// delivered only once `bobcat:bts` has imported the worker's global scope
+/// and handed `bobcat:bts-runtime` the function it starts the BTS with: the
+/// BTS asks for its entry and runs it. Delivered any earlier, it would reach
+/// a realm with no listener for it.
+#[test]
+fn an_initialize_posted_before_the_bts_starts_waits_for_bobcat_bts() {
+    let mut group = Group::new();
+    group.construct_background_after(
+        0,
+        vec![WorkerMessage::Post(wire_value(
+            r#"({bobcat: "runtime", method: "initialize", entry: "app:///bts.js"})"#,
+        ))],
+    );
+    let (url, completion) = group.views[0].source();
+    assert_eq!(url, "app:///bts.js");
+    completion.complete(Ok(LoadedSource::Module {
+        source: "postMessage('entry ran');".to_owned(),
+        url,
+    }));
+    assert_eq!(group.message(0), wire("entry ran"));
+}
+
+/// A BTS's `SystemInfo` and `NativeModules` come from the `initialize`
+/// message, not from its `Start`: `bobcat:bts-runtime` fills both in before
+/// it imports the entry that message names, so the entry's own top level
+/// already reads them, through each name the runtime gives them.
+#[test]
+fn a_bts_reads_its_screen_and_native_modules_from_initialize() {
+    let mut group = Group::new();
+    let table = vec![
+        (
+            "Echo".to_owned(),
+            vec!["ping".to_owned(), "pong".to_owned()],
+        ),
+        ("Bare".to_owned(), Vec::new()),
+    ];
+    let key = group.construct_background(0);
+    let table = serde_json::to_string(&crate::native_module::encode_table(&table)).unwrap();
+    group.send(
+        key,
+        WorkerMessage::Post(wire_value(&format!(
+            r#"({{bobcat: "runtime", method: "initialize", updateData: {{}}, entry: "app:///bts.js",
+                systemInfo: {{platform: "headless", pixelRatio: 3, pixelWidth: 1170, pixelHeight: 2532}},
+                nativeModuleTable: {table}}})"#
+        ))),
+    );
+    let (url, completion) = group.views[0].source();
+    completion.complete(Ok(LoadedSource::Module {
+        source: r"
+            import { lynx, NativeModules, SystemInfo } from 'bobcat:bts-runtime';
+            postMessage([
+                SystemInfo.pixelRatio,
+                SystemInfo.pixelWidth,
+                SystemInfo.pixelHeight,
+                lynx.SystemInfo === SystemInfo && globalThis.SystemInfo === SystemInfo,
+                Object.isFrozen(SystemInfo),
+                Object.keys(NativeModules),
+                Object.keys(NativeModules.Echo),
+                Object.keys(NativeModules.Bare),
+                lynx.getApp().NativeModules === NativeModules,
+            ]);
+        "
+        .to_owned(),
+        url,
+    }));
+    assert_eq!(
+        wire_json(&group.message(0)),
+        r#"[3,1170,2532,true,true,["Echo","Bare"],["ping","pong"],[],true]"#
+    );
 }
 
 #[test]
@@ -389,8 +628,56 @@ fn a_script_that_cannot_be_fetched_fails_its_worker_and_nothing_else() {
         error.message
     );
     // The runtime is untouched: the next worker over the same thread runs.
-    let key = group.start("postMessage(\"alive\");");
+    let key =
+        group.start("import 'bobcat:worker'; import 'bobcat:timers'; postMessage(\"alive\");");
     assert_eq!(group.next(0).key, key);
+}
+
+/// A worker whose URL is an engine name is loaded by its realm's own loader
+/// alone: `createWorker` asks the host nothing for such a URL, so its `Start`
+/// carries no script and nothing waits for one. A registered built-in is the
+/// root module, and links and runs. A name nothing registered is refused in
+/// the realm with a `ReferenceError`, which the worker reports as something
+/// it threw, and it goes on running like a worker whose script threw.
+#[test]
+fn a_worker_named_by_an_engine_url_is_loaded_by_its_realm_without_the_host() {
+    let mut group = Group::new();
+    group.views.push(View::new());
+    let registered = group.construct_engine_name(1, "bobcat:timers");
+    let refused = group.construct_engine_name(2, "bobcat:nope");
+    let event = group.next(2);
+    assert_eq!(event.key, refused);
+    let WorkerPayload::Errored(error) = event.payload else {
+        panic!("a refused import is something the realm threw")
+    };
+    assert!(
+        error.message.contains("ReferenceError") && error.message.contains("'bobcat:nope'"),
+        "{}",
+        error.message
+    );
+    // A full round of the thread later, no worker has reported anything
+    // more, its end included, and none asked its host for anything.
+    group.quiet();
+    for view in [1, 2] {
+        assert!(
+            group.views[view].incoming.try_recv().is_err(),
+            "the worker reported nothing more"
+        );
+        assert!(
+            group.views[view].sources.try_recv().is_err(),
+            "the worker asked its host for nothing"
+        );
+    }
+    // Each is still running until it is told to stop: its task still holds
+    // its view's event sender, and lets go of it once terminated.
+    for (view, key) in [(1, registered), (2, refused)] {
+        assert!(
+            group.views[view].events.strong_count() > 1,
+            "the worker is still running"
+        );
+        group.terminate(key);
+        group.wait_for_workers_to_end(view, PATIENCE, "the terminated worker ended");
+    }
 }
 
 /// A trap in the thread's own loop ends every worker on it at once, and no
@@ -406,20 +693,22 @@ fn a_trapped_worker_thread_fails_every_live_worker() {
     // One worker per view, each still waiting for its script.
     let first = group.construct(0, "");
     let second = group.construct(1, "");
-    // This one's boot job waits on a load until the test answers it, and no
-    // other job runs meanwhile.
+    // This one's script job waits on a load until the test answers it, and
+    // no other job runs meanwhile.
     let parked = group.construct(2, "");
     group.answer(
         parked,
         "app:///parked.js",
-        "import { createRequire } from 'bobcat:module';
+        "import 'bobcat:worker'; import 'bobcat:timers'; \
+         import { createRequire } from 'bobcat:module';
 createRequire(import.meta.url)('./held.cjs');",
     );
     let (url, held) = group.views[2].source();
-    // Ended by a `Terminate` its task reads during that wait. Its task is not
-    // joined before the trap: the job that reclaims its realm is queued
-    // behind the waiting one. Its boot task dropping the script's receiver is
-    // what shows it has ended.
+    // Constructed and ended during that wait, by a `Terminate` its message
+    // consumer reads while its boot job is still queued behind the waiting
+    // one. Its task is not joined before the trap: the job that reclaims its
+    // realm is queued there too. Its consumer dropping the script's receiver
+    // is what shows it has ended.
     let ended = group.construct(1, "");
     group.terminate(ended);
     let deadline = ClockInstant::now() + PATIENCE;
@@ -465,7 +754,8 @@ createRequire(import.meta.url)('./held.cjs');",
 fn a_script_that_throws_on_load_leaves_a_worker_that_still_answers() {
     let mut group = Group::new();
     let key = group.start(
-        "onmessage = (event) => postMessage(event.data);
+        "import 'bobcat:worker'; import 'bobcat:timers'; \
+         onmessage = (event) => postMessage(event.data);
 throw new Error(\"boom\");",
     );
     let event = group.next(0);
@@ -478,11 +768,225 @@ throw new Error(\"boom\");",
     assert_eq!(group.message(0), wire("still here"));
 }
 
+/// A worker's root module is its script, with nothing written around it: a
+/// throw at the script's top level is reported at the script's own URL and
+/// at the line it is on in the script, the import on its first line counted
+/// as the script's own.
+#[test]
+fn a_throw_at_a_scripts_top_level_is_reported_at_its_own_url_and_line() {
+    let mut group = Group::new();
+    let key = group.construct_requesting(0, "", "app:///thrower.js");
+    group.answer(
+        key,
+        "app:///thrower.js",
+        "import 'bobcat:worker';\nconst answer = 42;\nthrow new Error(`boom ${answer}`);",
+    );
+    let event = group.next(0);
+    assert_eq!(event.key, key);
+    let WorkerPayload::Errored(error) = event.payload else {
+        panic!("a script that throws on load is something the realm threw")
+    };
+    assert!(error.message.contains("boom 42"), "{}", error.message);
+    let location = error.location.expect("the throw has a location");
+    assert_eq!(location.source.as_deref(), Some("app:///thrower.js"));
+    assert_eq!(location.line, Some(3));
+}
+
+/// The engine installs no global scope in a worker realm: a script that
+/// wants `onmessage` imports `bobcat:worker`, and one that imports nothing
+/// has nothing a message could be delivered to. What is posted to it is
+/// dropped, and nothing is reported for it: no `Errored`, no `Failed`. It is
+/// still a worker, running until it is terminated, and then it ends.
+///
+/// The script's one statement is an `import()` nothing awaits, whose request
+/// is how the test knows the script has finished: the worker's epilogue
+/// reads the root module's load, and so marks it finished, before it sends
+/// that request. The post below reaches the realm after that either way —
+/// at once, or held until the message consumer has seen the load finish —
+/// and is dropped there.
+#[test]
+fn a_worker_whose_script_imports_no_global_scope_drops_what_is_posted() {
+    let mut group = Group::new();
+    group.views.push(View::new());
+    let key = group.construct(2, "");
+    group.answer(key, "app:///bare.js", "import('./later.js');");
+    let (url, _later) = group.views[2].source();
+    assert_eq!(url, "app:///later.js");
+    group.post(key, "dropped");
+    group.quiet();
+    assert!(
+        group.views[2].incoming.try_recv().is_err(),
+        "the post reached nothing and reported nothing"
+    );
+    assert!(
+        group.views[2].events.strong_count() > 1,
+        "the worker is still running"
+    );
+    group.terminate(key);
+    group.wait_for_workers_to_end(2, PATIENCE, "the terminated worker ended");
+    assert!(
+        group.views[2].incoming.try_recv().is_err(),
+        "its end reported nothing"
+    );
+}
+
+/// A message is delivered once `bobcat:worker` has *run* in the realm, not
+/// once the realm has the module. A script whose module graph fails to load
+/// leaves `bobcat:worker` compiled into the realm but never linked and never
+/// run, and a module in that state has no namespace that can be read. So a
+/// post to that worker is dropped, as a post to one whose script never
+/// imported the module is; the failed load is the only thing reported, and
+/// it is reported once.
+#[test]
+fn a_worker_whose_graph_failed_before_its_scope_ran_drops_what_is_posted() {
+    let mut group = Group::new();
+    group.views.push(View::new());
+    let key = group.construct(2, "");
+    group.answer(
+        key,
+        "app:///failing.js",
+        "import 'bobcat:worker'; import './missing.js';",
+    );
+    let (url, completion) = group.views[2].source();
+    assert_eq!(url, "app:///missing.js");
+    completion.complete(Err(ResourceError {
+        kind: ResourceErrorKind::NotFound,
+        phase: ResourceErrorPhase::ReceiveHeaders,
+        locator: None,
+        message: "404".into(),
+        retry: RetryAdvice::Never,
+    }
+    .into()));
+    let event = group.next(2);
+    assert_eq!(event.key, key);
+    let WorkerPayload::Errored(error) = event.payload else {
+        panic!("a graph that fails to load is something the realm threw")
+    };
+    assert!(error.message.contains("404"), "{}", error.message);
+    group.post(key, "dropped");
+    group.quiet();
+    assert!(
+        group.views[2].incoming.try_recv().is_err(),
+        "the failed load was reported once, and the post reached nothing"
+    );
+    group.terminate(key);
+    group.wait_for_workers_to_end(2, PATIENCE, "the terminated worker ended");
+}
+
+/// A root module whose graph fails in a job after its own completion — the
+/// job that answers a module the script imports — is reported once, by that
+/// job, named by what it was doing. The epilogue's read of the root module's
+/// load after it only learns that the load has settled. Two ways a graph
+/// fails there: a dependency the host could not load, and a dependency that
+/// throws as it is evaluated.
+#[test]
+fn a_root_whose_dependency_fails_is_reported_once() {
+    let mut group = Group::new();
+    group.views.push(View::new());
+    group.views.push(View::new());
+    let missing = group.construct(2, "");
+    group.answer(
+        missing,
+        "app:///needs-missing.js",
+        "import 'bobcat:worker'; import './missing.js';",
+    );
+    let (url, completion) = group.views[2].source();
+    assert_eq!(url, "app:///missing.js");
+    completion.complete(Err(ResourceError {
+        kind: ResourceErrorKind::NotFound,
+        phase: ResourceErrorPhase::ReceiveHeaders,
+        locator: None,
+        message: "404".into(),
+        retry: RetryAdvice::Never,
+    }
+    .into()));
+
+    let throwing = group.construct(3, "");
+    group.answer(
+        throwing,
+        "app:///needs-thrower.js",
+        "import 'bobcat:worker'; import './thrower.js';",
+    );
+    let (url, completion) = group.views[3].source();
+    assert_eq!(url, "app:///thrower.js");
+    completion.complete(Ok(LoadedSource::Module {
+        source: "throw new Error('the dependency threw');".into(),
+        url: "app:///thrower.js".into(),
+    }));
+
+    for (view, key, expected) in [(2, missing, "404"), (3, throwing, "the dependency threw")] {
+        let event = group.next(view);
+        assert_eq!(event.key, key);
+        let WorkerPayload::Errored(error) = event.payload else {
+            panic!("a graph that fails is something the realm threw")
+        };
+        assert!(error.message.contains(expected), "{}", error.message);
+    }
+    group.quiet();
+    for view in [2, 3] {
+        assert!(
+            group.views[view].incoming.try_recv().is_err(),
+            "the failure was reported once"
+        );
+    }
+    group.terminate(missing);
+    group.terminate(throwing);
+    group.wait_for_workers_to_end(2, PATIENCE, "the terminated worker ended");
+    group.wait_for_workers_to_end(3, PATIENCE, "the terminated worker ended");
+}
+
+/// The engine writes no global scope into a worker realm, so a script that
+/// uses `postMessage` without importing `bobcat:worker` has no such binding:
+/// its first line throws a `ReferenceError`, reported at the script's own URL
+/// and line as something the worker threw. The worker goes on running, with
+/// nothing in it that receives a post, until it is terminated, and its end
+/// reports nothing.
+#[test]
+fn a_script_that_uses_the_global_scope_without_importing_it_throws_a_reference_error() {
+    let mut group = Group::new();
+    group.views.push(View::new());
+    let key = group.construct_requesting(2, "", "app:///unscoped.js");
+    group.answer(
+        key,
+        "app:///unscoped.js",
+        "postMessage('reached');\nonmessage = (event) => postMessage(event.data);",
+    );
+    let event = group.next(2);
+    assert_eq!(event.key, key);
+    let WorkerPayload::Errored(error) = event.payload else {
+        panic!("a use of a binding nothing declared is something the realm threw")
+    };
+    assert!(
+        error.message.contains("ReferenceError") && error.message.contains("postMessage"),
+        "{}",
+        error.message
+    );
+    let location = error.location.expect("the throw has a location");
+    assert_eq!(location.source.as_deref(), Some("app:///unscoped.js"));
+    assert_eq!(location.line, Some(1));
+    group.post(key, "dropped");
+    group.quiet();
+    assert!(
+        group.views[2].incoming.try_recv().is_err(),
+        "the throw was reported once, and the post reached nothing"
+    );
+    assert!(
+        group.views[2].events.strong_count() > 1,
+        "the worker is still running"
+    );
+    group.terminate(key);
+    group.wait_for_workers_to_end(2, PATIENCE, "the terminated worker ended");
+    assert!(
+        group.views[2].incoming.try_recv().is_err(),
+        "its end reported nothing"
+    );
+}
+
 #[test]
 fn a_worker_that_closes_itself_reports_and_takes_no_more() {
     let mut group = Group::new();
     let key = group.start(
-        "onmessage = () => postMessage(\"late\");
+        "import 'bobcat:worker'; import 'bobcat:timers'; onmessage = () => postMessage(\"late\");
 close();",
     );
     let event = group.next(0);
@@ -495,7 +999,10 @@ close();",
 #[test]
 fn a_terminated_worker_is_never_heard_from_again() {
     let mut group = Group::new();
-    let key = group.start("onmessage = (event) => postMessage(event.data);");
+    let key = group.start(
+        "import 'bobcat:worker'; import 'bobcat:timers'; \
+         onmessage = (event) => postMessage(event.data);",
+    );
     group.post(key, "one");
     assert_eq!(group.message(0), wire("one"));
     // The terminate is followed by a post the worker would echo if it were
@@ -510,14 +1017,21 @@ fn terminating_a_worker_whose_script_is_still_in_flight_leaves_nothing_behind() 
     let mut group = Group::new();
     let key = group.construct(0, "");
     group.terminate(key);
-    group.answer(key, "app:///w.js", "postMessage(\"too late\");");
+    group.answer(
+        key,
+        "app:///w.js",
+        "import 'bobcat:worker'; import 'bobcat:timers'; postMessage(\"too late\");",
+    );
     group.quiet();
 }
 
 #[test]
 fn releasing_a_view_ends_the_workers_it_created() {
     let mut group = Group::new();
-    let key = group.start("onmessage = (event) => postMessage(event.data);");
+    let key = group.start(
+        "import 'bobcat:worker'; import 'bobcat:timers'; \
+         onmessage = (event) => postMessage(event.data);",
+    );
     group.post(key, "before");
     assert_eq!(group.message(0), wire("before"));
 
@@ -528,7 +1042,11 @@ fn releasing_a_view_ends_the_workers_it_created() {
     // Another view's worker still answers, which is what makes the silence
     // above a release rather than a stopped thread.
     let survivor = group.construct(1, "");
-    group.answer(survivor, "app:///other.js", "postMessage(\"alive\");");
+    group.answer(
+        survivor,
+        "app:///other.js",
+        "import 'bobcat:worker'; import 'bobcat:timers'; postMessage(\"alive\");",
+    );
     let event = group.next(1);
     assert_eq!(event.key, survivor);
 }
@@ -539,7 +1057,11 @@ fn cancelling_a_view_does_not_end_a_worker_whose_mts_handle_is_alive() {
     let mut group = Group::new();
     let worker = group.construct(0, "");
     group.cancel(0);
-    group.answer(worker, "app:///worker.js", "postMessage('still-owned');");
+    group.answer(
+        worker,
+        "app:///worker.js",
+        "import 'bobcat:worker'; import 'bobcat:timers'; postMessage('still-owned');",
+    );
     assert_eq!(group.message(0), wire("still-owned"));
     group.release(0);
     group.wait_for_workers_to_end(0, PATIENCE, "dropping the last sender ends the worker");
@@ -549,7 +1071,7 @@ fn cancelling_a_view_does_not_end_a_worker_whose_mts_handle_is_alive() {
 fn a_worker_keeps_its_own_timers() {
     let mut group = Group::new();
     group.start(
-        "let ticks = 0;
+        "import 'bobcat:worker'; import 'bobcat:timers'; let ticks = 0;
 const handle = setInterval(() => {
   ticks += 1;
   if (ticks === 3) {
@@ -567,13 +1089,21 @@ fn two_views_over_one_url_each_run_their_own_bytes() {
     // Every view has its own `ResourceFetcher`, so one URL can resolve to two
     // different scripts in one group. Each worker must run the bytes its own
     // view answered with — which nothing has to arrange, because a worker's
-    // script is evaluated into its realm rather than registered on the
+    // script is completed into its realm rather than registered on the
     // runtime under a name a second view could reach.
-    let first = group.construct(0, "");
-    let second = group.construct(1, "");
-    group.answer(first, "app:///shared.js", "postMessage(\"first view\");");
+    let first = group.construct_requesting(0, "", "app:///shared.js");
+    let second = group.construct_requesting(1, "", "app:///shared.js");
+    group.answer(
+        first,
+        "app:///shared.js",
+        "import 'bobcat:worker'; import 'bobcat:timers'; postMessage(\"first view\");",
+    );
     assert_eq!(group.message(0), wire("first view"));
-    group.answer(second, "app:///shared.js", "postMessage(\"second view\");");
+    group.answer(
+        second,
+        "app:///shared.js",
+        "import 'bobcat:worker'; import 'bobcat:timers'; postMessage(\"second view\");",
+    );
     let event = group.next(1);
     assert_eq!(
         event.key, second,
@@ -589,10 +1119,12 @@ fn two_views_over_one_url_each_run_their_own_bytes() {
 fn one_worker_realm_shares_no_global_with_another_on_the_same_runtime() {
     let mut group = Group::new();
     let first = group.start(
-        "globalThis.marker = \"first\";
+        "import 'bobcat:worker'; import 'bobcat:timers'; globalThis.marker = \"first\";
 onmessage = () => postMessage(globalThis.marker);",
     );
-    let second = group.start("postMessage(String(globalThis.marker));");
+    let second = group.start(
+        "import 'bobcat:worker'; import 'bobcat:timers'; postMessage(String(globalThis.marker));",
+    );
     let event = group.next(0);
     assert_eq!(event.key, second);
     let WorkerPayload::Message(data) = event.payload else {
@@ -607,7 +1139,7 @@ onmessage = () => postMessage(globalThis.marker);",
 fn imported_worker_graph_uses_response_urls_and_queues_messages_until_entry_finishes() {
     let mut group = Group::new();
     let worker = group.start(
-        r"
+        r"import 'bobcat:worker'; import 'bobcat:timers';
         const [first, second] = await Promise.all([import('./dep.js'), import('./dep.js')]);
         if (first !== second) throw Error('duplicate module evaluation');
         await new Promise(resolve => setTimeout(resolve, 1));
@@ -640,7 +1172,7 @@ fn imported_worker_graph_uses_response_urls_and_queues_messages_until_entry_fini
 fn a_worker_requires_commonjs_and_json_against_its_own_response_url() {
     let mut group = Group::new();
     group.start(
-        r"
+        r"import 'bobcat:worker'; import 'bobcat:timers';
         import { createRequire } from 'bobcat:module';
         const require = createRequire(import.meta.url);
         const lib = require('./lib/answer.cjs');
@@ -683,7 +1215,7 @@ fn a_worker_requires_commonjs_and_json_against_its_own_response_url() {
 fn a_bts_bundle_requires_a_chunk_beside_its_template_url() {
     let mut group = Group::new();
     group.start(
-        r"
+        r"import 'bobcat:worker'; import 'bobcat:timers';
         import { lynx, __BobcatRegisterBundle } from 'bobcat:bts-runtime';
         __BobcatRegisterBundle('https://cdn.test/app/x.web.bundle');
         postMessage(JSON.stringify(lynx.requireModule('/chunk.js')));
@@ -716,7 +1248,7 @@ fn a_bts_bundle_requires_a_chunk_beside_its_template_url() {
 fn a_registered_bundle_body_answers_through_its_modules_default_export() {
     let mut group = Group::new();
     group.start(
-        r"
+        r"import 'bobcat:worker'; import 'bobcat:timers';
         import { lynx, __BobcatRegisterBundle } from 'bobcat:bts-runtime';
         __BobcatRegisterBundle('https://cdn.test/app/x.web.bundle');
         postMessage(JSON.stringify(lynx.requireModule('/app-service.js')));
@@ -749,7 +1281,7 @@ fn a_worker_sync_load_resolves_against_the_views_base_not_its_own_url() {
     let mut group = Group::new();
     group.views[0].base = Arc::new(Url::parse("https://cdn.test/page/").unwrap());
     group.start(
-        r"
+        r"import 'bobcat:worker'; import 'bobcat:timers';
         import { lynx } from 'bobcat:bts-runtime';
         postMessage(lynx.loadScript('x', {bundleName: 'lazy.bundle'}));
     ",
@@ -767,7 +1299,7 @@ fn a_worker_sync_load_resolves_against_the_views_base_not_its_own_url() {
 fn a_require_nobody_answers_throws_in_the_worker_and_leaves_it_usable() {
     let mut group = Group::new();
     let worker = group.start(
-        r"
+        r"import 'bobcat:worker'; import 'bobcat:timers';
         import { createRequire } from 'bobcat:module';
         let message = '';
         try { createRequire(import.meta.url)('./missing.cjs'); }
@@ -790,7 +1322,7 @@ fn a_require_nobody_answers_throws_in_the_worker_and_leaves_it_usable() {
 fn a_worker_links_only_the_built_ins_its_host_modules_have_members_for() {
     let mut group = Group::new();
     group.start(
-        r"
+        r"import 'bobcat:worker'; import 'bobcat:timers';
         const outcomes = [];
         for (const specifier of ['bobcat:element', 'bobcat-internal', 'bobcat:nope']) {
             try { await import(specifier); outcomes.push('loaded'); }
@@ -819,18 +1351,19 @@ fn a_worker_links_only_the_built_ins_its_host_modules_have_members_for() {
     assert!(group.views[0].sources.try_recv().is_err());
 }
 
-/// The members a worker realm's two host modules export, which is what
-/// decides the built-ins it can link. Written down so that a change to either
+/// The members a worker realm's three host modules export, which is what
+/// decides the built-ins it can link. Written down so that a change to any
 /// set is a change to these lists. A namespace lists its exports sorted by
 /// name; `testFuture` is the test build's own producer.
 #[test]
 fn a_worker_realm_declares_these_host_members() {
     let mut group = Group::new();
     group.start(
-        r"
+        r"import 'bobcat:worker'; import 'bobcat:timers';
         postMessage([
             Object.keys(await import('bobcat-internal:host')).join(','),
             Object.keys(await import('bobcat-internal:worker')).join(','),
+            Object.keys(await import('bobcat-internal:native-modules')).join(','),
         ].join(' / '));
     ",
     );
@@ -848,10 +1381,16 @@ fn a_worker_realm_declares_these_host_members() {
         "testFuture",
         "waitFuture",
     ];
-    let worker = ["closeWorker", "invokeNativeModule", "postWorkerMessage"];
+    let worker = ["closeWorker", "postWorkerMessage", "workerName"];
+    let native_modules = ["invokeNativeModule"];
     assert_eq!(
         group.message(0),
-        wire(&format!("{} / {}", host.join(","), worker.join(",")))
+        wire(&format!(
+            "{} / {} / {}",
+            host.join(","),
+            worker.join(","),
+            native_modules.join(",")
+        ))
     );
 }
 
@@ -859,7 +1398,7 @@ fn a_worker_realm_declares_these_host_members() {
 fn a_handled_import_failure_keeps_the_worker_usable() {
     let mut group = Group::new();
     let worker = group.start(
-        r"
+        r"import 'bobcat:worker'; import 'bobcat:timers';
         let failed = false;
         try { await import('./missing.js'); } catch { failed = true; }
         addEventListener('message', event => postMessage([failed, event.data]));
@@ -874,7 +1413,10 @@ fn a_handled_import_failure_keeps_the_worker_usable() {
 #[test]
 fn worker_import_cancellation_follows_its_handle_instead_of_the_view_token() {
     let mut group = Group::new();
-    let worker = group.start("await import('./pending.js'); postMessage('must not run');");
+    let worker = group.start(
+        "import 'bobcat:worker'; import 'bobcat:timers'; \
+         await import('./pending.js'); postMessage('must not run');",
+    );
     let (_, completion) = group.views[0].source();
     group.cancel(0);
     assert!(!completion.is_cancelled());
@@ -887,7 +1429,7 @@ fn worker_import_cancellation_follows_its_handle_instead_of_the_view_token() {
 fn a_rejected_worker_tla_is_reported_and_leaves_the_message_queue_usable() {
     let mut group = Group::new();
     let worker = group.start(
-        r"
+        r"import 'bobcat:worker'; import 'bobcat:timers';
         onmessage = event => postMessage(event.data);
         await import('./rejected.js');
     ",
@@ -899,23 +1441,13 @@ fn a_rejected_worker_tla_is_reported_and_leaves_the_message_queue_usable() {
             .into(),
         url: "app:///rejected.js".into(),
     }));
-    let mut reported = false;
-    loop {
-        match group.next(0).payload {
-            WorkerPayload::Errored(error) => {
-                // The existing engine exposes both checkpoint failures and
-                // entry rejection; neither may poison later message delivery.
-                assert!(error.message.contains("TLA failed"), "{error}");
-                reported = true;
-            }
-            WorkerPayload::Message(value) => {
-                assert!(reported, "TLA rejection must be reported");
-                assert_eq!(value, wire("queued"));
-                break;
-            }
-            _ => panic!("a rejected entry must leave its worker usable"),
-        }
-    }
+    // Reported once, by the timer entry the rejection happened in, and then
+    // the held post is delivered: the failure does not poison delivery.
+    let WorkerPayload::Errored(error) = group.next(0).payload else {
+        panic!("TLA rejection must be reported")
+    };
+    assert!(error.message.contains("TLA failed"), "{error}");
+    assert_eq!(group.message(0), wire("queued"));
     group.quiet();
 }
 
@@ -934,7 +1466,7 @@ fn a_rejected_worker_tla_is_reported_and_leaves_the_message_queue_usable() {
 fn one_worker_future_times_out_then_settles_as_a_promise_and_refuses_a_later_wait() {
     let mut group = Group::new();
     group.start(
-        r"
+        r"import 'bobcat:worker'; import 'bobcat:timers';
         import { Future } from 'bobcat:future';
         import { testFuture } from 'bobcat-internal:host';
 

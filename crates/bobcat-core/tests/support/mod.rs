@@ -112,6 +112,7 @@ pub struct FetcherDouble {
 }
 
 impl FetcherDouble {
+    /// Serves `bytes` as they are, for every source this double is asked for.
     #[must_use]
     pub fn new(bytes: Vec<u8>) -> Self {
         Self {
@@ -126,6 +127,17 @@ impl FetcherDouble {
             image_requests: AtomicUsize::new(0),
             image_services: AtomicUsize::new(0),
         }
+    }
+
+    /// Serves a card's MTS body as the entry `bobcat-source` registers for
+    /// it: [`bobcat_core::MTS_CHUNK_PREAMBLE`], then the body on the
+    /// preamble's own line. The engine adds nothing to an entry, so this is
+    /// what a host serving a card's root serves.
+    #[must_use]
+    pub fn card(body: impl AsRef<[u8]>) -> Self {
+        let mut bytes = bobcat_core::MTS_CHUNK_PREAMBLE.as_bytes().to_vec();
+        bytes.extend_from_slice(body.as_ref());
+        Self::new(bytes)
     }
 
     pub fn image_request_count(&self) -> usize {

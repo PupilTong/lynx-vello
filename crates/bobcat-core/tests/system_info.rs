@@ -3,8 +3,10 @@
 //! physical pixels, which it names explicitly.
 //!
 //! Asserted over a real group, a real BTS Worker and a real fetcher, because
-//! the three numbers are written into the MTS boot module and reach the BTS
-//! realm only through the `initialize` message MTS sends it.
+//! the three numbers take two steps: they are written into the MTS boot
+//! module, and the MTS realm posts its own `SystemInfo` to the BTS Worker in
+//! the `initialize` message, where `bobcat:bts-runtime` takes it before it
+//! imports the BTS entry.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -25,8 +27,8 @@ const VIEW_WIDTH: f32 = 32.0;
 const VIEW_HEIGHT: f32 = 24.0;
 
 /// The MTS entry: it prints the three numbers and then renders one element,
-/// so boot finishes. `SystemInfo` is one of the bindings the entry preamble
-/// gives it.
+/// so boot finishes. `SystemInfo` is one of the bindings `MTS_CHUNK_PREAMBLE`
+/// gives a card's MTS body.
 const MAIN_ENTRY: &str = r"
 console.log('mts ' + SystemInfo.pixelRatio + ' ' + SystemInfo.pixelWidth + ' ' +
   SystemInfo.pixelHeight);
@@ -35,8 +37,8 @@ globalThis.renderPage = function () {
 };
 ";
 
-/// The BTS entry: the same object, as the `initialize` message MTS sent it
-/// carried the numbers.
+/// The BTS entry: the same three numbers, which `bobcat:bts-runtime` took
+/// from the `initialize` message before this entry was imported.
 const BACKGROUND_ENTRY: &str = r"
 import { console, SystemInfo } from 'bobcat:bts-runtime';
 console.log('bts ' + SystemInfo.pixelRatio + ' ' + SystemInfo.pixelWidth + ' ' +
@@ -66,9 +68,11 @@ impl ResourceFetcher for Entries {
             | SourceRequest::Font { url }
             | SourceRequest::Fetch { url } => url.clone(),
         };
+        // The main-thread entry is a card's MTS body, served as
+        // `bobcat-source` registers a card's root.
         let source = match specifier.as_str() {
-            MAIN_URL => Some(MAIN_ENTRY),
-            BACKGROUND_URL => Some(BACKGROUND_ENTRY),
+            MAIN_URL => Some(format!("{}{MAIN_ENTRY}", bobcat_core::MTS_CHUNK_PREAMBLE)),
+            BACKGROUND_URL => Some(BACKGROUND_ENTRY.to_owned()),
             _ => None,
         };
         completion.complete(source.map_or_else(
@@ -84,7 +88,7 @@ impl ResourceFetcher for Entries {
             },
             |source| {
                 Ok(LoadedSource::Module {
-                    source: source.to_owned(),
+                    source,
                     url: specifier.clone(),
                 })
             },
@@ -179,6 +183,28 @@ async fn both_realms_report_the_screen_the_embedder_measured() {
     .await;
     assert_eq!(main_thread, "3 1170 2532");
     assert_eq!(background, "3 1170 2532");
+}
+
+/// A ratio an `f32` cannot hold exactly reads the same in both realms: the
+/// MTS boot module is written with the number's shortest decimal, and the
+/// BTS is posted the MTS realm's `SystemInfo`, so it reports the number that
+/// decimal reads as, not the `f32`'s own value (`1.100000023841858`).
+#[tokio::test]
+async fn both_realms_report_a_ratio_an_f32_cannot_hold_as_the_same_number() {
+    let (main_thread, background) = printed(
+        1.0,
+        ScreenMetrics {
+            pixel_ratio: 1.1,
+            pixel_width: 1287.0,
+            pixel_height: 2785.0,
+        },
+        "app:///",
+        MAIN_URL,
+        BACKGROUND_URL,
+    )
+    .await;
+    assert_eq!(main_thread, "1.1 1287 2785");
+    assert_eq!(background, "1.1 1287 2785");
 }
 
 #[tokio::test]

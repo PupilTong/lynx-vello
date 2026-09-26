@@ -1,8 +1,15 @@
 // The `bobcat:runtime` compatibility ESM imported by each transformed MTS entry.
 //
 // The JS Context and lifecycle/event calls reach this view's BTS Worker.
-// This realm has no `NativeModules` of its own — Lepus has none — and only
-// carries the embedder's module table to the BTS Worker, which does.
+// `NativeModules` is `undefined` here, as it is on native's main thread and in
+// web-core. Native's main thread does have a native module path of its own,
+// `lynx.module(name).invoke(method, ...args)`, off by default and turned on by
+// the host's `enableMTSModule`; web-core's has none, and neither does this
+// runtime yet. The transport is in place: this realm declares
+// `bobcat-internal:native-modules`, and a call made through
+// `bobcat:native-modules` is answered back here. The view's module table is
+// one of this realm's startup members, which it posts unread to its BTS Worker,
+// where `NativeModules` is built out of it.
 // Diagnostics reach the view's host through `bobcat:diagnostics`, as every
 // realm's do, and the BTS Worker's own reach it without this realm; global
 // events reach BTS through the same Worker FIFO as Context messages. This
@@ -12,11 +19,19 @@
 // The one local delivery path is `lynx.getEngine()`:
 // its stable EventTarget retains realm-local listeners so `bobcat:boot` can
 // dispatch `__RenderPage` when an entry has no legacy `globalThis.renderPage`.
-// None of these bindings is installed on `globalThis`; the entry receives them
-// only through the import declarations Bobcat prepends to its source.
+// None of these bindings is installed on `globalThis`. A card's entry receives
+// them only through the import declarations `bobcat-source` prepends to its
+// body (`MTS_CHUNK_PREAMBLE`), and any other entry through its own imports:
+// the engine adds nothing to an entry.
 //
 // The host's page data arrives through `bobcat-internal:host` as the strings
 // the view was given, and is parsed here as this module evaluates.
+//
+// The view's data reaches the BTS Worker in one `initialize` message, which
+// `__BobcatConnectBackground` posts as boot connects it: the page data, the
+// BTS entry's URL, this realm's own `SystemInfo` and the view's native module
+// table. The worker is started like any other `Worker`, so a plain one, which
+// is posted none of this, sees none of it.
 //
 // This is not an Element PAPI implementation. Every `__*` element member,
 // including the scoped-style sink `__SetCSSId`, belongs to element-papi.ts.
@@ -37,11 +52,12 @@ import {
 import { __BobcatQueryNodes } from "bobcat:element";
 // The whole PAPI as one namespace, for the binding list a named Lepus
 // chunk is called with: the export names are this module's only source of
-// truth for what the entry preamble imports.
+// truth for what `MTS_CHUNK_PREAMBLE` imports.
 import * as elementPAPI from "bobcat:element";
 import type { NodeQueryRequest } from "bobcat:selector-query";
 import "bobcat:timers";
-import { requestScriptFrame } from "bobcat-internal:host";
+import { cancelAnimationFrame, clearAnimationFrames, requestAnimationFrame } from "bobcat:animation-frame";
+import { createSystemInfo } from "bobcat:system-info";
 import { initialProcessor as getInitialProcessor, globalProps, initData, loadModuleSync, nativeModuleTable, preloadStyleSheet, adoptStyleSheet } from "bobcat-internal:host";
 import { reportError as _ReportError, console } from "bobcat:diagnostics";
 import { sectionURL, styleSheetURL as sectionStyleSheetURL } from "bobcat:section-url";
@@ -157,28 +173,6 @@ let backgroundWorker: Worker | undefined;
 // The BTS Worker ended — it closed itself, its script failed, or its thread
 // trapped. Only disposal reads it: nothing can reply from an ended Worker.
 let backgroundEnded = false;
-const animationCallbacks = new Map<number, (milliseconds: number) => void>();
-let nextAnimationId = 1;
-let frameRequested = false;
-function updateFrameRequest() {
-  const pending = animationCallbacks.size > 0;
-  if (pending === frameRequested) return;
-  frameRequested = pending;
-  requestScriptFrame(pending);
-}
-export function __BobcatBeginFrame(milliseconds: number) {
-  frameRequested = false;
-  const mainIds = Array.from(animationCallbacks.keys());
-  for (const id of mainIds) {
-    const callback = animationCallbacks.get(id);
-    animationCallbacks.delete(id);
-    if (callback) {
-      try { callback(milliseconds); }
-      catch (error) { _ReportError(error); }
-    }
-  }
-  updateFrameRequest();
-}
 let backgroundDisposal: Promise<void> | undefined;
 let acknowledgeDisposal: (() => void) | undefined;
 let pendingBackgroundMessages: ToBackground[] = [];
@@ -225,8 +219,12 @@ async function callLepusMethod(message: LepusMethodCall) {
  * Called by boot only after the MTS entry finishes importing. Entry-level
  * listeners already exist; events it sent before Worker construction are
  * flushed in order through the same Worker transport as later events.
+ *
+ * `entry` is the BTS entry's URL as boot wrote it, already absolute, or
+ * `undefined` for a view that named none. It is not this realm's to import:
+ * the `initialize` message carries it to the BTS, which imports it.
  */
-export function __BobcatConnectBackground(worker: Worker, data: unknown) {
+export function __BobcatConnectBackground(worker: Worker, data: unknown, entry?: string) {
   if (backgroundDisposal) {
     worker.terminate();
     return;
@@ -268,8 +266,11 @@ export function __BobcatConnectBackground(worker: Worker, data: unknown) {
       jsContext.receive(message);
     }
   });
-  // Snapshot initial data before queued events or render can mutate it.
-  worker.postMessage({bobcat: "runtime", method: "initialize", ...__BobcatBackgroundData(data), systemInfo: SystemInfo, nativeModules: hostNativeModules});
+  // Snapshot initial data before queued events or render can mutate it. The
+  // BTS reports this realm's `SystemInfo`, whose screen numbers boot wrote as
+  // literals, so both realms report the same values.
+  worker.postMessage({bobcat: "runtime", method: "initialize", ...__BobcatBackgroundData(data),
+    entry, systemInfo: SystemInfo, nativeModuleTable: hostNativeModuleTable});
   backgroundWorker = worker;
   const queued = pendingBackgroundMessages;
   pendingBackgroundMessages = [];
@@ -294,8 +295,7 @@ function disposeBackground(): Promise<void> {
   if (backgroundDisposal) return backgroundDisposal;
   const worker = backgroundWorker;
   pendingBackgroundMessages = [];
-  animationCallbacks.clear();
-  updateFrameRequest();
+  clearAnimationFrames();
   // An ended Worker gets no `dispose`: nothing over there could run it, and
   // no acknowledgement could come back. Terminating it again is a no-op.
   const ended = worker === undefined || backgroundEnded;
@@ -369,42 +369,11 @@ export let __globalProps = parsePageData("globalProps", globalProps()) as Record
 // Host state is separate from the copies the two script realms may mutate.
 let hostGlobalPropsJson = "{}";
 const hostInitialProcessor = getInitialProcessor() ?? "";
+// The view's native modules as the host wrote them, a record of names and
+// comma-joined method lists. This realm has no `NativeModules` and never
+// decodes it: `__BobcatConnectBackground` posts it to the BTS Worker.
+const hostNativeModuleTable = nativeModuleTable();
 
-/**
- * Reads a `<utf16Length>:<text>` record the native side wrote, the twin of
- * element-papi's own reader: the writer counted UTF-16 code units, so
- * `String.prototype.slice` takes each field without a scan and a field may
- * contain any character at all, the delimiter included. The writer is Bobcat,
- * so nothing here validates the payload.
- */
-function splitRecord(record: string): string[] {
-  const fields: string[] = [];
-  let rest = record;
-  while (rest !== "") {
-    const separator = rest.indexOf(":");
-    const units = Number(rest.slice(0, separator));
-    const body = rest.slice(separator + 1);
-    fields.push(body.slice(0, units));
-    rest = body.slice(units);
-  }
-  return fields;
-}
-
-/**
- * The embedder's native modules, read once as this module evaluates: two
- * fields per module, its name then its method names joined with commas. This
- * realm only carries them to the BTS Worker, which is where `NativeModules`
- * lives — the MTS `NativeModules` stays `undefined`, as Lepus has none.
- */
-const hostNativeModules: Record<string, string[]> = (() => {
-  const fields = splitRecord(nativeModuleTable());
-  const modules: Record<string, string[]> = {};
-  for (let index = 0; index + 1 < fields.length; index += 2) {
-    const methods = fields[index + 1]!;
-    modules[fields[index]!] = methods === "" ? [] : methods.split(",");
-  }
-  return modules;
-})();
 let initialProcessor = hostInitialProcessor;
 let jsDataProcessor = false;
 
@@ -419,7 +388,7 @@ export function __BobcatInitializeMTS(options: {
   hostGlobalPropsJson = JSON.stringify("globalProps" in options ? options.globalProps : __globalProps);
   __globalProps = JSON.parse(hostGlobalPropsJson);
   lynx.__globalProps = __globalProps;
-  SystemInfo = Object.freeze({platform: "headless", runtimeType: "quickjs", lynxSdkVersion: "4.1.0", ...options.systemInfo});
+  SystemInfo = createSystemInfo(options.systemInfo);
   lynx.SystemInfo = SystemInfo;
   initialProcessor = options.processorName ?? hostInitialProcessor;
   jsDataProcessor = options.enableJSDataProcessor === true;
@@ -539,8 +508,8 @@ export function __OnLifecycleEvent(data: unknown) {
 }
 
 /**
- * What a named Lepus chunk is called with: every binding the entry preamble
- * gives the entry, as a parameter of its own.
+ * What a named Lepus chunk is called with: every binding `MTS_CHUNK_PREAMBLE`
+ * gives a card's entry, as a parameter of its own.
  *
  * Ordered, because the parameter list the chunk is compiled with and the
  * arguments it is applied to are both this list. Each value is read at the
@@ -589,9 +558,9 @@ type ChunkBody = (...bindings: unknown[]) => unknown;
  * is no chunk cache here.
  *
  * A chunk does not share the entry's lexical scope. What it has is this
- * realm's `globalThis` and `CHUNK_BINDINGS` — the same values the entry
- * preamble imports — as the parameters of the function body it was compiled
- * as. A `var` at its top level is therefore local to that call.
+ * realm's `globalThis` and `CHUNK_BINDINGS` — the same values
+ * `MTS_CHUNK_PREAMBLE` imports — as the parameters of the function body it
+ * was compiled as. A `var` at its top level is therefore local to that call.
  *
  * The answer is native's: `false` for a chunk this page does not carry and for
  * a different component entry, and `true` for a chunk that was found — even
@@ -693,17 +662,8 @@ export const lynx = {
   setInterval: timers.setInterval,
   clearTimeout: timers.clearTimeout,
   clearInterval: timers.clearInterval,
-  requestAnimationFrame(callback: (milliseconds: number) => void) {
-    if (typeof callback !== "function") throw new TypeError("requestAnimationFrame requires a function");
-    const id = nextAnimationId++;
-    animationCallbacks.set(id, callback);
-    updateFrameRequest();
-    return id;
-  },
-  cancelAnimationFrame(id: number) {
-    animationCallbacks.delete(id);
-    updateFrameRequest();
-  },
+  requestAnimationFrame,
+  cancelAnimationFrame,
   SystemInfo,
   __initData: {} as unknown,
   __globalProps,

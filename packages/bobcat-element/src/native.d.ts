@@ -160,7 +160,8 @@ interface BobcatNative {
    * record payload: a flat sequence of `<utf16Length>:<text>` fields, two per
    * module — its `NativeModules` key, then its method names joined with
    * commas, empty for a module that declared none. Empty for a view built with
-   * no modules at all. Answers once, like `initData`.
+   * no modules at all. This realm has no `NativeModules` and posts the record
+   * unread to its BTS Worker in `initialize`. Answers once, like `initData`.
    */
   nativeModuleTable(): string;
 }
@@ -186,28 +187,13 @@ interface BobcatWorkerNative {
    */
   closeWorker(): void;
   /**
-   * Hands one `NativeModules.<module>.<method>(...)` call to the embedder's
-   * module of that name, and returns at once: a module answers through the
-   * callbacks among its arguments, never through a result.
-   *
-   * `call` is this realm's own number for the call, which a callback's answer
-   * carries back. `arguments` is the argument list as JSON array text, with
-   * each function argument written as `null`; `callbacks` names those
-   * arguments by index, joined with commas and empty when there are none. The
-   * host mints one single-shot callback per index, and each is answered — or
-   * released unanswered — through `__BobcatNativeModuleCallback`.
-   *
-   * A module no view of this group carries is not an error here, and neither
-   * is a method its module did not declare: the call is dropped and its
-   * callbacks released.
+   * The worker's `self.name`, as its constructor named it: empty when it
+   * named none. `bobcat:worker` reads it in its last statement. Answers once:
+   * the string is handed over, not kept. The host takes the read as the
+   * whole of `bobcat:worker` having run in this realm, and delivers a posted
+   * message only to a realm in which it has.
    */
-  invokeNativeModule(
-    call: number,
-    module: string,
-    method: string,
-    args: string,
-    callbacks: string,
-  ): void;
+  workerName(): string;
 }
 
 declare module "bobcat-internal:host" {
@@ -431,5 +417,40 @@ interface Require {
 declare module "bobcat-internal:worker" {
   export const postWorkerMessage: BobcatWorkerNative["postWorkerMessage"];
   export const closeWorker: BobcatWorkerNative["closeWorker"];
-  export const invokeNativeModule: BobcatWorkerNative["invokeNativeModule"];
+  export const workerName: BobcatWorkerNative["workerName"];
+}
+
+/**
+ * The embedder's native modules as a realm reaches them. Every realm kind
+ * declares this module with the same one member, the MTS realm included.
+ * Which modules a realm's `NativeModules` names is not here: the MTS realm
+ * reads the view's table from `bobcat-internal:host` and posts it to its BTS
+ * Worker in `initialize`. `bobcat:native-modules` is the transport written
+ * over `invokeNativeModule`.
+ */
+declare module "bobcat-internal:native-modules" {
+  /**
+   * Hands one `NativeModules.<module>.<method>(...)` call to the embedder's
+   * module of that name, and returns at once: a module answers through the
+   * callbacks among its arguments, never through a result.
+   *
+   * `call` is this realm's own number for the call, which a callback's answer
+   * carries back. `args` is the argument list as JSON array text, with each
+   * function argument written as `null`; `callbacks` names those arguments by
+   * index, joined with commas and empty when there are none. The host mints
+   * one single-shot callback per index, and each is answered — or released
+   * unanswered — through `bobcat:native-modules`'s
+   * `__BobcatNativeModuleCallback`, in the realm that made the call.
+   *
+   * A module the view does not carry is not an error here, and neither is a
+   * method its module did not declare: the call is dropped and its callbacks
+   * released.
+   */
+  export function invokeNativeModule(
+    call: number,
+    module: string,
+    method: string,
+    args: string,
+    callbacks: string,
+  ): void;
 }

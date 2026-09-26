@@ -17,14 +17,12 @@ use dom::event::EventSteps;
 use tokio::sync::{mpsc, watch};
 
 use crate::background::{WorkerCommand, WorkerEvent};
-use crate::esm::build_runtime;
+use crate::esm::{MTS_CHUNK_PREAMBLE, build_runtime};
 use crate::jobs::JsThread;
 use crate::link::{DetachedView, InputEventPayload, detached_outbox};
 use crate::main::WorkerFactory;
 use crate::main::quickjs::ScriptRuntime;
-use crate::main::runtime::{
-    DocumentIngredients, MainThreadRuntime, RealmStartup, entry_module_source,
-};
+use crate::main::runtime::{DocumentIngredients, MainThreadRuntime, RealmStartup};
 use crate::main::tree::{LynxDocument, PageConfig, Viewport};
 use crate::view::NoWakeup;
 
@@ -106,11 +104,13 @@ impl ScriptHarness {
         }
     }
 
-    /// Runs a main-thread script and its global-function or engine-event boot,
-    /// as the engine does for a card's entry script. The boot module creates
-    /// the realm's document on the way through, so this is also what makes
-    /// every document-reading member below answerable — once per harness,
-    /// because a realm gets one document.
+    /// Runs a card's MTS body and its global-function or engine-event boot,
+    /// as the engine does for a card's entry script: the entry is the body
+    /// with [`MTS_CHUNK_PREAMBLE`] in front, as `bobcat-source` registers a
+    /// card's root. The boot module creates the realm's document on the way
+    /// through, so this is also what makes every document-reading member
+    /// below answerable — once per harness, because a realm gets one
+    /// document.
     ///
     /// # Panics
     ///
@@ -124,16 +124,17 @@ impl ScriptHarness {
     /// Evaluates a snippet in the booted realm, as one more module in the
     /// graph the entry booted through.
     ///
-    /// The entry's own preamble is prepended so a step sees exactly the PAPI
-    /// surface a card's entry module sees. The import is a registry lookup
-    /// after the first step — `bobcat:element` is already instantiated — so
-    /// what a step measures is still the work in its body.
+    /// [`MTS_CHUNK_PREAMBLE`] is prepended, as `bobcat-source` prepends it to
+    /// a card's MTS body, so a step sees exactly the PAPI surface a card's
+    /// entry module sees. The import is a registry lookup after the first
+    /// step — `bobcat:element` is already instantiated — so what a step
+    /// measures is still the work in its body.
     ///
     /// # Panics
     ///
     /// Panics if the snippet throws.
     pub fn evaluate(&mut self, source: &str) {
-        let source = entry_module_source(source);
+        let source = format!("{MTS_CHUNK_PREAMBLE}{source}");
         self.runtime
             .evaluate_module(
                 &mut self.js_runtime,

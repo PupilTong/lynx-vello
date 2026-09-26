@@ -625,11 +625,19 @@ pub struct ViewSources {
     /// and the realm's boot import name the result, in its WHATWG
     /// serialization. The fetcher may answer from another URL, which becomes
     /// the entry's `import.meta.url`.
+    ///
+    /// The entry is the module the fetcher answers, with nothing added to it.
+    /// A card's MTS body is registered prefixed with
+    /// [`crate::MTS_CHUNK_PREAMBLE`] by `bobcat-source`; any other entry
+    /// imports what it uses itself.
     pub entry: String,
-    /// Optional URL of the BTS application module `bobcat:bts` imports,
-    /// resolved against [`Self::base_url`] like [`Self::entry`].
-    /// The view always starts a BTS context; without this it runs only the
-    /// built-in environment. Its imports load through the view's resource fetcher.
+    /// Optional URL of the BTS application module the engine's `bobcat:bts`
+    /// bootstrap imports, resolved against [`Self::base_url`] like
+    /// [`Self::entry`]. The MTS realm posts it to the BTS in the BTS's first
+    /// message, `initialize`, and the BTS imports it once that message has
+    /// initialized it. The view always starts a BTS context;
+    /// without this it runs only the built-in environment. The entry and its
+    /// imports load through the view's resource fetcher.
     /// Neither MTS evaluation nor [`EngineEvent::ScriptFinished`] waits for it:
     /// a host update accepted while the BTS entry is still importing is
     /// forwarded to the Worker, which queues it behind that import. An entry
@@ -1278,20 +1286,22 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
                     }
                 }
                 // Assembled here, because here is where the handle a callback
-                // answers through already is: `WorkerCreated` registered it,
-                // and it precedes every call that worker makes on this one
-                // FIFO — so a sender this turn cannot find is a worker that
-                // has since gone, and there is nobody left to answer.
+                // answers through already is: the view's own command sender
+                // for a call the MTS realm made, and for a worker's the
+                // handle `WorkerCreated` registered, which precedes every
+                // call that worker makes on this one FIFO — so a handle this
+                // turn cannot find is a worker that has since gone, and there
+                // is nobody left to answer.
                 //
                 // A module nothing here is named for, or a method its module
                 // did not declare, is no error either: the realm's
                 // `NativeModules` object never carried that name, so such a
-                // call can only come from a script importing the host member
-                // directly. The call is assembled and dropped rather than
-                // invoked, and dropping it releases each of its functions in
-                // the realm that is waiting on them.
+                // call can only come from a script calling
+                // `bobcat:native-modules` directly. The call is assembled and
+                // dropped rather than invoked, and dropping it releases each
+                // of its functions in the realm that is waiting on them.
                 ViewNotice::NativeModuleCall {
-                    worker,
+                    caller,
                     call,
                     module,
                     method,
@@ -1302,7 +1312,11 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
                         // A statement of its own, so the borrow ends here: a
                         // module may drive this view's painter inside
                         // `invoke`, and the painter borrows the same cell.
-                        let reply = self.seat.frame_demand.borrow().sender(worker);
+                        let reply = self
+                            .seat
+                            .frame_demand
+                            .borrow()
+                            .reply(caller, &self.seat.commands);
                         if let Some(reply) = reply {
                             let call = crate::native_module::ModuleCall::assemble(
                                 call, method, arguments, &callbacks, &reply,
@@ -1452,8 +1466,10 @@ pub(crate) struct ViewAttachment {
     pub(crate) text_context: Option<dom::TextContext>,
     /// The answers to the requests `create_lynx_view` already made.
     pub(crate) startup: StartupSources,
-    /// The embedder's native modules as the realm hears about them: one
-    /// `<utf16Length>:<text>` record of names and comma-joined method lists.
+    /// The embedder's native modules as the BTS realm hears about them: one
+    /// `<utf16Length>:<text>` record of names and comma-joined method lists,
+    /// which the MTS realm reads as a startup member and posts to its BTS
+    /// Worker in the `initialize` message.
     /// The modules themselves stay on the view, on the embedder's thread.
     pub(crate) native_modules: String,
     pub(crate) commands: mpsc::UnboundedReceiver<ToMain>,

@@ -367,6 +367,10 @@ async function dispatchRequest(message: RequestMessage): Promise<void> {
       const styleSheetUrls = sheets.map((sheet) =>
         renderer!.registerStyleSheet(sheet.url, sheet.bytes),
       )
+      // The entry is registered verbatim. A raw script is neither a Lynx nor
+      // a web-core product, so nothing prepends the imports a card's body is
+      // given: it imports what it uses from `bobcat:runtime` and
+      // `bobcat:element` itself.
       const entryUrl = renderer.registerScript(entry.url, entry.bytes)
       await replaceNativeView(request, () =>
         renderer!.load(

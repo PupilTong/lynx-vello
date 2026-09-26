@@ -89,7 +89,7 @@
 //!
 //! # Waits
 //!
-//! After this module every `select!` in this crate is one of five kinds, and
+//! After this module every `select!` in this crate is one of six kinds, and
 //! each is a wait rather than a dispatcher:
 //!
 //! - **the top loop's turn** — one per engine thread, inside
@@ -100,15 +100,16 @@
 //!   versus the next task of that object to finish;
 //! - **a realm's clock** — one [`serve_clock`] per live realm, a view's and a worker's alike,
 //!   waiting on its deadline, the re-arm that moves it, and a sibling's checkpoint;
-//! - **the worker's pre-boot wait** — its script versus termination, channel closure, or its own
-//!   cancellation;
+//! - **a worker's message consumer** — one `consume_messages` per worker, waiting on what is
+//!   posted, termination included, versus the worker's script while it is outstanding, versus the
+//!   worker's root module finishing until it has;
 //! - **the painter's metrics** — one [`consume_metrics`] per view, waiting on the end versus the
 //!   next value the view's seat publishes.
 //!
 //! How many there are is the group's shape rather than a constant: one of the
 //! first two kinds per engine thread, one of the third and one of the sixth
 //! per live view, one of the third per live worker, one of the fourth per
-//! live realm, one of the fifth per worker that has not booted yet.
+//! live realm, one of the fifth per live worker.
 //! `link.rs`'s `block_on_deadline` is a hand-rolled poll loop rather than a
 //! select, and the only one left. The synchronous host members are a wait of
 //! their own shape — this view's token against the answer — parked on inside
@@ -627,6 +628,18 @@ impl Page {
                 self.pending_begin_frame.set(Some(seq.max(pending)));
             }
             ToMain::Refill { offsets } => runtime.refill_scroll_windows(&offsets),
+            ToMain::ModuleCallback {
+                call,
+                index,
+                arguments,
+            } => {
+                if let Err(error) =
+                    runtime.deliver_module_callback(js, call, index, arguments.as_deref())
+                {
+                    self.outbox
+                        .engine_event(EngineEvent::ScriptRunError(error.into_script_error()));
+                }
+            }
             ToMain::ImageEvents(events) => runtime.apply_image_events(&events),
             #[cfg(test)]
             ToMain::Probe(probe) => runtime.with_document(probe),
@@ -1125,8 +1138,9 @@ async fn consume_metrics(page: Rc<Page>, mut metrics: watch::Receiver<Option<Vie
 ///
 /// The entry is read here, before any of it runs, so an entry that cannot be
 /// loaded fails the boot: a load the fetcher could not make is reported as
-/// the fetcher's own error, and an answer that is not a script as a `Script`
-/// error naming the URL, each as `StartupFailed`. The module is not completed
+/// the fetcher's own error, and an answer that is not a script, or a script
+/// whose response URL is not an absolute URL, as a `Script` error naming the
+/// URL, each as `StartupFailed`. The module is not completed
 /// then — the view has ended, and boot's `import` of it is released with the
 /// realm. The entry's *evaluation* is the app's code: boot catches what it
 /// throws, so a failure there, or in a module it imports, is reported as
@@ -1171,9 +1185,24 @@ async fn load_entry(page: Rc<Page>, entry: StartupSource) {
 /// The script an answer to the entry request carries — its response URL and
 /// its source — or, for an answer of another kind, the startup failure that
 /// is: a `Script` error naming `url`, the URL the entry was requested by.
+///
+/// A response URL that is not an absolute URL is a failure of the same kind.
+/// It becomes `__Card__`, the base every `new Worker` URL is joined to by URL
+/// rules, and a join to a base that does not parse fails for every
+/// specifier, boot's own `bobcat:bts` included.
 fn entry_script(url: &str, answer: LoadedSource) -> Result<(String, String), LynxViewError> {
     let kind = match answer {
-        LoadedSource::Module { source, url } => return Ok((url, source)),
+        LoadedSource::Module {
+            source,
+            url: response,
+        } => {
+            return match url::Url::parse(&response) {
+                Ok(_) => Ok((response, source)),
+                Err(_) => Err(LynxViewError::Script(platform_script_error(format!(
+                    "the fetcher answered {url} from {response:?}, which is not an absolute URL"
+                )))),
+            };
+        }
         LoadedSource::StyleSheet(_) => "stylesheet",
         LoadedSource::Font(_) => "font",
         LoadedSource::Fetched => "plain fetch",

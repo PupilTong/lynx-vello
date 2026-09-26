@@ -370,11 +370,14 @@ async fn metrics_that_arrive_before_the_document_are_what_it_is_created_at() {
             .expect("pending completion")
             .take()
             .expect("the entry fetch is outstanding");
+        // A card's MTS body, as `bobcat-source` registers a card's root.
         completion.complete(Ok(bobcat_core::resource::LoadedSource::Module {
-            source: "globalThis.renderPage = function () {
+            source: format!(
+                "{}globalThis.renderPage = function () {{
                __SetInlineStyles(__CreatePage('card', 0), 'background-color:rgb(255,0,0)');
-             };"
-            .into(),
+             }};",
+                bobcat_core::MTS_CHUNK_PREAMBLE
+            ),
             url: "app:///main.js".into(),
         }));
         wait_for_script(&mut view).expect("the entry boots once its source arrives");
@@ -745,9 +748,10 @@ fn dropping_the_group_joins_both_of_its_threads() {
                             1.0,
                             |_| {
                                 Rc::new(TwoScriptFetcher {
-                                    base: FetcherDouble::new(WORKER_ENTRY.as_bytes().to_vec())
+                                    base: FetcherDouble::card(WORKER_ENTRY)
                                         .resolving_to("app:///main.js"),
-                                    worker: "setInterval(() => { throw new Error('tick'); }, 10);",
+                                    worker: "import 'bobcat:worker'; import 'bobcat:timers'; \
+                                             setInterval(() => { throw new Error('tick'); }, 10);",
                                 })
                             },
                             Vec::new(),

@@ -89,7 +89,7 @@ async fn a_second_painter_on_one_view_is_refused() {
             32.0,
             24.0,
             1.0,
-            |_reports| Rc::new(FetcherDouble::new(page("#ff0000")).resolving_to(SCRIPT_URL)),
+            |_reports| Rc::new(FetcherDouble::card(page("#ff0000")).resolving_to(SCRIPT_URL)),
             Vec::new(),
             ViewSources::new("app:///", SCRIPT_URL, SCREEN),
         )
@@ -123,7 +123,7 @@ async fn a_detached_view_can_be_painted_by_another_painter() {
             32.0,
             24.0,
             1.0,
-            |_reports| Rc::new(FetcherDouble::new(page("#ff0000")).resolving_to(SCRIPT_URL)),
+            |_reports| Rc::new(FetcherDouble::card(page("#ff0000")).resolving_to(SCRIPT_URL)),
             Vec::new(),
             ViewSources::new("app:///", SCRIPT_URL, SCREEN),
         )
@@ -168,7 +168,7 @@ async fn a_view_dropped_under_its_painter_leaves_the_last_frame_standing() {
             32.0,
             24.0,
             1.0,
-            |_reports| Rc::new(FetcherDouble::new(page("#ff0000")).resolving_to(SCRIPT_URL)),
+            |_reports| Rc::new(FetcherDouble::card(page("#ff0000")).resolving_to(SCRIPT_URL)),
             Vec::new(),
             ViewSources::new("app:///", SCRIPT_URL, SCREEN),
         )
@@ -216,7 +216,7 @@ async fn a_dropped_views_last_frame_keeps_the_image_pixels_it_read() {
             1.0,
             |sink| {
                 Rc::new(
-                    FetcherDouble::new(image_page())
+                    FetcherDouble::card(image_page())
                         .resolving_to(SCRIPT_URL)
                         .with_images(Rc::clone(&images))
                         .serving(sink),
@@ -283,7 +283,7 @@ async fn one_painter_re_attached_to_a_second_view_shows_the_second_page() {
             32.0,
             24.0,
             1.0,
-            |_reports| Rc::new(FetcherDouble::new(page("#ff0000")).resolving_to(SCRIPT_URL)),
+            |_reports| Rc::new(FetcherDouble::card(page("#ff0000")).resolving_to(SCRIPT_URL)),
             Vec::new(),
             ViewSources::new("app:///", SCRIPT_URL, SCREEN),
         )
@@ -308,7 +308,7 @@ async fn one_painter_re_attached_to_a_second_view_shows_the_second_page() {
             32.0,
             24.0,
             1.0,
-            |_reports| Rc::new(FetcherDouble::new(page("#0000ff")).resolving_to(SCRIPT_URL)),
+            |_reports| Rc::new(FetcherDouble::card(page("#0000ff")).resolving_to(SCRIPT_URL)),
             Vec::new(),
             ViewSources::new("app:///", SCRIPT_URL, SCREEN),
         )
@@ -346,7 +346,7 @@ async fn a_painter_whose_view_is_gone_attaches_to_the_next_one() {
             32.0,
             24.0,
             1.0,
-            |_reports| Rc::new(FetcherDouble::new(page("#ff0000")).resolving_to(SCRIPT_URL)),
+            |_reports| Rc::new(FetcherDouble::card(page("#ff0000")).resolving_to(SCRIPT_URL)),
             Vec::new(),
             ViewSources::new("app:///", SCRIPT_URL, SCREEN),
         )
@@ -367,7 +367,7 @@ async fn a_painter_whose_view_is_gone_attaches_to_the_next_one() {
             32.0,
             24.0,
             1.0,
-            |_reports| Rc::new(FetcherDouble::new(page("#0000ff")).resolving_to(SCRIPT_URL)),
+            |_reports| Rc::new(FetcherDouble::card(page("#0000ff")).resolving_to(SCRIPT_URL)),
             Vec::new(),
             ViewSources::new("app:///", SCRIPT_URL, SCREEN),
         )
@@ -404,7 +404,7 @@ async fn a_painter_re_attached_through_the_auto_detach_resets_what_it_kept() {
             32.0,
             24.0,
             1.0,
-            |_reports| Rc::new(FetcherDouble::new(page("#ff0000")).resolving_to(SCRIPT_URL)),
+            |_reports| Rc::new(FetcherDouble::card(page("#ff0000")).resolving_to(SCRIPT_URL)),
             Vec::new(),
             ViewSources::new("app:///", SCRIPT_URL, SCREEN),
         )
@@ -430,7 +430,7 @@ async fn a_painter_re_attached_through_the_auto_detach_resets_what_it_kept() {
             32.0,
             24.0,
             1.0,
-            |_reports| Rc::new(FetcherDouble::new(page("#0000ff")).resolving_to(SCRIPT_URL)),
+            |_reports| Rc::new(FetcherDouble::card(page("#0000ff")).resolving_to(SCRIPT_URL)),
             Vec::new(),
             ViewSources::new("app:///", SCRIPT_URL, SCREEN),
         )
@@ -487,7 +487,7 @@ async fn a_blurred_box_reaches_the_embedder_painter() {
             64.0,
             64.0,
             1.0,
-            |_reports| Rc::new(FetcherDouble::new(blurred_page()).resolving_to(SCRIPT_URL)),
+            |_reports| Rc::new(FetcherDouble::card(blurred_page()).resolving_to(SCRIPT_URL)),
             Vec::new(),
             ViewSources::new("app:///", SCRIPT_URL, SCREEN),
         )
@@ -571,7 +571,7 @@ async fn a_backdrop_filtered_box_reaches_the_embedder_painter() {
             64.0,
             64.0,
             1.0,
-            |_reports| Rc::new(FetcherDouble::new(backdrop_page()).resolving_to(SCRIPT_URL)),
+            |_reports| Rc::new(FetcherDouble::card(backdrop_page()).resolving_to(SCRIPT_URL)),
             Vec::new(),
             ViewSources::new("app:///", SCRIPT_URL, SCREEN),
         )
@@ -643,7 +643,7 @@ async fn a_flush_after_the_painter_detached_does_not_park() {
             32.0,
             24.0,
             1.0,
-            |_reports| Rc::new(FetcherDouble::new(flushing_page()).resolving_to(SCRIPT_URL)),
+            |_reports| Rc::new(FetcherDouble::card(flushing_page()).resolving_to(SCRIPT_URL)),
             Vec::new(),
             ViewSources::new("app:///", SCRIPT_URL, SCREEN),
         )

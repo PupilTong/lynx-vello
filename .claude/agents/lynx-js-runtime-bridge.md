@@ -39,8 +39,38 @@ and `bobcat-workers` (every Worker realm, including the BTS).
   `createWorker`/`sendWorkerMessage`/`terminateWorker`; `tree/` is the Lynx
   element policy layer (page root, UA sheet, `<text>`, `<image>`, scrollers).
 - `crates/bobcat-core/src/background/` — the `bobcat-workers` thread and worker
-  realm scopes. `view/` holds `LynxGroup`, `LynxView`, `ViewSources` and
-  `create_lynx_view`; `paint/` the `Painter`; `link.rs` the per-view channels;
+  realm scopes. There is one kind of worker: the BTS is the dedicated worker
+  whose URL is `bobcat:bts`. A worker realm opens as its `Start` is served,
+  and its root module is the module at its URL, loaded the way `import(<URL>)`
+  loads one (`ScriptEngine::load_root_module` over the bridge's
+  `Context::load_module`) with nothing written around it: the BTS's root is
+  `bobcat:bts` itself, a plain worker's its script, which the worker's
+  `consume_messages` completes under the request URL from the answer
+  `createWorker` asked for; a URL under `ENGINE_MODULE_PREFIXES` is never
+  requested, and the realm's own loader loads it. The engine installs no
+  global scope: `bobcat:bts` imports `bobcat:worker` and `bobcat:timers`
+  itself, a plain worker script imports them when it uses them (one that
+  does not and uses them throws a `ReferenceError`, unguarded), and a post
+  to a realm in which `bobcat:worker` has not run is dropped with nothing
+  reported. "Has run" is `WorkerFlags::scope_installed`, set by
+  `bobcat:worker`'s read of `workerName`, its last statement, never an
+  instance check: a module a failed or pending graph compiled is never
+  linked, and reading its namespace crashes QuickJS. `createWorker` decides from the URL alone, and
+  only the source: `bobcat:bts` is `ScriptSource::Background`, every other URL
+  `Worker(id)`; every `Start` is otherwise built the same way. The BTS's data
+  — its entry URL, the MTS realm's own `SystemInfo` and the view's native
+  module table — reaches it in the `initialize` message
+  `__BobcatConnectBackground` posts, beside the page data: the MTS boot
+  module is written with the BTS entry as a literal, and the table is the MTS
+  startup member `nativeModuleTable`. A plain Worker is posted none of it.
+  `native_module.rs` — the `NativeModule` seam and the transport every realm
+  kind shares: `install` gives each realm `bobcat-internal:native-modules`
+  (`invokeNativeModule` alone), a call names its caller (`None` for the
+  MTS realm), and `ModuleReply` answers it through the view's command FIFO
+  (`ToMain::ModuleCallback`) or the worker's inbox; `deliver` calls
+  `bobcat:native-modules` in the realm that made the call. `view/` holds
+  `LynxGroup`, `LynxView`, `ViewSources` and `create_lynx_view`; `paint/` the
+  `Painter`; `link.rs` the per-view channels;
   `lifetime.rs` the `CancellationToken`, `serve_clock` and `run_job`;
   `realm.rs` (`open_realm`, the one constructor both threads open a realm
   with: it installs the core every realm has under `bobcat-internal:host` —
@@ -67,7 +97,20 @@ and `bobcat-workers` (every Worker realm, including the BTS).
   `__FlushElementTree`, and `__SetCSSId`, accepted and ignored),
   `main-thread-runtime.ts` (`bobcat:runtime`), `worker.ts` (the W3C `Worker`),
   `worker-runtime.ts`, `background-thread-runtime.ts` (`bobcat:bts-runtime`),
-  `cross-thread-context.ts`, `event-target.ts`, `diagnostics.ts`
+  `bts.ts` (`bobcat:bts` — the BTS bootstrap and a BTS realm's root module;
+  it imports `bobcat:worker` and `bobcat:timers` first, then the BTS entry
+  the `initialize` message names),
+  `cross-thread-context.ts`, `event-target.ts` (with `reportException`, the
+  realm's installed exception reporter), `animation-frame.ts`
+  (`bobcat:animation-frame` — every realm's `requestAnimationFrame`, frame
+  demand and `__BobcatBeginFrame`, which both vsync paths call),
+  `system-info.ts` (`bobcat:system-info` — `createSystemInfo`, the one place
+  the three runtime constants are written), `record.ts` (`bobcat:record` —
+  `splitRecord`, the one reader of the host's `<utf16Length>:<text>`
+  records), `native-modules.ts` (`bobcat:native-modules` — `callNativeModule`
+  and `__BobcatNativeModuleCallback`, the native module transport; it links in
+  every realm kind, and `bobcat:bts-runtime` builds `NativeModules` over it),
+  `diagnostics.ts`
   (`bobcat:diagnostics` — every realm's `console` and `reportError`, the one
   `printable` and the `lynx.reportError` level rule), `timers.ts`, `future.ts`
   (`bobcat:future` — the `Future` class), `module.ts`
@@ -98,8 +141,10 @@ Landed and not to be regressed:
   it, and the BTS entry, against the required `ViewSources::base_url` by URL
   rules before any request; a failure is the construction error
   `EngineError::InvalidUrl`), a task of the view completes
-  that module from the pre-issued answer (with the entry preamble prepended
-  and the response URL as its `import.meta.url`; an answer that failed is
+  that module from the pre-issued answer (as the fetcher answered it, with
+  nothing prepended: `bobcat-source` registers a card's root prefixed with
+  `MTS_CHUNK_PREAMBLE`, on the body's own first line; and the response URL
+  as its `import.meta.url`; an answer that failed is
   `StartupFailed` carrying the fetcher's own error, and the module is never
   completed), the entry's own request
   never reaches the fetcher, that task names the entry (`__BobcatInitEntry`
@@ -145,8 +190,10 @@ Landed and not to be regressed:
   relayed through MTS as a Worker message, so a realm's diagnostics are
   ordered only among themselves. `ScriptReported.level` is `"warn"`,
   `"error"` or `"fatal"`, and `"fatal"` ends nothing. A worker's global
-  `console` is the module's (the BTS export is the same object); a plain
-  `Worker` has no `requestAnimationFrame`. A BTS animation-frame,
+  `console`, installed by `bobcat:worker` in a realm whose script imports
+  it, is the module's (the BTS export is the same object); a plain
+  `Worker` has no global `requestAnimationFrame` and imports
+  `bobcat:animation-frame`'s. A BTS animation-frame,
   `queueMicrotask` or `fetchBundle` callback that throws is an uncaught
   exception (`WorkerThrew`); only the dispose hook and a misused
   `SelectorQuery` use `lynx.reportError`.

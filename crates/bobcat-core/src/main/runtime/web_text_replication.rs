@@ -1362,6 +1362,7 @@ fn countdown_card(leading: bool, limit: &str) -> String {
 /// What the card's `useEffect` does a tick after mount, minus the timer: one
 /// `setNativeProps({text})` through a background-thread `SelectorQuery`.
 const COUNTDOWN_PUSH: &str = r"
+    import { lynx } from 'bobcat:bts-runtime';
     lynx.createSelectorQuery()
       .select('.countdown__num--h')
       .setNativeProps({text: 'the count is:1'})
@@ -1610,6 +1611,7 @@ fn a_native_props_push_survives_the_data_updates_interleaved_with_it() {
         };
         ",
         r"
+        import { lynx } from 'bobcat:bts-runtime';
         const query = lynx.createSelectorQuery();
         const core = lynx.getCoreContext();
         query.select('.container').setNativeProps({text: 'nativeText'}).exec();

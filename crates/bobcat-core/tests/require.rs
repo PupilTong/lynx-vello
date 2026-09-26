@@ -37,8 +37,8 @@ globalThis.renderPage = function () {
 };
 ";
 
-/// The background entry, which imports its own bindings as a fetched BTS
-/// entry does.
+/// The background entry, which imports its own bindings as a BTS entry that
+/// is not a card's body does.
 const BACKGROUND_ENTRY: &str = r"
 import { console } from 'bobcat:bts-runtime';
 import { createRequire } from 'bobcat:module';
@@ -159,8 +159,16 @@ impl ResourceFetcher for Files {
                 .into())
             },
             |source| {
+                // A main-thread entry is a card's MTS body, served as
+                // `bobcat-source` registers a card's root; every other file
+                // is served as it stands.
+                let source = if [MAIN_URL, MAIN_MODULE_URL].contains(&specifier.as_str()) {
+                    format!("{}{source}", bobcat_core::MTS_CHUNK_PREAMBLE)
+                } else {
+                    source.to_owned()
+                };
                 Ok(LoadedSource::Module {
-                    source: source.to_owned(),
+                    source,
                     url: specifier.clone(),
                 })
             },

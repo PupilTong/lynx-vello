@@ -39,8 +39,9 @@ use tokio::sync::watch;
 use super::quickjs::{ScriptEngine, ScriptRuntime};
 use crate::clock::ClockInstant;
 use crate::esm::{
-    BTS_MODULE_SPECIFIER, ELEMENT_MODULE_SPECIFIER, HOST_MODULE_SPECIFIER,
-    RUNTIME_MODULE_SPECIFIER, TIMER_MODULE_SPECIFIER, WORKER_CLASS_MODULE_SPECIFIER,
+    ANIMATION_FRAME_MODULE_SPECIFIER, BTS_MODULE_SPECIFIER, ELEMENT_MODULE_SPECIFIER,
+    HOST_MODULE_SPECIFIER, RUNTIME_MODULE_SPECIFIER, TIMER_MODULE_SPECIFIER,
+    WORKER_CLASS_MODULE_SPECIFIER,
 };
 use crate::link::{InputEventPayload, ViewNotice, ViewOutbox};
 use crate::main::tree::{ImageOutcomes, LynxDocument, PageConfig, new_document};
@@ -131,22 +132,17 @@ const INLINE_DECLARATIONS: usize = 16;
 
 mod style_sheets;
 
-/// What the MTS entry is given, which is [`crate::esm::MTS_CHUNK_PREAMBLE`] — the same
-/// list a lazy container's `main-thread` body is compiled against. Built from
-/// it rather than written twice, so the two lists cannot drift. web-core's
-/// wrapper also carries a `//# allFunctionsCalledOnLoad` line, a V8
-/// eager-compilation hint that `QuickJS`'s parser ignores, so it is not
-/// reproduced here.
+/// A card's MTS body as the entry `bobcat-source` registers for it:
+/// [`crate::esm::MTS_CHUNK_PREAMBLE`], then the body on the preamble's own
+/// line, so the body's first line is the module's first.
 ///
-/// The preamble does not name the entry: [`MainThreadRuntime::complete_entry`]
-/// hands the response URL to `__BobcatInitEntry` before the body runs, so the
-/// statement is not compiled into every module this preamble is prepended to.
-const ENTRY_PREAMBLE: &str = concat!(crate::esm::mts_chunk_preamble!(), "\n");
-
-pub(crate) fn entry_module_source(source: &str) -> String {
-    let mut module = String::with_capacity(ENTRY_PREAMBLE.len() + source.len());
-    module.push_str(ENTRY_PREAMBLE);
-    module.push_str(source);
+/// Only the seams without a fetcher write an entry this way —
+/// [`MainThreadRuntime::run_main_thread_script`] and the crate's own test
+/// hosts. A view completes its entry with what the fetcher answered.
+pub(crate) fn card_entry(body: &str) -> String {
+    let mut module = String::with_capacity(crate::esm::MTS_CHUNK_PREAMBLE.len() + body.len());
+    module.push_str(crate::esm::MTS_CHUNK_PREAMBLE);
+    module.push_str(body);
     module
 }
 
@@ -258,13 +254,15 @@ impl DocumentIngredients {
 /// [`LynxView::update_data`](crate::LynxView::update_data),
 /// [`update_global_props`](crate::LynxView::update_global_props) and
 /// [`reload`](crate::LynxView::reload) reach the realm through
-/// `ToMain::PageUpdate` instead, and never touch any of this. The four strings
-/// below `background_entry` become one-shot host members the realm alone reads,
-/// `entry` is written into the boot module's source, `background_entry` is
-/// spliced into the BTS Worker's boot script by `WorkerFactory::install`, and
-/// `sheets` go to the document slot, which the first `__FlushElementTree`
-/// settles them out of. The entry's source is not here: its answer is a task
-/// of the view's owner, which completes the module boot imports the entry as.
+/// `ToMain::PageUpdate` instead, and never touch any of this. The three
+/// page-data strings and `native_modules` become one-shot host members the
+/// realm alone reads, `entry`, `background_entry` and `screen` are written
+/// into the boot module's source, and `sheets` go to the document slot,
+/// which the first `__FlushElementTree` settles them out of. The BTS is
+/// handed its share by this realm's script, in the `initialize` message boot
+/// posts to it: the BTS entry, this realm's own `SystemInfo` and the module
+/// table. The entry's source is not here: its answer is a task of the view's
+/// owner, which completes the module boot imports the entry as.
 pub(crate) struct RealmStartup {
     /// The answers to the author stylesheet requests `create_lynx_view` made,
     /// in the order the view listed them, which is their cascade order. The
@@ -272,14 +270,18 @@ pub(crate) struct RealmStartup {
     /// document enters the style pipeline; nothing waits for them earlier.
     pub(crate) sheets: Vec<StartupSource>,
     /// The screen the realm's `SystemInfo` reports, as the embedder named it
-    /// in [`ViewSources::screen`](crate::ViewSources::screen).
+    /// in [`ViewSources::screen`](crate::ViewSources::screen). The BTS's
+    /// `SystemInfo` reports the same numbers: boot posts this realm's own
+    /// `SystemInfo` to the BTS in its `initialize` message.
     pub(crate) screen: ScreenMetrics,
     /// The view's MTS entry, [`ViewSources::entry`](crate::ViewSources::entry)
     /// as `create_lynx_view` resolved it: always an absolute URL, in its
     /// WHATWG serialization. Boot imports the entry by this string.
     pub(crate) entry: String,
     /// The BTS entry `bobcat:bts` imports, if the view named one: always an
-    /// absolute URL `create_lynx_view` resolved, like [`Self::entry`].
+    /// absolute URL `create_lynx_view` resolved, like [`Self::entry`]. Boot
+    /// writes it into its own source and posts it to the BTS in the
+    /// `initialize` message.
     pub(crate) background_entry: Option<String>,
     /// The host's processor name, page data and global props, as the strings
     /// it passed in. `bobcat:runtime` parses the data and props as JSON and
@@ -289,8 +291,10 @@ pub(crate) struct RealmStartup {
     pub(crate) global_props: Option<String>,
     /// The embedder's modules as one `<utf16Length>:<text>` record, two fields
     /// per module: its name, then its method names joined with commas. Empty
-    /// for a view built with none. The realm reads it into the
-    /// `{name: methods}` object it sends the BTS Worker.
+    /// for a view built with none. This realm reads it once, as the host
+    /// member `nativeModuleTable`, and posts it unread to the BTS in the
+    /// `initialize` message, where `bobcat:bts-runtime` builds
+    /// `NativeModules` out of it.
     pub(crate) native_modules: String,
 }
 
@@ -748,6 +752,10 @@ pub(crate) struct MainThreadRuntime {
     /// the same reason as [`Self::screen`], and read again by
     /// [`Self::complete_entry`] and [`Self::entry_module_name`].
     entry: String,
+    /// The BTS entry, which boot writes into its own module source and hands
+    /// to the BTS in the `initialize` message. Held for the same reason as
+    /// [`Self::screen`]; `None` is a view that named none.
+    background_entry: Option<String>,
 }
 
 impl fmt::Debug for MainThreadRuntime {
@@ -762,8 +770,9 @@ impl MainThreadRuntime {
     /// Opens one view's realm through [`crate::realm::open_realm`], which
     /// installs the core every realm has, and installs this realm's own host
     /// members — the document and host module, the stylesheet members, the
-    /// startup strings and the `Worker` bindings — handing back the one
-    /// channel everything this view's workers say arrives on.
+    /// startup strings, the native module member and the `Worker` bindings —
+    /// handing back the one channel everything this view's workers say
+    /// arrives on.
     ///
     /// A realm has its `Worker` members from the moment it exists: there is no
     /// state in which it is missing them, and so no order between furnishing
@@ -773,12 +782,12 @@ impl MainThreadRuntime {
     /// this call does not make.
     ///
     /// Opening spends the startup: the strings become one-shot members read
-    /// later by the boot module, the screen and the page configuration are
-    /// kept for the boot module's own source, and the author sheets' answers
-    /// go to the document slot for the first `__FlushElementTree` to settle.
-    /// Nothing here waits for any of them, and the entry is not part of it,
-    /// which is what lets a realm open while its own sources are still in
-    /// flight.
+    /// later by the boot module, the screen, the BTS entry and the page
+    /// configuration are kept for the boot module's own source, and the
+    /// author sheets' answers go to the document slot for the first
+    /// `__FlushElementTree` to settle. Nothing here waits for any of them, and
+    /// the entry is not part of it, which is what lets a realm open while its
+    /// own sources are still in flight.
     pub(crate) fn new(
         js_runtime: &mut ScriptRuntime,
         ingredients: DocumentIngredients,
@@ -820,8 +829,13 @@ impl MainThreadRuntime {
                     .map_err(MainThreadError::into_script_error)?;
                 install_startup_strings(engine, js_runtime, startup_strings(&mut startup))
                     .map_err(MainThreadError::into_script_error)?;
+                // The transport alone: the view's modules are the BTS's, and
+                // this realm has no `NativeModules`. What the transport is
+                // here for is a later MTS API answering calls through it.
+                crate::native_module::install(engine, js_runtime, &host, None)
+                    .map_err(|error| context_of("installing the native module members", error))?;
                 workers
-                    .install(engine, js_runtime, outbox, startup.background_entry.take())
+                    .install(engine, js_runtime, outbox)
                     .map_err(|error| context_of("installing Worker", error))
             },
         )
@@ -835,6 +849,7 @@ impl MainThreadRuntime {
                 screen: startup.screen,
                 config,
                 entry: startup.entry,
+                background_entry: startup.background_entry,
             },
             incoming,
         ))
@@ -974,6 +989,9 @@ impl MainThreadRuntime {
             .advance_animations(now);
     }
 
+    /// Runs the realm's animation-frame callbacks at the painting side's
+    /// vsync, through `bobcat:animation-frame`, the module every realm kind
+    /// files them with.
     pub(crate) fn vsync(
         &mut self,
         js: &mut ScriptRuntime,
@@ -984,12 +1002,26 @@ impl MainThreadRuntime {
             .engine
             .call_module_export(
                 js,
-                RUNTIME_MODULE_SPECIFIER,
+                ANIMATION_FRAME_MODULE_SPECIFIER,
                 "__BobcatBeginFrame",
                 &[HostArgument::Number(milliseconds)],
             )
             .map(|_| ())
             .map_err(|error| MainThreadError::from_engine("delivering animation callbacks", error))
+    }
+
+    /// Hands one native module's answer to one function argument of a call
+    /// this realm made back to it, through `bobcat:native-modules`.
+    pub(crate) fn deliver_module_callback(
+        &mut self,
+        js: &mut ScriptRuntime,
+        call: u64,
+        index: u32,
+        arguments: Option<&str>,
+    ) -> Result<(), MainThreadError> {
+        crate::native_module::deliver(&mut self.core.engine, js, call, index, arguments).map_err(
+            |error| MainThreadError::from_engine("running a native module callback", error),
+        )
     }
 
     /// Writes the painting side's scroll offsets into the document and
@@ -1296,12 +1328,15 @@ impl MainThreadRuntime {
     /// Nothing is waited for before this runs. The entry reaches the realm
     /// through an ordinary `import` of the URL the view named it by, a module
     /// a task of the view's owner completes from the answer
-    /// `create_lynx_view` already asked for, and the author stylesheets are
-    /// mounted by boot's own `__FlushElementTree`, which waits for each before
-    /// the document is styled. So this returns with a document in place
-    /// however long the entry takes, and boot's own completion is the promise
-    /// `main_module_finished` reads. The only two things boot waits on are
-    /// both inside that flush: the listed sheets, and a painter's binding.
+    /// `create_lynx_view` already asked for, with nothing added to it: a
+    /// card's MTS body already carries the imports `bobcat-source` prepended
+    /// when it registered it (see [`Self::complete_entry`]). The author
+    /// stylesheets are mounted by boot's own `__FlushElementTree`, which waits
+    /// for each before the document is styled. So this returns with a
+    /// document in place however long the entry takes, and boot's own
+    /// completion is the promise `main_module_finished` reads. The only two
+    /// things boot waits on are both inside that flush: the listed sheets,
+    /// and a painter's binding.
     ///
     /// How much of boot has run when this returns depends on the entry alone:
     /// an entry already completed is found in the realm's registry and boot
@@ -1318,13 +1353,18 @@ impl MainThreadRuntime {
     /// connecting the BTS, and the flush, the listed sheets included.
     ///
     /// The only literals written into it are the screen's three numbers, the
-    /// page configuration's four switches and the entry's URL — facts Rust
-    /// owns, written as primitives rather than as JSON the realm would parse
-    /// and hand back. The URL is written as a JSON string literal, which is
-    /// the one quoting that is also a JavaScript string literal.
+    /// page configuration's four switches, the entry's URL and the BTS
+    /// entry's — facts Rust owns, written as primitives rather than as JSON
+    /// the realm would parse and hand back. Each URL is written as a JSON
+    /// string literal, which is the one quoting that is also a JavaScript
+    /// string literal, and a view that named no BTS entry writes `undefined`.
     /// `SystemInfo` describes the screen the page is shown on, which this
     /// view's viewport is not; the switches are what the realm builds its
     /// document with and what `enableJSDataProcessor` tells the MTS runtime.
+    /// The BTS entry is not this realm's to import: boot hands it to
+    /// `__BobcatConnectBackground`, which posts it to the BTS in the
+    /// `initialize` message beside this realm's `SystemInfo` and the view's
+    /// native module table.
     pub(crate) fn run_boot_module(
         &mut self,
         js_runtime: &mut ScriptRuntime,
@@ -1341,6 +1381,10 @@ impl MainThreadRuntime {
             enable_js_data_processor,
         } = self.config;
         let entry = serde_json::to_string(&self.entry).expect("a string serializes");
+        let background_entry = self.background_entry.as_ref().map_or_else(
+            || "undefined".to_owned(),
+            |url| serde_json::to_string(url).expect("a string serializes"),
+        );
         let boot = format!(
             r#"import {{ lynx, __BobcatConnectBackground, __BobcatInitializeMTS, __BobcatProcessInitData, __BobcatRenderPage }} from "{RUNTIME_MODULE_SPECIFIER}";
 import {{ Document, __FlushElementTree }} from "{ELEMENT_MODULE_SPECIFIER}";
@@ -1384,7 +1428,9 @@ let data = lynx.__initData;
 try {{ await import({entry}); }} catch (error) {{ void Promise.reject(error); }}
 const {{ Worker }} = await import("bobcat-internal");
 data = __BobcatProcessInitData(data);
-__BobcatConnectBackground(new Worker("{BTS_MODULE_SPECIFIER}", {{ name: "lynx-bg" }}), data);
+// The BTS's own entry, by the URL the view named it by, is the BTS's to
+// import: this call posts that URL to the BTS in the `initialize` message.
+__BobcatConnectBackground(new Worker("{BTS_MODULE_SPECIFIER}", {{ name: "lynx-bg" }}), data, {background_entry});
 
 // Queue the flush after jobs already scheduled by the lifecycle hooks.
 __BobcatRenderPage(data);
@@ -1399,8 +1445,15 @@ await Promise.resolve().then(() => __FlushElementTree());
         )
     }
 
-    /// Boots a realm over `source` as its entry, without a fetcher behind it —
+    /// Boots a realm over a card's MTS body as its entry, without a fetcher —
     /// the seam this crate's own tests and benchmarks drive boot through.
+    ///
+    /// `source` is the body as a container carries it, and the entry is that
+    /// body the way `bobcat-source` registers a card's root script:
+    /// [`crate::esm::MTS_CHUNK_PREAMBLE`] and then the body, on the
+    /// preamble's own line, so the body's first line is the module's first.
+    /// Nothing else prepends it: [`Self::complete_entry`] completes an entry
+    /// with the source it is handed.
     ///
     /// `source_name` is both the URL the entry is requested by and the one it
     /// is answered from; it replaces whatever entry the realm was opened with.
@@ -1427,20 +1480,21 @@ await Promise.resolve().then(() => __FlushElementTree());
         // never sends to a fetcher; it is answered below.
         let requested = self.take_module_request();
         debug_assert_eq!(requested, self.entry_module_name().ok());
-        self.complete_entry(js_runtime, source_name, source)
+        self.complete_entry(js_runtime, source_name, &card_entry(source))
             .expect("naming an entry by an absolute URL does not fail")?;
         let finished = self.main_module_finished().map(|_| ());
         let collected = self.finish_batch(js_runtime, finished.is_ok());
         finished.and(collected)
     }
 
-    /// Boots a realm over `source` as its entry the way a view whose author
-    /// sheets the fetcher answered before its first flush boots: each sheet is
-    /// handed to the document slot as an answer already in hand, in the order
-    /// given, which is the listed order, and boot's own `__FlushElementTree`
-    /// mounts them before it styles the document. `source_name` is both the
-    /// entry's request URL and its response URL, as in
-    /// [`Self::run_main_thread_script`].
+    /// Boots a realm over a card's MTS body as its entry the way a view whose
+    /// author sheets the fetcher answered before its first flush boots: each
+    /// sheet is handed to the document slot as an answer already in hand, in
+    /// the order given, which is the listed order, and boot's own
+    /// `__FlushElementTree` mounts them before it styles the document.
+    /// `source` is the body, which becomes the entry the way it does in
+    /// [`Self::run_main_thread_script`], and `source_name` is both the
+    /// entry's request URL and its response URL, as there.
     ///
     /// The seam for this crate's own tests of cards that come with a sheet.
     #[cfg(test)]
@@ -1472,7 +1526,7 @@ await Promise.resolve().then(() => __FlushElementTree());
         // The one request boot left is its entry, which the view's owner
         // never sends to a fetcher.
         assert_eq!(self.take_module_request(), self.entry_module_name().ok());
-        self.complete_entry(js_runtime, source_name, source)
+        self.complete_entry(js_runtime, source_name, &card_entry(source))
             .expect("naming an entry by an absolute URL does not fail")
     }
 
@@ -1500,10 +1554,19 @@ await Promise.resolve().then(() => __FlushElementTree());
     ///
     /// The module is the one [`Self::entry_module_name`] names — the name
     /// boot's `import` asks for, the request URL, which is also the name its
-    /// errors and stack frames carry — completed like any other import: the
-    /// entry with the entry preamble prepended, answered from the fetcher's
+    /// errors and stack frames carry — completed like any other import: with
+    /// the source exactly as the fetcher answered it, from the fetcher's
     /// response URL. That URL is the base its own relative imports resolve
     /// against and its `import.meta.url`.
+    ///
+    /// **Nothing is added to the source.** What a card's MTS body imports —
+    /// [`crate::esm::MTS_CHUNK_PREAMBLE`] — is `bobcat-source`'s to prepend,
+    /// and it does so to every card body it registers, so the fetcher already
+    /// answers a card's root with its imports in place. A line of the source
+    /// is the line its errors report. An entry that is not a card's body
+    /// imports what it uses itself, and one that names a binding it did not
+    /// import throws a `ReferenceError` when that line runs, which is the
+    /// entry's own failure.
     ///
     /// **The entry is named here.** Before the script is completed, the
     /// response URL — the fetcher's, so a redirect is already applied — is
@@ -1558,7 +1621,7 @@ await Promise.resolve().then(() => __FlushElementTree());
         Ok(self
             .core
             .engine
-            .complete_module(js_runtime, &name, Ok((url, &entry_module_source(source))))
+            .complete_module(js_runtime, &name, Ok((url, source)))
             .map_err(booting))
     }
 
@@ -1908,9 +1971,9 @@ fn install_document_members(
 /// initial data or props become `undefined`.
 ///
 /// Each hands its string over once and keeps nothing. `bobcat:runtime` parses
-/// the initial data and props, uses the processor name as a plain string, and
-/// reads the module table as the record the realm decodes. All four answer
-/// before a document exists.
+/// the initial data and props, uses the processor name as a plain string,
+/// and posts the module table unread to the BTS in the `initialize` message.
+/// All four answer before a document exists.
 ///
 /// The strings are *moved* in rather than copied: each is handed over once and
 /// never read again, so the move says what the lifetime is.

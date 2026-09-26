@@ -1,7 +1,7 @@
 use tokio::sync::mpsc;
 
 use super::*;
-use crate::background::{WorkerCommand, WorkerEvent, WorkerRole};
+use crate::background::{WorkerCommand, WorkerEvent};
 use crate::esm::build_runtime;
 use crate::jobs::JsThread;
 use crate::link::{DetachedView, detached_outbox};
@@ -140,11 +140,11 @@ fn a_throwing_processor_reports_and_still_runs_render_and_flush() {
 /// same synchronous host loader a `require` uses and run again on every
 /// `__LoadLepusChunk` call, as native's `TemplateEntry` does.
 ///
-/// What a chunk shares with the root is the bindings the entry preamble gives
-/// the entry — the realm hands them to the chunk as the parameters of the
-/// function body it was compiled as — and this realm's `globalThis`. Not the
-/// root's lexical scope, and not the root's `var`s: a `var` at a chunk's top
-/// level is local to that call.
+/// What a chunk shares with the root is the bindings `MTS_CHUNK_PREAMBLE`
+/// gives a card's root — the realm hands them to the chunk as the parameters
+/// of the function body it was compiled as — and this realm's `globalThis`.
+/// Not the root's lexical scope, and not the root's `var`s: a `var` at a
+/// chunk's top level is local to that call.
 //
 // A plain test rather than a `tokio::test`, for the reason the `require`
 // tests spell out: the load's wait is a `block_on` of the realm's engine
@@ -232,7 +232,7 @@ fn mts_imported_inputs_follow_global_props_updates() {
             "app:///script-inputs.js",
         )
         .unwrap();
-    runtime.evaluate_module(&mut js, &entry_module_source(r#"
+    runtime.evaluate_module(&mut js, &card_entry(r#"
         import {__BobcatUpdateGlobalProps} from 'bobcat:runtime';
         const oldProps = scriptInputs.readProps();
         __BobcatUpdateGlobalProps('{"next":2}');
@@ -421,39 +421,65 @@ struct GroupFarEnds {
     thread: Option<Rc<JsThread>>,
 }
 
-/// A realm tells its two kinds of worker apart by the specifier alone, before
-/// it sends either `Start`: `bobcat:bts` is the background thread, and a
-/// script URL is a dedicated `Worker`. The source it records under each key
-/// says the same.
+/// A realm starts every worker the same way, from the URL its specifier joins
+/// to. The BTS is the worker whose URL is `bobcat:bts`: it alone is named
+/// `Background`, and nothing else in its `Start` differs, since the view's
+/// data reaches it in the `initialize` message. The host is asked for a
+/// worker's script only when its URL is not an engine name, so neither
+/// `bobcat:bts` nor `bobcat:timers` is requested. The source recorded under
+/// each key is the one its `Start` carries.
 #[test]
-fn each_worker_starts_with_the_role_its_specifier_names() {
+fn every_worker_starts_from_its_url_and_only_bobcat_bts_is_named_background() {
     let (mut js, mut first, _second, mut ends) = two_view_group();
     first
         .run_main_thread_script(
             &mut js,
             r"
             import { Worker } from 'bobcat-internal';
-            globalThis.workers = [new Worker('bobcat:bts'), new Worker('./w.js')];
+            globalThis.workers = [
+                new Worker('bobcat:bts'), new Worker('./w.js'), new Worker('bobcat:timers'),
+            ];
             ",
-            "app:///roles.js",
+            "app:///workers.js",
         )
-        .expect("the entry constructs both workers");
+        .expect("the entry constructs the three workers");
     let workers = ends.workers.as_mut().expect("the group's worker inbox");
-    let Ok(WorkerCommand::Start(background)) = workers.try_recv() else {
-        panic!("`new Worker('bobcat:bts')` sent no Start")
+    // The entry's three, in the order it constructed them. Boot's own BTS
+    // follows them, once the entry has run.
+    let mut start = || {
+        let Ok(WorkerCommand::Start(start)) = workers.try_recv() else {
+            panic!("each `new Worker` sent one Start")
+        };
+        start
     };
-    assert!(matches!(background.role, WorkerRole::Background));
+    let (background, fetched, engine) = (start(), start(), start());
+    assert_eq!(background.url, "bobcat:bts");
+    assert!(background.script.is_none());
+    assert_eq!(background.source, ScriptSource::Background);
+    assert_eq!(fetched.url, "app:///w.js");
+    assert!(fetched.script.is_some());
     assert_eq!(
-        first.workers.source_of(background.key),
-        Some(ScriptSource::Background)
+        fetched.source,
+        ScriptSource::Worker(WorkerId::from(fetched.key))
     );
-    let Ok(WorkerCommand::Start(dedicated)) = workers.try_recv() else {
-        panic!("`new Worker('./w.js')` sent no Start")
-    };
-    assert!(matches!(dedicated.role, WorkerRole::Dedicated));
+    assert_eq!(engine.url, "bobcat:timers");
+    assert!(engine.script.is_none());
     assert_eq!(
-        first.workers.source_of(dedicated.key),
-        Some(ScriptSource::Worker(WorkerId::from(dedicated.key)))
+        engine.source,
+        ScriptSource::Worker(WorkerId::from(engine.key))
+    );
+    for start in [&background, &fetched, &engine] {
+        assert_eq!(first.workers.source_of(start.key), Some(start.source));
+    }
+    let mut requested = Vec::new();
+    while let Ok(notice) = ends.views[0].notices.try_recv() {
+        if let ViewNotice::RequestSource { request, .. } = notice {
+            requested.push(request);
+        }
+    }
+    assert!(
+        matches!(requested.as_slice(), [crate::resource::SourceRequest::Module(url)] if url == "app:///w.js"),
+        "only the script at a URL that is not an engine name is requested"
     );
 }
 
@@ -957,6 +983,9 @@ fn get_engine_returns_one_event_target_with_standard_listener_identity() {
         .expect("engine EventTarget behavior");
 }
 
+/// A card's MTS body is its entry with `MTS_CHUNK_PREAMBLE` on the body's
+/// own first line, so an error in the body's first line is reported at line
+/// 1 of the entry's URL.
 #[test]
 fn bundle_url_reaches_script_error_location() {
     let (mut js_runtime, mut runtime, _elements) = runtime();
@@ -964,14 +993,9 @@ fn bundle_url_reaches_script_error_location() {
         .run_main_thread_script(&mut js_runtime, "const = 1", "app:///broken.js")
         .expect_err("syntax error");
 
-    assert!(
-        error
-            .source
-            .location
-            .as_ref()
-            .and_then(|location| location.source.as_deref())
-            .is_some_and(|source| source == "app:///broken.js")
-    );
+    let location = error.source.location.expect("the error has a location");
+    assert_eq!(location.source.as_deref(), Some("app:///broken.js"));
+    assert_eq!(location.line, Some(1), "the body's first line is line 1");
 }
 
 #[test]
@@ -4327,8 +4351,9 @@ fn a_fetch_reaches_the_fetcher_as_the_realm_wrote_it() {
 /// A name under an engine prefix is answered from the runtime's built-ins and
 /// this realm's host modules, and from nothing else. One that is neither
 /// fails in the realm with a `ReferenceError`, through an `import` or a
-/// `require`, and never reaches the host: `bobcat:worker` is registered, but
-/// it imports `bobcat-internal:worker`, which an MTS realm does not declare.
+/// `require`, and never reaches the host: `bobcat:worker` and `bobcat:bts` are
+/// registered, but each imports `bobcat-internal:worker` — `bobcat:bts`
+/// through `bobcat:worker` — which an MTS realm does not declare.
 /// `bobcat:lynx-modules`, `bobcat:selector-query` and
 /// `bobcat:global-event-emitter` import nothing an MTS realm lacks, so they
 /// load here as well.
@@ -4344,6 +4369,7 @@ fn an_engine_name_nothing_answers_fails_in_the_realm_without_a_request() {
             ['bobcat:nope', 'bobcat:nope'],
             ['bobcat-internal:nope', 'bobcat-internal:nope'],
             ['bobcat:worker', 'bobcat-internal:worker'],
+            ['bobcat:bts', 'bobcat-internal:worker'],
         ];
         for (const [specifier, named] of expected) {
             let failure;
@@ -4381,10 +4407,13 @@ fn an_engine_name_nothing_answers_fails_in_the_realm_without_a_request() {
     }
 }
 
-/// The members an MTS realm's `bobcat-internal:host` exports, which is what
-/// decides the built-ins it can link. Written down so that a change to the
-/// set is a change to this list. A namespace lists its exports sorted by
-/// name; `testFuture` is the test build's own producer.
+/// The members an MTS realm's `bobcat-internal:host` and
+/// `bobcat-internal:native-modules` export, which is what decides the
+/// built-ins it can link. Written down so that a change to either set is a
+/// change to these lists. A namespace lists its exports sorted by name;
+/// `testFuture` is the test build's own producer. The native module member
+/// is the one a worker realm has too; the module table is a startup member
+/// under `bobcat-internal:host`, which only this realm kind has.
 #[test]
 fn an_mts_realm_declares_these_host_members() {
     let expected = [
@@ -4435,6 +4464,7 @@ fn an_mts_realm_declares_these_host_members() {
         "waitFuture",
     ]
     .join(",");
+    let native_modules = "invokeNativeModule";
     let (mut js, mut runtime, _elements) = runtime();
     runtime
         .evaluate_module(
@@ -4443,6 +4473,8 @@ fn an_mts_realm_declares_these_host_members() {
                 r"
         const members = Object.keys(await import('bobcat-internal:host')).join(',');
         if (members !== '{expected}') throw Error(members);
+        const native = Object.keys(await import('bobcat-internal:native-modules')).join(',');
+        if (native !== '{native_modules}') throw Error(native);
         globalThis.finished = true;
     "
             ),

@@ -528,8 +528,9 @@ impl ScriptEngine {
     }
 
     /// Evaluates an in-memory module through its immediate job checkpoint.
-    /// Test snippets use this contract; both engine threads use `start_module`
-    /// so boot can wait for resources or timers.
+    /// Test snippets use this contract; an MTS realm's boot uses
+    /// `start_module` and a worker realm's `load_root_module`, so boot can
+    /// wait for resources or timers.
     #[cfg(test)]
     fn execute_module(
         &mut self,
@@ -573,6 +574,32 @@ impl ScriptEngine {
             .map_err(|error| map_quickjs_error(error, PHASE));
         let evaluation = self.finish_operation(runtime, evaluation, PHASE)?;
         self.evaluation = Some(evaluation);
+        self.module_finished().map(|_| ())
+    }
+
+    /// Loads the module `name` as this realm's root, the way an `import()`
+    /// of it would, and retains the promise that load settles, as
+    /// [`Self::start_module`] retains a module's evaluation: one
+    /// `module_finished` observes.
+    ///
+    /// Nothing is written around the module: the root *is* the module at
+    /// `name`. A registered one, and any graph whose every source this realm
+    /// already has, evaluates under this call. Any other waits as an import
+    /// does, its own source first: `name` itself becomes a
+    /// [`Self::take_module_request`], and completing it is what goes on to
+    /// load the rest of the graph and evaluate it.
+    pub(crate) fn load_root_module(
+        &mut self,
+        runtime: &mut ScriptRuntime,
+        name: &str,
+    ) -> Result<(), ScriptError> {
+        const PHASE: ScriptErrorPhase = ScriptErrorPhase::ExecuteModule;
+        let load = self
+            .realm
+            .load_module(name)
+            .map_err(|error| map_quickjs_error(error, PHASE));
+        let load = self.finish_operation(runtime, load, PHASE)?;
+        self.evaluation = Some(load);
         self.module_finished().map(|_| ())
     }
 

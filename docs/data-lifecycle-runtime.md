@@ -18,13 +18,15 @@ its flush with `Promise.resolve().then` after rendering.
 Only a non-null, non-array object replaces the input. A non-table result or a
 reported processor failure preserves the original data.
 
-Before rendering, boot posts the processed result, host props and SystemInfo as
-its first `worker.postMessage`. Worker transport supplies the structured-clone
+Before rendering, boot posts the processed result and host props as its first
+`worker.postMessage`, `initialize`, beside the rest of what the BTS starts
+with: the BTS entry's URL, the MTS realm's own SystemInfo and the view's
+native module table. Worker transport supplies the structured-clone
 copy, so the processed result must be one the serializer accepts; there is no
-native bootstrap-data binding, JSON map or generated data-bearing
-BTS module. The BTS bootstrap installs its receiver and returns, allowing the
-initialization message to arrive. JS initializes its inputs and imports the
-entry. An entry that throws is reported through the worker realm's
+native binding, JSON map or generated data-bearing BTS module for this data.
+The BTS bootstrap installs its receiver and returns, allowing the
+initialization message to arrive. JS initializes its inputs, SystemInfo and
+`NativeModules` included, and imports the entry the message names. An entry that throws is reported through the worker realm's
 `reportError`, which reaches the `Worker`'s `error` event and a nonfatal
 `WorkerThrew`, and leaves BTS running.
 Context/lifecycle messages received during that import wait on its Promise and
@@ -41,10 +43,14 @@ is the Rust-side ingredient `createDocument` builds it at. `ViewSources.initial_
 existing one-shot startup-data binding hands it directly to JS, without
 serializing it or embedding it in generated source. Nothing in that startup is
 ever updated — the host's update, reset and reload calls below take the
-`PageUpdate` path instead. JS constructs
+`PageUpdate` path instead. Each realm's JS constructs
 SystemInfo from its runtime constants and the screen metrics the embedder named
 in the required `ViewSources.screen` — what it measured, or, for a host with no
-screen, `ScreenMetrics::for_viewport` of its capture size — then sends it to BTS.
+screen, `ScreenMetrics::for_viewport` of its capture size. MTS reads them from
+its boot module, where they are written as literals. BTS builds its own out
+of the MTS realm's SystemInfo, which the initialization message carries, so
+both realms report the same numbers; the BTS Worker's `WorkerStart` carries
+none of the view's data.
 Initial global props come solely from `ViewSources.global_props`.
 
 `ViewSources.initial_processor` selects the initial name. Host update/reset/reload

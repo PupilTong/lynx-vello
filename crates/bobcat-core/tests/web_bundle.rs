@@ -33,8 +33,7 @@ fn page_config(template: &bobcat_source::web::WebTemplate) -> PageConfig {
 }
 
 async fn run(config: PageConfig, source: &str, resolved_url: &str) -> Result<(), LynxViewError> {
-    let fetcher =
-        Rc::new(FetcherDouble::new(source.as_bytes().to_vec()).resolving_to(resolved_url));
+    let fetcher = Rc::new(FetcherDouble::card(source).resolving_to(resolved_url));
     let (mut view, _painter) = solo_view(
         Arc::new(NoWakeup),
         393.0,

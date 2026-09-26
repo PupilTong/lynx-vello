@@ -26,6 +26,7 @@ import {
 } from "bobcat-internal:host";
 import type { NodeQueryRequest, QueryNode } from "bobcat:selector-query";
 import { __BobcatPublishEvent } from "bobcat:runtime";
+import { splitRecord } from "bobcat:record";
 
 // The Lynx Element PAPI runtime.
 //
@@ -1170,30 +1171,6 @@ export function __GetDataset(element: unknown) {
 export function __AddDataset(element: unknown, key: string, value: unknown) {
   if (typeof key !== "string") throw new TypeError("dataset key must be a string");
   valuesOf(element, datasetSymbol).set(key, copyElementValue(value));
-}
-
-/**
- * Reads a record the native side wrote back — the same
- * `<utf16Length>:<text>` fields [`styleField`] writes, in the other
- * direction, so a field may contain any character including the delimiter.
- * `String.prototype.slice` counts the units the writer counted, so each
- * field costs one slice and no scan.
- *
- * Nothing here validates the payload. The writer is Bobcat, not a card: a
- * malformed record would be an engine bug, and reporting it as a JavaScript
- * error would only move it further from where it happened.
- */
-function splitRecord(record: string): string[] {
-  const fields: string[] = [];
-  let rest = record;
-  while (rest !== "") {
-    const separator = rest.indexOf(":");
-    const units = Number(rest.slice(0, separator));
-    const body = rest.slice(separator + 1);
-    fields.push(body.slice(0, units));
-    rest = body.slice(units);
-  }
-  return fields;
 }
 
 /**
@@ -2970,6 +2947,6 @@ export function __FlushElementTree(): undefined {
 }
 
 // The host calls this export once per dispatch, with the whole path. It is
-// deliberately not part of the entry preamble's PAPI imports; it is the
+// deliberately not part of `MTS_CHUNK_PREAMBLE`'s PAPI imports; it is the
 // module-namespace return path from Rust into the realm.
 export { dispatchEvent as __BobcatDispatchEvent };
