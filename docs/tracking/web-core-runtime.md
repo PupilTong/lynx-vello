@@ -85,12 +85,14 @@ The engine now exposes `import { Worker } from "bobcat-internal"` on the main
 realm. Construction sends one `WorkerStart` from the view's task on
 `bobcat-main` to `bobcat-workers`, which spawns **one task per worker realm**;
 that message carries everything the worker will ever be given — its key, its
-name, its role with a one-shot for its script, the receiving end of its message
-channel, and the sender its events go back on, which is the creating view's own
-channel. The worker's realm opens as that message is served, and its root
-module imports the script by its URL. The script is loaded through the view's
-fetcher and answers that one-shot directly, without a main-thread turn; the
-worker completes the import from it. Early messages queue in the worker's own
+name, its URL, a one-shot for its script unless that URL is an engine name
+such as `bobcat:bts`, the view's data when the URL is `bobcat:bts`, the source
+its diagnostics are named by, the receiving end of its message channel, and the
+sender its events go back on, which is the creating view's own channel. The
+worker's realm opens as that message is served, and its root module imports
+the script by its URL. The script is loaded through the view's fetcher and
+answers that one-shot directly, without a main-thread turn; the worker
+completes the import from it. Early messages queue in the worker's own
 task until the script has run, a terminate that arrives before the script wins
 over it, and parent message/error listeners and termination are supported. This is the worker transport needed
 under the BTS integration above; it does not yet install the ReactLynx BTS
