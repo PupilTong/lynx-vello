@@ -865,7 +865,9 @@ fn deliver_module_callback(worker: &Rc<Worker>, call: u64, index: u32, arguments
 /// module waits for. There is none for a URL that is an engine name, the
 /// BTS's `bobcat:bts` or `new Worker("bobcat:timers")` alike: `createWorker`
 /// asks the host for nothing, and the realm's own loader loads the name or
-/// refuses it, so the root module finishes without one.
+/// refuses it, so the root module finishes without one. The root's own name,
+/// [`WORKER_BOOT_SPECIFIER`], is the one engine name that is neither: that
+/// root never finishes, so what is posted to such a worker stays held.
 async fn consume_messages(
     worker: Rc<Worker>,
     mut messages: mpsc::UnboundedReceiver<WorkerMessage>,
