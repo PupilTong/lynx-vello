@@ -40,7 +40,10 @@
 
 use std::cell::{Cell, RefCell};
 use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use quickjs_rust_bridge::{HostArgument, HostValue};
 use rustc_hash::FxHashMap;
@@ -49,31 +52,43 @@ use tokio::task::{self, JoinError, JoinSet};
 use tokio_util::sync::CancellationToken;
 
 use super::scope::{
-    WORKER_DELIVER_EXPORT, WORKER_MODULE_CALLBACK_EXPORT, WORKER_MODULE_SPECIFIER,
-    install_worker_members, install_worker_modules, worker_boot_source,
+    WORKER_DELIVER_EXPORT, WORKER_MODULE_CALLBACK_EXPORT, install_worker_members,
+    worker_boot_source,
 };
 use super::{WorkerCommand, WorkerEvent, WorkerKey, WorkerMessage, WorkerPayload, WorkerStart};
+use crate::esm::{WORKER_MODULE_SPECIFIER, build_runtime};
 use crate::jobs::{JsThread, JsThreadHandle};
 use crate::lifetime::{EndOnUnwind, Lifetime, Settles, run_job, serve_clock};
 use crate::link::{HostOutbox, SourceAnswer};
-use crate::main::quickjs::{ScriptEngine, ScriptRuntime};
+use crate::main::quickjs::{ScriptRuntime, SharedRuntime, mark_checkpoint_later};
+use crate::realm::{self, RealmCore, context_of};
 use crate::resource::{LoadedSource, SourceRequest};
 use crate::script::ScriptError;
 use crate::threads::{panicked, platform_script_error};
-use crate::timers::{TimerState, run_due_timers};
+use crate::timers::run_due_timers;
 
-/// The runtime every worker realm on this thread is opened on.
+/// Who each worker task reports to: its worker's key and the creating view's
+/// channel, beside the worker's own token. Kept by [`serve_workers`] until it
+/// joins the task, and read by [`report_thread_trap`] when the whole thread is
+/// over.
+type Reporters = Rc<RefCell<FxHashMap<task::Id, Reporter>>>;
+
+/// One entry of [`Reporters`].
 ///
-/// A runtime that could not be built is not fatal to the group: it is the
-/// failure of every worker that would have run on it, and each hears about it
-/// when it is asked for.
-type WorkerRuntime = Rc<RefCell<Result<ScriptRuntime, ScriptError>>>;
+/// The token is the one [`Worker::end`] cancels, and every way a worker ends
+/// goes through that call: a `Failed` or `Closed` it reported, a panic of its
+/// own, a `Terminate`, its channel closing. A task stays in the table until it
+/// is joined, which is some time after its worker ended, so the token is what
+/// tells a worker that is over from a live one.
+struct Reporter {
+    key: WorkerKey,
+    events: mpsc::UnboundedSender<WorkerEvent>,
+    token: CancellationToken,
+}
 
 /// The thread's whole body.
-pub(super) fn run(commands: mpsc::UnboundedReceiver<WorkerCommand>) {
-    let runtime = ScriptRuntime::new()
-        .and_then(|mut runtime| install_worker_modules(&mut runtime).map(|()| runtime));
-    serve(Rc::new(RefCell::new(runtime)), commands);
+pub(super) fn run(commands: mpsc::UnboundedReceiver<WorkerCommand>, trapped: &Arc<AtomicBool>) {
+    serve(Rc::new(RefCell::new(build_runtime())), commands, trapped);
 }
 
 /// Preloads a fixture through the existing runtime API for Context tests.
@@ -81,87 +96,176 @@ pub(super) fn run(commands: mpsc::UnboundedReceiver<WorkerCommand>) {
 pub(super) fn run_with_entry(
     commands: mpsc::UnboundedReceiver<WorkerCommand>,
     entry: (String, String),
+    trapped: &Arc<AtomicBool>,
 ) {
     let (source, url) = entry;
-    let mut runtime = ScriptRuntime::new().unwrap();
-    install_worker_modules(&mut runtime).unwrap();
+    let mut runtime = build_runtime().unwrap();
     let source = format!("{}{source}", crate::esm::BTS_ENTRY_PREAMBLE);
     runtime.register_module_source(&url, &source).unwrap();
-    serve(Rc::new(RefCell::new(Ok(runtime))), commands);
+    serve(Rc::new(RefCell::new(Ok(runtime))), commands, trapped);
 }
 
-fn serve(js: WorkerRuntime, commands: mpsc::UnboundedReceiver<WorkerCommand>) {
+/// Runs the thread's loop, and reports its trap to every worker still on it.
+///
+/// A panic in [`serve_workers`] — the loop's `main` task — is resumed by
+/// [`JsThread::run`] and ends every worker here at once. It is caught around
+/// that call and reported before the unwind goes on: the worker tasks are
+/// dropped with the loop, and their own owners report nothing. Under
+/// `panic = "abort"` nothing unwinds and nothing is caught, so on wasm the
+/// panic hook reports it instead, through the same function.
+fn serve(
+    js: SharedRuntime,
+    commands: mpsc::UnboundedReceiver<WorkerCommand>,
+    trapped: &Arc<AtomicBool>,
+) {
+    let reporters = Reporters::default();
+    // Installed here as well as on `bobcat-main`, because this thread is
+    // started first.
+    #[cfg(all(target_arch = "wasm32", panic = "abort"))]
+    {
+        crate::threads::install_script_panic_hook();
+        let trapped = Arc::clone(trapped);
+        let reporters = Rc::clone(&reporters);
+        crate::threads::add_script_panic_reporter(Box::new(move |detail| {
+            report_thread_trap(
+                &trapped,
+                &reporters,
+                &platform_script_error(format!("the worker thread {detail}")),
+            );
+        }));
+    }
     let thread = JsThread::new();
-    thread.run(serve_workers(js, commands, thread.handle()));
+    let served = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        thread.run(serve_workers(
+            js,
+            commands,
+            thread.handle(),
+            Rc::clone(&reporters),
+        ));
+    }));
+    if let Err(payload) = served {
+        report_thread_trap(
+            trapped,
+            &reporters,
+            &panicked("the worker thread panicked", payload.as_ref()),
+        );
+        std::panic::resume_unwind(payload);
+    }
     drop(thread);
 }
 
-/// Starts a task per worker and reports the ones that trapped.
+/// Starts a task per worker, and finishes each one that ends.
 async fn serve_workers(
-    js: WorkerRuntime,
+    js: SharedRuntime,
     mut commands: mpsc::UnboundedReceiver<WorkerCommand>,
     thread: JsThreadHandle,
+    reporters: Reporters,
 ) {
     let mut workers = JoinSet::new();
-    let mut reporters: FxHashMap<task::Id, (WorkerKey, mpsc::UnboundedSender<WorkerEvent>)> =
-        FxHashMap::default();
     loop {
         tokio::select! {
             command = commands.recv() => match command {
                 Some(WorkerCommand::Start(start)) => {
-                    let reporter = (start.key, start.events.clone());
+                    let reporter = Reporter {
+                        key: start.key,
+                        events: start.events.clone(),
+                        token: start.token.clone(),
+                    };
                     let handle = workers.spawn_local(
                         serve_worker(Rc::clone(&js), start, thread.clone()),
                     );
-                    reporters.insert(handle.id(), reporter);
+                    reporters.borrow_mut().insert(handle.id(), reporter);
                 }
+                #[cfg(test)]
+                Some(WorkerCommand::Panic) => panic!("the test asked the worker thread to trap"),
                 // Every realm that could name a worker is gone, and with it
                 // every message sender, so the tasks below are ending too.
                 None => break,
             },
             Some(finished) = workers.join_next_with_id(), if !workers.is_empty() => {
-                report_trap(finished, &mut reporters);
+                finish_worker_task(&js, &thread, finished, &reporters);
             }
         }
     }
     while let Some(finished) = workers.join_next_with_id().await {
-        report_trap(finished, &mut reporters);
+        finish_worker_task(&js, &thread, finished, &reporters);
     }
 }
 
-/// A worker task that panicked is a worker nothing will ever be heard from
-/// again, which is exactly what `Failed` means.
-fn report_trap(
+/// A worker task ended. If it trapped, the view that created its worker hears
+/// `Failed` — a worker nothing will ever be heard from again, which is exactly
+/// what `Failed` means. Either way the other realms on this runtime settle
+/// what their own realms owe, because a task that ended part-way through may
+/// have left the shared job queue with work in it.
+///
+/// The bump is made for a task that returned as well: a panic inside one of
+/// its jobs is caught by [`run_job`], and the task that queued that job then
+/// returns normally.
+fn finish_worker_task(
+    js: &SharedRuntime,
+    thread: &JsThreadHandle,
     finished: Result<(task::Id, ()), JoinError>,
-    reporters: &mut FxHashMap<task::Id, (WorkerKey, mpsc::UnboundedSender<WorkerEvent>)>,
+    reporters: &Reporters,
 ) {
-    let error = match finished {
+    let trapped = match finished {
         Ok((id, ())) => {
-            reporters.remove(&id);
-            return;
+            reporters.borrow_mut().remove(&id);
+            None
         }
-        Err(error) => error,
+        Err(error) => {
+            let reporter = reporters.borrow_mut().remove(&error.id());
+            reporter
+                .filter(|_| error.is_panic())
+                .map(|reporter| (reporter, error))
+        }
     };
-    let Some((key, events)) = reporters.remove(&error.id()) else {
-        return;
-    };
-    if !error.is_panic() {
-        return;
+    if let Some((reporter, error)) = trapped {
+        let error = panicked("the worker thread panicked", error.into_panic().as_ref());
+        let _ = reporter.events.send(WorkerEvent {
+            key: reporter.key,
+            payload: WorkerPayload::Failed(error),
+        });
     }
-    let error = panicked("the worker thread panicked", error.into_panic().as_ref());
-    let _ = events.send(WorkerEvent {
-        key,
-        payload: WorkerPayload::Failed(error),
-    });
+    mark_checkpoint_later(js, thread);
+}
+
+/// The whole thread is over: the flag `bobcat-main` reads before each `Start`
+/// is set, and the creator of every worker still live on it hears `Failed`.
+///
+/// The flag goes first, so a `Worker` constructed after any of these reports
+/// fails at once. `try_borrow`, because on wasm this runs from the panic hook
+/// at the panic itself, which may be inside a borrow of the table; such a trap
+/// sets the flag and reports nothing else.
+///
+/// A worker whose token is already cancelled is skipped: it ended before the
+/// trap, and either it has already reported its end or its creator ended it
+/// (a `terminate()`, or the release of the creating realm). No token is
+/// cancelled by the trap itself before this runs: on wasm this runs at the
+/// panic, and natively the worker tasks, whose unwind guards cancel their
+/// tokens, are dropped only after this report.
+fn report_thread_trap(trapped: &AtomicBool, reporters: &Reporters, error: &ScriptError) {
+    trapped.store(true, Ordering::Release);
+    let Ok(reporters) = reporters.try_borrow() else {
+        return;
+    };
+    for reporter in reporters.values() {
+        if reporter.token.is_cancelled() {
+            continue;
+        }
+        let _ = reporter.events.send(WorkerEvent {
+            key: reporter.key,
+            payload: WorkerPayload::Failed(error.clone()),
+        });
+    }
 }
 
 /// One live worker on this thread: its realm and everything that realm owns.
+///
+/// `core` is what [`realm::open_realm`] builds for every realm; `closing` is
+/// the one piece of state the worker's own host module,
+/// `bobcat-internal:worker`, adds to it.
 struct WorkerRealm {
-    engine: ScriptEngine,
-    timers: Rc<TimerState>,
-    /// Every host-backed operation this realm holds a `Future` for, every
-    /// `fetchResource` included.
-    futures: Rc<crate::future::FutureTable>,
+    core: RealmCore,
     /// Set by the native `closeWorker` export. A flag rather than a direct
     /// teardown because it is written from inside the realm it would tear
     /// down: the task reads it once the call that set it has returned.
@@ -188,7 +292,7 @@ enum WorkerState {
 /// posted to it and fires what it armed, and both of those settle the same
 /// things afterwards.
 struct Worker {
-    js: WorkerRuntime,
+    js: SharedRuntime,
     key: WorkerKey,
     /// Where this worker reports, which is the creating view's own channel.
     events: mpsc::UnboundedSender<WorkerEvent>,
@@ -213,7 +317,7 @@ struct Worker {
 
 impl Worker {
     fn new(
-        js: WorkerRuntime,
+        js: SharedRuntime,
         key: WorkerKey,
         events: mpsc::UnboundedSender<WorkerEvent>,
         token: CancellationToken,
@@ -355,7 +459,7 @@ impl Worker {
             return;
         }
         if !*self.boot_finished.borrow() {
-            let finished = match realm.engine.module_finished() {
+            let finished = match realm.core.engine.module_finished() {
                 Ok(finished) => finished,
                 Err(error) => {
                     report(&self.events, self.key, "running the worker's script", error);
@@ -366,14 +470,15 @@ impl Worker {
                 self.boot_finished.send_replace(true);
             }
         }
-        while let Some(url) = realm.engine.take_module_request() {
+        while let Some(url) = realm.core.engine.take_module_request() {
             let answer = self.sources.request(SourceRequest::Module(url.clone()));
             self.spawn(load_module(Rc::clone(self), url, answer));
         }
-        for (id, future) in realm.futures.take_settle_requests() {
+        for (id, future) in realm.core.futures.take_settle_requests() {
             self.spawn(settle_future(Rc::clone(self), id, future));
         }
-        self.lifetime.arm_deadline(realm.timers.next_deadline());
+        self.lifetime
+            .arm_deadline(realm.core.timers.next_deadline());
         // Last, so it names the generation this entry ran up rather than the
         // one it started from.
         self.lifetime.record_checkpoint(js.checkpoint_generation());
@@ -408,17 +513,32 @@ impl Worker {
                 // asked for. Each hears the same reason.
                 Err(error) => Err(error.clone()),
                 Ok(js) => {
-                    open_realm(
+                    // This worker's own token is the one `sources` carries,
+                    // so what a `Future.wait` or a `require` parks on is
+                    // cancelled with the worker rather than with the view: a
+                    // `Terminate` read while the job is parked ends the wait,
+                    // because that token is the one [`Worker::end`] cancels.
+                    realm::open_realm(
                         js,
-                        self.events.clone(),
-                        self.key,
                         &self.sources,
                         self.lifetime.thread().clone(),
+                        Some(self.key),
+                        |engine, js| {
+                            let events = self.events.clone();
+                            let key = self.key;
+                            install_worker_members(engine, js, key, &self.sources, move |data| {
+                                let _ = events.send(WorkerEvent {
+                                    key,
+                                    payload: WorkerPayload::Message(data),
+                                });
+                            })
+                        },
                     )
+                    .map(|(core, closing)| WorkerRealm { core, closing })
                     .map(|mut realm| {
                         let (source, url) = script;
                         let source = worker_boot_source(name, &source);
-                        if let Err(error) = realm.engine.start_module(js, &source, &url) {
+                        if let Err(error) = realm.core.engine.start_module(js, &source, &url) {
                             // Nothing to clean up after: a throw at this module's
                             // top level rejects through the runtime's shared job
                             // queue, and what it leaves there is this realm's — it
@@ -518,7 +638,7 @@ impl Settles for Worker {
 
 /// One worker's whole life on this thread: build it, start its boot, wait for
 /// the end, reclaim. Task lifetime and nothing else.
-async fn serve_worker(js: WorkerRuntime, start: WorkerStart, thread: JsThreadHandle) {
+async fn serve_worker(js: SharedRuntime, start: WorkerStart, thread: JsThreadHandle) {
     let WorkerStart {
         key,
         name,
@@ -618,7 +738,7 @@ async fn boot_worker(
 fn deliver_vsync(worker: &Rc<Worker>, milliseconds: f64) {
     let reporting = Rc::clone(worker);
     drop(worker.enter(move |realm, js| {
-        if let Err(error) = realm.engine.call_module_export(
+        if let Err(error) = realm.core.engine.call_module_export(
             js,
             crate::esm::BTS_RUNTIME_MODULE_SPECIFIER,
             "__BobcatBeginFrame",
@@ -647,7 +767,7 @@ fn deliver_module_callback(worker: &Rc<Worker>, call: u64, index: u32, arguments
             clippy::cast_precision_loss,
             reason = "the realm mints these counting up from one"
         )]
-        let delivered = realm.engine.call_module_export(
+        let delivered = realm.core.engine.call_module_export(
             js,
             WORKER_MODULE_SPECIFIER,
             WORKER_MODULE_CALLBACK_EXPORT,
@@ -746,7 +866,7 @@ async fn load_module(worker: Rc<Worker>, url: String, answer: SourceAnswer) {
                 .as_ref()
                 .map(|(source, resolved)| (resolved.as_str(), source.as_str()))
                 .map_err(String::as_str);
-            if let Err(error) = realm.engine.complete_module(js, &url, result) {
+            if let Err(error) = realm.core.engine.complete_module(js, &url, result) {
                 report(
                     &completing.events,
                     completing.key,
@@ -768,7 +888,7 @@ async fn settle_future(worker: Rc<Worker>, id: u32, future: crate::future::HostF
     let settling = Rc::clone(&worker);
     worker
         .enter(move |realm, js| {
-            if let Err(error) = crate::future::deliver(&mut realm.engine, js, id, outcome) {
+            if let Err(error) = crate::future::deliver(&mut realm.core.engine, js, id, outcome) {
                 report(
                     &settling.events,
                     settling.key,
@@ -801,65 +921,6 @@ fn worker_script(
     }
 }
 
-fn open_realm(
-    js_runtime: &mut ScriptRuntime,
-    events: mpsc::UnboundedSender<WorkerEvent>,
-    key: WorkerKey,
-    host: &HostOutbox,
-    thread: JsThreadHandle,
-) -> Result<WorkerRealm, ScriptError> {
-    let mut engine = js_runtime
-        .create_realm()
-        .map_err(|error| context_of("creating the worker realm", error))?;
-    engine.enable_module_loading();
-    let frames = host.clone();
-    crate::script_frames::install(&mut engine, js_runtime, move |pending| {
-        frames.notify(crate::link::ViewNotice::ScriptFrameDemand {
-            worker: Some(key),
-            pending,
-        });
-    })?;
-    // This worker's own token, so what a `Future.wait` parks on is cancelled
-    // with the worker rather than with the view: a `Terminate` read while the
-    // job is parked ends the wait, because the token this outbox carries is
-    // the one [`Worker::end`] cancels. The same holds for the load a `require`
-    // asks for, over the same outbox.
-    let futures = Rc::new(crate::future::FutureTable::new());
-    crate::future::install(
-        &mut engine,
-        js_runtime,
-        &futures,
-        host.token().clone(),
-        thread.clone(),
-    )?;
-    // Both realm kinds get `fetchResource`, over the table above: what a
-    // fetch answers is a future of this realm's.
-    crate::fetch::install(&mut engine, js_runtime, host, &futures)?;
-    crate::require::install(&mut engine, js_runtime, host.clone(), thread)?;
-    let timers = Rc::new(TimerState::new());
-    let closing = Rc::new(Cell::new(false));
-    install_worker_members(
-        &mut engine,
-        js_runtime,
-        &timers,
-        &closing,
-        key,
-        host,
-        move |data| {
-            let _ = events.send(WorkerEvent {
-                key,
-                payload: WorkerPayload::Message(data),
-            });
-        },
-    )?;
-    Ok(WorkerRealm {
-        engine,
-        timers,
-        futures,
-        closing,
-    })
-}
-
 /// Hands one message value to a realm that is up.
 fn deliver(
     events: &mpsc::UnboundedSender<WorkerEvent>,
@@ -875,7 +936,7 @@ fn deliver(
     if realm.closing.get() {
         return;
     }
-    let delivered = realm.engine.call_module_export(
+    let delivered = realm.core.engine.call_module_export(
         js_runtime,
         WORKER_MODULE_SPECIFIER,
         WORKER_DELIVER_EXPORT,
@@ -898,7 +959,8 @@ fn fire_timers(
     if realm.closing.get() {
         return;
     }
-    let Some(failures) = run_due_timers(&mut realm.engine, js_runtime, &realm.timers) else {
+    let Some(failures) = run_due_timers(&mut realm.core.engine, js_runtime, &realm.core.timers)
+    else {
         return;
     };
     for error in failures {
@@ -922,13 +984,6 @@ fn report(
         key,
         payload: WorkerPayload::Errored(context_of(context, error)),
     });
-}
-
-/// Prefixes a failure with what the host was doing, the way `MainThreadError`
-/// does for the errors that reach an embedder through a view.
-fn context_of(context: &str, mut error: ScriptError) -> ScriptError {
-    error.message = std::sync::Arc::from(format!("{context}: {}", error.message));
-    error
 }
 
 #[cfg(test)]
@@ -973,13 +1028,13 @@ mod tests {
     ///
     /// The script does nothing, because what most of these pins are about is
     /// which task ran rather than what the script said.
-    fn start(js: &WorkerRuntime, thread: &JsThreadHandle, key: u64) -> Started {
+    fn start(js: &SharedRuntime, thread: &JsThreadHandle, key: u64) -> Started {
         start_running(js, thread, key, String::new())
     }
 
     /// The same, over a script of the test's own.
     fn start_running(
-        js: &WorkerRuntime,
+        js: &SharedRuntime,
         thread: &JsThreadHandle,
         key: u64,
         source: String,
@@ -1020,9 +1075,8 @@ mod tests {
     }
 
     /// One worker runtime, furnished the way [`run`] furnishes this thread's.
-    fn worker_runtime() -> WorkerRuntime {
-        let mut js = ScriptRuntime::new().expect("a QuickJS runtime");
-        install_worker_modules(&mut js).expect("the worker modules register");
+    fn worker_runtime() -> SharedRuntime {
+        let js = build_runtime().expect("the worker runtime builds");
         Rc::new(RefCell::new(Ok(js)))
     }
 
@@ -1074,6 +1128,84 @@ mod tests {
             );
         });
     }
+
+    /// A worker task that ends may have left the job queue every realm here
+    /// shares with work in it — a panic in one of its jobs is caught and the
+    /// task returns normally — so its ending settles every other realm on
+    /// the runtime once, the way a view task's ending does on `bobcat-main`.
+    ///
+    /// The task that ends runs no JavaScript at all: its script never
+    /// arrives, and a `Terminate` ends it in its boot. So the one settle the
+    /// parked worker runs is the ending's and nothing else's.
+    #[test]
+    fn a_finished_worker_task_makes_a_parked_sibling_settle() {
+        on_a_js_thread(|thread| async move {
+            let js = worker_runtime();
+            let first = start(&js, &thread, 1);
+            assert!(
+                until(|| first.worker.is_live()).await,
+                "the first worker booted"
+            );
+
+            let (commands, receiver) = mpsc::unbounded_channel();
+            task::spawn_local(serve_workers(
+                Rc::clone(&js),
+                receiver,
+                thread.clone(),
+                Rc::default(),
+            ));
+            // Held for the whole test: a dropped script sender would fail the
+            // second worker, which ends its task before the `Terminate`.
+            let (_script, script) = oneshot::channel();
+            let (messages, incoming) = mpsc::unbounded_channel();
+            let (events, _events) = mpsc::unbounded_channel();
+            let (notices, _notices) = mpsc::unbounded_channel();
+            let token = CancellationToken::new();
+            commands
+                .send(WorkerCommand::Start(WorkerStart {
+                    key: WorkerKey::new(2),
+                    name: String::new(),
+                    script,
+                    messages: incoming,
+                    events,
+                    token: token.clone(),
+                    sources: HostOutbox::new(notices, Arc::new(crate::NoWakeup), token, None),
+                }))
+                .expect("the loop is serving");
+
+            // Parked: whatever the `Start` set off has settled, and a settle
+            // that finds nothing due enters no JavaScript, so the count stops
+            // moving.
+            let mut settled = first.worker.epilogue_count();
+            for _ in 0..TURNS {
+                for _ in 0..8 {
+                    task::yield_now().await;
+                }
+                let count = first.worker.epilogue_count();
+                if count == settled {
+                    break;
+                }
+                settled = count;
+            }
+
+            messages
+                .send(WorkerMessage::Terminate)
+                .expect("the second worker is waiting for its script");
+            assert!(
+                until(|| first.worker.epilogue_count() > settled).await,
+                "the second worker's ending settled the first"
+            );
+            for _ in 0..8 {
+                task::yield_now().await;
+            }
+            assert_eq!(
+                first.worker.epilogue_count(),
+                settled + 1,
+                "the ending is what settles this worker, once"
+            );
+        });
+    }
+
     impl Started {
         /// Runs one entry's body here and now, which is what the engine
         /// thread's top loop does with a queued job: these two pins are about
@@ -1083,17 +1215,18 @@ mod tests {
             self.worker
                 .enter_now(|realm, js| {
                     realm
+                        .core
                         .engine
                         .start_module(js, source, "app:///observer-test.js")
                         .unwrap();
-                    assert!(realm.engine.module_finished().unwrap());
+                    assert!(realm.core.engine.module_finished().unwrap());
                 })
                 .expect("the worker is live");
         }
 
         fn collect(&self) {
             self.worker
-                .enter_now(|realm, js| realm.engine.collect_garbage(js).unwrap())
+                .enter_now(|realm, js| realm.core.engine.collect_garbage(js).unwrap())
                 .expect("the worker is live");
         }
 

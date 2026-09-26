@@ -8,10 +8,11 @@ source text to JavaScript callbacks.
 
 ## Existing ESM transport
 
-`WorkerStart` carries a `SourceRequester` and a child of the view's cancellation
-token. Discovered imports use `SourceRequest::Module` on the view's existing
-notice channel. `LynxView::pump` calls `ResourceFetcher::request_source`; the
-concrete `SourceCompletion` answers the requesting worker directly. Resolution,
+`WorkerStart` carries a `HostOutbox` (`WorkerStart.sources`) and the worker's
+own cancellation token, which no view token is a parent of. Discovered imports
+use `SourceRequest::Module` on the view's existing notice channel.
+`LynxView::pump` calls `ResourceFetcher::request_source`; the concrete
+`SourceCompletion` answers the requesting worker directly. Resolution,
 transport, UTF-8 validation, and the final response URL belong to the fetcher.
 MTS does not route resource replies.
 

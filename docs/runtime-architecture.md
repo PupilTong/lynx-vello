@@ -152,7 +152,7 @@ bobcat-wasm ──┬───▶ bobcat-resources ─┘          │          
 bobcat-source ────────────────────────────────────┘
                                                   └──▶ quickjs-rust-bridge
 
-QuickJS preloaded ESM graph — bobcat-main's runtime
+QuickJS ESM graph — an MTS realm, on bobcat-main's runtime
   bobcat:boot
     ├──▶ bobcat:element (Document class + flush binding)
     ├──▶ bobcat:timers (timer-global installation)
@@ -178,7 +178,7 @@ QuickJS preloaded ESM graph — bobcat-main's runtime
                 └──▶ bobcat-internal:host (native named function exports)
                       └──▶ the document created above
 
-QuickJS ESM graph — shared built-ins and per-worker imports, on bobcat-workers
+QuickJS ESM graph — a worker realm, on bobcat-workers' runtime
   bobcat:worker-boot (one per live worker, evaluated, never registered)
     ├──▶ bobcat:worker (packages/bobcat-element/src/worker-runtime.ts)
     │     ├── the global scope: self, postMessage, close, name, onmessage
@@ -191,10 +191,16 @@ QuickJS ESM graph — shared built-ins and per-worker imports, on bobcat-workers
                 ├──▶ bobcat:bts-runtime exports lynx
                 │     └──▶ bobcat:cross-thread-context ──▶ bobcat:event-target
                 └──▶ await import(BTS entry) when configured
-                      SourceRequester → view resource host → worker completion
-  No bobcat:element and no bobcat:runtime here: a worker has no document to
-  reach and no page to be the main thread of, so reaching for either fails to
-  resolve rather than failing late.
+                      HostOutbox → view resource host → worker completion
+  Both runtimes register the same fifteen built-ins (esm.rs BUILTIN_MODULES),
+  and a realm's host modules decide which of them link. Here bobcat:element,
+  bobcat:runtime and bobcat-internal fail at link with a SyntaxError: they
+  import bobcat-internal:host members only an MTS realm has. In an MTS realm
+  bobcat:worker and bobcat:bts-runtime fail to load with a ReferenceError:
+  they import bobcat-internal:worker, which it does not declare. Any other
+  bobcat: or bobcat-internal: name, one no runtime registered and no realm
+  declared, fails its import or require in the realm with a ReferenceError
+  and is never sent to the fetcher.
 
 bobcat-cli ──▶ bobcat-source + winit
 bobcat-wasm ──▶ bobcat-source + wasm-bindgen + wasm_thread
@@ -333,7 +339,9 @@ ResourceFetcher; MTS top-level await is part of startup readiness, and the BTS
 entry's is not. Compiled
 bundle factories still need the module/init shell from a later stack layer.
 
-`LynxGroup::new` awaits the shared script runtime and style pool.
+`LynxGroup::new` awaits the shared style pool. A script runtime that
+`build_runtime` could not build does not fail the group: each view reports it
+as `StartupFailed` when its realm would open, and each `Worker` as `Failed`.
 `create_lynx_view` sends the view's half of its link to the group's thread and
 builds the host's fetcher on the calling thread. It is synchronous — nothing it
 builds can block — and returns a loading view. Attachment, native-module and
@@ -525,7 +533,13 @@ That checkpoint watch is a runtime-wide `u64` bumped inside
 than to any realm, so a view whose import finished inside a *sibling's* entry
 into JavaScript has to settle what its own realm owes; the checkpoint arm of
 `serve_clock` is how it learns to, and comparing the generation against the one
-the epilogue recorded is what keeps a page's own entries from waking it.
+the epilogue recorded is what keeps a page's own entries from waking it. The
+generation is also bumped, by a job, whenever a view task on `bobcat-main` or a
+worker task on `bobcat-workers` ends, whether it returned or panicked: a task
+that ended part-way through may have left the shared queue with work in it, and
+a panic inside one of its jobs is caught there, after which the task returns
+normally. The bump settles every other realm on that runtime once; it does not
+drain the queue itself.
 
 An end is one signal rather than a message anything has to race. A view and a
 worker are both built from `lifetime.rs`'s `Lifetime`: the `JoinSet` holding
@@ -591,13 +605,30 @@ them, and each with its own global object and native modules.
 other, with one task and one realm per live worker. It is an independent
 runtime environment rather than something `bobcat-main` offloads work to:
 `bobcat-main` holds one sender on it, sends three messages (start a context
-with its script, post to a context, stop a context) and receives events back,
-and nothing else crosses. Separating
+with its script, post to a context, stop a context) and receives events back.
+The one other thing that crosses is a flag `bobcat-workers` sets when it traps,
+which `bobcat-main` reads before each `Start`. Separating
 them is the whole point of a worker: script that must not stop the thread that
 owns the document. Because `QuickJS` binds a runtime to one thread, that
 separation is also what makes "a worker cannot touch the document" structural
 — there is no path from a worker realm to a `LynxDocument`, and no value of
 either runtime can be named by the other.
+
+Both threads open a realm through one constructor, `realm::open_realm`. It
+creates the realm on that thread's runtime, enables module loading, and
+installs the core every realm has under `bobcat-internal:host`: the
+display-frame demand, the timer pair, the three `Future` members,
+`fetchResource`, and the two members `bobcat:module` is written over. They
+reach the view through the `HostOutbox` the caller passes, whose token is the
+view's for an MTS realm and the worker's own for a worker realm, so a
+synchronous wait in either ends with the realm that asked. The realm's other
+host modules are a parameter of the same call: the document, stylesheet,
+startup and `Worker` members for an MTS realm, `bobcat-internal:worker` for a
+worker realm. The constructor names no realm kind. The one thing it is told
+is the key the realm's display-frame demand is reported under: `None` for an
+MTS realm, the worker's key for a worker realm. Since both runtimes register
+every built-in module, these host modules are also what decides which
+built-ins a realm can link.
 
 The main realm can explicitly import `Worker` from `bobcat-internal`:
 
@@ -1688,8 +1719,9 @@ create/append/drop/flush DOM API is exposed to JavaScript.
 
 1. `LynxGroup::new` starts both of the group's threads — `bobcat-workers`
    first, then `bobcat-main`, which is handed one sender on it — and waits for
-   `bobcat-main`'s report that the group's QuickJS runtime and Stylo pool are
-   built. `create_lynx_view` validates the fonts and default family into a
+   `bobcat-main`'s report that the group's Stylo pool is built; its QuickJS
+   runtime is built first, and one that failed is each view's
+   `StartupFailed` rather than the group's error. `create_lynx_view` validates the fonts and default family into a
    `dom::TextContext`, creates the view's link, builds the per-view
    `ResourceFetcher` on the calling thread, hands that fetcher each author
    stylesheet in the order the view listed them and then the entry, sends the far half of the

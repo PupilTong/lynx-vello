@@ -8,6 +8,7 @@
 //! a sanitized [`ScriptError`], and how a module namespace caches the atoms an
 //! export is looked up by.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
@@ -17,6 +18,7 @@ use std::time::Duration;
 
 use quickjs_rust_bridge as quickjs;
 
+use crate::jobs::JsThreadHandle;
 use crate::script::{ScriptError, ScriptErrorKind, ScriptErrorPhase, ScriptSourceLocation};
 
 /// A leaf host callback Bobcat installs in the realm.
@@ -182,6 +184,50 @@ impl ScriptRuntime {
             .register_module_source(specifier, source)
             .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterModule))
     }
+
+    /// Keeps every module name under `prefix` to what this runtime registered
+    /// and what each realm declares: an `import` of one resolves only to
+    /// those, and a `require` of one answers only from a module the realm has
+    /// already imported. Any other fails in the realm that asked with a
+    /// `ReferenceError`, and is never sent to a fetcher as a
+    /// [`SourceRequest::Module`].
+    ///
+    /// [`SourceRequest::Module`]: crate::resource::SourceRequest::Module
+    pub(crate) fn reserve_module_prefix(&mut self, prefix: &str) -> Result<(), ScriptError> {
+        self.runtime
+            .reserve_module_prefix(prefix)
+            .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterModule))
+    }
+}
+
+/// The runtime every realm on one engine thread is opened on, as that
+/// thread's tasks and jobs share it.
+///
+/// Shared rather than owned by any one task, and borrowed only inside a job:
+/// an entry holds it for its whole length, a synchronous wait included, which
+/// is safe because no other job runs until that one returns and no task ever
+/// takes it.
+///
+/// A runtime that could not be built is not fatal to the group: it is the
+/// failure of every view or worker that would have run on it, and each hears
+/// about it when it asks for a realm.
+pub(crate) type SharedRuntime = Rc<RefCell<Result<ScriptRuntime, ScriptError>>>;
+
+/// Announces a checkpoint nobody ran, from a task: a task on `thread` ended
+/// part-way through, so whatever it left in the shared job queue is now a
+/// sibling realm's to finish.
+///
+/// A job rather than a call, because the caller is a task and the shared
+/// runtime belongs to whichever job holds it. Nothing waits for the bump, so
+/// the answer is dropped. A runtime that was never built has no realm to
+/// wake, and is left alone.
+pub(crate) fn mark_checkpoint_later(js: &SharedRuntime, thread: &JsThreadHandle) {
+    let js = Rc::clone(js);
+    drop(thread.run(move || {
+        if let Ok(js) = &*js.borrow() {
+            js.mark_checkpoint();
+        }
+    }));
 }
 
 impl ScriptEngine {
@@ -287,6 +333,16 @@ impl ScriptEngine {
         self.realm.take_module_request()
     }
 
+    /// Answers one module request of this realm's with its source and
+    /// response URL, or with why there is none, and resumes the imports
+    /// waiting on it.
+    ///
+    /// The bridge passes the URL and the error text on as C strings, and
+    /// refuses one containing a NUL without completing the module, which
+    /// would leave the import pending forever. So both are made safe here,
+    /// for every caller: a NUL in the error text is replaced with U+FFFD, and
+    /// a response URL containing one fails the module instead, because the
+    /// replaced URL would name an address the fetcher never answered for.
     pub(crate) fn complete_module(
         &mut self,
         runtime: &mut ScriptRuntime,
@@ -295,8 +351,15 @@ impl ScriptEngine {
     ) -> Result<(), ScriptError> {
         const PHASE: ScriptErrorPhase = ScriptErrorPhase::ExecuteModule;
         self.take_deferred_checkpoint_error()?;
+        let result = match result {
+            Ok((url, _)) if url.contains('\0') => Err(format!(
+                "module '{name}': the response URL contains a NUL byte"
+            )),
+            Ok(loaded) => Ok(loaded),
+            Err(error) => Err(error.replace('\0', "\u{fffd}")),
+        };
         self.realm
-            .complete_module(name, result)
+            .complete_module(name, result.as_ref().copied().map_err(String::as_str))
             .map_err(|error| map_quickjs_error(error, PHASE))?;
         let result = self
             .realm
@@ -583,9 +646,10 @@ impl ScriptEngine {
 /// `import` does, and the realm runtime that implements it asks through the
 /// host member [`crate::require`] installs over this.
 pub(crate) fn normalize_module_url(base: &str, specifier: &str) -> Result<String, String> {
-    if specifier == super::workers::MODULE
-        || specifier.starts_with("bobcat:")
-        || specifier.starts_with("bobcat-internal:")
+    if specifier == crate::esm::WORKER_CLASS_MODULE_SPECIFIER
+        || crate::esm::ENGINE_MODULE_PREFIXES
+            .iter()
+            .any(|prefix| specifier.starts_with(prefix))
     {
         return Ok(specifier.to_owned());
     }
@@ -783,6 +847,54 @@ mod tests {
         assert_eq!(error.phase, ScriptErrorPhase::ExecuteModule);
         assert!(error.message.contains("app:///missing.mjs"));
         assert!(error.message.contains("not preloaded"));
+    }
+
+    /// The bridge refuses a C string containing a NUL without completing the
+    /// module, which would leave the import pending forever. So a completion
+    /// makes both of its strings safe first — the error text by replacement,
+    /// the response URL by failing the module — and either way the import
+    /// settles and the completion itself succeeds.
+    #[test]
+    fn a_nul_in_a_module_completion_still_settles_the_import() {
+        let (mut runtime, mut engine) = engine();
+        engine.enable_module_loading();
+        engine
+            .execute_script(
+                &mut runtime,
+                "globalThis.outcomes = {};
+                 for (const name of ['error', 'url']) {
+                     import(`app:///${name}.js`).then(
+                         () => { outcomes[name] = 'loaded'; },
+                         error => { outcomes[name] = String(error); });
+                 }",
+                "app:///main.js",
+            )
+            .expect("the imports are asked for");
+        let mut requests: Vec<String> =
+            std::iter::from_fn(|| engine.take_module_request()).collect();
+        requests.sort();
+        assert_eq!(requests, ["app:///error.js", "app:///url.js"]);
+
+        engine
+            .complete_module(&mut runtime, "app:///error.js", Err("broken\0text"))
+            .expect("an error text with a NUL completes the module");
+        engine
+            .complete_module(
+                &mut runtime,
+                "app:///url.js",
+                Ok(("app:///redirected\0.js", "export default 1;")),
+            )
+            .expect("a response URL with a NUL completes the module");
+        engine
+            .execute_script(
+                &mut runtime,
+                "if (!outcomes.error.includes('broken\\uFFFDtext'))
+                     throw new Error('the error text: ' + outcomes.error);
+                 if (!outcomes.url.includes('the response URL contains a NUL byte'))
+                     throw new Error('the response URL: ' + outcomes.url);",
+                "app:///verify.js",
+            )
+            .expect("both imports rejected with what the completion said");
     }
 
     #[test]

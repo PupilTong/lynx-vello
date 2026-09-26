@@ -299,10 +299,11 @@ pub enum EngineEvent {
     /// `LynxView::pump` records the view as ready before returning this
     /// notification.
     ScriptFinished,
-    /// Source loading, document configuration, or entry boot failed. The
-    /// view's fonts are not among them: an unknown default family is refused
-    /// by [`LynxGroup::create_lynx_view`] itself, before any source is
-    /// requested.
+    /// Source loading, document configuration, or entry boot failed, or the
+    /// group's script runtime could not be built, which fails every view the
+    /// group serves. The view's fonts are not among them: an unknown default
+    /// family is refused by [`LynxGroup::create_lynx_view`] itself, before
+    /// any source is requested.
     StartupFailed(LynxViewError),
     /// The script runtime failed fatally during owner-thread work after startup.
     /// Boot failures arrive as [`EngineEvent::StartupFailed`].
@@ -539,7 +540,7 @@ struct GroupInner {
     home: ThreadJoin,
     /// The group's other thread, held here rather than by `bobcat-main`:
     /// `bobcat-workers` is a runtime of the group's own, and all `bobcat-main`
-    /// is given of it is one sender.
+    /// is given of it is one sender and the flag it sets when it traps.
     #[expect(dead_code, reason = "held to end and wait for bobcat-workers on drop")]
     workers: WorkerHome,
 }
@@ -552,29 +553,31 @@ impl fmt::Debug for LynxGroup {
 
 impl LynxGroup {
     /// Starts this group's two threads — `bobcat-main` and `bobcat-workers` —
-    /// and waits until the script runtime and style pool `bobcat-main` shares
-    /// out are up.
+    /// and waits until the style pool `bobcat-main` shares out is up.
     ///
     /// All of it is ready before views attach. A thread or a style worker that
     /// cannot start fails the group here, rather than whichever view or
-    /// `Worker` happened to ask for it first.
+    /// `Worker` happened to ask for it first. A `QuickJS` runtime that cannot
+    /// be built does not: it fails what asks it for a realm instead, with its
+    /// own error. Every view created from the group reports
+    /// [`EngineEvent::StartupFailed`] when `bobcat-main`'s runtime is the one,
+    /// and every `Worker` fails when it is `bobcat-workers`'.
     ///
     /// # Errors
     ///
     /// [`LynxViewError::Engine`] if `bobcat-main`, `bobcat-workers` or a style
     /// worker will not start — asking for more workers than Stylo indexes is
-    /// one such refusal — and [`LynxViewError::Script`] if the shared
-    /// `QuickJS` runtime cannot be created.
+    /// one such refusal.
     pub async fn new<R: EventRequester>(
         event_requester: Arc<R>,
         style_threads: StyleThreads,
     ) -> Result<Self, LynxViewError> {
         // The group's second runtime, started here beside `bobcat-main`
-        // rather than by it: `bobcat-main` is handed one sender on it and
-        // nothing else. First, because a `bobcat-main` that will not spawn
-        // leaves this local to end the worker thread — its sender drops before
-        // its own `ThreadJoin` — rather than a thread parked on a channel
-        // nobody holds.
+        // rather than by it: `bobcat-main` is handed one sender on it and its
+        // trap flag, and nothing else. First, because a `bobcat-main` that
+        // will not spawn leaves this local to end the worker thread — its
+        // sender drops before its own `ThreadJoin` — rather than a thread
+        // parked on a channel nobody holds.
         let workers = WorkerHome::start()?;
         let (attach, attachments) = mpsc::unbounded_channel();
         let (ready, started) = oneshot::channel();
@@ -585,6 +588,7 @@ impl LynxGroup {
                 requester: event_requester,
                 ready,
                 workers: workers.commands(),
+                workers_trapped: workers.trapped(),
             },
         )?;
         // Into the handle before the first await, so every exit path from
@@ -598,7 +602,7 @@ impl LynxGroup {
         };
         match started.await {
             Ok(Ok(())) => Ok(group),
-            Ok(Err(error)) => Err(error),
+            Ok(Err(error)) => Err(error.into()),
             Err(_) => Err(EngineError::Thread {
                 name: "script",
                 message: "the Lynx main thread ended before it reported startup".to_owned(),
@@ -703,8 +707,7 @@ impl LynxGroup {
         // One view, one set of channels and one end signal: nothing here is
         // shared with a sibling, so nothing has to be addressed or deferred.
         // The token is minted here because the embedder's own thread is where
-        // a release happens, and it is the parent of every token the view's
-        // realm mints for a worker.
+        // a release happens.
         let cancel = CancellationToken::new();
         let (commands, command_receiver) = mpsc::unbounded_channel();
         let (notices, notice_receiver) = mpsc::unbounded_channel();
@@ -789,7 +792,12 @@ impl LynxGroup {
             frames: frame_receiver,
             inbox,
             fetcher,
-            native_modules,
+            // Each module beside the methods it declared, as read once above:
+            // `pump` checks a call against these rather than asking again.
+            native_modules: native_modules
+                .into_iter()
+                .zip(table.into_iter().map(|(_, methods)| methods))
+                .collect(),
             state: ViewState::Loading,
             timeline_epoch: ClockInstant::now(),
             group: Rc::clone(&self.inner),
@@ -815,8 +823,7 @@ pub struct LynxView<F> {
     /// This view's end signal, cancelled the instant it is released, before
     /// anything else is, so a host still holding one of its source completions
     /// sees it cancelled without waiting for a turn of its own. The view's
-    /// task holds a clone, and every worker its realm creates holds a child of
-    /// it.
+    /// task holds a clone.
     cancel: CancellationToken,
     /// What a painter observes this view through, and the goodbye with it:
     /// dropping this closes the view's task's inbox, which is what ends it —
@@ -839,11 +846,13 @@ pub struct LynxView<F> {
     /// an attached painter to read pixels through — so this view dropping
     /// both is what releases it.
     fetcher: Rc<F>,
-    /// The embedder's native modules, held rather than read: the realm was
-    /// told their names and methods at construction, and these are what serves
-    /// a call under one of those names. Called only from [`Self::pump`], on
+    /// The embedder's native modules, each beside the methods it declared:
+    /// the realm was told those names at construction, these are what serves
+    /// a call under one of them, and the list is what a call's method is
+    /// checked against — [`NativeModule::methods`] is read once, in
+    /// [`LynxGroup::create_lynx_view`]. Called only from [`Self::pump`], on
     /// this thread, which is why they need be neither `Send` nor `Sync`.
-    native_modules: Vec<Box<dyn NativeModule>>,
+    native_modules: Vec<(Box<dyn NativeModule>, Vec<String>)>,
     /// Updated by pump from boot/failure notices on the host thread.
     state: ViewState,
     /// When this view's document started, which is the epoch its animations
@@ -1042,8 +1051,7 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
                 ViewNotice::Engine(event) => {
                     // A fatal event ends the view the same way its release
                     // does, and by the same signal: the token this view was
-                    // built with, which its own task is waiting on and every
-                    // worker its realm created holds a child of.
+                    // built with, which its own task is waiting on.
                     if matches!(
                         event,
                         EngineEvent::StartupFailed(_) | EngineEvent::ScriptRunError(_)
@@ -1080,12 +1088,13 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
                 // FIFO — so a sender this turn cannot find is a worker that
                 // has since gone, and there is nobody left to answer.
                 //
-                // A module nothing here is named for is no error either: the
-                // realm's `NativeModules` object never carried that name, so
-                // such a call can only come from a script importing the host
-                // member directly, and what it registered is its own affair.
-                // Either way no call is built and nothing is answered — there
-                // is nobody left to answer, or nobody was ever asked.
+                // A module nothing here is named for, or a method its module
+                // did not declare, is no error either: the realm's
+                // `NativeModules` object never carried that name, so such a
+                // call can only come from a script importing the host member
+                // directly. The call is assembled and dropped rather than
+                // invoked, and dropping it releases each of its functions in
+                // the realm that is waiting on them.
                 ViewNotice::NativeModuleCall {
                     worker,
                     call,
@@ -1094,17 +1103,28 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
                     arguments,
                     callbacks,
                 } => {
-                    if self.state != ViewState::Failed
-                        && !self.cancel.is_cancelled()
-                        && let Some(native_module) = self
-                            .native_modules
-                            .iter()
-                            .find(|candidate| candidate.name() == module)
-                        && let Some(reply) = self.seat.frame_demand.borrow().sender(worker)
-                    {
-                        native_module.invoke(crate::native_module::ModuleCall::assemble(
-                            call, method, arguments, &callbacks, &reply,
-                        ));
+                    if self.state != ViewState::Failed && !self.cancel.is_cancelled() {
+                        // A statement of its own, so the borrow ends here: a
+                        // module may drive this view's painter inside
+                        // `invoke`, and the painter borrows the same cell.
+                        let reply = self.seat.frame_demand.borrow().sender(worker);
+                        if let Some(reply) = reply {
+                            let call = crate::native_module::ModuleCall::assemble(
+                                call, method, arguments, &callbacks, &reply,
+                            );
+                            match self
+                                .native_modules
+                                .iter()
+                                .find(|(candidate, _)| candidate.name() == module)
+                            {
+                                Some((native_module, methods))
+                                    if methods.contains(&call.method) =>
+                                {
+                                    native_module.invoke(call);
+                                }
+                                _ => drop(call),
+                            }
+                        }
                     }
                 }
             }

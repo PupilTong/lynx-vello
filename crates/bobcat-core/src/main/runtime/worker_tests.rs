@@ -7,6 +7,7 @@ use tokio::sync::mpsc;
 
 use super::*;
 use crate::background::{WorkerEvent, WorkerHome, WorkerPayload};
+use crate::esm::build_runtime;
 use crate::jobs::JsThread;
 use crate::link::{DetachedView, ViewNotice, block_on_deadline, detached_outbox};
 use crate::main::workers::WorkerFactory;
@@ -173,8 +174,7 @@ impl Pair {
         };
         let (outbox, view) = detached_outbox(Arc::new(NoWakeup));
         let cancel = view.token.clone();
-        let mut js = ScriptRuntime::new().unwrap();
-        install_shared_modules(&mut js).unwrap();
+        let mut js = build_runtime().unwrap();
         let ingredients =
             DocumentIngredients::for_test(crate::view::Viewport::new(32.0, 24.0), config);
         let thread = JsThread::new();
@@ -183,7 +183,7 @@ impl Pair {
             ingredients,
             crate::main::runtime::bound_metrics(crate::view::Viewport::new(32.0, 24.0)),
             outbox,
-            &WorkerFactory::new(home.commands()),
+            &WorkerFactory::new(home.commands(), home.trapped()),
             thread.handle(),
             startup,
         )
@@ -1293,6 +1293,51 @@ fn unanswered_script_dispatches_one_error_and_ends_the_handle() {
     drop(pair.source());
     pair.deliver();
     pair.check("if (errors.length !== 1 || !errors[0].includes('without completing')) throw Error('lost source'); worker.postMessage('ignored'); worker.terminate();");
+}
+
+/// A `Worker` constructed once `bobcat-workers` has trapped is never sent
+/// there: it fails at once, as one whose script could not be fetched does,
+/// with no `WorkerCreated`, no `Start` and no request to the host.
+#[test]
+fn a_worker_created_after_its_thread_trapped_fails_without_starting() {
+    let mut pair = Pair::new("globalThis.errors = [];");
+    pair.home
+        .as_ref()
+        .unwrap()
+        .trapped()
+        .store(true, std::sync::atomic::Ordering::Release);
+    pair.check(
+        r"
+        import { Worker } from 'bobcat-internal';
+        globalThis.worker = new Worker('./worker.js');
+        worker.onerror = e => errors.push(e.message);
+    ",
+    );
+    assert!(
+        !asked_for_a_worker(&pair.notices()),
+        "a worker that failed at once asks the host for nothing"
+    );
+    let event = pair.next_event().expect("the worker's failure");
+    assert!(
+        pair.frame_demand.sender(event.key).is_none(),
+        "the view never heard of the worker"
+    );
+    pair.runtime
+        .as_mut()
+        .unwrap()
+        .dispatch_worker_event(&mut pair.js, event.key, event.payload)
+        .unwrap();
+    let failures = worker_failures(pair.notices());
+    assert_eq!(failures.len(), 1);
+    assert!(
+        failures[0].message.contains("the worker thread has ended"),
+        "{}",
+        failures[0].message
+    );
+    pair.check(
+        "if (errors.length !== 1 || !errors[0].includes('the worker thread has ended')) throw Error(JSON.stringify(errors));",
+    );
+    assert_eq!(pair.live_workers(), 1, "only the built-in BTS remains");
 }
 
 #[test]
@@ -2418,6 +2463,7 @@ fn bts_animation_frames_continue_while_an_mts_callback_is_blocked() {
     pair.runtime
         .as_mut()
         .unwrap()
+        .core
         .engine
         .register_host_module_function(
             &mut pair.js,

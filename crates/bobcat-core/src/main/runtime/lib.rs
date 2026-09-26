@@ -39,22 +39,18 @@ use tokio::sync::watch;
 use super::quickjs::{ScriptEngine, ScriptRuntime};
 use crate::clock::ClockInstant;
 use crate::esm::{
-    BTS_MODULE_SPECIFIER, BUNDLE_FETCH_MODULE_SOURCE, BUNDLE_FETCH_MODULE_SPECIFIER,
-    CONTEXT_MODULE_SOURCE, CONTEXT_MODULE_SPECIFIER, EVENT_TARGET_MODULE_SPECIFIER,
-    EVENT_TARGET_SOURCE, FUTURE_MODULE_SOURCE, FUTURE_MODULE_SPECIFIER, HOST_MODULE_SPECIFIER,
-    REQUIRE_MODULE_SOURCE, REQUIRE_MODULE_SPECIFIER, SECTION_URL_MODULE_SOURCE,
-    SECTION_URL_MODULE_SPECIFIER, TIMER_MODULE_SOURCE, TIMER_MODULE_SPECIFIER,
+    BTS_MODULE_SPECIFIER, ELEMENT_MODULE_SPECIFIER, HOST_MODULE_SPECIFIER,
+    RUNTIME_MODULE_SPECIFIER, TIMER_MODULE_SPECIFIER, WORKER_CLASS_MODULE_SPECIFIER,
 };
 use crate::link::{InputEventPayload, ViewNotice, ViewOutbox};
 use crate::main::tree::{ImageOutcomes, LynxDocument, PageConfig, new_document};
+use crate::realm::{RealmCore, context_of, open_realm};
 use crate::resource::LoadedSource;
 use crate::script::ScriptError;
-use crate::timers::{TimerState, install_timer_members, run_due_timers};
+use crate::timers::run_due_timers;
 use crate::view::{LynxViewError, ScreenMetrics, StartupSource, Viewport};
 
 const BOOT_MODULE_SPECIFIER: &str = "bobcat:boot";
-const ELEMENT_MODULE_SPECIFIER: &str = "bobcat:element";
-const RUNTIME_MODULE_SPECIFIER: &str = "bobcat:runtime";
 const EVENT_DISPATCH_EXPORT: &str = "__BobcatDispatchEvent";
 
 /// What an element's own image source settling is called. Both are web-core's
@@ -133,9 +129,6 @@ impl EventDetail<'_> {
 /// Declarations one `__SetInlineStyles` record carries without touching the
 /// heap. Compiled `ReactLynx` records are a handful of properties.
 const INLINE_DECLARATIONS: usize = 16;
-
-const ELEMENT_PAPI_SOURCE: &str = crate::esm::runtime_source!("element-papi");
-const RUNTIME_MODULE_SOURCE: &str = crate::esm::runtime_source!("main-thread-runtime");
 
 mod style_sheets;
 
@@ -692,22 +685,22 @@ fn construction_phase<T>(phase: &str, work: impl FnOnce() -> T) -> Result<T, Str
 /// Everything that holds an `Rc` of this realm's JavaScript context is declared
 /// before `slot`, so the realm is freed — and with it every host function and
 /// its own clone of that `Rc` — before the `LynxDocument` those functions could
-/// name. JavaScript first, then the Rust object it named.
+/// name. JavaScript first, then the Rust object it named. `core` is first: the
+/// realm, then the timer and future tables the realm's core members wrote to,
+/// neither of which runs JavaScript when it drops.
 ///
 /// `workers` follows the realm handles: its channels belong to this MTS
 /// runtime and close when it is released. JS host functions reference it
 /// weakly, so queued finalizers cannot extend the channels' lifetime.
 pub(crate) struct MainThreadRuntime {
-    engine: ScriptEngine,
+    /// The realm and the members every realm has, which
+    /// [`crate::realm::open_realm`] installed.
+    core: RealmCore,
     /// This realm's side of the workers it created, shared with the three
     /// host functions that drive them, and where a worker failure is reported
     /// from.
     workers: Rc<super::workers::WorkerOwner>,
     slot: Rc<RefCell<DocumentSlot>>,
-    timers: Rc<TimerState>,
-    /// Every host-backed operation this realm holds a `Future` for, every
-    /// `fetchResource` included.
-    futures: Rc<crate::future::FutureTable>,
     /// The newest reading of the view's timeline this side has been handed —
     /// a `BeginFrame`'s `now` or a vsync's, both in milliseconds off the same
     /// epoch, the view's construction.
@@ -743,9 +736,11 @@ impl fmt::Debug for MainThreadRuntime {
 }
 
 impl MainThreadRuntime {
-    /// Opens one view's realm, furnishes it, and installs the `Worker`
-    /// bindings — handing back the one channel everything this view's workers
-    /// say arrives on.
+    /// Opens one view's realm through [`crate::realm::open_realm`], which
+    /// installs the core every realm has, and installs this realm's own host
+    /// members — the document and host module, the stylesheet members, the
+    /// startup strings and the `Worker` bindings — handing back the one
+    /// channel everything this view's workers say arrives on.
     ///
     /// A realm has its `Worker` members from the moment it exists: there is no
     /// state in which it is missing them, and so no order between furnishing
@@ -783,72 +778,35 @@ impl MainThreadRuntime {
         ),
         MainThreadError,
     > {
-        let mut engine = js_runtime
-            .create_realm()
-            .map_err(|error| MainThreadError::from_engine("creating the script realm", error))?;
-        let timers = Rc::new(TimerState::new());
-        let frame_outbox = outbox.clone();
-        crate::script_frames::install(&mut engine, js_runtime, move |pending| {
-            frame_outbox.notify(crate::link::ViewNotice::ScriptFrameDemand {
-                worker: None,
-                pending,
-            });
-        })
-        .map_err(|error| MainThreadError::from_engine("installing animation frames", error))?;
-        engine.enable_module_loading();
         let config = ingredients.config;
         let sheets = std::mem::take(&mut startup.sheets);
         let slot = DocumentSlot::new(ingredients, sheets, metrics, outbox.clone());
-        install_bobcat(
-            &mut engine,
+        // The view's own token: what this realm's core members park on ends
+        // with the view.
+        let host = outbox.host_outbox(outbox.token().clone());
+        let (core, (workers, incoming)) = open_realm(
             js_runtime,
-            &slot,
-            &outbox,
-            &timers,
+            &host,
             thread.clone(),
-        )?;
-        style_sheets::install_styles(&mut engine, js_runtime, &slot, &outbox, thread.clone())?;
-        let futures = Rc::new(crate::future::FutureTable::new());
-        crate::future::install(
-            &mut engine,
-            js_runtime,
-            &futures,
-            outbox.token().clone(),
-            thread.clone(),
+            None,
+            |engine, js_runtime| {
+                install_bobcat(engine, js_runtime, &slot, &outbox, thread.clone())
+                    .map_err(MainThreadError::into_script_error)?;
+                style_sheets::install_styles(engine, js_runtime, &slot, &outbox, thread)
+                    .map_err(MainThreadError::into_script_error)?;
+                install_startup_strings(engine, js_runtime, startup_strings(&mut startup))
+                    .map_err(MainThreadError::into_script_error)?;
+                workers
+                    .install(engine, js_runtime, outbox, startup.background_entry.take())
+                    .map_err(|error| context_of("installing Worker", error))
+            },
         )
-        .map_err(|error| MainThreadError::from_engine("installing Future", error))?;
-        // Beside the table rather than over a wait of its own: what a fetch
-        // hands JavaScript is a future id.
-        crate::fetch::install(
-            &mut engine,
-            js_runtime,
-            &outbox.host_outbox(outbox.token().clone()),
-            &futures,
-        )
-        .map_err(|error| MainThreadError::from_engine("installing fetchResource", error))?;
-        crate::require::install(
-            &mut engine,
-            js_runtime,
-            outbox.host_outbox(outbox.token().clone()),
-            thread,
-        )
-        .map_err(|error| MainThreadError::from_engine("installing require", error))?;
-        install_startup_strings(&mut engine, js_runtime, startup_strings(&mut startup))?;
-        let (workers, incoming) = workers
-            .install(
-                &mut engine,
-                js_runtime,
-                outbox,
-                startup.background_entry.take(),
-            )
-            .map_err(|error| MainThreadError::from_engine("installing Worker", error))?;
+        .map_err(|error| MainThreadError::from_engine("opening the MTS realm", error))?;
         Ok((
             Self {
-                engine,
+                core,
                 workers,
                 slot,
-                timers,
-                futures,
                 timeline_milliseconds: 0.0,
                 screen: startup.screen,
                 config,
@@ -896,10 +854,11 @@ impl MainThreadRuntime {
         let location = location.as_ref();
         let key = key.get().to_string();
         let called = self
+            .core
             .engine
             .call_module_export(
                 js_runtime,
-                super::workers::MODULE,
+                WORKER_CLASS_MODULE_SPECIFIER,
                 "__BobcatDispatchWorkerEvent",
                 &[
                     HostArgument::String(&key),
@@ -961,6 +920,7 @@ impl MainThreadRuntime {
             ),
         };
         let called = self
+            .core
             .engine
             .call_module_export(js, RUNTIME_MODULE_SPECIFIER, export, arguments)
             .map_err(|error| MainThreadError::from_engine("updating page data", error));
@@ -987,7 +947,8 @@ impl MainThreadRuntime {
         milliseconds: f64,
     ) -> Result<(), MainThreadError> {
         self.timeline_milliseconds = milliseconds;
-        self.engine
+        self.core
+            .engine
             .call_module_export(
                 js,
                 RUNTIME_MODULE_SPECIFIER,
@@ -1195,6 +1156,7 @@ impl MainThreadRuntime {
         detail.push_numbers(&mut arguments);
 
         let called = self
+            .core
             .engine
             .call_module_export(
                 js_runtime,
@@ -1272,7 +1234,7 @@ impl MainThreadRuntime {
 
     /// When the earliest armed timer comes due, if one is armed.
     pub(crate) fn next_timer_deadline(&mut self) -> Option<ClockInstant> {
-        self.timers.next_deadline()
+        self.core.timers.next_deadline()
     }
 
     /// Runs every timer due now, in the order the standard fires them.
@@ -1281,7 +1243,9 @@ impl MainThreadRuntime {
     /// one that throws neither stops the ones behind it nor ends the realm —
     /// the same standing an event listener that throws already has.
     pub(crate) fn run_due_timers(&mut self, js_runtime: &mut ScriptRuntime) -> Vec<ScriptError> {
-        let Some(mut failures) = run_due_timers(&mut self.engine, js_runtime, &self.timers) else {
+        let Some(mut failures) =
+            run_due_timers(&mut self.core.engine, js_runtime, &self.core.timers)
+        else {
             return Vec::new();
         };
         // Callbacks remove elements like any other realm entry point; the
@@ -1476,7 +1440,7 @@ await Promise.resolve().then(() => __FlushElementTree());
 
     /// The next module an import in this realm is waiting for, if any.
     pub(crate) fn take_module_request(&mut self) -> Option<String> {
-        self.engine.take_module_request()
+        self.core.engine.take_module_request()
     }
 
     /// The name boot's `import` of the entry asks the realm for: the entry's
@@ -1534,13 +1498,13 @@ await Promise.resolve().then(() => __FlushElementTree());
             Ok(LoadedSource::Entry { source, url }) => Ok((url, entry_module_source(&source))),
             Ok(_) => Err(format!("the MTS entry {requested} is not a script")),
             Err(error) => Err(format!("loading the MTS entry {requested}: {error}")),
-        }
-        .map_err(|message| message.replace('\0', "\u{fffd}"));
+        };
         // Without a checkpoint of its own: the completion below drains the
         // queue for both, so naming the entry wakes no sibling realm between
         // them.
         if let Ok((url, _)) = &loaded {
-            self.engine
+            self.core
+                .engine
                 .call_module_export_before_operation(
                     js_runtime,
                     RUNTIME_MODULE_SPECIFIER,
@@ -1549,7 +1513,8 @@ await Promise.resolve().then(() => __FlushElementTree());
                 )
                 .map_err(booting)?;
         }
-        self.engine
+        self.core
+            .engine
             .complete_module(
                 js_runtime,
                 &name,
@@ -1564,7 +1529,7 @@ await Promise.resolve().then(() => __FlushElementTree());
     /// The futures this realm asked to settle asynchronously — a `.then` on a
     /// `Future` — since the last entry. Each is a task for the view's owner.
     pub(crate) fn take_future_settles(&mut self) -> Vec<(u32, crate::future::HostFuture)> {
-        self.futures.take_settle_requests()
+        self.core.futures.take_settle_requests()
     }
 
     /// Hands one settled future back to the realm that asked for it.
@@ -1574,7 +1539,7 @@ await Promise.resolve().then(() => __FlushElementTree());
         id: u32,
         outcome: crate::future::Outcome,
     ) -> Result<(), MainThreadError> {
-        crate::future::deliver(&mut self.engine, js_runtime, id, outcome)
+        crate::future::deliver(&mut self.core.engine, js_runtime, id, outcome)
             .map_err(|error| MainThreadError::from_engine("settling a future", error))
     }
 
@@ -1593,7 +1558,8 @@ await Promise.resolve().then(() => __FlushElementTree());
     }
 
     pub(crate) fn main_module_finished(&mut self) -> Result<bool, MainThreadError> {
-        self.engine
+        self.core
+            .engine
             .module_finished()
             .map_err(|error| MainThreadError::from_engine("booting the MTS entry", error))
     }
@@ -1604,7 +1570,8 @@ await Promise.resolve().then(() => __FlushElementTree());
         &mut self,
         js_runtime: &mut ScriptRuntime,
     ) -> Result<(), MainThreadError> {
-        self.engine
+        self.core
+            .engine
             .start_module(
                 js_runtime,
                 "import { __BobcatDispose } from 'bobcat:runtime'; await __BobcatDispose();",
@@ -1614,7 +1581,8 @@ await Promise.resolve().then(() => __FlushElementTree());
     }
 
     pub(crate) fn disposal_finished(&mut self) -> Result<bool, MainThreadError> {
-        self.engine
+        self.core
+            .engine
             .module_finished()
             .map_err(|error| MainThreadError::from_engine("disposing the MTS realm", error))
     }
@@ -1633,9 +1601,10 @@ await Promise.resolve().then(() => __FlushElementTree());
             }
             Ok(LoadedSource::Font(_)) => Err("a module request returned a font".to_owned()),
             Ok(LoadedSource::Fetched) => Err("a module request returned a plain fetch".to_owned()),
-            Err(error) => Err(format!("module '{name}': {error}").replace('\0', "\u{fffd}")),
+            Err(error) => Err(format!("module '{name}': {error}")),
         };
-        self.engine
+        self.core
+            .engine
             .complete_module(
                 js_runtime,
                 name,
@@ -1649,7 +1618,8 @@ await Promise.resolve().then(() => __FlushElementTree());
 
     fn collect_garbage(&mut self, js_runtime: &mut ScriptRuntime) -> Result<(), MainThreadError> {
         self.slot.borrow_mut().removals = 0;
-        self.engine
+        self.core
+            .engine
             .collect_garbage(js_runtime)
             .map_err(|error| MainThreadError::from_engine("collecting garbage", error))
     }
@@ -1678,6 +1648,7 @@ await Promise.resolve().then(() => __FlushElementTree());
         phase: &'static str,
     ) -> Result<(), MainThreadError> {
         let result = self
+            .core
             .engine
             .start_module(js_runtime, source, name)
             .map_err(|error| MainThreadError::from_engine(phase, error));
@@ -1686,62 +1657,11 @@ await Promise.resolve().then(() => __FlushElementTree());
     }
 }
 
-/// Registers the source modules every realm on one runtime shares.
-///
-/// Their specifiers are fixed, so registering them per realm would refuse the
-/// second realm on a runtime — a runtime holds one source per name and
-/// compiles it into a module per realm, which is exactly what views share.
-pub(crate) fn install_shared_modules(
-    js_runtime: &mut ScriptRuntime,
-) -> Result<(), MainThreadError> {
-    js_runtime
-        .register_module_source(super::workers::MODULE, super::workers::SOURCE)
-        .map_err(|error| MainThreadError::from_engine("registering Worker", error))?;
-    js_runtime
-        .register_module_source(EVENT_TARGET_MODULE_SPECIFIER, EVENT_TARGET_SOURCE)
-        .map_err(|error| {
-            MainThreadError::from_engine("registering the EventTarget module", error)
-        })?;
-    js_runtime
-        .register_module_source(CONTEXT_MODULE_SPECIFIER, CONTEXT_MODULE_SOURCE)
-        .map_err(|error| MainThreadError::from_engine("registering the Context module", error))?;
-    js_runtime
-        .register_module_source(RUNTIME_MODULE_SPECIFIER, RUNTIME_MODULE_SOURCE)
-        .map_err(|error| {
-            MainThreadError::from_engine("registering the Bobcat runtime module", error)
-        })?;
-    js_runtime
-        .register_module_source(ELEMENT_MODULE_SPECIFIER, ELEMENT_PAPI_SOURCE)
-        .map_err(|error| {
-            MainThreadError::from_engine("registering the Element PAPI module", error)
-        })?;
-    js_runtime
-        .register_module_source(TIMER_MODULE_SPECIFIER, TIMER_MODULE_SOURCE)
-        .map_err(|error| MainThreadError::from_engine("registering the timer module", error))?;
-    js_runtime
-        .register_module_source(FUTURE_MODULE_SPECIFIER, FUTURE_MODULE_SOURCE)
-        .map_err(|error| MainThreadError::from_engine("registering the Future module", error))?;
-    js_runtime
-        .register_module_source(SECTION_URL_MODULE_SPECIFIER, SECTION_URL_MODULE_SOURCE)
-        .map_err(|error| {
-            MainThreadError::from_engine("registering the section URL module", error)
-        })?;
-    js_runtime
-        .register_module_source(BUNDLE_FETCH_MODULE_SPECIFIER, BUNDLE_FETCH_MODULE_SOURCE)
-        .map_err(|error| {
-            MainThreadError::from_engine("registering the bundle fetch module", error)
-        })?;
-    js_runtime
-        .register_module_source(REQUIRE_MODULE_SPECIFIER, REQUIRE_MODULE_SOURCE)
-        .map_err(|error| MainThreadError::from_engine("registering the require module", error))
-}
-
 fn install_bobcat(
     engine: &mut ScriptEngine,
     js_runtime: &mut ScriptRuntime,
     handle: &Rc<RefCell<DocumentSlot>>,
     outbox: &ViewOutbox,
-    timers: &Rc<TimerState>,
     thread: crate::jobs::JsThreadHandle,
 ) -> Result<(), MainThreadError> {
     for (name, is_error) in [("reportScriptError", true), ("logScriptMessage", false)] {
@@ -1758,9 +1678,7 @@ fn install_bobcat(
         })?;
     }
     install_host_module(engine, js_runtime, handle, thread)?;
-    install_event_members(engine, js_runtime, outbox)?;
-    install_timer_members(engine, js_runtime, timers)
-        .map_err(|error| MainThreadError::from_engine("installing the timer members", error))
+    install_event_members(engine, js_runtime, outbox)
 }
 
 fn install(

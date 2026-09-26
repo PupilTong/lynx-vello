@@ -1,9 +1,21 @@
-//! The module names both kinds of realm agree on.
+//! The built-in modules both runtimes register, and the module names both
+//! kinds of realm agree on.
 //!
-//! A source is registered per `QuickJS` runtime, so a group registers each of
-//! these twice: once on the runtime its views' realms share, once on the one
-//! its workers share. The names are here, beside [`crate::clock`], because
-//! neither runtime owns them.
+//! Both engine threads register the whole of [`BUILTIN_MODULES`] on their
+//! runtime, so a group holds each source twice: once on the runtime its views'
+//! realms share, once on the one its workers share. What a realm can use of
+//! them is decided by the host modules it declares: an import of a host module
+//! the realm does not declare fails with a `ReferenceError`, and an import of a
+//! member its host module lacks fails at link with a `SyntaxError`. A name
+//! under [`ENGINE_MODULE_PREFIXES`] that is neither registered nor declared
+//! fails in the realm that asked with a `ReferenceError`, and is never
+//! fetched. The names are here, beside [`crate::clock`], because neither
+//! runtime owns them.
+
+use std::sync::Arc;
+
+use crate::main::quickjs::ScriptRuntime;
+use crate::script::ScriptError;
 
 /// The `packages/bobcat-element/src` module `$name` as the JavaScript a realm
 /// evaluates, compiled by `build.rs` into this Cargo build's `OUT_DIR`.
@@ -12,7 +24,29 @@ macro_rules! runtime_source {
         include_str!(concat!(env!("OUT_DIR"), "/runtime/", $name, ".js"))
     };
 }
-pub(crate) use runtime_source;
+
+/// One built-in module, as a runtime registers it.
+pub(crate) struct BuiltinModule {
+    /// What a realm imports it by.
+    pub(crate) specifier: &'static str,
+    /// The `packages/bobcat-element/src` file it is compiled from.
+    pub(crate) file: &'static str,
+    /// The JavaScript `build.rs` compiled that file to.
+    pub(crate) source: &'static str,
+}
+
+/// The [`BuiltinModule`] compiled from `packages/bobcat-element/src/$name.ts`,
+/// imported as `$specifier`. The file name and the source are both written
+/// from `$name`, so the two cannot name different files.
+macro_rules! builtin_module {
+    ($specifier:expr, $name:literal) => {
+        BuiltinModule {
+            specifier: $specifier,
+            file: concat!($name, ".ts"),
+            source: runtime_source!($name),
+        }
+    };
+}
 
 /// The native module every realm's Rust-backed members are exported from.
 pub(crate) const HOST_MODULE_SPECIFIER: &str = "bobcat-internal:host";
@@ -20,35 +54,48 @@ pub(crate) const HOST_MODULE_SPECIFIER: &str = "bobcat-internal:host";
 /// The timer runtime: the realm's half of `setTimeout` and its three
 /// companions, imported for its effect.
 pub(crate) const TIMER_MODULE_SPECIFIER: &str = "bobcat:timers";
-pub(crate) const TIMER_MODULE_SOURCE: &str = runtime_source!("timers");
 
 /// The `Future` class: one host-backed operation, usable synchronously
 /// through `wait` and as a `PromiseLike` through `then`. The class is
 /// JavaScript like every other built-in; the table behind it and the three
 /// members it speaks to are [`crate::future`].
 pub(crate) const FUTURE_MODULE_SPECIFIER: &str = "bobcat:future";
-pub(crate) const FUTURE_MODULE_SOURCE: &str = runtime_source!("future");
 
 /// Node's `createRequire`, the one synchronous way into a source a realm has
 /// not imported. The algorithm is JavaScript like every other built-in; what
 /// it is written over is the two host members [`crate::require`] installs.
 pub(crate) const REQUIRE_MODULE_SPECIFIER: &str = "bobcat:module";
-pub(crate) const REQUIRE_MODULE_SOURCE: &str = runtime_source!("module");
 
 /// The `EventTarget` a view's `lynx.getEngine()` and a worker's global scope
 /// are both built on.
 pub(crate) const EVENT_TARGET_MODULE_SPECIFIER: &str = "bobcat:event-target";
-pub(crate) const EVENT_TARGET_SOURCE: &str = runtime_source!("event-target");
 
 pub(crate) const GLOBAL_EVENT_MODULE_SPECIFIER: &str = "bobcat:global-event-emitter";
-pub(crate) const GLOBAL_EVENT_MODULE_SOURCE: &str = runtime_source!("global-event-emitter");
 
 /// Lynx's typed asynchronous Context channel, shared by MTS and BTS.
 pub(crate) const CONTEXT_MODULE_SPECIFIER: &str = "bobcat:cross-thread-context";
-pub(crate) const CONTEXT_MODULE_SOURCE: &str = runtime_source!("cross-thread-context");
 
 /// The built-in BTS bootstrap, loaded like any other Worker script.
 pub(crate) const BTS_MODULE_SPECIFIER: &str = "bobcat:bts";
+
+/// The Element PAPI: the named exports an MTS entry builds and edits its
+/// view's document through.
+pub(crate) const ELEMENT_MODULE_SPECIFIER: &str = "bobcat:element";
+
+/// The MTS compatibility module: the bindings an MTS entry is given, and the
+/// exports the view calls into its realm through.
+pub(crate) const RUNTIME_MODULE_SPECIFIER: &str = "bobcat:runtime";
+
+/// The MTS realm's `Worker` class. The one built-in name without a colon,
+/// which the module normalizer passes through by name.
+pub(crate) const WORKER_CLASS_MODULE_SPECIFIER: &str = "bobcat-internal";
+
+/// The worker realm's global-scope module.
+pub(crate) const WORKER_MODULE_SPECIFIER: &str = "bobcat:worker";
+
+/// The compiler factory ABI: what the BTS runtime's `lynx.requireModule` and
+/// its companions load a bundle body through.
+pub(crate) const LYNX_MODULES_SPECIFIER: &str = "bobcat:lynx-modules";
 
 /// The literal [`MTS_CHUNK_PREAMBLE`] is, as a macro, so that
 /// `main::runtime`'s `ENTRY_PREAMBLE` can `concat!` onto it: `concat!` takes
@@ -90,7 +137,6 @@ pub const MTS_CHUNK_PREAMBLE: &str = mts_chunk_preamble!();
 
 /// BTS bindings live separately from the bootstrap that awaits the app entry.
 pub(crate) const BTS_RUNTIME_MODULE_SPECIFIER: &str = "bobcat:bts-runtime";
-pub(crate) const BTS_RUNTIME_MODULE_SOURCE: &str = runtime_source!("background-thread-runtime");
 
 /// Named imports prepended to a BTS application entry, as for MTS. The
 /// bootstrap uses the same import to initialize the Context before the app.
@@ -124,7 +170,6 @@ pub const BTS_CHUNK_PREAMBLE: &str = concat!(
 /// with — one module so the two cannot drift, and so `bobcat-source` has one
 /// rule to register under.
 pub(crate) const SECTION_URL_MODULE_SPECIFIER: &str = "bobcat:section-url";
-pub(crate) const SECTION_URL_MODULE_SOURCE: &str = runtime_source!("section-url");
 
 /// `lynx.fetchBundle`'s handle: the `{wait, then}` object and the callback
 /// list, over the [`Future`] a `fetchResource` ([`crate::fetch`]) answers
@@ -133,8 +178,110 @@ pub(crate) const SECTION_URL_MODULE_SOURCE: &str = runtime_source!("section-url"
 ///
 /// [`Future`]: crate::future
 pub(crate) const BUNDLE_FETCH_MODULE_SPECIFIER: &str = "bobcat:bundle-fetch";
-pub(crate) const BUNDLE_FETCH_MODULE_SOURCE: &str = runtime_source!("bundle-fetch");
 
 /// BTS query builders carry selection tokens across Worker messages.
 pub(crate) const SELECTOR_QUERY_SPECIFIER: &str = "bobcat:selector-query";
-pub(crate) const SELECTOR_QUERY_SOURCE: &str = runtime_source!("selector-query");
+
+/// The name prefixes of the engine's own modules. A runtime reserves both: a
+/// name under one is answered from the runtime's registered sources and the
+/// importing realm's host modules, and from nothing else.
+///
+/// [`WORKER_CLASS_MODULE_SPECIFIER`] has no colon, so neither covers it; both
+/// runtimes register it, so an import of it never reaches a fetcher either.
+pub(crate) const ENGINE_MODULE_PREFIXES: [&str; 2] = ["bobcat:", "bobcat-internal:"];
+
+/// Every built-in module. Both runtimes register all of them, and a realm's
+/// host modules decide which of them it can link.
+///
+/// In the order of the `paths` of `packages/bobcat-element/src/tsconfig.json`,
+/// which maps each specifier to the same file; a test holds the two equal.
+pub(crate) const BUILTIN_MODULES: &[BuiltinModule] = &[
+    builtin_module!(LYNX_MODULES_SPECIFIER, "lynx-modules"),
+    builtin_module!(GLOBAL_EVENT_MODULE_SPECIFIER, "global-event-emitter"),
+    builtin_module!(SELECTOR_QUERY_SPECIFIER, "selector-query"),
+    builtin_module!(ELEMENT_MODULE_SPECIFIER, "element-papi"),
+    builtin_module!(RUNTIME_MODULE_SPECIFIER, "main-thread-runtime"),
+    builtin_module!(TIMER_MODULE_SPECIFIER, "timers"),
+    builtin_module!(FUTURE_MODULE_SPECIFIER, "future"),
+    builtin_module!(REQUIRE_MODULE_SPECIFIER, "module"),
+    builtin_module!(SECTION_URL_MODULE_SPECIFIER, "section-url"),
+    builtin_module!(BUNDLE_FETCH_MODULE_SPECIFIER, "bundle-fetch"),
+    builtin_module!(EVENT_TARGET_MODULE_SPECIFIER, "event-target"),
+    builtin_module!(CONTEXT_MODULE_SPECIFIER, "cross-thread-context"),
+    builtin_module!(WORKER_CLASS_MODULE_SPECIFIER, "worker"),
+    builtin_module!(WORKER_MODULE_SPECIFIER, "worker-runtime"),
+    builtin_module!(BTS_RUNTIME_MODULE_SPECIFIER, "background-thread-runtime"),
+];
+
+/// Builds one of a group's two `QuickJS` runtimes: every built-in module
+/// registered on it for every realm that will be opened there, and the
+/// [`ENGINE_MODULE_PREFIXES`] reserved to those and to each realm's host
+/// modules.
+///
+/// Both engine threads build theirs with this, and both keep an `Err` rather
+/// than failing the group: it is the failure of every view or worker that
+/// asks that runtime for a realm, each of which reports it as its own.
+///
+/// Sources are registered once per runtime rather than once per realm: a
+/// runtime holds one source per name and compiles it into a module per realm,
+/// so a second registration of a name would refuse the second realm.
+pub(crate) fn build_runtime() -> Result<ScriptRuntime, ScriptError> {
+    let mut runtime = ScriptRuntime::new()?;
+    for module in BUILTIN_MODULES {
+        runtime
+            .register_module_source(module.specifier, module.source)
+            .map_err(|mut error| {
+                error.message = Arc::from(format!(
+                    "registering {} ({}): {}",
+                    module.specifier, module.file, error.message
+                ));
+                error
+            })?;
+    }
+    for prefix in ENGINE_MODULE_PREFIXES {
+        runtime.reserve_module_prefix(prefix).map_err(|mut error| {
+            error.message = Arc::from(format!("reserving {prefix}: {}", error.message));
+            error
+        })?;
+    }
+    Ok(runtime)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BUILTIN_MODULES;
+
+    /// What type-checks the built-ins: its `paths` resolve each specifier to
+    /// the file the realm registers under it, one entry per line.
+    const TSCONFIG: &str = include_str!("../../../packages/bobcat-element/src/tsconfig.json");
+
+    /// The table a runtime registers and the `paths` the TypeScript is
+    /// checked against name the same files under the same specifiers, in the
+    /// same order, so neither can gain or rename a module alone.
+    #[test]
+    fn the_built_in_table_is_the_tsconfig_paths() {
+        let paths: Vec<(&str, &str)> = TSCONFIG
+            .lines()
+            .map(str::trim)
+            .skip_while(|line| *line != r#""paths": {"#)
+            .skip(1)
+            .take_while(|line| *line != "}")
+            .map(|line| {
+                let (specifier, file) = line
+                    .split_once(": ")
+                    .unwrap_or_else(|| panic!("one path per line: {line}"));
+                let file = file
+                    .trim_end_matches(',')
+                    .strip_prefix(r#"["./"#)
+                    .and_then(|file| file.strip_suffix(r#""]"#))
+                    .unwrap_or_else(|| panic!("one file per path: {line}"));
+                (specifier.trim_matches('"'), file)
+            })
+            .collect();
+        let table: Vec<(&str, &str)> = BUILTIN_MODULES
+            .iter()
+            .map(|module| (module.specifier, module.file))
+            .collect();
+        assert_eq!(table, paths);
+    }
+}

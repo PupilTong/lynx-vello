@@ -129,6 +129,10 @@ unsafe extern "C" {
         source: *const u8,
         source_length: usize,
     ) -> c_int;
+    pub(crate) fn qjs_runtime_reserve_module_prefix(
+        runtime: *mut QjsRuntime,
+        prefix: *const c_char,
+    ) -> c_int;
     pub(crate) fn qjs_context_add_host_module_export(
         context: *mut QjsContext,
         name: *const c_char,

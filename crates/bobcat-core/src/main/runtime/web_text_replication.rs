@@ -67,6 +67,7 @@ use tokio::sync::mpsc;
 
 use super::*;
 use crate::background::{WorkerCommand, WorkerEvent, WorkerHome};
+use crate::esm::build_runtime;
 use crate::jobs::JsThread;
 use crate::link::{DetachedView, block_on_deadline, detached_outbox};
 use crate::main::tree::{PageConfig, Viewport};
@@ -141,8 +142,7 @@ fn runtime_over(
     ingredients: DocumentIngredients,
 ) -> (ScriptRuntime, MainThreadRuntime, DocumentProbe) {
     let (outbox, _far_end) = detached_outbox(Arc::new(NoWakeup));
-    let mut js_runtime = ScriptRuntime::new().expect("the test runtime starts");
-    install_shared_modules(&mut js_runtime).expect("the shared modules register");
+    let mut js_runtime = build_runtime().expect("the test runtime builds");
     let (workers, inbox) = mpsc::unbounded_channel();
     let thread = JsThread::new();
     let (runtime, worker_events) = MainThreadRuntime::new(
@@ -150,7 +150,7 @@ fn runtime_over(
         ingredients,
         bound_metrics(Viewport::new(393.0, 727.0)),
         outbox,
-        &WorkerFactory::new(workers),
+        &WorkerFactory::new(workers, Arc::default()),
         thread.handle(),
         RealmStartup::default(),
     )
@@ -210,8 +210,7 @@ fn background_pair(main: &str, background: &str) -> BackgroundPair {
     let home =
         WorkerHome::with_entry_for_test((background.to_owned(), "test:bts-entry".to_owned()));
     let (outbox, view) = detached_outbox(Arc::new(NoWakeup));
-    let mut js = ScriptRuntime::new().expect("the test runtime starts");
-    install_shared_modules(&mut js).expect("the shared modules register");
+    let mut js = build_runtime().expect("the test runtime builds");
     let mut text = dom::TextContext::new();
     assert_eq!(text.register_fonts(dom::FontBlob::from_static(AHEM)), 1);
     let mut ingredients =
@@ -223,7 +222,7 @@ fn background_pair(main: &str, background: &str) -> BackgroundPair {
         ingredients,
         bound_metrics(Viewport::new(393.0, 727.0)),
         outbox,
-        &WorkerFactory::new(home.commands()),
+        &WorkerFactory::new(home.commands(), home.trapped()),
         thread.handle(),
         // The main script boots below, which is what answers this realm's
         // entry request; this names the BTS entry and nothing else.

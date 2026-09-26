@@ -38,11 +38,20 @@ and `bobcat-workers` (every Worker realm, including the BTS).
   realm scopes. `view/` holds `LynxGroup`, `LynxView`, `ViewSources` and
   `create_lynx_view`; `paint/` the `Painter`; `link.rs` the per-view channels;
   `lifetime.rs` the `CancellationToken`, `serve_clock` and `run_job`;
+  `realm.rs` (`open_realm`, the one constructor both threads open a realm
+  with: it installs the core every realm has under `bobcat-internal:host` —
+  frame demand, timers, `Future`, `fetchResource`, `require` — then runs the
+  caller's own host modules, passed as a parameter, and answers with
+  `RealmCore { engine, timers, futures }`);
   `timers.rs`, `clock.rs`/`alarm.rs`, `future.rs` (the per-realm `FutureTable`
-  and `waitFuture`/`takeFuture`/`settleFuture`), `esm.rs`, `require.rs`
-  (`resolveModuleUrl` and `loadModuleSync`, the two members `bobcat:module` is
-  written over), `fetch.rs` (`fetchResource`, the one member a realm fetches a
-  URL through — a plain fetch registered as a `Future`, or `true` at once when
+  and `waitFuture`/`takeFuture`/`settleFuture`), `esm.rs` (`BUILTIN_MODULES`,
+  the one table both runtimes register, and `build_runtime`, which also
+  reserves `bobcat:`/`bobcat-internal:` so that an engine name nothing
+  registered or declared fails in the realm with a `ReferenceError` instead of
+  reaching the fetcher), `require.rs` (`resolveModuleUrl` and
+  `loadModuleSync`, the two members `bobcat:module` is written over),
+  `fetch.rs` (`fetchResource`, the one member a realm fetches a URL through —
+  a plain fetch registered as a `Future`, or `true` at once when
   `ResourceFetcher::fetch_probe` says this view already fetched the URL, with
   nothing bundle-specific anywhere in core), `script.rs`, `resource.rs`,
   `style.rs`.
@@ -165,6 +174,10 @@ Shorthand `lynx/`, `lynx-stack/`, `Paws/`; absolute paths live once in AGENTS.md
   `pnpm --filter reactlynx-test-fixtures build` first — `bobcat-core`'s build
   compiles the realm runtime into `OUT_DIR`, so a stale install breaks cargo.
 - `cargo clippy --all-targets -- -D warnings`.
+- The wasm32 clippy of CI's `browser` job (the command and the Homebrew
+  `llvm@22` `CC`/`CXX` are in AGENTS.md) whenever a change touches
+  `cfg(target_arch = "wasm32")` or `cfg(panic = "abort")` code, or an API
+  `crates/bobcat-wasm/src/browser.rs` uses: no native build type-checks either.
 - `cargo test -p bobcat-core` — `tests/main_thread.rs` runs the emitted JS
   through the real realm, beside `startup`, `multi_view`, `web_bundle`,
   `style_sheets`, `src/main/runtime/{tests,worker_tests}.rs` and

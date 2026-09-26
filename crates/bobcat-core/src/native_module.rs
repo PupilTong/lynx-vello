@@ -44,7 +44,10 @@ pub trait NativeModule {
     ///
     /// Only these exist on the JavaScript object. Anything else is
     /// `undefined`, which is the answer native gives for a method a module
-    /// does not carry.
+    /// does not carry. A call naming any other method — which only a script
+    /// importing the host member directly can make — never reaches
+    /// [`Self::invoke`]: [`LynxView::pump`](crate::LynxView::pump) drops it,
+    /// which releases its callbacks.
     ///
     /// [`CustomElement::observed_attributes`]: dom::CustomElement::observed_attributes
     fn methods(&self) -> Vec<String>;

@@ -8,6 +8,8 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use quickjs_rust_bridge::HostValue;
 use rustc_hash::FxHashMap;
@@ -15,26 +17,34 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::quickjs::{ScriptEngine, ScriptRuntime};
-use crate::background::{WorkerCommand, WorkerEvent, WorkerKey, WorkerMessage, WorkerStart};
+use crate::background::{
+    WorkerCommand, WorkerEvent, WorkerKey, WorkerMessage, WorkerPayload, WorkerStart,
+};
 use crate::esm::{BTS_ENTRY_PREAMBLE, BTS_MODULE_SPECIFIER, HOST_MODULE_SPECIFIER};
 use crate::link::{ViewNotice, ViewOutbox};
 use crate::resource::{LoadedSource, SourceCompletion, SourceRequest};
 use crate::script::ScriptError;
+use crate::threads::platform_script_error;
 
-pub(super) const MODULE: &str = "bobcat-internal";
-pub(super) const SOURCE: &str = crate::esm::runtime_source!("worker");
-
-/// Issued on bobcat-main, once per group. No cross-thread allocator or lock.
+/// Issued on bobcat-main, once per group. No cross-thread allocator or lock:
+/// the one thing it reads across threads is the worker thread's trap flag.
 #[derive(Clone)]
 pub(crate) struct WorkerFactory {
     commands: mpsc::UnboundedSender<WorkerCommand>,
+    /// Set by `bobcat-workers` once it has trapped, after which a `Start`
+    /// would be sent to a thread that never reads it.
+    trapped: Arc<AtomicBool>,
     next: Rc<Cell<u64>>,
 }
 
 impl WorkerFactory {
-    pub(crate) fn new(commands: mpsc::UnboundedSender<WorkerCommand>) -> Self {
+    pub(crate) fn new(
+        commands: mpsc::UnboundedSender<WorkerCommand>,
+        trapped: Arc<AtomicBool>,
+    ) -> Self {
         Self {
             commands,
+            trapped,
             next: Rc::new(Cell::new(1)),
         }
     }
@@ -79,7 +89,12 @@ impl WorkerFactory {
                     .next
                     .set(id.checked_add(1).ok_or("worker ids exhausted")?);
                 let key = WorkerKey::new(id);
-                let script = creator.start(key, name)?;
+                // A worker that has already failed is still a worker to the
+                // script that named it: its `error` event arrives with the
+                // `Failed` the owner queued, and nothing is asked of the host.
+                let Some(script) = creator.start(key, name) else {
+                    return Ok(HostValue::String(id.to_string()));
+                };
                 if specifier == BTS_MODULE_SPECIFIER {
                     let mut source = BTS_ENTRY_PREAMBLE.to_owned();
                     source.push_str("import { __BobcatStartBTS } from \"bobcat:bts-runtime\";\n__BobcatStartBTS(async () => {\n");
@@ -169,29 +184,49 @@ impl WorkerOwner {
     ///
     /// Source requests share this worker's own token. Neither a source
     /// completion nor a Worker inherits the view's cancellation token.
-    fn start(&self, key: WorkerKey, name: String) -> Result<SourceCompletion, String> {
-        let (messages, incoming) = mpsc::unbounded_channel();
-        let token = CancellationToken::new();
-        let (script, awaiting) = SourceCompletion::new(token.clone());
-        let sources = self.outbox.host_outbox(token.clone());
-        self.outbox.notify(ViewNotice::WorkerCreated {
-            key,
-            messages: messages.downgrade(),
-        });
-        self.factory
-            .commands
-            .send(WorkerCommand::Start(WorkerStart {
+    ///
+    /// `None` is a worker thread that has trapped, or one whose inbox is
+    /// closed: the worker fails at once, as one whose script could not be
+    /// fetched does. Its `Failed` is queued on this realm's own channel and
+    /// reaches the script as an `error` event, and nothing is sent to the
+    /// thread or kept in `live`.
+    fn start(&self, key: WorkerKey, name: String) -> Option<SourceCompletion> {
+        if !self.factory.trapped.load(Ordering::Acquire) {
+            let (messages, incoming) = mpsc::unbounded_channel();
+            let token = CancellationToken::new();
+            let (script, awaiting) = SourceCompletion::new(token.clone());
+            let sources = self.outbox.host_outbox(token.clone());
+            self.outbox.notify(ViewNotice::WorkerCreated {
                 key,
-                name,
-                script: awaiting,
-                messages: incoming,
-                events: self.events.clone(),
-                token,
-                sources,
-            }))
-            .map_err(|_| "the worker thread has ended".to_owned())?;
-        self.live.borrow_mut().insert(key, messages);
-        Ok(script)
+                messages: messages.downgrade(),
+            });
+            let started = self
+                .factory
+                .commands
+                .send(WorkerCommand::Start(WorkerStart {
+                    key,
+                    name,
+                    script: awaiting,
+                    messages: incoming,
+                    events: self.events.clone(),
+                    token,
+                    sources,
+                }));
+            // On a refused send `messages` drops at the end of this block, so
+            // the handle `WorkerCreated` registered no longer upgrades and the
+            // view sweeps it.
+            if started.is_ok() {
+                self.live.borrow_mut().insert(key, messages);
+                return Some(script);
+            }
+        }
+        let _ = self.events.send(WorkerEvent {
+            key,
+            payload: WorkerPayload::Failed(platform_script_error(
+                "the worker thread has ended".to_owned(),
+            )),
+        });
+        None
     }
 
     fn post(&self, key: WorkerKey, message: WorkerMessage) {

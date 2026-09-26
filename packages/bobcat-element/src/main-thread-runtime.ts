@@ -23,8 +23,10 @@
 // in this realm.
 //
 // `EventTarget` is imported rather than defined here: the worker realm needs
-// the same class, on a runtime this module is not registered on, so the source
-// is shared as a module and each runtime compiles its own copy.
+// the same class and cannot link this module, whose imports name
+// `bobcat-internal:host` members only an MTS realm has. So the class is a
+// module of its own: both runtimes register it, and each realm that imports it
+// gets its own instance.
 
 import { EventTarget, hasEventListener, installExceptionReporter } from "bobcat:event-target";
 import {

@@ -8,6 +8,7 @@
 
 use std::cell::Cell;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use quickjs_rust_bridge::HostValue;
@@ -29,12 +30,17 @@ use crate::resource::{
 impl WorkerHome {
     pub(crate) fn with_entry_for_test(entry: (String, String)) -> Self {
         let (commands, receiver) = mpsc::unbounded_channel();
+        let trapped = Arc::new(AtomicBool::new(false));
         let thread = super::ThreadBuilder::new()
             .name("bobcat-test-workers".into())
-            .spawn(move || super::thread::run_with_entry(receiver, entry))
+            .spawn({
+                let trapped = Arc::clone(&trapped);
+                move || super::thread::run_with_entry(receiver, entry, &trapped)
+            })
             .unwrap();
         Self {
             commands,
+            trapped,
             thread: crate::threads::ThreadJoin::new(thread),
         }
     }
@@ -111,7 +117,6 @@ struct Group {
     /// The thread itself, waited for by its own drop — which is reached with
     /// the goodbye already said, because [`Drop for Group`](Group::drop) drops
     /// the test's own sender and every view before any field drops.
-    #[expect(dead_code, reason = "held to end and wait for the worker thread")]
     home: WorkerHome,
     commands: Option<mpsc::UnboundedSender<WorkerCommand>>,
     views: Vec<View>,
@@ -379,6 +384,74 @@ fn a_script_that_cannot_be_fetched_fails_its_worker_and_nothing_else() {
     // The runtime is untouched: the next worker over the same thread runs.
     let key = group.start("postMessage(\"alive\");");
     assert_eq!(group.next(0).key, key);
+}
+
+/// A trap in the thread's own loop ends every worker on it at once, and no
+/// worker's own owner is left to say so: the thread tells the creator of each
+/// live one `Failed` and sets the flag `bobcat-main` reads before a `Start`.
+/// A worker that ended before the trap is not told again, even while its task
+/// has not been joined yet. The thread is over, so the group's drop still
+/// joins it.
+#[test]
+fn a_trapped_worker_thread_fails_every_live_worker() {
+    let mut group = Group::new();
+    group.views.push(View::new());
+    // One worker per view, each still waiting for its script.
+    let first = group.construct(0, "");
+    let second = group.construct(1, "");
+    // This one's boot job waits on a load until the test answers it, and no
+    // other job runs meanwhile.
+    let parked = group.construct(2, "");
+    group.answer(
+        parked,
+        "app:///parked.js",
+        "import { createRequire } from 'bobcat:module';
+createRequire(import.meta.url)('./held.cjs');",
+    );
+    let (url, held) = group.views[2].source();
+    // Ended by a `Terminate` its task reads during that wait. Its task is not
+    // joined before the trap: the job that reclaims its realm is queued
+    // behind the waiting one. Its boot task dropping the script's receiver is
+    // what shows it has ended.
+    let ended = group.construct(1, "");
+    group.terminate(ended);
+    let deadline = ClockInstant::now() + PATIENCE;
+    while !group.scripts[&ended].is_closed() {
+        assert!(
+            ClockInstant::now() < deadline,
+            "the terminated worker ended"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    group.tell(WorkerCommand::Panic);
+    held.complete(Ok(LoadedSource::Entry {
+        source: String::new(),
+        url,
+    }));
+    for (view, key) in [(0, first), (1, second), (2, parked)] {
+        let event = group.next(view);
+        assert_eq!(event.key, key);
+        let WorkerPayload::Failed(error) = event.payload else {
+            panic!("a worker on a trapped thread is over")
+        };
+        assert!(
+            error.message.contains("the worker thread panicked"),
+            "{}",
+            error.message
+        );
+    }
+    assert!(group.home.trapped().load(Ordering::Acquire));
+    // Exactly one each, and none for the worker that had ended: once the
+    // thread has dropped every clone of a view's sender, nothing more can
+    // arrive on it.
+    for view in [0, 1, 2] {
+        group.wait_for_workers_to_end(
+            view,
+            PATIENCE,
+            "the trapped thread dropped its clones of the view's event sender",
+        );
+        assert!(group.views[view].incoming.try_recv().is_err());
+    }
 }
 
 #[test]
@@ -677,6 +750,77 @@ fn a_require_nobody_answers_throws_in_the_worker_and_leaves_it_usable() {
     let (_, completion) = group.views[0].source();
     drop(completion);
     assert_eq!(wire_json(&group.views[0].message()), r#"[true,"queued"]"#);
+}
+
+/// The worker runtime registers every built-in, and a worker realm's host
+/// modules decide which of them link: the MTS modules import members only an
+/// MTS realm's `bobcat-internal:host` has, so they fail at link, and a name
+/// no runtime registered fails to load. None of the three reaches the host.
+#[test]
+fn a_worker_links_only_the_built_ins_its_host_modules_have_members_for() {
+    let mut group = Group::new();
+    group.start(
+        r"
+        const outcomes = [];
+        for (const specifier of ['bobcat:element', 'bobcat-internal', 'bobcat:nope']) {
+            try { await import(specifier); outcomes.push('loaded'); }
+            catch (error) { outcomes.push(`${error.name}: ${error.message}`); }
+        }
+        postMessage(JSON.stringify(outcomes));
+    ",
+    );
+    let HostValue::String(outcomes) = group.message(0) else {
+        panic!("the worker posts its outcomes as JSON text");
+    };
+    let outcomes: Vec<String> = serde_json::from_str(&outcomes).unwrap();
+    let [element, worker_class, missing] = outcomes.as_slice() else {
+        panic!("one outcome per import: {outcomes:?}");
+    };
+    for linked in [element, worker_class] {
+        assert!(
+            linked.starts_with("SyntaxError: Could not find export"),
+            "{linked}"
+        );
+    }
+    assert!(
+        missing.starts_with("ReferenceError: ") && missing.contains("'bobcat:nope'"),
+        "{missing}"
+    );
+    assert!(group.views[0].sources.try_recv().is_err());
+}
+
+/// The members a worker realm's two host modules export, which is what
+/// decides the built-ins it can link. Written down so that a change to either
+/// set is a change to these lists. A namespace lists its exports sorted by
+/// name; `testFuture` is the test build's own producer.
+#[test]
+fn a_worker_realm_declares_these_host_members() {
+    let mut group = Group::new();
+    group.start(
+        r"
+        postMessage([
+            Object.keys(await import('bobcat-internal:host')).join(','),
+            Object.keys(await import('bobcat-internal:worker')).join(','),
+        ].join(' / '));
+    ",
+    );
+    let host = [
+        "clearTimer",
+        "fetchResource",
+        "loadModuleSync",
+        "requestScriptFrame",
+        "resolveModuleUrl",
+        "setTimer",
+        "settleFuture",
+        "takeFuture",
+        "testFuture",
+        "waitFuture",
+    ];
+    let worker = ["closeWorker", "invokeNativeModule", "postWorkerMessage"];
+    assert_eq!(
+        group.message(0),
+        wire(&format!("{} / {}", host.join(","), worker.join(",")))
+    );
 }
 
 #[test]

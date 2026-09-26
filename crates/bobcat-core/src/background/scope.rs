@@ -9,60 +9,20 @@ use std::rc::Rc;
 use quickjs_rust_bridge::HostValue;
 
 use crate::background::WorkerKey;
-use crate::esm::{
-    BTS_RUNTIME_MODULE_SOURCE, BTS_RUNTIME_MODULE_SPECIFIER, BUNDLE_FETCH_MODULE_SOURCE,
-    BUNDLE_FETCH_MODULE_SPECIFIER, CONTEXT_MODULE_SOURCE, CONTEXT_MODULE_SPECIFIER,
-    EVENT_TARGET_MODULE_SPECIFIER, EVENT_TARGET_SOURCE, FUTURE_MODULE_SOURCE,
-    FUTURE_MODULE_SPECIFIER, GLOBAL_EVENT_MODULE_SOURCE, GLOBAL_EVENT_MODULE_SPECIFIER,
-    REQUIRE_MODULE_SOURCE, REQUIRE_MODULE_SPECIFIER, SECTION_URL_MODULE_SOURCE,
-    SECTION_URL_MODULE_SPECIFIER, TIMER_MODULE_SOURCE, TIMER_MODULE_SPECIFIER,
-};
+use crate::esm::{TIMER_MODULE_SPECIFIER, WORKER_MODULE_SPECIFIER};
 use crate::link::{HostOutbox, ViewNotice};
 use crate::main::quickjs::{ScriptEngine, ScriptRuntime};
 use crate::script::ScriptError;
-use crate::timers::{TimerState, install_timer_members};
 
-/// The worker realm's global-scope module, on the *worker* runtime.
-pub(super) const WORKER_MODULE_SPECIFIER: &str = "bobcat:worker";
-/// The worker realm's host module: what `bobcat-internal:host` is to
-/// `bobcat-main`, minus everything that would need a document.
+/// The worker realm's own host module. A worker realm declares two: this one,
+/// with the members only a worker has, and `bobcat-internal:host`, which
+/// carries the core [`crate::realm::open_realm`] installs in every realm and
+/// none of the MTS realm's document members.
 const WORKER_HOST_MODULE_SPECIFIER: &str = "bobcat-internal:worker";
 /// Called on `bobcat:worker`, in a worker realm, with one message value.
 pub(super) const WORKER_DELIVER_EXPORT: &str = "__BobcatDeliverWorkerMessage";
 /// Called on `bobcat:worker` with one native module callback's answer.
 pub(super) const WORKER_MODULE_CALLBACK_EXPORT: &str = "__BobcatNativeModuleCallback";
-
-const WORKER_MODULE_SOURCE: &str = crate::esm::runtime_source!("worker-runtime");
-
-/// Registers the source modules every worker realm on the group's *worker*
-/// runtime shares.
-///
-/// The worker runtime carries its global scope, timers, `Future`, `require`,
-/// shared event machinery and the BTS runtime module. Each script chooses its
-/// own imports.
-/// `bobcat:element` and `bobcat:runtime` are absent because a worker has no
-/// document to reach and no page to be the main thread of, and registering
-/// them would make an import that must fail merely fail late.
-pub(super) fn install_worker_modules(js_runtime: &mut ScriptRuntime) -> Result<(), ScriptError> {
-    js_runtime.register_module_source(
-        crate::esm::SELECTOR_QUERY_SPECIFIER,
-        crate::esm::SELECTOR_QUERY_SOURCE,
-    )?;
-    js_runtime.register_module_source(
-        "bobcat:lynx-modules",
-        crate::esm::runtime_source!("lynx-modules"),
-    )?;
-    js_runtime.register_module_source(GLOBAL_EVENT_MODULE_SPECIFIER, GLOBAL_EVENT_MODULE_SOURCE)?;
-    js_runtime.register_module_source(EVENT_TARGET_MODULE_SPECIFIER, EVENT_TARGET_SOURCE)?;
-    js_runtime.register_module_source(WORKER_MODULE_SPECIFIER, WORKER_MODULE_SOURCE)?;
-    js_runtime.register_module_source(CONTEXT_MODULE_SPECIFIER, CONTEXT_MODULE_SOURCE)?;
-    js_runtime.register_module_source(BTS_RUNTIME_MODULE_SPECIFIER, BTS_RUNTIME_MODULE_SOURCE)?;
-    js_runtime.register_module_source(TIMER_MODULE_SPECIFIER, TIMER_MODULE_SOURCE)?;
-    js_runtime.register_module_source(FUTURE_MODULE_SPECIFIER, FUTURE_MODULE_SOURCE)?;
-    js_runtime.register_module_source(SECTION_URL_MODULE_SPECIFIER, SECTION_URL_MODULE_SOURCE)?;
-    js_runtime.register_module_source(BUNDLE_FETCH_MODULE_SPECIFIER, BUNDLE_FETCH_MODULE_SOURCE)?;
-    js_runtime.register_module_source(REQUIRE_MODULE_SPECIFIER, REQUIRE_MODULE_SOURCE)
-}
 
 /// Every worker entry gets the same global scope, timers and name before its
 /// own script. Any other bindings are installed by that script's imports.
@@ -90,9 +50,11 @@ globalThis.name = {name};
     )
 }
 
-/// Installs everything one worker realm reaches the host through: the timer
-/// pair under `bobcat-internal:host`, so `bobcat:timers` compiles unchanged,
-/// and the three members that are a worker's whole outward surface.
+/// Installs a worker realm's own host module, `bobcat-internal:worker`: the
+/// three members that are a worker's whole outward surface beyond the core
+/// [`crate::realm::open_realm`] installed under `bobcat-internal:host`. The
+/// BTS and a plain `Worker` get the same three. Answers with the flag
+/// `closeWorker` sets.
 ///
 /// There is no document member here and no way to add one: this realm is on
 /// another runtime, on another thread, and the document is neither `Send` nor
@@ -102,13 +64,10 @@ globalThis.name = {name};
 pub(super) fn install_worker_members(
     engine: &mut ScriptEngine,
     js_runtime: &mut ScriptRuntime,
-    timers: &Rc<TimerState>,
-    closing: &Rc<Cell<bool>>,
     key: WorkerKey,
     host: &HostOutbox,
     mut post: impl FnMut(HostValue) + 'static,
-) -> Result<(), ScriptError> {
-    install_timer_members(engine, js_runtime, timers)?;
+) -> Result<Rc<Cell<bool>>, ScriptError> {
     install_native_modules(engine, js_runtime, key, host)?;
 
     engine.register_host_module_function(
@@ -126,7 +85,8 @@ pub(super) fn install_worker_members(
         }),
     )?;
 
-    let closing = Rc::clone(closing);
+    let closing = Rc::new(Cell::new(false));
+    let closer = Rc::clone(&closing);
     engine.register_host_module_function(
         js_runtime,
         WORKER_HOST_MODULE_SPECIFIER,
@@ -135,10 +95,11 @@ pub(super) fn install_worker_members(
         Box::new(move |_arguments| {
             // A flag, not a teardown: this runs inside the realm it would
             // tear down, so the thread reads it once the task returns.
-            closing.set(true);
+            closer.set(true);
             Ok(HostValue::Undefined)
         }),
-    )
+    )?;
+    Ok(closing)
 }
 
 /// Installs the one member `NativeModules.<module>.<method>(...)` reaches the

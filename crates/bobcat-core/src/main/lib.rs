@@ -7,9 +7,10 @@
 //! timers and the one boundary into JavaScript live.
 //!
 //! `bobcat-workers` is not this thread's. The group starts it beside this one
-//! and joins it after it; what arrives here is one sender, and the three
-//! messages a realm sends on it — start a context with its script, post to
-//! one, stop one — are the whole of what this thread does to it.
+//! and joins it after it; what arrives here is one sender and the flag that
+//! thread sets when it traps, and the three messages a realm sends on it —
+//! start a context with its script, post to one, stop one — are the whole of
+//! what this thread does to it.
 //!
 //! Tasks rather than one state machine for all of them. A view waiting for its
 //! entry parks on its own channels, so nothing it is waiting for can hold up a
@@ -38,6 +39,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 #[cfg(target_arch = "wasm32")]
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicBool;
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread::Builder as ThreadBuilder;
 
@@ -49,16 +51,16 @@ use tokio_util::sync::CancellationToken;
 #[cfg(target_arch = "wasm32")]
 use wasm_thread::Builder as ThreadBuilder;
 
-use self::quickjs::ScriptRuntime;
-use self::runtime::install_shared_modules;
+use self::quickjs::{SharedRuntime, mark_checkpoint_later};
 pub(crate) use self::workers::WorkerFactory;
 use crate::background::WorkerCommand;
+use crate::esm::build_runtime;
 use crate::jobs::{JsThread, JsThreadHandle};
 use crate::link::{ToMain, ViewOutbox};
 use crate::threads::{self, ThreadJoin};
 use crate::view::{
-    EngineError, EngineEvent, EventRequester, GroupCommand, LynxViewError, StartupSources,
-    StyleThreads, ViewAttachment, ViewSources, Viewport,
+    EngineError, EngineEvent, EventRequester, GroupCommand, StartupSources, StyleThreads,
+    ViewAttachment, ViewSources, Viewport,
 };
 
 /// The main thread's end of its group's link.
@@ -67,21 +69,26 @@ pub(crate) struct GroupLink {
     pub(crate) attach: mpsc::UnboundedReceiver<GroupCommand>,
     /// The one event loop every view in this group wakes.
     pub(crate) requester: Arc<dyn EventRequester>,
-    /// How this thread's own startup went, answered exactly once.
-    pub(crate) ready: oneshot::Sender<Result<(), LynxViewError>>,
-    /// The one thing this thread is given of `bobcat-workers`: the right to
-    /// send it messages. The thread itself is the group's, started before
-    /// this one and joined after it.
+    /// How this thread's own startup went, answered exactly once. Only the
+    /// style pool can fail it: a script runtime that could not be built is
+    /// each view's startup failure rather than the group's.
+    pub(crate) ready: oneshot::Sender<Result<(), EngineError>>,
+    /// What this thread is given of `bobcat-workers`: the right to send it
+    /// messages, and the flag below. The thread itself is the group's,
+    /// started before this one and joined after it.
     pub(crate) workers: mpsc::UnboundedSender<WorkerCommand>,
+    /// Set by `bobcat-workers` once it has trapped. A `Worker` constructed
+    /// after that fails at once instead of being sent to a thread that will
+    /// never read it.
+    pub(crate) workers_trapped: Arc<AtomicBool>,
 }
 
 /// What every view on this thread shares.
 struct GroupContext {
-    /// Shared rather than owned by the group task, and borrowed only inside a
-    /// job: an entry holds it for its whole length, a synchronous wait
-    /// included, which is safe because no other job runs until that one
-    /// returns and no task ever takes it.
-    js: Rc<RefCell<ScriptRuntime>>,
+    /// The runtime every view's realm is opened on, or why it could not be
+    /// built. In that case each view that attaches fails its startup with
+    /// that error, and the group itself stays up.
+    js: SharedRuntime,
     style_pool: Option<Rc<StylePool>>,
     requester: Arc<dyn EventRequester>,
     workers: WorkerFactory,
@@ -93,25 +100,6 @@ struct GroupContext {
 
 #[cfg(target_arch = "wasm32")]
 static WASM_WORKER_BOOTSTRAP: OnceLock<()> = OnceLock::new();
-#[cfg(all(target_arch = "wasm32", panic = "abort"))]
-static WASM_SCRIPT_PANIC_HOOK: OnceLock<()> = OnceLock::new();
-
-/// Reports a panic on the thread that installed it, over whatever link that
-/// thread holds. Erased to a closure because a `thread_local!` static cannot
-/// be generic — and the hook it feeds is process-global anyway.
-#[cfg(all(target_arch = "wasm32", panic = "abort"))]
-type ScriptPanicReporter = Box<dyn Fn(crate::script::ScriptError)>;
-
-#[cfg(all(target_arch = "wasm32", panic = "abort"))]
-thread_local! {
-    /// One reporter per view this thread has ever carried. Append-only: a
-    /// view that is gone has a closed channel, and sending onto one is
-    /// already a no-op, so nothing has to be pruned on a path that only runs
-    /// as the Worker traps.
-    static WASM_SCRIPT_PANIC_REPORTERS: RefCell<Vec<ScriptPanicReporter>> = const {
-        RefCell::new(Vec::new())
-    };
-}
 
 /// Tells `wasm_thread` which script boots a Worker, which is what every
 /// thread a view spawns — `bobcat-main` and each of its style workers — is
@@ -141,7 +129,9 @@ pub fn configure_wasm_workers(worker_script_url: String) -> Result<(), EngineErr
 }
 
 /// Starts one group's Lynx main thread, which builds the script runtime and
-/// the style pool its views share before adopting the first of them.
+/// the style pool its views share before adopting the first of them. Only the
+/// pool failing fails the group: a runtime that could not be built is kept,
+/// and fails each view that attaches.
 ///
 /// Nothing announces its exit: dropping every view's notice sender closes
 /// those channels, which is the same fact — and the one a painter blocked on
@@ -167,9 +157,10 @@ fn run_group(style_threads: StyleThreads, link: GroupLink) {
         requester,
         ready,
         workers,
+        workers_trapped,
     } = link;
     #[cfg(all(target_arch = "wasm32", panic = "abort"))]
-    install_script_panic_hook();
+    threads::install_script_panic_hook();
 
     // Both the runtime and the pool are the group's, not any view's. A group
     // opens one realm per view on that runtime, which is why the modules its
@@ -181,22 +172,14 @@ fn run_group(style_threads: StyleThreads, link: GroupLink) {
     // one pool because they cannot traverse at once — the single thread that
     // drives them both is already inside whichever traversal is running.
     //
-    // Both are ready before group construction returns and any view
-    // attaches.
-    let started = ScriptRuntime::new()
-        .map_err(LynxViewError::from)
-        .and_then(|mut runtime| {
-            install_shared_modules(&mut runtime)
-                .map_err(|error| error.into_script_error().into())
-                .map(|()| runtime)
-        })
-        .and_then(|runtime| {
-            build_style_pool(style_threads.resolve())
-                .map_err(LynxViewError::from)
-                .map(|pool| (runtime, pool.map(Rc::new)))
-        });
-    let (js_runtime, style_pool) = match started {
-        Ok(started) => started,
+    // Both are built before group construction returns and any view
+    // attaches, and only the pool can fail it: a runtime that could not be
+    // built is kept as its error, which every view that attaches reports as
+    // its own startup failure — as `bobcat-workers` keeps its own runtime's
+    // error for each of its workers.
+    let js_runtime = build_runtime();
+    let style_pool = match build_style_pool(style_threads.resolve()) {
+        Ok(pool) => pool.map(Rc::new),
         Err(error) => {
             let _ = ready.send(Err(error));
             return;
@@ -220,7 +203,7 @@ fn run_group(style_threads: StyleThreads, link: GroupLink) {
         js: Rc::new(RefCell::new(js_runtime)),
         style_pool,
         requester,
-        workers: WorkerFactory::new(workers),
+        workers: WorkerFactory::new(workers, workers_trapped),
         thread: thread.handle(),
     });
     // By value: the context — and with it this thread's one sender to
@@ -251,10 +234,14 @@ async fn group_task(context: Rc<GroupContext>, mut attach: mpsc::UnboundedReceiv
                         fetch_probe,
                     );
                     #[cfg(all(target_arch = "wasm32", panic = "abort"))]
-                    add_script_panic_reporter({
+                    threads::add_script_panic_reporter({
                         let outbox = outbox.clone();
-                        Box::new(move |error| {
-                            outbox.engine_event(EngineEvent::ScriptRunError(error));
+                        Box::new(move |detail| {
+                            outbox.engine_event(EngineEvent::ScriptRunError(
+                                threads::platform_script_error(format!(
+                                    "the Lynx main thread {detail}"
+                                )),
+                            ));
                         })
                     });
                     let view = AttachedView {
@@ -306,11 +293,7 @@ fn finish_view(
             error.into_panic().as_ref(),
         )));
     }
-    // A job rather than a call: this runs in `group_task`, which is a task,
-    // and the shared runtime belongs to whichever job holds it. Nothing waits
-    // for the bump, so the answer is dropped.
-    let js = Rc::clone(&context.js);
-    drop(context.thread.run(move || js.borrow().mark_checkpoint()));
+    mark_checkpoint_later(&context.js, &context.thread);
 }
 
 /// One view, minus the ends its outbox already took.
@@ -332,36 +315,8 @@ struct AttachedView {
     /// this, and no other job runs while one is parked.
     metrics: watch::Receiver<Option<Viewport>>,
     /// This view's end signal, minted on the embedder's thread. It is what the
-    /// view's owner waits on, what its own end cancels, and the parent of the
-    /// token every worker its realm creates carries.
+    /// view's owner waits on and what its own end cancels.
     cancel: CancellationToken,
-}
-
-#[cfg(all(target_arch = "wasm32", panic = "abort"))]
-fn install_script_panic_hook() {
-    WASM_SCRIPT_PANIC_HOOK.get_or_init(|| {
-        let previous = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
-            WASM_SCRIPT_PANIC_REPORTERS.with(|reporters| {
-                let location = info
-                    .location()
-                    .map_or_else(String::new, |location| format!(" at {location}"));
-                let error = threads::platform_script_error(format!(
-                    "the script Worker aborted after a panic{location}: {}",
-                    threads::panic_message(info.payload())
-                ));
-                for reporter in reporters.borrow().iter() {
-                    reporter(error.clone());
-                }
-            });
-            previous(info);
-        }));
-    });
-}
-
-#[cfg(all(target_arch = "wasm32", panic = "abort"))]
-fn add_script_panic_reporter(reporter: ScriptPanicReporter) {
-    WASM_SCRIPT_PANIC_REPORTERS.with(|reporters| reporters.borrow_mut().push(reporter));
 }
 
 /// Builds one group's style pool, on `bobcat-main` — the thread that owns

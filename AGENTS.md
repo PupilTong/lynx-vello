@@ -209,10 +209,14 @@ and bounce back) with `inertia.rs` running them over the scroll intents,
 `images.rs` image protocol and `graphics.rs` GPU target. `link.rs` is
 the one channel set a view spans its two threads with, `jobs.rs` the engine
 thread itself — its scheduler and its job queue — `lifetime.rs` the view's
-task set, `timers.rs` and `clock.rs`/`alarm.rs` the timer machinery both realm
-kinds share, `future.rs` the per-realm table the `Future` class is written
-over, `fetch.rs` the one member a realm fetches a URL through, `esm.rs` the
-preloaded module specifiers, `script.rs` the
+task set, `realm.rs` the one constructor every realm is opened with
+(`open_realm`, which installs the `RealmCore` members and then the host
+modules its caller passes), `timers.rs` and `clock.rs`/`alarm.rs` the timer
+machinery both realm kinds share, `future.rs` the per-realm table the `Future`
+class is written over, `fetch.rs` the one member a realm fetches a URL
+through, `esm.rs` the built-in module table both runtimes register
+(`BUILTIN_MODULES`), `build_runtime` that registers it, and the engine's
+module names and reserved prefixes, `script.rs` the
 sanitized error a failure is reported with, `style.rs` the
 `PreparsedStyleSheet` vocabulary, `resource.rs` the host protocol, and
 `threads.rs` the two engine threads.
@@ -236,8 +240,11 @@ turning the view's `ImageReports` into its `ResourceFetcher`; both go to
 
 **A view is built from a group, never on its own**: `LynxGroup::new` takes the
 lifecycle wakeup and `StyleThreads`, starts `bobcat-workers` then `bobcat-main`
-(handed one sender on it), and awaits the QuickJS runtime and Stylo pool every
-view in that group shares.
+(handed one sender on it), and awaits the Stylo pool every view in that group
+shares. Each thread builds its QuickJS runtime with `esm.rs`'s `build_runtime`
+and keeps an `Err` instead of failing the group: every view then fails its
+startup with it (`StartupFailed(LynxViewError::Script(..))`), and every
+`Worker` on a failed worker runtime ends with `Failed`.
 
 **Both engine threads are a `jobs.rs` `JsThread`: a tokio `current_thread`
 runtime with a `LocalSet`, plus a FIFO of jobs its top loop runs between two
@@ -470,8 +477,9 @@ awaiting its own call's answer would otherwise deadlock.
 module binding — an unknown module is `undefined` (web-core's answer, where
 native answers `null`; see `docs/tracking/deviations.md`), an undeclared method
 is `undefined` on both references, and a call naming a module this view lacks
-is never assembled at all, which leaves its functions released. No built-in module ships: `bridge`,
-`LynxUIMethodModule`, exposure and intersection are all absent.
+or a method its module did not declare is assembled and dropped, which releases
+its functions. No built-in module ships: `bridge`, `LynxUIMethodModule`,
+exposure and intersection are all absent.
 
 `PageSource` registers named CSS under entry-relative resource URLs. Boot
 supplies the entry response URL to the JS runtime before importing the entry,
@@ -968,7 +976,10 @@ them.
 joins it after `bobcat-main` has returned, so a thread that will not start
 fails the *group*. `bobcat-main` holds one sender on it and only ever sends:
 start a context with its script, post to a context, stop a context — and hears
-events back. A released view stops its own workers by sending each that stop.
+events back. It also reads one flag the worker thread sets when it traps: the
+trap reports `Failed` to the creator of every worker still on it, and a
+`new Worker` constructed afterwards fails at once instead of being sent there.
+A released view stops its own workers by sending each that stop.
 The price is one parked thread and one idle runtime per group; there is no
 lazily-built state and no lock. The runtime is separate from `bobcat-main`'s
 because worker script must not stop the thread that owns the document, and
@@ -1028,14 +1039,15 @@ its callback (`docs/destruction-runtime.md`). Raw BTS application entries
 explicitly import their bindings from `bobcat:bts-runtime`; neither runtime
 installs `globalThis.lynx`. XML uses this identical startup path, and the
 bootstrap contains no application source and does not fetch it in advance. A
-worker carries a `SourceRequester` that sends module requests directly to the
-view's resource host. ESM completion and timers continue during entry TLA;
-posted messages wait for entry settlement, and each completion shares its
-worker's cancellation token. ReactLynx compiled module execution and
-lazy-bundle APIs remain a later layer over this transport; bypassing
-`lynx_core.js` does not require its `requestScript`/`readScript` source-text
-interfaces (`docs/worker-resources-runtime.md`). Without an entry, only the
-built-in environment runs, and all workers use the same scope and protocol.
+worker carries a `HostOutbox` (`WorkerStart.sources`) that sends module
+requests directly to the view's resource host. ESM completion and timers
+continue during entry TLA; posted messages wait for entry settlement, and each
+completion shares its worker's cancellation token. ReactLynx compiled module
+execution and lazy-bundle APIs remain a later layer over this transport;
+bypassing `lynx_core.js` does not require its `requestScript`/`readScript`
+source-text interfaces (`docs/worker-resources-runtime.md`). Without an entry,
+only the built-in environment runs, and all workers use the same scope and
+protocol.
 
 MTS `lynx.getJSContext()` and this BTS Context are stable
 `CrossThreadContext extends EventTarget` instances returned directly by
@@ -1107,6 +1119,20 @@ one `RealmStartup`, which is everything a realm is opened with and nothing
 that is ever updated — `LynxView::update_data`, `update_global_props` and
 `reload` reach the realm through `ToMain::PageUpdate` and never touch it.
 
+Every realm, MTS or worker, is opened by the one constructor
+`realm::open_realm` (`crates/bobcat-core/src/realm.rs`). It creates the realm,
+enables module loading and installs the core every realm has under
+`bobcat-internal:host`: `requestScriptFrame`, `setTimer`/`clearTimer`,
+`waitFuture`/`takeFuture`/`settleFuture`, `fetchResource`, and
+`resolveModuleUrl`/`loadModuleSync`. Every other host module is a parameter
+of that call: `MainThreadRuntime::new` passes the document, stylesheet,
+startup-string, diagnostics, event-name and `Worker` members, and a worker
+passes `bobcat-internal:worker`. The constructor has no role field; the one
+thing it is told about a realm is the key its display-frame demand is
+reported under, `None` for MTS and the worker's key for a worker. What it
+answers with, `RealmCore { engine, timers, futures }`, is the first field of
+both `MainThreadRuntime` and the worker thread's `WorkerRealm`.
+
 The members that answer with a list encode it in the return string, since
 the boundary's value type carries no array: `attributeNames` and
 `getComputedStyleMap` as the length-prefixed record `setInlineStyles` accepts,
@@ -1124,14 +1150,26 @@ preconditions before entering `dom`, returning misuse as a JavaScript exception
 (unexpected internal panics remain fatal on abort-only Wasm). An unflushed
 batch may present once its evaluation ends — web-core's visibility model.
 
-Beside the host module, each runtime registers a fixed set of built-in ESM
-sources in QuickJS's loader: `install_shared_modules` for `bobcat-main`,
-`install_worker_modules` for `bobcat-workers`, the specifiers in `esm.rs`, and
-the per-runtime lists with their TypeScript sources in the
-`packages/bobcat-element` section below. The worker list is deliberately
-different, so importing `bobcat:element` or `bobcat:runtime` there fails to
-resolve rather than failing late. `bobcat:bts` is the BTS Worker's engine
-entry, `bobcat:boot` the MTS boot module's own specifier. A worker's own script
+Beside the host module, both runtimes register the same built-in ESM sources
+in QuickJS's loader: `build_runtime` registers `BUILTIN_MODULES`, the one table
+in `esm.rs` beside the specifiers, and the list with its TypeScript sources is
+in the `packages/bobcat-element` section below. A realm's host modules decide
+which of them it can use. A module written for the other realm kind fails at
+link with a `SyntaxError` naming a member its realm's `bobcat-internal:host`
+lacks (a worker importing `bobcat:element`, `bobcat:runtime` or
+`bobcat-internal`), or at load with a `ReferenceError` naming a host module
+its realm does not declare (an MTS realm importing `bobcat:worker` or
+`bobcat:bts-runtime`, both of which import `bobcat-internal:worker`).
+`build_runtime` also reserves the prefixes `ENGINE_MODULE_PREFIXES`
+(`bobcat:`, `bobcat-internal:`), so any other name under them — one no runtime
+registered and no realm declared — fails its `import` or `require` in the
+realm with a `ReferenceError` and is never sent to a fetcher.
+`bobcat-internal`, which has no colon, is registered on both runtimes, so an
+`import` of it always finds its source and never reaches a fetcher. The
+reserved prefixes do not cover it, though: a `require` of it in a realm that
+has not imported it still goes to the host's synchronous loader, which asks
+the fetcher for it. `bobcat:bts` is the BTS Worker's engine entry,
+`bobcat:boot` the MTS boot module's own specifier. A worker's own script
 is *inlined* into the one module its realm evaluates, as `ENTRY_PREAMBLE`
 carries the MTS entry, and never registered on the runtime. The Element module
 imports native operations directly from `bobcat-internal:host`; no host object
@@ -1367,6 +1405,17 @@ first point another load can replace the buffers the host lent. A module is
 linked during that compile, so the imports it pulls in are loaded — each
 through the same borrowed-until-the-next-load host callback — before its own
 evaluation starts.
+
+A runtime can also reserve module-name prefixes
+(`Runtime::reserve_module_prefix`), which checks a name at two places. The
+loader looks a name up in the realm's own sources, the runtime's registered
+sources, the pending loads and the realm's native modules; a reserved name
+found in none of them fails the import in that realm with a `ReferenceError`
+instead of becoming a module request or a call of the synchronous loader.
+`loadModuleSync` makes the same check itself, after its lookup of a module the
+realm already has an instance of, because a top-level `require` does not pass
+through the loader. Which prefixes are reserved is the host's choice.
+
 Every heap allocation made by the C shim or the five compiled QuickJS C
 translation units is redirected through a private C ABI into Rust's global
 allocator; a fixed aligned prefix supplies the size required for matching
@@ -1823,25 +1872,25 @@ browser WebGPU completion is Promise-driven.
 ### packages/bobcat-element
 
 The dependency-free TypeScript sources of the ESMs `bobcat-core` preloads into
-its QuickJS realms, one file per module. The main-thread runtime gets
-`src/main-thread-runtime.ts` as `bobcat:runtime`, `src/element-papi.ts` as
-`bobcat:element`, `src/timers.ts` as `bobcat:timers`, `src/module.ts` as
-`bobcat:module`, `src/event-target.ts` as `bobcat:event-target`,
-`src/cross-thread-context.ts` as `bobcat:cross-thread-context`, and
-`src/worker.ts` as the `Worker` class under `bobcat-internal`. The group's
-*worker* runtime gets `src/worker-runtime.ts` as `bobcat:worker`,
-`src/background-thread-runtime.ts` as `bobcat:bts-runtime`,
-`src/global-event-emitter.ts` as `bobcat:global-event-emitter`,
-`src/lynx-modules.ts` as `bobcat:lynx-modules`, `src/selector-query.ts` as
-`bobcat:selector-query`, plus `bobcat:event-target`,
-`bobcat:cross-thread-context`, `bobcat:timers`, `bobcat:module`,
-`src/section-url.ts` as `bobcat:section-url` and `src/bundle-fetch.ts` as
-`bobcat:bundle-fetch` again — the last two being on both runtimes because a
-container's section URLs and `lynx.fetchBundle`'s handle are both realms' —
+its QuickJS realms, one file per module. Both of a group's runtimes register
+all fifteen, as `esm.rs`'s `BUILTIN_MODULES` lists them in the order of
+`src/tsconfig.json`'s `paths` (a unit test holds the two equal):
+`src/lynx-modules.ts` as `bobcat:lynx-modules`, `src/global-event-emitter.ts`
+as `bobcat:global-event-emitter`, `src/selector-query.ts` as
+`bobcat:selector-query`, `src/element-papi.ts` as `bobcat:element`,
+`src/main-thread-runtime.ts` as `bobcat:runtime`, `src/timers.ts` as
+`bobcat:timers`, `src/future.ts` as `bobcat:future`, `src/module.ts` as
+`bobcat:module`, `src/section-url.ts` as `bobcat:section-url`,
+`src/bundle-fetch.ts` as `bobcat:bundle-fetch`, `src/event-target.ts` as
+`bobcat:event-target`, `src/cross-thread-context.ts` as
+`bobcat:cross-thread-context`, `src/worker.ts` as the `Worker` class under
+`bobcat-internal`, `src/worker-runtime.ts` as `bobcat:worker` and
+`src/background-thread-runtime.ts` as `bobcat:bts-runtime`. They are
 registered per runtime, because a source is runtime-wide and no value crosses
-between two runtimes. `src/native.d.ts` declares the two native modules' contracts and is
-the authoritative list of what `bobcat-internal:host` and
-`bobcat-internal:worker` export.
+between two runtimes; which of them a realm can link is decided by the host
+modules it declares, not by the table. `src/native.d.ts` declares the two
+native modules' contracts and is the authoritative list of what
+`bobcat-internal:host` and `bobcat-internal:worker` export.
 
 What core embeds, with `include_str!`, is the JavaScript TypeScript 7 compiles
 from `src/*.ts` during the Cargo build. `bobcat-core/build.rs` invokes the

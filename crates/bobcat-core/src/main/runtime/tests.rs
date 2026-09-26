@@ -2,6 +2,7 @@ use tokio::sync::mpsc;
 
 use super::*;
 use crate::background::{WorkerCommand, WorkerEvent};
+use crate::esm::build_runtime;
 use crate::jobs::JsThread;
 use crate::link::{DetachedView, detached_outbox};
 use crate::main::tree::{PageConfig, Viewport};
@@ -336,8 +337,7 @@ fn runtime_over_watching_names(
     PublishedNames,
 ) {
     let (outbox, far_end) = detached_outbox(Arc::new(NoWakeup));
-    let mut js_runtime = ScriptRuntime::new().expect("the test runtime starts");
-    install_shared_modules(&mut js_runtime).expect("the shared modules register");
+    let mut js_runtime = build_runtime().expect("the test runtime builds");
     let (workers, inbox) = mpsc::unbounded_channel();
     let thread = JsThread::new();
     let viewport = ingredients.viewport;
@@ -346,7 +346,7 @@ fn runtime_over_watching_names(
         ingredients,
         bound_metrics(viewport),
         outbox,
-        &WorkerFactory::new(workers),
+        &WorkerFactory::new(workers, Arc::default()),
         thread.handle(),
         // No entry here: these tests evaluate their own scripts against the
         // realm afterwards.
@@ -382,13 +382,12 @@ fn two_view_group_with(
     MainThreadRuntime,
     GroupFarEnds,
 ) {
-    let mut js_runtime = ScriptRuntime::new().expect("the test runtime starts");
-    install_shared_modules(&mut js_runtime).expect("the shared modules register");
+    let mut js_runtime = build_runtime().expect("the test runtime builds");
     let mut views = Vec::new();
     let mut ends = GroupFarEnds::default();
     let (workers, inbox) = mpsc::unbounded_channel();
     ends.workers = Some(inbox);
-    let workers = WorkerFactory::new(workers);
+    let workers = WorkerFactory::new(workers, Arc::default());
     let thread = JsThread::new();
     ends.thread = Some(Rc::clone(&thread));
     for startup in pages {
@@ -538,7 +537,7 @@ fn initial_values_reach_each_view_before_its_entry_and_render() {
             ..RealmStartup::default()
         },
     ]);
-    first.engine.collect_garbage(&mut js).unwrap();
+    first.core.engine.collect_garbage(&mut js).unwrap();
     first.run_main_thread_script(&mut js, r"
         if (lynx.__initData.count !== 42 || lynx.__initData.text !== '中文') throw Error('entry data');
         const data = lynx.__initData;
@@ -4170,6 +4169,142 @@ fn a_require_that_cannot_load_throws_and_leaves_the_realm_usable() {
             )
             .unwrap();
     }
+}
+
+/// A name under an engine prefix is answered from the runtime's built-ins and
+/// this realm's host modules, and from nothing else. One that is neither
+/// fails in the realm with a `ReferenceError`, through an `import` or a
+/// `require`, and never reaches the host: `bobcat:worker` is registered, but
+/// it imports `bobcat-internal:worker`, which an MTS realm does not declare.
+/// `bobcat:lynx-modules`, `bobcat:selector-query` and
+/// `bobcat:global-event-emitter` import nothing an MTS realm lacks, so they
+/// load here as well.
+#[test]
+fn an_engine_name_nothing_answers_fails_in_the_realm_without_a_request() {
+    let (mut js, mut runtime, _elements, mut far) = runtime_over_watching_names(ingredients());
+    runtime
+        .evaluate_module(
+            &mut js,
+            r"
+        import { createRequire } from 'bobcat:module';
+        const expected = [
+            ['bobcat:nope', 'bobcat:nope'],
+            ['bobcat-internal:nope', 'bobcat-internal:nope'],
+            ['bobcat:worker', 'bobcat-internal:worker'],
+        ];
+        for (const [specifier, named] of expected) {
+            let failure;
+            try { await import(specifier); } catch (error) { failure = error; }
+            if (!(failure instanceof ReferenceError) || !failure.message.includes(`'${named}'`))
+                throw Error(`${specifier}: ${failure}`);
+        }
+        let failure;
+        try { createRequire(import.meta.url)('bobcat:nope'); } catch (error) { failure = error; }
+        if (!(failure instanceof ReferenceError) || !failure.message.includes(`'bobcat:nope'`))
+            throw Error(`require: ${failure}`);
+        await import('bobcat:lynx-modules');
+        await import('bobcat:selector-query');
+        await import('bobcat:global-event-emitter');
+        globalThis.finished = true;
+    ",
+            "app:///engine-names.js",
+            "importing engine names",
+        )
+        .unwrap();
+    runtime
+        .evaluate_module(
+            &mut js,
+            "if (globalThis.finished !== true) throw Error('the imports never settled');",
+            "app:///after.js",
+            "the realm after the imports",
+        )
+        .unwrap();
+    assert_eq!(runtime.take_module_request(), None);
+    while let Ok(notice) = far.0.notices.try_recv() {
+        assert!(
+            !matches!(notice, ViewNotice::RequestSource { .. }),
+            "an engine name reached the host"
+        );
+    }
+}
+
+/// The members an MTS realm's `bobcat-internal:host` exports, which is what
+/// decides the built-ins it can link. Written down so that a change to the
+/// set is a change to this list. A namespace lists its exports sorted by
+/// name; `testFuture` is the test build's own producer.
+#[test]
+fn an_mts_realm_declares_these_host_members() {
+    let expected = [
+        "adoptStyleSheet",
+        "attributeNames",
+        "callElementMethod",
+        "childElementIds",
+        "clearTimer",
+        "createDocument",
+        "createElement",
+        "createPage",
+        "createWorker",
+        "dropElement",
+        "fetchResource",
+        "flushElementTree",
+        "getAttribute",
+        "getComputedStyleMap",
+        "globalProps",
+        "initData",
+        "initialProcessor",
+        "insertBefore",
+        "listenerNameClosed",
+        "listenerNameOpened",
+        "loadModuleSync",
+        "logScriptMessage",
+        "nativeModuleTable",
+        "parentNode",
+        "preloadStyleSheet",
+        "queryElementIds",
+        "removeAttribute",
+        "removeElement",
+        "replaceElement",
+        "reportScriptError",
+        "requestScriptFrame",
+        "resolveModuleUrl",
+        "sendWorkerMessage",
+        "setAttribute",
+        "setInlineStyleProperty",
+        "setInlineStyles",
+        "setTimer",
+        "settleFuture",
+        "supportsStyleProperty",
+        "swapElement",
+        "tagName",
+        "takeFuture",
+        "terminateWorker",
+        "testFuture",
+        "waitFuture",
+    ]
+    .join(",");
+    let (mut js, mut runtime, _elements) = runtime();
+    runtime
+        .evaluate_module(
+            &mut js,
+            &format!(
+                r"
+        const members = Object.keys(await import('bobcat-internal:host')).join(',');
+        if (members !== '{expected}') throw Error(members);
+        globalThis.finished = true;
+    "
+            ),
+            "app:///members.js",
+            "reading the host members",
+        )
+        .unwrap();
+    runtime
+        .evaluate_module(
+            &mut js,
+            "if (globalThis.finished !== true) throw Error('the import never settled');",
+            "app:///after.js",
+            "the realm after the import",
+        )
+        .unwrap();
 }
 
 fn requested_stylesheet(

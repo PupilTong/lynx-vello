@@ -85,6 +85,16 @@ typedef struct QjsHostModuleName {
     struct QjsHostModuleName *next;
 } QjsHostModuleName;
 
+/* A module-name prefix reserved on a runtime: a name with it resolves only
+   to a source the runtime registered or a native module the importing realm
+   declared, and anything else fails in the realm that asked without becoming
+   a request to the host. */
+typedef struct QjsReservedPrefix {
+    char *prefix;
+    size_t length;
+    struct QjsReservedPrefix *next;
+} QjsReservedPrefix;
+
 /* A native module's exports are `JSValue`s built in one context, so both the
    module and its exports belong to that context. */
 typedef struct QjsHostModule {
@@ -146,6 +156,7 @@ typedef struct QjsRuntime {
     JSClassID host_owner_class_id;
     QjsModuleSource *module_sources;
     QjsHostModuleName *host_module_names;
+    QjsReservedPrefix *reserved_prefixes;
     /* How many module-graph evaluations are on the C stack: an entry that
        can run a module body raises it for as long as it might be doing so.
        At zero no body of any realm on this runtime is part-way through, and
@@ -455,6 +466,28 @@ static void qjs_host_module_names_free(QjsHostModuleName *reserved) {
     while (reserved != NULL) {
         QjsHostModuleName *next = reserved->next;
         free(reserved->name);
+        free(reserved);
+        reserved = next;
+    }
+}
+
+static int qjs_module_name_is_reserved(const QjsRuntime *runtime,
+                                       const char *name) {
+    const QjsReservedPrefix *reserved = runtime->reserved_prefixes;
+    size_t length = strlen(name);
+
+    while (reserved != NULL &&
+           (length < reserved->length ||
+            memcmp(name, reserved->prefix, reserved->length) != 0)) {
+        reserved = reserved->next;
+    }
+    return reserved != NULL;
+}
+
+static void qjs_reserved_prefixes_free(QjsReservedPrefix *reserved) {
+    while (reserved != NULL) {
+        QjsReservedPrefix *next = reserved->next;
+        free(reserved->prefix);
         free(reserved);
         reserved = next;
     }
@@ -787,6 +820,16 @@ static JSModuleDef *qjs_module_loader(JSContext *raw_context,
     }
 
     host_module = qjs_find_host_module(context, module_name);
+    /* The realm's own sources, answered or pending, the runtime's sources
+       and this realm's native modules have all been looked in. A reserved
+       name none of them has is not the host's to fetch, so it is neither
+       loaded synchronously nor recorded as a request. */
+    if (host_module == NULL &&
+        qjs_module_name_is_reserved(runtime, module_name)) {
+        JS_ThrowReferenceError(raw_context, "module '%s' is not preloaded",
+                               module_name);
+        return NULL;
+    }
     if (host_module == NULL && context->synchronous_link > 0 &&
         context->require_load != NULL) {
         if (qjs_require_module_source(context, module_name) < 0) {
@@ -971,7 +1014,25 @@ void qjs_runtime_free(QjsRuntime *runtime) {
     JS_FreeRuntime(runtime->raw);
     qjs_module_sources_free(runtime->module_sources);
     qjs_host_module_names_free(runtime->host_module_names);
+    qjs_reserved_prefixes_free(runtime->reserved_prefixes);
     free(runtime);
+}
+
+int qjs_runtime_reserve_module_prefix(QjsRuntime *runtime, const char *prefix) {
+    QjsReservedPrefix *reserved = calloc(1, sizeof(*reserved));
+
+    if (reserved == NULL) {
+        return -1;
+    }
+    reserved->prefix = qjs_strdup(prefix);
+    if (reserved->prefix == NULL) {
+        free(reserved);
+        return -1;
+    }
+    reserved->length = strlen(prefix);
+    reserved->next = runtime->reserved_prefixes;
+    runtime->reserved_prefixes = reserved;
+    return 0;
 }
 
 int qjs_runtime_add_module(QjsRuntime *runtime, const char *name,
@@ -1573,6 +1634,14 @@ static JSValue qjs_load_module_sync(JSContext *raw, JSValueConst this_value,
     if (instance != NULL) {
         JS_FreeCString(raw, url);
         return qjs_require_instance(context, instance);
+    }
+    /* The loader's rule for a reserved name, for the one load that does not
+       go through the loader: a name this realm has no instance of is not
+       the host's to answer. */
+    if (qjs_module_name_is_reserved(context->runtime, url)) {
+        JS_ThrowReferenceError(raw, "module '%s' is not preloaded", url);
+        JS_FreeCString(raw, url);
+        return JS_EXCEPTION;
     }
     parameters = JS_ToCString(raw, argv[1]);
     if (parameters == NULL) {
