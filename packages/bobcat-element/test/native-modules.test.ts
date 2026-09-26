@@ -16,17 +16,8 @@ rstest.mockRequire("bobcat-internal:worker", () => ({
   postWorkerMessage: rstest.fn(),
   closeWorker: rstest.fn(),
   workerName: () => "",
-  pixelRatio: () => undefined,
-  pixelWidth: () => undefined,
-  pixelHeight: () => undefined,
 }));
-// The table a BTS whose view was built with one module, `Foo`, declaring one
-// method, `bar`, is handed: the BTS runtime builds `NativeModules` out of it
-// as it evaluates.
-rstest.mockRequire("bobcat-internal:native-modules", () => ({
-  invokeNativeModule,
-  nativeModuleTable: () => "3:Foo3:bar",
-}));
+rstest.mockRequire("bobcat-internal:native-modules", () => ({ invokeNativeModule }));
 import * as record from "../src/record.ts";
 rstest.mockRequire("bobcat:record", () => record);
 rstest.mockRequire("bobcat:lynx-modules", () => lynxModules);
@@ -85,13 +76,6 @@ type Invocation = [
   callbacks: string,
 ];
 
-/** The worker realm's global, as this suite stands in for it. */
-interface TestScope {
-  postMessage(message: unknown): void;
-  addEventListener(name: string, callback: (event: { data: unknown }) => void): void;
-}
-
-const scope = globalThis as unknown as TestScope;
 let transport: typeof nativeModulesRuntime;
 let worker: typeof workerRuntime;
 let bts: typeof btsRuntime;
@@ -99,9 +83,10 @@ let bts: typeof btsRuntime;
 // runs against, which here is Node's: this is Node's, put back afterwards.
 const nodeConsole = Object.getOwnPropertyDescriptor(globalThis, "console")!;
 
+// Nothing stands in for the global's `postMessage` and `addEventListener`:
+// the real `bobcat:worker` defines both on Node's global, and the BTS runtime
+// hears `initialize` through the second.
 beforeAll(async () => {
-  scope.postMessage = () => undefined;
-  scope.addEventListener = () => undefined;
   transport = await import("../src/native-modules.ts");
   worker = await import("../src/worker-runtime.ts");
   bts = await import("../src/background-thread-runtime.ts");
@@ -109,6 +94,8 @@ beforeAll(async () => {
 
 afterAll(() => {
   Object.defineProperty(globalThis, "console", nodeConsole);
+  // The BTS runtime's own global, which it defines on Node's.
+  delete (globalThis as { SystemInfo?: unknown }).SystemInfo;
 });
 
 /** The most recent call the host was handed. */
@@ -203,8 +190,31 @@ describe("NativeModules transport", () => {
 });
 
 describe("the BTS NativeModules object", () => {
-  it("carries exactly the methods the embedder declared, as it evaluated", () => {
-    // Built out of the host's table before anything initialized the runtime.
+  it("is built out of the table `initialize` carries, before the entry runs", () => {
+    const modules = bts.lynx.getApp().NativeModules;
+    // Empty as the runtime evaluates, which is all a plain `Worker` that
+    // imports it ever sees: nothing posts one an `initialize`.
+    expect(Object.keys(modules)).toEqual([]);
+    const seen: unknown[] = [];
+    bts.__BobcatStartBTS(async () => {
+      seen.push(Object.keys(bts.NativeModules), bts.SystemInfo["pixelRatio"]);
+    });
+    // The table the MTS realm posts for a view built with one module, `Foo`,
+    // declaring one method, `bar`, beside that realm's own `SystemInfo`.
+    worker.__BobcatDeliverWorkerMessage({
+      bobcat: "runtime", method: "initialize", updateData: {},
+      systemInfo: systemInfo.createSystemInfo({ pixelRatio: 1.1, pixelWidth: 1287, pixelHeight: 2785 }),
+      nativeModuleTable: "3:Foo3:bar",
+    });
+    // The entry ran with both in place, and the object it saw is the one
+    // every name for `NativeModules` already held.
+    expect(seen).toEqual([["Foo"], 1.1]);
+    expect(bts.NativeModules).toBe(modules);
+    expect(bts.lynx.SystemInfo).toBe(bts.SystemInfo);
+    expect((globalThis as { SystemInfo?: unknown }).SystemInfo).toBe(bts.SystemInfo);
+  });
+
+  it("carries exactly the methods the embedder declared", () => {
     const modules = bts.lynx.getApp().NativeModules as Record<string, Record<string, Function>>;
     expect(Object.keys(modules)).toEqual(["Foo"]);
     invokeNativeModule.mockClear();

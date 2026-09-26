@@ -4,13 +4,15 @@
 //
 // `platform`, `runtimeType` and `lynxSdkVersion` name the runtime this engine
 // is: the selected runtime target, independent of the minimum SDK a card was
-// compiled for. The screen members come from the embedder, through the realm
-// that calls this.
+// compiled for. The screen members come from the embedder: the MTS realm
+// passes the numbers its boot module was written with, and the BTS passes the
+// MTS realm's whole `SystemInfo`, which the `initialize` message carries.
 
 /**
  * A frozen `SystemInfo`: the three runtime constants, then the members of
  * `screen` — `pixelRatio`, `pixelWidth` and `pixelHeight` as a view's realm
- * passes them — over them. Without a screen it is the constants alone.
+ * passes them, or another realm's whole `SystemInfo`, whose constants are
+ * these — over them. Without a screen it is the constants alone.
  */
 export function createSystemInfo(
   screen?: Record<string, unknown>,

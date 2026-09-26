@@ -86,7 +86,7 @@ use wasm_thread::Builder as ThreadBuilder;
 use crate::link::SourceAnswer;
 use crate::script::ScriptError;
 use crate::threads::ThreadJoin;
-use crate::view::{EngineError, ScreenMetrics, ScriptSource};
+use crate::view::{EngineError, ScriptSource};
 
 /// Names one `Worker` for the life of its group.
 ///
@@ -110,12 +110,12 @@ impl WorkerKey {
 ///
 /// No state. What it says about the worker is what the creating realm
 /// decided from its URL before sending it: the URL itself, the answer to the
-/// request for its script when the host was asked for one, the view's data
-/// when the URL is `bobcat:bts`, and the source its diagnostics are named
-/// by. The BTS is the dedicated worker whose URL is `bobcat:bts`, and those
-/// last two fields are all that set it apart. Everything else a worker has —
-/// what is posted to it, what it says back — is a channel that arrives with
-/// it.
+/// request for its script when the host was asked for one, and the source
+/// its diagnostics are named by. The BTS is the dedicated worker whose URL
+/// is `bobcat:bts`, and its source is all that sets its `Start` apart: the
+/// view's data reaches it in the `initialize` message the MTS realm posts to
+/// it, as any other message does. Everything else a worker has — what is
+/// posted to it, what it says back — is a channel that arrives with it.
 pub(crate) struct WorkerStart {
     pub(crate) key: WorkerKey,
     /// The worker's `self.name`, empty when the constructor named none.
@@ -131,10 +131,6 @@ pub(crate) struct WorkerStart {
     /// the host is never asked for: the realm's own loader loads it, or
     /// refuses it with a `ReferenceError`.
     pub(crate) script: Option<SourceAnswer>,
-    /// The view's data, for the worker whose URL is `bobcat:bts`; `None` for
-    /// every other worker, whose host modules answer with no entry, no screen
-    /// and an empty native module table.
-    pub(crate) background: Option<BackgroundStart>,
     /// What the worker's diagnostics are named by: `Background` for the
     /// worker whose URL is `bobcat:bts`, and `Worker` with its key for every
     /// other. The creating realm records the same value under the key.
@@ -151,40 +147,7 @@ pub(crate) struct WorkerStart {
     pub(crate) sources: crate::link::HostOutbox,
 }
 
-/// What the worker whose URL is `bobcat:bts` is started with beyond what
-/// every worker is.
-///
-/// Cloned into each `Start` for `bobcat:bts`: a card that constructs a
-/// second one gets the same data. `bobcat:bts-runtime` reads the screen and
-/// the module table from the realm's host modules as it is evaluated, so a
-/// worker at any other URL that imports it reads what a `Start` without this
-/// answers: no screen and an empty table.
-#[derive(Clone)]
-pub(crate) struct BackgroundStart {
-    /// The view's BTS entry, which `bobcat:bts` imports once the BTS is
-    /// initialized: [`ViewSources::background_entry`](crate::ViewSources::background_entry)
-    /// as `create_lynx_view` resolved it. `None` is a view that named none.
-    pub(crate) entry: Option<String>,
-    /// The screen the BTS's `SystemInfo` reports: the view's
-    /// [`ViewSources::screen`](crate::ViewSources::screen), which the MTS
-    /// boot module reports too.
-    pub(crate) screen: ScreenMetrics,
-    /// The embedder's native modules, as the record
-    /// [`encode_table`](crate::native_module::encode_table) wrote: two
-    /// fields per module, its name and then its method names joined with
-    /// commas. Empty for a view built with none. The BTS's `NativeModules`
-    /// is built out of it.
-    pub(crate) native_modules: String,
-}
-
 /// Everything the worker thread is ever told.
-#[cfg_attr(
-    test,
-    expect(
-        clippy::large_enum_variant,
-        reason = "the one small variant exists only in the test build"
-    )
-)]
 pub(crate) enum WorkerCommand {
     /// A realm constructed a `Worker`.
     Start(WorkerStart),

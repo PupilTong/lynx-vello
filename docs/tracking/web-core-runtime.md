@@ -86,9 +86,9 @@ realm. Construction sends one `WorkerStart` from the view's task on
 `bobcat-main` to `bobcat-workers`, which spawns **one task per worker realm**;
 that message carries everything the worker will ever be given — its key, its
 name, its URL, a one-shot for its script unless that URL is an engine name
-such as `bobcat:bts`, the view's data when the URL is `bobcat:bts`, the source
-its diagnostics are named by, the receiving end of its message channel, and the
-sender its events go back on, which is the creating view's own channel. The
+such as `bobcat:bts`, the source its diagnostics are named by, the receiving
+end of its message channel, and the sender its events go back on, which is the
+creating view's own channel. The
 worker's realm opens as that message is served, and its root module imports
 the script by its URL. The script is loaded through the view's fetcher and
 answers that one-shot directly, without a main-thread turn; the worker
@@ -106,15 +106,16 @@ termination recorded in `../runtime-architecture.md`.
 After it awaits the import of the entry by its URL, boot creates a BTS Worker on the group's
 existing `bobcat-workers` thread with `new Worker("bobcat:bts")`. Its `Start`
 carries no script: `bobcat:bts` is a registered module, the engine's own
-source, which the BTS realm's root module imports by that URL, and the `Start`
-carries the view's BTS entry for it instead. The BTS is a dedicated worker
-whose URL is `bobcat:bts`: every worker uses the same scope and the same root
-module, and the BTS differs only in its URL and the view's data its `Start`
-carries. `ViewSources.background_entry`
+source, which the BTS realm's root module imports by that URL. The BTS is a
+dedicated worker whose URL is `bobcat:bts`: every worker uses the same scope,
+the same root module and the same `Start`, and the BTS differs only in its URL
+and the source its diagnostics are named by. `ViewSources.background_entry`
 selects an optional raw module; native/browser XML adapters supply the
-background section's URL. The `bobcat:bts` bootstrap hands `bobcat:bts-runtime`
-a loader that imports that entry once the first message has initialized the
-runtime. The application entry imports its bindings, `lynx` included, from
+background section's URL. The MTS realm posts that URL to the BTS in the
+first message, `initialize`, beside the page data, its own `SystemInfo` and
+the view's native module table. The `bobcat:bts` bootstrap hands
+`bobcat:bts-runtime` a loader that imports the entry that message names once
+the message has initialized the runtime. The application entry imports its bindings, `lynx` included, from
 `bobcat:bts-runtime`, as a card's compiled bodies do through their chunk
 preamble; `globalThis.lynx` stays absent on both sides. Application source is
 neither prefetched nor included in the bootstrap. The entry is loaded through

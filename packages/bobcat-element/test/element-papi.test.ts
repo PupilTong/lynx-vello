@@ -435,6 +435,7 @@ function createMockBobcat(issuedIds?: number[]): MockBobcat {
     },
     initData: () => undefined,
     globalProps: () => undefined,
+    nativeModuleTable: () => "",
   };
   return host;
 }

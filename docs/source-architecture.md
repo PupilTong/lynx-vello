@@ -60,10 +60,10 @@ explicit host policies. Native XML uses strict UTF-8 and private memory URLs,
 while browser XML uses already replacement-decoded text and final-response
 fragments. Both paths register the optional background body and pass its URL
 as `ViewSources.background_entry`. Core starts the page's BTS worker after
-the MTS entry import completes, and hands it that URL in its `Start`. Its
-`bobcat:bts` bootstrap initializes `lynx.getCoreContext()` and awaits an import
-of that URL, which the worker requests through the view's ResourceFetcher like
-any other import. An absent background body leaves the BTS worker with its
+the MTS entry import completes, and the MTS realm posts it that URL in its
+first message, `initialize`. Its `bobcat:bts` bootstrap initializes
+`lynx.getCoreContext()` and awaits an import of that URL, which the worker
+requests through the view's ResourceFetcher like any other import. An absent background body leaves the BTS worker with its
 built-in runtime only. Browser PageConfig remains host-owned.
 
 This raw-module path does not execute binary templates' `manifest` scripts.

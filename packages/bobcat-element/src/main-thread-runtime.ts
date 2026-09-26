@@ -6,8 +6,10 @@
 // `lynx.module(name).invoke(method, ...args)`, off by default and turned on by
 // the host's `enableMTSModule`; web-core's has none, and neither does this
 // runtime yet. The transport is in place: this realm declares
-// `bobcat-internal:native-modules` with an empty table, and a call made through
-// `bobcat:native-modules` is answered back here.
+// `bobcat-internal:native-modules`, and a call made through
+// `bobcat:native-modules` is answered back here. The view's module table is
+// one of this realm's startup members, which it posts unread to its BTS Worker,
+// where `NativeModules` is built out of it.
 // Diagnostics reach the view's host through `bobcat:diagnostics`, as every
 // realm's do, and the BTS Worker's own reach it without this realm; global
 // events reach BTS through the same Worker FIFO as Context messages. This
@@ -22,6 +24,12 @@
 //
 // The host's page data arrives through `bobcat-internal:host` as the strings
 // the view was given, and is parsed here as this module evaluates.
+//
+// The view's data reaches the BTS Worker in one `initialize` message, which
+// `__BobcatConnectBackground` posts as boot connects it: the page data, the
+// BTS entry's URL, this realm's own `SystemInfo` and the view's native module
+// table. The worker is started like any other `Worker`, so a plain one, which
+// is posted none of this, sees none of it.
 //
 // This is not an Element PAPI implementation. Every `__*` element member,
 // including the scoped-style sink `__SetCSSId`, belongs to element-papi.ts.
@@ -48,7 +56,7 @@ import type { NodeQueryRequest } from "bobcat:selector-query";
 import "bobcat:timers";
 import { cancelAnimationFrame, clearAnimationFrames, requestAnimationFrame } from "bobcat:animation-frame";
 import { createSystemInfo } from "bobcat:system-info";
-import { initialProcessor as getInitialProcessor, globalProps, initData, loadModuleSync, preloadStyleSheet, adoptStyleSheet } from "bobcat-internal:host";
+import { initialProcessor as getInitialProcessor, globalProps, initData, loadModuleSync, nativeModuleTable, preloadStyleSheet, adoptStyleSheet } from "bobcat-internal:host";
 import { reportError as _ReportError, console } from "bobcat:diagnostics";
 import { sectionURL, styleSheetURL as sectionStyleSheetURL } from "bobcat:section-url";
 import { type BundleHandle, createBundleFetches } from "bobcat:bundle-fetch";
@@ -209,8 +217,12 @@ async function callLepusMethod(message: LepusMethodCall) {
  * Called by boot only after the MTS entry finishes importing. Entry-level
  * listeners already exist; events it sent before Worker construction are
  * flushed in order through the same Worker transport as later events.
+ *
+ * `entry` is the BTS entry's URL as boot wrote it, already absolute, or
+ * `undefined` for a view that named none. It is not this realm's to import:
+ * the `initialize` message carries it to the BTS, which imports it.
  */
-export function __BobcatConnectBackground(worker: Worker, data: unknown) {
+export function __BobcatConnectBackground(worker: Worker, data: unknown, entry?: string) {
   if (backgroundDisposal) {
     worker.terminate();
     return;
@@ -252,8 +264,11 @@ export function __BobcatConnectBackground(worker: Worker, data: unknown) {
       jsContext.receive(message);
     }
   });
-  // Snapshot initial data before queued events or render can mutate it.
-  worker.postMessage({bobcat: "runtime", method: "initialize", ...__BobcatBackgroundData(data)});
+  // Snapshot initial data before queued events or render can mutate it. The
+  // BTS reports this realm's `SystemInfo`, whose screen numbers boot wrote as
+  // literals, so both realms report the same values.
+  worker.postMessage({bobcat: "runtime", method: "initialize", ...__BobcatBackgroundData(data),
+    entry, systemInfo: SystemInfo, nativeModuleTable: hostNativeModuleTable});
   backgroundWorker = worker;
   const queued = pendingBackgroundMessages;
   pendingBackgroundMessages = [];
@@ -352,6 +367,10 @@ export let __globalProps = parsePageData("globalProps", globalProps()) as Record
 // Host state is separate from the copies the two script realms may mutate.
 let hostGlobalPropsJson = "{}";
 const hostInitialProcessor = getInitialProcessor() ?? "";
+// The view's native modules as the host wrote them, a record of names and
+// comma-joined method lists. This realm has no `NativeModules` and never
+// decodes it: `__BobcatConnectBackground` posts it to the BTS Worker.
+const hostNativeModuleTable = nativeModuleTable();
 
 let initialProcessor = hostInitialProcessor;
 let jsDataProcessor = false;

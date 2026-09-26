@@ -8,7 +8,7 @@ use std::rc::Rc;
 
 use quickjs_rust_bridge::HostValue;
 
-use crate::background::{BackgroundStart, WorkerKey};
+use crate::background::WorkerKey;
 use crate::esm::{TIMER_MODULE_SPECIFIER, WORKER_MODULE_SPECIFIER};
 use crate::link::HostOutbox;
 use crate::main::quickjs::{ScriptEngine, ScriptRuntime};
@@ -19,7 +19,8 @@ use crate::script::ScriptError;
 /// carries the core [`crate::realm::open_realm`] installs in every realm and
 /// none of the MTS realm's document members; and
 /// [`NATIVE_MODULES_HOST_SPECIFIER`](crate::esm::NATIVE_MODULES_HOST_SPECIFIER),
-/// which every realm kind declares, with the embedder's module table.
+/// which every realm kind declares, with the member a native module call
+/// reaches the embedder through.
 const WORKER_HOST_MODULE_SPECIFIER: &str = "bobcat-internal:worker";
 /// Called on `bobcat:worker`, in a worker realm, with one message value.
 pub(super) const WORKER_DELIVER_EXPORT: &str = "__BobcatDeliverWorkerMessage";
@@ -57,22 +58,18 @@ await import({url});
 /// Installs a worker realm's own host modules, `bobcat-internal:worker` and
 /// `bobcat-internal:native-modules`: the members that are a worker's whole
 /// outward surface beyond the core [`crate::realm::open_realm`] installed
-/// under `bobcat-internal:host`. Every worker gets the same members. The
-/// BTS's members answer with its `background` data; a worker at any other URL
-/// has none, so its `backgroundEntry` and three screen members answer
-/// `undefined` and its `nativeModuleTable` an empty table. Answers with the
-/// flag `closeWorker` sets.
+/// under `bobcat-internal:host`. Every worker gets the same members, the BTS
+/// included: what sets the BTS apart is data the MTS realm posts to it, not
+/// anything installed here. Answers with the flag `closeWorker` sets.
 ///
 /// `bobcat-internal:native-modules` is [`crate::native_module::install`]'s,
 /// the one every realm kind is given; a call a worker makes names the
 /// worker's `key`, which is how the view answers it through the worker's
 /// inbox.
 ///
-/// `workerName` and `backgroundEntry` each hand their string over once and
-/// keep nothing, as an MTS realm's page data members do: `bobcat:worker`
-/// reads the name and `bobcat:bts` the entry, as each is evaluated. The
-/// screen members answer numbers, primitives Rust owns, rather than an
-/// object the realm would have to be handed and parse.
+/// `workerName` hands its string over once and keeps nothing, as an MTS
+/// realm's page data members do: `bobcat:worker` reads it as it is
+/// evaluated.
 ///
 /// There is no document member here and no way to add one: this realm is on
 /// another runtime, on another thread, and the document is neither `Send` nor
@@ -85,44 +82,18 @@ pub(super) fn install_worker_members(
     key: WorkerKey,
     host: &HostOutbox,
     name: String,
-    background: Option<BackgroundStart>,
     mut post: impl FnMut(HostValue) + 'static,
 ) -> Result<Rc<Cell<bool>>, ScriptError> {
-    let (entry, screen, table) = match background {
-        Some(BackgroundStart {
-            entry,
-            screen,
-            native_modules,
-        }) => (entry, Some(screen), native_modules),
-        None => (None, None, String::new()),
-    };
-    crate::native_module::install(engine, js_runtime, host, Some(key), table)?;
+    crate::native_module::install(engine, js_runtime, host, Some(key))?;
 
-    for (member, mut value) in [("workerName", Some(name)), ("backgroundEntry", entry)] {
-        engine.register_host_module_function(
-            js_runtime,
-            WORKER_HOST_MODULE_SPECIFIER,
-            member,
-            0,
-            Box::new(move |_arguments| {
-                Ok(value.take().map_or(HostValue::Undefined, HostValue::String))
-            }),
-        )?;
-    }
-    for (member, value) in [
-        ("pixelRatio", screen.map(|screen| screen.pixel_ratio)),
-        ("pixelWidth", screen.map(|screen| screen.pixel_width)),
-        ("pixelHeight", screen.map(|screen| screen.pixel_height)),
-    ] {
-        let value = value.map_or(HostValue::Undefined, screen_number);
-        engine.register_host_module_function(
-            js_runtime,
-            WORKER_HOST_MODULE_SPECIFIER,
-            member,
-            0,
-            Box::new(move |_arguments| Ok(value.clone())),
-        )?;
-    }
+    let mut name = Some(name);
+    engine.register_host_module_function(
+        js_runtime,
+        WORKER_HOST_MODULE_SPECIFIER,
+        "workerName",
+        0,
+        Box::new(move |_arguments| Ok(name.take().map_or(HostValue::Undefined, HostValue::String))),
+    )?;
 
     engine.register_host_module_function(
         js_runtime,
@@ -154,20 +125,4 @@ pub(super) fn install_worker_members(
         }),
     )?;
     Ok(closing)
-}
-
-/// One screen number as the MTS boot module's literal for it evaluates.
-///
-/// Boot writes an `f32` into its source in the shortest decimal that reads
-/// back as that `f32`, and JavaScript reads the decimal as the nearest
-/// `f64`, which is not always the `f32`'s own value: `1.1_f32` is written
-/// `1.1`, while `f64::from(1.1_f32)` is `1.100000023841858`. Reading the
-/// same decimal here keeps the BTS's `SystemInfo` equal to the MTS's.
-fn screen_number(value: f32) -> HostValue {
-    HostValue::Number(
-        value
-            .to_string()
-            .parse()
-            .expect("an f32's decimal form parses as an f64"),
-    )
 }

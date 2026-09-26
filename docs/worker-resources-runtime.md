@@ -37,8 +37,8 @@ view release cancels outstanding completions and discards late results.
 Raw XML background entries use this path and import their runtime bindings,
 `lynx` included, from `bobcat:bts-runtime`. The BTS starts from nothing
 fetched: its root module imports the registered bootstrap `bobcat:bts`, which
-reads the view's BTS entry from its `Start`, installs a JS initializer and
-returns; the first Worker message supplies inputs before the application entry
+installs a JS initializer and returns; the first Worker message, `initialize`,
+supplies inputs, the BTS entry's URL among them, before the application entry
 imports. Later messages wait on that import Promise and are delivered in order
 once it settles,
 success or failure. An entry that throws is reported

@@ -18,8 +18,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::quickjs::{ScriptEngine, ScriptRuntime};
 use crate::background::{
-    BackgroundStart, WorkerCommand, WorkerEvent, WorkerKey, WorkerMessage, WorkerPayload,
-    WorkerStart,
+    WorkerCommand, WorkerEvent, WorkerKey, WorkerMessage, WorkerPayload, WorkerStart,
 };
 use crate::esm::{BTS_MODULE_SPECIFIER, ENGINE_MODULE_PREFIXES, HOST_MODULE_SPECIFIER};
 use crate::link::{ViewNotice, ViewOutbox};
@@ -53,14 +52,12 @@ impl WorkerFactory {
 
     /// Installs the three members a realm creates and drives workers through,
     /// and hands back the owner they share and the channel everything they say
-    /// arrives on. `background` is what each worker of the realm whose URL is
-    /// `bobcat:bts` is started with.
+    /// arrives on.
     pub(super) fn install(
         &self,
         engine: &mut ScriptEngine,
         runtime: &mut ScriptRuntime,
         outbox: ViewOutbox,
-        background: BackgroundStart,
     ) -> Result<(Rc<WorkerOwner>, mpsc::UnboundedReceiver<WorkerEvent>), ScriptError> {
         let (events, incoming) = mpsc::unbounded_channel();
         // The MTS runtime owns the channels. Host functions borrow that owner
@@ -123,13 +120,14 @@ impl WorkerFactory {
                     (Some(script), Some(completion))
                 };
                 // The worker whose URL is `bobcat:bts` is the view's
-                // background thread: it is started with the view's data and
-                // its diagnostics are the BTS's. Every other worker gets
-                // neither.
-                let (background, source) = if url == BTS_MODULE_SPECIFIER {
-                    (Some(background.clone()), ScriptSource::Background)
+                // background thread, and its diagnostics are the BTS's. That
+                // is the one thing its `Start` says differently: the view's
+                // data reaches it in the `initialize` message the realm posts
+                // to it.
+                let source = if url == BTS_MODULE_SPECIFIER {
+                    ScriptSource::Background
                 } else {
-                    (None, ScriptSource::Worker(WorkerId::from(key)))
+                    ScriptSource::Worker(WorkerId::from(key))
                 };
                 let (messages, incoming) = mpsc::unbounded_channel();
                 let start = WorkerStart {
@@ -137,7 +135,6 @@ impl WorkerFactory {
                     name,
                     url,
                     script,
-                    background,
                     source,
                     messages: incoming,
                     events: creator.events.clone(),

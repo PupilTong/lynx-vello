@@ -1,7 +1,7 @@
 // The one reader of the records the host writes, preloaded as the
 // `bobcat:record` ESM on both runtimes: the Element PAPI's attribute and
-// computed-style answers in an MTS realm, and the native module table a
-// worker realm reads from `bobcat-internal:native-modules`.
+// computed-style answers in an MTS realm, and the native module table the
+// BTS is posted in `initialize`, as its MTS realm read it from the host.
 
 /**
  * Reads a record the native side wrote: a flat sequence of
