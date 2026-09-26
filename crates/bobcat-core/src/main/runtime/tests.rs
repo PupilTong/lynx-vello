@@ -1128,7 +1128,16 @@ fn the_page_config_written_into_the_boot_module_builds_the_ua_cascade() {
             )
             .expect("main-thread script");
         let tree = elements.tree();
-        let view = tree.get(node_id(2)).expect("the card's one view");
+        // The page is minted with the document; the script's own view follows it.
+        let page = tree.get(node_id(2)).expect("the card's page");
+        let view = tree.get(node_id(3)).expect("the card's one view");
+        assert_eq!(
+            page.computed_style()
+                .expect("a flushed element has style")
+                .clone_overflow_x(),
+            Overflow::Clip,
+            "the page clips whatever `defaultOverflowVisible` says: linear={linear}"
+        );
         let style = view.computed_style().expect("a flushed element has style");
         assert_eq!(
             style.clone_display(),

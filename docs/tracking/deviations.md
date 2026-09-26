@@ -30,6 +30,36 @@ consequential choice about whether to follow the spec or the quirk.
   algorithm** (reuse stylo/Servo's existing stacking-context logic) —
   apps relying on Lynx's actual buggy z-index behavior may render
   differently, and that's intentional.
+- **`justify-content: start | end` mean different things in flex and in
+  linear (user, 2026-09-25)** — css-align-3 resolves them against the writing
+  mode, so on a `*-reverse` container `start` sits at the opposite end from
+  `flex-start`. Lynx's own value table instead aliases them to `flex-start`
+  and `flex-end` (`css_defines/58-justify-content.json` gives `start` the
+  align-type `flex-start`), and web-core rewrites the declaration outright —
+  `("start", &[("justify-content", "flex-start")])` in its
+  `style_transformer/rules.rs`, which also poisons `left`/`right` into
+  `--lynx-invalid-invalid-invalid`. **Decision: flexbox implements the W3C
+  meaning; `display: linear` keeps Lynx's.** `linear` is a layout mode only
+  Lynx has, so its keywords mean what Lynx says they mean, while `flex` is a
+  CSS box and answers to CSS. The two therefore differ on a reversed
+  container, which is the only place either pair parts, and
+  `computed_main_gravity` in `crates/hughie/src/compute/linear.rs` is where
+  the alias lives.
+- **`defaultOverflowVisible` never reaches `page` (user, 2026-09-25)** — the
+  switch releases `view` and the two blur-view tags back to `visible`, and
+  nothing else. Both references pin the page: native calls
+  `SetDefaultOverflow(false)` in `PageElement`'s constructor under the comment
+  "make sure page's default overflow is hidden" and reads the config in
+  `ViewElement` (and `ComponentElement`) alone; web-core's page is a plain
+  `div` with no UA overflow, and its release selector is
+  `[lynx-default-overflow-visible="true"] x-view`, so the root clip comes from
+  `lynx-view { contain: strict }` instead. A card asking for visible overflow
+  asks it of its views, not of the window it is drawn in. Two related
+  divergences between the references, not resolved here because nothing in
+  this engine reaches them yet: native's decoder *raises* an absent key to
+  true for any `targetSdkVersion >= 2.0`, where web-core needs the key to say
+  `"true"` (this engine follows web-core — an absent key is false); and native
+  also applies the switch to `<component>`, which has no DOM counterpart.
 - **`overflow`/`overflow-x`/`overflow-y` default** — Lynx defaults to
   `hidden`; CSS defaults to `visible`. **Decision: match Lynx's default**,
   not CSS's — this is a values/defaults divergence, not an algorithm one,

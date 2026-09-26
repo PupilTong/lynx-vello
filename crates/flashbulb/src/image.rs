@@ -133,17 +133,23 @@ impl Image {
         self.width == other.width && self.height == other.height
     }
 
-    /// Decodes an 8-bit RGBA PNG.
+    /// Decodes an 8-bit RGB or RGBA PNG.
+    ///
+    /// An opaque reference written by another tool is usually RGB — Playwright
+    /// writes its screenshots that way — and refusing those would mean
+    /// re-encoding a golden before it can be compared, which is exactly the
+    /// step that lets a golden stop being the thing it came from. An RGB image
+    /// reads as fully opaque.
     pub fn decode_png(bytes: &[u8]) -> Result<Self, ImageError> {
         let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
         let mut reader = decoder
             .read_info()
             .map_err(|error| ImageError::Codec(error.to_string()))?;
         let info = reader.info();
-        if info.color_type != png::ColorType::Rgba {
+        let color_type = info.color_type;
+        if !matches!(color_type, png::ColorType::Rgba | png::ColorType::Rgb) {
             return Err(ImageError::Format(format!(
-                "expected RGBA, got {:?}",
-                info.color_type
+                "expected RGB or RGBA, got {color_type:?}"
             )));
         }
         if info.bit_depth != png::BitDepth::Eight {
@@ -162,6 +168,14 @@ impl Image {
             .next_frame(&mut pixels)
             .map_err(|error| ImageError::Codec(error.to_string()))?;
         pixels.truncate(frame.buffer_size());
+        if color_type == png::ColorType::Rgb {
+            let mut rgba = Vec::with_capacity(pixels.len() / 3 * 4);
+            for pixel in pixels.chunks_exact(3) {
+                rgba.extend_from_slice(pixel);
+                rgba.push(u8::MAX);
+            }
+            pixels = rgba;
+        }
         Self::from_rgba8(frame.width, frame.height, pixels)
     }
 
@@ -219,6 +233,42 @@ mod tests {
         assert_eq!(decoded.width(), 3);
         assert_eq!(decoded.height(), 2);
         assert_eq!(decoded.pixels(), pixels.as_slice());
+    }
+
+    /// Playwright writes opaque screenshots as RGB, and those screenshots are
+    /// goldens here, so reading one must not need a re-encode first.
+    #[test]
+    fn an_rgb_png_reads_as_opaque_rgba() {
+        let mut bytes = Vec::new();
+        let mut encoder = png::Encoder::new(&mut bytes, 2, 1);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .write_header()
+            .unwrap()
+            .write_image_data(&[1, 2, 3, 4, 5, 6])
+            .unwrap();
+
+        let decoded = Image::decode_png(&bytes).unwrap();
+        assert_eq!(decoded.width(), 2);
+        assert_eq!(decoded.height(), 1);
+        assert_eq!(decoded.pixels(), &[1, 2, 3, 255, 4, 5, 6, 255]);
+    }
+
+    #[test]
+    fn a_greyscale_png_is_still_refused() {
+        let mut bytes = Vec::new();
+        let mut encoder = png::Encoder::new(&mut bytes, 2, 1);
+        encoder.set_color(png::ColorType::Grayscale);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .write_header()
+            .unwrap()
+            .write_image_data(&[7, 9])
+            .unwrap();
+
+        let error = Image::decode_png(&bytes).unwrap_err();
+        assert!(matches!(error, ImageError::Format(_)), "{error:?}");
     }
 
     #[test]
