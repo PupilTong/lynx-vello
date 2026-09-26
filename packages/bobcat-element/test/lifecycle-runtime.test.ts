@@ -294,7 +294,7 @@ describe("MTS/BTS lifecycle runtime", () => {
     expect(ran).toHaveLength(3);
     expect(ran[0]).toEqual([mts.__Card__, mts.lynx, mts.__LoadStyleSheet, queryNodes]);
     expect("chunkLocal" in scope).toBe(false);
-    // Every binding the entry preamble imports is a parameter, PAPI included.
+    // Every binding `MTS_CHUNK_PREAMBLE` imports is a parameter, PAPI included.
     const parameters = moduleLoads[0]![1].split(", ");
     expect(parameters).toEqual(expect.arrayContaining([
       "__BobcatQueryNodes", "__Card__", "lynx", "console", "SystemInfo",

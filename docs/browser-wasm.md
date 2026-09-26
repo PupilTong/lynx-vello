@@ -96,7 +96,11 @@ entry-MTS bytes with the `bobcat-resources` system it owns
 response URLs, then calls `BobcatRenderer::load(entry_url, style_sheet_urls)`.
 Core reads them through `ResourceFetcher`, validates UTF-8 strictly, and uses
 the entry's final URL as the ESM entry specifier; it never receives a bundle
-decoder. That 16 MiB bound is browser-embedder policy and crosses no part of the
+decoder. The entry is registered and completed verbatim: a raw script is
+neither a Lynx nor a web-core product, so nothing gives it the imports
+`bobcat-source` writes in front of a card's body (`MTS_CHUNK_PREAMBLE`), and a
+raw main-thread script imports what it uses from `bobcat:runtime` and
+`bobcat:element` itself. That 16 MiB bound is browser-embedder policy and crosses no part of the
 resource protocol. The load also makes the entry URL the view's base URL and
 the fetcher's, the base a relative `url(...)` in the page's CSS resolves
 against.
@@ -126,7 +130,11 @@ with the browser's replacement-mode UTF-8 `TextDecoder`, matching web-core's
 raw XML loader. Rust's `bobcat-source::xml` parser validates and extracts the sections in
 the Render Worker. The source uses `<lynx engine-version="...">` and
 `<script thread="main">` / `<script thread="background">`; legacy
-attribute spellings are rejected. A present stylesheet is registered as CSS
+attribute spellings are rejected. Both scripts are registered the way
+`bobcat-source` registers every card body: the main-thread script behind
+`MTS_CHUNK_PREAMBLE`, and the background-thread script as the `CommonJS`
+chunk web-core runs it as, behind `BTS_CHUNK_PREAMBLE`, each on the body's own
+first line. A present stylesheet is registered as CSS
 text and mounted as the view's one sheet by boot's first flush, before anything is styled;
 the returned Promise uses the same engine-event completion path as `load`. The
 exported `LYNX_XML_PAGE_CONFIG` supplies the source format's fixed

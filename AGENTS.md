@@ -182,13 +182,25 @@ external modules are preserved and acquire no invented page root.
 `PageSource::from_native_bundle` requires an explicit entry name, `from_bytes`
 a `root` for binary page inputs.
 
+**The import wrappers of a card's bodies are this crate's.** The engine adds
+nothing to a script, so every card body `bobcat-source` registers carries the
+names its realm gives a card, on the body's own first line, so every line of
+the body keeps its number: an MTS body — a container's root Lepus script, an
+XML main-thread script — behind `bobcat_core::MTS_CHUNK_PREAMBLE`
+(`mts_entry_source`), and a BTS body behind `bobcat_core::BTS_CHUNK_PREAMBLE`
+in the shape its compiler calls for (`bts_module_source`). An XML
+background-thread script is a `.web.bundle`'s `CommonJS` shape, because
+web-core runs it as its bundle's `/app-service.js`, through its chunk wrapper.
+A named Lepus chunk is registered verbatim, since the realm compiles it as a
+function body over those same names.
+
 `PageSource`, browser response registration, shared StyleInfo lowering and all
 three parsers are always available: the crate has no Cargo feature flags, so
 every embedder including Wasm depends on the complete crate. IO and view
 construction stay with the embedder; the browser's `loadLynxXml` accepts only
 XML responses. Native XML keeps strict UTF-8 and private memory URLs; the
 browser keeps replacement decoding, final-response fragment URLs and host
-PageConfig. The two register the raw XML background script under different
+PageConfig. The two register the XML background script under different
 URLs: native under `bobcat-memory://lynx-xml/app-service.js`, the browser's
 `register_lynx_xml_response` at `<final-response-URL>#background-thread`, which
 keeps the response URL as the base for that script's own relative imports.
@@ -567,9 +579,10 @@ transform, graph membership and boot policy stay in the core adapter.
 **`bobcat:module` is the synchronous way into a source.**
 `import { createRequire } from "bobcat:module"` is available in a view's MTS
 realm and in every Worker realm, the BTS included; it is an explicit import,
-and neither entry preamble carries it. Node's algorithm — the cache, the
-`module` object, cycles, eviction, `require.resolve` — is the
-`packages/bobcat-element` source module `module.ts`, like every other built-in.
+and neither `MTS_CHUNK_PREAMBLE` nor `BTS_CHUNK_PREAMBLE` carries it. Node's
+algorithm — the cache, the `module` object, cycles, eviction,
+`require.resolve` — is the `packages/bobcat-element` source module
+`module.ts`, like every other built-in.
 It is written over two host members on `bobcat-internal:host`, which both realm
 kinds have: `resolveModuleUrl(base, specifier)`, the normalizer `import`
 resolves through, so a `require` and an `import` name a module by the same URL;
@@ -789,7 +802,7 @@ and it then imports the entry by the URL `create_lynx_view` resolved against
 parks for the entry's answer: it is a task of the view that enters the realm
 when it arrives, queued behind `open_realm`. The
 entry's task (`load_entry`) completes that module from the pre-issued answer,
-with the entry preamble prepended and the fetcher's response URL as its
+exactly as the fetcher answered it and with the fetcher's response URL as its
 `import.meta.url`, so boot's remainder (the BTS Worker, the render and the
 flush) runs in the job that completes it; the entry's own request never reaches
 the fetcher. The listed sheets are mounted by that flush, in listed order, as
@@ -828,7 +841,12 @@ own realm owes. Comparing that generation against the one recorded at the end
 of the page's own last entry keeps a page's own bumps from waking it.
 
 A `.web.bundle`'s `lepusCode.root` or raw XML main body becomes a real ESM at
-its resolved entry URL: core prepends named imports from both built-ins. The
+its resolved entry URL, and it is `bobcat-source` that gives it named imports
+from both built-ins (`MTS_CHUNK_PREAMBLE`, on the body's first line) when it
+registers it. Core completes the entry with what the fetcher answered and adds
+nothing, so an entry that is not a card's body imports what it uses itself,
+and one naming a binding it did not import fails with a `ReferenceError`, the
+entry's own failure. The
 `bobcat:boot` ESM imports its lifecycle helpers from `bobcat:runtime`,
 `Document` and `__FlushElementTree` from `bobcat:element`, and
 `bobcat:timers` for its effect. The runtime parses the view's `init_data` and `global_props`
@@ -861,16 +879,17 @@ handed to JS by the one-shot startup-data binding without JSON serialization or
 source interpolation. JS merges those three numbers over its own runtime
 constants into SystemInfo; BTS builds its own out of that `SystemInfo`, which
 the MTS realm posts to it in the `initialize` message, so both realms report
-the numbers the MTS literals read as. Entries receive runtime bindings through
-prepended ESM imports; global props updates replace the live module binding,
-and there is no native evaluator or separate Script lexical environment.
+the numbers the MTS literals read as. A card's entry receives runtime
+bindings through the ESM imports `bobcat-source` prepended; global props
+updates replace the live module binding, and there is no native evaluator or
+separate Script lexical environment.
 
 Runtime JS reads ReactLynx's hooks directly from `globalThis`, while runtime
 and PAPI identifiers remain module imports; a named Lepus chunk is a plain
 script resource `PageSource` registers verbatim, which `__LoadLepusChunk`
 builds the URL of, loads through the same synchronous host loader a `require`
 uses, and runs — again on every call, as native does — as a function body
-whose parameters are the bindings the entry preamble gives the entry. Named
+whose parameters are the bindings `MTS_CHUNK_PREAMBLE` gives the entry. Named
 calls and replies belong to the two JS Worker message handlers; Rust
 transports opaque messages and performs no Lepus-specific dispatch or reply
 flush. Boot's deferred flush
@@ -1355,10 +1374,10 @@ imports native operations directly from `bobcat-internal:host`; no host object
 and no element member is installed on `globalThis`.
 
 The PAPI runtime exports the supported Element PAPI only as named ESM bindings,
-which transformed entries receive through the prepended import, and **the
-header table of `packages/bobcat-element/src/element-papi.ts` is the
-authoritative enumeration** — it names every member and what backs it, and
-`ENTRY_PREAMBLE` in `main/runtime/lib.rs` imports exactly that set. By kind:
+which a card's entry receives through the import `bobcat-source` prepends to
+its body, and **the header table of `packages/bobcat-element/src/element-papi.ts`
+is the authoritative enumeration** — it names every member and what backs it, and
+`MTS_CHUNK_PREAMBLE` in `esm.rs` imports exactly that set. By kind:
 every ReactLynx Snapshot constructor except `__CreateFrame`; all six tree
 mutations; the properties and queries a Snapshot's `create`/`update` functions
 write through and read back, among them `__SetInlineStyles` and the name-based
@@ -1972,17 +1991,22 @@ Page sources arrive through the Render Worker's own `fetch`: it registers the
 raw stylesheet and entry-MTS bytes with the `bobcat-resources` system it owns
 and calls `BobcatRenderer::load(entry_url, style_sheet_urls)`; the entry's
 final response URL is the ESM specifier `bobcat:boot` imports and the base its
-images resolve against. Images are fetched by the resource system through the
+images resolve against. That raw entry is neither a Lynx nor a web-core
+product, so it is registered verbatim, with no `MTS_CHUNK_PREAMBLE`: a raw
+main-thread script imports what it uses from `bobcat:runtime` and
+`bobcat:element` itself. Images are fetched by the resource system through the
 same Worker `fetch` and decoded on the main thread by an `Image` element in the
 package's `js/image-decoder.ts`, over a `MessageChannel` whose Worker end the
 facade hands to `BobcatRenderer::create` at init. `loadLynxXml(url)` fetches an
 XML envelope once, decodes it with the web loader's replacement-mode UTF-8
-behavior, parses it with `bobcat-source::xml`, and hands any raw stylesheet and
-its main-thread body to the same `load`; both are repeatable. The exported
-`LYNX_XML_PAGE_CONFIG` names the source format's fixed page defaults, which a
-host may still deliberately override. The optional background body is
-registered at its section URL, `<final-response-URL>#background-thread`, and
-named in `ViewSources::background_entry` for the view's BTS Worker.
+behavior, parses it with `bobcat-source::xml`, registers any raw stylesheet
+and its main-thread body — behind `MTS_CHUNK_PREAMBLE`, as `bobcat-source`
+registers every card body — and hands them to the same `load`; both are
+repeatable. The exported `LYNX_XML_PAGE_CONFIG` names the source format's
+fixed page defaults, which a host may still deliberately override. The optional background body is
+registered, as the `CommonJS` chunk web-core runs it as, at its section URL,
+`<final-response-URL>#background-thread`, and named in
+`ViewSources::background_entry` for the view's BTS Worker.
 
 Transferring the canvas does not transfer its DOM event target, so the
 `BobcatCanvas` facade retains that element and forwards active

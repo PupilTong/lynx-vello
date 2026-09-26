@@ -116,14 +116,18 @@ itself, which is where the BTS's global scope and timers come from. The BTS
 is a dedicated worker whose URL is `bobcat:bts`: every worker is started from
 the same kind of `Start`, and the BTS differs only in its URL and the source
 its diagnostics are named by. `ViewSources.background_entry`
-selects an optional raw module; native/browser XML adapters supply the
-background section's URL. The MTS realm posts that URL to the BTS in the
+selects an optional module; native/browser XML adapters supply the
+background section's URL, where `bobcat-source` registered the section as the
+`CommonJS` chunk web-core runs it as, behind `BTS_CHUNK_PREAMBLE`. The MTS
+realm posts that URL to the BTS in the
 first message, `initialize`, beside the page data, its own `SystemInfo` and
 the view's native module table. The `bobcat:bts` bootstrap hands
 `bobcat:bts-runtime` a loader that imports the entry that message names once
-the message has initialized the runtime. The application entry imports its bindings, `lynx` included, from
-`bobcat:bts-runtime`, as a card's compiled bodies do through their chunk
-preamble; `globalThis.lynx` stays absent on both sides. Application source is
+the message has initialized the runtime. The application entry has its
+bindings, `lynx` included, from `bobcat:bts-runtime`: a card body — a compiled
+body or an XML background script — through the `BTS_CHUNK_PREAMBLE`
+`bobcat-source` prepended, and a raw entry through its own import;
+`globalThis.lynx` stays absent on both sides. Application source is
 neither prefetched nor included in the bootstrap. The entry is loaded through
 the view's ResourceFetcher like any other worker import. Without an entry, the
 built-in BTS environment still starts. Compiled BTS bundle manifests

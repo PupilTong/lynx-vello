@@ -106,7 +106,7 @@ async fn view_with(
 #[tokio::test]
 async fn a_preparsed_sheet_styles_the_page() {
     let fetcher = Rc::new(
-        FetcherDouble::new(CLASSED_VIEW_SCRIPT.as_bytes().to_vec())
+        FetcherDouble::card(CLASSED_VIEW_SCRIPT)
             .with_preparsed_style_sheet(basic_sheet())
             .resolving_to(SCRIPT_URL),
     );
@@ -130,7 +130,7 @@ async fn a_css_text_sheet_mounts_through_the_same_entry_point() {
     // The raw-text arm is independent of the entry resource, as it is for an
     // embedder that keeps both URLs in one resource registry.
     let fetcher = Rc::new(
-        FetcherDouble::new(CLASSED_VIEW_SCRIPT.as_bytes().to_vec())
+        FetcherDouble::card(CLASSED_VIEW_SCRIPT)
             .with_style_sheet_text(b".basic { width: 100px; height: 100px; }".to_vec())
             .resolving_to(SCRIPT_URL),
     );
@@ -149,7 +149,7 @@ async fn a_byte_order_mark_prefixed_sheet_mounts() {
     let mut css = "\u{feff}".as_bytes().to_vec();
     css.extend_from_slice(b".basic { width: 100px; }");
     let fetcher = Rc::new(
-        FetcherDouble::new(CLASSED_VIEW_SCRIPT.as_bytes().to_vec())
+        FetcherDouble::card(CLASSED_VIEW_SCRIPT)
             .with_style_sheet_text(css)
             .resolving_to(SCRIPT_URL),
     );
@@ -169,7 +169,7 @@ async fn a_byte_order_mark_prefixed_sheet_mounts() {
 #[tokio::test]
 async fn a_stylesheet_that_is_not_utf8_is_a_precise_error() {
     let fetcher = Rc::new(
-        FetcherDouble::new(CLASSED_VIEW_SCRIPT.as_bytes().to_vec())
+        FetcherDouble::card(CLASSED_VIEW_SCRIPT)
             .with_style_sheet_text(vec![0xff, 0xfe, 0x00])
             .resolving_to(SCRIPT_URL),
     );
@@ -197,7 +197,7 @@ async fn a_stylesheet_that_is_not_utf8_is_a_precise_error() {
 #[tokio::test]
 async fn every_listed_sheet_issues_its_own_stylesheet_request() {
     let fetcher = Rc::new(
-        FetcherDouble::new(CLASSED_VIEW_SCRIPT.as_bytes().to_vec())
+        FetcherDouble::card(CLASSED_VIEW_SCRIPT)
             .with_preparsed_style_sheet(basic_sheet())
             .resolving_to(SCRIPT_URL),
     );

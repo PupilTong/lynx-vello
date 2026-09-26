@@ -969,6 +969,12 @@ export class BobcatCanvas {
    * Fetch a page's author stylesheets and its main-thread entry script, then
    * show it.
    *
+   * The entry is a raw ES module, run as it was fetched: nothing is prepended
+   * to it, so it imports what it uses — `lynx` and the rest from
+   * `bobcat:runtime`, the Element PAPI from `bobcat:element` — itself. A
+   * compiled card goes through `loadTemplate` or `loadZip`, and an XML
+   * envelope through `loadLynxXml`, which give its scripts those imports.
+   *
    * A native view is its page, so this builds a fresh one and drops the view
    * before it. Stylesheets cascade in the order given and all mount before the
    * entry script runs. The Promise resolves after Bobcat's boot sequence and
@@ -999,7 +1005,11 @@ export class BobcatCanvas {
    * load as `load()`, with the envelope's sections as the sources. Its
    * optional background script runs as a module in the page's BTS worker
    * after the main-thread entry loads, with `lynx.getCoreContext()`
-   * available. Page configuration remains the host's `BobcatCanvas.create`
+   * available. Unlike `load()`'s raw entry, both scripts are card bodies:
+   * each has its thread's `lynx`, `console` and the rest in scope without
+   * importing them, the main-thread script the Element PAPI too, and the
+   * background script the `module` and `exports` of web-core's chunk
+   * wrapper. Page configuration remains the host's `BobcatCanvas.create`
    * choice; `LYNX_XML_PAGE_CONFIG` supplies web-core's raw-loader defaults.
    */
   async loadLynxXml(url: string | URL, options: LoadOptions = {}): Promise<void> {

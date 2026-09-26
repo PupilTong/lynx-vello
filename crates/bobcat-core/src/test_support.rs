@@ -48,7 +48,9 @@ pub(crate) enum TestSheet {
 
 /// A host whose whole resource system is the strings it was built with.
 pub(crate) struct InlineFetcher {
-    /// The script served for [`ENTRY`]; every other module is missing.
+    /// The script served for [`ENTRY`]; every other module is missing. A
+    /// card's MTS body as `bobcat-source` registers it, with
+    /// `MTS_CHUNK_PREAMBLE` in front, since the engine adds nothing to it.
     entry: String,
     sheets: FxHashMap<String, TestSheet>,
     /// The faces this host serves an `@font-face` `src` from, by URL. A URL
@@ -185,6 +187,10 @@ pub(crate) struct TestViewSpec {
 impl TestViewSpec {
     /// A phone-shaped view whose painter has nowhere to draw, which is what a
     /// test about routing, events or timers wants.
+    ///
+    /// `entry` is a card's MTS body, which the host serves the way
+    /// `bobcat-source` registers a card's root: `MTS_CHUNK_PREAMBLE`, then the
+    /// body on the preamble's own line.
     pub(crate) fn new(entry: &str) -> Self {
         Self {
             entry: entry.to_owned(),
@@ -274,7 +280,7 @@ impl TestViewSpec {
             )
         };
         let fetcher = Rc::new(InlineFetcher {
-            entry,
+            entry: crate::main::runtime::card_entry(&entry),
             sheets: sheets.into_iter().collect(),
             fonts: fonts.into_iter().collect(),
         });

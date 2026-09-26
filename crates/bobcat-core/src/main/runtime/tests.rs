@@ -140,11 +140,11 @@ fn a_throwing_processor_reports_and_still_runs_render_and_flush() {
 /// same synchronous host loader a `require` uses and run again on every
 /// `__LoadLepusChunk` call, as native's `TemplateEntry` does.
 ///
-/// What a chunk shares with the root is the bindings the entry preamble gives
-/// the entry — the realm hands them to the chunk as the parameters of the
-/// function body it was compiled as — and this realm's `globalThis`. Not the
-/// root's lexical scope, and not the root's `var`s: a `var` at a chunk's top
-/// level is local to that call.
+/// What a chunk shares with the root is the bindings `MTS_CHUNK_PREAMBLE`
+/// gives a card's root — the realm hands them to the chunk as the parameters
+/// of the function body it was compiled as — and this realm's `globalThis`.
+/// Not the root's lexical scope, and not the root's `var`s: a `var` at a
+/// chunk's top level is local to that call.
 //
 // A plain test rather than a `tokio::test`, for the reason the `require`
 // tests spell out: the load's wait is a `block_on` of the realm's engine
@@ -232,7 +232,7 @@ fn mts_imported_inputs_follow_global_props_updates() {
             "app:///script-inputs.js",
         )
         .unwrap();
-    runtime.evaluate_module(&mut js, &entry_module_source(r#"
+    runtime.evaluate_module(&mut js, &card_entry(r#"
         import {__BobcatUpdateGlobalProps} from 'bobcat:runtime';
         const oldProps = scriptInputs.readProps();
         __BobcatUpdateGlobalProps('{"next":2}');
@@ -983,6 +983,9 @@ fn get_engine_returns_one_event_target_with_standard_listener_identity() {
         .expect("engine EventTarget behavior");
 }
 
+/// A card's MTS body is its entry with `MTS_CHUNK_PREAMBLE` on the body's
+/// own first line, so an error in the body's first line is reported at line
+/// 1 of the entry's URL.
 #[test]
 fn bundle_url_reaches_script_error_location() {
     let (mut js_runtime, mut runtime, _elements) = runtime();
@@ -990,14 +993,9 @@ fn bundle_url_reaches_script_error_location() {
         .run_main_thread_script(&mut js_runtime, "const = 1", "app:///broken.js")
         .expect_err("syntax error");
 
-    assert!(
-        error
-            .source
-            .location
-            .as_ref()
-            .and_then(|location| location.source.as_deref())
-            .is_some_and(|source| source == "app:///broken.js")
-    );
+    let location = error.source.location.expect("the error has a location");
+    assert_eq!(location.source.as_deref(), Some("app:///broken.js"));
+    assert_eq!(location.line, Some(1), "the body's first line is line 1");
 }
 
 #[test]

@@ -132,22 +132,17 @@ const INLINE_DECLARATIONS: usize = 16;
 
 mod style_sheets;
 
-/// What the MTS entry is given, which is [`crate::esm::MTS_CHUNK_PREAMBLE`] — the same
-/// list a lazy container's `main-thread` body is compiled against. Built from
-/// it rather than written twice, so the two lists cannot drift. web-core's
-/// wrapper also carries a `//# allFunctionsCalledOnLoad` line, a V8
-/// eager-compilation hint that `QuickJS`'s parser ignores, so it is not
-/// reproduced here.
+/// A card's MTS body as the entry `bobcat-source` registers for it:
+/// [`crate::esm::MTS_CHUNK_PREAMBLE`], then the body on the preamble's own
+/// line, so the body's first line is the module's first.
 ///
-/// The preamble does not name the entry: [`MainThreadRuntime::complete_entry`]
-/// hands the response URL to `__BobcatInitEntry` before the body runs, so the
-/// statement is not compiled into every module this preamble is prepended to.
-const ENTRY_PREAMBLE: &str = concat!(crate::esm::mts_chunk_preamble!(), "\n");
-
-pub(crate) fn entry_module_source(source: &str) -> String {
-    let mut module = String::with_capacity(ENTRY_PREAMBLE.len() + source.len());
-    module.push_str(ENTRY_PREAMBLE);
-    module.push_str(source);
+/// Only the seams with no fetcher behind them write an entry this way —
+/// [`MainThreadRuntime::run_main_thread_script`] and the crate's own test
+/// hosts. A view completes its entry with what the fetcher answered.
+pub(crate) fn card_entry(body: &str) -> String {
+    let mut module = String::with_capacity(crate::esm::MTS_CHUNK_PREAMBLE.len() + body.len());
+    module.push_str(crate::esm::MTS_CHUNK_PREAMBLE);
+    module.push_str(body);
     module
 }
 
@@ -1333,12 +1328,15 @@ impl MainThreadRuntime {
     /// Nothing is waited for before this runs. The entry reaches the realm
     /// through an ordinary `import` of the URL the view named it by, a module
     /// a task of the view's owner completes from the answer
-    /// `create_lynx_view` already asked for, and the author stylesheets are
-    /// mounted by boot's own `__FlushElementTree`, which waits for each before
-    /// the document is styled. So this returns with a document in place
-    /// however long the entry takes, and boot's own completion is the promise
-    /// `main_module_finished` reads. The only two things boot waits on are
-    /// both inside that flush: the listed sheets, and a painter's binding.
+    /// `create_lynx_view` already asked for, with nothing added to it: a
+    /// card's MTS body already carries the imports `bobcat-source` prepended
+    /// when it registered it (see [`Self::complete_entry`]). The author
+    /// stylesheets are mounted by boot's own `__FlushElementTree`, which waits
+    /// for each before the document is styled. So this returns with a
+    /// document in place however long the entry takes, and boot's own
+    /// completion is the promise `main_module_finished` reads. The only two
+    /// things boot waits on are both inside that flush: the listed sheets,
+    /// and a painter's binding.
     ///
     /// How much of boot has run when this returns depends on the entry alone:
     /// an entry already completed is found in the realm's registry and boot
@@ -1447,8 +1445,16 @@ await Promise.resolve().then(() => __FlushElementTree());
         )
     }
 
-    /// Boots a realm over `source` as its entry, without a fetcher behind it —
-    /// the seam this crate's own tests and benchmarks drive boot through.
+    /// Boots a realm over a card's MTS body as its entry, without a fetcher
+    /// behind it — the seam this crate's own tests and benchmarks drive boot
+    /// through.
+    ///
+    /// `source` is the body as a container carries it, and the entry is that
+    /// body the way `bobcat-source` registers a card's root script:
+    /// [`crate::esm::MTS_CHUNK_PREAMBLE`] and then the body, on the
+    /// preamble's own line, so the body's first line is the module's first.
+    /// Nothing else prepends it: [`Self::complete_entry`] completes an entry
+    /// with the source it is handed.
     ///
     /// `source_name` is both the URL the entry is requested by and the one it
     /// is answered from; it replaces whatever entry the realm was opened with.
@@ -1475,20 +1481,21 @@ await Promise.resolve().then(() => __FlushElementTree());
         // never sends to a fetcher; it is answered below.
         let requested = self.take_module_request();
         debug_assert_eq!(requested, self.entry_module_name().ok());
-        self.complete_entry(js_runtime, source_name, source)
+        self.complete_entry(js_runtime, source_name, &card_entry(source))
             .expect("naming an entry by an absolute URL does not fail")?;
         let finished = self.main_module_finished().map(|_| ());
         let collected = self.finish_batch(js_runtime, finished.is_ok());
         finished.and(collected)
     }
 
-    /// Boots a realm over `source` as its entry the way a view whose author
-    /// sheets the fetcher answered before its first flush boots: each sheet is
-    /// handed to the document slot as an answer already in hand, in the order
-    /// given, which is the listed order, and boot's own `__FlushElementTree`
-    /// mounts them before it styles the document. `source_name` is both the
-    /// entry's request URL and its response URL, as in
-    /// [`Self::run_main_thread_script`].
+    /// Boots a realm over a card's MTS body as its entry the way a view whose
+    /// author sheets the fetcher answered before its first flush boots: each
+    /// sheet is handed to the document slot as an answer already in hand, in
+    /// the order given, which is the listed order, and boot's own
+    /// `__FlushElementTree` mounts them before it styles the document.
+    /// `source` is the body, which becomes the entry the way it does in
+    /// [`Self::run_main_thread_script`], and `source_name` is both the
+    /// entry's request URL and its response URL, as there.
     ///
     /// The seam for this crate's own tests of cards that come with a sheet.
     #[cfg(test)]
@@ -1520,7 +1527,7 @@ await Promise.resolve().then(() => __FlushElementTree());
         // The one request boot left is its entry, which the view's owner
         // never sends to a fetcher.
         assert_eq!(self.take_module_request(), self.entry_module_name().ok());
-        self.complete_entry(js_runtime, source_name, source)
+        self.complete_entry(js_runtime, source_name, &card_entry(source))
             .expect("naming an entry by an absolute URL does not fail")
     }
 
@@ -1548,10 +1555,19 @@ await Promise.resolve().then(() => __FlushElementTree());
     ///
     /// The module is the one [`Self::entry_module_name`] names — the name
     /// boot's `import` asks for, the request URL, which is also the name its
-    /// errors and stack frames carry — completed like any other import: the
-    /// entry with the entry preamble prepended, answered from the fetcher's
+    /// errors and stack frames carry — completed like any other import: with
+    /// the source exactly as the fetcher answered it, from the fetcher's
     /// response URL. That URL is the base its own relative imports resolve
     /// against and its `import.meta.url`.
+    ///
+    /// **Nothing is added to the source.** What a card's MTS body imports —
+    /// [`crate::esm::MTS_CHUNK_PREAMBLE`] — is `bobcat-source`'s to prepend,
+    /// and it does so to every card body it registers, so the fetcher already
+    /// answers a card's root with its imports in place. A line of the source
+    /// is the line its errors report. An entry that is not a card's body
+    /// imports what it uses itself, and one that names a binding it did not
+    /// import throws a `ReferenceError` when that line runs, which is the
+    /// entry's own failure.
     ///
     /// **The entry is named here.** Before the script is completed, the
     /// response URL — the fetcher's, so a redirect is already applied — is
@@ -1606,7 +1622,7 @@ await Promise.resolve().then(() => __FlushElementTree());
         Ok(self
             .core
             .engine
-            .complete_module(js_runtime, &name, Ok((url, &entry_module_source(source))))
+            .complete_module(js_runtime, &name, Ok((url, source)))
             .map_err(booting))
     }
 

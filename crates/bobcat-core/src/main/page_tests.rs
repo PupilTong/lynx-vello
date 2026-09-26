@@ -23,7 +23,7 @@ use crate::link::{
     DetachedView, InputEventPayload, PageUpdate, ViewNotice, detached_base, detached_outbox,
 };
 use crate::main::WorkerFactory;
-use crate::main::runtime::bound_metrics;
+use crate::main::runtime::{bound_metrics, card_entry};
 use crate::main::tree::PageConfig;
 use crate::resource::{SourceCompletion, SourceRequest};
 use crate::script::ScriptError;
@@ -70,11 +70,12 @@ async fn open_realm(page: &Rc<Page>, entry: &str, url: &str) {
 }
 
 /// An entry the fetcher answered before the realm opened, which is what every
-/// pin here that is not about the loading itself wants.
+/// pin here that is not about the loading itself wants: a card's MTS body, as
+/// the module `bobcat-source` registers for a card's root.
 fn answered_entry(entry: &str, url: &str, token: &CancellationToken) -> StartupSource {
     let (completion, answer) = SourceCompletion::new(token.clone());
     completion.complete(Ok(LoadedSource::Module {
-        source: entry.to_owned(),
+        source: card_entry(entry),
         url: url.to_owned(),
     }));
     StartupSource {
@@ -319,6 +320,13 @@ impl Harness {
         }));
     }
 
+    /// Answers the outstanding entry request with a card's MTS body, as the
+    /// module `bobcat-source` registers for a card's root: `body` with
+    /// `MTS_CHUNK_PREAMBLE` in front, since the engine adds nothing to it.
+    fn answer_entry(&mut self, url: &str, body: &str) {
+        self.answer(url, &card_entry(body));
+    }
+
     /// Answers the outstanding request for the stylesheet at `url` with
     /// author CSS, whatever else is outstanding.
     fn answer_style_sheet_at(&mut self, url: &str, css: &str) {
@@ -392,7 +400,7 @@ impl Harness {
             !harness.sources.is_empty()
         })
         .await;
-        self.answer("app:///main.js", entry);
+        self.answer_entry("app:///main.js", entry);
         self.until("MTS never rendered", |h| {
             h.view.published.commit().is_some()
         })
@@ -958,7 +966,7 @@ fn a_frame_held_before_the_binding_never_replaces_a_newer_one() {
             "the empty document's frame is held rather than published"
         );
 
-        harness.answer("app:///main.js", ONE_BOX);
+        harness.answer_entry("app:///main.js", ONE_BOX);
         harness.metrics.send_replace(Some(CREATE_VIEWPORT));
         harness
             .until("boot never finished once bound", |h| h.finished())
@@ -1002,7 +1010,7 @@ fn an_unbound_view_holds_its_first_frame_and_publishes_it_on_the_binding() {
                 !harness.sources.is_empty()
             })
             .await;
-        harness.answer("app:///main.js", ONE_BOX);
+        harness.answer_entry("app:///main.js", ONE_BOX);
 
         // Every task of the view goes on running while the flush is parked,
         // so this is as far as an unbound view ever gets.
@@ -1047,7 +1055,7 @@ fn binding_at_other_metrics_recommits_the_held_frame() {
                 !harness.sources.is_empty()
             })
             .await;
-        harness.answer("app:///main.js", ONE_BOX);
+        harness.answer_entry("app:///main.js", ONE_BOX);
         for _ in 0..64 {
             harness.turn().await;
         }
@@ -1090,7 +1098,7 @@ fn a_view_released_while_its_first_flush_is_parked_never_finishes() {
                 !harness.sources.is_empty()
             })
             .await;
-        harness.answer("app:///main.js", ONE_BOX);
+        harness.answer_entry("app:///main.js", ONE_BOX);
         for _ in 0..64 {
             harness.turn().await;
         }
@@ -1566,7 +1574,7 @@ fn a_frame_that_fails_during_boot_is_reported_and_boot_still_finishes_once() {
                 !h.sources.is_empty()
             })
             .await;
-        harness.answer(
+        harness.answer_entry(
             "app:///main.js",
             &format!(
                 "{ONE_BOX}
@@ -2019,7 +2027,7 @@ fn an_entry_answered_from_a_url_that_is_not_absolute_fails_the_startup_naming_it
                 !h.sources.is_empty()
             })
             .await;
-        harness.answer("main.js", "globalThis.ran = true;");
+        harness.answer_entry("main.js", "globalThis.ran = true;");
         harness
             .until("the view never ended", |h| h.owner.is_finished())
             .await;
@@ -2150,7 +2158,7 @@ fn script_finished_is_published_once_without_any_bts_acknowledgement() {
         harness
             .until("entry request", |h| !h.sources.is_empty())
             .await;
-        harness.answer("app:///main.js", "__CreatePage();");
+        harness.answer_entry("app:///main.js", "__CreatePage();");
         harness
             .until("MTS did not render", |h| {
                 h.view.published.commit().is_some()
@@ -2194,7 +2202,7 @@ fn disposal_finishes_behind_a_job_heavy_worker_event() {
         harness
             .until("entry request", |h| !h.sources.is_empty())
             .await;
-        harness.answer(
+        harness.answer_entry(
             "app:///main.js",
             r"__CreatePage();
 lynx.getJSContext().addEventListener('flood', () => {
@@ -2261,7 +2269,7 @@ fn a_bts_worker_that_fails_reports_worker_ended_and_leaves_boot_alone() {
         harness
             .until("entry request", |h| !h.sources.is_empty())
             .await;
-        harness.answer("app:///main.js", "__CreatePage();");
+        harness.answer_entry("app:///main.js", "__CreatePage();");
         harness
             .until("MTS did not render", |h| {
                 h.view.published.commit().is_some()
@@ -2361,7 +2369,7 @@ fn card_url_uses_the_entry_response_url_before_requesting_styles() {
         harness
             .until("the entry was not requested", |h| h.sources.len() == 1)
             .await;
-        harness.answer(
+        harness.answer_entry(
             "https://cdn.test/redirected/main.js?version=2#entry",
             r"
             if (__Card__ !== 'https://cdn.test/redirected/main.js?version=2#entry')
@@ -2508,7 +2516,7 @@ fn an_outstanding_entry_leaves_the_view_serving() {
         );
         assert!(!harness.finished(), "and boot has not finished either");
 
-        harness.answer("app:///main.js", ONE_BOX);
+        harness.answer_entry("app:///main.js", ONE_BOX);
         harness
             .until("boot never finished once its entry arrived", |h| {
                 h.finished()
@@ -2552,9 +2560,9 @@ async fn classed_box_size(harness: &mut Harness) -> (f32, f32) {
     size.expect("the probe answered")
 }
 
-/// Answers the entry request with [`CLASSED_BOX`], leaving every stylesheet
-/// request where it is. The entry is picked out by its URL, since it is a
-/// module request like any import the view has made.
+/// Answers the entry request with [`CLASSED_BOX`] as a card's root, leaving
+/// every stylesheet request where it is. The entry is picked out by its URL,
+/// since it is a module request like any import the view has made.
 fn answer_classed_entry(harness: &mut Harness) {
     let entry = harness
         .sources
@@ -2565,7 +2573,7 @@ fn answer_classed_entry(harness: &mut Harness) {
         .expect("the entry request is outstanding");
     let (_, completion) = harness.sources.remove(entry);
     completion.complete(Ok(LoadedSource::Module {
-        source: CLASSED_BOX.to_owned(),
+        source: card_entry(CLASSED_BOX),
         url: "app:///main.js".to_owned(),
     }));
 }
@@ -2807,7 +2815,7 @@ fn a_listed_sheet_that_app_code_settles_first_still_fails_the_boot() {
             } else {
                 format!("{ONE_BOX}\n{adoption}")
             };
-            harness.answer("app:///main.js", &entry);
+            harness.answer_entry("app:///main.js", &entry);
             harness
                 .until("the sheet failure never reached the embedder", |h| {
                     h.startup_failure().is_some()
@@ -2876,7 +2884,7 @@ fn an_entry_a_worker_event_resumes_reports_its_throw_before_boots_failure() {
             })
             .await;
         harness.refuse_style_sheet();
-        harness.answer(
+        harness.answer_entry(
             "app:///main.js",
             r"
             import { Worker } from 'bobcat-internal';
@@ -2966,7 +2974,7 @@ fn a_synchronous_adoption_parks_javascript_and_leaves_a_siblings_tasks_running()
         adopting
             .until("A never asked for its entry", |h| !h.sources.is_empty())
             .await;
-        adopting.answer("app:///main.js", ADOPTING_BOX);
+        adopting.answer_entry("app:///main.js", ADOPTING_BOX);
         adopting
             .until("A never adopted a stylesheet", |h| h.wants_a_style_sheet())
             .await;
@@ -2989,7 +2997,7 @@ fn a_synchronous_adoption_parks_javascript_and_leaves_a_siblings_tasks_running()
             })
             .await;
         loading.answer_style_sheet(".box{width:10px}");
-        loading.answer("app:///b.js", ONE_BOX);
+        loading.answer_entry("app:///b.js", ONE_BOX);
         loading
             .commands
             .send(ToMain::BeginFrame { now: 0.0, seq: 4 })
@@ -3047,7 +3055,7 @@ fn releasing_a_view_whose_job_is_waiting_ends_the_wait_and_releases_its_realm() 
                 !h.sources.is_empty()
             })
             .await;
-        harness.answer("app:///main.js", ADOPTING_BOX);
+        harness.answer_entry("app:///main.js", ADOPTING_BOX);
         harness
             .until("the entry never adopted a stylesheet", |h| {
                 h.wants_a_style_sheet()
@@ -3136,7 +3144,7 @@ fn a_passed_deadline_queues_one_settle_while_a_sibling_holds_the_thread() {
         adopting
             .until("A never asked for its entry", |h| !h.sources.is_empty())
             .await;
-        adopting.answer("app:///main.js", ADOPTING_BOX);
+        adopting.answer_entry("app:///main.js", ADOPTING_BOX);
         adopting
             .until("A never adopted a stylesheet", |h| h.wants_a_style_sheet())
             .await;

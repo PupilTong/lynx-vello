@@ -523,7 +523,7 @@ describe("installation", () => {
         "__BobcatComputedStyleMap",
         "CSSStyleValue",
         // Not a PAPI member: the lifecycle export the boot module
-        // constructs, which no entry preamble imports.
+        // constructs, which `MTS_CHUNK_PREAMBLE` does not import.
         "Document",
       ].sort(),
     );

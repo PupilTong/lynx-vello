@@ -27,8 +27,8 @@ const VIEW_WIDTH: f32 = 32.0;
 const VIEW_HEIGHT: f32 = 24.0;
 
 /// The MTS entry: it prints the three numbers and then renders one element,
-/// so boot finishes. `SystemInfo` is one of the bindings the entry preamble
-/// gives it.
+/// so boot finishes. `SystemInfo` is one of the bindings `MTS_CHUNK_PREAMBLE`
+/// gives a card's MTS body.
 const MAIN_ENTRY: &str = r"
 console.log('mts ' + SystemInfo.pixelRatio + ' ' + SystemInfo.pixelWidth + ' ' +
   SystemInfo.pixelHeight);
@@ -68,9 +68,11 @@ impl ResourceFetcher for Entries {
             | SourceRequest::Font { url }
             | SourceRequest::Fetch { url } => url.clone(),
         };
+        // The main-thread entry is a card's MTS body, served as
+        // `bobcat-source` registers a card's root.
         let source = match specifier.as_str() {
-            MAIN_URL => Some(MAIN_ENTRY),
-            BACKGROUND_URL => Some(BACKGROUND_ENTRY),
+            MAIN_URL => Some(format!("{}{MAIN_ENTRY}", bobcat_core::MTS_CHUNK_PREAMBLE)),
+            BACKGROUND_URL => Some(BACKGROUND_ENTRY.to_owned()),
             _ => None,
         };
         completion.complete(source.map_or_else(
@@ -86,7 +88,7 @@ impl ResourceFetcher for Entries {
             },
             |source| {
                 Ok(LoadedSource::Module {
-                    source: source.to_owned(),
+                    source,
                     url: specifier.clone(),
                 })
             },

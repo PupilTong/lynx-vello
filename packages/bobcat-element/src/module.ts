@@ -3,7 +3,8 @@ import { loadModuleSync, resolveModuleUrl } from "bobcat-internal:host";
 // Node's `createRequire` and the `require` it answers, preloaded as the
 // `bobcat:module` ESM. Every realm this engine builds has it: the views'
 // main-thread realms on one runtime, and each worker realm on the group's
-// worker runtime. It is an explicit import — no entry preamble carries it.
+// worker runtime. It is an explicit import — neither `MTS_CHUNK_PREAMBLE`
+// nor `BTS_CHUNK_PREAMBLE` carries it.
 //
 // # What lives here and what lives in the host
 //

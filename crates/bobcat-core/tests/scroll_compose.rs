@@ -51,8 +51,7 @@ globalThis.renderPage = function renderPage() {
 ";
 
 async fn booted() -> (LynxView<Rc<FetcherDouble>>, Painter) {
-    let fetcher =
-        Rc::new(FetcherDouble::new(TWO_ROW_SCRIPT.as_bytes().to_vec()).resolving_to(SCRIPT_URL));
+    let fetcher = Rc::new(FetcherDouble::card(TWO_ROW_SCRIPT).resolving_to(SCRIPT_URL));
     let (mut view, painter) = solo_view(
         Arc::new(NoWakeup),
         100.0,

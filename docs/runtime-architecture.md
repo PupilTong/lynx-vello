@@ -481,14 +481,19 @@ no frame and no `ScriptFinished` — until every listed sheet has loaded or
 failed. Boot imports the entry by the URL
 `create_lynx_view` resolved, which is absolute, so the module normalizer maps
 it to itself. The entry's task (`load_entry`) awaits
-its answer and completes that module with it, with the entry preamble
-prepended, exactly as an ordinary import is completed: the module is
+its answer and completes that module with it, exactly as the fetcher answered
+it and exactly as an ordinary import is completed: the module is
 registered under the request URL, which is the name its errors carry, and
 answered from the fetcher's response URL, which is its `import.meta.url` and
 the base its relative imports resolve against. Boot's `import` finds it in the
 registry if it was completed first, and is resumed by the completion
 otherwise; the entry's own request is answered by `load_entry` and never
-reaches the fetcher a second time, so the epilogue skips it. The only two
+reaches the fetcher a second time, so the epilogue skips it. Nothing is added
+to the entry: the imports a card's MTS body is given, `MTS_CHUNK_PREAMBLE`,
+are `bobcat-source`'s to prepend, which it does to every card body it
+registers, on the body's own first line, so a line of the entry is the line
+its errors report. An entry that is not a card's body imports what it uses
+itself. The only two
 things boot waits on are both inside its first flush: the listed sheets, then
 a painter's binding (see
 [Document and rendering ownership](#document-and-rendering-ownership)). While
@@ -1056,9 +1061,10 @@ named Element-PAPI exports, and the fetched entry under the URL boot imports
 it by, answered from its resolved URL.
 `bobcat:element`
 imports its native operations directly; nothing is installed as
-`globalThis.bobcat`. Before registering the entry, core prepends its runtime
-and Element-PAPI import declarations. Event delivery travels back through the
-loaded `bobcat:element` namespace's `__BobcatDispatchEvent` export, once per
+`globalThis.bobcat`. The entry is completed as the fetcher answered it: a
+card's entry carries its runtime and Element-PAPI import declarations because
+`bobcat-source` wrote them in front of its body. Event delivery travels back
+through the loaded `bobcat:element` namespace's `__BobcatDispatchEvent` export, once per
 dispatch, carrying the whole event path as two comma-joined id strings and
 everything else as primitives: whether the event bubbles — which decides how
 much of that path the bind pass runs on, and whether the `global-bindEvent`

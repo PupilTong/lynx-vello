@@ -440,6 +440,12 @@ impl BobcatRenderer {
     /// Build the native `LynxView` for one page and attach it to the
     /// Worker-owned `OffscreenCanvas`.
     ///
+    /// The entry and the background entry are loaded as they were registered:
+    /// the engine adds nothing to either. [`Self::register_script`] leaves a
+    /// raw script as it is, and [`Self::register_lynx_xml`] registers an XML
+    /// envelope's scripts with the imports `bobcat-source` gives a card's
+    /// bodies.
+    ///
     /// A view is its page, so loading a second one replaces the view rather
     /// than mutating the running one. The Wasm instance, resource provider,
     /// page configuration, metrics, font containers, default family, and
@@ -512,6 +518,11 @@ impl BobcatRenderer {
 
     /// Internal Render-Worker seam: retain bytes that the browser host already
     /// fetched under its URL policy. Returns the normalized absolute URL.
+    ///
+    /// The bytes are registered verbatim. A raw script is neither a Lynx nor a
+    /// web-core product, so it is no card body for `bobcat-source` to wrap: a
+    /// raw main-thread entry imports what it uses from `bobcat:runtime` and
+    /// `bobcat:element` itself.
     #[wasm_bindgen(js_name = registerScript)]
     #[allow(
         clippy::needless_pass_by_value,

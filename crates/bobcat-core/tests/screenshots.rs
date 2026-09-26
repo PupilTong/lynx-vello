@@ -124,7 +124,7 @@ fn declaration(property: &str, value: &str) -> PreparsedDeclaration {
 /// it captured is the one its entry module committed.
 fn fetcher(source: &[u8]) -> impl FnOnce(bobcat_core::ImageReports) -> Rc<FetcherDouble> {
     let source = source.to_vec();
-    move |_sink| Rc::new(FetcherDouble::new(source).resolving_to(SCRIPT_URL))
+    move |_sink| Rc::new(FetcherDouble::card(source).resolving_to(SCRIPT_URL))
 }
 
 async fn booted(
@@ -191,7 +191,7 @@ async fn booted_with_sheet_sources(
         DrawTarget::Offscreen,
         |_sink| {
             Rc::new(
-                FetcherDouble::new(source.to_vec())
+                FetcherDouble::card(source)
                     .resolving_to(SCRIPT_URL)
                     .with_preparsed_style_sheet(sheet),
             )
@@ -340,7 +340,7 @@ async fn an_embedder_image_store_reaches_the_private_painter() {
     let (mut view, mut painter) = booted(
         |sink| {
             Rc::new(
-                FetcherDouble::new(IMAGE_SCRIPT.as_bytes().to_vec())
+                FetcherDouble::card(IMAGE_SCRIPT)
                     .resolving_to(SCRIPT_URL)
                     .with_images(Rc::clone(&images))
                     .serving(sink),
@@ -374,7 +374,7 @@ async fn an_image_element_loads_and_paints_from_its_src() {
     let (mut view, mut painter) = booted(
         |sink| {
             Rc::new(
-                FetcherDouble::new(IMAGE_ELEMENT_SCRIPT.as_bytes().to_vec())
+                FetcherDouble::card(IMAGE_ELEMENT_SCRIPT)
                     .resolving_to(SCRIPT_URL)
                     .with_images(Rc::clone(&images))
                     .serving(sink),
@@ -728,7 +728,7 @@ async fn booted_with_images(
         DrawTarget::Offscreen,
         move |sink| {
             Rc::new(
-                FetcherDouble::new(source.into_bytes())
+                FetcherDouble::card(source)
                     .resolving_to(SCRIPT_URL)
                     .with_images(images)
                     .serving(sink),

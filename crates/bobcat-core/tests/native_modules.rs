@@ -66,13 +66,16 @@ impl bobcat_core::FrameImages for Entries {
 }
 
 impl Entries {
-    fn source(specifier: &str) -> Option<&'static str> {
+    /// A main-thread entry is a card's MTS body, served as `bobcat-source`
+    /// registers a card's root; a background entry is served as it stands.
+    fn source(specifier: &str) -> Option<String> {
+        let card = |body: &str| format!("{}{body}", bobcat_core::MTS_CHUNK_PREAMBLE);
         match specifier {
-            MAIN_URL => Some(MAIN_ENTRY),
-            MAIN_CALLER_URL => Some(MAIN_CALLER_ENTRY),
-            BACKGROUND_URL => Some(BACKGROUND_ENTRY),
-            UNDECLARED_URL => Some(UNDECLARED_ENTRY),
-            ON_EVENT_URL => Some(ON_EVENT_ENTRY),
+            MAIN_URL => Some(card(MAIN_ENTRY)),
+            MAIN_CALLER_URL => Some(card(MAIN_CALLER_ENTRY)),
+            BACKGROUND_URL => Some(BACKGROUND_ENTRY.to_owned()),
+            UNDECLARED_URL => Some(UNDECLARED_ENTRY.to_owned()),
+            ON_EVENT_URL => Some(ON_EVENT_ENTRY.to_owned()),
             _ => None,
         }
     }
@@ -102,7 +105,7 @@ impl ResourceFetcher for Entries {
             },
             |source| {
                 Ok(LoadedSource::Module {
-                    source: source.to_owned(),
+                    source,
                     url: specifier.clone(),
                 })
             },
@@ -112,8 +115,9 @@ impl ResourceFetcher for Entries {
 
 /// The background entry: one call, whose callback prints what came back.
 ///
-/// It imports its own bindings, as a fetched BTS entry does — only the
-/// built-in bootstrap carries a preamble.
+/// It imports its own bindings, as a BTS entry that is not a card's body
+/// does: `BTS_CHUNK_PREAMBLE` is what `bobcat-source` prepends to a card's
+/// bodies, and the engine adds nothing to an entry.
 const BACKGROUND_ENTRY: &str = r"
 import { console, lynx } from 'bobcat:bts-runtime';
 const modules = lynx.getApp().NativeModules;

@@ -2947,6 +2947,6 @@ export function __FlushElementTree(): undefined {
 }
 
 // The host calls this export once per dispatch, with the whole path. It is
-// deliberately not part of the entry preamble's PAPI imports; it is the
+// deliberately not part of `MTS_CHUNK_PREAMBLE`'s PAPI imports; it is the
 // module-namespace return path from Rust into the realm.
 export { dispatchEvent as __BobcatDispatchEvent };
