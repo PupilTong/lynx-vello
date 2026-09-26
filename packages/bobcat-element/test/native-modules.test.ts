@@ -190,26 +190,39 @@ describe("NativeModules transport", () => {
 });
 
 describe("the BTS NativeModules object", () => {
-  it("is built out of the table `initialize` carries, before the entry runs", () => {
-    const modules = bts.lynx.getApp().NativeModules;
-    // Empty as the runtime evaluates, which is all a plain `Worker` that
-    // imports it ever sees: nothing posts one an `initialize`.
-    expect(Object.keys(modules)).toEqual([]);
-    const seen: unknown[] = [];
+  // The object `app.NativeModules` named as the runtime evaluated, its keys
+  // then, and what the entry saw as it ran.
+  let evaluated: object;
+  let keysBeforeInitialize: string[];
+  const seen: unknown[] = [];
+
+  // The one `initialize` a BTS is posted, delivered once for every test
+  // below: the table the MTS realm posts for a view built with one module,
+  // `Foo`, declaring one method, `bar`, beside that realm's own `SystemInfo`.
+  beforeAll(() => {
+    evaluated = bts.lynx.getApp().NativeModules;
+    keysBeforeInitialize = Object.keys(evaluated);
     bts.__BobcatStartBTS(async () => {
       seen.push(Object.keys(bts.NativeModules), bts.SystemInfo["pixelRatio"]);
     });
-    // The table the MTS realm posts for a view built with one module, `Foo`,
-    // declaring one method, `bar`, beside that realm's own `SystemInfo`.
     worker.__BobcatDeliverWorkerMessage({
       bobcat: "runtime", method: "initialize", updateData: {},
       systemInfo: systemInfo.createSystemInfo({ pixelRatio: 1.1, pixelWidth: 1287, pixelHeight: 2785 }),
       nativeModuleTable: "3:Foo3:bar",
     });
+  });
+
+  it("is empty until `initialize` arrives", () => {
+    // Which is all a plain `Worker` that imports the runtime ever sees:
+    // nothing posts one an `initialize`.
+    expect(keysBeforeInitialize).toEqual([]);
+  });
+
+  it("is built out of the table `initialize` carries, before the entry runs", () => {
     // The entry ran with both in place, and the object it saw is the one
     // every name for `NativeModules` already held.
     expect(seen).toEqual([["Foo"], 1.1]);
-    expect(bts.NativeModules).toBe(modules);
+    expect(bts.NativeModules).toBe(evaluated);
     expect(bts.lynx.SystemInfo).toBe(bts.SystemInfo);
     expect((globalThis as { SystemInfo?: unknown }).SystemInfo).toBe(bts.SystemInfo);
   });

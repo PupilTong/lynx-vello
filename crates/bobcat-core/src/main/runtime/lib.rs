@@ -1431,7 +1431,7 @@ try {{ await import({entry}); }} catch (error) {{ void Promise.reject(error); }}
 const {{ Worker }} = await import("bobcat-internal");
 data = __BobcatProcessInitData(data);
 // The BTS's own entry, by the URL the view named it by, is the BTS's to
-// import: it travels in the `initialize` message this call posts.
+// import: this call posts that URL to the BTS in the `initialize` message.
 __BobcatConnectBackground(new Worker("{BTS_MODULE_SPECIFIER}", {{ name: "lynx-bg" }}), data, {background_entry});
 
 // Queue the flush after jobs already scheduled by the lifecycle hooks.
