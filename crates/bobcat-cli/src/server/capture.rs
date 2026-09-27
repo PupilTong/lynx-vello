@@ -674,7 +674,10 @@ mod tests {
     /// `animation-timeline: scroll()`: the lowering carries it to stylo, the
     /// row binds its list's scroll timeline, and at the boot offset it shows
     /// its `from` keyframe — opacity 0.25 over white — while its sibling
-    /// stays solid blue.
+    /// stays solid blue. The third row's `view()` animation keys its
+    /// keyframes by named ranges (`entry 100%`, `exit 0%`), which the
+    /// toolchain and the lowering carry as written: at the boot offset its
+    /// `entry` range ends, where `entry 100%` puts opacity 0.25.
     #[tokio::test(flavor = "current_thread")]
     async fn a_scroll_timeline_card_renders_at_its_scroll_progress() {
         let executor = CaptureExecutor::new().expect("start capture owner thread");
@@ -710,5 +713,11 @@ mod tests {
             pixel(150, 50)
         );
         assert_eq!(pixel(150, 150), [0, 0, 255], "the next row is solid");
+        let [red, green, blue] = pixel(150, 250);
+        assert!(
+            (187..=195).contains(&red) && (187..=195).contains(&green) && blue == 255,
+            "the entering row shows its entry 100% keyframe, got {:?}",
+            pixel(150, 250)
+        );
     }
 }

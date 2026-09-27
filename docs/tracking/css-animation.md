@@ -19,7 +19,7 @@ Scope covered: `animation-*`/`transition-*` CSS longhands and shorthands, `@keyf
 | `animation-direction` | `normal\|reverse\|alternate\|alternate-reverse` | Core | Yes | | lynx/core/renderer/starlight/style/css_type.h:332-337 |
 | `animation-fill-mode` | `none\|forwards\|backwards\|both` | Core | Yes | | lynx/core/renderer/starlight/style/css_type.h:339-344 |
 | `animation-play-state` | `running\|paused` | Core | Yes | | lynx/core/renderer/css/parser/css_string_parser.cc:4089-4095 |
-| `@keyframes` selectors | `from`/`to`/`N%`, clamped to [0,1] | Core | Yes | | lynx/core/renderer/css/css_keyframes_token.h:64-81 |
+| `@keyframes` selectors | `from`/`to`/`N%`, clamped to [0,1] | Core | Yes | lynx-vello also admits scroll-animations-1's `<timeline-range-name> <percentage>` (a W3C extension; see *Scroll-driven animations*, "Range keyframes"). | lynx/core/renderer/css/css_keyframes_token.h:64-81 |
 | `transition` (shorthand) | `[property, duration, delay, timing]`, comma-separated | Core | Partial | see `transition-property` row | lynx/core/renderer/css/parser/transition_shorthand_handler.cc |
 | `transition-property` | Lynx uses a closed enum (`AnimationPropertyType`), not free-form idents | Core | No | Spec allows any CSS property name (incl. custom idents/`all`, undefined ones are just no-ops); Lynx's parser instead resolves each token against a **fixed** internal property enum (`ALL_ANIMATABLE_PROPERTY_ID` in `css_property.h:47-65`) plus Lynx-only pseudo-properties `scaleX`/`scaleY`/`scaleXY` (single-axis transform animation) that are not real CSS properties at all. Rewrite should accept standard longhand names + `all`/`none`, and drop scaleX/Y/XY as first-class transition targets (model them as `transform` axis animations instead, or keep as a compat shim). | lynx-stack/packages/repl/src/generated/lynx-types-map.json (transitionProperty union); lynx/core/renderer/css/parser/css_string_parser.cc (CSSTransitionLayer/`Transition()`) |
 | `transition-duration` / `transition-delay` / `transition-timing-function` | one entry per `transition-property` slot, cycles if fewer entries (per spec) | Core | Yes | | lynx/core/renderer/css/parser/transition_shorthand_handler.cc |
@@ -258,16 +258,23 @@ concretely, so the tables above are read as "the target" and this section as
   `from` to its `to`, eased by its own timing function. A scroll timeline
   picks progress in `[0, 1]` as the clock does, so the reach — which reads no
   time — bounds a scroll-driven curve exactly as it bounds the same keyframes on
-  the document timeline. It eases in the direction the binding samples, which
-  stylo's `return;` deviation can leave apart from the cloned animation's; a
-  held progress-driven sample takes both directions. A list holding an op the reach does not
-  model (matrix, skew, 3D rotation) or a mismatched remainder stylo decomposes
-  has no reach: its pullback admits everything, the extent cap bounds its
-  encode, and it does not export inside a composited group. That is the one
-  culling coarsening the stylo-sampled curves brought. A composited group
-  whose content moves inside it takes its rect from that content carried
-  through the same ranges, cut to its clips and to the viewport pulled back
-  into the group's space.
+  the document timeline. A range keyframe can sit outside `[0, 1]`
+  (*Scroll-driven animations*, "Range keyframes"); stylo hands the reach every
+  segment whose span meets `[0, 1]`, a zero-length one between keyframes tied
+  at one offset included, so every value a sample in `[0, 1]` returns is an
+  endpoint of, or lies on, one of them, and each segment's eased range over its
+  whole length bounds it. That bound is the whole segment, not its part inside
+  `[0, 1]`: a keyframe far outside the attachment range makes the reach larger
+  than the movement a sample shows — a known limit. It eases in the direction
+  the binding samples, which stylo's `return;` deviation can leave apart from
+  the cloned animation's; a held progress-driven sample takes both directions. A
+  list holding an op the reach does not model (matrix, skew, 3D rotation) or a
+  mismatched remainder stylo decomposes has no reach: its pullback admits
+  everything, the extent cap bounds its encode, and it does not export inside a
+  composited group. That is the one culling coarsening the stylo-sampled curves
+  brought. A composited group whose content moves inside it takes its rect from
+  that content carried through the same ranges, cut to its clips and to the
+  viewport pulled back into the group's space.
 - **Per-frame work is bounded by what the program draws.** Composition
   samples only the curves and sticky boxes the compose program references;
   the earliest curve end is a commit-time value. `has_live_curves` is true
@@ -288,7 +295,10 @@ concretely, so the tables above are read as "the target" and this section as
   it). The driver keeps two node bits, `animates_opacity` and
   `animates_transform`, recomputed in `sync_animation_state`: an animation
   counts while pending (its delay included), running or paused, or finished
-  with a `forwards`/`both` fill; a transition while pending or running.
+  with a `forwards`/`both` fill; a transition while pending or running. An
+  animation names the properties it has keyframes for
+  (`Animation::animating_properties`, the set the export reads), so a
+  property only ignored range keyframes declare sets no bit.
   Either bit makes the element a stacking context; the opacity bit also
   forces its composited group and makes it a Backdrop Root at every reading;
   the transform bit makes it the containing block of its absolute and fixed
@@ -419,6 +429,42 @@ the specifications are silent or disagree.
   range contributes at every offset, the limit included, fill or not. The
   specification's examples use `both`, which is representable at every
   offset.
+- **Range keyframes** (`entry 0% { }`; scroll-animations-1 Appendix A, "Named
+  Timeline Range Keyframe Selectors", over the named ranges of §3.1). A keyframe
+  selector may name a timeline range and a percentage of any value
+  (`cover -20%`); the fork parses the form under `lynx`. The fork computes an
+  animation's keyframes once per style (`DeclaredKeyframes`) and samples each
+  animated property from its own track of keyframes ordered by offset, built
+  in one place (`DeclaredKeyframes::tracks`). A range keyframe sits at the
+  offset its point takes in the attachment range,
+  `(R.start + p·(R.end − R.start) − A.start) / (A.end − A.start)` for range
+  `R` and attachment range `A` (`animation-range`), which `resolve_timelines`
+  hands the fork as each named range's fractions of `A`
+  (`Animation::set_timeline_ranges`). Delays and the iteration count play no
+  part, so every iteration holds the keyframes at the same fractions (Blink).
+  - The offset may lie outside `[0, 1]`. A segment interpolates with its
+    keyframes' own offsets, so a keyframe outside the attachment range still
+    shapes the values inside it, and the before phase, which stands at offset
+    0 (1 reversed), shows the value there: a keyframe's own when one sits
+    exactly there, else the interpolated one.
+  - Automatic 0% and 100% keyframes (the base value) are added per property,
+    only where no keyframe of that property sits at or before 0, or at or
+    after 1. A property every keyframe declaring it is ignored for is not
+    animated at all.
+  - At equal offsets the value jumps to the later keyframe in css-animations-2's
+    computed keyframe order: percentage keyframes first, then range keyframes
+    as specified. Range keyframes with one selector (range and percentage)
+    collapse into the earliest of them (csswg-drafts#8507), their declarations
+    cascading; a range keyframe never merges with a percentage keyframe.
+  - Ignored — as if absent — on the document timeline, on an inactive
+    timeline, and for an empty attachment range (`animation-range: contain 50%
+    contain 50%`).
+  - They are placed at every resolution: a layout change moves them, a paused
+    animation's included while its progress holds, and an element in skipped
+    contents holds them. A restyle rebuilds the animation with the ranges
+    already placed, so no frame shows them unplaced. The painter samples the
+    tracks of the curve's cloned animation, so its values stay bit-equal to
+    the cascade's.
 - **Stale timelines** (scroll-animations-1 §5.1). The flush that creates an
   animation cascades it with no effect; the same `layout()` binds it, writes
   its sample and re-cascades it before the commit, and a change that relayouts
@@ -464,7 +510,8 @@ the specifications are silent or disagree.
     at the range's start, as `NormalizedTiming` does (SPEC-3 first gave the
     latter the `auto` rule): past the start only a forwards fill shows, and
     it shows the last keyframe.
-  - A range name on a scroll timeline names the whole timeline.
+  - A range name on a scroll timeline names the whole timeline, in
+    `animation-range` and in a range keyframe alike.
   - Resuming from `animation-play-state: paused` re-aligns to the scroll
     position; a paused animation holds its last sample, and one created
     paused holds the sample of that moment, not the base value.
@@ -481,8 +528,33 @@ the specifications are silent or disagree.
     binding reads `Animation::timeline`.
   - `view-timeline-inset` is not animatable (the fork keeps Firefox's
     `animation_type = "none"`; scroll-animations-1 animates it).
-  - Named-range keyframe selectors (`entry 0% { }`) stay pref-gated in the
-    fork and are ignored — a ruled follow-up.
+  - Range keyframes on a scroll progress timeline are placed with every
+    range name standing for the whole scroll range, as Blink resolves them
+    and WPT `timeline-offset-keyframes-with-scroll-timeline.html` asserts.
+    scroll-animations-1 defines named ranges for view progress timelines only
+    (§3.1), and Appendix A ("Named Timeline Range Keyframe Selectors") says a
+    timeline without the named range ignores them. A scroll timeline's named
+    ranges are `NamedRanges::scroll` in `crates/dom/src/style/timeline.rs`,
+    which `animation-range` resolves against and range keyframes are placed
+    with.
+  - Tied offsets follow the computed keyframe order (percentage keyframes
+    first). Blink sorts range keyframes before percentage keyframes while
+    they are unresolved and keeps that order once they resolve
+    (`ProcessKeyframesRule`, `Keyframe::LessThan`).
+  - Range keyframes with one selector collapse whatever their timing
+    functions, as stylo merges percentage keyframes. Blink merges only those
+    with equal easing and composite, into the later one
+    (`FindIndexOfMatchingKeyframe`, crbug 1408702).
+  - An automatic keyframe takes the timing function of the rule's 0% (100%)
+    keyframe, else the animation's, as stylo resolves the automatic
+    percentage keyframes (csswg-drafts#13872 is open).
+  - Where keyframes straddle offset 0 in the before phase (1 reversed), the
+    value is interpolated with the ordinary easing evaluation: a step easing
+    has no before flag there to choose its limit from.
+  - Upstream parity: in a stylo build without the `lynx` feature and with the
+    scroll-driven-animations pref on, a rule whose only keyframes are range
+    keyframes used to animate its properties from and to the base value;
+    those properties are now not animated at all.
   - Pseudo-element animations on a progress timeline are not bound and have
     no effect.
   - An element in skipped contents (css-contain-2 §4) holds its sample.

@@ -1669,6 +1669,125 @@ fn a_view_timeline_without_a_fill_composes_its_presence_as_committed() {
     }
 }
 
+/// Range keyframes (scroll-animations-1 Appendix A, "Named Timeline Range
+/// Keyframe Selectors") on the same `view()` range: `entry` is `[80, 160]`, so
+/// `entry 0%` and `entry 100%` sit at 0 and 1, `contain 50%` at 2.375,
+/// `cover -10%` at -0.475 and `cover 150%` at 7.125 of the attachment range.
+/// The opacity segment straddles the whole range, the transform track runs
+/// past its end, and the before phase stands between opacity keyframes. The
+/// curve samples the keyframes the commit placed, as the cascade does.
+#[test]
+fn range_keyframes_on_a_view_timeline_compose_as_committed() {
+    let (mut fixture, scroller, card) = scroll_fixture(
+        ".filler { height: 120px; }
+         .lead { flex-shrink: 0; width: 280px; height: 360px; }
+         @keyframes ranged {
+             cover -10% { opacity: 0.1; }
+             entry 0% { transform: translate(0px, 0px); }
+             entry 100% { transform: translate(60px, 20px); }
+             contain 50% { opacity: 0.9; }
+             cover 150% { transform: translate(90px, 30px); } }",
+        true,
+        ("ranged", "both"),
+        "animation-timeline: view(); animation-range: entry",
+    );
+    // Halfway through `entry` the keyframes are in place: the transform
+    // halfway to `entry 100%`, the opacity 0.975 / 2.85 of the way from
+    // `cover -10%` to `contain 50%`.
+    fixture.doc.flush();
+    fixture
+        .doc
+        .dom
+        .scroll_to(scroller, Vector2D::new(0.0, 120.0));
+    fixture.doc.dom.advance_scroll_timelines(&[scroller]);
+    assert_eq!(
+        fixture.doc.value(card, "transform"),
+        "translate(30px, 10px)"
+    );
+    assert_eq!(fixture.doc.value(card, "opacity"), "0.373684");
+    fixture.probes = vec![scroller];
+    fixture.check_scroll(
+        "range keyframes",
+        scroller,
+        120.0,
+        &[40.0, 80.0, 160.0, 101.5, 230.0, 300.0],
+    );
+}
+
+/// `to` and `entry 100%` tied at offset 1 on the card's `entry` range, with
+/// no keyframe above: from 160 on the card takes the later one's value,
+/// `translate(-1000px, 0px)`, which lies on no segment of positive length.
+/// The zero-length segment between the two is in the curve, so the reach
+/// carries the 120px card over the whole 1000px, and composition matches
+/// the cascade there.
+#[test]
+fn range_keyframes_tied_at_the_end_reach_the_later_value() {
+    let fixture = || {
+        let (mut fixture, scroller, card) = scroll_fixture(
+            ".filler { height: 120px; }
+             .lead { flex-shrink: 0; width: 280px; height: 360px; }
+             @keyframes tied {
+                 to { transform: translate(0px, 0px); }
+                 entry 100% { transform: translate(-1000px, 0px); } }",
+            true,
+            ("tied", "both"),
+            "animation-timeline: view(); animation-range: entry",
+        );
+        fixture.probes = vec![scroller];
+        (fixture, scroller, card)
+    };
+    let (mut probe, scroller, card) = fixture();
+    probe.doc.flush();
+    probe.doc.dom.scroll_to(scroller, Vector2D::new(0.0, 160.0));
+    probe.doc.dom.advance_scroll_timelines(&[scroller]);
+    assert_eq!(probe.doc.value(card, "transform"), "translate(-1000px)");
+    probe.doc.dom.scroll_to(scroller, Vector2D::new(0.0, 120.0));
+    probe.doc.dom.advance_scroll_timelines(&[scroller]);
+    let frame = probe.doc.dom.commit();
+    let [slot] = frame.animation_slots() else {
+        panic!("the card exports");
+    };
+    let track = slot.curve.transform.as_ref().expect("a transform track");
+    let carried = track.reach.carry(Rect::new(0.0, 0.0, 120.0, 80.0));
+    assert_eq!(
+        (carried.width(), carried.height()),
+        (1120.0, 80.0),
+        "the reach spans the tie"
+    );
+    let (fixture, scroller, _) = fixture();
+    fixture.check_scroll(
+        "tied at the end",
+        scroller,
+        120.0,
+        &[40.0, 159.0, 160.0, 300.0, 80.0],
+    );
+}
+
+/// A keyframe some interpolation takes out of the plane refuses the export
+/// even where it only ties another keyframe at offset 1: the zero-length
+/// segment is checked like any other.
+#[test]
+fn a_projective_keyframe_tied_at_the_end_refuses_the_export() {
+    let (mut fixture, scroller, _) = scroll_fixture(
+        ".filler { height: 120px; }
+         .lead { flex-shrink: 0; width: 280px; height: 360px; }
+         @keyframes tilted {
+             to { transform: translate(0px, 0px); }
+             entry 100% { transform: matrix3d(1,0,0,0, 0,1,0,0, 0,0,1,-0.002, 0,0,0,1); } }",
+        true,
+        ("tilted", "both"),
+        "animation-timeline: view(); animation-range: entry",
+    );
+    fixture.doc.flush();
+    fixture
+        .doc
+        .dom
+        .scroll_to(scroller, Vector2D::new(0.0, 120.0));
+    fixture.doc.dom.advance_scroll_timelines(&[scroller]);
+    let frame = fixture.doc.dom.commit();
+    assert!(frame.animation_slots().is_empty(), "refused");
+}
+
 /// A named scroll timeline on a list painted after the header it drives:
 /// its slot is allocated after the header's animation slot, and the header,
 /// outside the list, does not move with it.

@@ -452,6 +452,82 @@ mod tests {
         assert!((document.rounded_layout(view).unwrap().size.width - 22.0).abs() < f32::EPSILON);
     }
 
+    /// A keyframe block keyed by a scroll-animations-1 range selector, as a
+    /// lowered `.web.bundle` hands it over, reaches stylo's keyframes rule
+    /// and places its keyframe on the subject's view timeline: halfway
+    /// through `entry` (`[200, 400]` of a 400px scrollport over 600px, the
+    /// 200px subject, and 600px) the fade is halfway.
+    #[test]
+    fn a_range_keyframe_selector_places_its_keyframe_on_the_timeline() {
+        let mut document = document();
+        add_preparsed_style_sheet(
+            &mut document,
+            &PreparsedStyleSheet {
+                rules: vec![
+                    PreparsedRule::Keyframes {
+                        name: "reveal".to_owned(),
+                        keyframes: vec![
+                            PreparsedKeyframe {
+                                selector: "entry 0%".to_owned(),
+                                declarations: vec![declaration("opacity", "0")],
+                            },
+                            PreparsedKeyframe {
+                                selector: "entry 100%".to_owned(),
+                                declarations: vec![declaration("opacity", "1")],
+                            },
+                        ],
+                    },
+                    style(
+                        ".container",
+                        vec![
+                            declaration("display", "flex"),
+                            declaration("flex-direction", "column"),
+                            declaration("overflow", "scroll"),
+                            declaration("width", "400px"),
+                            declaration("height", "400px"),
+                        ],
+                    ),
+                    style(
+                        ".spacer",
+                        vec![
+                            declaration("flex-shrink", "0"),
+                            declaration("height", "600px"),
+                        ],
+                    ),
+                    style(
+                        ".subject",
+                        vec![
+                            declaration("flex-shrink", "0"),
+                            declaration("height", "200px"),
+                            declaration("animation", "reveal linear both"),
+                            declaration("animation-timeline", "view()"),
+                        ],
+                    ),
+                ],
+            },
+        );
+        let page = document.document_element().id();
+        let element = |document: &mut LynxDocument, parent, class| {
+            let id = document.create_element("view", ());
+            document.insert_before(parent, id, None);
+            document.set_classes(id, class);
+            id
+        };
+        let container = element(&mut document, page, "container");
+        element(&mut document, container, "spacer");
+        let subject = element(&mut document, container, "subject");
+        element(&mut document, container, "spacer");
+        document.layout();
+        document.scroll_to(container, dom::Vector2D::new(0.0, 300.0));
+        document.advance_scroll_timelines(&[container]);
+
+        let opacity = document
+            .get(subject)
+            .and_then(dom::Node::computed_style)
+            .map(|style| style.clone_opacity());
+        assert_eq!(opacity, Some(0.5));
+    }
+
     /// That the rule itself carries its name, offsets and blocks is asserted
     /// in `dom`, where the built rule is still readable. This covers the part
     /// visible from here: a keyframes rule mounts alongside style rules

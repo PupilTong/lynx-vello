@@ -1054,6 +1054,39 @@ fn a_card_carries_keyframes_and_font_face() {
     );
 }
 
+/// A scroll-animations-1 range keyframe selector (`entry 0%`) as web-core's
+/// encoder writes it — one `UnknownText` component holding the authored
+/// text — survives the bundle round trip and the lowering unchanged, so the
+/// engine's keyframe-selector parser sees it as written.
+#[test]
+fn a_range_keyframe_selector_survives_the_bundle() {
+    let info = style_info(vec![keyframes_rule(
+        "reveal",
+        vec![
+            (
+                "entry 0%",
+                vec![one_token("opacity", token_types::NUMBER_TOKEN, "0")],
+            ),
+            (
+                "entry 100%",
+                vec![one_token("opacity", token_types::NUMBER_TOKEN, "1")],
+            ),
+        ],
+    )]);
+
+    assert_eq!(
+        lowerable_rules(&info, 0),
+        vec![expect_keyframes(
+            "reveal",
+            vec![
+                ("entry 0%", vec![declaration("opacity", "0")]),
+                ("entry 100%", vec![declaration("opacity", "1")]),
+            ],
+        )]
+    );
+    assert!(registered_style_sheet(&info).is_some());
+}
+
 /// The Lynx XML envelope the upstream fixture is written in, kept as its own
 /// case so that dropping it from
 /// [`a_card_carries_keyframes_and_font_face`] loses no coverage.

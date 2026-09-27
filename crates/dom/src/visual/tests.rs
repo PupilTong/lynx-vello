@@ -3154,3 +3154,62 @@ fn a_paused_scroll_driven_animation_holds_on_the_painter() {
         "created paused at offset 0, it holds there"
     );
 }
+
+/// The `animates` side effects follow the keyframes an animation has, not
+/// its `@keyframes` rule. A 400px scroller over 600px, the 200px subject
+/// defining `--foo` and 600px: with its only `transform` keyframes, on
+/// `entry`, ignored — on the document timeline, or attached to an empty
+/// range — the subject is no stacking context and no containing block for
+/// its fixed child; placed on its view timeline, it is both, and ignoring
+/// them again undoes both.
+#[test]
+fn ignored_range_keyframes_have_no_side_effects() {
+    let mut doc = Doc::with_css(
+        "page { display: flex; width: 800px; height: 600px; align-items: flex-start; }
+         .container { display: flex; flex-direction: column; overflow: scroll; width: 400px;
+                      height: 400px; flex-shrink: 0; }
+         .spacer { flex-shrink: 0; width: 400px; height: 600px; }
+         .subject { flex-shrink: 0; width: 200px; height: 200px; view-timeline-name: --foo; }
+         .fixed { position: fixed; left: 0px; top: 0px; width: 10px; height: 10px; }
+         @keyframes shift {
+             entry 0% { transform: translateX(10px); }
+             entry 100% { transform: translateX(20px); } }",
+    );
+    let root = doc.root;
+    let container = doc.el(root, "view.container");
+    doc.el(container, "view.spacer");
+    let subject = doc.el(container, "view.subject");
+    let fixed = doc.el(subject, "view.fixed");
+    doc.el(container, "view.spacer");
+    let effects = |doc: &Doc| {
+        let node = doc.dom.get(subject).expect("live");
+        let style = doc.dom.paint_style(subject).expect("styled");
+        let origin = |id| doc.dom.bounding_client_rect(id).expect("laid out").origin;
+        (
+            node.animates_transform(),
+            super::stacking::establishes_stacking_context(node, style, false),
+            origin(fixed) == origin(subject),
+        )
+    };
+    for (animation, expected) in [
+        ("shift 10s linear both", (false, false, false)),
+        (
+            "shift linear both; animation-timeline: --foo;
+             animation-range: contain 50% contain 50%",
+            (false, false, false),
+        ),
+        (
+            "shift linear both; animation-timeline: --foo",
+            (true, true, true),
+        ),
+        (
+            "shift linear both; animation-timeline: --foo;
+             animation-range: contain 50% contain 50%",
+            (false, false, false),
+        ),
+    ] {
+        doc.set_inline(subject, &format!("animation: {animation}"));
+        doc.flush();
+        assert_eq!(effects(&doc), expected, "{animation}");
+    }
+}

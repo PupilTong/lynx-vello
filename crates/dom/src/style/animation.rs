@@ -115,9 +115,7 @@ use stylo::dom::OpaqueNode;
 use stylo::driver;
 use stylo::invalidation::element::restyle_hints::RestyleHint;
 use stylo::properties::longhands::animation_fill_mode::computed_value::single_value::T as AnimationFillMode;
-use stylo::properties::{
-    LonghandId, OwnedPropertyDeclarationId, PropertyDeclarationId, PropertyDeclarationIdSet,
-};
+use stylo::properties::{LonghandId, OwnedPropertyDeclarationId, PropertyDeclarationId};
 use stylo::selector_parser::SnapshotMap;
 use stylo::servo::animation::{
     Animation, AnimationSetKey, AnimationState, DocumentAnimationSet, ElementAnimationSet,
@@ -215,13 +213,6 @@ fn transition_has_side_effects(transition: &Transition) -> bool {
         transition.state,
         AnimationState::Pending | AnimationState::Running
     )
-}
-
-fn composite_bits(properties: &PropertyDeclarationIdSet) -> u8 {
-    COMPOSITES
-        .iter()
-        .filter(|(longhand, _)| properties.contains(PropertyDeclarationId::Longhand(*longhand)))
-        .fold(0, |bits, (_, bit)| bits | bit)
 }
 
 fn composite_bit(property: PropertyDeclarationId<'_>) -> u8 {
@@ -963,11 +954,13 @@ impl<T: Sync> Document<T> {
     }
 
     /// The [`ANIMATES_OPACITY`] and [`ANIMATES_TRANSFORM`] bits of `node`'s
-    /// own set: the composite properties its animations and transitions name
-    /// while they have side effects. A keyframes animation's properties are
-    /// its `@keyframes` rule's, the set Stylo built the animation from.
+    /// own set: the composite properties its animations and transitions
+    /// animate while they have side effects. A keyframes animation's
+    /// properties are those it has keyframes for, `Animation::animating_properties`,
+    /// the set the composite export reads: a property only ignored range
+    /// keyframes declare is not one of them, and placing or ignoring them
+    /// (`Document::resolve_timelines`) re-syncs the bits.
     fn animates(&self, node: &Node<T>, set: &ElementAnimationSet) -> u8 {
-        let stylist = self.style_engine().stylist();
         let timelines = &self.animations().timelines;
         let animations = set
             .animations
@@ -977,10 +970,8 @@ impl<T: Sync> Document<T> {
                     timelines.is_current(node.id(), &animation.name)
                 })
             })
-            .filter_map(|animation| stylist.lookup_keyframes(&animation.name, node))
-            .fold(0, |bits, keyframes| {
-                bits | composite_bits(&keyframes.properties_changed)
-            });
+            .flat_map(Animation::animating_properties)
+            .fold(0, |bits, (_, property)| bits | composite_bit(property));
         set.transitions
             .iter()
             .filter(|transition| transition_has_side_effects(transition))

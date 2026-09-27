@@ -413,6 +413,56 @@ mod tests {
         );
     }
 
+    /// web-core's encoder stores a keyframe block's selector as one
+    /// `UnknownText` component holding the authored text, so a
+    /// scroll-animations-1 range selector (`entry 0%`) reaches the engine's
+    /// keyframe-selector parser as written.
+    #[test]
+    fn a_range_keyframe_selector_is_lowered_verbatim() {
+        let info = style_info(vec![(
+            0,
+            StyleSheet {
+                imports: vec![],
+                rules: vec![Rule {
+                    kind: RuleKind::Keyframes,
+                    prelude: RulePrelude {
+                        selectors: vec![text_selector("reveal")],
+                    },
+                    declaration_block: DeclarationBlock {
+                        declarations: vec![],
+                    },
+                    children: vec![
+                        style_rule(
+                            vec![text_selector("entry 0%")],
+                            vec![declaration(CssPropertyId::Opacity, "0")],
+                        ),
+                        style_rule(
+                            vec![text_selector("entry 100%, exit 0%")],
+                            vec![declaration(CssPropertyId::Opacity, "1")],
+                        ),
+                    ],
+                }],
+            },
+        )]);
+
+        assert_eq!(
+            to_preparsed_style_sheet(&info).rules,
+            vec![PreparsedRule::Keyframes {
+                name: "reveal".to_owned(),
+                keyframes: vec![
+                    PreparsedKeyframe {
+                        selector: "entry 0%".to_owned(),
+                        declarations: vec![preparsed("opacity", "0")],
+                    },
+                    PreparsedKeyframe {
+                        selector: "entry 100%, exit 0%".to_owned(),
+                        declarations: vec![preparsed("opacity", "1")],
+                    },
+                ],
+            }]
+        );
+    }
+
     #[test]
     fn a_font_face_rule_becomes_a_descriptor_block() {
         let mut src = declaration(CssPropertyId::Unknown, "url(a.ttf)");

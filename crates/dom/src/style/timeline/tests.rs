@@ -981,3 +981,492 @@ fn a_definer_leaves_with_its_element_and_returns_with_it() {
     assert_eq!(source(&doc, mover), Some(definer), "linked back");
     assert!(listed(&doc));
 }
+
+/// WPT `timeline-range-name-offset-in-keyframes.tentative.html`'s page: a
+/// 400px scroller over a 600px spacer, the 200px subject defining `--foo`,
+/// and another 600px spacer, so `cover` is `[200, 800]`, `entry`
+/// `[200, 400]`, `contain` `[400, 600]` and `exit` `[600, 800]` of a
+/// 1000px scroll range. The subject runs `animation` on `--foo`; `keyframes`
+/// adds rules.
+fn range_page(keyframes: &str, animation: &str) -> (Doc, NodeId, NodeId) {
+    let mut doc = Doc::with_css(&format!(
+        "page {{ display: flex; width: 800px; height: 600px; align-items: flex-start; }}
+         .container {{ display: flex; flex-direction: column; overflow: scroll; width: 400px;
+                       height: 400px; flex-shrink: 0; }}
+         .spacer {{ flex-shrink: 0; width: 400px; height: 600px; }}
+         .subject {{ flex-shrink: 0; width: 200px; height: 200px; view-timeline-name: --foo; }}
+         @keyframes fade-in-out {{
+             entry 0%, exit 100% {{ opacity: 0 }}
+             entry 100%, exit 0% {{ opacity: 1 }} }}
+         {keyframes}"
+    ));
+    let root = doc.root;
+    let container = doc.el(root, "view.container");
+    doc.el(container, "view.spacer");
+    let subject = doc.el(container, "view.subject");
+    doc.set_inline(
+        subject,
+        &format!("animation: {animation}; animation-timeline: --foo"),
+    );
+    doc.el(container, "view.spacer");
+    doc.flush();
+    (doc, container, subject)
+}
+
+/// `longhand` of `id` with `container` scrolled to `offset`.
+fn value_at(doc: &mut Doc, container: NodeId, id: NodeId, offset: f32, longhand: &str) -> String {
+    doc.dom.scroll_to(container, Vector2D::new(0.0, offset));
+    doc.dom.advance_scroll_timelines(&[container]);
+    doc.value(id, longhand)
+}
+
+fn opacity_at(doc: &mut Doc, container: NodeId, id: NodeId, offset: f32) -> String {
+    value_at(doc, container, id, offset, "opacity")
+}
+
+/// scroll-animations-1 Appendix A, "Named Timeline Range Keyframe Selectors",
+/// as WPT `timeline-range-name-offset-in-keyframes.tentative.html` asserts it:
+/// keyframes on the `entry` and `exit` ranges fade the subject in and out, hold
+/// between them, and move with the ranges when the scrollport shrinks to 300px
+/// (`entry` then `[300, 500]`, `exit` still `[600, 800]`).
+#[test]
+fn range_keyframes_sit_on_their_named_ranges() {
+    let (mut doc, container, subject) = range_page("", "fade-in-out linear both");
+    for (offset, expected) in [
+        (200.0, "0"),
+        (300.0, "0.5"),
+        (400.0, "1"),
+        (500.0, "1"),
+        (600.0, "1"),
+        (700.0, "0.5"),
+        (800.0, "0"),
+    ] {
+        assert_eq!(
+            opacity_at(&mut doc, container, subject, offset),
+            expected,
+            "at {offset}"
+        );
+    }
+    assert_eq!(opacity_at(&mut doc, container, subject, 400.0), "1");
+    doc.set_inline(container, "height: 300px");
+    doc.flush();
+    assert_eq!(
+        doc.value(subject, "opacity"),
+        "0.5",
+        "entry 50% after the resize"
+    );
+    assert_eq!(
+        opacity_at(&mut doc, container, subject, 700.0),
+        "0.5",
+        "exit 50% after the resize"
+    );
+}
+
+/// The example of scroll-animations-1 Appendix A, "Named Timeline Range
+/// Keyframe Selectors": range keyframes on one animation have the outcome of
+/// two animations attached to `entry` and `exit`, over the cover range. Past it
+/// the two differ by fill: the example's range version has none, and the
+/// two-animation version fills forwards.
+#[test]
+fn range_keyframes_equal_the_two_animation_formulation() {
+    let keyframes = "
+        @keyframes animate-in-and-out {
+            entry 0% { opacity: 0; transform: translateY(100%); }
+            entry 100% { opacity: 1; transform: translateY(0); }
+            exit 0% { opacity: 1; transform: translateY(0); }
+            exit 100% { opacity: 0; transform: translateY(-100%); } }
+        @keyframes animate-in {
+            0% { opacity: 0; transform: translateY(100%); }
+            100% { opacity: 1; transform: translateY(0); } }
+        @keyframes animate-out {
+            0% { opacity: 1; transform: translateY(0); }
+            100% { opacity: 0; transform: translateY(-100%); } }";
+    let (mut ranged, ranged_container, ranged_subject) =
+        range_page(keyframes, "linear animate-in-and-out");
+    let (mut split, split_container, split_subject) = range_page(
+        keyframes,
+        "animate-in linear forwards, animate-out linear forwards; animation-range: entry, exit",
+    );
+    for offset in [
+        200.0, 250.0, 300.0, 399.0, 400.0, 500.0, 600.0, 650.0, 700.0, 799.0,
+    ] {
+        for longhand in ["opacity", "transform"] {
+            assert_eq!(
+                value_at(
+                    &mut ranged,
+                    ranged_container,
+                    ranged_subject,
+                    offset,
+                    longhand
+                ),
+                value_at(&mut split, split_container, split_subject, offset, longhand),
+                "{longhand} at {offset}"
+            );
+        }
+    }
+    assert_eq!(
+        value_at(
+            &mut ranged,
+            ranged_container,
+            ranged_subject,
+            250.0,
+            "opacity"
+        ),
+        "0.25"
+    );
+}
+
+/// WPT `view-timeline-keyframe-boundary-interpolation.html`, its bottom
+/// margin an 800px box after the target: attached to `contain`
+/// (`[700, 800]`), `cover 0%` resolves to offset -1 and
+/// `cover 100%` to 2. A property with keyframes on both sides interpolates
+/// across the attachment range with no automatic keyframe; one declared only
+/// before 0 gets an automatic 100% keyframe with its base value, one declared
+/// only past 1 an automatic 0%. The backwards-filled before phase stands at
+/// offset 0, between keyframes, so it shows the interpolated value.
+#[test]
+fn range_keyframes_outside_the_attachment_range_interpolate_across_it() {
+    let mut doc = Doc::with_css(
+        "page { display: flex; width: 800px; height: 600px; align-items: flex-start; }
+         .scroller { display: flex; flex-direction: column; overflow: scroll; width: 300px;
+                     height: 200px; flex-shrink: 0; border: 10px solid black; }
+         .target { flex-shrink: 0; margin: 800px 10px 0px; width: 100px; height: 100px;
+                   animation: anim auto both linear; animation-timeline: --t1;
+                   animation-range-start: contain 0%; animation-range-end: contain 100%;
+                   view-timeline: --t1 block; }
+         @keyframes anim {
+             cover 0% { opacity: 0; transform: none; margin-left: 0px; }
+             cover 100% { opacity: 1; transform: translateX(300px); margin-right: 0px; } }
+         .tail { flex-shrink: 0; width: 100px; height: 800px; }",
+    );
+    let root = doc.root;
+    let scroller = doc.el(root, "view.scroller");
+    let target = doc.el(scroller, "view.target");
+    doc.el(scroller, "view.tail");
+    doc.flush();
+    for (offset, expected) in [
+        (650.0, ["translateX(100px)", "0.333333", "5px", "10px"]),
+        (700.0, ["translateX(100px)", "0.333333", "5px", "10px"]),
+        (750.0, ["translateX(150px)", "0.5", "7.5px", "7.5px"]),
+        (800.0, ["translateX(200px)", "0.666667", "10px", "5px"]),
+    ] {
+        let got = ["transform", "opacity", "margin-left", "margin-right"]
+            .map(|longhand| value_at(&mut doc, scroller, target, offset, longhand));
+        assert_eq!(got, expected, "at {offset}");
+    }
+}
+
+/// Percentage and range keyframes in one rule, on `range_page`'s cover
+/// range: `entry 100%` and `contain 0%` both resolve to a third, where the
+/// value jumps to the later one's; a percentage keyframe tied with a range
+/// keyframe comes first (css-animations-2's computed keyframe order, where
+/// Blink puts the range keyframe first); and range keyframes with one
+/// selector collapse into the earliest (csswg-drafts#8507), their
+/// declarations cascading.
+#[test]
+fn range_keyframes_order_by_offset_then_computed_order() {
+    let keyframes = "
+        @keyframes tie {
+            from { opacity: 0; }
+            entry 100% { opacity: 0.2; }
+            contain 0% { opacity: 0.8; }
+            to { opacity: 1; } }
+        @keyframes order { cover 50% { opacity: 0.8; } 50% { opacity: 0.2; } }
+        @keyframes merged {
+            entry 100% { opacity: 0.4; }
+            contain 0% { opacity: 0.9; }
+            entry 100% { opacity: 0.5; } }";
+    let (mut doc, container, subject) = range_page(keyframes, "tie linear both");
+    for (offset, expected) in [
+        (300.0, "0.1"),
+        (399.0, "0.199"),
+        (400.0, "0.8"),
+        (500.0, "0.85"),
+    ] {
+        assert_eq!(
+            opacity_at(&mut doc, container, subject, offset),
+            expected,
+            "tie at {offset}"
+        );
+    }
+    let (mut doc, container, subject) = range_page(keyframes, "order linear both");
+    assert_eq!(
+        opacity_at(&mut doc, container, subject, 500.0),
+        "0.8",
+        "the range keyframe follows the percentage keyframe at 50%"
+    );
+    assert_eq!(opacity_at(&mut doc, container, subject, 350.0), "0.6");
+    let (mut doc, container, subject) = range_page(keyframes, "merged linear both");
+    for (offset, expected) in [(300.0, "0.75"), (400.0, "0.9"), (500.0, "0.925")] {
+        assert_eq!(
+            opacity_at(&mut doc, container, subject, offset),
+            expected,
+            "merged at {offset}"
+        );
+    }
+}
+
+/// The opacity `id`'s animation `name` samples at `progress` running forward,
+/// from its keyframes as placed now.
+fn sampled_opacity(doc: &Doc, id: NodeId, name: &str, progress: f64) -> Option<f32> {
+    use stylo::properties::animated_properties::{AnimationValue, AnimationValueMap};
+    use stylo::properties::{LonghandId, OwnedPropertyDeclarationId};
+    let handle = doc.dom.animations().context_handle();
+    let sets = handle.sets.read();
+    let key = stylo::servo::animation::AnimationSetKey::new_for_non_pseudo(stylo::dom::OpaqueNode(
+        id.arena_key(),
+    ));
+    let animation = sets
+        .get(&key)?
+        .animations
+        .iter()
+        .find(|animation| &*animation.name == name)?;
+    let mut values = AnimationValueMap::default();
+    animation.sample_at(AnimationProgress::new(progress, false), &mut values);
+    match values.get(&OwnedPropertyDeclarationId::Longhand(LonghandId::Opacity))? {
+        AnimationValue::Opacity(opacity) => Some(*opacity),
+        _ => None,
+    }
+}
+
+/// On the document timeline no keyframe has a named range to attach to, so
+/// range keyframes are ignored and a property only they declare is not
+/// animated; percentage keyframes beside them animate as usual.
+#[test]
+fn range_keyframes_are_ignored_on_the_document_timeline() {
+    let mut doc = Doc::with_css(
+        "page { display: flex; width: 800px; height: 600px; }
+         @keyframes mixed { entry 0% { opacity: 0.2; } 50% { width: 20px; } }",
+    );
+    let root = doc.root;
+    let element = doc.el(root, "view");
+    doc.set_inline(
+        element,
+        "opacity: 0.7; width: 10px; height: 10px; flex-shrink: 0;
+         animation: mixed 2s linear -1s both paused",
+    );
+    doc.flush();
+    assert_eq!(doc.value(element, "width"), "20px");
+    assert_eq!(doc.value(element, "opacity"), "0.7");
+    assert_eq!(sampled_opacity(&doc, element, "mixed", 0.25), None);
+}
+
+/// On a scroll progress timeline every range name stands for the whole
+/// scroll range, as Blink resolves it and WPT
+/// `timeline-offset-keyframes-with-scroll-timeline.html` asserts:
+/// `cover 0%` is offset 0 and `cover 100%` offset 1, beside a 50% keyframe.
+#[test]
+fn range_keyframes_on_a_scroll_timeline_name_the_whole_range() {
+    let mut doc = Doc::with_css(&format!(
+        "{PAGE}
+         @keyframes anim {{ cover 100% {{ opacity: 1; }} cover 0% {{ opacity: 0; }}
+                            50% {{ opacity: 0.5; }} }}"
+    ));
+    let root = doc.root;
+    let container = doc.el(root, "view.scroller");
+    let mover = doc.el(container, "view.mover");
+    doc.set_inline(
+        mover,
+        "animation: anim linear both; animation-timeline: scroll()",
+    );
+    doc.el(container, "view.tail");
+    doc.el(container, "view.tail");
+    doc.flush();
+    // A 200px scrollport over 1020px: an 820px scroll range.
+    for (offset, expected) in [(0.0, "0"), (205.0, "0.25"), (615.0, "0.75"), (820.0, "1")] {
+        assert_eq!(
+            opacity_at(&mut doc, container, mover, offset),
+            expected,
+            "at {offset}"
+        );
+    }
+}
+
+/// A change of the subject's box places the keyframes again at the next
+/// layout: at offset 300 the 200px subject is halfway through `entry`, and
+/// the 100px one (`cover` `[200, 700]`, `entry` `[200, 300]`) past it.
+#[test]
+fn range_keyframes_follow_a_resized_subject() {
+    let (mut doc, container, subject) = range_page("", "fade-in-out linear both");
+    assert_eq!(opacity_at(&mut doc, container, subject, 300.0), "0.5");
+    doc.set_inline(
+        subject,
+        "height: 100px; animation: fade-in-out linear both; animation-timeline: --foo",
+    );
+    doc.flush();
+    assert_eq!(doc.value(subject, "opacity"), "1");
+}
+
+/// A restyle rebuilds the animation from its keyframes rule, and the
+/// ranges placed before it place the new keyframes too: a style flush alone,
+/// with no layout to place them again, keeps the value.
+#[test]
+fn a_restyle_keeps_the_placed_range_keyframes() {
+    let (mut doc, container, subject) = range_page("", "fade-in-out linear both");
+    assert_eq!(opacity_at(&mut doc, container, subject, 300.0), "0.5");
+    doc.set_inline(
+        subject,
+        "background-color: red; animation: fade-in-out linear both; animation-timeline: --foo",
+    );
+    doc.dom.flush_styles_with_damage_sink(&mut |_, _| {});
+    assert_eq!(doc.value(subject, "background-color"), "rgb(255, 0, 0)");
+    assert_eq!(doc.value(subject, "opacity"), "0.5");
+}
+
+/// A paused animation holds its progress, and its range keyframes still
+/// follow the layout: held at a sixth of the cover range, the shrunk
+/// subject's `entry 100%` sits at a fifth, five sixths of the way there.
+#[test]
+fn a_paused_animation_places_its_range_keyframes_again() {
+    let (mut doc, container, subject) = range_page("", "fade-in-out linear both");
+    assert_eq!(opacity_at(&mut doc, container, subject, 300.0), "0.5");
+    let paused = "animation: fade-in-out linear both paused; animation-timeline: --foo";
+    doc.set_inline(subject, paused);
+    doc.flush();
+    assert_eq!(doc.value(subject, "opacity"), "0.5");
+    doc.set_inline(subject, &format!("height: 100px; {paused}"));
+    doc.flush();
+    assert_eq!(doc.value(subject, "opacity"), "0.833333");
+    assert_eq!(
+        opacity_at(&mut doc, container, subject, 700.0),
+        "0.833333",
+        "paused: the scroll does not move it"
+    );
+}
+
+/// An element in skipped contents holds its keyframes as placed
+/// (css-contain-2 §4), and places them again once rendered.
+#[test]
+fn range_keyframes_in_skipped_contents_hold() {
+    let (mut doc, container, subject) = range_page("", "none");
+    let root = doc.root;
+    let hidden = doc.el(root, "view");
+    let element = doc.el(hidden, "view");
+    doc.set_inline(
+        element,
+        "width: 10px; height: 10px; animation: fade-in-out linear both;
+         animation-timeline: --foo",
+    );
+    doc.flush();
+    assert_eq!(opacity_at(&mut doc, container, element, 300.0), "0.5");
+    assert_eq!(
+        sampled_opacity(&doc, element, "fade-in-out", 1.0 / 6.0),
+        Some(0.5)
+    );
+    doc.set_inline(hidden, "content-visibility: hidden");
+    doc.set_inline(subject, "height: 100px");
+    doc.flush();
+    assert_eq!(
+        sampled_opacity(&doc, element, "fade-in-out", 1.0 / 6.0),
+        Some(0.5),
+        "skipped: placed for the 200px subject"
+    );
+    doc.set_inline(hidden, "");
+    doc.flush();
+    assert_eq!(
+        sampled_opacity(&doc, element, "fade-in-out", 1.0 / 6.0),
+        Some(0.833_333_3),
+        "rendered: placed for the 100px subject"
+    );
+    assert_eq!(doc.value(element, "opacity"), "1");
+}
+
+/// Directions read the range keyframes' offsets like any others: a reversed
+/// iteration eases each segment by its upper keyframe's timing function,
+/// and `alternate` reverses the second of two iterations, each holding the
+/// keyframes at the same fractions of the attachment range.
+#[test]
+fn range_keyframes_run_in_every_direction() {
+    let keyframes = "
+        @keyframes lopsided {
+            entry 0% { opacity: 0; }
+            entry 100% { opacity: 0.6; }
+            exit 100% { opacity: 1; } }
+        @keyframes stepped {
+            entry 0% { opacity: 0; animation-timing-function: steps(2, jump-end); }
+            entry 100% { opacity: 1; } }";
+    for (animation, offset, expected) in [
+        ("lopsided linear both", 700.0, "0.9"),
+        ("lopsided linear both reverse", 300.0, "0.9"),
+        ("lopsided linear both 2 alternate", 300.0, "0.6"),
+        ("lopsided linear both 2 alternate", 600.0, "0.8"),
+        ("stepped linear both; animation-range: entry", 250.0, "0"),
+        ("stepped linear both; animation-range: entry", 350.0, "0.5"),
+        (
+            "stepped linear both reverse; animation-range: entry",
+            250.0,
+            "0.75",
+        ),
+    ] {
+        let (mut doc, container, subject) = range_page(keyframes, animation);
+        assert_eq!(
+            opacity_at(&mut doc, container, subject, offset),
+            expected,
+            "{animation} at {offset}"
+        );
+    }
+}
+
+/// Range keyframes are ignored on an inactive timeline and for an empty
+/// attachment range, and a property only they declare is not animated: on
+/// `--missing`, which nothing defines, the animation is idle; attached to
+/// `contain 50% contain 50%` its `to` keyframe fills forwards past the empty
+/// range while its `entry 0%` opacity is absent.
+#[test]
+fn range_keyframes_are_ignored_on_inactive_timelines_and_empty_ranges() {
+    let keyframes = "@keyframes partly { entry 0% { opacity: 0.2; } to { width: 100px; } }";
+    let (mut doc, container, subject) = range_page(keyframes, "partly linear both");
+    doc.set_inline(
+        subject,
+        "animation: partly linear both; animation-timeline: --missing",
+    );
+    doc.flush();
+    assert_eq!(opacity_at(&mut doc, container, subject, 300.0), "1");
+    assert_eq!(doc.value(subject, "width"), "200px", "inactive: idle");
+    assert_eq!(sampled_opacity(&doc, subject, "partly", 0.0), None);
+    assert!(!doc.dom.get(subject).expect("live").animates_opacity());
+
+    doc.set_inline(
+        subject,
+        "animation: partly linear both; animation-timeline: --foo;
+         animation-range: contain 50% contain 50%",
+    );
+    doc.flush();
+    assert_eq!(opacity_at(&mut doc, container, subject, 700.0), "1");
+    assert_eq!(
+        doc.value(subject, "width"),
+        "100px",
+        "the `to` keyframe fills"
+    );
+    assert_eq!(sampled_opacity(&doc, subject, "partly", 0.0), None);
+    assert!(!doc.dom.get(subject).expect("live").animates_opacity());
+}
+
+/// A subject taken out with `display: none` makes its timeline inactive, and
+/// the keyframes are ignored; brought back 100px tall, they are placed for
+/// the new box (`entry 100%` at a fifth of the cover range).
+#[test]
+fn a_subject_without_a_box_and_back_places_range_keyframes_again() {
+    let (mut doc, container, subject) = range_page("", "fade-in-out linear both");
+    assert_eq!(opacity_at(&mut doc, container, subject, 300.0), "0.5");
+    assert_eq!(
+        sampled_opacity(&doc, subject, "fade-in-out", 1.0 / 6.0),
+        Some(0.5)
+    );
+    let animation = "animation: fade-in-out linear both; animation-timeline: --foo";
+    doc.set_inline(subject, &format!("display: none; {animation}"));
+    doc.flush();
+    assert_eq!(
+        sampled_opacity(&doc, subject, "fade-in-out", 1.0 / 6.0),
+        None,
+        "no box: ignored"
+    );
+    doc.set_inline(subject, &format!("height: 100px; {animation}"));
+    doc.flush();
+    assert_eq!(
+        sampled_opacity(&doc, subject, "fade-in-out", 1.0 / 6.0),
+        Some(0.833_333_3),
+        "placed for the 100px subject"
+    );
+    assert_eq!(doc.value(subject, "opacity"), "1");
+}
