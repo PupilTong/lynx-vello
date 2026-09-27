@@ -147,7 +147,7 @@ async fn a_view_animates_with_the_host_arranging_no_timeline() {
 }
 
 /// The slider's `translateX` keyframes export as a curve, so the square
-/// moves between two captures with no tick in between — no `BeginFrame`,
+/// moves between two captures with no tick in between — no frame post,
 /// no restyle, no commit: the same committed frame composed at two clock
 /// readings.
 #[tokio::test]

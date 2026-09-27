@@ -217,7 +217,8 @@ impl Fixture {
     }
 
     /// Whether `node`'s committed style takes `property` from the animations
-    /// origin: whether the main thread's cascade sampled an animation for it.
+    /// or the transitions origin: whether the main thread's cascade sampled
+    /// an animation or a transition for it.
     fn animated_by_cascade(&self, node: NodeId, property: LonghandId) -> bool {
         let dom = &self.doc.dom;
         let style = dom
@@ -225,12 +226,14 @@ impl Fixture {
             .expect("an animated element is styled");
         let guard = dom.style_engine().shared_lock().read();
         style.rules().self_and_ancestors().any(|rule| {
-            rule.cascade_level().origin() == CascadeOrigin::Animations
-                && rule.style_source().is_some_and(|source| {
-                    source
-                        .read(&guard)
-                        .contains(PropertyDeclarationId::Longhand(property))
-                })
+            matches!(
+                rule.cascade_level().origin(),
+                CascadeOrigin::Animations | CascadeOrigin::Transitions
+            ) && rule.style_source().is_some_and(|source| {
+                source
+                    .read(&guard)
+                    .contains(PropertyDeclarationId::Longhand(property))
+            })
         })
     }
 
@@ -1199,6 +1202,190 @@ fn a_planar_curve_under_a_perspective_parent_composes_as_committed() {
     }
 }
 
+/// A `transform` transition started by a restyle: sampled through
+/// `Transition::calculate_value`, it composes as committed until its end,
+/// where the frame hands back. Its reach is unbounded — the fork keeps a
+/// transition's timing function private — so the extent budget bounds its
+/// encode, and the coverage check holds over the whole viewport.
+#[test]
+fn a_transform_transition_composes_as_committed() {
+    let fixture = || {
+        let (mut fixture, card) = card(
+            ".card { transition: transform 1s ease-in-out; }",
+            "none",
+            &[0.25, 0.5, 0.75, 0.9375, 1.25],
+        );
+        fixture.restyles.push((
+            card,
+            "transform: translate(120px, 40px) rotate(30deg);".into(),
+        ));
+        fixture.entries = Some(0);
+        fixture
+    };
+    let frame = commit_early(&mut fixture());
+    let curve = &frame.animation_slots()[0].curve;
+    assert_eq!(curve.transitions.len(), 1, "the transition exports");
+    let track = curve.transform.as_ref().expect("a transform track");
+    assert!(!track.reach.is_bounded(), "a transition has no reach yet");
+    assert_eq!(curve.expires_at, Some(1.0), "it hands back at its end");
+    fixture().check("transform transition");
+}
+
+/// An `opacity` transition beside a `transform` animation on one element:
+/// both export in one curve, each property from its own entry.
+#[test]
+fn an_opacity_transition_beside_a_transform_animation_composes_as_committed() {
+    let (mut fixture, card) = card(
+        ".card { transition: opacity 1s linear; }",
+        "rotate 1s linear infinite",
+        &[0.25, 0.5, 0.75, 1.25],
+    );
+    fixture.restyles.push((
+        card,
+        "opacity: 0.3; animation: rotate 1s linear infinite;".into(),
+    ));
+    fixture.entries = Some(1);
+    fixture.check("opacity transition beside a transform animation");
+}
+
+/// A transition in its delay exports once a frame anchors its start: the
+/// anchoring owes that frame a commit although no style moves until the
+/// delay ends, and the commit hands the element to the painter.
+#[test]
+fn a_delayed_transition_exports_once_anchored() {
+    let (mut fixture, card) = card(
+        ".card { transform: translate(0px, 0px); transition: transform 1s linear 0.5s; }",
+        "none",
+        &[],
+    );
+    let dom = &mut fixture.doc.dom;
+    dom.render();
+    dom.advance_animations(0.0);
+    dom.set_inline_style(card, "transform: translate(120px, 40px);");
+    let fresh = dom.commit();
+    assert!(
+        fresh.animation_slots().is_empty() && fresh.needs_main_ticks(),
+        "a fresh start does not export"
+    );
+    dom.advance_animations(0.1);
+    assert!(dom.needs_render(), "the anchoring owes a commit");
+    let anchored = dom.commit();
+    assert_eq!(
+        anchored.animation_slots().len(),
+        1,
+        "it exports in its delay"
+    );
+    assert!(!anchored.needs_main_ticks(), "and main stops ticking");
+}
+
+/// The value `frame`'s first curve samples for `property` at `t`: what the
+/// painter shows then.
+fn painted(frame: &CommittedFrame, property: LonghandId, t: f64) -> AnimationValue {
+    let mut values = AnimationValueMap::default();
+    frame.animation_slots()[0].curve.values_at(t, &mut values);
+    values
+        .get(&OwnedPropertyDeclarationId::Longhand(property))
+        .cloned()
+        .expect("the curve samples the property")
+}
+
+/// A tap mid-flight whose listener restyles the card back: the job that
+/// runs it syncs the main thread's clock to the painter's first, so the
+/// reversed transition starts from the value the painter showed at that
+/// instant, shortened by the factor css-transitions-1 §3 computes — the
+/// progress the old one had reached — rather than from the last tick's. The
+/// next frame anchors it, and the export resumes from that value.
+#[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "a linear progress at a binary fraction is exact"
+)]
+fn a_retarget_mid_flight_reverses_from_the_painted_value() {
+    let (mut fixture, card) = card(
+        ".card { transform: translate(0px, 0px); transition: transform 1s linear; }",
+        "none",
+        &[],
+    );
+    fixture
+        .restyles
+        .push((card, "transform: translate(120px, 40px);".into()));
+    let early = commit_early(&mut fixture);
+    assert_eq!(early.animation_slots().len(), 1, "the transition exports");
+    let tap = 0.625;
+    let shown = painted(&early, LonghandId::Transform, tap);
+
+    let dom = &mut fixture.doc.dom;
+    dom.sync_animation_clock(tap);
+    dom.set_inline_style(card, "transform: translate(0px, 0px);");
+    let late = dom.commit();
+    let handle = dom.animations().context_handle();
+    let sets = handle.sets.read();
+    let key = stylo::servo::animation::AnimationSetKey::new_for_non_pseudo(stylo::dom::OpaqueNode(
+        card.arena_key(),
+    ));
+    let reversed = sets
+        .get(&key)
+        .and_then(|set| {
+            set.transitions.iter().find(|transition| {
+                transition.state != stylo::servo::animation::AnimationState::Canceled
+            })
+        })
+        .expect("a reversed transition runs");
+    assert_eq!(
+        reversed.reversing_shortening_factor, tap,
+        "shortened by the progress"
+    );
+    assert_eq!(reversed.start_time, tap);
+    assert_eq!(reversed.property_animation.duration, tap);
+    assert_eq!(
+        reversed.calculate_value(tap),
+        shown,
+        "from the painted value"
+    );
+    drop(sets);
+    // Pending until a frame anchors its start, as any new transition is.
+    assert!(late.animation_slots().is_empty() && late.needs_main_ticks());
+    let frame = tap + 0.0625;
+    dom.advance_animations(frame);
+    let anchored = dom.commit();
+    assert_eq!(
+        anchored.animation_slots().len(),
+        1,
+        "the reversed one exports"
+    );
+    assert_eq!(painted(&anchored, LonghandId::Transform, frame), shown);
+}
+
+/// `animation-play-state: paused` applied by a restyle while a curve covers
+/// the element holds the progress the painter had reached, not the progress
+/// at the last tick.
+#[test]
+fn a_pause_mid_flight_holds_the_painted_progress() {
+    let (mut fixture, card) = card("", "translate 1s linear infinite", &[]);
+    let early = commit_early(&mut fixture);
+    assert_eq!(early.animation_slots().len(), 1, "the animation exports");
+    let pause = 0.375;
+    let AnimationValue::Transform(shown) = painted(&early, LonghandId::Transform, pause) else {
+        unreachable!("a transform curve samples a transform list");
+    };
+
+    let dom = &mut fixture.doc.dom;
+    dom.sync_animation_clock(pause);
+    dom.set_inline_style(card, "animation: translate 1s linear infinite paused");
+    dom.render();
+    let committed = dom.paint_style(card).expect("the card is styled");
+    assert_eq!(
+        committed.get_box().transform,
+        shown,
+        "paused where it was painted"
+    );
+    let later = dom.commit();
+    let AnimationValue::Transform(held) = painted(&later, LonghandId::Transform, 0.875) else {
+        unreachable!("a transform curve samples a transform list");
+    };
+    assert_eq!(held, shown, "and it holds there");
+}
+
 /// Commits `fixture` at [`EARLY`] after its restyles, without checking it.
 fn commit_early(fixture: &mut Fixture) -> std::sync::Arc<CommittedFrame> {
     let dom = &mut fixture.doc.dom;
@@ -1214,11 +1401,10 @@ fn commit_early(fixture: &mut Fixture) -> std::sync::Arc<CommittedFrame> {
 }
 
 /// What the painter could not reproduce stays on the main thread: an
-/// `!important` transform the animation cannot move, a transition — on a
-/// property other than `opacity` and `transform`, or on `opacity` beside a
-/// `transform` animation — and keyframes some interpolation takes out of
-/// the plane: `matrix3d` with a perspective term, and `rotateX` under a
-/// perspective parent.
+/// `!important` transform the animation cannot move, a transition on a
+/// property other than `opacity` and `transform`, and keyframes some
+/// interpolation takes out of the plane: `matrix3d` with a perspective term,
+/// and `rotateX` under a perspective parent.
 #[test]
 fn what_the_painter_cannot_reproduce_refuses_the_export() {
     let keyframes = "@keyframes persp {
@@ -1236,11 +1422,6 @@ fn what_the_painter_cannot_reproduce_refuses_the_export() {
             ".card { transition: width 1s linear, transform 1s linear; }",
             "translate 1s linear infinite",
             Some("animation: translate 1s linear infinite; width: 200px;"),
-        ),
-        (
-            ".card { transition: opacity 1s linear; }",
-            "none",
-            Some("opacity: 0.3; animation: rotate 1s linear infinite;"),
         ),
         ("", "persp 1s linear infinite", None),
         (

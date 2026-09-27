@@ -358,15 +358,17 @@ plus a compose program — so a consumer composes at its own current offsets per
 every offset stays inside its slot's `encode_window`. A slot's
 `viewport_axes` maps its local scroll offsets and encode window through the
 container's transform, so a scaled or rotated scrollport moves content in the
-same coordinate system as its sticky offsets. When one leaves the window,
-`note_scroll_windows_stale` is the consumer's refill request, which the painter
-sends as `ToMain::Refill { offsets }` and the main thread answers with a
-recentered commit. `Document::scroll_to` applies the same rule to its own
-writes: a scroll the retained frame's slot can still compose invalidates
-nothing, and one past that slot's `encode_window`
+same coordinate system as its sticky offsets. `Document::scroll_to` is how a
+consumer's offsets reach the document (Bobcat's main thread calls it for every
+offset the painter posts): a scroll the retained frame's slot can still
+compose invalidates nothing, and one past that slot's `encode_window`
 (`CommittedFrame::covers_scroll_offset`) makes the frame stale, because past
 it there is no encoded content to compose and no `auto` box was determined
-for it. Composition is the one render path: `compose_into` replays
+for it. One still inside but past half the window's remaining headroom
+toward an edge is `ScrollSlot::recenter_due`, and the consumer answers it with
+`note_scroll_windows_stale`, whose commit re-centers the window before the
+painter reaches its edge. `CommittedFrame::slot_of` is one lookup in the
+node index the commit built. Composition is the one render path: `compose_into` replays
 the whole program into one flat scene at those offsets, and nothing is retained
 per scroller. A scroll container is no stacking context by itself, as on the
 web (see `runtime-architecture.md`). Composite animations ride the same split:

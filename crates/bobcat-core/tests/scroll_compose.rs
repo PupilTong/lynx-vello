@@ -3,12 +3,13 @@
 //! Two laws, both invisible from outside without a GPU. Inside the encode
 //! window a scroll is pure composition — the frame the boot committed is
 //! recomposed at the new offset and nothing recommits. Past half the
-//! window's headroom the engine asks the main thread for a refill commit,
-//! and the offscreen tick — a synchronization point by design — waits for
-//! it, so the capture after a deep scroll shows the recommitted frame at
-//! its published offsets. Either way the same pixels move the same way;
-//! which path produced them is the engine's business, asserted directly by
-//! `bobcat_core::paint::event_loop_tests`.
+//! window's headroom the main thread, adopting the posted offset, recommits
+//! with the window re-centered, and the offscreen tick — a synchronization
+//! point by design — waits for its own frame post, which rides behind the
+//! scroll's marker, so the capture after a deep scroll shows the recommitted
+//! frame at its published offsets. Either way the same pixels move the same
+//! way; which path produced them is the engine's business, asserted directly
+//! by `bobcat_core::paint::event_loop_tests`.
 
 mod support;
 
@@ -120,12 +121,12 @@ async fn a_wheel_scroll_moves_the_pixels_through_both_compose_paths() {
         "content y=115 is the blue row: composition applied the offset"
     );
 
-    // 40px more reaches 70: past half the headroom, so a refill commit is
-    // requested, and the synchronizing tick waits for the round that
-    // applies it — this capture is the recommitted frame at its published
+    // 40px more reaches 70: past half the headroom, so main recenters as it
+    // adopts the offset, and the synchronizing tick waits for the round that
+    // commits it — this capture is the recommitted frame at its published
     // offsets.
     wheel(&mut painter, 40.0);
-    assert!(painter.tick(false).expect("the refilled frame renders"));
+    assert!(painter.tick(false).expect("the recentered frame renders"));
     assert_eq!(
         pixel_at(&mut painter, 50, 20),
         RED,
@@ -134,6 +135,6 @@ async fn a_wheel_scroll_moves_the_pixels_through_both_compose_paths() {
     assert_eq!(
         pixel_at(&mut painter, 50, 45),
         BLUE,
-        "content y=115 is the blue row, now through the refill commit"
+        "content y=115 is the blue row, now through the recentering commit"
     );
 }
