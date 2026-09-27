@@ -120,10 +120,11 @@ mod transform;
 use std::sync::Arc;
 
 use euclid::default::{Point2D, Rect, Size2D, Transform3D};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use stylo::properties::animated_properties::AnimationValueMap;
 
 pub(crate) use self::build::BuildScratch;
+pub(crate) use self::frame::ScrollOffsets;
 pub use self::frame::{
     AnimationSlot, CommittedFrame, HitTarget, ScrollSlot, SnapSlot, SnapSlotAxis,
 };
@@ -233,6 +234,10 @@ pub(crate) struct ComposedSlots {
     /// The sticky slots on those paths plus the boxes they solve against,
     /// ascending.
     pub(crate) stickies: Vec<u32>,
+    /// Whether one of `animations` reads the document timeline.
+    pub(crate) clock: bool,
+    /// Whether one of `animations` reads a scroll slot's offset.
+    pub(crate) scroll: bool,
 }
 
 impl ComposedSlots {
@@ -240,6 +245,8 @@ impl ComposedSlots {
     pub(crate) fn clear(&mut self) {
         self.animations.clear();
         self.stickies.clear();
+        self.clock = false;
+        self.scroll = false;
     }
 }
 
@@ -409,16 +416,21 @@ impl PaintOrder {
     }
 
     /// Every animation slot's compose values sampled at `now` — the
-    /// committed values (identity delta, committed opacity) when `now` is
-    /// `None`.
+    /// committed instant when `None` — with each scroll slot at the offset
+    /// `offset_of` reports, falling back to the committed one.
     ///
     /// Every slot, because hit testing answers over every item the frame
     /// carries, including the ones culling left unencoded.
-    pub(crate) fn sample_animations(&self, now: Option<f64>) -> AnimationSamples {
+    pub(crate) fn sample_animations(
+        &self,
+        now: Option<f64>,
+        offset_of: &dyn Fn(&ScrollSlot) -> Option<euclid::default::Vector2D<f32>>,
+    ) -> AnimationSamples {
+        let offsets = self.scroll_offsets(offset_of);
         let mut values = AnimationValueMap::default();
         (0_u32..)
             .zip(&self.animations)
-            .map(|(index, slot)| (index, slot.sample(now, &mut values)))
+            .map(|(index, slot)| (index, slot.sample(now, &offsets, &mut values)))
             .collect()
     }
 
@@ -428,17 +440,64 @@ impl PaintOrder {
         &self,
         composed: &[u32],
         now: Option<f64>,
+        offset_of: &dyn Fn(&ScrollSlot) -> Option<euclid::default::Vector2D<f32>>,
     ) -> AnimationSamples {
+        let offsets = self.scroll_offsets(offset_of);
         let mut values = AnimationValueMap::default();
         composed
             .iter()
             .map(|&index| {
                 (
                     index,
-                    self.animations[index as usize].sample(now, &mut values),
+                    self.animations[index as usize].sample(now, &offsets, &mut values),
                 )
             })
             .collect()
+    }
+
+    /// The committed values of `composed`: identity deltas, committed
+    /// opacities.
+    pub(crate) fn committed_animations(composed: &[u32]) -> AnimationSamples {
+        composed
+            .iter()
+            .map(|&index| {
+                (
+                    index,
+                    AnimationSample {
+                        delta: crate::vello::kurbo::Affine::IDENTITY,
+                        alpha: None,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn scroll_offsets<'a>(
+        &'a self,
+        offset_of: &'a dyn Fn(&ScrollSlot) -> Option<euclid::default::Vector2D<f32>>,
+    ) -> ScrollOffsets<'a> {
+        ScrollOffsets {
+            slots: &self.slots,
+            offset_of,
+        }
+    }
+
+    /// Binds every exported scroll timeline to its source's slot, now the
+    /// walk has allocated every slot: an element's own slot comes after its
+    /// animation slot, and a later-painted source's after its dependent's.
+    /// Writes into `painted` the elements whose curve reads a slot.
+    fn bind_scroll_timelines(&mut self, painted: &mut FxHashSet<NodeId>) {
+        painted.clear();
+        for slot in &mut self.animations {
+            for (_, timeline) in &mut slot.curve.animations {
+                if let curves::Timeline::Scroll(scroll) = timeline {
+                    scroll.slot = self.slot_index.get(&scroll.source).copied();
+                    if scroll.slot.is_some() {
+                        painted.insert(slot.node);
+                    }
+                }
+            }
+        }
     }
 
     /// The earliest instant an exported curve leaves its domain at, over
@@ -495,6 +554,11 @@ impl PaintOrder {
         }
         // Space order is slot order within each kind.
         composed.animations.reverse();
+        for &slot in &composed.animations {
+            let curve = &self.animations[slot as usize].curve;
+            composed.clock |= curve.reads_clock();
+            composed.scroll |= curve.reads_scroll();
+        }
         // A sticky box solves against its parent box's cumulative shift and
         // the one its scrollport shares, both allocated before it.
         for index in (0..stickies.len()).rev() {
@@ -698,8 +762,9 @@ impl<T: Sync> Document<T> {
             let painter = self.painter.get_mut();
             (painter.take_build_scratch(), painter.take_spare_buffers())
         };
-        let (frame, scratch) = build::build(self, scratch, buffers);
+        let (mut frame, scratch) = build::build(self, scratch, buffers);
         self.painter.get_mut().restore_build_scratch(scratch);
+        frame.bind_scroll_timelines(&mut self.animations_mut().timelines.painted);
         frame
     }
 
