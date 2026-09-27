@@ -120,6 +120,7 @@ mod transform;
 use std::sync::Arc;
 
 use euclid::default::{Point2D, Rect, Size2D, Transform3D};
+use stylo::properties::animated_properties::AnimationValueMap;
 
 pub(crate) use self::build::BuildScratch;
 pub use self::frame::{
@@ -401,9 +402,10 @@ impl PaintOrder {
     /// Every slot, because hit testing answers over every item the frame
     /// carries, including the ones culling left unencoded.
     pub(crate) fn sample_animations(&self, now: Option<f64>) -> AnimationSamples {
+        let mut values = AnimationValueMap::default();
         (0_u32..)
             .zip(&self.animations)
-            .map(|(index, slot)| (index, slot.sample(now)))
+            .map(|(index, slot)| (index, slot.sample(now, &mut values)))
             .collect()
     }
 
@@ -414,9 +416,15 @@ impl PaintOrder {
         composed: &[u32],
         now: Option<f64>,
     ) -> AnimationSamples {
+        let mut values = AnimationValueMap::default();
         composed
             .iter()
-            .map(|&index| (index, self.animations[index as usize].sample(now)))
+            .map(|&index| {
+                (
+                    index,
+                    self.animations[index as usize].sample(now, &mut values),
+                )
+            })
             .collect()
     }
 

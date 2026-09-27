@@ -368,23 +368,27 @@ nothing, and one past that slot's `encode_window`
 it there is no encoded content to compose and no `auto` box was determined
 for it. Composition is the one render path: `compose_into` replays
 the whole program into one flat scene at those offsets, and nothing is retained
-per scroller. A scroll
-container is no stacking context by itself, as on the web (see
-`runtime-architecture.md`). Composite
-animations ride the same split: an exportable `opacity`/`transform` animation
-publishes an `AnimationSlot` curve the consumer samples at its own timeline
-reading. What moves at composition is recorded as one compose space tree
-(`visual/space.rs`): scroll, sticky and animation nodes in containing-block
-order, each applying one affine, with every fragment, push, image draw, item,
-clip and filter entry naming its innermost node. An element's own box, clip and
-effect layer take its *box space* — inside its own sticky and animation nodes,
-outside its own scroll node — and its content the *content space* inside that
-scroll node. A record's map is the product of its path's node affines, root
-first, formed in one place (`SpaceSamples::css`) that composition, filter bakes
-and hit testing (inverting it) all read, so a scroll container, a sticky box or
-a clip inside an animated subtree moves exactly as a fresh commit would place
-it. `docs/dom-public-api.md`'s "Retained visual output" row is the
-authoritative description of the whole surface.
+per scroller. A scroll container is no stacking context by itself, as on the
+web (see `runtime-architecture.md`). Composite animations ride the same split:
+an element whose `opacity`/`transform` animation set exports publishes an
+`AnimationSlot` curve — a clone of that stylo state — which the consumer
+samples at its own timeline reading through stylo's own sampling code. The
+sampled values are the ones the main thread's cascade commits at the same
+instant whenever both sides iterate from the same animation state (start times
+accumulated over several main-thread ticks can differ in the last bit), and
+composed geometry agrees with a commit to f32 rounding. What moves at
+composition is recorded as one compose space tree (`visual/space.rs`): scroll,
+sticky and animation nodes in containing-block order, each applying one affine,
+with every fragment, push, image draw, item, clip and filter entry naming its
+innermost node. An element's own box, clip and effect layer take its *box
+space* — inside its own sticky and animation nodes, outside its own scroll node
+— and its content the *content space* inside that scroll node. A record's map
+is the product of its path's node affines, root first, formed in one place
+(`SpaceSamples::css`) that composition, filter bakes and hit testing (inverting
+it) all read, so a scroll container, a sticky box or a clip inside an animated
+subtree moves exactly as a fresh commit would place it.
+`docs/dom-public-api.md`'s "Retained visual output" row is the authoritative
+description of the whole surface.
 
 **Sticky positioning also resolves in that compose path.** A private constraint
 table records each sticky box's normal geometry, physical insets, containing

@@ -36,7 +36,11 @@ vello is the only wgpu dependency in this workspace, so it pins wgpu's major
   testing is a pure read of the retained frame), `space.rs` (the compose space
   tree: scroll, sticky and animation nodes every record's map is formed
   from), `reach.rs` (a transform curve's reach, which culls moving content),
-  `transform.rs`, `geometry.rs`, `motion.rs`, `curves.rs`.
+  `transform.rs` (`ContextMatrix`: the one f32 world fold the builder and a
+  sampled transform share), `geometry.rs`, `motion.rs`, `curves.rs` (the
+  exported curve: a clone of the element's stylo animation state, sampled
+  through stylo's own `progress_at`/`sample_at`; there is no second
+  interpolation). The export decision is `style/curve_export.rs`.
 - `paint/`: `walker.rs` (viewport + clip culling, zero-alloc paint-order build),
   `painter.rs`, `background.rs`, `border.rs`, `shadow.rs`, `filters.rs`,
   `mask.rs`, `shape.rs`, `text.rs`, `compose.rs`, `convert.rs`,

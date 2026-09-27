@@ -3,6 +3,9 @@
 
 #![allow(clippy::float_cmp)]
 
+use stylo::properties::animated_properties::{AnimationValue, AnimationValueMap};
+use stylo::properties::{LonghandId, OwnedPropertyDeclarationId};
+
 use crate::test_common::{self as common, Doc};
 use crate::visual::{PaintItemKind, PaintOrder};
 use crate::{FontBlob, NodeId, Point2D};
@@ -2043,7 +2046,7 @@ fn an_opacity_animation_exports_a_curve_and_frees_the_main_thread() {
     let slots = frame.animation_slots();
     assert_eq!(slots.len(), 1);
     let sampled = slots[0]
-        .sample(Some(0.5))
+        .sample(Some(0.5), &mut AnimationValueMap::default())
         .alpha
         .expect("the slot exports an opacity curve");
     assert!(
@@ -2151,7 +2154,9 @@ fn tall_wrapper(height: u16, animation: &str) -> std::sync::Arc<crate::Committed
          .tall {{ display: flex; flex-shrink: 0; width: 800px; height: {height}px; }}
          @keyframes slide {{ from {{ transform: translateY(0px); }}
                              to {{ transform: translateY(-100px); }} }}
-         @keyframes fade {{ from {{ opacity: 1; }} to {{ opacity: 0.5; }} }}"
+         @keyframes fade {{ from {{ opacity: 1; }} to {{ opacity: 0.5; }} }}
+         @keyframes warp {{ from {{ transform: matrix(1, 0, 0, 1, 0, 0); }}
+                            to {{ transform: matrix(1, 0.1, 0, 1, 0, -100); }} }}"
     ));
     let root = h.root();
     h.el(root, "view.tall");
@@ -2173,6 +2178,9 @@ fn a_transform_curve_over_the_extent_budget_is_not_exported() {
     let over = tall_wrapper(2000, "slide");
     assert!(!over.has_exported_curves(), "over it the slide is refused");
     assert!(over.needs_main_ticks(), "and ticks on the main thread");
+    // A matrix curve has no reach; the budget is all that bounds it.
+    assert!(tall_wrapper(1400, "warp").has_exported_curves());
+    assert!(!tall_wrapper(2000, "warp").has_exported_curves());
 }
 
 #[test]
@@ -2196,6 +2204,7 @@ fn two_animated(first: &str, second: &str) -> std::sync::Arc<crate::CommittedFra
          .second {{ display: flex; width: 50px; height: 50px; background-color: red;
                     animation: {second}; }}
          @keyframes fade {{ from {{ opacity: 1; }} to {{ opacity: 0; }} }}
+         @keyframes fade2 {{ from {{ opacity: 0.5; }} to {{ opacity: 0.9; }} }}
          @keyframes recolor {{ from {{ background-color: red; }}
                                to {{ background-color: blue; }} }}"
     ));
@@ -2211,10 +2220,11 @@ fn two_animated(first: &str, second: &str) -> std::sync::Arc<crate::CommittedFra
 
 /// web-animations-1: an `opacity` or `transform` animation makes its element
 /// a stacking context — and an `opacity` one a group — for as long as it is
-/// current, whether or not its curve exports. A second concurrent animation
-/// makes the exporter refuse; a delay keeps it pending. The fade still reads
-/// 1 at the commit, so no committed style stacks the card. Paint order is the
-/// same in every case, so nothing reorders at the handover.
+/// current, whether or not its curve exports. A second animation on a
+/// non-composite property makes the exporter refuse; an anchored delay
+/// exports, with or without a backwards fill. The fade still reads 1 at the
+/// commit, so no committed style stacks the card. Paint order is the same in
+/// every case, so nothing reorders at the handover.
 #[test]
 fn an_animation_stacks_its_element_whether_or_not_it_exports() {
     for (keyframes, grouped) in [("fade", true), ("slide", false)] {
@@ -2225,7 +2235,8 @@ fn an_animation_stacks_its_element_whether_or_not_it_exports() {
                 format!("{keyframes} 1s linear infinite, recolor 1s linear infinite"),
                 false,
             ),
-            (format!("{keyframes} 1s linear 5s infinite"), false),
+            (format!("{keyframes} 1s linear 5s infinite"), true),
+            (format!("{keyframes} 1s linear 5s infinite both"), true),
         ] {
             let mut h = Harness::new(&format!(
                 "{PAGE}
@@ -2337,6 +2348,87 @@ fn the_earliest_curve_end_is_the_handback_instant() {
     assert!(short < long && (short - 0.5).abs() < 1e-3, "{ends:?}");
     assert!(!frame.animation_boundary_passed(short - 1e-6));
     assert!(frame.animation_boundary_passed(short));
+}
+
+/// One element's curve hands back at its first animation's end: the
+/// earlier of two finite animations'.
+#[test]
+fn a_curve_hands_back_at_its_first_animations_end() {
+    let frame = two_animated("fade 2s linear 1, fade2 0.25s linear 2", "fade 1s linear 1");
+    assert_eq!(
+        frame.animation_slots()[0].curve.expires_at,
+        Some(0.5),
+        "the shorter animation's two iterations end first",
+    );
+    assert!(!frame.animation_boundary_passed(0.5 - 1e-6));
+    assert!(frame.animation_boundary_passed(0.5));
+}
+
+/// A fade of 2.5 iterations of 0.7 s anchored at 1.163 s, committed at
+/// 1.2 s, so its end is no binary fraction: the instant before the curve's
+/// end still samples the fade, as the main thread's tick there does, and the
+/// main thread's tick at the end finds it over.
+#[test]
+fn a_curve_ends_where_the_main_thread_finds_its_animation_over() {
+    let fade = |ticks: &[f64]| {
+        let mut h = Harness::new(&format!(
+            "{PAGE}
+             .card {{ display: flex; width: 50px; height: 50px; background-color: red;
+                      animation: fade 0.7s linear 2.5; }}
+             @keyframes fade {{ from {{ opacity: 1; }} to {{ opacity: 0; }} }}"
+        ));
+        let root = h.root();
+        let card = h.el(root, "view.card");
+        let document = &mut h.doc.dom;
+        document.render();
+        for &now in ticks {
+            document.advance_animations(now);
+            document.render();
+        }
+        (h, card)
+    };
+    let (h, _) = fade(&[1.163, 1.2]);
+    let frame = h.doc.dom.committed_frame().expect("a frame is committed");
+    let [slot] = frame.animation_slots() else {
+        panic!("the card exports its fade");
+    };
+    let end = slot.curve.expires_at.expect("the fade ends");
+    let mut values = AnimationValueMap::default();
+    slot.curve.values_at(end.next_down(), &mut values);
+    assert!(
+        values.contains_key(&OwnedPropertyDeclarationId::Longhand(LonghandId::Opacity)),
+        "the hold instant samples the fade"
+    );
+
+    let (before, card) = fade(&[1.163, 1.2, end.next_down()]);
+    assert_ne!(before.doc.value(card, "opacity"), "1", "still fading");
+    let (after, card) = fade(&[1.163, 1.2, end]);
+    assert_eq!(after.doc.value(card, "opacity"), "1", "over at the end");
+}
+
+/// An easing overshooting 1 samples an opacity past 1, which stylo leaves
+/// unclamped; the compositor clamps it as paint clamps the committed one.
+#[test]
+fn an_overshooting_opacity_never_composes_past_one() {
+    let frame = two_animated(
+        "fade2 1s cubic-bezier(0.3, 1.8, 0.7, 1.8) infinite",
+        "fade 1s linear infinite",
+    );
+    let slot = &frame.animation_slots()[0];
+    let mut values = AnimationValueMap::default();
+    let mut overshot = false;
+    for step in 0_u8..=64 {
+        let now = 0.25 + f64::from(step) / 64.0;
+        slot.curve.values_at(now, &mut values);
+        if let Some(AnimationValue::Opacity(raw)) =
+            values.get(&OwnedPropertyDeclarationId::Longhand(LonghandId::Opacity))
+        {
+            overshot |= *raw > 1.0;
+        }
+        let alpha = slot.sample(Some(now), &mut values).alpha.expect("a fade");
+        assert!((0.0..=1.0).contains(&alpha), "{now}: {alpha}");
+    }
+    assert!(overshot, "the easing overshoots");
 }
 
 /// A curve culling leaves out of the program is exported but not live: the
