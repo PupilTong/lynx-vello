@@ -16,4 +16,5 @@ pub(crate) mod flush;
 mod invalidation;
 pub(crate) mod pool;
 pub(crate) mod query;
+pub(crate) mod timeline;
 mod traits;

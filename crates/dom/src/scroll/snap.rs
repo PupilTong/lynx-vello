@@ -366,7 +366,7 @@ fn snap_point(
     }
 }
 
-pub(super) fn scroll_padding(value: NonNegativeLengthPercentageOrAuto, basis: f32) -> f32 {
+pub(crate) fn scroll_padding(value: NonNegativeLengthPercentageOrAuto, basis: f32) -> f32 {
     match value {
         NonNegativeLengthPercentageOrAuto::Auto => 0.0,
         NonNegativeLengthPercentageOrAuto::LengthPercentage(length) => {
@@ -486,7 +486,7 @@ impl<T> Document<T> {
     }
 
     /// The first scroll container above `id` on its containing-block chain.
-    fn nearest_scroll_container(&self, id: NodeId) -> Option<NodeId> {
+    pub(crate) fn nearest_scroll_container(&self, id: NodeId) -> Option<NodeId> {
         let mut current = self.scroll_parent(id);
         while let Some(node_id) = current {
             if self.is_scroll_container(node_id) {
@@ -500,7 +500,7 @@ impl<T> Document<T> {
     /// `id`'s border box in `container`'s scrolling coordinates: relative to
     /// the container's padding-box origin, unscrolled. `None` when `id` is
     /// not laid out under `container`.
-    pub(super) fn rect_in_scroll_container(
+    pub(crate) fn rect_in_scroll_container(
         &self,
         id: NodeId,
         container: NodeId,

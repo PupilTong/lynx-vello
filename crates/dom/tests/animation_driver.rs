@@ -954,3 +954,231 @@ fn a_revealed_animation_exports_once_its_start_times_are_carried() {
         "once carried, the slide exports"
     );
 }
+
+const SCROLL_DRIVEN: &str = "
+    @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+    @keyframes grow { from { width: 100px; } to { width: 300px; } }
+    page { display: flex; width: 800px; height: 600px; align-items: flex-start; }
+    .scroller { display: flex; flex-direction: column; align-items: flex-start;
+                overflow: scroll; width: 200px; height: 200px; }
+    .filler { flex-shrink: 0; width: 200px; height: 1180px; }
+    .mover { flex-shrink: 0; width: 20px; height: 20px; }
+    .driven { animation: fade linear both; animation-timeline: scroll(); }
+    .paused { animation-play-state: paused; }
+    .hidden { content-visibility: hidden; }
+    .wrapper { display: flex; flex-shrink: 0; width: 200px; height: 20px; }";
+
+/// A 200px scroller over 1200px of content — a scroll timeline of 1000px —
+/// holding a mover carrying `classes`, then the filler.
+fn scroll_driven(classes: &str) -> (Doc, dom::NodeId, dom::NodeId) {
+    let mut doc = Doc::with_css(SCROLL_DRIVEN);
+    let root = doc.root;
+    let scroller = doc.el(root, "view.scroller");
+    let mover = doc.el(scroller, &format!("view.mover{classes}"));
+    doc.el(scroller, "view.filler");
+    doc.flush();
+    (doc, scroller, mover)
+}
+
+/// Moves the scroller the way an adopted painter scroll does.
+fn scroll(doc: &mut Doc, scroller: dom::NodeId, y: f32) {
+    doc.dom.scroll_to(scroller, Vector2D::new(0.0, y));
+    doc.dom.advance_scroll_timelines(&[scroller]);
+}
+
+/// scroll-animations-1: the value follows the scroll container's offset
+/// with no clock, and the first layout already shows the one for the
+/// offset it found — the stale-timelines pass, not the base value.
+#[test]
+fn a_scroll_driven_animation_follows_its_scroller() {
+    let (mut doc, scroller, mover) = scroll_driven(".driven");
+    assert_eq!(
+        doc.value(mover, "opacity"),
+        "0",
+        "the first layout samples offset 0"
+    );
+    assert!(!doc.dom.has_active_animations(), "no clock frames");
+    assert!(
+        !doc.dom.commit().has_exported_curves(),
+        "no curve carries a scroll timeline yet: as a clock curve it would recompose every frame"
+    );
+    scroll(&mut doc, scroller, 250.0);
+    assert_eq!(doc.value(mover, "opacity"), "0.25", "no flush needed");
+    doc.flush();
+    assert_eq!(doc.value(mover, "opacity"), "0.25");
+    scroll(&mut doc, scroller, 1000.0);
+    assert_eq!(doc.value(mover, "opacity"), "1");
+    scroll(&mut doc, scroller, 100.0);
+    assert_eq!(
+        doc.value(mover, "opacity"),
+        "0.1",
+        "scrolling back un-finishes it"
+    );
+}
+
+/// An animation created at a scrolled offset shows that offset's value in
+/// the layout that creates it.
+#[test]
+fn a_scroll_driven_animation_starts_at_the_offset_it_finds() {
+    let (mut doc, scroller, mover) = scroll_driven("");
+    doc.dom.scroll_to(scroller, Vector2D::new(0.0, 500.0));
+    doc.add_class(mover, "driven");
+    doc.flush();
+    assert_eq!(doc.value(mover, "opacity"), "0.5");
+}
+
+/// A paused animation holds its sample; one created paused takes the
+/// sample of the moment it was created; resuming re-aligns to the scroll
+/// position, as Blink does.
+#[test]
+fn a_paused_scroll_driven_animation_holds_and_resumes_aligned() {
+    let (mut doc, scroller, mover) = scroll_driven("");
+    doc.dom.scroll_to(scroller, Vector2D::new(0.0, 300.0));
+    doc.add_class(mover, "driven");
+    doc.add_class(mover, "paused");
+    doc.flush();
+    assert_eq!(doc.value(mover, "opacity"), "0.3", "created paused at 300");
+    scroll(&mut doc, scroller, 600.0);
+    doc.flush();
+    assert_eq!(doc.value(mover, "opacity"), "0.3", "held while paused");
+    doc.remove_class(mover, "paused");
+    doc.flush();
+    assert_eq!(
+        doc.value(mover, "opacity"),
+        "0.6",
+        "resumed at the scroll position"
+    );
+    doc.add_class(mover, "paused");
+    doc.flush();
+    scroll(&mut doc, scroller, 900.0);
+    assert_eq!(doc.value(mover, "opacity"), "0.6", "paused again");
+}
+
+/// css-contain-2 §4: an animation in skipped contents does not advance on
+/// its timeline, and follows it again once revealed.
+#[test]
+fn a_scroll_driven_animation_in_skipped_contents_holds() {
+    let mut doc = Doc::with_css(SCROLL_DRIVEN);
+    let root = doc.root;
+    let scroller = doc.el(root, "view.scroller");
+    let wrapper = doc.el(scroller, "view.wrapper");
+    let mover = doc.el(wrapper, "view.mover.driven");
+    doc.el(scroller, "view.filler");
+    doc.flush();
+    scroll(&mut doc, scroller, 200.0);
+    assert_eq!(doc.value(mover, "opacity"), "0.2");
+    doc.add_class(wrapper, "hidden");
+    doc.flush();
+    scroll(&mut doc, scroller, 700.0);
+    doc.flush();
+    assert_eq!(doc.value(mover, "opacity"), "0.2", "frozen while skipped");
+    doc.remove_class(wrapper, "hidden");
+    doc.flush();
+    assert_eq!(doc.value(mover, "opacity"), "0.7", "revealed at the offset");
+}
+
+/// An inactive timeline has no effect whatever the fill: the base value
+/// shows.
+#[test]
+fn an_inactive_scroll_timeline_leaves_the_base_value() {
+    let mut doc = Doc::with_css(SCROLL_DRIVEN);
+    let root = doc.root;
+    let unscrolled = doc.el(root, "view.mover.driven");
+    let scroller = doc.el(root, "view.scroller");
+    let short = doc.el(scroller, "view.mover.driven");
+    doc.flush();
+    assert_eq!(doc.value(unscrolled, "opacity"), "1", "no scroll container");
+    assert_eq!(doc.value(short, "opacity"), "1", "nothing to scroll");
+}
+
+/// A scroll-driven `width` reaches layout: the stale-timelines pass lays the
+/// first frame out at the sampled width, and a scroll relayouts at the next.
+#[test]
+fn a_scroll_driven_width_reaches_layout() {
+    let (mut doc, scroller, mover) = scroll_driven("");
+    doc.set_inline(
+        mover,
+        "animation: grow linear both; animation-timeline: scroll()",
+    );
+    doc.flush();
+    assert_eq!(box_of(&doc, mover).1.width, 100.0);
+    scroll(&mut doc, scroller, 500.0);
+    doc.flush();
+    assert_eq!(box_of(&doc, mover).1.width, 200.0);
+}
+
+/// Absolute values, not only one path against another: `reverse` at a
+/// quarter shows keyframe 0.75, `alternate` flips each iteration, a
+/// backwards-filled `steps(2, jump-start)` before its range shows the 0%
+/// keyframe, not the first step, the last of three `steps(4)` iterations
+/// ends on the last keyframe, and a 1s delay before 1s is the first half.
+#[test]
+fn scroll_driven_values_match_the_keyframes_they_name() {
+    for (animation, offset, expected) in [
+        ("fade linear both reverse", 250.0, "0.75"),
+        ("fade linear both alternate 2", 100.0, "0.2"),
+        ("fade linear both alternate 2", 600.0, "0.8"),
+        ("fade steps(2, jump-start) both", 0.0, "0.5"),
+        ("fade steps(4) 3 both", 1000.0, "1"),
+        ("fade 1s 1s linear both", 250.0, "0"),
+        ("fade 1s 1s linear both", 750.0, "0.5"),
+    ] {
+        let (mut doc, scroller, mover) = scroll_driven("");
+        doc.set_inline(
+            mover,
+            &format!("animation: {animation}; animation-timeline: scroll()"),
+        );
+        doc.flush();
+        scroll(&mut doc, scroller, offset);
+        assert_eq!(
+            doc.value(mover, "opacity"),
+            expected,
+            "{animation} at {offset}"
+        );
+    }
+    let (mut doc, scroller, mover) = scroll_driven("");
+    doc.set_inline(
+        mover,
+        "animation: fade steps(2, jump-start) both; animation-timeline: scroll();
+         animation-range: 50% 100%",
+    );
+    doc.flush();
+    assert_eq!(doc.value(mover, "opacity"), "0", "before the range");
+    scroll(&mut doc, scroller, 600.0);
+    assert_eq!(
+        doc.value(mover, "opacity"),
+        "0.5",
+        "the first step inside it"
+    );
+}
+
+/// A paused animation keeps holding when an earlier animation leaves its
+/// set and its place in the set moves.
+#[test]
+fn a_paused_scroll_driven_animation_holds_when_its_set_shrinks() {
+    let mut doc = Doc::with_css(&format!(
+        "{SCROLL_DRIVEN}
+         @keyframes pulse {{ from {{ color: red; }} to {{ color: blue; }} }}"
+    ));
+    let root = doc.root;
+    let scroller = doc.el(root, "view.scroller");
+    let mover = doc.el(scroller, "view.mover");
+    doc.el(scroller, "view.filler");
+    doc.set_inline(
+        mover,
+        "animation: pulse 10s, fade linear both; animation-timeline: auto, scroll();
+         animation-play-state: running, paused",
+    );
+    doc.flush();
+    assert_eq!(doc.value(mover, "opacity"), "0", "created paused at 0");
+    scroll(&mut doc, scroller, 500.0);
+    doc.flush();
+    assert_eq!(doc.value(mover, "opacity"), "0", "held");
+    doc.set_inline(
+        mover,
+        "animation: fade linear both; animation-timeline: scroll();
+         animation-play-state: paused",
+    );
+    doc.flush();
+    assert_eq!(doc.value(mover, "opacity"), "0", "still held");
+}

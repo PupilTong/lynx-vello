@@ -42,7 +42,9 @@ value *grammar* is not yours to widen in Rust — it is the vendored stylo fork'
 - Engine: `crates/dom/src/style/` — `engine.rs` (rule builders, sheet mounting),
   `flush.rs`, `invalidation.rs`, `damage.rs`, `pool.rs` (`StylePool`,
   `MAX_STYLE_THREADS` = 6, a ceiling and not a knob), `query.rs`, `device.rs`,
-  `animation.rs`, `curve_export.rs`.
+  `animation.rs`, `curve_export.rs`, `timeline.rs` (scroll-animations-1
+  timelines: name lookup over the timeline definers the flush's restyles keep,
+  view geometry, the progress normalization).
 - Grammar: `vendor/stylo` (fork, `lynx` branch). The author-facing property list
   is `vendor/stylo/style/properties/lynx_properties.txt`; fork-side tests are
   `vendor/stylo/style/tests/lynx_*.rs`. Confirm the tip with

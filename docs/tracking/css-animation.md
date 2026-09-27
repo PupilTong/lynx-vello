@@ -30,7 +30,7 @@ Scope covered: `animation-*`/`transition-*` CSS longhands and shorthands, `@keyf
 | `layout-animation-create/update/delete-duration/delay/timing-function/property` | Lynx-specific `<list>` item insert/update/delete animation properties; `property` value restricted to `opacity\|scaleX\|scaleY\|scaleXY` | Rare | No (no W3C equivalent) | Native `<list>`-only feature (Android/iOS list adapter diffing); out of scope unless lynx-vello implements a native recycler-backed `<list>`. | lynx/core/renderer/ui_component/list/list_container_animation_manager.h; lynx-stack/packages/repl/src/generated/lynx-types-map.json (layoutAnimationCreateProperty union) |
 | `implicit-animation` | Parsed but explicitly a no-op placeholder — deprecated | Rare | N/A (dead property) | Skip entirely; upstream already treats it as inert. | lynx/core/renderer/css/computed_css_style.cc:1787-1793 |
 | `x-animation-color-interpolation` | Vendor-prefixed: `auto\|sRGB\|linearRGB` — controls color space used when interpolating color animations | Extended | No (non-standard property name/prefix) | CSS Color 4 has an analogous concept via `color-interpolation-method` inside `@keyframes`/gradients (`in oklab`, `in srgb`, etc.) but no such vendor property exists standardly. If matching Lynx behavior, add an internal (non-CSS-exposed) linear-vs-sRGB interpolation toggle for color animation curves; do not expose as a real CSS property in the standards-compliant path. | lynx/core/renderer/css/parser/enum_handler.cc:494-509,772-774,843 |
-| `animation-composition`, `animation-timeline` (scroll-driven), `linear()` easing | CSS Animations Level 2 / Scroll-driven Animations features | — | Not implemented in Lynx | Confirmed absent from the entire `core/renderer/css` + `core/animation` tree (grepped, zero hits). Not a "deviation" per se — just an unimplemented-in-Lynx feature; lynx-vello should treat these as net-new asks, not compatibility work. | (absence confirmed via grep across lynx/core/renderer/css, lynx/core/animation) |
+| `animation-composition`, `animation-timeline` (scroll-driven), `linear()` easing | CSS Animations Level 2 / Scroll-driven Animations features | — | Not implemented in Lynx | Confirmed absent from the entire `core/renderer/css` + `core/animation` tree (grepped, zero hits). Not a "deviation" per se — just an unimplemented-in-Lynx feature; lynx-vello should treat these as net-new asks, not compatibility work. lynx-vello implements scroll-driven animations as a W3C extension (see *Scroll-driven animations* below); `animation-composition` and `linear()` stay absent. | (absence confirmed via grep across lynx/core/renderer/css, lynx/core/animation) |
 
 #### Timing-function keywords / curves
 
@@ -330,6 +330,120 @@ concretely, so the tables above are read as "the target" and this section as
   Transitions are wired (`transition_rule`, `has_css_transitions`) and their
   timeline start is covered by a test, but nothing else about them is.
   `element.animate()` has no producer and is out of scope.
+
+## Scroll-driven animations
+
+scroll-animations-1 over the css-animations-2 `animation-timeline`, landed on
+the main thread (the painter does not sample these animations yet). Native
+Lynx has no scroll timelines, so there is nothing to reconcile with it; the
+choices below follow Blink where the specifications are silent or disagree.
+
+- **Properties.** `animation-timeline: scroll() | view() | <dashed-ident> |
+  none | auto`, `scroll-timeline-name/-axis` (+ `scroll-timeline`),
+  `view-timeline-name/-axis/-inset` (+ `view-timeline`), `timeline-scope`,
+  `animation-range-start/-end` (+ `animation-range`) and
+  `animation-duration: auto` parse and cascade under `lynx` (the stylo fork's
+  `lynx: expose the scroll-animations-1 timeline properties`). `animation`
+  resets `animation-timeline` and the ranges, as Firefox and Chrome ship it.
+- **Model.** An animation whose `animation-timeline` is not `auto` is
+  *progress-driven* (the fork's `Animation::is_progress_driven`): stylo
+  cascades `Animation::timeline_sample`, the simple iteration progress plus
+  the iteration's direction, and never iterates, ends or ticks it by the
+  clock. `dom::style::timeline` writes that sample: `ProgressTiming`
+  normalizes the animation's range, delay and duration into scroll-offset px
+  once per commit, and `iteration_progress` applies web-animations-1 §4.5-4.8
+  (web-animations-2 §2.4.4's timeline-boundary rule included) to an offset.
+  The phase boundaries are absolute offsets and the active interval's end is
+  the range's end itself, so a range ending at the scroll limit reaches its
+  last keyframe exactly however its start delay rounds (Blink snaps within a
+  tolerance instead).
+- **Timeline boundary.** An active interval ending at the source's scroll
+  limit — the timeline's maximum time — stays active there without a
+  forwards fill; one ending anywhere else is in its after phase at its end.
+  This is web-animations-2 as amended by csswg-drafts#13819 (issue #12134)
+  and Blink's `Animation::UpdateBoundaryAlignment`, which compare the range
+  end against the scroll limits. For `view()` that is not the cover range's
+  100%: `animation-range: entry` on a last child ends at the limit and holds;
+  `cover` ending short of it does not. The superseded wording, which checked
+  the timeline's own 0% and 100%, is what SPEC-3 first encoded.
+  An animation is bound per commit after layout (`Document::resolve_timelines`,
+  inside `Document::layout`'s pass loop) and re-sampled between commits when
+  its scroll container moves (`Document::advance_scroll_timelines`, which the
+  runtime calls when it adopts the painter's scroll at the mailbox marker).
+  No clock frame is ever asked for; a scroll-driven animation leaves the
+  timeline idle.
+- **Stale timelines** (scroll-animations-1 §5.1). The flush that creates an
+  animation cascades it with no effect; the same `layout()` binds it, writes
+  its sample and re-cascades it before the commit, and a change that relayouts
+  takes one more pass (bounded by `CONTAINER_PASSES`). A change that pass
+  causes is re-sampled at the next commit.
+- **Sources.** `scroll(nearest)` binds the nearest scroll container on the
+  containing-block chain, `hidden` axes included (every scroll container here
+  scrolls both axes; Blink skips only `visible`/`clip` axes); with none, and
+  for `scroll(root)`, the document element stands in for the viewport and is
+  inactive unless it is a scroll container. `scroll(self)` binds the element.
+  `view()` binds the nearest scroll container with no root fallback. A
+  timeline whose source cannot scroll along its axis, whose view subject has
+  no box (`display: none`/`contents`, or skipped contents, css-contain-2 §4),
+  or whose cover range is empty is inactive.
+- **View geometry.** The subject's border box in the source's unscrolled
+  padding-box coordinates, transforms ignored, against the scrollport inset by
+  `view-timeline-inset` (`auto` = the source's `scroll-padding`, `%` of the
+  scrollport). A `position: sticky` box between the subject and its source
+  makes each edge alignment hold over an interval of offsets; the sticky chain
+  is solved exactly (its offset is piecewise linear in the scroll offset) and
+  each named range takes the earliest or latest end scroll-animations-1 §3.1
+  names. Blink handles only the first sticky container.
+- **Named timelines** (§4.2): over the flat tree, the nearest inclusive
+  ancestor defining the name (later list entries win, a scroll timeline beats
+  a view timeline), else the last definer in flat tree order under the
+  nearest `timeline-scope` boundary or the document element, skipping those
+  a nested `timeline-scope` limits. Names are tree-scoped (css-scoping): a
+  reference matches a definition from the same tree. The tree a cascaded name
+  belongs to is read back from stylo's shadow cascade order the way its rule
+  collector writes it: `::slotted` rules name the tree of the slot they came
+  through along the assigned-slot chain, `:host` rules the element's own
+  shadow tree, and `::part` rules the `n`-th enclosing tree that has any
+  `::part` rule. The definers come from a side table the flush's restyles
+  keep, so a lookup walks candidates, never the page; ordering them walks
+  each candidate's flat-tree path once and scans a node's children only
+  where the survivors branch.
+- **Blink choices.**
+  - A time duration and delay convert *proportionally* into the range
+    (`AnimationEffect::NormalizedTiming`), rather than css-animations-2's
+    "treated as `auto`"; the two agree unless a delay is non-zero. `auto`
+    fills the range with no delay. An infinite count, and a duration and
+    delay totalling nothing or less (`1s -1s`), leave a zero active duration
+    at the range's start, as `NormalizedTiming` does (SPEC-3 first gave the
+    latter the `auto` rule): past the start only a forwards fill shows, and
+    it shows the last keyframe.
+  - A range name on a scroll timeline names the whole timeline.
+  - Resuming from `animation-play-state: paused` re-aligns to the scroll
+    position; a paused animation holds its last sample, and one created
+    paused holds the sample of that moment, not the base value.
+  - Progress reads the offset clamped to `[0, max]`: a `contain-bounce`
+    stretch is not a scroll offset.
+  - An animation on an inactive timeline is idle: no effect whatever its
+    fill, and not *current*, so it sets none of the `animates` side effects.
+- **Deviations and limits.**
+  - Stylo's `return;` after updating an existing same-name animation is kept
+    (the servo deviation is mirrored), and it now also freezes the timeline
+    kind and the timeline of every later same-name animation:
+    `Animation::timeline` can lag `animation-timeline` for those, and the
+    binding reads `Animation::timeline`.
+  - `view-timeline-inset` is not animatable (the fork keeps Firefox's
+    `animation_type = "none"`; scroll-animations-1 animates it).
+  - Named-range keyframe selectors (`entry 0% { }`) stay pref-gated in the
+    fork and are ignored — a ruled follow-up.
+  - Pseudo-element animations on a progress timeline are not bound and have
+    no effect.
+  - An element in skipped contents (css-contain-2 §4) holds its sample.
+  - No animation events and no JS `ScrollTimeline`/`ViewTimeline` API: the
+    engine dispatches no animation events at all.
+  - The composite export refuses an element holding a progress-driven
+    animation, so these animations re-cascade on the main thread when their
+    scroll container moves: one animation-only restyle and one commit per
+    adopted scroll while a source moves, and nothing at rest.
 
 ---
 
