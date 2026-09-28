@@ -34,6 +34,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::hash_map::Entry;
 use std::future::Future;
+use std::num::NonZeroU64;
 use std::pin::pin;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -358,6 +359,12 @@ pub(crate) struct ScrollEntry {
     /// drag let go without a fling, a fling spent, a bounce back landed, a
     /// snap after a commit. Kept across later posts until taken.
     pub(crate) rest: Option<Vector2D<f32>>,
+    /// The newest programmatic scroll request the painter had handled for
+    /// the container when it posted ([`dom::ScrollSlot::request`]). Main
+    /// drops a post naming an older one than the container's pending
+    /// request, which it was made before the painter saw, and acknowledges
+    /// the request with one that names it.
+    pub(crate) request: Option<NonZeroU64>,
 }
 
 /// The painter's frame request: its clock reading, the sequence number

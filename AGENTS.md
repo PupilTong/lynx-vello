@@ -204,8 +204,10 @@ realm entry point, `quickjs.rs`'s script engine, `runtime/` for realm
 integration, `workers.rs` for the `Worker` class, `tree/` for Lynx page policy.
 `background/` is the `bobcat-workers` thread and its worker realms. `view/` is
 the public view facade, `paint/` the `Painter` with its `gesture.rs` input
-router, `motion.rs` scroll kinematics (lynx-ui's rubber band, fling decay
-and bounce back) with `inertia.rs` running them over the scroll intents,
+router, `motion.rs` scroll kinematics (lynx-ui's rubber band, fling decay,
+bounce back, and the glide — the bounce back's spring toward a snap position
+or a smooth programmatic scroll's target) with `inertia.rs` running them over
+the scroll intents,
 `images.rs` image protocol and `graphics.rs` GPU target. `link.rs` is
 the one channel set a view spans its two threads with, `jobs.rs` the engine
 thread itself — its scheduler and its job queue — `lifetime.rs` the view's
@@ -2172,6 +2174,9 @@ Subsystems:
   `scroll-snap-type`/`-align`/`-stop`, `scroll-padding` and `scroll-margin`,
   published per scroll slot, settled on at a drag's end, stepped to by a
   wheel tick, and re-snapped at rest on every commit; no snap events.
+  `scroll/request.rs` is CSSOM-View's `scrollTo({behavior})`: a script-facing
+  scroll is a request the committed frame carries to the painter, which
+  animates a smooth one and names the request in the offsets it posts back.
   `scroll/initial_target.rs` is css-scroll-snap-2's `scroll-initial-target`:
   the build records the `nearest` elements, the render scrolls each
   container to its first one and rebuilds the frame in the same commit.

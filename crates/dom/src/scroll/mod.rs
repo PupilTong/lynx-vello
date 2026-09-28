@@ -69,10 +69,12 @@
 //! - The scrolling area does not extend past the last box by the scroll container's own end-side
 //!   padding (css-overflow-3 §2.2). That end padding is missing from the layout engine's
 //!   accumulated content size, not discarded here.
-//! - `scroll-behavior` is absent: a programmatic scroll is instantaneous and clamps hard at the
-//!   boundary, and a snap is a jump. Inertia and the `contain-bounce` stretch exist only on the
-//!   painter's side, over the committed frame; `overscroll-behavior: none` therefore does exactly
-//!   what `contain` does here — there is no document-side boundary effect for it to suppress.
+//! - The `scroll-behavior` property is absent, so a script-facing scroll names its
+//!   [`ScrollBehavior`] outright ([`Document::scroll_to_with`], module `request`). Every offset
+//!   this crate writes itself is instantaneous and clamps hard at the boundary, and a snap is a
+//!   jump. A smooth scroll, inertia and the `contain-bounce` stretch exist only on the painter's
+//!   side, over the committed frame; `overscroll-behavior: none` therefore does exactly what
+//!   `contain` does here — there is no document-side boundary effect for it to suppress.
 
 use euclid::default::{Size2D, Vector2D};
 use hughie::style::PositionProperty;
@@ -98,10 +100,12 @@ pub struct ScrollAxes {
 #[cfg(test)]
 mod behavior_tests;
 pub(crate) mod initial_target;
+mod request;
 pub mod snap;
 #[cfg(test)]
 mod sticky_geometry_tests;
 
+pub use request::{ScrollBehavior, ScrollRequest};
 pub use snap::{
     PROXIMITY_RATIO, ScrollKind, SnapAxis, SnapAxisPositions, SnapPoint, SnapPositions,
     SnapStrictness, resolve_step, settle_offset,
@@ -389,6 +393,11 @@ impl<T> Document<T> {
     /// the range the frame was culled — and its
     /// `content-visibility: auto` boxes determined — to stay valid over; past
     /// it, the committed frame simply has no content to compose.
+    ///
+    /// Records no request for the painter: this is the write the runtime
+    /// adopts the painter's own posted offsets with, so a painter holding an
+    /// offset of its own for the container may post over it. A scroll the
+    /// painter has to honour is [`Self::scroll_to_with`].
     pub fn scroll_to(&mut self, id: NodeId, offset: Vector2D<f32>) -> Vector2D<f32> {
         debug_assert!(
             offset.x.is_finite() && offset.y.is_finite(),

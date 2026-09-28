@@ -21,6 +21,11 @@
 //!   [`OVERSHOOT_DECAY_PER_MS`], so an overshoot is short.
 //! - **Bounce back** — a critically damped spring from displacement `C₁` with no initial velocity:
 //!   `x(t) = (C₁ + β·C₁·t)·e^(−β·t)`, `β =` [`BOUNCE_BACK_STIFFNESS`] per second.
+//! - **Glide** — the same spring toward a target inside the range, from displacement `C` with an
+//!   initial velocity `v` of the displacement: `x(t) = (C + (v + β·C)·t)·e^(−β·t)`. With `v = 0` it
+//!   is the bounce back. What moves a container to a snap position after a release, and to the
+//!   target of a smooth programmatic scroll. `v` is limited ([`glide_velocity`]) so the curve never
+//!   crosses its target: the engine's own rule, since lynx-ui only ever springs from rest.
 //!
 //! Rest is one physical pixel ([`rest_threshold`]): a curve whose remaining
 //! travel is under it is over, and a stretch under it is none.
@@ -142,8 +147,30 @@ pub(crate) fn fling_velocity_for_travel(travel: f32, rate: f32) -> f32 {
 /// Critically damped with no initial velocity, so it never crosses the
 /// boundary it returns to.
 pub(crate) fn bounce_back(displacement: f32, elapsed_s: f32) -> f32 {
-    let beta_t = BOUNCE_BACK_STIFFNESS * elapsed_s.max(0.0);
-    displacement * (1.0 + beta_t) * (-beta_t).exp()
+    glide(displacement, 0.0, elapsed_s)
+}
+
+/// Where a glide from `displacement`, whose displacement was changing at
+/// `velocity` CSS px per second, stands `elapsed_s` seconds in: the
+/// critically damped spring `(C + (v + β·C)·t)·e^(−β·t)`. It never crosses
+/// zero when `velocity` is what [`glide_velocity`] admits.
+pub(crate) fn glide(displacement: f32, velocity: f32, elapsed_s: f32) -> f32 {
+    let t = elapsed_s.max(0.0);
+    let beta_t = BOUNCE_BACK_STIFFNESS * t;
+    (displacement + (velocity + BOUNCE_BACK_STIFFNESS * displacement) * t) * (-beta_t).exp()
+}
+
+/// The initial velocity, in CSS px per second of displacement, a glide from
+/// `displacement` may start with when the container is moving at
+/// `velocity`: toward the target it keeps up to `β·|C|`, the speed of a pure
+/// exponential approach, past which the spring would cross the target; a
+/// velocity pointing away from the target starts the glide from rest.
+pub(crate) fn glide_velocity(displacement: f32, velocity: f32) -> f32 {
+    if !velocity.is_finite() || velocity * displacement >= 0.0 {
+        return 0.0;
+    }
+    let limit = BOUNCE_BACK_STIFFNESS * displacement.abs();
+    velocity.clamp(-limit, limit)
 }
 
 /// The signed stretch of `offset` past `0..=max`: negative past the start
@@ -412,6 +439,46 @@ mod tests {
         }
         assert!(bounce_back(c1, 1.0) < rest_threshold(3.0));
         assert_eq!(bounce_back(-c1, 0.5), -bounce_back(c1, 0.5));
+    }
+
+    #[test]
+    fn a_glide_from_rest_is_the_bounce_back() {
+        for t in [0.0, 0.01, 0.1, 0.3, 1.0] {
+            assert_eq!(glide(80.0, 0.0, t), bounce_back(80.0, t));
+        }
+    }
+
+    #[test]
+    fn a_glide_keeps_its_velocity_toward_the_target_and_never_crosses_it() {
+        let c = 120.0;
+        // Toward the target (displacement falling): kept up to β·|C|.
+        assert_eq!(glide_velocity(c, -500.0), -500.0);
+        assert_eq!(glide_velocity(c, -1e6), -BOUNCE_BACK_STIFFNESS * c);
+        assert_eq!(glide_velocity(-c, 1e6), BOUNCE_BACK_STIFFNESS * c);
+        // Away from it, or nowhere to go: from rest.
+        assert_eq!(glide_velocity(c, 500.0), 0.0);
+        assert_eq!(glide_velocity(0.0, -500.0), 0.0);
+        assert_eq!(glide_velocity(c, f32::NAN), 0.0);
+        for v in [0.0, -500.0, -BOUNCE_BACK_STIFFNESS * c] {
+            let v = glide_velocity(c, v);
+            assert_eq!(glide(c, v, 0.0), c);
+            // The curve's slope at the start is the velocity it was given.
+            let slope = (glide(c, v, 1e-4) - c) / 1e-4;
+            assert!((slope - v).abs() < 5.0, "slope {slope} for {v}");
+            let mut previous = c;
+            for step in 1..=200 {
+                let now = glide(c, v, step as f32 * 0.005);
+                assert!(now <= previous && now >= 0.0, "monotone onto the target");
+                previous = now;
+            }
+            assert!(glide(c, v, 1.0) < rest_threshold(3.0));
+        }
+        // The full velocity is the pure exponential approach.
+        let v = -BOUNCE_BACK_STIFFNESS * c;
+        assert!(close(
+            glide(c, v, 0.2),
+            c * (-BOUNCE_BACK_STIFFNESS * 0.2).exp()
+        ));
     }
 
     #[test]

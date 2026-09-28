@@ -33,10 +33,10 @@
 //!
 //! Deliberately absent: css-scroll-snap-2's `scrollsnapchange` and
 //! `scrollsnapchanging` events (scoped out of the request), snap
-//! *animation* (`scroll-behavior` is absent, so a snap is instantaneous),
-//! §7's preference for the same element on both axes (axes are chosen
-//! independently), and inertial scrolling to feed §7's intended end
-//! position from.
+//! *animation* in this crate (every snap the document applies is
+//! instantaneous; the runtime's painter animates the snap after a drag's
+//! release), and §7's preference for the same element on both axes (axes
+//! are chosen independently).
 //!
 //! Snap areas are the elements in the container's DOM subtree whose nearest
 //! scroll container on the containing-block chain is this one. The walk

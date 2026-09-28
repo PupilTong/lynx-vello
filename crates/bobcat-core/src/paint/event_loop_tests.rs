@@ -571,9 +571,10 @@ fn overscroll_contain_keeps_a_wheel_inside_its_container() {
 }
 
 /// A drag on a `mandatory` snapping scroller is raw while it lasts and
-/// settles onto the nearest snap position at its release: 130px of travel
-/// less the 8px slop leaves it at 122, nearer the second card's start (200)
-/// than the first's (0).
+/// settles onto the nearest snap position after its release: 130px of
+/// travel less the 8px slop leaves it at 122, nearer the second card's start
+/// (200) than the first's (0). Let go without velocity, it glides there over
+/// the frames that follow rather than jumping on the release.
 #[test]
 fn a_released_drag_settles_onto_the_nearest_snap_position() {
     let mut engine = booted(&snapping_page(
@@ -582,26 +583,22 @@ fn a_released_drag_settles_onto_the_nearest_snap_position() {
         200,
         0,
     ));
-    engine.dispatch_input(InputEvent::pointer(
-        Point2D::new(100.0, 150.0),
-        1,
-        PointerKind::Touch,
-        PointerPhase::Down,
-    ));
-    engine.dispatch_input(InputEvent::pointer(
-        Point2D::new(100.0, 20.0),
-        1,
-        PointerKind::Touch,
-        PointerPhase::Move,
-    ));
+    touch_at(&mut engine, 0.0, PointerPhase::Down, 150.0);
+    touch_at(&mut engine, 0.05, PointerPhase::Move, 20.0);
     assert_intent(&engine, 3, 122.0);
-    engine.dispatch_input(InputEvent::pointer(
-        Point2D::new(100.0, 20.0),
-        1,
-        PointerKind::Touch,
-        PointerPhase::Up,
-    ));
-    assert_intent(&engine, 3, 200.0);
+    touch_at(&mut engine, 0.4, PointerPhase::Up, 20.0);
+    assert_intent(&engine, 3, 122.0);
+    assert!(engine.is_animating(), "the settle owes frames");
+    frame_at(&mut engine, 0.45);
+    let moving = intent_y(&engine, 3);
+    assert!(moving > 122.0 && moving < 200.0, "on its way, got {moving}");
+    frame_at(&mut engine, 1.5);
+    assert!(
+        (intent_y(&engine, 3) - 200.0).abs() < f32::EPSILON,
+        "exactly on the position, got {}",
+        intent_y(&engine, 3)
+    );
+    assert!(!engine.is_animating());
 }
 
 /// A wheel tick on a `mandatory` snapping scroller lands on the next snap
@@ -917,6 +914,354 @@ fn a_drag_on_a_flinging_scroller_takes_it_over() {
     engine.dispatch_input(touch(1, PointerPhase::Down, 150.0));
     engine.dispatch_input(touch(1, PointerPhase::Up, 150.0));
     wait_for_log(&mut engine, "tap:150");
+}
+
+/// A 200px row pager (node 3) of five 200px pages (nodes 4–8) snapping
+/// `mandatory` on x, each page carrying `page_css`.
+fn pager_page(page_css: &str) -> String {
+    format!(
+        r"
+        globalThis.renderPage = function () {{
+          const page = __CreatePage('card', 0);
+          const pager = __CreateView(0);
+          __AppendElement(page, pager);
+          globalThis.held = [page, pager];
+          __SetInlineStyles(pager, 'display:flex;flex-direction:row;overflow:scroll;width:200px;height:200px;scroll-snap-type:x mandatory');
+          for (let i = 0; i < 5; i++) {{
+            const item = __CreateView(0);
+            __AppendElement(pager, item);
+            held.push(item);
+            __SetInlineStyles(item, 'flex-shrink:0;width:200px;height:200px;scroll-snap-align:start;{page_css}');
+          }}
+          __FlushElementTree();
+        }};
+        "
+    )
+}
+
+/// Pins the painter's clock and feeds one touch at `x`, halfway down.
+fn touch_x_at(engine: &mut TestEngine, at: f64, phase: PointerPhase, x: f32) {
+    engine.painter.clock.pin(at);
+    engine.dispatch_input(InputEvent::pointer(
+        Point2D::new(x, 100.0),
+        1,
+        PointerKind::Touch,
+        phase,
+    ));
+}
+
+/// Where the painter shows `node`: its live offset, else the committed one.
+fn live_offset(engine: &mut TestEngine, node: u64) -> dom::Vector2D<f32> {
+    let node = node_id(node);
+    engine
+        .painter
+        .scroll_intents
+        .offset_for(node)
+        .unwrap_or_else(|| {
+            let frame = engine
+                .painter
+                .published_frame()
+                .expect("a frame is adopted");
+            let index = frame.slot_of(node).expect("the node is a scroll container");
+            frame.scroll_slots()[index as usize].offset
+        })
+}
+
+/// Adopts whatever the view has published and rebases onto it at `at`,
+/// the way a display frame does before it composes.
+fn adopt_at(engine: &mut TestEngine, at: f64) {
+    frame_at(engine, at);
+    let frame = engine
+        .painter
+        .published_frame()
+        .expect("a frame is adopted");
+    engine.painter.scroll_intents.rebase(&frame, at);
+}
+
+/// A horizontal flick on the pager: 60px of leftward travel over 20ms —
+/// 52px of drag after the slop, then a release velocity of 3 px/ms.
+fn flick_x(engine: &mut TestEngine, at: f64) {
+    touch_x_at(engine, at, PointerPhase::Down, 150.0);
+    touch_x_at(engine, at + 0.01, PointerPhase::Move, 120.0);
+    touch_x_at(engine, at + 0.02, PointerPhase::Move, 90.0);
+    touch_x_at(engine, at + 0.02, PointerPhase::Up, 90.0);
+}
+
+/// A release without velocity on a pager glides to the nearest page over
+/// several frames — never past it — lands on it exactly and stops asking
+/// for frames; the document follows.
+#[test]
+fn a_quiet_release_on_a_pager_glides_onto_the_nearest_page() {
+    let mut engine = booted(&pager_page(""));
+    touch_x_at(&mut engine, 0.0, PointerPhase::Down, 150.0);
+    touch_x_at(&mut engine, 0.05, PointerPhase::Move, 30.0);
+    let released = live_offset(&mut engine, 3).x;
+    assert!((released - 112.0).abs() < 0.5, "got {released}");
+    touch_x_at(&mut engine, 0.4, PointerPhase::Up, 30.0);
+    assert!(engine.is_animating(), "the glide owes frames");
+    let mut previous = released;
+    let mut moving_frames = 0;
+    let mut at = 0.4;
+    while engine.is_animating() {
+        at += 1.0 / 60.0;
+        assert!(at < 1.5, "the glide never landed");
+        frame_at(&mut engine, at);
+        let now = live_offset(&mut engine, 3).x;
+        assert!(
+            now >= previous && now <= 200.0,
+            "monotone onto the page, got {now} after {previous}"
+        );
+        if now < 200.0 {
+            moving_frames += 1;
+        }
+        previous = now;
+    }
+    assert!(moving_frames >= 5, "a glide, not a jump: {moving_frames}");
+    assert!((live_offset(&mut engine, 3).x - 200.0).abs() < f32::EPSILON);
+    engine.painter.publish_scroll(at, None);
+    assert_eq!(
+        scroll_offset_of(&mut engine, 3),
+        dom::Vector2D::new(200.0, 0.0),
+        "the document adopts where it landed"
+    );
+}
+
+/// A flick on a pager whose pages are `scroll-snap-stop: always` lands on
+/// the next page — the stop its whole fling would have passed — well within
+/// 0.7s, keeping the release velocity, and never passes it.
+#[test]
+fn a_flick_on_a_pager_lands_on_the_next_page_without_passing_it() {
+    let mut engine = booted(&pager_page("scroll-snap-stop:always"));
+    flick_x(&mut engine, 0.0);
+    let released = live_offset(&mut engine, 3).x;
+    assert!((released - 52.0).abs() < 0.5, "got {released}");
+    assert!(engine.is_animating());
+    frame_at(&mut engine, 0.02 + 1.0 / 60.0);
+    let first = live_offset(&mut engine, 3).x;
+    assert!(
+        first - released > 20.0,
+        "the release velocity carries on at once, got {first}"
+    );
+    let mut at = 0.02;
+    while engine.is_animating() {
+        at += 1.0 / 60.0;
+        assert!(at < 0.7, "not on the page within 0.7s");
+        frame_at(&mut engine, at);
+        let now = live_offset(&mut engine, 3).x;
+        assert!(now <= 200.0, "passed the next page: {now}");
+    }
+    assert!((live_offset(&mut engine, 3).x - 200.0).abs() < f32::EPSILON);
+}
+
+/// A snap position farther than one scrollport is still reached by the
+/// aimed fling: without `always` stops the same flick's whole travel
+/// settles on the last page, 748px on.
+#[test]
+fn a_far_snap_position_is_still_reached_by_a_fling() {
+    let mut engine = booted(&pager_page(""));
+    flick_x(&mut engine, 0.0);
+    let frame = engine
+        .painter
+        .published_frame()
+        .expect("a frame is adopted");
+    assert!(
+        engine
+            .painter
+            .scroll_intents
+            .is_flinging(&frame, node_id(3)),
+        "a fling carries it"
+    );
+    assert!(!engine.painter.scroll_intents.is_gliding(node_id(3)));
+    frame_at(&mut engine, 0.3);
+    let mid = live_offset(&mut engine, 3).x;
+    assert!(mid > 200.0 && mid < 800.0, "on its way, got {mid}");
+    for at in [1.0, 2.0, 4.0, 8.0] {
+        frame_at(&mut engine, at);
+    }
+    assert!(
+        (live_offset(&mut engine, 3).x - 800.0).abs() < 0.5,
+        "aimed at the last page, got {}",
+        live_offset(&mut engine, 3).x
+    );
+    assert!(!engine.is_animating());
+}
+
+/// A drag's first step on a gliding pager stops the glide where it finds
+/// the pager, and the pager moves with the finger from there.
+#[test]
+fn a_drag_interrupts_a_glide() {
+    let mut engine = booted(&pager_page(""));
+    touch_x_at(&mut engine, 0.0, PointerPhase::Down, 150.0);
+    touch_x_at(&mut engine, 0.05, PointerPhase::Move, 30.0);
+    touch_x_at(&mut engine, 0.4, PointerPhase::Up, 30.0);
+    frame_at(&mut engine, 0.45);
+    let found = live_offset(&mut engine, 3).x;
+    assert!(found > 112.0 && found < 200.0, "mid-glide, got {found}");
+
+    touch_x_at(&mut engine, 0.5, PointerPhase::Down, 100.0);
+    // 10px of travel: the 8px slop, then a 2px step that takes over.
+    touch_x_at(&mut engine, 0.55, PointerPhase::Move, 90.0);
+    assert!(!engine.is_animating(), "the drag stopped the glide");
+    let held = live_offset(&mut engine, 3).x;
+    assert!(
+        (held - (found + 2.0)).abs() < 0.5,
+        "got {held} after {found}"
+    );
+    frame_at(&mut engine, 0.8);
+    assert!((live_offset(&mut engine, 3).x - held).abs() < f32::EPSILON);
+}
+
+/// A smooth programmatic scroll leaves the document where it was and the
+/// painter glides the pager to the target from rest; the offsets it posts
+/// name the request, so main adopts them and the request ends.
+#[test]
+fn a_smooth_request_glides_to_its_target() {
+    let mut engine = booted(&pager_page(""));
+    let target = engine
+        .probe_document(|document| {
+            document.scroll_to_with(
+                node_id(3),
+                dom::Vector2D::new(400.0, 0.0),
+                dom::scroll::ScrollBehavior::Smooth,
+            )
+        })
+        .expect("the view's task answers probes");
+    assert_eq!(target, dom::Vector2D::new(400.0, 0.0));
+    // A later entry, so the request's own commit has been published too.
+    assert_eq!(scroll_offset_of(&mut engine, 3), dom::Vector2D::zero());
+
+    adopt_at(&mut engine, 1.0);
+    assert!(engine.is_animating(), "the request started a glide");
+    assert!(engine.painter.scroll_intents.is_gliding(node_id(3)));
+    let mut previous = 0.0;
+    let mut at = 1.0;
+    while engine.is_animating() {
+        at += 1.0 / 60.0;
+        assert!(at < 2.0, "the glide never landed");
+        frame_at(&mut engine, at);
+        let now = live_offset(&mut engine, 3).x;
+        assert!(now >= previous && now <= 400.0, "got {now}");
+        previous = now;
+    }
+    assert!((live_offset(&mut engine, 3).x - 400.0).abs() < f32::EPSILON);
+    engine.painter.publish_scroll(at, None);
+    assert_eq!(
+        scroll_offset_of(&mut engine, 3),
+        dom::Vector2D::new(400.0, 0.0)
+    );
+    assert_eq!(
+        engine
+            .probe_document(|document| document.pending_scroll_request(node_id(3)))
+            .expect("the view's task answers probes"),
+        None,
+        "acknowledged"
+    );
+}
+
+/// An instant programmatic scroll lands in one frame even while a fling is
+/// carrying the container: the fling stops, and a post the painter made
+/// before it saw the request does not undo the document's move.
+#[test]
+fn an_instant_request_lands_at_once_over_a_fling() {
+    let mut engine = booted(SCROLLING_GESTURE_PAGE);
+    flick(&mut engine, 0.0);
+    frame_at(&mut engine, 0.1);
+    assert!(engine.is_animating(), "flinging");
+    let flung = live_offset(&mut engine, 3).y;
+    assert!(flung > 52.0);
+
+    engine
+        .probe_document(|document| {
+            document.scroll_to_with(
+                node_id(3),
+                dom::Vector2D::new(0.0, 100.0),
+                dom::scroll::ScrollBehavior::Instant,
+            )
+        })
+        .expect("the view's task answers probes");
+    // The fling's last step, posted before the painter adopted the frame
+    // carrying the request.
+    engine.painter.publish_scroll(0.1, None);
+    assert_eq!(
+        scroll_offset_of(&mut engine, 3),
+        dom::Vector2D::new(0.0, 100.0),
+        "the stale post was dropped"
+    );
+
+    frame_at(&mut engine, 0.12);
+    assert!(!engine.is_animating(), "the request stopped the fling");
+    assert!((live_offset(&mut engine, 3).y - 100.0).abs() < f32::EPSILON);
+    frame_at(&mut engine, 0.5);
+    assert!((live_offset(&mut engine, 3).y - 100.0).abs() < f32::EPSILON);
+    engine.painter.publish_scroll(0.5, None);
+    assert_eq!(
+        engine
+            .probe_document(|document| document.pending_scroll_request(node_id(3)))
+            .expect("the view's task answers probes"),
+        None,
+        "the painter's post acknowledged it"
+    );
+    assert_eq!(
+        scroll_offset_of(&mut engine, 3),
+        dom::Vector2D::new(0.0, 100.0)
+    );
+}
+
+/// A wheel tick on a container a smooth request is gliding ends the glide:
+/// the wheel's own landing position, snapped as a wheel tick snaps, is
+/// where the container rests, and no later frame of the glide overwrites
+/// it. The post that follows names the request, so main adopts it.
+#[test]
+fn a_wheel_tick_ends_a_glide_where_the_wheel_puts_it() {
+    let mut engine = booted(&pager_page("scroll-snap-stop:always"));
+    engine
+        .probe_document(|document| {
+            document.scroll_to_with(
+                node_id(3),
+                dom::Vector2D::new(800.0, 0.0),
+                dom::scroll::ScrollBehavior::Smooth,
+            )
+        })
+        .expect("the view's task answers probes");
+    // A later entry, so the request's own commit has been published too.
+    assert_eq!(scroll_offset_of(&mut engine, 3), dom::Vector2D::zero());
+    adopt_at(&mut engine, 1.0);
+    frame_at(&mut engine, 1.05);
+    let mid = live_offset(&mut engine, 3).x;
+    assert!(mid > 0.0 && mid < 600.0, "mid-glide, got {mid}");
+    assert!(engine.painter.scroll_intents.is_gliding(node_id(3)));
+
+    engine.painter.clock.pin(1.06);
+    engine.dispatch_input(InputEvent::wheel(
+        Point2D::new(100.0, 100.0),
+        dom::Vector2D::new(30.0, 0.0),
+    ));
+    let landed = live_offset(&mut engine, 3).x;
+    assert!(
+        landed > mid && landed % 200.0 == 0.0,
+        "the wheel stepped to the next page ahead of {mid}, got {landed}"
+    );
+    assert!(!engine.painter.scroll_intents.is_gliding(node_id(3)));
+    assert!(!engine.is_animating(), "the glide ended");
+    for at in [1.1, 1.3, 2.0] {
+        frame_at(&mut engine, at);
+        assert!(
+            (live_offset(&mut engine, 3).x - landed).abs() < f32::EPSILON,
+            "the wheel's position stands at {at}"
+        );
+    }
+    engine.painter.publish_scroll(2.0, None);
+    assert_eq!(
+        scroll_offset_of(&mut engine, 3),
+        dom::Vector2D::new(landed, 0.0)
+    );
+    assert_eq!(
+        engine
+            .probe_document(|document| document.pending_scroll_request(node_id(3)))
+            .expect("the view's task answers probes"),
+        None,
+        "the post named the request"
+    );
 }
 
 /// A wheel over scrollable content scrolls it (the router's decision,

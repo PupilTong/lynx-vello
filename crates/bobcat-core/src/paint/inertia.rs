@@ -22,13 +22,25 @@
 //!   pixel; stretched, when its velocity is (lynx-ui's rule, so the bounce back starts promptly).
 //! - A stretched container nothing is holding or flinging starts a [`BounceBack`] per stretched
 //!   axis: a drag's release without velocity, a fling's end.
-//! - A drag's first step on a chain ([`ScrollIntents::interrupt`]) stops the fling and the bounce
-//!   backs on it: the containers stay where the finger found them, held like any the drag moves,
-//!   and the release decides again.
+//! - A container that has to move to a snap position once the finger is off starts a [`Glide`] per
+//!   axis instead of jumping there. On the axis the drag's latched slot snaps on, the release picks
+//!   the snap position its whole fling would settle on, as before; a release without velocity
+//!   glides there from rest, and one with velocity glides there starting at that velocity (limited
+//!   so the spring cannot pass the position) when the position is within one scrollport, where a
+//!   fling aimed at it would spend most of its time on the curve's last pixels. A farther position
+//!   is still reached by the aimed fling. Every other container the drag or fling let go settles by
+//!   gliding ([`ScrollIntents::settle`]), and a smooth programmatic scroll is a glide from rest
+//!   (`ScrollIntents::apply_request`). A distance under one physical pixel is written at once.
+//! - A drag's step on a chain ([`ScrollIntents::interrupt`]) stops what moves on it — the fling and
+//!   the bounce backs on its first step, a glide on any step — and the containers stay where the
+//!   finger found them, held like any the drag moves, and the release decides again.
+//! - A wheel step that moves a gliding container ends its glides ([`ScrollIntents::stop_glides`]):
+//!   the wheel's own landing position, already snapped, stands.
 //!
 //! The drag's own holds ([`ScrollIntents::gesture_origins`]) outlive the
 //! drag for as long as its fling runs, so a commit landing mid-fling does
-//! not re-snap a container out from under the curve.
+//! not re-snap a container out from under the curve; a gliding container
+//! is exempt from that at-rest rule on its own.
 
 use dom::input::PointerId;
 use dom::scroll::{ScrollAxes, SnapAxis};
@@ -37,8 +49,8 @@ use smallvec::SmallVec;
 
 use super::motion::{
     FLING_DECAY_PER_MS, Motion, OVERSHOOT_DECAY_PER_MS, bounce_back, fling_distance, fling_travel,
-    fling_velocity, fling_velocity_for_travel, rest_threshold, rubber_band_slope,
-    rubber_band_travel, stretch_of,
+    fling_velocity, fling_velocity_for_travel, glide, glide_velocity, rest_threshold,
+    rubber_band_slope, rubber_band_travel, stretch_of,
 };
 use super::{ScrollIntents, note_changed};
 
@@ -197,6 +209,57 @@ pub(super) struct BounceBack {
     started: f64,
 }
 
+/// One container's axis moving to a position inside its range on
+/// [`glide`]'s spring.
+#[derive(Debug, Clone)]
+pub(super) struct Glide {
+    node: NodeId,
+    axis: Axis,
+    /// Where the axis ends. Re-clamped to the range by every commit
+    /// ([`ScrollIntents::retain_motion`]).
+    target: f32,
+    /// The offset less the target when the glide started.
+    displacement: f32,
+    /// How fast the displacement was changing when the glide started, in
+    /// CSS px per second, as [`glide_velocity`] admits it: so the curve
+    /// never crosses the target.
+    velocity: f32,
+    started: f64,
+}
+
+impl Glide {
+    /// A glide of `node`'s `axis` from `from` to `target`, starting at `now`
+    /// with the container moving at `velocity` CSS px per second.
+    pub(super) fn new(
+        node: NodeId,
+        axis: Axis,
+        from: f32,
+        target: f32,
+        velocity: f32,
+        now: f64,
+    ) -> Self {
+        let displacement = from - target;
+        Self {
+            node,
+            axis,
+            target,
+            displacement,
+            velocity: glide_velocity(displacement, velocity),
+            started: now,
+        }
+    }
+
+    /// The offset less the target at `now`.
+    fn remaining(&self, now: f64) -> f32 {
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "a glide's seconds are well inside f32"
+        )]
+        let elapsed = (now - self.started).max(0.0) as f32;
+        glide(self.displacement, self.velocity, elapsed)
+    }
+}
+
 /// What one chain walk did, per axis.
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct ChainOutcome {
@@ -224,10 +287,10 @@ pub(super) fn chain_nodes(frame: &CommittedFrame, from: NodeId) -> SmallVec<[Nod
 }
 
 impl ScrollIntents {
-    /// Whether a fling or a bounce back is in progress, and so owes the
-    /// timeline another frame.
+    /// Whether a fling, a bounce back or a glide is in progress, and so owes
+    /// the timeline another frame.
     pub(super) fn is_animating(&self) -> bool {
-        !self.flings.is_empty() || !self.bounce_backs.is_empty()
+        !self.flings.is_empty() || !self.bounce_backs.is_empty() || !self.glides.is_empty()
     }
 
     fn offset_of_slot(&self, frame: &CommittedFrame, node: NodeId) -> Option<Vector2D<f32>> {
@@ -266,19 +329,24 @@ impl ScrollIntents {
         if fresh {
             self.drags.insert(pointer, DragTrack::new(from));
             self.interrupt(frame, from, pointer);
+        } else if !self.glides.is_empty() {
+            // A glide a request started under a drag already in progress.
+            self.interrupt_glides(frame, &chain_nodes(frame, from), pointer);
         }
         if let Some(track) = self.drags.get_mut(&pointer) {
             track.step(at, delta);
         }
     }
 
-    /// Stops the fling and the bounce backs on the chain from `from`; their
-    /// containers become `pointer`'s holds, from where they stand.
+    /// Stops the fling, the bounce backs and the glides on the chain from
+    /// `from`; their containers become `pointer`'s holds, from where they
+    /// stand.
     fn interrupt(&mut self, frame: &CommittedFrame, from: NodeId, pointer: PointerId) {
         let chain = chain_nodes(frame, from);
         if chain.is_empty() {
             return;
         }
+        self.interrupt_glides(frame, &chain, pointer);
         for fling in std::mem::take(&mut self.flings) {
             let shared =
                 chain.contains(&fling.from) || chain_nodes(frame, fling.from).contains(&from);
@@ -312,18 +380,35 @@ impl ScrollIntents {
         }
     }
 
-    /// A scrolling drag's release at `now`: flings its chain at the
+    /// Stops the glides on `chain`; their containers become `pointer`'s
+    /// holds, from where they stand.
+    fn interrupt_glides(&mut self, frame: &CommittedFrame, chain: &[NodeId], pointer: PointerId) {
+        for glide in std::mem::take(&mut self.glides) {
+            if !chain.contains(&glide.node) {
+                self.glides.push(glide);
+                continue;
+            }
+            if let Some(offset) = self.offset_of_slot(frame, glide.node) {
+                self.gesture_origins
+                    .entry((pointer, glide.node))
+                    .or_insert(offset);
+            }
+        }
+    }
+
+    /// A scrolling drag's release at `now`: glides the latched slot's
+    /// snapping axes to their snap positions and flings its chain at the
     /// velocity its last steps measured, or — with none worth a curve —
     /// settles what it held and lets any stretch spring back.
     pub(super) fn end_drag(&mut self, frame: &CommittedFrame, pointer: PointerId, now: f64) {
-        self.rebase(frame);
+        self.rebase(frame, now);
         let track = self.drags.remove(&pointer);
         let threshold = rest_threshold(frame.device_pixel_ratio());
         let Some((from, start)) = track
             .as_ref()
             .and_then(|track| Some((track.from, frame.slot_of(track.from)?)))
         else {
-            self.settle(frame, pointer);
+            self.settle(frame, pointer, now);
             self.start_bounce_backs(frame, now);
             return;
         };
@@ -351,22 +436,42 @@ impl ScrollIntents {
             if let Some((stretch, extent)) = self.stretched_hold(frame, pointer, axis) {
                 v *= rubber_band_slope(rubber_band_travel(stretch.abs(), extent), extent);
                 axis.raise(&mut stretched);
-            } else if v != 0.0 {
-                // Aimed at the snap position the whole curve would settle
-                // on, so the fling ends there rather than snapping after.
-                let snap = match axis {
-                    Axis::X => snap_x,
-                    Axis::Y => snap_y,
+            } else if let Some(snap) = match axis {
+                Axis::X => snap_x,
+                Axis::Y => snap_y,
+            } {
+                // The snap position the whole fling would settle on — where
+                // the container stands, without velocity.
+                let current = axis.of(offset);
+                let max = axis.of(slot.max_offset);
+                let predicted = if v == 0.0 {
+                    current
+                } else {
+                    (current + fling_travel(v, FLING_DECAY_PER_MS)).clamp(0.0, max)
                 };
-                if let Some(snap) = snap {
-                    let current = axis.of(offset);
-                    let max = axis.of(slot.max_offset);
-                    let predicted = (current + fling_travel(v, FLING_DECAY_PER_MS)).clamp(0.0, max);
-                    let target = snap.settle(
-                        axis.of(origin),
-                        predicted,
-                        SnapAxis::proximity_threshold(axis.extent(slot.scrollport)),
-                    );
+                let extent = axis.extent(slot.scrollport);
+                let target = snap.settle(
+                    axis.of(origin),
+                    predicted,
+                    SnapAxis::proximity_threshold(extent),
+                );
+                let distance = (target - current).abs();
+                if distance < threshold {
+                    // Nothing to move: the settle below writes it.
+                    v = 0.0;
+                } else if v == 0.0 || distance <= extent {
+                    self.glides.push(Glide::new(
+                        slot.node,
+                        axis,
+                        current,
+                        target,
+                        v * 1000.0,
+                        now,
+                    ));
+                    v = 0.0;
+                } else {
+                    // Aimed at it, so the fling ends there rather than
+                    // snapping after.
                     v = fling_velocity_for_travel(target - current, FLING_DECAY_PER_MS);
                 }
             }
@@ -381,7 +486,7 @@ impl ScrollIntents {
         };
         fling.rest(threshold);
         if fling.velocity == Vector2D::zero() {
-            self.settle(frame, pointer);
+            self.settle(frame, pointer, now);
             self.start_bounce_backs(frame, now);
             return;
         }
@@ -411,14 +516,15 @@ impl ScrollIntents {
             })
     }
 
-    /// Advances every fling and bounce back to `now`.
+    /// Advances every fling, bounce back and glide to `now`.
     pub(super) fn tick(&mut self, frame: &CommittedFrame, now: f64) {
         if !self.is_animating() {
             return;
         }
-        self.rebase(frame);
+        self.rebase(frame, now);
         self.tick_flings(frame, now);
         self.tick_bounce_backs(frame, now);
+        self.tick_glides(frame, now);
     }
 
     fn tick_flings(&mut self, frame: &CommittedFrame, now: f64) {
@@ -459,7 +565,7 @@ impl ScrollIntents {
             }
             fling.rest(threshold);
             if fling.velocity == Vector2D::zero() {
-                self.settle(frame, fling.pointer);
+                self.settle(frame, fling.pointer, now);
                 self.start_bounce_backs(frame, now);
             } else {
                 self.flings.push(fling);
@@ -493,16 +599,89 @@ impl ScrollIntents {
             self.set_offset(back.node, offset);
             if done {
                 // Back on its edge, which a snapping container may not
-                // rest on: the at-rest rule applies as after any commit.
-                self.settle_node_at_rest(frame, slot);
+                // rest on: the at-rest rule applies as after any commit —
+                // once a glide on its other axis has landed too.
+                if !self.is_gliding(back.node) {
+                    self.settle_node_at_rest(frame, slot);
+                }
             } else {
                 self.bounce_backs.push(back);
             }
         }
     }
 
+    fn tick_glides(&mut self, frame: &CommittedFrame, now: f64) {
+        let threshold = rest_threshold(frame.device_pixel_ratio());
+        let mut landed: SmallVec<[NodeId; 2]> = SmallVec::new();
+        for glide in std::mem::take(&mut self.glides) {
+            let Some(mut offset) = self.offset_of_slot(frame, glide.node) else {
+                continue;
+            };
+            let remaining = glide.remaining(now);
+            let done = remaining.abs() < threshold;
+            glide.axis.set(
+                &mut offset,
+                if done {
+                    glide.target
+                } else {
+                    glide.target + remaining
+                },
+            );
+            self.set_offset(glide.node, offset);
+            if done {
+                // Posted at rest even when the last step moved nothing.
+                note_changed(&mut self.changed, glide.node);
+                landed.push(glide.node);
+            } else {
+                self.glides.push(glide);
+            }
+        }
+        // After the loop, so a container still gliding on its other axis is
+        // not settled under that glide.
+        for node in landed {
+            if self.is_gliding(node) || self.is_held(node) || self.is_bouncing(node) {
+                continue;
+            }
+            if let Some(index) = frame.slot_of(node) {
+                // A target a commit re-clamped may be no snap position.
+                self.settle_node_at_rest(frame, &frame.scroll_slots()[index as usize]);
+            }
+        }
+    }
+
+    /// Glides `node`'s axes from `from` to `to`, or writes an axis whose
+    /// distance is under one physical pixel at once. An axis already gliding
+    /// is left to its glide.
+    pub(super) fn glide_to(
+        &mut self,
+        frame: &CommittedFrame,
+        node: NodeId,
+        from: Vector2D<f32>,
+        to: Vector2D<f32>,
+        now: f64,
+    ) {
+        let threshold = rest_threshold(frame.device_pixel_ratio());
+        let mut written = from;
+        for axis in Axis::BOTH {
+            let gap = axis.of(to) - axis.of(from);
+            if gap == 0.0 || self.is_gliding_axis(node, axis) {
+                continue;
+            }
+            if gap.abs() < threshold {
+                axis.set(&mut written, axis.of(to));
+            } else {
+                self.glides
+                    .push(Glide::new(node, axis, axis.of(from), axis.of(to), 0.0, now));
+            }
+        }
+        if written != from {
+            self.write(node, written);
+            self.generation += 1;
+        }
+    }
+
     /// Starts a bounce back for every stretched axis of every container
-    /// nothing is holding or flinging.
+    /// nothing is holding or flinging, unless a glide is moving that axis.
     pub(super) fn start_bounce_backs(&mut self, frame: &CommittedFrame, now: f64) {
         for slot in frame.scroll_slots() {
             if slot.bounce == ScrollAxes::NONE {
@@ -521,6 +700,7 @@ impl ScrollIntents {
                 }
                 let stretch = stretch_of(axis.of(offset), axis.of(slot.max_offset));
                 if stretch == 0.0
+                    || self.is_gliding_axis(slot.node, axis)
                     || self
                         .bounce_backs
                         .iter()
@@ -560,15 +740,69 @@ impl ScrollIntents {
         self.bounce_backs.iter().any(|back| back.node == node)
     }
 
+    /// Whether a glide is moving `node`.
+    pub(super) fn is_gliding(&self, node: NodeId) -> bool {
+        self.glides.iter().any(|glide| glide.node == node)
+    }
+
+    fn is_gliding_axis(&self, node: NodeId, axis: Axis) -> bool {
+        self.glides
+            .iter()
+            .any(|glide| glide.node == node && glide.axis == axis)
+    }
+
+    /// Ends every glide on `node`, where it stands: a wheel step that moves
+    /// the container has decided where it goes instead.
+    pub(super) fn stop_glides(&mut self, node: NodeId) {
+        if !self.glides.is_empty() {
+            self.glides.retain(|glide| glide.node != node);
+        }
+    }
+
+    /// Stops everything moving `node` on the painter's own account — a
+    /// fling whose chain runs through it, its bounce backs and its glides —
+    /// for a programmatic scroll that decides where it goes. A stopped
+    /// fling lets go of its other holds as a spent one does.
+    pub(super) fn stop_motion_on(&mut self, frame: &CommittedFrame, node: NodeId, now: f64) {
+        let mut stopped: SmallVec<[PointerId; 1]> = SmallVec::new();
+        self.flings.retain(|fling| {
+            let through = chain_nodes(frame, fling.from).contains(&node);
+            if through {
+                stopped.push(fling.pointer);
+            }
+            !through
+        });
+        if !stopped.is_empty() {
+            for pointer in stopped {
+                self.gesture_origins.remove(&(pointer, node));
+                self.settle(frame, pointer, now);
+            }
+            self.start_bounce_backs(frame, now);
+        }
+        self.bounce_backs.retain(|back| back.node != node);
+        self.glides.retain(|glide| glide.node != node);
+    }
+
     /// Drops what no longer applies to `frame`: a fling whose latched slot
     /// is gone, a bounce back whose container is gone or no longer
-    /// stretched, a drag whose slot is gone. A dropped bounce back records
-    /// its container: a commit that widened the range ends one without a
-    /// step, and the offset main holds clamped to the old edge is posted
-    /// again, at rest.
+    /// stretched, a glide whose container is gone, a drag whose slot is
+    /// gone. A dropped bounce back records its container: a commit that
+    /// widened the range ends one without a step, and the offset main holds
+    /// clamped to the old edge is posted again, at rest. A glide's target
+    /// is re-clamped to the range the frame admits.
     pub(super) fn retain_motion(&mut self, frame: &CommittedFrame) {
         self.flings
             .retain(|fling| frame.slot_of(fling.from).is_some());
+        self.glides.retain_mut(|glide| {
+            let Some(index) = frame.slot_of(glide.node) else {
+                return false;
+            };
+            let max = glide
+                .axis
+                .of(frame.scroll_slots()[index as usize].max_offset);
+            glide.target = glide.target.clamp(0.0, max.max(0.0));
+            true
+        });
         self.drags
             .retain(|_, track| frame.slot_of(track.from).is_some());
         let offsets = &self.offsets;

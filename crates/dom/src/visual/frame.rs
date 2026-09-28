@@ -21,7 +21,9 @@ use stylo::properties::animated_properties::AnimationValueMap;
 use super::{AnimationSample, PaintOrder, SpaceSamples};
 use crate::NodeId;
 use crate::paint::compose::{self, ComposeOp, FilterGroup};
-use crate::scroll::{ChainLink, ScrollAxes, ScrollCapture, SnapAxis, SnapPoint, SnapStrictness};
+use crate::scroll::{
+    ChainLink, ScrollAxes, ScrollCapture, ScrollRequest, SnapAxis, SnapPoint, SnapStrictness,
+};
 use crate::vello::Scene;
 use crate::vello::kurbo::Affine;
 use crate::vello::peniko::ImageData;
@@ -68,6 +70,11 @@ pub struct ScrollSlot {
     /// Scroll offsets stay local; composition maps their translations through
     /// these axes so transformed scroll containers move their content correctly.
     pub viewport_axes: [Vector2D<f32>; 2],
+    /// The container's pending programmatic scroll, target clamped to
+    /// `max_offset`: carried by every frame until the painter acknowledges
+    /// it, and handled by the painter once per serial
+    /// ([`Document::scroll_to_with`](crate::Document::scroll_to_with)).
+    pub request: Option<ScrollRequest>,
 }
 
 /// Where compose puts a frame's scroll slots at one instant: `offset_of`'s

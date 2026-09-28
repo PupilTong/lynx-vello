@@ -15,11 +15,13 @@ use std::num::{NonZeroU32, NonZeroU64};
 use hughie::geometry::Edges;
 use hughie::text::TextContext;
 use hughie::tree::{LayoutInput, LayoutSlot};
+use rustc_hash::FxHashMap;
 use slab::Slab;
 
 use crate::layout::committed_box::{CommittedBox, CommittedBoxTable};
 use crate::layout::relevance::{Relevance, RelevanceTable};
 use crate::layout::text_block::TextBlockStore;
+use crate::scroll::ScrollRequest;
 use crate::tree::node::Node;
 
 /// A node's identity *and* the position its state occupies: the arena key it
@@ -472,6 +474,17 @@ pub(crate) struct DocumentLayoutState {
     /// has one: a page without the property keeps it empty and pays
     /// nothing per node.
     pub(crate) initial_targets: Vec<(NodeId, NodeId)>,
+    /// Each scroll container's pending programmatic scroll request, the
+    /// newest only; see `scroll::request`. A side table rather than a
+    /// per-node field because only a container a script has scrolled has
+    /// one, and only until the painter acknowledges it: bounded by the
+    /// containers with an unacknowledged request. An entry dies with its
+    /// acknowledgement, with its node ([`Self::remove`]), or at the first
+    /// render whose frame has no scroll slot for it.
+    pub(crate) scroll_requests: FxHashMap<NodeId, ScrollRequest>,
+    /// The serial the next scroll request takes: one counter per document,
+    /// so serials order every request against every post that names one.
+    pub(crate) next_scroll_request: NonZeroU64,
     /// The grid items whose `position: sticky` insets resolve against their
     /// grid area rather than the grid container: the area's edges in the
     /// container's border-box coordinates, unrounded as the layout run
@@ -514,6 +527,8 @@ impl DocumentLayoutState {
             interleaves_containers: false,
             container_deferrals: Vec::new(),
             initial_targets: Vec::new(),
+            scroll_requests: FxHashMap::default(),
+            next_scroll_request: NonZeroU64::MIN,
             sticky_containing_blocks: Vec::new(),
         }
     }
@@ -554,6 +569,9 @@ impl DocumentLayoutState {
     pub(crate) fn remove(&mut self, slot: NodeId) {
         if let Some(entry) = self.nodes.get_mut(slot.arena_key()) {
             *entry = NodeLayoutState::default();
+        }
+        if !self.scroll_requests.is_empty() {
+            self.scroll_requests.remove(&slot);
         }
     }
 
@@ -596,6 +614,8 @@ impl DocumentLayoutState {
             interleaves_containers: _,
             container_deferrals: _,
             initial_targets: _,
+            scroll_requests: _,
+            next_scroll_request: _,
             sticky_containing_blocks: _,
         } = self;
         let context = text_context
@@ -640,6 +660,8 @@ impl DocumentLayoutState {
             interleaves_containers: _,
             container_deferrals: _,
             initial_targets: _,
+            scroll_requests: _,
+            next_scroll_request: _,
             sticky_containing_blocks: _,
         } = self;
         // Unlike the path this replaces, restoring can re-enter the shaper —

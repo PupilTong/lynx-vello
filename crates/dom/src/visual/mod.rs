@@ -823,6 +823,9 @@ impl<T: Sync> Document<T> {
         self.layout();
         let _ = self.next_commit_id();
         let frame = self.build_frame_with_relevance();
+        // A request is carried by the container's scroll slot, so one whose
+        // container this frame has no slot for has nowhere to go.
+        self.retain_scroll_requests(|node| frame.slot_of(node).is_some());
         // Asked again now the frame is final: the relevance pass inside the
         // build reveals and skips subtrees with no style change to notice it,
         // and css-contain-2 §4 freezes the animations inside a skipped one.
