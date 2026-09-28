@@ -57,18 +57,29 @@ interface BobcatNative {
    */
   attributeNames(nodeId: number): string;
   /**
-   * Dispatches one Lynx UI method by name on the element and answers its
-   * result as text, or `null` when the engine has no method of that name.
+   * Dispatches one Lynx UI method by name on the element, with `params` as
+   * JSON text, and answers either a status code or the method's data as
+   * text:
    *
-   * `boundingClientRect` answers `"<left>,<top>,<width>,<height>"` — the
-   * border box in viewport CSS px as of the last completed layout pass,
-   * ancestor scroll offsets applied, transforms ignored (native's own
-   * conversion ignores them too), zeros for an element with no box.
+   * - `3` (`METHOD_NOT_FOUND`): the element has no method of that name.
+   * - `4` (`PARAM_INVALID`): the method refused `params`, and did nothing.
+   * - `0` (`SUCCESS`): the method ran and has no data to answer.
+   * - a string: the method ran, and this is its data. Only
+   *   `boundingClientRect` has any: `"<left>,<top>,<width>,<height>"` — the
+   *   border box in viewport CSS px as of the last completed layout pass,
+   *   ancestor scroll offsets applied, transforms ignored (native's own
+   *   conversion ignores them too), zeros for an element with no box. It
+   *   reads no params.
    *
-   * Runs no style, layout or paint: it reports the last completed pass, and
+   * `selectTab({index, smooth = true})` exists on `viewpager` and
+   * `x-viewpager-ng` only: it scrolls the pager to `index` times its
+   * scrollport width, clamped to the range, smoothly unless `smooth` is
+   * falsy.
+   *
+   * Runs no style, layout or paint: it reads the last completed pass, and
    * user code decides when to flush.
    */
-  callElementMethod(nodeId: number, method: string): string | null;
+  callElementMethod(nodeId: number, method: string, params: string): string | number;
   /**
    * The element's computed style as one record payload: a flat sequence of
    * `<utf16Length>:<text>` fields, name then value, two per property.

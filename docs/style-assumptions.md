@@ -277,6 +277,23 @@ the semantics are stylo's.** Everything below refines that sentence.
       web-core does not have (native is split; see `docs/tracking/deviations.md`). `margin` is deliberately untouched — the shadow
       part inherits it — and so is a `view` inside a `text`, which web-core
       leaves a real `inline-flex` box with its padding intact.
+    - The `viewpager` row (2026-09-28): `flex-direction: row`,
+      `linear-direction: row` and `flex-wrap: nowrap` on `viewpager` /
+      `x-viewpager-ng`, and `position: relative` on `viewpager-item` /
+      `x-viewpager-item-ng`. In both references a pager's pages form one row
+      whatever the author writes on the pager: web-core lays them out in a
+      shadow `#content` box whose `flex-direction: row` no author rule on the
+      host reaches (`htmlTemplates.ts:379-405`), and native places the pages
+      itself. Authors do write a main axis there — the web-core e2e cards style
+      the pager `display: flex; flex-direction: column` or `display: linear` —
+      and still get a row. Here the authored pager is the box that lays the
+      pages out, so a normal declaration would let those cards stack their
+      pages vertically, an engine neither reference has. The three are every
+      property this grammar lets an author move a flex or linear main axis or
+      wrap its line with (`linear-orientation` does not parse). The page's
+      `position` is web-core's own `!important` (`x-viewpager-ng.css:63`): a
+      page positioned absolutely would leave the row. The pager's `display`
+      stays a default, as a scroller's does.
 
 16. **cssId scoping is a runtime-adapter concern.** The feature exists for
     pageConfig `enableRemoveCSSScope = false` (that is the exact
@@ -800,8 +817,9 @@ and §D.16 with what the wire format actually permits.)*
       release velocity when the position is within one scrollport (an aimed
       fling otherwise), and a script-facing scroll names its behavior — a
       smooth one is a glide from rest, an instant one a jump — through
-      `Document::scroll_to_with` (CSSOM-View `scrollTo({behavior})`). There
-      is still no `scroll-behavior` property.
+      `Document::scroll_to_with` (CSSOM-View `scrollTo({behavior})`, which is
+      what `<viewpager>`'s `selectTab` calls). There is still no
+      `scroll-behavior` property.
     - **`scroll-capture: auto | nearest`** is lynx-vello's own property, with
       no W3C or Lynx counterpart (the fork declares it `lynx_only`). `nearest`
       on a scroll container hands a gesture that starts in it to the nearest

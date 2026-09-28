@@ -36,10 +36,15 @@ queue without clearing it. Selection captures its root at select time.
   ancestor scroll offsets applied and transforms ignored, `right` and `bottom`
   derived from the other four. `id` is the attribute, empty when the element
   carries none; `dataset` is the typed copy `__GetDataset` hands out, which
-  native includes and web-core does not. Every other method name fails with
+  native includes and web-core does not. `selectTab({index, smooth = true})`
+  on a `viewpager` or `x-viewpager-ng` succeeds with no data as soon as the
+  scroll is requested: the pager scrolls to `index` times its scrollport
+  width, clamped to its range, smoothly unless `smooth` is falsy; a missing or
+  non-numeric `index` fails with code 4, `PARAM_INVALID`, and moves nothing.
+  Every other method name, and `selectTab` on any other element, fails with
   code 3, `METHOD_NOT_FOUND` — web-core's code, where native answers its
   generic 1. A failure without a fail callback is ignored by the production
-  facade.
+  facade. `params` crosses to the main thread as JSON text.
 - The measurement runs no flush. It reports the last completed pass, so a BTS
   query is always current: the entry that queued it has already returned and
   its epilogue committed, and `setNativeProps` commits before the next request
@@ -75,11 +80,11 @@ native numeric-length conversion remain unsupported.
 ## Remaining boundaries
 
 Legacy component-scoped roots, direct MTS selector PAPI, UI invoke methods
-other than `boundingClientRect`, animation methods, dataset-to-DOM reflection
-and cross-realm host objects remain pending. `boundingClientRect` takes no
-`relativeTo`, `androidEnableTransformProps` or `iOSEnableAnimationProps`: the
-`params` object is accepted and ignored, since each of those names behavior
-this engine does not have. Query failures and invalid legacy ReactRef chaining
+other than `boundingClientRect` and `selectTab`, animation methods,
+dataset-to-DOM reflection and cross-realm host objects remain pending.
+`boundingClientRect` takes no `relativeTo`, `androidEnableTransformProps` or
+`iOSEnableAnimationProps`: it reads nothing from its `params`, since each of
+those names behavior this engine does not have. Query failures and invalid legacy ReactRef chaining
 now use the nonfatal [runtime reporter](events-diagnostics-runtime.md), alongside
 the existing query status replies.
 Compiled ReactLynx bundle loading and ref hydration integration remain later

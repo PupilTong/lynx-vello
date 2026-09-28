@@ -43,7 +43,7 @@ use crate::esm::{
     RUNTIME_MODULE_SPECIFIER, TIMER_MODULE_SPECIFIER, WORKER_CLASS_MODULE_SPECIFIER,
 };
 use crate::link::{InputEventPayload, ViewNotice, ViewOutbox};
-use crate::main::tree::{ImageOutcomes, LynxDocument, PageConfig, new_document};
+use crate::main::tree::{self, ImageOutcomes, LynxDocument, PageConfig, new_document};
 use crate::realm::{RealmCore, context_of, open_realm, string_argument};
 use crate::script::ScriptError;
 use crate::timers::run_due_timers;
@@ -2020,39 +2020,60 @@ fn install_event_members(
     Ok(())
 }
 
+/// The UI-method status codes `callElementMethod` answers with, from the
+/// table every `invoke` path reports (web-core's `ErrorCode`; native's
+/// `LynxUIMethodConstants`).
+const UI_METHOD_SUCCESS: f64 = 0.0;
+const UI_METHOD_NOT_FOUND: f64 = 3.0;
+const UI_METHOD_PARAM_INVALID: f64 = 4.0;
+
 /// Installs the two members that read geometry and style back out of the
-/// document.
+/// document, one of which also runs the UI methods.
 ///
-/// Neither runs a pipeline step. Both report what the last completed pass
+/// Neither runs a pipeline step. Both read what the last completed pass
 /// left behind, and the realm decides when the next one runs by calling
 /// `__FlushElementTree` — measuring must not be able to move layout out from
 /// under the job that measures, and a card that wants current numbers says
-/// so. Both still go through [`validate_live_element`], so a freed element
-/// is a script error rather than a zero rect or an empty style.
+/// so. The one UI method that writes, `selectTab`, records a scroll request
+/// the next commit carries. Both still go through [`validate_live_element`],
+/// so a freed element is a script error rather than a zero rect or an empty
+/// style.
 fn install_readback_members(
     engine: &mut ScriptEngine,
     js_runtime: &mut ScriptRuntime,
     handle: &Rc<RefCell<DocumentSlot>>,
 ) -> Result<(), MainThreadError> {
     tree_members! { engine, js_runtime, handle;
-        fn callElementMethod(node: node_id_argument, method: string_argument) |document| {
+        fn callElementMethod(
+            node: node_id_argument,
+            method: string_argument,
+            params: string_argument
+        ) |document| {
             validate_live_element(document, NAME, node)?;
-            // One method, dispatched by name because the PAPI is generic:
-            // anything else is "no such method" for the realm to turn into
-            // the shared table's code 3. `params` is not carried — nothing
-            // reads one, and the first method that does brings it.
-            if method != "boundingClientRect" {
-                return Ok(HostValue::Null);
-            }
-            // A box-less element answers zeros rather than nothing, which is
-            // what both references report for one.
-            let rect = document
-                .bounding_client_rect(node)
-                .unwrap_or_else(dom::Rect::zero);
-            Ok(HostValue::String(format!(
-                "{},{},{},{}",
-                rect.origin.x, rect.origin.y, rect.size.width, rect.size.height
-            )))
+            // Dispatched by name, and by tag for a method only one component
+            // has, because the PAPI is generic. The answer is a status code
+            // when the method has no data and the rect text when it has:
+            // see `native.d.ts` for the four shapes the realm tells apart.
+            Ok(match method {
+                "boundingClientRect" => {
+                    // A box-less element answers zeros rather than nothing,
+                    // which is what both references report for one.
+                    let rect = document
+                        .bounding_client_rect(node)
+                        .unwrap_or_else(dom::Rect::zero);
+                    HostValue::String(format!(
+                        "{},{},{},{}",
+                        rect.origin.x, rect.origin.y, rect.size.width, rect.size.height
+                    ))
+                }
+                "selectTab" if tree::is_viewpager(document, node) => {
+                    HostValue::Number(match tree::select_tab(document, node, params) {
+                        Ok(()) => UI_METHOD_SUCCESS,
+                        Err(tree::InvalidParams) => UI_METHOD_PARAM_INVALID,
+                    })
+                }
+                _ => HostValue::Number(UI_METHOD_NOT_FOUND),
+            })
         }
         fn getComputedStyleMap(
             node: node_id_argument,

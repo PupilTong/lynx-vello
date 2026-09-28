@@ -1121,6 +1121,55 @@ consequential choice about whether to follow the spec or the quirk.
      container. Recorded in
      [style-assumptions.md](../style-assumptions.md) §19.
 
+- **`<viewpager>` (2026-09-28): the authored pager is the scroll container,
+  and its row is pinned in the cascade.** `crates/bobcat-core/src/main/tree/viewpager.rs`
+  translates `x-viewpager-ng.css` onto all four tags (native's `viewpager` /
+  `viewpager-item`, web-core's `x-viewpager-ng` / `x-viewpager-item-ng`). Where
+  it leaves a reference:
+  - *The row is UA `!important`.* web-core keeps its pages in a row inside a
+    shadow `#content` box (`htmlTemplates.ts:379-405`) that no author rule on the
+    host reaches; native places the pages itself. Here the authored pager lays
+    them out, so `flex-direction: row`, `linear-direction: row` and
+    `flex-wrap: nowrap` on the pager and `position: relative` on a page (the one
+    web-core also pins, `x-viewpager-ng.css:63`) are important UA declarations —
+    new §D.15 exceptions ([style-assumptions.md](../style-assumptions.md)),
+    argued as structural invariants. An author `display` other than `flex` or
+    `linear` is not pinned; web-core's `#content` inherits the host's `display`
+    too.
+  - *`bounces` stretches both edges* (`overscroll-behavior-x: contain-bounce`).
+    web-core shows a page-wide blank box ahead of the pages only
+    (`x-viewpager-ng.css:43-45`), so only the leading edge can be pulled; iOS
+    hands the attribute to `UIScrollView.bounces` (`LynxUIViewPager.m:712`) and
+    Harmony to `ARKUI_EDGE_EFFECT_SPRING` (`ui_viewpager.cc:55-59`), both edges.
+    **Native over web-core; the architect's decision, to be confirmed by the
+    user.** The default stays off, as in web-core and Harmony.
+  - *`selectTab` with no numeric `index` is code 4 and moves nothing* (Android
+    `LynxUIViewPager.kt:172-174`, Harmony `ui_viewpager.cc:224-227`). web-core
+    multiplies whatever it gets (`XViewpagerNg.ts:26-35`): a missing or `NaN`
+    index scrolls to 0 and succeeds, and a numeric string or a boolean is
+    coerced. iOS answers its generic code 1. **Native over web-core; the
+    architect's decision, to be confirmed by the user.**
+  - *`selectTab` past either end clamps and succeeds*, and a fractional index
+    is multiplied as given (the `mandatory` snap settles the result) — both
+    web-core. Native refuses an out-of-range index (Android code 4,
+    `LynxUIViewPager.kt:168-170`; Harmony code 4, `ui_viewpager.cc:229-235`;
+    iOS code 1), and iOS and Harmony truncate a fraction to an integer
+    (`intValue`, `LynxUIViewPager.m:771`; `static_cast<int32_t>`,
+    `ui_viewpager.cc:222`).
+  - *`selectTab` answers at once*, when the scroll is requested, as web-core
+    does. iOS answers a smooth turn when it lands and fails the earlier
+    callback when a second `selectTab` interrupts it
+    (`LynxUIViewPager.m:757-829`).
+  - *`smooth` is read with JavaScript truthiness* and defaults to `true`
+    (web-core).
+  - *`select-index` / `initial-select-index` are not implemented*: the pager
+    always starts on its first page. Waiting on a decision about the CSS
+    mechanism that carries them.
+  - *A `viewpager-item` outside a pager is an ordinary container*, where
+    web-core hides it (`x-viewpager-ng.css:6-14`) — the `list-item` decision
+    above. *No `contain: strict` from the fifth page on* (`:66-68`): a browser
+    performance shortcut, not a behavior.
+
 ## JS runtime & APIs (see [js-runtime.md](js-runtime.md), [accessibility.md](accessibility.md))
 
 - **`lynx.createSelectorQuery()`/`NodesRef`** — modeled on WeChat Mini
@@ -1139,7 +1188,8 @@ consequential choice about whether to follow the spec or the quirk.
   rect is the untransformed border box the layout pass produced, so a rotated
   or translated element reports where it was laid out, not where it paints.
   `relativeTo`, `androidEnableTransformProps` and `iOSEnableAnimationProps`
-  are not accepted at all; the `params` object is ignored.
+  are not accepted at all; `boundingClientRect` reads nothing from its
+  `params`.
 - **The rect carries `id` and `dataset`** — native's result bundles both
   (`LynxUI.m`, `platform_event_target_helper.cc`); web-core's carries the
   geometry and the id only, because DOM `getBoundingClientRect()` has neither.

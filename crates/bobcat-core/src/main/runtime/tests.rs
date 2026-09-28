@@ -2026,6 +2026,200 @@ fn invoke_answers_a_bounding_client_rect_carrying_the_elements_id_and_dataset() 
         .expect("measuring");
 }
 
+/// `selectTab` on a pager, through both paths a card reaches a UI method by:
+/// `__InvokeUIMethod`, and the selector-query `invoke` the background
+/// thread's `lynx.createSelectorQuery()` sends (`__BobcatQueryNodes`). The
+/// target is `index` times the 200px scrollport width; an instant turn moves
+/// the document at once, a smooth one — the default — only records the
+/// request for the painter. Bad params are code 4 and move nothing; an
+/// index past the end clamps; `selectTab` anywhere but a pager, and any
+/// other method on a pager, is code 3; `boundingClientRect` is unchanged.
+#[test]
+#[expect(clippy::too_many_lines, reason = "one scenario over both invoke paths")]
+fn select_tab_turns_a_viewpager_through_both_invoke_paths() {
+    let (mut js_runtime, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const pager = __CreateElement('x-viewpager-ng', 0);
+                  __SetID(pager, 'pager');
+                  __SetInlineStyles(pager, 'width:200px;height:100px');
+                  __AppendElement(page, pager);
+                  for (let i = 0; i < 4; i++) {
+                    __AppendElement(pager, __CreateElement('x-viewpager-item-ng', 0));
+                  }
+                  const view = __CreateView(0);
+                  __SetID(view, 'plain');
+                  __AppendElement(page, view);
+                  globalThis.held = [page, pager, view];
+                };
+                ",
+            "app:///pager.js",
+        )
+        .expect("main-thread script");
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                import {
+                  __BobcatQueryNodes,
+                  __FlushElementTree,
+                  __InvokeUIMethod,
+                } from 'bobcat:element';
+                __FlushElementTree();
+                globalThis.viaPapi = (element, method, params) => {
+                  let answer;
+                  let calls = 0;
+                  __InvokeUIMethod(element, method, params, result => {
+                    answer = result;
+                    calls += 1;
+                  });
+                  if (calls !== 1) throw new Error('the callback ran ' + calls + ' times');
+                  return answer;
+                };
+                globalThis.viaQuery = (selector, method, params) => __BobcatQueryNodes({
+                  bobcat: 'runtime', method: 'nodeQuery', operation: 'invoke',
+                  token: {type: 0, identifier: selector, component_id: '',
+                          first_only: true, root_unique_id: undefined},
+                  params: {method, params},
+                });
+                globalThis.expectCode = (answer, code) => {
+                  if (answer.code !== code || answer.data !== undefined) {
+                    throw new Error('expected ' + code + ', got ' + JSON.stringify(answer));
+                  }
+                };
+                ",
+            "app:///helpers.js",
+            "helpers",
+        )
+        .expect("helpers");
+    let pager = {
+        let tree = elements.tree();
+        let page = tree.document_element().id();
+        tree.get(page).expect("the page").child_ids()[0]
+    };
+    let offset = || elements.tree().scroll_offset(pager);
+    let request = || {
+        let mut tree = elements.tree();
+        let frame = tree.commit();
+        let slot = frame
+            .slot_of(pager)
+            .expect("the pager is a scroll container");
+        frame.scroll_slots()[slot as usize]
+            .request
+            .map(|request| (request.target, request.behavior))
+    };
+    // One module per step, each under a URL of its own.
+    let steps = std::cell::Cell::new(0);
+    let run = |runtime: &mut MainThreadRuntime, js_runtime: &mut ScriptRuntime, source: &str| {
+        steps.set(steps.get() + 1);
+        let name = format!("app:///step-{}.js", steps.get());
+        runtime
+            .evaluate_module(js_runtime, source, &name, "step")
+            .expect("step");
+    };
+
+    run(
+        &mut runtime,
+        &mut js_runtime,
+        "expectCode(viaPapi(held[1], 'selectTab', {index: 2, smooth: false}), 0);",
+    );
+    assert_eq!(offset(), dom::Vector2D::new(400.0, 0.0), "instant: at once");
+    assert_eq!(
+        request(),
+        Some((
+            dom::Vector2D::new(400.0, 0.0),
+            dom::scroll::ScrollBehavior::Instant
+        ))
+    );
+
+    run(
+        &mut runtime,
+        &mut js_runtime,
+        "expectCode(viaQuery('#pager', 'selectTab', {index: 1, smooth: true}), 0);",
+    );
+    assert_eq!(
+        offset(),
+        dom::Vector2D::new(400.0, 0.0),
+        "smooth: the painter's"
+    );
+    assert_eq!(
+        request(),
+        Some((
+            dom::Vector2D::new(200.0, 0.0),
+            dom::scroll::ScrollBehavior::Smooth
+        ))
+    );
+
+    // Smooth is the default, on either path.
+    for source in [
+        "expectCode(viaPapi(held[1], 'selectTab', {index: 3}), 0);",
+        "expectCode(viaQuery('#pager', 'selectTab', {index: 3}), 0);",
+    ] {
+        run(&mut runtime, &mut js_runtime, source);
+        assert_eq!(offset(), dom::Vector2D::new(400.0, 0.0), "{source}");
+        assert_eq!(
+            request(),
+            Some((
+                dom::Vector2D::new(600.0, 0.0),
+                dom::scroll::ScrollBehavior::Smooth
+            )),
+            "{source}"
+        );
+    }
+
+    // No index worth multiplying: refused, and nothing recorded or moved.
+    let pending = elements.tree().pending_scroll_request(pager);
+    run(
+        &mut runtime,
+        &mut js_runtime,
+        r"
+            for (const params of [{}, {index: NaN}, {index: Infinity}, {index: '1'},
+                                  {smooth: false}, undefined, null]) {
+              expectCode(viaPapi(held[1], 'selectTab', params), 4);
+              expectCode(viaQuery('#pager', 'selectTab', params), 4);
+            }
+            ",
+    );
+    assert_eq!(offset(), dom::Vector2D::new(400.0, 0.0));
+    assert_eq!(elements.tree().pending_scroll_request(pager), pending);
+
+    // Past the end clamps to the last page, and succeeds.
+    run(
+        &mut runtime,
+        &mut js_runtime,
+        "expectCode(viaQuery('#pager', 'selectTab', {index: 9, smooth: false}), 0);",
+    );
+    assert_eq!(offset(), dom::Vector2D::new(600.0, 0.0));
+
+    run(
+        &mut runtime,
+        &mut js_runtime,
+        r"
+            // `selectTab` belongs to the pager tags alone.
+            expectCode(viaPapi(held[2], 'selectTab', {index: 1}), 3);
+            expectCode(viaQuery('#plain', 'selectTab', {index: 1}), 3);
+            // And the pager has no other method than the ones every element has.
+            expectCode(viaPapi(held[1], 'scrollTo', {index: 1}), 3);
+            expectCode(viaQuery('#pager', 'selectPage', {index: 1}), 3);
+            // `boundingClientRect` still answers its rect, params or none.
+            for (const answer of [viaPapi(held[1], 'boundingClientRect', {index: 1}),
+                                  viaQuery('#pager', 'boundingClientRect', undefined)]) {
+              const {code, data} = answer;
+              if (code !== 0 || data.id !== 'pager' || data.left !== 0 || data.top !== 0 ||
+                  data.width !== 200 || data.height !== 100 || data.right !== 200 ||
+                  data.bottom !== 100) {
+                throw new Error(JSON.stringify(answer));
+              }
+            }
+            ",
+    );
+    assert_eq!(offset(), dom::Vector2D::new(600.0, 0.0));
+}
+
 /// Measuring runs no pipeline step. A job that mutates and then measures
 /// sees the box the last pass produced; the new one arrives only once the
 /// realm flushes itself, or once the entry's epilogue commits for it.

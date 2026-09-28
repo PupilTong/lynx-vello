@@ -20,7 +20,7 @@ Both commands set `NODE_ENV` explicitly so the fixture matrix and compiler
 use the same mode.
 
 The default build produces eight native production pages, three native development
-variants and seven web pages. Each native environment has its own
+variants and eight web pages. Each native environment has its own
 compilation, so its lazy chunks cannot be shared with another test page.
 
 | Environment | Fixture behavior |
@@ -37,6 +37,7 @@ compilation, so its lazy chunks cannot be shared with another test page.
 | `web-basic-class-selector`, `web-basic-performance-large-css` | CSS decoding and rendered cards |
 | `web-basic-mts-run-on-main-thread`, `web-basic-mts-run-on-background` | Worklets and main-thread refs |
 | `web-react-scroll-timeline` | A row revealing along its list's `animation-timeline: scroll()` |
+| `web-react-viewpager` | A `<viewpager>` of four coloured pages, and a tap whose selector query `selectTab`s the fourth |
 
 Development builds select `lynx-react-reload`, `lynx-react-global-props` and
 `lynx-react-lazy-nested`, retaining the compiler's default HMR client and asset

@@ -192,6 +192,20 @@ async fn compiled_bts_ref_queries_and_native_props_change_real_pixels() {
     .await;
 }
 
+/// A compiled `<viewpager>` starts on its first page, red, and the tap's
+/// selector-query `selectTab({index: 3, smooth: false})` crosses from the
+/// background thread and turns it to the fourth, yellow, in the next frame.
+#[tokio::test]
+async fn compiled_viewpager_select_tab_turns_to_the_fourth_page() {
+    paint_and_tap(
+        fixtures::fixture("react-viewpager").page,
+        [120, 120],
+        &[[255, 0, 0, 255], [255, 255, 0, 255]],
+        None,
+    )
+    .await;
+}
+
 async fn paint_and_tap(
     bytes: &[u8],
     point: [u16; 2],

@@ -1588,7 +1588,7 @@ container). Every post for the container from then on names the newest
 serial the painter has handled there — the per-slot epoch — and main drops
 a post naming an older serial than the pending request, which the painter
 made before it saw the request, and acknowledges the request with one that
-names it.
+names it. `<viewpager>`'s `selectTab` is the first caller.
 
 Every writer of an intent — a chain step, a fling step, a bounce back, a
 glide, a settle, a snap on adoption, a request on adoption, a rebase's

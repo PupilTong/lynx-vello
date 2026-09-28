@@ -2,21 +2,23 @@
 //! defaults every container tag shares, and the assembly of the one sheet.
 //!
 //! Each tag's own policy lives with that tag — [`super::scroll_container`],
-//! [`super::list`], [`super::text`], [`super::raw_text`], [`super::image`] —
-//! and this module only decides what they all agree on and what order they
-//! land in.
+//! [`super::list`], [`super::viewpager`], [`super::text`],
+//! [`super::raw_text`], [`super::image`] — and this module only decides what
+//! they all agree on and what order they land in.
 //! [`super::blur_view`] is the one tag module with no rules of its own: a
 //! blur view is a container and nothing more, so everything it needs is here.
 //!
 //! Order is mostly documentation, with one exception that is mechanism:
 //! [`super::image`]'s child suppression ties on specificity with the `display`
-//! rules `view`, `scroll-view`, `list`, `list-item`, `blur-view`,
-//! `x-blur-view` and `wrapper` carry, so it wins only by being assembled last.
+//! rules `view`, `scroll-view`, `list`, `list-item`, the two spellings each of
+//! `viewpager` and `viewpager-item`, `blur-view`, `x-blur-view` and `wrapper`
+//! carry, so it wins only by being assembled last.
 //! That module's `nothing_inside_an_image_generates_a_box` is the tripwire for
 //! it.
 
 use super::blur_view::{BLUR_VIEW_TAG, X_BLUR_VIEW_TAG};
-use super::{image, list, raw_text, scroll_container, text};
+use super::viewpager::{VIEWPAGER_ITEM_TAG, VIEWPAGER_TAG, X_VIEWPAGER_ITEM_TAG, X_VIEWPAGER_TAG};
+use super::{image, list, raw_text, scroll_container, text, viewpager};
 
 /// Page configuration for the Lynx runtime and UA cascade.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,6 +51,7 @@ impl Default for PageConfig {
 /// The Lynx UA stylesheet: embedder cascade policy `dom` must not know.
 ///
 /// The container tags — `page`, `view`, `scroll-view`, `list`, `list-item`,
+/// `viewpager`, `x-viewpager-ng`, `viewpager-item`, `x-viewpager-item-ng`,
 /// `blur-view` and `x-blur-view` — share
 /// `web-elements`' common block: a border box, and the display mode
 /// `defaultDisplayLinear` picks — a per-tag exception to that switch would
@@ -65,9 +68,9 @@ impl Default for PageConfig {
 /// that. `defaultOverflowVisible` releases the non-scrolling containers —
 /// `page`, `view` and the two blur-view tags — back to `visible`, the way
 /// web-core's `[lynx-default-overflow-visible=true] x-view` releases `x-view`
-/// alone; a scroller carries its own axes regardless, and a `list-item` stays
-/// clipped — by this `clip` and by the paint containment [`super::list`]
-/// gives it.
+/// alone; a scroller carries its own axes regardless, and a `list-item` or a
+/// pager's page stays clipped — by this `clip` and by the paint containment
+/// [`super::list`] and [`super::viewpager`] give them.
 ///
 /// The blur-view tags are here because native's `LynxUIBlurView` extends
 /// `LynxUIView`: a blur view is a view in everything layout can see, and its
@@ -85,8 +88,8 @@ impl Default for PageConfig {
 /// web-elements merely forces is written here as a plain declaration a page's
 /// own CSS can still override (`docs/style-assumptions.md` §D.15).
 ///
-/// The exceptions are all the paragraph's, and all of the same shape: a fact
-/// the cascade is merely *reporting* rather than a default it is *choosing*.
+/// The exceptions are all of the same shape: a fact the cascade is merely
+/// *reporting* rather than a default it is *choosing*.
 /// `display: -lynx-text` on `text`, on `inline-text` and on a `text`'s own
 /// `inline-truncation` child is the first three — Lynx does not decide
 /// inline-ness by cascade at all: `ConvertToInlineElement` runs when a child is
@@ -95,15 +98,21 @@ impl Default for PageConfig {
 /// the authored element no box at all and rebuilds one in its shadow tree
 /// without inheriting `padding`, so there is no box for an author's padding to
 /// reach, and a declaration a page could override would misdescribe both
-/// references. [`super::text`] carries the citation for each.
+/// references. [`super::text`] carries the citation for each. The pager's
+/// row is the fifth and sixth: its pages form one row in both references
+/// whatever main axis an author writes on it, so its `flex-direction`,
+/// `linear-direction` and `flex-wrap`, and its pages' `position`, are pinned
+/// ([`super::viewpager`] carries the argument).
 /// `the_ua_sheet_is_important_free_apart_from_the_text_block` pins the set to
-/// exactly those four rules.
+/// exactly those six rules.
 #[must_use]
 pub(super) fn ua_stylesheet(config: PageConfig) -> String {
+    let pager_tags =
+        format!("{VIEWPAGER_TAG}, {X_VIEWPAGER_TAG}, {VIEWPAGER_ITEM_TAG}, {X_VIEWPAGER_ITEM_TAG}");
     let display = if config.default_display_linear {
         format!(
-            "page, view, scroll-view, list, list-item, {BLUR_VIEW_TAG}, {X_BLUR_VIEW_TAG} \
-             {{ display: linear; }}\n"
+            "page, view, scroll-view, list, list-item, {pager_tags}, {BLUR_VIEW_TAG}, \
+             {X_BLUR_VIEW_TAG} {{ display: linear; }}\n"
         )
     } else {
         String::new()
@@ -114,8 +123,8 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
         String::new()
     };
     format!(
-        "page, view, scroll-view, list, list-item, {BLUR_VIEW_TAG}, {X_BLUR_VIEW_TAG}, text, image \
-         {{ box-sizing: border-box; border-width: 0; border-style: solid; \
+        "page, view, scroll-view, list, list-item, {pager_tags}, {BLUR_VIEW_TAG}, {X_BLUR_VIEW_TAG}, \
+         text, image {{ box-sizing: border-box; border-width: 0; border-style: solid; \
          position: relative; overflow: clip; min-width: 0; min-height: 0; }}\n\
          {display}\
          {overflow}\
@@ -123,11 +132,13 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
          wrapper {{ display: contents; }}\n\
          {scrollers}\
          {lists}\
+         {pagers}\
          {text}\
          {carriers}\
          {images}",
         scrollers = scroll_container::UA_RULES,
         lists = list::UA_RULES,
+        pagers = viewpager::UA_RULES,
         text = text::UA_RULES,
         carriers = raw_text::UA_RULES,
         images = image::UA_RULES,
@@ -142,15 +153,22 @@ mod tests {
 
     use super::super::LynxDocument;
     use super::super::test_support::{child, document, overflow, style_of, with_config};
-    use super::{BLUR_VIEW_TAG, PageConfig, X_BLUR_VIEW_TAG, ua_stylesheet};
+    use super::{
+        BLUR_VIEW_TAG, PageConfig, VIEWPAGER_ITEM_TAG, VIEWPAGER_TAG, X_BLUR_VIEW_TAG,
+        X_VIEWPAGER_ITEM_TAG, X_VIEWPAGER_TAG, ua_stylesheet,
+    };
 
     /// The tags that get `web-elements`' common container block.
-    const CONTAINER_TAGS: [&str; 7] = [
+    const CONTAINER_TAGS: [&str; 11] = [
         "page",
         "view",
         "scroll-view",
         "list",
         "list-item",
+        VIEWPAGER_TAG,
+        X_VIEWPAGER_TAG,
+        VIEWPAGER_ITEM_TAG,
+        X_VIEWPAGER_ITEM_TAG,
         BLUR_VIEW_TAG,
         X_BLUR_VIEW_TAG,
     ];
@@ -321,7 +339,9 @@ mod tests {
                 .map(|tag| (tag, child(&mut document, tag, "")));
             let scroller = child(&mut document, "scroll-view", "");
             let list = child(&mut document, "list", "");
-            let leaves = ["text", "image"].map(|tag| (tag, child(&mut document, tag, "")));
+            let pagers = [VIEWPAGER_TAG, X_VIEWPAGER_TAG].map(|tag| child(&mut document, tag, ""));
+            let leaves = ["text", "image", VIEWPAGER_ITEM_TAG, X_VIEWPAGER_ITEM_TAG]
+                .map(|tag| (tag, child(&mut document, tag, "")));
             document.layout();
 
             assert_eq!(
@@ -348,6 +368,13 @@ mod tests {
                     overflow(&document, scroller),
                     (Overflow::Hidden, Overflow::Scroll),
                     "a scroller keeps its own axes whatever the switch says: {visible}"
+                );
+            }
+            for pager in pagers {
+                assert_eq!(
+                    overflow(&document, pager),
+                    (Overflow::Scroll, Overflow::Hidden),
+                    "a pager keeps its own axes whatever the switch says: {visible}"
                 );
             }
         }
@@ -407,9 +434,23 @@ mod tests {
     /// declaration would lose to the author's own `padding` — which would
     /// describe an engine neither reference has. [`super::text`] carries the
     /// full citation.
+    ///
+    /// The pager's row is the other two, ahead of the text block in the
+    /// sheet. In both references a
+    /// `viewpager`'s pages form one row whatever the author writes on the
+    /// pager — web-core lays them out in a shadow box no author rule reaches,
+    /// native places them itself — and authors do write `display: flex;
+    /// flex-direction: column` on it. Here the authored pager is the box that
+    /// lays the pages out, so the row is either pinned in the cascade or
+    /// lost; the same for a page's `position: relative`, which web-core
+    /// itself pins with `!important`. [`super::viewpager`] carries the full
+    /// argument.
     #[test]
     fn the_ua_sheet_is_important_free_apart_from_the_text_block() {
-        const ALLOWED: [&str; 4] = [
+        const ALLOWED: [&str; 6] = [
+            "viewpager, x-viewpager-ng { flex-direction: row !important; \
+             linear-direction: row !important; flex-wrap: nowrap !important; }",
+            "viewpager-item, x-viewpager-item-ng { position: relative !important; }",
             "text { display: -lynx-text !important; color: initial; }",
             "inline-text { display: -lynx-text !important; }",
             "text > inline-truncation { display: -lynx-text !important; \
@@ -433,7 +474,7 @@ mod tests {
             assert_eq!(
                 important, ALLOWED,
                 "a UA-origin important declaration outranks author `!important`, \
-                 so the set of them is fixed by §D.15's one recorded exception"
+                 so the set of them is fixed by §D.15's recorded exceptions"
             );
         }
     }

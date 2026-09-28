@@ -670,6 +670,47 @@ mod tests {
         );
     }
 
+    /// A compiled `ReactLynx` `<viewpager>` of four coloured pages, styled by
+    /// the engine's UA sheet alone: the pager fills the page, lays its pages
+    /// out as one row of scrollport-wide pages and starts on the first, so the
+    /// whole capture is page 0's red. The card's tap, which turns to page 3
+    /// through `selectTab`, needs input this capture route has no way to
+    /// send; `crates/bobcat-source/tests/reactlynx_runtime.rs` drives it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_viewpager_card_renders_its_first_page() {
+        let executor = CaptureExecutor::new().expect("start capture owner thread");
+        let result = executor
+            .capture(CaptureRequest {
+                input: CaptureInput::Bytes(fixtures::fixture("react-viewpager").page.to_vec()),
+                width: 800,
+                height: 600,
+                screenshot_settle: Duration::ZERO,
+                timeout: Duration::from_secs(30),
+                url: Url::parse("file:///react-viewpager.web.bundle").expect("fixture URL"),
+            })
+            .await
+            .expect("capture queue remains available");
+        executor.shutdown().expect("stop capture owner thread");
+
+        let screenshot = result.expect("decode, boot, and render the web bundle");
+        let width = usize::try_from(screenshot.size.width).expect("an addressable width");
+        let pixel = |x: usize, y: usize| {
+            let at = (y * width + x) * 4;
+            [
+                screenshot.pixels[at],
+                screenshot.pixels[at + 1],
+                screenshot.pixels[at + 2],
+            ]
+        };
+        for (x, y) in [(1, 1), (400, 300), (798, 598)] {
+            assert_eq!(
+                pixel(x, y),
+                [255, 0, 0],
+                "page 0 fills the view at ({x}, {y})"
+            );
+        }
+    }
+
     /// A compiled `ReactLynx` card whose stylesheet declares
     /// `animation-timeline: scroll()`: the lowering carries it to stylo, the
     /// row binds its list's scroll timeline, and at the boot offset it shows
