@@ -3275,15 +3275,9 @@ describe("__InvokeUIMethod", () => {
         height: 50,
       },
     });
-    // The params cross as JSON text whatever the method; this one reads
-    // none of it.
+    // `boundingClientRect` reads no params, so none are serialized.
     expect(mock.named("callElementMethod")).toEqual([
-      [
-        "callElementMethod",
-        __GetElementUniqueID(view),
-        "boundingClientRect",
-        '{"relativeTo":7}',
-      ],
+      ["callElementMethod", __GetElementUniqueID(view), "boundingClientRect", ""],
     ]);
   });
 

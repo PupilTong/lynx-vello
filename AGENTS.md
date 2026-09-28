@@ -1239,7 +1239,8 @@ the latter a flat name-then-value sequence; `childElementIds` and
 and `height` — none of which needs a length prefix. `callElementMethod`
 answers a number instead when the method has no data: the status code, `0`
 for a success, `3` for no such method, `4` for params it refused; the params
-themselves cross as JSON text.
+themselves cross as JSON text, and as the empty string for
+`boundingClientRect`, which reads none.
 
 Each call is a plain owner-thread mutation, and `__FlushElementTree` runs the
 style + layout + paint commit and publishes one immutable `Arc<CommittedFrame>`
@@ -1419,8 +1420,10 @@ way the subtree stacks, from `web-elements`' own `scroll-view.css` and
 `x-list.css`; `enable-scroll="false"` leaves the box a scroll container only
 script can move), `tree::viewpager` (`viewpager`/`x-viewpager-ng` as a
 horizontal scroll container that snaps page by page, its pages' row pinned in
-the cascade, and the `selectTab` UI method the runtime dispatches by tag
-name; no component), and `tree::blur_view` (`blur-radius` reflected into a
+the cascade, the initial page (`select-index`/`initial-select-index`) as a
+typed `attr()` and an `if()` over `sibling-index()` into
+`scroll-initial-target`, and the `selectTab` UI method the runtime dispatches
+by tag name; no component), and `tree::blur_view` (`blur-radius` reflected into a
 `backdrop-filter: blur()` presentational hint, under both the native tag
 `blur-view` and web-core's `x-blur-view`, as a CSS length rather than
 web-core's `parseFloat` — the one tag module with no UA rules of its own,
@@ -2186,7 +2189,8 @@ Subsystems:
   animates a smooth one and names the request in the offsets it posts back.
   `scroll/initial_target.rs` is css-scroll-snap-2's `scroll-initial-target`:
   the build records the `nearest` elements, the render scrolls each
-  container to its first one and rebuilds the frame in the same commit.
+  container to its first one as an instant scroll request and rebuilds the
+  frame in the same commit.
 - `input/` and `event/` — the `InputEvent` host seam, `Document::event_steps`,
   which computes a path for a *script* dispatch above, and
   `Document::dispatch_element_event`, which walks that path here for an event

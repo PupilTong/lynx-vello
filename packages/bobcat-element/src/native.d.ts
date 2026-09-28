@@ -58,8 +58,8 @@ interface BobcatNative {
   attributeNames(nodeId: number): string;
   /**
    * Dispatches one Lynx UI method by name on the element, with `params` as
-   * JSON text, and answers either a status code or the method's data as
-   * text:
+   * JSON text — the empty string for `boundingClientRect`, which reads
+   * none — and answers either a status code or the method's data as text:
    *
    * - `3` (`METHOD_NOT_FOUND`): the element has no method of that name.
    * - `4` (`PARAM_INVALID`): the method refused `params`, and did nothing.

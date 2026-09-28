@@ -1630,8 +1630,9 @@ interface InvokeResult {
  * derived here rather than sent, because they are sums.
  *
  * `params` crosses as JSON text. A value JSON cannot carry — a cycle, a
- * BigInt — crosses as `null`, which a method that reads params refuses
- * and one that does not never notices.
+ * BigInt — crosses as `null`, which a method that reads params refuses.
+ * `boundingClientRect` reads none and is the frequent call, so it sends the
+ * empty string without serializing anything.
  *
  * `id` and `dataset` ride along as native does (web-core reports the id
  * only): `id` is the attribute, empty when the element carries none, the way
@@ -1646,11 +1647,13 @@ interface InvokeResult {
  * `Element.invoke` uses.
  */
 function invokeUIMethod(handle: Handle, method: string, params: unknown): InvokeResult {
-  let text: string;
-  try {
-    text = JSON.stringify(params ?? {}) ?? "null";
-  } catch {
-    text = "null";
+  let text = "";
+  if (method !== "boundingClientRect") {
+    try {
+      text = JSON.stringify(params ?? {}) ?? "null";
+    } catch {
+      text = "null";
+    }
   }
   const answer = callElementMethod(nodeIdOf(handle), method, text);
   if (typeof answer === "number") {

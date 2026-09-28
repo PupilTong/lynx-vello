@@ -2,9 +2,9 @@ import {root} from '@lynx-js/react';
 import './index.css';
 
 // Four coloured pages in a `<viewpager>` that fills the page. The pager
-// starts on its first page; a tap anywhere on it turns to the fourth without
-// animation, through the background thread's selector query, which is the
-// path a card's own `selectTab` call takes.
+// starts on its second page (`select-index`); a tap anywhere on it turns to
+// the fourth without animation, through the background thread's selector
+// query, which is the path a card's own `selectTab` call takes.
 const COLORS = ['red', 'green', 'blue', 'yellow'];
 
 function App() {
@@ -15,7 +15,7 @@ function App() {
       .exec();
   };
   return (
-    <viewpager id='pager' bindtap={turn}>
+    <viewpager id='pager' select-index={1} bindtap={turn}>
       {COLORS.map(color => <viewpager-item key={color} class={color} />)}
     </viewpager>
   );

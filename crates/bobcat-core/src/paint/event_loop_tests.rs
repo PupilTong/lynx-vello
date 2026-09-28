@@ -1329,6 +1329,55 @@ fn a_viewpager_drag_returns_under_half_a_page_and_turns_past_it() {
     }
 }
 
+/// `select-index="2"`: the first frame the painter adopts is on page 2 and
+/// rests there. The user then swipes to page 3, main adopts it without a
+/// commit, and the card changes the attribute to 0: the commit that follows
+/// carries the new initial target as an instant request, so the painter
+/// shows page 0 rather than keeping the offset it held for the swipe.
+#[test]
+fn a_selected_page_is_the_first_frame_and_a_new_index_overrides_a_swipe() {
+    let mut engine = booted(&viewpager_page(
+        "__SetAttribute(pager, 'select-index', '2');",
+    ));
+    adopt_at(&mut engine, 0.0);
+    assert!((live_offset(&mut engine, 3).x - 400.0).abs() < f32::EPSILON);
+    assert!(!engine.is_animating(), "at rest on the page");
+    engine.painter.publish_scroll(0.0, None);
+    assert_eq!(
+        engine
+            .probe_document(|document| document.pending_scroll_request(node_id(3)))
+            .expect("the view's task answers probes"),
+        None,
+        "the painter's post acknowledged the first commit's request"
+    );
+
+    touch_x_at(&mut engine, 1.0, PointerPhase::Down, 190.0);
+    touch_x_at(&mut engine, 1.05, PointerPhase::Move, 30.0);
+    touch_x_at(&mut engine, 1.4, PointerPhase::Up, 30.0);
+    assert!((frames_until_rest(&mut engine, 1.4) - 600.0).abs() < f32::EPSILON);
+    engine.painter.publish_scroll(3.0, None);
+    assert_eq!(
+        scroll_offset_of(&mut engine, 3),
+        dom::Vector2D::new(600.0, 0.0),
+        "main adopted the swipe"
+    );
+
+    engine
+        .probe_document(|document| document.set_attribute(node_id(3), "select-index", "0"))
+        .expect("the view's task answers probes");
+    // A later entry, so the attribute's own commit has been published too.
+    assert_eq!(scroll_offset_of(&mut engine, 3), dom::Vector2D::zero());
+    adopt_at(&mut engine, 3.1);
+    assert!(
+        live_offset(&mut engine, 3).x.abs() < f32::EPSILON,
+        "the painter shows the new page, got {}",
+        live_offset(&mut engine, 3).x
+    );
+    frame_at(&mut engine, 3.5);
+    assert!(live_offset(&mut engine, 3).x.abs() < f32::EPSILON);
+    assert!(!engine.is_animating());
+}
+
 /// A flick moves exactly one page: the UA sheet's `scroll-snap-stop:
 /// always` on every page stops the fling the flick would carry past it.
 #[test]

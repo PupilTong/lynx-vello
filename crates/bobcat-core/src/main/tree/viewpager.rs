@@ -72,8 +72,45 @@
 //!   `LynxUIViewPager.m:712`; Harmony to `ARKUI_EDGE_EFFECT_SPRING`, `ui_viewpager.cc:55-59`).
 //!   Without the attribute nothing bounces, which is web-core's default and Harmony's. Recorded in
 //!   `docs/tracking/deviations.md`.
-//! - `select-index` and `initial-select-index` are not implemented yet: the pager always starts on
-//!   its first page (`docs/tracking/components.md`).
+//! - `select-index`, else `initial-select-index` — web-core's order, `getAttribute('select-index')
+//!   || getAttribute('initial-select-index')` (`XViewpagerNg.ts:38-39`) — names the page the pager
+//!   starts on. See below.
+//!
+//! # The initial page is CSS
+//!
+//! Three rules and no component code (`docs/style-assumptions.md` §27 for what `if()` and
+//! `sibling-index()` do here). The pager sets a registered, inherited `<integer>`,
+//! `--viewpager-initial-index`, from the typed `attr()` of its two attributes, `-1` when neither
+//! is an integer; each page is its container's `scroll-initial-target` exactly when that number
+//! equals its own `sibling-index() - 1`. css-scroll-snap-2's initial target then does the rest
+//! (`crates/dom/src/scroll/initial_target.rs`): the first layout with a target scrolls the pager
+//! to it, instantly, in the same commit, and the frame carries the position to the painter as an
+//! instant scroll request.
+//!
+//! Because `scroll-initial-target` honours each *new* target once, this is not web-core's
+//! read-once-at-connect attribute:
+//!
+//! - Changing the attribute in force after the first layout names a new target, and the pager turns
+//!   to it, instantly, over whatever offset the user left it at.
+//! - Inserting or removing a page ahead of the target makes another page the target, and the pager
+//!   turns to that one.
+//! - A commit that leaves the target where it was moves nothing, so a user who swiped away stays.
+//! - `sibling-index()` counts the children of the page's own parent: pages wrapped one by one in
+//!   `wrapper` all count as index 0, and pages sharing one `wrapper` count as without it.
+//! - A present `select-index` that is not an integer (`"abc"`, `"1.5"`, `""`) does not fall back to
+//!   `initial-select-index` (the fork's typed `attr()` fallback gap, §27): the first page. web-core
+//!   shows the first page for `"abc"` (`NaN`), lands between pages for `"1.5"`, and falls back for
+//!   `""`.
+//! - A negative or out-of-range index names no page: the first page.
+//! - Every pager sets the property from its own attributes, so an inner pager does not inherit an
+//!   outer one's index.
+//! - A `display: none` pager has no scroll slot, so its target waits for the first commit that
+//!   shows it. A pager zero pixels wide at its first commit honours its target at offset 0 and, the
+//!   target being honoured, stays on the first page once it gets a width; web-core retries every
+//!   animation frame until it has one. Pages that arrive after the first layout bring the target
+//!   with them.
+//!
+//! All of these are recorded in `docs/tracking/deviations.md`.
 //!
 //! # Where this deliberately leaves web-core
 //!
@@ -107,10 +144,13 @@ pub(super) const X_VIEWPAGER_ITEM_TAG: &str = "x-viewpager-item-ng";
 /// Each important declaration sits on a line of its own, because
 /// [`super::ua_sheet`]'s pinned test reads the sheet line by line.
 pub(super) const UA_RULES: &str = r#"
+@property --viewpager-initial-index { syntax: "<integer>"; inherits: true; initial-value: -1; }
 viewpager, x-viewpager-ng {
   width: 100%; height: 100%; contain: content;
   overflow-x: scroll; overflow-y: clip;
   scroll-snap-type: x mandatory;
+  --viewpager-initial-index:
+    attr(select-index type(<integer>), attr(initial-select-index type(<integer>), -1));
 }
 viewpager, x-viewpager-ng { flex-direction: row !important; linear-direction: row !important; flex-wrap: nowrap !important; }
 viewpager[allow-horizontal-gesture="false"], viewpager[enable-scroll="false"],
@@ -120,6 +160,8 @@ x-viewpager-ng[bounces]:not([bounces="false"]) { overscroll-behavior-x: contain-
 viewpager-item, x-viewpager-item-ng {
   width: 100%; height: 100%; contain: content; flex: 0 0 auto;
   scroll-snap-align: start; scroll-snap-stop: always;
+  scroll-initial-target:
+    if(style(--viewpager-initial-index: calc(sibling-index() - 1)): nearest; else: none);
 }
 viewpager-item, x-viewpager-item-ng { position: relative !important; }
 "#;
@@ -523,6 +565,326 @@ mod tests {
                 assert_eq!(value(&document, pager, "overscroll-behavior-y"), "auto");
             }
         }
+    }
+
+    // --- the initial page ---------------------------------------------------
+
+    /// A 200px pager of `count` pages under the page, spelled `spelling`, with
+    /// `attributes` written before anything is laid out.
+    fn initial_pager(
+        spelling: (&str, &str),
+        attributes: &[(&str, &str)],
+        count: usize,
+    ) -> (LynxDocument, NodeId, Vec<NodeId>) {
+        let mut document = document();
+        let (pager, items) = build_pager(
+            &mut document,
+            spelling,
+            "width: 200px; height: 100px",
+            count,
+        );
+        for (name, value) in attributes {
+            document.set_attribute(pager, name, value);
+        }
+        (document, pager, items)
+    }
+
+    fn offset_x(document: &LynxDocument, pager: NodeId) -> f32 {
+        document.scroll_offset(pager).x
+    }
+
+    fn targets(document: &LynxDocument, items: &[NodeId]) -> Vec<String> {
+        items
+            .iter()
+            .map(|item| value(document, *item, "scroll-initial-target"))
+            .collect()
+    }
+
+    /// The request the committed frame carries to the painter for `pager`.
+    fn carried(document: &mut LynxDocument, pager: NodeId) -> Option<(f32, ScrollBehavior)> {
+        let frame = document.commit();
+        let index = frame.slot_of(pager).expect("the pager has a slot");
+        frame.scroll_slots()[index as usize]
+            .request
+            .map(|request| (request.target.x, request.behavior))
+    }
+
+    /// `select-index` first, then `initial-select-index` — web-core's order —
+    /// in the first commit, which carries the position to the painter as an
+    /// instant request.
+    #[test]
+    fn the_first_commit_starts_on_the_selected_page() {
+        for spelling in SPELLINGS {
+            for (attributes, index, offset) in [
+                (&[][..], "-1", 0.0),
+                (&[("select-index", "1")][..], "1", 200.0),
+                (&[("initial-select-index", "2")][..], "2", 400.0),
+                (
+                    &[("select-index", "3"), ("initial-select-index", "1")][..],
+                    "3",
+                    600.0,
+                ),
+                (
+                    &[("select-index", "0"), ("initial-select-index", "2")][..],
+                    "0",
+                    0.0,
+                ),
+            ] {
+                let (mut document, pager, items) = initial_pager(spelling, attributes, 4);
+                let request = carried(&mut document, pager);
+                assert_eq!(
+                    offset_x(&document, pager),
+                    offset,
+                    "{spelling:?} {attributes:?}"
+                );
+                assert_eq!(
+                    value(&document, pager, "--viewpager-initial-index"),
+                    index,
+                    "{spelling:?} {attributes:?}"
+                );
+                let expected: Vec<&str> = (0..4)
+                    .map(|page| {
+                        if page.to_string() == index {
+                            "nearest"
+                        } else {
+                            "none"
+                        }
+                    })
+                    .collect();
+                assert_eq!(
+                    targets(&document, &items),
+                    expected,
+                    "{spelling:?} {attributes:?}"
+                );
+                if index == "-1" {
+                    assert_eq!(request, None);
+                } else {
+                    assert_eq!(request, Some((offset, ScrollBehavior::Instant)));
+                }
+            }
+        }
+    }
+
+    /// A present `select-index` that is not an integer does not fall back to
+    /// `initial-select-index` — the fork's typed `attr()` fallback gap
+    /// (`docs/style-assumptions.md` §27) — so the pager shows its first page.
+    #[test]
+    fn a_select_index_that_is_no_integer_shows_the_first_page() {
+        for select in ["abc", "1.5", ""] {
+            let (mut document, pager, items) = initial_pager(
+                SPELLINGS[0],
+                &[("select-index", select), ("initial-select-index", "2")],
+                4,
+            );
+            document.commit();
+            assert_eq!(
+                value(&document, pager, "--viewpager-initial-index"),
+                "-1",
+                "{select:?}"
+            );
+            assert_eq!(targets(&document, &items), ["none"; 4], "{select:?}");
+            assert_eq!(offset_x(&document, pager), 0.0, "{select:?}");
+        }
+    }
+
+    #[test]
+    fn an_index_naming_no_page_shows_the_first_page() {
+        for index in ["-1", "-5", "4", "10"] {
+            let (mut document, pager, items) =
+                initial_pager(SPELLINGS[1], &[("select-index", index)], 4);
+            document.commit();
+            assert_eq!(targets(&document, &items), ["none"; 4], "{index}");
+            assert_eq!(offset_x(&document, pager), 0.0, "{index}");
+        }
+    }
+
+    /// Each new target is honoured once, so changing the attribute in force
+    /// after the first layout turns the pager, instantly — where web-core
+    /// reads it once, at connect.
+    #[test]
+    fn changing_the_index_in_force_turns_the_pager() {
+        let (mut document, pager, _) = initial_pager(SPELLINGS[0], &[("select-index", "1")], 4);
+        document.commit();
+        assert_eq!(offset_x(&document, pager), 200.0);
+        document.set_attribute(pager, "select-index", "3");
+        assert_eq!(
+            carried(&mut document, pager),
+            Some((600.0, ScrollBehavior::Instant))
+        );
+        assert_eq!(offset_x(&document, pager), 600.0);
+
+        let (mut document, pager, _) =
+            initial_pager(SPELLINGS[1], &[("initial-select-index", "1")], 4);
+        document.commit();
+        document.set_attribute(pager, "initial-select-index", "2");
+        document.commit();
+        assert_eq!(offset_x(&document, pager), 400.0);
+        // `select-index` takes over from `initial-select-index`.
+        document.set_attribute(pager, "select-index", "0");
+        document.commit();
+        assert_eq!(offset_x(&document, pager), 0.0);
+    }
+
+    /// A user who moved away is not moved back by a commit that leaves the
+    /// target where it was.
+    #[test]
+    fn an_unrelated_commit_leaves_a_swiped_pager_alone() {
+        let (mut document, pager, items) = initial_pager(SPELLINGS[0], &[("select-index", "2")], 4);
+        document.commit();
+        // Where main writes the offset the painter posted for a swipe.
+        document.scroll_to(pager, Vector2D::new(0.0, 0.0));
+        document.set_inline_style(items[0], "opacity: 0.5");
+        assert_eq!(
+            carried(&mut document, pager),
+            Some((400.0, ScrollBehavior::Instant))
+        );
+        assert_eq!(
+            offset_x(&document, pager),
+            0.0,
+            "the request still carried is the first commit's, which the painter has handled"
+        );
+        let serial = document
+            .pending_scroll_request(pager)
+            .expect("not yet acknowledged");
+        document.acknowledge_scroll_request(pager, serial);
+        document.set_inline_style(items[1], "opacity: 0.5");
+        assert_eq!(carried(&mut document, pager), None);
+        assert_eq!(offset_x(&document, pager), 0.0);
+    }
+
+    /// `sibling-index()` counts the item's own parent's children, so a page
+    /// inserted or removed ahead of the target makes another page the
+    /// target, and the pager turns to it.
+    #[test]
+    fn inserting_or_removing_a_page_ahead_of_the_target_moves_the_target() {
+        let (mut document, pager, items) = initial_pager(SPELLINGS[0], &[("select-index", "2")], 4);
+        document.commit();
+        document.scroll_to(pager, Vector2D::new(0.0, 0.0));
+        let inserted = document.create_element(VIEWPAGER_ITEM_TAG, ());
+        document.insert_before(pager, inserted, Some(items[0]));
+        document.commit();
+        assert_eq!(
+            targets(&document, &items),
+            ["none", "nearest", "none", "none"]
+        );
+        assert_eq!(offset_x(&document, pager), 400.0);
+
+        document.scroll_to(pager, Vector2D::new(0.0, 0.0));
+        document.remove_element(inserted);
+        document.commit();
+        assert_eq!(
+            targets(&document, &items),
+            ["none", "none", "nearest", "none"]
+        );
+        assert_eq!(offset_x(&document, pager), 400.0);
+    }
+
+    /// A `wrapper` around each page makes every page the first child of its
+    /// own parent: all of them count as index 0. Pages sharing one
+    /// `wrapper` count as they would without it.
+    #[test]
+    fn wrapped_pages_count_among_their_own_parents_children() {
+        for (select, expected) in [("0", "nearest"), ("1", "none")] {
+            let mut document = document();
+            let pager = child(&mut document, VIEWPAGER_TAG, "width: 200px; height: 100px");
+            document.set_attribute(pager, "select-index", select);
+            let items: Vec<_> = (0..3)
+                .map(|_| {
+                    let wrapper = element_under(&mut document, pager, "wrapper", "");
+                    element_under(&mut document, wrapper, VIEWPAGER_ITEM_TAG, "")
+                })
+                .collect();
+            document.commit();
+            assert_eq!(targets(&document, &items), [expected; 3], "{select}");
+            assert_eq!(offset_x(&document, pager), 0.0, "{select}");
+        }
+
+        let mut document = document();
+        let pager = child(&mut document, VIEWPAGER_TAG, "width: 200px; height: 100px");
+        document.set_attribute(pager, "select-index", "2");
+        let wrapper = element_under(&mut document, pager, "wrapper", "");
+        let items: Vec<_> = (0..3)
+            .map(|_| element_under(&mut document, wrapper, VIEWPAGER_ITEM_TAG, ""))
+            .collect();
+        document.commit();
+        assert_eq!(targets(&document, &items), ["none", "none", "nearest"]);
+        assert_eq!(offset_x(&document, pager), 400.0);
+    }
+
+    /// Every pager sets the index from its own attributes, so a pager inside
+    /// another's page does not inherit the outer one's.
+    #[test]
+    fn a_nested_pager_does_not_inherit_the_outer_index() {
+        let (mut document, outer, pages) = initial_pager(SPELLINGS[0], &[("select-index", "1")], 2);
+        let inner = element_under(&mut document, pages[1], VIEWPAGER_TAG, "");
+        let inner_pages: Vec<_> = (0..3)
+            .map(|_| element_under(&mut document, inner, VIEWPAGER_ITEM_TAG, ""))
+            .collect();
+        document.commit();
+        assert_eq!(offset_x(&document, outer), 200.0);
+        assert_eq!(value(&document, inner, "--viewpager-initial-index"), "-1");
+        assert_eq!(targets(&document, &inner_pages), ["none"; 3]);
+        assert_eq!(offset_x(&document, inner), 0.0);
+
+        document.set_attribute(inner, "select-index", "2");
+        document.commit();
+        assert_eq!(offset_x(&document, inner), 400.0);
+        assert_eq!(offset_x(&document, outer), 200.0);
+    }
+
+    /// A `display: none` pager has no scroll slot, so nothing is honoured
+    /// until it is shown; the first commit that shows it starts on the page.
+    #[test]
+    fn a_pager_shown_later_starts_on_the_selected_page_when_shown() {
+        let mut document = document();
+        let (pager, _) = build_pager(
+            &mut document,
+            SPELLINGS[0],
+            "display: none; width: 200px; height: 100px",
+            4,
+        );
+        document.set_attribute(pager, "select-index", "2");
+        document.commit();
+        assert_eq!(offset_x(&document, pager), 0.0);
+        document.set_inline_style(pager, "width: 200px; height: 100px");
+        document.commit();
+        assert_eq!(offset_x(&document, pager), 400.0);
+    }
+
+    /// A zero-width pager is a scroll container with nowhere to go: its
+    /// target is honoured at offset 0 in its first commit, and a target is
+    /// honoured once, so widening the pager later leaves it on the first
+    /// page. web-core instead retries each animation frame until the pager
+    /// has a width. Pinned as it is; recorded in `deviations.md`.
+    #[test]
+    fn a_pager_that_is_zero_wide_at_its_first_commit_stays_on_the_first_page() {
+        let mut document = document();
+        let (pager, items) =
+            build_pager(&mut document, SPELLINGS[0], "width: 0px; height: 100px", 4);
+        document.set_attribute(pager, "select-index", "2");
+        document.commit();
+        assert_eq!(
+            targets(&document, &items),
+            ["none", "none", "nearest", "none"]
+        );
+        assert_eq!(offset_x(&document, pager), 0.0);
+        document.set_inline_style(pager, "width: 200px; height: 100px");
+        document.commit();
+        assert_eq!(offset_x(&document, pager), 0.0);
+    }
+
+    /// Pages that arrive after the pager's first layout bring the target
+    /// with them, and a new target is honoured.
+    #[test]
+    fn pages_that_arrive_later_bring_the_target_with_them() {
+        let (mut document, pager, _) = initial_pager(SPELLINGS[1], &[("select-index", "2")], 0);
+        document.commit();
+        assert_eq!(offset_x(&document, pager), 0.0);
+        for _ in 0..4 {
+            element_under(&mut document, pager, X_VIEWPAGER_ITEM_TAG, "");
+        }
+        document.commit();
+        assert_eq!(offset_x(&document, pager), 400.0);
     }
 
     // --- selectTab ----------------------------------------------------------

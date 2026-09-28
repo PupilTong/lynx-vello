@@ -10,6 +10,17 @@
 //! and the target's `scroll-margin`. The frame is then rebuilt so the
 //! commit publishes the offset it settled on.
 //!
+//! The scroll is an instant scroll request ([`Document::scroll_to_with`]),
+//! not a plain [`Document::scroll_to`]. A painter that holds an offset of its
+//! own for the container — the user scrolled it, and the document adopted
+//! the posted offset without a commit — keeps showing that offset over a new
+//! frame's, so a plain write would move the document and leave the screen
+//! where the user left it. The request travels in the rebuilt frame's scroll
+//! slot and the painter carries it out on adoption. It is recorded even when
+//! the document's own offset already equals the position, because the
+//! painter's may not; that costs one more paint-order build inside the same
+//! render, and only on a render that honours a new target.
+//!
 //! A container honours each new target once, when it first becomes the
 //! target: on the container's first layout, and again for a target that
 //! arrives later (§3.1.4 says a user agent *should* still scroll then). The
@@ -22,6 +33,7 @@
 use euclid::default::Vector2D;
 use stylo::values::computed::Length;
 
+use super::ScrollBehavior;
 use super::snap::scroll_padding;
 use crate::NodeId;
 use crate::tree::document::Document;
@@ -55,13 +67,14 @@ fn nearest_edge(current: f32, area: (f32, f32), port: (f32, f32)) -> f32 {
 
 impl<T> Document<T> {
     /// Honours the initial scroll targets the build found; returns whether
-    /// any container moved, in which case the frame must be rebuilt.
+    /// any scroll request was recorded, in which case the frame must be
+    /// rebuilt to carry it.
     pub(crate) fn scroll_to_initial_targets(&mut self, frame: &PaintOrder) -> bool {
         let targets = frame.initial_targets();
         if targets.is_empty() {
             return false;
         }
-        let mut moved = false;
+        let mut requested = false;
         let mut chains_done: Vec<u32> = Vec::new();
         for target in targets {
             if chains_done.contains(&target.chain) {
@@ -81,11 +94,11 @@ impl<T> Document<T> {
             }
             self.set_honoured_initial_target(container, Some(chosen));
             if let Some(position) = self.scroll_into_view_position(chosen, container) {
-                let before = self.scroll_offset(container);
-                moved |= self.scroll_to(container, position) != before;
+                self.scroll_to_with(container, position, ScrollBehavior::Instant);
+                requested = true;
             }
         }
-        moved
+        requested
     }
 
     /// Of `candidates` under `container`, the first in tree order — the
@@ -262,6 +275,57 @@ mod tests {
         document.set_inline_style(pages[3], "scroll-initial-target: nearest");
         document.commit();
         assert_eq!(document.scroll_offset(scroller), Vector2D::new(0.0, 320.0));
+    }
+
+    fn slot_request(
+        frame: &crate::CommittedFrame,
+        scroller: NodeId,
+    ) -> Option<crate::scroll::ScrollRequest> {
+        let index = frame.slot_of(scroller).expect("the scroller has a slot");
+        frame.scroll_slots()[index as usize].request
+    }
+
+    /// The honoured target travels to the painter as an instant request in
+    /// the frame the same render publishes, and that render is one commit:
+    /// the request's own dirt is spent by the rebuild, so nothing is left
+    /// for a second one.
+    #[test]
+    fn a_honoured_target_is_an_instant_request_in_the_same_commit() {
+        let (mut document, scroller, pages) = paged("", 4);
+        document.set_inline_style(pages[2], "scroll-initial-target: nearest");
+        let frame = document.commit();
+        assert!(!document.needs_render(), "one commit, nothing left dirty");
+        let request = slot_request(&frame, scroller).expect("the frame carries the request");
+        assert_eq!(request.target, Vector2D::new(0.0, 200.0));
+        assert_eq!(request.behavior, ScrollBehavior::Instant);
+        assert_eq!(
+            document.pending_scroll_request(scroller),
+            Some(request.serial)
+        );
+        assert!(
+            std::sync::Arc::ptr_eq(&frame, &document.commit()),
+            "no second commit follows"
+        );
+
+        // The same target on a later commit records nothing new.
+        document.acknowledge_scroll_request(scroller, request.serial);
+        document.set_inline_style(pages[0], "opacity: 0.5");
+        let frame = document.commit();
+        assert_eq!(slot_request(&frame, scroller), None);
+    }
+
+    /// A new target whose position the document's own offset already has
+    /// still sends a request: the painter may be showing another offset.
+    #[test]
+    fn a_new_target_at_the_current_offset_still_reaches_the_painter() {
+        let (mut document, scroller, pages) = paged("", 4);
+        document.commit();
+        document.scroll_to(scroller, Vector2D::new(0.0, 100.0));
+        document.set_inline_style(pages[1], "scroll-initial-target: nearest");
+        let frame = document.commit();
+        assert!(!document.needs_render());
+        let request = slot_request(&frame, scroller).expect("the frame carries the request");
+        assert_eq!(request.target, Vector2D::new(0.0, 100.0));
     }
 
     #[test]
