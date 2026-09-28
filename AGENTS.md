@@ -2233,6 +2233,13 @@ Rulings and limits to know before touching it:
   `disconnected_callback` takes a shared `&Document`.
 - Attribute-derived style enters through `Document::set_presentational_hint` at
   `CascadeOrigin::PresHints`, never the author's inline block.
+- The fork's `lynx` feature carries css-values-5 `if()` (an arbitrary
+  substitution function with `style()` / `media()` / `supports()` tests) and
+  `sibling-index()` / `sibling-count()`, neither of which Lynx has
+  (user-directed 2026-09-28). `dom` adds no code for them: a queried custom
+  property, an `attr()` read, a child-list change and a device change already
+  recascade what depends on them. Scope, choices and the one known gap are in
+  `docs/style-assumptions.md` §27.
 - Stylo's per-element style data and its traversal/invalidation flags live
   inline on `Node` (bench-defended 2026-08-03: no traversal regression, a
   measurably faster no-op-commit fast path).

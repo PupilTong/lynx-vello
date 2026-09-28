@@ -864,6 +864,99 @@ and §D.16 with what the wire format actually permits.)*
       it counts as active, so an animation on an active timeline — the usual
       case — never flips its bits.
 
+27. **`if()` and the tree-counting functions (user-directed, 2026-09-28):
+    css-values-5 §8.3 and §10, from the fork's `lynx` feature.** Neither is
+    in Lynx: `lynx/core/renderer/css` names no `if()`, `sibling-index()` or
+    `sibling-count()`, and `lynx-stack/packages/web-platform` authors none.
+    The first user is the `<viewpager>` initial-page rule: a registered
+    `<integer>` custom property set from `attr(select-index type(<integer>),
+    …)` on the pager, and on each page
+    `scroll-initial-target: if(style(--… : calc(sibling-index() - 1)): nearest;
+    else: none)`. With the `lynx` feature off, the fork is upstream: `if` is
+    not an arbitrary substitution function and the tree-counting functions
+    stay behind `layout.css.tree-counting-functions.enabled` (pinned by
+    `vendor/stylo/style/tests/lynx_feature_off_parity.rs`).
+    - **Implemented.** `if()` is an arbitrary substitution function in any
+      property, custom or not, shorthands included. At parse time a
+      declaration is checked against the argument grammar only: `;`-separated
+      branches, an optional trailing `;`, a condition that is not empty and
+      holds no top-level `:`, an optional value, and no top-level `!` in
+      either half; anything else drops the declaration. At computed-value
+      time the branches are taken in order ("replace an if() function"):
+      the condition's substitution functions are substituted, the result is
+      parsed as `else | <boolean-expr[ <if-test> ]>`, evaluated, and only the
+      first true branch's value is substituted. No true branch is the empty
+      token stream, which a custom property keeps as its value and any other
+      property, or a registered custom property whose syntax rejects it,
+      treats as invalid at computed-value time. `not` / `and` / `or` /
+      parentheses follow Appendix B: `<general-enclosed>` is unknown, and an
+      unknown top-level result is false. The tests reuse the fork's parsers
+      and evaluators: `style()` is the `@container style()` grammar including
+      its range form (`style(--x > 3)`, `style(1 < --x <= 5)`), evaluated
+      against the element's own custom properties; `media()` is a
+      `<media-feature>` or `<media-condition>` against the device;
+      `supports()` is `@supports` against this engine's `lynx` grammar.
+      `var()`, `attr()`, `env()` and `if()` nest in either half of a branch
+      and `if()` nests in `var()` fallbacks. `sibling-index()` and
+      `sibling-count()` parse wherever a number, integer or dimension is
+      calculated with element context — declarations, registered custom
+      property values, `style()` values and ranges — and not in `media()`,
+      which has none.
+    - **The cycle rule.** A custom property's `if()` is ordered by the
+      custom-property dependency walk the way `var()` is: branch by branch,
+      the condition's own references, the custom properties its `style()`
+      tests read, and the font-relative units its text spells resolve first;
+      then the condition is evaluated, and only the chosen value's references
+      are walked. A branch that is never reached adds no dependency. A `style()` test that reaches the property being
+      substituted puts it in a cycle, which makes it invalid at
+      computed-value time (§8.3's "evaluates to false" plus the cyclic
+      substitution context it marks).
+    - **Choices where the text is silent or the tests disagree.** (a) A
+      guaranteed-invalid value in a condition: the condition is parsed with
+      its substitution functions left in place, so a `style()` feature whose
+      value holds one is false and anything else holding one does not parse.
+      This is what wpt `css/css-values/if-cycle.html` expects
+      (`style(not (--x: var(--y)))` with `--y` cyclic is true). (b) A branch
+      value may hold top-level commas and `{}` blocks, and a `{}` wrapper is
+      kept, not stripped: §3.1.1 says a free-form production matches no
+      top-level comma unless `{}`-wrapped; Blink's `ConsumeIf`
+      (`third_party/blink/renderer/core/css/parser/css_variable_parser.cc`)
+      parses the value unrestricted. (c) `style()` compares values without
+      their attr()-taint (§8.7.2's taint restricts use, it is not part of the
+      value; wpt `if-conditionals.html` "Equality of attr-tainted if()").
+      (d) `unset` computes with respect to the element and a feature without
+      a value on a registered property is true only when it differs from the
+      initial value (css-conditional-5 §6.2). `@container style()` keeps the
+      fork's upstream behaviour on (c) and (d).
+    - **Not implemented.** The spread syntax `...var()` (Appendix A);
+      `style()` on standard properties (`style(color: red)` is
+      `<general-enclosed>`, so unknown); stripping a `{}` wrapper from a
+      branch value; the `color` media feature, which the servo device does
+      not have. `if()` is not valid outside property values (descriptors,
+      `@media` preludes).
+    - **Invalidation, all pre-existing in `dom`.** A queried custom property
+      of the element's own changes with its own declarations; an inherited
+      one changes the parent's custom properties, and stylo recascades the
+      children. An attribute read through `attr()`, in a condition or a
+      chosen value, lands in the element's `attribute_references`, which
+      `note_generated_attribute_change`
+      (`crates/dom/src/style/invalidation.rs`) turns into a recascade of
+      that element. A tree-counting function flags the parent
+      `MAY_HAVE_TREE_COUNTING_FUNCTION`; inserting or removing a child then
+      recascades its element children (`note_child_list_change`). A device
+      change recascades the whole tree (`change_device`,
+      `crates/dom/src/style/engine.rs`), which re-evaluates `media()`. Each
+      is paid at the mutation; nothing runs per frame or per commit.
+    - **Known gap (fork, pre-existing).** A typed `attr()` whose attribute is
+      present but does not parse never resolves a typed `attr()` in its
+      fallback: the dependency walk counts the present attribute as a valid
+      primary and skips the fallback's references, so the nested `attr()`
+      substitutes its own fallback. `attr(select-index type(<integer>),
+      attr(initial-select-index type(<integer>), -1))` with
+      `select-index="two"` and `initial-select-index="3"` is `-1`, not `3`
+      (`crates/dom/tests/if_function.rs`, the ignored
+      `recipe_a_non_integer_first_attribute_falls_through_to_the_second`).
+
 ## Deliberately still open (known non-decisions)
 
 - The v1 media-feature set `Device` exposes (viewport geometry, orientation,
