@@ -210,6 +210,10 @@ fn a_value_that_breaks_the_argument_grammar_is_invalid_at_parse_time() {
         "if(style(--x): green!)",
         "if(!style(--x): green)",
         "if(style(--x): green; else)",
+        // A condition excludes top-level commas and `{}` blocks.
+        "if(style(--x: 1), else: red)",
+        "if(style(--x: 1) {x}: red; else: blue)",
+        "if({else}: red; else: blue)",
     ] {
         let (doc, el) = styled(&format!("--x: 1; color: rgb(4, 5, 6); color: {value}"));
         assert_eq!(doc.color(el), rgb(4, 5, 6), "`{value}` must not parse");
@@ -473,6 +477,45 @@ fn a_font_relative_query_value_uses_this_elements_font_size() {
     assert_eq!(doc.value(el, "--p"), "yes");
 }
 
+#[test]
+fn a_font_relative_unit_in_a_branch_not_taken_is_no_dependency() {
+    let css = "@property --l { syntax: \"<length>\"; inherits: false; initial-value: 1px; }";
+    // The `2em` branch is not taken, so `--l` does not depend on the font
+    // size and `font-size: var(--l)` is no cycle.
+    let mut doc = Doc::with_css(css);
+    let el = doc.el(doc.root, "view");
+    doc.set_inline(
+        el,
+        "--x: 0; --l: if(style(--x: 1): 2em; else: 10px); font-size: var(--l)",
+    );
+    doc.flush();
+    assert_eq!(doc.value(el, "--l"), "10px");
+    assert_eq!(doc.value(el, "font-size"), "10px");
+    // Taken, the branch makes the cycle: both are invalid at computed-value
+    // time, `--l` takes its initial value and `font-size` inherits.
+    let mut doc = Doc::with_css(css);
+    let parent = doc.el(doc.root, "view");
+    doc.set_inline(parent, "font-size: 7px");
+    let el = doc.el(parent, "view");
+    doc.set_inline(
+        el,
+        "--x: 1; --l: if(style(--x: 1): 2em; else: 10px); font-size: var(--l)",
+    );
+    doc.flush();
+    assert_eq!(doc.value(el, "--l"), "1px");
+    assert_eq!(doc.value(el, "font-size"), "7px");
+    // A taken branch with a font-relative unit and no cycle computes against
+    // this element's font size.
+    let mut doc = Doc::with_css(css);
+    let el = doc.el(doc.root, "view");
+    doc.set_inline(
+        el,
+        "--x: 1; font-size: 10px; --l: if(style(--x: 1): 2em; else: 10px)",
+    );
+    doc.flush();
+    assert_eq!(doc.value(el, "--l"), "20px");
+}
+
 // ---------------------------------------------------------------------------
 // Nesting.
 
@@ -627,6 +670,49 @@ fn tree_counting_functions_in_registered_values_and_lengths() {
 }
 
 #[test]
+fn tree_counting_values_are_per_parent() {
+    // One list of one item and one of three, the same rule on every item: a
+    // value must come from the item's own parent, in a property that does not
+    // inherit (whose computed values stylo caches per rule) and in one that
+    // does.
+    for (rule, property, one, three) in [
+        (
+            "width: calc(1px * sibling-count())",
+            "width",
+            ["1px"],
+            ["3px", "3px", "3px"],
+        ),
+        (
+            "height: calc(1px * sibling-index())",
+            "height",
+            ["1px"],
+            ["1px", "2px", "3px"],
+        ),
+        (
+            "font-size: calc(10px * sibling-count())",
+            "font-size",
+            ["10px"],
+            ["30px", "30px", "30px"],
+        ),
+        (
+            "line-height: calc(10px * sibling-index())",
+            "line-height",
+            ["10px"],
+            ["10px", "20px", "30px"],
+        ),
+    ] {
+        let mut doc = Doc::with_css(&format!(".item {{ {rule}; }}"));
+        let a = doc.el(doc.root, "view");
+        let b = doc.el(doc.root, "view");
+        let a_items = doc.els(a, &["view.item"]);
+        let b_items = doc.els(b, &["view.item", "view.item", "view.item"]);
+        doc.flush();
+        assert_eq!(column(&doc, &a_items, property), one, "{rule}");
+        assert_eq!(column(&doc, &b_items, property), three, "{rule}");
+    }
+}
+
+#[test]
 fn tree_counting_functions_follow_sibling_insertion_and_removal() {
     let (mut doc, items) = counted();
     let list = doc.dom.get(items[0]).unwrap().parent_id().unwrap();
@@ -726,9 +812,10 @@ fn recipe_ignores_a_value_that_is_not_an_integer() {
 }
 
 #[test]
-#[ignore = "fork gap: a typed attr() whose attribute is present but does not parse never \
-            resolves a typed attr() in its fallback (custom property dependency walk, \
-            style/properties/cascade.rs visit_value_references), so the result is -1"]
+#[ignore = "fork gap (pre-existing): the custom-property dependency walk counts a present \
+            attribute as a valid attr() primary even when it does not parse, so it never \
+            reaches the typed attr() in the fallback, which is then missing from the \
+            attribute map and takes its own fallback: the result is -1 (style-assumptions §27)"]
 fn recipe_a_non_integer_first_attribute_falls_through_to_the_second() {
     let (mut doc, container, _) = pager("view.pager[select-index=two][initial-select-index=3]", 4);
     doc.dom.commit();
@@ -883,6 +970,215 @@ fn a_device_change_re_evaluates_media_tests() {
     }
 }
 
+#[test]
+fn inherit_of_a_non_inherited_registered_property_follows_the_parent() {
+    const CSS: &str = "@property --l { syntax: \"<length>\"; inherits: false; initial-value: 1px; }
+        .a { --l: 30px; }
+        .b { --l: 40px; }";
+    const CHILD: &str = "--l: 30px; --p: if(style(--l: inherit): yes; else: no);
+        width: if(style(--l: inherit): 5px; else: 6px)";
+    // The parent's own declaration changes.
+    let mut doc = Doc::with_css(CSS);
+    let parent = doc.el(doc.root, "view");
+    doc.set_inline(parent, "--l: 30px");
+    let el = doc.el(parent, "view");
+    doc.set_inline(el, CHILD);
+    doc.flush();
+    assert_eq!(
+        (doc.value(el, "--p"), doc.value(el, "width")),
+        ("yes".into(), "5px".into())
+    );
+    doc.set_inline(parent, "--l: 40px");
+    doc.flush();
+    assert_eq!(
+        (doc.value(el, "--p"), doc.value(el, "width")),
+        ("no".into(), "6px".into())
+    );
+    // The parent matches another rule.
+    let mut doc = Doc::with_css(CSS);
+    let parent = doc.el(doc.root, "view.a");
+    let el = doc.el(parent, "view");
+    doc.set_inline(el, CHILD);
+    doc.flush();
+    assert_eq!(doc.value(el, "--p"), "yes");
+    doc.remove_class(parent, "a");
+    doc.add_class(parent, "b");
+    doc.flush();
+    assert_eq!(
+        (doc.value(el, "--p"), doc.value(el, "width")),
+        ("no".into(), "6px".into())
+    );
+}
+
+#[test]
+fn inherit_and_unset_of_inherited_properties_follow_the_parent() {
+    let mut doc = Doc::with_css(
+        "@property --li { syntax: \"<length>\"; inherits: true; initial-value: 1px; }",
+    );
+    let parent = doc.el(doc.root, "view");
+    doc.set_inline(parent, "--li: 30px; --u: a");
+    let el = doc.el(parent, "view");
+    doc.set_inline(
+        el,
+        "--li: 30px; --u: a;
+         --p1: if(style(--li: unset): yes; else: no);
+         --p2: if(style(--u: inherit): yes; else: no)",
+    );
+    doc.flush();
+    assert_eq!(
+        (doc.value(el, "--p1"), doc.value(el, "--p2")),
+        ("yes".into(), "yes".into())
+    );
+    doc.set_inline(parent, "--li: 40px; --u: b");
+    doc.flush();
+    assert_eq!(
+        (doc.value(el, "--p1"), doc.value(el, "--p2")),
+        ("no".into(), "no".into())
+    );
+}
+
+// ---------------------------------------------------------------------------
+// attr() taint through if() (css-values-5 §8.7.2).
+
+/// The stylesheet of wpt `css/css-values/attr-security-if.html`, its `div`
+/// rule on a class.
+const ATTR_SECURITY_SHEET: &str = r#"
+@property --some-string { syntax: "<string>"; inherits: false; initial-value: "empty"; }
+.d { --condition-val: 3; --str: text; --true: true; --some-string: attr(data-foo); }
+"#;
+
+const URL: &str = "https://does-not-exist.test/404.png";
+const URL2: &str = "https://does-not-exist-2.test/404.png";
+
+fn with_data_foo(data_foo: &str, property: &str, value: &str) -> String {
+    let mut doc = Doc::with_css(ATTR_SECURITY_SHEET);
+    let el = doc.el(doc.root, "view.d");
+    doc.set_attr(el, "data-foo", data_foo);
+    doc.set_inline(el, &format!("{property}: {value}"));
+    doc.flush();
+    doc.value(el, property)
+}
+
+/// wpt `css/css-values/attr-security-if.html`, with `background-image`
+/// holding the `url()` directly: `image-set()` is outside the `lynx`
+/// grammar. Its second case (an `attr()` string as the image) has no
+/// counterpart without `image-set()`, since a string is no `<image>`.
+#[test]
+fn wpt_attr_security_if() {
+    let image = |url: &str| format!("url(\"{url}\")");
+    // The custom property keeps the tainted text; only a URL is refused.
+    assert_eq!(
+        with_data_foo(URL, "--x", "if(style(--true): attr(data-foo);)"),
+        format!("\"{URL}\"")
+    );
+    // A branch that is not taken does not taint.
+    assert_eq!(
+        with_data_foo(
+            URL2,
+            "background-image",
+            &format!("if(style(--true): url({URL2}); else: attr(data-foo);)")
+        ),
+        image(URL2)
+    );
+    for (data_foo, value) in [
+        // A value a style() test read is tainted.
+        (URL, format!("if(style(--some-string): url({URL});)")),
+        // A condition's own text is tainted.
+        (
+            "3",
+            format!("if(style(--condition-val: attr(data-foo type(*))): url({URL});)"),
+        ),
+        // So is an earlier condition that was false.
+        (
+            "1",
+            format!(
+                "if(style(--condition-val: attr(data-foo type(*))): url({URL});
+                    style(--true): url({URL}); else: url({URL});)"
+            ),
+        ),
+        // And an if() inside a style() value.
+        (
+            "3",
+            format!(
+                "if(style(--condition-val: if(style(--true): attr(data-foo type(*));)): url({URL});)"
+            ),
+        ),
+        (
+            "3",
+            format!("if(style(--condition-val >= attr(data-foo type(*))): url({URL});)"),
+        ),
+        (
+            "3",
+            format!("if(style(--condition-val < attr(data-foo type(*))): url({URL});)"),
+        ),
+        (
+            "3",
+            format!("if(style(--str < attr(data-foo type(*))): url({URL});)"),
+        ),
+        (
+            "text",
+            format!("if(style(--condition-val < attr(data-foo type(*))): url({URL});)"),
+        ),
+    ] {
+        assert_eq!(
+            with_data_foo(data_foo, "background-image", &value),
+            "none",
+            "{value} with data-foo={data_foo}"
+        );
+    }
+    // A condition after the chosen one is not evaluated and does not taint.
+    assert_eq!(
+        with_data_foo(
+            "attr(data-foo type(*))",
+            "background-image",
+            &format!(
+                "if(style(--true): url({URL}); style(--condition-val): url({URL}); else: url({URL});)"
+            )
+        ),
+        image(URL)
+    );
+    // The custom-property counterparts keep the URL as text.
+    for value in [
+        format!(
+            "if(style(--condition-val: if(style(--true): attr(data-foo type(*));)): url({URL});)"
+        ),
+        format!("if(style(--condition-val >= attr(data-foo type(*))): url({URL});)"),
+    ] {
+        assert_eq!(
+            with_data_foo("3", "--x", &value),
+            format!("url({URL})"),
+            "{value}"
+        );
+    }
+}
+
+#[test]
+fn attr_taint_from_values_read_by_style_tests() {
+    // `--t` holds an attr() value; testing it taints the chosen URL, whether
+    // the test compares it or only asks whether it has a value.
+    for condition in ["style(--t: \"x\")", "style(--t)", "not style(--t: \"y\")"] {
+        let mut doc = Doc::new();
+        let el = doc.el(doc.root, "view[data-foo=x]");
+        doc.set_inline(
+            el,
+            &format!(
+                "--t: attr(data-foo); background-image: if({condition}: url({URL}); else: none)"
+            ),
+        );
+        doc.flush();
+        assert_eq!(doc.value(el, "background-image"), "none", "{condition}");
+    }
+    // An untainted read leaves the URL alone.
+    let mut doc = Doc::new();
+    let el = doc.el(doc.root, "view");
+    doc.set_inline(
+        el,
+        &format!("--t: x; background-image: if(style(--t: x): url({URL}); else: none)"),
+    );
+    doc.flush();
+    assert_eq!(doc.value(el, "background-image"), format!("url(\"{URL}\")"));
+}
+
 // ---------------------------------------------------------------------------
 // web-platform-tests ports.
 
@@ -931,6 +1227,10 @@ const IF_CONDITIONALS_SHEET: &str = r#"
 .inner { --inherited: inner_value; }
 "#;
 
+/// What `--property` computes to when its `if()` declaration was dropped at
+/// parse time: an earlier declaration of it that the test sets first.
+const REJECTED: &str = "rejected-at-parse-time";
+
 /// `(value, custom properties on the element, expected --property)`.
 type ConditionalsCase = (
     &'static str,
@@ -951,7 +1251,9 @@ type CycleCase = (
 /// four expect `supports()` to accept `display: table-cell`, `list-item` or
 /// `contents`, or a three-value `transform-origin`, all outside the `lynx`
 /// grammar. An empty custom property value is the test's
-/// `setProperty(name, '')`, which sets nothing.
+/// `setProperty(name, '')`, which sets nothing. The test expects `""` both for
+/// a value no branch of which matched and for one rejected at parse time; the
+/// second is [`REJECTED`] here.
 const IF_CONDITIONALS: &[ConditionalsCase] = &[
     (
         "if(style(--x: 3): true_value)",
@@ -1826,23 +2128,23 @@ const IF_CONDITIONALS: &[ConditionalsCase] = &[
         &[],
         "false_value",
     ),
-    ("if()", &[("--x", "3")], ""),
-    ("if(style())", &[("--x", "3")], ""),
-    ("if(style(--x: 3) !)", &[("--x", "3")], ""),
+    ("if()", &[("--x", "3")], REJECTED),
+    ("if(style())", &[("--x", "3")], REJECTED),
+    ("if(style(--x: 3) !)", &[("--x", "3")], REJECTED),
     (
         "if(style(--x: 3) true_value;\n          else: false_value)",
         &[("--x", "3")],
-        "",
+        REJECTED,
     ),
     (
         "if(style(--x: 3): true_value;\n          else: false_value!)",
         &[("--x", "3")],
-        "",
+        REJECTED,
     ),
     (
         "if(!style(--x: 3): true_value;\n          else: false_value)",
         &[("--x", "3")],
-        "",
+        REJECTED,
     ),
     (
         "if(style(--x) and invalid: true_value;\n          else: false_value)",
@@ -1910,7 +2212,7 @@ fn wpt_if_conditionals() {
                 write!(inline, "{name}: {value}; ").unwrap();
             }
         }
-        write!(inline, "--property: {value}").unwrap();
+        write!(inline, "--property: {REJECTED}; --property: {value}").unwrap();
         doc.set_inline(inner, &inline);
         doc.flush();
         assert_eq!(

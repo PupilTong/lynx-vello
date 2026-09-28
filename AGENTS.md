@@ -2238,7 +2238,9 @@ Rulings and limits to know before touching it:
   `sibling-index()` / `sibling-count()`, neither of which Lynx has
   (user-directed 2026-09-28). `dom` adds no code for them: a queried custom
   property, an `attr()` read, a child-list change and a device change already
-  recascade what depends on them. Scope, choices and the one known gap are in
+  recascade what depends on them, and the fork flags a style that reads a
+  parent's non-inherited custom property `INHERITS_RESET_STYLE`. Scope,
+  choices, the Blink differences and the known typed-`attr()` gap are in
   `docs/style-assumptions.md` §27.
 - Stylo's per-element style data and its traversal/invalidation flags live
   inline on `Node` (bench-defended 2026-08-03: no traversal regression, a
