@@ -10,9 +10,10 @@
 //!   and duration normalized into scroll-offset px once per commit, and web-animations-1's phase
 //!   and iteration arithmetic applied to an offset.
 //! - [`Document::resolve_timelines`] binds every progress-driven animation to its timeline after a
-//!   layout pass and writes its sample. A change re-cascades the element inside the same `layout()`
-//!   call — scroll-animations-1 §5.1's stale-timelines pass — so the commit that creates an
-//!   animation already shows it at its offset.
+//!   layout pass, writes its sample and places its range keyframes (`entry 0% { }`) against the
+//!   timeline's named ranges. A change re-cascades the element inside the same `layout()` call —
+//!   scroll-animations-1 §5.1's stale-timelines pass — so the commit that creates an animation
+//!   already shows it at its offset, with its keyframes in place.
 //! - [`Document::advance_scroll_timelines`] re-samples, between commits, the animations a moved
 //!   scroll container drives.
 //!
@@ -27,7 +28,9 @@ use stylo::dom::OpaqueNode;
 use stylo::properties::ComputedValues;
 use stylo::properties::style_structs::UI;
 use stylo::rule_tree::{CascadeLevel, ShadowCascadeOrder};
-use stylo::servo::animation::{Animation, AnimationProgress, AnimationSetKey, AnimationState};
+use stylo::servo::animation::{
+    Animation, AnimationProgress, AnimationSetKey, AnimationState, TimelineRanges,
+};
 use stylo::values::computed::{
     AnimationDirection, AnimationFillMode, AnimationTimeline, Length, LengthPercentage, ScrollAxis,
     TimelineName, ViewTimelineInset,
@@ -472,8 +475,14 @@ struct Reference<'a> {
     tree: Option<NodeId>,
 }
 
-/// A view progress timeline's named ranges, in scroll-offset px.
-struct ViewRanges {
+/// A timeline's named ranges (scroll-animations-1 §3.1, and Appendix A
+/// "Named Timeline Ranges"), in scroll-offset px: what `animation-range`
+/// resolves against and what places range keyframes. `cover` is the
+/// timeline's own extent, its 0% and 100%, and `scroll` ends at the largest
+/// offset the timeline's source reaches. A view progress timeline's are what
+/// `Document::view_ranges` answers, a scroll progress timeline's are
+/// [`NamedRanges::scroll`].
+struct NamedRanges {
     cover: [f32; 2],
     contain: [f32; 2],
     entry: [f32; 2],
@@ -483,51 +492,94 @@ struct ViewRanges {
     scroll: [f32; 2],
 }
 
-/// One end of the attachment range: `normal` is the timeline's own end, a
-/// bare `<length-percentage>` measures from the timeline's start against its
-/// length, and a named range on a view timeline measures from that range's
-/// start against its length. A range name on a scroll timeline names the
-/// whole timeline, as Blink resolves it.
+impl NamedRanges {
+    /// A scroll progress timeline's over its source's scroll range
+    /// `[0, max]`: every range name stands for the whole scroll range, in
+    /// `animation-range` and in a range keyframe (`entry 0% { }`) alike, as
+    /// Blink resolves them and WPT
+    /// `timeline-offset-keyframes-with-scroll-timeline.html` asserts.
+    /// scroll-animations-1 defines named ranges for view progress timelines
+    /// only (§3.1), and its Appendix A ("Named Timeline Range Keyframe
+    /// Selectors") ignores keyframes on a range the timeline does not have;
+    /// `docs/tracking/css-animation.md` records the deviation.
+    const fn scroll(max: f32) -> Self {
+        let range = [0.0, max];
+        Self {
+            cover: range,
+            contain: range,
+            entry: range,
+            exit: range,
+            entry_crossing: range,
+            exit_crossing: range,
+            scroll: range,
+        }
+    }
+
+    /// The range `name` names; `None` for `normal` and for no name.
+    const fn named(&self, name: TimelineRangeName) -> Option<[f32; 2]> {
+        Some(match name {
+            TimelineRangeName::Normal | TimelineRangeName::None => return None,
+            TimelineRangeName::Cover => self.cover,
+            TimelineRangeName::Contain => self.contain,
+            TimelineRangeName::Entry => self.entry,
+            TimelineRangeName::Exit => self.exit,
+            TimelineRangeName::EntryCrossing => self.entry_crossing,
+            TimelineRangeName::ExitCrossing => self.exit_crossing,
+            TimelineRangeName::Scroll => self.scroll,
+        })
+    }
+}
+
+/// `ranges` as fractions of the attachment range `[start, end]`, which place
+/// an animation's range keyframes; `None` when the attachment range is
+/// empty, where they are ignored.
+fn keyframe_ranges(attachment: [f32; 2], ranges: &NamedRanges) -> Option<TimelineRanges> {
+    let [start, end] = attachment.map(f64::from);
+    let length = end - start;
+    if length <= 0.0 {
+        return None;
+    }
+    TimelineRanges::from_fn(|name| {
+        Some(
+            ranges
+                .named(name)?
+                .map(|bound| (f64::from(bound) - start) / length),
+        )
+    })
+}
+
+/// One end of the attachment range over a timeline with `ranges`: `normal`
+/// is the end of the timeline's cover range, a bare `<length-percentage>`
+/// measures from the cover range's start against its length, and a named
+/// range measures from that range's start against its length.
 fn range_point(
     value: &AnimationRangeValue<LengthPercentage>,
     end: bool,
-    bounds: [f32; 2],
-    ranges: Option<&ViewRanges>,
+    ranges: &NamedRanges,
 ) -> f32 {
-    let [from, to] = match (value.name, ranges) {
-        (TimelineRangeName::Normal, _) => return bounds[usize::from(end)],
-        (TimelineRangeName::None, _) | (_, None) => bounds,
-        (TimelineRangeName::Cover, Some(ranges)) => ranges.cover,
-        (TimelineRangeName::Contain, Some(ranges)) => ranges.contain,
-        (TimelineRangeName::Entry, Some(ranges)) => ranges.entry,
-        (TimelineRangeName::Exit, Some(ranges)) => ranges.exit,
-        (TimelineRangeName::EntryCrossing, Some(ranges)) => ranges.entry_crossing,
-        (TimelineRangeName::ExitCrossing, Some(ranges)) => ranges.exit_crossing,
-        (TimelineRangeName::Scroll, Some(ranges)) => ranges.scroll,
-    };
+    if value.name == TimelineRangeName::Normal {
+        return ranges.cover[usize::from(end)];
+    }
+    let [from, to] = ranges.named(value.name).unwrap_or(ranges.cover);
     from + value.lp.resolve(Length::new(to - from)).px()
 }
 
-/// Animation `index` of `ui`'s timing over a timeline spanning `bounds`,
-/// whose source scrolls to `limit`.
-fn timing(
-    ui: &UI,
-    index: usize,
-    bounds: [f32; 2],
-    limit: f32,
-    ranges: Option<&ViewRanges>,
-) -> ProgressTiming {
-    let start = range_point(
-        &ui.animation_range_start_mod(index).0,
-        false,
-        bounds,
-        ranges,
-    );
-    let end = range_point(&ui.animation_range_end_mod(index).0, true, bounds, ranges);
+/// Animation `index` of `ui`'s attachment range over a timeline with
+/// `ranges`: `animation-range-start` and `-end` resolved.
+fn attachment(ui: &UI, index: usize, ranges: &NamedRanges) -> [f32; 2] {
+    [
+        range_point(&ui.animation_range_start_mod(index).0, false, ranges),
+        range_point(&ui.animation_range_end_mod(index).0, true, ranges),
+    ]
+}
+
+/// Animation `index` of `ui`'s timing over `attachment`, on a timeline whose
+/// source scrolls to `limit`.
+fn timing(ui: &UI, index: usize, attachment: [f32; 2], limit: f32) -> ProgressTiming {
     let duration = ui.animation_duration_mod(index);
     ProgressTiming::normalized(
         limit,
-        [start, end],
+        attachment,
         (!duration.is_auto()).then(|| f64::from(duration.seconds())),
         f64::from(ui.animation_delay_mod(index).seconds()),
         f64::from(ui.animation_iteration_count_mod(index).0),
@@ -622,16 +674,18 @@ impl Knots {
 
 impl<T: Sync> Document<T> {
     /// Binds every progress-driven animation to its timeline against the
-    /// layout just committed, writes its sample, and re-cascades the
-    /// elements whose sample or binding changed. Answers whether that left
-    /// layout work, which `layout()` takes as one more pass.
+    /// layout just committed, writes its sample, places its range keyframes,
+    /// and re-cascades the elements whose sample, binding or keyframes
+    /// changed. Answers whether that left layout work, which `layout()` takes
+    /// as one more pass.
     ///
     /// The timeline kind and the timeline come from `Animation::timeline`,
     /// what stylo captured when it started or updated the animation; the
     /// style is read by the animation's name only for its range, duration,
     /// delay, fill, count and direction. A paused animation holds its sample
-    /// once it has one, and an element in a skipped subtree holds whatever it
-    /// had (css-contain-2 §4).
+    /// once it has one, while its range keyframes still follow the layout;
+    /// an element in a skipped subtree holds whatever it had (css-contain-2
+    /// §4).
     pub(crate) fn resolve_timelines(&mut self) -> bool {
         let timelines = &mut self.animations_mut().timelines;
         if timelines.progress_driven.is_empty() && timelines.bindings.is_empty() {
@@ -661,7 +715,7 @@ impl<T: Sync> Document<T> {
                     {
                         continue;
                     }
-                    let binding = document.bind(id, animation);
+                    let (binding, ranges) = document.bind(id, animation);
                     let key = (id, animation.name.clone());
                     let old = previous.remove(&key);
                     let mut sampled = old.as_ref().is_some_and(|bound| bound.sampled);
@@ -669,6 +723,9 @@ impl<T: Sync> Document<T> {
                     let was_active = old.as_ref().is_none_or(|bound| bound.binding.is_active());
                     flipped |= was_active != binding.is_active();
                     changed |= old.is_none_or(|bound| bound.binding != binding);
+                    // Range keyframes follow the layout whether or not the
+                    // animation is paused.
+                    changed |= !skipped && animation.set_timeline_ranges(ranges);
                     let paused = matches!(animation.state, AnimationState::Paused(_));
                     if !skipped && (!paused || !sampled) {
                         sampled = true;
@@ -776,16 +833,19 @@ impl<T: Sync> Document<T> {
         tick.relayout
     }
 
-    /// What `animation` of `id` is attached to, against the current layout.
-    fn bind(&self, id: NodeId, animation: &Animation) -> Binding {
+    /// What `animation` of `id` is attached to, against the current layout,
+    /// and the ranges that place its range keyframes: `None`, ignoring them,
+    /// on an inactive timeline, the document timeline, or an empty attachment
+    /// range.
+    fn bind(&self, id: NodeId, animation: &Animation) -> (Binding, Option<TimelineRanges>) {
         let Some(ui) = self.paint_style(id).map(|style| style.get_ui()) else {
-            return Binding::Inactive;
+            return (Binding::Inactive, None);
         };
         let Some(index) = ui
             .animation_name_iter()
             .position(|name| name.as_atom() == Some(&animation.name))
         else {
-            return Binding::Inactive;
+            return (Binding::Inactive, None);
         };
         let timeline = match &animation.timeline {
             AnimationTimeline::Auto => None,
@@ -809,7 +869,7 @@ impl<T: Sync> Document<T> {
         };
         timeline
             .and_then(|timeline| self.bind_to(&timeline, ui, index))
-            .unwrap_or(Binding::Inactive)
+            .unwrap_or((Binding::Inactive, None))
     }
 
     /// `scroll(root)`, and `scroll(nearest)` with no scroll container above:
@@ -820,14 +880,22 @@ impl<T: Sync> Document<T> {
         Some(DOCUMENT_ELEMENT_NODE_ID).filter(|&root| self.is_scroll_container(root))
     }
 
-    /// `timeline` with animation `index` of `ui`'s timing, or `None` when it
-    /// is inactive: its source cannot scroll along its axis, its view
-    /// subject has no box, or its cover range is empty.
-    fn bind_to(&self, timeline: &Timeline, ui: &UI, index: usize) -> Option<Binding> {
-        let (source, axis, bounds, limit, ranges) = match timeline {
+    /// `timeline` with animation `index` of `ui`'s timing, and the ranges
+    /// that place its range keyframes (`None` for an empty attachment
+    /// range); `None` when the timeline is inactive: its source cannot
+    /// scroll along its axis, its view subject has no box, or its cover
+    /// range is empty. An animation without range keyframes ignores the
+    /// ranges (`Animation::set_timeline_ranges`).
+    fn bind_to(
+        &self,
+        timeline: &Timeline,
+        ui: &UI,
+        index: usize,
+    ) -> Option<(Binding, Option<TimelineRanges>)> {
+        let (source, axis, ranges) = match timeline {
             &Timeline::Scroll { source, axis } => {
                 let max = axis.of_vector(self.scroll_box(source)?.max_offset());
-                (source, axis, [0.0, max], max, None)
+                (source, axis, NamedRanges::scroll(max))
             }
             Timeline::View {
                 subject,
@@ -836,13 +904,17 @@ impl<T: Sync> Document<T> {
             } => {
                 let source = self.nearest_scroll_container(*subject)?;
                 let ranges = self.view_ranges(*subject, source, *axis, inset)?;
-                (source, *axis, ranges.cover, ranges.scroll[1], Some(ranges))
+                (source, *axis, ranges)
             }
         };
-        (bounds[1] > bounds[0]).then(|| Binding::Active {
-            source,
-            axis,
-            timing: timing(ui, index, bounds, limit, ranges.as_ref()),
+        (ranges.cover[1] > ranges.cover[0]).then(|| {
+            let attachment = attachment(ui, index, &ranges);
+            let binding = Binding::Active {
+                source,
+                axis,
+                timing: timing(ui, index, attachment, ranges.scroll[1]),
+            };
+            (binding, keyframe_ranges(attachment, &ranges))
         })
     }
 
@@ -861,7 +933,7 @@ impl<T: Sync> Document<T> {
         source: NodeId,
         axis: Axis,
         inset: &ViewTimelineInset,
-    ) -> Option<ViewRanges> {
+    ) -> Option<NamedRanges> {
         // No box: `display: none` or `contents`, or skipped contents, whose
         // layout is zeroed.
         let style = self.paint_style(subject)?;
@@ -912,7 +984,7 @@ impl<T: Sync> Document<T> {
         let c = shift.preimage(position - inset_start);
         let d = shift.preimage(position + length - inset_start);
         let contain = [b.0.min(c.0), b.1.max(c.1)];
-        Some(ViewRanges {
+        Some(NamedRanges {
             cover: [a.1, d.0],
             contain,
             entry: [a.1, contain[0]],

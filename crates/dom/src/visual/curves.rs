@@ -246,8 +246,10 @@ impl CompositeCurve {
     /// segment eases by the lower keyframe's function running forward and by
     /// the upper's over flipped progress running reversed, as stylo eases
     /// them, in the direction the sample runs; iterations, fill and a scroll
-    /// timeline only pick progress in `[0, 1]`. A transition runs once forward from its `from` to
-    /// its `to`.
+    /// timeline only pick progress in `[0, 1]`, and stylo yields every
+    /// segment whose span meets it, zero-length ones at a tie included, so
+    /// every value a sample there returns is an endpoint of, or lies on, one
+    /// of them. A transition runs once forward from its `from` to its `to`.
     fn transform_segments(&self) -> impl Iterator<Item = Segment<'_>> {
         fn list(value: &AnimationValue) -> &ComputedTransform {
             let AnimationValue::Transform(list) = value else {

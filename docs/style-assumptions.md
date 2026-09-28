@@ -842,19 +842,21 @@ and §D.16 with what the wire format actually permits.)*
       (the source's `max_offset`, the view subject's position) that feed the
       cascade, like a query container's size (19). So `Document::layout`
       resolves every progress-driven animation's timeline after each layout
-      pass, writes its sample into stylo's `Animation::timeline_sample`, and
-      re-cascades the elements whose sample or binding changed before the
-      containers' own marks are made (an animation-only traversal would strip
-      their `RECASCADE_SELF`); a re-cascade that relayouts is one more pass of
-      the same bounded loop. This is scroll-animations-1 §5.1's extra style
-      and layout pass: the commit that creates an animation already shows it
-      at the offset it found, never its base value first. What that final
-      pass changes is re-sampled at the next commit, as §5.1 allows. Between
-      commits an adopted scroll re-samples only the animations its container
-      drives that the committed frame does not sample itself
-      (`Document::advance_scroll_timelines`) — one animation-only restyle, no
-      layout unless an animated property moves a box. An exported one is the
-      painter's between commits, and stale here (12).
+      pass, writes its sample into stylo's `Animation::timeline_sample`,
+      places its range keyframes (`Animation::set_timeline_ranges`), and
+      re-cascades the elements whose sample, binding or keyframes changed
+      before the containers' own marks are made (an animation-only traversal
+      would strip their `RECASCADE_SELF`); a re-cascade that relayouts is one
+      more pass of the same bounded loop. This is scroll-animations-1 §5.1's
+      extra style and layout pass: the commit that creates an animation
+      already shows it at the offset it found, never its base value first.
+      What that final pass changes is re-sampled at the next commit, as §5.1
+      allows. Between commits an adopted scroll re-samples only the
+      animations its container drives that the committed frame does not
+      sample itself (`Document::advance_scroll_timelines`) — one
+      animation-only restyle, no layout unless an animated property moves a
+      box. An exported one is the painter's between commits, and stale here
+      (12).
     - **An animation on an inactive timeline is not current.** It is idle
       (Blink), so it has no effect whatever its fill and none of 11's side
       effects: no stacking context, group or containing block. A binding is

@@ -34,3 +34,17 @@
     opacity: 1;
   }
 }
+
+.enter {
+  animation: enter linear both;
+  animation-timeline: view();
+}
+
+@keyframes enter {
+  entry 100% {
+    opacity: 0.25;
+  }
+  exit 0% {
+    opacity: 1;
+  }
+}
