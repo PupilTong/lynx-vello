@@ -672,12 +672,13 @@ mod tests {
 
     /// A compiled `ReactLynx` `<viewpager>` of four coloured pages, styled by
     /// the engine's UA sheet alone: the pager fills the page, lays its pages
-    /// out as one row of scrollport-wide pages and starts on the first, so the
-    /// whole capture is page 0's red. The card's tap, which turns to page 3
+    /// out as one row of scrollport-wide pages and starts on the one its
+    /// `select-index={1}` names, so the whole capture is page 1's green. The
+    /// card's tap, which turns to page 3
     /// through `selectTab`, needs input this capture route has no way to
     /// send; `crates/bobcat-source/tests/reactlynx_runtime.rs` drives it.
     #[tokio::test(flavor = "current_thread")]
-    async fn a_viewpager_card_renders_its_first_page() {
+    async fn a_viewpager_card_renders_its_selected_page() {
         let executor = CaptureExecutor::new().expect("start capture owner thread");
         let result = executor
             .capture(CaptureRequest {
@@ -705,8 +706,8 @@ mod tests {
         for (x, y) in [(1, 1), (400, 300), (798, 598)] {
             assert_eq!(
                 pixel(x, y),
-                [255, 0, 0],
-                "page 0 fills the view at ({x}, {y})"
+                [0, 128, 0],
+                "page 1 fills the view at ({x}, {y})"
             );
         }
     }

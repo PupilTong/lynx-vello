@@ -849,9 +849,11 @@ and §D.16 with what the wire format actually permits.)*
       declaration. The build records the `nearest` elements per scroll slot;
       the document scrolls each container to its first-in-tree-order target
       as `scrollIntoView` with `block: start`, `inline: nearest` and rebuilds
-      the frame in the same commit. Each new target is honoured once (first
-      layout, or a later arrival); the "user no longer interested" escape is
-      not modelled, and an unchanged target never re-scrolls.
+      the frame in the same commit. The scroll is an instant scroll request,
+      so the painter shows it even over an offset of its own. Each new target
+      is honoured once (first layout, or a later arrival); the "user no
+      longer interested" escape is not modelled, and an unchanged target
+      never re-scrolls.
 
     The one chain walk (`drive_chain`) and the snap rules are shared by the
     document and by `bobcat-core`'s painter over the frame's scroll-slot

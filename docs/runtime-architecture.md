@@ -1642,10 +1642,14 @@ commit, so neither the painter's lookups nor main's check scan the table.
   window never committed.
 - A script-facing scroll (`Document::scroll_to_with`) is never undone by a
   post the painter made before it saw the request: main drops a post naming
-  an older request serial than the container's pending one. Scrolls the
-  document makes on its own account (`scroll-initial-target`, a snap or
-  chain the document runs) record no request and can still be overwritten by
-  a later post.
+  an older request serial than the container's pending one. A
+  `scroll-initial-target` the render honours is such a request too (an
+  instant one, carried by the frame the same render publishes), so a new
+  target moves the screen even when the painter holds an offset of its own
+  for the container, as it does after a user scroll main adopted without a
+  commit. Scrolls the document makes otherwise on its own account (a snap
+  or chain the document runs) record no request and can still be
+  overwritten by a later post.
 - A request stays in the committed frame until the next commit after its
   acknowledgement. A painter attached in between starts with no handled
   serials, so it carries the request out again: an instant one lands on its

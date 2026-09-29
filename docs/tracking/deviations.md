@@ -1162,9 +1162,50 @@ consequential choice about whether to follow the spec or the quirk.
     (`LynxUIViewPager.m:757-829`).
   - *`smooth` is read with JavaScript truthiness* and defaults to `true`
     (web-core).
-  - *`select-index` / `initial-select-index` are not implemented*: the pager
-    always starts on its first page. Waiting on a decision about the CSS
-    mechanism that carries them.
+  - *`select-index` / `initial-select-index` are CSS, not a read at connect*
+    (user ruling, 2026-09-28: standard CSS in the UA sheet, no component
+    code). The pager sets `--viewpager-initial-index` from the typed `attr()`
+    of `select-index`, else `initial-select-index` (web-core's order,
+    `XViewpagerNg.ts:38-39`), and each page is its container's
+    `scroll-initial-target` when that equals its `sibling-index() - 1`.
+    web-core reads the attributes once, at connect, and scrolls once its
+    width is known (`:37-57`). Accepted consequences, each pinned by a test in
+    `crates/bobcat-core/src/main/tree/viewpager.rs`:
+    - changing the attribute in force after the first layout turns the pager
+      to the new page, instantly, over a user's swipe
+      (`changing_the_index_in_force_turns_the_pager`; painter side
+      `a_selected_page_is_the_first_frame_and_a_new_index_overrides_a_swipe`);
+      web-core does not;
+    - inserting or removing a page ahead of the target makes another page the
+      target, and the pager turns to it
+      (`inserting_or_removing_a_page_ahead_of_the_target_moves_the_target`);
+      web-core does not;
+    - a commit that leaves the target alone does not move a pager the user
+      swiped away (`an_unrelated_commit_leaves_a_swiped_pager_alone`);
+    - pages wrapped one by one in `wrapper` all count as index 0, and pages
+      sharing one `wrapper` count correctly
+      (`wrapped_pages_count_among_their_own_parents_children`);
+    - a present `select-index` that is not an integer (`"abc"`, `"1.5"`,
+      `""`) does not fall back to `initial-select-index` — the fork's typed
+      `attr()` fallback gap ([style-assumptions.md](../style-assumptions.md)
+      §27) — and shows the first page
+      (`a_select_index_that_is_no_integer_shows_the_first_page`); web-core
+      shows the first page for `"abc"` (`NaN`), lands between pages for
+      `"1.5"`, and falls back for `""`;
+    - a negative or out-of-range index names no page: the first page
+      (`an_index_naming_no_page_shows_the_first_page`); web-core scrolls to
+      the clamped position;
+    - an inner pager does not inherit an outer pager's index
+      (`a_nested_pager_does_not_inherit_the_outer_index`);
+    - a `display: none` pager starts on the page at the first commit that
+      shows it (`a_pager_shown_later_starts_on_the_selected_page_when_shown`);
+      pages that arrive after the first layout bring the target with them
+      (`pages_that_arrive_later_bring_the_target_with_them`);
+    - **a pager zero pixels wide at its first commit stays on the first page**
+      once it gets a width: its target is honoured at offset 0 and not again
+      (`a_pager_that_is_zero_wide_at_its_first_commit_stays_on_the_first_page`).
+      web-core retries every animation frame until the pager has a width
+      (`:45-51`).
   - *A `viewpager-item` outside a pager is an ordinary container*, where
     web-core hides it (`x-viewpager-ng.css:6-14`) — the `list-item` decision
     above. *No `contain: strict` from the fifth page on* (`:66-68`): a browser

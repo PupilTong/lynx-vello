@@ -780,8 +780,10 @@ impl<T: Sync> Document<T> {
         if self.scroll_to_initial_targets(&frame) {
             // css-scroll-snap-2's initial scroll position is set from the
             // built frame and must be in the frame this commit publishes,
-            // so the frame it was decided on is void — same commit, as
-            // below.
+            // with the scroll request that carries it to the painter, so the
+            // frame it was decided on is void — same commit, as below. The
+            // request dirtied the document; the rebuild is the answer to
+            // that too.
             let stale = std::mem::replace(&mut frame, PaintOrder::empty());
             self.painter.get_mut().restore_spare_buffers(stale);
             frame = self.build_frame();
