@@ -383,11 +383,15 @@ where
         containing_block,
         static_position,
         // Every field of the input `absolute_layout` builds for this box is a
-        // function of the containing block and the box's own style — an
-        // out-of-flow box is never measured to build its own input. And its
-        // content cannot move the containing block back: it contributes to no
-        // ancestor's used size, only to their scrollable overflow, which is an
-        // output the in-place path compares before it trusts anything.
+        // function of the containing block, the box's own style and, when
+        // that style holds `anchor-size()`, its anchors' sizes — none of
+        // which the box's own subtree can move. The one exception is an
+        // anchored axis sized from content, which is measured to build the
+        // input; `settle_anchored_axes` withdraws the claim on that axis. And
+        // the box's content cannot move the containing block back: it
+        // contributes to no ancestor's used size, only to their scrollable
+        // overflow, which is an output the in-place path compares before it
+        // trusts anything.
         LayoutGoal::Commit {
             content_independent: Size::new(true, true),
         },
@@ -585,13 +589,13 @@ fn absolute_known_dimensions(
 ///
 /// An axis with a definite preferred size takes it clamped by the min/max
 /// sizes, exactly the preferred size the box's own run derives from these
-/// values (`resolve_container_box`). An axis sized from content — `auto`, or a
-/// size the substitution made `auto` — with an anchor-bearing min/max size or
-/// margin is measured with the box's size styles ignored, so none of its
-/// unresolvable reads enter the result, and then fitted and clamped here: the
-/// shrink-to-fit width of CSS 2.1 §10.3.7, `min(max-content, max(min-content,
-/// available))`, and the content height at the used width. Answers which axes
-/// that measured.
+/// values (`resolve_container_box`). An axis sized from content — `auto`, an
+/// intrinsic sizing keyword, or a size the substitution made `auto` — with an
+/// anchor-bearing min/max size or margin is measured with the box's size
+/// styles ignored, so none of its unresolvable reads enter the result, in the
+/// space its keyword asks for ([`content_available_space`]), and then clamped
+/// here; a height is measured at the used width. Returns the goal with content
+/// independence withdrawn on the axes it measured.
 #[allow(
     clippy::too_many_arguments,
     reason = "one step of absolute_layout, consuming its locals"
@@ -638,9 +642,15 @@ fn settle_anchored_axes<T: LayoutTree>(
     }
 
     let mut measured = Size::new(false, false);
+    let content_space = content_available_space(style, values, space);
     if sensitive.width && known.width.is_none() {
-        let available = space.inset_modified_size.width - space.fixed_margin.horizontal_sum();
-        let width = measure_content_width(tree, state, node, parent_size, known.height, available);
+        let input = content_measure(
+            Size::new(None, known.height),
+            parent_size,
+            content_space,
+            RequestedAxis::Horizontal,
+        );
+        let width = tree.compute_layout(state, node, input).size.width;
         known.width = Some(clamp_width(width));
         measured.width = true;
     }
@@ -663,7 +673,7 @@ fn settle_anchored_axes<T: LayoutTree>(
         let input = content_measure(
             Size::new(Some(width), None),
             parent_size,
-            Size::MAX_CONTENT,
+            content_space,
             RequestedAxis::Vertical,
         );
         let height = tree.compute_layout(state, node, input).size.height;
@@ -702,28 +712,50 @@ fn content_measure(
     input
 }
 
-/// The shrink-to-fit width of the box's content in `available`.
-fn measure_content_width<T: LayoutTree>(
-    tree: &T,
-    state: &mut T::State,
-    node: T::NodeId,
-    parent_size: Size<Option<f32>>,
-    height: Option<f32>,
-    available: f32,
-) -> f32 {
-    let known = Size::new(None, height);
-    let mut width = |available_width| {
-        let input = content_measure(
-            known,
-            parent_size,
-            Size::new(available_width, AvailableSpace::MaxContent),
-            RequestedAxis::Horizontal,
-        );
-        tree.compute_layout(state, node, input).size.width
-    };
-    let min_content = width(AvailableSpace::MinContent);
-    let max_content = width(AvailableSpace::MaxContent);
-    max_content.min(min_content.max(available))
+/// The space a content-sized anchored axis is measured in: the same space the
+/// box's own run gets when nothing is anchored — its intrinsic sizing keyword
+/// (`min-content`, `max-content`, `fit-content(<limit>)`), else the
+/// inset-modified containing block — so the keyword, not a formula of its
+/// own, decides the size.
+///
+/// The measurement ignores size styles but not margins: the run still
+/// subtracts the margins it reads from a definite space, and on an anchored
+/// axis it reads their unresolvable form. The space is widened by exactly
+/// that and narrowed by the substituted margins, so the run ends up
+/// subtracting the margins that apply.
+fn content_available_space(
+    style: &impl CoreStyle,
+    values: &GeometryValues<'_>,
+    space: AbsoluteSpace,
+) -> Size<AvailableSpace> {
+    let unresolved = auto_edges_to_zero(resolve_margins(style.margin(), space.parent_size.width));
+    let axis =
+        |size: &StyleSize, basis: Option<f32>, inset_modified: f32, unresolved: f32, used: f32| {
+            match absolute_preferred_available(size, basis)
+                .unwrap_or(AvailableSpace::Definite(inset_modified))
+            {
+                AvailableSpace::Definite(space) => {
+                    AvailableSpace::Definite((space + unresolved - used).max(0.0))
+                }
+                intrinsic => intrinsic,
+            }
+        };
+    Size::new(
+        axis(
+            values.size.width,
+            space.parent_size.width,
+            space.inset_modified_size.width,
+            unresolved.horizontal_sum(),
+            space.fixed_margin.horizontal_sum(),
+        ),
+        axis(
+            values.size.height,
+            space.parent_size.height,
+            space.inset_modified_size.height,
+            unresolved.vertical_sum(),
+            space.fixed_margin.vertical_sum(),
+        ),
+    )
 }
 
 fn resolve_absolute_style(

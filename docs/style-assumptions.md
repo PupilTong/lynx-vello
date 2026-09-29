@@ -1054,8 +1054,10 @@ and §D.16 with what the wire format actually permits.)*
     upstream (`vendor/stylo/style/tests/lynx_feature_off_parity.rs`).
     - **Resolution (§5.1.1).** `hughie` resolves the function
       (`crates/hughie/src/compute/anchor.rs`) for an absolutely positioned
-      box that its containing block's own absolute pass lays out:
-      `position: absolute` whose box parent is its containing block. The
+      box that its containing block's own absolute pass lays out: an
+      `absolute` box, or a `fixed` one, whose box parent establishes its
+      containing block — so a `fixed` box under a transformed parent
+      resolves like `absolute`. The
       host names the target and reports its unrounded border-box size from
       the current pass (`LayoutTree::anchor_size`). The keyword picks the
       anchor's axis: `width`/`height` physically, `block`/`self-block`
@@ -1064,9 +1066,10 @@ and §D.16 with what the wire format actually permits.)*
       left out selects the implicit anchor, which needs `position-anchor`,
       so there is none.
     - **Unresolvable → fallback → initial value.** Every other box — in
-      flow, relatively or stickily positioned, `fixed`, or an `absolute` box
-      the positioned pass places because its parent does not contain it —
-      and an absolutely positioned box with no target take the fallback.
+      flow, relatively or stickily positioned, or a `fixed` (or `absolute`)
+      box the positioned pass places against a containing block that is not
+      its box parent — and an absolutely positioned box with no target take
+      the fallback.
       Without one the declaration is invalid at computed-value time, which
       the engine approximates by using the property's initial value at
       layout time: `auto` for sizes and insets, `none` for max sizes, `0`
@@ -1081,14 +1084,20 @@ and §D.16 with what the wire format actually permits.)*
       same); the last acceptable one in tree order wins. An ancestor is
       never a target: the containing block is the box parent, and §2.3 wants
       a descendant of it. **Not modelled:** §2.3's containing-block-chain
-      clause (an anchor deeper inside a sibling's subtree), `anchor-scope`
+      clause (an anchor deeper inside a sibling's subtree), an absolutely
+      positioned sibling that escapes to an outer containing block (§2.3
+      accepts it; the positioned pass places it only after the query box, so
+      it is rejected as a candidate), `anchor-scope`
       (so nothing is scoped — but since only the containing block's own
       children are candidates, a coordinator nested in another's header sees
       only its own header and toolbar), the top layer, and tree-scoped name
       matching (names compare by identifier; a name from a shadow tree's
       styles is not kept out of the light tree). The lookup is one pass over
-      the containing block's children per function, which the containing
-      block's own run already makes; there is no document-wide index.
+      the containing block's children per function, with no document-wide
+      index, so one commit of a containing block costs anchored boxes ×
+      functions × its children — quadratic in its fan-out when many
+      absolutely positioned children use `anchor-size()`. It is paid per
+      relayout of the containing block, never per frame.
     - **Why the subtree clause is out.** Sizes come from the current pass,
       and the engine lays a query box out again only when its containing
       block runs again. A direct child cannot change size without its parent
@@ -1108,9 +1117,11 @@ and §D.16 with what the wire format actually permits.)*
       moved anchor is a cache miss, not a stale hit. An axis sized from
       content with an anchored limit or margin (`width: auto;
       max-width: anchor-size(--a width)`) is measured with the box's size
-      styles ignored and then fitted — `min(max-content, max(min-content,
-      available))`, or the content height at the used width — and clamped;
-      its committed input then claims no content independence on that axis.
+      styles ignored, in the space its own run would get — the one its
+      intrinsic sizing keyword (`min-content`, `max-content`,
+      `fit-content`) asks for, else the inset-modified containing block, a
+      height at the used width — and then clamped; its committed input then
+      claims no content independence on that axis.
       Two approximations follow: that measurement ignores the *other* axis's
       min/max sizes when that axis is also content-sized, and Flexbox's,
       Grid's and Relative's static position (used only when both insets on

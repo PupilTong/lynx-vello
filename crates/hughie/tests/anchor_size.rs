@@ -629,3 +629,103 @@ fn grid_and_relative_items_take_the_fallback_or_the_initial_value() {
     definite_layout(&tree, relative, 300.0, 200.0);
     assert_eq!(tree.layout(relative_item).size.width, 5.0);
 }
+
+/// The width an absolutely positioned wrapping flex box with a 150px and a
+/// 250px item takes in a 300px-wide containing block, under `style`.
+fn keyword_box_width(anchors: Vec<(&'static str, Size<f32>)>, style: TestStyle) -> f32 {
+    let mut tree = TestTree::default();
+    tree.anchors = anchors;
+    let items = [150.0, 250.0].map(|width| {
+        tree.push_leaf(
+            TestStyle {
+                flex_shrink: nn(0.0),
+                ..fixed_leaf_style(width, 10.0)
+            },
+            Size::new(width, 10.0),
+            None,
+        )
+    });
+    let target = tree.push_flex(
+        absolute(TestStyle {
+            flex_wrap: stylo::computed_values::flex_wrap::T::WRAP,
+            ..style
+        }),
+        items.to_vec(),
+    );
+    let root = flex_container(&mut tree, container_style(), &[target]);
+    definite_layout(&tree, root, 300.0, 200.0);
+    tree.layout(target).size.width
+}
+
+/// An anchored limit or margin on an axis sized by an intrinsic keyword
+/// changes only the limit: the keyword still picks the size, exactly as it
+/// does with the same limit written in pixels. (The items' min-content width
+/// is 250 and their max-content width 400; the wrapping box's own run sizes
+/// `fit-content` in 260px at its widest line, 250.)
+#[test]
+fn an_anchored_axis_keeps_its_intrinsic_sizing_keyword() {
+    let anchor = |width| vec![("--a", Size::new(width, 30.0))];
+    let cases = [
+        (
+            "width: min-content; max-width: 300px",
+            250.0,
+            anchor(300.0),
+            TestStyle {
+                size: Size::new(size_min_content(), size_auto()),
+                max_size: Size::new(
+                    max_anchor("--a", AnchorSizeKeyword::Width, None),
+                    max_none(),
+                ),
+                ..TestStyle::default()
+            },
+            TestStyle {
+                size: Size::new(size_min_content(), size_auto()),
+                max_size: Size::new(max_px(300.0), max_none()),
+                ..TestStyle::default()
+            },
+        ),
+        (
+            "width: max-content; min-width: 40px",
+            400.0,
+            anchor(40.0),
+            TestStyle {
+                size: Size::new(size_max_content(), size_auto()),
+                min_size: Size::new(
+                    size_anchor("--a", AnchorSizeKeyword::Width, None),
+                    size_auto(),
+                ),
+                ..TestStyle::default()
+            },
+            TestStyle {
+                size: Size::new(size_max_content(), size_auto()),
+                min_size: Size::new(size_px(40.0), size_auto()),
+                ..TestStyle::default()
+            },
+        ),
+        (
+            "width: fit-content; margin-left: 40px",
+            250.0,
+            anchor(40.0),
+            TestStyle {
+                size: Size::new(StyleSize::FitContent, size_auto()),
+                margin: Edges {
+                    left: margin_anchor("--a", AnchorSizeKeyword::Width, None),
+                    ..Edges::uniform(margin_px(0.0))
+                },
+                ..TestStyle::default()
+            },
+            TestStyle {
+                size: Size::new(StyleSize::FitContent, size_auto()),
+                margin: Edges {
+                    left: margin_px(40.0),
+                    ..Edges::uniform(margin_px(0.0))
+                },
+                ..TestStyle::default()
+            },
+        ),
+    ];
+    for (case, expected, anchors, anchored, plain) in cases {
+        assert_eq!(keyword_box_width(Vec::new(), plain), expected, "{case}");
+        assert_eq!(keyword_box_width(anchors, anchored), expected, "{case}");
+    }
+}

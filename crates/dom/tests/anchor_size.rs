@@ -462,6 +462,23 @@ fn a_box_placed_by_the_positioned_pass_takes_the_fallback() {
     assert_eq!(page.size(fixed), (5.0, 6.0));
 }
 
+#[test]
+fn a_fixed_box_whose_parent_contains_it_resolves_like_an_absolute_one() {
+    // A `transform` makes the parent the containing block of a `fixed` child,
+    // so the parent's own absolute pass lays the box out; a `fixed` box is
+    // absolutely positioned, and §5.1.1 resolves for it.
+    let (mut page, cb) = anchored_page();
+    page.doc.set_inline(cb, "transform: translateX(0px)");
+    page.el(cb, ".anchor", "");
+    let fixed = page.el(
+        cb,
+        ".abs",
+        "position: fixed; width: anchor-size(--a width, 5px); height: 6px",
+    );
+    page.layout();
+    assert_eq!(page.size(fixed), (40.0, 6.0));
+}
+
 // ---------------------------------------------------------------------------
 // Which element is the target (§2.3, over this engine's subset).
 

@@ -278,9 +278,11 @@ impl<T> LayoutTree for TreeArenas<T> {
     /// css-anchor-position-1 §2.3's target anchor element for `node`, over
     /// the subset this engine resolves (`docs/style-assumptions.md` §28):
     ///
-    /// - The query box is laid out by its containing block's own absolute pass — `position:
-    ///   absolute` whose box parent is its containing block. A box the positioned pass places
-    ///   instead (`fixed`, or an `absolute` box escaping a non-positioned parent) answers `None`:
+    /// - The query box is laid out by its containing block's own absolute pass: an absolutely
+    ///   positioned box — `absolute`, or `fixed` — whose box parent establishes its containing
+    ///   block (a `fixed` box under a transformed parent resolves like `absolute`). A box the
+    ///   positioned pass places against a containing block that is not its box parent (`fixed`
+    ///   under an ordinary parent, or `absolute` escaping a non-positioned one) answers `None`:
     ///   that pass is the rounding tail's, which reaches only boxes whose own subtree moved, so a
     ///   moved anchor would never reach it.
     /// - Candidates are the containing block's box children (with `display: contents` flattened)
@@ -289,10 +291,15 @@ impl<T> LayoutTree for TreeArenas<T> {
     ///   order; the last acceptable one in tree order wins. No ancestor of `node` is a descendant
     ///   of its containing block, so the "nearest ancestor" rule never applies to such a box. Not
     ///   modelled: an anchor deeper in a sibling's subtree (§2.3's containing-block-chain clause),
-    ///   `anchor-scope`, the top layer, and tree-scoped name matching.
+    ///   an absolutely positioned child that escapes to an outer containing block (§2.3 accepts it;
+    ///   it is placed only after `node`), `anchor-scope`, the top layer, and tree-scoped name
+    ///   matching.
     ///
-    /// Cost: one pass over the containing block's children per function,
-    /// which the containing block's own run already makes. It reads sizes
+    /// Cost: one pass over the containing block's children per function, so
+    /// one commit of the containing block costs anchored boxes × functions ×
+    /// its children — quadratic in its fan-out when many absolutely
+    /// positioned children use `anchor-size()`. It is paid per relayout of the
+    /// containing block, never per frame. It reads sizes
     /// this pass wrote, which is why the subtree clause is out: a mutation
     /// under a sibling can relayout in place (or stop at a `contain: strict`
     /// sibling) without that sibling's own size changing, while an anchor
@@ -330,8 +337,8 @@ impl<T> LayoutTree for TreeArenas<T> {
                 // — earlier in tree order — has a size yet; §2.3 says the
                 // same.
                 PositionProperty::Absolute if !before_query => {}
-                // Placed by the positioned pass, against another containing
-                // block.
+                // Placed by the positioned pass, against an outer containing
+                // block and after `node`. §2.3 would accept it; not modelled.
                 PositionProperty::Fixed => {}
                 _ => target = Some(child),
             }
