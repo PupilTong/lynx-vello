@@ -820,13 +820,24 @@ and §D.16 with what the wire format actually permits.)*
       `Document::scroll_to_with` (CSSOM-View `scrollTo({behavior})`, which is
       what `<viewpager>`'s `selectTab` calls). There is still no
       `scroll-behavior` property.
-    - **`scroll-capture: auto | nearest`** is lynx-vello's own property, with
-      no W3C or Lynx counterpart (the fork declares it `lynx_only`). `nearest`
-      on a scroll container hands a gesture that starts in it to the nearest
-      scroll container above it first; the container itself moves only once
-      that ancestor cannot. It reorders the chain and nothing else: reach is
-      decided first (so `nearest` beside `contain` stays inside), the walk
-      continues outward past the ancestor, and it nests outward-first.
+    - **`scroll-capture: auto | nearest [ forward | backward ]?`** is
+      lynx-vello's own property, with no W3C or Lynx counterpart (the fork
+      declares it `lynx_only`). `nearest` on a scroll container hands a
+      gesture that starts in it to the nearest scroll container above it
+      first; the container itself moves only once that ancestor cannot. A
+      direction narrows that to one sign of delta: `nearest forward` defers
+      only a delta that increases the offset on the axis being walked,
+      `nearest backward` only one that decreases it, and the other direction
+      keeps the inner-first order; `nearest` alone is both (user ruling
+      2026-09-29, the per-direction spelling `<scroll-coordinator>` needs:
+      forward folds the header first, backward unfolds it last). The
+      direction is read per axis and per step — an axis the step does not
+      move keeps the inner-first order, and each frame of a fling is a step
+      of its own, so a forward fling folds the header and then carries on
+      into the content. It reorders the chain and nothing else: reach is
+      decided first (so `nearest` beside `contain` stays inside, whatever the
+      direction), the walk continues outward past the ancestor, and it nests
+      outward-first.
     - **Scroll snapping**: `scroll-snap-type`, `scroll-snap-align`,
       `scroll-snap-stop`, `scroll-padding` and `scroll-margin`, ported to servo
       in the fork behind the experimental pref like the other gecko-only

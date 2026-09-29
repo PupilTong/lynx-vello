@@ -45,13 +45,26 @@
 //!   [`ScrollBox::bounce`] axes: the runtime's painter reads them off the committed frame and
 //!   stretches the boundary there. Nothing in this crate stretches — a programmatic scroll clamps.
 //! - **`scroll-capture`** is this engine's own, with no W3C or Lynx counterpart, and it changes the
-//!   *order*, not the reach. `nearest` on a container hands a gesture that starts in it to the
-//!   nearest scroll container above it first; this container moves only once that ancestor cannot
-//!   (it is at its boundary in that direction, or does not scroll that axis at all). The chain then
-//!   continues outward past the ancestor as usual. It nests: `nearest` on both of two nested
-//!   containers visits the grandparent, then the parent, then the innermost. Reach is decided
-//!   before order, so `nearest` beside `contain` on the same container keeps the gesture inside it
-//!   — the ancestor it would have deferred to is exactly what `contain` fences off.
+//!   *order*, not the reach: `auto | nearest [ forward | backward ]?`. `nearest` on a container
+//!   hands a gesture that starts in it to the nearest scroll container above it first; this
+//!   container moves only once that ancestor cannot (it is at its boundary in that direction, or
+//!   does not scroll that axis at all). The chain then continues outward past the ancestor as
+//!   usual. It nests: `nearest` on both of two nested containers visits the grandparent, then the
+//!   parent, then the innermost. A direction narrows it: `nearest forward` defers only a delta that
+//!   increases the offset on the axis being walked, `nearest backward` only one that decreases it;
+//!   the other direction keeps the inner-first order. `nearest` alone is both. This is how
+//!   `<scroll-coordinator>` folds its header before its content scrolls, and unfolds it after.
+//!   Reach is decided before order, so `nearest` beside `contain` on the same container keeps the
+//!   gesture inside it — the ancestor it would have deferred to is exactly what `contain` fences
+//!   off.
+//!
+//! Order is decided **per axis and per step**, from the sign of that axis's
+//! delta ([`chain_order`], [`chain_orders`]): a link defers only for a delta
+//! it [defers](ScrollCapture::defers), and an axis the step does not move
+//! keeps the inner-first order. A fling is a step per frame, so each of its
+//! frames is ordered afresh. When the two axes' orders coincide the walk is
+//! one walk over both; when they differ, [`drive_chain`] walks x in its
+//! order and then y in its own.
 //!
 //! Where each step lands is [`snap`]'s: css-scroll-snap-1 positions per
 //! container, applied as a wheel tick lands and when a drag ends. Where a
@@ -79,9 +92,8 @@
 use euclid::default::{Size2D, Vector2D};
 use hughie::style::PositionProperty;
 use smallvec::SmallVec;
-use stylo::computed_values::scroll_capture;
 use stylo::properties::ComputedValues;
-use stylo::values::computed::OverscrollBehavior;
+use stylo::values::computed::{OverscrollBehavior, ScrollCapture as ComputedScrollCapture};
 
 use crate::NodeId;
 use crate::layout::{
@@ -125,9 +137,36 @@ pub enum ScrollCapture {
     /// hands the remainder outward.
     #[default]
     Auto,
-    /// The nearest scroll container above this one goes first; this one
-    /// moves only once that ancestor cannot.
+    /// `nearest`: the nearest scroll container above this one goes first,
+    /// in either direction; this one moves only once that ancestor cannot.
     Nearest,
+    /// `nearest forward`: the ancestor goes first for a delta that
+    /// increases the offset on the axis being walked; a decreasing one keeps
+    /// the inner-first order.
+    NearestForward,
+    /// `nearest backward`: the ancestor goes first for a delta that
+    /// decreases the offset on the axis being walked; an increasing one
+    /// keeps the inner-first order.
+    NearestBackward,
+}
+
+impl ScrollCapture {
+    /// Whether this container hands a delta of `sign` on one axis to the
+    /// scroll container above it first: a positive delta is forward, a
+    /// negative one backward, and a zero (or NaN) delta has no direction and
+    /// is never deferred, so an axis the step does not move keeps the
+    /// inner-first order.
+    #[must_use]
+    pub fn defers(self, sign: f32) -> bool {
+        let forward = sign > 0.0;
+        let backward = sign < 0.0;
+        match self {
+            Self::Auto => false,
+            Self::Nearest => forward || backward,
+            Self::NearestForward => forward,
+            Self::NearestBackward => backward,
+        }
+    }
 }
 
 /// One scroll container's part in a chain walk: what it may consume, what
@@ -144,19 +183,21 @@ pub struct ChainLink {
     pub capture: ScrollCapture,
 }
 
-/// The order a chain of links is visited in, as indices into `links`.
+/// The order a chain of links is visited in on one axis whose delta has
+/// `sign`, as indices into `links`.
 ///
 /// `links` is nearest-first: index 0 is the container the gesture starts in
 /// and each next index is the scroll container above the previous one. A
-/// [`ScrollCapture::Nearest`] link moves to directly after its parent, and
-/// the placement runs from the outermost link inward so a nested `nearest`
-/// resolves against a parent that has already found its own place.
+/// link whose `scroll-capture` [defers](ScrollCapture::defers) `sign` moves
+/// to directly after its parent, and the placement runs from the outermost
+/// link inward so a nested `nearest` resolves against a parent that has
+/// already found its own place. Every other link keeps its inner-first
+/// place.
 #[must_use]
-pub fn chain_order(links: &[ChainLink]) -> SmallVec<[usize; 4]> {
+pub fn chain_order(links: &[ChainLink], sign: f32) -> SmallVec<[usize; 4]> {
     let mut order = SmallVec::new();
     for index in (0..links.len()).rev() {
-        let defers = links[index].capture == ScrollCapture::Nearest && index + 1 < links.len();
-        if defers {
+        if links[index].capture.defers(sign) && index + 1 < links.len() {
             let parent_at = order
                 .iter()
                 .position(|&placed| placed == index + 1)
@@ -167,6 +208,24 @@ pub fn chain_order(links: &[ChainLink]) -> SmallVec<[usize; 4]> {
         }
     }
     order
+}
+
+/// A chain walk's visiting order on each axis, as indices into the links.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChainOrders {
+    pub x: SmallVec<[usize; 4]>,
+    pub y: SmallVec<[usize; 4]>,
+}
+
+/// The order a chain of links is visited in for `delta`, per axis: each
+/// axis's [`chain_order`] for the sign of its own delta. An axis with a zero
+/// delta keeps the inner-first order.
+#[must_use]
+pub fn chain_orders(links: &[ChainLink], delta: Vector2D<f32>) -> ChainOrders {
+    ChainOrders {
+        x: chain_order(links, delta.x),
+        y: chain_order(links, delta.y),
+    }
 }
 
 /// How far up the chain each axis's delta may travel: the number of leading
@@ -182,48 +241,66 @@ fn chain_reach(links: &[ChainLink]) -> (usize, usize) {
     (reach(|link| link.chains.x), reach(|link| link.chains.y))
 }
 
-/// Drives `delta` through a chain of links, in [`chain_order`] and within
+/// Drives `delta` through a chain of links, in [`chain_orders`] and within
 /// each axis's `overscroll-behavior` reach, calling `scroll` with a link's
 /// index and the delta it is admitted; `scroll` applies what it can and
 /// returns the delta it absorbed, which is what stops chaining on (a
 /// snapped step can absorb more than it moved — see [`resolve_step`]).
 /// Returns the index of the first link that absorbed anything and the
 /// total absorbed, or `None` when nothing did.
+///
+/// When both axes visit the links in the same order it is one walk and
+/// `scroll` sees both axes at once. When the orders differ — a step that
+/// moves one axis only, past a `nearest` link — the x axis is walked in its
+/// order and then the y axis in its own, and `scroll` sees a single-axis
+/// delta; "first" is then the first link to absorb in that sequence. Two
+/// walks rather than an interleaving, because the axes are independent —
+/// neither walk reads what the other absorbed — and a link visited at
+/// different positions on the two axes has no single place to receive both.
 pub fn drive_chain(
     links: &[ChainLink],
     delta: Vector2D<f32>,
     mut scroll: impl FnMut(usize, Vector2D<f32>) -> Vector2D<f32>,
 ) -> Option<(usize, Vector2D<f32>)> {
     let (reach_x, reach_y) = chain_reach(links);
-    let mut remaining = delta;
+    let orders = chain_orders(links, delta);
     let mut first = None;
     let mut consumed = Vector2D::zero();
-    for index in chain_order(links) {
-        let link = links[index];
-        let admitted = Vector2D::new(
-            if link.user_scrollable.x && index < reach_x {
-                remaining.x
-            } else {
-                0.0
-            },
-            if link.user_scrollable.y && index < reach_y {
-                remaining.y
-            } else {
-                0.0
-            },
-        );
-        if admitted == Vector2D::zero() {
-            continue;
+    let mut walk = |order: &[usize], delta: Vector2D<f32>| {
+        let mut remaining = delta;
+        for &index in order {
+            let link = links[index];
+            let admitted = Vector2D::new(
+                if link.user_scrollable.x && index < reach_x {
+                    remaining.x
+                } else {
+                    0.0
+                },
+                if link.user_scrollable.y && index < reach_y {
+                    remaining.y
+                } else {
+                    0.0
+                },
+            );
+            if admitted == Vector2D::zero() {
+                continue;
+            }
+            let absorbed = scroll(index, admitted);
+            if absorbed != Vector2D::zero() {
+                first.get_or_insert(index);
+                consumed += absorbed;
+                remaining -= absorbed;
+            }
+            if remaining == Vector2D::zero() {
+                break;
+            }
         }
-        let absorbed = scroll(index, admitted);
-        if absorbed != Vector2D::zero() {
-            first.get_or_insert(index);
-            consumed += absorbed;
-            remaining -= absorbed;
-        }
-        if remaining == Vector2D::zero() {
-            break;
-        }
+    };
+    if orders.x == orders.y {
+        walk(&orders.x, delta);
+    } else {
+        walk(&orders.x, Vector2D::new(delta.x, 0.0));
+        walk(&orders.y, Vector2D::new(0.0, delta.y));
     }
     first.map(|index| (index, consumed))
 }
@@ -304,8 +381,10 @@ fn bouncing_axes(style: &ComputedValues) -> ScrollAxes {
 #[must_use]
 fn scroll_capture(style: &ComputedValues) -> ScrollCapture {
     match style.clone_scroll_capture() {
-        scroll_capture::T::Auto => ScrollCapture::Auto,
-        scroll_capture::T::Nearest => ScrollCapture::Nearest,
+        ComputedScrollCapture::Auto => ScrollCapture::Auto,
+        ComputedScrollCapture::Nearest => ScrollCapture::Nearest,
+        ComputedScrollCapture::NearestForward => ScrollCapture::NearestForward,
+        ComputedScrollCapture::NearestBackward => ScrollCapture::NearestBackward,
     }
 }
 
@@ -807,7 +886,7 @@ mod tests {
                 .map(|&capture| link(capture, ScrollAxes::BOTH))
                 .collect::<Vec<_>>()
         };
-        let order = |captures: &[ScrollCapture]| chain_order(&links(captures)).to_vec();
+        let order = |captures: &[ScrollCapture]| chain_order(&links(captures), 1.0).to_vec();
         assert_eq!(order(&[Auto, Auto, Auto]), [0, 1, 2]);
         assert_eq!(order(&[Nearest, Auto, Auto]), [1, 0, 2]);
         assert_eq!(order(&[Nearest, Nearest, Auto]), [2, 1, 0]);
@@ -989,5 +1068,137 @@ mod tests {
         let outer_slot = slot_of(outer);
         assert_eq!(outer_slot.capture, ScrollCapture::Auto);
         assert_eq!(outer_slot.chains, ScrollAxes::BOTH);
+    }
+    #[test]
+    fn scroll_capture_defers_the_directions_it_names() {
+        use ScrollCapture::{Auto, Nearest, NearestBackward, NearestForward};
+        let defers =
+            |capture: ScrollCapture| [1.0, -1.0, 0.0, f32::NAN].map(|sign| capture.defers(sign));
+        assert_eq!(defers(Auto), [false, false, false, false]);
+        assert_eq!(defers(Nearest), [true, true, false, false]);
+        assert_eq!(defers(NearestForward), [true, false, false, false]);
+        assert_eq!(defers(NearestBackward), [false, true, false, false]);
+    }
+
+    #[test]
+    fn nested_nearest_forward_goes_outermost_first_forward_only() {
+        use ScrollCapture::{Auto, NearestForward};
+        let links = [
+            link(NearestForward, ScrollAxes::BOTH),
+            link(NearestForward, ScrollAxes::BOTH),
+            link(Auto, ScrollAxes::BOTH),
+        ];
+        assert_eq!(chain_order(&links, 1.0).to_vec(), [2, 1, 0]);
+        assert_eq!(chain_order(&links, -1.0).to_vec(), [0, 1, 2]);
+        assert_eq!(chain_order(&links, 0.0).to_vec(), [0, 1, 2]);
+    }
+
+    #[test]
+    fn each_axis_orders_the_chain_by_its_own_delta() {
+        let links = [
+            link(ScrollCapture::NearestForward, ScrollAxes::BOTH),
+            link(ScrollCapture::Auto, ScrollAxes::BOTH),
+        ];
+        let orders = chain_orders(&links, Vector2D::new(0.0, 10.0));
+        assert_eq!(
+            orders.x.to_vec(),
+            [0, 1],
+            "an unmoved axis keeps the inner-first order"
+        );
+        assert_eq!(orders.y.to_vec(), [1, 0]);
+        let orders = chain_orders(&links, Vector2D::new(-10.0, 10.0));
+        assert_eq!(orders.x.to_vec(), [0, 1], "backward is not deferred");
+        assert_eq!(orders.y.to_vec(), [1, 0]);
+    }
+
+    #[test]
+    fn differing_axis_orders_walk_each_axis_on_its_own() {
+        let links = [
+            link(ScrollCapture::NearestForward, ScrollAxes::BOTH),
+            link(ScrollCapture::Auto, ScrollAxes::BOTH),
+        ];
+        let mut visited = Vec::new();
+        let result = drive_chain(&links, Vector2D::new(-10.0, 10.0), |index, admitted| {
+            visited.push((index, admitted));
+            admitted * 0.5
+        });
+        assert_eq!(
+            visited,
+            [
+                (0, Vector2D::new(-10.0, 0.0)),
+                (1, Vector2D::new(-5.0, 0.0)),
+                (1, Vector2D::new(0.0, 10.0)),
+                (0, Vector2D::new(0.0, 5.0)),
+            ],
+            "x walks inner first, then y walks the parent first, each with its own axis only",
+        );
+        assert_eq!(result, Some((0, Vector2D::new(-7.5, 7.5))));
+    }
+
+    #[test]
+    fn nearest_forward_hands_only_forward_deltas_to_the_ancestor() {
+        let (mut document, outer, inner) =
+            nested_scrollers_with(".inner { scroll-capture: nearest forward; }");
+        assert_eq!(
+            document.scroll_chain(inner, Vector2D::new(0.0, 50.0)),
+            Some((outer, Vector2D::new(0.0, 50.0))),
+        );
+        assert_eq!(document.scroll_offset(outer), Vector2D::new(0.0, 50.0));
+        assert_eq!(document.scroll_offset(inner), Vector2D::zero());
+
+        document.scroll_to(inner, Vector2D::new(0.0, 100.0));
+        assert_eq!(
+            document.scroll_chain(inner, Vector2D::new(0.0, -120.0)),
+            Some((inner, Vector2D::new(0.0, -120.0))),
+            "backward is inner first: the inner empties, then the ancestor takes the rest",
+        );
+        assert_eq!(document.scroll_offset(inner), Vector2D::zero());
+        assert_eq!(document.scroll_offset(outer), Vector2D::new(0.0, 30.0));
+    }
+
+    #[test]
+    fn nearest_backward_is_the_mirror() {
+        let (mut document, outer, inner) =
+            nested_scrollers_with(".inner { scroll-capture: nearest backward; }");
+        assert_eq!(
+            document.scroll_chain(inner, Vector2D::new(0.0, 50.0)),
+            Some((inner, Vector2D::new(0.0, 50.0))),
+        );
+        assert_eq!(document.scroll_offset(outer), Vector2D::zero());
+
+        document.scroll_to(outer, Vector2D::new(0.0, 100.0));
+        assert_eq!(
+            document.scroll_chain(inner, Vector2D::new(0.0, -20.0)),
+            Some((outer, Vector2D::new(0.0, -20.0))),
+        );
+        assert_eq!(document.scroll_offset(outer), Vector2D::new(0.0, 80.0));
+        assert_eq!(document.scroll_offset(inner), Vector2D::new(0.0, 50.0));
+    }
+
+    #[test]
+    fn a_hidden_ancestor_is_admitted_nothing_whatever_the_direction() {
+        let (mut document, outer, inner) = nested_scrollers_with(
+            ".inner { scroll-capture: nearest forward; } .outer { overflow-y: hidden; }",
+        );
+        assert_eq!(
+            document.scroll_chain(inner, Vector2D::new(0.0, 50.0)),
+            Some((inner, Vector2D::new(0.0, 50.0))),
+        );
+        assert_eq!(document.scroll_offset(outer), Vector2D::zero());
+    }
+
+    #[test]
+    fn the_published_slot_carries_the_capture_direction() {
+        let (mut document, _outer, inner) =
+            nested_scrollers_with(".inner { scroll-capture: nearest backward; }");
+        let frame = document.commit();
+        let slot = frame
+            .scroll_slots()
+            .iter()
+            .find(|slot| slot.node == inner)
+            .copied()
+            .expect("a scroll container has a slot");
+        assert_eq!(slot.capture, ScrollCapture::NearestBackward);
+        assert_eq!(slot.link().capture, ScrollCapture::NearestBackward);
     }
 }
