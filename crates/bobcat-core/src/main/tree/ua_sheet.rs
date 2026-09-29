@@ -62,12 +62,20 @@ impl Default for PageConfig {
 /// `min-height: 0`, and `overflow: clip`. `clip` is not a scroll container,
 /// so a clipped box neither scrolls nor gets its automatic minimum size
 /// zeroed by the overflow — the explicit `min-width`/`min-height` are what do
-/// that. `defaultOverflowVisible` releases the non-scrolling containers —
-/// `page`, `view` and the two blur-view tags — back to `visible`, the way
-/// web-core's `[lynx-default-overflow-visible=true] x-view` releases `x-view`
-/// alone; a scroller carries its own axes regardless, and a `list-item` stays
-/// clipped — by this `clip` and by the paint containment [`super::list`]
-/// gives it.
+/// that. `defaultOverflowVisible` releases `view` and the two blur-view tags
+/// back to `visible`, the way web-core's
+/// `[lynx-default-overflow-visible=true] x-view` releases `x-view` alone; a
+/// scroller carries its own axes regardless, and a `list-item` stays clipped —
+/// by this `clip` and by the paint containment [`super::list`] gives it.
+///
+/// **`page` is not among them.** Native reads the switch in `ViewElement`
+/// alone (`SetDefaultOverflow(element_manager_->GetDefaultOverflowVisible())`,
+/// `core/renderer/dom/fiber/view_element.cc`) and pins the page unconditionally
+/// in `PageElement` — `SetDefaultOverflow(false)` under the comment "make sure
+/// page's default overflow is hidden" (`.../page_element.cc`). web-core names
+/// only `x-view` in its release selector, so its page clips too. A card that
+/// asks for visible overflow is asking it of its views, not of the window it
+/// is drawn in.
 ///
 /// The blur-view tags are here because native's `LynxUIBlurView` extends
 /// `LynxUIView`: a blur view is a view in everything layout can see, and its
@@ -109,7 +117,7 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
         String::new()
     };
     let overflow = if config.default_overflow_visible {
-        format!("page, view, {BLUR_VIEW_TAG}, {X_BLUR_VIEW_TAG} {{ overflow: visible; }}\n")
+        format!("view, {BLUR_VIEW_TAG}, {X_BLUR_VIEW_TAG} {{ overflow: visible; }}\n")
     } else {
         String::new()
     };
@@ -307,11 +315,17 @@ mod tests {
     }
 
     /// Every box clips by default (`overflow: clip`, not a scroll container);
-    /// the switch releases the containers that are not scrollers — `page`,
-    /// `view` and the two blur-view tags, which native treats as views
-    /// (`LynxUIBlurView` extends `LynxUIView`) — and nothing else.
+    /// the switch releases the containers that are not scrollers — `view` and
+    /// the two blur-view tags, which native treats as views (`LynxUIBlurView`
+    /// extends `LynxUIView`) — and nothing else.
+    ///
+    /// `page` is deliberately not among them: native pins it in
+    /// `PageElement::PageElement` with `SetDefaultOverflow(false)` and reads
+    /// the switch in `ViewElement` alone, and web-core's release selector
+    /// names only `x-view`. A card asking for visible overflow asks it of its
+    /// views, not of the window it is drawn in.
     #[test]
-    fn the_overflow_page_config_switch_skips_the_scrollers() {
+    fn the_overflow_page_config_switch_skips_the_scrollers_and_the_page() {
         for (visible, expected) in [(true, Overflow::Visible), (false, Overflow::Clip)] {
             let mut document = with_config(PageConfig {
                 default_overflow_visible: visible,
@@ -326,8 +340,8 @@ mod tests {
 
             assert_eq!(
                 overflow(&document, document.document_element().id()),
-                (expected, expected),
-                "{visible}"
+                (Overflow::Clip, Overflow::Clip),
+                "the page clips whatever the switch says: {visible}"
             );
             for (tag, view) in views {
                 assert_eq!(
@@ -354,7 +368,7 @@ mod tests {
     }
 
     /// The whole rule `defaultOverflowVisible` gates, spelled out once.
-    const OVERFLOW_RULE: &str = "page, view, blur-view, x-blur-view { overflow: visible; }";
+    const OVERFLOW_RULE: &str = "view, blur-view, x-blur-view { overflow: visible; }";
 
     #[test]
     fn default_config_is_linear_and_overflow_visible() {

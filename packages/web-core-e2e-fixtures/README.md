@@ -1,0 +1,91 @@
+# web-core-e2e-fixtures
+
+`lynx-stack`'s web-core end-to-end cards, vendored as ReactLynx source and
+compiled here for the engine version this repository targets.
+
+The cards come from `packages/web-platform/web-core-e2e/tests/reactlynx` and
+keep their Apache-2.0 headers; `NOTICE.lynx-stack` and `LICENSE.lynx-stack`
+carry the notice, as they do for `packages/reactlynx-test-fixtures`. Playwright's
+screenshots of web-core rendering these same cards stay upstream — the census
+reads them from a `lynx-stack` checkout — so this package holds sources and a
+build, never goldens.
+
+## Why vendor them rather than build them upstream
+
+ReactLynx picks its lazy-bundle implementation at compile time. Only
+`engineVersion` 3.9 and above compile against `lynx.fetchBundle`; below that the
+card calls `__QueryComponent`, which this engine does not implement and, by the
+scope decision, will not. Upstream's own `dist/` is built without an
+`engineVersion`, so its whole `basic-lazy-component-*` family exercises a path
+this engine has no intention of serving. Compiled here at `4.1.0`, the same
+sources exercise the path it does.
+
+The cards, their CSS and their assets are otherwise upstream's, with two
+rewrites applied to the vendored text by user ruling on 2026-09-25:
+
+- **`direction: lynx-rtl` becomes `direction: rtl`** (24 files). `lynx-rtl` is
+  a value the fork's grammar rejects, so upstream's own spelling left every
+  right-to-left case testing nothing here. The standard value is what this
+  engine implements.
+- **`<x-text>` becomes `<text>`** (5 files). `x-text` is web-core's DOM name
+  for the Lynx tag; written literally in JSX it reaches this engine as a tag
+  no sheet has a rule for, and the run disappears. `<x-textarea>` is a
+  different tag and is untouched.
+
+Both are recorded here rather than absorbed silently, because a re-sync from
+upstream will bring the original spellings back.
+
+## Building
+
+```sh
+pnpm --filter web-core-e2e-fixtures build          # every group
+node scripts/build.js default                      # one group
+E2E_GROUP=default npx rsbuild build                # one group, directly
+```
+
+Output is `dist/<case>.web.bundle`, the layout upstream's goldens were taken
+against and the one `.github/scripts/web-core-census.py` reads. Two families
+sit elsewhere:
+
+- the three `config-splitchunk-*` cards and `config-mode-dev-with-all-in-one`
+  write into `dist/<case>/`, because they load further chunks by relative path;
+- `config-lazy-component-*` writes into `dist/containers/`. Those are
+  lazy-bundle containers rather than cards — they carry no `lepusCode.root`,
+  and upstream's spec never opens one — so keeping them out of `dist/`'s top
+  level is what makes "every `dist/*.web.bundle`" mean "every page".
+
+Cards reach their own bitmaps and fonts through `file:` URLs pointing into this
+`dist/`, which the engine's resource transport reads directly — upstream points
+the same setting at its dev server. Nothing has to be served for a card to
+resolve its assets, and because `dist/` is never committed, the absolute path
+baked into a bundle belongs to the machine that built it.
+
+This build is not part of `pnpm --filter reactlynx-test-fixtures build`, which
+the Rust tests need before every `cargo` run. Hundreds of cards are minutes of
+work, and one suite reads them:
+`crates/bobcat-source/tests/web_core_e2e.rs`, which holds each card to a
+rendering someone read the case for and judged right. CI builds the corpus in
+the job that runs tests and nowhere else.
+
+## `groups.js`
+
+Upstream expresses per-case compiler configuration as 21 rspeedy config files:
+six that glob a family, fifteen that sit beside a single case. This repository
+builds ReactLynx with Rsbuild directly, so that information lives in
+`groups.js` as one entry per distinct configuration, matched by case name —
+`enableCSSSelector: false`, `enableRemoveCSSScope: false`,
+`experimental_isLazyBundle: true`, the two `enableCSSInheritance` variants, the
+split-chunk presets, and the development-mode card whose asset prefix points at
+a host that does not resolve.
+
+**When re-syncing `src/` from upstream, re-read those config files.** A case
+whose family moved would otherwise compile with the wrong switches, and the
+census would blame the engine for it.
+
+## What is not built
+
+`external-bundle` needs `external-libs/greeting`, an external bundle upstream
+builds with `@lynx-js/lynx-bundle-rslib-config` and serves from its own
+`resources/`. That library is not vendored here, so the card's source is
+present and unbuilt. It is the one card in the corpus that exercises
+`lynx.fetchBundle` against a foreign container rather than a lazy child.
