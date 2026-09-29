@@ -1620,11 +1620,18 @@ interface InvokeResult {
 /**
  * Runs one UI method on one element and shapes its answer.
  *
- * The host dispatches by name and answers text, or null for a name it has no
- * method for — which is code 3, `METHOD_NOT_FOUND`, web-core's code rather
- * than native's generic 1. `boundingClientRect`, the one method there is,
- * answers four numbers: `left`, `top`, `width`, `height`. `right` and
- * `bottom` are derived here rather than sent, because they are sums.
+ * The host dispatches by name — and by tag, for a method one component
+ * owns — and answers a status code, or its data as text. A name it has no
+ * method for is code 3, `METHOD_NOT_FOUND`, web-core's code rather than
+ * native's generic 1; params the method refuses are code 4,
+ * `PARAM_INVALID`; a method with nothing to report answers code 0 and no
+ * `data`. `boundingClientRect`, the one method with data, answers four
+ * numbers: `left`, `top`, `width`, `height`. `right` and `bottom` are
+ * derived here rather than sent, because they are sums.
+ *
+ * `params` crosses as JSON text. A value JSON cannot carry — a cycle, a
+ * BigInt — crosses as `null`, which a method that reads params refuses
+ * and one that does not never notices.
  *
  * `id` and `dataset` ride along as native does (web-core reports the id
  * only): `id` is the attribute, empty when the element carries none, the way
@@ -1638,10 +1645,16 @@ interface InvokeResult {
  * `__FlushElementTree`, which is also the order ReactLynx's
  * `Element.invoke` uses.
  */
-function invokeUIMethod(handle: Handle, method: string): InvokeResult {
-  const answer = callElementMethod(nodeIdOf(handle), method);
-  if (answer === null) {
-    return { code: 3, data: undefined };
+function invokeUIMethod(handle: Handle, method: string, params: unknown): InvokeResult {
+  let text: string;
+  try {
+    text = JSON.stringify(params ?? {}) ?? "null";
+  } catch {
+    text = "null";
+  }
+  const answer = callElementMethod(nodeIdOf(handle), method, text);
+  if (typeof answer === "number") {
+    return { code: answer, data: undefined };
   }
   const [left = 0, top = 0, width = 0, height = 0] = answer
     .split(",")
@@ -1662,14 +1675,16 @@ function invokeUIMethod(handle: Handle, method: string): InvokeResult {
 }
 
 /**
- * The MTS UI-method call. `params` is accepted and ignored: no method this
- * engine has reads one, and the options `boundingClientRect` takes on the
- * platforms — `relativeTo`, `androidEnableTransformProps`,
+ * The MTS UI-method call. `params` goes to the method as JSON text; see
+ * `invokeUIMethod`. `boundingClientRect` reads none of it: the options it
+ * takes on the platforms — `relativeTo`, `androidEnableTransformProps`,
  * `iOSEnableAnimationProps` — each name behavior this engine does not have.
  *
  * The callback runs synchronously inside the call, exactly once, as
  * web-core's does: the answer is already in hand when the host returns, and
- * a card that measures and then acts in the same job depends on it.
+ * a card that measures and then acts in the same job depends on it. A
+ * `selectTab` answers as soon as the scroll is requested, not when a smooth
+ * one ends, as web-core's does.
  */
 export function __InvokeUIMethod(
   element: unknown,
@@ -1677,8 +1692,7 @@ export function __InvokeUIMethod(
   params: unknown,
   callback: (result: InvokeResult) => void,
 ): undefined {
-  void params;
-  callback(invokeUIMethod(element as Handle, String(method)));
+  callback(invokeUIMethod(element as Handle, String(method), params));
   return undefined;
 }
 
@@ -1765,7 +1779,8 @@ export function __BobcatQueryNodes(request: NodeQueryRequest) {
     // The reply is the bare status, not the `{status, data}` pair the node
     // operations answer with; the BTS facade reads `code` and `data` off it.
     if (code) return status;
-    return invokeUIMethod(elements[0]!, String((params as { method: unknown }).method));
+    const { method, params: methodParams } = params as { method: unknown; params: unknown };
+    return invokeUIMethod(elements[0]!, String(method), methodParams);
   }
   if (operation === "setNativeProps") {
     if (code || params === null || typeof params !== "object" || Array.isArray(params)) return;

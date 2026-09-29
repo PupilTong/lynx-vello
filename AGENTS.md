@@ -1236,7 +1236,10 @@ the boundary's value type carries no array: `attributeNames` and
 the latter a flat name-then-value sequence; `childElementIds` and
 `queryElementIds` as comma-joined ids, and `callElementMethod`'s
 `boundingClientRect` as the four comma-joined numbers `left`, `top`, `width`
-and `height` — none of which needs a length prefix.
+and `height` — none of which needs a length prefix. `callElementMethod`
+answers a number instead when the method has no data: the status code, `0`
+for a success, `3` for no such method, `4` for params it refused; the params
+themselves cross as JSON text.
 
 Each call is a plain owner-thread mutation, and `__FlushElementTree` runs the
 style + layout + paint commit and publishes one immutable `Arc<CommittedFrame>`
@@ -1281,9 +1284,10 @@ every ReactLynx Snapshot constructor except `__CreateFrame`; all six tree
 mutations; the properties and queries a Snapshot's `create`/`update` functions
 write through and read back, among them `__SetInlineStyles` and the name-based
 `__AddInlineStyle`, with `__SetCSSId` accepted and ignored; the readback pair
-`__InvokeUIMethod`, whose one UI method is `boundingClientRect`, and
-`__GetComputedStyleByKey`, neither of which commits anything — both report the
-last completed pass and leave the decision to flush to the caller; the event
+`__InvokeUIMethod`, whose UI methods are `boundingClientRect` and a pager's
+`selectTab`, and `__GetComputedStyleByKey`, neither of which commits anything
+— both read the last completed pass and leave the decision to flush to the
+caller; the event
 registration and propagation members, `__AddEvent` and `__AddEventListener`
 included; `__CreateList` with `__UpdateListCallbacks`; and
 `__FlushElementTree`. Everything else is not implemented, `__CreateFrame` and
@@ -1413,7 +1417,10 @@ reflection and its UA box), `tree::scroll_container` (`scroll-view` and
 `list` as scroll containers — which axis scrolls, which one clips, and which
 way the subtree stacks, from `web-elements`' own `scroll-view.css` and
 `x-list.css`; `enable-scroll="false"` leaves the box a scroll container only
-script can move), and `tree::blur_view` (`blur-radius` reflected into a
+script can move), `tree::viewpager` (`viewpager`/`x-viewpager-ng` as a
+horizontal scroll container that snaps page by page, its pages' row pinned in
+the cascade, and the `selectTab` UI method the runtime dispatches by tag
+name; no component), and `tree::blur_view` (`blur-radius` reflected into a
 `backdrop-filter: blur()` presentational hint, under both the native tag
 `blur-view` and web-core's `x-blur-view`, as a CSS length rather than
 web-core's `parseFloat` — the one tag module with no UA rules of its own,
@@ -2032,9 +2039,9 @@ over the existing Worker messages; MTS resolves those through the document's
 selector engine, including the query root, and returns fields/path data, while
 `setNativeProps` applies CSS/attributes and commits before the next request.
 `invoke` answers `boundingClientRect` — the last layout pass's border box,
-plus the element's `id` and `dataset` as native reports them — and fails
-every other method with code 3, `METHOD_NOT_FOUND`, alongside the selection
-failures it already delivered. No callback or document handle crosses into
+plus the element's `id` and `dataset` as native reports them — and a pager's
+`selectTab`, and fails every other method with code 3, `METHOD_NOT_FOUND`,
+alongside the selection failures it already delivered. No callback or document handle crosses into
 Rust's Worker transport. See `docs/node-query-runtime.md` for the supported
 fields, callback semantics and remaining boundaries.
 
@@ -2400,11 +2407,12 @@ would host it:
 - **The rest of the `<image>` element surface.** `src` loads; `mode`,
   `auto-size`, `placeholder` racing, `cap-insets`, `blur-radius` and the
   `load`/`error` events do not.
-- **UI methods other than `boundingClientRect`.** That one dispatches by name
-  through `__InvokeUIMethod`; every other name — `scrollIntoView`,
-  `getScrollInfo`, `requestUIInfo`, `takeScreenshot` and the per-component
-  catalog — answers code 3, `METHOD_NOT_FOUND`. The rect itself ignores
-  transforms and never flushes.
+- **UI methods other than `boundingClientRect` and `selectTab`.** Those two
+  dispatch by name (`selectTab` on the two pager tags only) through
+  `__InvokeUIMethod`; every other name — `scrollIntoView`, `getScrollInfo`,
+  `requestUIInfo`, `takeScreenshot` and the rest of the per-component catalog
+  — answers code 3, `METHOD_NOT_FOUND`. The rect itself ignores transforms and
+  never flushes.
 - **The text `layout` event.** The per-line ranges `hughie`'s
   `text/block/content.rs` computes have no delivery path.
 - **`rpx`-aware view/device policy** and the `<list>` *component* (its UI methods,

@@ -917,7 +917,7 @@ fn a_drag_on_a_flinging_scroller_takes_it_over() {
 }
 
 /// A 200px row pager (node 3) of five 200px pages (nodes 4–8) snapping
-/// `mandatory` on x, each page carrying `page_css`.
+/// `mandatory` on x, each page carrying `page_css`: a `<viewpager>`'s shape.
 fn pager_page(page_css: &str) -> String {
     format!(
         r"
@@ -1213,7 +1213,7 @@ fn an_instant_request_lands_at_once_over_a_fling() {
 /// it. The post that follows names the request, so main adopts it.
 #[test]
 fn a_wheel_tick_ends_a_glide_where_the_wheel_puts_it() {
-    let mut engine = booted(&pager_page("scroll-snap-stop:always"));
+    let mut engine = booted(&viewpager_page(""));
     engine
         .probe_document(|document| {
             document.scroll_to_with(
@@ -1261,6 +1261,214 @@ fn a_wheel_tick_ends_a_glide_where_the_wheel_puts_it() {
             .expect("the view's task answers probes"),
         None,
         "the post named the request"
+    );
+}
+
+// --- `<viewpager>` built from its own tags -----------------------------------
+
+/// A 200px `viewpager` (node 3) of five `viewpager-item` pages (nodes 4–8),
+/// styled by the UA sheet alone apart from the pager's size, with `setup`
+/// run before the first flush. A tap on the pager calls
+/// `selectTab({index: 2, smooth: false})` and logs the answer's code in the
+/// pager's `log` attribute.
+fn viewpager_page(setup: &str) -> String {
+    format!(
+        r"
+        globalThis.renderPage = function () {{
+          const page = __CreatePage('card', 0);
+          const pager = __CreateElement('viewpager', 0);
+          __AppendElement(page, pager);
+          globalThis.held = [page, pager];
+          __SetInlineStyles(pager, 'width:200px;height:200px');
+          for (let i = 0; i < 5; i++) {{
+            const item = __CreateElement('viewpager-item', 0);
+            __AppendElement(pager, item);
+            held.push(item);
+          }}
+          __AddEventListener(pager, 'tap', () => {{
+            __InvokeUIMethod(pager, 'selectTab', {{index: 2, smooth: false}}, result => {{
+              __SetAttribute(pager, 'log', 'selectTab:' + result.code);
+            }});
+          }}, {{}});
+          {setup}
+          __FlushElementTree();
+        }};
+        "
+    )
+}
+
+/// Runs display frames until nothing animates, and answers where the
+/// pager came to rest.
+fn frames_until_rest(engine: &mut TestEngine, mut at: f64) -> f32 {
+    let deadline = at + 3.0;
+    while engine.is_animating() {
+        at += 1.0 / 60.0;
+        assert!(at < deadline, "never came to rest");
+        frame_at(engine, at);
+    }
+    live_offset(engine, 3).x
+}
+
+/// A quiet release under half a page glides back to the page; one past half
+/// glides on to the next.
+#[test]
+fn a_viewpager_drag_returns_under_half_a_page_and_turns_past_it() {
+    for (to, dragged, rest) in [(100.0, 42.0, 0.0), (30.0, 112.0, 200.0)] {
+        let mut engine = booted(&viewpager_page(""));
+        touch_x_at(&mut engine, 0.0, PointerPhase::Down, 150.0);
+        touch_x_at(&mut engine, 0.05, PointerPhase::Move, to);
+        let released = live_offset(&mut engine, 3).x;
+        assert!((released - dragged).abs() < 0.5, "got {released}");
+        touch_x_at(&mut engine, 0.4, PointerPhase::Up, to);
+        assert!(engine.is_animating(), "a glide, not a jump");
+        let landed = frames_until_rest(&mut engine, 0.4);
+        assert!(
+            (landed - rest).abs() < f32::EPSILON,
+            "dragged to {dragged}, came to rest at {landed}"
+        );
+    }
+}
+
+/// A flick moves exactly one page: the UA sheet's `scroll-snap-stop:
+/// always` on every page stops the fling the flick would carry past it.
+#[test]
+fn a_viewpager_flick_turns_exactly_one_page() {
+    let mut engine = booted(&viewpager_page(""));
+    flick_x(&mut engine, 0.0);
+    let mut at = 0.02;
+    while engine.is_animating() {
+        at += 1.0 / 60.0;
+        assert!(at < 1.0, "never came to rest");
+        frame_at(&mut engine, at);
+        assert!(
+            live_offset(&mut engine, 3).x <= 200.0,
+            "passed the next page"
+        );
+    }
+    assert!((live_offset(&mut engine, 3).x - 200.0).abs() < f32::EPSILON);
+}
+
+/// `enable-scroll="false"`: a drag moves nothing, and `selectTab` still turns
+/// the pager — in the document at once, on the painter at its next frame.
+#[test]
+fn a_viewpager_that_cannot_scroll_ignores_drags_but_not_select_tab() {
+    let mut engine = booted(&viewpager_page(
+        "__SetAttribute(pager, 'enable-scroll', 'false');",
+    ));
+    touch_x_at(&mut engine, 0.0, PointerPhase::Down, 190.0);
+    touch_x_at(&mut engine, 0.05, PointerPhase::Move, 30.0);
+    touch_x_at(&mut engine, 0.4, PointerPhase::Up, 30.0);
+    assert!(!engine.is_animating());
+    assert!(live_offset(&mut engine, 3).x.abs() < f32::EPSILON);
+
+    engine.painter.clock.pin(1.0);
+    engine.dispatch_input(touch(1, PointerPhase::Down, 100.0));
+    engine.dispatch_input(touch(1, PointerPhase::Up, 100.0));
+    wait_for_log(&mut engine, "selectTab:0");
+    assert_eq!(
+        scroll_offset_of(&mut engine, 3),
+        dom::Vector2D::new(400.0, 0.0),
+        "an instant turn moves the document at once"
+    );
+    adopt_at(&mut engine, 1.1);
+    assert!((live_offset(&mut engine, 3).x - 400.0).abs() < f32::EPSILON);
+    assert!(!engine.is_animating());
+}
+
+/// `bounces`: a drag past the first page and one past the last stretch the
+/// pager, and each springs back to its edge. Without it, neither edge moves.
+#[test]
+fn a_bouncing_viewpager_stretches_at_both_ends_and_springs_back() {
+    for bounces in [true, false] {
+        let setup = if bounces {
+            "__SetAttribute(pager, 'bounces', 'true');"
+        } else {
+            ""
+        };
+        let mut engine = booted(&viewpager_page(setup));
+        for (edge, from, to, start) in [(0.0, 50.0, 150.0, 0.0), (800.0, 150.0, 50.0, 2.0)] {
+            if edge > 0.0 {
+                engine
+                    .probe_document(|document| {
+                        document.scroll_to_with(
+                            node_id(3),
+                            dom::Vector2D::new(800.0, 0.0),
+                            dom::scroll::ScrollBehavior::Instant,
+                        )
+                    })
+                    .expect("the view's task answers probes");
+                // A later entry, so the request's own commit is published.
+                assert_eq!(
+                    scroll_offset_of(&mut engine, 3),
+                    dom::Vector2D::new(800.0, 0.0)
+                );
+                adopt_at(&mut engine, start - 0.1);
+                assert!((live_offset(&mut engine, 3).x - edge).abs() < f32::EPSILON);
+            }
+            touch_x_at(&mut engine, start, PointerPhase::Down, from);
+            touch_x_at(&mut engine, start + 0.05, PointerPhase::Move, to);
+            let stretch = live_offset(&mut engine, 3).x - edge;
+            if bounces {
+                // 92px past the edge on a 200px scrollport: the rubber band's
+                // `(1 − 1/(92·0.55/200 + 1))·200` ≈ 40.4px.
+                assert!(
+                    (stretch.abs() - 40.4).abs() < 0.2,
+                    "stretched past {edge}: {stretch}"
+                );
+                assert_eq!(stretch < 0.0, edge == 0.0, "outward at {edge}");
+            } else {
+                assert!(stretch.abs() < f32::EPSILON, "{edge} is a wall: {stretch}");
+            }
+            touch_x_at(&mut engine, start + 0.4, PointerPhase::Up, to);
+            let rest = frames_until_rest(&mut engine, start + 0.4);
+            assert!(
+                (rest - edge).abs() < f32::EPSILON,
+                "back on {edge}, got {rest} (bounces={bounces})"
+            );
+        }
+    }
+}
+
+/// A vertical `scroll-view` filling the first page scrolls vertically under
+/// a vertical drag and leaves the pager alone; a horizontal drag starting on
+/// it passes through to the pager, which turns.
+#[test]
+fn a_vertical_scroller_inside_a_page_scrolls_and_hands_horizontal_drags_to_the_pager() {
+    let mut engine = booted(&viewpager_page(
+        "const inner = __CreateScrollView(0);
+         __AppendElement(held[2], inner);
+         __SetInlineStyles(inner, 'width:100%;height:100%');
+         const tall = __CreateView(0);
+         __AppendElement(inner, tall);
+         __SetInlineStyles(tall, 'flex-shrink:0;width:200px;height:1000px');
+         held.push(inner, tall);",
+    ));
+    touch_at(&mut engine, 0.0, PointerPhase::Down, 150.0);
+    touch_at(&mut engine, 0.05, PointerPhase::Move, 50.0);
+    touch_at(&mut engine, 0.4, PointerPhase::Up, 50.0);
+    frames_until_rest(&mut engine, 0.4);
+    let inner = live_offset(&mut engine, 9);
+    assert!(
+        (inner.y - 92.0).abs() < 0.5,
+        "the scroll-view scrolled: {inner:?}"
+    );
+    assert!(inner.x.abs() < f32::EPSILON);
+    assert!(
+        live_offset(&mut engine, 3).x.abs() < f32::EPSILON,
+        "the pager stayed"
+    );
+
+    touch_x_at(&mut engine, 1.0, PointerPhase::Down, 190.0);
+    touch_x_at(&mut engine, 1.05, PointerPhase::Move, 30.0);
+    touch_x_at(&mut engine, 1.4, PointerPhase::Up, 30.0);
+    let rest = frames_until_rest(&mut engine, 1.4);
+    assert!(
+        (rest - 200.0).abs() < f32::EPSILON,
+        "the pager turned: {rest}"
+    );
+    assert!(
+        (live_offset(&mut engine, 9).y - inner.y).abs() < f32::EPSILON,
+        "the scroll-view kept its offset"
     );
 }
 

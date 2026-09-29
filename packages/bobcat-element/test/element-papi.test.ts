@@ -110,7 +110,7 @@ type MockBobcat = BobcatNative & {
    * defaults are the two empty ones — a method the engine does not have, and
    * an element that has not been through a flush.
    */
-  answerElementMethod: (nodeId: number, method: string) => string | null;
+  answerElementMethod: (nodeId: number, method: string, params: string) => string | number;
   answerComputedStyle: (
     nodeId: number,
     properties: string,
@@ -304,11 +304,11 @@ function createMockBobcat(issuedIds?: number[]): MockBobcat {
       }
       return tag;
     },
-    answerElementMethod: () => null,
-    callElementMethod: (node: unknown, method: unknown) => {
+    answerElementMethod: () => 3,
+    callElementMethod: (node: unknown, method: unknown, params: unknown) => {
       const id = nodeId("callElementMethod", node);
-      calls.push(["callElementMethod", id, method]);
-      return host.answerElementMethod(id, method as string);
+      calls.push(["callElementMethod", id, method, params]);
+      return host.answerElementMethod(id, method as string, params as string);
     },
     answerComputedStyle: () => "",
     getComputedStyleMap: (
@@ -3275,11 +3275,49 @@ describe("__InvokeUIMethod", () => {
         height: 50,
       },
     });
-    // The host takes the element and the method name and nothing else:
-    // `params` names behavior this engine does not have, so it is dropped
-    // here rather than carried to a boundary that would ignore it.
+    // The params cross as JSON text whatever the method; this one reads
+    // none of it.
     expect(mock.named("callElementMethod")).toEqual([
-      ["callElementMethod", __GetElementUniqueID(view), "boundingClientRect"],
+      [
+        "callElementMethod",
+        __GetElementUniqueID(view),
+        "boundingClientRect",
+        '{"relativeTo":7}',
+      ],
+    ]);
+  });
+
+  it("tells a refusal, a success without data and a rect apart", () => {
+    const view = __CreateView(0);
+    const answers: unknown[] = [];
+    for (const answer of [4, 0, "1,2,3,4"]) {
+      mock.answerElementMethod = () => answer;
+      __InvokeUIMethod(view, "selectTab", {}, (result: unknown) => answers.push(result));
+    }
+    expect(answers[0]).toStrictEqual({ code: 4, data: undefined });
+    expect(answers[1]).toStrictEqual({ code: 0, data: undefined });
+    expect(answers[2]).toMatchObject({
+      code: 0,
+      data: { left: 1, top: 2, width: 3, height: 4, right: 4, bottom: 6 },
+    });
+  });
+
+  it("sends missing params as an empty object and uncarriable ones as null", () => {
+    const view = __CreateView(0);
+    const cyclic: Record<string, unknown> = {};
+    cyclic['self'] = cyclic;
+    mock.calls.length = 0;
+
+    __InvokeUIMethod(view, "selectTab", undefined, () => {});
+    __InvokeUIMethod(view, "selectTab", { index: 2, smooth: false }, () => {});
+    __InvokeUIMethod(view, "selectTab", cyclic, () => {});
+    __InvokeUIMethod(view, "selectTab", () => {}, () => {});
+
+    expect(mock.named("callElementMethod").map((call) => call[3])).toEqual([
+      "{}",
+      '{"index":2,"smooth":false}',
+      "null",
+      "null",
     ]);
   });
 

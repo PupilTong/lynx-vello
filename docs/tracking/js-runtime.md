@@ -198,14 +198,14 @@ In parallel/subsequently, the BTS context is constructed, its `App`/`LynxProxy` 
 ### NodesRef.invoke()/fields() measurement API surface and native UIMethod catalog
 
 Bobcat now implements the structural query facade and Worker transport described
-in [node-query-runtime](../node-query-runtime.md), plus the one UI method
+in [node-query-runtime](../node-query-runtime.md), plus two UI methods:
 `boundingClientRect` (`Document::bounding_client_rect` in
 `crates/dom/src/layout/mod.rs` under the `callElementMethod` host member, shaped
 into the result object by `__InvokeUIMethod` in
-`packages/bobcat-element/src/element-papi.ts`). It ignores transforms and runs
-no flush — see the row below and
-[deviations](deviations.md). The rest of the UI-method catalog below still
-describes the compatibility target and remains pending.
+`packages/bobcat-element/src/element-papi.ts`), which ignores transforms and
+runs no flush — see the row below and [deviations](deviations.md) — and a
+pager's `selectTab` (see its row). The rest of the UI-method catalog below
+still describes the compatibility target and remains pending.
 
 **Architecture, not just an API list.** `NodesRef`/`SelectorQuery` is a dual-mechanism contract, and this matters for lynx-vello's design:
 
@@ -284,7 +284,7 @@ interface NodesRef extends BaseNodesRef {
 | `video`/`x-video`: `play`/`pause`/`stop`/`seek` | media transport controls | Core | Partial | `play`/`pause` mirror `HTMLMediaElement.play()/pause()`; `stop` (reset to start + pause) and `seek` (by params) have no single W3C method equivalent (`stop` ~ manual `currentTime=0; pause()`, `seek` ~ setting `.currentTime`) | `lynx/platform/darwin/ios/lynx_xelement/video/LynxUIVideo.m:97-161` |
 | `webview`/`x-webview`: `eval`/`reload` | run JS in the embedded webview / reload it | Rare | Partial | Mirrors `<iframe>` postMessage-eval patterns and `location.reload()`, gated by whatever embedded-webview strategy lynx-vello adopts (likely out of scope early) | `lynx/platform/darwin/ios/lynx_xelement/webview/LynxUIWebView.m:94-114` |
 | `refresh`/`x-refresh` (pull-to-refresh): `finishRefresh`/`autoStartRefresh` | end/programmatically-trigger a refresh gesture | Extended | No | No W3C pull-to-refresh primitive; purely a native gesture-affordance control surface | `lynx/platform/darwin/ios/lynx_xelement/refresh/LynxUIRefresh.m:373-380` |
-| `viewpager`/`x-viewpager`: `selectTab`/`setDragGesture` | programmatic tab switch / drag-gesture config | Extended | No | Analogous to a carousel/tab-strip widget with no DOM equivalent | `lynx/platform/darwin/ios/lynx_xelement/viewpager/LynxUIViewPager.m:757-831` |
+| `viewpager`/`x-viewpager`: `selectTab`/`setDragGesture` | programmatic tab switch / drag-gesture config | Extended | No | Analogous to a carousel/tab-strip widget with no DOM equivalent. **`selectTab` implemented 2026-09-28** on `viewpager` and `x-viewpager-ng`, dispatched by tag name in `callElementMethod` (`crates/bobcat-core/src/main/tree/viewpager.rs`): `{index, smooth = true}` scrolls to `index` × the scrollport width of the last layout, clamped, as CSSOM-View `scrollTo({behavior})` — an instant turn moves the document at once, a smooth one is animated by the painter — and answers `{code: 0}` at once; a missing or non-numeric `index` is code 4 (Android/Harmony), an out-of-range one clamps (web-core). Where it leaves each reference: [deviations.md](deviations.md). `setDragGesture` is not implemented (code 3) | `lynx/platform/darwin/ios/lynx_xelement/viewpager/LynxUIViewPager.m:757-831` |
 | `markdown`/`x-markdown`: `getContent`/`getParseResult`/`getImages`/`getCharIndexByPoint` + shares `pauseAnimation`/`resumeAnimation`/`getTextBoundingRect`/`getSelectedText`/`setTextSelection` with text/image | Rich markdown-renderer-specific readback | Rare | No | Composite widget combining text + image + animation surfaces; only relevant if lynx-vello ships a markdown component | `lynx/platform/darwin/ios/lynx_xelement/markdown/LynxUIMarkdown.m:105-328` |
 | `animax`/`x-animax` (Lottie-like): `play`/`pause`/`resume`/`stop`/`seek`/`getDuration`/`isAnimating`/`getCurrentFrame`/`playSegment`/`subscribe(s)UpdateEvent(s)`/`unsubscribe(s)UpdateEvent(s)` | full vector-animation transport + frame-event subscription control surface | Extended | No | Lottie/Rive-style playback API; no W3C equivalent (`Web Animations API` is the closest conceptual analog but a different data model). Large surface — worth its own tracking entry if lynx-vello targets AnimaX-format assets | `lynx/platform/darwin/ios/lynx_xelement/animax/LynxUIAnimaX.mm:378-498` |
 | `scroll-coordinator`/`x-scroll-coordinator` (fold/collapsing-header): `setFoldExpanded`/`getScrollInfo`/`scrollBy` | nested-scroll coordination for collapsing-toolbar-style UIs | Extended | No | CoordinatorLayout-style nested scroll behavior; no W3C equivalent (closest: manual scroll-linking via JS `scroll` event listeners) | `lynx/platform/darwin/ios/lynx_xelement/scroll_coordinator/LynxUIScrollCoordinator.m:771-815` |

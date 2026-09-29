@@ -12,6 +12,8 @@
 //! Each tag owns its UA rules and tests. Numeric text and list attributes
 //! flow through `attr()`; boolean flags use attribute selectors. Only `image`
 //! and `blur_view` need components, for image resources and blur hints.
+//! `viewpager` needs none; its one UI method, `selectTab`, is here for the
+//! runtime to dispatch by tag name.
 //!
 //! [`NodeId`]: dom::NodeId
 
@@ -24,6 +26,7 @@ mod scroll_container;
 mod test_support;
 mod text;
 mod ua_sheet;
+mod viewpager;
 #[cfg(test)]
 mod web_text_replication;
 
@@ -31,6 +34,7 @@ use dom::{Document, StylesheetOrigin};
 
 pub(crate) use self::image::ImageOutcomes;
 pub use self::ua_sheet::PageConfig;
+pub(crate) use self::viewpager::{InvalidParams, is_viewpager, select_tab};
 pub(crate) use crate::view::Viewport;
 
 /// The one document shape the runtime speaks.
