@@ -207,6 +207,146 @@ async fn compiled_viewpager_select_tab_turns_to_the_fourth_page() {
     .await;
 }
 
+/// A compiled `<scroll-coordinator>` (300 by 400: a translucent blue toolbar
+/// 60 tall, a red header 200 tall, a slot of eight 100px items in a
+/// `<scroll-view>`) boots with the header under the toolbar and the first
+/// item at 200. A forward drag of 148px in the scroll-view — 140 of scroll
+/// after the 8px slop, the fold's whole range — folds the header first: the
+/// toolbar then covers the header's bottom band and the first item sits
+/// directly under it, at 60..160.
+#[tokio::test]
+async fn compiled_scroll_coordinator_folds_its_header_before_the_content() {
+    use bobcat_core::input::{InputEvent, Point2D, PointerKind, PointerPhase};
+    use bobcat_core::{DrawTarget, Painter};
+
+    const HEIGHT: u16 = 400;
+    const RED: [u8; 4] = [255, 0, 0, 255];
+    const GREEN: [u8; 4] = [0, 128, 0, 255];
+    const YELLOW: [u8; 4] = [255, 255, 0, 255];
+
+    let page = PageSource::from_bytes(
+        &Url::parse("app:///react-scroll-coordinator.web.bundle").unwrap(),
+        fixtures::fixture("react-scroll-coordinator").page,
+    )
+    .unwrap();
+    let resources = Resources::new(ResourcesConfig::default(), || {});
+    page.register_with(&resources);
+    let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Auto)
+        .await
+        .unwrap();
+    let (width, height) = (f32::from(COORDINATOR_WIDTH), f32::from(HEIGHT));
+    let mut view = group
+        .create_lynx_view(
+            width,
+            height,
+            1.0,
+            resources.builder(),
+            Vec::new(),
+            page.view_sources(SCREEN),
+        )
+        .unwrap();
+    let mut painter = Painter::new(DrawTarget::Offscreen, width, height, 1.0)
+        .await
+        .unwrap();
+    painter.attach(&view).unwrap();
+
+    let mut booted = false;
+    let band = settle(
+        &mut view,
+        &mut painter,
+        &mut booted,
+        &[(150, 150, RED), (150, 250, GREEN), (150, 350, YELLOW)],
+        "boot",
+    );
+    eprintln!("toolbar over the header at boot: {band:?}");
+    let [red, green, blue, _] = band;
+    assert!(
+        (126..=129).contains(&red) && green == 0 && (126..=129).contains(&blue),
+        "the translucent toolbar shows the red header through it, got {band:?}"
+    );
+
+    // One move and a release: a single step measures no release velocity, so
+    // nothing flings after it.
+    for (phase, y) in [
+        (PointerPhase::Down, 350.0),
+        (PointerPhase::Move, 202.0),
+        (PointerPhase::Up, 202.0),
+    ] {
+        painter.dispatch_input(InputEvent::pointer(
+            Point2D::new(150.0, y),
+            1,
+            PointerKind::Touch,
+            phase,
+        ));
+    }
+    let band = settle(
+        &mut view,
+        &mut painter,
+        &mut booted,
+        &[(150, 65, GREEN), (150, 150, GREEN), (150, 200, YELLOW)],
+        "folded",
+    );
+    eprintln!("toolbar over the header folded: {band:?}");
+    assert!(
+        (126..=129).contains(&band[0]) && band[1] == 0 && (126..=129).contains(&band[2]),
+        "folded, the toolbar covers the header's bottom band, got {band:?}"
+    );
+}
+
+/// The width of the coordinator test's view.
+const COORDINATOR_WIDTH: u16 = 300;
+
+/// Pumps `view` and `painter` until every `(x, y, colour)` of `expected` is
+/// on screen, and answers the colour at (150, 30), the toolbar band.
+fn settle<F: bobcat_core::resource::ResourceFetcher + 'static>(
+    view: &mut bobcat_core::LynxView<F>,
+    painter: &mut bobcat_core::Painter,
+    booted: &mut bool,
+    expected: &[(u16, u16, [u8; 4])],
+    stage: &str,
+) -> [u8; 4] {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        for event in view.pump() {
+            match event {
+                EngineEvent::ScriptFinished => *booted = true,
+                EngineEvent::ConsoleMessage { level, message, .. } => {
+                    eprintln!("[{level}] {message}");
+                }
+                other => panic!("{stage}: {other:?}"),
+            }
+        }
+        painter.pump().unwrap();
+        if *booted {
+            let shot = painter.capture().unwrap();
+            let pixel = |x: u16, y: u16| {
+                let at = (usize::from(y) * usize::from(COORDINATOR_WIDTH) + usize::from(x)) * 4;
+                [
+                    shot.pixels[at],
+                    shot.pixels[at + 1],
+                    shot.pixels[at + 2],
+                    shot.pixels[at + 3],
+                ]
+            };
+            let seen: Vec<_> = expected.iter().map(|(x, y, _)| pixel(*x, *y)).collect();
+            if expected
+                .iter()
+                .zip(&seen)
+                .all(|((_, _, colour), seen)| colour == seen)
+            {
+                return pixel(150, 30);
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{stage}: expected {expected:?}, got {seen:?}"
+            );
+        } else {
+            assert!(Instant::now() < deadline, "BTS boot did not finish");
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 async fn paint_and_tap(
     bytes: &[u8],
     point: [u16; 2],
