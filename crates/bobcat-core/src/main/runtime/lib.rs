@@ -1020,6 +1020,12 @@ impl MainThreadRuntime {
     /// to bake windows re-centered on it, and one past the window already
     /// did inside `scroll_to`. The scroll-driven animations those containers
     /// drive then re-sample, which is a commit only when one moved.
+    ///
+    /// A post naming an older request than the container's pending one
+    /// ([`dom::Document::pending_scroll_request`]) is dropped: the painter
+    /// made it before it saw the request, so it would write back the offset
+    /// the request replaced. One that names the pending request, or a newer
+    /// one, is adopted and acknowledges it.
     pub(crate) fn adopt_scroll_offsets(
         &mut self,
         entries: impl Iterator<Item = (dom::NodeId, crate::link::ScrollEntry)>,
@@ -1030,6 +1036,12 @@ impl MainThreadRuntime {
         let mut recenter = false;
         let mut moved: SmallVec<[dom::NodeId; 4]> = SmallVec::new();
         for (node, entry) in entries {
+            if let Some(pending) = document.pending_scroll_request(node) {
+                let Some(handled) = entry.request.filter(|handled| *handled >= pending) else {
+                    continue;
+                };
+                document.acknowledge_scroll_request(node, handled);
+            }
             document.scroll_to(node, entry.offset);
             moved.push(node);
             recenter |= frame.as_ref().is_some_and(|frame| {

@@ -775,6 +775,7 @@ fn a_drag_queues_one_marker_until_main_takes() {
                 offset: live,
                 at: 0.0,
                 rest: None,
+                request: None,
             }
         )],
         "one entry at the latest offset, held by the finger"
@@ -1093,7 +1094,7 @@ fn a_bounce_back_a_commit_ends_posts_its_rest() {
     main.outbox.publish_frame(document.commit());
     painter.poll_link();
     let grown = painter.frame().cloned().expect("the new frame is adopted");
-    painter.scroll_intents.rebase(&grown);
+    painter.scroll_intents.rebase(&grown, 0.016);
     assert!(!painter.scroll_intents.is_bouncing(scroller));
     painter.publish_scroll(0.016, None);
     let (entries, _) = take(&main);
@@ -1105,8 +1106,86 @@ fn a_bounce_back_a_commit_ends_posts_its_rest() {
                 offset: stretched,
                 at: 0.016,
                 rest: Some(stretched),
+                request: None,
             }
         )],
         "posted in range, at rest"
     );
+}
+
+/// A smooth request's glide posts each step naming the request, and its
+/// landing at rest; a post made before the painter saw the request names
+/// none, which is what lets main drop it.
+#[test]
+fn a_smooth_request_posts_its_serial_and_lands_at_rest() {
+    let mut document = document();
+    let root = document.document_element().id();
+    let scroller = document.create_element("view", ());
+    document.set_inline_style(
+        scroller,
+        "display:flex;flex-direction:column;overflow:scroll;width:200px;height:200px",
+    );
+    document.append_child(root, scroller);
+    let filler = document.create_element("view", ());
+    document.set_inline_style(filler, "flex-shrink:0;width:200px;height:1000px");
+    document.append_child(scroller, filler);
+    let (mut painter, main) = detached();
+    main.outbox.publish_frame(document.commit());
+    painter.poll_link();
+    painter.clock.pin(0.0);
+
+    // A wheel before the request: its post names no request.
+    painter.dispatch_input(dom::input::InputEvent::wheel(
+        dom::Point2D::new(100.0, 100.0),
+        dom::Vector2D::new(0.0, 30.0),
+    ));
+    let (entries, _) = take(&main);
+    assert_eq!(entries[0].1.request, None);
+
+    document.scroll_to_with(
+        scroller,
+        dom::Vector2D::new(0.0, 300.0),
+        dom::scroll::ScrollBehavior::Smooth,
+    );
+    let serial = document
+        .pending_scroll_request(scroller)
+        .expect("the request is pending");
+    main.outbox.publish_frame(document.commit());
+    painter.poll_link();
+    let frame = painter.frame().cloned().expect("the new frame is adopted");
+    painter.scroll_intents.rebase(&frame, 0.0);
+    assert!(painter.scroll_intents.is_gliding(scroller));
+    painter.publish_scroll(0.0, None);
+    let (entries, _) = take(&main);
+    assert_eq!(
+        entries,
+        [(
+            scroller,
+            ScrollEntry {
+                offset: dom::Vector2D::new(0.0, 30.0),
+                at: 0.0,
+                rest: None,
+                request: Some(serial),
+            }
+        )],
+        "posted at once, from where the wheel left it, naming the request"
+    );
+
+    for step in 1..120_u16 {
+        let now = f64::from(step) / 60.0;
+        painter.scroll_intents.tick(&frame, now);
+        painter.publish_scroll(now, None);
+        let (entries, _) = take(&main);
+        let Some((_, entry)) = entries.into_iter().find(|(node, _)| *node == scroller) else {
+            continue;
+        };
+        assert_eq!(entry.request, Some(serial));
+        if let Some(rest) = entry.rest {
+            assert_eq!(rest, dom::Vector2D::new(0.0, 300.0), "landed exactly");
+            assert!(!painter.scroll_intents.is_animating());
+            return;
+        }
+        assert!(entry.offset.y > 30.0 && entry.offset.y < 300.0);
+    }
+    panic!("the glide never came to rest");
 }

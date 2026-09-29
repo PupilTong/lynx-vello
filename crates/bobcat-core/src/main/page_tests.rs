@@ -543,11 +543,21 @@ impl OwnedPage {
     /// Posts `offset` for `scroller` the way a painter does and applies the
     /// marker as one burst.
     async fn scroll_to(&self, scroller: dom::NodeId, offset: dom::Vector2D<f32>) {
-        let entry = ScrollEntry {
-            offset,
-            at: 0.0,
-            rest: Some(offset),
-        };
+        self.post(
+            scroller,
+            ScrollEntry {
+                offset,
+                at: 0.0,
+                rest: Some(offset),
+                request: None,
+            },
+        )
+        .await;
+    }
+
+    /// Posts `entry` for `scroller` the way a painter does and applies the
+    /// marker as one burst.
+    async fn post(&self, scroller: dom::NodeId, entry: ScrollEntry) {
         assert!(
             self.scroll.post([(scroller, entry)], None),
             "a marker is due"
@@ -888,6 +898,88 @@ fn a_scroll_past_the_window_delivers_both_directions_in_the_entry_after_its_comm
         );
         assert_eq!(take(&log), expected);
         assert!(!js_heard(&owned.page).await);
+    });
+}
+
+/// The document's offset for `scroller`, and its pending request.
+async fn scroll_state(
+    page: &Rc<Page>,
+    scroller: dom::NodeId,
+) -> (dom::Vector2D<f32>, Option<std::num::NonZeroU64>) {
+    let (answer, read) = std::sync::mpsc::channel();
+    page.apply(vec![ToMain::Probe(Box::new(move |document| {
+        let _ = answer.send((
+            document.scroll_offset(scroller),
+            document.pending_scroll_request(scroller),
+        ));
+    }))])
+    .await;
+    read.try_recv().expect("the probe ran")
+}
+
+/// A post the painter made before it saw a container's pending scroll
+/// request names an older one and is dropped: adopting it would write back
+/// the offset the request replaced. The post that names the request is
+/// adopted and acknowledges it, and a later one naming nothing newer is
+/// adopted as any post is.
+#[test]
+fn a_post_older_than_the_pending_scroll_request_is_dropped() {
+    on_a_js_thread(|thread| async move {
+        let (context, _workers) = group(&thread);
+        let mut owned = OwnedPage::new(context);
+        owned.boot(ONE_BOX).await;
+        let (answer, built) = std::sync::mpsc::channel();
+        owned
+            .page
+            .apply(vec![ToMain::Probe(Box::new(move |document| {
+                let root = document.document_element().id();
+                let scroller = document.create_element("view", ());
+                document.set_inline_style(
+                    scroller,
+                    "display:flex;flex-direction:column;overflow:scroll;width:200px;height:200px",
+                );
+                document.append_child(root, scroller);
+                let filler = document.create_element("view", ());
+                document.set_inline_style(filler, "flex-shrink:0;width:200px;height:1000px");
+                document.append_child(scroller, filler);
+                document.layout();
+                document.scroll_to_with(
+                    scroller,
+                    dom::Vector2D::new(0.0, 100.0),
+                    dom::scroll::ScrollBehavior::Instant,
+                );
+                let _ = answer.send((scroller, document.pending_scroll_request(scroller)));
+            }))])
+            .await;
+        let (scroller, pending) = built.try_recv().expect("the probe ran");
+        let serial = pending.expect("the request is pending");
+        let entry = |offset: f32, request| ScrollEntry {
+            offset: dom::Vector2D::new(0.0, offset),
+            at: 0.0,
+            rest: None,
+            request,
+        };
+
+        owned.post(scroller, entry(40.0, None)).await;
+        assert_eq!(
+            scroll_state(&owned.page, scroller).await,
+            (dom::Vector2D::new(0.0, 100.0), Some(serial)),
+            "the stale post was dropped"
+        );
+
+        owned.post(scroller, entry(100.0, Some(serial))).await;
+        assert_eq!(
+            scroll_state(&owned.page, scroller).await,
+            (dom::Vector2D::new(0.0, 100.0), None),
+            "adopted, and the request acknowledged"
+        );
+
+        owned.post(scroller, entry(60.0, Some(serial))).await;
+        assert_eq!(
+            scroll_state(&owned.page, scroller).await,
+            (dom::Vector2D::new(0.0, 60.0), None),
+            "with nothing pending every post is adopted"
+        );
     });
 }
 

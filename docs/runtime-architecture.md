@@ -1559,21 +1559,48 @@ the position its whole travel would settle on. A slot published with
 `overscroll-behavior: contain-bounce` lets the intents stand past its edge:
 a drag stretches it on the rubber band, a fling overshoots at the overshoot
 decay, and once nothing holds it a bounce back per frame brings it home on
-the critically damped spring. A drag's first step stops whatever is moving
-on its chain and takes over. The router decides what it always did, no
-event is involved, and nothing waits on the main thread — a stretch composes
-the edge's own content, and what the painter posts for it is the edge, since
+the critically damped spring. A drag's release on a snapping axis does not
+jump to its snap position: it *glides* there on the same spring, starting
+at the release velocity when the position is within one scrollport (limited
+so the curve cannot pass it), where a fling aimed at it would spend most of
+its time on its last pixels; a farther position is still reached by the
+aimed fling. A drag's step stops whatever is moving on its chain and takes
+over, and a wheel step that moves a gliding container ends its glide where
+the wheel put it. The router decides what it always did, no event is
+involved, and nothing waits on the main thread — a stretch composes the
+edge's own content, and what the painter posts for it is the edge, since
 every posted offset is clamped to the committed range.
 
+A script-facing scroll is a **request** the committed frame carries to the
+painter (`crates/dom/src/scroll/request.rs`, CSSOM-View's
+`scrollTo({behavior})`), because the document is not the only writer of an
+offset: a plain `scroll_to` would be overwritten by the painter's next post,
+and a smooth scroll has nothing on the main thread to animate it.
+`Document::scroll_to_with` records the latest request per container with a
+serial from one counter per document; an instant one also moves the
+document's offset at once, a smooth one leaves it. The paint build copies
+the pending request into the container's `ScrollSlot`, clamped to the built
+range. The painter handles each serial once, when it adopts the frame that
+first carries it: whatever was moving the container stops, an instant
+request puts the live offset on the target, and a smooth one glides there
+from rest (to the snap position the target settles on, for a snapping
+container). Every post for the container from then on names the newest
+serial the painter has handled there — the per-slot epoch — and main drops
+a post naming an older serial than the pending request, which the painter
+made before it saw the request, and acknowledges the request with one that
+names it.
+
 Every writer of an intent — a chain step, a fling step, a bounce back, a
-settle, a snap on adoption, a rebase's re-clamp — goes through one write that
+glide, a settle, a snap on adoption, a request on adoption, a rebase's
+re-clamp — goes through one write that
 records the container among the pass's changed ones (and a drag's release
 records every container it let go). `publish_scroll` posts them: at the top of
 every send of the pass, of the frame post and of the `Vsync` delivery, and at
 the end of `dispatch_input`, `draw` and `tick`. An entry carries the clamped
-offset, the pass's clock, and a `rest` when nothing holds, flings or bounces
-the container any more — a drag let go without a fling, a spent fling, a
-landed bounce, a snap after a commit. A pass with nothing changed and no
+offset, the pass's clock, the newest request serial the painter has handled
+for the container, and a `rest` when nothing holds, flings, bounces or
+glides the container any more — a drag let go without a fling, a spent
+fling, a landed bounce or glide, a snap after a commit. A pass with nothing changed and no
 frame to post takes no lock.
 
 At the marker main takes the whole mailbox in one swap, writes each offset
@@ -1613,11 +1640,18 @@ commit, so neither the painter's lookups nor main's check scan the table.
 - Reattaching a painter (unchanged): a new painter shows the committed
   `slot.offset`, which can be behind the document when an adoption inside the
   window never committed.
-- Programmatic scrolls on the document side (`scroll-initial-target`, a snap
-  or chain the document runs) can be overwritten by a later post; per-slot
-  epochs belong to the script-facing scroll API. Scroll events, a wheel's
-  quiet period and `scrollend` on detach are not implemented: a detaching
-  painter drops what it had not posted.
+- A script-facing scroll (`Document::scroll_to_with`) is never undone by a
+  post the painter made before it saw the request: main drops a post naming
+  an older request serial than the container's pending one. Scrolls the
+  document makes on its own account (`scroll-initial-target`, a snap or
+  chain the document runs) record no request and can still be overwritten by
+  a later post.
+- A request stays in the committed frame until the next commit after its
+  acknowledgement. A painter attached in between starts with no handled
+  serials, so it carries the request out again: an instant one lands on its
+  target once more, a smooth one glides there from the committed offset.
+- Scroll events, a wheel's quiet period and `scrollend` on detach are not
+  implemented: a detaching painter drops what it had not posted.
 
 ### One render path: a scroll frame recomposes the committed fragments
 

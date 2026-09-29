@@ -30,13 +30,16 @@ use std::cell::Cell;
 #[cfg(test)]
 use std::cell::RefCell;
 use std::marker::PhantomData;
+use std::num::NonZeroU64;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::time::Duration;
 
 use dom::input::{InputEvent, InputKind, PointerId};
 use dom::render::gpu::Headless;
-use dom::scroll::{ChainLink, ScrollAxes, drive_chain, settle_offset};
+use dom::scroll::{
+    ChainLink, ScrollAxes, ScrollBehavior, ScrollRequest, drive_chain, settle_offset,
+};
 use dom::vello::Scene;
 use dom::vello::peniko::{Color, ImageData};
 use dom::{CommittedFrame, HitTarget, NodeId, Vector2D};
@@ -50,7 +53,7 @@ pub(crate) use self::gesture::RouterHost;
 use self::gesture::{GestureRouter, InputDecision, InputDecisions};
 pub use self::graphics::WindowTarget;
 use self::graphics::{FrameAcquisition, WindowGraphics};
-use self::inertia::{Axis, BounceBack, ChainOutcome, DragTrack, Fling};
+use self::inertia::{Axis, BounceBack, ChainOutcome, DragTrack, Fling, Glide};
 use self::motion::{Motion, resolve_elastic_step, stretch_of, unwind_stretch};
 use crate::clock::ClockInstant;
 use crate::link::{
@@ -406,6 +409,15 @@ pub(super) struct ScrollIntents {
     flings: SmallVec<[Fling; 1]>,
     /// The stretched axes springing back; see [`inertia`].
     bounce_backs: SmallVec<[BounceBack; 2]>,
+    /// The axes moving to a snap position or to a smooth scroll's target;
+    /// see [`inertia`].
+    glides: SmallVec<[Glide; 2]>,
+    /// The newest programmatic scroll request handled per container
+    /// ([`dom::ScrollSlot::request`]), which every post for it names. An
+    /// entry is written when a request is first seen and pruned by every
+    /// rebase to the containers the adopted frame still has a slot for, so
+    /// it is bounded by the live containers that ever received a request.
+    handled: FxHashMap<NodeId, NonZeroU64>,
     /// The drags in progress, for their release velocity; see [`inertia`].
     drags: FxHashMap<PointerId, DragTrack>,
     /// The containers whose live offset changed, or whose hold a drag let
@@ -417,7 +429,11 @@ pub(super) struct ScrollIntents {
 }
 
 impl ScrollIntents {
-    fn rebase(&mut self, frame: &CommittedFrame) {
+    /// Brings the intents onto a newly adopted `frame`, at `now`: re-clamps
+    /// every live offset to the frame's ranges, drops what moves a container
+    /// the frame no longer has, carries out the requests the frame brings
+    /// for the first time, and settles the snapping containers at rest.
+    fn rebase(&mut self, frame: &CommittedFrame, now: f64) {
         if self.rebased_commit == Some(frame.commit_id()) {
             return;
         }
@@ -451,18 +467,90 @@ impl ScrollIntents {
         self.gesture_origins
             .retain(|(_, node), _| frame.slot_of(*node).is_some());
         self.retain_motion(frame);
+        self.apply_requests(frame, now);
         self.settle_at_rest(frame);
+    }
+
+    /// Carries out each programmatic scroll `frame` brings that this painter
+    /// has not handled yet: the request's serial is newer than the one
+    /// recorded for the container.
+    fn apply_requests(&mut self, frame: &CommittedFrame, now: f64) {
+        if !self.handled.is_empty() {
+            self.handled
+                .retain(|node, _| frame.slot_of(*node).is_some());
+        }
+        for slot in frame.scroll_slots() {
+            let Some(request) = slot.request else {
+                continue;
+            };
+            if self
+                .handled
+                .get(&slot.node)
+                .is_some_and(|handled| *handled >= request.serial)
+            {
+                continue;
+            }
+            self.handled.insert(slot.node, request.serial);
+            self.apply_request(frame, slot, request, now);
+        }
+    }
+
+    /// One programmatic scroll of `slot`'s container. Whatever the painter
+    /// was moving it with stops ([`Self::stop_motion_on`]). An instant one
+    /// puts the live offset on the target, where a drag holding the
+    /// container continues from; a smooth one glides there from rest, to
+    /// the position the at-rest snap rule would move the target to, so a
+    /// snapping container does not jump at the end. Either way the
+    /// container is posted, naming the request.
+    fn apply_request(
+        &mut self,
+        frame: &CommittedFrame,
+        slot: &dom::ScrollSlot,
+        request: ScrollRequest,
+        now: f64,
+    ) {
+        let node = slot.node;
+        self.stop_motion_on(frame, node, now);
+        let live = self.offsets.get(&node).copied().unwrap_or(slot.offset);
+        match request.behavior {
+            ScrollBehavior::Instant => {
+                for ((_, held), origin) in &mut self.gesture_origins {
+                    if *held == node {
+                        *origin = request.target;
+                    }
+                }
+                if request.target == slot.offset {
+                    self.offsets.remove(&node);
+                } else {
+                    self.offsets.insert(node, request.target);
+                }
+            }
+            ScrollBehavior::Smooth => {
+                let (snap_x, snap_y) = frame.snap_axes(slot);
+                let target = settle_offset(
+                    request.target,
+                    request.target,
+                    slot.scrollport,
+                    snap_x,
+                    snap_y,
+                );
+                self.glide_to(frame, node, live, target, now);
+            }
+        }
+        note_changed(&mut self.changed, node);
+        self.generation += 1;
     }
 
     /// css-scroll-snap-1 §6.1: a snapping container must rest on a snap
     /// position. Every commit publishes fresh positions — the first layout,
     /// a relayout that moved the areas, a programmatic scroll the document
     /// applied — so each snapping container no drag is holding, no fling is
-    /// driving and no bounce back is moving settles from where it stands,
-    /// as an intent like any other scroll.
+    /// driving and no bounce back or glide is moving settles from where it
+    /// stands, at once, as an intent like any other scroll.
     fn settle_at_rest(&mut self, frame: &CommittedFrame) {
         for slot in frame.scroll_slots() {
-            if self.is_held(slot.node) || self.is_bouncing(slot.node) {
+            if self.is_held(slot.node) || self.is_bouncing(slot.node) || self.is_gliding(slot.node)
+            {
                 continue;
             }
             self.settle_node_at_rest(frame, slot);
@@ -487,11 +575,13 @@ impl ScrollIntents {
     }
 
     /// Settles every container `pointer`'s drag moved onto a snap position,
-    /// from where the drag found it to where it left it, and releases the
-    /// hold on them. A stretched axis is not settled: it springs back
-    /// first ([`Self::start_bounce_backs`]) and is re-snapped when it lands.
-    fn settle(&mut self, frame: &CommittedFrame, pointer: PointerId) {
-        self.rebase(frame);
+    /// from where the drag found it to where it left it, gliding there
+    /// ([`Self::glide_to`]), and releases the hold on them. A stretched axis
+    /// is not settled: it springs back first ([`Self::start_bounce_backs`])
+    /// and is re-snapped when it lands. An axis already gliding keeps its
+    /// glide.
+    fn settle(&mut self, frame: &CommittedFrame, pointer: PointerId, now: f64) {
+        self.rebase(frame, now);
         let held: SmallVec<[(NodeId, Vector2D<f32>); 2]> = self
             .gesture_origins
             .iter()
@@ -509,10 +599,7 @@ impl ScrollIntents {
             let (snap_x, snap_y) = frame.snap_axes(slot);
             let offset = self.offsets.get(&node).copied().unwrap_or(slot.offset);
             let settled = settle_stretch_aware(origin, offset, slot, snap_x, snap_y);
-            if settled != offset {
-                self.write(node, settled);
-                self.generation += 1;
-            }
+            self.glide_to(frame, node, offset, settled, now);
         }
     }
 
@@ -525,7 +612,9 @@ impl ScrollIntents {
     /// `contain-bounce` stretch the document never takes. A drag or fling
     /// step (`pointer` set) records where it found each container it moved,
     /// and a drag step feeds its release velocity; a wheel step snaps as it
-    /// lands. Before the walk, a container on the chain already stretched
+    /// lands, and ends the glides on each container it moves, so where the
+    /// wheel put it stands rather than being overwritten by the glide's
+    /// next frame. Before the walk, a container on the chain already stretched
     /// on an axis unwinds toward its edge first (Lynx's restore-first rule),
     /// whatever the walk's order.
     fn chain(
@@ -537,7 +626,7 @@ impl ScrollIntents {
         pointer: Option<PointerId>,
         at: f64,
     ) -> ChainOutcome {
-        self.rebase(frame);
+        self.rebase(frame, at);
         if motion == Motion::Drag
             && let Some(pointer) = pointer
         {
@@ -586,6 +675,9 @@ impl ScrollIntents {
                         .entry((pointer, slot.node))
                         .or_insert(offset);
                 }
+                if motion == Motion::Wheel {
+                    self.stop_glides(slot.node);
+                }
                 self.write(slot.node, moved);
                 if stretch_of(applied, axis.of(slot.max_offset)) != 0.0 {
                     axis.raise(&mut stretched);
@@ -617,6 +709,9 @@ impl ScrollIntents {
                     self.gesture_origins
                         .entry((pointer, slot.node))
                         .or_insert(offset);
+                }
+                if motion == Motion::Wheel {
+                    self.stop_glides(slot.node);
                 }
                 self.write(slot.node, step.applied);
             }
@@ -667,14 +762,17 @@ impl ScrollIntents {
                     clamp_scroll_axis(live.x, slot.max_offset.x),
                     clamp_scroll_axis(live.y, slot.max_offset.y),
                 );
-                let moving =
-                    self.is_held(node) || self.is_flinging(frame, node) || self.is_bouncing(node);
+                let moving = self.is_held(node)
+                    || self.is_flinging(frame, node)
+                    || self.is_bouncing(node)
+                    || self.is_gliding(node);
                 posting.push((
                     node,
                     ScrollEntry {
                         offset,
                         at,
                         rest: (!moving).then_some(offset),
+                        request: self.handled.get(&node).copied(),
                     },
                 ));
             }
@@ -1223,7 +1321,7 @@ impl Painter {
         let at = self.clock.now_seconds();
         let published = self.frame().cloned();
         if let Some(frame) = &published {
-            self.scroll_intents.rebase(frame);
+            self.scroll_intents.rebase(frame, at);
         }
         let generation = self.scroll_intents.generation;
         let frame = published.as_deref();
@@ -1562,7 +1660,7 @@ impl Painter {
         // Before the post, so a commit adopted this turn cannot re-snap an
         // offset after its state went out. The post is the pass's last
         // publish: nothing below moves an offset.
-        self.scroll_intents.rebase(&frame);
+        self.scroll_intents.rebase(&frame, now);
         let _ = self.begin_frame(now, false);
         let key: ComposeKey = (frame.commit_id(), self.scroll_intents.generation);
         let animation_now = frame.has_live_curves().then_some(now);
@@ -1680,7 +1778,7 @@ impl Painter {
         let now = self.clock.now_seconds();
         self.service_gesture_clock(now);
         if let Some(frame) = self.frame().cloned() {
-            self.scroll_intents.rebase(&frame);
+            self.scroll_intents.rebase(&frame, now);
         }
         self.deliver_vsync(now);
         if let Some(seq) = self.begin_frame(now, true) {
@@ -1693,7 +1791,7 @@ impl Painter {
         };
         // The wait may have adopted a newer commit. What this rebase changes
         // is the pass's last publish; no send of the pass follows it.
-        self.scroll_intents.rebase(&frame);
+        self.scroll_intents.rebase(&frame, now);
         self.publish_scroll(now, None);
         let key: ComposeKey = (frame.commit_id(), self.scroll_intents.generation);
         let animation_now = frame.has_live_curves().then_some(now);

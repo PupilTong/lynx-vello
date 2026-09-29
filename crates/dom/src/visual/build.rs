@@ -28,7 +28,7 @@
 //! in their containing-block chain. Both escapes are the same rule, which is
 //! why one struct carries both.
 
-use euclid::default::{Point2D, Rect, Size2D, Transform3D};
+use euclid::default::{Point2D, Rect, Size2D, Transform3D, Vector2D};
 use hughie::style::containment::effective_containment;
 use hughie::style::{
     Contain, ContentVisibility, CoreStyle, Overflow, PositionProperty, visibility,
@@ -52,7 +52,7 @@ use crate::layout::{
     establishes_fixed_containing_block, skips_contents,
 };
 use crate::scroll::initial_target::InitialTarget;
-use crate::scroll::{ScrollAxes, SnapAxisPositions, SnapPoint};
+use crate::scroll::{ScrollAxes, ScrollRequest, SnapAxisPositions, SnapPoint};
 use crate::style::curve_export::ExportedComposite;
 use crate::tree::document::{Document, DocumentLayoutState, NodeSlot, TreeArenas};
 use crate::tree::node::Node;
@@ -427,6 +427,18 @@ impl<'doc, T: Sync> Builder<'doc, T> {
                 x: positions.x.map(|axis| self.push_snap_axis(&axis)),
                 y: positions.y.map(|axis| self.push_snap_axis(&axis)),
             });
+        let max_offset = scroll_box.max_offset();
+        let request = self
+            .state
+            .scroll_requests
+            .get(&node)
+            .map(|request| ScrollRequest {
+                target: Vector2D::new(
+                    request.target.x.clamp(0.0, max_offset.x),
+                    request.target.y.clamp(0.0, max_offset.y),
+                ),
+                ..*request
+            });
         self.scratch.scroll_stickies.push(sticky);
         self.slots.push(ScrollSlot {
             node,
@@ -437,12 +449,13 @@ impl<'doc, T: Sync> Builder<'doc, T> {
             capture: scroll_box.capture,
             snap,
             offset: scroll_box.offset,
-            max_offset: scroll_box.max_offset(),
+            max_offset,
             scrollport: scroll_box.scrollport,
             viewport_axes: [
                 euclid::vec2(world.m11, world.m12),
                 euclid::vec2(world.m21, world.m22),
             ],
+            request,
         });
         Some(
             u32::try_from(self.slots.len() - 1)

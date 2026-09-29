@@ -795,8 +795,13 @@ and §D.16 with what the wire format actually permits.)*
       moving container stops it and takes over. Rest is one physical pixel.
       Nothing outside the painter changed for this: the input router and
       the document's scroll API are as they were, and no event is
-      involved. No `scroll-behavior` still: programmatic scrolls and snaps
-      remain jumps.
+      involved. A drag's release on a snapping axis glides to its snap
+      position on the bounce back's critically damped spring, keeping the
+      release velocity when the position is within one scrollport (an aimed
+      fling otherwise), and a script-facing scroll names its behavior — a
+      smooth one is a glide from rest, an instant one a jump — through
+      `Document::scroll_to_with` (CSSOM-View `scrollTo({behavior})`). There
+      is still no `scroll-behavior` property.
     - **`scroll-capture: auto | nearest`** is lynx-vello's own property, with
       no W3C or Lynx counterpart (the fork declares it `lynx_only`). `nearest`
       on a scroll container hands a gesture that starts in it to the nearest
@@ -815,8 +820,9 @@ and §D.16 with what the wire format actually permits.)*
       within range — never a position behind it, so small ticks still make
       progress); a drag settles on release; a snapping container is
       re-snapped at rest on every commit, which is also the initial snap;
-      `block`/`inline` are `y`/`x`; axes are chosen independently. Snaps are
-      instantaneous (no `scroll-behavior`). **Out by request**: the
+      `block`/`inline` are `y`/`x`; axes are chosen independently. A drag's
+      release glides to its snap position (the inertia bullet above); a wheel
+      tick and the at-rest snap after a commit are instantaneous. **Out by request**: the
       `scrollsnapchange`/`scrollsnapchanging` events of css-scroll-snap-2.
       **Not implemented**: §7's same-element preference across axes, and
       snap areas escaping from inside a nested scroll container.
