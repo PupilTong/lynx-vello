@@ -62,6 +62,7 @@ Most files use a table with these columns:
 | [reactlynx.md](reactlynx.md) | ReactLynx runtime/compiler model, hooks compatibility matrix, public API & component library |
 | [media-resources.md](media-resources.md) | Image loading pipeline, clipboard, video/audio playback |
 | [accessibility.md](accessibility.md) | Accessibility node tree, screen-reader semantics, JS a11y API |
+| [scroll-snap-settle.md](scroll-snap-settle.md) | How a paged or snapping scroller lands after a release: lynx-ui's Swiper and Sheet, the native `<viewpager>`s, web-core, and this engine's glide, side by side (ruled 2026-09-29: the engine keeps its own) |
 | [deviations.md](deviations.md) | Curated rollup of the highest-impact Lynx-vs-W3C behavior divergences, with the W3C-correct behavior to implement (the exhaustive per-property list lives in each file above) |
 
 ## Status
