@@ -555,8 +555,16 @@ fn fit_content_available(
         | StyleSize::FitContent
         | StyleSize::Stretch
         | StyleSize::WebkitFillAvailable => available,
+        // An in-flow item: §5.1.1 resolves nothing for it.
         StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => {
-            unreachable!("anchor sizing is pref-dead under the lynx feature")
+            fit_content_available(
+                &super::anchor::unresolvable_style_size(value),
+                axis,
+                parent_size,
+                available,
+                box_sizing,
+                box_floor,
+            )
         }
     }
 }
@@ -1311,6 +1319,7 @@ where
         (container_size.height - border.vertical_sum()).max(0.0),
     );
     let mut scrollable_size = container_size;
+    super::util::debug_assert_tree_order(items.iter().map(|item| item.document_index));
     for pending in items {
         let style = tree.style(pending.node);
         match style.position() {

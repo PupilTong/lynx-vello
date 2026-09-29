@@ -237,8 +237,9 @@ fn margin_depends_on_basis(value: &Margin) -> bool {
     match value {
         Margin::LengthPercentage(lp) => lp_depends_on_basis(lp),
         Margin::Auto => false,
+        // An in-flow item: §5.1.1 resolves nothing for it.
         Margin::AnchorSizeFunction(_) | Margin::AnchorContainingCalcFunction(_) => {
-            unreachable!("anchor margins are pref-dead under the lynx feature")
+            margin_depends_on_basis(&super::anchor::unresolvable_margin(value))
         }
     }
 }
@@ -248,10 +249,11 @@ fn inset_depends_on_basis(value: &Inset) -> bool {
     match value {
         Inset::LengthPercentage(lp) => lp_depends_on_basis(lp),
         Inset::Auto => false,
+        // The relative nudge of an in-flow item: §5.1.1 resolves nothing for it.
         Inset::AnchorFunction(_)
         | Inset::AnchorSizeFunction(_)
         | Inset::AnchorContainingCalcFunction(_) => {
-            unreachable!("anchor insets are pref-dead under the lynx feature")
+            inset_depends_on_basis(&super::anchor::unresolvable_inset(value))
         }
     }
 }
@@ -1246,6 +1248,7 @@ where
     for key in hidden_items {
         super::hide_child_at_order(tree, state, key.node, key.layout_order);
     }
+    super::util::debug_assert_tree_order(absolute_items.iter().map(|item| item.key.document_index));
     for item in absolute_items {
         let AbsoluteItem {
             key,
@@ -1473,10 +1476,12 @@ where
                     },
                     position,
                     gravity: computed_cross_gravity(child_style.align_self(), align_items, axes),
-                    static_axes: Size::new(
-                        inset.left.is_auto() && inset.right.is_auto(),
-                        inset.top.is_auto() && inset.bottom.is_auto(),
-                    ),
+                    // An `anchor-size()` inset may still resolve to `auto`.
+                    static_axes: {
+                        let auto = inset
+                            .map(|inset| inset.is_auto() || super::anchor::is_anchor_inset(inset));
+                        Size::new(auto.left && auto.right, auto.top && auto.bottom)
+                    },
                 });
             }
             continue;

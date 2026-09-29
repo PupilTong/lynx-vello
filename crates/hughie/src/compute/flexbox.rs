@@ -24,11 +24,11 @@ use super::single_axis::{
 use super::util::{
     Axis, ItemGeometry, ItemKey, OrderedItem, ResolvedContainerBox, accumulate_scrollable_overflow,
     axis_has_intrinsic_style, axis_sizing_is_stable, clamp_axis, container_content_independence,
-    edges_depend_on_inline_basis, normalize_content_alignment, normalize_item_alignment,
-    own_scrollable_overflow, relative_offset, resolve_container_box, resolve_gap, resolve_gap_axis,
-    resolve_insets, resolve_item_geometry, resolve_length_percentage, resolve_style_size,
-    sort_and_assign_layout_order, store_committed_child, style_size_behaves_auto,
-    style_size_depends_on_basis,
+    debug_assert_tree_order, edges_depend_on_inline_basis, normalize_content_alignment,
+    normalize_item_alignment, own_scrollable_overflow, relative_offset, resolve_container_box,
+    resolve_gap, resolve_gap_axis, resolve_insets, resolve_item_geometry,
+    resolve_length_percentage, resolve_style_size, sort_and_assign_layout_order,
+    store_committed_child, style_size_behaves_auto, style_size_depends_on_basis,
 };
 use crate::geometry::{Edges, Point, Size};
 use crate::style::containment::contained_axes;
@@ -546,6 +546,17 @@ fn determine_flex_base_sizes<'tree, T>(
                     }
                 }
             };
+            // A flex item is in flow, so §5.1.1 resolves nothing for it.
+            let unresolved_anchor;
+            let content_basis = if matches!(
+                content_basis,
+                StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_)
+            ) {
+                unresolved_anchor = super::anchor::unresolvable_style_size(content_basis);
+                &unresolved_anchor
+            } else {
+                content_basis
+            };
             match content_basis {
                 StyleSize::MinContent => probes.min_content(),
                 StyleSize::MaxContent => probes.max_content(),
@@ -575,7 +586,7 @@ fn determine_flex_base_sizes<'tree, T>(
                     }
                 }
                 StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => {
-                    unreachable!("anchor sizing is pref-dead under the lynx feature")
+                    unreachable!("substituted with the unresolvable form above")
                 }
             }
         };
@@ -1589,6 +1600,7 @@ where
         (container_size.height - border.vertical_sum()).max(0.0),
     );
 
+    debug_assert_tree_order(absolute_items.iter().map(|item| item.document_index));
     for pending in absolute_items {
         let key = pending.key();
         let style = tree.style(key.node);

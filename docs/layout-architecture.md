@@ -320,6 +320,19 @@ its 336-byte budget and a page without them pays nothing per node. The
 visual layer reads the recorded area rather than reconstructing track
 placement, alignment or baseline adjustments.
 
+css-anchor-position-1 `anchor-size()` crosses the seam the other way: an
+absolutely positioned box's sizes, min/max sizes, insets and margins may hold
+the function, and the engine asks the host for each target's size through
+`LayoutTree::anchor_size` (default `None`, which makes every function take its
+fallback). The engine owns resolution (`compute/anchor.rs`: keyword → physical
+axis, fallback, the initial value standing in for invalid-at-computed-value
+time, `calc()` substitution) and asks only from `absolute_layout`, where every
+in-flow sibling and every earlier out-of-flow one is already committed; the
+host owns which element is the target, since that is a tree walk over
+`anchor-name`. The box's own run never resolves the function: the absolute
+pass hands it the anchored axes as known dimensions, so its cache key carries
+every anchor it read. Scope and reasons: `docs/style-assumptions.md` §28.
+
 **`LayoutInput` stays one type, and the tree stays one trait.** The style
 surface splits per algorithm and the wire struct does not, for a structural
 reason rather than a matter of taste: a style belongs to one node whose own

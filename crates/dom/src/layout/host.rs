@@ -19,14 +19,14 @@ use hughie::compute::{
 };
 use hughie::geometry::{Edges, Point, Size};
 use hughie::invalidate::is_relayout_boundary;
-use hughie::style::{CoreStyle, PositionProperty};
+use hughie::style::{CoreStyle, DashedIdent, PhysicalAxis, PositionProperty};
 use hughie::tree::{AvailableSpace, Layout, LayoutInput, LayoutOutput, LayoutSlot, LayoutTree};
 use rustc_hash::FxHashSet;
 
 use super::committed_box;
 use super::style::{
     DisplayMode, StyleView, box_parent, display_mode, establishes_absolute_containing_block,
-    establishes_fixed_containing_block, resolve_position,
+    establishes_fixed_containing_block, has_anchor_name, resolve_position,
 };
 use super::text_block::compute_text_block_layout;
 use crate::tree::document::{
@@ -273,6 +273,79 @@ impl<T> LayoutTree for TreeArenas<T> {
 
     fn clear_layout_cache(&self, state: &mut Self::State, node: NodeSlot) {
         state.clear_layout_cache(node);
+    }
+
+    /// css-anchor-position-1 §2.3's target anchor element for `node`, over
+    /// the subset this engine resolves (`docs/style-assumptions.md` §28):
+    ///
+    /// - The query box is laid out by its containing block's own absolute pass — `position:
+    ///   absolute` whose box parent is its containing block. A box the positioned pass places
+    ///   instead (`fixed`, or an `absolute` box escaping a non-positioned parent) answers `None`:
+    ///   that pass is the rounding tail's, which reaches only boxes whose own subtree moved, so a
+    ///   moved anchor would never reach it.
+    /// - Candidates are the containing block's box children (with `display: contents` flattened)
+    ///   that carry `name`: the "same containing block" half of §2.3. An in-flow child is
+    ///   acceptable wherever it sits, an absolutely positioned one only before `node` in tree
+    ///   order; the last acceptable one in tree order wins. No ancestor of `node` is a descendant
+    ///   of its containing block, so the "nearest ancestor" rule never applies to such a box. Not
+    ///   modelled: an anchor deeper in a sibling's subtree (§2.3's containing-block-chain clause),
+    ///   `anchor-scope`, the top layer, and tree-scoped name matching.
+    ///
+    /// Cost: one pass over the containing block's children per function,
+    /// which the containing block's own run already makes. It reads sizes
+    /// this pass wrote, which is why the subtree clause is out: a mutation
+    /// under a sibling can relayout in place (or stop at a `contain: strict`
+    /// sibling) without that sibling's own size changing, while an anchor
+    /// inside it did, and nothing would lay `node` out again. A direct child
+    /// cannot change size without its parent — the containing block — being
+    /// laid out again, and that run is what lays `node` out.
+    fn anchor_size(
+        &self,
+        state: &Self::State,
+        node: NodeSlot,
+        name: &DashedIdent,
+        axis: PhysicalAxis,
+    ) -> Option<f32> {
+        let query = self.at(node);
+        let style = StyleView::try_of(query)?;
+        if style.position() != PositionProperty::Absolute {
+            return None;
+        }
+        let containing_block = box_parent(query)?;
+        let mut target = None;
+        let mut before_query = true;
+        for (child, child_style, display) in self.flattened_children(containing_block.slot()) {
+            if child == node {
+                before_query = false;
+                continue;
+            }
+            if display.is_none()
+                || !self.at(child).is_element()
+                || !has_anchor_name(child_style.values(), name)
+            {
+                continue;
+            }
+            match child_style.position() {
+                // Laid out by this same pass, so only one already laid out
+                // — earlier in tree order — has a size yet; §2.3 says the
+                // same.
+                PositionProperty::Absolute if !before_query => {}
+                // Placed by the positioned pass, against another containing
+                // block.
+                PositionProperty::Fixed => {}
+                _ => target = Some(child),
+            }
+        }
+        let slot = self.layout(state, target?);
+        debug_assert!(
+            !slot.is_hidden(),
+            "an anchor that generates a box has been committed by this pass"
+        );
+        let size = slot.unrounded.size;
+        Some(match axis {
+            PhysicalAxis::Horizontal => size.width,
+            PhysicalAxis::Vertical => size.height,
+        })
     }
 }
 

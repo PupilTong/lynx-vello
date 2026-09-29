@@ -9,7 +9,7 @@ use smallvec::SmallVec;
 
 use crate::cache::Cache;
 use crate::geometry::{Edges, Point, Size};
-use crate::style::{CoreStyle, Display};
+use crate::style::{CoreStyle, DashedIdent, Display, PhysicalAxis};
 
 /// Per-node marks that outlive one layout pass: what the rounding tail still
 /// owes this node, and whether its subtree is already hidden.
@@ -281,6 +281,35 @@ pub trait LayoutTree {
         bounds: Edges<f32>,
     ) {
         let _ = (state, node, bounds);
+    }
+
+    /// css-anchor-position-1 §5.1.1: the unrounded border-box size, on
+    /// `axis`, of the target anchor element `name` selects for the absolutely
+    /// positioned `node` (§2.3), or `None` when there is none — then the
+    /// `anchor-size()` takes its fallback.
+    ///
+    /// The engine asks while laying `node` out through its containing block's
+    /// absolute pass, so the answer must come from the current pass: every
+    /// in-flow child of that containing block is committed by then, and so is
+    /// every absolutely positioned child before `node` in tree order (each
+    /// algorithm lays its out-of-flow children after its in-flow commit, in
+    /// tree order). Which elements are acceptable targets is the host's
+    /// decision — the engine owns no tree walk and no `anchor-name` — as is
+    /// answering `None` for a box it does not lay out through that pass. The
+    /// axis is physical; [`crate::compute::anchor_size_axis`] maps the
+    /// function's keyword onto it.
+    ///
+    /// The default answers `None`: a host with no anchors resolves every
+    /// function to its fallback.
+    fn anchor_size(
+        &self,
+        state: &Self::State,
+        node: Self::NodeId,
+        name: &DashedIdent,
+        axis: PhysicalAxis,
+    ) -> Option<f32> {
+        let _ = (state, node, name, axis);
+        None
     }
 }
 

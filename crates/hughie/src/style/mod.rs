@@ -50,6 +50,8 @@ pub use stylo::computed_values::{
     box_sizing, direction, flex_direction, flex_wrap, linear_direction, relative_center,
     relative_layout_once, text_wrap_mode, visibility,
 };
+pub use stylo::logical_geometry::PhysicalAxis;
+pub use stylo::values::DashedIdent;
 pub use stylo::values::computed::length::NonNegativeLengthPercentageOrNormal;
 pub use stylo::values::computed::lynx_layout::{RelativeAlign, RelativeReference};
 pub use stylo::values::computed::{

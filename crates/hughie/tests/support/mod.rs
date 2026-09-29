@@ -13,6 +13,7 @@ use hughie::compute::{
 };
 use hughie::prelude::*;
 use hughie::style::containment::effective_containment;
+use hughie::style::{DashedIdent, PhysicalAxis};
 use style_traits::values::specified::AllowedNumericType;
 use stylo::computed_values::{
     box_sizing, direction, flex_direction, flex_wrap, linear_direction, relative_center,
@@ -1107,6 +1108,9 @@ pub(super) struct TestTree {
     pub(super) static_position_writes: Cell<usize>,
     pub(super) leaf_measure_calls: Cell<usize>,
     pub(super) record_measure_inputs: Cell<bool>,
+    /// The anchors every box's `anchor-size()` sees, by name: the target
+    /// lookup is the host's (`dom`'s), so this host answers any query.
+    pub(super) anchors: Vec<(&'static str, Size<f32>)>,
 }
 
 impl Default for TestTree {
@@ -1120,6 +1124,7 @@ impl Default for TestTree {
             static_position_writes: Cell::new(0),
             leaf_measure_calls: Cell::new(0),
             record_measure_inputs: Cell::new(true),
+            anchors: Vec::new(),
         }
     }
 }
@@ -1188,6 +1193,23 @@ impl LayoutTree for TestTree {
             .set(self.static_position_writes.get().saturating_add(1));
         self.session[node.index].static_position.set(Some(position));
         state.slots[node.index].static_position = position;
+    }
+
+    fn anchor_size(
+        &self,
+        _state: &TestState,
+        _node: TestRef,
+        name: &DashedIdent,
+        axis: PhysicalAxis,
+    ) -> Option<f32> {
+        let (_, size) = self
+            .anchors
+            .iter()
+            .find(|(anchor, _)| **anchor == *name.0)?;
+        Some(match axis {
+            PhysicalAxis::Horizontal => size.width,
+            PhysicalAxis::Vertical => size.height,
+        })
     }
 
     fn compute_layout(

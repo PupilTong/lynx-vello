@@ -1,4 +1,5 @@
 //! Protocol machinery entry points over a statically split tree and state.
+mod anchor;
 mod flexbox;
 mod grid;
 mod leaf;
@@ -7,6 +8,7 @@ mod relative;
 mod single_axis;
 mod util;
 
+pub use anchor::anchor_size_axis;
 pub use flexbox::compute_flexbox_layout;
 pub use grid::{compute_grid_lanes_layout, compute_grid_layout};
 #[cfg(feature = "layout-test-utils")]
@@ -52,6 +54,17 @@ pub fn used_padding<Style: CoreStyle>(style: &Style, inline_basis: Option<f32>) 
     resolve_padding(style.padding(), inline_basis)
 }
 
+/// The used value of an inset on a box its host offsets itself — a sticky
+/// box's constraint rectangle, a relative nudge — which is never absolutely
+/// positioned: css-anchor-position-1 §5.1.1 resolves no `anchor-size()` for
+/// it, so the function takes its fallback, and one without a fallback leaves
+/// the inset `auto` (`None`), the initial value an invalid-at-computed-value
+/// time declaration computes to.
+#[must_use]
+pub fn used_inset(value: &Inset, basis: Option<f32>) -> Option<f32> {
+    self::util::resolve_inset(value, basis)
+}
+
 /// The used border widths, with a `none`/`hidden` side reading zero.
 #[must_use]
 pub fn used_border<Style: CoreStyle>(style: &Style) -> Edges<f32> {
@@ -61,11 +74,13 @@ pub fn used_border<Style: CoreStyle>(style: &Style) -> Edges<f32> {
 pub use linear::compute_linear_layout;
 pub use relative::compute_relative_layout;
 use stylo::computed_values::direction;
-use stylo::values::computed::{Margin, Size as StyleSize};
+use stylo::values::computed::{Inset, Margin, Size as StyleSize};
 
+use self::anchor::{AnchoredGeometry, GeometryValues};
 use self::util::{
-    apply_box_sizing, auto_edges_to_zero, clamp, clamp_axis, resolve_border, resolve_container_box,
-    resolve_insets, resolve_length_percentage, resolve_margins, resolve_max_sizes, resolve_padding,
+    apply_box_sizing, auto_edges_to_zero, box_inset_size, clamp, clamp_axis, resolve_border,
+    resolve_container_box, resolve_insets, resolve_length_percentage, resolve_margins,
+    resolve_max_sizes, resolve_padding, resolve_quantitative_max_sizes, resolve_quantitative_sizes,
     resolve_size, style_size_behaves_auto, used_aspect_ratio,
 };
 use crate::geometry::{Edges, Point, Size};
@@ -74,6 +89,7 @@ use crate::style::CoreStyle;
 use crate::style::containment::contain_intrinsic_length;
 use crate::tree::{
     AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutOutput, LayoutTree, RequestedAxis,
+    SizingMode,
 };
 
 pub fn compute_root_layout<T: LayoutTree>(
@@ -416,7 +432,10 @@ where
         "containing-block sizes must be finite and non-negative"
     );
     let parent_size = Size::new(Some(containing_block.width), Some(containing_block.height));
-    let resolved_style = resolve_absolute_style(tree, node, parent_size);
+    let style = tree.style(node);
+    let anchored = AnchoredGeometry::resolve(tree, state, node, &style);
+    let values = GeometryValues::of_box(&style, anchored.as_ref());
+    let resolved_style = resolve_absolute_style(&style, &values, parent_size);
     let ResolvedAbsoluteStyle {
         insets,
         optional_margin,
@@ -435,7 +454,7 @@ where
             .max(0.0),
     );
 
-    let known_dimensions =
+    let mut known_dimensions =
         absolute_known_dimensions(&resolved_style, inset_modified_size, fixed_margin);
     let available_space = Size::new(
         preferred_available
@@ -444,6 +463,21 @@ where
         preferred_available
             .height
             .unwrap_or(AvailableSpace::Definite(inset_modified_size.height)),
+    );
+    let goal = settle_anchored_axes(
+        tree,
+        state,
+        node,
+        &style,
+        &values,
+        anchored.as_ref(),
+        AbsoluteSpace {
+            parent_size,
+            inset_modified_size,
+            fixed_margin,
+        },
+        &mut known_dimensions,
+        goal,
     );
     let child_input = LayoutInput::new(goal, known_dimensions, parent_size, available_space);
     let output = tree.compute_layout(state, node, child_input);
@@ -543,19 +577,167 @@ fn absolute_known_dimensions(
     )
 }
 
-fn resolve_absolute_style<T: LayoutTree>(
+/// Settles, for an absolutely positioned box whose style references
+/// `anchor-size()` (`anchored`; any other box passes through), the used
+/// border-box size on every axis its own run would
+/// otherwise read an anchor-bearing value on, and records it as that axis's
+/// known dimension (see [`AnchoredGeometry`] for why that is the whole job).
+///
+/// An axis with a definite preferred size takes it clamped by the min/max
+/// sizes, exactly the preferred size the box's own run derives from these
+/// values (`resolve_container_box`). An axis sized from content — `auto`, or a
+/// size the substitution made `auto` — with an anchor-bearing min/max size or
+/// margin is measured with the box's size styles ignored, so none of its
+/// unresolvable reads enter the result, and then fitted and clamped here: the
+/// shrink-to-fit width of CSS 2.1 §10.3.7, `min(max-content, max(min-content,
+/// available))`, and the content height at the used width. Answers which axes
+/// that measured.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one step of absolute_layout, consuming its locals"
+)]
+fn settle_anchored_axes<T: LayoutTree>(
     tree: &T,
+    state: &mut T::State,
+    node: T::NodeId,
+    style: &impl CoreStyle,
+    values: &GeometryValues<'_>,
+    anchored: Option<&AnchoredGeometry>,
+    space: AbsoluteSpace,
+    known: &mut Size<Option<f32>>,
+    mut goal: LayoutGoal,
+) -> LayoutGoal {
+    let Some(&AnchoredGeometry { sensitive, .. }) = anchored else {
+        return goal;
+    };
+    let parent_size = space.parent_size;
+    let aspect_ratio = used_aspect_ratio(style.aspect_ratio());
+    let box_sizing = style.box_sizing();
+    let box_inset = box_inset_size(
+        resolve_padding(style.padding(), parent_size.width),
+        resolve_border(&style.border()),
+    );
+    let quantitative =
+        |value| resolve_quantitative_sizes(value, parent_size, aspect_ratio, box_sizing, box_inset);
+    let preferred = quantitative(values.size);
+    let min = quantitative(values.min_size);
+    let max = resolve_quantitative_max_sizes(
+        values.max_size,
+        parent_size,
+        aspect_ratio,
+        box_sizing,
+        box_inset,
+    );
+    let clamp_width = |width| clamp_axis(width, min.width, max.width, box_inset.width);
+    let clamp_height = |height| clamp_axis(height, min.height, max.height, box_inset.height);
+    if sensitive.width && known.width.is_none() {
+        known.width = preferred.width.map(clamp_width);
+    }
+    if sensitive.height && known.height.is_none() {
+        known.height = preferred.height.map(clamp_height);
+    }
+
+    let mut measured = Size::new(false, false);
+    if sensitive.width && known.width.is_none() {
+        let available = space.inset_modified_size.width - space.fixed_margin.horizontal_sum();
+        let width = measure_content_width(tree, state, node, parent_size, known.height, available);
+        known.width = Some(clamp_width(width));
+        measured.width = true;
+    }
+    if sensitive.height && known.height.is_none() {
+        // The height of content depends on the width it is laid out at, which
+        // the measurement below would otherwise take from the very size
+        // styles it ignores.
+        let width = known.width.unwrap_or_else(|| {
+            let input = LayoutInput::measure(
+                Size::NONE,
+                parent_size,
+                Size::new(
+                    AvailableSpace::Definite(space.inset_modified_size.width),
+                    AvailableSpace::MaxContent,
+                ),
+                RequestedAxis::Horizontal,
+            );
+            tree.compute_layout(state, node, input).size.width
+        });
+        let input = content_measure(
+            Size::new(Some(width), None),
+            parent_size,
+            Size::MAX_CONTENT,
+            RequestedAxis::Vertical,
+        );
+        let height = tree.compute_layout(state, node, input).size.height;
+        known.height = Some(clamp_height(height));
+        measured.height = true;
+    }
+    if let LayoutGoal::Commit {
+        content_independent,
+    } = &mut goal
+    {
+        // A size measured from the box's own content moves with it.
+        content_independent.width &= !measured.width;
+        content_independent.height &= !measured.height;
+    }
+    goal
+}
+
+/// The containing-block geometry `absolute_layout` has resolved for one box.
+#[derive(Clone, Copy)]
+struct AbsoluteSpace {
+    parent_size: Size<Option<f32>>,
+    inset_modified_size: Size<f32>,
+    fixed_margin: Edges<f32>,
+}
+
+/// A measurement of the box's content alone: its own size, min and max sizes
+/// ignored.
+fn content_measure(
+    known: Size<Option<f32>>,
+    parent_size: Size<Option<f32>>,
+    available: Size<AvailableSpace>,
+    axis: RequestedAxis,
+) -> LayoutInput {
+    let mut input = LayoutInput::measure(known, parent_size, available, axis);
+    input.sizing_mode = SizingMode::IgnoreSizeStyles;
+    input
+}
+
+/// The shrink-to-fit width of the box's content in `available`.
+fn measure_content_width<T: LayoutTree>(
+    tree: &T,
+    state: &mut T::State,
     node: T::NodeId,
     parent_size: Size<Option<f32>>,
+    height: Option<f32>,
+    available: f32,
+) -> f32 {
+    let known = Size::new(None, height);
+    let mut width = |available_width| {
+        let input = content_measure(
+            known,
+            parent_size,
+            Size::new(available_width, AvailableSpace::MaxContent),
+            RequestedAxis::Horizontal,
+        );
+        tree.compute_layout(state, node, input).size.width
+    };
+    let min_content = width(AvailableSpace::MinContent);
+    let max_content = width(AvailableSpace::MaxContent);
+    max_content.min(min_content.max(available))
+}
+
+fn resolve_absolute_style(
+    style: &impl CoreStyle,
+    values: &GeometryValues<'_>,
+    parent_size: Size<Option<f32>>,
 ) -> ResolvedAbsoluteStyle {
-    let style = tree.style(node);
     let padding = resolve_padding(style.padding(), parent_size.width);
     let border = resolve_border(&style.border());
     let padding_border_size = Size::new(
         padding.horizontal_sum() + border.horizontal_sum(),
         padding.vertical_sum() + border.vertical_sum(),
     );
-    let style_size = style.size();
+    let style_size = values.size;
     let preferred_available = Size::new(
         absolute_preferred_available(style_size.width, parent_size.width),
         absolute_preferred_available(style_size.height, parent_size.height),
@@ -566,19 +748,19 @@ fn resolve_absolute_style<T: LayoutTree>(
         padding_border_size,
     );
     let min_size = apply_box_sizing(
-        resolve_size(style.min_size(), parent_size),
+        resolve_size(values.min_size, parent_size),
         style.box_sizing(),
         padding_border_size,
     );
     let max_size = apply_box_sizing(
-        resolve_max_sizes(style.max_size(), parent_size),
+        resolve_max_sizes(values.max_size, parent_size),
         style.box_sizing(),
         padding_border_size,
     );
 
     ResolvedAbsoluteStyle {
-        insets: resolve_insets(style.inset(), parent_size),
-        optional_margin: resolve_margins(style.margin(), parent_size.width),
+        insets: resolve_insets(values.inset, parent_size),
+        optional_margin: resolve_margins(values.margin, parent_size.width),
         padding,
         border,
         preferred_available,
@@ -606,8 +788,11 @@ fn absolute_preferred_available(value: &StyleSize, basis: Option<f32>) -> Option
         | StyleSize::FitContent
         | StyleSize::Stretch
         | StyleSize::WebkitFillAvailable => None,
+        // `absolute_layout` hands over substituted values whenever the style
+        // references `anchor-size()`; a function still here resolves as
+        // §5.1.1's unresolvable form, which is never an intrinsic keyword.
         StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => {
-            unreachable!("anchor sizing is pref-dead under the lynx feature")
+            absolute_preferred_available(&self::anchor::unresolvable_style_size(value), basis)
         }
     }
 }

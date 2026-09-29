@@ -10,6 +10,7 @@ use stylo::values::computed::{
 use stylo::values::generics::position::PreferredRatio;
 use stylo::values::specified::align::AlignFlags;
 
+use super::anchor;
 use crate::geometry::{Edges, Point, Size};
 use crate::style::{Contain, CoreStyle};
 use crate::tree::{AvailableSpace, LayoutInput, RequestedAxis, SizingMode};
@@ -249,6 +250,28 @@ pub(super) fn sort_and_assign_layout_order<N, InFlow, OutOfFlow>(
     }
 }
 
+/// Checks, in debug builds, that a container lays its out-of-flow children
+/// out in tree order.
+///
+/// Every algorithm lays them out after its in-flow commit and in tree order,
+/// and [`crate::tree::LayoutTree::anchor_size`] depends on both: when an
+/// absolutely positioned child resolves `anchor-size()`, each in-flow sibling
+/// and each earlier out-of-flow sibling — every acceptable target — already
+/// holds its size from this pass.
+#[inline]
+pub(super) fn debug_assert_tree_order(document_indices: impl Iterator<Item = usize>) {
+    if cfg!(debug_assertions) {
+        let mut previous = None;
+        for index in document_indices {
+            debug_assert!(
+                previous.is_none_or(|previous| previous < index),
+                "out-of-flow children must be laid out in tree order"
+            );
+            previous = Some(index);
+        }
+    }
+}
+
 /// Compact auto-edge mask retained with resolved item geometry.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[repr(transparent)]
@@ -325,10 +348,8 @@ macro_rules! intrinsic_tag_from {
                 $type::MinContent => Self::MinContent,
                 $type::MaxContent => Self::MaxContent,
                 $type::FitContentFunction(_) => Self::FitContent,
-                $type::AnchorSizeFunction(_) | $type::AnchorContainingCalcFunction(_) => {
-                    debug_assert!(false, "anchor sizing is pref-dead under the lynx feature");
-                    Self::None
-                }
+                // Resolved, a fallback, or `auto`/`none` when invalid at
+                // computed-value time: never an intrinsic keyword.
                 _ => Self::None,
             }
         }
@@ -515,7 +536,7 @@ pub(super) fn resolve_margin(value: &Margin, basis: Option<f32>) -> Option<f32> 
         Margin::LengthPercentage(lp) => resolve_length_percentage(lp, basis),
         Margin::Auto => None,
         Margin::AnchorSizeFunction(_) | Margin::AnchorContainingCalcFunction(_) => {
-            unreachable!("anchor margins are pref-dead under the lynx feature")
+            resolve_margin(&anchor::unresolvable_margin(value), basis)
         }
     }
 }
@@ -528,7 +549,7 @@ pub(super) fn resolve_inset(value: &Inset, basis: Option<f32>) -> Option<f32> {
         Inset::AnchorFunction(_)
         | Inset::AnchorSizeFunction(_)
         | Inset::AnchorContainingCalcFunction(_) => {
-            unreachable!("anchor insets are pref-dead under the lynx feature")
+            resolve_inset(&anchor::unresolvable_inset(value), basis)
         }
     }
 }
@@ -545,7 +566,7 @@ pub(super) fn resolve_style_size(value: &StyleSize, basis: Option<f32>) -> Optio
         | StyleSize::WebkitFillAvailable
         | StyleSize::FitContentFunction(_) => None,
         StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => {
-            unreachable!("anchor sizing is pref-dead under the lynx feature")
+            resolve_style_size(&anchor::unresolvable_style_size(value), basis)
         }
     }
 }
@@ -562,7 +583,7 @@ pub(super) fn resolve_max_size(value: &MaxSize, basis: Option<f32>) -> Option<f3
         | MaxSize::WebkitFillAvailable
         | MaxSize::FitContentFunction(_) => None,
         MaxSize::AnchorSizeFunction(_) | MaxSize::AnchorContainingCalcFunction(_) => {
-            unreachable!("anchor sizing is pref-dead under the lynx feature")
+            resolve_max_size(&anchor::unresolvable_max_size(value), basis)
         }
     }
 }
@@ -720,6 +741,9 @@ pub(super) fn style_size_depends_on_basis(value: &StyleSize) -> bool {
     match value {
         StyleSize::LengthPercentage(lp) => lp.0.has_percentage(),
         StyleSize::FitContentFunction(limit) => limit.0.has_percentage(),
+        StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => {
+            style_size_depends_on_basis(&anchor::unresolvable_style_size(value))
+        }
         _ => false,
     }
 }
@@ -729,6 +753,9 @@ pub(super) fn max_size_depends_on_basis(value: &MaxSize) -> bool {
     match value {
         MaxSize::LengthPercentage(lp) => lp.0.has_percentage(),
         MaxSize::FitContentFunction(limit) => limit.0.has_percentage(),
+        MaxSize::AnchorSizeFunction(_) | MaxSize::AnchorContainingCalcFunction(_) => {
+            max_size_depends_on_basis(&anchor::unresolvable_max_size(value))
+        }
         _ => false,
     }
 }
@@ -740,12 +767,9 @@ pub(super) fn edges_depend_on_inline_basis(
     margin: &Edges<&Margin>,
     padding: &Edges<&NonNegativeLengthPercentage>,
 ) -> bool {
-    let margin_depends = |value: &Margin| match value {
+    let margin_depends = |value: &Margin| match anchor::unresolvable_margin(value) {
         Margin::LengthPercentage(lp) => lp.has_percentage(),
-        Margin::Auto => false,
-        Margin::AnchorSizeFunction(_) | Margin::AnchorContainingCalcFunction(_) => {
-            unreachable!("anchor margins are pref-dead under the lynx feature")
-        }
+        _ => false,
     };
     margin_depends(margin.left)
         || margin_depends(margin.right)
@@ -829,7 +853,7 @@ pub(super) fn axis_sizing_is_stable(
 pub(super) fn style_size_behaves_auto(value: &StyleSize) -> bool {
     match value {
         StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => {
-            unreachable!("anchor sizing is pref-dead under the lynx feature")
+            style_size_behaves_auto(&anchor::unresolvable_style_size(value))
         }
         _ => matches!(
             value,
@@ -913,7 +937,7 @@ fn style_size_is_definite(value: &StyleSize, parent_basis: Option<f32>) -> bool 
     match value {
         StyleSize::LengthPercentage(lp) => !lp.0.has_percentage() || parent_basis.is_some(),
         StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => {
-            unreachable!("anchor sizing is pref-dead under the lynx feature")
+            style_size_is_definite(&anchor::unresolvable_style_size(value), parent_basis)
         }
         _ => false,
     }

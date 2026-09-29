@@ -1035,6 +1035,93 @@ and §D.16 with what the wire format actually permits.)*
       (`crates/dom/tests/if_function.rs`, the ignored
       `recipe_a_non_integer_first_attribute_falls_through_to_the_second`).
 
+28. **Anchor-positioning subset (user-directed, 2026-09-29):
+    css-anchor-position-1 `anchor-name` (§2.1) and `anchor-size()` (§5.1),
+    nothing else.** Not in Lynx: `lynx/core/renderer/css` has no anchor
+    property or function, and web-core reaches the same geometry with a
+    `ResizeObserver`. The first user is the `<scroll-coordinator>` slot, which
+    reads its header's and toolbar's heights
+    (`top: anchor-size(--h height, 0px)`,
+    `height: calc(100% - anchor-size(--t height, 0px))`). The fork's `lynx`
+    feature parses `anchor-name` and `anchor-size()` — in `width`/`height`,
+    `min-*`/`max-*`, the insets (the `inset` shorthand included) and the
+    margins, on its own or inside a math function, with a
+    `<length-percentage>`-only fallback — and keeps the function in the
+    computed value; `anchor()`, `anchor-center`, `anchor-scope`,
+    `position-anchor`, `position-area`, `position-try-*`,
+    `position-visibility` and `@position-try` do not parse (a dropped
+    declaration, not a guarded one). With the feature off the fork is
+    upstream (`vendor/stylo/style/tests/lynx_feature_off_parity.rs`).
+    - **Resolution (§5.1.1).** `hughie` resolves the function
+      (`crates/hughie/src/compute/anchor.rs`) for an absolutely positioned
+      box that its containing block's own absolute pass lays out:
+      `position: absolute` whose box parent is its containing block. The
+      host names the target and reports its unrounded border-box size from
+      the current pass (`LayoutTree::anchor_size`). The keyword picks the
+      anchor's axis: `width`/`height` physically, `block`/`self-block`
+      vertically and `inline`/`self-inline` horizontally (the fork has no
+      `writing-mode`), and an omitted keyword the property's own axis. A name
+      left out selects the implicit anchor, which needs `position-anchor`,
+      so there is none.
+    - **Unresolvable → fallback → initial value.** Every other box — in
+      flow, relatively or stickily positioned, `fixed`, or an `absolute` box
+      the positioned pass places because its parent does not contain it —
+      and an absolutely positioned box with no target take the fallback.
+      Without one the declaration is invalid at computed-value time, which
+      the engine approximates by using the property's initial value at
+      layout time: `auto` for sizes and insets, `none` for max sizes, `0`
+      for margins. Inside a math function one unresolvable `anchor-size()`
+      without a fallback makes the whole value initial. The computed value
+      never changes; only layout sees the substitution.
+    - **Targets (§2.3, a subset).** The candidates are the query box's
+      containing block's box children (`display: contents` flattened) whose
+      `anchor-name` lists the name. An in-flow one is acceptable anywhere in
+      tree order, an absolutely positioned one only before the query box
+      (after it, it is laid out after the query box, and §2.3 says the
+      same); the last acceptable one in tree order wins. An ancestor is
+      never a target: the containing block is the box parent, and §2.3 wants
+      a descendant of it. **Not modelled:** §2.3's containing-block-chain
+      clause (an anchor deeper inside a sibling's subtree), `anchor-scope`
+      (so nothing is scoped — but since only the containing block's own
+      children are candidates, a coordinator nested in another's header sees
+      only its own header and toolbar), the top layer, and tree-scoped name
+      matching (names compare by identifier; a name from a shadow tree's
+      styles is not kept out of the light tree). The lookup is one pass over
+      the containing block's children per function, which the containing
+      block's own run already makes; there is no document-wide index.
+    - **Why the subtree clause is out.** Sizes come from the current pass,
+      and the engine lays a query box out again only when its containing
+      block runs again. A direct child cannot change size without its parent
+      — the containing block — running again, so every target of the subset
+      is covered by the existing dirty-path invalidation. A box deeper inside
+      a sibling can: a mutation below it may relayout in place under a
+      content-independent input, or stop at a `contain: strict` sibling,
+      without that sibling's own size changing, and nothing would reach the
+      query box. Covering it needs a target index and anchor-aware
+      invalidation; neither exists.
+    - **Caching.** The query box stays cacheable. Its own run still reads
+      the function, unresolved; the absolute pass therefore hands it, on
+      every axis where a size, a min/max size or a margin holds one (both
+      axes under an `aspect-ratio`), the used border-box size as a known
+      dimension, and applies anchored insets and margins itself. So the
+      box's layout input carries everything an anchor contributes, and a
+      moved anchor is a cache miss, not a stale hit. An axis sized from
+      content with an anchored limit or margin (`width: auto;
+      max-width: anchor-size(--a width)`) is measured with the box's size
+      styles ignored and then fitted — `min(max-content, max(min-content,
+      available))`, or the content height at the used width — and clamped;
+      its committed input then claims no content independence on that axis.
+      Two approximations follow: that measurement ignores the *other* axis's
+      min/max sizes when that axis is also content-sized, and Flexbox's,
+      Grid's and Relative's static position (used only when both insets on
+      an axis are `auto`) is computed from the box's unresolved values.
+    - **Tests.** `crates/dom/tests/anchor_size.rs` (the WPT ports
+      `anchor-size-001`, `-minmax-001`, `-function-chain` and `-replaced-001`,
+      the fallback rules, the target subset, the coordinator geometry and
+      its invalidation) and `crates/hughie/tests/anchor_size.rs` (every
+      algorithm's absolute pass, the measured and aspect-ratio paths, in-flow
+      items, and the cache).
+
 ## Deliberately still open (known non-decisions)
 
 - The v1 media-feature set `Device` exposes (viewport geometry, orientation,

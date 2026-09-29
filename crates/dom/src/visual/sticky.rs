@@ -6,7 +6,7 @@
 use euclid::default::Vector2D;
 use hughie::geometry::Edges;
 use hughie::style::PositionProperty;
-use stylo::values::computed::{Inset, Length, Margin};
+use stylo::values::computed::{Inset, Margin};
 
 use crate::NodeId;
 use crate::layout::box_parent;
@@ -100,16 +100,11 @@ impl StickyAxis {
     }
 }
 
+/// A sticky box is not absolutely positioned, so an `anchor-size()` inset
+/// takes its fallback, or leaves the side `auto` without one
+/// ([`hughie::compute::used_inset`]).
 fn inset(value: &Inset, basis: f32) -> Option<f32> {
-    match value {
-        Inset::Auto => None,
-        Inset::LengthPercentage(value) => Some(value.resolve(Length::new(basis)).px()),
-        Inset::AnchorFunction(_)
-        | Inset::AnchorSizeFunction(_)
-        | Inset::AnchorContainingCalcFunction(_) => {
-            unreachable!("anchor insets are pref-dead under the lynx feature")
-        }
-    }
+    hughie::compute::used_inset(value, Some(basis))
 }
 
 fn origin<T>(document: &Document<T>, id: NodeId) -> Vector2D<f32> {

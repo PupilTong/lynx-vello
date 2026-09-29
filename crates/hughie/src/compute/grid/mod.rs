@@ -28,7 +28,7 @@ use sizing::{
     resolve_item_intrinsic_dimensions, size_tracks,
 };
 use stylo::computed_values::direction;
-use stylo::values::computed::{Inset, PositionProperty, Size as StyleSize};
+use stylo::values::computed::{PositionProperty, Size as StyleSize};
 use stylo::values::specified::align::AlignFlags;
 use tracks::{ExpandedTemplate, MAX_MATERIALIZED_TRACKS, build_axis_tracks, expand_template};
 use types::{Axis, GridItem, TrackSet, TrackSizingFunction};
@@ -187,8 +187,13 @@ where
         | StyleSize::WebkitFillAvailable => true,
         StyleSize::LengthPercentage(length) => length.0.to_length().is_none(),
         StyleSize::MinContent | StyleSize::MaxContent | StyleSize::FitContentFunction(_) => false,
+        // A grid item is in flow, so §5.1.1 resolves nothing for it: the
+        // fallback, or `auto` when the declaration is invalid.
         StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => {
-            unreachable!("anchor positioning is pref-disabled under lynx")
+            match crate::compute::anchor::unresolvable_style_size(value) {
+                StyleSize::LengthPercentage(length) => length.0.to_length().is_none(),
+                _ => true,
+            }
         }
     };
     let minimum_behaves_auto = |value: &StyleSize| {
@@ -1226,11 +1231,18 @@ where
     let content_origin = Point::new(border.left + padding.left, border.top + padding.top);
     let logical_content_start =
         Point::new(if rtl { padding.right } else { padding.left }, padding.top);
+    crate::compute::util::debug_assert_tree_order(
+        items.iter().map(|item| item.ordered.document_index),
+    );
     for pending in items {
         let key = pending.key();
+        // An `anchor-size()` inset may still resolve to `auto`, so it asks for
+        // the static position too; `absolute_layout` decides whether it reads it.
         let inset_auto = {
             let style = tree.style(key.node);
-            style.inset().map(Inset::is_auto)
+            style
+                .inset()
+                .map(|inset| inset.is_auto() || crate::compute::anchor::is_anchor_inset(inset))
         };
         let needs_static_measurement =
             (inset_auto.left && inset_auto.right) || (inset_auto.top && inset_auto.bottom);
