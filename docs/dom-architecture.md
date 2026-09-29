@@ -669,6 +669,9 @@ feature's public grammar carries the `content` longhand the `raw-text`
 generated-text rule depends on. Read PR #21 against the paragraph above rather
 than as a contradiction of it: the *initial* value is what an element computes
 to with no declaration reaching it at all, while Lynx's `display: linear`
-default is a UA-sheet declaration this embedder cascades. Confirm the tip with
+default is a UA-sheet declaration this embedder cascades. The `lynx` feature also enables css-values-5 `if()` and the
+tree-counting functions `sibling-index()` / `sibling-count()`
+(`style/queries/if_condition.rs`, `style/custom_properties.rs`; scope in
+[style-assumptions.md](style-assumptions.md) §27). Confirm the tip with
 `git -C vendor/stylo rev-parse --short HEAD` before trusting this line — the
 gitlink moves and the prose does not.
