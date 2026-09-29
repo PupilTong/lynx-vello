@@ -1274,6 +1274,110 @@ consequential choice about whether to follow the spec or the quirk.
     above. *No `contain: strict` from the fifth page on* (`:66-68`): a browser
     performance shortcut, not a behavior.
 
+- **`<scroll-coordinator>` (2026-09-29): the authored coordinator is the
+  scroll container, its slot is anchor-sized, and the fold is
+  `scroll-capture`.** `crates/bobcat-core/src/main/tree/scroll_coordinator.rs`
+  translates `x-foldview-ng.css` onto all ten tags (native's
+  `scroll-coordinator`, `-header`, `-toolbar`, `-slot`, `-slot-drag`;
+  web-core's `x-foldview-ng`, `x-foldview-header-ng`, `x-foldview-toolbar-ng`,
+  `x-foldview-slot-ng`, `x-foldview-slot-drag-ng`) and replaces web-core's
+  component code with CSS: the header and the slot are absolutely positioned,
+  the slot sits at `anchor-size()` of the header and is the coordinator's
+  height less `anchor-size()` of the toolbar
+  ([style-assumptions.md](../style-assumptions.md) §28), the toolbar is
+  sticky, and every box inside the slot is `scroll-capture: nearest forward`
+  (§25). web-core writes the slot's `top` from a `ResizeObserver`
+  (`XFoldviewNg.ts:27-38`), caps `scrollTop` (`:42-61`) and routes drags in
+  its own slot handler (`XFoldviewSlotNgTouchEventsHandler.ts`); native uses
+  Material's CoordinatorLayout + AppBarLayout (Android) and `UIScrollView`
+  code (iOS). The geometry agrees with all three (slot at the header's
+  height, slot height = coordinator height less toolbar height, range =
+  header height less toolbar height). Where it leaves them:
+  - *The structure is UA `!important`*: the coordinator's `overflow-y:
+    scroll` (web-core's own `!important`, `x-foldview-ng.css:8`) and its
+    `flex-direction`/`linear-direction: column`, the header's and the slot's
+    `position: absolute`, the toolbar's `position: sticky`, and the
+    `overflow-y: hidden` of `enable-scroll="false"` that has to beat that
+    scroll — new §D.15 exceptions
+    ([style-assumptions.md](../style-assumptions.md)), argued as structural
+    invariants.
+  - *A coordinator with `height: auto` collapses to its toolbar's height*:
+    absolutely positioned children never size their parent. web-core and
+    native size it from toolbar + slot. The docs require the coordinator to
+    be sized ("coordinator height == slot height + toolbar height"), and the
+    UA gives it `height: 100%`.
+  - *`flex-grow` on the toolbar fills the coordinator*: the toolbar is its
+    only in-flow child. web-core's `size-toolbar-slot-share-flex-parent`
+    fixture shares the space between toolbar and slot.
+  - *A slot written before its header sits at the top*: an absolutely
+    positioned anchor is acceptable only before the query box in tree order
+    (css-anchor-position-1 §2.3), so the slot takes the `0px` fallback. The
+    documented structure (toolbar, header, slot) is unaffected.
+  - *A slot taller than the coordinator less the toolbar extends the range*
+    past header less toolbar; web-core caps `scrollTop` and native caps the
+    fold. Cards that size the slot to exactly that (every e2e card) are
+    unaffected; an author `flex: 1` on the slot (the docs' recipe) is
+    ignored, but the UA height gives the same length whenever the
+    coordinator's height is definite.
+  - *Stray children of the coordinator are shown*; web-core `display: none`s
+    every child that is not one of the three roles (`x-foldview-ng.css:36-50`).
+    That needs `!important` on `display`, which is a default here — the
+    `list-item` decision above.
+  - *A fling continues from the fold into the content*, as native's nested
+    fling does: every fling frame is a chain step ordered by its own
+    direction. web-core instead replaces the release with
+    `scrollBy(deltaY * 4, smooth)` on the last box it scrolled, and skips it
+    once the fold is complete.
+  - *The fold order nests*: a list inside a scroll-view inside the slot goes
+    forward coordinator, scroll-view, list (`nearest` nests outward-first);
+    web-core pairs the coordinator with the innermost scroller only.
+  - *web-core's `x-foldview-slot-ng scroll-view { overscroll-behavior-y:
+    none }` (`x-foldview-ng.css:75-78`, a Safari bounce fix) is not carried*:
+    here it would fence the chain and nothing inside the slot could unfold
+    the header. For the same reason an author `overscroll-behavior-y:
+    contain` on a scroller inside the slot keeps that scroller from moving
+    the fold (Lynx has no `overscroll-behavior`, so ported cards do not write
+    it).
+  - *`enable-scroll="false"` / `scroll-enable="false"`: a three-way
+    conflict.* Here the coordinator is not user-scrollable (`overflow-y:
+    hidden !important`): the fold stays where it is, scrollers inside the slot
+    scroll themselves, script can still scroll the coordinator. web-core's
+    rule is dead — `x-foldview-ng[scroll-enable="false"] { overflow-y: hidden
+    }` (`:32-34`) loses to its own `overflow-y: scroll !important`, and its
+    slot handler writes `scrollTop` regardless — so nothing is disabled.
+    Android swallows every vertical drag in the coordinator, inner lists
+    included; iOS disables its pan and keeps the inner content pinned while
+    expanded; both keep programmatic scrolling. **The architect's decision,
+    to be confirmed by the user.** Both spellings are accepted (the
+    documented/Android `enable-scroll`, and iOS's alias `scroll-enable`,
+    which web-core reads).
+  - *`header-over-slot` raises the header* (`z-index: 1`, present and not
+    `"false"`), the documented and native meaning; the toolbar's `z-index: 2`
+    keeps it above both. web-core raises the *slot* instead
+    (`x-foldview-ng.css:66-69`), which contradicts its own docs and both
+    platforms and changes nothing visible, the slot already painting after
+    the header. **Docs and native over web-core; the architect's decision, to
+    be confirmed by the user.** web-core's toolbar is `z-index: 1`
+    (`:55`); here it is `2` so a raised header stays under it.
+  - *`bounces` is opt-in* (`overscroll-behavior-y: contain-bounce` when
+    present and not `"false"`), the `<viewpager>` precedent. Default off, as
+    web-core has it (`overscroll-behavior: contain`); iOS bounces by default.
+  - *`enable-scroll-bar` / `scroll-bar-enable` are no-ops*: the engine draws
+    no scrollbars.
+  - *Slot-drag `enable-drag` is not implemented* (Android
+    `LynxUIScrollCoordinatorSlotDrag.kt:114`; web-core implements nothing for
+    the tag). With the default, a drag on non-scrolling content in the slot
+    already latches the coordinator and folds it.
+  - *Not implemented*: `setFoldExpanded`, `getScrollInfo`, `scrollBy`, the
+    `offset` event, `granularity`, `refresh-mode`, `tab-movable-enable`,
+    `toolbar-interaction-enable`, `header-scrollview-enable`,
+    `compat-container-popup` and every `ios-*`/`android-*` prop.
+  - *A coordinator nested in another's header or slot reads its own header
+    and toolbar*: `anchor-scope` is not implemented, but anchor targets are
+    only the containing block's own children
+    ([style-assumptions.md](../style-assumptions.md) §28), so the outer
+    header is never a candidate.
+
 ## JS runtime & APIs (see [js-runtime.md](js-runtime.md), [accessibility.md](accessibility.md))
 
 - **`lynx.createSelectorQuery()`/`NodesRef`** — modeled on WeChat Mini
