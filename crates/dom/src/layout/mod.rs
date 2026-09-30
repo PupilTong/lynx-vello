@@ -99,28 +99,58 @@ impl<T: Sync> Document<T> {
             return;
         }
 
-        // css-anchor-position-1's settle loop (`layout::anchors`): a run
-        // whose anchor-positioned boxes read an anchor that moved after they
-        // read it invalidates them and runs again, `ANCHOR_PASSES` times at
-        // most. A page with no such box leaves after the first run, on one
-        // `is_empty` test.
-        for anchor_pass in 0..anchors::ANCHOR_PASSES {
-            let full = self.layout_requires_full_pass(viewport, scale);
-            let rescale = self.layout_inputs_changed(viewport, scale);
-            let bound = self.arenas().slot_bound();
-            self.layout_state_mut().ensure_covers(bound);
-            host::run_layout(self, viewport, scale, full, rescale, resized);
-            // Publishing is what makes the pass's sizes readable by the style
-            // traversal, which is parallel, and by the pass after this one;
-            // see [`crate::layout::committed_box`]. The run publishes on its
-            // own whenever it interleaved a restyle into itself, so what is
-            // left here is what the *last* boxes it laid out recorded.
-            self.arenas_mut().publish_committed_boxes(resized);
-            self.clear_relayout_roots();
-            self.mark_layout_complete(viewport, scale);
-            let last = anchor_pass + 1 == anchors::ANCHOR_PASSES;
-            if !self.settle_anchors(!last) {
-                break;
+        self.run_layout_once(viewport, scale, resized);
+        // css-anchor-position-1's settle loop (`layout::anchors`), out of
+        // line: a page with no anchor-positioned box pays this one test.
+        let state = self.layout_state_mut();
+        if !state.anchored.is_empty() || !state.anchor_pending.get_mut().is_empty() {
+            self.settle_anchor_runs(viewport, scale, resized);
+        }
+    }
+
+    /// One layout run and its bookkeeping.
+    #[inline]
+    fn run_layout_once(
+        &mut self,
+        viewport: Size<f32>,
+        scale: f32,
+        resized: &mut Vec<crate::NodeId>,
+    ) {
+        let full = self.layout_requires_full_pass(viewport, scale);
+        let rescale = self.layout_inputs_changed(viewport, scale);
+        let bound = self.arenas().slot_bound();
+        self.layout_state_mut().ensure_covers(bound);
+        host::run_layout(self, viewport, scale, full, rescale, resized);
+        // Publishing is what makes the pass's sizes readable by the style
+        // traversal, which is parallel, and by the pass after this one; see
+        // [`crate::layout::committed_box`]. The run publishes on its own
+        // whenever it interleaved a restyle into itself, so what is left here
+        // is what the *last* boxes it laid out recorded.
+        self.arenas_mut().publish_committed_boxes(resized);
+        self.clear_relayout_roots();
+        self.mark_layout_complete(viewport, scale);
+    }
+
+    /// The settle loop after a run that laid out anchor-positioned boxes: a
+    /// box that read an anchor which moved after it read it is invalidated
+    /// and the document runs again, [`anchors::ANCHOR_PASSES`] runs in all
+    /// at most; the last one's reads are recorded, not verified.
+    #[cold]
+    #[inline(never)]
+    fn settle_anchor_runs(
+        &mut self,
+        viewport: Size<f32>,
+        scale: f32,
+        resized: &mut Vec<crate::NodeId>,
+    ) {
+        for run in 1..anchors::ANCHOR_PASSES {
+            let last = run + 1 == anchors::ANCHOR_PASSES;
+            if !self.settle_anchors(true) {
+                return;
+            }
+            self.run_layout_once(viewport, scale, resized);
+            if last {
+                self.settle_anchors(false);
             }
         }
     }
