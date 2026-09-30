@@ -45,10 +45,13 @@
 //!   [`ScrollBox::bounce`] axes: the runtime's painter reads them off the committed frame and
 //!   stretches the boundary there. Nothing in this crate stretches — a programmatic scroll clamps.
 //! - **`scroll-capture`** is this engine's own, with no W3C or Lynx counterpart, and it changes the
-//!   *order*, not the reach: `auto | nearest [ forward | backward ]?`. `nearest` on a container
-//!   hands a gesture that starts in it to the nearest scroll container above it first; this
-//!   container moves only once that ancestor cannot (it is at its boundary in that direction, or
-//!   does not scroll that axis at all). The chain then continues outward past the ancestor as
+//!   *order*, not the reach. It is a shorthand over the physical longhands `scroll-capture-x` and
+//!   `scroll-capture-y` (no logical pair: a chain walks physical axes), each `auto | nearest [
+//!   forward | backward ]?`, and each axis is ordered by its own longhand, so a container can hand
+//!   its vertical gestures to its ancestor while its horizontal ones nest inner first. `nearest` on
+//!   a container hands a gesture that starts in it to the nearest scroll container above it first;
+//!   this container moves only once that ancestor cannot (it is at its boundary in that direction,
+//!   or does not scroll that axis at all). The chain then continues outward past the ancestor as
 //!   usual. It nests: `nearest` on both of two nested containers visits the grandparent, then the
 //!   parent, then the innermost. A direction narrows it: `nearest forward` defers only a delta that
 //!   increases the offset on the axis being walked, `nearest backward` only one that decreases it;
@@ -58,9 +61,9 @@
 //!   gesture inside it — the ancestor it would have deferred to is exactly what `contain` fences
 //!   off.
 //!
-//! Order is decided **per axis and per step**, from the sign of that axis's
-//! delta ([`chain_order`], [`chain_orders`]): a link defers only for a delta
-//! it [defers](ScrollCapture::defers), and an axis the step does not move
+//! Order is decided **per axis and per step**, from that axis's longhand and
+//! the sign of that axis's delta ([`chain_order`], [`chain_orders`]): a link
+//! defers only for a delta it [defers](ScrollCapture::defers), and an axis the step does not move
 //! keeps the inner-first order. A fling is a step per frame, so each of its
 //! frames is ordered afresh. When the two axes' orders coincide the walk is
 //! one walk over both; when they differ, [`drive_chain`] walks x in its
@@ -169,6 +172,41 @@ impl ScrollCapture {
     }
 }
 
+/// A container's `scroll-capture` on each physical axis: the
+/// `scroll-capture-x` and `scroll-capture-y` longhands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CaptureAxes {
+    pub x: ScrollCapture,
+    pub y: ScrollCapture,
+}
+
+impl CaptureAxes {
+    /// The same value on both axes, as the `scroll-capture` shorthand sets.
+    #[must_use]
+    pub const fn both(capture: ScrollCapture) -> Self {
+        Self {
+            x: capture,
+            y: capture,
+        }
+    }
+
+    /// The value on `axis`.
+    #[must_use]
+    pub fn on(self, axis: ScrollAxis) -> ScrollCapture {
+        match axis {
+            ScrollAxis::X => self.x,
+            ScrollAxis::Y => self.y,
+        }
+    }
+}
+
+/// One physical scroll axis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScrollAxis {
+    X,
+    Y,
+}
+
 /// One scroll container's part in a chain walk: what it may consume, what
 /// it lets past, and where it stands in the order. See the module's
 /// *Chaining* section.
@@ -179,25 +217,25 @@ pub struct ChainLink {
     /// The axes on which a boundary hands the remainder outward —
     /// `overscroll-behavior: auto`. `contain` and `none` clear the flag.
     pub chains: ScrollAxes,
-    /// Whether the container above goes first.
-    pub capture: ScrollCapture,
+    /// Whether the container above goes first, per axis.
+    pub capture: CaptureAxes,
 }
 
-/// The order a chain of links is visited in on one axis whose delta has
-/// `sign`, as indices into `links`.
+/// The order a chain of links is visited in on `axis` for a delta of
+/// `sign` on it, as indices into `links`.
 ///
 /// `links` is nearest-first: index 0 is the container the gesture starts in
 /// and each next index is the scroll container above the previous one. A
-/// link whose `scroll-capture` [defers](ScrollCapture::defers) `sign` moves
+/// link whose `scroll-capture` on `axis` [defers](ScrollCapture::defers) `sign` moves
 /// to directly after its parent, and the placement runs from the outermost
 /// link inward so a nested `nearest` resolves against a parent that has
 /// already found its own place. Every other link keeps its inner-first
 /// place.
 #[must_use]
-pub fn chain_order(links: &[ChainLink], sign: f32) -> SmallVec<[usize; 4]> {
+pub fn chain_order(links: &[ChainLink], axis: ScrollAxis, sign: f32) -> SmallVec<[usize; 4]> {
     let mut order = SmallVec::new();
     for index in (0..links.len()).rev() {
-        if links[index].capture.defers(sign) && index + 1 < links.len() {
+        if links[index].capture.on(axis).defers(sign) && index + 1 < links.len() {
             let parent_at = order
                 .iter()
                 .position(|&placed| placed == index + 1)
@@ -218,13 +256,13 @@ pub struct ChainOrders {
 }
 
 /// The order a chain of links is visited in for `delta`, per axis: each
-/// axis's [`chain_order`] for the sign of its own delta. An axis with a zero
-/// delta keeps the inner-first order.
+/// axis's [`chain_order`], from that axis's own `scroll-capture` and the sign
+/// of its own delta. An axis with a zero delta keeps the inner-first order.
 #[must_use]
 pub fn chain_orders(links: &[ChainLink], delta: Vector2D<f32>) -> ChainOrders {
     ChainOrders {
-        x: chain_order(links, delta.x),
-        y: chain_order(links, delta.y),
+        x: chain_order(links, ScrollAxis::X, delta.x),
+        y: chain_order(links, ScrollAxis::Y, delta.y),
     }
 }
 
@@ -323,8 +361,9 @@ pub struct ScrollBox {
     /// (`overscroll-behavior: contain-bounce`). Published for the runtime's
     /// painter, which owns the stretch; the document itself always clamps.
     pub bounce: ScrollAxes,
-    /// Whether the container above goes first (`scroll-capture`).
-    pub capture: ScrollCapture,
+    /// Whether the container above goes first, per axis
+    /// (`scroll-capture-x` / `scroll-capture-y`).
+    pub capture: CaptureAxes,
 }
 
 impl ScrollBox {
@@ -379,12 +418,16 @@ fn bouncing_axes(style: &ComputedValues) -> ScrollAxes {
 }
 
 #[must_use]
-fn scroll_capture(style: &ComputedValues) -> ScrollCapture {
-    match style.clone_scroll_capture() {
+fn scroll_capture(style: &ComputedValues) -> CaptureAxes {
+    let lower = |value: ComputedScrollCapture| match value {
         ComputedScrollCapture::Auto => ScrollCapture::Auto,
         ComputedScrollCapture::Nearest => ScrollCapture::Nearest,
         ComputedScrollCapture::NearestForward => ScrollCapture::NearestForward,
         ComputedScrollCapture::NearestBackward => ScrollCapture::NearestBackward,
+    };
+    CaptureAxes {
+        x: lower(style.clone_scroll_capture_x()),
+        y: lower(style.clone_scroll_capture_y()),
     }
 }
 
@@ -873,7 +916,7 @@ mod tests {
         ChainLink {
             user_scrollable: ScrollAxes::BOTH,
             chains,
-            capture,
+            capture: CaptureAxes::both(capture),
         }
     }
 
@@ -886,7 +929,8 @@ mod tests {
                 .map(|&capture| link(capture, ScrollAxes::BOTH))
                 .collect::<Vec<_>>()
         };
-        let order = |captures: &[ScrollCapture]| chain_order(&links(captures), 1.0).to_vec();
+        let order =
+            |captures: &[ScrollCapture]| chain_order(&links(captures), ScrollAxis::Y, 1.0).to_vec();
         assert_eq!(order(&[Auto, Auto, Auto]), [0, 1, 2]);
         assert_eq!(order(&[Nearest, Auto, Auto]), [1, 0, 2]);
         assert_eq!(order(&[Nearest, Nearest, Auto]), [2, 1, 0]);
@@ -1062,11 +1106,14 @@ mod tests {
                 .expect("a scroll container has a slot")
         };
         let inner_slot = slot_of(inner);
-        assert_eq!(inner_slot.capture, ScrollCapture::Nearest);
+        assert_eq!(
+            inner_slot.capture,
+            CaptureAxes::both(ScrollCapture::Nearest)
+        );
         assert_eq!(inner_slot.chains, ScrollAxes { x: false, y: true });
         assert_eq!(inner_slot.link().user_scrollable, ScrollAxes::BOTH);
         let outer_slot = slot_of(outer);
-        assert_eq!(outer_slot.capture, ScrollCapture::Auto);
+        assert_eq!(outer_slot.capture, CaptureAxes::default());
         assert_eq!(outer_slot.chains, ScrollAxes::BOTH);
     }
     #[test]
@@ -1088,9 +1135,9 @@ mod tests {
             link(NearestForward, ScrollAxes::BOTH),
             link(Auto, ScrollAxes::BOTH),
         ];
-        assert_eq!(chain_order(&links, 1.0).to_vec(), [2, 1, 0]);
-        assert_eq!(chain_order(&links, -1.0).to_vec(), [0, 1, 2]);
-        assert_eq!(chain_order(&links, 0.0).to_vec(), [0, 1, 2]);
+        assert_eq!(chain_order(&links, ScrollAxis::Y, 1.0).to_vec(), [2, 1, 0]);
+        assert_eq!(chain_order(&links, ScrollAxis::Y, -1.0).to_vec(), [0, 1, 2]);
+        assert_eq!(chain_order(&links, ScrollAxis::Y, 0.0).to_vec(), [0, 1, 2]);
     }
 
     #[test]
@@ -1198,7 +1245,74 @@ mod tests {
             .find(|slot| slot.node == inner)
             .copied()
             .expect("a scroll container has a slot");
-        assert_eq!(slot.capture, ScrollCapture::NearestBackward);
-        assert_eq!(slot.link().capture, ScrollCapture::NearestBackward);
+        let backward = CaptureAxes::both(ScrollCapture::NearestBackward);
+        assert_eq!(slot.capture, backward);
+        assert_eq!(slot.link().capture, backward);
+    }
+    fn link_y(capture: ScrollCapture) -> ChainLink {
+        ChainLink {
+            user_scrollable: ScrollAxes::BOTH,
+            chains: ScrollAxes::BOTH,
+            capture: CaptureAxes {
+                x: ScrollCapture::Auto,
+                y: capture,
+            },
+        }
+    }
+
+    /// A horizontal scroller inside a horizontal pager inside a vertical
+    /// coordinator, the two inner ones capturing on y only: x nests inner
+    /// first as usual, y goes outermost first.
+    #[test]
+    fn a_y_only_capture_leaves_x_nesting_inner_first() {
+        use ScrollCapture::{Auto, NearestForward};
+        let links = [link_y(NearestForward), link_y(NearestForward), link_y(Auto)];
+        assert_eq!(chain_order(&links, ScrollAxis::X, 1.0).to_vec(), [0, 1, 2]);
+        assert_eq!(chain_order(&links, ScrollAxis::Y, 1.0).to_vec(), [2, 1, 0]);
+        let orders = chain_orders(&links, Vector2D::new(10.0, 10.0));
+        assert_eq!(orders.x.to_vec(), [0, 1, 2]);
+        assert_eq!(orders.y.to_vec(), [2, 1, 0]);
+    }
+
+    #[test]
+    fn a_diagonal_step_lands_each_axis_on_its_own_link() {
+        let links = [
+            link_y(ScrollCapture::NearestForward),
+            link(ScrollCapture::Auto, ScrollAxes::BOTH),
+        ];
+        let mut visited = Vec::new();
+        let result = drive_chain(&links, Vector2D::new(10.0, 10.0), |index, admitted| {
+            visited.push((index, admitted));
+            admitted
+        });
+        assert_eq!(
+            visited,
+            [(0, Vector2D::new(10.0, 0.0)), (1, Vector2D::new(0.0, 10.0))],
+        );
+        assert_eq!(result, Some((0, Vector2D::new(10.0, 10.0))));
+    }
+
+    #[test]
+    fn the_longhands_capture_one_axis_each() {
+        let (mut document, outer, inner) =
+            nested_scrollers_with(".inner { scroll-capture-y: nearest forward; }");
+        let scroll_box = document.scroll_box(inner).expect("inner is a scroll box");
+        assert_eq!(
+            scroll_box.capture,
+            CaptureAxes {
+                x: ScrollCapture::Auto,
+                y: ScrollCapture::NearestForward,
+            }
+        );
+        assert_eq!(
+            document.scroll_chain(inner, Vector2D::new(50.0, 50.0)),
+            Some((inner, Vector2D::new(50.0, 50.0))),
+        );
+        assert_eq!(
+            document.scroll_offset(inner),
+            Vector2D::new(50.0, 0.0),
+            "x stays inner first; y went to the ancestor",
+        );
+        assert_eq!(document.scroll_offset(outer), Vector2D::new(0.0, 50.0));
     }
 }

@@ -1542,8 +1542,9 @@ the mailbox (below), never from a per-event command. When a frame publishes, an 
 already equals has served its purpose and drops; the rest re-clamp to the
 new bounds. The arbitration is `dom`'s own chain walk (`drive_chain`) over
 each slot's published policy — `overscroll-behavior` fences the reach, the
-engine's `scroll-capture: nearest [forward | backward]?` visits the container
-above first, for the named delta sign, ordered afresh per axis on every step,
+engine's `scroll-capture-x` / `scroll-capture-y` (`nearest [forward |
+backward]?` per axis) visits the container above first, for the named delta
+sign, ordered afresh per axis on every step,
 fling frames included — and
 each step lands per css-scroll-snap-1 from the slot's published snap
 positions: a wheel tick steps to the next position, a drag is raw until its

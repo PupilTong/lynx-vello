@@ -22,7 +22,7 @@ use super::{AnimationSample, PaintOrder, SpaceSamples};
 use crate::NodeId;
 use crate::paint::compose::{self, ComposeOp, FilterGroup};
 use crate::scroll::{
-    ChainLink, ScrollAxes, ScrollCapture, ScrollRequest, SnapAxis, SnapPoint, SnapStrictness,
+    CaptureAxes, ChainLink, ScrollAxes, ScrollRequest, SnapAxis, SnapPoint, SnapStrictness,
 };
 use crate::vello::Scene;
 use crate::vello::kurbo::Affine;
@@ -54,8 +54,9 @@ pub struct ScrollSlot {
     /// intents may stand outside `0..=max_offset` on such an axis, while the
     /// committed `offset` never does.
     pub bounce: ScrollAxes,
-    /// Whether the container above goes first: `scroll-capture`.
-    pub capture: ScrollCapture,
+    /// Whether the container above goes first, per axis:
+    /// `scroll-capture-x` / `scroll-capture-y`.
+    pub capture: CaptureAxes,
     /// The axes this container snaps on, each naming its points in the
     /// frame's [`snap_points`](CommittedFrame::snap_points).
     pub snap: SnapSlot,

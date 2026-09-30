@@ -2179,8 +2179,9 @@ Subsystems:
 - `scroll/` — CSSOM-View geometry, per-node offsets, `scroll_to`/`scroll_by`/
   `scroll_chain`, and the one chain walk (`drive_chain`) both the document
   and `bobcat-core`'s painter run: `overscroll-behavior` fences the reach,
-  the engine's own `scroll-capture: nearest [forward | backward]?` hands a
-  gesture to the container above first (per axis, for the named delta sign). `scroll/snap.rs` is css-scroll-snap-1 — positions from
+  the engine's own `scroll-capture-x` / `scroll-capture-y` (shorthand
+  `scroll-capture`) hands a gesture to the container above first (per axis,
+  for the named delta sign). `scroll/snap.rs` is css-scroll-snap-1 — positions from
   `scroll-snap-type`/`-align`/`-stop`, `scroll-padding` and `scroll-margin`,
   published per scroll slot, settled on at a drag's end, stepped to by a
   wheel tick, and re-snapped at rest on every commit; no snap events.

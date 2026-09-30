@@ -2314,7 +2314,7 @@ fn a_throwing_interval_is_reported_and_keeps_its_place_in_the_schedule() {
 /// A `<scroll-coordinator>`'s shape in plain CSS: a 400px column scroller
 /// (node 3) carrying `outer_css`, holding a 200px header block (node 4) and
 /// a 400px-tall inner column scroller (node 5) of ten 100px items with
-/// `scroll-capture: nearest forward`. The outer's range is 200 (header plus
+/// `scroll-capture-y: nearest forward`. The outer's range is 200 (header plus
 /// inner, 600, less its 400px scrollport), the inner's 600.
 fn coordinator_page(outer_css: &str) -> String {
     format!(
@@ -2330,7 +2330,7 @@ fn coordinator_page(outer_css: &str) -> String {
           globalThis.held = [page, outer, header, inner];
           __SetInlineStyles(outer, 'display:flex;flex-direction:column;overflow:scroll;width:200px;height:400px;{outer_css}');
           __SetInlineStyles(header, 'flex-shrink:0;width:200px;height:200px');
-          __SetInlineStyles(inner, 'display:flex;flex-direction:column;flex-shrink:0;overflow:scroll;width:200px;height:400px;scroll-capture:nearest forward');
+          __SetInlineStyles(inner, 'display:flex;flex-direction:column;flex-shrink:0;overflow:scroll;width:200px;height:400px;scroll-capture-y:nearest forward');
           for (let i = 0; i < 10; i++) {{
             const item = __CreateView(0);
             __AppendElement(inner, item);

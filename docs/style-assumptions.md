@@ -820,9 +820,15 @@ and §D.16 with what the wire format actually permits.)*
       `Document::scroll_to_with` (CSSOM-View `scrollTo({behavior})`, which is
       what `<viewpager>`'s `selectTab` calls). There is still no
       `scroll-behavior` property.
-    - **`scroll-capture: auto | nearest [ forward | backward ]?`** is
-      lynx-vello's own property, with no W3C or Lynx counterpart (the fork
-      declares it `lynx_only`). `nearest` on a scroll container hands a
+    - **`scroll-capture-x` / `scroll-capture-y`: `auto | nearest [ forward
+      | backward ]?`**, with the `scroll-capture` shorthand setting both, are
+      lynx-vello's own properties, with no W3C or Lynx counterpart (the fork
+      declares them `lynx_only`). They are physical axes only, with no
+      logical pair: the chain walk moves physical axes, and each axis is
+      ordered by its own longhand, so a container can hand its vertical
+      gestures to its ancestor while its horizontal ones nest inner first
+      (what `<scroll-coordinator>` sets: `scroll-capture-y: nearest forward`
+      inside its slot). `nearest` on a scroll container hands a
       gesture that starts in it to the nearest scroll container above it
       first; the container itself moves only once that ancestor cannot. A
       direction narrows that to one sign of delta: `nearest forward` defers
