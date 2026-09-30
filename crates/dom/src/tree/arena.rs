@@ -18,6 +18,7 @@ use hughie::tree::{LayoutInput, LayoutSlot};
 use rustc_hash::FxHashMap;
 use slab::Slab;
 
+use crate::layout::anchors::{AnchorRegistry, AnchoredBox, PendingReads};
 use crate::layout::committed_box::{CommittedBox, CommittedBoxTable};
 use crate::layout::relevance::{Relevance, RelevanceTable};
 use crate::layout::text_block::TextBlockStore;
@@ -164,6 +165,13 @@ pub(crate) struct TreeArenas<T> {
     /// Neither can reach anything but these arenas. See
     /// [`crate::layout::committed_box`].
     committed_boxes: CommittedBoxTable,
+    /// css-anchor-position-1's name index and each element's position
+    /// options, here rather than in `DocumentLayoutState` because
+    /// `LayoutTree::position_option_style` lends an option style out of
+    /// these arenas as it lends the base style, with no state to reach. Its
+    /// entries are the elements that declare an anchor name, an anchor
+    /// scope or position-try fallbacks; see [`crate::layout::anchors`].
+    anchors: AnchorRegistry,
 }
 
 impl<T> TreeArenas<T> {
@@ -174,7 +182,19 @@ impl<T> TreeArenas<T> {
             generations: Vec::with_capacity(INITIAL_NODE_CAPACITY),
             relevance: RelevanceTable::default(),
             committed_boxes: CommittedBoxTable::default(),
+            anchors: AnchorRegistry::default(),
         }
+    }
+
+    /// The anchor-positioning registry; see [`crate::layout::anchors`].
+    #[inline]
+    pub(crate) fn anchors(&self) -> &AnchorRegistry {
+        &self.anchors
+    }
+
+    #[inline]
+    pub(crate) fn anchors_mut(&mut self) -> &mut AnchorRegistry {
+        &mut self.anchors
     }
 
     /// One element's `content-visibility: auto` relevance.
@@ -434,6 +454,9 @@ impl<T> TreeArenas<T> {
         // and no element is a query container until its own `container-type`
         // says so, so the key's next occupant starts with neither.
         self.committed_boxes.reset(id.arena_key());
+        // And whatever it declared for anchor positioning: a name index that
+        // outlived its element would offer a dead candidate to every lookup.
+        self.anchors.forget(id);
         (node, payload)
     }
 }
@@ -493,6 +516,19 @@ pub(crate) struct DocumentLayoutState {
     /// items have one: a page without them keeps it empty and pays nothing
     /// per node (`hughie::LayoutTree::set_sticky_containing_block`).
     pub(crate) sticky_containing_blocks: Vec<StickyContainingBlock>,
+    /// css-anchor-position-1's per-box state — outcome, reads, remembered
+    /// scroll offsets, last successful position option — for every box
+    /// `hughie` reported as anchor-positioned and nothing else: a page
+    /// without anchor positioning keeps it empty. See
+    /// [`crate::layout::anchors`] for what each part is for.
+    pub(crate) anchored: FxHashMap<NodeId, AnchoredBox>,
+    /// The reads of the boxes being laid out that `hughie` has not reported
+    /// an outcome for yet. Interior-mutable because the queries arrive with
+    /// the state borrowed shared; empty between runs.
+    pub(crate) anchor_pending: PendingReads,
+    /// The boxes whose outcome this run reported, in report order, for the
+    /// recording the settle loop makes after the run. Empty between runs.
+    pub(crate) anchor_reported: Vec<NodeId>,
 }
 
 /// One entry of [`DocumentLayoutState::sticky_containing_blocks`].
@@ -530,6 +566,9 @@ impl DocumentLayoutState {
             scroll_requests: FxHashMap::default(),
             next_scroll_request: NonZeroU64::MIN,
             sticky_containing_blocks: Vec::new(),
+            anchored: FxHashMap::default(),
+            anchor_pending: PendingReads::default(),
+            anchor_reported: Vec::new(),
         }
     }
 
@@ -572,6 +611,9 @@ impl DocumentLayoutState {
         }
         if !self.scroll_requests.is_empty() {
             self.scroll_requests.remove(&slot);
+        }
+        if !self.anchored.is_empty() {
+            self.anchored.remove(&slot);
         }
     }
 
@@ -617,6 +659,9 @@ impl DocumentLayoutState {
             scroll_requests: _,
             next_scroll_request: _,
             sticky_containing_blocks: _,
+            anchored: _,
+            anchor_pending: _,
+            anchor_reported: _,
         } = self;
         let context = text_context
             .get_or_insert_with(|| Box::new(TextContext::new()))
@@ -663,6 +708,9 @@ impl DocumentLayoutState {
             scroll_requests: _,
             next_scroll_request: _,
             sticky_containing_blocks: _,
+            anchored: _,
+            anchor_pending: _,
+            anchor_reported: _,
         } = self;
         // Unlike the path this replaces, restoring can re-enter the shaper —
         // a truncating block rebuilds its display layout — so the context is

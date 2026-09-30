@@ -27,7 +27,7 @@ use smallvec::SmallVec;
 use stylo::dom::OpaqueNode;
 use stylo::properties::ComputedValues;
 use stylo::properties::style_structs::UI;
-use stylo::rule_tree::{CascadeLevel, ShadowCascadeOrder};
+use stylo::rule_tree::CascadeLevel;
 use stylo::servo::animation::{
     Animation, AnimationProgress, AnimationSetKey, AnimationState, TimelineRanges,
 };
@@ -1052,50 +1052,9 @@ impl<T: Sync> Document<T> {
     }
 
     /// The tree a tree-scoped name cascaded for `element` at `scope` belongs
-    /// to: a shadow root, or `None` for the document tree. Stylo records the
-    /// scope relative to the element (css-scoping §3.5), and this reads it
-    /// back the way stylo's rule collector writes it:
-    /// - 0: the element's own tree;
-    /// - `-j`: `::slotted` rules from the tree of the `j`-th slot outward along the element's
-    ///   assigned-slot chain, and `-(1 + the chain's length)`: `:host` rules from the element's own
-    ///   shadow tree;
-    /// - `n > 0`: `::part` rules from the `n`-th tree outward that has any `::part` rule, the trees
-    ///   without one not counted.
+    /// to; see [`crate::Node::scoped_name_tree`].
     fn name_tree(&self, element: NodeId, scope: CascadeLevel) -> Option<NodeId> {
-        let own = self.containing_shadow_root(element);
-        let order = scope.shadow_order();
-        let same = ShadowCascadeOrder::for_same_tree();
-        if !scope.is_tree() || order == same {
-            return own;
-        }
-        if order < same {
-            let mut step = ShadowCascadeOrder::for_outermost_shadow_tree();
-            let mut slot = self.assigned_slot(element);
-            while let Some(current) = slot {
-                if step == order {
-                    return self.containing_shadow_root(current);
-                }
-                step.dec();
-                slot = self.assigned_slot(current);
-            }
-            return self.shadow_root(element);
-        }
-        // Past the last shadow tree is the document tree.
-        let mut tree = own?;
-        let mut step = ShadowCascadeOrder::for_innermost_containing_tree();
-        loop {
-            tree = self.containing_shadow_root(self.shadow_host(tree)?)?;
-            let has_part_rules = self
-                .get(tree)
-                .and_then(|root| root.shadow_data())
-                .is_some_and(|shadow| shadow.styles.data.part_rules(&[]).is_some());
-            if has_part_rules {
-                if step >= order {
-                    return Some(tree);
-                }
-                step.inc();
-            }
-        }
+        self.get(element)?.scoped_name_tree(scope)
     }
 
     /// Whether `name`, cascaded for `element`, is `reference`.

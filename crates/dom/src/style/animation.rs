@@ -1246,10 +1246,11 @@ impl<T: Sync> Document<T> {
     fn harvest_animation_damage(&mut self, root: NodeId) -> AnimationTick {
         let mut tick = AnimationTick::default();
         let mut containing_blocks = Vec::new();
+        let mut anchor_restyled = Vec::new();
         let mut stack = vec![root];
         while let Some(current) = stack.pop() {
             let harvested = {
-                let (harvested, descend) = {
+                let (harvested, descend, anchor_restyle) = {
                     let Some(node) = self.arenas_mut().get_mut(current) else {
                         continue;
                     };
@@ -1263,6 +1264,10 @@ impl<T: Sync> Document<T> {
                     // sound only because clearing restyle state touches the
                     // hint, the damage, and the flags — never `styles`.
                     let refresh = node.refresh_layout_style();
+                    let anchor_restyle = refresh.changed.then(|| {
+                        node.layout_computed_style()
+                            .is_some_and(crate::layout::anchors::declares_anchor_state)
+                    });
                     let harvested = StyleDamage::from_style_change(
                         damage.unwrap_or_default(),
                         refresh.paragraph_limits_changed,
@@ -1270,8 +1275,14 @@ impl<T: Sync> Document<T> {
                     (
                         harvested.map(|damage| (damage, refresh)),
                         node.has_animation_dirty_descendants() || refresh.changed,
+                        anchor_restyle,
                     )
                 };
+                if let Some(declares) = anchor_restyle
+                    && (declares || self.arenas().anchors().knows(current))
+                {
+                    anchor_restyled.push(current);
+                }
                 if descend {
                     let node = self
                         .arenas()
@@ -1307,6 +1318,10 @@ impl<T: Sync> Document<T> {
         for id in containing_blocks {
             tick.relayout |= self.invalidate_containing_block(id);
         }
+        tick.relayout |= self.refresh_anchor_state(
+            &anchor_restyled,
+            crate::layout::anchors::RestyleSource::Animation,
+        );
         tick
     }
 }

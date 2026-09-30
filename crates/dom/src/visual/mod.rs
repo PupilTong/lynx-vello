@@ -823,6 +823,15 @@ impl<T: Sync> Document<T> {
         // invalidates layout, which notes a visual mutation, so an id
         // claimed ahead of it would be stale the instant it was claimed.
         self.layout();
+        // css-anchor-position-1 §6.5.1.1 records the last successful position
+        // option "at the time that ResizeObserver events are determined and
+        // delivered" — here, once per rendering update, after layout and
+        // before paint. A box that made a fallback-sensitive change forgets
+        // its option first and determines again from its base style.
+        if self.forget_fallback_sensitive_options() {
+            self.layout();
+        }
+        self.record_last_successful_options();
         let _ = self.next_commit_id();
         let frame = self.build_frame_with_relevance();
         // A request is carried by the container's scroll slot, so one whose

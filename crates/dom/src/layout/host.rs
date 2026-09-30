@@ -15,22 +15,24 @@ use hughie::compute::{
     compute_flexbox_layout, compute_grid_lanes_layout, compute_grid_layout, compute_leaf_layout,
     compute_linear_layout, compute_relative_layout, compute_root_layout,
     compute_skipped_contents_size, hide_skipped_contents, hide_subtree,
-    round_layout_subtree_with as round_with, used_border,
+    round_layout_subtree_with as round_with,
 };
 use hughie::geometry::{Edges, Point, Rect, Size};
 use hughie::invalidate::is_relayout_boundary;
-use hughie::style::{CoreStyle, PositionProperty};
+use hughie::style::{CoreStyle, DashedIdent, PhysicalAxis, PositionProperty, TreeScoped};
 use hughie::tree::{
-    AnchorSpec, AvailableSpace, Layout, LayoutInput, LayoutOutput, LayoutSlot, LayoutTree,
+    AnchorOutcome, AnchorSpec, AvailableSpace, Layout, LayoutInput, LayoutOutput, LayoutSlot,
+    LayoutTree,
 };
 use rustc_hash::FxHashSet;
+use smallvec::SmallVec;
 
-use super::committed_box;
 use super::style::{
     DisplayMode, StyleView, box_parent, display_mode, establishes_absolute_containing_block,
-    establishes_fixed_containing_block, has_anchor_name, resolve_position,
+    establishes_fixed_containing_block, resolve_position,
 };
 use super::text_block::compute_text_block_layout;
+use super::{anchors, committed_box};
 use crate::tree::document::{
     DeferredContainer, Document, DocumentLayoutState, NodeId, NodeSlot, PendingRelayout,
     RelayoutKind, StickyContainingBlock, TreeArenas,
@@ -277,42 +279,18 @@ impl<T> LayoutTree for TreeArenas<T> {
         state.clear_layout_cache(node);
     }
 
-    /// css-anchor-position-1 §2.3's target anchor element for `node`, over
-    /// the subset this engine resolves (`docs/style-assumptions.md` §28):
+    /// css-anchor-position-1 §2.3's target anchor element for `node`, and
+    /// its border box in the padding-box coordinates of the element
+    /// generating `node`'s containing block, translated by `node`'s
+    /// remembered scroll offsets (§3.3). The lookup and the geometry are
+    /// [`anchors`]'s; this records the read for the settle loop.
     ///
-    /// - The query box is laid out by its containing block's own absolute pass: an absolutely
-    ///   positioned box — `absolute`, or `fixed` — whose box parent establishes its containing
-    ///   block (a `fixed` box under a transformed parent resolves like `absolute`). A box the
-    ///   positioned pass places against a containing block that is not its box parent (`fixed`
-    ///   under an ordinary parent, or `absolute` escaping a non-positioned one) answers `None`:
-    ///   that pass is the rounding tail's, which reaches only boxes whose own subtree moved, so a
-    ///   moved anchor would never reach it.
-    /// - Candidates are the containing block's box children (with `display: contents` flattened)
-    ///   that carry `name`: the "same containing block" half of §2.3. An in-flow child is
-    ///   acceptable wherever it sits, an absolutely positioned one only before `node` in tree
-    ///   order; the last acceptable one in tree order wins. No ancestor of `node` is a descendant
-    ///   of its containing block, so the "nearest ancestor" rule never applies to such a box. Not
-    ///   modelled: an anchor deeper in a sibling's subtree (§2.3's containing-block-chain clause),
-    ///   an absolutely positioned child that escapes to an outer containing block (§2.3 accepts it;
-    ///   it is placed only after `node`), `anchor-scope`, the top layer, and tree-scoped name
-    ///   matching.
-    ///
-    /// The rectangle is the target's unrounded border box in the containing
-    /// block's padding-box coordinates; `anchor-size()` reads its size. The
-    /// default anchor ([`AnchorSpec::Default`]) and position options are not
-    /// resolved yet (`position-anchor` does not parse), so they answer `None`.
-    ///
-    /// Cost: one pass over the containing block's children per function, so
-    /// one commit of the containing block costs anchored boxes × functions ×
-    /// its children — quadratic in its fan-out when many absolutely
-    /// positioned children use `anchor-size()`. It is paid per relayout of the
-    /// containing block, never per frame. It reads sizes
-    /// this pass wrote, which is why the subtree clause is out: a mutation
-    /// under a sibling can relayout in place (or stop at a `contain: strict`
-    /// sibling) without that sibling's own size changing, while an anchor
-    /// inside it did, and nothing would lay `node` out again. A direct child
-    /// cannot change size without its parent — the containing block — being
-    /// laid out again, and that run is what lays `node` out.
+    /// A box whose containing block is not its box parent (a `fixed` box, or
+    /// an `absolute` one under a static parent) is placed by the positioned
+    /// pass in the rounding tail, against that containing block, and asks
+    /// here in the same frame. An anchor that pass places after the box that
+    /// reads it, or one that moves under a relayout that never reaches the
+    /// reader, is caught by [`Document::settle_anchors`] after the run.
     fn anchor_rect(
         &self,
         state: &Self::State,
@@ -320,53 +298,157 @@ impl<T> LayoutTree for TreeArenas<T> {
         option: usize,
         spec: AnchorSpec<'_>,
     ) -> Option<Rect<f32>> {
-        let AnchorSpec::Named(name) = spec else {
-            return None;
+        let query = match spec {
+            AnchorSpec::Default => anchors::AnchorQuery::Default,
+            AnchorSpec::Named(name) => anchors::AnchorQuery::Named(name.clone()),
         };
-        debug_assert_eq!(option, 0, "this host reports no position options");
-        let name = &name.value;
-        let query = self.at(node);
-        let style = StyleView::try_of(query)?;
-        if style.position() != PositionProperty::Absolute {
-            return None;
+        self.anchor_query(state, node, option, query).1
+    }
+
+    /// Recorded like an anchor query: a box whose default anchor does not
+    /// exist yet reads nothing else, and must still be laid out again when
+    /// one appears.
+    fn default_anchor(
+        &self,
+        state: &Self::State,
+        node: NodeSlot,
+        option: usize,
+    ) -> Option<NodeSlot> {
+        self.anchor_query(state, node, option, anchors::AnchorQuery::Default)
+            .0
+    }
+
+    fn anchor_scrolls_with_default(
+        &self,
+        state: &Self::State,
+        node: NodeSlot,
+        option: usize,
+        name: &TreeScoped<DashedIdent>,
+        axis: PhysicalAxis,
+    ) -> bool {
+        let Some(anchored) = anchors::Query::of(self.at(node)) else {
+            return false;
+        };
+        let liveness = anchors::Liveness::Committed(state);
+        let Some(style) = anchors::option_style(self, self.at(node), option) else {
+            return false;
+        };
+        let (Some(named), Some(default)) = (
+            anchors::target_anchor(self, &anchored, name, liveness),
+            anchors::default_anchor(self, &anchored, style, liveness),
+        ) else {
+            return false;
+        };
+        anchors::scrolls_with_default(named, default, axis)
+    }
+
+    /// css-position-4's scrollable containing block, from the containing
+    /// block's last committed box. The containing block is the one running
+    /// the absolute pass that asks, so that box is the *previous* run's; the
+    /// read is recorded, and the settle loop lays `node` out again when the
+    /// run moved it.
+    fn scrollable_containing_block(
+        &self,
+        state: &Self::State,
+        node: NodeSlot,
+    ) -> Option<Size<f32>> {
+        self.anchor_query(state, node, 0, anchors::AnchorQuery::Scrollable)
+            .1
+            .map(|rect| rect.size)
+    }
+
+    fn position_option_count(&self, node: NodeSlot) -> usize {
+        self.anchors()
+            .options(node)
+            .map_or(0, |options| options.styles.len() + 1)
+    }
+
+    fn position_option_style(&self, node: NodeSlot, index: usize) -> Self::Style<'_> {
+        let node_ref = self.at(node);
+        match anchors::option_style(self, node_ref, index) {
+            Some(style) if index > 0 => StyleView::with_values(node_ref, style),
+            _ => StyleView::of(node_ref),
         }
-        let containing_block = box_parent(query)?;
-        let mut target = None;
-        let mut before_query = true;
-        for (child, child_style, display) in self.flattened_children(containing_block.slot()) {
-            if child == node {
-                before_query = false;
-                continue;
+    }
+
+    fn last_successful_option(&self, state: &Self::State, node: NodeSlot) -> Option<usize> {
+        state.anchored.get(&node)?.last_successful
+    }
+
+    /// Keeps `outcome` and seals the reads the box's layout made since its
+    /// last report as the ones the settle loop verifies.
+    fn set_anchor_outcome(&self, state: &mut Self::State, node: NodeSlot, outcome: AnchorOutcome) {
+        let mut reads = SmallVec::new();
+        state.anchor_pending.get_mut().retain(|(reader, read)| {
+            if *reader != node {
+                return true;
             }
-            if display.is_none()
-                || !self.at(child).is_element()
-                || !has_anchor_name(child_style.values(), name)
-            {
-                continue;
+            if !reads.contains(read) {
+                reads.push(read.clone());
             }
-            match child_style.position() {
-                // Laid out by this same pass, so only one already laid out
-                // — earlier in tree order — has a size yet; §2.3 says the
-                // same.
-                PositionProperty::Absolute if !before_query => {}
-                // Placed by the positioned pass, against an outer containing
-                // block and after `node`. §2.3 would accept it; not modelled.
-                PositionProperty::Fixed => {}
-                _ => target = Some(child),
-            }
+            false
+        });
+        let entry = state.anchored.entry(node).or_default();
+        entry.outcome = Some(outcome);
+        entry.reads = reads;
+        state.anchor_reported.push(node);
+    }
+}
+
+impl<T> TreeArenas<T> {
+    /// Answers one anchor query — the target and its rectangle — and records
+    /// it as a read of `node`'s layout.
+    fn anchor_query(
+        &self,
+        state: &DocumentLayoutState,
+        node: NodeSlot,
+        option: usize,
+        query: anchors::AnchorQuery,
+    ) -> (Option<NodeSlot>, Option<Rect<f32>>) {
+        let node_ref = self.at(node);
+        let Some(style) = StyleView::try_of(node_ref) else {
+            return (None, None);
+        };
+        if !matches!(
+            style.values().clone_position(),
+            PositionProperty::Absolute | PositionProperty::Fixed
+        ) {
+            return (None, None);
         }
-        let slot = self.layout(state, target?);
-        debug_assert!(
-            !slot.is_hidden(),
-            "an anchor that generates a box has been committed by this pass"
-        );
-        // A child's location is in its box parent's border-box coordinates.
-        let border = used_border(&StyleView::of(containing_block));
-        let location = slot.unrounded.location;
-        Some(Rect::new(
-            Point::new(location.x - border.left, location.y - border.top),
-            slot.unrounded.size,
-        ))
+        let Some(anchored) = anchors::Query::of(node_ref) else {
+            return (None, None);
+        };
+        let (target, rect) = anchors::answer(self, state, &anchored, option, &query);
+        #[cfg(debug_assertions)]
+        if let Some(target) = target {
+            // Acceptability is what guarantees the anchor was laid out
+            // before the box reading it; a descendant never is.
+            let mut current = self.at(target).flat_parent();
+            while let Some(ancestor) = current {
+                assert_ne!(
+                    ancestor.id(),
+                    node,
+                    "an acceptable anchor is never inside the box that reads it"
+                );
+                current = ancestor.flat_parent();
+            }
+            assert!(
+                state
+                    .get(target)
+                    .is_some_and(|entry| !entry.slot.is_hidden()),
+                "a target anchor holds a committed box"
+            );
+        }
+        state.anchor_pending.borrow_mut().push((
+            node,
+            anchors::AnchorRead {
+                option,
+                query,
+                target,
+                rect,
+            },
+        ));
+        (target, rect)
     }
 }
 

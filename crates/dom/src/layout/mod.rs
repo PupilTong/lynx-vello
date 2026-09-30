@@ -1,5 +1,6 @@
 //! Box layout over the document tree — the concrete [`hughie`] host.
 
+pub(crate) mod anchors;
 pub(crate) mod committed_box;
 mod host;
 pub(crate) mod relevance;
@@ -98,19 +99,30 @@ impl<T: Sync> Document<T> {
             return;
         }
 
-        let full = self.layout_requires_full_pass(viewport, scale);
-        let rescale = self.layout_inputs_changed(viewport, scale);
-        let bound = self.arenas().slot_bound();
-        self.layout_state_mut().ensure_covers(bound);
-        host::run_layout(self, viewport, scale, full, rescale, resized);
-        // Publishing is what makes the pass's sizes readable by the style
-        // traversal, which is parallel, and by the pass after this one; see
-        // [`crate::layout::committed_box`]. The run publishes on its own
-        // whenever it interleaved a restyle into itself, so what is left here
-        // is what the *last* boxes it laid out recorded.
-        self.arenas_mut().publish_committed_boxes(resized);
-        self.clear_relayout_roots();
-        self.mark_layout_complete(viewport, scale);
+        // css-anchor-position-1's settle loop (`layout::anchors`): a run
+        // whose anchor-positioned boxes read an anchor that moved after they
+        // read it invalidates them and runs again, `ANCHOR_PASSES` times at
+        // most. A page with no such box leaves after the first run, on one
+        // `is_empty` test.
+        for anchor_pass in 0..anchors::ANCHOR_PASSES {
+            let full = self.layout_requires_full_pass(viewport, scale);
+            let rescale = self.layout_inputs_changed(viewport, scale);
+            let bound = self.arenas().slot_bound();
+            self.layout_state_mut().ensure_covers(bound);
+            host::run_layout(self, viewport, scale, full, rescale, resized);
+            // Publishing is what makes the pass's sizes readable by the style
+            // traversal, which is parallel, and by the pass after this one;
+            // see [`crate::layout::committed_box`]. The run publishes on its
+            // own whenever it interleaved a restyle into itself, so what is
+            // left here is what the *last* boxes it laid out recorded.
+            self.arenas_mut().publish_committed_boxes(resized);
+            self.clear_relayout_roots();
+            self.mark_layout_complete(viewport, scale);
+            let last = anchor_pass + 1 == anchors::ANCHOR_PASSES;
+            if !self.settle_anchors(!last) {
+                break;
+            }
+        }
     }
 
     /// Marks the container-unit users under every query container the pass

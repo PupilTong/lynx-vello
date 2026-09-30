@@ -32,12 +32,12 @@ pub(super) static NO_PAINTERS: NoPainters = NoPainters;
 
 /// Balances [`thread_state::enter`] on unwind, so a panicking traversal does
 /// not leave the embedder's thread permanently flagged `LAYOUT`.
-pub(super) struct LayoutThreadStateGuard {
+pub(crate) struct LayoutThreadStateGuard {
     entered: bool,
 }
 
 impl LayoutThreadStateGuard {
-    pub(super) fn enter() -> Self {
+    pub(crate) fn enter() -> Self {
         let entered = !thread_state::get().is_layout();
         if entered {
             thread_state::enter(ThreadState::LAYOUT);
@@ -182,7 +182,13 @@ impl<T: Sync> Document<T> {
             }
         };
         drop(phase);
-        self.harvest_flush(harvest_root, snapshots, sink);
+        let anchor_restyled = self.harvest_flush(harvest_root, snapshots, sink);
+        // After the harvest, so every element it reads holds its post-flush
+        // style; before the animation sync, which cascades nothing new.
+        self.refresh_anchor_state(
+            &anchor_restyled,
+            crate::layout::anchors::RestyleSource::Flush,
+        );
         // The flush is where animations start and stop; the timeline has to
         // learn what it now owns before the next frame asks whether to tick.
         self.sync_animation_state();

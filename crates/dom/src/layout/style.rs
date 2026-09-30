@@ -5,9 +5,9 @@
 use hughie::geometry::Size;
 use hughie::style::containment::effective_containment;
 use hughie::style::{
-    Contain, ContainIntrinsicSize, ContentVisibility, CoreStyle, DashedIdent, Display,
-    FlexboxStyle, GridLanesStyle, GridStyle, LinearStyle, PositionProperty, RelativeStyle,
-    TextContainerStyle, TextRunStyle,
+    Contain, ContainIntrinsicSize, ContentVisibility, CoreStyle, Display, FlexboxStyle,
+    GridLanesStyle, GridStyle, LinearStyle, PositionProperty, RelativeStyle, TextContainerStyle,
+    TextRunStyle,
 };
 use stylo::properties::ComputedValues;
 use stylo::values::computed::motion::OffsetPath;
@@ -147,22 +147,6 @@ pub(crate) fn establishes_absolute_containing_block<T>(
         || establishes_fixed_containing_block(node, style)
 }
 
-/// Whether `name` is one of the element's `anchor-name`s
-/// (css-anchor-position-1 §2.1).
-///
-/// Names match by identifier alone: the tree scope `anchor-name` carries is
-/// not compared, so a name declared in a shadow tree's styles also answers a
-/// query from outside it.
-pub(crate) fn has_anchor_name(style: &ComputedValues, name: &DashedIdent) -> bool {
-    style
-        .get_box()
-        .anchor_name
-        .value
-        .0
-        .iter()
-        .any(|own| own == name)
-}
-
 pub(crate) fn box_parent<T>(node: &Node<T>) -> Option<&Node<T>> {
     let mut current = node.flat_parent()?;
     loop {
@@ -236,6 +220,13 @@ impl<'dom, T> StyleView<'dom, T> {
             node,
             style: &super::ANONYMOUS_STYLE,
         })
+    }
+
+    /// `node` seen through another of its styles: a position option
+    /// (css-anchor-position-1 §6.1) cascaded for it. Everything node-bound —
+    /// the position lowering, containment, relevance — still reads `node`.
+    pub(crate) const fn with_values(node: &'dom Node<T>, style: &'dom ComputedValues) -> Self {
+        Self { node, style }
     }
 
     pub(crate) fn values(&self) -> &ComputedValues {

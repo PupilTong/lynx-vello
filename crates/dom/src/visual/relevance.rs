@@ -157,7 +157,13 @@ impl<T: Sync> Document<T> {
             if self.arenas().relevance_is_fresh(slot) {
                 continue;
             }
-            let state = Relevance::of(scratch.plan.admits_auto_box(frame, auto));
+            // css-anchor-position-1 §2.5: an `auto` box holding the target
+            // anchor of a positioned box outside it that is itself shown is
+            // relevant, wherever it is. Asked only of a box about to skip,
+            // and only on a page with anchor-positioned boxes.
+            let state = Relevance::of(
+                scratch.plan.admits_auto_box(frame, auto) || self.anchor_keeps_relevant(auto.node),
+            );
             if self.arenas_mut().determine_relevance(slot, state) {
                 scratch.flips.push(auto.node);
                 // css-contain-2 §4.4: the skipping state changed, so this

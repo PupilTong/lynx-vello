@@ -903,12 +903,16 @@ impl<T> Document<T> {
         std::mem::replace(&mut self.pending_snapshots, SnapshotMap::new())
     }
 
+    /// Collects the flush's damage and answers the restyled elements whose
+    /// anchor-positioning state (`layout::anchors`) has to be re-read — empty,
+    /// and unallocated, for every flush of a page that declares none.
     pub(crate) fn harvest_flush<F>(
         &mut self,
         root: NodeId,
         mut snapshots: SnapshotMap,
         sink: &mut F,
-    ) where
+    ) -> Vec<NodeId>
+    where
         F: FnMut(NodeId, StyleDamage),
     {
         self.retain_unhandled_snapshots(&mut snapshots);
@@ -919,7 +923,7 @@ impl<T> Document<T> {
         self.pending_snapshots = snapshots;
 
         let mut stack = vec![root];
-        self.harvest_style_damage(&mut stack, sink);
+        self.harvest_style_damage(&mut stack, sink)
     }
 
     fn retain_unhandled_snapshots(&self, snapshots: &mut SnapshotMap) {
@@ -986,14 +990,15 @@ impl<T> Document<T> {
         }
     }
 
-    fn harvest_style_damage<F>(&mut self, stack: &mut Vec<NodeId>, sink: &mut F)
+    fn harvest_style_damage<F>(&mut self, stack: &mut Vec<NodeId>, sink: &mut F) -> Vec<NodeId>
     where
         F: FnMut(NodeId, StyleDamage),
     {
         let mut containing_blocks = Vec::new();
+        let mut anchor_restyled = Vec::new();
         while let Some(current) = stack.pop() {
             let harvested = {
-                let (harvested, descend) = {
+                let (harvested, descend, anchor_restyle) = {
                     let Some(node) = self.tree.get_mut(current) else {
                         continue;
                     };
@@ -1007,6 +1012,12 @@ impl<T> Document<T> {
                     // sound only because clearing restyle state touches the
                     // hint, the damage, and the flags — never `styles`.
                     let refresh = node.refresh_layout_style();
+                    // `Some(declares)` for a restyled element: whether its new
+                    // style declares anything the anchor registry indexes.
+                    let anchor_restyle = refresh.changed.then(|| {
+                        node.layout_computed_style()
+                            .is_some_and(crate::layout::anchors::declares_anchor_state)
+                    });
                     if refresh.changed {
                         self.animations
                             .timelines
@@ -1020,8 +1031,16 @@ impl<T> Document<T> {
                     (
                         harvested.map(|damage| (damage, refresh)),
                         std::mem::replace(dirty, false) || refresh.changed,
+                        anchor_restyle,
                     )
                 };
+                // An element that declares nothing now may have declared
+                // something before, which only the registry remembers.
+                if let Some(declares) = anchor_restyle
+                    && (declares || self.tree.anchors().knows(current))
+                {
+                    anchor_restyled.push(current);
+                }
                 if descend {
                     let node = self
                         .tree
@@ -1060,6 +1079,7 @@ impl<T> Document<T> {
         for id in containing_blocks {
             self.invalidate_containing_block(id);
         }
+        anchor_restyled
     }
 }
 
