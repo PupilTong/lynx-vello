@@ -15,12 +15,14 @@ use hughie::compute::{
     compute_flexbox_layout, compute_grid_lanes_layout, compute_grid_layout, compute_leaf_layout,
     compute_linear_layout, compute_relative_layout, compute_root_layout,
     compute_skipped_contents_size, hide_skipped_contents, hide_subtree,
-    round_layout_subtree_with as round_with,
+    round_layout_subtree_with as round_with, used_border,
 };
-use hughie::geometry::{Edges, Point, Size};
+use hughie::geometry::{Edges, Point, Rect, Size};
 use hughie::invalidate::is_relayout_boundary;
-use hughie::style::{CoreStyle, DashedIdent, PhysicalAxis, PositionProperty};
-use hughie::tree::{AvailableSpace, Layout, LayoutInput, LayoutOutput, LayoutSlot, LayoutTree};
+use hughie::style::{CoreStyle, PositionProperty};
+use hughie::tree::{
+    AnchorSpec, AvailableSpace, Layout, LayoutInput, LayoutOutput, LayoutSlot, LayoutTree,
+};
 use rustc_hash::FxHashSet;
 
 use super::committed_box;
@@ -295,6 +297,11 @@ impl<T> LayoutTree for TreeArenas<T> {
     ///   it is placed only after `node`), `anchor-scope`, the top layer, and tree-scoped name
     ///   matching.
     ///
+    /// The rectangle is the target's unrounded border box in the containing
+    /// block's padding-box coordinates; `anchor-size()` reads its size. The
+    /// default anchor ([`AnchorSpec::Default`]) and position options are not
+    /// resolved yet (`position-anchor` does not parse), so they answer `None`.
+    ///
     /// Cost: one pass over the containing block's children per function, so
     /// one commit of the containing block costs anchored boxes × functions ×
     /// its children — quadratic in its fan-out when many absolutely
@@ -306,13 +313,18 @@ impl<T> LayoutTree for TreeArenas<T> {
     /// inside it did, and nothing would lay `node` out again. A direct child
     /// cannot change size without its parent — the containing block — being
     /// laid out again, and that run is what lays `node` out.
-    fn anchor_size(
+    fn anchor_rect(
         &self,
         state: &Self::State,
         node: NodeSlot,
-        name: &DashedIdent,
-        axis: PhysicalAxis,
-    ) -> Option<f32> {
+        option: usize,
+        spec: AnchorSpec<'_>,
+    ) -> Option<Rect<f32>> {
+        let AnchorSpec::Named(name) = spec else {
+            return None;
+        };
+        debug_assert_eq!(option, 0, "this host reports no position options");
+        let name = &name.value;
         let query = self.at(node);
         let style = StyleView::try_of(query)?;
         if style.position() != PositionProperty::Absolute {
@@ -348,11 +360,13 @@ impl<T> LayoutTree for TreeArenas<T> {
             !slot.is_hidden(),
             "an anchor that generates a box has been committed by this pass"
         );
-        let size = slot.unrounded.size;
-        Some(match axis {
-            PhysicalAxis::Horizontal => size.width,
-            PhysicalAxis::Vertical => size.height,
-        })
+        // A child's location is in its box parent's border-box coordinates.
+        let border = used_border(&StyleView::of(containing_block));
+        let location = slot.unrounded.location;
+        Some(Rect::new(
+            Point::new(location.x - border.left, location.y - border.top),
+            slot.unrounded.size,
+        ))
     }
 }
 

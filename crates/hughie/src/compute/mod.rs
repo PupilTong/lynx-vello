@@ -1,5 +1,7 @@
 //! Protocol machinery entry points over a statically split tree and state.
 mod anchor;
+mod anchor_area;
+mod anchor_fallback;
 mod flexbox;
 mod grid;
 mod leaf;
@@ -75,15 +77,16 @@ pub use linear::compute_linear_layout;
 pub use relative::compute_relative_layout;
 use stylo::computed_values::direction;
 use stylo::values::computed::{Inset, Margin, Size as StyleSize};
+use stylo::values::specified::align::AlignFlags;
 
-use self::anchor::{AnchoredGeometry, GeometryValues};
+use self::anchor::GeometryValues;
 use self::util::{
     apply_box_sizing, auto_edges_to_zero, box_inset_size, clamp, clamp_axis, resolve_border,
     resolve_container_box, resolve_insets, resolve_length_percentage, resolve_margins,
     resolve_max_sizes, resolve_padding, resolve_quantitative_max_sizes, resolve_quantitative_sizes,
     resolve_size, style_size_behaves_auto, used_aspect_ratio,
 };
-use crate::geometry::{Edges, Point, Size};
+use crate::geometry::{Edges, Point, Rect, Size};
 use crate::invalidate::is_relayout_boundary;
 use crate::style::CoreStyle;
 use crate::style::containment::contain_intrinsic_length;
@@ -356,42 +359,104 @@ pub fn compute_absolute_layout<T: LayoutTree>(
     containing_block: Size<f32>,
     static_position: Point<f32>,
 ) -> Layout {
-    compute_absolute_layout_with_static_position(
+    // A host places this box against a containing block it found itself,
+    // whose direction the engine does not see; the box's own `direction`
+    // stands in for it (they differ only when the box sets its own).
+    let rtl = tree.style(node).direction() == direction::T::Rtl;
+    compute_absolute_layout_in(
         tree,
         state,
         node,
-        containing_block,
+        AbsoluteContainingBlock::padding_box(containing_block, rtl),
         move |_, _| static_position,
     )
 }
 
-pub(super) fn compute_absolute_layout_with_static_position<T, StaticPosition>(
+/// The containing block of an absolutely positioned box, as the absolute pass
+/// of the box that generates it knows it.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct AbsoluteContainingBlock {
+    /// Its origin in its generator's padding-box coordinates: a grid area's
+    /// offset, zero for every other containing block.
+    pub(super) origin: Point<f32>,
+    pub(super) size: Size<f32>,
+    /// Its generator's padding-box size. css-position-3 §2.1.1: "The
+    /// element's original containing block is its containing block before
+    /// applying any of these effects" — grid placement included.
+    pub(super) padding_box_size: Size<f32>,
+    /// Whether it is its generator's whole padding box, the one
+    /// css-position-4's scrollable containing block replaces.
+    pub(super) is_padding_box: bool,
+    /// Its `direction`: what `start`/`end` mean in the horizontal axis.
+    pub(super) rtl: bool,
+    /// Whether the author's `justify-self`/`align-self` place the box
+    /// (css-position-3 §4.3). Lynx's own `linear` and `relative` containers
+    /// place an absolutely positioned child by its insets alone, and those
+    /// algorithms are not extended; `anchor-center` and `position-area`'s
+    /// defaults, which are opt-in anchor positioning, still apply there.
+    pub(super) honors_self_alignment: bool,
+}
+
+impl AbsoluteContainingBlock {
+    #[inline]
+    pub(super) const fn padding_box(size: Size<f32>, rtl: bool) -> Self {
+        Self {
+            origin: Point::ZERO,
+            size,
+            padding_box_size: size,
+            is_padding_box: true,
+            rtl,
+            honors_self_alignment: true,
+        }
+    }
+
+    /// The original containing block in this one's coordinates.
+    #[inline]
+    pub(super) fn original(&self) -> Rect<f32> {
+        Rect::new(
+            Point::new(-self.origin.x, -self.origin.y),
+            self.padding_box_size,
+        )
+    }
+
+    /// The padding box of a Lynx `linear` or `relative` container.
+    #[inline]
+    pub(super) const fn lynx_padding_box(size: Size<f32>, rtl: bool) -> Self {
+        Self {
+            honors_self_alignment: false,
+            ..Self::padding_box(size, rtl)
+        }
+    }
+}
+
+pub(super) fn compute_absolute_layout_in<T, StaticPosition>(
     tree: &T,
     state: &mut T::State,
     node: T::NodeId,
-    containing_block: Size<f32>,
+    containing_block: AbsoluteContainingBlock,
     static_position: StaticPosition,
 ) -> Layout
 where
     T: LayoutTree,
-    StaticPosition: FnOnce(Size<f32>, Edges<f32>) -> Point<f32>,
+    StaticPosition: Fn(Size<f32>, Edges<f32>) -> Point<f32>,
 {
     absolute_layout(
         tree,
         state,
         node,
-        containing_block,
-        static_position,
+        &containing_block,
+        &static_position,
         // Every field of the input `absolute_layout` builds for this box is a
         // function of the containing block, the box's own style and, when
-        // that style holds `anchor-size()`, its anchors' sizes — none of
-        // which the box's own subtree can move. The one exception is an
+        // that style uses anchor positioning, its anchors' geometry — none of
+        // which the box's own subtree can move. The exceptions are an
         // anchored axis sized from content, which is measured to build the
-        // input; `settle_anchored_axes` withdraws the claim on that axis. And
-        // the box's content cannot move the containing block back: it
-        // contributes to no ancestor's used size, only to their scrollable
-        // overflow, which is an output the in-place path compares before it
-        // trusts anything.
+        // input (`settle_anchored_axes` withdraws the claim on that axis),
+        // and a box with position options, whose choice among them depends on
+        // its own size (`anchor_fallback` withdraws both). And the box's
+        // content cannot move the containing block back: it contributes to no
+        // ancestor's used size, only to their scrollable overflow, which is an
+        // output the in-place path compares before it trusts anything.
         LayoutGoal::Commit {
             content_independent: Size::new(true, true),
         },
@@ -403,15 +468,15 @@ pub(super) fn measure_absolute_layout<T: LayoutTree>(
     tree: &T,
     state: &mut T::State,
     node: T::NodeId,
-    containing_block: Size<f32>,
+    containing_block: AbsoluteContainingBlock,
     requested_axis: RequestedAxis,
 ) -> Layout {
     absolute_layout(
         tree,
         state,
         node,
-        containing_block,
-        |_, _| Point::ZERO,
+        &containing_block,
+        &|_, _| Point::ZERO,
         LayoutGoal::Measure(requested_axis),
     )
 }
@@ -420,26 +485,195 @@ fn absolute_layout<T, StaticPosition>(
     tree: &T,
     state: &mut T::State,
     node: T::NodeId,
-    containing_block: Size<f32>,
-    static_position: StaticPosition,
+    containing_block: &AbsoluteContainingBlock,
+    static_position: &StaticPosition,
     goal: LayoutGoal,
 ) -> Layout
 where
     T: LayoutTree,
-    StaticPosition: FnOnce(Size<f32>, Edges<f32>) -> Point<f32>,
+    StaticPosition: Fn(Size<f32>, Edges<f32>) -> Point<f32>,
 {
+    let size = containing_block.size;
     debug_assert!(
-        containing_block.width.is_finite()
-            && containing_block.height.is_finite()
-            && containing_block.width >= 0.0
-            && containing_block.height >= 0.0,
+        size.width.is_finite()
+            && size.height.is_finite()
+            && size.width >= 0.0
+            && size.height >= 0.0,
         "containing-block sizes must be finite and non-negative"
     );
-    let parent_size = Size::new(Some(containing_block.width), Some(containing_block.height));
     let style = tree.style(node);
-    let anchored = AnchoredGeometry::resolve(tree, state, node, &style);
-    let values = GeometryValues::of_box(&style, anchored.as_ref());
-    let resolved_style = resolve_absolute_style(&style, &values, parent_size);
+    if tree.position_option_count(node) > 1 || anchor::uses_anchor_positioning(&style) {
+        return anchor_fallback::anchored_absolute_layout(
+            tree,
+            state,
+            node,
+            containing_block,
+            static_position,
+            goal,
+        );
+    }
+    let values = GeometryValues::of(&style);
+    let placement = AbsolutePlacement::plain(&style, &values, containing_block);
+    place_absolute(
+        tree,
+        state,
+        node,
+        &style,
+        &values,
+        &placement,
+        containing_block,
+        static_position,
+        goal,
+    )
+    .layout
+}
+
+/// The used self-alignment of an absolutely positioned box on one axis.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct AxisAlignment {
+    /// The value with its overflow-position bits. `auto` is stored as
+    /// `normal`: css-align-3 §6.1 — "Behaves as normal … when determining the
+    /// actual position of an absolutely positioned box."
+    pub(super) flags: AlignFlags,
+    /// `anchor-center` with a default anchor: where the margin box's center
+    /// goes, in the coordinates of the containing block it is laid out in.
+    pub(super) anchor_center: Option<f32>,
+}
+
+impl AxisAlignment {
+    pub(super) const NORMAL: Self = Self {
+        flags: AlignFlags::NORMAL,
+        anchor_center: None,
+    };
+
+    #[inline]
+    pub(super) fn of(flags: AlignFlags) -> Self {
+        Self {
+            flags: if flags.value() == AlignFlags::AUTO {
+                AlignFlags::NORMAL
+            } else {
+                flags
+            },
+            anchor_center: None,
+        }
+    }
+
+    #[inline]
+    pub(super) fn is_normal(self) -> bool {
+        self.flags.value() == AlignFlags::NORMAL
+    }
+
+    /// css-position-3 §4.1: an automatic size is the stretch-fit size only
+    /// under `stretch`, or `normal`, and both insets non-`auto`; css-align-3
+    /// §6.1.2: "Values other than stretch or normal cause non-replaced
+    /// absolutely-positioned boxes to use fit-content sizing".
+    #[inline]
+    fn stretches(self) -> bool {
+        matches!(self.flags.value(), AlignFlags::NORMAL | AlignFlags::STRETCH)
+    }
+}
+
+/// Where and against what an absolutely positioned box is laid out.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct AbsolutePlacement {
+    /// The containing block the box is sized and positioned in, in the
+    /// coordinates of the one its generator's absolute pass handed over: that
+    /// one, or a `position-area` region.
+    pub(super) area: Rect<f32>,
+    /// The original containing block (css-position-3 §2.1.1: the generator's
+    /// padding box, or its scrollable containing block), for css-align-3
+    /// §4.4.1.2's overflow limit rect.
+    pub(super) original: Rect<f32>,
+    /// `justify-self` (horizontal) and `align-self` (vertical), used values.
+    pub(super) align: Size<AxisAlignment>,
+    /// The insets whose computed value is `auto`, even where `position-area`
+    /// or `anchor-center` made their used value 0.
+    pub(super) auto_inset: Edges<bool>,
+    /// Axes the box's own run would read differently from the values it is
+    /// laid out with, which the pass hands it as known dimensions.
+    pub(super) sensitive: Size<bool>,
+}
+
+impl AbsolutePlacement {
+    /// The placement of a box that uses no anchor positioning.
+    #[inline]
+    fn plain(
+        style: &impl CoreStyle,
+        values: &GeometryValues<'_>,
+        containing_block: &AbsoluteContainingBlock,
+    ) -> Self {
+        Self {
+            area: Rect::new(Point::ZERO, containing_block.size),
+            original: containing_block.original(),
+            align: if containing_block.honors_self_alignment {
+                Size::new(
+                    AxisAlignment::of(style.justify_self().0),
+                    AxisAlignment::of(style.align_self().0),
+                )
+            } else {
+                Size::new(AxisAlignment::NORMAL, AxisAlignment::NORMAL)
+            },
+            auto_inset: values.inset.map(|inset| matches!(inset, Inset::Auto)),
+            sensitive: Size::new(false, false),
+        }
+    }
+}
+
+/// One absolute layout of a box, with what the position fallback test reads.
+pub(super) struct Placed {
+    pub(super) layout: Layout,
+    /// The inset-modified containing block, in the handed-over containing
+    /// block's coordinates.
+    pub(super) imcb: Rect<f32>,
+    /// The margin box, in the same coordinates.
+    pub(super) margin_box: Rect<f32>,
+    /// css-anchor-position-1 §6.5: "If cb rect was negative-size in either
+    /// axis and corrected into zero-size".
+    pub(super) negative_corrected: bool,
+}
+
+impl Placed {
+    /// §6.5: the margin box is "fully contained within" the inset-modified
+    /// containing block, which was not negative-size.
+    #[inline]
+    pub(super) fn fits(&self) -> bool {
+        // A layout unit of slack (1/64 px) keeps an exact fit a fit.
+        !self.negative_corrected && self.imcb.contains_rect(&self.margin_box, 1.0 / 64.0)
+    }
+}
+
+/// css-position-3 §4's absolute positioning layout model for one box:
+/// inset-modified containing block, size, auto margins, then alignment of the
+/// margin box — in `placement.area`, with `values` in place of the box's own
+/// geometry values.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the model's inputs; bundling them would only rename them"
+)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the four steps of the model in their order"
+)]
+#[inline]
+fn place_absolute<T, StaticPosition>(
+    tree: &T,
+    state: &mut T::State,
+    node: T::NodeId,
+    style: &impl CoreStyle,
+    values: &GeometryValues<'_>,
+    placement: &AbsolutePlacement,
+    containing_block: &AbsoluteContainingBlock,
+    static_position: &StaticPosition,
+    goal: LayoutGoal,
+) -> Placed
+where
+    T: LayoutTree,
+    StaticPosition: Fn(Size<f32>, Edges<f32>) -> Point<f32>,
+{
+    let area = placement.area;
+    let containing = area.size;
+    let parent_size = Size::new(Some(containing.width), Some(containing.height));
+    let resolved_style = resolve_absolute_style(style, values, parent_size);
     let ResolvedAbsoluteStyle {
         insets,
         optional_margin,
@@ -452,14 +686,19 @@ where
 
     let fixed_margin = auto_edges_to_zero(optional_margin);
     let inset_modified_size = Size::new(
-        (containing_block.width - insets.left.unwrap_or(0.0) - insets.right.unwrap_or(0.0))
-            .max(0.0),
-        (containing_block.height - insets.top.unwrap_or(0.0) - insets.bottom.unwrap_or(0.0))
-            .max(0.0),
+        (containing.width - insets.left.unwrap_or(0.0) - insets.right.unwrap_or(0.0)).max(0.0),
+        (containing.height - insets.top.unwrap_or(0.0) - insets.bottom.unwrap_or(0.0)).max(0.0),
     );
 
-    let mut known_dimensions =
-        absolute_known_dimensions(&resolved_style, inset_modified_size, fixed_margin);
+    let mut known_dimensions = absolute_known_dimensions(
+        &resolved_style,
+        inset_modified_size,
+        fixed_margin,
+        Size::new(
+            placement.align.width.stretches(),
+            placement.align.height.stretches(),
+        ),
+    );
     let available_space = Size::new(
         preferred_available
             .width
@@ -472,9 +711,9 @@ where
         tree,
         state,
         node,
-        &style,
-        &values,
-        anchored.as_ref(),
+        style,
+        values,
+        placement.sensitive,
         AbsoluteSpace {
             parent_size,
             inset_modified_size,
@@ -498,19 +737,72 @@ where
         static_position.x.is_finite() && static_position.y.is_finite(),
         "static positions must be finite"
     );
+    let static_position = Point::new(
+        static_position.x - area.origin.x,
+        static_position.y - area.origin.y,
+    );
+    let self_rtl = direction == direction::T::Rtl;
+    let horizontal_imcb = inset_modified_axis(
+        containing.width,
+        (insets.left, insets.right),
+        weaker_is_start(
+            (placement.auto_inset.left, placement.auto_inset.right),
+            containing_block.rtl,
+        ),
+        static_position.x,
+    );
+    let vertical_imcb = inset_modified_axis(
+        containing.height,
+        (insets.top, insets.bottom),
+        weaker_is_start(
+            (placement.auto_inset.top, placement.auto_inset.bottom),
+            false,
+        ),
+        static_position.y,
+    );
+    let original = placement.original;
+    let aligned = |alignment: AxisAlignment,
+                   start_margin: Option<f32>,
+                   end_margin: Option<f32>,
+                   imcb: InsetModifiedAxis,
+                   limit: (f32, f32),
+                   horizontal: bool| {
+        (!alignment.is_normal() && start_margin.is_some() && end_margin.is_some()).then_some(
+            AlignedAxis {
+                imcb_start: imcb.start,
+                imcb_size: imcb.size,
+                alignment,
+                limit,
+                containing_rtl: horizontal && containing_block.rtl,
+                self_rtl: horizontal && self_rtl,
+                horizontal,
+            },
+        )
+    };
     let location = Point::new(
         absolute_axis_location(AbsoluteAxis {
-            containing_size: containing_block.width,
+            containing_size: containing.width,
             box_size: output.size.width,
             start_inset: insets.left,
             end_inset: insets.right,
             start_margin: margin.left,
             end_margin: margin.right,
             static_position: static_position.x,
-            prefer_end: direction == direction::T::Rtl,
+            prefer_end: self_rtl,
+            aligned: aligned(
+                placement.align.width,
+                optional_margin.left,
+                optional_margin.right,
+                horizontal_imcb,
+                (
+                    original.origin.x - area.origin.x,
+                    original.origin.x + original.size.width - area.origin.x,
+                ),
+                true,
+            ),
         }),
         absolute_axis_location(AbsoluteAxis {
-            containing_size: containing_block.height,
+            containing_size: containing.height,
             box_size: output.size.height,
             start_inset: insets.top,
             end_inset: insets.bottom,
@@ -518,17 +810,110 @@ where
             end_margin: margin.bottom,
             static_position: static_position.y,
             prefer_end: false,
+            aligned: aligned(
+                placement.align.height,
+                optional_margin.top,
+                optional_margin.bottom,
+                vertical_imcb,
+                (
+                    original.origin.y - area.origin.y,
+                    original.origin.y + original.size.height - area.origin.y,
+                ),
+                false,
+            ),
         }),
     );
 
     let mut layout = Layout::with_order(0);
-    layout.location = location;
+    layout.location = Point::new(area.origin.x + location.x, area.origin.y + location.y);
     layout.size = output.size;
     layout.content_size = output.content_size;
     layout.border = border;
     layout.padding = padding;
     layout.margin = margin;
-    layout
+    Placed {
+        imcb: Rect::new(
+            Point::new(
+                area.origin.x + horizontal_imcb.start,
+                area.origin.y + vertical_imcb.start,
+            ),
+            Size::new(horizontal_imcb.size, vertical_imcb.size),
+        ),
+        margin_box: Rect::new(
+            Point::new(
+                layout.location.x - margin.left,
+                layout.location.y - margin.top,
+            ),
+            Size::new(
+                output.size.width + margin.horizontal_sum(),
+                output.size.height + margin.vertical_sum(),
+            ),
+        ),
+        negative_corrected: horizontal_imcb.negative_corrected || vertical_imcb.negative_corrected,
+        layout,
+    }
+}
+
+/// One axis of the inset-modified containing block, in the coordinates of
+/// the containing block it is cut from.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct InsetModifiedAxis {
+    start: f32,
+    size: f32,
+    negative_corrected: bool,
+}
+
+/// css-position-3 §3.5.2: "the weaker inset in the affected axis is reduced
+/// … In the case that only one inset is auto, that is the weaker inset …;
+/// otherwise the weaker inset is the inset of the end edge (where end is
+/// interpreted relative to the writing mode of the containing block)."
+/// Whether that is the start (left or top) inset, from the computed-`auto`
+/// flags of the start and end insets.
+#[inline]
+fn weaker_is_start(auto_insets: (bool, bool), rtl: bool) -> bool {
+    match auto_insets {
+        (true, false) => true,
+        (false, true) => false,
+        _ => rtl,
+    }
+}
+
+/// The inset-modified containing block on one axis (css-position-3 §3.5):
+/// the containing block reduced by the insets, an `auto` one being 0 when
+/// the other is not (§3.5.1: "If only one inset property in a given axis is
+/// auto, it is set to zero") and both `auto` standing at the static
+/// position (§3.5.1: "Set its start-edge inset property to the static
+/// position, and its end-edge inset property to zero"). A negative size is
+/// brought up to zero by moving the weaker edge (§3.5.2).
+#[inline]
+fn inset_modified_axis(
+    containing: f32,
+    (start, end): (Option<f32>, Option<f32>),
+    weaker_is_start: bool,
+    static_position: f32,
+) -> InsetModifiedAxis {
+    let (start, end) = match (start, end) {
+        (None, None) => (static_position, 0.0),
+        (start, end) => (start.unwrap_or(0.0), end.unwrap_or(0.0)),
+    };
+    let size = containing - start - end;
+    if size >= 0.0 {
+        InsetModifiedAxis {
+            start,
+            size,
+            negative_corrected: false,
+        }
+    } else {
+        InsetModifiedAxis {
+            start: if weaker_is_start {
+                containing - end
+            } else {
+                start
+            },
+            size: 0.0,
+            negative_corrected: true,
+        }
+    }
 }
 
 /// Resolved box-model and positioning inputs retained across the recursive
@@ -552,9 +937,12 @@ fn absolute_known_dimensions(
     style: &ResolvedAbsoluteStyle,
     inset_modified_size: Size<f32>,
     fixed_margin: Edges<f32>,
+    stretch_alignment: Size<bool>,
 ) -> Size<Option<f32>> {
-    let horizontal_stretch =
-        style.auto_size.width && style.insets.left.is_some() && style.insets.right.is_some();
+    let horizontal_stretch = style.auto_size.width
+        && stretch_alignment.width
+        && style.insets.left.is_some()
+        && style.insets.right.is_some();
     let ratio_dependent_height =
         style.aspect_ratio.is_some() && horizontal_stretch && style.auto_size.height;
     Size::new(
@@ -567,6 +955,7 @@ fn absolute_known_dimensions(
             .max(style.padding_border_size.width),
         ),
         (style.auto_size.height
+            && stretch_alignment.height
             && !ratio_dependent_height
             && style.insets.top.is_some()
             && style.insets.bottom.is_some())
@@ -581,11 +970,12 @@ fn absolute_known_dimensions(
     )
 }
 
-/// Settles, for an absolutely positioned box whose style references
-/// `anchor-size()` (`anchored`; any other box passes through), the used
-/// border-box size on every axis its own run would
-/// otherwise read an anchor-bearing value on, and records it as that axis's
-/// known dimension (see [`AnchoredGeometry`] for why that is the whole job).
+/// Settles, for an absolutely positioned box laid out with values its own
+/// run would read differently — substituted anchor functions, a fallback
+/// option's values — the used border-box size on every such `sensitive`
+/// axis, and records it as that axis's known dimension (see
+/// [`anchor::AnchoredGeometry`] for why that is the whole job). Any other box
+/// passes through.
 ///
 /// An axis with a definite preferred size takes it clamped by the min/max
 /// sizes, exactly the preferred size the box's own run derives from these
@@ -606,14 +996,14 @@ fn settle_anchored_axes<T: LayoutTree>(
     node: T::NodeId,
     style: &impl CoreStyle,
     values: &GeometryValues<'_>,
-    anchored: Option<&AnchoredGeometry>,
+    sensitive: Size<bool>,
     space: AbsoluteSpace,
     known: &mut Size<Option<f32>>,
     mut goal: LayoutGoal,
 ) -> LayoutGoal {
-    let Some(&AnchoredGeometry { sensitive, .. }) = anchored else {
+    if !sensitive.width && !sensitive.height {
         return goal;
-    };
+    }
     let parent_size = space.parent_size;
     let aspect_ratio = used_aspect_ratio(style.aspect_ratio());
     let box_sizing = style.box_sizing();
@@ -972,12 +1362,16 @@ fn absolute_axis_location(axis: AbsoluteAxis) -> f32 {
         end_margin,
         static_position,
         prefer_end,
+        aligned,
     } = axis;
-    match (start_inset, end_inset) {
-        (None, None) => static_position + start_margin,
-        (Some(_), Some(end)) if prefer_end => containing_size - end - box_size - end_margin,
-        (Some(start), _) => start + start_margin,
-        (None, Some(end)) => containing_size - end - box_size - end_margin,
+    match (start_inset, end_inset, aligned) {
+        (None, None, _) => static_position + start_margin,
+        (Some(_), Some(_), Some(aligned)) => {
+            aligned_margin_box_start(aligned, box_size + start_margin + end_margin) + start_margin
+        }
+        (Some(_), Some(end), None) if prefer_end => containing_size - end - box_size - end_margin,
+        (Some(start), _, _) => start + start_margin,
+        (None, Some(end), _) => containing_size - end - box_size - end_margin,
     }
 }
 
@@ -993,6 +1387,101 @@ struct AbsoluteAxis {
     end_margin: f32,
     static_position: f32,
     prefer_end: bool,
+    /// Self-alignment other than `normal` with both insets and both margins
+    /// non-`auto`: css-position-3 §4.3's last case. `None` keeps the
+    /// equation above — the stronger inset, or the margins' own solution.
+    aligned: Option<AlignedAxis>,
+}
+
+/// css-position-3 §4.3: "the box is aligned as specified by its
+/// self-alignment property in the relevant axis (as defined by the writing
+/// mode of the containing block), using its margin box as the alignment
+/// subject and the inset-modified containing block as the alignment
+/// container."
+#[derive(Debug, Clone, Copy)]
+struct AlignedAxis {
+    imcb_start: f32,
+    imcb_size: f32,
+    alignment: AxisAlignment,
+    /// css-align-3 §4.4.1.2's overflow limit rect on this axis: "the
+    /// bounding rectangle of the alignment subject's inset-modified
+    /// containing block and its original containing block", before the
+    /// bounding with the inset-modified containing block.
+    limit: (f32, f32),
+    /// The containing block's inline direction runs right to left on this
+    /// axis.
+    containing_rtl: bool,
+    /// The box's own inline direction runs right to left on this axis.
+    self_rtl: bool,
+    horizontal: bool,
+}
+
+/// Where the margin box of size `subject` starts (its left or top edge) under
+/// `axis`'s alignment.
+fn aligned_margin_box_start(axis: AlignedAxis, subject: f32) -> f32 {
+    let AlignedAxis {
+        imcb_start,
+        imcb_size,
+        alignment,
+        limit,
+        containing_rtl,
+        self_rtl,
+        horizontal,
+    } = axis;
+    let free = imcb_size - subject;
+    let toward = |at_end: bool| imcb_start + if at_end { free } else { 0.0 };
+    let desired = match alignment.anchor_center {
+        // css-anchor-position-1 §4.2: "it is centered (insofar as possible)
+        // over the default anchor box in the relevant axis".
+        Some(center) => center - subject / 2.0,
+        None => match alignment.flags.value() {
+            AlignFlags::CENTER | AlignFlags::ANCHOR_CENTER => imcb_start + free / 2.0,
+            AlignFlags::END | AlignFlags::FLEX_END => toward(!containing_rtl),
+            AlignFlags::LEFT if horizontal => toward(false),
+            AlignFlags::RIGHT if horizontal => toward(true),
+            // css-align-3 §4.2: a baseline's fallback alignment is "safe
+            // self-start" (first) or "safe self-end" (last); there is no
+            // baseline to share with an absolutely positioned box.
+            AlignFlags::SELF_START | AlignFlags::BASELINE => toward(self_rtl),
+            AlignFlags::SELF_END | AlignFlags::LAST_BASELINE => toward(!self_rtl),
+            // `start`, `flex-start`, a `stretch` that could not stretch
+            // (css-align-3 §6.1: it "falls back to flex-start"), and `left`
+            // or `right` in `align-self`, where they are not values.
+            _ => toward(containing_rtl),
+        },
+    };
+    if alignment.flags.flags().contains(AlignFlags::UNSAFE) {
+        // css-align-3 §4.4: "Regardless of the relative sizes of the
+        // alignment subject and alignment container, the given alignment
+        // value is honored."
+        return desired;
+    }
+    // css-align-3 §4.4.1.2, which both `safe` and the default follow for an
+    // absolutely positioned box whose alignment is not `normal`.
+    let imcb_end = imcb_start + imcb_size;
+    // "If the alignment subject fits within the inset-modified containing
+    // block, align as specified to the extent possible without overflowing
+    // the inset-modified containing block."
+    if subject <= imcb_size {
+        return desired.clamp(imcb_start, imcb_end - subject);
+    }
+    let (limit_start, limit_end) = (limit.0.min(imcb_start), limit.1.max(imcb_end));
+    // "Otherwise, if the alignment subject fits within the overflow limit
+    // rect, align the alignment subject such that it fully covers the
+    // inset-modified containing block and is otherwise aligned as specified
+    // to the extent possible without overflowing the overflow limit rect."
+    if subject <= limit_end - limit_start {
+        return desired
+            .clamp(imcb_end - subject, imcb_start)
+            .clamp(limit_start, limit_end - subject);
+    }
+    // "Otherwise, start-align the alignment subject within the overflow limit
+    // rect."
+    if containing_rtl {
+        limit_end - subject
+    } else {
+        limit_start
+    }
 }
 
 fn rounded_layout(
@@ -1365,6 +1854,50 @@ mod tests {
     }
 
     #[test]
+    fn the_anchor_seam_defaults_mean_no_anchors() {
+        use crate::tree::{AnchorOutcome, AnchorSpec};
+        let tree = BranchTree;
+        let mut state: Vec<crate::tree::LayoutSlot> =
+            (0..5).map(|_| crate::tree::LayoutSlot::default()).collect();
+        let name = crate::style::TreeScoped::with_default_level(crate::style::DashedIdent(
+            stylo::Atom::from("--a"),
+        ));
+        assert_eq!(tree.anchor_rect(&state, 1, 0, AnchorSpec::Default), None);
+        assert_eq!(
+            tree.anchor_rect(&state, 1, 0, AnchorSpec::Named(&name)),
+            None
+        );
+        assert_eq!(tree.default_anchor(&state, 1, 0), None);
+        assert!(!tree.anchor_scrolls_with_default(
+            &state,
+            1,
+            0,
+            &name,
+            crate::style::PhysicalAxis::Vertical,
+        ));
+        assert_eq!(tree.scrollable_containing_block(&state, 1), None);
+        assert_eq!(tree.position_option_count(1), 0);
+        assert!(core::ptr::eq(
+            tree.position_option_style(1, 0),
+            tree.style(1)
+        ));
+        assert_eq!(tree.last_successful_option(&state, 1), None);
+        tree.set_anchor_outcome(
+            &mut state,
+            1,
+            AnchorOutcome {
+                chosen: 0,
+                overflows: false,
+                references_default_anchor: false,
+                default_anchor_resolved: false,
+                compensates: Size::new(false, false),
+                imcb: Rect::ZERO,
+                margin_box: Rect::ZERO,
+            },
+        );
+    }
+
+    #[test]
     fn hiding_an_already_hidden_subtree_costs_nothing() {
         let tree = BranchTree;
         let mut state: Vec<crate::tree::LayoutSlot> =
@@ -1566,16 +2099,20 @@ mod tests {
         ratio.aspect_ratio = Some(2.0);
         let mut vertical_only = style;
         vertical_only.auto_size.width = false;
+        let stretch = Size::new(true, true);
         assert_cases! { absolute_known_dimensions;
             "stretch clamp":
-                (&style, Size::new(100.0, 80.0), Edges::uniform(5.0))
+                (&style, Size::new(100.0, 80.0), Edges::uniform(5.0), stretch)
                 => Size::new(Some(90.0), Some(60.0));
             "ratio defers height":
-                (&ratio, Size::new(100.0, 80.0), Edges::uniform(5.0))
+                (&ratio, Size::new(100.0, 80.0), Edges::uniform(5.0), stretch)
                 => Size::new(Some(90.0), None);
             "vertical only clamps minimum":
-                (&vertical_only, Size::new(100.0, 30.0), Edges::uniform(20.0))
+                (&vertical_only, Size::new(100.0, 30.0), Edges::uniform(20.0), stretch)
                 => Size::new(None, Some(10.0));
+            "aligned axes fit their content":
+                (&style, Size::new(100.0, 80.0), Edges::uniform(5.0), Size::new(false, true))
+                => Size::new(None, Some(60.0));
         }
     }
 
@@ -1617,6 +2154,7 @@ mod tests {
             end_margin: 4.0,
             static_position: 11.0,
             prefer_end: false,
+            aligned: None,
         };
         let mut start = base;
         start.start_inset = Some(7.0);

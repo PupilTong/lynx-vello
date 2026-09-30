@@ -4,7 +4,6 @@ use stylo::computed_values::{box_sizing, direction, relative_center, relative_la
 use stylo::values::computed::lynx_layout::RelativeReference;
 use stylo::values::computed::{PositionProperty, Size as StyleSize};
 
-use super::compute_absolute_layout;
 use super::util::{
     Axis, ItemGeometry, ItemKey, OrderedItem, ResolvedContainerBox, accumulate_scrollable_overflow,
     axis_has_intrinsic_style, clamp_axis, container_content_independence, item_value_stability,
@@ -12,6 +11,7 @@ use super::util::{
     resolve_item_geometry_with_bases, resolve_length_percentage, sort_and_assign_layout_order,
     store_committed_child, subtract_available_space,
 };
+use super::{AbsoluteContainingBlock, compute_absolute_layout_in};
 use crate::geometry::{Edges, Line, Point, Size};
 use crate::style::containment::{ContainedAxes, contained_axes};
 use crate::style::{CoreStyle, RELATIVE_REFERENCE_NONE, RELATIVE_REFERENCE_PARENT, RelativeStyle};
@@ -1332,6 +1332,7 @@ fn commit_out_of_flow<T>(
     items: &[OrderedItem<T::NodeId>],
     container_size: Size<f32>,
     border: Edges<f32>,
+    rtl: bool,
 ) -> Size<f32>
 where
     T: LayoutTree,
@@ -1346,12 +1347,12 @@ where
         let style = tree.style(pending.node);
         match style.position() {
             PositionProperty::Absolute => {
-                let mut layout = compute_absolute_layout(
+                let mut layout = compute_absolute_layout_in(
                     tree,
                     state,
                     pending.node,
-                    padding_box_size,
-                    Point::ZERO,
+                    AbsoluteContainingBlock::lynx_padding_box(padding_box_size, rtl),
+                    |_, _| Point::ZERO,
                 );
                 layout.order = pending.layout_order;
                 layout.location.x += border.left;
@@ -1581,7 +1582,14 @@ where
         super::hide_child_at_order(tree, state, child, order);
     }
     scrollable_size = scrollable_size.zip_map(
-        commit_out_of_flow(tree, state, &absolute_items, outer_size, border),
+        commit_out_of_flow(
+            tree,
+            state,
+            &absolute_items,
+            outer_size,
+            border,
+            style.direction() == direction::T::Rtl,
+        ),
         f32::max,
     );
 

@@ -254,10 +254,10 @@ pub(super) fn sort_and_assign_layout_order<N, InFlow, OutOfFlow>(
 /// out in tree order.
 ///
 /// Every algorithm lays them out after its in-flow commit and in tree order,
-/// and [`crate::tree::LayoutTree::anchor_size`] depends on both: when an
-/// absolutely positioned child resolves `anchor-size()`, each in-flow sibling
-/// and each earlier out-of-flow sibling — every acceptable target — already
-/// holds its size from this pass.
+/// and [`crate::tree::LayoutTree::anchor_rect`] depends on both: when an
+/// absolutely positioned child resolves an anchor function, `position-area`
+/// or `anchor-center`, each in-flow sibling and each earlier out-of-flow
+/// sibling — every acceptable target — already holds its box from this pass.
 #[inline]
 pub(super) fn debug_assert_tree_order(document_indices: impl Iterator<Item = usize>) {
     if cfg!(debug_assertions) {

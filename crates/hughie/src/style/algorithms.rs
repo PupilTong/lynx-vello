@@ -12,7 +12,7 @@ use stylo::computed_values::{
 use stylo::values::computed::lynx_layout::{RelativeAlign, RelativeReference};
 use stylo::values::computed::{
     FlexBasis, FlowTolerance, GridAutoFlow, GridLine, GridTemplateComponent, ImplicitGridTracks,
-    JustifyItems, NonNegativeNumber, SelfAlignment,
+    JustifyItems, NonNegativeNumber,
 };
 
 use crate::geometry::Edges;
@@ -56,8 +56,6 @@ style_protocol! {
                 &style.computed_values().get_position().grid_column_start,
             grid_column_end -> &GridLine =
                 &style.computed_values().get_position().grid_column_end,
-            justify_self -> SelfAlignment =
-                style.computed_values().get_position().justify_self,
         }
     }
 }
@@ -190,7 +188,6 @@ mod tests {
             AlignFlags::NORMAL
         );
         assert!(style.grid_row_start().is_auto());
-        assert_eq!(style.justify_self(), SelfAlignment::auto());
 
         assert_eq!(style.flow_tolerance(), &FlowTolerance::normal());
         assert_eq!(GridLanesStyle::font_size(&style), 16.0);

@@ -21,7 +21,7 @@ use super::util::{
     resolve_insets, resolve_intrinsic, resolve_item_geometry, resolve_margins, resolve_padding,
     sort_and_assign_layout_order, store_committed_child,
 };
-use super::{compute_absolute_layout_with_static_position, measure_absolute_layout};
+use super::{AbsoluteContainingBlock, compute_absolute_layout_in, measure_absolute_layout};
 use crate::geometry::{Edges, Point, Size};
 use crate::style::containment::contained_axes;
 use crate::style::{Contain, CoreStyle, LinearStyle};
@@ -1232,10 +1232,12 @@ fn commit_non_in_flow_children<T>(
     border: Edges<f32>,
     main_gravity: AlignFlags,
     mut content_size: Size<f32>,
+    rtl: bool,
 ) -> Size<f32>
 where
     T: LayoutTree,
 {
+    let containing_block = |size| AbsoluteContainingBlock::lynx_padding_box(size, rtl);
     let padding_box_size = Size::new(
         (outer_size.width - border.horizontal_sum()).max(0.0),
         (outer_size.height - border.vertical_sum()).max(0.0),
@@ -1258,11 +1260,11 @@ where
 
         match position {
             PositionProperty::Absolute => {
-                let mut layout = compute_absolute_layout_with_static_position(
+                let mut layout = compute_absolute_layout_in(
                     tree,
                     state,
                     child,
-                    padding_box_size,
+                    containing_block(padding_box_size),
                     |size, margin| {
                         let static_position = absolute_static_position(
                             axes,
@@ -1298,7 +1300,7 @@ where
                         tree,
                         state,
                         child,
-                        padding_box_size,
+                        containing_block(padding_box_size),
                         match (width, height) {
                             (true, false) => RequestedAxis::Horizontal,
                             (false, true) => RequestedAxis::Vertical,
@@ -1612,6 +1614,7 @@ where
             border,
             main_gravity,
             content_size,
+            style.direction() == direction::T::Rtl,
         );
     }
     let content_size = own_scrollable_overflow(&style, final_outer_size, content_size);

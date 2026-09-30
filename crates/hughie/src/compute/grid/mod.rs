@@ -41,7 +41,7 @@ use super::util::{
     resolve_container_box, resolve_gap, resolve_insets, resolve_item_geometry,
     sort_and_assign_layout_order,
 };
-use super::{compute_absolute_layout, hide_subtree};
+use super::{AbsoluteContainingBlock, compute_absolute_layout_in, hide_subtree};
 use crate::geometry::{Edges, Line, Point, Size};
 use crate::style::containment::contained_axes;
 use crate::style::{Contain, CoreStyle, Display, GridStyle, Overflow};
@@ -1284,8 +1284,20 @@ where
                     padding.left + content_static_offset.x - x,
                     padding.top + content_static_offset.y - y,
                 );
-                let mut layout =
-                    compute_absolute_layout(tree, state, key.node, containing_size, static_offset);
+                let mut layout = compute_absolute_layout_in(
+                    tree,
+                    state,
+                    key.node,
+                    AbsoluteContainingBlock {
+                        origin: Point::new(x, y),
+                        size: containing_size,
+                        padding_box_size,
+                        is_padding_box: x == 0.0 && y == 0.0 && containing_size == padding_box_size,
+                        rtl,
+                        honors_self_alignment: true,
+                    },
+                    move |_, _| static_offset,
+                );
                 layout.location.x += origin.x;
                 layout.location.y += origin.y;
                 layout.order = key.layout_order;

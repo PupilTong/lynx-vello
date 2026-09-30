@@ -16,7 +16,6 @@ use stylo::values::computed::{
 };
 use stylo::values::specified::align::AlignFlags;
 
-use super::compute_absolute_layout;
 use super::single_axis::{
     BaseReversals, FlowAxes, flow_end, flow_start, flow_to_physical, measure_child, set_flow_end,
     set_flow_start,
@@ -30,6 +29,7 @@ use super::util::{
     resolve_length_percentage, resolve_style_size, sort_and_assign_layout_order,
     store_committed_child, style_size_behaves_auto, style_size_depends_on_basis,
 };
+use super::{AbsoluteContainingBlock, compute_absolute_layout_in};
 use crate::geometry::{Edges, Point, Size};
 use crate::style::containment::contained_axes;
 use crate::style::{Contain, CoreStyle, FlexboxStyle};
@@ -1642,12 +1642,12 @@ where
                     static_position.x - border.left,
                     static_position.y - border.top,
                 );
-                let mut layout = compute_absolute_layout(
+                let mut layout = compute_absolute_layout_in(
                     tree,
                     state,
                     key.node,
-                    padding_box_size,
-                    static_in_padding_space,
+                    AbsoluteContainingBlock::padding_box(padding_box_size, rtl),
+                    move |_, _| static_in_padding_space,
                 );
                 layout.order = key.layout_order;
                 layout.location.x += border.left;

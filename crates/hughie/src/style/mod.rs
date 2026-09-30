@@ -60,9 +60,10 @@ pub use stylo::values::computed::{
     FontFeatureSettings, FontStyle, FontVariationSettings, FontWeight, GridAutoFlow, GridLine,
     GridTemplateComponent, ImplicitGridTracks, Inset, ItemPlacement, JustifyItems,
     LengthPercentage, LetterSpacing, LineHeight, Margin, MaxSize, NonNegativeLengthPercentage,
-    NonNegativeNumber, Overflow, PositionProperty, SelfAlignment, Size as StyleSize, TextAlign,
-    TextIndent, WordBreak,
+    NonNegativeNumber, Overflow, PositionArea, PositionProperty, PositionTryOrder, SelfAlignment,
+    Size as StyleSize, TextAlign, TextIndent, WordBreak,
 };
+pub use stylo::values::generics::position::TreeScoped;
 pub use stylo::values::specified::align::AlignFlags;
 pub use text::{TextBrush, TextContainerStyle, TextRun, TextRunStyle};
 
@@ -206,6 +207,23 @@ style_protocol! {
                 style.computed_values().get_position().justify_content,
             align_self -> SelfAlignment =
                 style.computed_values().get_position().align_self,
+            // Grid items read it, and so does every algorithm's absolute
+            // pass: css-align-3 §6.1.2 aligns an absolutely positioned box's
+            // margin box in the inline axis of its containing block.
+            justify_self -> SelfAlignment =
+                style.computed_values().get_position().justify_self,
+            // css-anchor-position-1 §3.1. An accepted `@position-try`
+            // property, so the absolute pass reads it from the position
+            // option being laid out, like the insets, sizes and margins.
+            //
+            // This and `position_try_order` (§6.2) answer their initial
+            // values: the fork's `lynx` build does not generate either
+            // longhand yet, so there is no computed value to read. Once it
+            // does, the defaults read `get_position().position_area` and
+            // `.position_try_order`; until then only a host overriding them
+            // gets past the initial value.
+            position_area -> PositionArea = PositionArea::none(),
+            position_try_order -> PositionTryOrder = PositionTryOrder::normal(),
             order -> i32 = style.computed_values().get_position().order,
         }
     }
@@ -284,6 +302,9 @@ mod tests {
         assert_eq!(style.align_items(), ItemPlacement::normal());
         assert_eq!(style.justify_content(), ContentDistribution::normal());
         assert_eq!(style.align_self(), SelfAlignment::auto());
+        assert_eq!(style.justify_self(), SelfAlignment::auto());
+        assert!(style.position_area().is_none());
+        assert!(style.position_try_order().is_normal());
         assert_eq!(style.order(), 0);
     }
 
