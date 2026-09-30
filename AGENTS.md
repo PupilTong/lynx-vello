@@ -2258,6 +2258,20 @@ Rulings and limits to know before touching it:
   parent's non-inherited custom property `INHERITS_RESET_STYLE`. Scope,
   choices, the Blink differences and the known typed-`attr()` gap are in
   `docs/style-assumptions.md` §27.
+- css-anchor-position-1 (the Editor's Draft module, user-directed
+  2026-09-29/30; not in Lynx) is `dom`'s host half: an anchor-name index and
+  each element's position options (cascaded at the style harvest with the
+  fork's `Stylist::resolve_position_try`) in `TreeArenas`' `AnchorRegistry`,
+  the §2.3 target lookup, remembered scroll offsets, the last successful
+  option recorded per rendering update, and a settle loop of at most
+  `ANCHOR_PASSES` layout runs (`crates/dom/src/layout/anchors.rs`). The
+  default scroll shift and `position-visibility` are one space-tree node per
+  anchored box, sampled at compose and hit-test time
+  (`crates/dom/src/visual/anchored.rs`); a page without anchor positioning
+  pays one `is_empty` test per run and per adopted scroll and three field
+  reads per restyled element at the harvest. Scope, the "Out"
+  list, approximations and gaps: `docs/style-assumptions.md` §28; the
+  browser-visible differences: `docs/tracking/deviations.md`.
 - Stylo's per-element style data and its traversal/invalidation flags live
   inline on `Node` (bench-defended 2026-08-03: no traversal regression, a
   measurably faster no-op-commit fast path).
@@ -2313,6 +2327,19 @@ intrinsic/height-for-width measurement, baselines, and retained Parley layouts
 are unconditional crate behavior, in `src/text/block` — including
 `truncate.rs`, which lays an `<inline-truncation>` subtree in at the clamp and
 applies `tail-color-convert`'s native semantics.
+
+**css-anchor-position-1** is in the absolute pass: `anchor()`/`anchor-size()`
+resolution, the `position-area` grid, `anchor-center`, the css-position-3
+§4 self-alignment of every absolutely positioned box (flexbox, grid and the
+host-placed boxes; Lynx `linear`/`relative` keep starlight's inset-only
+placement) and the §6.5 fallback loop (`compute/anchor.rs`,
+`anchor_area.rs`, `anchor_fallback.rs`), against `LayoutTree` methods whose
+defaults mean "no anchors" (`anchor_rect`, `default_anchor`,
+`scrollable_containing_block`, `position_option_style`,
+`set_anchor_outcome`, …). A box that uses none of it pays one predicate and
+one `position_option_count` call; an anchored box's own run reads its base
+style and gets every differing axis as a known dimension, so it stays
+cacheable (`docs/style-assumptions.md` §28, `docs/layout-architecture.md`).
 
 **CSS containment (css-contain-2)** is landed layout-side: the stylo
 `Contain`/`ContainIntrinsicSize` accessors on `CoreStyle`, size-substitution +

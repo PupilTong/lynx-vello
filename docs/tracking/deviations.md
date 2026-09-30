@@ -118,6 +118,62 @@ consequential choice about whether to follow the spec or the quirk.
   element's native view is simply never mounted inside any scrollable
   ancestor — and that part already matches the *observable* CSS behavior of
   staying put while scrolling, so no decision is needed there.)
+- **css-anchor-position-1 (user-directed extension, 2026-09-29/30)** —
+  neither native Lynx nor web-core has the module (web-core leaves it to the
+  browser, so a web bundle gets Chrome's behaviour); this engine implements
+  the Editor's Draft in `hughie` and `dom`
+  ([style-assumptions.md](../style-assumptions.md) §28). What a page can
+  observe differently from Chrome or from the ED:
+  - **`position-visibility` is a paint-time flag.** A hidden box draws
+    nothing and hits nothing, but its computed `visibility` stays what the
+    cascade says (Blink's model; the ED's `visibility: force-hidden` is not
+    a computed value here), and `boundingClientRect` still reports it.
+  - **`boundingClientRect` omits the default scroll shift.** It reports the
+    layout position, which uses the remembered scroll offsets; the shift
+    that makes the box follow a scrolled anchor is applied at composition,
+    so between two anchor recalculation points the reported rectangle does
+    not move (Chrome's `getBoundingClientRect` includes the shift).
+  - **No transforms in anchor geometry.** The anchor box is the layout box
+    (relative offsets included), not the bounding box of its transformed
+    border box.
+  - **No implicit anchor elements, no top layer.** `position-anchor: auto`
+    finds nothing; `normal` behaves as `none` (as `auto`, so again nothing,
+    under a `position-area`). Every box is in one layer, so the top-layer
+    clauses of §2.3 never apply; popover, dialog and `::backdrop` anchoring
+    do not exist.
+  - **Flat tree order, and one initial containing block.** "Tree order" in
+    the target lookup is the flat tree's, and the initial containing block
+    is the viewport's containing block, so a `fixed` box may anchor to
+    anything in flow (as Blink allows).
+  - **`@position-try` on the Lynx surface.** `inset-block-*`,
+    `margin-block-*`, `block-size`, `inline-size` and their min/max are not
+    Lynx properties, so they are dropped inside `@position-try` as in any
+    style rule; the physical and inline-axis ones work.
+  - **Legacy spellings.** `position-visibility: anchors-valid` and
+    `anchors-visible` are accepted and serialize as `anchor-valid` /
+    `anchor-visible`; every other withdrawn spelling (`inset-area`,
+    `position-try-options`, `@position-fallback`, `anchor(implicit)`) is
+    rejected.
+  - **Lynx `linear` and `relative` containers ignore authored
+    `justify-self`/`align-self` on absolutely positioned children**, as
+    starlight does (`position_layout_utils.cc`, `CalcStartOffset`); flexbox
+    and grid containers follow css-position-3 §4 and align them.
+    `anchor-center` and `position-area`'s default alignment still apply in
+    every container.
+  - **No anti-flicker rule when a scroll forces a new fallback.** Blink
+    (`out_of_flow_layout_part.cc`) skips, when it re-determines at the
+    current scroll offset, every option that also overflowed at the
+    remembered one, so two options with the same constraints do not
+    alternate as the user scrolls; this engine tries every option but the
+    current one, as §6.5 reads, and a box that overflowed in every option is
+    re-determined only after it fits again and leaves again.
+  - **Overflow limit of a grid item.** For an absolutely positioned grid
+    item whose `position-area` region lies at an empty column, css-align-3
+    §4.4.1.2's overflow limit is the bounding box of the inset-modified
+    containing block and the grid container's padding box, not the grid
+    area, so the box is shifted
+    back to end at the padding edge; WPT `grid-position-area-basic.html`'s
+    reference leaves it overflowing (unverified in browsers).
 
 ## CSS visual/paint & animation (see [css-visual.md](css-visual.md), [css-animation.md](css-animation.md))
 
