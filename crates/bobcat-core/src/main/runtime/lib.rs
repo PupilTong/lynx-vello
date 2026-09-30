@@ -1019,7 +1019,11 @@ impl MainThreadRuntime {
     /// an edge ([`dom::ScrollSlot::recenter_due`]) asks this entry's commit
     /// to bake windows re-centered on it, and one past the window already
     /// did inside `scroll_to`. The scroll-driven animations those containers
-    /// drive then re-sample, which is a commit only when one moved.
+    /// drive then re-sample, which is a commit only when one moved, and an
+    /// anchor-positioned box the offsets shifted out of its inset-modified
+    /// containing block is laid out again to pick a position fallback
+    /// ([`dom::Document::redetermine_scrolled_fallbacks`]) — also a commit
+    /// only then.
     ///
     /// A post naming an older request than the container's pending one
     /// ([`dom::Document::pending_scroll_request`]) is dropped: the painter
@@ -1054,6 +1058,10 @@ impl MainThreadRuntime {
             document.note_scroll_windows_stale();
         }
         document.advance_scroll_timelines(&moved);
+        // css-anchor-position-1 §6.5: an anchored box the adopted offsets
+        // shifted out of its inset-modified containing block determines its
+        // position fallback styles again, in this entry's commit.
+        document.redetermine_scrolled_fallbacks();
     }
 
     /// Applies the painting side's image reports, queueing the `load`s and
