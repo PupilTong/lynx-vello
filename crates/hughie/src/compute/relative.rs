@@ -557,8 +557,8 @@ fn fit_content_available(
         | StyleSize::WebkitFillAvailable => available,
         // An in-flow item: §5.1.1 resolves nothing for it.
         StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => {
-            fit_content_available(
-                &super::anchor::unresolvable_style_size(value),
+            unresolvable_fit_content_available(
+                value,
                 axis,
                 parent_size,
                 available,
@@ -567,6 +567,28 @@ fn fit_content_available(
             )
         }
     }
+}
+
+/// The anchor arm of [`fit_content_available`], out of line so the hot
+/// function does not call itself.
+#[cold]
+#[inline(never)]
+fn unresolvable_fit_content_available(
+    value: &StyleSize,
+    axis: Axis,
+    parent_size: Size<Option<f32>>,
+    available: AvailableSpace,
+    box_sizing: box_sizing::T,
+    box_floor: f32,
+) -> AvailableSpace {
+    fit_content_available(
+        &super::anchor::unresolvable_style_size(value),
+        axis,
+        parent_size,
+        available,
+        box_sizing,
+        box_floor,
+    )
 }
 
 fn intrinsic_probe<T>(

@@ -536,8 +536,75 @@ pub(super) fn resolve_margin(value: &Margin, basis: Option<f32>) -> Option<f32> 
         Margin::LengthPercentage(lp) => resolve_length_percentage(lp, basis),
         Margin::Auto => None,
         Margin::AnchorSizeFunction(_) | Margin::AnchorContainingCalcFunction(_) => {
-            resolve_margin(&anchor::unresolvable_margin(value), basis)
+            resolve_unresolvable_margin(value, basis)
         }
+    }
+}
+
+// The anchor arms of the resolvers below are cold and out of line on purpose:
+// every box resolves its geometry through these on the in-flow hot path, and
+// a resolver that called itself on the substituted value would be recursive,
+// which keeps it from being inlined into any of its callers. Each cold
+// sibling substitutes the §5.1.1 unresolvable form (which never carries an
+// anchor function again) and matches it without calling back. The
+// `*_depends_on_basis` predicates need no sibling at all: they answer an
+// anchor function with a conservative `true`, which only withholds a
+// stability claim or asks for a re-resolution.
+
+#[cold]
+#[inline(never)]
+fn resolve_unresolvable_margin(value: &Margin, basis: Option<f32>) -> Option<f32> {
+    match anchor::unresolvable_margin(value) {
+        Margin::LengthPercentage(lp) => resolve_length_percentage(&lp, basis),
+        _ => None,
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn resolve_unresolvable_inset(value: &Inset, basis: Option<f32>) -> Option<f32> {
+    match anchor::unresolvable_inset(value) {
+        Inset::LengthPercentage(lp) => resolve_length_percentage(&lp, basis),
+        _ => None,
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn resolve_unresolvable_style_size(value: &StyleSize, basis: Option<f32>) -> Option<f32> {
+    match anchor::unresolvable_style_size(value) {
+        StyleSize::LengthPercentage(lp) => resolve_length_percentage(&lp.0, basis),
+        _ => None,
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn resolve_unresolvable_max_size(value: &MaxSize, basis: Option<f32>) -> Option<f32> {
+    match anchor::unresolvable_max_size(value) {
+        MaxSize::LengthPercentage(lp) => resolve_length_percentage(&lp.0, basis),
+        _ => None,
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn unresolvable_style_size_behaves_auto(value: &StyleSize) -> bool {
+    matches!(
+        anchor::unresolvable_style_size(value),
+        StyleSize::Auto
+            | StyleSize::FitContent
+            | StyleSize::Stretch
+            | StyleSize::WebkitFillAvailable
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn unresolvable_style_size_is_definite(value: &StyleSize, parent_basis: Option<f32>) -> bool {
+    match anchor::unresolvable_style_size(value) {
+        StyleSize::LengthPercentage(lp) => !lp.0.has_percentage() || parent_basis.is_some(),
+        _ => false,
     }
 }
 
@@ -548,9 +615,7 @@ pub(super) fn resolve_inset(value: &Inset, basis: Option<f32>) -> Option<f32> {
         Inset::Auto => None,
         Inset::AnchorFunction(_)
         | Inset::AnchorSizeFunction(_)
-        | Inset::AnchorContainingCalcFunction(_) => {
-            resolve_inset(&anchor::unresolvable_inset(value), basis)
-        }
+        | Inset::AnchorContainingCalcFunction(_) => resolve_unresolvable_inset(value, basis),
     }
 }
 
@@ -566,7 +631,7 @@ pub(super) fn resolve_style_size(value: &StyleSize, basis: Option<f32>) -> Optio
         | StyleSize::WebkitFillAvailable
         | StyleSize::FitContentFunction(_) => None,
         StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => {
-            resolve_style_size(&anchor::unresolvable_style_size(value), basis)
+            resolve_unresolvable_style_size(value, basis)
         }
     }
 }
@@ -583,7 +648,7 @@ pub(super) fn resolve_max_size(value: &MaxSize, basis: Option<f32>) -> Option<f3
         | MaxSize::WebkitFillAvailable
         | MaxSize::FitContentFunction(_) => None,
         MaxSize::AnchorSizeFunction(_) | MaxSize::AnchorContainingCalcFunction(_) => {
-            resolve_max_size(&anchor::unresolvable_max_size(value), basis)
+            resolve_unresolvable_max_size(value, basis)
         }
     }
 }
@@ -741,9 +806,10 @@ pub(super) fn style_size_depends_on_basis(value: &StyleSize) -> bool {
     match value {
         StyleSize::LengthPercentage(lp) => lp.0.has_percentage(),
         StyleSize::FitContentFunction(limit) => limit.0.has_percentage(),
-        StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => {
-            style_size_depends_on_basis(&anchor::unresolvable_style_size(value))
-        }
+        // Conservatively yes: the answer only withholds a stability claim or
+        // asks for a re-resolution, and a precise one would put a call on
+        // every box's path for a value no in-flow box carries in practice.
+        StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => true,
         _ => false,
     }
 }
@@ -753,9 +819,10 @@ pub(super) fn max_size_depends_on_basis(value: &MaxSize) -> bool {
     match value {
         MaxSize::LengthPercentage(lp) => lp.0.has_percentage(),
         MaxSize::FitContentFunction(limit) => limit.0.has_percentage(),
-        MaxSize::AnchorSizeFunction(_) | MaxSize::AnchorContainingCalcFunction(_) => {
-            max_size_depends_on_basis(&anchor::unresolvable_max_size(value))
-        }
+        // Conservatively yes: the answer only withholds a stability claim or
+        // asks for a re-resolution, and a precise one would put a call on
+        // every box's path for a value no in-flow box carries in practice.
+        MaxSize::AnchorSizeFunction(_) | MaxSize::AnchorContainingCalcFunction(_) => true,
         _ => false,
     }
 }
@@ -767,9 +834,11 @@ pub(super) fn edges_depend_on_inline_basis(
     margin: &Edges<&Margin>,
     padding: &Edges<&NonNegativeLengthPercentage>,
 ) -> bool {
-    let margin_depends = |value: &Margin| match anchor::unresolvable_margin(value) {
+    let margin_depends = |value: &Margin| match value {
         Margin::LengthPercentage(lp) => lp.has_percentage(),
-        _ => false,
+        Margin::Auto => false,
+        // Conservatively yes, as in `style_size_depends_on_basis`.
+        Margin::AnchorSizeFunction(_) | Margin::AnchorContainingCalcFunction(_) => true,
     };
     margin_depends(margin.left)
         || margin_depends(margin.right)
@@ -853,7 +922,7 @@ pub(super) fn axis_sizing_is_stable(
 pub(super) fn style_size_behaves_auto(value: &StyleSize) -> bool {
     match value {
         StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => {
-            style_size_behaves_auto(&anchor::unresolvable_style_size(value))
+            unresolvable_style_size_behaves_auto(value)
         }
         _ => matches!(
             value,
@@ -937,7 +1006,7 @@ fn style_size_is_definite(value: &StyleSize, parent_basis: Option<f32>) -> bool 
     match value {
         StyleSize::LengthPercentage(lp) => !lp.0.has_percentage() || parent_basis.is_some(),
         StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => {
-            style_size_is_definite(&anchor::unresolvable_style_size(value), parent_basis)
+            unresolvable_style_size_is_definite(value, parent_basis)
         }
         _ => false,
     }

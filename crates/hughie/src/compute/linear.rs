@@ -237,10 +237,9 @@ fn margin_depends_on_basis(value: &Margin) -> bool {
     match value {
         Margin::LengthPercentage(lp) => lp_depends_on_basis(lp),
         Margin::Auto => false,
-        // An in-flow item: §5.1.1 resolves nothing for it.
-        Margin::AnchorSizeFunction(_) | Margin::AnchorContainingCalcFunction(_) => {
-            margin_depends_on_basis(&super::anchor::unresolvable_margin(value))
-        }
+        // Conservatively yes: a refresh re-resolves the margin, whatever the
+        // unresolvable form turns out to be, and keeps a call off every item.
+        Margin::AnchorSizeFunction(_) | Margin::AnchorContainingCalcFunction(_) => true,
     }
 }
 
@@ -249,12 +248,10 @@ fn inset_depends_on_basis(value: &Inset) -> bool {
     match value {
         Inset::LengthPercentage(lp) => lp_depends_on_basis(lp),
         Inset::Auto => false,
-        // The relative nudge of an in-flow item: §5.1.1 resolves nothing for it.
+        // Conservatively yes, as for margins above.
         Inset::AnchorFunction(_)
         | Inset::AnchorSizeFunction(_)
-        | Inset::AnchorContainingCalcFunction(_) => {
-            inset_depends_on_basis(&super::anchor::unresolvable_inset(value))
-        }
+        | Inset::AnchorContainingCalcFunction(_) => true,
     }
 }
 

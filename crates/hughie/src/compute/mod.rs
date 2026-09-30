@@ -824,9 +824,20 @@ fn absolute_preferred_available(value: &StyleSize, basis: Option<f32>) -> Option
         // references `anchor-size()`; a function still here resolves as
         // §5.1.1's unresolvable form, which is never an intrinsic keyword.
         StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => {
-            absolute_preferred_available(&self::anchor::unresolvable_style_size(value), basis)
+            unresolvable_preferred_available(value, basis)
         }
     }
+}
+
+/// The anchor arm of [`absolute_preferred_available`], out of line so the hot
+/// function does not call itself.
+#[cold]
+#[inline(never)]
+fn unresolvable_preferred_available(
+    value: &StyleSize,
+    basis: Option<f32>,
+) -> Option<AvailableSpace> {
+    absolute_preferred_available(&self::anchor::unresolvable_style_size(value), basis)
 }
 
 pub fn round_layout<T: LayoutTree>(tree: &T, state: &mut T::State, root: T::NodeId, scale: f32) {
