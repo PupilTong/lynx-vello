@@ -1292,11 +1292,15 @@ and §D.16 with what the wire format actually permits.)*
          names' candidates times their depth.
       5. **Scrollable containing block (css-position-4).** The containing
          block generator's scrolling area from its last committed box — this
-         engine's `ScrollBox::scroll_size`, which ends at the content's far
-         edge, not past the end padding (WPT
-         `scrollable-containing-block-*.html` expect the padding; recorded as
-         a difference). Asked during the generator's own run, so it is the
-         previous run's box; the settle loop re-reads it.
+         engine's `ScrollBox::scroll_size`, whatever the generator's
+         algorithm made its scrollable overflow: a flexbox's ends at its
+         content's far edge and counts a relatively positioned child's
+         offset, a grid's ends past the end padding. WPT
+         `scrollable-containing-block-size.html` wants the end padding and
+         no relative offsets everywhere; the flexbox rows are recorded there
+         as differences (one ignored `GAP` test). Asked during the
+         generator's own run, so it is the previous run's box; the settle
+         loop re-reads it.
       6. **Position options (§6).** Cascaded at the style harvest, once per
          restyle of an element whose `position-try-fallbacks` is not `none`,
          with the fork's `Stylist::resolve_position_try` (Position Fallback
