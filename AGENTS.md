@@ -1427,7 +1427,7 @@ by tag name; no component), `tree::scroll_coordinator` (the ten
 `scroll-coordinator`/`x-foldview-*-ng` tags as a collapsing header: the
 coordinator a vertical scroll container, the header and slot absolutely
 positioned with the slot placed and sized by `anchor-size()` of the header and
-the toolbar, a sticky toolbar, `scroll-capture: nearest forward` inside the
+the toolbar, a sticky toolbar, `scroll-capture-y: nearest forward` inside the
 slot for the fold order, and the structure pinned in the cascade; no
 component, no UI method), and `tree::blur_view` (`blur-radius` reflected into a
 `backdrop-filter: blur()` presentational hint, under both the native tag

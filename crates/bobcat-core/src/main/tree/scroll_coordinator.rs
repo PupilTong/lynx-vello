@@ -10,7 +10,7 @@
 //! container, its header and slot are absolutely positioned boxes that read
 //! each other's sizes through css-anchor-position-1's `anchor-size()`
 //! (`docs/style-assumptions.md` §28), the toolbar is `position: sticky`, and
-//! the fold order is the engine's `scroll-capture: nearest forward` on every
+//! the fold order is the engine's `scroll-capture-y: nearest forward` on every
 //! box inside the slot (`docs/style-assumptions.md` §25). No component is
 //! defined for any of the tags and no UI method is implemented.
 //!
@@ -103,20 +103,30 @@
 //!
 //! `ua_sheet`'s pinned test lists all six lines.
 //!
+//! Plain author declarations can still take the geometry apart, and are not
+//! pinned, the same way an author `scroll-snap-align` on a pager item is not:
+//! a `top` on the slot (`top: auto` included) replaces its `anchor-size()`
+//! offset, and an author `anchor-name` on the header or the toolbar renames
+//! the anchor the slot reads, which then takes its `0px` fallback.
+//!
 //! # The fold order
 //!
-//! `scroll-coordinator-slot *, x-foldview-slot-ng * { scroll-capture:
-//! nearest forward; }`: every box inside the slot defers a forward delta (one
-//! that increases the offset) to its nearest ancestor scroll container
-//! first. Boxes that are not scroll containers ignore the property. A scroll
-//! container directly inside the slot therefore lets the coordinator fold
-//! before it scrolls, and scrolls back to its start before the coordinator
-//! unfolds. `nearest` nests outward-first, so a list inside a scroll-view
-//! inside the slot goes forward in the order coordinator, scroll-view, list;
-//! web-core's touch handler only ever pairs the coordinator with the
-//! innermost scroller. A drag on content in the slot that is not a scroll
-//! container latches the coordinator itself. The descendant selector costs
-//! one ancestor-bloom-filter probe per element outside a slot.
+//! `scroll-coordinator-slot *, x-foldview-slot-ng * { scroll-capture-y:
+//! nearest forward; }`: every box inside the slot defers a forward vertical
+//! delta (one that increases the vertical offset) to its nearest ancestor
+//! scroll container first. Boxes that are not scroll containers ignore the
+//! property. A scroll container directly inside the slot therefore lets the
+//! coordinator fold before it scrolls, and scrolls back to its start before
+//! the coordinator unfolds. `nearest` nests outward-first, so a list inside a
+//! scroll-view inside the slot goes forward in the order coordinator,
+//! scroll-view, list; web-core's touch handler pairs the coordinator with
+//! the innermost scroller that can still move in the drag's direction
+//! (`XFoldviewSlotNgTouchEventsHandler.ts:75-93`). Only the vertical
+//! longhand is set, so horizontal nesting inside the slot (a horizontal list
+//! in a pager, say) stays inner first. A drag on content in the slot that is
+//! not a scroll container latches the coordinator itself. The two descendant
+//! selectors cost one ancestor-bloom-filter probe each per element outside a
+//! slot.
 //!
 //! web-core also sets `overscroll-behavior-y: none` on a `scroll-view` inside
 //! the slot (`x-foldview-ng.css:75-78`, to stop Safari's bounce). That is not
@@ -231,7 +241,7 @@ scroll-coordinator, x-foldview-ng { flex-direction: column !important; linear-di
 scroll-coordinator[enable-scroll="false"], scroll-coordinator[scroll-enable="false"], x-foldview-ng[enable-scroll="false"], x-foldview-ng[scroll-enable="false"] { overflow-y: hidden !important; }
 scroll-coordinator[bounces]:not([bounces="false"]),
 x-foldview-ng[bounces]:not([bounces="false"]) { overscroll-behavior-y: contain-bounce; }
-scroll-coordinator-slot *, x-foldview-slot-ng * { scroll-capture: nearest forward; }
+scroll-coordinator-slot *, x-foldview-slot-ng * { scroll-capture-y: nearest forward; }
 scroll-coordinator-header, x-foldview-header-ng {
   top: 0; left: 0; width: 100%;
   anchor-name: --lynx-scroll-coordinator-header;
@@ -495,7 +505,8 @@ mod tests {
                         "height",
                         "calc(100% - anchor-size(--lynx-scroll-coordinator-toolbar height, 0px))",
                     ),
-                    ("scroll-capture", "auto"),
+                    ("scroll-capture-x", "auto"),
+                    ("scroll-capture-y", "auto"),
                 ],
             );
             assert_eq!(
@@ -506,8 +517,8 @@ mod tests {
     }
 
     /// Every box inside the slot, at any depth and through a `wrapper`,
-    /// defers a forward delta to the scroll container above it; nothing
-    /// outside a slot does.
+    /// defers a forward vertical delta to the scroll container above it, and
+    /// leaves the horizontal axis alone; nothing outside a slot does.
     #[test]
     fn everything_inside_the_slot_captures_forward() {
         for spelling in SPELLINGS {
@@ -527,14 +538,21 @@ mod tests {
                 (drag, spelling.slot_drag),
             ] {
                 assert_eq!(
-                    value(&document, element, "scroll-capture"),
+                    value(&document, element, "scroll-capture-y"),
                     "nearest forward",
+                    "{} > {name}",
+                    spelling.slot
+                );
+                assert_eq!(
+                    value(&document, element, "scroll-capture-x"),
+                    "auto",
                     "{} > {name}",
                     spelling.slot
                 );
             }
             for element in [built.coordinator, built.header, outside] {
-                assert_eq!(value(&document, element, "scroll-capture"), "auto");
+                assert_eq!(value(&document, element, "scroll-capture-y"), "auto");
+                assert_eq!(value(&document, element, "scroll-capture-x"), "auto");
             }
         }
     }
@@ -636,6 +654,35 @@ mod tests {
             assert_eq!(value(&document, built.slot, "position"), "absolute");
             assert_eq!(value(&document, toolbar, "position"), "sticky");
             assert_eq!(rect(&document, built.slot), (0.0, 400.0, 393.0, 200.0));
+        }
+    }
+
+    /// Inline `!important` is author-origin too, so it loses to the UA's
+    /// `!important` like any author rule.
+    #[test]
+    fn inline_important_cannot_undo_the_pins() {
+        for spelling in SPELLINGS {
+            let mut document = document();
+            let built = build(&mut document, spelling, "height: 600px", Some(200), 400);
+            let toolbar = built.toolbar.expect("built with a toolbar");
+            document.set_inline_style(
+                built.coordinator,
+                "height: 600px; overflow-y: visible !important; flex-direction: row !important",
+            );
+            document.set_inline_style(built.header, "height: 400px; position: static !important");
+            document.set_inline_style(built.slot, "position: relative !important");
+            document.set_inline_style(toolbar, "height: 200px; position: static !important");
+            document.layout();
+
+            assert_eq!(overflow(&document, built.coordinator).1, Overflow::Scroll);
+            assert_eq!(
+                value(&document, built.coordinator, "flex-direction"),
+                "column"
+            );
+            assert_eq!(value(&document, built.header, "position"), "absolute");
+            assert_eq!(value(&document, built.slot, "position"), "absolute");
+            assert_eq!(value(&document, toolbar, "position"), "sticky");
+            assert_eq!(rect(&document, built.slot), (0.0, 400.0, 393.0, 400.0));
         }
     }
 

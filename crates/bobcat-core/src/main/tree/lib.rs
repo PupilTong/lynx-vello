@@ -16,7 +16,7 @@
 //! runtime to dispatch by tag name.
 //! `scroll_coordinator` needs none either, and has no UI method: its ten tags
 //! are UA rules over anchor-sized absolute boxes, a sticky toolbar and
-//! `scroll-capture`.
+//! `scroll-capture-y`.
 //!
 //! [`NodeId`]: dom::NodeId
 
