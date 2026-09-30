@@ -2111,6 +2111,8 @@ fn held(
 /// Content is baked unscrolled, unstuck and at committed transforms, so each
 /// node between the two carries it by its whole committed range — a scroll
 /// node by its encode window, a sticky node by its offset bounds, an
+/// anchored node by its default scroll shift over its scrollers' encode
+/// windows (a hidden box draws nothing, so its zero map needs no bound), an
 /// animation node with a transform track by its curve's
 /// [`Reach`](crate::visual::reach::Reach). The region crosses the nodes
 /// outermost first, since that is the order their maps undo in; runs of
@@ -2158,6 +2160,11 @@ fn pull_back(
                 let (sticky_low, sticky_high) = frame.sticky_slot_range(slot);
                 low -= sticky_high;
                 high -= sticky_low;
+            }
+            SpaceKind::Anchored(slot) => {
+                let (shift_low, shift_high) = frame.anchored_slot_range(slot, windows);
+                low -= shift_high;
+                high -= shift_low;
             }
             SpaceKind::Animation(slot) => {
                 let Some(track) = &frame.animations()[slot as usize].curve.transform else {
@@ -2288,7 +2295,9 @@ fn into_group(
         nearest_sticky(spaces, content),
         nearest_sticky(spaces, group),
     );
-    Some(expand_region(bounds, sticky_low, sticky_high))
+    let bounds = expand_region(bounds, sticky_low, sticky_high);
+    let (shift_low, shift_high) = frame.anchored_range(windows, content, group);
+    Some(expand_region(bounds, shift_low, shift_high))
 }
 
 /// `bounds`, in `from`'s coordinates, carried into `into`'s: forward through
@@ -2316,6 +2325,10 @@ fn carry(
             }
             SpaceKind::Sticky(slot) => {
                 let (low, high) = frame.sticky_slot_range(slot);
+                expand_region(bounds, low, high)
+            }
+            SpaceKind::Anchored(slot) => {
+                let (low, high) = frame.anchored_slot_range(slot, windows);
                 expand_region(bounds, low, high)
             }
             SpaceKind::Animation(slot) => frame.animations()[slot as usize]

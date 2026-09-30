@@ -254,6 +254,16 @@ pub(crate) struct AnchoredBox {
     /// rendering update, so the next one forgets [`Self::last_successful`]
     /// before it records again.
     pub(crate) fallback_sensitive: bool,
+    /// §6.5 on scroll: the box, shifted by its default scroll shift, stopped
+    /// fitting its inset-modified containing block since its last layout, so
+    /// its next layout determines position fallback styles again, with every
+    /// option — the current one included — reading its anchors at the
+    /// current offsets ([`Document::redetermine_scrolled_fallbacks`]).
+    pub(crate) redetermine: bool,
+    /// Whether the box fit, shifted, at the last scroll that checked it: the
+    /// state a re-determination is due on leaving. Reset from the outcome by
+    /// every layout that reports the box.
+    pub(crate) fits_scrolled: bool,
 }
 
 /// What an anchor query asked.
@@ -831,8 +841,8 @@ fn stored_displacement<T>(
 /// in the containing block's padding-box coordinates, translated by the
 /// query box's remembered displacement for it — or, before any recalculation
 /// point recorded one (and for an option being *tried*, §6.5.2's
-/// hypothetical recalculation point), by the displacement the stored
-/// offsets give now.
+/// hypothetical recalculation point, which a scroll-driven re-determination
+/// makes of every option), by the displacement the stored offsets give now.
 pub(crate) fn anchor_rect_of<T>(
     tree: &TreeArenas<T>,
     state: &DocumentLayoutState,
@@ -844,6 +854,7 @@ pub(crate) fn anchor_rect_of<T>(
     let remembered = state
         .anchored
         .get(&query.node.id())
+        .filter(|entry| !entry.redetermine)
         .and_then(|entry| entry.remembered.as_ref())
         .filter(|remembered| remembered.option == option)
         .and_then(|remembered| remembered.displacement_of(target));
@@ -913,6 +924,38 @@ pub(crate) fn scrolls_with_default<T>(
     axis: PhysicalAxis,
 ) -> bool {
     nearest_scroller(named, axis) == nearest_scroller(default, axis)
+}
+
+/// Which edges of an anchor-positioned box's inset-modified containing
+/// block its default anchor carries — left, top, right, bottom — and so
+/// move with its default scroll shift: an edge an `anchor()` inset puts
+/// there, and a `position-area` grid line that is not the containing
+/// block's own edge. An `auto` inset without `position-area`, a length and
+/// an `anchor-size()` put an edge where the containing block does.
+pub(crate) type CarriedEdges = [bool; 4];
+
+/// Whether a margin box moved by `shift` is inside the inset-modified
+/// containing block moved by `shift` on its [`CarriedEdges`], with
+/// `hughie`'s layout unit of slack — §6.5's fit test after "applying any
+/// default scroll shift", without the layout that would re-derive the
+/// anchor's edges.
+pub(crate) fn fits_shifted(
+    imcb: Rect<f32>,
+    margin_box: Rect<f32>,
+    carried: CarriedEdges,
+    shift: Vector2D<f32>,
+) -> bool {
+    const SLACK: f32 = 1.0 / 64.0;
+    let moved = |carried: bool, edge: f32, by: f32| if carried { edge + by } else { edge };
+    let left = moved(carried[0], imcb.origin.x, shift.x);
+    let top = moved(carried[1], imcb.origin.y, shift.y);
+    let right = moved(carried[2], imcb.origin.x + imcb.size.width, shift.x);
+    let bottom = moved(carried[3], imcb.origin.y + imcb.size.height, shift.y);
+    let (x, y) = (margin_box.origin.x + shift.x, margin_box.origin.y + shift.y);
+    x >= left - SLACK
+        && y >= top - SLACK
+        && x + margin_box.size.width <= right + SLACK
+        && y + margin_box.size.height <= bottom + SLACK
 }
 
 /// The option style `option` names for `node`: its base style for `0`.
@@ -1172,13 +1215,6 @@ impl<T> crate::tree::document::Document<T> {
     /// `id`'s remembered scroll offsets (§3.3), recorded at its last anchor
     /// recalculation point.
     #[must_use]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the painter's scroll compensation and position-visibility read it"
-        )
-    )]
     pub(crate) fn remembered_scroll(&self, id: NodeId) -> Option<&RememberedScroll> {
         self.layout_state().anchored.get(&id)?.remembered.as_ref()
     }
@@ -1347,10 +1383,14 @@ impl<T> crate::tree::document::Document<T> {
             return;
         };
         let chosen = outcome.chosen;
-        let recalculate = entry
-            .remembered
-            .as_ref()
-            .is_none_or(|remembered| remembered.option != chosen);
+        // A scroll-driven re-determination laid every option out at the
+        // current offsets, the one it kept included, so what it committed
+        // is only consistent with offsets remembered now.
+        let recalculate = entry.redetermine
+            || entry
+                .remembered
+                .as_ref()
+                .is_none_or(|remembered| remembered.option != chosen);
         let mut targets: SmallVec<[NodeId; 2]> = entry
             .reads
             .iter()
@@ -1392,7 +1432,168 @@ impl<T> crate::tree::document::Document<T> {
         }
         if let Some(entry) = self.layout_state_mut().anchored.get_mut(&id) {
             entry.remembered = Some(remembered);
+            entry.redetermine = false;
+            entry.fits_scrolled = !outcome.overflows;
         }
+    }
+
+    /// `id`'s default scroll shift (§3.3) at the stored offsets: the current
+    /// displacement of its default anchor less the remembered one, on the
+    /// axes it compensates in, in its containing block's layout space. What
+    /// the frame's anchored node composes, unsnapped.
+    #[must_use]
+    pub(crate) fn default_scroll_shift(&self, id: NodeId) -> Option<Vector2D<f32>> {
+        let entry = self.layout_state().anchored.get(&id)?;
+        let outcome = entry.outcome?;
+        let remembered = entry.remembered.as_ref()?;
+        let default = remembered.default?;
+        let then = remembered.displacement_of(default)?;
+        let now = self.anchor_displacement(default, self.anchor_containing_block(id));
+        let shift = now - then;
+        Some(Vector2D::new(
+            if outcome.compensates.width {
+                shift.x
+            } else {
+                0.0
+            },
+            if outcome.compensates.height {
+                shift.y
+            } else {
+                0.0
+            },
+        ))
+    }
+
+    /// The [`CarriedEdges`] of `id`'s inset-modified containing block under
+    /// the option it was laid out with.
+    #[must_use]
+    pub(crate) fn carried_edges(&self, id: NodeId) -> CarriedEdges {
+        let (tree, state) = self.visual_parts();
+        let (Some(node), Some(outcome)) = (tree.get(id), self.anchor_outcome(id)) else {
+            return [false; 4];
+        };
+        let Some(style) = option_style(tree, node, outcome.chosen) else {
+            return [false; 4];
+        };
+        let position = style.get_position();
+        let area = !position.position_area.is_none();
+        let containing_block = containing_block_generator(node).map(Node::id);
+        let block = containing_block
+            .and_then(|block| state.get(block))
+            .map_or_else(
+                || {
+                    let viewport = self.viewport_size();
+                    Size::new(viewport.width, viewport.height)
+                },
+                |entry| {
+                    let layout = &entry.slot.unrounded;
+                    Size::new(
+                        layout.size.width - layout.border.left - layout.border.right,
+                        layout.size.height - layout.border.top - layout.border.bottom,
+                    )
+                },
+            );
+        let scrollable = scrollable_containing_block(tree, state, containing_block);
+        let imcb = outcome.imcb;
+        // Whether a `position-area` line at `edge` is one of the containing
+        // block's own edges on an axis `extent` long.
+        let own_edge = |edge: f32, extents: [f32; 2]| {
+            (edge - 0.0).abs() <= 0.5 || extents.iter().any(|extent| (edge - extent).abs() <= 0.5)
+        };
+        let widths = [
+            block.width,
+            scrollable.map_or(block.width, |size| size.width),
+        ];
+        let heights = [
+            block.height,
+            scrollable.map_or(block.height, |size| size.height),
+        ];
+        let edges = [
+            imcb.origin.x,
+            imcb.origin.y,
+            imcb.origin.x + imcb.size.width,
+            imcb.origin.y + imcb.size.height,
+        ];
+        let insets = [
+            &position.left,
+            &position.top,
+            &position.right,
+            &position.bottom,
+        ];
+        std::array::from_fn(|side| match insets[side] {
+            stylo::values::computed::position::Inset::Auto => {
+                let extents = if side % 2 == 0 { widths } else { heights };
+                area && !own_edge(edges[side], extents)
+            }
+            stylo::values::computed::position::Inset::AnchorFunction(_)
+            | stylo::values::computed::position::Inset::AnchorContainingCalcFunction(_) => true,
+            stylo::values::computed::position::Inset::LengthPercentage(_)
+            | stylo::values::computed::position::Inset::AnchorSizeFunction(_) => false,
+        })
+    }
+
+    /// css-anchor-position-1 §6.5 on scroll: "When a positioned box (after
+    /// applying any default scroll shift) overflows its inset-modified
+    /// containing block, and has more than one position option", it
+    /// determines position fallback styles. A scroll moves no layout here —
+    /// the painter shifts the box — so this asks, for every box with
+    /// position options, whether the stored offsets' default scroll shift
+    /// took it from fitting to overflowing since it was last checked, and
+    /// invalidates the layout of each that did, flagged so its next layout
+    /// determines again at the current offsets. Answers whether any was.
+    ///
+    /// The main thread asks after it adopts the painter's offsets and before
+    /// every render, so there is at most one re-determination per adopted
+    /// offset, and none while the box stays on one side of its edge. A box
+    /// that overflowed in every option at its last layout is re-determined
+    /// only once it has fit again and left again.
+    pub fn redetermine_scrolled_fallbacks(&mut self) -> bool {
+        if self.layout_state().anchored.is_empty() {
+            return false;
+        }
+        let candidates: SmallVec<[NodeId; 4]> = {
+            let (tree, state) = self.visual_parts();
+            state
+                .anchored
+                .iter()
+                .filter(|&(&id, entry)| {
+                    !entry.redetermine
+                        && entry.outcome.is_some()
+                        && tree.anchors().options(id).is_some()
+                })
+                .map(|(&id, _)| id)
+                .collect()
+        };
+        let mut due: SmallVec<[NodeId; 2]> = SmallVec::new();
+        for id in candidates {
+            let Some(shift) = self.default_scroll_shift(id) else {
+                continue;
+            };
+            let Some(outcome) = self.anchor_outcome(id).copied() else {
+                continue;
+            };
+            let fits = if shift == Vector2D::zero() {
+                !outcome.overflows
+            } else {
+                fits_shifted(
+                    outcome.imcb,
+                    outcome.margin_box,
+                    self.carried_edges(id),
+                    shift,
+                )
+            };
+            let Some(entry) = self.layout_state_mut().anchored.get_mut(&id) else {
+                continue;
+            };
+            if std::mem::replace(&mut entry.fits_scrolled, fits) && !fits {
+                entry.redetermine = true;
+                due.push(id);
+            }
+        }
+        for &id in &due {
+            self.invalidate_layout(id);
+        }
+        !due.is_empty()
     }
 
     /// The first half of §6.5.1.1 at a rendering update: every box that

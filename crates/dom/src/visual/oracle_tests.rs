@@ -439,15 +439,29 @@ impl Fixture {
         let offset_of = self.offset_of();
         let early_animations = early.order.sample_animations(at, &offset_of);
         let early_stickies = early.order.sample_stickies(1.0, &offset_of);
-        let early_samples =
+        let early_anchored =
             early
                 .order
-                .space_samples(&early_animations, &early_stickies, 1.0, &offset_of);
+                .sample_anchored(&early_animations, &early_stickies, 1.0, &offset_of);
+        let early_samples = early.order.space_samples(
+            &early_animations,
+            &early_stickies,
+            &early_anchored,
+            1.0,
+            &offset_of,
+        );
         let late_animations = late.order.sample_animations(None, &offset_of);
         let late_stickies = late.order.sample_stickies(1.0, &offset_of);
-        let late_samples =
+        let late_anchored =
             late.order
-                .space_samples(&late_animations, &late_stickies, 1.0, &offset_of);
+                .sample_anchored(&late_animations, &late_stickies, 1.0, &offset_of);
+        let late_samples = late.order.space_samples(
+            &late_animations,
+            &late_stickies,
+            &late_anchored,
+            1.0,
+            &offset_of,
+        );
         let layers = early.order.layers();
         for (index, item) in late.order.items().iter().enumerate() {
             let groups: Vec<(Affine, Rect)> = layers
@@ -491,9 +505,12 @@ impl Fixture {
         let offset_of = self.offset_of();
         let animations = late.order.sample_animations(None, &offset_of);
         let stickies = late.order.sample_stickies(1.0, &offset_of);
+        let anchored = late
+            .order
+            .sample_anchored(&animations, &stickies, 1.0, &offset_of);
         let samples = late
             .order
-            .space_samples(&animations, &stickies, 1.0, &offset_of);
+            .space_samples(&animations, &stickies, &anchored, 1.0, &offset_of);
         for (index, item) in late.order.items().iter().enumerate() {
             if encoded[index] {
                 continue;
@@ -525,15 +542,29 @@ impl Fixture {
         let offset_of = self.offset_of();
         let early_animations = early.order.sample_animations(at, &offset_of);
         let early_stickies = early.order.sample_stickies(1.0, &offset_of);
-        let early_samples =
+        let early_anchored =
             early
                 .order
-                .space_samples(&early_animations, &early_stickies, 1.0, &offset_of);
+                .sample_anchored(&early_animations, &early_stickies, 1.0, &offset_of);
+        let early_samples = early.order.space_samples(
+            &early_animations,
+            &early_stickies,
+            &early_anchored,
+            1.0,
+            &offset_of,
+        );
         let late_animations = late.order.sample_animations(None, &offset_of);
         let late_stickies = late.order.sample_stickies(1.0, &offset_of);
-        let late_samples =
+        let late_anchored =
             late.order
-                .space_samples(&late_animations, &late_stickies, 1.0, &offset_of);
+                .sample_anchored(&late_animations, &late_stickies, 1.0, &offset_of);
+        let late_samples = late.order.space_samples(
+            &late_animations,
+            &late_stickies,
+            &late_anchored,
+            1.0,
+            &offset_of,
+        );
 
         let (early_items, late_items) = (early.order.items(), late.order.items());
         assert_eq!(early_items.len(), late_items.len(), "{label}: item count");

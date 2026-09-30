@@ -346,7 +346,8 @@ pub struct FilterGroup {
     /// Backdrop Root's content start up to the element's own scope open.
     pub(crate) ops: Range<u32>,
     /// Whether some op in `ops` and `space` differ in their innermost
-    /// scroll or sticky node — a node on one path and not the other — or an
+    /// scroll, sticky or anchored node — a node on one path and not the
+    /// other — or an
     /// op draws a backdrop whose own flag is set: the one condition under
     /// which the bake's pixels depend on a scroll offset, and therefore the
     /// one condition under which a scroll invalidates the bake. A blurred
@@ -656,7 +657,8 @@ impl ComposeAssembly {
             }
             if let Some(op) = op.space(&self.filter_groups) {
                 scrolls |= differs(spaces, op, own, space::nearest_scroll)
-                    || differs(spaces, op, own, space::nearest_sticky);
+                    || differs(spaces, op, own, space::nearest_sticky)
+                    || differs(spaces, op, own, space::nearest_anchored);
                 animations |= space::sampled_against(spaces, slots, op, own);
             }
         }
@@ -837,10 +839,12 @@ pub(crate) fn replay_ops(
                 index: fragment,
                 space,
             } => {
-                scene.append(
-                    &fragments[*fragment as usize],
-                    Some(device_transform(*space)),
-                );
+                let transform = device_transform(*space);
+                // A space `position-visibility` hides is the zero map, and
+                // content collapsed to a point draws nothing.
+                if transform.determinant() != 0.0 {
+                    scene.append(&fragments[*fragment as usize], Some(transform));
+                }
             }
             ComposeOp::Push {
                 clip_only,
@@ -873,7 +877,10 @@ pub(crate) fn replay_ops(
                 }
             }
             ComposeOp::Image { index: draw, space } => {
-                encode_draw(scene, image_draws, images, *draw, device_transform(*space));
+                let transform = device_transform(*space);
+                if transform.determinant() != 0.0 {
+                    encode_draw(scene, image_draws, images, *draw, transform);
+                }
             }
             ComposeOp::Pop => scene.pop_layer(),
             ComposeOp::PushFilter { index: group } => {
@@ -1155,6 +1162,7 @@ mod tests {
                 slots: &[],
                 animations: &crate::visual::AnimationSamples::default(),
                 stickies: &crate::visual::StickySamples::default(),
+                anchored: &crate::visual::anchored::AnchoredSamples::new(),
                 ratio: 1.0,
                 offset_of: &|_| None,
             },
