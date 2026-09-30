@@ -1058,8 +1058,9 @@ and §D.16 with what the wire format actually permits.)*
       `absolute` box, or a `fixed` one, whose box parent establishes its
       containing block — so a `fixed` box under a transformed parent
       resolves like `absolute`. The
-      host names the target and reports its unrounded border-box size from
-      the current pass (`LayoutTree::anchor_size`). The keyword picks the
+      host names the target and reports its unrounded border box from the
+      current pass (`LayoutTree::anchor_rect`, whose size `anchor-size()`
+      reads). The keyword picks the
       anchor's axis: `width`/`height` physically, `block`/`self-block`
       vertically and `inline`/`self-inline` horizontally (the fork has no
       `writing-mode`), and an omitted keyword the property's own axis. A name
@@ -1132,6 +1133,138 @@ and §D.16 with what the wire format actually permits.)*
       its invalidation) and `crates/hughie/tests/anchor_size.rs` (every
       algorithm's absolute pass, the measured and aspect-ratio paths, in-flow
       items, and the cache).
+
+    - **Layout engine for the full module (2026-09-30, ahead of the fork
+      and the `dom` host).** `hughie` now implements the rest of
+      css-anchor-position-1's layout side; until the fork parses the
+      properties and `dom` answers the new `LayoutTree` methods, only its
+      mock-host tests reach it (`crates/hughie/tests/anchor_positioning.rs`,
+      WPT numbers where a file is named). `CoreStyle::position_area` and
+      `position_try_order` answer their initial values until the fork's
+      `lynx` build generates the longhands. The rules, in the order the
+      absolute pass applies them per position option:
+      1. **Options (§6.1, §6.5.2).** The host hands over each option
+         already cascaded (`position_option_style`, index 0 = the box's own
+         style); the engine reads only the accepted `@position-try`
+         properties from it — insets, margins, sizes, min/max sizes,
+         `justify-self`/`align-self`, `position-area` — and the default
+         anchor through the host (`position-anchor`). The box's own run
+         keeps reading its base style: every axis whose values differ is
+         handed over as a known dimension (the same mechanism as
+         `anchor-size()` above).
+      2. **Containing block.** css-position-4's scrollable containing block
+         (host-supplied size, never smaller than the padding box) replaces
+         the padding box for a box with a default anchor; a grid area is not
+         replaced. §3.1.1's "pre-modification containing block" is that
+         (or the grid area); css-position-3 §2.1.1's *original* containing
+         block — used only as css-align-3 §4.4.1.2's overflow limit — is
+         the generator's padding box even for a grid item.
+      3. **`position-area` (§3.1).** With a default anchor, the 3×3 grid is
+         built from the pre-modification containing block and the anchor
+         (lines 1 and 4 extend to an anchor outside it, so tracks can be
+         empty), keywords resolve through the fork's `to_physical` with
+         `horizontal-tb` writing modes (`direction` only), and the region
+         becomes the containing block — percentages included. `auto` insets
+         and margins become 0. `normal` self-alignment takes §4.1's value
+         (`center`, `anchor-center`, or toward the anchor), except that a
+         single `auto` inset on an axis aligns *unsafely* toward the other
+         one. Without a default anchor the property does nothing (but still
+         counts as referencing it, for `anchor-valid`).
+      4. **`anchor()` (§3.2).** Every `<anchor-side>`: physical keywords only
+         in insets on their own axis (else unresolvable); `inside`/`outside`
+         by the inset's side; `start`/`end` by the containing block's
+         `direction`, `self-start`/`self-end` by the box's; percentages and
+         `center` between start and end in the containing block's
+         direction. The inset is the length that puts the inset-modified
+         containing block's edge on that anchor edge, in the coordinates of
+         the containing block after step 3. Inside math functions through
+         the same specified-calc round trip as `anchor-size()`. An omitted
+         name is the default anchor. Unresolvable → fallback → initial
+         (`auto`), exactly as above; on a box that is not absolutely
+         positioned it is always unresolvable.
+      5. **Self-alignment of absolutely positioned boxes (css-position-3
+         §4, css-align-3 §6.1.2/§6.2.2), new for every absolutely positioned
+         box, anchored or not.** `auto` is `normal`; `normal` and `stretch`
+         keep the previous behaviour (stretch-fit auto size with both insets
+         non-`auto`, placed at the start edge — the box's own `direction`
+         picks it, as before). Every other value makes an `auto` size
+         fit-content in the inset-modified containing block and aligns the
+         margin box in it, `start`/`end` by the containing block's
+         direction, `self-*` by the box's, `left`/`right` physically,
+         `baseline`/`last baseline` as their `self-start`/`self-end`
+         fallbacks. It applies only with both insets and both margins
+         non-`auto`: one `auto` inset places the box by the other, `auto`
+         margins win. Overflow: `unsafe` honours the alignment; `safe` and
+         the default follow §4.4.1.2 (stay inside the inset-modified
+         containing block if it fits, else cover it and stay inside the
+         bounding box of it and the original containing block, else
+         start-align there). A negative inset-modified containing block is
+         brought to zero at its weaker edge (css-position-3 §3.5.2: the
+         `auto` one, else the end one). **Lynx `linear` and `relative`
+         containers ignore authored `justify-self`/`align-self`** on
+         absolutely positioned children: starlight places them by their
+         insets alone (`lynx/core/renderer/starlight/layout/
+         position_layout_utils.cc`, `CalcStartOffset`: the start inset wins,
+         then the end inset, then the static position), and those
+         algorithms are not extended; `anchor-center` and `position-area`'s
+         defaults, which are opt-in, still apply there.
+      6. **`anchor-center` (§4.2).** With a default anchor: `auto` insets and
+         margins on that axis become 0, the auto size is fit-content in the
+         inset-modified containing block, and the margin box is centered on
+         the anchor's center, then shifted by the §4.4.1.2 rules (so it
+         stays inside the inset-modified containing block when it fits).
+         Without one it is `center`, with no effect on insets.
+      7. **Fallback (§6.5).** Current option = the host's last successful
+         one, else the base style. It is committed; if its margin box fits
+         its inset-modified containing block (a layout unit of slack, 1/64
+         px) and that was not negative-size, nothing is determined.
+         Otherwise the options are tried in list order — stably sorted by
+         their inset-modified containing block size, `auto` insets as 0,
+         for `position-try-order` (`most-height`/`most-block-size`
+         vertical, the others horizontal) — skipping the current one, each
+         as a *measurement*; the first that fits is committed. None fits →
+         the current option's commit stands. **The engine never records the
+         last successful option**: §6.5.1.1 records it at
+         `ResizeObserver` time, after layout, and WPT
+         `position-try-fallbacks-no-fit-after-fit.html` shows the
+         difference (a second layout before rendering starts again from the
+         base style), so the host records `AnchorOutcome::chosen` itself.
+         A box with options claims no content independence (its choice
+         depends on its own size).
+      8. **Outcome.** For every committed anchor-positioned box: the chosen
+         option, `overflows` (§6.6 `no-overflow`), whether it references
+         the default anchor (`position-area`, `anchor-center`, an unnamed
+         function) and resolved one (`anchor-valid`), §3.3's per-axis
+         compensation (default anchor present and `anchor-center` on that
+         axis, or any `position-area`, or a resolved `anchor()` in a used
+         inset on that axis whose target shares the default anchor's
+         nearest scroll container — the host answers that last part), and
+         the inset-modified containing block and margin box in the
+         generator's padding-box coordinates. Boxes using none of the
+         module report nothing.
+      **Approximated or not done (engine side):** the containing block's
+      direction for a box `dom` places itself (`compute_absolute_layout`,
+      the positioned pass and `<text>` blocks) is the box's own
+      `direction`; §4.4.1.2's extension of the overflow limit rect to a
+      scroll container's scrollable area (and to infinity for scrollers) is
+      not modelled — the limit is the bounding box of the inset-modified
+      and original containing blocks; `normal` still stretches a replaced
+      box (css-position-3 §4.1 wants fit-content); the static position
+      ignores self-alignment (§3.5.1's `self-end`/`center` rules — both
+      `auto` insets still use the start-aligned static position); §3.5.2's
+      *resolved* weaker inset for `getComputedStyle` is not produced; the
+      scrollable containing block replaces the padding box only for a box
+      on the anchored path — one that uses an anchor function,
+      `position-area`, `anchor-center` or options — because the engine
+      never reads `position-anchor` and a box with nothing else never asks
+      the host whether it has a default anchor (a plain `position-anchor`
+      box is laid out against the padding box).
+      **Conflict, unverified in browsers:** WPT
+      `grid-position-area-basic.html`'s reference places its box (as wide as
+      the word "Anchored") at an empty `position-area` column 20px from the
+      grid container's padding edge, unshifted, overflowing that edge; the
+      engine follows §4.4.1.2's text instead and shifts it back until it
+      ends at the padding edge (the mock-host test uses a 30px box).
 
 ## Deliberately still open (known non-decisions)
 

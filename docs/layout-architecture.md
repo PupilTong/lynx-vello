@@ -320,18 +320,38 @@ its 336-byte budget and a page without them pays nothing per node. The
 visual layer reads the recorded area rather than reconstructing track
 placement, alignment or baseline adjustments.
 
-css-anchor-position-1 `anchor-size()` crosses the seam the other way: an
-absolutely positioned box's sizes, min/max sizes, insets and margins may hold
-the function, and the engine asks the host for each target's size through
-`LayoutTree::anchor_size` (default `None`, which makes every function take its
-fallback). The engine owns resolution (`compute/anchor.rs`: keyword → physical
-axis, fallback, the initial value standing in for invalid-at-computed-value
-time, `calc()` substitution) and asks only from `absolute_layout`, where every
-in-flow sibling and every earlier out-of-flow one is already committed; the
-host owns which element is the target, since that is a tree walk over
-`anchor-name`. The box's own run never resolves the function: the absolute
-pass hands it the anchored axes as known dimensions, so its cache key carries
-every anchor it read. Scope and reasons: `docs/style-assumptions.md` §28.
+css-anchor-position-1 crosses the seam the other way. The engine owns every
+rule that turns anchor geometry into a box: `anchor()` and `anchor-size()`
+resolution (`compute/anchor.rs`: sides, the matching-axis rule, fallbacks, the
+initial value standing in for invalid-at-computed-value time, `calc()`
+substitution), the `position-area` grid and its default alignment
+(`compute/anchor_area.rs`), `anchor-center`, the self-alignment of absolutely
+positioned boxes (css-position-3 §4.3 with css-align-3 §4.4.1.2's overflow
+rules, in `compute/mod.rs`), and position fallback (`compute/anchor_fallback.rs`:
+the §6.5 determination, `position-try-order`'s sort). The host owns what is a
+tree walk or a cascade, through `LayoutTree` methods whose defaults mean "no
+anchors": `anchor_rect(state, node, option, AnchorSpec)` — a target's border
+box in the padding-box coordinates of the element generating `node`'s
+containing block, with §3.3's remembered scroll offsets applied —
+`default_anchor`, `anchor_scrolls_with_default` (§3.3's scroll-container
+condition), `scrollable_containing_block` (css-position-4),
+`position_option_count`/`position_option_style` (the options list, each
+already cascaded with its try tactic; index 0 is the box's own style),
+`last_successful_option` (which the host records after layout, §6.5.1.1), and
+`set_anchor_outcome`, which hands back per box the chosen option, whether it
+still overflows, whether it references and resolved its default anchor, the
+per-axis compensation flags and its inset-modified containing block and margin
+box (`AnchorOutcome`). The engine asks only from an absolute pass, where every
+in-flow sibling and every earlier out-of-flow one is already committed, and
+rebases the host's rectangles onto what it actually lays out against (a grid
+area, the scrollable containing block, a `position-area` region). A box that
+uses none of it pays one predicate and one `position_option_count` call; the
+anchored path is a cold, out-of-line function. The box's own run never
+resolves an anchor function or reads an option: the absolute pass hands it
+every axis whose values differ from its own style's as a known dimension, so
+its cache key carries every anchor and option it depends on, and trial options
+are measured, only the chosen one committed. Scope and reasons:
+`docs/style-assumptions.md` §28.
 
 **`LayoutInput` stays one type, and the tree stays one trait.** The style
 surface splits per algorithm and the wire struct does not, for a structural
