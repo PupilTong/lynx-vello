@@ -1285,8 +1285,8 @@ consequential choice about whether to follow the spec or the quirk.
   the slot sits at `anchor-size()` of the header and is the coordinator's
   height less `anchor-size()` of the toolbar
   ([style-assumptions.md](../style-assumptions.md) §28), the toolbar is
-  sticky, and every box inside the slot is `scroll-capture: nearest forward`
-  (§25). web-core writes the slot's `top` from a `ResizeObserver`
+  sticky, and every box inside the slot is `scroll-capture-y: nearest
+  forward` (§25). web-core writes the slot's `top` from a `ResizeObserver`
   (`XFoldviewNg.ts:27-38`), caps `scrollTop` (`:42-61`) and routes drags in
   its own slot handler (`XFoldviewSlotNgTouchEventsHandler.ts`); native uses
   Material's CoordinatorLayout + AppBarLayout (Android) and `UIScrollView`
@@ -1300,7 +1300,12 @@ consequential choice about whether to follow the spec or the quirk.
     `overflow-y: hidden` of `enable-scroll="false"` that has to beat that
     scroll — new §D.15 exceptions
     ([style-assumptions.md](../style-assumptions.md)), argued as structural
-    invariants.
+    invariants. Plain author declarations can still take the geometry apart
+    and are not pinned, the same way an author `scroll-snap-align` on a pager
+    item is not: a `top` on the slot (`top: auto` included) replaces its
+    `anchor-size()` offset, and an author `anchor-name` on the header or the
+    toolbar renames the anchor the slot reads, which then takes its `0px`
+    fallback.
   - *A coordinator with `height: auto` collapses to its toolbar's height*:
     absolutely positioned children never size their parent. web-core and
     native size it from toolbar + slot. The docs require the coordinator to
@@ -1315,8 +1320,9 @@ consequential choice about whether to follow the spec or the quirk.
     documented structure (toolbar, header, slot) is unaffected.
   - *A slot taller than the coordinator less the toolbar extends the range*
     past header less toolbar; web-core caps `scrollTop` and native caps the
-    fold. Cards that size the slot to exactly that (every e2e card) are
-    unaffected; an author `flex: 1` on the slot (the docs' recipe) is
+    fold. Cards that size the slot to exactly that are unaffected;
+    web-core's `size-toolbar-and-slot-size-lager` (slot 500 in a 600
+    coordinator with a 200 toolbar) folds 300 here, 200 there; an author `flex: 1` on the slot (the docs' recipe) is
     ignored, but the UA height gives the same length whenever the
     coordinator's height is definite.
   - *Stray children of the coordinator are shown*; web-core `display: none`s
@@ -1330,7 +1336,12 @@ consequential choice about whether to follow the spec or the quirk.
     once the fold is complete.
   - *The fold order nests*: a list inside a scroll-view inside the slot goes
     forward coordinator, scroll-view, list (`nearest` nests outward-first);
-    web-core pairs the coordinator with the innermost scroller only.
+    web-core's touch handler pairs the coordinator with the innermost
+    scroller that can still move in the drag's direction
+    (`XFoldviewSlotNgTouchEventsHandler.ts:75-93`). Horizontal nesting inside
+    the slot is untouched, because only the `scroll-capture-y` longhand is
+    set: a horizontal list in a horizontal pager inside the slot still
+    scrolls inner first.
   - *web-core's `x-foldview-slot-ng scroll-view { overscroll-behavior-y:
     none }` (`x-foldview-ng.css:75-78`, a Safari bounce fix) is not carried*:
     here it would fence the chain and nothing inside the slot could unfold
