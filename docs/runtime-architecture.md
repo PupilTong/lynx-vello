@@ -1530,7 +1530,7 @@ the wait takes implies them and the wait is deterministic.
 
 The frame is baked *unscrolled*: the walker's layer-stack pushes become a
 compose program tagged with the compose space each shape rides — its path of
-scroll, sticky and animation nodes in the frame's one space tree — the content
+scroll, sticky, anchored and animation nodes in the frame's one space tree — the content
 between them lands in per-space scene fragments, and replaying the program
 with a set of per-slot offsets reproduces exactly what a monolithic encode at
 those offsets would have produced. A user scroll therefore never waits for a
@@ -1616,6 +1616,51 @@ sees the offset from the marker on. The encode is windowed: each slot's fragment
 scrollport past its committed offset per scrollable axis
 (`ENCODE_WINDOW_SCROLLPORTS`). A committed frame indexes its slots by node at
 commit, so neither the painter's lookups nor main's check scan the table.
+
+### Anchored boxes compose; a fallback flip commits at the marker
+
+css-anchor-position-1 lays an anchor-positioned box out against its anchors'
+*remembered* scroll offsets (§3.3), so a scroll between its default anchor
+and its containing block relays nothing out. What follows the anchor is the
+box's **anchored node** in the space tree (`crates/dom/src/visual/anchored.rs`),
+the outermost node of its own, enclosing its box space: every record of the
+box — box, clip, group layer, content, filter entries — composes through it.
+Its map is the default scroll shift `Tr(L · mask(Σ own(sticky) −
+Σ snap(offset(scroller)) + fixed − remembered))`, summed over the scroll and
+sticky slots between the default anchor and the containing block and read at
+the offsets the compose uses (snapped as the scroll node snaps them, so the
+box moves exactly as far as the anchor's pixels), `fixed` covering the
+ancestors the frame has no slot for, `mask` zeroing the axes the box does not
+compensate in, `L` its containing block's linear map into viewport px. The
+same node carries `position-visibility`: while a predicate hides the box its
+map is the zero affine, so the box and its containing-block descendants draw
+nothing, hit nothing and bake nothing, without touching computed
+`visibility`. Each sample evaluates the predicates from the frame alone —
+`anchor-valid` fixed at commit; `anchor-visible` maps the anchor's border box
+and each clip between it and the containing block through their live spaces
+(a hidden anchored box's zero map makes a box anchored to it hide too, the
+slots being sampled anchor-first); `no-overflow` shifts the margin box, and
+the inset-modified containing block's anchor-carried edges, by the shift. The
+painter samples every anchored slot per composed frame, the main thread per
+hit test; that is the whole per-frame cost, bounded by the anchored boxes and
+the few slots and clips between each and its anchor. Culling bounds an
+anchored node by its scrollers' encode windows and its stickies' ranges.
+
+A shift can also push a box with position options out of its inset-modified
+containing block, which §6.5 answers with a fresh fallback determination —
+layout, so main's. No new message carries it: the painter posts every offset
+it moves (above), a flip only happens when one moves, and at the marker, after
+`advance_scroll_timelines`, main calls
+`Document::redetermine_scrolled_fallbacks`: for each box with options it
+recomputes the shift at the adopted offsets and, when the box went from
+fitting to overflowing since the last check, flags it and invalidates its
+layout, so the entry's commit determines again with every option — the
+current one included — reading its anchors at the current offsets, and
+records them as its new remembered offsets. At most one re-determination per
+adopted offset, none while the box stays on one side of its edge, and nothing
+at all for a page without anchor-positioned boxes (one `is_empty` test).
+`Document::render` asks the same question first, for a document driven
+without the marker.
 
 ### Ordering guarantees
 

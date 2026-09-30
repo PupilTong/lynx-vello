@@ -1338,9 +1338,63 @@ and §D.16 with what the wire format actually permits.)*
           about to skip stays relevant when it holds, looked up as if it did
           not skip, a target anchor of a shown anchored box whose containing
           block is outside it.
+      11. **Painter side (§3.3 default scroll shift, §6.6, §6.5 on
+          scroll; 2026-10-01).** `crates/dom/src/visual/anchored.rs`. A box
+          that compensates on some axis, or whose `position-visibility` can
+          hide it, gets an anchored node in the frame's space tree, the
+          outermost of its own ("as if affected by a transform (before any
+          other transforms)"). Its translation is `L · mask(Σ own(sticky) −
+          Σ snap(offset(scroller)) + fixed − remembered)` over the default
+          anchor's scroll-adjustment ancestors below the containing block,
+          at the offsets the compose or hit test uses — the same chain and
+          sign as the remembered displacement (3.), so the shift is exactly
+          "the difference between the remembered scroll offset … and what
+          its current remembered scroll offset would be". `position-visibility`
+          hides by making that node the zero map: the box and its
+          containing-block descendants draw, hit and bake nothing; the
+          computed `visibility` is untouched (Blink's model; not
+          `force-hidden`). Predicates, evaluated per composed frame on the
+          painter and per hit test on the main thread, from the frame:
+          `anchor-valid` from the outcome; `anchor-visible` — the default
+          anchor's `visibility` is not `visible`, or its border box (ink
+          overflow is approximated by it) mapped through its live space is
+          fully clipped (zero intersection area; for a zero-area anchor, no
+          contact) by *one* of the clips between it and the box's containing
+          block — the frame's clip nodes, i.e. `overflow` and paint
+          containment, each mapped through its live space and bounded by its
+          axis-aligned box (radii and `clip-path` are not tested); a box
+          anchored to a hidden anchored box, or to anything that box's node
+          carries, finds its anchor's space degenerate and hides too;
+          `no-overflow` — the margin box shifted by the default scroll shift
+          is outside the inset-modified containing block, whose edges the
+          default anchor carries (an `anchor()` inset's; a `position-area`
+          line off the containing block's own edge) shifted with it
+          (`CarriedEdges`) — the rest are the containing block's and stay.
+          At a zero shift it is the layout's own answer. **§6.5 on scroll:**
+          the main thread, at the scroll mailbox marker and before every
+          render, recomputes the shift at the adopted offsets for each box
+          with position options and, on a fit → overflow flip (same edge
+          model), flags it: its next layout reads every option's anchors at
+          the current offsets (the current option included, so `hughie`'s
+          loop runs from it) and remembers them. **Deviations:** a
+          re-determination that finds no fitting option keeps the current
+          option *and* refreshes its remembered offsets (the spec keeps
+          them), observable only for `anchor()` references to non-default
+          anchors in another scroll context; a box that overflowed in every
+          option is re-determined on scroll only after it fits again and
+          leaves again (Blink re-checks each option's range); `no-overflow`
+          applies only to boxes `hughie` reports (anchor-positioned or with
+          options); a fixed-position descendant escaping the box's
+          containing-block chain is not hidden with it; an anchor with no
+          box item of its own (an inline span painted by its paragraph) is
+          never found clipped.
       **Tests:** `crates/dom/tests/anchor_positioning.rs` (WPT ports, each
       naming its file and adaptation, and the skipped groups in its module
-      doc) and `crates/dom/tests/anchor_size.rs`.
+      doc), `crates/dom/tests/anchor_size.rs`, the compose-side units in
+      `crates/dom/src/visual/anchored.rs`, one GPU pixel test
+      (`gpu_pixels.rs`, `an_anchored_box_follows_its_scrolled_anchor_and_hides_with_it`),
+      and the painter's end-to-end tests in
+      `crates/bobcat-core/src/paint/event_loop_tests.rs`.
 
 ## Deliberately still open (known non-decisions)
 

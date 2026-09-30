@@ -324,8 +324,18 @@ Per-box state lives in one `DocumentLayoutState::anchored` table keyed by node,
 with entries only for boxes `hughie` reported through `set_anchor_outcome`:
 the last `AnchorOutcome`, the anchor queries its last committing pass read
 (with their answers), its `RememberedScroll`, and its last successful position
-option. The painter's scroll compensation and `position-visibility` read the
-outcome and the remembered offsets from there. **The settle loop**: `hughie`
+option. The paint build reads the outcome and the remembered offsets from
+there into the frame's **anchored slots** (`visual/anchored.rs`): each
+anchor-positioned box that compensates for scroll, or whose
+`position-visibility` can hide it, gets an anchored node in the space tree,
+outermost of its own, carrying its default scroll shift and its visibility
+predicates, sampled at compose and hit-test time (see
+`docs/runtime-architecture.md` "Anchored boxes compose"). A box with position
+options whose shift at the adopted offsets takes it from fitting to
+overflowing is flagged `redetermine` (`Document::redetermine_scrolled_fallbacks`):
+its next layout reads every option's anchors at the current offsets — the
+current option included, so §6.5's loop runs — and records them as its
+remembered offsets. **The settle loop**: `hughie`
 lays an anchored box out only when its containing block runs, and an anchor
 can move without that happening (an in-place relayout deep in a sibling, a
 `contain: strict` boundary, an escaping anchor the rounding tail places after
@@ -340,8 +350,9 @@ the rendering update (`Document::render`, after layout and before paint, as
 boxes whose harvest noted a §6.5.1 fallback-sensitive change. §2.5 anchor
 relevance is a clause of the `content-visibility: auto` determination
 (`visual/relevance.rs`). Cost: a page without anchor positioning pays one
-`is_empty` test per run, three field reads per restyled element at the
-harvest, and nothing per frame.
+`is_empty` test per run and per adopted scroll, three field reads per
+restyled element at the harvest, and nothing per frame; a page with some
+pays, per frame, one sample per anchored slot.
 
 ## Visual order, paint and the committed frame
 
