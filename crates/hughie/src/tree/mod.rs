@@ -408,9 +408,12 @@ pub trait LayoutTree {
 
     /// Hands the host what a committing absolute pass decided for an
     /// anchor-positioned `node`: every box that uses an anchor function,
-    /// `position-area`, `anchor-center` or position options. Boxes that use
-    /// none of them are never reported (the host knows it cleared them). The
-    /// default keeps nothing.
+    /// `position-area`, `anchor-center`, a `position-anchor` naming an
+    /// element, or position options — exactly the boxes
+    /// [`crate::compute::uses_anchor_positioning`] (or a position option
+    /// count above one) selects. Boxes that use none of them are never
+    /// reported (the host knows it cleared them). The default keeps
+    /// nothing.
     fn set_anchor_outcome(
         &self,
         state: &mut Self::State,

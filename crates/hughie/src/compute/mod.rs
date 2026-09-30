@@ -10,7 +10,7 @@ mod relative;
 mod single_axis;
 mod util;
 
-pub use anchor::anchor_size_axis;
+pub use anchor::{anchor_size_axis, uses_anchor_positioning};
 pub use flexbox::compute_flexbox_layout;
 pub use grid::{compute_grid_lanes_layout, compute_grid_layout};
 #[cfg(feature = "layout-test-utils")]

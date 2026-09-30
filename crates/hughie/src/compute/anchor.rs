@@ -602,11 +602,19 @@ pub(super) fn is_anchor_inset(value: &Inset) -> bool {
 
 /// Whether an absolutely positioned box's style uses anything of
 /// css-anchor-position-1 the absolute pass resolves: an anchor function in a
-/// size, min/max size, margin or inset, a `position-area`, or
-/// `anchor-center` self-alignment. The one check every absolutely positioned
+/// size, min/max size, margin or inset, a `position-area`,
+/// `anchor-center` self-alignment, or a `position-anchor` that names an
+/// element (which gives the box a default anchor, and with it the
+/// scrollable containing block). The one check every absolutely positioned
 /// box pays; a box without any of them is laid out exactly as before.
+///
+/// Public for hosts: exactly the boxes this answers `true` for (plus those
+/// with position options) are reported through
+/// [`LayoutTree::set_anchor_outcome`](crate::tree::LayoutTree::set_anchor_outcome),
+/// so a host keeping per-box anchor state can tell a box that stopped being
+/// anchor-positioned from one that simply was not laid out again.
 #[inline]
-pub(super) fn uses_anchor_positioning(style: &impl CoreStyle) -> bool {
+pub fn uses_anchor_positioning(style: &impl CoreStyle) -> bool {
     let size = style.size();
     let min_size = style.min_size();
     let max_size = style.max_size();
@@ -629,6 +637,7 @@ pub(super) fn uses_anchor_positioning(style: &impl CoreStyle) -> bool {
         || !style.position_area().is_none()
         || style.justify_self().0.value() == AlignFlags::ANCHOR_CENTER
         || style.align_self().0.value() == AlignFlags::ANCHOR_CENTER
+        || style.names_position_anchor()
 }
 
 /// The geometry values an absolutely positioned box's layout reads, borrowed

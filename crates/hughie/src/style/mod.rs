@@ -65,6 +65,7 @@ pub use stylo::values::computed::{
 };
 pub use stylo::values::generics::position::TreeScoped;
 pub use stylo::values::specified::align::AlignFlags;
+pub use stylo::values::specified::position::PositionAnchorKeyword;
 pub use text::{TextBrush, TextContainerStyle, TextRun, TextRunStyle};
 
 pub const RELATIVE_REFERENCE_NONE: RelativeReference = -1;
@@ -215,15 +216,27 @@ style_protocol! {
             // css-anchor-position-1 §3.1. An accepted `@position-try`
             // property, so the absolute pass reads it from the position
             // option being laid out, like the insets, sizes and margins.
-            //
-            // This and `position_try_order` (§6.2) answer their initial
-            // values: the fork's `lynx` build does not generate either
-            // longhand yet, so there is no computed value to read. Once it
-            // does, the defaults read `get_position().position_area` and
-            // `.position_try_order`; until then only a host overriding them
-            // gets past the initial value.
-            position_area -> PositionArea = PositionArea::none(),
-            position_try_order -> PositionTryOrder = PositionTryOrder::normal(),
+            position_area -> PositionArea =
+                style.computed_values().get_position().position_area,
+            // §6.2, read from the box's own style: the order the fallback
+            // loop tries its options in is not itself an option's property.
+            position_try_order -> PositionTryOrder =
+                style.computed_values().get_position().position_try_order,
+            // §2.4: whether `position-anchor` names an element — a
+            // `<anchor-name>` or `match-parent` — rather than `normal`,
+            // `none` or `auto`. `normal` and `auto` name the implicit anchor
+            // element, which only a host language defines; `normal` with a
+            // `position-area` is already on the anchored path through that
+            // property. A box whose only anchor-positioning property is
+            // `position-anchor` still has a default anchor, and so its
+            // scrollable containing block (css-position-4), which only the
+            // anchored path asks the host for.
+            names_position_anchor -> bool = !matches!(
+                style.computed_values().get_position().position_anchor.value,
+                PositionAnchorKeyword::Normal
+                    | PositionAnchorKeyword::None
+                    | PositionAnchorKeyword::Auto
+            ),
             order -> i32 = style.computed_values().get_position().order,
         }
     }
@@ -305,6 +318,7 @@ mod tests {
         assert_eq!(style.justify_self(), SelfAlignment::auto());
         assert!(style.position_area().is_none());
         assert!(style.position_try_order().is_normal());
+        assert!(!style.names_position_anchor());
         assert_eq!(style.order(), 0);
     }
 
