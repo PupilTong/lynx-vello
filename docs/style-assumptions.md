@@ -1053,62 +1053,33 @@ and §D.16 with what the wire format actually permits.)*
     declaration, not a guarded one). With the feature off the fork is
     upstream (`vendor/stylo/style/tests/lynx_feature_off_parity.rs`).
     - **Resolution (§5.1.1).** `hughie` resolves the function
-      (`crates/hughie/src/compute/anchor.rs`) for an absolutely positioned
-      box that its containing block's own absolute pass lays out: an
-      `absolute` box, or a `fixed` one, whose box parent establishes its
-      containing block — so a `fixed` box under a transformed parent
-      resolves like `absolute`. The
+      (`crates/hughie/src/compute/anchor.rs`) for every absolutely
+      positioned box: one its containing block's own absolute pass lays out
+      (its box parent establishes its containing block), and — since the
+      host's full §2.3 lookup (below, "Host side") — one the positioned
+      pass places against an outer containing block. The
       host names the target and reports its unrounded border box from the
       current pass (`LayoutTree::anchor_rect`, whose size `anchor-size()`
       reads). The keyword picks the
       anchor's axis: `width`/`height` physically, `block`/`self-block`
       vertically and `inline`/`self-inline` horizontally (the fork has no
       `writing-mode`), and an omitted keyword the property's own axis. A name
-      left out selects the implicit anchor, which needs `position-anchor`,
-      so there is none.
+      left out selects the default anchor (`position-anchor`).
     - **Unresolvable → fallback → initial value.** Every other box — in
-      flow, relatively or stickily positioned, or a `fixed` (or `absolute`)
-      box the positioned pass places against a containing block that is not
-      its box parent — and an absolutely positioned box with no target take
-      the fallback.
+      flow, relatively or stickily positioned — and an absolutely positioned
+      box with no target take the fallback.
       Without one the declaration is invalid at computed-value time, which
       the engine approximates by using the property's initial value at
       layout time: `auto` for sizes and insets, `none` for max sizes, `0`
       for margins. Inside a math function one unresolvable `anchor-size()`
       without a fallback makes the whole value initial. The computed value
       never changes; only layout sees the substitution.
-    - **Targets (§2.3, a subset).** The candidates are the query box's
-      containing block's box children (`display: contents` flattened) whose
-      `anchor-name` lists the name. An in-flow one is acceptable anywhere in
-      tree order, an absolutely positioned one only before the query box
-      (after it, it is laid out after the query box, and §2.3 says the
-      same); the last acceptable one in tree order wins. An ancestor is
-      never a target: the containing block is the box parent, and §2.3 wants
-      a descendant of it. **Not modelled:** §2.3's containing-block-chain
-      clause (an anchor deeper inside a sibling's subtree), an absolutely
-      positioned sibling that escapes to an outer containing block (§2.3
-      accepts it; the positioned pass places it only after the query box, so
-      it is rejected as a candidate), `anchor-scope`
-      (so nothing is scoped — but since only the containing block's own
-      children are candidates, a coordinator nested in another's header sees
-      only its own header and toolbar), the top layer, and tree-scoped name
-      matching (names compare by identifier; a name from a shadow tree's
-      styles is not kept out of the light tree). The lookup is one pass over
-      the containing block's children per function, with no document-wide
-      index, so one commit of a containing block costs anchored boxes ×
-      functions × its children — quadratic in its fan-out when many
-      absolutely positioned children use `anchor-size()`. It is paid per
-      relayout of the containing block, never per frame.
-    - **Why the subtree clause is out.** Sizes come from the current pass,
-      and the engine lays a query box out again only when its containing
-      block runs again. A direct child cannot change size without its parent
-      — the containing block — running again, so every target of the subset
-      is covered by the existing dirty-path invalidation. A box deeper inside
-      a sibling can: a mutation below it may relayout in place under a
-      content-independent input, or stop at a `contain: strict` sibling,
-      without that sibling's own size changing, and nothing would reach the
-      query box. Covering it needs a target index and anchor-aware
-      invalidation; neither exists.
+    - **Targets.** Superseded by the host's full §2.3 lookup ("Host side",
+      below): the 2026-09-29 subset (only the containing block's own box
+      children, no `anchor-scope`, no tree scopes) and its reason for
+      leaving the containing-block-chain clause out (no target index, no
+      anchor-aware invalidation) are gone — the name index and the settle
+      loop are both.
     - **Caching.** The query box stays cacheable. Its own run still reads
       the function, unresolved; the absolute pass therefore hands it, on
       every axis where a size, a min/max size or a margin holds one (both
@@ -1134,15 +1105,13 @@ and §D.16 with what the wire format actually permits.)*
       algorithm's absolute pass, the measured and aspect-ratio paths, in-flow
       items, and the cache).
 
-    - **Layout engine for the full module (2026-09-30, ahead of the fork
-      and the `dom` host).** `hughie` now implements the rest of
-      css-anchor-position-1's layout side; until the fork parses the
-      properties and `dom` answers the new `LayoutTree` methods, only its
-      mock-host tests reach it (`crates/hughie/tests/anchor_positioning.rs`,
-      WPT numbers where a file is named). `CoreStyle::position_area` and
-      `position_try_order` answer their initial values until the fork's
-      `lynx` build generates the longhands. The rules, in the order the
-      absolute pass applies them per position option:
+    - **Layout engine for the full module (2026-09-30).** `hughie`
+      implements the rest of css-anchor-position-1's layout side, pinned
+      against a mock host (`crates/hughie/tests/anchor_positioning.rs`, WPT
+      numbers where a file is named) and reached through `dom` (below,
+      "Host side"). `CoreStyle::position_area`, `position_try_order` and
+      `names_position_anchor` read the fork's computed values. The rules, in
+      the order the absolute pass applies them per position option:
       1. **Options (§6.1, §6.5.2).** The host hands over each option
          already cascaded (`position_option_style`, index 0 = the box's own
          style); the engine reads only the accepted `@position-try`
@@ -1252,19 +1221,122 @@ and §D.16 with what the wire format actually permits.)*
       box (css-position-3 §4.1 wants fit-content); the static position
       ignores self-alignment (§3.5.1's `self-end`/`center` rules — both
       `auto` insets still use the start-aligned static position); §3.5.2's
-      *resolved* weaker inset for `getComputedStyle` is not produced; the
-      scrollable containing block replaces the padding box only for a box
-      on the anchored path — one that uses an anchor function,
-      `position-area`, `anchor-center` or options — because the engine
-      never reads `position-anchor` and a box with nothing else never asks
-      the host whether it has a default anchor (a plain `position-anchor`
-      box is laid out against the padding box).
+      *resolved* weaker inset for `getComputedStyle` is not produced. A box
+      whose only anchor-positioning property is a `position-anchor` naming
+      an element (`<anchor-name>` or `match-parent`) is on the anchored path
+      too (`CoreStyle::names_position_anchor`), so it gets its scrollable
+      containing block.
       **Conflict, unverified in browsers:** WPT
       `grid-position-area-basic.html`'s reference places its box (as wide as
       the word "Anchored") at an empty `position-area` column 20px from the
       grid container's padding edge, unshifted, overflowing that edge; the
       engine follows §4.4.1.2's text instead and shifts it back until it
       ends at the padding edge (the mock-host test uses a 30px box).
+
+    - **Host side (`dom`, 2026-09-30).** `crates/dom/src/layout/anchors.rs`
+      answers `hughie`'s anchor queries and keeps the per-box state;
+      `docs/dom-architecture.md` ("Anchor positioning") has the storage and
+      the settle loop. What it resolves, and how:
+      1. **Target anchor element (§2.3).** Candidates come from a name index
+         the style harvest maintains (entries only for elements declaring
+         `anchor-name`/`anchor-scope`), so a lookup costs the elements
+         declaring the name. A candidate qualifies when its name *loosely*
+         matches the reference (declared in the reference's tree or a
+         shadow-including ancestor tree — the tree read back from the
+         cascade level the fork records, as for timeline names), it holds a
+         committed box this pass that is not hidden, `anchor-scope` lets it
+         through both ways (its nearest scope for the name must contain the
+         query box; the query box's nearest scope for the name must contain
+         it; scopes match strictly, `all` included), and it is acceptable:
+         it, or recursively the element generating its containing block,
+         shares the query box's containing block and is in flow or an
+         absolutely positioned box earlier in flat tree order. The nearest
+         qualifying ancestor wins, else the last in flat tree order. **Not
+         modelled / approximated:** the top layer (every box is in one),
+         the distinction between the initial containing block and the
+         viewport (the same containing block here, so a `fixed` box can
+         anchor to anything in flow — Blink's behaviour), "tree order" (the
+         flat tree's), and the skipped-contents clause, which the
+         committed-box check subsumes (an element in skipped contents has no
+         box; a positioned box in the same skipped contents is not laid out
+         either). WPT `anchor-name-in-shadow.html`'s second case (a shadow
+         tree's reference not matching its host's document-tree name)
+         contradicts the ED's loosely matched names and
+         `anchor-name-shadow-higher-tree.html`; the ED wins.
+      2. **Geometry.** The target's unrounded border box in the padding-box
+         coordinates of the element generating the query box's containing
+         block (the viewport's for `None`), unscrolled, relative offsets
+         included, transforms ignored, translated by the box's remembered
+         scroll offsets (3.).
+      3. **Remembered scroll offsets (§3.3).** Kept per anchored box as
+         *displacements*: over each anchor's scroll containers up to, not
+         including, the box's containing block, minus their scroll offsets,
+         plus the sticky shifts of the anchor and its sticky ancestors on
+         that chain. Recorded after the run that reached a recalculation
+         point: the box's first report (it began generating boxes — a box
+         that stops generating one loses its state) and a fallback
+         determination that switched options; an anchor first referenced
+         between two points is recorded on first reference, so no layout
+         answer ever follows live scrolling. An option being *tried*, and a
+         box with no record yet, read the current (stored, clamped) scroll
+         offsets — §6.5.2's hypothetical recalculation point — without
+         sticky shifts, which need a finished run; the settle loop re-reads
+         when the recording then differs.
+      4. **Default anchor (§2.4).** `<anchor-name>` → the target anchor
+         element; `match-parent` → the flat-tree parent's default anchor
+         when the parent is absolutely positioned (`position-anchor` applies
+         to nothing else) and that anchor is acceptable for the box;
+         `normal`, `none`, `auto` → none (no implicit anchors here, and
+         `normal` is `auto` only with a `position-area`). Not cached per
+         pass: the lookup is recomputed per query; its cost is the declared
+         names' candidates times their depth.
+      5. **Scrollable containing block (css-position-4).** The containing
+         block generator's scrolling area from its last committed box — this
+         engine's `ScrollBox::scroll_size`, which ends at the content's far
+         edge, not past the end padding (WPT
+         `scrollable-containing-block-*.html` expect the padding; recorded as
+         a difference). Asked during the generator's own run, so it is the
+         previous run's box; the settle loop re-reads it.
+      6. **Position options (§6).** Cascaded at the style harvest, once per
+         restyle of an element whose `position-try-fallbacks` is not `none`,
+         with the fork's `Stylist::resolve_position_try` (Position Fallback
+         Origin over the element's rules, then the try tactic; an entry
+         naming no rule is dropped, §6.1), and re-cascaded when a stylist
+         flush reports a referenced `@position-try` name changed. Stored on
+         the tree arenas beside the base style.
+      7. **Last successful option (§6.5.1).** Recorded once per rendering
+         update (`Document::render`, after layout, before paint), from the
+         outcome of the last layout; `Document::layout` alone never records,
+         so a second layout without a render starts from the base style (WPT
+         `position-try-fallbacks-no-fit-after-fit.html`). A fallback-sensitive
+         change noted at the flush harvest — `position`, a `position-try`
+         longhand, an accepted `@position-try` property of the base style or
+         of any option, a referenced rule, generating no box — makes the
+         next rendering update forget the option and lay the box out again
+         before it records. Animation ticks never make one (§6.5.1 ignores
+         the Animations and Transitions origins; approximated as "a change
+         the animation harvest saw"). Not modelled: "its containing block
+         association has changed".
+      8. **Readback.** Computed-value readback (`getComputedStyle`,
+         `__GetComputedStyleByKey`) reports the chosen option's values for
+         the accepted `@position-try` properties; every other property, and
+         layout and paint themselves, read the base style (plus the
+         option's geometry, which `hughie` reads from the option).
+      9. **Settle loop.** After every layout run the host re-asks every
+         query each anchored box's last committing pass read and lays the
+         boxes whose answers moved out again: an anchor behind a
+         containment boundary, one relaid in place deep in a sibling, an
+         escaping anchor the rounding tail placed after its reader, a
+         scrollable containing block. At most `ANCHOR_PASSES` (3) runs per
+         `layout()`, the last closing; whatever it leaves is re-verified by
+         the next run.
+      10. **Anchor relevance (§2.5).** A `content-visibility: auto` element
+          about to skip stays relevant when it holds, looked up as if it did
+          not skip, a target anchor of a shown anchored box whose containing
+          block is outside it.
+      **Tests:** `crates/dom/tests/anchor_positioning.rs` (WPT ports, each
+      naming its file and adaptation, and the skipped groups in its module
+      doc) and `crates/dom/tests/anchor_size.rs`.
 
 ## Deliberately still open (known non-decisions)
 

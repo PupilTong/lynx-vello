@@ -46,7 +46,13 @@ the layout vector does. The committed-box table is the one the layout pass
 *writes*, and `LayoutTree::compute_layout` holds the arenas shared, so its
 records are staged through a `RefCell` and published by `Document::layout`
 under the exclusive borrow, once per pass — the published half has to be a
-plain `Vec`, because the parallel style traversal reads the container half. The **document element is permanent
+plain `Vec`, because the parallel style traversal reads the container half. A
+third, keyed rather than slot-aligned, is css-anchor-position-1's
+`AnchorRegistry` (`layout/anchors.rs`): the anchor-name index and each
+element's cascaded position options, kept on the arenas because
+`LayoutTree::position_option_style` lends an option style out of them exactly
+as it lends the base style, with no state parameter to reach (see "Anchor
+positioning" under the layout host). The **document element is permanent
 and pre-created**: `Document::new(device, root_tag, root_payload)` builds it at
 slot one (tag injected — the core owns no tag vocabulary), `document_element()`
 returns it non-optionally, and it can never be detached or removed, so the
@@ -289,6 +295,53 @@ boundary-stopped invalidation); the internal invalidation funnel covers
 mutations styles cannot see (content/child-list changes with identical computed
 styles). Public mutation methods perform that invalidation themselves; only the
 `layout-test-utils` feature exposes an explicit benchmark hook.
+
+**Anchor positioning** (css-anchor-position-1; `layout/anchors.rs`,
+`docs/style-assumptions.md` §28). `hughie` resolves every anchor function,
+`position-area`, `anchor-center` and the fallback loop; the host answers which
+element a query names and where it is, and keeps what must outlive one pass.
+Style-derived state lives in `TreeArenas`' `AnchorRegistry`, maintained by both
+style harvests (the flush's and the animation tick's), which report the
+restyled elements whose style declares an `anchor-name`, an `anchor-scope` or
+`position-try-fallbacks` (or declared one before): a **name index** (anchor
+name → declaring elements, element → names, the set of `anchor-scope`
+declarers) in the `ScrollTimelines` shape, so a lookup visits only the
+elements declaring the name; and each element's **position options**, cascaded
+once per restyle with the fork's `Stylist::resolve_position_try` (Position
+Fallback Origin + try tactic, base style first) and re-cascaded when a stylist
+flush reports a referenced `@position-try` name in
+`CascadeDataDifference::changed_position_try_names` (the style engine
+accumulates them across flushes). The target lookup (§2.3) walks the
+candidates: loosely matched tree-scoped names (`Node::scoped_name_tree`, shared
+with the timeline lookup), `anchor-scope` both ways, a committed unhidden box,
+and acceptability through the containing-block chain (the element generating a
+candidate's containing block, recursively, until one shares the query box's
+containing block and is in flow or an earlier absolutely positioned box); then
+the nearest ancestor, else the last in flat tree order. Geometry is the
+target's unrounded border box in the query box's containing-block padding-box
+coordinates, translated by the box's **remembered scroll offsets** (§3.3).
+Per-box state lives in one `DocumentLayoutState::anchored` table keyed by node,
+with entries only for boxes `hughie` reported through `set_anchor_outcome`:
+the last `AnchorOutcome`, the anchor queries its last committing pass read
+(with their answers), its `RememberedScroll`, and its last successful position
+option. The painter's scroll compensation and `position-visibility` read the
+outcome and the remembered offsets from there. **The settle loop**: `hughie`
+lays an anchored box out only when its containing block runs, and an anchor
+can move without that happening (an in-place relayout deep in a sibling, a
+`contain: strict` boundary, an escaping anchor the rounding tail places after
+its reader, a scrollable containing block read from the previous run), so after
+every run `Document::layout_pass` re-asks every recorded query, invalidates
+the boxes whose answer moved and runs again — `ANCHOR_PASSES` (3) runs at
+most, the last one closing. The same step records remembered scroll offsets at
+§3.3's recalculation points (a box's first report, and a fallback determination
+that switched options). The last successful position option is recorded at
+the rendering update (`Document::render`, after layout and before paint, as
+§6.5.1.1 times it), after first forgetting it — and laying out again — for
+boxes whose harvest noted a §6.5.1 fallback-sensitive change. §2.5 anchor
+relevance is a clause of the `content-visibility: auto` determination
+(`visual/relevance.rs`). Cost: a page without anchor positioning pays one
+`is_empty` test per run, three field reads per restyled element at the
+harvest, and nothing per frame.
 
 ## Visual order, paint and the committed frame
 

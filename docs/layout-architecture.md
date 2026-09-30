@@ -350,7 +350,14 @@ anchored path is a cold, out-of-line function. The box's own run never
 resolves an anchor function or reads an option: the absolute pass hands it
 every axis whose values differ from its own style's as a known dimension, so
 its cache key carries every anchor and option it depends on, and trial options
-are measured, only the chosen one committed. Scope and reasons:
+are measured, only the chosen one committed. A box with none of those
+properties but a `position-anchor` naming an element
+(`CoreStyle::names_position_anchor`) is on the anchored path too: it has a
+default anchor, and so a scrollable containing block. The `dom` host's half —
+the anchor-name index, the §2.3 lookup, remembered scroll offsets, options
+cascaded at the style harvest, and the settle loop that relays a box whose
+anchor moved without its containing block running again — is
+`docs/dom-architecture.md` ("Anchor positioning"). Scope and reasons:
 `docs/style-assumptions.md` §28.
 
 **`LayoutInput` stays one type, and the tree stays one trait.** The style
