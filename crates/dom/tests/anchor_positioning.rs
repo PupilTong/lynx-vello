@@ -39,8 +39,11 @@
 //! `crates/dom/src/visual/anchored.rs` cover §3.3 and §6.6);
 //! `position-try-order-include-base.html` (it passes only if the base
 //! style is re-sorted while it fits; the ED determines fallback only on
-//! overflow); the remaining reftests; and parse/computed-value cases (the
-//! fork's `lynx_anchor_positioning.rs` has them).
+//! overflow); `position-area-fixed.html` and the fixed-position and
+//! `position-area-overflow-icb-*` reftests (they size the root element
+//! against the initial containing block, which is the viewport here); the
+//! remaining reftests; and parse/computed-value cases (the fork's
+//! `lynx_anchor_positioning.rs` has them).
 
 #![allow(clippy::float_cmp)]
 

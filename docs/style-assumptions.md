@@ -1460,8 +1460,10 @@ and §D.16 with what the wire format actually permits.)*
       `CSS.registerProperty`; stylesheet removal; `-crash` files;
       `anchor-scroll-*`, `position-visibility-*` and the other
       scroll-compensation files, whose numbers include the default scroll
-      shift (covered instead by the painter and compose tests above); and
-      the remaining reftests.
+      shift (covered instead by the painter and compose tests above);
+      root-element and initial-containing-block sizing
+      (`position-area-fixed`, `position-area-overflow-icb-*`); and the
+      remaining reftests.
 
 ## Deliberately still open (known non-decisions)
 
