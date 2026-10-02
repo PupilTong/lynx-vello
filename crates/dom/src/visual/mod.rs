@@ -38,9 +38,9 @@
 //! Invariants this module relies on (verified against the layout host):
 //! - `Layout.location` is border-box-relative to the **box parent**'s border box for every box —
 //!   the container whose formatting context laid the box out, which is the DOM parent except across
-//!   dissolved `display: contents` levels — including hoisted absolute/fixed boxes
-//!   (`position_hoisted` rewrites their location back into parent-relative terms). The build walks
-//!   the same flattened box-tree, so plain offset accumulation along it is sound.
+//!   dissolved `display: contents` levels — including hoisted absolute/fixed boxes (the layout
+//!   host's `hoisted` module rewrites their location back into parent-relative terms). The build
+//!   walks the same flattened box-tree, so plain offset accumulation along it is sound.
 //! - Rounded layouts stay in CSS px with parent-relative locations that telescope exactly to
 //!   snapped absolute positions at any device scale.
 //! - Subtrees the layout host zeroes (display:none, unstyled descendants, `DisplayMode::Leaf`

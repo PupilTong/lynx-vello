@@ -513,6 +513,7 @@ impl<T> Document<T> {
         self.note_slot_assignment_inserted(parent, child, appended);
         self.note_child_list_change(parent, index);
         self.invalidate_layout(child);
+        self.invalidate_hoisted_under(child);
         let connected = contains_custom_elements && self.is_connected(child);
         self.note_custom_elements_inserted(child, connected);
         self.drain_reactions(base);

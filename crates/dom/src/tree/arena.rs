@@ -17,6 +17,7 @@ use hughie::text::TextContext;
 use hughie::tree::{LayoutInput, LayoutSlot};
 use rustc_hash::FxHashMap;
 use slab::Slab;
+use smallvec::SmallVec;
 
 use crate::layout::anchors::{AnchorRegistry, AnchoredBox, PendingReads};
 use crate::layout::committed_box::{CommittedBox, CommittedBoxTable};
@@ -529,6 +530,28 @@ pub(crate) struct DocumentLayoutState {
     /// The boxes whose outcome this run reported, in report order, for the
     /// recording the settle loop makes after the run. Empty between runs.
     pub(crate) anchor_reported: Vec<NodeId>,
+    /// Each element that generates the containing block of an out-of-flow
+    /// box whose box parent is another box (an `absolute` box under a
+    /// non-positioned parent, a `fixed` one under a transformed ancestor),
+    /// with those boxes: what its algorithm's absolute pass lays out besides
+    /// its own children ([`hughie::tree::LayoutTree::hoisted_children`]).
+    /// Written where the box's parent records its static position, the one
+    /// call every committing run of that parent makes for it. A side table
+    /// because only such containing blocks have an entry: the document's
+    /// UA sheet makes every Lynx element `position: relative`, so a page
+    /// gets one only from `fixed` boxes under transforms or authored
+    /// `position: static` parents. An entry can outlive its box's escape —
+    /// the box stopped being positioned, or moved — until the box escapes
+    /// elsewhere or is freed; every read re-derives the containing block and
+    /// skips it, so a stale entry costs a lookup, never a misplaced box.
+    pub(crate) hoisted_to: FxHashMap<NodeId, SmallVec<[NodeId; 2]>>,
+    /// The inverse of [`Self::hoisted_to`]: each registered box and the
+    /// containing block it is listed under, so moving it costs one lookup.
+    pub(crate) hoisted_from: FxHashMap<NodeId, NodeId>,
+    /// Whether the rounding tail is running, where a box placed late (its
+    /// containing block did not run) is written after the walk has already
+    /// rounded the boxes above it and needs no marks on them.
+    pub(crate) in_rounding_tail: bool,
 }
 
 /// One entry of [`DocumentLayoutState::sticky_containing_blocks`].
@@ -569,6 +592,9 @@ impl DocumentLayoutState {
             anchored: FxHashMap::default(),
             anchor_pending: PendingReads::default(),
             anchor_reported: Vec::new(),
+            hoisted_to: FxHashMap::default(),
+            hoisted_from: FxHashMap::default(),
+            in_rounding_tail: false,
         }
     }
 
@@ -614,6 +640,37 @@ impl DocumentLayoutState {
         }
         if !self.anchored.is_empty() {
             self.anchored.remove(&slot);
+        }
+        if !self.hoisted_from.is_empty() {
+            self.register_hoisted(slot, None);
+            if let Some(boxes) = self.hoisted_to.remove(&slot) {
+                for hoisted in boxes {
+                    self.hoisted_from.remove(&hoisted);
+                }
+            }
+        }
+    }
+
+    /// Lists `node` under the containing block `block` its absolute pass
+    /// lays it out from (`None`: no element's — the initial containing
+    /// block's, which the run's tail places), moving it off any other.
+    pub(crate) fn register_hoisted(&mut self, node: NodeId, block: Option<NodeId>) {
+        let previous = self.hoisted_from.get(&node).copied();
+        if previous == block {
+            return;
+        }
+        if let Some(previous) = previous {
+            self.hoisted_from.remove(&node);
+            if let Some(list) = self.hoisted_to.get_mut(&previous) {
+                list.retain(|listed| *listed != node);
+                if list.is_empty() {
+                    self.hoisted_to.remove(&previous);
+                }
+            }
+        }
+        if let Some(block) = block {
+            self.hoisted_to.entry(block).or_default().push(node);
+            self.hoisted_from.insert(node, block);
         }
     }
 
@@ -662,6 +719,9 @@ impl DocumentLayoutState {
             anchored: _,
             anchor_pending: _,
             anchor_reported: _,
+            hoisted_to: _,
+            hoisted_from: _,
+            in_rounding_tail: _,
         } = self;
         let context = text_context
             .get_or_insert_with(|| Box::new(TextContext::new()))
@@ -711,6 +771,9 @@ impl DocumentLayoutState {
             anchored: _,
             anchor_pending: _,
             anchor_reported: _,
+            hoisted_to: _,
+            hoisted_from: _,
+            in_rounding_tail: _,
         } = self;
         // Unlike the path this replaces, restoring can re-enter the shaper —
         // a truncating block rebuilds its display layout — so the context is

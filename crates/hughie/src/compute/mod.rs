@@ -372,6 +372,201 @@ pub fn compute_absolute_layout<T: LayoutTree>(
     )
 }
 
+/// Lays out `node`, a box [`LayoutTree::hoisted_children`] reports for
+/// `containing_block`, against that box's padding box as its last committed
+/// layout has it.
+///
+/// What a container's own absolute pass does for the hoisted boxes it
+/// reaches, for a host that has to place one whose containing block did not
+/// run: an in-place relayout of a subtree the box sits in, which its
+/// containing block above it never sees. Both read the same padding box, so
+/// they agree on the result.
+pub fn compute_hoisted_layout<T: LayoutTree>(
+    tree: &T,
+    state: &mut T::State,
+    containing_block: T::NodeId,
+    node: T::NodeId,
+) {
+    let block = &tree.layout(state, containing_block).unrounded;
+    let border = block.border;
+    let size = Size::new(
+        (block.size.width - border.horizontal_sum()).max(0.0),
+        (block.size.height - border.vertical_sum()).max(0.0),
+    );
+    let rtl = tree.style(containing_block).direction() == direction::T::Rtl;
+    lay_out_hoisted(
+        tree,
+        state,
+        containing_block,
+        node,
+        &AbsoluteContainingBlock::padding_box(size, rtl),
+        border,
+    );
+}
+
+/// Lays out every box [`LayoutTree::hoisted_children`] reports for `node`,
+/// whose padding box is `padding_box_size` inside `border`: the absolute
+/// pass of a host algorithm (a paragraph) that has no own out-of-flow
+/// children to interleave them with.
+pub fn compute_hoisted_children<T: LayoutTree>(
+    tree: &T,
+    state: &mut T::State,
+    node: T::NodeId,
+    padding_box_size: Size<f32>,
+    border: Edges<f32>,
+    rtl: bool,
+) {
+    HoistedPass::new(padding_box_size, border, rtl).rest(tree, state, node);
+}
+
+/// One hoisted box: its static position moved from its box parent's
+/// coordinates into the containing block's, laid out there, and its layout
+/// moved back.
+fn lay_out_hoisted<T: LayoutTree>(
+    tree: &T,
+    state: &mut T::State,
+    containing_block_node: T::NodeId,
+    node: T::NodeId,
+    containing_block: &AbsoluteContainingBlock,
+    border: Edges<f32>,
+) {
+    let offset = tree.hoisted_parent_offset(state, containing_block_node, node);
+    let static_position = tree.layout(state, node).static_position;
+    let static_in_padding = Point::new(
+        offset.x + static_position.x - border.left,
+        offset.y + static_position.y - border.top,
+    );
+    let mut layout =
+        compute_absolute_layout_in(tree, state, node, *containing_block, move |_, _| {
+            static_in_padding
+        });
+    layout.location = Point::new(
+        layout.location.x + border.left - offset.x,
+        layout.location.y + border.top - offset.y,
+    );
+    tree.set_hoisted_layout(state, containing_block_node, node, layout);
+}
+
+/// The hoisted half of a container's absolute pass: the boxes
+/// [`LayoutTree::hoisted_children`] reports, laid out in flat tree order
+/// among the container's own out-of-flow children.
+///
+/// Every hoisted box is placed against the container's padding box —
+/// css-position-3's containing block, with the container's direction and the
+/// author's self-alignment — whatever the container's algorithm does for its
+/// own children (a grid area, Lynx's inset-only `linear` and `relative`):
+/// those are rules about a container's children, and a hoisted box is not
+/// one.
+pub(super) struct HoistedPass {
+    /// Every hoisted box whose `via` is below this has been laid out.
+    next: usize,
+    containing_block: AbsoluteContainingBlock,
+    border: Edges<f32>,
+}
+
+impl HoistedPass {
+    #[inline]
+    pub(super) const fn new(padding_box_size: Size<f32>, border: Edges<f32>, rtl: bool) -> Self {
+        Self {
+            next: 0,
+            containing_block: AbsoluteContainingBlock::padding_box(padding_box_size, rtl),
+            border,
+        }
+    }
+
+    /// Lays out the hoisted boxes that come before the container's own
+    /// out-of-flow child at flattened index `index` in tree order.
+    #[inline]
+    pub(super) fn before<T: LayoutTree>(
+        &mut self,
+        tree: &T,
+        state: &mut T::State,
+        node: T::NodeId,
+        index: usize,
+    ) {
+        if index > self.next {
+            self.lay_out(tree, state, node, self.next, index);
+            self.next = index;
+        }
+    }
+
+    /// Lays out the hoisted boxes inside the container's own out-of-flow
+    /// child at flattened index `index`, which was just laid out: they come
+    /// after it in tree order, and its own layout may be what registered
+    /// them.
+    #[inline]
+    pub(super) fn inside<T: LayoutTree>(
+        &mut self,
+        tree: &T,
+        state: &mut T::State,
+        node: T::NodeId,
+        index: usize,
+    ) {
+        self.lay_out(tree, state, node, index, index + 1);
+        self.next = index + 1;
+    }
+
+    /// Lays out every hoisted box left, after the container's last own
+    /// out-of-flow child.
+    #[inline]
+    pub(super) fn rest<T: LayoutTree>(&mut self, tree: &T, state: &mut T::State, node: T::NodeId) {
+        self.lay_out(tree, state, node, self.next, usize::MAX);
+        self.next = usize::MAX;
+    }
+
+    /// The hoisted boxes whose `via` is in `from..to`, in order. The common
+    /// answer — none — costs one host call and stays inline; the rest is
+    /// out of line.
+    #[inline]
+    fn lay_out<T: LayoutTree>(
+        &self,
+        tree: &T,
+        state: &mut T::State,
+        node: T::NodeId,
+        from: usize,
+        to: usize,
+    ) {
+        if tree.hoisted_children(state, node).is_empty() {
+            return;
+        }
+        self.lay_out_listed(tree, state, node, from, to);
+    }
+
+    /// The host is asked again after every box: laying one out can register
+    /// another inside it, which comes right after it in tree order.
+    #[cold]
+    #[inline(never)]
+    fn lay_out_listed<T: LayoutTree>(
+        &self,
+        tree: &T,
+        state: &mut T::State,
+        node: T::NodeId,
+        from: usize,
+        to: usize,
+    ) {
+        let mut done = 0;
+        loop {
+            let hoisted = tree.hoisted_children(state, node);
+            let Some(child) = hoisted
+                .iter()
+                .filter(|child| (from..to).contains(&child.via))
+                .nth(done)
+            else {
+                return;
+            };
+            lay_out_hoisted(
+                tree,
+                state,
+                node,
+                child.node,
+                &self.containing_block,
+                self.border,
+            );
+            done += 1;
+        }
+    }
+}
+
 /// The containing block of an absolutely positioned box, as the absolute pass
 /// of the box that generates it knows it.
 #[derive(Debug, Clone, Copy)]
@@ -1895,6 +2090,15 @@ mod tests {
                 margin_box: Rect::ZERO,
             },
         );
+        // Hoisting: a host that lowers no position reports nothing, and the
+        // default commit is a plain store.
+        assert!(tree.hoisted_children(&state, 0).is_empty());
+        assert_eq!(tree.hoisted_parent_offset(&state, 0, 1), Point::ZERO);
+        let mut hoisted = Layout::with_order(0);
+        hoisted.size = Size::new(3.0, 4.0);
+        tree.set_hoisted_layout(&mut state, 0, 1, hoisted);
+        assert_eq!(state[1].unrounded.size, Size::new(3.0, 4.0));
+        compute_hoisted_children(&tree, &mut state, 0, Size::ZERO, Edges::ZERO, false);
     }
 
     #[test]

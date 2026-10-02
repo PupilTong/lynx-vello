@@ -1145,6 +1145,13 @@ pub(super) struct TestTree {
     pub(super) position_options: Vec<(TestId, Vec<TestStyle>)>,
     /// Last successful position option per node.
     pub(super) last_successful: Vec<(TestId, usize)>,
+    /// Boxes hoisted to a containing block other than their parent:
+    /// `(containing block, box, via)`, in tree order. The host's job in
+    /// production (`dom`'s `layout::hoisted`); here the test names them.
+    pub(super) hoisted: Vec<(TestId, TestId, usize)>,
+    /// Every box written by an absolute pass, in write order, own children
+    /// and hoisted ones alike.
+    pub(super) out_of_flow_writes: RefCell<Vec<TestId>>,
 }
 
 impl Default for TestTree {
@@ -1166,6 +1173,8 @@ impl Default for TestTree {
             scrollable_containing_block: None,
             position_options: Vec::new(),
             last_successful: Vec::new(),
+            hoisted: Vec::new(),
+            out_of_flow_writes: RefCell::new(Vec::new()),
         }
     }
 }
@@ -1226,7 +1235,54 @@ impl LayoutTree for TestTree {
     fn set_unrounded_layout(&self, state: &mut TestState, node: TestRef, layout: Layout) {
         self.layout_writes
             .set(self.layout_writes.get().saturating_add(1));
+        if matches!(
+            self.nodes[node.index].style.position,
+            PositionProperty::Absolute | PositionProperty::Fixed
+        ) {
+            self.out_of_flow_writes.borrow_mut().push(node.index);
+        }
         state.slots[node.index].unrounded = layout;
+    }
+
+    fn hoisted_children(
+        &self,
+        _state: &TestState,
+        node: TestRef,
+    ) -> smallvec::SmallVec<[hughie::tree::HoistedChild<TestRef>; 2]> {
+        self.hoisted
+            .iter()
+            .filter(|&&(block, ..)| block == node.index)
+            .map(|&(_, hoisted, via)| hughie::tree::HoistedChild {
+                node: TestRef { index: hoisted },
+                via,
+            })
+            .collect()
+    }
+
+    /// The sum of the locations from the box's parent up to, not including,
+    /// the containing block.
+    fn hoisted_parent_offset(
+        &self,
+        state: &TestState,
+        containing_block: TestRef,
+        node: TestRef,
+    ) -> Point<f32> {
+        let parent_of = |child: TestId| {
+            self.nodes
+                .iter()
+                .position(|candidate| candidate.children.contains(&child))
+        };
+        let mut offset = Point::ZERO;
+        let mut current = parent_of(node.index);
+        while let Some(ancestor) = current {
+            if ancestor == containing_block.index {
+                break;
+            }
+            let location = state.slots[ancestor].unrounded.location;
+            offset = Point::new(offset.x + location.x, offset.y + location.y);
+            current = parent_of(ancestor);
+        }
+        offset
     }
 
     fn set_static_position(&self, state: &mut TestState, node: TestRef, position: Point<f32>) {

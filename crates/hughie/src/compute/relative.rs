@@ -1329,6 +1329,7 @@ where
 fn commit_out_of_flow<T>(
     tree: &T,
     state: &mut T::State,
+    node: T::NodeId,
     items: &[OrderedItem<T::NodeId>],
     container_size: Size<f32>,
     border: Edges<f32>,
@@ -1343,7 +1344,9 @@ where
     );
     let mut scrollable_size = container_size;
     super::util::debug_assert_tree_order(items.iter().map(|item| item.document_index));
+    let mut hoisted = super::HoistedPass::new(padding_box_size, border, rtl);
     for pending in items {
+        hoisted.before(tree, state, node, pending.document_index);
         let style = tree.style(pending.node);
         match style.position() {
             PositionProperty::Absolute => {
@@ -1365,6 +1368,7 @@ where
                     style.overflow(),
                 );
                 tree.set_unrounded_layout(state, pending.node, layout);
+                hoisted.inside(tree, state, node, pending.document_index);
             }
             PositionProperty::Fixed => {
                 tree.set_static_position(state, pending.node, Point::new(border.left, border.top));
@@ -1372,6 +1376,7 @@ where
             PositionProperty::Static | PositionProperty::Relative | PositionProperty::Sticky => {}
         }
     }
+    hoisted.rest(tree, state, node);
     scrollable_size
 }
 
@@ -1585,6 +1590,7 @@ where
         commit_out_of_flow(
             tree,
             state,
+            node,
             &absolute_items,
             outer_size,
             border,

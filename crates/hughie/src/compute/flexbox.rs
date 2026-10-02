@@ -1578,6 +1578,7 @@ fn static_position_for_absolute<N>(
 fn perform_absolute_children<'tree, T>(
     tree: &'tree T,
     state: &mut T::State,
+    node: T::NodeId,
     absolute_items: &[OrderedItem<T::NodeId>],
     axes: Axes,
     rtl: bool,
@@ -1601,7 +1602,9 @@ where
     );
 
     debug_assert_tree_order(absolute_items.iter().map(|item| item.document_index));
+    let mut hoisted = super::HoistedPass::new(padding_box_size, border, rtl);
     for pending in absolute_items {
+        hoisted.before(tree, state, node, pending.document_index);
         let key = pending.key();
         let style = tree.style(key.node);
         let mut item = resolve_item(&style, key, parent_size, axes, rtl, default_alignment);
@@ -1660,6 +1663,7 @@ where
                     item.overflow,
                 );
                 tree.set_unrounded_layout(state, key.node, layout);
+                hoisted.inside(tree, state, node, pending.document_index);
             }
             PositionProperty::Fixed => {
                 tree.set_static_position(state, key.node, static_position);
@@ -1667,6 +1671,7 @@ where
             PositionProperty::Static | PositionProperty::Relative | PositionProperty::Sticky => {}
         }
     }
+    hoisted.rest(tree, state, node);
     content_size
 }
 
@@ -2030,6 +2035,7 @@ where
     let absolute_content_size = perform_absolute_children(
         tree,
         state,
+        node,
         &absolute_items,
         axes,
         rtl,

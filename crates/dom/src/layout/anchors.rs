@@ -381,9 +381,9 @@ fn is_absolutely_positioned(style: &ComputedValues) -> bool {
 /// `node` and its flat-tree ancestors, nearest first, up to and including
 /// the document node — or `None` when the chain does not end at one (a
 /// detached subtree, which lays nothing out).
-type Chain = SmallVec<[NodeId; 16]>;
+pub(super) type Chain = SmallVec<[NodeId; 16]>;
 
-fn connected_chain<T>(node: &Node<T>) -> Option<Chain> {
+pub(super) fn connected_chain<T>(node: &Node<T>) -> Option<Chain> {
     let mut chain = Chain::new();
     let mut current = Some(node);
     let mut last = node;
@@ -403,7 +403,7 @@ fn chain_contains_ancestor(chain: &Chain, ancestor: NodeId) -> bool {
 
 /// Whether the node with chain `first` comes before the one with chain
 /// `second` in flat tree order (pre-order: an ancestor comes first).
-fn precedes<T>(tree: &TreeArenas<T>, first: &Chain, second: &Chain) -> bool {
+pub(super) fn precedes<T>(tree: &TreeArenas<T>, first: &Chain, second: &Chain) -> bool {
     let mut a = first.iter().rev();
     let mut b = second.iter().rev();
     let mut parent = None;

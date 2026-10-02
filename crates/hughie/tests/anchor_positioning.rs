@@ -1926,3 +1926,53 @@ fn options_change_position_area_and_the_default_anchor() {
     assert_eq!(reported.chosen, 2);
     assert_eq!(reported.imcb, rect(100.0, 0.0, 50.0, 200.0));
 }
+
+// ---------------------------------------------------------------------------
+// Hoisted boxes: laid out by their containing block's absolute pass.
+
+/// A box whose containing block is not its parent — here `fixed` under a
+/// non-establishing wrapper — is laid out by the containing block's
+/// absolute pass in tree order with the block's own out-of-flow children:
+/// after the one before its wrapper, before the one after it. Its static
+/// position comes from the wrapper (recorded during the in-flow phase) and
+/// its layout goes back into the wrapper's coordinates.
+#[test]
+fn hoisted_boxes_interleave_with_own_out_of_flow_children_in_tree_order() {
+    let mut tree = TestTree::default();
+    let before = tree.push_leaf(absolute(5.0, 5.0), Size::new(5.0, 5.0), None);
+    let hoisted = tree.push_leaf(
+        TestStyle {
+            position: PositionProperty::Fixed,
+            inset: edges(inset_auto(), inset_auto(), inset_auto(), inset_px(20.0)),
+            ..absolute(10.0, 10.0)
+        },
+        Size::new(10.0, 10.0),
+        None,
+    );
+    let wrapper = tree.push_flex(
+        TestStyle {
+            size: Size::new(size_px(50.0), size_px(30.0)),
+            margin: edges(
+                margin_px(0.0),
+                margin_px(0.0),
+                margin_px(0.0),
+                margin_px(7.0),
+            ),
+            padding: edges(npx(3.0), npx(3.0), npx(3.0), npx(3.0)),
+            ..TestStyle::default()
+        },
+        vec![hoisted],
+    );
+    let after = tree.push_leaf(absolute(5.0, 5.0), Size::new(5.0, 5.0), None);
+    let root = tree.push_flex(container(200.0, 100.0), vec![before, wrapper, after]);
+    tree.hoisted = vec![(root, hoisted, 1)];
+    definite_layout(&tree, root, 200.0, 100.0);
+
+    assert_eq!(
+        *tree.out_of_flow_writes.borrow(),
+        vec![before, hoisted, after]
+    );
+    // `left: 20px` against the containing block is 13px into the wrapper,
+    // which sits 7px in; the static `top` is the wrapper's content edge.
+    assert_box(&tree.layout(hoisted), (13.0, 3.0, 10.0, 10.0), "hoisted");
+}

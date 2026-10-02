@@ -79,8 +79,8 @@ impl LayoutSlot {
     pub fn clear_layout_cache(&mut self) {
         self.cache.clear();
         // The node will be laid out again by whoever cleared this, and a node
-        // its parent lays out out-of-flow — an escaping absolute box, whose
-        // box the rounding tail itself writes — is reached by no other mark.
+        // its parent does not lay out — an escaping absolute box, whose box
+        // its containing block writes — is reached by no other mark.
         self.marks.insert(SlotMarks::SUBTREE_DIRTY);
     }
 
@@ -218,6 +218,12 @@ pub trait LayoutTree {
         self.layout_mut(state, node).set_unrounded(layout);
     }
 
+    /// Records the static position of an out-of-flow child whose
+    /// [`CoreStyle::position`] lowered to `fixed` — one whose containing
+    /// block its box parent does not generate — in the parent's border-box
+    /// coordinates. The parent's algorithm calls this for every such child
+    /// on every committing run, so it is also where a host learns which
+    /// containing block the child escapes to ([`Self::hoisted_children`]).
     fn set_static_position(
         &self,
         state: &mut Self::State,
@@ -227,10 +233,73 @@ pub trait LayoutTree {
         let slot = self.layout_mut(state, node);
         if slot.static_position != position {
             slot.static_position = position;
-            // The box itself is written by the rounding tail, from this
-            // position; moving it is the only warning the tail gets.
+            // The box itself is written later — by its containing block's
+            // absolute pass, or by the host after the run — from this
+            // position; moving it is the only warning the rounding tail gets.
             slot.mark_subtree_dirty();
         }
+    }
+
+    /// The out-of-flow boxes whose containing block `node` generates but
+    /// whose box parent is another box — an `absolute` box under a
+    /// non-positioned parent, a `fixed` one under a transformed ancestor
+    /// (css-position-3 §2.1) — in flat tree order, each with the index in
+    /// [`Self::flattened_children`]`(node)` of the child whose subtree holds
+    /// it.
+    ///
+    /// `node`'s algorithm lays these out in its absolute pass, interleaved
+    /// with its own out-of-flow children in tree order: css-position-3 lays
+    /// an absolutely positioned box out with its containing block, after
+    /// that block's in-flow content, and css-anchor-position-1 §2.3's
+    /// acceptable anchors are exactly the boxes that order has already
+    /// placed. The algorithm asks again after each out-of-flow box it lays
+    /// out, so a host may report a box first registered by that layout (the
+    /// box's parent ran [`Self::set_static_position`] inside it). A box whose
+    /// containing block is the initial containing block is not reported:
+    /// the host places it after the run.
+    ///
+    /// The default reports none, which is a host that does not lower
+    /// positions.
+    fn hoisted_children(
+        &self,
+        state: &Self::State,
+        node: Self::NodeId,
+    ) -> SmallVec<[HoistedChild<Self::NodeId>; 2]> {
+        let _ = (state, node);
+        SmallVec::new()
+    }
+
+    /// The border-box origin of `node`'s box parent in the border-box
+    /// coordinates of `containing_block`, from this run's committed boxes:
+    /// what turns the static position the parent recorded into the
+    /// containing block's space, and the layout computed there back into the
+    /// parent's. Asked for a box [`Self::hoisted_children`] reported, just
+    /// before it is laid out.
+    fn hoisted_parent_offset(
+        &self,
+        state: &Self::State,
+        containing_block: Self::NodeId,
+        node: Self::NodeId,
+    ) -> Point<f32> {
+        let _ = (state, containing_block, node);
+        Point::ZERO
+    }
+
+    /// Commits the layout of a box [`Self::hoisted_children`] reported, with
+    /// `location` in its box parent's border-box coordinates. The host owns
+    /// its paint `order` (its place among its parent's children, which the
+    /// containing block's algorithm does not know) and whatever marks the
+    /// rounding tail needs to reach it below boxes that did not run. The
+    /// default only stores it.
+    fn set_hoisted_layout(
+        &self,
+        state: &mut Self::State,
+        containing_block: Self::NodeId,
+        node: Self::NodeId,
+        layout: Layout,
+    ) {
+        let _ = containing_block;
+        self.set_unrounded_layout(state, node, layout);
     }
 
     fn compute_layout(
@@ -302,13 +371,14 @@ pub trait LayoutTree {
     /// The engine asks while laying `node` out through its containing block's
     /// absolute pass, so the answer must come from the current pass: every
     /// in-flow child of that containing block is committed by then, and so is
-    /// every absolutely positioned child before `node` in tree order (each
-    /// algorithm lays its out-of-flow children after its in-flow commit, in
-    /// tree order). Which elements are acceptable targets — `anchor-name`,
+    /// every absolutely positioned box it is the containing block of that
+    /// comes before `node` in tree order — its own out-of-flow children and
+    /// the ones [`Self::hoisted_children`] reports alike, since each
+    /// algorithm lays both out after its in-flow commit, interleaved in tree
+    /// order. Which elements are acceptable targets — `anchor-name`,
     /// `anchor-scope`, tree scopes, `position-anchor` for
     /// [`AnchorSpec::Default`] under the option's style — is the host's
-    /// decision, as is answering `None` for a box it does not lay out through
-    /// that pass. `anchor-size()` reads the rectangle's size.
+    /// decision. `anchor-size()` reads the rectangle's size.
     ///
     /// The default answers `None`: a host with no anchors resolves every
     /// function to its fallback and gives no box a default anchor.
@@ -422,6 +492,18 @@ pub trait LayoutTree {
     ) {
         let _ = (state, node, outcome);
     }
+}
+
+/// One box [`LayoutTree::hoisted_children`] reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HoistedChild<N> {
+    /// The hoisted box.
+    pub node: N,
+    /// The index, among the containing block's
+    /// [`LayoutTree::flattened_children`], of the child whose subtree holds
+    /// `node`: the box comes after that child, and after every own
+    /// out-of-flow child before it, in tree order.
+    pub via: usize,
 }
 
 /// Which target anchor element an anchor query names (css-anchor-position-1

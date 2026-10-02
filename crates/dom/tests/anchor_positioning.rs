@@ -1294,11 +1294,11 @@ fn an_anchor_behind_a_containment_boundary_moves_its_reader() {
     assert_eq!(page.offset(reader, cb).1, 70.0);
 }
 
-/// The settle loop, other direction: an absolutely positioned anchor that
-/// escapes a static wrapper is placed by the rounding tail, after the box
-/// reading it; the loop lays the reader out again against where it landed.
+/// An absolutely positioned anchor that escapes a static wrapper is laid
+/// out by its containing block's absolute pass, in tree order, before the
+/// later box reading it — not after it, by a pass of its own.
 #[test]
-fn an_escaping_anchor_placed_after_its_reader_is_read_where_it_lands() {
+fn an_escaping_anchor_is_laid_out_before_its_reader() {
     let mut page = Page::new(
         ".anchor { anchor-name: --a; position: absolute; left: 50px; top: 60px;
                    width: 40px; height: 30px; }
@@ -1312,6 +1312,93 @@ fn an_escaping_anchor_placed_after_its_reader_is_read_where_it_lands() {
     let reader = page.el(cb, "view.reader", "");
     page.layout();
     assert_eq!(page.offset(reader, cb), (90.0, 90.0, 10.0, 10.0));
+}
+
+/// The page css-position-3's layout order exists for: a chain of anchors
+/// alternating between a containing block's own absolutely positioned
+/// children and boxes that escape static wrappers into it. Each box's left
+/// edge is the right edge of the box before it, so every box reads one
+/// placed earlier in tree order in the same absolute pass, and the chain is
+/// right after one `layout()` — and stays right after a change at its head.
+#[test]
+fn an_anchor_chain_through_escaping_boxes_settles_in_tree_order() {
+    let mut page = Page::new(
+        ".x1 { anchor-name: --x1; width: 10px; height: 10px; }
+         .link { position: absolute; top: 0px; width: 10px; height: 10px; }
+         .y1 { anchor-name: --y1; left: anchor(--x1 right); }
+         .x2 { anchor-name: --x2; left: anchor(--y1 right); }
+         .y2 { anchor-name: --y2; left: anchor(--x2 right); }
+         .x3 { anchor-name: --x3; left: anchor(--y2 right); }
+         .y3 { left: anchor(--x3 right); }",
+    );
+    let root = page.root();
+    let cb = page.el(root, "view.cb", "width: 400px; height: 400px");
+    let x1 = page.el(cb, "view.x1", "");
+    let y1 = page.el(cb, "view.link.y1", "");
+    let wrapper = page.el(cb, "view", "");
+    let x2 = page.el(wrapper, "view.link.x2", "");
+    let y2 = page.el(cb, "view.link.y2", "");
+    let deeper = page.el(cb, "view", "");
+    let inner = page.el(deeper, "view", "");
+    let x3 = page.el(inner, "view.link.x3", "");
+    let y3 = page.el(cb, "view.link.y3", "");
+    page.layout();
+    let left = |page: &Page, id| page.offset(id, cb).0;
+    // Two hops through one escaping box, then three.
+    assert_eq!(
+        [x2, y2, x3, y3].map(|id| left(&page, id)),
+        [20.0, 30.0, 40.0, 50.0]
+    );
+    assert_eq!(left(&page, y1), 10.0);
+
+    page.doc.set_inline(x1, "margin-left: 5px");
+    page.layout();
+    assert_eq!(
+        [y1, x2, y2, x3, y3].map(|id| left(&page, id)),
+        [15.0, 25.0, 35.0, 45.0, 55.0]
+    );
+}
+
+/// A box that escapes a subtree relaid in place keeps following its static
+/// position: its containing block, above the subtree, does not run, so the
+/// rounding tail places it from what the relay recorded. (A flex
+/// container's static position for an out-of-flow child is that of a sole
+/// item, so `justify-content: center` makes it depend on the box's size.)
+#[test]
+fn an_escaping_box_follows_an_in_place_relayout() {
+    let mut page = Page::new(
+        ".frame { width: 200px; height: 200px; justify-content: center; }
+         .escaping { position: absolute; left: 3px; width: 10px; height: 10px; }",
+    );
+    let root = page.root();
+    let cb = page.el(root, "view.cb", "width: 400px; height: 400px");
+    let frame = page.el(cb, "view.frame", "");
+    page.el(frame, "view", "height: 20px");
+    let escaping = page.el(frame, "view.escaping", "");
+    page.layout();
+    assert_eq!(page.offset(escaping, cb), (3.0, 95.0, 10.0, 10.0));
+    page.doc.set_inline(escaping, "height: 30px");
+    page.layout();
+    assert_eq!(page.offset(escaping, cb), (3.0, 85.0, 10.0, 30.0));
+}
+
+/// A subtree moved under another containing block takes its escaping boxes
+/// with it, caches and all: they are laid out by the new one.
+#[test]
+fn an_escaping_box_moves_with_its_subtree() {
+    let mut page = Page::new(
+        ".escaping { position: absolute; right: 0px; top: 0px; width: 10px; height: 10px; }",
+    );
+    let root = page.root();
+    let first = page.el(root, "view.cb", "width: 300px; height: 100px");
+    let second = page.el(root, "view.cb", "width: 200px; height: 100px");
+    let wrapper = page.el(first, "view", "");
+    let escaping = page.el(wrapper, "view.escaping", "");
+    page.layout();
+    assert_eq!(page.offset(escaping, first).0, 290.0);
+    page.doc.dom.append_child(second, wrapper);
+    page.layout();
+    assert_eq!(page.offset(escaping, second).0, 190.0);
 }
 
 /// A removed anchor drops its reader to the fallback; a new one is picked

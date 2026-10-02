@@ -21,18 +21,15 @@ use hughie::geometry::{Edges, Point, Rect, Size};
 use hughie::invalidate::is_relayout_boundary;
 use hughie::style::{CoreStyle, DashedIdent, PhysicalAxis, PositionProperty, TreeScoped};
 use hughie::tree::{
-    AnchorOutcome, AnchorSpec, AvailableSpace, Layout, LayoutInput, LayoutOutput, LayoutSlot,
-    LayoutTree,
+    AnchorOutcome, AnchorSpec, AvailableSpace, HoistedChild, Layout, LayoutInput, LayoutOutput,
+    LayoutSlot, LayoutTree,
 };
 use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
 
-use super::style::{
-    DisplayMode, StyleView, box_parent, display_mode, establishes_absolute_containing_block,
-    establishes_fixed_containing_block, resolve_position,
-};
+use super::style::{DisplayMode, StyleView, box_parent, display_mode, resolve_position};
 use super::text_block::compute_text_block_layout;
-use super::{anchors, committed_box};
+use super::{anchors, committed_box, hoisted};
 use crate::tree::document::{
     DeferredContainer, Document, DocumentLayoutState, NodeId, NodeSlot, PendingRelayout,
     RelayoutKind, StickyContainingBlock, TreeArenas,
@@ -126,6 +123,48 @@ impl<T> LayoutTree for TreeArenas<T> {
         {
             entry.rounded = Some(bounds);
         }
+    }
+
+    /// Records the position and lists the box under the containing block
+    /// that lays it out ([`hoisted`]).
+    fn set_static_position(&self, state: &mut Self::State, node: NodeSlot, position: Point<f32>) {
+        let slot = self.layout_mut(state, node);
+        if slot.static_position != position {
+            slot.static_position = position;
+            slot.mark_subtree_dirty();
+        }
+        state.register_hoisted(node, hoisted::hoisting_block(self.at(node)));
+    }
+
+    #[inline]
+    fn hoisted_children(
+        &self,
+        state: &Self::State,
+        node: NodeSlot,
+    ) -> SmallVec<[HoistedChild<NodeSlot>; 2]> {
+        if state.hoisted_to.is_empty() {
+            return SmallVec::new();
+        }
+        hoisted::children_of(self, state, node)
+    }
+
+    fn hoisted_parent_offset(
+        &self,
+        state: &Self::State,
+        containing_block: NodeSlot,
+        node: NodeSlot,
+    ) -> Point<f32> {
+        hoisted::parent_offset(self, state, containing_block, node)
+    }
+
+    fn set_hoisted_layout(
+        &self,
+        state: &mut Self::State,
+        containing_block: NodeSlot,
+        node: NodeSlot,
+        layout: Layout,
+    ) {
+        hoisted::commit(self, state, containing_block, node, layout);
     }
 
     fn compute_layout(
@@ -286,11 +325,12 @@ impl<T> LayoutTree for TreeArenas<T> {
     /// [`anchors`]'s; this records the read for the settle loop.
     ///
     /// A box whose containing block is not its box parent (a `fixed` box, or
-    /// an `absolute` one under a static parent) is placed by the positioned
-    /// pass in the rounding tail, against that containing block, and asks
-    /// here in the same frame. An anchor that pass places after the box that
-    /// reads it, or one that moves under a relayout that never reaches the
-    /// reader, is caught by [`Document::settle_anchors`] after the run.
+    /// an `absolute` one under a static parent) is laid out by that
+    /// containing block's absolute pass in tree order with its own
+    /// out-of-flow children (`layout::hoisted`), so every acceptable anchor
+    /// is placed before the box reads it. An anchor that moves under a
+    /// relayout that never reaches the reader is caught by
+    /// [`Document::settle_anchors`] after the run.
     fn anchor_rect(
         &self,
         state: &Self::State,
@@ -579,6 +619,11 @@ pub(super) fn run_layout<T: Sync>(
         );
         state.take_container_deferrals(&mut deferred);
     }
+    // The parked subtrees this run relaid in place, before the root pass: a
+    // box under one of them that escapes to a containing block above it was
+    // laid out by nobody, and the tail places it (`hoisted::places_late`).
+    // A run that started whole relaid none of them first.
+    let relays_in_place = !full;
     let full = full || escalated;
     let settled = settle_deferred_containers(document, resized, &mut deferred);
     // A deferred container is a relayout boundary, so its own box did not move
@@ -596,13 +641,19 @@ pub(super) fn run_layout<T: Sync>(
         }
         Some(ids)
     };
+    let relayed: FxHashSet<NodeId> = if relays_in_place {
+        parked.iter().map(|&(_, pending)| pending.node_id).collect()
+    } else {
+        FxHashSet::default()
+    };
     {
         let (tree, state, live_parked_ids) = document.layout_parts();
         let root = tree.live_slot(root_id);
         state.begin_container_interleave(false);
+        state.in_rounding_tail = true;
         if full {
             let position = |tree: &TreeArenas<T>, state: &mut DocumentLayoutState, node| {
-                pre_position(tree, state, node, viewport)
+                pre_position(tree, state, node, viewport, &relayed)
             };
             round_with(tree, state, root, scale, Point::ZERO, rescale, position);
         } else {
@@ -613,8 +664,10 @@ pub(super) fn run_layout<T: Sync>(
                 &parked,
                 viewport,
                 scale,
+                &relayed,
             );
         }
+        state.in_rounding_tail = false;
         // Every text node this pass measured but did not commit still holds
         // the probe's line break; painting reads the committed one.
         state.restore_probed_text();
@@ -717,6 +770,7 @@ fn position_and_round_parked_boundaries<T: Sync>(
     parked: &[(usize, PendingRelayout)],
     viewport: Size<f32>,
     scale: f32,
+    relayed: &FxHashSet<NodeId>,
 ) {
     for &(_, pending) in parked {
         let Some(slot) = tree.slot(pending.node_id) else {
@@ -738,7 +792,7 @@ fn position_and_round_parked_boundaries<T: Sync>(
             accumulated_unrounded_origin(tree, state, parent)
         });
         let position = |tree: &TreeArenas<T>, state: &mut DocumentLayoutState, node| {
-            pre_position(tree, state, node, viewport)
+            pre_position(tree, state, node, viewport, relayed)
         };
         round_with(tree, state, slot, scale, parent_origin, false, position);
     }
@@ -785,11 +839,18 @@ fn boundary_depth<T>(document: &Document<T>, id: NodeId) -> usize {
     depth
 }
 
+/// The rounding tail's pre-node hook: zeroes a `display: contents` box, and
+/// places the out-of-flow boxes no containing block's absolute pass laid out
+/// this run — the ones whose containing block is the initial containing
+/// block, which lays its out-of-flow boxes out after everything else, and
+/// the ones a subtree relaid in place hides from their containing block
+/// (`hoisted::places_late`).
 fn pre_position<T: Sync>(
     tree: &TreeArenas<T>,
     state: &mut DocumentLayoutState,
     node_id: NodeSlot,
     viewport: Size<f32>,
+    relayed: &FxHashSet<NodeId>,
 ) -> bool {
     let node = tree.at(node_id);
     let Some(style) = StyleView::try_of(node) else {
@@ -810,79 +871,56 @@ fn pre_position<T: Sync>(
         .is_some_and(Node::is_element)
         && resolve_position(node, style.values()) == PositionProperty::Fixed
     {
-        let fixed = style.values().clone_position() == PositionProperty::Fixed;
-        position_hoisted(tree, state, node_id, viewport, fixed);
+        match anchors::containing_block_generator(node) {
+            None => position_against_viewport(tree, state, node_id, viewport),
+            Some(block) => {
+                if hoisted::places_late(tree, node_id, block.id(), relayed) {
+                    hoisted::place_late(tree, state, block.id(), node_id);
+                }
+            }
+        }
     }
     display != DisplayMode::Leaf
         && !style.skips_contents()
         && !(display == DisplayMode::Text && super::text_block::replaces_children(node))
 }
 
-fn position_hoisted<T: Sync>(
+/// Places an out-of-flow box whose containing block is the initial
+/// containing block — the viewport here — from the static position its
+/// parent recorded.
+fn position_against_viewport<T: Sync>(
     tree: &TreeArenas<T>,
     state: &mut DocumentLayoutState,
     node_id: NodeSlot,
     viewport: Size<f32>,
-    fixed: bool,
 ) {
     let node = tree.at(node_id);
     let Some(parent_slot) = node.flat_parent_slot() else {
         return;
     };
-
-    let mut containing = None;
-    let mut ancestor = Some(parent_slot);
-    while let Some(current_id) = ancestor {
-        let current = tree.at(current_id);
-        let Some(style) = StyleView::try_of(current) else {
-            break;
-        };
-        let establishes = if fixed {
-            establishes_fixed_containing_block(current, style.values())
-        } else {
-            establishes_absolute_containing_block(current, style.values())
-        };
-        if establishes {
-            containing = Some(current_id);
-            break;
-        }
-        ancestor = current.flat_parent_slot();
-    }
-
-    let (containing_origin, containing_size) = match containing {
-        Some(block) => {
-            let origin = accumulated_unrounded_origin(tree, state, block);
-            let layout = &tree.layout(state, block).unrounded;
-            (
-                Point::new(origin.x + layout.border.left, origin.y + layout.border.top),
-                Size::new(
-                    (layout.size.width - layout.border.horizontal_sum()).max(0.0),
-                    (layout.size.height - layout.border.vertical_sum()).max(0.0),
-                ),
-            )
-        }
-        None => (Point::ZERO, viewport),
-    };
-
     let parent_origin = accumulated_unrounded_origin(tree, state, parent_slot);
     let static_position = tree.layout(state, node_id).static_position;
     let static_in_cb = Point::new(
-        parent_origin.x + static_position.x - containing_origin.x,
-        parent_origin.y + static_position.y - containing_origin.y,
+        parent_origin.x + static_position.x,
+        parent_origin.y + static_position.y,
     );
 
-    let mut layout = compute_absolute_layout(tree, state, node_id, containing_size, static_in_cb);
+    let mut layout = compute_absolute_layout(tree, state, node_id, viewport, static_in_cb);
 
     layout.location = Point::new(
-        containing_origin.x + layout.location.x - parent_origin.x,
-        containing_origin.y + layout.location.y - parent_origin.y,
+        layout.location.x - parent_origin.x,
+        layout.location.y - parent_origin.y,
     );
     let ordering_parent = box_parent(node).map_or(parent_slot, Node::slot);
     layout.order = sibling_paint_order(tree, ordering_parent, node_id);
     tree.layout_mut(state, node_id).set_unrounded(layout);
 }
 
-fn sibling_paint_order<T>(tree: &TreeArenas<T>, parent_id: NodeSlot, target: NodeSlot) -> u32 {
+pub(super) fn sibling_paint_order<T>(
+    tree: &TreeArenas<T>,
+    parent_id: NodeSlot,
+    target: NodeSlot,
+) -> u32 {
     let Some(target_index) = tree
         .flattened_children(parent_id)
         .position(|(id, ..)| id == target)

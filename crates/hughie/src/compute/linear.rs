@@ -1225,6 +1225,7 @@ where
 fn commit_non_in_flow_children<T>(
     tree: &T,
     state: &mut T::State,
+    node: T::NodeId,
     hidden_items: &[LayoutItemKey<T::NodeId>],
     absolute_items: &[AbsoluteItem<T::NodeId>],
     axes: LinearAxes,
@@ -1248,6 +1249,7 @@ where
         super::hide_child_at_order(tree, state, key.node, key.layout_order);
     }
     super::util::debug_assert_tree_order(absolute_items.iter().map(|item| item.key.document_index));
+    let mut hoisted = super::HoistedPass::new(padding_box_size, border, rtl);
     for item in absolute_items {
         let AbsoluteItem {
             key,
@@ -1255,6 +1257,7 @@ where
             gravity,
             static_axes,
         } = *item;
+        hoisted.before(tree, state, node, key.document_index);
         let child = key.node;
         let layout_order = key.layout_order;
 
@@ -1292,6 +1295,7 @@ where
                     tree.style(child).overflow(),
                 );
                 tree.set_unrounded_layout(state, child, layout);
+                hoisted.inside(tree, state, node, key.document_index);
             }
             PositionProperty::Fixed => {
                 let measured = match (static_axes.width, static_axes.height) {
@@ -1323,6 +1327,7 @@ where
             _ => unreachable!(),
         }
     }
+    hoisted.rest(tree, state, node);
     content_size
 }
 
@@ -1603,20 +1608,21 @@ where
         final_outer_size,
         content_origin,
     );
-    if !absolute_items.is_empty() || !hidden_items.is_empty() {
-        content_size = commit_non_in_flow_children(
-            tree,
-            state,
-            &hidden_items,
-            &absolute_items,
-            axes,
-            final_outer_size,
-            border,
-            main_gravity,
-            content_size,
-            style.direction() == direction::T::Rtl,
-        );
-    }
+    // Unconditional: a box this one is the containing block of may sit
+    // deeper than its children (`LayoutTree::hoisted_children`).
+    content_size = commit_non_in_flow_children(
+        tree,
+        state,
+        node,
+        &hidden_items,
+        &absolute_items,
+        axes,
+        final_outer_size,
+        border,
+        main_gravity,
+        content_size,
+        style.direction() == direction::T::Rtl,
+    );
     let content_size = own_scrollable_overflow(&style, final_outer_size, content_size);
     let baseline = if layout_contained {
         None

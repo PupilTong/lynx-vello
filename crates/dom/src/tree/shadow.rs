@@ -313,6 +313,7 @@ impl<T> Document<T> {
         self.assign_slots(root);
         self.mark_subtree_dirty(host);
         self.invalidate_layout(host);
+        self.invalidate_hoisted_under(host);
         root
     }
 
@@ -638,6 +639,7 @@ impl<T> Document<T> {
         if changed {
             self.mark_subtree_dirty(host);
             self.invalidate_layout(host);
+            self.invalidate_hoisted_under(host);
         }
     }
 }

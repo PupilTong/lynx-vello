@@ -903,6 +903,7 @@ where
         let absolute_content_size = layout_absolute_items(
             tree,
             state,
+            node,
             &absolute.expect("commit keeps out-of-flow grid-lanes items"),
             columns,
             rows,

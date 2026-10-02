@@ -1203,9 +1203,14 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one ordered pass; the hoisted boxes interleave with it in tree order"
+)]
 fn layout_absolute_items<'tree, T>(
     tree: &'tree T,
     state: &mut T::State,
+    node: T::NodeId,
     items: &[PendingItem<T::NodeId>],
     columns: &TrackSet,
     rows: &TrackSet,
@@ -1234,7 +1239,9 @@ where
     crate::compute::util::debug_assert_tree_order(
         items.iter().map(|item| item.ordered.document_index),
     );
+    let mut hoisted = crate::compute::HoistedPass::new(padding_box_size, border, rtl);
     for pending in items {
+        hoisted.before(tree, state, node, pending.ordered.document_index);
         let key = pending.key();
         // An `anchor-size()` inset may still resolve to `auto`, so it asks for
         // the static position too; `absolute_layout` decides whether it reads it.
@@ -1309,6 +1316,7 @@ where
                     tree.style(key.node).overflow(),
                 );
                 tree.set_unrounded_layout(state, key.node, layout);
+                hoisted.inside(tree, state, node, pending.ordered.document_index);
             }
             PositionProperty::Fixed => {
                 tree.set_static_position(
@@ -1323,6 +1331,7 @@ where
             PositionProperty::Static | PositionProperty::Relative | PositionProperty::Sticky => {}
         }
     }
+    hoisted.rest(tree, state, node);
     content_size
 }
 
@@ -1554,6 +1563,7 @@ where
         let absolute_content_size = layout_absolute_items(
             tree,
             state,
+            node,
             &absolute.expect("commit keeps out-of-flow grid items"),
             &columns,
             &rows,

@@ -2,6 +2,7 @@
 
 pub(crate) mod anchors;
 pub(crate) mod committed_box;
+mod hoisted;
 mod host;
 pub(crate) mod relevance;
 mod style;
