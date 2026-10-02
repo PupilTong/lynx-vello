@@ -113,6 +113,10 @@ pub(crate) struct AnchoredSlot {
     probe: Option<AnchorProbe>,
     /// `no-overflow`'s live test, where one is due.
     overflow: Option<OverflowTest>,
+    /// Whether [`Self::probe`] reads a space a transform curve moves, or one
+    /// an anchored slot that does hides: the hidden state changes with the
+    /// timeline reading as well as with the offsets.
+    reads_timeline: bool,
 }
 
 /// One input of a default scroll shift.
@@ -229,7 +233,15 @@ impl AnchoredSlot {
             hidden: false,
             probe: None,
             overflow: None,
+            reads_timeline: false,
         })
+    }
+
+    /// Whether the slot's hidden state depends on the timeline reading, so
+    /// a filter bake holding a record it hides samples the instant
+    /// ([`super::space::sampled_against`]).
+    pub(crate) fn reads_timeline(&self) -> bool {
+        self.reads_timeline
     }
 
     /// Whether some `position-visibility` predicate can hide the box: what
@@ -516,6 +528,41 @@ impl PaintOrder {
             self.bind_slot(document, index, &sticky_index, &anchors);
         }
         self.order_anchored();
+        // In sample order, so a dependency's answer is known first.
+        for position in 0..self.anchored_order.len() {
+            let index = self.anchored_order[position] as usize;
+            self.anchored[index].reads_timeline = self.probe_reads_timeline(index);
+        }
+    }
+
+    /// The anchored slots, by slot.
+    pub(crate) fn anchored(&self) -> &[AnchoredSlot] {
+        &self.anchored
+    }
+
+    /// Whether slot `index`'s `anchor-visible` probe reads a space a
+    /// transform curve moves, or one an anchored slot whose own hidden
+    /// state reads the timeline hides.
+    fn probe_reads_timeline(&self, index: usize) -> bool {
+        let Some(probe) = &self.anchored[index].probe else {
+            return false;
+        };
+        let clip_spaces = self.anchor_clips[probe.clips.start as usize..probe.clips.end as usize]
+            .iter()
+            .map(|&clip| self.clips[clip as usize].space);
+        std::iter::once(probe.space)
+            .chain(clip_spaces)
+            .any(|space| {
+                space::path(&self.spaces, space).any(|kind| match kind {
+                    SpaceKind::Animation(slot) => {
+                        self.animations[slot as usize].curve.transform.is_some()
+                    }
+                    SpaceKind::Anchored(slot) | SpaceKind::AnchoredVisibility(slot) => {
+                        slot as usize != index && self.anchored[slot as usize].reads_timeline
+                    }
+                    SpaceKind::Scroll(_) | SpaceKind::Sticky(_) => false,
+                })
+            })
     }
 
     fn bind_slot<T>(
@@ -887,6 +934,58 @@ mod tests {
             page.scroll(0.0, 0.0);
             assert_eq!(page.hit(310.0, 310.0), Some(fixed), "{group}: back");
         }
+    }
+
+    /// An `anchor-visible` probe whose anchor a transform curve moves makes
+    /// the slot's hidden state read the timeline, so a filter bake holding
+    /// a record the slot hides samples the instant.
+    #[test]
+    fn a_probe_on_an_animated_anchor_reads_the_timeline() {
+        let mut page = page("position-area: bottom center;");
+        assert!(
+            !page
+                .doc
+                .dom
+                .committed_frame()
+                .expect("rendered")
+                .order
+                .anchored()[0]
+                .reads_timeline()
+        );
+        page.doc.add_css(
+            "@keyframes slide { from { transform: translateX(0px); }
+                                to { transform: translateX(300px); } }",
+        );
+        page.doc
+            .set_inline(page.anchor, "animation: slide 1s linear infinite");
+        page.doc.dom.render();
+        page.doc.dom.advance_animations(0.0);
+        page.doc.dom.advance_animations(0.1);
+        page.doc.dom.render();
+        let frame = page.doc.dom.committed_frame().expect("rendered");
+        let order = &frame.order;
+        assert_eq!(order.animations().len(), 1, "the slide exports");
+        let slot = &order.anchored()[0];
+        assert!(slot.reads_timeline());
+        let anchored = order
+            .spaces()
+            .iter()
+            .position(|space| space.kind == SpaceKind::Anchored(0))
+            .and_then(|index| u32::try_from(index).ok());
+        assert!(super::space::sampled_against(
+            order.spaces(),
+            order.animations(),
+            order.anchored(),
+            anchored,
+            None,
+        ));
+        assert!(!super::space::sampled_against(
+            order.spaces(),
+            order.animations(),
+            &[],
+            anchored,
+            None,
+        ));
     }
 
     /// A box anchored to a hidden anchored box hides with it.

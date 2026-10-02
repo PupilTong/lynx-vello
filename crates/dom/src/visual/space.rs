@@ -30,7 +30,7 @@
 
 use euclid::default::Vector2D;
 
-use super::anchored::AnchoredSamples;
+use super::anchored::{AnchoredSamples, AnchoredSlot};
 use super::reach::Reach;
 use super::{AnimationSamples, AnimationSlot, ClipNode, ScrollSlot, StickySamples};
 use crate::paint::compose::snap_offset;
@@ -128,20 +128,28 @@ pub(crate) fn curves_within<'a>(
 
 /// Whether what a record in `record` draws into a bake in `bake` changes
 /// with the timeline reading: a curve on `record`'s path below the two
-/// spaces' common ancestor moves or fades it, and a transform curve on
-/// `bake`'s moves the bake across it. An opacity-only curve on `bake`'s
-/// side changes neither, since its alpha applies where the bake is drawn.
+/// spaces' common ancestor moves or fades it, an anchored node there hides
+/// it on a probe a transform curve moves
+/// ([`AnchoredSlot::reads_timeline`]), and a transform curve on `bake`'s
+/// moves the bake across it. An opacity-only curve on `bake`'s side
+/// changes neither, since its alpha applies where the bake is drawn.
 pub(crate) fn sampled_against(
     spaces: &[Space],
     animations: &[AnimationSlot],
+    anchored: &[AnchoredSlot],
     record: Option<u32>,
     bake: Option<u32>,
 ) -> bool {
     let common = common_ancestor(spaces, record, bake);
-    path_below(spaces, record, common).any(|node| matches!(node.kind, SpaceKind::Animation(_)))
-        || curves_within(spaces, animations, bake, record)
-            .next()
-            .is_some()
+    path_below(spaces, record, common).any(|node| match node.kind {
+        SpaceKind::Animation(_) => true,
+        SpaceKind::Anchored(slot) | SpaceKind::AnchoredVisibility(slot) => anchored
+            .get(slot as usize)
+            .is_some_and(AnchoredSlot::reads_timeline),
+        SpaceKind::Scroll(_) | SpaceKind::Sticky(_) => false,
+    }) || curves_within(spaces, animations, bake, record)
+        .next()
+        .is_some()
 }
 
 /// The innermost clip on `clip`'s chain that no transform curve moves

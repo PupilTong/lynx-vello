@@ -118,9 +118,7 @@ use crate::vello::Scene;
 use crate::vello::kurbo::{Affine, Point, Rect};
 use crate::vello::peniko::{BlendMode, Compose, Fill, Mix};
 use crate::visual::space::{self, SpaceKind, nearest_scroll, nearest_sticky};
-use crate::visual::{
-    AnimationSlot, AutoBox, ClipNode, PaintItem, PaintItemKind, PaintOrder, RenderLayer, Space,
-};
+use crate::visual::{AutoBox, ClipNode, PaintItem, PaintItemKind, PaintOrder, RenderLayer};
 
 /// Where one walk's output goes.
 ///
@@ -287,10 +285,12 @@ impl WalkSink<'_> {
         }
     }
 
-    fn pop_filter(&mut self, spaces: &[Space], slots: &[AnimationSlot]) {
+    fn pop_filter(&mut self, frame: &PaintOrder) {
         match self {
             Self::Monolithic(..) => {}
-            Self::Compose(assembly) => assembly.pop_filter(spaces, slots),
+            Self::Compose(assembly) => {
+                assembly.pop_filter(frame.spaces(), frame.animations(), frame.anchored());
+            }
         }
     }
 
@@ -316,12 +316,17 @@ impl WalkSink<'_> {
         &mut self,
         entry: FilterGroup,
         ops: std::ops::Range<u32>,
-        spaces: &[Space],
-        slots: &[AnimationSlot],
+        frame: &PaintOrder,
     ) -> bool {
         match self {
             Self::Monolithic(..) => false,
-            Self::Compose(assembly) => assembly.push_backdrop(entry, ops, spaces, slots),
+            Self::Compose(assembly) => assembly.push_backdrop(
+                entry,
+                ops,
+                frame.spaces(),
+                frame.animations(),
+                frame.anchored(),
+            ),
         }
     }
 }
@@ -1167,7 +1172,7 @@ fn open_scope<T>(
     if let Some((root_start, end)) = backdrop_end
         && let Some(entry) = backdrop_entry(style, layer, space, scale, ratio)
     {
-        sink.push_backdrop(entry, root_start..end, frame.spaces(), frame.animations());
+        sink.push_backdrop(entry, root_start..end, frame);
     }
 
     // A current `opacity` animation roots at every reading, 1 included,
@@ -1476,7 +1481,7 @@ fn close_scope<T>(sink: &mut WalkSink<'_>, scratch: &mut Scratch, painting: Pain
         );
     }
     if scope.blurred {
-        sink.pop_filter(frame.spaces(), frame.animations());
+        sink.pop_filter(frame);
     }
     if let Some((list, plan)) = &plan {
         filters::apply(
