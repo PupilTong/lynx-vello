@@ -1736,17 +1736,33 @@ impl<T> crate::tree::document::Document<T> {
 
     /// `id`'s default scroll shift (§3.3) at the stored offsets: the current
     /// displacement of its default anchor less the remembered one, on the
-    /// axes it compensates in, in its containing block's layout space. What
-    /// the frame's anchored node composes, unsnapped.
+    /// axes it compensates in, in its containing block's layout space.
+    ///
+    /// With `ratio`, each displacement is snapped to that device pixel grid
+    /// first — `snap(now) − snap(then)`, exactly what the frame's anchored
+    /// node composes ([`crate::visual::anchored`]), so the main thread's
+    /// fit test and the painter's agree, and a box at rest has a zero shift
+    /// whatever fraction of a pixel its scrollers sit at. Without, the exact
+    /// shift `now − then`.
     #[must_use]
-    pub(crate) fn default_scroll_shift(&self, id: NodeId) -> Option<Vector2D<f32>> {
+    pub(crate) fn default_scroll_shift(
+        &self,
+        id: NodeId,
+        ratio: Option<f32>,
+    ) -> Option<Vector2D<f32>> {
         let entry = self.layout_state().anchored.get(&id)?;
         let outcome = entry.outcome?;
         let remembered = entry.remembered.as_ref()?;
         let default = remembered.default?;
         let then = remembered.displacement_of(default)?;
         let now = self.anchor_displacement(default, self.anchor_containing_block(id));
-        let shift = now - then;
+        let shift = match ratio {
+            Some(ratio) => {
+                crate::paint::compose::snap_offset(now, ratio)
+                    - crate::paint::compose::snap_offset(then, ratio)
+            }
+            None => now - then,
+        };
         Some(Vector2D::new(
             if outcome.compensates.width {
                 shift.x
@@ -1794,8 +1810,9 @@ impl<T> crate::tree::document::Document<T> {
                 .collect()
         };
         let mut due: SmallVec<[NodeId; 2]> = SmallVec::new();
+        let ratio = self.device_pixel_ratio();
         for id in candidates {
-            let Some(shift) = self.default_scroll_shift(id) else {
+            let Some(shift) = self.default_scroll_shift(id, Some(ratio)) else {
                 continue;
             };
             let Some(outcome) = self.anchor_outcome(id).copied() else {

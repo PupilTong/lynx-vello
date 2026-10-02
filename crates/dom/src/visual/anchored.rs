@@ -17,18 +17,25 @@
 //! box's containing block ([`RememberedScroll`]). At compose time
 //!
 //! ```text
-//! shift = mask(Σ own(sticky) − Σ snap(offset(scroller)) + fixed − remembered)
+//! live  = Σ own(sticky) − Σ offset(scroller) + fixed
+//! shift = mask(snap(live) − snap(remembered))
 //! delta = L · shift
 //! ```
 //!
 //! with `offset(scroller)` the live offset the compose uses for the same
-//! scroll slot (snapped the way the scroll node snaps it, so the box moves
-//! exactly as far as the anchor's pixels do), `own(sticky)` the sticky
-//! node's own layout-space shift at those offsets, `fixed` the displacement
-//! of the scrollers and sticky boxes the frame carries no slot for (their
-//! offsets cannot move without a commit), `mask` zeroing the axes the box
-//! does not compensate in, and `L` the linear part of the box's containing
-//! block's world, which maps the layout-space shift into viewport CSS px.
+//! scroll slot, `own(sticky)` the sticky node's own layout-space shift at
+//! those offsets, `fixed` the displacement of the scrollers and sticky boxes
+//! the frame carries no slot for (their offsets cannot move without a
+//! commit), `snap` the device-pixel snap a scroll node applies to its
+//! offset, `mask` zeroing the axes the box does not compensate in, and `L`
+//! the linear part of the box's containing block's world, which maps the
+//! layout-space shift into viewport CSS px. Both displacements are snapped
+//! the same way, so a box whose scrollers have not moved since its
+//! recalculation point has a shift of exactly zero, at any fractional
+//! offset; with one scroller between the anchor and the containing block
+//! the box moves exactly as far as the anchor's pixels do (`round` is odd),
+//! with more it may differ from them by one device pixel. The main thread's
+//! fit test ([`Document::default_scroll_shift`]) snaps the same two terms.
 //!
 //! `position-visibility` rides the same node: a hidden box's node is the
 //! zero map, so the box and everything composed through it — its descendants
@@ -87,9 +94,11 @@ pub(crate) struct AnchoredSlot {
     /// The scroll and sticky slots between the default anchor and the
     /// box's containing block, as a range of [`PaintOrder::anchor_links`].
     links: Range<u32>,
-    /// The displacement of the ancestors with no slot, minus the remembered
-    /// one: `fixed − remembered` in the module formula.
-    base: Vector2D<f32>,
+    /// The displacement of the ancestors with no slot: `fixed` in the
+    /// module formula.
+    fixed: Vector2D<f32>,
+    /// The default anchor's remembered displacement, unsnapped.
+    remembered: Vector2D<f32>,
     /// `anchor-valid` failed, or `anchor-visible` found the anchor not
     /// `visible`: hidden whatever the offsets.
     hidden: bool,
@@ -198,7 +207,8 @@ impl AnchoredSlot {
             compensates: [outcome.compensates.width, outcome.compensates.height],
             visibility,
             links: 0..0,
-            base: Vector2D::zero(),
+            fixed: Vector2D::zero(),
+            remembered: Vector2D::zero(),
             hidden: false,
             probe: None,
             overflow: None,
@@ -219,18 +229,17 @@ impl AnchoredSlot {
 
     /// The layout-space default scroll shift at `samples`' offsets.
     fn shift(&self, frame: &PaintOrder, samples: &SpaceSamples<'_>) -> Vector2D<f32> {
-        let mut shift = self.base;
+        let mut live = self.fixed;
         for link in &frame.anchor_links[self.links.start as usize..self.links.end as usize] {
             match *link {
                 AnchorLink::Scroll(slot) => {
                     let slot = &samples.slots[slot as usize];
-                    let offset = (samples.offset_of)(slot).unwrap_or(slot.offset);
-                    shift -= snap_offset(offset, samples.ratio);
+                    live -= (samples.offset_of)(slot).unwrap_or(slot.offset);
                 }
-                AnchorLink::Sticky(slot) => shift += samples.stickies.get(slot).own,
+                AnchorLink::Sticky(slot) => live += samples.stickies.get(slot).own,
             }
         }
-        self.mask(shift)
+        self.mask(snap_offset(live, samples.ratio) - snap_offset(self.remembered, samples.ratio))
     }
 
     /// This slot's values at `samples`, whose anchored table holds every
@@ -250,14 +259,16 @@ impl AnchoredSlot {
     }
 
     /// The range of this slot's viewport delta over the scroll windows
-    /// `windows` and every sticky shift the frame permits.
+    /// `windows` and every sticky shift the frame permits, widened by the
+    /// one CSS px the two snaps can add.
     fn range(
         &self,
         frame: &PaintOrder,
         windows: &[(Vector2D<f32>, Vector2D<f32>)],
     ) -> (Vector2D<f32>, Vector2D<f32>) {
-        let mut low = self.base;
-        let mut high = self.base;
+        let base = self.fixed - self.remembered;
+        let mut low = base - Vector2D::splat(1.0);
+        let mut high = base + Vector2D::splat(1.0);
         for link in &frame.anchor_links[self.links.start as usize..self.links.end as usize] {
             match *link {
                 AnchorLink::Scroll(slot) => {
@@ -566,7 +577,8 @@ impl PaintOrder {
 
         let slot = &mut self.anchored[index];
         slot.links = links;
-        slot.base = fixed - remembered_default;
+        slot.fixed = fixed;
+        slot.remembered = remembered_default;
         slot.hidden = hidden;
         slot.probe = probe;
         slot.overflow = overflow;
@@ -862,6 +874,40 @@ mod tests {
             "past the top edge"
         );
         let _ = page.anchor;
+    }
+
+    /// The two displacements are snapped alike: a box remembered at a
+    /// fractional offset has a zero shift at rest, so a `no-overflow` box
+    /// flush with its containing block's top edge stays visible there, on
+    /// the painter and on the main thread, and hides one pixel further.
+    #[test]
+    fn a_box_remembered_at_a_fractional_offset_is_unshifted_at_rest() {
+        // The anchor's top at 50 − 0.75 = 49.25; the box above it, as tall,
+        // flush with the containing block's top.
+        let mut page = page_scrolled(
+            "bottom: anchor(top); left: anchor(left); height: 49.25px;
+             position-visibility: no-overflow;",
+            0.0,
+            0.75,
+        );
+        let shift = page
+            .doc
+            .dom
+            .default_scroll_shift(page.anchored, Some(1.0))
+            .expect("compensating");
+        assert_eq!(shift, Vector2D::zero(), "main: snap(now) − snap(then)");
+        let frame = page.doc.dom.committed_frame().expect("rendered");
+        let sampled = frame.order.sample_anchored(
+            &crate::visual::AnimationSamples::default(),
+            &crate::visual::StickySamples::default(),
+            1.0,
+            &|_| None,
+        );
+        assert_eq!(sampled[0], super::AnchoredSample::default(), "painter");
+        drop(frame);
+        assert_eq!(page.hit(55.0, 20.0), Some(page.anchored));
+        page.scroll(0.0, 1.75);
+        assert_ne!(page.hit(55.0, 20.0), Some(page.anchored), "1px up: out");
     }
 
     /// Blink's fit test after a scroll: a length inset leaves its side
