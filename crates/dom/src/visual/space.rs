@@ -6,7 +6,8 @@
 //! it: a scroll node `Tr(−A·snap(o))` with `A` the scrollport's
 //! [`ScrollSlot::viewport_axes`], a sticky node its own mapped shift, an
 //! anchored node its box's default scroll shift `Tr(L·s)` — or the zero map
-//! while `position-visibility` hides the box ([`super::anchored`]) — an
+//! while `position-visibility` hides the box ([`super::anchored`]) — a
+//! visibility node the identity or that same zero map, an
 //! animation node its sampled delta `pre·L(t)·Lc⁻¹·pre⁻¹`. A record's live map
 //! is the product of the `X`s on its path, root first — so a node's order on
 //! the path is the order its movement applies in.
@@ -16,7 +17,10 @@
 //! box, clip and effect layer take its *box space* — after its own sticky and
 //! animation nodes, before its own scroll node — and its content takes its
 //! *content space*, after its scroll node. An anchor-positioned box's
-//! anchored node is the outermost of its own: it encloses its box space. [`SpaceSamples::css`] is
+//! anchored node is the outermost of its own: it encloses its box space. Its
+//! descendants that escape its containing-block chain (a `position: fixed`
+//! box whose containing block is outside it) compose through its visibility
+//! node instead, which hides them with it and does not shift them. [`SpaceSamples::css`] is
 //! the one place the product is formed: compose, filter bakes and hit testing (which
 //! inverts it) all read it.
 //!
@@ -52,6 +56,11 @@ pub(crate) enum SpaceKind {
     /// An anchor-positioned box's default scroll shift and
     /// `position-visibility`, by anchored slot.
     Anchored(u32),
+    /// An anchor-positioned box's `position-visibility` alone, by anchored
+    /// slot, for its descendants that escape its containing-block chain:
+    /// `force-hidden` hides "the element and its descendants", but only
+    /// the box and what its containing-block chain carries move with it.
+    AnchoredVisibility(u32),
 }
 
 /// The kinds on `space`'s path, innermost first.
@@ -110,7 +119,10 @@ pub(crate) fn curves_within<'a>(
             .transform
             .as_ref()
             .map(|track| &track.reach),
-        SpaceKind::Scroll(_) | SpaceKind::Sticky(_) | SpaceKind::Anchored(_) => None,
+        SpaceKind::Scroll(_)
+        | SpaceKind::Sticky(_)
+        | SpaceKind::Anchored(_)
+        | SpaceKind::AnchoredVisibility(_) => None,
     })
 }
 
@@ -170,7 +182,10 @@ pub(crate) fn movers_bounded(
             .is_none_or(|track| track.reach.inverse_norm().is_some()),
         // A translation, or the zero map of a hidden box, which draws
         // nothing to bound.
-        SpaceKind::Scroll(_) | SpaceKind::Sticky(_) | SpaceKind::Anchored(_) => true,
+        SpaceKind::Scroll(_)
+        | SpaceKind::Sticky(_)
+        | SpaceKind::Anchored(_)
+        | SpaceKind::AnchoredVisibility(_) => true,
     })
 }
 
@@ -190,11 +205,16 @@ pub(crate) fn nearest_sticky(spaces: &[Space], space: Option<u32>) -> Option<u32
     })
 }
 
-/// The innermost anchored slot on `space`'s path.
+/// The innermost anchored or anchored-visibility *node* on `space`'s path,
+/// as its index in `spaces`: two records under the same one move and hide
+/// together; under a box's anchored node and its visibility node they hide
+/// together but only one moves.
 pub(crate) fn nearest_anchored(spaces: &[Space], space: Option<u32>) -> Option<u32> {
-    path(spaces, space).find_map(|kind| match kind {
-        SpaceKind::Anchored(slot) => Some(slot),
-        _ => None,
+    std::iter::successors(space, |&index| spaces[index as usize].parent).find(|&index| {
+        matches!(
+            spaces[index as usize].kind,
+            SpaceKind::Anchored(_) | SpaceKind::AnchoredVisibility(_)
+        )
     })
 }
 
@@ -297,6 +317,10 @@ impl SpaceSamples<'_> {
                 .anchored
                 .get(slot as usize)
                 .map_or(Affine::IDENTITY, |sample| sample.affine()),
+            SpaceKind::AnchoredVisibility(slot) => self
+                .anchored
+                .get(slot as usize)
+                .map_or(Affine::IDENTITY, |sample| sample.visibility_affine()),
         }
     }
 }

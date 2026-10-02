@@ -580,7 +580,9 @@ impl PaintOrder {
                 spaces[parent as usize] = true;
             }
             match node.kind {
-                SpaceKind::Scroll(_) | SpaceKind::Anchored(_) => {}
+                SpaceKind::Scroll(_)
+                | SpaceKind::Anchored(_)
+                | SpaceKind::AnchoredVisibility(_) => {}
                 SpaceKind::Sticky(slot) => stickies[slot as usize] = true,
                 SpaceKind::Animation(slot) => composed.animations.push(slot),
             }

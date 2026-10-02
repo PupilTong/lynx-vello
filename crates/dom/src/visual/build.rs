@@ -420,12 +420,18 @@ impl<'doc, T: Sync> Builder<'doc, T> {
     /// space its box starts from. `parent_world` is its containing block's
     /// world, `clip` the clip chain its box is in. A page without
     /// anchor-positioned boxes pays one `is_empty` test per box.
+    ///
+    /// When `position-visibility` can hide the box and the box is not
+    /// itself a fixed containing block, also opens the slot's visibility
+    /// node inside `fixed` — the context its escaping `position: fixed`
+    /// descendants take — so they hide with it.
     fn enter_anchored(
         &mut self,
         node: NodeId,
         style: &ComputedValues,
         parent_world: &Transform3D<f32>,
         (space, clip): (Option<u32>, Option<usize>),
+        fixed: &mut FlowContext,
     ) -> Option<u32> {
         if self.state.anchored.is_empty()
             || !matches!(
@@ -439,10 +445,15 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         else {
             return space;
         };
+        let can_hide = slot.can_hide();
         self.anchored.push(slot);
         let index = u32::try_from(self.anchored.len() - 1)
             .expect("a frame cannot hold 2^32 anchored boxes");
-        Some(self.push_space(space, SpaceKind::Anchored(index)))
+        let anchored = self.push_space(space, SpaceKind::Anchored(index));
+        if can_hide && !establishes_fixed_containing_block(self.node(node), style) {
+            fixed.space = Some(self.push_space(fixed.space, SpaceKind::AnchoredVisibility(index)));
+        }
+        Some(anchored)
     }
 
     /// Records `node` in the frame's scroll-slot table when it is a scroll
@@ -656,7 +667,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         offset_in_parent: Point2D<f32>,
         parent_world: &Transform3D<f32>,
         parent_perspective: Option<ParentPerspective>,
-        seed: ClipContexts,
+        mut seed: ClipContexts,
     ) {
         let values = style.values();
         // Allocation order is space order: the element's own anchored,
@@ -667,6 +678,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
             values,
             parent_world,
             (seed.current.space, seed.current.clip),
+            &mut seed.fixed,
         );
         let own_sticky = self.allocate_sticky_slot(root, values, seed.current, parent_world);
         if let Some(index) = own_sticky {
@@ -1076,6 +1088,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
             style,
             collection.world,
             (outer.current.space, outer.current.clip),
+            &mut outer.fixed,
         );
 
         // A scroll container that is no stacking context takes its slot and

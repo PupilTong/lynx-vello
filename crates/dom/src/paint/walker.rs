@@ -2166,6 +2166,8 @@ fn pull_back(
                 low -= shift_high;
                 high -= shift_low;
             }
+            // The identity, or a hidden box's zero map, which draws nothing.
+            SpaceKind::AnchoredVisibility(_) => {}
             SpaceKind::Animation(slot) => {
                 let Some(track) = &frame.animations()[slot as usize].curve.transform else {
                     // An opacity-only curve moves nothing.
@@ -2331,6 +2333,7 @@ fn carry(
                 let (low, high) = frame.anchored_slot_range(slot, windows);
                 expand_region(bounds, low, high)
             }
+            SpaceKind::AnchoredVisibility(_) => bounds,
             SpaceKind::Animation(slot) => frame.animations()[slot as usize]
                 .curve
                 .transform

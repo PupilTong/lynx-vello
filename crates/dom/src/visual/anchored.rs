@@ -39,7 +39,14 @@
 //!
 //! `position-visibility` rides the same node: a hidden box's node is the
 //! zero map, so the box and everything composed through it — its descendants
-//! on its containing-block chain — draw nothing and hit nothing. Its
+//! on its containing-block chain — draw nothing and hit nothing. A
+//! descendant that escapes that chain (a `position: fixed` box whose
+//! containing block is outside the anchored box) composes through the slot's
+//! second node, [`SpaceKind::AnchoredVisibility`], which the build opens on
+//! the fixed-containing-block context it hands the box's descendants: the
+//! same zero map while the box is hidden, the identity otherwise. Draw and
+//! hit testing read records through their spaces alike, so every
+//! descendant — escaping or not — hides and stops hitting with the box. Its
 //! computed `visibility` is untouched (Blink's model; the spec's
 //! `force-hidden` is not a computed value here). Each predicate is evaluated
 //! per sample, on the painter per composed frame and on the main thread per
@@ -159,6 +166,16 @@ impl AnchoredSample {
             Affine::translate((f64::from(self.delta.x), f64::from(self.delta.y)))
         }
     }
+
+    /// The visibility node's map: the identity, or the zero map for a
+    /// hidden box.
+    pub(crate) fn visibility_affine(self) -> Affine {
+        if self.hidden {
+            Affine::scale(0.0)
+        } else {
+            Affine::IDENTITY
+        }
+    }
 }
 
 /// Whether a box with `outcome` and `visibility` needs an anchored node:
@@ -213,6 +230,12 @@ impl AnchoredSlot {
             probe: None,
             overflow: None,
         })
+    }
+
+    /// Whether some `position-visibility` predicate can hide the box: what
+    /// earns its escaping descendants a visibility node.
+    pub(crate) fn can_hide(&self) -> bool {
+        !self.visibility.is_empty()
     }
 
     /// `v` with the axes the box does not compensate in zeroed.
@@ -652,7 +675,8 @@ impl PaintOrder {
                 .map(|&clip| self.clips[clip as usize].space);
             for space in std::iter::once(probe.space).chain(clip_spaces) {
                 for kind in space::path(&self.spaces, space) {
-                    if let SpaceKind::Anchored(dependency) = kind
+                    if let SpaceKind::Anchored(dependency)
+                    | SpaceKind::AnchoredVisibility(dependency) = kind
                         && dependency as usize != index
                     {
                         self.visit_anchored(dependency as usize, state, order);
@@ -826,6 +850,43 @@ mod tests {
             super::tests::page("position-area: bottom center; position-visibility: always;");
         page.scroll(0.0, 85.0);
         assert_eq!(page.hit(70.0, 2.0), Some(page.anchored));
+    }
+
+    /// `force-hidden` hides the box's descendants too, a `position: fixed`
+    /// one whose containing block is outside the box included: it hides and
+    /// stops hitting with the box — with and without a group layer on the
+    /// box — and does not follow the box's default scroll shift.
+    #[test]
+    fn an_escaping_fixed_descendant_hides_with_its_anchored_box() {
+        for group in ["", "opacity: 0.5;"] {
+            let mut page = page(&format!("position-area: bottom center; {group}"));
+            page.doc.add_css(
+                ".fixed { position: fixed; left: 300px; top: 300px; width: 20px; height: 20px; }",
+            );
+            let fixed = page.doc.el(page.anchored, "view.fixed");
+            assert_eq!(page.hit(310.0, 310.0), Some(fixed), "{group}");
+            {
+                let frame = page.doc.dom.committed_frame().expect("rendered");
+                let order = &frame.order;
+                let item = order
+                    .items
+                    .iter()
+                    .find(|item| item.node == fixed)
+                    .expect("painted");
+                let path: Vec<_> = super::space::path(order.spaces(), item.space).collect();
+                assert!(
+                    path.contains(&SpaceKind::AnchoredVisibility(0))
+                        && !path.contains(&SpaceKind::Anchored(0)),
+                    "{group}: {path:?}"
+                );
+            }
+            page.scroll(20.0, 30.0);
+            assert_eq!(page.hit(310.0, 310.0), Some(fixed), "{group}: not shifted");
+            page.scroll(0.0, 85.0);
+            assert_ne!(page.hit(310.0, 310.0), Some(fixed), "{group}: hidden");
+            page.scroll(0.0, 0.0);
+            assert_eq!(page.hit(310.0, 310.0), Some(fixed), "{group}: back");
+        }
     }
 
     /// A box anchored to a hidden anchored box hides with it.
