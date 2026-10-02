@@ -32,11 +32,12 @@
 //! (css-values-5, not in the fork); `CSS.registerProperty`; removing a
 //! stylesheet (`remove-position-try-rules-001.html` — no API for it);
 //! `-crash` files; `anchor-scroll-*`, `position-visibility-*` and the
-//! other scroll-compensation files (their numbers include the default scroll
-//! shift, which this engine applies at compose, not in layout — see
-//! `bounding_client_rect_omits_the_default_scroll_shift`; the painter's
-//! tests in `crates/bobcat-core/src/paint/event_loop_tests.rs` and
-//! `crates/dom/src/visual/anchored.rs` cover §3.3 and §6.6);
+//! other scroll-compensation files (they drive scrolling and visibility
+//! through the browser's rendering loop; `bounding_client_rect` reports the
+//! default scroll shift — see
+//! `bounding_client_rect_includes_the_default_scroll_shift` — and the
+//! painter's tests in `crates/bobcat-core/src/paint/event_loop_tests.rs`
+//! and `crates/dom/src/visual/anchored.rs` cover §3.3 and §6.6);
 //! `position-try-order-include-base.html` (it passes only if the base
 //! style is re-sorted while it fits; the ED determines fallback only on
 //! overflow); `position-area-fixed.html` and the fixed-position and
@@ -4733,13 +4734,13 @@ fn wpt_inherit_height_from_fallback() {
     assert_eq!(page.abs(child).3, 100.0, "inherited from the option");
 }
 
-/// Not a WPT port: `bounding_client_rect` (the `boundingClientRect` UI
-/// method, `getBoundingClientRect`) reports the box's layout position,
-/// which uses the remembered scroll offsets; the default scroll shift is
-/// applied at compose only, so a scroll after the recalculation point does
-/// not move the reported rectangle (browsers include the shift).
+/// Not a WPT port: layout places the box against the remembered scroll
+/// offsets and the painter applies the default scroll shift, but
+/// `bounding_client_rect` (the `boundingClientRect` UI method,
+/// `getBoundingClientRect`) adds the shift, as browsers do — for the box
+/// and for its descendants.
 #[test]
-fn bounding_client_rect_omits_the_default_scroll_shift() {
+fn bounding_client_rect_includes_the_default_scroll_shift() {
     let mut page = Page::new(
         ".scroller { overflow: scroll; width: 200px; height: 100px; }
          .filler { height: 500px; }
@@ -4754,18 +4755,17 @@ fn bounding_client_rect_omits_the_default_scroll_shift() {
     let anchor = page.el(content, "view.anchor", "");
     page.el(content, "view.filler", "");
     let anchored = page.el(cb, "view.anchored", "");
+    let child = page.el(anchored, "view", "height: 5px");
     page.render();
     assert_eq!(page.abs(anchored).1, 80.0);
+    assert_eq!(page.abs(child).1, 80.0);
     page.doc
         .dom
         .scroll_to(scroller, dom::Vector2D::new(0.0, 20.0));
     page.render();
     assert_eq!(page.abs(anchor).1, 30.0, "the anchor scrolled");
-    assert_eq!(
-        page.abs(anchored).1,
-        80.0,
-        "the anchored box did not, in layout"
-    );
+    assert_eq!(page.abs(anchored).1, 60.0, "the box follows it");
+    assert_eq!(page.abs(child).1, 60.0, "and so does its content");
 }
 
 /// wpt `registered-custom-property-anchor.html`, both cases: `anchor()` and

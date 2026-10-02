@@ -508,6 +508,14 @@ impl<T> Document<T> {
     /// Sticky offsets are sampled from these same live scroll positions,
     /// including those inherited from sticky containing-block ancestors.
     ///
+    /// So is css-anchor-position-1's default scroll shift (§3.3), for the
+    /// box and every anchor-positioned box on its containing-block chain,
+    /// as browsers report it: layout places such a box against its anchors'
+    /// remembered offsets and the painter shifts it, so the rect adds the
+    /// shift at the stored offsets (unsnapped, like them). A box hidden by
+    /// `position-visibility` still reports its rect: the hide is a paint
+    /// and hit-testing effect, as in Blink.
+    ///
     /// `None` when the element has no box at all: `display: none` or
     /// `display: contents`, a node that is not a styled element, a node no
     /// pass has laid out, or one detached from the document tree.
@@ -530,6 +538,15 @@ impl<T> Document<T> {
         if style.values().clone_position() == PositionProperty::Sticky {
             origin += crate::visual::sticky::live_offset(self, id, &mut sticky_offsets);
         }
+        let anchored = !self.layout_state().anchored.is_empty();
+        let shift = |id| {
+            if anchored {
+                self.default_scroll_shift(id, None).unwrap_or_default()
+            } else {
+                Vector2D::zero()
+            }
+        };
+        origin += shift(id);
         // The position the *escaping* box was keyed on, which decides which
         // ancestor is its containing block — and so which scroll offsets
         // move it. It is the computed value, not hughie's parent-lowered
@@ -570,6 +587,7 @@ impl<T> Document<T> {
                 if self.is_scroll_container(ancestor_id) {
                     origin -= self.scroll_offset(ancestor_id);
                 }
+                origin += shift(ancestor_id);
                 escape = ancestor_style.values().clone_position();
             }
             current = ancestor;
