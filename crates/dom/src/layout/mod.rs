@@ -812,8 +812,11 @@ impl<T> Document<T> {
     /// the old and new computed style). Answers whether any such descendant
     /// was invalidated.
     ///
-    /// Every positioned descendant that could name `id` lays out again:
-    /// rounding only re-hoists a box under a subtree some write reached. That
+    /// Every positioned descendant that could name `id` lays out again —
+    /// its parent re-records its static position under whichever
+    /// containing block it escapes to now (`layout::hoisted`) — and, if it
+    /// is anchor-positioned with a last successful position option, has made
+    /// a fallback-sensitive change (css-anchor-position-1 §6.5.1). That
     /// holds even where its style establishes the block now, since the same
     /// flush can have changed that style too and the relayout damage it
     /// produced reaches `id` alone. `id` itself lays out again only through a
@@ -847,6 +850,18 @@ impl<T> Document<T> {
                         child.id(),
                         absolute_held || establishes_absolute_containing_block(child, style),
                     ));
+                }
+            }
+        }
+        let anchored = &mut self.layout_state_mut().anchored;
+        if !anchored.is_empty() {
+            // css-anchor-position-1 §6.5.1: "the box's containing block
+            // association changed" is a fallback-sensitive change.
+            for descendant in &positioned {
+                if let Some(entry) = anchored.get_mut(descendant)
+                    && entry.last_successful.is_some()
+                {
+                    entry.fallback_sensitive = true;
                 }
             }
         }

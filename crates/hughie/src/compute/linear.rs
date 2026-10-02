@@ -1480,8 +1480,12 @@ where
                     },
                     position,
                     gravity: computed_cross_gravity(child_style.align_self(), align_items, axes),
-                    // An `anchor-size()` inset may still resolve to `auto`.
-                    static_axes: {
+                    // An `anchor-size()` inset may still resolve to `auto`,
+                    // and a position option can make `auto` an inset the
+                    // box's own style gives a length.
+                    static_axes: if tree.position_option_count(child) > 1 {
+                        Size::new(true, true)
+                    } else {
                         let auto = inset
                             .map(|inset| inset.is_auto() || super::anchor::is_anchor_inset(inset));
                         Size::new(auto.left && auto.right, auto.top && auto.bottom)

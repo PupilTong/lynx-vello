@@ -176,6 +176,14 @@ impl AnchorRegistry {
         self.options.get(&id)
     }
 
+    /// Whether `id` has a position option past its base style — what makes
+    /// `hughie` run the fallback loop for it (an options list whose entries
+    /// all name unknown rules is no list at all, §6.1).
+    pub(crate) fn has_fallbacks(&self, id: NodeId) -> bool {
+        self.options(id)
+            .is_some_and(|options| !options.styles.is_empty())
+    }
+
     /// Every element holding position options.
     pub(crate) fn option_holders(&self) -> impl Iterator<Item = NodeId> + '_ {
         self.options.keys().copied()
@@ -870,9 +878,26 @@ pub(crate) fn default_anchor<'t, T>(
                 .node
                 .flat_parent()
                 .filter(|parent| parent.is_element())?;
-            let parent_style = parent
+            let parent_base = parent
                 .layout_computed_style()
                 .filter(|style| is_absolutely_positioned(style))?;
+            // The parent's default anchor under the option it was laid out
+            // with: `position-anchor` is an accepted `@position-try`
+            // property, so the option may name another one. A parent being
+            // laid out right now has the last run's outcome; when that run
+            // chose differently, the settle loop re-reads this (a
+            // `match-parent` read goes through no single name, so it is
+            // always looked up again).
+            let parent_style = match liveness {
+                Liveness::Committed(state) => state
+                    .anchored
+                    .get(&parent.id())
+                    .and_then(|entry| entry.outcome)
+                    .filter(|outcome| outcome.chosen > 0)
+                    .and_then(|outcome| option_style(tree, parent, outcome.chosen))
+                    .unwrap_or(parent_base),
+                Liveness::Relevance { .. } => parent_base,
+            };
             let parent_query = Query::of(parent)?;
             let anchor = default_anchor(tree, &parent_query, parent_style, liveness)?;
             let chain = connected_chain(anchor)?;
@@ -1341,7 +1366,7 @@ impl<T: Sync> crate::tree::document::Document<T> {
         }
         let mut invalidated = false;
         for id in recascade {
-            let options = self.cascade_position_options(id);
+            let options = self.cascade_position_options(id, source);
             let old = self.arenas_mut().anchors_mut().options.remove(&id);
             let (sensitive, options_moved) = match (&old, &options) {
                 (None, None) => (false, false),
@@ -1374,10 +1399,22 @@ impl<T: Sync> crate::tree::document::Document<T> {
 
     /// `id`'s position options past its base style, cascaded now; `None`
     /// when its `position-try-fallbacks` is `none`.
-    fn cascade_position_options(&self, id: NodeId) -> Option<PositionOptions> {
+    ///
+    /// The options are cascaded over the element's current style, animated
+    /// values included: the Position Fallback Origin sits below the
+    /// Animations origin, so an animation still wins over an option. The
+    /// stored [`PositionOptions::base`] is the other thing §6.5.1 compares —
+    /// the base style *ignoring* the Animations and Transitions origins — so
+    /// a flush recomputes it without them, and an animation tick, which can
+    /// change nothing §6.5.1 counts, keeps the one it has.
+    fn cascade_position_options(
+        &self,
+        id: NodeId,
+        source: RestyleSource,
+    ) -> Option<PositionOptions> {
         let node = self.get(id)?;
-        let base = node.computed_style()?;
-        let fallbacks = &base.get_position().position_try_fallbacks;
+        let style = node.computed_style()?;
+        let fallbacks = &style.get_position().position_try_fallbacks;
         if fallbacks.value.is_none() {
             return None;
         }
@@ -1392,11 +1429,72 @@ impl<T: Sync> crate::tree::document::Document<T> {
             .filter_map(|item| {
                 engine
                     .stylist()
-                    .resolve_position_try(&base, &guards, fallbacks.scope, node, item)
+                    .resolve_position_try(&style, &guards, fallbacks.scope, node, item)
             })
             .collect();
+        let kept = match source {
+            RestyleSource::Animation => self
+                .arenas()
+                .anchors()
+                .options(id)
+                .map(|options| options.base.clone()),
+            RestyleSource::Flush => None,
+        };
+        let base =
+            kept.unwrap_or_else(|| without_animations(engine.stylist(), &guards, node, &style));
         Some(PositionOptions { base, styles })
     }
+}
+
+/// `style`, `node`'s computed style, cascaded again without the rules of
+/// the Animations, Transitions and SMIL override origins — §6.5.1's
+/// "computed base style … ignoring any declarations originating from the
+/// Transitions or Animations cascade origins". The style itself when it has
+/// none of those rules, which is every style no animation touches; a
+/// cascade from the stripped rule node otherwise, with the parents a
+/// restyle would use (the flat tree parent, and the nearest one that
+/// generates a box for the fixups).
+fn without_animations<T: Sync>(
+    stylist: &stylo::stylist::Stylist,
+    guards: &stylo::shared_lock::StylesheetGuards<'_>,
+    node: &Node<T>,
+    style: &Arc<ComputedValues>,
+) -> Arc<ComputedValues> {
+    let Some(rules) = style.rules.as_ref() else {
+        return style.clone();
+    };
+    if !rules.has_animation_or_transition_rules() {
+        return style.clone();
+    }
+    let mut inputs = stylo::context::CascadeInputs::new_from_style(style);
+    inputs.rules = Some(stylist.rule_tree().remove_animation_rules(rules));
+    inputs.visited_rules = None;
+    let parent = node.flat_parent().filter(|parent| parent.is_element());
+    let parent_style = parent.and_then(Node::computed_style);
+    let mut layout_parent = parent;
+    while let Some(candidate) = layout_parent {
+        if candidate
+            .computed_style()
+            .is_none_or(|style| !style.clone_display().is_contents())
+        {
+            break;
+        }
+        layout_parent = candidate.flat_parent().filter(|parent| parent.is_element());
+    }
+    let layout_parent_style = layout_parent.and_then(Node::computed_style);
+    stylist.cascade_style_and_visited(
+        Some(node),
+        None,
+        &inputs,
+        guards,
+        parent_style.as_deref(),
+        layout_parent_style.as_deref(),
+        stylo::properties::FirstLineReparenting::No,
+        &stylo::values::specified::position::PositionTryFallbacksTryTactic::default(),
+        None,
+        &mut stylo::rule_cache::RuleCacheConditions::default(),
+        &mut stylo::context::TreeCountingCaches::default(),
+    )
 }
 
 impl<T> crate::tree::document::Document<T> {
@@ -1547,8 +1645,10 @@ impl<T> crate::tree::document::Document<T> {
                     let Some(style) = node.layout_computed_style() else {
                         return true;
                     };
+                    // A box whose fallbacks all name unknown rules has one
+                    // option, which `hughie` treats as none at all.
                     !is_absolutely_positioned(style)
-                        || (tree.anchors().options(id).is_none()
+                        || (!tree.anchors().has_fallbacks(id)
                             && !hughie::compute::uses_anchor_positioning(&super::StyleView::of(
                                 node,
                             )))
@@ -1752,7 +1852,7 @@ impl<T> crate::tree::document::Document<T> {
                 .filter(|&(&id, entry)| {
                     !entry.redetermine
                         && entry.outcome.is_some()
-                        && tree.anchors().options(id).is_some()
+                        && tree.anchors().has_fallbacks(id)
                 })
                 .map(|(&id, _)| id)
                 .collect()
@@ -1817,7 +1917,7 @@ impl<T> crate::tree::document::Document<T> {
     pub(crate) fn record_last_successful_options(&mut self) {
         let (tree, state, _) = self.layout_parts();
         for (&id, entry) in &mut state.anchored {
-            let has_options = tree.anchors().options(id).is_some();
+            let has_options = tree.anchors().has_fallbacks(id);
             entry.last_successful = entry
                 .outcome
                 .filter(|_| has_options)
@@ -2149,5 +2249,121 @@ mod tests {
             assert!(first <= 2 * items, "{items} items: {first} candidates");
             assert!(again <= 2 * items, "{items} items: {again} candidates");
         }
+    }
+
+    /// §6.5.1 compares the base style ignoring the Animations and
+    /// Transitions origins: the stored base never carries an animated value,
+    /// and a flush during the animation is not a fallback-sensitive change.
+    #[test]
+    fn the_fallback_base_ignores_animations() {
+        let mut doc = doc(".cb { position: relative; width: 200px; height: 200px; }
+             .box { position: absolute; left: 0px; top: 10px; width: 20px; height: 20px;
+                    position-try-fallbacks: --other; animation: drift 10s linear; }
+             @position-try --other { top: 0px; }
+             @keyframes drift { from { top: 80px; } to { top: 80px; } }");
+        let root = doc.root;
+        let cb = doc.el(root, "view.cb");
+        let target = doc.el(cb, "view.box");
+        doc.flush();
+        doc.dom.advance_animations(0.0);
+        doc.dom.advance_animations(1.0);
+        doc.dom.render();
+        let top = |doc: &Doc| {
+            let options = doc.dom.arenas().anchors().options(target).expect("options");
+            format!("{:?}", options.base.get_position().top)
+        };
+        assert!(top(&doc).contains("10.0"), "{}", top(&doc));
+        assert_eq!(
+            doc.dom.rounded_layout(target).expect("laid out").location.y,
+            80.0,
+            "the animation still lays the box out"
+        );
+        doc.set_inline(target, "opacity: 0.5");
+        doc.flush();
+        assert!(top(&doc).contains("10.0"), "{}", top(&doc));
+        assert!(
+            !doc.dom.layout_state().anchored[&target].fallback_sensitive,
+            "a restyle that moved only the animation is not fallback-sensitive"
+        );
+    }
+
+    /// §6.5.1: a change of containing block association is
+    /// fallback-sensitive.
+    #[test]
+    fn a_new_containing_block_is_fallback_sensitive() {
+        let mut doc = doc(".cb { position: relative; width: 200px; height: 200px; }
+             .box { position: absolute; left: 0px; top: 500px; width: 20px; height: 20px;
+                    position-try-fallbacks: --up; }
+             @position-try --up { top: 0px; }");
+        let root = doc.root;
+        let cb = doc.el(root, "view.cb");
+        let wrapper = doc.el(cb, "view");
+        let target = doc.el(wrapper, "view.box");
+        doc.flush();
+        doc.dom.render();
+        assert_eq!(
+            doc.dom.layout_state().anchored[&target].last_successful,
+            Some(1)
+        );
+        doc.set_inline(wrapper, "transform: translateX(0px)");
+        doc.flush();
+        assert!(doc.dom.layout_state().anchored[&target].fallback_sensitive);
+    }
+
+    /// A box whose fallbacks all name unknown rules has no options, so once
+    /// it stops using anchor positioning nothing is reported for it and its
+    /// state goes, rather than keeping a stale outcome for the painter.
+    #[test]
+    fn unknown_fallbacks_retire_like_none() {
+        let mut doc = doc(".cb { position: relative; width: 200px; height: 200px; }
+             .anchor { anchor-name: --a; width: 10px; height: 10px; }
+             .box { position: absolute; left: 0px; top: anchor(--a bottom); width: 20px;
+                    height: 20px; position-try-fallbacks: --missing; }");
+        let root = doc.root;
+        let cb = doc.el(root, "view.cb");
+        doc.el(cb, "view.anchor");
+        let target = doc.el(cb, "view.box");
+        doc.dom.layout();
+        assert!(doc.dom.anchor_outcome(target).is_some());
+        doc.set_inline(target, "top: 5px");
+        doc.dom.layout();
+        assert!(doc.dom.anchor_outcome(target).is_none());
+        assert!(!doc.dom.layout_state().anchored.contains_key(&target));
+    }
+
+    /// `match-parent` matches the default anchor of the option its parent
+    /// was laid out with, not its base style's.
+    #[test]
+    fn match_parent_follows_the_parents_chosen_option() {
+        let mut doc = doc(".case { position: relative; width: 120px; height: 100px;
+                     transform: translateX(0px); }
+             .a1 { position: absolute; anchor-name: --a1; left: 0px; top: 0px;
+                   width: 10px; height: 10px; }
+             .a2 { position: absolute; anchor-name: --a2; left: 20px; top: 50px;
+                   width: 30px; height: 20px; }
+             .parent { position: fixed; position-anchor: --a1; left: 0px; top: 200px;
+                       width: 10px; height: 10px; position-try-fallbacks: --two; }
+             @position-try --two { position-anchor: --a2; top: 0px; }
+             .probe { position: fixed; position-anchor: match-parent;
+                      left: anchor(right, 1px); top: anchor(bottom, 1px);
+                      width: 5px; height: 5px; }");
+        let root = doc.root;
+        let case = doc.el(root, "view.case");
+        doc.el(case, "view.a1");
+        doc.el(case, "view.a2");
+        let parent = doc.el(case, "view.parent");
+        let probe = doc.el(parent, "view.probe");
+        let runs = layout_runs_during(|| doc.dom.layout());
+        assert_eq!(doc.dom.anchor_outcome(parent).expect("reported").chosen, 1);
+        assert_eq!(runs, 1, "the parent reports before its escaping child runs");
+        let rect = doc.dom.bounding_client_rect(probe).expect("laid out");
+        let frame = doc.dom.bounding_client_rect(case).expect("laid out");
+        assert_eq!(
+            (
+                rect.origin.x - frame.origin.x,
+                rect.origin.y - frame.origin.y
+            ),
+            (50.0, 70.0)
+        );
     }
 }

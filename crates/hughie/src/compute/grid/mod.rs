@@ -1251,8 +1251,11 @@ where
                 .inset()
                 .map(|inset| inset.is_auto() || crate::compute::anchor::is_anchor_inset(inset))
         };
-        let needs_static_measurement =
-            (inset_auto.left && inset_auto.right) || (inset_auto.top && inset_auto.bottom);
+        // A position option can make an inset `auto` the box's own style
+        // gives a length, so a box with options always has one ready.
+        let needs_static_measurement = (inset_auto.left && inset_auto.right)
+            || (inset_auto.top && inset_auto.bottom)
+            || tree.position_option_count(key.node) > 1;
         let content_static_offset = if needs_static_measurement {
             let item = resolve_grid_item(
                 &tree.style(key.node),

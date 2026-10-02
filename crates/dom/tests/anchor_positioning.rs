@@ -1401,6 +1401,47 @@ fn an_escaping_box_moves_with_its_subtree() {
     assert_eq!(page.offset(escaping, second).0, 190.0);
 }
 
+/// A position option that makes both insets of an axis `auto` places the
+/// box at its static position — which a grid container computes for a box
+/// with options whatever its own style's insets say (here `justify-items:
+/// center` puts it at 75, not at the padding edge).
+#[test]
+fn an_option_with_auto_insets_reads_the_grid_static_position() {
+    let mut page = Page::new(
+        ".grid { display: grid; grid-template-columns: 200px; grid-template-rows: 200px;
+                 justify-items: center; width: 200px; height: 200px; }
+         .box { position: absolute; left: 0px; top: 300px; width: 50px; height: 50px;
+                position-try-fallbacks: --auto; }
+         @position-try --auto { left: auto; top: 0px; }",
+    );
+    let root = page.root();
+    let grid = page.el(root, "view.grid.cb", "");
+    let target = page.el(grid, "view.box", "");
+    page.layout();
+    assert_eq!(page.offset(target, grid), (75.0, 0.0, 50.0, 50.0));
+}
+
+/// The same for a box escaping a Lynx `linear` parent: the parent measures
+/// it for its static position when it has options, so the option's `auto`
+/// insets land on the cross-axis gravity (75), not on a zero-size box's
+/// (100).
+#[test]
+fn an_option_with_auto_insets_reads_the_linear_static_position() {
+    let mut page = Page::new(
+        ".lin { display: linear; linear-direction: column; align-items: center;
+                width: 200px; height: 200px; }
+         .box { position: absolute; left: 0px; top: 300px; width: 50px; height: 50px;
+                position-try-fallbacks: --auto; }
+         @position-try --auto { left: auto; top: 0px; }",
+    );
+    let root = page.root();
+    let cb = page.el(root, "view.cb", "width: 200px; height: 200px");
+    let linear = page.el(cb, "view.lin", "");
+    let target = page.el(linear, "view.box", "");
+    page.layout();
+    assert_eq!(page.offset(target, cb), (75.0, 0.0, 50.0, 50.0));
+}
+
 /// A removed anchor drops its reader to the fallback; a new one is picked
 /// up without any change to the reader.
 #[test]
