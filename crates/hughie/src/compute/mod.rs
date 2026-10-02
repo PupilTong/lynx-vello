@@ -730,7 +730,12 @@ where
         "containing-block sizes must be finite and non-negative"
     );
     let style = tree.style(node);
-    if tree.position_option_count(node) > 1 || anchor::uses_anchor_positioning(&style) {
+    // The style test first: a box that names no anchor and lists no
+    // fallbacks — nearly every absolutely positioned box — decides here,
+    // without asking the host for an options list it cannot have.
+    if anchor::uses_anchor_positioning(&style)
+        || (style.has_position_try_fallbacks() && tree.position_option_count(node) > 1)
+    {
         return anchor_fallback::anchored_absolute_layout(
             tree,
             state,

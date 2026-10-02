@@ -4668,12 +4668,10 @@ fn wpt_under_invalidation() {
 
 /// wpt `anchor-center-002.html`, the flexbox half: `anchor-center` on an
 /// in-flow item is `center` (§4.2: "If the box is not absolutely
-/// positioned … this value behaves as center"). Reftest → geometry. Not
-/// ported: the grid half, which uses plain `center`. `hughie`'s in-flow
-/// self-alignment (flexbox, grid) does not recognise the keyword and
-/// places the item at the start.
+/// positioned … this value behaves as center"). Reftest → geometry. The
+/// grid half uses plain `center` in the file; `in_flow_anchor_center_is_center_in_grid`
+/// runs the keyword itself there.
 #[test]
-#[ignore = "GAP: anchor-center on an in-flow flex or grid item aligns as start, not center"]
 fn wpt_anchor_center_002() {
     let mut page = Page::new("");
     let root = page.root();
@@ -4689,6 +4687,26 @@ fn wpt_anchor_center_002() {
     );
     page.layout();
     assert_eq!(page.offset(item, container).1, 30.0);
+}
+
+/// §4.2's in-flow rule on a grid item, both axes: `anchor-center` is
+/// `center`.
+#[test]
+fn in_flow_anchor_center_is_center_in_grid() {
+    let mut page = Page::new("");
+    let root = page.root();
+    let container = page.el(
+        root,
+        "view",
+        "display: grid; grid-template-columns: 100px; grid-template-rows: 100px",
+    );
+    let item = page.el(
+        container,
+        "view",
+        "width: 40px; height: 20px; justify-self: anchor-center; align-self: anchor-center",
+    );
+    page.layout();
+    assert_eq!(page.offset(item, container), (30.0, 40.0, 40.0, 20.0));
 }
 
 /// wpt `inherit-height-from-fallback.html`: a child inherits `height` from

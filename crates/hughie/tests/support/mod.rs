@@ -519,6 +519,13 @@ impl CoreStyle for TestStyle {
         self.display
     }
 
+    /// The mock host keeps position options in its own table
+    /// (`TestTree::position_options`), not in a `position-try-fallbacks`
+    /// value, so every style lets the absolute pass ask it.
+    fn has_position_try_fallbacks(&self) -> bool {
+        true
+    }
+
     fn position(&self) -> PositionProperty {
         self.position
     }

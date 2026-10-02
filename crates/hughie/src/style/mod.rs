@@ -237,6 +237,11 @@ style_protocol! {
                     | PositionAnchorKeyword::None
                     | PositionAnchorKeyword::Auto
             ),
+            // §6.1: whether `position-try-fallbacks` lists anything. Only a
+            // box that does can have position options, so only it costs the
+            // absolute pass a host call to count them.
+            has_position_try_fallbacks -> bool =
+                !style.computed_values().get_position().position_try_fallbacks.value.is_none(),
             order -> i32 = style.computed_values().get_position().order,
         }
     }

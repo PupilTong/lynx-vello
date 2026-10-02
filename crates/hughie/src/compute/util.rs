@@ -92,6 +92,11 @@ fn normalize_alignment<const CONTENT: bool>(
     if !CONTENT && value == AlignFlags::LAST_BASELINE {
         return Some(AlignFlags::END);
     }
+    // css-anchor-position-1 §4.2: "If the box is not absolutely positioned,
+    // … this value behaves as center" — every in-flow item is not.
+    if !CONTENT && value == AlignFlags::ANCHOR_CENTER {
+        return Some(AlignFlags::CENTER);
+    }
     let common = matches!(
         value,
         AlignFlags::START
@@ -1491,6 +1496,7 @@ mod tests {
             "physical right vertical": A::RIGHT, false, false => Some(A::START);
             "self start": A::SELF_START, true, false => Some(A::START);
             "self end": A::SELF_END, false, false => Some(A::START);
+            "anchor-center in flow": A::ANCHOR_CENTER, true, false => Some(A::CENTER);
         }
     }
 
