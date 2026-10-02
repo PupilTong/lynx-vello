@@ -489,6 +489,7 @@ impl<T> TreeArenas<T> {
                 "a target anchor holds a committed box"
             );
         }
+        let generation = anchors::lookup_generation(self, node_ref, option, &query);
         state.anchor_pending.borrow_mut().push((
             node,
             anchors::AnchorRead {
@@ -496,6 +497,7 @@ impl<T> TreeArenas<T> {
                 query,
                 target,
                 rect,
+                generation,
             },
         ));
         (target, rect)

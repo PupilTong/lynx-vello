@@ -133,6 +133,14 @@ pub(crate) struct AnchorRegistry {
     /// The elements whose `position-try-fallbacks` is not `none`, with the
     /// option styles cascaded for them.
     options: FxHashMap<NodeId, PositionOptions>,
+    /// Per anchor name, a counter bumped whenever an element declaring it
+    /// (before or after) is restyled or freed: what a lookup's answer for
+    /// that name can depend on besides the tree. See [`Self::generation`].
+    generations: FxHashMap<Atom, u64>,
+    /// Bumped by what decides every name's lookup at once: an `anchor-scope`
+    /// appearing, changing or going, and a `content-visibility: auto`
+    /// relevance flip, which gives or takes the boxes of a whole subtree.
+    epoch: u64,
 }
 
 /// One element's position options list past its base style (§6.1).
@@ -198,6 +206,29 @@ impl AnchorRegistry {
         self.defined.is_empty() && self.scopers.is_empty() && self.options.is_empty()
     }
 
+    /// What a §2.3 lookup of `name` read from the registry, as a number that
+    /// changes whenever that could: a lookup answered at one generation
+    /// names the same target at the same generation, as long as that target
+    /// still has a box (the settle loop's check, [`Document::settle_anchors`]).
+    #[inline]
+    pub(crate) fn generation(&self, name: &Atom) -> u64 {
+        self.epoch
+            .wrapping_add(self.generations.get(name).copied().unwrap_or(0))
+    }
+
+    /// A `content-visibility: auto` element's relevance flipped: its subtree
+    /// gained or lost its boxes, which any lookup may have counted.
+    pub(crate) fn note_relevance_flip(&mut self) {
+        if !self.is_empty() {
+            self.epoch = self.epoch.wrapping_add(1);
+        }
+    }
+
+    fn bump(&mut self, name: &Atom) {
+        let generation = self.generations.entry(name.clone()).or_default();
+        *generation = generation.wrapping_add(1);
+    }
+
     /// Re-reads the names and the scope `id` declares from its restyled
     /// `style` (`None` when it has none).
     pub(crate) fn restyled(&mut self, id: NodeId, style: Option<&ComputedValues>) {
@@ -214,18 +245,21 @@ impl AnchorRegistry {
         }
         for name in &names {
             self.definers.entry(name.clone()).or_default().push(id);
+            self.bump(name);
         }
         if !names.is_empty() {
             self.defined.insert(id, names);
         }
         if !box_style.anchor_scope.is_none() {
             self.scopers.insert(id);
+            self.epoch = self.epoch.wrapping_add(1);
         }
     }
 
     fn undefine(&mut self, id: NodeId) {
         if let Some(names) = self.defined.remove(&id) {
             for name in names {
+                self.bump(&name);
                 if let Some(list) = self.definers.get_mut(&name) {
                     list.retain(|definer| *definer != id);
                     if list.is_empty() {
@@ -234,7 +268,9 @@ impl AnchorRegistry {
                 }
             }
         }
-        self.scopers.remove(&id);
+        if self.scopers.remove(&id) {
+            self.epoch = self.epoch.wrapping_add(1);
+        }
     }
 
     /// Drops everything `id` declared: it was freed.
@@ -310,6 +346,12 @@ pub(crate) struct AnchorRead {
     /// The answer: the anchor's rectangle, or the scrollable containing
     /// block at the origin.
     pub(crate) rect: Option<Rect<f32>>,
+    /// The registry generation of the name the lookup went through
+    /// ([`AnchorRegistry::generation`]), or `None` when it went through no
+    /// single name (`match-parent`, the scrollable containing block): the
+    /// settle loop re-reads only the rectangle of a target found at the
+    /// current generation.
+    pub(crate) generation: Option<u64>,
 }
 
 /// §3.3's remembered scroll offsets of one anchor-positioned box, recorded
@@ -354,6 +396,35 @@ impl RememberedScroll {
 /// their outcome. Interior-mutable because the queries arrive through
 /// `&DocumentLayoutState`.
 pub(crate) type PendingReads = RefCell<Vec<(NodeSlot, AnchorRead)>>;
+
+/// One name's definers partitioned by their nearest `anchor-scope` for it
+/// (`None`: unscoped), at the registry generation they were sorted at.
+///
+/// §2.2 makes a candidate acceptable only when its nearest scope for the
+/// name contains the query box, so a lookup needs only the partitions keyed
+/// by the query box's scoping ancestors and the unscoped one: with N list
+/// items each scoping one shared name over one anchor, a lookup sees one
+/// candidate instead of N, and a layout's lookups are O(N) rather than
+/// O(N²). Kept in [`DocumentLayoutState::anchor_buckets`] (interior-mutable:
+/// lookups arrive with the state borrowed shared), one entry per scoped name
+/// a lookup asked about, rebuilt when that name's generation moves.
+pub(crate) type AnchorBuckets = RefCell<FxHashMap<Atom, (u64, ScopeBuckets)>>;
+
+type ScopeBuckets = FxHashMap<Option<NodeId>, SmallVec<[NodeId; 2]>>;
+
+#[cfg(test)]
+std::thread_local! {
+    /// How many candidates the §2.3 lookups on this thread have examined.
+    static CANDIDATES_EXAMINED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Runs `pass` and answers how many §2.3 candidates its lookups examined.
+#[cfg(test)]
+pub(crate) fn candidates_examined_during(pass: impl FnOnce()) -> usize {
+    CANDIDATES_EXAMINED.with(|count| count.set(0));
+    pass();
+    CANDIDATES_EXAMINED.with(std::cell::Cell::get)
+}
 
 // ---------------------------------------------------------------------------
 // Tree walks.
@@ -517,14 +588,23 @@ pub(crate) fn target_anchor<'t, T>(
 ) -> Option<&'t Node<T>> {
     let atom = &name.value.0;
     let registry = tree.anchors();
-    let candidates = registry.definers(atom);
-    if candidates.is_empty() {
+    let all = registry.definers(atom);
+    if all.is_empty() {
         return None;
     }
+    let scoped = match liveness {
+        Liveness::Committed(state) if registry.has_scopers() && all.len() > 1 => {
+            Some(scoped_candidates(tree, state, query, atom))
+        }
+        _ => None,
+    };
+    let candidates = scoped.as_deref().unwrap_or(all);
     let reference_tree = query.node.scoped_name_tree(name.scope);
     let mut nearest_ancestor: Option<(usize, &Node<T>)> = None;
     let mut last: Option<(&Node<T>, Chain)> = None;
     for &candidate in candidates {
+        #[cfg(test)]
+        CANDIDATES_EXAMINED.with(|count| count.set(count.get() + 1));
         let Some(node) = tree.get(candidate) else {
             continue;
         };
@@ -577,6 +657,59 @@ pub(crate) fn target_anchor<'t, T>(
     nearest_ancestor
         .map(|(_, node)| node)
         .or_else(|| last.map(|(node, _)| node))
+}
+
+/// The definers of `name` that can be in scope for `query` (§2.2): those
+/// whose nearest scope for the name is unscoped or one of the query box's
+/// scoping ancestors — a superset of the ones [`in_scope`] accepts, read
+/// from the name's [`AnchorBuckets`] entry.
+fn scoped_candidates<T>(
+    tree: &TreeArenas<T>,
+    state: &DocumentLayoutState,
+    query: &Query<'_, T>,
+    name: &Atom,
+) -> SmallVec<[NodeId; 4]> {
+    let registry = tree.anchors();
+    let generation = registry.generation(name);
+    let mut buckets = state.anchor_buckets.borrow_mut();
+    let entry = buckets
+        .entry(name.clone())
+        .or_insert_with(|| (generation.wrapping_add(1), ScopeBuckets::default()));
+    if entry.0 != generation {
+        entry.1.clear();
+        for &definer in registry.definers(name) {
+            let Some(node) = tree.get(definer) else {
+                continue;
+            };
+            let declared_tree = node
+                .layout_computed_style()
+                .map(|style| node.scoped_name_tree(style.get_box().anchor_name.scope));
+            let nearest = declared_tree.and_then(|declared_tree| {
+                let mut current = Some(node);
+                while let Some(step) = current {
+                    if scopes(tree, step.id(), name, declared_tree) {
+                        return Some(step.id());
+                    }
+                    current = step.flat_parent();
+                }
+                None
+            });
+            entry.1.entry(nearest).or_default().push(definer);
+        }
+        entry.0 = generation;
+    }
+    let mut candidates = SmallVec::new();
+    if let Some(unscoped) = entry.1.get(&None) {
+        candidates.extend_from_slice(unscoped);
+    }
+    for &ancestor in query.chain.iter().skip(1) {
+        if registry.is_scoper(ancestor)
+            && let Some(bucket) = entry.1.get(&Some(ancestor))
+        {
+            candidates.extend_from_slice(bucket);
+        }
+    }
+    candidates
 }
 
 /// Whether `node` has a box the lookup may read.
@@ -1017,6 +1150,53 @@ pub(crate) fn answer<T>(
     )
 }
 
+/// The registry generation a lookup of `query` for `node` under `option`
+/// goes through, when it goes through one name; see
+/// [`AnchorRead::generation`].
+pub(crate) fn lookup_generation<T>(
+    tree: &TreeArenas<T>,
+    node: &Node<T>,
+    option: usize,
+    query: &AnchorQuery,
+) -> Option<u64> {
+    match query {
+        AnchorQuery::Named(name) => Some(tree.anchors().generation(&name.value.0)),
+        AnchorQuery::Default => match &option_style(tree, node, option)?
+            .get_position()
+            .position_anchor
+            .value
+        {
+            PositionAnchorKeyword::Ident(name) => Some(tree.anchors().generation(&name.0)),
+            PositionAnchorKeyword::MatchParent
+            | PositionAnchorKeyword::Normal
+            | PositionAnchorKeyword::None
+            | PositionAnchorKeyword::Auto => None,
+        },
+        AnchorQuery::Scrollable => None,
+    }
+}
+
+/// Whether `read`, a query the box `anchored` made in an earlier run, would
+/// be answered differently now. A target found at the registry generation
+/// still current is the target now too, as long as it keeps its box, so
+/// only its rectangle is re-read; anything else is looked up again.
+fn read_moved<T>(
+    tree: &TreeArenas<T>,
+    state: &DocumentLayoutState,
+    anchored: &Query<'_, T>,
+    read: &AnchorRead,
+) -> bool {
+    if let (Some(generation), Some(target)) = (read.generation, read.target)
+        && lookup_generation(tree, anchored.node, read.option, &read.query) == Some(generation)
+        && let Some(node) = tree.get(target)
+        && connected_chain(node)
+            .is_some_and(|chain| has_box(tree, node, &chain, Liveness::Committed(state)))
+    {
+        return Some(anchor_rect_of(tree, state, anchored, read.option, target)) != read.rect;
+    }
+    answer(tree, state, anchored, read.option, &read.query) != (read.target, read.rect)
+}
+
 // ---------------------------------------------------------------------------
 // The document's half: harvest, settle loop, rendering-update recording.
 
@@ -1334,10 +1514,10 @@ impl<T> crate::tree::document::Document<T> {
                     let Some(query) = tree.get(id).and_then(Query::of) else {
                         return false;
                     };
-                    entry.reads.iter().any(|read| {
-                        answer(tree, state, &query, read.option, &read.query)
-                            != (read.target, read.rect)
-                    })
+                    entry
+                        .reads
+                        .iter()
+                        .any(|read| read_moved(tree, state, &query, read))
                 })
                 .map(|(&id, _)| id)
                 .collect()
@@ -1928,5 +2108,46 @@ mod tests {
         assert_eq!(runs, 1);
         assert_eq!(top(&doc), 70.0);
         assert!(!doc.dom.layout_needs_pass(viewport, scale));
+    }
+
+    /// §2.2 + §2.3 cost: N list items scoping one shared name, each over one
+    /// anchor and one box reading it. A lookup sees only the definers under
+    /// the query box's scopes, and the settle loop re-reads a found target's
+    /// rectangle without looking it up again, so a layout examines O(N)
+    /// candidates — not N per box.
+    #[test]
+    fn scoped_lookups_examine_one_candidate_per_box() {
+        let examined = |items: usize| {
+            let mut doc = doc(
+                ".li { position: relative; anchor-scope: --a; width: 100px; height: 20px; }
+                 .anchor { anchor-name: --a; width: 10px; height: 10px; }
+                 .box { position: absolute; top: anchor(--a bottom); left: 0px;
+                        width: 5px; height: 5px; }",
+            );
+            let root = doc.root;
+            let list = doc.el(root, "view");
+            let mut boxes = Vec::new();
+            for _ in 0..items {
+                let li = doc.el(list, "view.li");
+                doc.el(li, "view.anchor");
+                boxes.push(doc.el(li, "view.box"));
+            }
+            let first = super::candidates_examined_during(|| doc.dom.layout());
+            for &target in &boxes {
+                assert_eq!(
+                    doc.dom.rounded_layout(target).expect("laid out").location.y,
+                    10.0
+                );
+            }
+            // A relayout of the list's container re-runs every box.
+            doc.set_inline(list, "padding-top: 1px");
+            let again = super::candidates_examined_during(|| doc.dom.layout());
+            (first, again)
+        };
+        for items in [8, 32] {
+            let (first, again) = examined(items);
+            assert!(first <= 2 * items, "{items} items: {first} candidates");
+            assert!(again <= 2 * items, "{items} items: {again} candidates");
+        }
     }
 }

@@ -10,7 +10,7 @@
 use smallvec::SmallVec;
 use stylo::values::computed::PositionTryOrder;
 
-use super::anchor::{AnchoredGeometry, GeometryValues};
+use super::anchor::{AnchorMemo, AnchoredGeometry, GeometryValues};
 use super::{AbsoluteContainingBlock, AbsolutePlacement, Placed, place_absolute};
 use crate::geometry::{Edges, Point, Rect, Size};
 use crate::style::CoreStyle;
@@ -40,13 +40,22 @@ fn lay_out_with<T, StaticPosition>(
     containing_block: &AbsoluteContainingBlock,
     static_position: &StaticPosition,
     goal: LayoutGoal,
+    memo: &mut AnchorMemo,
 ) -> Tried
 where
     T: LayoutTree,
     StaticPosition: Fn(Size<f32>, Edges<f32>) -> Point<f32>,
 {
-    let geometry =
-        AnchoredGeometry::resolve(tree, state, node, base, style, option, containing_block);
+    let geometry = AnchoredGeometry::resolve(
+        tree,
+        state,
+        node,
+        base,
+        style,
+        option,
+        containing_block,
+        memo,
+    );
     let Some(geometry) = geometry else {
         let values = GeometryValues::of(style);
         let placement = AbsolutePlacement::plain(style, &values, containing_block);
@@ -104,6 +113,7 @@ fn lay_out_option<T, StaticPosition>(
     containing_block: &AbsoluteContainingBlock,
     static_position: &StaticPosition,
     goal: LayoutGoal,
+    memo: &mut AnchorMemo,
 ) -> Tried
 where
     T: LayoutTree,
@@ -121,6 +131,7 @@ where
             containing_block,
             static_position,
             goal,
+            memo,
         )
     } else {
         lay_out_with(
@@ -133,6 +144,7 @@ where
             containing_block,
             static_position,
             goal,
+            memo,
         )
     }
 }
@@ -146,31 +158,44 @@ fn option_sort_size<T: LayoutTree>(
     base: &impl CoreStyle,
     option: usize,
     containing_block: &AbsoluteContainingBlock,
+    memo: &mut AnchorMemo,
 ) -> Size<f32> {
     let style = tree.position_option_style(node, option);
-    AnchoredGeometry::resolve(tree, state, node, base, &style, option, containing_block)
-        .map_or_else(
-            || {
-                // No anchor positioning in this option: its containing block
-                // is the handed-over one and its insets are its own.
-                let inset = style.inset();
-                let size = containing_block.size;
-                let used =
-                    |inset, basis| super::util::resolve_inset(inset, Some(basis)).unwrap_or(0.0);
-                Size::new(
-                    (size.width - used(inset.left, size.width) - used(inset.right, size.width))
-                        .max(0.0),
-                    (size.height - used(inset.top, size.height) - used(inset.bottom, size.height))
-                        .max(0.0),
-                )
-            },
-            |geometry| geometry.sort_size(),
-        )
+    AnchoredGeometry::resolve(
+        tree,
+        state,
+        node,
+        base,
+        &style,
+        option,
+        containing_block,
+        memo,
+    )
+    .map_or_else(
+        || {
+            // No anchor positioning in this option: its containing block
+            // is the handed-over one and its insets are its own.
+            let inset = style.inset();
+            let size = containing_block.size;
+            let used = |inset, basis| super::util::resolve_inset(inset, Some(basis)).unwrap_or(0.0);
+            Size::new(
+                (size.width - used(inset.left, size.width) - used(inset.right, size.width))
+                    .max(0.0),
+                (size.height - used(inset.top, size.height) - used(inset.bottom, size.height))
+                    .max(0.0),
+            )
+        },
+        |geometry| geometry.sort_size(),
+    )
 }
 
 /// The absolute pass of a box that uses anchor positioning or has position
 /// options. Out of line and cold: the absolute pass of every other box never
 /// reaches it.
+#[allow(
+    clippy::too_many_lines,
+    reason = "§6.5's determination in its order, threading one memo"
+)]
 #[cold]
 #[inline(never)]
 pub(super) fn anchored_absolute_layout<T, StaticPosition>(
@@ -188,6 +213,7 @@ where
     let base = tree.style(node);
     let count = tree.position_option_count(node);
     let has_options = count > 1;
+    let mut memo = AnchorMemo::default();
     // §6.5: "Let current styles be the current used styles of abspos, as
     // derived from the computed base style (which might be the result of
     // earlier fallback)" — the last successful option, else the base style.
@@ -214,6 +240,7 @@ where
             containing_block,
             static_position,
             goal,
+            &mut memo,
         )
         .placed
         .layout;
@@ -237,6 +264,7 @@ where
         containing_block,
         static_position,
         commit,
+        &mut memo,
     );
     // §6.5: "When a positioned box … overflows its inset-modified
     // containing block, and has more than one position option in its
@@ -254,7 +282,15 @@ where
         let keys: SmallVec<[f32; 8]> = order
             .iter()
             .map(|&option| {
-                let size = option_sort_size(tree, state, node, &base, option, containing_block);
+                let size = option_sort_size(
+                    tree,
+                    state,
+                    node,
+                    &base,
+                    option,
+                    containing_block,
+                    &mut memo,
+                );
                 match try_order {
                     // No `writing-mode`: the block axis is vertical.
                     PositionTryOrder::MostHeight | PositionTryOrder::MostBlockSize => size.height,
@@ -285,6 +321,7 @@ where
             containing_block,
             static_position,
             LayoutGoal::Measure(RequestedAxis::Both),
+            &mut memo,
         );
         // "If cb rect was negative-size in either axis and corrected into
         // zero-size, continue. … If el rect is not fully contained within cb
@@ -300,6 +337,7 @@ where
                 containing_block,
                 static_position,
                 commit,
+                &mut memo,
             );
             return report(tree, state, node, containing_block, option, chosen);
         }

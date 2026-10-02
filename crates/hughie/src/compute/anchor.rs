@@ -32,6 +32,7 @@
 //! `horizontal-tb` — the block axis is vertical, the inline axis horizontal —
 //! and only `direction` distinguishes inline-start from inline-end.
 
+use smallvec::SmallVec;
 use stylo::logical_geometry::{PhysicalAxis, PhysicalSide};
 use stylo::values::computed::position::AnchorSide;
 use stylo::values::computed::{
@@ -155,6 +156,95 @@ fn spec_of(name: &TreeScoped<DashedIdent>) -> AnchorSpec<'_> {
     }
 }
 
+/// What one absolute layout of a box has asked its host, kept for the rest
+/// of that layout.
+///
+/// The fallback loop lays one option out up to three times — §6.2's sort,
+/// the trial, the commit — and several anchor functions of one option may
+/// name the same anchor, so without this each question reaches the host's
+/// §2.3 lookup once per use. The memo lives exactly as long as one call of
+/// the absolute pass, never across a pass: the same pass can lay the box out
+/// earlier, before its anchors are placed (a `linear` parent measures an
+/// escaping box for its static position during its own in-flow phase), and
+/// an answer kept from there would outlive the anchors it missed.
+#[derive(Debug, Default)]
+pub(super) struct AnchorMemo {
+    /// Whether the box has a default anchor, per option.
+    defaults: SmallVec<[(usize, bool); 2]>,
+    /// Each answered anchor rectangle, per option and name (`None` is the
+    /// default anchor), in host coordinates.
+    rects: SmallVec<[MemoRect; 4]>,
+    /// The scrollable containing block, which no option changes, once asked.
+    scrollable: MemoScrollable,
+}
+
+/// One answered rectangle: the option, the name (`None` for the default
+/// anchor) and the host's answer.
+type MemoRect = (usize, Option<TreeScoped<DashedIdent>>, Option<Rect<f32>>);
+
+/// The scrollable containing block, before and after the host is asked.
+#[derive(Debug, Default, Clone, Copy)]
+enum MemoScrollable {
+    #[default]
+    Unasked,
+    Answered(Option<Size<f32>>),
+}
+
+impl AnchorMemo {
+    fn has_default_anchor<T: LayoutTree>(
+        &mut self,
+        tree: &T,
+        state: &T::State,
+        node: T::NodeId,
+        option: usize,
+    ) -> bool {
+        if let Some(&(_, known)) = self.defaults.iter().find(|(asked, _)| *asked == option) {
+            return known;
+        }
+        let known = tree.default_anchor(state, node, option).is_some();
+        self.defaults.push((option, known));
+        known
+    }
+
+    fn rect<T: LayoutTree>(
+        &mut self,
+        tree: &T,
+        state: &T::State,
+        node: T::NodeId,
+        option: usize,
+        spec: AnchorSpec<'_>,
+    ) -> Option<Rect<f32>> {
+        let name = match spec {
+            AnchorSpec::Default => None,
+            AnchorSpec::Named(name) => Some(name),
+        };
+        if let Some((.., known)) = self
+            .rects
+            .iter()
+            .find(|(asked, asked_name, _)| *asked == option && asked_name.as_ref() == name)
+        {
+            return *known;
+        }
+        let rect = tree.anchor_rect(state, node, option, spec);
+        self.rects.push((option, name.cloned(), rect));
+        rect
+    }
+
+    fn scrollable<T: LayoutTree>(
+        &mut self,
+        tree: &T,
+        state: &T::State,
+        node: T::NodeId,
+    ) -> Option<Size<f32>> {
+        if let MemoScrollable::Answered(answer) = self.scrollable {
+            return answer;
+        }
+        let answer = tree.scrollable_containing_block(state, node);
+        self.scrollable = MemoScrollable::Answered(answer);
+        answer
+    }
+}
+
 /// The anchors of an absolutely positioned box laid out with one position
 /// option, as its host answers them in the current pass, plus what §3.3 and
 /// §6.6 want to know about the references.
@@ -167,6 +257,7 @@ struct HostAnchors<'a, T: LayoutTree> {
     state: &'a T::State,
     node: T::NodeId,
     option: usize,
+    memo: &'a mut AnchorMemo,
     /// Host coordinates (the containing block generator's padding box) minus
     /// this, is the current containing block's coordinates: the grid area's
     /// and `position-area` region's offsets.
@@ -191,8 +282,8 @@ impl<T: LayoutTree> HostAnchors<'_, T> {
             }
         }
         let rect = self
-            .tree
-            .anchor_rect(self.state, self.node, self.option, spec)?;
+            .memo
+            .rect(self.tree, self.state, self.node, self.option, spec)?;
         debug_assert!(
             rect.size.width.is_finite()
                 && rect.size.height.is_finite()
@@ -712,6 +803,10 @@ impl AnchoredGeometry {
         clippy::too_many_lines,
         reason = "one ordered pass over §3.1, §3.2, §4 and §5; splitting it scatters the order"
     )]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the absolute pass's inputs plus the option and its memo"
+    )]
     pub(super) fn resolve<T: LayoutTree>(
         tree: &T,
         state: &T::State,
@@ -720,6 +815,7 @@ impl AnchoredGeometry {
         style: &impl CoreStyle,
         option: usize,
         containing_block: &AbsoluteContainingBlock,
+        memo: &mut AnchorMemo,
     ) -> Option<Self> {
         if option == 0 && !uses_anchor_positioning(style) {
             return None;
@@ -730,9 +826,9 @@ impl AnchoredGeometry {
         // §2.4: the default anchor. The host resolves `position-anchor`
         // under the option's style; its rectangle comes in the containing
         // block generator's padding-box coordinates.
-        let has_default_anchor = tree.default_anchor(state, node, option).is_some();
+        let has_default_anchor = memo.has_default_anchor(tree, state, node, option);
         let default_rect = if has_default_anchor {
-            tree.anchor_rect(state, node, option, AnchorSpec::Default)
+            memo.rect(tree, state, node, option, AnchorSpec::Default)
                 .map(|rect| rect.translate(negate(containing_block.origin)))
         } else {
             None
@@ -744,14 +840,14 @@ impl AnchoredGeometry {
         // §2.1.1's original containing block (the overflow limit's) is the
         // same unless grid placement narrowed it to a grid area.
         let scrollable = match default_rect {
-            Some(_) if containing_block.is_padding_box => tree
-                .scrollable_containing_block(state, node)
-                .map(|scrollable| {
+            Some(_) if containing_block.is_padding_box => {
+                memo.scrollable(tree, state, node).map(|scrollable| {
                     Size::new(
                         scrollable.width.max(containing_block.size.width),
                         scrollable.height.max(containing_block.size.height),
                     )
-                }),
+                })
+            }
             _ => None,
         };
         let pre_modification = Rect::new(Point::ZERO, scrollable.unwrap_or(containing_block.size));
@@ -780,6 +876,7 @@ impl AnchoredGeometry {
             state,
             node,
             option,
+            memo,
             origin: Point::new(
                 containing_block.origin.x + area.origin.x,
                 containing_block.origin.y + area.origin.y,

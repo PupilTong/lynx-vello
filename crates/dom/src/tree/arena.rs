@@ -19,7 +19,7 @@ use rustc_hash::FxHashMap;
 use slab::Slab;
 use smallvec::SmallVec;
 
-use crate::layout::anchors::{AnchorRegistry, AnchoredBox, PendingReads};
+use crate::layout::anchors::{AnchorBuckets, AnchorRegistry, AnchoredBox, PendingReads};
 use crate::layout::committed_box::{CommittedBox, CommittedBoxTable};
 use crate::layout::relevance::{Relevance, RelevanceTable};
 use crate::layout::text_block::TextBlockStore;
@@ -213,7 +213,11 @@ impl<T> TreeArenas<T> {
 
     /// Records one determination, answering whether the bit moved.
     pub(crate) fn determine_relevance(&mut self, slot: NodeId, state: Relevance) -> bool {
-        self.relevance.determine(slot.arena_key(), state)
+        let flipped = self.relevance.determine(slot.arena_key(), state);
+        if flipped {
+            self.anchors.note_relevance_flip();
+        }
+        flipped
     }
 
     /// Ends a render's determinations; see [`RelevanceTable::settle`].
@@ -530,6 +534,10 @@ pub(crate) struct DocumentLayoutState {
     /// The boxes whose outcome this run reported, in report order, for the
     /// recording the settle loop makes after the run. Empty between runs.
     pub(crate) anchor_reported: Vec<NodeId>,
+    /// Each scoped anchor name's definers partitioned by their nearest
+    /// `anchor-scope`, for the §2.3 lookup; see
+    /// [`crate::layout::anchors::AnchorBuckets`].
+    pub(crate) anchor_buckets: AnchorBuckets,
     /// Each element that generates the containing block of an out-of-flow
     /// box whose box parent is another box (an `absolute` box under a
     /// non-positioned parent, a `fixed` one under a transformed ancestor),
@@ -602,6 +610,7 @@ impl DocumentLayoutState {
             anchored: FxHashMap::default(),
             anchor_pending: PendingReads::default(),
             anchor_reported: Vec::new(),
+            anchor_buckets: AnchorBuckets::default(),
             hoisted_to: FxHashMap::default(),
             hoisted_from: FxHashMap::default(),
             in_rounding_tail: false,
@@ -733,6 +742,7 @@ impl DocumentLayoutState {
             anchored: _,
             anchor_pending: _,
             anchor_reported: _,
+            anchor_buckets: _,
             hoisted_to: _,
             hoisted_from: _,
             in_rounding_tail: _,
@@ -786,6 +796,7 @@ impl DocumentLayoutState {
             anchored: _,
             anchor_pending: _,
             anchor_reported: _,
+            anchor_buckets: _,
             hoisted_to: _,
             hoisted_from: _,
             in_rounding_tail: _,
