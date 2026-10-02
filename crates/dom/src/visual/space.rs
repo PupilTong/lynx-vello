@@ -339,7 +339,7 @@ mod tests {
     use euclid::default::{Point2D, Rect, Size2D, Transform3D, Vector2D};
 
     use super::{Space, SpaceKind, SpaceSamples};
-    use crate::scroll::{ScrollAxes, ScrollCapture};
+    use crate::scroll::{CaptureAxes, ScrollAxes};
     use crate::tree::document::DOCUMENT_ELEMENT_NODE_ID;
     use crate::vello::kurbo::{Affine, Point};
     use crate::visual::{
@@ -371,7 +371,7 @@ mod tests {
             user_scrollable: ScrollAxes::default(),
             chains: ScrollAxes::default(),
             bounce: ScrollAxes::default(),
-            capture: ScrollCapture::default(),
+            capture: CaptureAxes::default(),
             snap: SnapSlot::default(),
             offset: Vector2D::new(0.0, offset_y),
             max_offset: Vector2D::new(0.0, 1000.0),

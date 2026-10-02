@@ -2555,3 +2555,157 @@ fn a_scroll_that_pushes_an_anchored_box_out_switches_its_fallback_and_back() {
     assert_eq!(painter_hit(&mut engine, 20.0, 200.0), Some(anchored));
     assert_ne!(painter_hit(&mut engine, 20.0, 300.0), Some(anchored));
 }
+
+/// A `<scroll-coordinator>`'s shape in plain CSS: a 400px column scroller
+/// (node 3) carrying `outer_css`, holding a 200px header block (node 4) and
+/// a 400px-tall inner column scroller (node 5) of ten 100px items with
+/// `scroll-capture-y: nearest forward`. The outer's range is 200 (header plus
+/// inner, 600, less its 400px scrollport), the inner's 600.
+fn coordinator_page(outer_css: &str) -> String {
+    format!(
+        r"
+        globalThis.renderPage = function () {{
+          const page = __CreatePage('card', 0);
+          const outer = __CreateView(0);
+          const header = __CreateView(0);
+          const inner = __CreateView(0);
+          __AppendElement(page, outer);
+          __AppendElement(outer, header);
+          __AppendElement(outer, inner);
+          globalThis.held = [page, outer, header, inner];
+          __SetInlineStyles(outer, 'display:flex;flex-direction:column;overflow:scroll;width:200px;height:400px;{outer_css}');
+          __SetInlineStyles(header, 'flex-shrink:0;width:200px;height:200px');
+          __SetInlineStyles(inner, 'display:flex;flex-direction:column;flex-shrink:0;overflow:scroll;width:200px;height:400px;scroll-capture-y:nearest forward');
+          for (let i = 0; i < 10; i++) {{
+            const item = __CreateView(0);
+            __AppendElement(inner, item);
+            held.push(item);
+            __SetInlineStyles(item, 'flex-shrink:0;width:200px;height:100px');
+          }}
+          __FlushElementTree();
+        }};
+        "
+    )
+}
+
+/// A drag at `at` from `from_y` to `to_y` in one move, released half a
+/// second later so it carries no velocity: a scroll of
+/// `from_y − to_y` less the 8px slop, and no fling after it.
+fn quiet_drag(engine: &mut TestEngine, at: f64, from_y: f32, to_y: f32) {
+    touch_at(engine, at, PointerPhase::Down, from_y);
+    touch_at(engine, at + 0.01, PointerPhase::Move, to_y);
+    touch_at(engine, at + 0.5, PointerPhase::Up, to_y);
+}
+
+/// The coordinator's and the inner scroller's vertical offsets.
+fn coordinator_offsets(engine: &mut TestEngine) -> (f32, f32) {
+    (live_offset(engine, 3).y, live_offset(engine, 5).y)
+}
+
+/// A forward drag that starts in the inner scroller folds the coordinator
+/// first: 100px of scroll all go to the coordinator, the inner stays.
+#[test]
+fn a_forward_drag_in_the_inner_scroller_folds_the_coordinator_first() {
+    let mut engine = booted(&coordinator_page(""));
+    // The inner scroller spans 200..600 in the coordinator; 350 is in it.
+    quiet_drag(&mut engine, 0.0, 350.0, 242.0);
+    assert_eq!(coordinator_offsets(&mut engine), (100.0, 0.0));
+}
+
+/// The fold, then the inner content, then the other way round: forward 300
+/// folds the coordinator to its 200 maximum and gives the inner the rest;
+/// backward 50 goes to the inner first; backward 300 empties the inner's 50
+/// and unfolds the coordinator by the 250 left — all 200 of it, the last
+/// 50 going nowhere.
+#[test]
+fn forward_folds_before_the_inner_scroller_and_backward_unfolds_after_it() {
+    let mut engine = booted(&coordinator_page(""));
+    quiet_drag(&mut engine, 0.0, 390.0, 82.0);
+    assert_eq!(coordinator_offsets(&mut engine), (200.0, 100.0));
+
+    // Folded, the inner scroller spans the whole 0..400 scrollport.
+    quiet_drag(&mut engine, 1.0, 100.0, 158.0);
+    assert_eq!(coordinator_offsets(&mut engine), (200.0, 50.0));
+
+    quiet_drag(&mut engine, 2.0, 50.0, 358.0);
+    assert_eq!(coordinator_offsets(&mut engine), (0.0, 0.0));
+}
+
+/// A forward fling from the inner scroller is captured on every frame: it
+/// folds the coordinator, and once that is at its maximum the rest of the
+/// fling carries on into the inner content until it comes to rest there.
+#[test]
+fn a_forward_fling_folds_the_coordinator_then_scrolls_the_inner_content() {
+    let mut engine = booted(&coordinator_page(""));
+    // The flick of `flick`, inside the inner scroller: 52px of drag after
+    // the slop, then a release at 3 px/ms.
+    touch_at(&mut engine, 0.0, PointerPhase::Down, 350.0);
+    touch_at(&mut engine, 0.01, PointerPhase::Move, 320.0);
+    touch_at(&mut engine, 0.02, PointerPhase::Move, 290.0);
+    touch_at(&mut engine, 0.02, PointerPhase::Up, 290.0);
+    assert_eq!(coordinator_offsets(&mut engine), (52.0, 0.0));
+    assert!(engine.is_animating(), "a fling owes frames");
+
+    // 80ms of fling is about 222px: 148 fold the coordinator, the rest
+    // scrolls the inner content.
+    frame_at(&mut engine, 0.1);
+    let (outer, inner) = coordinator_offsets(&mut engine);
+    assert!((outer - 200.0).abs() < f32::EPSILON, "folded, got {outer}");
+    assert!(
+        inner > 50.0,
+        "the fling went on into the inner, got {inner}"
+    );
+    assert!(engine.is_animating(), "and is still going");
+
+    let mut at = 0.1;
+    while engine.is_animating() {
+        at += 1.0 / 60.0;
+        assert!(at < 10.0, "never came to rest");
+        frame_at(&mut engine, at);
+    }
+    // A 3 px/ms fling travels about 1498px: past both ranges.
+    assert_eq!(coordinator_offsets(&mut engine), (200.0, 600.0));
+}
+
+/// A wheel over the inner scroller folds the coordinator before it scrolls
+/// the inner content.
+#[test]
+fn a_forward_wheel_over_the_inner_scroller_folds_the_coordinator_first() {
+    let mut engine = booted(&coordinator_page(""));
+    engine.dispatch_input(InputEvent::wheel(
+        Point2D::new(100.0, 350.0),
+        dom::Vector2D::new(0.0, 150.0),
+    ));
+    assert_eq!(coordinator_offsets(&mut engine), (150.0, 0.0));
+    engine.dispatch_input(InputEvent::wheel(
+        Point2D::new(100.0, 350.0),
+        dom::Vector2D::new(0.0, 100.0),
+    ));
+    assert_eq!(coordinator_offsets(&mut engine), (200.0, 50.0));
+}
+
+/// A drag that starts on the header latches the coordinator itself, whose
+/// chain the inner scroller is not on: it scrolls as any scroller does, and
+/// the inner never moves.
+#[test]
+fn a_drag_on_the_coordinators_own_content_scrolls_it_as_before() {
+    let mut engine = booted(&coordinator_page(""));
+    quiet_drag(&mut engine, 0.0, 180.0, 22.0);
+    assert_eq!(coordinator_offsets(&mut engine), (150.0, 0.0));
+    quiet_drag(&mut engine, 1.0, 30.0, -178.0);
+    assert_eq!(
+        coordinator_offsets(&mut engine),
+        (200.0, 0.0),
+        "the coordinator pins at its maximum and the rest goes nowhere"
+    );
+}
+
+/// `overflow-y: hidden` on the coordinator (its `enable-scroll="false"`):
+/// not user-scrollable, so the walk admits it nothing and the inner
+/// scroller scrolls from the first pixel.
+#[test]
+fn a_coordinator_that_is_not_user_scrollable_never_folds() {
+    let mut engine = booted(&coordinator_page("overflow-y:hidden"));
+    quiet_drag(&mut engine, 0.0, 350.0, 242.0);
+    assert_eq!(coordinator_offsets(&mut engine), (0.0, 100.0));
+}
