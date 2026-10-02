@@ -1111,31 +1111,23 @@ pub(crate) fn scrolls_with_default<T>(
     nearest_scroller(named, axis) == nearest_scroller(default, axis)
 }
 
-/// Which edges of an anchor-positioned box's inset-modified containing
-/// block its default anchor carries — left, top, right, bottom — and so
-/// move with its default scroll shift: an edge an `anchor()` inset puts
-/// there, and a `position-area` grid line that is not the containing
-/// block's own edge. An `auto` inset without `position-area`, a length and
-/// an `anchor-size()` put an edge where the containing block does.
-pub(crate) type CarriedEdges = [bool; 4];
-
 /// Whether a margin box moved by `shift` is inside the inset-modified
-/// containing block moved by `shift` on its [`CarriedEdges`], with
+/// containing block moved by `shift` on its carried edges
+/// ([`AnchorOutcome::carried_edges`], which `hughie` reports from the
+/// insets and `position-area` lines it laid the box out with), with
 /// `hughie`'s layout unit of slack — §6.5's fit test after "applying any
 /// default scroll shift", without the layout that would re-derive the
-/// anchor's edges.
-pub(crate) fn fits_shifted(
-    imcb: Rect<f32>,
-    margin_box: Rect<f32>,
-    carried: CarriedEdges,
-    shift: Vector2D<f32>,
-) -> bool {
+/// anchor's edges. Only an `auto` inset's containing-block edge constrains
+/// the shifted box, as in Blink (`CalculateNonOverflowingRangeInOneAxis`):
+/// a carried edge keeps the relation it was laid out with.
+pub(crate) fn fits_shifted(outcome: &AnchorOutcome, shift: Vector2D<f32>) -> bool {
     const SLACK: f32 = 1.0 / 64.0;
+    let (imcb, margin_box, carried) = (outcome.imcb, outcome.margin_box, outcome.carried_edges);
     let moved = |carried: bool, edge: f32, by: f32| if carried { edge + by } else { edge };
-    let left = moved(carried[0], imcb.origin.x, shift.x);
-    let top = moved(carried[1], imcb.origin.y, shift.y);
-    let right = moved(carried[2], imcb.origin.x + imcb.size.width, shift.x);
-    let bottom = moved(carried[3], imcb.origin.y + imcb.size.height, shift.y);
+    let left = moved(carried.left, imcb.origin.x, shift.x);
+    let top = moved(carried.top, imcb.origin.y, shift.y);
+    let right = moved(carried.right, imcb.origin.x + imcb.size.width, shift.x);
+    let bottom = moved(carried.bottom, imcb.origin.y + imcb.size.height, shift.y);
     let (x, y) = (margin_box.origin.x + shift.x, margin_box.origin.y + shift.y);
     x >= left - SLACK
         && y >= top - SLACK
@@ -1769,74 +1761,6 @@ impl<T> crate::tree::document::Document<T> {
         ))
     }
 
-    /// The [`CarriedEdges`] of `id`'s inset-modified containing block under
-    /// the option it was laid out with.
-    #[must_use]
-    pub(crate) fn carried_edges(&self, id: NodeId) -> CarriedEdges {
-        let (tree, state) = self.visual_parts();
-        let (Some(node), Some(outcome)) = (tree.get(id), self.anchor_outcome(id)) else {
-            return [false; 4];
-        };
-        let Some(style) = option_style(tree, node, outcome.chosen) else {
-            return [false; 4];
-        };
-        let position = style.get_position();
-        let area = !position.position_area.is_none();
-        let containing_block = containing_block_generator(node).map(Node::id);
-        let block = containing_block
-            .and_then(|block| state.get(block))
-            .map_or_else(
-                || {
-                    let viewport = self.viewport_size();
-                    Size::new(viewport.width, viewport.height)
-                },
-                |entry| {
-                    let layout = &entry.slot.unrounded;
-                    Size::new(
-                        layout.size.width - layout.border.left - layout.border.right,
-                        layout.size.height - layout.border.top - layout.border.bottom,
-                    )
-                },
-            );
-        let scrollable = scrollable_containing_block(tree, state, containing_block);
-        let imcb = outcome.imcb;
-        // Whether a `position-area` line at `edge` is one of the containing
-        // block's own edges on an axis `extent` long.
-        let own_edge = |edge: f32, extents: [f32; 2]| {
-            (edge - 0.0).abs() <= 0.5 || extents.iter().any(|extent| (edge - extent).abs() <= 0.5)
-        };
-        let widths = [
-            block.width,
-            scrollable.map_or(block.width, |size| size.width),
-        ];
-        let heights = [
-            block.height,
-            scrollable.map_or(block.height, |size| size.height),
-        ];
-        let edges = [
-            imcb.origin.x,
-            imcb.origin.y,
-            imcb.origin.x + imcb.size.width,
-            imcb.origin.y + imcb.size.height,
-        ];
-        let insets = [
-            &position.left,
-            &position.top,
-            &position.right,
-            &position.bottom,
-        ];
-        std::array::from_fn(|side| match insets[side] {
-            stylo::values::computed::position::Inset::Auto => {
-                let extents = if side % 2 == 0 { widths } else { heights };
-                area && !own_edge(edges[side], extents)
-            }
-            stylo::values::computed::position::Inset::AnchorFunction(_)
-            | stylo::values::computed::position::Inset::AnchorContainingCalcFunction(_) => true,
-            stylo::values::computed::position::Inset::LengthPercentage(_)
-            | stylo::values::computed::position::Inset::AnchorSizeFunction(_) => false,
-        })
-    }
-
     /// css-anchor-position-1 §6.5 on scroll: "When a positioned box (after
     /// applying any default scroll shift) overflows its inset-modified
     /// containing block, and has more than one position option", it
@@ -1880,12 +1804,7 @@ impl<T> crate::tree::document::Document<T> {
             let fits = if shift == Vector2D::zero() {
                 !outcome.overflows
             } else {
-                fits_shifted(
-                    outcome.imcb,
-                    outcome.margin_box,
-                    self.carried_edges(id),
-                    shift,
-                )
+                fits_shifted(&outcome, shift)
             };
             let Some(entry) = self.layout_state_mut().anchored.get_mut(&id) else {
                 continue;

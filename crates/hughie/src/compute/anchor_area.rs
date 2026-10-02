@@ -13,7 +13,7 @@ use stylo::values::computed::{PositionArea, PositionAreaKeyword};
 use stylo::values::specified::align::AlignFlags;
 use stylo::values::specified::position::{PositionAreaAxis, PositionAreaTrack};
 
-use crate::geometry::{Point, Rect, Size};
+use crate::geometry::{Edges, Point, Rect, Size};
 
 /// A `<position-area>` as one keyword per physical axis.
 #[derive(Debug, Clone, Copy)]
@@ -71,13 +71,31 @@ impl AreaKeywords {
 /// `lines` (§3.1.2): a single track, the center track plus one side
 /// (`span-*`), or all three (`span-all`). `None` keyword: all three.
 fn tracks(keyword: PositionAreaKeyword, lines: [f32; 4]) -> (f32, f32) {
+    let (start, end) = track_lines(keyword);
+    (lines[start], lines[end])
+}
+
+/// The indices of the grid lines `keyword`'s tracks start and end at.
+fn track_lines(keyword: PositionAreaKeyword) -> (usize, usize) {
     match keyword.track().unwrap_or(PositionAreaTrack::SpanAll) {
-        PositionAreaTrack::Start => (lines[0], lines[1]),
-        PositionAreaTrack::SpanStart => (lines[0], lines[2]),
-        PositionAreaTrack::Center => (lines[1], lines[2]),
-        PositionAreaTrack::SpanEnd => (lines[1], lines[3]),
-        PositionAreaTrack::End => (lines[2], lines[3]),
-        PositionAreaTrack::SpanAll => (lines[0], lines[3]),
+        PositionAreaTrack::Start => (0, 1),
+        PositionAreaTrack::SpanStart => (0, 2),
+        PositionAreaTrack::Center => (1, 2),
+        PositionAreaTrack::SpanEnd => (1, 3),
+        PositionAreaTrack::End => (2, 3),
+        PositionAreaTrack::SpanAll => (0, 3),
+    }
+}
+
+/// Whether grid line `index` of [`grid_lines`]`(origin, containing,
+/// anchor_start, anchor_end)` is one of the default anchor box's own edges,
+/// and so moves with it: the two inner lines always, an outer line only
+/// where the anchor box reaches past the containing block's edge.
+fn anchor_line(index: usize, origin: f32, containing: f32, anchor: (f32, f32)) -> bool {
+    match index {
+        0 => anchor.0 < origin,
+        3 => anchor.1 > origin + containing,
+        _ => true,
     }
 }
 
@@ -134,6 +152,41 @@ pub(super) fn position_area_region(
         Point::new(left, top),
         Size::new((right - left).max(0.0), (bottom - top).max(0.0)),
     )
+}
+
+/// Which edges of the region [`position_area_region`] selects — left,
+/// right, top, bottom — are the default anchor box's edges rather than the
+/// pre-modification containing block's: the edges a scroll of the anchor
+/// carries along (§3.3's default scroll shift moves them with the box).
+pub(super) fn position_area_carried(
+    keywords: AreaKeywords,
+    original: Rect<f32>,
+    anchor: Rect<f32>,
+) -> Edges<bool> {
+    let (left, right) = track_lines(keywords.horizontal);
+    let (top, bottom) = track_lines(keywords.vertical);
+    let horizontal = |index| {
+        anchor_line(
+            index,
+            original.origin.x,
+            original.size.width,
+            (anchor.origin.x, anchor.origin.x + anchor.size.width),
+        )
+    };
+    let vertical = |index| {
+        anchor_line(
+            index,
+            original.origin.y,
+            original.size.height,
+            (anchor.origin.y, anchor.origin.y + anchor.size.height),
+        )
+    };
+    Edges {
+        left: horizontal(left),
+        right: horizontal(right),
+        top: vertical(top),
+        bottom: vertical(bottom),
+    }
 }
 
 /// §4.1's used value of `normal` self-alignment on `axis` of a box with a
@@ -229,6 +282,38 @@ mod tests {
         assert_eq!(
             grid_lines(0.0, 300.0, 280.0, 350.0),
             [0.0, 280.0, 350.0, 350.0]
+        );
+    }
+
+    /// The anchor's own lines are carried, wherever they land; an outer line
+    /// only where the anchor reaches past the containing block.
+    #[test]
+    fn carried_lines_are_the_anchors_edges() {
+        use PositionAreaKeyword as K;
+        let keywords = |horizontal, vertical| AreaKeywords {
+            horizontal,
+            vertical,
+        };
+        let block = Rect::new(Point::ZERO, Size::new(300.0, 300.0));
+        let anchor = Rect::new(Point::new(100.0, 0.0), Size::new(100.0, 50.0));
+        let carried = position_area_carried(keywords(K::Center, K::Bottom), block, anchor);
+        assert_eq!(
+            (carried.left, carried.right, carried.top, carried.bottom),
+            (true, true, true, false),
+            "the bottom track's top line is the anchor's bottom edge"
+        );
+        let carried = position_area_carried(keywords(K::SpanAll, K::Top), block, anchor);
+        assert_eq!(
+            (carried.left, carried.right, carried.top, carried.bottom),
+            (false, false, false, true),
+            "the anchor's top at the block's top: line 0 is the block's"
+        );
+        let past = Rect::new(Point::new(280.0, -20.0), Size::new(70.0, 50.0));
+        let carried = position_area_carried(keywords(K::Right, K::Top), block, past);
+        assert_eq!(
+            (carried.left, carried.right, carried.top, carried.bottom),
+            (true, true, true, true),
+            "an anchor past both outer lines carries them"
         );
     }
 }

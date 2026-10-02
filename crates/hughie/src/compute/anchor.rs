@@ -48,7 +48,9 @@ use stylo::values::specified::calc::{CalcNode as SpecifiedCalcNode, Leaf as Spec
 use stylo::values::specified::length::NoCalcLength;
 use stylo::values::{DashedIdent, specified};
 
-use super::anchor_area::{AreaKeywords, area_default_alignment, position_area_region};
+use super::anchor_area::{
+    AreaKeywords, area_default_alignment, position_area_carried, position_area_region,
+};
 use super::{AbsoluteContainingBlock, AbsolutePlacement, AxisAlignment};
 use crate::geometry::{Edges, Point, Rect, Size};
 use crate::style::{CoreStyle, direction};
@@ -792,6 +794,8 @@ pub(super) struct AnchoredGeometry {
     pub(super) has_default_anchor: bool,
     /// §3.3, per axis.
     pub(super) compensates: Size<bool>,
+    /// [`crate::tree::AnchorOutcome::carried_edges`].
+    pub(super) carried: Edges<bool>,
 }
 
 impl AnchoredGeometry {
@@ -958,6 +962,12 @@ impl AnchoredGeometry {
             references_default_anchor: false,
             has_default_anchor,
             compensates: Size::new(false, false),
+            carried: Edges {
+                left: false,
+                right: false,
+                top: false,
+                bottom: false,
+            },
         };
         let HostAnchors {
             references_default_anchor,
@@ -974,6 +984,28 @@ impl AnchoredGeometry {
             .as_ref()
             .map(|inset| matches!(inset, Inset::Auto));
         geometry.placement.auto_inset = auto_inset;
+        // §6.5's fit test after a default scroll shift (Blink's
+        // `CalculateNonOverflowingRangeInOneAxis`): an edge a non-`auto`
+        // inset places keeps its relation to the box as laid out, and so does
+        // a `position-area` line that is the anchor's own edge; only an
+        // `auto` inset's containing-block edge stays where it is.
+        let area_carried = match (area_keywords, default_rect) {
+            (Some(keywords), Some(anchor)) => {
+                position_area_carried(keywords, pre_modification, anchor)
+            }
+            _ => Edges {
+                left: false,
+                right: false,
+                top: false,
+                bottom: false,
+            },
+        };
+        geometry.carried = Edges {
+            left: !auto_inset.left || area_carried.left,
+            right: !auto_inset.right || area_carried.right,
+            top: !auto_inset.top || area_carried.top,
+            bottom: !auto_inset.bottom || area_carried.bottom,
+        };
 
         if let Some(keywords) = area_keywords {
             // §4.1: "When position-area is not none, the used value of normal

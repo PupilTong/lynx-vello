@@ -22,6 +22,7 @@ struct Tried {
     references_default_anchor: bool,
     has_default_anchor: bool,
     compensates: Size<bool>,
+    carried_edges: Edges<bool>,
 }
 
 /// Lays `node` out with the geometry values of `style`, position option
@@ -75,6 +76,13 @@ where
             references_default_anchor: false,
             has_default_anchor: false,
             compensates: Size::new(false, false),
+            // No default anchor: no shift to carry anything by.
+            carried_edges: Edges {
+                left: false,
+                right: false,
+                top: false,
+                bottom: false,
+            },
         };
     };
     let placed = place_absolute(
@@ -93,6 +101,7 @@ where
         references_default_anchor: geometry.references_default_anchor,
         has_default_anchor: geometry.has_default_anchor,
         compensates: geometry.compensates,
+        carried_edges: geometry.carried,
     }
 }
 
@@ -368,6 +377,7 @@ fn report<T: LayoutTree>(
             references_default_anchor: tried.references_default_anchor,
             default_anchor_resolved: tried.has_default_anchor,
             compensates: tried.compensates,
+            carried_edges: tried.carried_edges,
             imcb: to_host(tried.placed.imcb),
             margin_box: to_host(tried.placed.margin_box),
         },

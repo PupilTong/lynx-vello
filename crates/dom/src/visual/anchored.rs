@@ -47,9 +47,9 @@
 //!   inside it — finds its anchor degenerate and hides too (the spec's chained case): slots are
 //!   sampled in an order that puts every anchored node on an anchor's path first.
 //! - `no-overflow`: the margin box shifted by the default scroll shift is not inside the
-//!   inset-modified containing block, whose edges the default anchor carries (an `anchor()`
-//!   inset's, a `position-area` line off the containing block's edge) shifted with it
-//!   ([`crate::layout::anchors::CarriedEdges`]).
+//!   inset-modified containing block, whose carried edges (`hughie`'s
+//!   [`hughie::tree::AnchorOutcome::carried_edges`]: a non-`auto` inset's, a `position-area` line
+//!   that is the anchor's own edge) shift with it ([`fits_shifted`]).
 //!
 //! Nothing here is linear in page content: a frame samples its anchored
 //! slots and, for each, the few scroll slots, sticky slots and clips between
@@ -65,7 +65,7 @@ use stylo::values::specified::position::PositionVisibility;
 use super::space::{self, SpaceKind, SpaceSamples};
 use super::{PaintItemKind, PaintOrder};
 use crate::NodeId;
-use crate::layout::anchors::{CarriedEdges, containing_block_generator, fits_shifted};
+use crate::layout::anchors::{containing_block_generator, fits_shifted};
 use crate::paint::compose::snap_offset;
 use crate::tree::document::Document;
 use crate::vello::kurbo::{self, Affine};
@@ -119,18 +119,14 @@ struct AnchorProbe {
     clips: Range<u32>,
 }
 
-/// What `no-overflow` compares, in the containing block's layout space.
+/// What `no-overflow` compares, in the containing block's layout space:
+/// the outcome's inset-modified containing block, margin box and carried
+/// edges, and whether the box overflowed as laid out, after position
+/// fallback — the answer at a zero shift, which also carries `hughie`'s
+/// negative-size correction.
 #[derive(Debug, Clone, Copy)]
 struct OverflowTest {
-    imcb: hughie::geometry::Rect<f32>,
-    margin_box: hughie::geometry::Rect<f32>,
-    /// The inset-modified containing block's edges the default anchor
-    /// carries, which move with the shift.
-    carried: CarriedEdges,
-    /// Whether the box overflowed as laid out, after position fallback:
-    /// the answer at a zero shift, which also carries `hughie`'s
-    /// negative-size correction.
-    overflows: bool,
+    outcome: hughie::tree::AnchorOutcome,
 }
 
 /// One anchored slot's sampled values.
@@ -299,9 +295,9 @@ impl AnchoredSlot {
 impl OverflowTest {
     fn overflows_at(self, shift: Vector2D<f32>) -> bool {
         if shift == Vector2D::zero() {
-            return self.overflows;
+            return self.outcome.overflows;
         }
-        !fits_shifted(self.imcb, self.margin_box, self.carried, shift)
+        !fits_shifted(&self.outcome, shift)
     }
 }
 
@@ -566,12 +562,7 @@ impl PaintOrder {
 
         let overflow = visibility
             .contains(PositionVisibility::NO_OVERFLOW)
-            .then(|| OverflowTest {
-                imcb: outcome.imcb,
-                margin_box: outcome.margin_box,
-                carried: document.carried_edges(node),
-                overflows: outcome.overflows,
-            });
+            .then_some(OverflowTest { outcome });
 
         let slot = &mut self.anchored[index];
         slot.links = links;
@@ -700,6 +691,28 @@ mod tests {
         let scroller = doc.el(cb, "view.scroller");
         let content = doc.el(scroller, "view.content");
         let anchor = doc.el(content, "view.anchor");
+        let anchored = doc.el(cb, "view.anchored");
+        doc.dom.render();
+        Page {
+            doc,
+            scroller,
+            anchor,
+            anchored,
+        }
+    }
+
+    /// [`page`], with the anchored box added only once the scroller sits
+    /// at `(x, y)`: its recalculation point is there.
+    fn page_scrolled(anchored: &str, x: f32, y: f32) -> Page {
+        let mut doc = Doc::with_css(&format!("{BASE}\n.anchored {{ {anchored} }}"));
+        let root = doc.root;
+        let cb = doc.el(root, "view.cb");
+        let scroller = doc.el(cb, "view.scroller");
+        let content = doc.el(scroller, "view.content");
+        let anchor = doc.el(content, "view.anchor");
+        doc.dom.render();
+        doc.dom.scroll_to(scroller, Vector2D::new(x, y));
+        doc.dom.render();
         let anchored = doc.el(cb, "view.anchored");
         doc.dom.render();
         Page {
@@ -849,6 +862,55 @@ mod tests {
             "past the top edge"
         );
         let _ = page.anchor;
+    }
+
+    /// Blink's fit test after a scroll: a length inset leaves its side
+    /// unconstrained, so a box stretched from its anchor to the containing
+    /// block's edge is not re-determined on every adopted offset.
+    #[test]
+    fn a_stretched_box_is_not_redetermined_on_every_offset() {
+        let mut page = page_scrolled(
+            "left: anchor(right); right: 0; top: anchor(bottom); height: 10px;
+             position-try-fallbacks: flip-block;",
+            40.0,
+            0.0,
+        );
+        let outcome = *page
+            .doc
+            .dom
+            .anchor_outcome(page.anchored)
+            .expect("reported");
+        assert!(outcome.carried_edges.left && outcome.carried_edges.right);
+        assert!(outcome.carried_edges.top && !outcome.carried_edges.bottom);
+        for x in (0..40_u8).rev() {
+            page.scroll(f32::from(x), 0.0);
+            assert!(
+                !page.doc.dom.redetermine_scrolled_fallbacks(),
+                "no re-determination at {x}"
+            );
+        }
+    }
+
+    /// `hughie` reports which `position-area` lines the anchor carries: a
+    /// line that is the anchor's edge is carried even where it lands on the
+    /// containing block's edge.
+    #[test]
+    fn a_position_area_line_on_the_containing_block_edge_is_still_carried() {
+        // The anchor's bottom (80) at the containing block's top at 80.
+        let mut page = page_scrolled(
+            "position-area: bottom center; position-visibility: no-overflow;",
+            0.0,
+            80.0,
+        );
+        let outcome = *page
+            .doc
+            .dom
+            .anchor_outcome(page.anchored)
+            .expect("reported");
+        assert!(outcome.carried_edges.top && !outcome.carried_edges.bottom);
+        assert_eq!(page.hit(70.0, 5.0), Some(page.anchored));
+        page.scroll(0.0, 81.0);
+        assert_eq!(page.hit(70.0, 4.0), Some(page.anchored), "1px up, carried");
     }
 
     /// §6.5 on scroll: a box pushed out of its containing block by its

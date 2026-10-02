@@ -555,6 +555,15 @@ pub struct AnchorOutcome {
     /// §3.3: per physical axis, whether the box compensates for the scroll
     /// of its default anchor.
     pub compensates: Size<bool>,
+    /// Which edges of [`Self::imcb`] keep their relation to the margin box
+    /// under the box's default scroll shift, for §6.5's fit test "after
+    /// applying any default scroll shift": an edge a non-`auto` inset places
+    /// (`anchor()` carries it with the anchor; a length leaves the fit on
+    /// that side unconstrained, as Blink's
+    /// `CalculateNonOverflowingRangeInOneAxis` does), and an `auto` inset's
+    /// `position-area` line that is the default anchor box's own edge. The
+    /// other edges — an `auto` inset's containing-block edge — stay put.
+    pub carried_edges: Edges<bool>,
     /// The inset-modified containing block the box was laid out in.
     pub imcb: Rect<f32>,
     /// The box's margin box.

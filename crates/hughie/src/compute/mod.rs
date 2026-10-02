@@ -2124,6 +2124,7 @@ mod tests {
                 references_default_anchor: false,
                 default_anchor_resolved: false,
                 compensates: Size::new(false, false),
+                carried_edges: Edges::default(),
                 imcb: Rect::ZERO,
                 margin_box: Rect::ZERO,
             },
