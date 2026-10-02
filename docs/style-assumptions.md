@@ -1328,28 +1328,43 @@ and §D.16 with what the wire format actually permits.)*
       box that compensates on some axis, or whose `position-visibility` can
       hide it, gets an *anchored node* in the frame's space tree, the
       outermost of its own ("as if affected by a transform (before any other
-      transforms)"), whose translation is `L · mask(Σ own(sticky) −
-      Σ snap(offset(scroller)) + fixed − remembered)` over the default
-      anchor's scroll-adjustment ancestors below the containing block, at
-      the offsets the compose or hit test uses — the same chain and sign as
-      the remembered displacement, so the shift is exactly "the difference
-      between the remembered scroll offset … and what its current remembered
-      scroll offset would be". **§6.5 on scroll:** the main thread, at the
+      transforms)"), whose translation is `L · mask(snap(live) −
+      snap(remembered))` with `live = Σ own(sticky) − Σ offset(scroller) +
+      fixed` over the default anchor's scroll-adjustment ancestors below
+      the containing block, at the offsets the compose or hit test uses —
+      the same chain and sign as the remembered displacement, so the shift
+      is "the difference between the remembered scroll offset … and what
+      its current remembered scroll offset would be". Both terms are
+      snapped to the device pixel grid the same way, on the painter and in
+      the main thread's fit test, so a box whose scrollers have not moved
+      since its recalculation point has a shift of exactly zero at any
+      fractional offset. **§6.5 on scroll:** the main thread, at the
       scroll mailbox marker and before every render
       (`Document::redetermine_scrolled_fallbacks`), recomputes the shift at
       the adopted offsets for each box with position options and, on a fit
       → overflow flip, flags it: its next layout reads every option's
       anchors at the current offsets (the current option included, so the
-      loop runs from it) and remembers them. The fit test moves the margin
-      box, and the inset-modified containing block's edges the default
-      anchor carries (an `anchor()` inset's; a `position-area` line off the
-      containing block's own edge), by the shift; the rest are the
-      containing block's and stay.
+      loop runs from it) and remembers them — every re-determination
+      refreshes the remembered offsets, including one that keeps a
+      still-fitting current option. The fit test moves the margin box, and
+      the inset-modified containing block's *carried* edges, by the shift;
+      `hughie` reports which those are (`AnchorOutcome::carried_edges`):
+      a non-`auto` inset's edge (an `anchor()` edge moves with the anchor;
+      a length or `anchor-size()` edge leaves that side unconstrained, as
+      Blink's `CalculateNonOverflowingRangeInOneAxis` does) and an `auto`
+      inset's `position-area` line that is the default anchor's own edge.
+      Only an `auto` inset's containing-block edge stays, and constrains.
     - **`position-visibility` (§6.6).** A paint-time flag, not a computed
       value: a hidden box's anchored node is the zero map, so the box and
       its containing-block descendants draw, hit and bake nothing, and its
       computed `visibility` is untouched (Blink's model, not the spec's
-      `visibility: force-hidden`). The predicates are
+      `visibility: force-hidden`). A descendant escaping the box's
+      containing-block chain (a `position: fixed` box whose containing
+      block is outside it) composes through the slot's *visibility node*,
+      opened on the fixed-containing-block context the box hands its
+      descendants: the same zero map while the box is hidden, the identity
+      otherwise, so it hides with the box without following its shift. The
+      predicates are
       evaluated per composed frame on the painter and per hit test on the
       main thread, from the frame alone: `anchor-valid` from the outcome;
       `anchor-visible` — the default anchor's `visibility` is not
@@ -1425,21 +1440,33 @@ and §D.16 with what the wire format actually permits.)*
       min/max sizes when that axis is also content-sized, and Flexbox's,
       Grid's and Relative's static position (used only when both insets on
       an axis are `auto`) is computed from the box's unresolved values.
-    - **Deviations on the compose side.** A re-determination on scroll that
-      finds no fitting option keeps the current option *and* refreshes its
-      remembered offsets (the spec keeps them), observable only for
-      `anchor()` references to non-default anchors in another scroll
-      context; a box that overflowed in every option is re-determined on
-      scroll only after it fits again and leaves again (Blink re-checks each
-      option's range); `no-overflow` applies only to
-      boxes `hughie` reports (anchor-positioned or with options); a
-      fixed-position descendant escaping the box's containing-block chain is
-      not hidden with it; an anchor with no box item of its own (an inline
-      span painted by its paragraph) is never found clipped;
-      `bounding_client_rect` (the `boundingClientRect` UI method) reports
-      the layout position, so it omits the default scroll shift and a
-      `position-visibility` hide (browsers include both in
-      `getBoundingClientRect`).
+    - **Deviations on the compose side.** Every re-determination on scroll
+      refreshes the remembered offsets, also when it keeps the current
+      option — still fitting at the current offsets, or no option fitting
+      (the spec keeps them) — observable only for `anchor()` references to
+      non-default anchors in another scroll context; a box that overflowed
+      in every option is re-determined on scroll only after it fits again
+      and leaves again (Blink re-checks each option's range); a box that
+      flips between two options on adjacent boundaries is bounded by one
+      re-determination per adopted offset, with no last-successful
+      hysteresis (Blink's anti-flicker rule is not implemented); a length
+      inset leaves its side of the scrolled fit test unconstrained (Blink's
+      rule, not the spec's fixed inset-modified containing block); with
+      more than one scroller between anchor and containing block the
+      snapped shift may differ from the anchor's pixels by one device
+      pixel; the shift sums the intervening scrollers' offsets in the
+      containing block's layout space, so transforms on those scrollers are
+      ignored (Blink maps through them; an open spec issue); a box anchored
+      to an anchored box does not follow that box's own default scroll
+      shift (spec-literal: only scroll containers adjust; Blink adds the
+      chained translation); `no-overflow` applies only to boxes `hughie`
+      reports (anchor-positioned or with options); an anchor with no box
+      item of its own (an inline span painted by its paragraph) is never
+      found clipped. `bounding_client_rect` (the `boundingClientRect` UI
+      method) adds the default scroll shift of the box and of each
+      anchored box on its containing-block chain, as
+      `getBoundingClientRect` does, but not a `position-visibility` hide
+      (in Blink the hidden box reports its rect too).
     - **Gaps (ignored `GAP` tests).** Anchor functions inherit as
       functions, not as the length they resolved to, so a child's `inherit`
       of an anchored inset or size is unresolvable there (WPT

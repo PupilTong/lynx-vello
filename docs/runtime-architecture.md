@@ -1625,22 +1625,31 @@ and its containing block relays nothing out. What follows the anchor is the
 box's **anchored node** in the space tree (`crates/dom/src/visual/anchored.rs`),
 the outermost node of its own, enclosing its box space: every record of the
 box — box, clip, group layer, content, filter entries — composes through it.
-Its map is the default scroll shift `Tr(L · mask(Σ own(sticky) −
-Σ snap(offset(scroller)) + fixed − remembered))`, summed over the scroll and
-sticky slots between the default anchor and the containing block and read at
-the offsets the compose uses (snapped as the scroll node snaps them, so the
-box moves exactly as far as the anchor's pixels), `fixed` covering the
-ancestors the frame has no slot for, `mask` zeroing the axes the box does not
-compensate in, `L` its containing block's linear map into viewport px. The
-same node carries `position-visibility`: while a predicate hides the box its
-map is the zero affine, so the box and its containing-block descendants draw
-nothing, hit nothing and bake nothing, without touching computed
-`visibility`. Each sample evaluates the predicates from the frame alone —
+Its map is the default scroll shift `Tr(L · mask(snap(live) −
+snap(remembered)))`, `live = Σ own(sticky) − Σ offset(scroller) + fixed`
+summed over the scroll and sticky slots between the default anchor and the
+containing block and read at the offsets the compose uses, `fixed` covering
+the ancestors the frame has no slot for, `snap` the scroll node's
+device-pixel snap, `mask` zeroing the axes the box does not compensate in,
+`L` its containing block's linear map into viewport px. Both displacements
+are snapped alike — here and in main's fit test — so a box whose scrollers
+have not moved since its recalculation point has a shift of exactly zero.
+The same node carries `position-visibility`: while a predicate hides the box
+its map is the zero affine, so the box and its containing-block descendants
+draw nothing, hit nothing and bake nothing, without touching computed
+`visibility`. A descendant that escapes that chain (a `position: fixed` box
+whose containing block is outside it) composes through the slot's
+**visibility node** instead, opened on the fixed-containing-block context
+the box hands its descendants: the same zero map while hidden, the identity
+otherwise, so draw and hit agree for every descendant. Each sample evaluates the predicates from the frame alone —
 `anchor-valid` fixed at commit; `anchor-visible` maps the anchor's border box
 and each clip between it and the containing block through their live spaces
 (a hidden anchored box's zero map makes a box anchored to it hide too, the
 slots being sampled anchor-first); `no-overflow` shifts the margin box, and
-the inset-modified containing block's anchor-carried edges, by the shift. The
+the inset-modified containing block's carried edges (`hughie`'s
+`AnchorOutcome::carried_edges`), by the shift. A filter bake holding a record
+an anchored node hides re-bakes on the timeline when that slot's probe reads a
+space a transform curve moves (`AnchoredSlot::reads_timeline`). The
 painter samples every anchored slot per composed frame, the main thread per
 hit test; that is the whole per-frame cost, bounded by the anchored boxes and
 the few slots and clips between each and its anchor. Culling bounds an
@@ -1656,7 +1665,8 @@ recomputes the shift at the adopted offsets and, when the box went from
 fitting to overflowing since the last check, flags it and invalidates its
 layout, so the entry's commit determines again with every option — the
 current one included — reading its anchors at the current offsets, and
-records them as its new remembered offsets. At most one re-determination per
+records them as its new remembered offsets (also when it keeps the current
+option). At most one re-determination per
 adopted offset, none while the box stays on one side of its edge, and nothing
 at all for a page without anchor-positioned boxes (one `is_empty` test).
 `Document::render` asks the same question first, for a document driven

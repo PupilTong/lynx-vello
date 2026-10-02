@@ -128,11 +128,15 @@ consequential choice about whether to follow the spec or the quirk.
     nothing and hits nothing, but its computed `visibility` stays what the
     cascade says (Blink's model; the ED's `visibility: force-hidden` is not
     a computed value here), and `boundingClientRect` still reports it.
-  - **`boundingClientRect` omits the default scroll shift.** It reports the
-    layout position, which uses the remembered scroll offsets; the shift
-    that makes the box follow a scrolled anchor is applied at composition,
-    so between two anchor recalculation points the reported rectangle does
-    not move (Chrome's `getBoundingClientRect` includes the shift).
+  - **Scroll-driven fallback without Blink's anti-flicker rule.** The fit
+    test after a scroll leaves a length inset's side unconstrained (as
+    Blink does), but a box flipping between two options on adjacent
+    boundaries is bounded only by one re-determination per adopted offset;
+    Blink's last-successful hysteresis is not implemented. Transforms on
+    the scrollers between anchor and containing block are ignored in the
+    default scroll shift (Chrome maps through them), and a box anchored to
+    an anchored box does not follow that box's own shift (Chrome adds the
+    chained translation; the spec adjusts for scroll containers only).
   - **No transforms in anchor geometry.** The anchor box is the layout box
     (relative offsets included), not the bounding box of its transformed
     border box.
