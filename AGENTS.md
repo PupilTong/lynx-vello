@@ -2368,7 +2368,8 @@ workspace crates or own host tree/style storage, DOM/runtime types, resolved
 device-unit policy, or paint order.
 
 The runtime-layout integration — the `LayoutTree` host, display dispatch,
-fixed/hoisted positioned pass, per-node cache storage, and the automatic
+hoisted out-of-flow box registry (their containing blocks lay them out),
+per-node cache storage, and the automatic
 style-damage→layout-invalidation wiring (boundary-stopped and engine-internal,
 not a runtime-adapter concern) — lives in `dom`; generic W3C text style,
 document context, and artifact storage live there too.

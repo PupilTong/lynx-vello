@@ -18,18 +18,25 @@
 //! Two places, split by who reads them:
 //!
 //! - [`AnchorRegistry`], in [`TreeArenas`]: the **name index** (who declares which `anchor-name`,
-//!   who declares an `anchor-scope`) and each element's **position options** (§6.1, cascaded at the
-//!   flush harvest). It is style-derived and maintained by the harvest, and it lives beside the
-//!   tree rather than in [`DocumentLayoutState`] because `LayoutTree::position_option_style` has no
-//!   state parameter: the option style has to be lent out of the tree arenas, exactly like the base
-//!   style. Entries exist only for elements that declare an anchor name, an anchor scope or
-//!   `position-try-fallbacks`, so it scales with declared names, never with the page.
+//!   who declares an `anchor-scope`), a **generation** per name (bumped when an element declaring
+//!   it is restyled or freed; a document-wide epoch for `anchor-scope` changes and relevance flips)
+//!   and each element's **position options** (§6.1, cascaded at the flush harvest, with the
+//!   animation-free base style §6.5.1 compares). It is style-derived and maintained by the harvest,
+//!   and it lives beside the tree rather than in [`DocumentLayoutState`] because
+//!   `LayoutTree::position_option_style` has no state parameter: the option style has to be lent
+//!   out of the tree arenas, exactly like the base style. Entries exist only for elements that
+//!   declare an anchor name, an anchor scope or `position-try-fallbacks`, so it scales with
+//!   declared names, never with the page.
 //! - [`AnchoredBox`], one entry per anchor-positioned box in [`DocumentLayoutState::anchored`]: the
-//!   last [`AnchorOutcome`], the anchor queries its last committing pass read ([`AnchorRead`]), its
-//!   [`RememberedScroll`] (§3.3) and its last successful position option (§6.5.1.1). A box gets an
-//!   entry the first time `hughie` reports it and loses it when it stops being anchor-positioned,
-//!   stops generating a box, or is freed. The painter (scroll compensation, `position-visibility`)
-//!   reads the outcome and the remembered offsets from here.
+//!   last [`AnchorOutcome`], the anchor queries its last committing pass read ([`AnchorRead`], each
+//!   with the generation it was answered at), its [`RememberedScroll`] (§3.3) and its last
+//!   successful position option (§6.5.1.1). A box gets an entry the first time `hughie` reports it
+//!   and loses it when it stops being anchor-positioned, stops generating a box, or is freed. The
+//!   painter (scroll compensation, `position-visibility`) reads the outcome and the remembered
+//!   offsets from here.
+//! - [`AnchorBuckets`], in [`DocumentLayoutState::anchor_buckets`]: each scoped name's definers
+//!   partitioned by their nearest `anchor-scope`, rebuilt when the name's generation moves, so a
+//!   lookup under `anchor-scope` examines only the definers that can be in scope.
 //!
 //! One transient buffer, [`DocumentLayoutState::anchor_pending`], carries the
 //! reads of the box being laid out until `hughie` reports its outcome; it is
@@ -37,16 +44,21 @@
 //!
 //! # The settle loop
 //!
-//! `hughie` lays an anchored box out when its containing block runs, and
-//! reads its anchors from the current pass. Nothing else makes that run
-//! again when only an anchor moved — an anchor deeper in a sibling's
-//! subtree relays out in place, a `contain: strict` sibling stops the dirty
-//! walk, an escaping (`fixed`, or `absolute` under a static parent) anchor
-//! is placed by the rounding tail after the box that read it — so after
-//! every run [`Document::settle_anchors`] re-asks every query each box read
-//! and compares: a box whose answers moved is invalidated and the document
-//! is laid out again, [`ANCHOR_PASSES`] times at most, the last pass
-//! closing. A page without anchor-positioned boxes pays one `is_empty` test.
+//! Every containing block lays its absolutely positioned boxes out after its
+//! in-flow content, in tree order — the ones escaping static wrappers into it
+//! included (`layout::hoisted`) — so within one run a box reads only anchors
+//! already placed. What a run cannot see is an anchor that moved while the
+//! reader's containing block was served from the cache: an anchor deeper in
+//! a sibling's subtree relaid in place, or behind a `contain: strict`
+//! sibling that stopped the dirty walk. So after every run
+//! [`Document::settle_anchors`] re-checks each read — the rectangle of the
+//! target found, when the name's registry generation is unchanged and the
+//! target keeps its box; the whole lookup otherwise — and invalidates the
+//! boxes whose answers moved. The document runs again until every read is
+//! stable, [`ANCHOR_PASSES`] runs at most; the last run's reads are checked
+//! too, and a move found there leaves the document dirty, so the next
+//! `layout()` continues rather than staying a commit behind. A page without
+//! anchor-positioned boxes pays one `is_empty` test.
 //!
 //! # What is modelled of §2.3
 //!

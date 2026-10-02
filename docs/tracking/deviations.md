@@ -155,9 +155,11 @@ consequential choice about whether to follow the spec or the quirk.
     `position-try-options`, `@position-fallback`, `anchor(implicit)`) is
     rejected.
   - **Lynx `linear` and `relative` containers ignore authored
-    `justify-self`/`align-self` on absolutely positioned children**, as
-    starlight does (`position_layout_utils.cc`, `CalcStartOffset`); flexbox
-    and grid containers follow css-position-3 §4 and align them.
+    `justify-self`/`align-self` on their own absolutely positioned
+    children**, as starlight does (`position_layout_utils.cc`,
+    `CalcStartOffset`); flexbox and grid containers follow css-position-3 §4
+    and align them, and so does every container for a box that escapes into
+    it through a non-positioned wrapper (Lynx has no such boxes).
     `anchor-center` and `position-area`'s default alignment still apply in
     every container.
   - **No anti-flicker rule when a scroll forces a new fallback.** Blink

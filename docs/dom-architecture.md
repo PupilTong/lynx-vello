@@ -265,12 +265,23 @@ crashing. Public computed-style access still uses Stylo's guarded borrow.
 Layout and text state use ordinary exclusive Rust borrows with no runtime
 borrow checking. Display dispatch routes flex/grid/linear/relative with
 `display: none` hiding and a leaf fallback, text nodes through concrete Parley
-measurement, and the positioned pass implements the W3C `position: fixed`
-containing-block rule via the protocol's scheme override. `display: contents`
-elements generate no box: the engine's `flattened_children` splices them out of
-every item collection, and the host denies them containing-block, containment,
-skipped-contents, and hoisting status and zeroes their `LayoutSlot` in the
-positioned pass (the document element is exempt — Stylo blockifies it).
+measurement, and the W3C `position: fixed`/`absolute` containing-block rule
+is expressed through the protocol's `position()` override: a box whose
+containing block is not its box parent lowers to `fixed`, its parent records
+only its static position, and the host lists it under the element that
+generates its containing block (`layout/hoisted.rs`, a side table holding
+entries only for containing blocks that have such boxes), whose algorithm lays
+it out in its own absolute pass, in flat tree order with its own out-of-flow
+children — css-position-3's order, which is also what makes every
+css-anchor-position-1 acceptable anchor placed before its reader. A moved
+subtree, which keeps its caches, has its listed boxes relaid so they
+re-register; a box under a subtree relaid in place, whose containing block
+above it does not run, and a box whose containing block is the initial one are
+placed by the rounding tail. `display: contents` elements generate no box: the
+engine's `flattened_children` splices them out of every item collection, and
+the host denies them containing-block, containment, skipped-contents, and
+hoisting status and zeroes their `LayoutSlot` in the rounding tail (the
+document element is exempt — Stylo blockifies it).
 Replaced leaf content reads a closed `NaturalSize` value stored in lazily
 allocated node content; its internal update path automatically invalidates the
 affected cache path. Mutually exclusive literal text, natural size, and
@@ -306,7 +317,12 @@ restyled elements whose style declares an `anchor-name`, an `anchor-scope` or
 `position-try-fallbacks` (or declared one before): a **name index** (anchor
 name → declaring elements, element → names, the set of `anchor-scope`
 declarers) in the `ScrollTimelines` shape, so a lookup visits only the
-elements declaring the name; and each element's **position options**, cascaded
+elements declaring the name, with a **generation** per name (bumped when a
+declaring element is restyled or freed; an epoch for `anchor-scope` changes
+and relevance flips) and, in `DocumentLayoutState::anchor_buckets`, each
+scoped name's definers partitioned by nearest `anchor-scope`, so a lookup
+under a scope visits only the definers that can be in scope; and each
+element's **position options**, cascaded
 once per restyle with the fork's `Stylist::resolve_position_try` (Position
 Fallback Origin + try tactic, base style first) and re-cascaded when a stylist
 flush reports a referenced `@position-try` name in
@@ -335,14 +351,21 @@ options whose shift at the adopted offsets takes it from fitting to
 overflowing is flagged `redetermine` (`Document::redetermine_scrolled_fallbacks`):
 its next layout reads every option's anchors at the current offsets — the
 current option included, so §6.5's loop runs — and records them as its
-remembered offsets. **The settle loop**: `hughie`
-lays an anchored box out only when its containing block runs, and an anchor
-can move without that happening (an in-place relayout deep in a sibling, a
-`contain: strict` boundary, an escaping anchor the rounding tail places after
-its reader, a scrollable containing block read from the previous run), so after
-every run `Document::layout_pass` re-asks every recorded query, invalidates
-the boxes whose answer moved and runs again — `ANCHOR_PASSES` (3) runs at
-most, the last one closing. The same step records remembered scroll offsets at
+remembered offsets. **The settle loop**: a run lays
+every out-of-flow box out after the anchors acceptable to it (the hoisted
+order above), so it misses only an anchor that moved while the reader's
+containing block was served from the cache (an in-place relayout deep in a
+sibling, a `contain: strict` boundary). After every run
+`Document::layout_pass` re-checks each recorded read — the found target's
+rectangle when the name's generation is unchanged and the target keeps its
+box, the whole lookup otherwise — invalidates the boxes whose answer moved and
+runs again until every read is stable, `ANCHOR_PASSES` (6) runs at most; a move
+the last run's check still finds leaves the document dirty, so the next
+`layout()` continues instead of staying a commit behind. The scrollable
+containing block a box reads is the one its containing block recorded earlier
+in the same run (`DocumentLayoutState::scrollable_containing_blocks`, scroll
+containers only: their in-flow overflow, which no out-of-flow box can grow).
+The same step records remembered scroll offsets at
 §3.3's recalculation points (a box's first report, and a fallback determination
 that switched options). The last successful position option is recorded at
 the rendering update (`Document::render`, after layout and before paint, as
@@ -352,7 +375,10 @@ relevance is a clause of the `content-visibility: auto` determination
 (`visual/relevance.rs`). Cost: a page without anchor positioning pays one
 `is_empty` test per run and per adopted scroll, three field reads per
 restyled element at the harvest, and nothing per frame; a page with some
-pays, per frame, one sample per anchored slot.
+pays, per layout, one lookup per anchor query (memoized within a box's
+absolute layout) over the candidates its scopes admit, one rectangle per
+recorded read in the settle check, and, per frame, one sample per anchored
+slot.
 
 ## Visual order, paint and the committed frame
 
