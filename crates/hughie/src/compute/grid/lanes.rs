@@ -900,6 +900,15 @@ where
         // needs its own count: the template's in the grid axis, one in the
         // stacking axis.
         let explicit_lines = grid_axis.pack(explicit_len, 1);
+        crate::compute::record_scrollable_containing_block(
+            tree,
+            state,
+            node,
+            &style,
+            outer_size,
+            metrics.border,
+            content_size,
+        );
         let absolute_content_size = layout_absolute_items(
             tree,
             state,

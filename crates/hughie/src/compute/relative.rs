@@ -1586,6 +1586,15 @@ where
         let order = u32::try_from(document_index).unwrap_or(u32::MAX);
         super::hide_child_at_order(tree, state, child, order);
     }
+    super::record_scrollable_containing_block(
+        tree,
+        state,
+        node,
+        &style,
+        outer_size,
+        border,
+        scrollable_size,
+    );
     scrollable_size = scrollable_size.zip_map(
         commit_out_of_flow(
             tree,

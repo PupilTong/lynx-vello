@@ -84,15 +84,37 @@ use crate::tree::document::{DocumentLayoutState, NodeId, NodeSlot, TreeArenas};
 use crate::tree::node::Node;
 
 /// How many layout runs one `layout()` may spend settling anchors: the first
-/// run, and two more for boxes whose anchors moved after they read them.
+/// run, and up to five more for boxes whose anchors moved after they read
+/// them.
 ///
-/// Two covers every dependency this engine can produce in one direction (an
-/// anchor placed by the rounding tail after its reader, then the reader);
-/// the third absorbs a scrollable containing block that grew because of
-/// the box laid out against it. The last run closes the loop rather than
-/// capping it silently: its reads are kept, and the next layout that runs
-/// at all verifies them again, so a page is one commit behind at worst.
-pub(crate) const ANCHOR_PASSES: usize = 3;
+/// The layout order already places every acceptable anchor before the box
+/// that reads it (each containing block lays its out-of-flow boxes out in
+/// tree order, the escaping ones included), so a run reads stale geometry
+/// only where it did not lay the reader out at all: its containing block
+/// was served from the cache while an anchor elsewhere moved. One more run
+/// per such link is the cost, and chains of them are short. The bound is
+/// not a cap on correctness: the last run's reads are verified like the
+/// others, and a reader whose anchor still moved is invalidated, which
+/// schedules another pass ([`Document::settle_anchors`]).
+pub(crate) const ANCHOR_PASSES: usize = 6;
+
+#[cfg(test)]
+std::thread_local! {
+    /// A test's override of [`ANCHOR_PASSES`], to reach the bound with a
+    /// short chain.
+    pub(crate) static ANCHOR_PASS_LIMIT: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// [`ANCHOR_PASSES`], or a test's override of it.
+#[inline]
+pub(crate) fn anchor_passes() -> usize {
+    #[cfg(test)]
+    if let Some(limit) = ANCHOR_PASS_LIMIT.with(std::cell::Cell::get) {
+        return limit;
+    }
+    ANCHOR_PASSES
+}
 
 // ---------------------------------------------------------------------------
 // The registry: name index and position options.
@@ -870,10 +892,11 @@ pub(crate) fn anchor_rect_of<T>(
 }
 
 /// css-position-4's scrollable containing block of a box whose containing
-/// block `containing_block` generates: that scroll container's scrollable
-/// overflow area measured from its padding-box origin, from its last
-/// committed box (`scroll::resolve`'s `scroll_size`). `None` when the
-/// generator is not a scroll container.
+/// block `containing_block` generates: that scroll container's in-flow
+/// scrollable overflow area measured from its padding-box origin, as its
+/// last committing run recorded it before laying its out-of-flow boxes out
+/// (the current run's, when the box is being laid out by that container's
+/// absolute pass). `None` when the generator is not a scroll container.
 pub(crate) fn scrollable_containing_block<T>(
     tree: &TreeArenas<T>,
     state: &DocumentLayoutState,
@@ -886,15 +909,7 @@ pub(crate) fn scrollable_containing_block<T>(
     {
         return None;
     }
-    let layout = &state.get(block.id())?.slot.unrounded;
-    let scrollport = Size::new(
-        (layout.size.width - layout.border.left - layout.border.right).max(0.0),
-        (layout.size.height - layout.border.top - layout.border.bottom).max(0.0),
-    );
-    Some(Size::new(
-        (layout.content_size.width - layout.border.left).max(scrollport.width),
-        (layout.content_size.height - layout.border.top).max(scrollport.height),
-    ))
+    state.scrollable_containing_blocks.get(&block.id()).copied()
 }
 
 /// The nearest scroll container on `node`'s containing-block chain whose
@@ -1290,11 +1305,12 @@ impl<T> crate::tree::document::Document<T> {
 
     /// The settle step after one layout run: drops the state of boxes that
     /// stopped being anchor-positioned, records the remembered scroll offsets
-    /// of boxes the run reached at an anchor recalculation point, and — with
-    /// `verify` — re-asks every query each box last read, invalidating the
-    /// boxes whose answers moved. Answers whether it invalidated any, which
-    /// is what owes another run.
-    pub(crate) fn settle_anchors(&mut self, verify: bool) -> bool {
+    /// of boxes the run reached at an anchor recalculation point, and
+    /// re-asks every query each box last read, invalidating the boxes whose
+    /// answers moved. Answers whether it invalidated any, which is what owes
+    /// another run — and what the invalidation itself schedules, so a caller
+    /// that stops here leaves the document dirty rather than settled.
+    pub(crate) fn settle_anchors(&mut self) -> bool {
         let state = self.layout_state_mut();
         state.anchor_pending.get_mut().clear();
         if state.anchored.is_empty() {
@@ -1309,9 +1325,6 @@ impl<T> crate::tree::document::Document<T> {
         let mut reported = reported;
         reported.clear();
         self.layout_state_mut().anchor_reported = reported;
-        if !verify {
-            return false;
-        }
         let moved: Vec<NodeId> = {
             let (tree, state) = self.visual_parts();
             state
@@ -1788,10 +1801,9 @@ mod tests {
     }
 
     #[test]
-    fn the_settle_loop_is_bounded() {
-        // The scrollable containing block is read from the scroller's
-        // previous run, so the first layout settles in a second run; a
-        // second layout with nothing changed needs none.
+    fn a_scrollable_containing_block_settles_in_the_run_that_reads_it() {
+        // The scroller records its in-flow overflow before its absolute pass,
+        // so the box laid out against it reads this run's area.
         let mut doc = doc(
             ".scroller { overflow: hidden; position: relative; width: 80px; height: 80px; }
              .filler { width: 180px; height: 180px; }
@@ -1805,7 +1817,7 @@ mod tests {
         doc.el(filler, "view.anchor");
         let target = doc.el(scroller, "view.target");
         let runs = layout_runs_during(|| doc.dom.layout());
-        assert_eq!(runs, 2);
+        assert_eq!(runs, 1);
         assert_eq!(
             doc.dom.rounded_layout(target).expect("laid out").size.width,
             180.0
@@ -1813,6 +1825,108 @@ mod tests {
         doc.set_inline(target, "opacity: 0.5");
         let runs = layout_runs_during(|| doc.dom.layout());
         assert!(runs <= 1, "{runs}");
-        assert!(runs <= super::ANCHOR_PASSES);
+    }
+
+    /// The reviewer's page: a box laid out against a scrollable containing
+    /// block that it overflows itself. The area ignores it, so the box does
+    /// not grow it — before, the area grew by the box's own overhang on every
+    /// pass (250, 350, 450 …).
+    #[test]
+    fn a_box_does_not_grow_its_own_scrollable_containing_block() {
+        let mut doc = doc(
+            ".cb { position: relative; overflow: hidden; width: 100px; height: 100px; }
+             .anchor { anchor-name: --a; width: 20px; height: 20px; }
+             .box { position: absolute; position-anchor: --a; left: 0px; right: -50px;
+                    top: 0px; height: 10px; }",
+        );
+        let root = doc.root;
+        let cb = doc.el(root, "view.cb");
+        doc.el(cb, "view.anchor");
+        let target = doc.el(cb, "view.box");
+        for pass in 0..4 {
+            // Each pass lays the box out again, so its containing block's
+            // absolute pass reads the area again.
+            let runs = layout_runs_during(|| doc.dom.layout());
+            assert_eq!(runs, 1, "pass {pass}");
+            assert_eq!(
+                doc.dom.rounded_layout(target).expect("laid out").size.width,
+                150.0,
+                "pass {pass}"
+            );
+            doc.set_inline(target, &format!("top: {}px", pass + 1));
+        }
+    }
+
+    /// A chain through boxes that escape static wrappers is laid out in one
+    /// run: every link reads a box its containing block placed before it.
+    #[test]
+    fn an_anchor_chain_through_escaping_boxes_takes_one_run() {
+        let mut doc = doc(".cb { position: relative; width: 400px; height: 400px; }
+             .x1 { anchor-name: --x1; width: 10px; height: 10px; }
+             .link { position: absolute; top: 0px; width: 10px; height: 10px; }
+             .y1 { anchor-name: --y1; left: anchor(--x1 right); }
+             .x2 { anchor-name: --x2; left: anchor(--y1 right); }
+             .y2 { anchor-name: --y2; left: anchor(--x2 right); }
+             .x3 { anchor-name: --x3; left: anchor(--y2 right); }
+             .y3 { left: anchor(--x3 right); }");
+        let root = doc.root;
+        let cb = doc.el(root, "view.cb");
+        doc.el(cb, "view.x1");
+        doc.el(cb, "view.link.y1");
+        let wrapper = doc.el(cb, "view");
+        doc.el(wrapper, "view.link.x2");
+        doc.el(cb, "view.link.y2");
+        let deeper = doc.el(cb, "view");
+        let inner = doc.el(deeper, "view");
+        doc.el(inner, "view.link.x3");
+        let y3 = doc.el(cb, "view.link.y3");
+        let runs = layout_runs_during(|| doc.dom.layout());
+        assert_eq!(runs, 1);
+        assert_eq!(
+            doc.dom.rounded_layout(y3).expect("laid out").location.x,
+            50.0
+        );
+    }
+
+    /// The settle loop never closes on an unverified read: with its bound
+    /// cut to one run, the reader of an anchor behind a containment boundary
+    /// is invalidated after that run, the document stays dirty, and the next
+    /// `layout()` — with nothing else changed — places it.
+    #[test]
+    fn the_settle_loop_hands_a_moved_read_to_the_next_layout() {
+        let mut doc = doc(".cb { position: relative; width: 400px; height: 400px; }
+             .boundary { contain: strict; width: 200px; height: 200px; }
+             .anchor { anchor-name: --a; width: 40px; height: 30px; }
+             .reader { position: absolute; top: anchor(--a bottom); left: 0px;
+                       width: 10px; height: 10px; }");
+        let root = doc.root;
+        let cb = doc.el(root, "view.cb");
+        let boundary = doc.el(cb, "view.boundary");
+        let anchor = doc.el(boundary, "view.anchor");
+        let reader = doc.el(cb, "view.reader");
+        doc.dom.layout();
+        let top = |doc: &Doc| doc.dom.rounded_layout(reader).expect("laid out").location.y;
+        assert_eq!(top(&doc), 30.0);
+
+        super::ANCHOR_PASS_LIMIT.with(|limit| limit.set(Some(1)));
+        doc.set_inline(anchor, "height: 70px");
+        doc.dom.layout();
+        assert_eq!(
+            top(&doc),
+            30.0,
+            "one run: the reader still holds the old read"
+        );
+        let viewport = doc.dom.device().viewport_size();
+        let viewport = hughie::geometry::Size::new(viewport.width, viewport.height);
+        let scale = doc.dom.device().device_pixel_ratio().get();
+        assert!(
+            doc.dom.layout_needs_pass(viewport, scale),
+            "the moved read left the document dirty"
+        );
+        let runs = layout_runs_during(|| doc.dom.layout());
+        super::ANCHOR_PASS_LIMIT.with(|limit| limit.set(None));
+        assert_eq!(runs, 1);
+        assert_eq!(top(&doc), 70.0);
+        assert!(!doc.dom.layout_needs_pass(viewport, scale));
     }
 }

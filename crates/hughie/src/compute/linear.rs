@@ -1608,6 +1608,15 @@ where
         final_outer_size,
         content_origin,
     );
+    super::record_scrollable_containing_block(
+        tree,
+        state,
+        node,
+        &style,
+        final_outer_size,
+        border,
+        content_size,
+    );
     // Unconditional: a box this one is the containing block of may sit
     // deeper than its children (`LayoutTree::hoisted_children`).
     content_size = commit_non_in_flow_children(

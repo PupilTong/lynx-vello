@@ -12,7 +12,7 @@ use core::fmt;
 use std::hint::likely;
 use std::num::{NonZeroU32, NonZeroU64};
 
-use hughie::geometry::Edges;
+use hughie::geometry::{Edges, Size};
 use hughie::text::TextContext;
 use hughie::tree::{LayoutInput, LayoutSlot};
 use rustc_hash::FxHashMap;
@@ -552,6 +552,16 @@ pub(crate) struct DocumentLayoutState {
     /// containing block did not run) is written after the walk has already
     /// rounded the boxes above it and needs no marks on them.
     pub(crate) in_rounding_tail: bool,
+    /// Each scroll container's css-position-4 scrollable containing block
+    /// from its last committing run: its in-flow content's scrollable
+    /// overflow, the out-of-flow boxes' excluded
+    /// ([`hughie::tree::LayoutTree::set_scrollable_containing_block`]). A
+    /// side table because only scroll containers have one and only the
+    /// anchor-positioned boxes laid out against one read it — not a field
+    /// of every `Layout`, which would grow `LayoutSlot` for every node to
+    /// serve the few that scroll. An entry lives until its element is freed;
+    /// one that stops scrolling is never asked about again.
+    pub(crate) scrollable_containing_blocks: FxHashMap<NodeId, Size<f32>>,
 }
 
 /// One entry of [`DocumentLayoutState::sticky_containing_blocks`].
@@ -595,6 +605,7 @@ impl DocumentLayoutState {
             hoisted_to: FxHashMap::default(),
             hoisted_from: FxHashMap::default(),
             in_rounding_tail: false,
+            scrollable_containing_blocks: FxHashMap::default(),
         }
     }
 
@@ -648,6 +659,9 @@ impl DocumentLayoutState {
                     self.hoisted_from.remove(&hoisted);
                 }
             }
+        }
+        if !self.scrollable_containing_blocks.is_empty() {
+            self.scrollable_containing_blocks.remove(&slot);
         }
     }
 
@@ -722,6 +736,7 @@ impl DocumentLayoutState {
             hoisted_to: _,
             hoisted_from: _,
             in_rounding_tail: _,
+            scrollable_containing_blocks: _,
         } = self;
         let context = text_context
             .get_or_insert_with(|| Box::new(TextContext::new()))
@@ -774,6 +789,7 @@ impl DocumentLayoutState {
             hoisted_to: _,
             hoisted_from: _,
             in_rounding_tail: _,
+            scrollable_containing_blocks: _,
         } = self;
         // Unlike the path this replaces, restoring can re-enter the shaper —
         // a truncating block rebuilds its display layout — so the context is

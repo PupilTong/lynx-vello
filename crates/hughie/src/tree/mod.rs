@@ -302,6 +302,24 @@ pub trait LayoutTree {
         self.set_unrounded_layout(state, node, layout);
     }
 
+    /// Records css-position-4's scrollable containing block of the scroll
+    /// container `node`, as a committing run of it computed it: the
+    /// scrollable overflow of its *in-flow* content measured from its
+    /// padding-box origin, never smaller than its padding box. The spec's
+    /// area ignores absolutely positioned descendants, so a box laid out
+    /// against it cannot grow it. Called only for scroll containers, after
+    /// their in-flow layout and before their absolute pass, which is what
+    /// lets [`Self::scrollable_containing_block`] answer from the current
+    /// run. The default keeps nothing.
+    fn set_scrollable_containing_block(
+        &self,
+        state: &mut Self::State,
+        node: Self::NodeId,
+        size: Size<f32>,
+    ) {
+        let _ = (state, node, size);
+    }
+
     fn compute_layout(
         &self,
         state: &mut Self::State,

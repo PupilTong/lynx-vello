@@ -167,6 +167,15 @@ impl<T> LayoutTree for TreeArenas<T> {
         hoisted::commit(self, state, containing_block, node, layout);
     }
 
+    fn set_scrollable_containing_block(
+        &self,
+        state: &mut Self::State,
+        node: NodeSlot,
+        size: Size<f32>,
+    ) {
+        state.scrollable_containing_blocks.insert(node, size);
+    }
+
     fn compute_layout(
         &self,
         state: &mut Self::State,
@@ -382,11 +391,12 @@ impl<T> LayoutTree for TreeArenas<T> {
         anchors::scrolls_with_default(named, default, axis)
     }
 
-    /// css-position-4's scrollable containing block, from the containing
-    /// block's last committed box. The containing block is the one running
-    /// the absolute pass that asks, so that box is the *previous* run's; the
-    /// read is recorded, and the settle loop lays `node` out again when the
-    /// run moved it.
+    /// css-position-4's scrollable containing block, as the containing
+    /// block's algorithm recorded it in this run, before the absolute pass
+    /// that asks ([`LayoutTree::set_scrollable_containing_block`]): its
+    /// in-flow overflow only, so the box laid out against it cannot grow it.
+    /// The read is recorded like an anchor query, for a box whose containing
+    /// block was served from the cache.
     fn scrollable_containing_block(
         &self,
         state: &Self::State,

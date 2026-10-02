@@ -2032,6 +2032,15 @@ where
         let order = u32::try_from(document_index).unwrap_or(u32::MAX);
         super::hide_child_at_order(tree, state, child, order);
     }
+    super::record_scrollable_containing_block(
+        tree,
+        state,
+        node,
+        &style,
+        outer_size,
+        border,
+        content_size,
+    );
     let absolute_content_size = perform_absolute_children(
         tree,
         state,

@@ -134,8 +134,12 @@ impl<T: Sync> Document<T> {
 
     /// The settle loop after a run that laid out anchor-positioned boxes: a
     /// box that read an anchor which moved after it read it is invalidated
-    /// and the document runs again, [`anchors::ANCHOR_PASSES`] runs in all
-    /// at most; the last one's reads are recorded, not verified.
+    /// and the document runs again, until every read is stable or
+    /// [`anchors::ANCHOR_PASSES`] runs have been spent. The loop never closes
+    /// on unverified reads: the last run's are verified too, and a box whose
+    /// anchor still moved is invalidated, which leaves the document dirty, so
+    /// the next `layout()` — or `render()` — runs again even if nothing else
+    /// changes.
     #[cold]
     #[inline(never)]
     fn settle_anchor_runs(
@@ -144,16 +148,15 @@ impl<T: Sync> Document<T> {
         scale: f32,
         resized: &mut Vec<crate::NodeId>,
     ) {
-        for run in 1..anchors::ANCHOR_PASSES {
-            let last = run + 1 == anchors::ANCHOR_PASSES;
-            if !self.settle_anchors(true) {
+        for _ in 1..anchors::anchor_passes() {
+            if !self.settle_anchors() {
                 return;
             }
             self.run_layout_once(viewport, scale, resized);
-            if last {
-                self.settle_anchors(false);
-            }
         }
+        // What the last run read is verified like every other run's; a move
+        // found here is laid out by the pass its invalidation scheduled.
+        self.settle_anchors();
     }
 
     /// Marks the container-unit users under every query container the pass

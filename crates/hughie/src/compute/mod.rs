@@ -404,6 +404,39 @@ pub fn compute_hoisted_layout<T: LayoutTree>(
     );
 }
 
+/// Hands the host css-position-4's scrollable containing block of `node`
+/// when it is a scroll container: its in-flow content's scrollable overflow
+/// `in_flow` (border-box coordinates, before any out-of-flow child adds to
+/// it) measured from the padding-box origin, never smaller than the padding
+/// box. Each algorithm calls this between its in-flow commit and its
+/// absolute pass.
+#[inline]
+pub(super) fn record_scrollable_containing_block<T: LayoutTree>(
+    tree: &T,
+    state: &mut T::State,
+    node: T::NodeId,
+    style: &impl CoreStyle,
+    outer: Size<f32>,
+    border: Edges<f32>,
+    in_flow: Size<f32>,
+) {
+    if !util::is_scroll_container(style.overflow()) {
+        return;
+    }
+    let padding_box = Size::new(
+        (outer.width - border.horizontal_sum()).max(0.0),
+        (outer.height - border.vertical_sum()).max(0.0),
+    );
+    tree.set_scrollable_containing_block(
+        state,
+        node,
+        Size::new(
+            (in_flow.width - border.left).max(padding_box.width),
+            (in_flow.height - border.top).max(padding_box.height),
+        ),
+    );
+}
+
 /// Lays out every box [`LayoutTree::hoisted_children`] reports for `node`,
 /// whose padding box is `padding_box_size` inside `border`: the absolute
 /// pass of a host algorithm (a paragraph) that has no own out-of-flow
@@ -2098,6 +2131,7 @@ mod tests {
         hoisted.size = Size::new(3.0, 4.0);
         tree.set_hoisted_layout(&mut state, 0, 1, hoisted);
         assert_eq!(state[1].unrounded.size, Size::new(3.0, 4.0));
+        tree.set_scrollable_containing_block(&mut state, 1, Size::new(9.0, 9.0));
         compute_hoisted_children(&tree, &mut state, 0, Size::ZERO, Edges::ZERO, false);
     }
 
