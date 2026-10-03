@@ -1575,6 +1575,7 @@ fn static_position_for_absolute<N>(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[inline(never)]
 fn perform_absolute_children<'tree, T>(
     tree: &'tree T,
     state: &mut T::State,
@@ -2041,20 +2042,26 @@ where
         border,
         content_size,
     );
-    let absolute_content_size = perform_absolute_children(
-        tree,
-        state,
-        node,
-        &absolute_items,
-        axes,
-        rtl,
-        inner_size,
-        outer_size,
-        padding,
-        border,
-        justify_content,
-        align_items,
-    );
+    // With no out-of-flow box to lay out, the pass answers `outer_size`.
+    let absolute_content_size =
+        if absolute_items.is_empty() && !tree.has_hoisted_children(state, node) {
+            outer_size
+        } else {
+            perform_absolute_children(
+                tree,
+                state,
+                node,
+                &absolute_items,
+                axes,
+                rtl,
+                inner_size,
+                outer_size,
+                padding,
+                border,
+                justify_content,
+                align_items,
+            )
+        };
     content_size = content_size.zip_map(absolute_content_size, f32::max);
     let content_size = own_scrollable_overflow(&style, outer_size, content_size);
 

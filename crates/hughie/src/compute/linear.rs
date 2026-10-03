@@ -1222,6 +1222,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
+#[inline(never)]
 fn commit_non_in_flow_children<T>(
     tree: &T,
     state: &mut T::State,
@@ -1483,7 +1484,9 @@ where
                     // An `anchor-size()` inset may still resolve to `auto`,
                     // and a position option can make `auto` an inset the
                     // box's own style gives a length.
-                    static_axes: if tree.position_option_count(child) > 1 {
+                    static_axes: if child_style.has_position_try_fallbacks()
+                        && tree.position_option_count(child) > 1
+                    {
                         Size::new(true, true)
                     } else {
                         let auto = inset
@@ -1621,21 +1624,26 @@ where
         border,
         content_size,
     );
-    // Unconditional: a box this one is the containing block of may sit
-    // deeper than its children (`LayoutTree::hoisted_children`).
-    content_size = commit_non_in_flow_children(
-        tree,
-        state,
-        node,
-        &hidden_items,
-        &absolute_items,
-        axes,
-        final_outer_size,
-        border,
-        main_gravity,
-        content_size,
-        style.direction() == direction::T::Rtl,
-    );
+    // A box this one is the containing block of may sit deeper than its
+    // children (`LayoutTree::hoisted_children`).
+    if !hidden_items.is_empty()
+        || !absolute_items.is_empty()
+        || tree.has_hoisted_children(state, node)
+    {
+        content_size = commit_non_in_flow_children(
+            tree,
+            state,
+            node,
+            &hidden_items,
+            &absolute_items,
+            axes,
+            final_outer_size,
+            border,
+            main_gravity,
+            content_size,
+            style.direction() == direction::T::Rtl,
+        );
+    }
     let content_size = own_scrollable_overflow(&style, final_outer_size, content_size);
     let baseline = if layout_contained {
         None

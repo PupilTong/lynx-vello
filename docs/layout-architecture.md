@@ -600,8 +600,11 @@ definite-inset visual nudge):
   or place it. The host resolves the CB node there (for Lynx `fixed`: the
   viewport root, or the nearest transformed/filtered/`will-change` ancestor
   per the W3C rule the tracking doc mandates) and reports the node from
-  `tree.hoisted_children(state, cb)`. The CB's own algorithm lays it out in
-  its absolute pass, after its in-flow commit, interleaved in flat tree order
+  `tree.hoisted_children(state, cb)`, behind the cheap
+  `tree.has_hoisted_children(state, cb)` probe every container asks first (a
+  container with no out-of-flow child and no hoisted box skips its absolute
+  pass outright, and keeps the pass out of line). The CB's own algorithm lays
+  it out in its absolute pass, after its in-flow commit, interleaved in flat tree order
   with its own out-of-flow children (each reported box names the index of
   the flattened child it sits under): css-position-3's order, in which every
   box a later one may anchor to is already placed. It moves the recorded

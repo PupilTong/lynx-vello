@@ -148,6 +148,13 @@ impl<T> LayoutTree for TreeArenas<T> {
         hoisted::children_of(self, state, node)
     }
 
+    /// A listed block is not proof of a box: `hoisted::children_of`
+    /// re-derives each listed box's containing block and skips stale ones.
+    #[inline]
+    fn has_hoisted_children(&self, state: &Self::State, node: NodeSlot) -> bool {
+        !state.hoisted_to.is_empty() && state.hoisted_to.contains_key(&node)
+    }
+
     fn hoisted_parent_offset(
         &self,
         state: &Self::State,

@@ -548,8 +548,8 @@ impl HoistedPass {
     }
 
     /// The hoisted boxes whose `via` is in `from..to`, in order. The common
-    /// answer — none — costs one host call and stays inline; the rest is
-    /// out of line.
+    /// answer — none — costs one [`LayoutTree::has_hoisted_children`] probe
+    /// and stays inline; the rest is out of line.
     #[inline]
     fn lay_out<T: LayoutTree>(
         &self,
@@ -559,7 +559,7 @@ impl HoistedPass {
         from: usize,
         to: usize,
     ) {
-        if tree.hoisted_children(state, node).is_empty() {
+        if !tree.has_hoisted_children(state, node) {
             return;
         }
         self.lay_out_listed(tree, state, node, from, to);

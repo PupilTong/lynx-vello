@@ -1207,6 +1207,7 @@ where
     clippy::too_many_lines,
     reason = "one ordered pass; the hoisted boxes interleave with it in tree order"
 )]
+#[inline(never)]
 fn layout_absolute_items<'tree, T>(
     tree: &'tree T,
     state: &mut T::State,
@@ -1245,17 +1246,20 @@ where
         let key = pending.key();
         // An `anchor-size()` inset may still resolve to `auto`, so it asks for
         // the static position too; `absolute_layout` decides whether it reads it.
-        let inset_auto = {
+        let (inset_auto, has_fallbacks) = {
             let style = tree.style(key.node);
-            style
-                .inset()
-                .map(|inset| inset.is_auto() || crate::compute::anchor::is_anchor_inset(inset))
+            (
+                style
+                    .inset()
+                    .map(|inset| inset.is_auto() || crate::compute::anchor::is_anchor_inset(inset)),
+                style.has_position_try_fallbacks(),
+            )
         };
         // A position option can make an inset `auto` the box's own style
         // gives a length, so a box with options always has one ready.
         let needs_static_measurement = (inset_auto.left && inset_auto.right)
             || (inset_auto.top && inset_auto.bottom)
-            || tree.position_option_count(key.node) > 1;
+            || (has_fallbacks && tree.position_option_count(key.node) > 1);
         let content_static_offset = if needs_static_measurement {
             let item = resolve_grid_item(
                 &tree.style(key.node),
@@ -1572,22 +1576,29 @@ where
             metrics.border,
             content_size,
         );
-        let absolute_content_size = layout_absolute_items(
-            tree,
-            state,
-            node,
-            &absolute.expect("commit keeps out-of-flow grid items"),
-            &columns,
-            &rows,
-            explicit_columns.tracks.len(),
-            explicit_rows.tracks.len(),
-            final_inner,
-            outer_size,
-            metrics.padding,
-            metrics.border,
-            rtl,
-            item_defaults,
-        );
+        let absolute = absolute.expect("commit keeps out-of-flow grid items");
+        // With no out-of-flow box to lay out, the pass answers `outer_size`.
+        let absolute_content_size =
+            if absolute.is_empty() && !tree.has_hoisted_children(state, node) {
+                outer_size
+            } else {
+                layout_absolute_items(
+                    tree,
+                    state,
+                    node,
+                    &absolute,
+                    &columns,
+                    &rows,
+                    explicit_columns.tracks.len(),
+                    explicit_rows.tracks.len(),
+                    final_inner,
+                    outer_size,
+                    metrics.padding,
+                    metrics.border,
+                    rtl,
+                    item_defaults,
+                )
+            };
         content_size = content_size.zip_map(absolute_content_size, f32::max);
     }
     let content_size = own_scrollable_overflow(&style, outer_size, content_size);

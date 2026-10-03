@@ -909,22 +909,29 @@ where
             metrics.border,
             content_size,
         );
-        let absolute_content_size = layout_absolute_items(
-            tree,
-            state,
-            node,
-            &absolute.expect("commit keeps out-of-flow grid-lanes items"),
-            columns,
-            rows,
-            explicit_lines.width,
-            explicit_lines.height,
-            final_inner,
-            outer_size,
-            metrics.padding,
-            metrics.border,
-            rtl,
-            item_defaults,
-        );
+        let absolute = absolute.expect("commit keeps out-of-flow grid-lanes items");
+        // With no out-of-flow box to lay out, the pass answers `outer_size`.
+        let absolute_content_size =
+            if absolute.is_empty() && !tree.has_hoisted_children(state, node) {
+                outer_size
+            } else {
+                layout_absolute_items(
+                    tree,
+                    state,
+                    node,
+                    &absolute,
+                    columns,
+                    rows,
+                    explicit_lines.width,
+                    explicit_lines.height,
+                    final_inner,
+                    outer_size,
+                    metrics.padding,
+                    metrics.border,
+                    rtl,
+                    item_defaults,
+                )
+            };
         content_size = content_size.zip_map(absolute_content_size, f32::max);
     }
     let content_size = own_scrollable_overflow(&style, outer_size, content_size);

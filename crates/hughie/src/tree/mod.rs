@@ -269,6 +269,16 @@ pub trait LayoutTree {
         SmallVec::new()
     }
 
+    /// Whether [`Self::hoisted_children`] may report a box for `node`: what
+    /// every container's absolute pass asks before it walks them, once per
+    /// container on every committing run, so a host keeps it cheap. It may
+    /// answer `true` for a node `hoisted_children` then reports nothing for,
+    /// never `false` for one it reports a box for. The default asks
+    /// [`Self::hoisted_children`].
+    fn has_hoisted_children(&self, state: &Self::State, node: Self::NodeId) -> bool {
+        !self.hoisted_children(state, node).is_empty()
+    }
+
     /// The border-box origin of `node`'s box parent in the border-box
     /// coordinates of `containing_block`, from this run's committed boxes:
     /// what turns the static position the parent recorded into the

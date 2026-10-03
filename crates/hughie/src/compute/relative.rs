@@ -1326,6 +1326,7 @@ where
     scrollable_size
 }
 
+#[inline(never)]
 fn commit_out_of_flow<T>(
     tree: &T,
     state: &mut T::State,
@@ -1595,7 +1596,10 @@ where
         border,
         scrollable_size,
     );
-    scrollable_size = scrollable_size.zip_map(
+    // With no out-of-flow box to lay out, the pass answers `outer_size`.
+    let out_of_flow_size = if absolute_items.is_empty() && !tree.has_hoisted_children(state, node) {
+        outer_size
+    } else {
         commit_out_of_flow(
             tree,
             state,
@@ -1604,9 +1608,9 @@ where
             outer_size,
             border,
             style.direction() == direction::T::Rtl,
-        ),
-        f32::max,
-    );
+        )
+    };
+    scrollable_size = scrollable_size.zip_map(out_of_flow_size, f32::max);
 
     let scrollable_size = own_scrollable_overflow(&style, outer_size, scrollable_size);
     LayoutOutput::new(outer_size, scrollable_size)
