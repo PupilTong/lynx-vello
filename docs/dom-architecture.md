@@ -621,9 +621,13 @@ itself is one function, `drive_chain` over a list of `ChainLink`s, that the
 document runs over live geometry and `bobcat-core`'s painter runs over the
 committed frame's scroll-slot table, so the two agree on order and reach:
 `overscroll-behavior: contain | none` fences everything above a container on
-that axis, and the engine's own `scroll-capture: nearest` (no W3C or Lynx
-counterpart) visits the container above first and this one only once that
-ancestor cannot move. `scroll/snap.rs` is css-scroll-snap-1 without its
+that axis, and the engine's own `scroll-capture-x` / `scroll-capture-y`
+(`auto | nearest [forward | backward]?` per physical axis, the
+`scroll-capture` shorthand setting both; no W3C or Lynx counterpart) visits
+the container above first and this one only once that ancestor cannot move —
+for a delta of either sign, or only the named one. The order is decided per
+axis and per step from that axis's own longhand and delta sign, and `drive_chain` walks the two axes separately when their orders
+differ. `scroll/snap.rs` is css-scroll-snap-1 without its
 events: a container's snap positions are computed from layout and published
 beside its slot, a drag settles onto the nearest one at release, a wheel tick
 steps to the next one in its direction, and a snapping container is re-snapped
