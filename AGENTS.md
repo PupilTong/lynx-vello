@@ -1423,7 +1423,13 @@ horizontal scroll container that snaps page by page, its pages' row pinned in
 the cascade, the initial page (`select-index`/`initial-select-index`) as a
 typed `attr()` and an `if()` over `sibling-index()` into
 `scroll-initial-target`, and the `selectTab` UI method the runtime dispatches
-by tag name; no component), and `tree::blur_view` (`blur-radius` reflected into a
+by tag name; no component), `tree::scroll_coordinator` (the ten
+`scroll-coordinator`/`x-foldview-*-ng` tags as a collapsing header: the
+coordinator a vertical scroll container, the header and slot absolutely
+positioned with the slot placed and sized by `anchor-size()` of the header and
+the toolbar, a sticky toolbar, `scroll-capture-y: nearest forward` inside the
+slot for the fold order, and the structure pinned in the cascade; no
+component, no UI method), and `tree::blur_view` (`blur-radius` reflected into a
 `backdrop-filter: blur()` presentational hint, under both the native tag
 `blur-view` and web-core's `x-blur-view`, as a CSS length rather than
 web-core's `parseFloat` — the one tag module with no UA rules of its own,

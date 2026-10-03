@@ -2,23 +2,24 @@
 //! defaults every container tag shares, and the assembly of the one sheet.
 //!
 //! Each tag's own policy lives with that tag — [`super::scroll_container`],
-//! [`super::list`], [`super::viewpager`], [`super::text`],
-//! [`super::raw_text`], [`super::image`] — and this module only decides what
-//! they all agree on and what order they land in.
+//! [`super::list`], [`super::viewpager`], [`super::scroll_coordinator`],
+//! [`super::text`], [`super::raw_text`], [`super::image`] — and this module
+//! only decides what they all agree on and what order they land in.
 //! [`super::blur_view`] is the one tag module with no rules of its own: a
 //! blur view is a container and nothing more, so everything it needs is here.
 //!
 //! Order is mostly documentation, with one exception that is mechanism:
 //! [`super::image`]'s child suppression ties on specificity with the `display`
 //! rules `view`, `scroll-view`, `list`, `list-item`, the two spellings each of
-//! `viewpager` and `viewpager-item`, `blur-view`, `x-blur-view` and `wrapper`
-//! carry, so it wins only by being assembled last.
+//! `viewpager` and `viewpager-item`, the ten `scroll-coordinator` tags,
+//! `blur-view`, `x-blur-view` and `wrapper` carry, so it wins only by being
+//! assembled last.
 //! That module's `nothing_inside_an_image_generates_a_box` is the tripwire for
 //! it.
 
 use super::blur_view::{BLUR_VIEW_TAG, X_BLUR_VIEW_TAG};
 use super::viewpager::{VIEWPAGER_ITEM_TAG, VIEWPAGER_TAG, X_VIEWPAGER_ITEM_TAG, X_VIEWPAGER_TAG};
-use super::{image, list, raw_text, scroll_container, text, viewpager};
+use super::{image, list, raw_text, scroll_container, scroll_coordinator, text, viewpager};
 
 /// Page configuration for the Lynx runtime and UA cascade.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,6 +53,9 @@ impl Default for PageConfig {
 ///
 /// The container tags — `page`, `view`, `scroll-view`, `list`, `list-item`,
 /// `viewpager`, `x-viewpager-ng`, `viewpager-item`, `x-viewpager-item-ng`,
+/// the five `scroll-coordinator` roles under both spellings
+/// (`scroll-coordinator`, `-header`, `-toolbar`, `-slot`, `-slot-drag`, and
+/// web-core's `x-foldview-ng`, `x-foldview-header-ng`, …),
 /// `blur-view` and `x-blur-view` — share
 /// `web-elements`' common block: a border box, and the display mode
 /// `defaultDisplayLinear` picks — a per-tag exception to that switch would
@@ -61,7 +65,9 @@ impl Default for PageConfig {
 /// where the linear toggle covers container tags only.
 /// Every tag that generates a box of its own — the containers, `text` and
 /// `image` — also gets the rest of that common block: `border-width: 0` with
-/// `border-style: solid`, `position: relative`, `min-width: 0` and
+/// `border-style: solid`, `position: relative` (which is what makes a
+/// coordinator the containing block of its header and slot,
+/// [`super::scroll_coordinator`]), `min-width: 0` and
 /// `min-height: 0`, and `overflow: clip`. `clip` is not a scroll container,
 /// so a clipped box neither scrolls nor gets its automatic minimum size
 /// zeroed by the overflow — the explicit `min-width`/`min-height` are what do
@@ -102,16 +108,23 @@ impl Default for PageConfig {
 /// row is the fifth and sixth: its pages form one row in both references
 /// whatever main axis an author writes on it, so its `flex-direction`,
 /// `linear-direction` and `flex-wrap`, and its pages' `position`, are pinned
-/// ([`super::viewpager`] carries the argument).
+/// ([`super::viewpager`] carries the argument). The coordinator's structure
+/// is six more, between the pager's and the text block's in the sheet: its
+/// `overflow-y: scroll` and its column, the `overflow-y: hidden` that
+/// `enable-scroll="false"` needs to beat that scroll, and the header's, the
+/// toolbar's and the slot's positions, which its geometry is built from
+/// ([`super::scroll_coordinator`] carries the argument).
 /// `the_ua_sheet_is_important_free_apart_from_the_text_block` pins the set to
-/// exactly those six rules.
+/// exactly those twelve rules.
 #[must_use]
 pub(super) fn ua_stylesheet(config: PageConfig) -> String {
-    let pager_tags =
-        format!("{VIEWPAGER_TAG}, {X_VIEWPAGER_TAG}, {VIEWPAGER_ITEM_TAG}, {X_VIEWPAGER_ITEM_TAG}");
+    let component_tags = format!(
+        "{VIEWPAGER_TAG}, {X_VIEWPAGER_TAG}, {VIEWPAGER_ITEM_TAG}, {X_VIEWPAGER_ITEM_TAG}, {}",
+        scroll_coordinator::TAGS.join(", ")
+    );
     let display = if config.default_display_linear {
         format!(
-            "page, view, scroll-view, list, list-item, {pager_tags}, {BLUR_VIEW_TAG}, \
+            "page, view, scroll-view, list, list-item, {component_tags}, {BLUR_VIEW_TAG}, \
              {X_BLUR_VIEW_TAG} {{ display: linear; }}\n"
         )
     } else {
@@ -123,7 +136,7 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
         String::new()
     };
     format!(
-        "page, view, scroll-view, list, list-item, {pager_tags}, {BLUR_VIEW_TAG}, {X_BLUR_VIEW_TAG}, \
+        "page, view, scroll-view, list, list-item, {component_tags}, {BLUR_VIEW_TAG}, {X_BLUR_VIEW_TAG}, \
          text, image {{ box-sizing: border-box; border-width: 0; border-style: solid; \
          position: relative; overflow: clip; min-width: 0; min-height: 0; }}\n\
          {display}\
@@ -133,12 +146,14 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
          {scrollers}\
          {lists}\
          {pagers}\
+         {coordinators}\
          {text}\
          {carriers}\
          {images}",
         scrollers = scroll_container::UA_RULES,
         lists = list::UA_RULES,
         pagers = viewpager::UA_RULES,
+        coordinators = scroll_coordinator::UA_RULES,
         text = text::UA_RULES,
         carriers = raw_text::UA_RULES,
         images = image::UA_RULES,
@@ -152,14 +167,23 @@ mod tests {
     use dom::stylo::values::computed::{BorderStyle, CSSPixelLength, Display, Overflow, Size};
 
     use super::super::LynxDocument;
+    use super::super::scroll_coordinator::{
+        SCROLL_COORDINATOR_HEADER_TAG, SCROLL_COORDINATOR_SLOT_DRAG_TAG,
+        SCROLL_COORDINATOR_SLOT_TAG, SCROLL_COORDINATOR_TAG, SCROLL_COORDINATOR_TOOLBAR_TAG,
+        X_FOLDVIEW_HEADER_TAG, X_FOLDVIEW_SLOT_DRAG_TAG, X_FOLDVIEW_SLOT_TAG, X_FOLDVIEW_TAG,
+        X_FOLDVIEW_TOOLBAR_TAG,
+    };
     use super::super::test_support::{child, document, overflow, style_of, with_config};
     use super::{
         BLUR_VIEW_TAG, PageConfig, VIEWPAGER_ITEM_TAG, VIEWPAGER_TAG, X_BLUR_VIEW_TAG,
         X_VIEWPAGER_ITEM_TAG, X_VIEWPAGER_TAG, ua_stylesheet,
     };
 
-    /// The tags that get `web-elements`' common container block.
-    const CONTAINER_TAGS: [&str; 11] = [
+    /// The tags that get `web-elements`' common container block and keep
+    /// its `position: relative`. The coordinator's header, toolbar and slot
+    /// get the block too, but their positions are pinned
+    /// ([`super::super::scroll_coordinator`] tests them).
+    const CONTAINER_TAGS: [&str; 15] = [
         "page",
         "view",
         "scroll-view",
@@ -169,6 +193,10 @@ mod tests {
         X_VIEWPAGER_TAG,
         VIEWPAGER_ITEM_TAG,
         X_VIEWPAGER_ITEM_TAG,
+        SCROLL_COORDINATOR_TAG,
+        X_FOLDVIEW_TAG,
+        SCROLL_COORDINATOR_SLOT_DRAG_TAG,
+        X_FOLDVIEW_SLOT_DRAG_TAG,
         BLUR_VIEW_TAG,
         X_BLUR_VIEW_TAG,
     ];
@@ -340,8 +368,23 @@ mod tests {
             let scroller = child(&mut document, "scroll-view", "");
             let list = child(&mut document, "list", "");
             let pagers = [VIEWPAGER_TAG, X_VIEWPAGER_TAG].map(|tag| child(&mut document, tag, ""));
-            let leaves = ["text", "image", VIEWPAGER_ITEM_TAG, X_VIEWPAGER_ITEM_TAG]
-                .map(|tag| (tag, child(&mut document, tag, "")));
+            let coordinators =
+                [SCROLL_COORDINATOR_TAG, X_FOLDVIEW_TAG].map(|tag| child(&mut document, tag, ""));
+            let leaves = [
+                "text",
+                "image",
+                VIEWPAGER_ITEM_TAG,
+                X_VIEWPAGER_ITEM_TAG,
+                SCROLL_COORDINATOR_HEADER_TAG,
+                X_FOLDVIEW_HEADER_TAG,
+                SCROLL_COORDINATOR_TOOLBAR_TAG,
+                X_FOLDVIEW_TOOLBAR_TAG,
+                SCROLL_COORDINATOR_SLOT_TAG,
+                X_FOLDVIEW_SLOT_TAG,
+                SCROLL_COORDINATOR_SLOT_DRAG_TAG,
+                X_FOLDVIEW_SLOT_DRAG_TAG,
+            ]
+            .map(|tag| (tag, child(&mut document, tag, "")));
             document.layout();
 
             assert_eq!(
@@ -375,6 +418,13 @@ mod tests {
                     overflow(&document, pager),
                     (Overflow::Scroll, Overflow::Hidden),
                     "a pager keeps its own axes whatever the switch says: {visible}"
+                );
+            }
+            for coordinator in coordinators {
+                assert_eq!(
+                    overflow(&document, coordinator),
+                    (Overflow::Hidden, Overflow::Scroll),
+                    "a coordinator keeps its own axes whatever the switch says: {visible}"
                 );
             }
         }
@@ -435,7 +485,7 @@ mod tests {
     /// describe an engine neither reference has. [`super::text`] carries the
     /// full citation.
     ///
-    /// The pager's row is the other two, ahead of the text block in the
+    /// The pager's row is two more, ahead of the text block in the
     /// sheet. In both references a
     /// `viewpager`'s pages form one row whatever the author writes on the
     /// pager — web-core lays them out in a shadow box no author rule reaches,
@@ -445,12 +495,31 @@ mod tests {
     /// lost; the same for a page's `position: relative`, which web-core
     /// itself pins with `!important`. [`super::viewpager`] carries the full
     /// argument.
+    ///
+    /// The coordinator's six follow the pager's. In every reference its
+    /// header, toolbar and slot are placed by something no author rule
+    /// reaches — web-core's `!important` scroll axis, header position and
+    /// component code, native's own layout — and here the authored boxes
+    /// are the layout: the coordinator must scroll on y in a column, the
+    /// header and the slot must be absolutely positioned (the slot's
+    /// `anchor-size()` resolves only there) and the toolbar sticky. The
+    /// `enable-scroll="false"` line is important only to beat the pinned
+    /// scroll. [`super::super::scroll_coordinator`] carries the argument.
     #[test]
     fn the_ua_sheet_is_important_free_apart_from_the_text_block() {
-        const ALLOWED: [&str; 6] = [
+        const ALLOWED: [&str; 12] = [
             "viewpager, x-viewpager-ng { flex-direction: row !important; \
              linear-direction: row !important; flex-wrap: nowrap !important; }",
             "viewpager-item, x-viewpager-item-ng { position: relative !important; }",
+            "scroll-coordinator, x-foldview-ng { overflow-y: scroll !important; }",
+            "scroll-coordinator, x-foldview-ng { flex-direction: column !important; \
+             linear-direction: column !important; }",
+            "scroll-coordinator[enable-scroll=\"false\"], scroll-coordinator[scroll-enable=\"false\"], \
+             x-foldview-ng[enable-scroll=\"false\"], x-foldview-ng[scroll-enable=\"false\"] \
+             { overflow-y: hidden !important; }",
+            "scroll-coordinator-header, x-foldview-header-ng { position: absolute !important; }",
+            "scroll-coordinator-toolbar, x-foldview-toolbar-ng { position: sticky !important; }",
+            "scroll-coordinator-slot, x-foldview-slot-ng { position: absolute !important; }",
             "text { display: -lynx-text !important; color: initial; }",
             "inline-text { display: -lynx-text !important; }",
             "text > inline-truncation { display: -lynx-text !important; \
