@@ -118,9 +118,7 @@ use crate::vello::Scene;
 use crate::vello::kurbo::{Affine, Point, Rect};
 use crate::vello::peniko::{BlendMode, Compose, Fill, Mix};
 use crate::visual::space::{self, SpaceKind, nearest_scroll, nearest_sticky};
-use crate::visual::{
-    AnimationSlot, AutoBox, ClipNode, PaintItem, PaintItemKind, PaintOrder, RenderLayer, Space,
-};
+use crate::visual::{AutoBox, ClipNode, PaintItem, PaintItemKind, PaintOrder, RenderLayer};
 
 /// Where one walk's output goes.
 ///
@@ -287,10 +285,12 @@ impl WalkSink<'_> {
         }
     }
 
-    fn pop_filter(&mut self, spaces: &[Space], slots: &[AnimationSlot]) {
+    fn pop_filter(&mut self, frame: &PaintOrder) {
         match self {
             Self::Monolithic(..) => {}
-            Self::Compose(assembly) => assembly.pop_filter(spaces, slots),
+            Self::Compose(assembly) => {
+                assembly.pop_filter(frame.spaces(), frame.animations(), frame.anchored());
+            }
         }
     }
 
@@ -316,12 +316,17 @@ impl WalkSink<'_> {
         &mut self,
         entry: FilterGroup,
         ops: std::ops::Range<u32>,
-        spaces: &[Space],
-        slots: &[AnimationSlot],
+        frame: &PaintOrder,
     ) -> bool {
         match self {
             Self::Monolithic(..) => false,
-            Self::Compose(assembly) => assembly.push_backdrop(entry, ops, spaces, slots),
+            Self::Compose(assembly) => assembly.push_backdrop(
+                entry,
+                ops,
+                frame.spaces(),
+                frame.animations(),
+                frame.anchored(),
+            ),
         }
     }
 }
@@ -1167,7 +1172,7 @@ fn open_scope<T>(
     if let Some((root_start, end)) = backdrop_end
         && let Some(entry) = backdrop_entry(style, layer, space, scale, ratio)
     {
-        sink.push_backdrop(entry, root_start..end, frame.spaces(), frame.animations());
+        sink.push_backdrop(entry, root_start..end, frame);
     }
 
     // A current `opacity` animation roots at every reading, 1 included,
@@ -1476,7 +1481,7 @@ fn close_scope<T>(sink: &mut WalkSink<'_>, scratch: &mut Scratch, painting: Pain
         );
     }
     if scope.blurred {
-        sink.pop_filter(frame.spaces(), frame.animations());
+        sink.pop_filter(frame);
     }
     if let Some((list, plan)) = &plan {
         filters::apply(
@@ -2111,6 +2116,8 @@ fn held(
 /// Content is baked unscrolled, unstuck and at committed transforms, so each
 /// node between the two carries it by its whole committed range — a scroll
 /// node by its encode window, a sticky node by its offset bounds, an
+/// anchored node by its default scroll shift over its scrollers' encode
+/// windows (a hidden box draws nothing, so its zero map needs no bound), an
 /// animation node with a transform track by its curve's
 /// [`Reach`](crate::visual::reach::Reach). The region crosses the nodes
 /// outermost first, since that is the order their maps undo in; runs of
@@ -2159,6 +2166,13 @@ fn pull_back(
                 low -= sticky_high;
                 high -= sticky_low;
             }
+            SpaceKind::Anchored(slot) => {
+                let (shift_low, shift_high) = frame.anchored_slot_range(slot, windows);
+                low -= shift_high;
+                high -= shift_low;
+            }
+            // The identity, or a hidden box's zero map, which draws nothing.
+            SpaceKind::AnchoredVisibility(_) => {}
             SpaceKind::Animation(slot) => {
                 let Some(track) = &frame.animations()[slot as usize].curve.transform else {
                     // An opacity-only curve moves nothing.
@@ -2288,7 +2302,9 @@ fn into_group(
         nearest_sticky(spaces, content),
         nearest_sticky(spaces, group),
     );
-    Some(expand_region(bounds, sticky_low, sticky_high))
+    let bounds = expand_region(bounds, sticky_low, sticky_high);
+    let (shift_low, shift_high) = frame.anchored_range(windows, content, group);
+    Some(expand_region(bounds, shift_low, shift_high))
 }
 
 /// `bounds`, in `from`'s coordinates, carried into `into`'s: forward through
@@ -2318,6 +2334,11 @@ fn carry(
                 let (low, high) = frame.sticky_slot_range(slot);
                 expand_region(bounds, low, high)
             }
+            SpaceKind::Anchored(slot) => {
+                let (low, high) = frame.anchored_slot_range(slot, windows);
+                expand_region(bounds, low, high)
+            }
+            SpaceKind::AnchoredVisibility(_) => bounds,
             SpaceKind::Animation(slot) => frame.animations()[slot as usize]
                 .curve
                 .transform

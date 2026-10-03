@@ -46,7 +46,8 @@ impl PaintOrder {
     ) -> Vec<NodeId> {
         let animations = self.sample_animations(None, offsets);
         let stickies = self.sample_stickies(ratio, offsets);
-        let samples = self.space_samples(&animations, &stickies, ratio, offsets);
+        let anchored = self.sample_anchored(&animations, &stickies, ratio, offsets);
+        let samples = self.space_samples(&animations, &stickies, &anchored, ratio, offsets);
         let mut elements = Vec::new();
         for node in self.hits_at(document, point, &samples) {
             if !elements.contains(&node) {
@@ -66,7 +67,8 @@ impl PaintOrder {
     ) -> Option<NodeId> {
         let animations = self.sample_animations(None, offsets);
         let stickies = self.sample_stickies(ratio, offsets);
-        let samples = self.space_samples(&animations, &stickies, ratio, offsets);
+        let anchored = self.sample_anchored(&animations, &stickies, ratio, offsets);
+        let samples = self.space_samples(&animations, &stickies, &anchored, ratio, offsets);
         self.hits_at(document, point, &samples).next()
     }
 

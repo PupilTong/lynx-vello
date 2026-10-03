@@ -222,6 +222,13 @@ impl<'dom, T> StyleView<'dom, T> {
         })
     }
 
+    /// `node` seen through another of its styles: a position option
+    /// (css-anchor-position-1 §6.1) cascaded for it. Everything node-bound —
+    /// the position lowering, containment, relevance — still reads `node`.
+    pub(crate) const fn with_values(node: &'dom Node<T>, style: &'dom ComputedValues) -> Self {
+        Self { node, style }
+    }
+
     pub(crate) fn values(&self) -> &ComputedValues {
         self.style
     }

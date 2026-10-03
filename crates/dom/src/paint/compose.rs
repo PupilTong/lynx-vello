@@ -58,6 +58,7 @@ use crate::vello::kurbo::{Affine, Point, Rect, Size};
 use crate::vello::peniko::{
     BlendMode, BrushRef, Extend, Fill, ImageBrush, ImageData, ImageQuality, ImageSampler,
 };
+use crate::visual::anchored::AnchoredSlot;
 use crate::visual::space::{self, Space, SpaceSamples};
 use crate::visual::{AnimationSamples, AnimationSlot};
 
@@ -346,7 +347,8 @@ pub struct FilterGroup {
     /// Backdrop Root's content start up to the element's own scope open.
     pub(crate) ops: Range<u32>,
     /// Whether some op in `ops` and `space` differ in their innermost
-    /// scroll or sticky node — a node on one path and not the other — or an
+    /// scroll, sticky or anchored node — a node on one path and not the
+    /// other — or an
     /// op draws a backdrop whose own flag is set: the one condition under
     /// which the bake's pixels depend on a scroll offset, and therefore the
     /// one condition under which a scroll invalidates the bake. A blurred
@@ -594,6 +596,7 @@ impl ComposeAssembly {
         ops: Range<u32>,
         spaces: &[Space],
         slots: &[AnimationSlot],
+        anchored: &[AnchoredSlot],
     ) -> bool {
         self.seal_fragment();
         if ops.start >= ops.end {
@@ -604,7 +607,7 @@ impl ComposeAssembly {
             "a backdrop's range ends at or before the op that draws it",
         );
         let (inner_chains, inner_animations, open_pushes) =
-            self.scan_range(&ops, entry.space, spaces, slots);
+            self.scan_range(&ops, entry.space, spaces, slots, anchored);
         let index =
             u32::try_from(self.filter_groups.len()).expect("a frame cannot hold 2^32 filters");
         entry.parent = self.open_filter;
@@ -638,6 +641,7 @@ impl ComposeAssembly {
         own: Option<u32>,
         spaces: &[Space],
         slots: &[AnimationSlot],
+        anchored: &[AnchoredSlot],
     ) -> (bool, bool, u32) {
         let mut scrolls = false;
         let mut animations = false;
@@ -656,8 +660,9 @@ impl ComposeAssembly {
             }
             if let Some(op) = op.space(&self.filter_groups) {
                 scrolls |= differs(spaces, op, own, space::nearest_scroll)
-                    || differs(spaces, op, own, space::nearest_sticky);
-                animations |= space::sampled_against(spaces, slots, op, own);
+                    || differs(spaces, op, own, space::nearest_sticky)
+                    || differs(spaces, op, own, space::nearest_anchored);
+                animations |= space::sampled_against(spaces, slots, anchored, op, own);
             }
         }
         // The range starts and ends with an empty clip stack (every group
@@ -681,7 +686,12 @@ impl ComposeAssembly {
     /// `filter` contains its positioned descendants, so all of it rides the
     /// group's own space or one below, and the ancestors' clips a curve on
     /// the element moves it across are pushed outside the bracket.
-    pub(crate) fn pop_filter(&mut self, spaces: &[Space], slots: &[AnimationSlot]) {
+    pub(crate) fn pop_filter(
+        &mut self,
+        spaces: &[Space],
+        slots: &[AnimationSlot],
+        anchored: &[AnchoredSlot],
+    ) {
         self.seal_fragment();
         let Some(index) = self.open_filter else {
             debug_assert!(false, "pop_filter is only called with an open filter group");
@@ -694,7 +704,7 @@ impl ComposeAssembly {
             (group.space, group.parent, group.ops.start)
         };
         let (inner_chains, inner_animations, _) =
-            self.scan_range(&(start..end), own, spaces, slots);
+            self.scan_range(&(start..end), own, spaces, slots, anchored);
         let group = &mut self.filter_groups[index as usize];
         group.inner_chains = inner_chains;
         group.inner_animations = inner_animations;
@@ -837,10 +847,12 @@ pub(crate) fn replay_ops(
                 index: fragment,
                 space,
             } => {
-                scene.append(
-                    &fragments[*fragment as usize],
-                    Some(device_transform(*space)),
-                );
+                let transform = device_transform(*space);
+                // A space `position-visibility` hides is the zero map, and
+                // content collapsed to a point draws nothing.
+                if transform.determinant() != 0.0 {
+                    scene.append(&fragments[*fragment as usize], Some(transform));
+                }
             }
             ComposeOp::Push {
                 clip_only,
@@ -873,7 +885,10 @@ pub(crate) fn replay_ops(
                 }
             }
             ComposeOp::Image { index: draw, space } => {
-                encode_draw(scene, image_draws, images, *draw, device_transform(*space));
+                let transform = device_transform(*space);
+                if transform.determinant() != 0.0 {
+                    encode_draw(scene, image_draws, images, *draw, transform);
+                }
             }
             ComposeOp::Pop => scene.pop_layer(),
             ComposeOp::PushFilter { index: group } => {
@@ -1052,8 +1067,8 @@ mod tests {
         assembly.push_op(push(None));
         let inner = assembly.push_filter(group(None));
         assembly.push_op(push(None));
-        assembly.pop_filter(&SPACES, &slots(true));
-        assembly.pop_filter(&SPACES, &slots(true));
+        assembly.pop_filter(&SPACES, &slots(true), &[]);
+        assembly.pop_filter(&SPACES, &slots(true), &[]);
         let finished = assembly.finish();
 
         assert_eq!((outer, inner), (0, 1), "groups are numbered in push order");
@@ -1093,7 +1108,7 @@ mod tests {
         let mut same = assembly();
         same.push_filter(group(SCROLLED));
         same.push_op(push(SCROLLED));
-        same.pop_filter(&SPACES, &slots(true));
+        same.pop_filter(&SPACES, &slots(true), &[]);
         assert!(!same.finish().filter_groups[0].inner_chains);
 
         // Content on a chain the group is not on: the content slides under
@@ -1101,7 +1116,7 @@ mod tests {
         let mut differing = assembly();
         differing.push_filter(group(None));
         differing.push_op(push(SCROLLED));
-        differing.pop_filter(&SPACES, &slots(true));
+        differing.pop_filter(&SPACES, &slots(true), &[]);
         assert!(differing.finish().filter_groups[0].inner_chains);
 
         // The group on a chain an op is not on: the shape a backdrop inside
@@ -1109,7 +1124,7 @@ mod tests {
         let mut reverse = assembly();
         reverse.push_filter(group(SCROLLED));
         reverse.push_op(push(None));
-        reverse.pop_filter(&SPACES, &slots(true));
+        reverse.pop_filter(&SPACES, &slots(true), &[]);
         assert!(reverse.finish().filter_groups[0].inner_chains);
 
         // An animation node is not a scroll node: it makes the bake depend
@@ -1117,7 +1132,7 @@ mod tests {
         let mut animated = assembly();
         animated.push_filter(group(None));
         animated.push_op(push(ANIMATED));
-        animated.pop_filter(&SPACES, &slots(true));
+        animated.pop_filter(&SPACES, &slots(true), &[]);
         assert!(!animated.finish().filter_groups[0].inner_chains);
     }
 
@@ -1155,6 +1170,7 @@ mod tests {
                 slots: &[],
                 animations: &crate::visual::AnimationSamples::default(),
                 stickies: &crate::visual::StickySamples::default(),
+                anchored: &crate::visual::anchored::AnchoredSamples::new(),
                 ratio: 1.0,
                 offset_of: &|_| None,
             },
@@ -1276,7 +1292,13 @@ mod tests {
         assembly.push_op(ComposeOp::Pop);
         let end = assembly.content_boundary();
         assert!(
-            assembly.push_backdrop(backdrop_entry(None), root_start..end, &SPACES, &slots(true)),
+            assembly.push_backdrop(
+                backdrop_entry(None),
+                root_start..end,
+                &SPACES,
+                &slots(true),
+                &[]
+            ),
             "a non-empty range records an entry",
         );
         let finished = assembly.finish();
@@ -1326,7 +1348,7 @@ mod tests {
                 let mut backdrop = assembly();
                 backdrop.push_op(push(op));
                 let end = backdrop.content_boundary();
-                backdrop.push_backdrop(backdrop_entry(space), 0..end, &SPACES, &slots);
+                backdrop.push_backdrop(backdrop_entry(space), 0..end, &SPACES, &slots, &[]);
                 assert_eq!(
                     backdrop.finish().filter_groups[0].samples_animations(),
                     expected,
@@ -1337,7 +1359,7 @@ mod tests {
                 blur.push_filter(FilterGroup::new(2.0, Rect::new(0.0, 0.0, 8.0, 8.0), space));
                 blur.push_op(push(op));
                 blur.push_op(ComposeOp::Pop);
-                blur.pop_filter(&SPACES, &slots);
+                blur.pop_filter(&SPACES, &slots, &[]);
                 assert_eq!(
                     blur.finish().filter_groups[0].samples_animations(),
                     expected,
@@ -1354,7 +1376,13 @@ mod tests {
     fn an_empty_range_records_no_backdrop_at_all() {
         let mut assembly = assembly();
         let start = assembly.content_boundary();
-        assert!(!assembly.push_backdrop(backdrop_entry(None), start..start, &SPACES, &slots(true)));
+        assert!(!assembly.push_backdrop(
+            backdrop_entry(None),
+            start..start,
+            &SPACES,
+            &slots(true),
+            &[]
+        ));
         let finished = assembly.finish();
         assert!(finished.filter_groups.is_empty());
         assert!(finished.program.is_empty());
@@ -1448,8 +1476,8 @@ mod tests {
         let mut assembly = assembly();
         assembly.push_filter(group(None));
         assembly.push_filter(group(SCROLLED));
-        assembly.pop_filter(&SPACES, &slots(true));
-        assembly.pop_filter(&SPACES, &slots(true));
+        assembly.pop_filter(&SPACES, &slots(true), &[]);
+        assembly.pop_filter(&SPACES, &slots(true), &[]);
         let finished = assembly.finish();
         assert!(
             finished.filter_groups[0].inner_chains,
@@ -1469,10 +1497,16 @@ mod tests {
             assembly.push_op(ComposeOp::Pop);
             let end = assembly.content_boundary();
             assembly.push_filter(group(None));
-            assert!(assembly.push_backdrop(backdrop_entry(None), 0..end, &SPACES, &slots(true)));
+            assert!(assembly.push_backdrop(
+                backdrop_entry(None),
+                0..end,
+                &SPACES,
+                &slots(true),
+                &[]
+            ));
             assembly.push_op(push(None));
             assembly.push_op(ComposeOp::Pop);
-            assembly.pop_filter(&SPACES, &slots(true));
+            assembly.pop_filter(&SPACES, &slots(true), &[]);
             let finished = assembly.finish();
             let [blur, backdrop] = &finished.filter_groups[..] else {
                 panic!("a blur group and a backdrop");
@@ -1499,7 +1533,7 @@ mod tests {
         assembly.push_op(ComposeOp::Pop);
         let end = assembly.content_boundary();
         let root_content = assembly.content_boundary();
-        assert!(assembly.push_backdrop(backdrop_entry(None), 0..end, &SPACES, &slots(true)));
+        assert!(assembly.push_backdrop(backdrop_entry(None), 0..end, &SPACES, &slots(true), &[]));
         assembly.push_op(push(None));
         assembly.push_op(ComposeOp::Pop);
         let child_end = assembly.content_boundary();
@@ -1507,7 +1541,8 @@ mod tests {
             backdrop_entry(None),
             root_content..child_end,
             &SPACES,
-            &slots(true)
+            &slots(true),
+            &[]
         ));
         let finished = assembly.finish();
         let [root, child] = &finished.filter_groups[..] else {

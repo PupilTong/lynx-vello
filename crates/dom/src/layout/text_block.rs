@@ -792,30 +792,7 @@ fn place_and_hide<T>(
         }
     }
 
-    // Out-of-flow children never entered the paragraph, so the block lays
-    // them out itself against its own padding box — the same thing every
-    // other container algorithm does for the children it does not flow.
-    let padding_box = block.padding_box();
-    for child in tree.children(element) {
-        let node = tree.at(child);
-        if !node.is_element() || !out_of_flow(StyleView::of(node).position()) {
-            continue;
-        }
-        let mut layout = hughie::compute::compute_absolute_layout(
-            tree,
-            state,
-            child,
-            padding_box,
-            // The static position, in the padding-box space the containing
-            // block is: where an in-flow box would have started, which is the
-            // content-box origin.
-            Point::new(block.padding.left, block.padding.top),
-        );
-        // And back out to the border-box space `location` is read in.
-        layout.location.x += block.border.left;
-        layout.location.y += block.border.top;
-        tree.set_unrounded_layout(state, child, layout);
-    }
+    lay_out_out_of_flow(tree, state, element, block);
 
     // Everything the paragraph swallowed generates no box. Hiding the whole
     // child rather than each consumed node keeps this O(children) wherever the
@@ -850,6 +827,68 @@ fn place_and_hide<T>(
         tree.set_unrounded_layout(state, child, hughie::tree::Layout::with_order(order));
         stack.extend(tree.children(child));
     }
+}
+
+/// The paragraph's absolute pass: its own out-of-flow children, which never
+/// entered the paragraph, then the boxes hoisted to it.
+fn lay_out_out_of_flow<T>(
+    tree: &TreeArenas<T>,
+    state: &mut DocumentLayoutState,
+    element: NodeSlot,
+    block: &BlockBox,
+) {
+    use hughie::tree::LayoutTree;
+    // Out-of-flow children never entered the paragraph, so the block lays
+    // them out itself against its own padding box — the same thing every
+    // other container algorithm does for the children it does not flow.
+    let padding_box = block.padding_box();
+    for child in tree.children(element) {
+        let node = tree.at(child);
+        if !node.is_element() {
+            continue;
+        }
+        let position = StyleView::of(node).position();
+        if !out_of_flow(position) {
+            continue;
+        }
+        if position == PositionProperty::Fixed {
+            // Its containing block is above the paragraph, whose pass lays it
+            // out from this static position (`layout::hoisted`).
+            tree.set_static_position(
+                state,
+                child,
+                Point::new(
+                    block.border.left + block.padding.left,
+                    block.border.top + block.padding.top,
+                ),
+            );
+            continue;
+        }
+        let mut layout = hughie::compute::compute_absolute_layout(
+            tree,
+            state,
+            child,
+            padding_box,
+            // The static position, in the padding-box space the containing
+            // block is: where an in-flow box would have started, which is the
+            // content-box origin.
+            Point::new(block.padding.left, block.padding.top),
+        );
+        // And back out to the border-box space `location` is read in.
+        layout.location.x += block.border.left;
+        layout.location.y += block.border.top;
+        tree.set_unrounded_layout(state, child, layout);
+    }
+    // The boxes deeper down whose containing block this paragraph is, after
+    // its own: an atom's subtree is the only place one can sit.
+    hughie::compute::compute_hoisted_children(
+        tree,
+        state,
+        element,
+        padding_box,
+        block.border,
+        StyleView::of(tree.at(element)).direction() == hughie::style::direction::T::Rtl,
+    );
 }
 
 /// The consumed elements between `element` and each of `placed`, exclusive of

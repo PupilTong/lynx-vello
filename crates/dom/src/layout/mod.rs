@@ -1,6 +1,8 @@
 //! Box layout over the document tree — the concrete [`hughie`] host.
 
+pub(crate) mod anchors;
 pub(crate) mod committed_box;
+mod hoisted;
 mod host;
 pub(crate) mod relevance;
 mod style;
@@ -98,6 +100,23 @@ impl<T: Sync> Document<T> {
             return;
         }
 
+        self.run_layout_once(viewport, scale, resized);
+        // css-anchor-position-1's settle loop (`layout::anchors`), out of
+        // line: a page with no anchor-positioned box pays this one test.
+        let state = self.layout_state_mut();
+        if !state.anchored.is_empty() || !state.anchor_pending.get_mut().is_empty() {
+            self.settle_anchor_runs(viewport, scale, resized);
+        }
+    }
+
+    /// One layout run and its bookkeeping.
+    #[inline]
+    fn run_layout_once(
+        &mut self,
+        viewport: Size<f32>,
+        scale: f32,
+        resized: &mut Vec<crate::NodeId>,
+    ) {
         let full = self.layout_requires_full_pass(viewport, scale);
         let rescale = self.layout_inputs_changed(viewport, scale);
         let bound = self.arenas().slot_bound();
@@ -111,6 +130,33 @@ impl<T: Sync> Document<T> {
         self.arenas_mut().publish_committed_boxes(resized);
         self.clear_relayout_roots();
         self.mark_layout_complete(viewport, scale);
+    }
+
+    /// The settle loop after a run that laid out anchor-positioned boxes: a
+    /// box that read an anchor which moved after it read it is invalidated
+    /// and the document runs again, until every read is stable or
+    /// [`anchors::ANCHOR_PASSES`] runs have been spent. The loop never closes
+    /// on unverified reads: the last run's are verified too, and a box whose
+    /// anchor still moved is invalidated, which leaves the document dirty, so
+    /// the next `layout()` — or `render()` — runs again even if nothing else
+    /// changes.
+    #[cold]
+    #[inline(never)]
+    fn settle_anchor_runs(
+        &mut self,
+        viewport: Size<f32>,
+        scale: f32,
+        resized: &mut Vec<crate::NodeId>,
+    ) {
+        for _ in 1..anchors::anchor_passes() {
+            if !self.settle_anchors() {
+                return;
+            }
+            self.run_layout_once(viewport, scale, resized);
+        }
+        // What the last run read is verified like every other run's; a move
+        // found here is laid out by the pass its invalidation scheduled.
+        self.settle_anchors();
     }
 
     /// Marks the container-unit users under every query container the pass
@@ -462,6 +508,14 @@ impl<T> Document<T> {
     /// Sticky offsets are sampled from these same live scroll positions,
     /// including those inherited from sticky containing-block ancestors.
     ///
+    /// So is css-anchor-position-1's default scroll shift (§3.3), for the
+    /// box and every anchor-positioned box on its containing-block chain,
+    /// as browsers report it: layout places such a box against its anchors'
+    /// remembered offsets and the painter shifts it, so the rect adds the
+    /// shift at the stored offsets (unsnapped, like them). A box hidden by
+    /// `position-visibility` still reports its rect: the hide is a paint
+    /// and hit-testing effect, as in Blink.
+    ///
     /// `None` when the element has no box at all: `display: none` or
     /// `display: contents`, a node that is not a styled element, a node no
     /// pass has laid out, or one detached from the document tree.
@@ -484,6 +538,15 @@ impl<T> Document<T> {
         if style.values().clone_position() == PositionProperty::Sticky {
             origin += crate::visual::sticky::live_offset(self, id, &mut sticky_offsets);
         }
+        let anchored = !self.layout_state().anchored.is_empty();
+        let shift = |id| {
+            if anchored {
+                self.default_scroll_shift(id, None).unwrap_or_default()
+            } else {
+                Vector2D::zero()
+            }
+        };
+        origin += shift(id);
         // The position the *escaping* box was keyed on, which decides which
         // ancestor is its containing block — and so which scroll offsets
         // move it. It is the computed value, not hughie's parent-lowered
@@ -524,6 +587,7 @@ impl<T> Document<T> {
                 if self.is_scroll_container(ancestor_id) {
                     origin -= self.scroll_offset(ancestor_id);
                 }
+                origin += shift(ancestor_id);
                 escape = ancestor_style.values().clone_position();
             }
             current = ancestor;
@@ -766,8 +830,11 @@ impl<T> Document<T> {
     /// the old and new computed style). Answers whether any such descendant
     /// was invalidated.
     ///
-    /// Every positioned descendant that could name `id` lays out again:
-    /// rounding only re-hoists a box under a subtree some write reached. That
+    /// Every positioned descendant that could name `id` lays out again —
+    /// its parent re-records its static position under whichever
+    /// containing block it escapes to now (`layout::hoisted`) — and, if it
+    /// is anchor-positioned with a last successful position option, has made
+    /// a fallback-sensitive change (css-anchor-position-1 §6.5.1). That
     /// holds even where its style establishes the block now, since the same
     /// flush can have changed that style too and the relayout damage it
     /// produced reaches `id` alone. `id` itself lays out again only through a
@@ -801,6 +868,18 @@ impl<T> Document<T> {
                         child.id(),
                         absolute_held || establishes_absolute_containing_block(child, style),
                     ));
+                }
+            }
+        }
+        let anchored = &mut self.layout_state_mut().anchored;
+        if !anchored.is_empty() {
+            // css-anchor-position-1 §6.5.1: "the box's containing block
+            // association changed" is a fallback-sensitive change.
+            for descendant in &positioned {
+                if let Some(entry) = anchored.get_mut(descendant)
+                    && entry.last_successful.is_some()
+                {
+                    entry.fallback_sensitive = true;
                 }
             }
         }

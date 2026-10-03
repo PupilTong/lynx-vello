@@ -186,6 +186,49 @@ impl<T> Line<T> {
     }
 }
 
+/// An axis-aligned rectangle: an origin and a size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[repr(C)]
+pub struct Rect<T> {
+    pub origin: Point<T>,
+    pub size: Size<T>,
+}
+
+impl<T> Rect<T> {
+    #[must_use]
+    pub const fn new(origin: Point<T>, size: Size<T>) -> Self {
+        Self { origin, size }
+    }
+}
+
+impl Rect<f32> {
+    pub const ZERO: Self = Self {
+        origin: Point::ZERO,
+        size: Size::ZERO,
+    };
+
+    /// The rectangle moved by `offset`.
+    #[inline]
+    #[must_use]
+    pub fn translate(self, offset: Point<f32>) -> Self {
+        Self {
+            origin: Point::new(self.origin.x + offset.x, self.origin.y + offset.y),
+            size: self.size,
+        }
+    }
+
+    /// Whether `other` lies inside this rectangle, edges included, with
+    /// `tolerance` of slack on every side.
+    #[inline]
+    #[must_use]
+    pub fn contains_rect(&self, other: &Self, tolerance: f32) -> bool {
+        other.origin.x >= self.origin.x - tolerance
+            && other.origin.y >= self.origin.y - tolerance
+            && other.origin.x + other.size.width <= self.origin.x + self.size.width + tolerance
+            && other.origin.y + other.size.height <= self.origin.y + self.size.height + tolerance
+    }
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {

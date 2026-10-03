@@ -4,7 +4,6 @@ use stylo::computed_values::{box_sizing, direction, relative_center, relative_la
 use stylo::values::computed::lynx_layout::RelativeReference;
 use stylo::values::computed::{PositionProperty, Size as StyleSize};
 
-use super::compute_absolute_layout;
 use super::util::{
     Axis, ItemGeometry, ItemKey, OrderedItem, ResolvedContainerBox, accumulate_scrollable_overflow,
     axis_has_intrinsic_style, clamp_axis, container_content_independence, item_value_stability,
@@ -12,6 +11,7 @@ use super::util::{
     resolve_item_geometry_with_bases, resolve_length_percentage, sort_and_assign_layout_order,
     store_committed_child, subtract_available_space,
 };
+use super::{AbsoluteContainingBlock, compute_absolute_layout_in};
 use crate::geometry::{Edges, Line, Point, Size};
 use crate::style::containment::{ContainedAxes, contained_axes};
 use crate::style::{CoreStyle, RELATIVE_REFERENCE_NONE, RELATIVE_REFERENCE_PARENT, RelativeStyle};
@@ -555,10 +555,40 @@ fn fit_content_available(
         | StyleSize::FitContent
         | StyleSize::Stretch
         | StyleSize::WebkitFillAvailable => available,
+        // An in-flow item: §5.1.1 resolves nothing for it.
         StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => {
-            unreachable!("anchor sizing is pref-dead under the lynx feature")
+            unresolvable_fit_content_available(
+                value,
+                axis,
+                parent_size,
+                available,
+                box_sizing,
+                box_floor,
+            )
         }
     }
+}
+
+/// The anchor arm of [`fit_content_available`], out of line so the hot
+/// function does not call itself.
+#[cold]
+#[inline(never)]
+fn unresolvable_fit_content_available(
+    value: &StyleSize,
+    axis: Axis,
+    parent_size: Size<Option<f32>>,
+    available: AvailableSpace,
+    box_sizing: box_sizing::T,
+    box_floor: f32,
+) -> AvailableSpace {
+    fit_content_available(
+        &super::anchor::unresolvable_style_size(value),
+        axis,
+        parent_size,
+        available,
+        box_sizing,
+        box_floor,
+    )
 }
 
 fn intrinsic_probe<T>(
@@ -1296,12 +1326,15 @@ where
     scrollable_size
 }
 
+#[inline(never)]
 fn commit_out_of_flow<T>(
     tree: &T,
     state: &mut T::State,
+    node: T::NodeId,
     items: &[OrderedItem<T::NodeId>],
     container_size: Size<f32>,
     border: Edges<f32>,
+    rtl: bool,
 ) -> Size<f32>
 where
     T: LayoutTree,
@@ -1311,16 +1344,19 @@ where
         (container_size.height - border.vertical_sum()).max(0.0),
     );
     let mut scrollable_size = container_size;
+    super::util::debug_assert_tree_order(items.iter().map(|item| item.document_index));
+    let mut hoisted = super::HoistedPass::new(padding_box_size, border, rtl);
     for pending in items {
+        hoisted.before(tree, state, node, pending.document_index);
         let style = tree.style(pending.node);
         match style.position() {
             PositionProperty::Absolute => {
-                let mut layout = compute_absolute_layout(
+                let mut layout = compute_absolute_layout_in(
                     tree,
                     state,
                     pending.node,
-                    padding_box_size,
-                    Point::ZERO,
+                    AbsoluteContainingBlock::lynx_padding_box(padding_box_size, rtl),
+                    |_, _| Point::ZERO,
                 );
                 layout.order = pending.layout_order;
                 layout.location.x += border.left;
@@ -1333,6 +1369,7 @@ where
                     style.overflow(),
                 );
                 tree.set_unrounded_layout(state, pending.node, layout);
+                hoisted.inside(tree, state, node, pending.document_index);
             }
             PositionProperty::Fixed => {
                 tree.set_static_position(state, pending.node, Point::new(border.left, border.top));
@@ -1340,6 +1377,7 @@ where
             PositionProperty::Static | PositionProperty::Relative | PositionProperty::Sticky => {}
         }
     }
+    hoisted.rest(tree, state, node);
     scrollable_size
 }
 
@@ -1549,10 +1587,30 @@ where
         let order = u32::try_from(document_index).unwrap_or(u32::MAX);
         super::hide_child_at_order(tree, state, child, order);
     }
-    scrollable_size = scrollable_size.zip_map(
-        commit_out_of_flow(tree, state, &absolute_items, outer_size, border),
-        f32::max,
+    super::record_scrollable_containing_block(
+        tree,
+        state,
+        node,
+        &style,
+        outer_size,
+        border,
+        scrollable_size,
     );
+    // With no out-of-flow box to lay out, the pass answers `outer_size`.
+    let out_of_flow_size = if absolute_items.is_empty() && !tree.has_hoisted_children(state, node) {
+        outer_size
+    } else {
+        commit_out_of_flow(
+            tree,
+            state,
+            node,
+            &absolute_items,
+            outer_size,
+            border,
+            style.direction() == direction::T::Rtl,
+        )
+    };
+    scrollable_size = scrollable_size.zip_map(out_of_flow_size, f32::max);
 
     let scrollable_size = own_scrollable_overflow(&style, outer_size, scrollable_size);
     LayoutOutput::new(outer_size, scrollable_size)

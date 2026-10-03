@@ -17,18 +17,19 @@ use hughie::compute::{
     compute_skipped_contents_size, hide_skipped_contents, hide_subtree,
     round_layout_subtree_with as round_with,
 };
-use hughie::geometry::{Edges, Point, Size};
+use hughie::geometry::{Edges, Point, Rect, Size};
 use hughie::invalidate::is_relayout_boundary;
-use hughie::style::{CoreStyle, PositionProperty};
-use hughie::tree::{AvailableSpace, Layout, LayoutInput, LayoutOutput, LayoutSlot, LayoutTree};
-use rustc_hash::FxHashSet;
-
-use super::committed_box;
-use super::style::{
-    DisplayMode, StyleView, box_parent, display_mode, establishes_absolute_containing_block,
-    establishes_fixed_containing_block, resolve_position,
+use hughie::style::{CoreStyle, DashedIdent, PhysicalAxis, PositionProperty, TreeScoped};
+use hughie::tree::{
+    AnchorOutcome, AnchorSpec, AvailableSpace, HoistedChild, Layout, LayoutInput, LayoutOutput,
+    LayoutSlot, LayoutTree,
 };
+use rustc_hash::FxHashSet;
+use smallvec::SmallVec;
+
+use super::style::{DisplayMode, StyleView, box_parent, display_mode, resolve_position};
 use super::text_block::compute_text_block_layout;
+use super::{anchors, committed_box, hoisted};
 use crate::tree::document::{
     DeferredContainer, Document, DocumentLayoutState, NodeId, NodeSlot, PendingRelayout,
     RelayoutKind, StickyContainingBlock, TreeArenas,
@@ -122,6 +123,64 @@ impl<T> LayoutTree for TreeArenas<T> {
         {
             entry.rounded = Some(bounds);
         }
+    }
+
+    /// Records the position and lists the box under the containing block
+    /// that lays it out ([`hoisted`]).
+    fn set_static_position(&self, state: &mut Self::State, node: NodeSlot, position: Point<f32>) {
+        let slot = self.layout_mut(state, node);
+        if slot.static_position != position {
+            slot.static_position = position;
+            slot.mark_subtree_dirty();
+        }
+        state.register_hoisted(node, hoisted::hoisting_block(self.at(node)));
+    }
+
+    #[inline]
+    fn hoisted_children(
+        &self,
+        state: &Self::State,
+        node: NodeSlot,
+    ) -> SmallVec<[HoistedChild<NodeSlot>; 2]> {
+        if state.hoisted_to.is_empty() {
+            return SmallVec::new();
+        }
+        hoisted::children_of(self, state, node)
+    }
+
+    /// A listed block is not proof of a box: `hoisted::children_of`
+    /// re-derives each listed box's containing block and skips stale ones.
+    #[inline]
+    fn has_hoisted_children(&self, state: &Self::State, node: NodeSlot) -> bool {
+        !state.hoisted_to.is_empty() && state.hoisted_to.contains_key(&node)
+    }
+
+    fn hoisted_parent_offset(
+        &self,
+        state: &Self::State,
+        containing_block: NodeSlot,
+        node: NodeSlot,
+    ) -> Point<f32> {
+        hoisted::parent_offset(self, state, containing_block, node)
+    }
+
+    fn set_hoisted_layout(
+        &self,
+        state: &mut Self::State,
+        containing_block: NodeSlot,
+        node: NodeSlot,
+        layout: Layout,
+    ) {
+        hoisted::commit(self, state, containing_block, node, layout);
+    }
+
+    fn set_scrollable_containing_block(
+        &self,
+        state: &mut Self::State,
+        node: NodeSlot,
+        size: Size<f32>,
+    ) {
+        state.scrollable_containing_blocks.insert(node, size);
     }
 
     fn compute_layout(
@@ -274,6 +333,182 @@ impl<T> LayoutTree for TreeArenas<T> {
     fn clear_layout_cache(&self, state: &mut Self::State, node: NodeSlot) {
         state.clear_layout_cache(node);
     }
+
+    /// css-anchor-position-1 §2.3's target anchor element for `node`, and
+    /// its border box in the padding-box coordinates of the element
+    /// generating `node`'s containing block, translated by `node`'s
+    /// remembered scroll offsets (§3.3). The lookup and the geometry are
+    /// [`anchors`]'s; this records the read for the settle loop.
+    ///
+    /// A box whose containing block is not its box parent (a `fixed` box, or
+    /// an `absolute` one under a static parent) is laid out by that
+    /// containing block's absolute pass in tree order with its own
+    /// out-of-flow children (`layout::hoisted`), so every acceptable anchor
+    /// is placed before the box reads it. An anchor that moves under a
+    /// relayout that never reaches the reader is caught by
+    /// [`Document::settle_anchors`] after the run.
+    fn anchor_rect(
+        &self,
+        state: &Self::State,
+        node: NodeSlot,
+        option: usize,
+        spec: AnchorSpec<'_>,
+    ) -> Option<Rect<f32>> {
+        let query = match spec {
+            AnchorSpec::Default => anchors::AnchorQuery::Default,
+            AnchorSpec::Named(name) => anchors::AnchorQuery::Named(name.clone()),
+        };
+        self.anchor_query(state, node, option, query).1
+    }
+
+    /// Recorded like an anchor query: a box whose default anchor does not
+    /// exist yet reads nothing else, and must still be laid out again when
+    /// one appears.
+    fn default_anchor(
+        &self,
+        state: &Self::State,
+        node: NodeSlot,
+        option: usize,
+    ) -> Option<NodeSlot> {
+        self.anchor_query(state, node, option, anchors::AnchorQuery::Default)
+            .0
+    }
+
+    fn anchor_scrolls_with_default(
+        &self,
+        state: &Self::State,
+        node: NodeSlot,
+        option: usize,
+        name: &TreeScoped<DashedIdent>,
+        axis: PhysicalAxis,
+    ) -> bool {
+        let Some(anchored) = anchors::Query::of(self.at(node)) else {
+            return false;
+        };
+        let liveness = anchors::Liveness::Committed(state);
+        let Some(style) = anchors::option_style(self, self.at(node), option) else {
+            return false;
+        };
+        let (Some(named), Some(default)) = (
+            anchors::target_anchor(self, &anchored, name, liveness),
+            anchors::default_anchor(self, &anchored, style, liveness),
+        ) else {
+            return false;
+        };
+        anchors::scrolls_with_default(named, default, axis)
+    }
+
+    /// css-position-4's scrollable containing block, as the containing
+    /// block's algorithm recorded it in this run, before the absolute pass
+    /// that asks ([`LayoutTree::set_scrollable_containing_block`]): its
+    /// in-flow overflow only, so the box laid out against it cannot grow it.
+    /// The read is recorded like an anchor query, for a box whose containing
+    /// block was served from the cache.
+    fn scrollable_containing_block(
+        &self,
+        state: &Self::State,
+        node: NodeSlot,
+    ) -> Option<Size<f32>> {
+        self.anchor_query(state, node, 0, anchors::AnchorQuery::Scrollable)
+            .1
+            .map(|rect| rect.size)
+    }
+
+    fn position_option_count(&self, node: NodeSlot) -> usize {
+        self.anchors()
+            .options(node)
+            .map_or(0, |options| options.styles.len() + 1)
+    }
+
+    fn position_option_style(&self, node: NodeSlot, index: usize) -> Self::Style<'_> {
+        let node_ref = self.at(node);
+        match anchors::option_style(self, node_ref, index) {
+            Some(style) if index > 0 => StyleView::with_values(node_ref, style),
+            _ => StyleView::of(node_ref),
+        }
+    }
+
+    fn last_successful_option(&self, state: &Self::State, node: NodeSlot) -> Option<usize> {
+        state.anchored.get(&node)?.last_successful
+    }
+
+    /// Keeps `outcome` and seals the reads the box's layout made since its
+    /// last report as the ones the settle loop verifies.
+    fn set_anchor_outcome(&self, state: &mut Self::State, node: NodeSlot, outcome: AnchorOutcome) {
+        let mut reads = SmallVec::new();
+        state.anchor_pending.get_mut().retain(|(reader, read)| {
+            if *reader != node {
+                return true;
+            }
+            if !reads.contains(read) {
+                reads.push(read.clone());
+            }
+            false
+        });
+        let entry = state.anchored.entry(node).or_default();
+        entry.outcome = Some(outcome);
+        entry.reads = reads;
+        state.anchor_reported.push(node);
+    }
+}
+
+impl<T> TreeArenas<T> {
+    /// Answers one anchor query — the target and its rectangle — and records
+    /// it as a read of `node`'s layout.
+    fn anchor_query(
+        &self,
+        state: &DocumentLayoutState,
+        node: NodeSlot,
+        option: usize,
+        query: anchors::AnchorQuery,
+    ) -> (Option<NodeSlot>, Option<Rect<f32>>) {
+        let node_ref = self.at(node);
+        let Some(style) = StyleView::try_of(node_ref) else {
+            return (None, None);
+        };
+        if !matches!(
+            style.values().clone_position(),
+            PositionProperty::Absolute | PositionProperty::Fixed
+        ) {
+            return (None, None);
+        }
+        let Some(anchored) = anchors::Query::of(node_ref) else {
+            return (None, None);
+        };
+        let (target, rect) = anchors::answer(self, state, &anchored, option, &query);
+        #[cfg(debug_assertions)]
+        if let Some(target) = target {
+            // Acceptability is what guarantees the anchor was laid out
+            // before the box reading it; a descendant never is.
+            let mut current = self.at(target).flat_parent();
+            while let Some(ancestor) = current {
+                assert_ne!(
+                    ancestor.id(),
+                    node,
+                    "an acceptable anchor is never inside the box that reads it"
+                );
+                current = ancestor.flat_parent();
+            }
+            assert!(
+                state
+                    .get(target)
+                    .is_some_and(|entry| !entry.slot.is_hidden()),
+                "a target anchor holds a committed box"
+            );
+        }
+        let generation = anchors::lookup_generation(self, node_ref, option, &query);
+        state.anchor_pending.borrow_mut().push((
+            node,
+            anchors::AnchorRead {
+                option,
+                query,
+                target,
+                rect,
+                generation,
+            },
+        ));
+        (target, rect)
+    }
 }
 
 #[cfg(test)]
@@ -403,6 +638,11 @@ pub(super) fn run_layout<T: Sync>(
         );
         state.take_container_deferrals(&mut deferred);
     }
+    // The parked subtrees this run relaid in place, before the root pass: a
+    // box under one of them that escapes to a containing block above it was
+    // laid out by nobody, and the tail places it (`hoisted::places_late`).
+    // A run that started whole relaid none of them first.
+    let relays_in_place = !full;
     let full = full || escalated;
     let settled = settle_deferred_containers(document, resized, &mut deferred);
     // A deferred container is a relayout boundary, so its own box did not move
@@ -420,13 +660,19 @@ pub(super) fn run_layout<T: Sync>(
         }
         Some(ids)
     };
+    let relayed: FxHashSet<NodeId> = if relays_in_place {
+        parked.iter().map(|&(_, pending)| pending.node_id).collect()
+    } else {
+        FxHashSet::default()
+    };
     {
         let (tree, state, live_parked_ids) = document.layout_parts();
         let root = tree.live_slot(root_id);
         state.begin_container_interleave(false);
+        state.in_rounding_tail = true;
         if full {
             let position = |tree: &TreeArenas<T>, state: &mut DocumentLayoutState, node| {
-                pre_position(tree, state, node, viewport)
+                pre_position(tree, state, node, viewport, &relayed)
             };
             round_with(tree, state, root, scale, Point::ZERO, rescale, position);
         } else {
@@ -437,8 +683,10 @@ pub(super) fn run_layout<T: Sync>(
                 &parked,
                 viewport,
                 scale,
+                &relayed,
             );
         }
+        state.in_rounding_tail = false;
         // Every text node this pass measured but did not commit still holds
         // the probe's line break; painting reads the committed one.
         state.restore_probed_text();
@@ -541,6 +789,7 @@ fn position_and_round_parked_boundaries<T: Sync>(
     parked: &[(usize, PendingRelayout)],
     viewport: Size<f32>,
     scale: f32,
+    relayed: &FxHashSet<NodeId>,
 ) {
     for &(_, pending) in parked {
         let Some(slot) = tree.slot(pending.node_id) else {
@@ -562,7 +811,7 @@ fn position_and_round_parked_boundaries<T: Sync>(
             accumulated_unrounded_origin(tree, state, parent)
         });
         let position = |tree: &TreeArenas<T>, state: &mut DocumentLayoutState, node| {
-            pre_position(tree, state, node, viewport)
+            pre_position(tree, state, node, viewport, relayed)
         };
         round_with(tree, state, slot, scale, parent_origin, false, position);
     }
@@ -609,11 +858,18 @@ fn boundary_depth<T>(document: &Document<T>, id: NodeId) -> usize {
     depth
 }
 
+/// The rounding tail's pre-node hook: zeroes a `display: contents` box, and
+/// places the out-of-flow boxes no containing block's absolute pass laid out
+/// this run — the ones whose containing block is the initial containing
+/// block, which lays its out-of-flow boxes out after everything else, and
+/// the ones a subtree relaid in place hides from their containing block
+/// (`hoisted::places_late`).
 fn pre_position<T: Sync>(
     tree: &TreeArenas<T>,
     state: &mut DocumentLayoutState,
     node_id: NodeSlot,
     viewport: Size<f32>,
+    relayed: &FxHashSet<NodeId>,
 ) -> bool {
     let node = tree.at(node_id);
     let Some(style) = StyleView::try_of(node) else {
@@ -634,79 +890,56 @@ fn pre_position<T: Sync>(
         .is_some_and(Node::is_element)
         && resolve_position(node, style.values()) == PositionProperty::Fixed
     {
-        let fixed = style.values().clone_position() == PositionProperty::Fixed;
-        position_hoisted(tree, state, node_id, viewport, fixed);
+        match anchors::containing_block_generator(node) {
+            None => position_against_viewport(tree, state, node_id, viewport),
+            Some(block) => {
+                if hoisted::places_late(tree, node_id, block.id(), relayed) {
+                    hoisted::place_late(tree, state, block.id(), node_id);
+                }
+            }
+        }
     }
     display != DisplayMode::Leaf
         && !style.skips_contents()
         && !(display == DisplayMode::Text && super::text_block::replaces_children(node))
 }
 
-fn position_hoisted<T: Sync>(
+/// Places an out-of-flow box whose containing block is the initial
+/// containing block — the viewport here — from the static position its
+/// parent recorded.
+fn position_against_viewport<T: Sync>(
     tree: &TreeArenas<T>,
     state: &mut DocumentLayoutState,
     node_id: NodeSlot,
     viewport: Size<f32>,
-    fixed: bool,
 ) {
     let node = tree.at(node_id);
     let Some(parent_slot) = node.flat_parent_slot() else {
         return;
     };
-
-    let mut containing = None;
-    let mut ancestor = Some(parent_slot);
-    while let Some(current_id) = ancestor {
-        let current = tree.at(current_id);
-        let Some(style) = StyleView::try_of(current) else {
-            break;
-        };
-        let establishes = if fixed {
-            establishes_fixed_containing_block(current, style.values())
-        } else {
-            establishes_absolute_containing_block(current, style.values())
-        };
-        if establishes {
-            containing = Some(current_id);
-            break;
-        }
-        ancestor = current.flat_parent_slot();
-    }
-
-    let (containing_origin, containing_size) = match containing {
-        Some(block) => {
-            let origin = accumulated_unrounded_origin(tree, state, block);
-            let layout = &tree.layout(state, block).unrounded;
-            (
-                Point::new(origin.x + layout.border.left, origin.y + layout.border.top),
-                Size::new(
-                    (layout.size.width - layout.border.horizontal_sum()).max(0.0),
-                    (layout.size.height - layout.border.vertical_sum()).max(0.0),
-                ),
-            )
-        }
-        None => (Point::ZERO, viewport),
-    };
-
     let parent_origin = accumulated_unrounded_origin(tree, state, parent_slot);
     let static_position = tree.layout(state, node_id).static_position;
     let static_in_cb = Point::new(
-        parent_origin.x + static_position.x - containing_origin.x,
-        parent_origin.y + static_position.y - containing_origin.y,
+        parent_origin.x + static_position.x,
+        parent_origin.y + static_position.y,
     );
 
-    let mut layout = compute_absolute_layout(tree, state, node_id, containing_size, static_in_cb);
+    let mut layout = compute_absolute_layout(tree, state, node_id, viewport, static_in_cb);
 
     layout.location = Point::new(
-        containing_origin.x + layout.location.x - parent_origin.x,
-        containing_origin.y + layout.location.y - parent_origin.y,
+        layout.location.x - parent_origin.x,
+        layout.location.y - parent_origin.y,
     );
     let ordering_parent = box_parent(node).map_or(parent_slot, Node::slot);
     layout.order = sibling_paint_order(tree, ordering_parent, node_id);
     tree.layout_mut(state, node_id).set_unrounded(layout);
 }
 
-fn sibling_paint_order<T>(tree: &TreeArenas<T>, parent_id: NodeSlot, target: NodeSlot) -> u32 {
+pub(super) fn sibling_paint_order<T>(
+    tree: &TreeArenas<T>,
+    parent_id: NodeSlot,
+    target: NodeSlot,
+) -> u32 {
     let Some(target_index) = tree
         .flattened_children(parent_id)
         .position(|(id, ..)| id == target)

@@ -54,8 +54,9 @@ impl Harness {
         let ratio = self.doc.dom.device_pixel_ratio();
         let animations = frame.sample_animations(None, &offsets);
         let stickies = frame.sample_stickies(ratio, &offsets);
+        let anchored = frame.sample_anchored(&animations, &stickies, ratio, &offsets);
         let moved = frame
-            .space_samples(&animations, &stickies, ratio, &offsets)
+            .space_samples(&animations, &stickies, &anchored, ratio, &offsets)
             .css(item.space)
             * crate::vello::kurbo::Point::new(f64::from(baked.x), f64::from(baked.y));
         #[allow(clippy::cast_possible_truncation, reason = "CSS px fit f32")]

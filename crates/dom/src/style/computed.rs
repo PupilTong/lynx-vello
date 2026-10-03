@@ -78,6 +78,35 @@ impl UsedBoxValue {
     }
 }
 
+/// Whether `physical` is an accepted `@position-try` property
+/// (css-anchor-position-1 §6.3): an inset, a margin, a size or min/max
+/// size, `justify-self`, `align-self`, `position-anchor` or
+/// `position-area`. Logical longhands are asked about through their
+/// physical mapping.
+fn accepts_position_try(physical: LonghandId) -> bool {
+    matches!(
+        physical,
+        LonghandId::Top
+            | LonghandId::Right
+            | LonghandId::Bottom
+            | LonghandId::Left
+            | LonghandId::MarginTop
+            | LonghandId::MarginRight
+            | LonghandId::MarginBottom
+            | LonghandId::MarginLeft
+            | LonghandId::Width
+            | LonghandId::Height
+            | LonghandId::MinWidth
+            | LonghandId::MinHeight
+            | LonghandId::MaxWidth
+            | LonghandId::MaxHeight
+            | LonghandId::JustifySelf
+            | LonghandId::AlignSelf
+            | LonghandId::PositionAnchor
+            | LonghandId::PositionArea
+    )
+}
+
 impl<T> Document<T> {
     /// One property's computed — or, with `resolved`, resolved — value, as
     /// CSSOM serializes it.
@@ -209,12 +238,22 @@ impl<T> Document<T> {
         longhand: LonghandId,
         resolved: bool,
     ) -> String {
-        if resolved
-            && let Some(used) =
-                self.used_box_value(id, style, longhand.to_physical(style.writing_mode))
-        {
+        let physical = longhand.to_physical(style.writing_mode);
+        if resolved && let Some(used) = self.used_box_value(id, style, physical) {
             return used;
         }
+        // css-anchor-position-1 §6.5: the position option a box was laid out
+        // with applies "via interleaving, so they affect computed values".
+        // Layout and paint keep reading the base style (plus the option's
+        // geometry, which `hughie` reads from the option itself); only this
+        // readback swaps the accepted `@position-try` properties in.
+        let style = if accepts_position_try(physical)
+            && let Some(option) = self.applied_position_option(id)
+        {
+            option
+        } else {
+            style
+        };
         style.computed_value_to_string(PropertyDeclarationId::Longhand(longhand))
     }
 

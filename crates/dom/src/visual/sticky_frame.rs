@@ -15,6 +15,9 @@ use crate::paint::compose::snap_offset;
 
 #[derive(Debug)]
 pub(crate) struct StickySlot {
+    /// The sticky box, which an anchored box's scroll compensation looks its
+    /// slot up by.
+    pub(crate) node: crate::NodeId,
     pub(crate) parent: Option<u32>,
     pub(crate) scroll: [Option<u32>; 2],
     /// Sticky movement shared with the selected scrollport cancels out.
@@ -31,6 +34,10 @@ pub(crate) struct StickySample {
     /// Cumulative movement before transforms, the input of nested sticky
     /// constraints.
     layout: Vector2D<f32>,
+    /// This box's own movement before transforms: what an anchored box's
+    /// default scroll shift adds for a sticky box between its anchor and its
+    /// containing block.
+    pub(crate) own: Vector2D<f32>,
     /// This box's own movement mapped through its parent transform, in
     /// viewport CSS px: its sticky node's shift in the space tree.
     pub(crate) mapped: Vector2D<f32>,
@@ -95,6 +102,7 @@ impl PaintOrder {
                 index,
                 StickySample {
                     layout: inherited.layout + own,
+                    own,
                     // Insets retain subpixel precision. Only the scroll input
                     // follows the engine's per-scrollport device-grid snapping.
                     mapped,
