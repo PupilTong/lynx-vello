@@ -1055,9 +1055,10 @@ and §D.16 with what the wire format actually permits.)*
       (not in the `*-items` properties), `position-try-fallbacks`,
       `position-try-order`, the `position-try` shorthand, `@position-try`
       and `position-visibility` (`always | [anchor-valid || anchor-visible
-      || no-overflow]`, initial `anchor-visible`; the legacy
-      `anchors-valid`/`anchors-visible` are accepted and serialize in the
-      current spelling). The computed value keeps every anchor function;
+      || no-overflow]`, initial `anchor-visible`; by the user's ruling the
+      legacy `anchors-valid`/`anchors-visible` are rejected as parse
+      errors, and WPT's `position-visibility-*` parsing cases, which use
+      them, are ported in the current spelling). The computed value keeps every anchor function;
       only layout resolves them. `@position-try` admits exactly the ED's
       properties that exist on the Lynx surface — the physical insets,
       `inset-inline-*`, `inset-inline`, `inset`, the physical and

@@ -153,11 +153,15 @@ consequential choice about whether to follow the spec or the quirk.
     `margin-block-*`, `block-size`, `inline-size` and their min/max are not
     Lynx properties, so they are dropped inside `@position-try` as in any
     style rule; the physical and inline-axis ones work.
-  - **Legacy spellings.** `position-visibility: anchors-valid` and
-    `anchors-visible` are accepted and serialize as `anchor-valid` /
-    `anchor-visible`; every other withdrawn spelling (`inset-area`,
-    `position-try-options`, `@position-fallback`, `anchor(implicit)`) is
-    rejected.
+  - **Legacy spellings are rejected.** By the user's ruling
+    `position-visibility` takes only `anchor-valid` / `anchor-visible`:
+    the legacy `anchors-valid` and `anchors-visible`, which the Editor's
+    Draft lets a user agent keep as aliases, are parse errors. WPT's
+    `parsing/position-visibility-*.html` cases still use the old spelling,
+    so their ports in `vendor/stylo/style/tests/lynx_anchor_positioning.rs`
+    are translated to the current one. Every other withdrawn spelling
+    (`inset-area`, `position-try-options`, `@position-fallback`,
+    `anchor(implicit)`) is rejected too.
   - **Lynx `linear` and `relative` containers ignore authored
     `justify-self`/`align-self` on their own absolutely positioned
     children**, as starlight does (`position_layout_utils.cc`,
