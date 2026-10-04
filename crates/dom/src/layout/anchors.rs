@@ -297,6 +297,10 @@ pub(crate) fn declares_anchor_state(style: &ComputedValues) -> bool {
 /// Everything kept for one anchor-positioned box between passes; see the
 /// module docs.
 #[derive(Debug, Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent per-box flags with different writers, not a state machine"
+)]
 pub(crate) struct AnchoredBox {
     /// What the box's last committing absolute pass decided.
     pub(crate) outcome: Option<AnchorOutcome>,
@@ -322,6 +326,11 @@ pub(crate) struct AnchoredBox {
     /// state a re-determination is due on leaving. Reset from the outcome by
     /// every layout that reports the box.
     pub(crate) fits_scrolled: bool,
+    /// The run in flight reported an outcome for the box, so the settle
+    /// loop after it records the box's remembered scroll offsets. Set by
+    /// `set_anchor_outcome`, cleared by [`Document::settle_anchors`]: false
+    /// between runs.
+    pub(crate) reported: bool,
 }
 
 /// What an anchor query asked.
@@ -407,7 +416,10 @@ pub(crate) type PendingReads = RefCell<Vec<(NodeSlot, AnchorRead)>>;
 /// candidate instead of N, and a layout's lookups are O(N) rather than
 /// O(N²). Kept in [`DocumentLayoutState::anchor_buckets`] (interior-mutable:
 /// lookups arrive with the state borrowed shared), one entry per scoped name
-/// a lookup asked about, rebuilt when that name's generation moves.
+/// a lookup asked about, rebuilt when that name's generation moves. Not in
+/// the [`AnchorRegistry`] it is derived from: those lookups hold the arenas
+/// shared too, so it would keep its `RefCell` there, inside the arenas the
+/// parallel style traversal reads (see [`crate::layout::committed_box`]).
 pub(crate) type AnchorBuckets = RefCell<FxHashMap<Atom, (u64, ScopeBuckets)>>;
 
 type ScopeBuckets = FxHashMap<Option<NodeId>, SmallVec<[NodeId; 2]>>;
@@ -1405,7 +1417,6 @@ impl<T: Sync> crate::tree::document::Document<T> {
         let engine = self.style_engine();
         let guard = engine.shared_lock().read();
         let guards = stylo::shared_lock::StylesheetGuards::same(&guard);
-        let _layout_thread = crate::style::flush::LayoutThreadStateGuard::enter();
         let styles = fallbacks
             .value
             .0
@@ -1582,17 +1593,18 @@ impl<T> crate::tree::document::Document<T> {
         let state = self.layout_state_mut();
         state.anchor_pending.get_mut().clear();
         if state.anchored.is_empty() {
-            debug_assert!(state.anchor_reported.is_empty());
             return false;
         }
-        let reported = std::mem::take(&mut state.anchor_reported);
         self.retire_anchored_boxes();
-        for &id in &reported {
+        let reported: SmallVec<[NodeId; 8]> = self
+            .layout_state_mut()
+            .anchored
+            .iter_mut()
+            .filter_map(|(&id, entry)| std::mem::take(&mut entry.reported).then_some(id))
+            .collect();
+        for id in reported {
             self.record_remembered_scroll(id);
         }
-        let mut reported = reported;
-        reported.clear();
-        self.layout_state_mut().anchor_reported = reported;
         let moved: Vec<NodeId> = {
             let (tree, state) = self.visual_parts();
             state

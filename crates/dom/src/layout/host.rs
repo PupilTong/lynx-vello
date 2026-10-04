@@ -448,7 +448,7 @@ impl<T> LayoutTree for TreeArenas<T> {
         let entry = state.anchored.entry(node).or_default();
         entry.outcome = Some(outcome);
         entry.reads = reads;
-        state.anchor_reported.push(node);
+        entry.reported = true;
     }
 }
 

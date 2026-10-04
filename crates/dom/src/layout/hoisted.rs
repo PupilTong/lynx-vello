@@ -234,14 +234,15 @@ impl<T> Document<T> {
     /// caches, so the parents inside it will not record again, and its
     /// boxes may escape to another containing block now.
     pub(crate) fn invalidate_hoisted_under(&mut self, root: NodeId) {
-        if self.layout_state().hoisted_from.is_empty() {
+        if self.layout_state().hoisted_to.is_empty() {
             return;
         }
         let inside: SmallVec<[NodeId; 4]> = {
             let tree = self.arenas();
             self.layout_state()
-                .hoisted_from
-                .keys()
+                .hoisted_to
+                .values()
+                .flatten()
                 .copied()
                 .filter(|&node| {
                     let mut current = tree.get(node);

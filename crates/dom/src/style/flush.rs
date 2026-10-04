@@ -32,12 +32,12 @@ pub(super) static NO_PAINTERS: NoPainters = NoPainters;
 
 /// Balances [`thread_state::enter`] on unwind, so a panicking traversal does
 /// not leave the embedder's thread permanently flagged `LAYOUT`.
-pub(crate) struct LayoutThreadStateGuard {
+pub(super) struct LayoutThreadStateGuard {
     entered: bool,
 }
 
 impl LayoutThreadStateGuard {
-    pub(crate) fn enter() -> Self {
+    pub(super) fn enter() -> Self {
         let entered = !thread_state::get().is_layout();
         if entered {
             thread_state::enter(ThreadState::LAYOUT);
