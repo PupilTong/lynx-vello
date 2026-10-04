@@ -221,7 +221,7 @@ style_protocol! {
             // §6.2, read from the box's own style: the order the fallback
             // loop tries its options in is not itself an option's property.
             position_try_order -> PositionTryOrder =
-                style.computed_values().get_anchor().position_try_order,
+                style.computed_values().get_position().position_try_order,
             // §2.4: whether `position-anchor` names an element — a
             // `<anchor-name>` or `match-parent` — rather than `normal`,
             // `none` or `auto`. `normal` and `auto` name the implicit anchor
@@ -232,7 +232,7 @@ style_protocol! {
             // scrollable containing block (css-position-4), which only the
             // anchored path asks the host for.
             names_position_anchor -> bool = !matches!(
-                style.computed_values().get_anchor().position_anchor.value,
+                style.computed_values().get_position().position_anchor.value,
                 PositionAnchorKeyword::Normal
                     | PositionAnchorKeyword::None
                     | PositionAnchorKeyword::Auto
@@ -241,7 +241,7 @@ style_protocol! {
             // box that does can have position options, so only it costs the
             // absolute pass a host call to count them.
             has_position_try_fallbacks -> bool =
-                !style.computed_values().get_anchor().position_try_fallbacks.value.is_none(),
+                !style.computed_values().get_position().position_try_fallbacks.value.is_none(),
             order -> i32 = style.computed_values().get_position().order,
         }
     }

@@ -236,9 +236,9 @@ impl AnchorRegistry {
         let Some(style) = style else {
             return;
         };
-        let anchor_style = style.get_anchor();
+        let box_style = style.get_box();
         let mut names: SmallVec<[Atom; 2]> = SmallVec::new();
-        for name in anchor_style.anchor_name.value.0.iter() {
+        for name in box_style.anchor_name.value.0.iter() {
             if !names.contains(&name.0) {
                 names.push(name.0.clone());
             }
@@ -250,7 +250,7 @@ impl AnchorRegistry {
         if !names.is_empty() {
             self.defined.insert(id, names);
         }
-        if !anchor_style.anchor_scope.is_none() {
+        if !box_style.anchor_scope.is_none() {
             self.scopers.insert(id);
             self.epoch = self.epoch.wrapping_add(1);
         }
@@ -285,10 +285,10 @@ impl AnchorRegistry {
 
 /// Whether a computed style declares anything the registry indexes.
 pub(crate) fn declares_anchor_state(style: &ComputedValues) -> bool {
-    let anchor_style = style.get_anchor();
-    !anchor_style.anchor_name.value.0.is_empty()
-        || !anchor_style.anchor_scope.is_none()
-        || !anchor_style.position_try_fallbacks.value.is_none()
+    let box_style = style.get_box();
+    !box_style.anchor_name.value.0.is_empty()
+        || !box_style.anchor_scope.is_none()
+        || !style.get_position().position_try_fallbacks.value.is_none()
 }
 
 // ---------------------------------------------------------------------------
@@ -616,7 +616,7 @@ pub(crate) fn target_anchor<'t, T>(
         };
         // "el is an anchor element with an anchor name of anchor spec" and
         // "el's anchor name loosely matches anchor spec".
-        let anchor_name = &style.get_anchor().anchor_name;
+        let anchor_name = &style.get_box().anchor_name;
         if !anchor_name.value.0.iter().any(|own| own.0 == *atom) {
             continue;
         }
@@ -683,7 +683,7 @@ fn scoped_candidates<T>(
             };
             let declared_tree = node
                 .layout_computed_style()
-                .map(|style| node.scoped_name_tree(style.get_anchor().anchor_name.scope));
+                .map(|style| node.scoped_name_tree(style.get_box().anchor_name.scope));
             let nearest = declared_tree.and_then(|declared_tree| {
                 let mut current = Some(node);
                 while let Some(step) = current {
@@ -798,7 +798,7 @@ fn scopes<T>(tree: &TreeArenas<T>, id: NodeId, name: &Atom, name_tree: Option<No
     let Some(style) = node.layout_computed_style() else {
         return false;
     };
-    let scope = &style.get_anchor().anchor_scope;
+    let scope = &style.get_box().anchor_scope;
     (scope.value.is_all() || scope.value.iter().any(|own| own == name))
         && node.scoped_name_tree(scope.scope) == name_tree
 }
@@ -852,7 +852,7 @@ pub(crate) fn default_anchor<'t, T>(
     style: &ComputedValues,
     liveness: Liveness<'_>,
 ) -> Option<&'t Node<T>> {
-    let position_anchor = &style.get_anchor().position_anchor;
+    let position_anchor = &style.get_position().position_anchor;
     match &position_anchor.value {
         PositionAnchorKeyword::Ident(name) => {
             let name = TreeScoped {
@@ -1171,7 +1171,7 @@ pub(crate) fn lookup_generation<T>(
     match query {
         AnchorQuery::Named(name) => Some(tree.anchors().generation(&name.value.0)),
         AnchorQuery::Default => match &option_style(tree, node, option)?
-            .get_anchor()
+            .get_position()
             .position_anchor
             .value
         {
@@ -1237,7 +1237,7 @@ fn fallback_sensitive_difference(old: &ComputedValues, new: &ComputedValues) -> 
         || no_box(old) != no_box(new)
         || accepted_properties_differ(old, new)
         || {
-            let (a, b) = (old.get_anchor(), new.get_anchor());
+            let (a, b) = (old.get_position(), new.get_position());
             a.position_try_fallbacks != b.position_try_fallbacks
                 || a.position_try_order != b.position_try_order
         }
@@ -1261,12 +1261,10 @@ pub(crate) fn accepted_properties_differ(old: &ComputedValues, new: &ComputedVal
             || a.max_height != b.max_height
             || a.justify_self != b.justify_self
             || a.align_self != b.align_self
+            || a.position_anchor != b.position_anchor
             || a.position_area != b.position_area);
-    let (a, b) = (old.get_anchor(), new.get_anchor());
-    let anchor = !std::ptr::eq(a, b) && a.position_anchor != b.position_anchor;
     let (a, b) = (old.get_margin(), new.get_margin());
     position
-        || anchor
         || (!std::ptr::eq(a, b)
             && (a.margin_top != b.margin_top
                 || a.margin_right != b.margin_right
@@ -1318,7 +1316,9 @@ impl<T: Sync> crate::tree::document::Document<T> {
             .filter(|&id| {
                 self.get(id)
                     .and_then(Node::layout_computed_style)
-                    .is_some_and(|style| !style.get_anchor().position_try_fallbacks.value.is_none())
+                    .is_some_and(|style| {
+                        !style.get_position().position_try_fallbacks.value.is_none()
+                    })
                     || self.arenas().anchors().options(id).is_some()
             })
             .collect();
@@ -1328,7 +1328,7 @@ impl<T: Sync> crate::tree::document::Document<T> {
             let names_changed_rule = |options: &PositionOptions| {
                 options
                     .base
-                    .get_anchor()
+                    .get_position()
                     .position_try_fallbacks
                     .value
                     .0
@@ -1398,7 +1398,7 @@ impl<T: Sync> crate::tree::document::Document<T> {
     ) -> Option<PositionOptions> {
         let node = self.get(id)?;
         let style = node.computed_style()?;
-        let fallbacks = &style.get_anchor().position_try_fallbacks;
+        let fallbacks = &style.get_position().position_try_fallbacks;
         if fallbacks.value.is_none() {
             return None;
         }
