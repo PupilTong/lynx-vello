@@ -359,9 +359,14 @@ sibling, a `contain: strict` boundary). After every run
 `Document::layout_pass` re-checks each recorded read — the found target's
 rectangle when the name's generation is unchanged and the target keeps its
 box, the whole lookup otherwise — invalidates the boxes whose answer moved and
-runs again until every read is stable, `ANCHOR_PASSES` (6) runs at most; a move
-the last run's check still finds leaves the document dirty, so the next
-`layout()` continues instead of staying a commit behind. The scrollable
+runs again until every read is stable. Each anchor-positioned box earns that
+re-run at most once per `layout()` (a set, as WebKit bounds its
+layout-dependency loop), so the runs are bounded by the number of distinct
+boxes whose reads went stale, not by a constant. A box that reads two anchors
+whose moves surface in different runs goes stale twice even though §2.3's
+dependencies are acyclic; that repeat is invalidated without earning a run,
+which leaves the document dirty, so the next `layout()` continues instead of
+staying a commit behind. The scrollable
 containing block a box reads is the one its containing block recorded earlier
 in the same run (`DocumentLayoutState::scrollable_containing_blocks`, scroll
 containers only: their in-flow overflow, which no out-of-flow box can grow).

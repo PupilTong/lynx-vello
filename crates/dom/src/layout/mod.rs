@@ -24,6 +24,7 @@ use hughie::style::{CoreStyle, PositionProperty};
 use hughie::text::{FontBlob, TextContext};
 pub use hughie::tree::Layout;
 use hughie::tree::LayoutSlot;
+use rustc_hash::FxHashSet;
 use stylo::properties::ComputedValues;
 use stylo::servo_arc::Arc;
 
@@ -134,12 +135,14 @@ impl<T: Sync> Document<T> {
 
     /// The settle loop after a run that laid out anchor-positioned boxes: a
     /// box that read an anchor which moved after it read it is invalidated
-    /// and the document runs again, until every read is stable or
-    /// [`anchors::ANCHOR_PASSES`] runs have been spent. The loop never closes
-    /// on unverified reads: the last run's are verified too, and a box whose
-    /// anchor still moved is invalidated, which leaves the document dirty, so
-    /// the next `layout()` — or `render()` — runs again even if nothing else
-    /// changes.
+    /// and the document runs again, until every read is stable or every box
+    /// whose read moved has already been invalidated once in this call
+    /// (`layout::anchors`, "The settle loop"). The runs are bounded by the
+    /// number of distinct such boxes, not by a constant. The loop never
+    /// closes on unverified reads: the last run's are verified by the
+    /// `settle_anchors` call that ends it, and a repeat found there is
+    /// invalidated, which leaves the document dirty, so the next `layout()`
+    /// — or `render()` — runs again even if nothing else changes.
     #[cold]
     #[inline(never)]
     fn settle_anchor_runs(
@@ -148,15 +151,10 @@ impl<T: Sync> Document<T> {
         scale: f32,
         resized: &mut Vec<crate::NodeId>,
     ) {
-        for _ in 1..anchors::anchor_passes() {
-            if !self.settle_anchors() {
-                return;
-            }
+        let mut invalidated = FxHashSet::default();
+        while self.settle_anchors(&mut invalidated) {
             self.run_layout_once(viewport, scale, resized);
         }
-        // What the last run read is verified like every other run's; a move
-        // found here is laid out by the pass its invalidation scheduled.
-        self.settle_anchors();
     }
 
     /// Marks the container-unit users under every query container the pass

@@ -46,19 +46,32 @@
 //!
 //! Every containing block lays its absolutely positioned boxes out after its
 //! in-flow content, in tree order — the ones escaping static wrappers into it
-//! included (`layout::hoisted`) — so within one run a box reads only anchors
-//! already placed. What a run cannot see is an anchor that moved while the
-//! reader's containing block was served from the cache: an anchor deeper in
-//! a sibling's subtree relaid in place, or behind a `contain: strict`
-//! sibling that stopped the dirty walk. So after every run
-//! [`Document::settle_anchors`] re-checks each read — the rectangle of the
-//! target found, when the name's registry generation is unchanged and the
-//! target keeps its box; the whole lookup otherwise — and invalidates the
-//! boxes whose answers moved. The document runs again until every read is
-//! stable, [`ANCHOR_PASSES`] runs at most; the last run's reads are checked
-//! too, and a move found there leaves the document dirty, so the next
-//! `layout()` continues rather than staying a commit behind. A page without
-//! anchor-positioned boxes pays one `is_empty` test.
+//! included (`layout::hoisted`) — so the layout order places every acceptable
+//! anchor before the box that reads it. A reader's relayout root is never
+//! deeper than its anchor's: the reader's containing block lies inside the
+//! reader's own `contain: size layout` root, and §2.3 makes the anchor a
+//! descendant of that containing block. So a run reads stale geometry only
+//! where the reader was served from the cache while an anchor under a deeper
+//! root moved: an anchor deeper in a sibling's subtree relaid in place, or
+//! behind a `contain: strict` boundary that stopped the dirty walk. After
+//! every run [`Document::settle_anchors`] re-checks each read — the
+//! rectangle of the target found, when the name's registry generation is
+//! unchanged and the target keeps its box; the whole lookup otherwise — and
+//! invalidates the boxes whose answers moved.
+//!
+//! Each such reader costs one more run, and within one `layout()` each
+//! anchor-positioned box earns that run at most once — the bound `WebKit` puts
+//! on its layout-dependency loop (`LayoutDependencyUpdateContext`'s
+//! `invalidatedAnchorPositioned` set). The runs are therefore bounded by the
+//! number of distinct boxes whose reads went stale, with no constant: every
+//! run that is owed was earned by a box not invalidated before. §2.3's
+//! dependencies are acyclic, but a box can still go stale twice in one
+//! `layout()`: when it reads two anchors whose moves surface in different
+//! runs, the ends of two chains with different numbers of cache-served hops.
+//! Such a repeat is invalidated like any other move and earns no run, so
+//! the document stays dirty and the next `layout()` or `render()` lays the
+//! box out — one commit late, never left on an unverified read. A page
+//! without anchor-positioned boxes pays one `is_empty` test.
 //!
 //! # What is modelled of §2.3
 //!
@@ -94,39 +107,6 @@ use super::style::{
 };
 use crate::tree::document::{DocumentLayoutState, NodeId, NodeSlot, TreeArenas};
 use crate::tree::node::Node;
-
-/// How many layout runs one `layout()` may spend settling anchors: the first
-/// run, and up to five more for boxes whose anchors moved after they read
-/// them.
-///
-/// The layout order already places every acceptable anchor before the box
-/// that reads it (each containing block lays its out-of-flow boxes out in
-/// tree order, the escaping ones included), so a run reads stale geometry
-/// only where it did not lay the reader out at all: its containing block
-/// was served from the cache while an anchor elsewhere moved. One more run
-/// per such link is the cost, and chains of them are short. The bound is
-/// not a cap on correctness: the last run's reads are verified like the
-/// others, and a reader whose anchor still moved is invalidated, which
-/// schedules another pass ([`Document::settle_anchors`]).
-pub(crate) const ANCHOR_PASSES: usize = 6;
-
-#[cfg(test)]
-std::thread_local! {
-    /// A test's override of [`ANCHOR_PASSES`], to reach the bound with a
-    /// short chain.
-    pub(crate) static ANCHOR_PASS_LIMIT: std::cell::Cell<Option<usize>> =
-        const { std::cell::Cell::new(None) };
-}
-
-/// [`ANCHOR_PASSES`], or a test's override of it.
-#[inline]
-pub(crate) fn anchor_passes() -> usize {
-    #[cfg(test)]
-    if let Some(limit) = ANCHOR_PASS_LIMIT.with(std::cell::Cell::get) {
-        return limit;
-    }
-    ANCHOR_PASSES
-}
 
 // ---------------------------------------------------------------------------
 // The registry: name index and position options.
@@ -1589,10 +1569,16 @@ impl<T> crate::tree::document::Document<T> {
     /// stopped being anchor-positioned, records the remembered scroll offsets
     /// of boxes the run reached at an anchor recalculation point, and
     /// re-asks every query each box last read, invalidating the boxes whose
-    /// answers moved. Answers whether it invalidated any, which is what owes
-    /// another run — and what the invalidation itself schedules, so a caller
-    /// that stops here leaves the document dirty rather than settled.
-    pub(crate) fn settle_anchors(&mut self) -> bool {
+    /// answers moved.
+    ///
+    /// `invalidated` holds the boxes this `layout()` call has invalidated so
+    /// far. Every moved box is invalidated, which marks the document dirty;
+    /// the answer is whether one of them was not in the set yet, which is
+    /// what owes another run. A box already in it is a repeat — its reads
+    /// went stale twice in one `layout()` — and earns none: the document
+    /// stays dirty, so the next `layout()` or `render()` lays it out again
+    /// rather than leaving it settled on a stale read.
+    pub(crate) fn settle_anchors(&mut self, invalidated: &mut FxHashSet<NodeId>) -> bool {
         let state = self.layout_state_mut();
         state.anchor_pending.get_mut().clear();
         if state.anchored.is_empty() {
@@ -1624,10 +1610,12 @@ impl<T> crate::tree::document::Document<T> {
                 .map(|(&id, _)| id)
                 .collect()
         };
-        for &id in &moved {
+        let mut fresh = false;
+        for id in moved {
             self.invalidate_layout(id);
+            fresh |= invalidated.insert(id);
         }
-        !moved.is_empty()
+        fresh
     }
 
     /// Drops the entries of boxes that are gone, generate no box, or no
@@ -2116,45 +2104,134 @@ mod tests {
         );
     }
 
-    /// The settle loop never closes on an unverified read: with its bound
-    /// cut to one run, the reader of an anchor behind a containment boundary
-    /// is invalidated after that run, the document stays dirty, and the next
+    /// The settle loop's bound is per box, not a constant: a chain whose
+    /// every hop is served from the cache when the anchor before it moves
+    /// costs one run per stale hop, and `layout()` ends settled.
+    ///
+    /// Each reader `hop{k}` is the `contain: strict` boundary `ring{k}`'s
+    /// absolutely positioned child and reads `--hop{k-1}`, which sits inside
+    /// `ring{k-1}`, `ring{k}`'s in-flow child; `ring0` holds the in-flow
+    /// anchor `--hop0`. Resizing that anchor dirties `ring0` only, and
+    /// relaying `hop{k}` dirties `ring{k}` only (a strict boundary's size does
+    /// not depend on its content), so every run moves exactly one more hop
+    /// and leaves the next one served from the cache. Two stale hops is
+    /// the three-hop chain `--hop0` → `hop1` → `hop2`; nine runs is more than
+    /// the six the removed constant allowed.
+    #[test]
+    fn each_stale_hop_of_an_anchor_chain_costs_one_run() {
+        use std::fmt::Write as _;
+
+        // Every hop sits 10px below the bottom of the one before it.
+        let assert_tops = |doc: &Doc, hops: &[crate::NodeId], first: f32| {
+            let mut expected = first;
+            for (k, &hop) in hops.iter().enumerate() {
+                let top = doc.dom.rounded_layout(hop).expect("laid out").location.y;
+                assert_eq!(top, expected, "hop {}", k + 1);
+                expected += 10.0;
+            }
+        };
+        for stale in [2, 8] {
+            let mut css = String::from(
+                ".ring { contain: strict; width: 300px; height: 300px; }
+                 .hop0 { anchor-name: --hop0; width: 40px; height: 30px; }",
+            );
+            for k in 1..=stale {
+                write!(
+                    css,
+                    ".hop{k} {{ position: absolute; anchor-name: --hop{k};
+                               top: anchor(--hop{} bottom); left: 0px;
+                               width: 10px; height: 10px; }}",
+                    k - 1
+                )
+                .expect("a String takes any write");
+            }
+            let mut doc = doc(&css);
+            let root = doc.root;
+            let mut rings = vec![doc.el(root, "view.ring")];
+            for _ in 0..stale {
+                let outer = *rings.last().expect("one ring");
+                rings.push(doc.el(outer, "view.ring"));
+            }
+            rings.reverse();
+            let anchor = doc.el(rings[0], "view.hop0");
+            let hops: Vec<_> = (1..=stale)
+                .map(|k| doc.el(rings[k], &format!("view.hop{k}")))
+                .collect();
+            let runs = layout_runs_during(|| doc.dom.layout());
+            assert_eq!(runs, 1, "{stale}: the first layout reads in order");
+            assert_tops(&doc, &hops, 30.0);
+
+            doc.set_inline(anchor, "height: 70px");
+            let runs = layout_runs_during(|| doc.dom.layout());
+            assert_eq!(runs, 1 + stale, "{stale}: one run per stale hop");
+            assert_tops(&doc, &hops, 70.0);
+            let viewport = doc.dom.device().viewport_size();
+            let viewport = hughie::geometry::Size::new(viewport.width, viewport.height);
+            let scale = doc.dom.device().device_pixel_ratio().get();
+            assert!(
+                !doc.dom.layout_needs_pass(viewport, scale),
+                "{stale}: settled within the call"
+            );
+        }
+    }
+
+    /// The bound in action, with no hook: a box that reads two anchors whose
+    /// moves surface in different runs goes stale twice in one `layout()`.
+    /// `b` reads `--a1` (behind one boundary) and `--x2`, the end of the
+    /// chain `--a0` → `x1` → `x2`, each link behind its own boundary.
+    /// Resizing both anchors in one flush: the first run moves `a0` and
+    /// `a1`; the second relays `b` (for `--a1`) and `x1`, while `x2` is still
+    /// served from the cache; the third relays `x2`, which leaves `b` stale
+    /// again. `b` was already invalidated in this call, so it earns no fourth
+    /// run: it is invalidated, the document stays dirty, and the next
     /// `layout()` — with nothing else changed — places it.
     #[test]
-    fn the_settle_loop_hands_a_moved_read_to_the_next_layout() {
-        let mut doc = doc(".cb { position: relative; width: 400px; height: 400px; }
-             .boundary { contain: strict; width: 200px; height: 200px; }
-             .anchor { anchor-name: --a; width: 40px; height: 30px; }
-             .reader { position: absolute; top: anchor(--a bottom); left: 0px;
-                       width: 10px; height: 10px; }");
+    fn a_box_stale_twice_in_one_layout_waits_for_the_next() {
+        let mut doc = doc(".ring { contain: strict; width: 300px; height: 300px; }
+             .outer { contain: strict; width: 300px; height: 700px; }
+             .a0 { anchor-name: --a0; width: 40px; height: 30px; }
+             .a1 { anchor-name: --a1; width: 40px; height: 30px; }
+             .x1 { position: absolute; anchor-name: --x1; top: anchor(--a0 bottom); left: 0px;
+                   width: 10px; height: 10px; }
+             .x2 { position: absolute; anchor-name: --x2; top: anchor(--x1 bottom); left: 0px;
+                   width: 10px; height: 10px; }
+             .b { position: absolute; top: anchor(--x2 bottom); left: anchor(--a1 right);
+                  width: 10px; height: 10px; }");
         let root = doc.root;
-        let cb = doc.el(root, "view.cb");
-        let boundary = doc.el(cb, "view.boundary");
-        let anchor = doc.el(boundary, "view.anchor");
-        let reader = doc.el(cb, "view.reader");
-        doc.dom.layout();
-        let top = |doc: &Doc| doc.dom.rounded_layout(reader).expect("laid out").location.y;
-        assert_eq!(top(&doc), 30.0);
-
-        super::ANCHOR_PASS_LIMIT.with(|limit| limit.set(Some(1)));
-        doc.set_inline(anchor, "height: 70px");
-        doc.dom.layout();
-        assert_eq!(
-            top(&doc),
-            30.0,
-            "one run: the reader still holds the old read"
-        );
+        let outer = doc.el(root, "view.outer");
+        let upper = doc.el(outer, "view.ring");
+        let side = doc.el(outer, "view.ring");
+        let b = doc.el(outer, "view.b");
+        let middle = doc.el(upper, "view.ring");
+        doc.el(upper, "view.x2");
+        let inner = doc.el(middle, "view.ring");
+        doc.el(middle, "view.x1");
+        let a0 = doc.el(inner, "view.a0");
+        let a1 = doc.el(side, "view.a1");
+        let at = |doc: &Doc| {
+            let at = doc.dom.rounded_layout(b).expect("laid out").location;
+            (at.x, at.y)
+        };
+        assert_eq!(layout_runs_during(|| doc.dom.layout()), 1);
+        assert_eq!(at(&doc), (40.0, 50.0));
         let viewport = doc.dom.device().viewport_size();
         let viewport = hughie::geometry::Size::new(viewport.width, viewport.height);
         let scale = doc.dom.device().device_pixel_ratio().get();
+
+        doc.set_inline(a0, "height: 70px");
+        doc.set_inline(a1, "width: 90px");
+        assert_eq!(layout_runs_during(|| doc.dom.layout()), 3);
+        assert_eq!(
+            at(&doc),
+            (90.0, 50.0),
+            "the second read is not laid out yet"
+        );
         assert!(
             doc.dom.layout_needs_pass(viewport, scale),
-            "the moved read left the document dirty"
+            "the repeat left the document dirty"
         );
-        let runs = layout_runs_during(|| doc.dom.layout());
-        super::ANCHOR_PASS_LIMIT.with(|limit| limit.set(None));
-        assert_eq!(runs, 1);
-        assert_eq!(top(&doc), 70.0);
+        assert_eq!(layout_runs_during(|| doc.dom.layout()), 1);
+        assert_eq!(at(&doc), (90.0, 90.0));
         assert!(!doc.dom.layout_needs_pass(viewport, scale));
     }
 

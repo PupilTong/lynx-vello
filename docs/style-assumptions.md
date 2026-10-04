@@ -1389,10 +1389,18 @@ and §D.16 with what the wire format actually permits.)*
       target's rectangle when the name's registry generation is unchanged
       and the target still has a box, the whole lookup otherwise — lays the
       boxes whose answers moved out again, and repeats until every read is
-      stable: at most `ANCHOR_PASSES` (6) runs per `layout()`. The last
-      run's reads are checked too; a move found there leaves the document
-      dirty, so the next `layout()` or `render()` runs again even when
-      nothing else changed, and no read is ever left unverified. **§2.5:**
+      stable. Within one `layout()` each anchor-positioned box earns a
+      re-run at most once (WebKit's bound on its layout-dependency loop, the
+      `invalidatedAnchorPositioned` set): a reader's relayout root is never
+      deeper than its anchor's, so each stale reader costs one run, and the
+      runs are bounded by the number of distinct stale boxes, with no
+      constant. §2.3's dependencies are acyclic, but a box that reads two
+      anchors whose moves surface in different runs (the ends of two chains
+      with different numbers of cache-served hops) goes stale twice; the
+      repeat is invalidated and earns no run. The last run's reads are
+      checked too; a repeat found there leaves the document dirty, so the
+      next `layout()` or `render()` runs again even when nothing else
+      changed — one commit late — and no read is ever left unverified. **§2.5:**
       a `content-visibility: auto` element about to skip stays relevant
       when it holds, looked up as if it did not skip, a target anchor of a
       shown anchored box whose containing block is outside it.

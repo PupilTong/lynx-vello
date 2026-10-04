@@ -2263,8 +2263,9 @@ Rulings and limits to know before touching it:
   each element's position options (cascaded at the style harvest with the
   fork's `Stylist::resolve_position_try`) in `TreeArenas`' `AnchorRegistry`,
   the §2.3 target lookup, remembered scroll offsets, the last successful
-  option recorded per rendering update, and a settle loop of at most
-  `ANCHOR_PASSES` layout runs (`crates/dom/src/layout/anchors.rs`). The
+  option recorded per rendering update, and a settle loop that re-runs
+  layout at most once per anchor-positioned box whose read went stale
+  (`crates/dom/src/layout/anchors.rs`). The
   default scroll shift and `position-visibility` are one space-tree node per
   anchored box, sampled at compose and hit-test time
   (`crates/dom/src/visual/anchored.rs`); a page without anchor positioning
