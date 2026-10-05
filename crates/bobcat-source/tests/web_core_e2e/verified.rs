@@ -123,9 +123,9 @@ verified! {
     // an out-of-flow header with no author width fills the coordinator, and the `anchor-size()` slot offset puts the slot at the header's end
     basic_element_x_foldview_ng_header_width => "basic-element-x-foldview-ng-header-width",
     // `globalThis.Object` is truthy in the realm that evaluates the component, so the 100x100 target paints green
-    basic_globalThis_property_bts => "basic-globalThis-property-bts",
+    basic_global_this_property_bts => "basic-globalThis-property-bts",
     // the same probe through a BTS `useEffect`: the effect ran, the state update crossed back, and the green re-render reached the first screen
-    basic_globalThis_property_mts => "basic-globalThis-property-mts",
+    basic_global_this_property_mts => "basic-globalThis-property-mts",
     // a `position: fixed` child of a scroll-view anchors to the viewport, not the scrollport, and escapes the scroller's clip
     basic_element_scroll_view_fixed => "basic-element-scroll-view-fixed",
     // the scroll-x/scroll-y/enable-scroll axis matrix: the first scroller clips its 1000x1000 image to the scrollport on both axes and the eight empty ones paint nothing (the card's post-tap half is outside a first screen)
@@ -250,4 +250,120 @@ verified! {
     api_inject_style_rules => "api-inject-style-rules",
     // `registerDataProcessors`'s default processor runs over the host's raw page data before the first render, turning `mockData` into the green background.
     basic_dataprocessor => "basic-dataprocessor",
+    // A tap's `detail.x`/`detail.y` are numbers inside the view: tapping `#tap-area` turns `#target` green. Upstream also offsets the host element by 200px to tell view-relative from page-relative; a view here has no embedding page, so its own viewport is the only frame of reference there is.
+    api_bindtap_lynx_view_relative => "api-bindtap-lynx-view-relative",
+    // `NativeModules.CustomModule.getColor(data, callback)` reaches the embedder's module, and the answer its callback carries turns the box green.
+    api_nativemodules_call => "api-nativemodules-call",
+    // `NativeModules.bridge.call('getColor', data, callback)`: the module the embedder registers as `bridge` answers, and the box turns green.
+    api_nativemodules_bridge_call => "api-nativemodules-bridge-call",
+    // A module call answered 2.5 s late: the box is pink while the callback is held and green once it is invoked.
+    api_nativemodules_call_delay => "api-nativemodules-call-delay",
+    // `SystemInfo.pixelWidth` and `pixelHeight` are the screen the host names, not the viewport: the two texts read 1234 and 5678.
+    api_createlynxview_browserconfig => "api-createLynxView-browserConfig",
+    // `lynx.requestAnimationFrame` keeps calling back (`loop` appears) until `lynx.cancelAnimationFrame` stops it (`stop`).
+    api_requestanimationframe => "api-requestAnimationFrame",
+    // The host's `sendGlobalEvent` reaches a `GlobalEventEmitter` listener with its argument: pink, then green.
+    api_sendglobalevent => "api-sendGlobalEvent",
+    // The host's `updateData` reaches `useInitData()`: pink, then green.
+    api_updatedata => "api-updateData",
+    // `updateData` goes through the card's `defaultDataProcessor`, which rewrites the value into the one the render checks for: pink, then green.
+    api_updatedata_processdata => "api-updateData-processData",
+    // `updateGlobalProps` re-renders the card with the new `lynx.__globalProps`: pink, then blue.
+    api_updateglobalprops => "api-updateGlobalProps",
+    // The initial `globalProps` are on `lynx.__globalProps` for the first render: pink.
+    basic_globalprops => "basic-globalProps",
+    // `bindTap` reaches its background handler and the `setState` it makes comes back as a patch: pink, green, pink.
+    basic_bindtap => "basic-bindtap",
+    // A tap's `detail.x` and `detail.y` are numbers, the only case the handler toggles for: pink, green, pink.
+    basic_bindtap_detail => "basic-bindtap-detail",
+    // A `bindtap` and a `main-thread:bindtap` on one element both run for one tap: the box turns green, the text reads `BTS Clicked`, and the main-thread handler logs `MTS Clicked`.
+    basic_bindtap_simultaneous => "basic-bindtap-simultaneous",
+    // `bindwheel` on a view: after a wheel turn over it the text reads `wheel` and the indicator is green.
+    basic_bindwheel_view => "basic-bindwheel-view",
+    // An `<image>` delivers `bindtap`: the result box goes from red to green.
+    basic_element_image_support_tap_event => "basic-element-image-support-tap-event",
+    // A wheel turn over a `<list>` scrolls it by 100px and reaches its `bindwheel`: cells 1 to 3, the text `wheel`, a green indicator.
+    basic_element_list_bindwheel => "basic-element-list-bindwheel",
+    // A keyed re-render replaces list cells 2 and 3 by cell 4 and back: four cells, then three with the red one in the middle, then the first four again.
+    basic_element_list_remove_action => "basic-element-list-remove-action",
+    // `selectTab({index: 1})` through a selector query, from a tap that bubbles off the pager to the page: the red page, then the green one.
+    basic_element_x_viewpager_ng_method_selecttab => "basic-element-x-viewpager-ng-method-selecttab",
+    // A bubbled tap's `target` is the child that was hit and carries that child's dataset, a string value and an object value both: the two result boxes turn green.
+    basic_event_bubble_dataset => "basic-event-bubble-dataset",
+    // `currentTarget.dataset` in the element's own `bindtap`, a string value and an object value both: the two result boxes turn green.
+    basic_event_dataset => "basic-event-dataset",
+    // A tap's `target.id` and `currentTarget.id` are the element's `id`, the only case the handler toggles for: pink, green, pink.
+    basic_event_target_id => "basic-event-target-id",
+    // `global-bindTap` on a sibling of the tapped element runs for a tap elsewhere: the observer goes pink, green, pink while the tapped box stays blue.
+    basic_global_bind => "basic-global-bind",
+    // A `lazy()` component from a container fetched at runtime mounts (green beside blue, no fallback left), and a tap inside it toggles its own state: green, pink, green.
+    basic_lazy_component => "basic-lazy-component",
+    // The same lazy container, named by a relative `./dist/…` path.
+    basic_lazy_component_relative_path => "basic-lazy-component-relative-path",
+    // Two instances of one lazy component keep separate state: a tap in the first row turns only its box pink, then the second row's.
+    basic_lazy_component_multi => "basic-lazy-component-multi",
+    // Two `lazy()` imports of one container, each its own instance: the first row's box turns pink, then both.
+    basic_lazy_component_multi_import => "basic-lazy-component-multi-import",
+    // A lazy component requested by a tap rather than at boot: the row mounts under the red box, then toggles green, pink, green.
+    basic_lazy_component_when_needed => "basic-lazy-component-when-needed",
+    // A second instance of an already loaded lazy component, mounted by a tap: it appears under the red box, the two keep separate state, and tapping `#target` again reloads neither.
+    basic_lazy_component_when_need_with_itself => "basic-lazy-component-when-need-with-itself",
+    // A `useEffect` inside a lazily loaded component runs and its patch paints: the 200x200 box is the effect's pink, not the initial green.
+    basic_lazy_component_effect => "basic-lazy-component-effect",
+    // `lynx.reload()` called by the card resets component state: green after the first tap, pink again after the tap on `#reload`.
+    basic_lynx_reload => "basic-lynx-reload",
+    // The host's `reload` resets component state: green after the tap, pink again after the reload.
+    basic_reload => "basic-reload",
+    // A `main-thread:bindTap` handler runs: the tap logs `hello world` from the main thread, and the box stays pink.
+    basic_mts_bindtap => "basic-mts-bindtap",
+    // A main-thread handler styles `event.currentTarget` itself, with no background round trip: pink, then green.
+    basic_mts_bindtap_change_element_background => "basic-mts-bindtap-change-element-background",
+    // A main-thread `touchstart` carries `touches`, `targetTouches`, `changedTouches` and `detail.x`/`detail.y`: one swipe turns all four boxes green.
+    basic_mts_bindtouchstart => "basic-mts-bindtouchstart",
+    // A `main-thread:ref` is set by the time the tap handler reads it: `setStyleProperties` leaves the box green and 200x200.
+    basic_mts_mainthread_ref => "basic-mts-mainthread-ref",
+    // `runOnBackground` from a main-thread tap handler reaches a background `setState`: pink, then green.
+    basic_mts_run_on_background => "basic-mts-run-on-background",
+    // A tap on a child bubbles to a `bindtap` written on the card's own `<page>`: pink, then green.
+    basic_page_event => "basic-page-event",
+    // An inline style emptied to `{}` loses its last declaration, so the class's pink shows; restoring it paints green again.
+    basic_style_remove => "basic-style-remove",
+    // One inline property is removed while another stays: the class's pink shows through, then green again.
+    basic_style_remove_one_property => "basic-style-remove-one-property",
+    // An inline colour and a class added in one update, then both removed: inline wins, so yellow, red, yellow. Nothing in this card depends on `enableCSSSelector`.
+    config_css_selector_false_inline_css_change_same_time => "config-css-selector-false-inline-css-change-same-time",
+    // The inline colour changes in the same update that adds or removes a class: inline wins each time, so green, yellow, green. Nothing in this card depends on `enableCSSSelector`.
+    config_css_selector_false_remove_css_and_style_collapsed => "config-css-selector-false-remove-css-and-style-collapsed",
+    // With no `defaultOverflowVisible` in the build the compiler writes `true`, so the unstyled sixth box lets its 50px child overflow like the explicit `overflow: visible` fifth; the two `hidden` boxes clip at the padding edge, and so do the two mixed-axis boxes, whose `visible` axis pairs into a clip (css-overflow-3, as web-core; native clips per axis).
+    config_css_default_overflow_visible_unset => "config-css-default-overflow-visible-unset",
+    // `SystemInfo.pixelHeight` and `SystemInfo.pixelWidth` are both numbers on the background thread: the effect that checks them turns the 100x100 box from pink to green.
+    api_systeminfo_height_width => "api-SystemInfo-height-width",
+    // `boundingClientRect` through `lynx.createSelectorQuery()` answers in the view's own coordinates: the blue 100x100 box with `margin: 50px` reports 50/50/150/150, which is what turns `#target` green.
+    api_boundingclientrect_lynx_view_relative => "api-boundingclientrect-lynx-view-relative",
+    // `lynx.getJSModule('GlobalEventEmitter')`: a `trigger('event1', {color: 'pink'})` 500 ms after mount reaches the `event1` listener alone, so the box goes from orange to pink and never to the `event0` listener's red.
+    api_getjsmodule => "api-getJSModule",
+    // `lynx.queueMicrotask` runs its callback: the `setColor('green')` queued from the effect turns the 100x100 box from pink to green.
+    api_queuemicrotask => "api-queueMicrotask",
+    // The card every `api-frame-*` case nests, loaded on its own: three `<text>` lines, where `useInitData().label` and `lynx.__globalProps.message` are absent from the shell's data and render as nothing after `data:` and `global:`.
+    api_frame_inner => "api-frame-inner",
+    // `auto-size` sizes an `<image>` from its 128x128 bitmap like a replaced element under `max-width/max-height: 100%`: a stretched cross size transfers through the 1:1 ratio (400x400, 200x200, 50x50), a 40px parent caps the width (40x40), and where both axes are fixed by the parent the bitmap fills them unproportionally (40x200).
+    basic_element_image_auto_size => "basic-element-image-auto-size",
+    // An empty `src` leaves the `placeholder` bitmap on screen: the 128x128 picture fills the 40x40 box at the page origin.
+    basic_element_image_placeholder => "basic-element-image-placeholder",
+    // `list-type='waterfall'` with `span-count='2'`: each cell goes into the shorter of two 250px lanes at its own 240px width, so the first five cells sit at y = 0, 0, 185, 295 and 357 before the 500px list clips them.
+    basic_element_list_waterfall => "basic-element-list-waterfall",
+    // A lazy import of a bundle nobody serves (`/dist/nonexistent.web.bundle`) fails without ending the page, and the Suspense fallback stays: `Loading...` is the whole screen.
+    basic_lazy_component_fail => "basic-lazy-component-fail",
+    // A main-thread ref function handed down as a prop is called from inside the child's own `main-thread:ref` worklet, and the child then styles itself: `#target` has no size until `setStyleProperties` gives it 200x200 green.
+    basic_mts_mainthread_nested_ref => "basic-mts-mainthread-nested-ref",
+    // `runOnMainThread` from a BTS timer reaches the main-thread ref: the box starts 100x100 pink and the worklet's `setStyleProperties` leaves it 200x200 green.
+    basic_mts_run_on_main_thread => "basic-mts-run-on-main-thread",
+    // No upstream test opens it. 100 `<div>`s, each with a `bindtap`, give the same gapless 100-wide pink column as `basic-performance-div-100`: a tap listener per box changes nothing in the paint.
+    basic_performance_event_div_100 => "basic-performance-event-div-100",
+    // `defaultDisplayLinear: false` makes a plain `<view>` a flex row: the two 200px boxes sit side by side and shrink to half the 393px viewport each, where the linear default would stack them.
+    config_css_default_display_linear_false => "config-css-default-display-linear-false",
+    // With `enableRemoveCSSScope: true` both files' `.basic` are one global sheet and the later `sub.css` wins on both views: green 100x100. `#sub` covers `#index` exactly, so the frame shows the winner on `#sub`; `#index` matches the same two rules.
+    config_css_remove_scope_true => "config-css-remove-scope-true",
+    // A cell not reached yet is sized by `estimated-main-axis-size-px` and takes its real size once reached: the first scroll to the end stops with 100px of the last cell in view, because the extent counted its 100px estimate, and a second one shows all 200px of it.
+    basic_element_list_estimated_main_axis_size_px => "basic-element-list-estimated-main-axis-size-px",
 }

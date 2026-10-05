@@ -6,9 +6,10 @@ compiled here for the engine version this repository targets.
 The cards come from `packages/web-platform/web-core-e2e/tests/reactlynx` and
 keep their Apache-2.0 headers; `NOTICE.lynx-stack` and `LICENSE.lynx-stack`
 carry the notice, as they do for `packages/reactlynx-test-fixtures`. Playwright's
-screenshots of web-core rendering these same cards stay upstream — the census
-reads them from a `lynx-stack` checkout — so this package holds sources and a
-build, never goldens.
+screenshots of web-core rendering these same cards stay upstream, so this
+package holds sources and a build, never goldens. The goldens that are kept
+are of this engine's own renderings, beside the suite that judges them:
+`crates/bobcat-source/tests/web_core_e2e.rs`.
 
 ## Why vendor them rather than build them upstream
 
@@ -44,7 +45,7 @@ E2E_GROUP=default npx rsbuild build                # one group, directly
 ```
 
 Output is `dist/<case>.web.bundle`, the layout upstream's goldens were taken
-against and the one `.github/scripts/web-core-census.py` reads. Two families
+against and the one `crates/bobcat-source/tests/web_core_e2e.rs` reads. Two families
 sit elsewhere:
 
 - the three `config-splitchunk-*` cards and `config-mode-dev-with-all-in-one`
@@ -80,7 +81,7 @@ a host that does not resolve.
 
 **When re-syncing `src/` from upstream, re-read those config files.** A case
 whose family moved would otherwise compile with the wrong switches, and the
-census would blame the engine for it.
+suite would blame the engine for it.
 
 ## What is not built
 

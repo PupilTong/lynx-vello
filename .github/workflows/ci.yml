@@ -58,13 +58,6 @@ jobs:
       - name: APFS worktree cache hook
         run: python3 .github/scripts/test-worktree-cow.py -v
 
-      - name: Web-core census harness
-        # The census run itself needs a built `lynx-stack` corpus and a live
-        # server, neither of which CI has. These cover the part that decides
-        # what a run means — the image decoders, the blank rule and the
-        # scoring — where a silent break yields a plausible wrong number.
-        run: python3 .github/scripts/test-web-core-census.py -v
-
       - name: Independent `cli` embedder feature
         # `cli` alone is the one feature set only macOS can check: it pulls in
         # winit and `cli/macos.rs`. `server` alone, and no feature at all,

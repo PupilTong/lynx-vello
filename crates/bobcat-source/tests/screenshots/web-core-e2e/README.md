@@ -11,6 +11,10 @@ are about behaviour an image only indirectly shows, so a pixel distance to
 chromium answers a question nobody asked. web-core's rendering is evidence
 while reading a case, never the criterion.
 
+`<case>.png` is a card's first screen. A card upstream drives further has one
+more file per frame, `<case>.<label>.png`, taken after the steps
+`web_core_e2e/driven.rs` lists under that label.
+
 A card with no file here is in `web_core_e2e/pending.rs` with a reason, and
 `no_pending_case_has_a_golden` fails if one gains a file without moving. That
 is the point: a picture of a rendering nobody has judged would be read as a

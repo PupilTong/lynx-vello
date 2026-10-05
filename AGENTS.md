@@ -2096,6 +2096,18 @@ indirectly shows, so a pixel distance to chromium answers a question nobody
 asked. Accepting a rendering is `FLASHBULB_UPDATE_SNAPSHOTS=1` on one test,
 after the reading, in the same change that moves the card to `verified!`.
 
+A first screen is not the whole of most cases, so `web_core_e2e/driven.rs`
+restates, per card, what upstream's Playwright spec drives — a tap, a drag or
+a wheel turn at a viewport point, `updateData`, `updateGlobalProps`, `reload`,
+`sendGlobalEvent`, a wait for a console line — and the suite pins one more
+golden per frame of that script (`<case>.<label>.png`). A script is not a
+verdict: a pending card may carry one and still has no golden. The harness
+boots every card the way upstream's shell does
+(`web-core-e2e/shell-project/index.ts`: page data, the two native modules,
+`/dist/` and `/resources/`), and a card that renders wrong is checked against
+that file before the engine is blamed — four separate omissions there each
+made a family of cards test nothing until they were found.
+
 ### crates/bobcat-wasm
 
 The pure-Rust `wasm-bindgen` browser embedder and npm facade, built for
@@ -2468,9 +2480,11 @@ of the element path in the same file.
   rather than `lynx.fetchBundle`. `groups.js` restates the 21 upstream rspeedy
   config files as one entry per distinct compiler configuration — re-read them
   when re-syncing `src/`, or a case compiles with the wrong switches and the
-  census blames the engine. Nothing in `crates/` reads this package; its only
-  consumer is `.github/scripts/web-core-census.py`, so its build stays out of
-  the fixtures build Rust tests depend on.
+  suite blames the engine. Its one consumer is
+  `crates/bobcat-source/tests/web_core_e2e.rs`, which reads `dist/` and
+  `resources/` at run time; its build (`pnpm --filter web-core-e2e-fixtures
+  build`) is separate from the fixtures build every other Rust test depends
+  on, and CI runs it in the job that runs tests.
 - `packages/explorer-homepage`, `packages/explorer-showcase` and
   `packages/explorer-lib` — the Lynx Explorer home screen and showcase menu in
   ReactLynx, over the navigation, launch-command, history and theme helpers the
