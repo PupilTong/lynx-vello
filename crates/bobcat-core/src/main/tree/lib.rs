@@ -14,6 +14,9 @@
 //! and `blur_view` need components, for image resources and blur hints.
 //! `viewpager` needs none; its one UI method, `selectTab`, is here for the
 //! runtime to dispatch by tag name.
+//! `scroll_coordinator` needs none either, and has no UI method: its ten tags
+//! are UA rules over anchor-sized absolute boxes, a sticky toolbar and
+//! `scroll-capture-y`.
 //!
 //! [`NodeId`]: dom::NodeId
 
@@ -22,6 +25,7 @@ mod image;
 mod list;
 pub(crate) mod raw_text;
 mod scroll_container;
+mod scroll_coordinator;
 #[cfg(test)]
 mod test_support;
 mod text;

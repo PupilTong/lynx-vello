@@ -712,6 +712,54 @@ mod tests {
         }
     }
 
+    /// A compiled `ReactLynx` `<scroll-coordinator>`, 300 by 400 at the page
+    /// origin and laid out by the engine's UA sheet: a translucent blue
+    /// toolbar 60 tall pinned over a red header 200 tall, and the slot
+    /// starting under the header, at 200, with its scroll-view's green and
+    /// yellow 100px items. The fold a forward drag makes needs input this
+    /// capture route has no way to send;
+    /// `crates/bobcat-source/tests/reactlynx_runtime.rs` drives it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_scroll_coordinator_card_renders_its_header_over_the_slot() {
+        let executor = CaptureExecutor::new().expect("start capture owner thread");
+        let result = executor
+            .capture(CaptureRequest {
+                input: CaptureInput::Bytes(
+                    fixtures::fixture("react-scroll-coordinator").page.to_vec(),
+                ),
+                width: 800,
+                height: 600,
+                screenshot_settle: Duration::ZERO,
+                timeout: Duration::from_secs(30),
+                url: Url::parse("file:///react-scroll-coordinator.web.bundle")
+                    .expect("fixture URL"),
+            })
+            .await
+            .expect("capture queue remains available");
+        executor.shutdown().expect("stop capture owner thread");
+
+        let screenshot = result.expect("decode, boot, and render the web bundle");
+        let width = usize::try_from(screenshot.size.width).expect("an addressable width");
+        let pixel = |x: usize, y: usize| {
+            let at = (y * width + x) * 4;
+            [
+                screenshot.pixels[at],
+                screenshot.pixels[at + 1],
+                screenshot.pixels[at + 2],
+            ]
+        };
+        let [red, green, blue] = pixel(150, 30);
+        assert!(
+            (126..=129).contains(&red) && green == 0 && (126..=129).contains(&blue),
+            "the translucent toolbar shows the red header through it, got {:?}",
+            pixel(150, 30)
+        );
+        assert_eq!(pixel(150, 150), [255, 0, 0], "the header below the toolbar");
+        assert_eq!(pixel(150, 250), [0, 128, 0], "the slot's first item at 200");
+        assert_eq!(pixel(150, 350), [255, 255, 0], "its second item at 300");
+        assert_eq!(pixel(500, 300), [255, 255, 255], "nothing past 300");
+    }
+
     /// A compiled `ReactLynx` card whose stylesheet declares
     /// `animation-timeline: scroll()`: the lowering carries it to stylo, the
     /// row binds its list's scroll timeline, and at the boot offset it shows

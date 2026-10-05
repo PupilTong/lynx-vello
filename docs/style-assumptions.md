@@ -294,6 +294,27 @@ the semantics are stylo's.** Everything below refines that sentence.
       `position` is web-core's own `!important` (`x-viewpager-ng.css:63`): a
       page positioned absolutely would leave the row. The pager's `display`
       stays a default, as a scroller's does.
+    - The `<scroll-coordinator>` structure (2026-09-29), six rules under
+      both spellings (`scroll-coordinator*` and web-core's
+      `x-foldview-*-ng`): the coordinator's `overflow-y: scroll` and its
+      `flex-direction: column` / `linear-direction: column`, the header's and
+      the slot's `position: absolute`, the toolbar's `position: sticky`, and
+      `overflow-y: hidden` under `enable-scroll="false"` /
+      `scroll-enable="false"`. In every reference these boxes are placed by
+      something no author rule reaches: web-core pins the scroll axis with its
+      own `!important` (`x-foldview-ng.css:8`) and places the slot from a
+      `ResizeObserver` (`XFoldviewNg.ts:27-38`), native lays all of them out
+      in CoordinatorLayout / `UIScrollView` code. Here the authored boxes
+      are the layout — the slot's `anchor-size()` resolves only in an
+      absolutely positioned box (§28), the header must be one so it adds
+      nothing to the in-flow height, the toolbar must be sticky to stay over
+      the fold, and in a row the toolbar would stop spanning the coordinator
+      — so a normal declaration would let an author rule take the
+      coordinator apart. The `enable-scroll="false"` line is important only
+      because it must beat the pinned `scroll`. The coordinator's `display`,
+      sizes, `contain`, `overscroll-behavior` and the slot's `top`/`height`
+      stay defaults; `crates/bobcat-core/src/main/tree/scroll_coordinator.rs`
+      carries the full argument.
 
 16. **cssId scoping is a runtime-adapter concern.** The feature exists for
     pageConfig `enableRemoveCSSScope = false` (that is the exact
