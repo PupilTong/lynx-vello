@@ -109,7 +109,7 @@
 //! zero when the subtree reveals. Recorded in `docs/style-assumptions.md`
 //! §19.
 
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashSet;
 use stylo::context::{SharedStyleContext, StyleSystemOptions};
 use stylo::dom::OpaqueNode;
 use stylo::driver;
@@ -1013,7 +1013,7 @@ impl<T: Sync> Document<T> {
     fn restore_held_animations(
         &self,
         held: &mut Vec<(NodeId, Animation)>,
-        sets: &mut FxHashMap<AnimationSetKey, ElementAnimationSet>,
+        sets: &mut stylo::FxHashMap<AnimationSetKey, ElementAnimationSet>,
     ) {
         held.retain(|(id, animation)| {
             if self.arenas().get(*id).is_none() {

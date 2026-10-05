@@ -59,7 +59,7 @@ pub(crate) fn offset_sample(
 
     let total = contour.total_length();
     let distance = style
-        .clone_offset_distance()
+        .get_offset_distance()
         .resolve(CSSPixelLength::new(total))
         .px();
     let used_distance = if total <= 0.0 {
@@ -71,7 +71,7 @@ pub(crate) fn offset_sample(
     };
 
     let (position, direction) = contour.sample(used_distance);
-    let rotate: OffsetRotate = style.clone_offset_rotate();
+    let rotate: OffsetRotate = *style.get_offset_rotate();
     let angle = if rotate.auto {
         direction + rotate.angle.radians()
     } else {

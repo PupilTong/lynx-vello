@@ -190,12 +190,12 @@ impl LayoutFixture {
 
     pub(super) fn prepare(mut self) -> Self {
         self.document.layout();
-        let display = self
+        let display = *self
             .document
             .get(self.root)
             .and_then(Node::computed_style)
             .expect("the attached benchmark root is styled")
-            .clone_display();
+            .get_display();
         assert_eq!(
             display, self.expected_display,
             "the benchmark root's display declaration must reach dom"

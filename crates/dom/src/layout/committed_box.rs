@@ -367,7 +367,7 @@ fn axis_value<T>(
     computed: ContainIntrinsicSize,
     axis: impl FnOnce(RememberedSize) -> Option<f32>,
 ) -> ContainIntrinsicSize {
-    let value = effective(computed, style.clone_content_visibility());
+    let value = effective(computed, *style.get_content_visibility());
     // "and is currently skipping its contents": a `contain: size` box that is
     // *not* skipping keeps its `<length>` (or `none`) however recently it was
     // laid out with real contents.
@@ -384,9 +384,12 @@ pub(crate) fn contain_intrinsic_width<T>(
     node: &Node<T>,
     style: &ComputedValues,
 ) -> ContainIntrinsicSize {
-    axis_value(node, style, style.clone_contain_intrinsic_width(), |size| {
-        size.width
-    })
+    axis_value(
+        node,
+        style,
+        style.slow_clone_contain_intrinsic_width(),
+        |size| size.width,
+    )
 }
 
 pub(crate) fn contain_intrinsic_height<T>(
@@ -396,7 +399,7 @@ pub(crate) fn contain_intrinsic_height<T>(
     axis_value(
         node,
         style,
-        style.clone_contain_intrinsic_height(),
+        style.slow_clone_contain_intrinsic_height(),
         |size| size.height,
     )
 }
@@ -419,7 +422,7 @@ pub(crate) fn record<T>(
     let style = view.values();
     let container_type = view.container_type();
     let is_container = container_type.is_size_container_type();
-    let content_visibility = style.clone_content_visibility();
+    let content_visibility = *style.get_content_visibility();
     let position = style.get_position();
     let auto = Size::new(
         has_effective_auto(&position.contain_intrinsic_width, content_visibility),

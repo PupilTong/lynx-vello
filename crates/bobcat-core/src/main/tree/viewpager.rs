@@ -338,7 +338,7 @@ mod tests {
                     "{tag} {property}"
                 );
             }
-            assert_eq!(style_of(&document, pager).clone_display(), Display::Linear);
+            assert_eq!(*style_of(&document, pager).get_display(), Display::Linear);
         }
     }
 
@@ -369,7 +369,7 @@ mod tests {
                 );
             }
             assert_eq!(
-                style_of(&document, items[0]).clone_display(),
+                *style_of(&document, items[0]).get_display(),
                 Display::Linear
             );
             assert!(!is_viewpager(&document, items[0]), "{tag}");
@@ -383,7 +383,7 @@ mod tests {
         let mut document = document();
         let item = child(&mut document, VIEWPAGER_ITEM_TAG, "");
         document.layout();
-        assert_eq!(style_of(&document, item).clone_display(), Display::Linear);
+        assert_eq!(*style_of(&document, item).get_display(), Display::Linear);
     }
 
     #[test]
@@ -397,12 +397,12 @@ mod tests {
                 let (pager, items) = build_pager(&mut document, spelling, "", 1);
                 document.layout();
                 assert_eq!(
-                    style_of(&document, pager).clone_display(),
+                    *style_of(&document, pager).get_display(),
                     expected,
                     "{spelling:?} linear={linear}"
                 );
                 assert_eq!(
-                    style_of(&document, items[0]).clone_display(),
+                    *style_of(&document, items[0]).get_display(),
                     expected,
                     "{spelling:?} linear={linear}"
                 );

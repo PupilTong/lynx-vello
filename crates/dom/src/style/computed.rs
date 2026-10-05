@@ -266,7 +266,7 @@ impl<T> Document<T> {
         physical: LonghandId,
     ) -> Option<String> {
         let wanted = UsedBoxValue::of(physical)?;
-        let display = style.clone_display();
+        let display = *style.get_display();
         if display.is_none() || display.is_contents() {
             return None;
         }
@@ -287,7 +287,7 @@ impl<T> Document<T> {
                 } else {
                     layout.size.width
                 };
-                if style.clone_box_sizing() == box_sizing::T::BorderBox {
+                if *style.get_box_sizing() == box_sizing::T::BorderBox {
                     border_box
                 } else {
                     let edges = if vertical {

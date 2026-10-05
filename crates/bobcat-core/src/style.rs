@@ -524,7 +524,7 @@ mod tests {
         let opacity = document
             .get(subject)
             .and_then(dom::Node::computed_style)
-            .map(|style| style.clone_opacity());
+            .map(|style| *style.get_opacity());
         assert_eq!(opacity, Some(0.5));
     }
 

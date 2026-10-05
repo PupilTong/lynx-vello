@@ -69,21 +69,21 @@ mod tests {
         for scroller in vertical {
             let style = style_of(&document, scroller);
             assert_eq!(
-                (style.clone_overflow_x(), style.clone_overflow_y()),
+                (*style.get_overflow_x(), *style.get_overflow_y()),
                 (Overflow::Hidden, Overflow::Scroll),
                 "the clipped axis computes to `hidden` beside a scrolling one"
             );
-            assert_eq!(style.clone_flex_direction(), flex_direction::T::Column);
-            assert_eq!(style.clone_linear_direction(), linear_direction::T::Column);
+            assert_eq!(*style.get_flex_direction(), flex_direction::T::Column);
+            assert_eq!(*style.get_linear_direction(), linear_direction::T::Column);
         }
         for scroller in horizontal {
             let style = style_of(&document, scroller);
             assert_eq!(
-                (style.clone_overflow_x(), style.clone_overflow_y()),
+                (*style.get_overflow_x(), *style.get_overflow_y()),
                 (Overflow::Scroll, Overflow::Hidden)
             );
-            assert_eq!(style.clone_flex_direction(), flex_direction::T::Row);
-            assert_eq!(style.clone_linear_direction(), linear_direction::T::Row);
+            assert_eq!(*style.get_flex_direction(), flex_direction::T::Row);
+            assert_eq!(*style.get_linear_direction(), linear_direction::T::Row);
         }
     }
 

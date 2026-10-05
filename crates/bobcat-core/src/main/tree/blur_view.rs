@@ -493,8 +493,8 @@ mod tests {
             "`blur-view` and `x-blur-view` are the same component"
         );
         assert_eq!(
-            style_of(&document, native).clone_display(),
-            style_of(&document, web).clone_display(),
+            *style_of(&document, native).get_display(),
+            *style_of(&document, web).get_display(),
             "and carry the same UA rules"
         );
     }

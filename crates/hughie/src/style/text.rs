@@ -37,15 +37,15 @@ style_protocol! {
     pub trait TextContainerStyle: CoreStyle {
         defaults(style) {
             text_align -> TextAlign =
-                style.inherited_values().get_inherited_text().clone_text_align(),
+                *style.inherited_values().get_inherited_text().get_text_align(),
             text_wrap_mode -> text_wrap_mode::T =
-                style.inherited_values().get_inherited_text().clone_text_wrap_mode(),
+                *style.inherited_values().get_inherited_text().get_text_wrap_mode(),
             word_break -> WordBreak =
-                style.inherited_values().get_inherited_text().clone_word_break(),
+                *style.inherited_values().get_inherited_text().get_word_break(),
             text_indent -> TextIndent =
-                style.inherited_values().get_inherited_text().clone_text_indent(),
+                style.inherited_values().get_inherited_text().slow_clone_text_indent(),
             text_overflow -> TextOverflow =
-                style.inherited_values().get_text().clone_text_overflow(),
+                style.inherited_values().get_text().slow_clone_text_overflow(),
             text_maxline -> Option<NonZeroU32> =
                 paragraph_limit(style.computed_values(), &TEXT_MAXLINE).and_then(NonZeroU32::new),
             text_maxlength -> Option<u32> =
@@ -74,35 +74,35 @@ style_protocol! {
             font_family -> FontFamily = style
                 .computed_text_values()
                 .map_or_else(
-                    || initial_values().get_font().clone_font_family(),
-                    |values| values.get_font().clone_font_family(),
+                    || initial_values().get_font().slow_clone_font_family(),
+                    |values| values.get_font().slow_clone_font_family(),
                 ),
             font_size -> f32 = style.computed_text_values().map_or(16.0, |values| {
-                values.get_font().clone_font_size().computed_size().px()
+                values.get_font().slow_clone_font_size().computed_size().px()
             }),
             font_weight -> FontWeight = style
                 .computed_text_values()
-                .map_or(FontWeight::NORMAL, |values| values.get_font().clone_font_weight()),
+                .map_or(FontWeight::NORMAL, |values| *values.get_font().get_font_weight()),
             font_style -> FontStyle = style
                 .computed_text_values()
-                .map_or(FontStyle::NORMAL, |values| values.get_font().clone_font_style()),
+                .map_or(FontStyle::NORMAL, |values| *values.get_font().get_font_style()),
             letter_spacing -> LetterSpacing = style.computed_text_values().map_or_else(
                 LetterSpacing::normal,
-                |values| values.get_inherited_text().clone_letter_spacing(),
+                |values| values.get_inherited_text().slow_clone_letter_spacing(),
             ),
             line_height -> LineHeight = style.computed_text_values().map_or_else(
                 LineHeight::normal,
-                |values| values.get_font().clone_line_height(),
+                |values| *values.get_font().get_line_height(),
             ),
             font_feature_settings -> FontFeatureSettings =
                 style.computed_text_values().map_or_else(
                     FontFeatureSettings::normal,
-                    |values| values.get_font().clone_font_feature_settings(),
+                    |values| values.get_font().slow_clone_font_feature_settings(),
                 ),
             font_variation_settings -> FontVariationSettings =
                 style.computed_text_values().map_or_else(
                     FontVariationSettings::normal,
-                    |values| values.get_font().clone_font_variation_settings(),
+                    |values| values.get_font().slow_clone_font_variation_settings(),
                 ),
         }
     }

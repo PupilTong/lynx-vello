@@ -202,7 +202,7 @@ impl AnchoredSlot {
         clip: Option<usize>,
     ) -> Option<Self> {
         let outcome = *document.anchor_outcome(node)?;
-        let visibility = style.clone_position_visibility();
+        let visibility = *style.get_position_visibility();
         let default = document
             .remembered_scroll(node)
             .and_then(|remembered| remembered.default);
@@ -564,7 +564,7 @@ impl PaintOrder {
                 .get(anchor)
                 .and_then(crate::tree::node::Node::layout_computed_style)
                 .is_none_or(|style| {
-                    style.clone_visibility() != hughie::style::visibility::T::Visible
+                    *style.get_visibility() != hughie::style::visibility::T::Visible
                 });
             if !invisible && let Some(&Some(item)) = anchors.get(&anchor) {
                 // The anchor's clips below the deepest one on both chains:

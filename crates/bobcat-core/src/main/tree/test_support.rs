@@ -57,10 +57,10 @@ pub(super) fn style_of(document: &LynxDocument, element: NodeId) -> Arc<Computed
 }
 
 pub(super) fn display(document: &LynxDocument, element: NodeId) -> Display {
-    style_of(document, element).clone_display()
+    *style_of(document, element).get_display()
 }
 
 pub(super) fn overflow(document: &LynxDocument, element: NodeId) -> (Overflow, Overflow) {
     let style = style_of(document, element);
-    (style.clone_overflow_x(), style.clone_overflow_y())
+    (*style.get_overflow_x(), *style.get_overflow_y())
 }

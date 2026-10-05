@@ -291,19 +291,19 @@ fn element_with_id(tree: &LynxDocument, id: &str) -> dom::NodeId {
 
 /// The computed colour of a live element.
 fn color(tree: &LynxDocument, element: dom::NodeId) -> AbsoluteColor {
-    computed(tree, element).clone_color()
+    computed(tree, element).get_color().solid_color()
 }
 
 /// The computed font size, in CSS pixels.
 fn font_size(tree: &LynxDocument, element: dom::NodeId) -> f32 {
     computed(tree, element)
-        .clone_font_size()
+        .slow_clone_font_size()
         .computed_size()
         .px()
 }
 
 fn font_style(tree: &LynxDocument, element: dom::NodeId) -> FontStyle {
-    computed(tree, element).clone_font_style()
+    *computed(tree, element).get_font_style()
 }
 
 fn computed(

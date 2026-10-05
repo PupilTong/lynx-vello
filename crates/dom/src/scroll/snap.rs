@@ -366,7 +366,7 @@ fn snap_point(
     }
 }
 
-pub(crate) fn scroll_padding(value: NonNegativeLengthPercentageOrAuto, basis: f32) -> f32 {
+pub(crate) fn scroll_padding(value: &NonNegativeLengthPercentageOrAuto, basis: f32) -> f32 {
     match value {
         NonNegativeLengthPercentageOrAuto::Auto => 0.0,
         NonNegativeLengthPercentageOrAuto::LengthPercentage(length) => {
@@ -384,7 +384,7 @@ impl<T> Document<T> {
     pub fn snap_positions(&self, id: NodeId) -> Option<SnapPositions> {
         let node = self.get(id)?;
         let style = node.layout_computed_style()?;
-        let snap_type = style.clone_scroll_snap_type();
+        let snap_type = *style.get_scroll_snap_type();
         let strictness = match snap_type.strictness() {
             ScrollSnapStrictness::None => return None,
             ScrollSnapStrictness::Mandatory => SnapStrictness::Mandatory,
@@ -399,12 +399,12 @@ impl<T> Document<T> {
         let port = scroll_box.scrollport;
         let max = scroll_box.max_offset();
         let snapport_x = (
-            scroll_padding(style.clone_scroll_padding_left(), port.width),
-            port.width - scroll_padding(style.clone_scroll_padding_right(), port.width),
+            scroll_padding(style.get_scroll_padding_left(), port.width),
+            port.width - scroll_padding(style.get_scroll_padding_right(), port.width),
         );
         let snapport_y = (
-            scroll_padding(style.clone_scroll_padding_top(), port.height),
-            port.height - scroll_padding(style.clone_scroll_padding_bottom(), port.height),
+            scroll_padding(style.get_scroll_padding_top(), port.height),
+            port.height - scroll_padding(style.get_scroll_padding_bottom(), port.height),
         );
 
         let mut x = Vec::new();
@@ -423,21 +423,21 @@ impl<T> Document<T> {
             }
             let values = view.values();
             if mode != DisplayMode::Contents {
-                let align = values.clone_scroll_snap_align();
+                let align = *values.get_scroll_snap_align();
                 let wants_x = snaps_x && align.inline() != ScrollSnapAlignKeyword::None;
                 let wants_y = snaps_y && align.block() != ScrollSnapAlignKeyword::None;
                 if (wants_x || wants_y)
                     && self.nearest_scroll_container(child_id) == Some(id)
                     && let Some(rect) = self.rect_in_scroll_container(child_id, id)
                 {
-                    let stop = values.clone_scroll_snap_stop() == ScrollSnapStop::Always;
+                    let stop = *values.get_scroll_snap_stop() == ScrollSnapStop::Always;
                     let area_x = (
-                        rect.min_x() - values.clone_scroll_margin_left().px(),
-                        rect.max_x() + values.clone_scroll_margin_right().px(),
+                        rect.min_x() - values.get_scroll_margin_left().px(),
+                        rect.max_x() + values.get_scroll_margin_right().px(),
                     );
                     let area_y = (
-                        rect.min_y() - values.clone_scroll_margin_top().px(),
-                        rect.max_y() + values.clone_scroll_margin_bottom().px(),
+                        rect.min_y() - values.get_scroll_margin_top().px(),
+                        rect.max_y() + values.get_scroll_margin_bottom().px(),
                     );
                     if wants_x {
                         x.push(snap_point(align.inline(), area_x, snapport_x, max.x, stop));

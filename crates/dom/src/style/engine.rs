@@ -25,8 +25,8 @@ use stylo::shared_lock::{Locked, SharedRwLock, StylesheetGuards};
 pub use stylo::stylesheets::Origin as StylesheetOrigin;
 use stylo::stylesheets::keyframes_rule::{Keyframe, KeyframeSelectors, KeyframesRule};
 use stylo::stylesheets::{
-    AllowImportRules, CssRule as StyloCssRule, CssRuleType, CssRules, CustomMediaMap,
-    DocumentStyleSheet, Origin, StyleRule, Stylesheet, StylesheetContents, UrlExtraData,
+    AllowImportRules, CssRule as StyloCssRule, CssRuleType, CssRules, DocumentStyleSheet, Origin,
+    StyleRule, Stylesheet, StylesheetContents, UrlExtraData,
 };
 use stylo::stylist::Stylist;
 use stylo::values::{KeyframesName, SourceLocation};
@@ -456,9 +456,7 @@ impl StyleEngine {
     ) {
         let sheet = self.parse_stylesheet(css, Origin::Author);
         let guard = self.lock.read();
-        styles
-            .stylesheets
-            .append_stylesheet(None, &CustomMediaMap::default(), sheet, &guard);
+        styles.stylesheets.append_stylesheet(sheet, &guard);
         let invalidations = styles.flush(&mut self.stylist, &guard);
         drop(guard);
         Self::note_flush(&mut self.changed_position_try_names, &invalidations);

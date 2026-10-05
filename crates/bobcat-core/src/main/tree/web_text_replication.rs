@@ -337,13 +337,13 @@ fn a_text_nested_in_a_text_is_an_inline_run_that_scopes_only_its_own_colour() {
          whitespace: the newline and its indentation collapsed to a single space"
     );
     assert_eq!(
-        style_of(&document, nested).clone_color(),
+        style_of(&document, nested).get_color().solid_color(),
         AbsoluteColor::srgb_legacy(255, 0, 0, 1.0),
         "the nested run overrides the colour it is handed"
     );
     assert_eq!(
-        style_of(&document, nested).clone_font_weight(),
-        style_of(&document, text).clone_font_weight(),
+        *style_of(&document, nested).get_font_weight(),
+        *style_of(&document, text).get_font_weight(),
         "and still inherits the weight the paragraph was given"
     );
 }
@@ -384,8 +384,8 @@ fn a_wrapper_between_a_text_and_its_nested_run_changes_nothing() {
         "the wrapper dissolves: same runs, same line, same advance"
     );
     assert_eq!(
-        style_of(&document, through).clone_color(),
-        style_of(&document, direct).clone_color(),
+        style_of(&document, through).get_color().solid_color(),
+        style_of(&document, direct).get_color().solid_color(),
     );
 }
 
@@ -420,12 +420,12 @@ fn splitting_a_paragraph_into_two_runs_leaves_its_line_geometry_untouched() {
         "the nested run shares the parent's line box instead of opening one"
     );
     assert_eq!(
-        style_of(&document, nested).clone_font_weight(),
-        style_of(&document, split).clone_font_weight(),
+        *style_of(&document, nested).get_font_weight(),
+        *style_of(&document, split).get_font_weight(),
     );
     assert_ne!(
-        style_of(&document, nested).clone_color(),
-        style_of(&document, split).clone_color(),
+        style_of(&document, nested).get_color().solid_color(),
+        style_of(&document, split).get_color().solid_color(),
     );
 }
 
@@ -1585,12 +1585,12 @@ fn a_one_line_clamp_keeps_the_nested_run_s_colour_and_the_parent_s_weight() {
         "the whole mixed-style paragraph is clamped to a single line box"
     );
     assert_eq!(
-        style_of(&document, nested).clone_color(),
+        style_of(&document, nested).get_color().solid_color(),
         AbsoluteColor::srgb_legacy(255, 0, 0, 1.0),
     );
     assert_eq!(
-        style_of(&document, nested).clone_font_weight(),
-        style_of(&document, text).clone_font_weight(),
+        *style_of(&document, nested).get_font_weight(),
+        *style_of(&document, text).get_font_weight(),
     );
 }
 
@@ -1823,7 +1823,7 @@ fn a_padded_view_nested_in_a_text_is_an_atom_the_surrounding_runs_flow_around() 
 
     assert!(
         matches!(
-            style_of(&document, inner).clone_color_value(),
+            style_of(&document, inner).get_color(),
             ColorPropertyValue::Gradient(_)
         ),
         "a nested text inside the atom is its own text block, and a Lynx colour \
@@ -2053,10 +2053,13 @@ fn the_later_of_two_equal_specificity_class_rules_wins_on_a_text() {
 
     let style = style_of(&document, text);
     assert!(
-        matches!(style.clone_color_value(), ColorPropertyValue::Gradient(_)),
+        matches!(style.get_color(), ColorPropertyValue::Gradient(_)),
         "source order decides the cascade, so `.b`'s gradient wins over `.a`'s red"
     );
-    assert_eq!(style.get_font().clone_font_size().used_size().px(), 80.0);
+    assert_eq!(
+        style.get_font().slow_clone_font_size().used_size().px(),
+        80.0
+    );
     assert_eq!(
         ink(&document, text),
         (10.0 * 80.0, 80.0),
@@ -2095,12 +2098,12 @@ fn a_text_child_does_not_inherit_its_view_parent_s_colour() {
         "the paragraph the reset applies to is not an empty one"
     );
     assert_eq!(
-        style_of(&document, text).clone_color(),
+        style_of(&document, text).get_color().solid_color(),
         AbsoluteColor::BLACK,
         "the reset stops the cascade at the text root"
     );
     assert_ne!(
-        style_of(&document, view).clone_color(),
+        style_of(&document, view).get_color().solid_color(),
         AbsoluteColor::BLACK,
         "and the ancestor really did declare a colour to inherit"
     );

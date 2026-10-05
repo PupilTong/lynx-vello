@@ -64,7 +64,7 @@ fn is_root_element<T>(node: &Node<T>) -> bool {
 }
 
 pub(crate) fn generates_no_box(style: &ComputedValues) -> bool {
-    style.clone_display().is_contents()
+    style.get_display().is_contents()
 }
 
 /// css-contain-2 §4: whether this element skips its contents.
@@ -83,7 +83,7 @@ pub(crate) fn skips_contents<T>(node: &Node<T>, style: &ComputedValues) -> bool 
     if generates_no_box(style) {
         return false;
     }
-    match style.clone_content_visibility() {
+    match *style.get_content_visibility() {
         ContentVisibility::Visible => false,
         ContentVisibility::Hidden => true,
         ContentVisibility::Auto => node.arenas().relevance(node.id()).skips(),
@@ -122,10 +122,10 @@ pub(crate) fn establishes_fixed_containing_block<T>(
             .intersects(WillChangeBits::FIXPOS_CB_NON_SVG)
             && !is_root_element(node))
         || effective_containment(
-            style.clone_contain(),
-            style.clone_content_visibility(),
+            *style.get_contain(),
+            *style.get_content_visibility(),
             skips_contents(node, style),
-            style.clone_container_type(),
+            *style.get_container_type(),
         )
         .intersects(Contain::LAYOUT | Contain::PAINT)
         || (filters && !is_root_element(node))
@@ -138,7 +138,7 @@ pub(crate) fn establishes_absolute_containing_block<T>(
     if generates_no_box(style) {
         return false;
     }
-    style.clone_position() != PositionProperty::Static
+    *style.get_box().get_position() != PositionProperty::Static
         || style
             .get_box()
             .will_change
@@ -170,7 +170,7 @@ pub(crate) fn resolve_position<T>(node: &Node<T>, style: &ComputedValues) -> Pos
             })
         })
     };
-    match style.clone_position() {
+    match *style.get_box().get_position() {
         computed @ (PositionProperty::Static
         | PositionProperty::Relative
         | PositionProperty::Sticky) => computed,

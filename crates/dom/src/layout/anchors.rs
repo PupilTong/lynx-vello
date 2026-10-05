@@ -437,7 +437,7 @@ pub(crate) fn containing_block_generator<T>(node: &Node<T>) -> Option<&Node<T>> 
     let Some(style) = node.layout_computed_style() else {
         return box_parent(node);
     };
-    match style.clone_position() {
+    match *style.get_box().get_position() {
         PositionProperty::Absolute => positioned_containing_block(node, false),
         PositionProperty::Fixed => positioned_containing_block(node, true),
         PositionProperty::Static | PositionProperty::Relative | PositionProperty::Sticky => {
@@ -467,7 +467,7 @@ fn positioned_containing_block<T>(node: &Node<T>, fixed: bool) -> Option<&Node<T
 
 fn is_absolutely_positioned(style: &ComputedValues) -> bool {
     matches!(
-        style.clone_position(),
+        *style.get_box().get_position(),
         PositionProperty::Absolute | PositionProperty::Fixed
     )
 }
@@ -625,7 +625,7 @@ pub(crate) fn target_anchor<'t, T>(
             continue;
         }
         // An anchor element generates a principal box (§2.1).
-        if generates_no_box(style) || style.clone_display().is_none() {
+        if generates_no_box(style) || style.get_display().is_none() {
             continue;
         }
         let Some(chain) = connected_chain(node) else {
@@ -737,7 +737,7 @@ fn has_box<T>(tree: &TreeArenas<T>, node: &Node<T>, chain: &Chain, liveness: Liv
                 let Some(style) = ancestor.layout_computed_style() else {
                     continue;
                 };
-                if style.clone_display().is_none() || super::skips_contents(ancestor, style) {
+                if style.get_display().is_none() || super::skips_contents(ancestor, style) {
                     return false;
                 }
             }
@@ -1058,8 +1058,8 @@ fn nearest_scroller<T>(node: &Node<T>, axis: PhysicalAxis) -> Option<NodeId> {
     while let Some(ancestor) = current {
         if let Some(style) = ancestor.layout_computed_style() {
             let overflow = match axis {
-                PhysicalAxis::Horizontal => style.clone_overflow_x(),
-                PhysicalAxis::Vertical => style.clone_overflow_y(),
+                PhysicalAxis::Horizontal => *style.get_overflow_x(),
+                PhysicalAxis::Vertical => *style.get_overflow_y(),
             };
             if overflow.is_scrollable() {
                 return Some(ancestor.id());
@@ -1147,7 +1147,8 @@ pub(crate) fn scroll_adjustment_ancestors<T>(
     .flat_map(move |step| {
         let style = step.layout_computed_style();
         let scroll = step.id() != anchor && style.is_some_and(crate::scroll::is_scroll_container);
-        let sticky = style.is_some_and(|style| style.clone_position() == PositionProperty::Sticky);
+        let sticky =
+            style.is_some_and(|style| *style.get_box().get_position() == PositionProperty::Sticky);
         [
             (scroll, ScrollAdjust::Scroll),
             (sticky, ScrollAdjust::Sticky),
@@ -1273,10 +1274,10 @@ fn fallback_sensitive_difference(old: &ComputedValues, new: &ComputedValues) -> 
         return false;
     }
     let no_box = |style: &ComputedValues| {
-        let display = style.clone_display();
+        let display = *style.get_display();
         display.is_none() || display.is_contents()
     };
-    old.clone_position() != new.clone_position()
+    *old.get_box().get_position() != *new.get_box().get_position()
         || no_box(old) != no_box(new)
         || accepted_properties_differ(old, new)
         || {
@@ -1504,7 +1505,7 @@ fn without_animations<T: Sync>(
     while let Some(candidate) = layout_parent {
         if candidate
             .computed_style()
-            .is_none_or(|style| !style.clone_display().is_contents())
+            .is_none_or(|style| !style.get_display().is_contents())
         {
             break;
         }

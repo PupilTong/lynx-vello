@@ -295,10 +295,10 @@ pub(crate) fn live_offset<T>(
             .get(ancestor)
             .and_then(|node| node.layout_computed_style())
         {
-            if scroll_nodes[0].is_none() && style.clone_overflow_x().is_scrollable() {
+            if scroll_nodes[0].is_none() && style.get_overflow_x().is_scrollable() {
                 scroll_nodes[0] = Some(ancestor);
             }
-            if scroll_nodes[1].is_none() && style.clone_overflow_y().is_scrollable() {
+            if scroll_nodes[1].is_none() && style.get_overflow_y().is_scrollable() {
                 scroll_nodes[1] = Some(ancestor);
             }
         }
@@ -317,7 +317,7 @@ pub(crate) fn live_offset<T>(
         if document
             .get(ancestor)
             .and_then(|node| node.layout_computed_style())
-            .is_some_and(|style| style.clone_position() == PositionProperty::Sticky)
+            .is_some_and(|style| *style.get_box().get_position() == PositionProperty::Sticky)
         {
             let offset = live_offset(document, ancestor, sampled);
             if inside[0] {

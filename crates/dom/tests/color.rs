@@ -24,8 +24,8 @@ fn assert_rgba(got: AbsoluteColor, r: u8, g: u8, b: u8, alpha: f32, ctx: &str) {
 
 fn background_color(doc: &Doc, id: NodeId) -> AbsoluteColor {
     let style = doc.style(id);
-    let current = style.clone_color();
-    style.clone_background_color().resolve_to_absolute(&current)
+    let current = style.get_color().solid_color();
+    style.get_background_color().resolve_to_absolute(&current)
 }
 
 const NAMED_COLORS: &[(&str, u8, u8, u8, f32)] = &[

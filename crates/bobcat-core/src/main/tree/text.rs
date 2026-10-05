@@ -529,12 +529,12 @@ mod tests {
         document.layout();
 
         assert_eq!(
-            style_of(&document, nested).clone_color(),
-            style_of(&document, view).clone_color(),
+            style_of(&document, nested).get_color().solid_color(),
+            style_of(&document, view).get_color().solid_color(),
             "a view still inherits color: only text is reset"
         );
         assert_eq!(
-            style_of(&document, text).clone_color(),
+            style_of(&document, text).get_color().solid_color(),
             AbsoluteColor::BLACK,
             "`color: initial` stops the cascade at the text root"
         );
@@ -549,10 +549,13 @@ mod tests {
         let through_wrapper = element_under(&mut document, wrapper, "text", "");
         document.layout();
 
-        let parent = style_of(&document, text).clone_color();
+        let parent = style_of(&document, text).get_color().solid_color();
         assert_ne!(parent, AbsoluteColor::BLACK);
         for nested in [direct, through_wrapper] {
-            assert_eq!(style_of(&document, nested).clone_color(), parent);
+            assert_eq!(
+                style_of(&document, nested).get_color().solid_color(),
+                parent
+            );
         }
     }
 
@@ -573,7 +576,7 @@ mod tests {
         for gradient in [painted, nested] {
             assert!(
                 matches!(
-                    style_of(&document, gradient).clone_color_value(),
+                    style_of(&document, gradient).get_color(),
                     ColorPropertyValue::Gradient(_)
                 ),
                 "`inherit` hands a nested run the gradient, not the black it collapses to"
@@ -581,7 +584,7 @@ mod tests {
         }
         assert!(
             matches!(
-                style_of(&document, under_view).clone_color_value(),
+                style_of(&document, under_view).get_color(),
                 ColorPropertyValue::Color(_)
             ),
             "`color: initial` stops an ancestor's gradient at the text root"

@@ -421,7 +421,7 @@ mod tests {
                 ],
             );
             assert_eq!(
-                style_of(&document, built.coordinator).clone_display(),
+                *style_of(&document, built.coordinator).get_display(),
                 Display::Linear
             );
         }
@@ -448,7 +448,7 @@ mod tests {
                 ],
             );
             assert_eq!(
-                style_of(&document, built.header).clone_display(),
+                *style_of(&document, built.header).get_display(),
                 Display::Linear
             );
         }
@@ -475,10 +475,7 @@ mod tests {
                     ("anchor-name", "--lynx-scroll-coordinator-toolbar"),
                 ],
             );
-            assert_eq!(
-                style_of(&document, toolbar).clone_display(),
-                Display::Linear
-            );
+            assert_eq!(*style_of(&document, toolbar).get_display(), Display::Linear);
         }
     }
 
@@ -510,7 +507,7 @@ mod tests {
                 ],
             );
             assert_eq!(
-                style_of(&document, built.slot).clone_display(),
+                *style_of(&document, built.slot).get_display(),
                 Display::Linear
             );
         }
@@ -579,7 +576,7 @@ mod tests {
                 ],
             );
             assert_eq!(overflow(&document, drag), (Overflow::Clip, Overflow::Clip));
-            assert_eq!(style_of(&document, drag).clone_display(), Display::Linear);
+            assert_eq!(*style_of(&document, drag).get_display(), Display::Linear);
         }
     }
 
@@ -597,7 +594,7 @@ mod tests {
             document.layout();
             for (tag, element) in elements {
                 assert_eq!(
-                    style_of(&document, element).clone_display(),
+                    *style_of(&document, element).get_display(),
                     expected,
                     "{tag} linear={linear}"
                 );
