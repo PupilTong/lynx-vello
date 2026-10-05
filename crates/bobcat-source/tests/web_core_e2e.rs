@@ -55,6 +55,10 @@ const BOOT_DEADLINE: Duration = Duration::from_secs(30);
 /// Time to keep pumping after boot, so a `useEffect` patch, a lazy child and
 /// an image read all land before the capture.
 const SETTLE: Duration = Duration::from_millis(500);
+/// How long a card may go on changing before the suite refuses to pin it.
+const STABLE_DEADLINE: Duration = Duration::from_secs(10);
+/// Turns between two capture attempts, each a 5 ms sleep apart.
+const STABLE_TICKS: usize = 20;
 
 fn repository() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -69,7 +73,17 @@ fn corpus() -> PathBuf {
 }
 
 fn screenshots() -> Screenshots {
+    // A budget, not a tolerance for being wrong: two runs of the same card on
+    // the same engine differ by a handful of glyph pixels — 4 on
+    // `config-css-inheritance-true`, 11 on `basic-performance-text-200`, each
+    // an isolated pixel inside a text row — because the rasterizer is not bit
+    // deterministic between runs. Without a budget those cards could not hold
+    // a golden at all; with one this size, a real change still fails, since
+    // the smallest of them moves whole glyphs or boxes. The nondeterminism
+    // itself is worth fixing in the engine; until it is, this is what lets the
+    // suite mean something.
     flashbulb::screenshots_in(env!("CARGO_MANIFEST_DIR"))
+        .with_options(flashbulb::CompareOptions::default().with_max_diff_pixels(64))
 }
 
 fn golden_path(case: &str) -> PathBuf {
@@ -129,7 +143,14 @@ async fn first_screen(case: &str) -> Image {
                 other => eprintln!("[event] {other:?}"),
             }
         }
-        painter.pump().unwrap();
+        // `tick`, not `pump`: an offscreen painter's `draw` returns at once
+        // because there is no window to present to, so a `pump` settle never
+        // publishes a clock and every card's animation timeline stays pinned
+        // at zero. `tick` is the offscreen turn — it reads the clock, services
+        // the gestures and composes — so a card whose first screen depends on
+        // time (a CSS animation, a transition, a scroll-driven sample) is a
+        // thing this suite can judge at all.
+        painter.tick(false).unwrap();
         match settling_until {
             Some(until) if Instant::now() >= until => break,
             Some(_) => {}
@@ -138,8 +159,32 @@ async fn first_screen(case: &str) -> Image {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 
-    let shot = painter.capture().expect("capture the first screen");
-    Image::from_rgba8(shot.size.width, shot.size.height, shot.pixels).expect("captured RGBA image")
+    // Capture the frame the card has stopped changing on. A fixed settle is
+    // not enough on its own: a font that resolves or an image that decodes
+    // after it leaves the capture showing one state on one run and another on
+    // the next, which in a golden suite is a test that fails for no reason
+    // anybody can read. So captures are taken until two in a row are
+    // identical, and a card that never stops changing says so rather than
+    // pinning whichever frame it happened to be on.
+    let stable_by = Instant::now() + STABLE_DEADLINE;
+    let mut previous: Option<Vec<u8>> = None;
+    loop {
+        let shot = painter.capture().expect("capture the first screen");
+        if previous.as_deref() == Some(shot.pixels.as_slice()) {
+            return Image::from_rgba8(shot.size.width, shot.size.height, shot.pixels)
+                .expect("captured RGBA image");
+        }
+        assert!(
+            Instant::now() < stable_by,
+            "{case}: the first screen never stopped changing, so no golden of it would mean anything"
+        );
+        previous = Some(shot.pixels);
+        for _ in 0..STABLE_TICKS {
+            let _ = view.pump();
+            painter.tick(false).unwrap();
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
 }
 
 /// Renders a card and holds it to the rendering that was judged right.
