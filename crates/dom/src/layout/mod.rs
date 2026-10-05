@@ -870,15 +870,13 @@ impl<T> Document<T> {
             }
         }
         let anchored = &mut self.layout_state_mut().anchored;
-        if !anchored.is_empty() {
-            // css-anchor-position-1 §6.5.1: "the box's containing block
-            // association changed" is a fallback-sensitive change.
-            for descendant in &positioned {
-                if let Some(entry) = anchored.get_mut(descendant)
-                    && entry.last_successful.is_some()
-                {
-                    entry.fallback_sensitive = true;
-                }
+        // css-anchor-position-1 §6.5.1: "the box's containing block
+        // association changed" is a fallback-sensitive change.
+        for descendant in &positioned {
+            if let Some(entry) = anchored.get_mut(descendant)
+                && entry.last_successful.is_some()
+            {
+                entry.fallback_sensitive = true;
             }
         }
         for &descendant in &positioned {

@@ -8,12 +8,14 @@
 //! at each parked boundary — because those happen once per pass while the
 //! trait calls happen many times per node.
 
+use std::collections::hash_map::Entry;
+
 #[cfg(feature = "layout-test-utils")]
 use hughie::compute::compute_leaf_layout_with_measurement_for_testing;
 use hughie::compute::{
     compute_absolute_layout, compute_boundary_relayout, compute_cached_layout,
-    compute_flexbox_layout, compute_grid_lanes_layout, compute_grid_layout, compute_leaf_layout,
-    compute_linear_layout, compute_relative_layout, compute_root_layout,
+    compute_flexbox_layout, compute_grid_lanes_layout, compute_grid_layout, compute_hoisted_layout,
+    compute_leaf_layout, compute_linear_layout, compute_relative_layout, compute_root_layout,
     compute_skipped_contents_size, hide_skipped_contents, hide_subtree,
     round_layout_subtree_with as round_with,
 };
@@ -142,9 +144,6 @@ impl<T> LayoutTree for TreeArenas<T> {
         state: &Self::State,
         node: NodeSlot,
     ) -> SmallVec<[HoistedChild<NodeSlot>; 2]> {
-        if state.hoisted_to.is_empty() {
-            return SmallVec::new();
-        }
         hoisted::children_of(self, state, node)
     }
 
@@ -152,7 +151,7 @@ impl<T> LayoutTree for TreeArenas<T> {
     /// re-derives each listed box's containing block and skips stale ones.
     #[inline]
     fn has_hoisted_children(&self, state: &Self::State, node: NodeSlot) -> bool {
-        !state.hoisted_to.is_empty() && state.hoisted_to.contains_key(&node)
+        state.hoisted_to.contains_key(&node)
     }
 
     fn hoisted_parent_offset(
@@ -423,19 +422,35 @@ impl<T> LayoutTree for TreeArenas<T> {
     /// last report as the ones the settle loop verifies.
     fn set_anchor_outcome(&self, state: &mut Self::State, node: NodeSlot, outcome: AnchorOutcome) {
         let mut reads = SmallVec::new();
-        state.anchor_pending.get_mut().retain(|(reader, read)| {
-            if *reader != node {
-                return true;
+        for (_, read) in state
+            .anchor_pending
+            .get_mut()
+            .extract_if(.., |(reader, _)| *reader == node)
+        {
+            if !reads.contains(&read) {
+                reads.push(read);
             }
-            if !reads.contains(read) {
-                reads.push(read.clone());
+        }
+        match state.anchored.entry(node) {
+            Entry::Occupied(mut entry) => {
+                let entry = entry.get_mut();
+                entry.outcome = outcome;
+                entry.reads = reads;
+                entry.reported = true;
             }
-            false
-        });
-        let entry = state.anchored.entry(node).or_default();
-        entry.outcome = Some(outcome);
-        entry.reads = reads;
-        entry.reported = true;
+            Entry::Vacant(entry) => {
+                entry.insert(anchors::AnchoredBox {
+                    outcome,
+                    reads,
+                    remembered: None,
+                    last_successful: None,
+                    fallback_sensitive: false,
+                    redetermine: false,
+                    fits_scrolled: false,
+                    reported: true,
+                });
+            }
+        }
     }
 }
 
@@ -450,15 +465,18 @@ impl<T> TreeArenas<T> {
         query: anchors::AnchorQuery,
     ) -> (Option<NodeSlot>, Option<Rect<f32>>) {
         let node_ref = self.at(node);
-        let Some(style) = StyleView::try_of(node_ref) else {
-            return (None, None);
-        };
-        if !matches!(
-            style.values().clone_position(),
-            PositionProperty::Absolute | PositionProperty::Fixed
-        ) {
-            return (None, None);
-        }
+        // Only `AnchorMemo` asks, from the absolute pass hughie dispatches
+        // `absolute` and `fixed` boxes to (`resolve_position` maps those
+        // onto each other).
+        debug_assert!(
+            node_ref
+                .layout_computed_style()
+                .is_some_and(|style| matches!(
+                    style.clone_position(),
+                    PositionProperty::Absolute | PositionProperty::Fixed
+                )),
+            "only an absolutely positioned box asks anchor queries"
+        );
         let Some(anchored) = anchors::Query::of(node_ref) else {
             return (None, None);
         };
@@ -476,12 +494,6 @@ impl<T> TreeArenas<T> {
                 );
                 current = ancestor.flat_parent();
             }
-            assert!(
-                state
-                    .get(target)
-                    .is_some_and(|entry| !entry.slot.is_hidden()),
-                "a target anchor holds a committed box"
-            );
         }
         let generation = anchors::lookup_generation(self, node_ref, option, &query);
         state.anchor_pending.borrow_mut().push((
@@ -881,7 +893,7 @@ fn pre_position<T: Sync>(
             None => position_against_viewport(tree, state, node_id, viewport),
             Some(block) => {
                 if hoisted::places_late(tree, node_id, block.id(), relayed) {
-                    hoisted::place_late(tree, state, block.id(), node_id);
+                    compute_hoisted_layout(tree, state, block.id(), node_id);
                 }
             }
         }

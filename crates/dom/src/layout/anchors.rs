@@ -177,19 +177,8 @@ impl AnchorRegistry {
     }
 
     /// Every element holding position options.
-    pub(crate) fn option_holders(&self) -> impl Iterator<Item = NodeId> + '_ {
+    fn option_holders(&self) -> impl Iterator<Item = NodeId> + '_ {
         self.options.keys().copied()
-    }
-
-    pub(crate) fn set_options(&mut self, id: NodeId, options: Option<PositionOptions>) {
-        match options {
-            Some(options) => {
-                self.options.insert(id, options);
-            }
-            None => {
-                self.options.remove(&id);
-            }
-        }
     }
 
     /// Whether the registry holds anything for `id`, which is what decides
@@ -296,14 +285,14 @@ pub(crate) fn declares_anchor_state(style: &ComputedValues) -> bool {
 
 /// Everything kept for one anchor-positioned box between passes; see the
 /// module docs.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 #[expect(
     clippy::struct_excessive_bools,
     reason = "independent per-box flags with different writers, not a state machine"
 )]
 pub(crate) struct AnchoredBox {
     /// What the box's last committing absolute pass decided.
-    pub(crate) outcome: Option<AnchorOutcome>,
+    pub(crate) outcome: AnchorOutcome,
     /// The anchor queries that pass read, with their answers, for the
     /// settle loop and for §2.5 anchor relevance.
     pub(crate) reads: SmallVec<[AnchorRead; 2]>,
@@ -387,9 +376,9 @@ pub(crate) struct RememberedScroll {
     /// Each anchor the box referenced under that option, with its
     /// displacement.
     pub(crate) anchors: SmallVec<[(NodeId, Vector2D<f32>); 2]>,
-    /// The default anchor element, which always has an entry in
-    /// [`Self::anchors`] when present.
-    pub(crate) default: Option<NodeId>,
+    /// The default anchor element with its displacement — the same pair
+    /// [`Self::anchors`] holds for it.
+    pub(crate) default: Option<(NodeId, Vector2D<f32>)>,
 }
 
 impl RememberedScroll {
@@ -459,7 +448,7 @@ pub(crate) fn containing_block_generator<T>(node: &Node<T>) -> Option<&Node<T>> 
 
 /// The nearest box ancestor establishing the containing block of an
 /// absolutely (or, with `fixed`, fixed) positioned descendant.
-pub(crate) fn positioned_containing_block<T>(node: &Node<T>, fixed: bool) -> Option<&Node<T>> {
+fn positioned_containing_block<T>(node: &Node<T>, fixed: bool) -> Option<&Node<T>> {
     let mut current = box_parent(node);
     while let Some(ancestor) = current {
         let style = ancestor.layout_computed_style()?;
@@ -507,8 +496,9 @@ fn chain_contains_ancestor(chain: &Chain, ancestor: NodeId) -> bool {
 }
 
 /// Whether the node with chain `first` comes before the one with chain
-/// `second` in flat tree order (pre-order: an ancestor comes first).
-pub(super) fn precedes<T>(tree: &TreeArenas<T>, first: &Chain, second: &Chain) -> bool {
+/// `second` in flat tree order (pre-order: an ancestor comes first). Both
+/// are connected chains (or suffixes of one), ending at the document node.
+pub(super) fn precedes<T>(tree: &TreeArenas<T>, first: &[NodeId], second: &[NodeId]) -> bool {
     let mut a = first.iter().rev();
     let mut b = second.iter().rev();
     let mut parent = None;
@@ -516,9 +506,7 @@ pub(super) fn precedes<T>(tree: &TreeArenas<T>, first: &Chain, second: &Chain) -
         match (a.next(), b.next()) {
             (Some(x), Some(y)) if x == y => parent = Some(*x),
             (Some(x), Some(y)) => {
-                let Some(parent) = parent else {
-                    return false;
-                };
+                let parent = parent.expect("both chains end at the document node");
                 let children = tree.at(parent).flat_children();
                 let index = |id: &NodeId| children.iter().position(|child| child == id);
                 return index(x) < index(y);
@@ -617,21 +605,21 @@ pub(crate) fn target_anchor<'t, T>(
     for &candidate in candidates {
         #[cfg(test)]
         CANDIDATES_EXAMINED.with(|count| count.set(count.get() + 1));
-        let Some(node) = tree.get(candidate) else {
-            continue;
-        };
+        let node = tree.at(candidate);
         if node.id() == query.node.id() {
             continue;
         }
         let Some(style) = node.layout_computed_style() else {
             continue;
         };
-        // "el is an anchor element with an anchor name of anchor spec" and
-        // "el's anchor name loosely matches anchor spec".
+        // "el is an anchor element with an anchor name of anchor spec" — the
+        // registry lists only those — and "el's anchor name loosely matches
+        // anchor spec".
         let anchor_name = &style.get_box().anchor_name;
-        if !anchor_name.value.0.iter().any(|own| own.0 == *atom) {
-            continue;
-        }
+        debug_assert!(
+            anchor_name.value.0.iter().any(|own| own.0 == *atom),
+            "the registry lists an element under a name it declares"
+        );
         let declared_tree = node.scoped_name_tree(anchor_name.scope);
         if !loosely_matches(tree, declared_tree, reference_tree) {
             continue;
@@ -690,9 +678,7 @@ fn scoped_candidates<T>(
     if entry.0 != generation {
         entry.1.clear();
         for &definer in registry.definers(name) {
-            let Some(node) = tree.get(definer) else {
-                continue;
-            };
+            let node = tree.at(definer);
             let declared_tree = node
                 .layout_computed_style()
                 .map(|style| node.scoped_name_tree(style.get_box().anchor_name.scope));
@@ -714,10 +700,9 @@ fn scoped_candidates<T>(
     if let Some(unscoped) = entry.1.get(&None) {
         candidates.extend_from_slice(unscoped);
     }
+    // Buckets are keyed by scopers only.
     for &ancestor in query.chain.iter().skip(1) {
-        if registry.is_scoper(ancestor)
-            && let Some(bucket) = entry.1.get(&Some(ancestor))
-        {
+        if let Some(bucket) = entry.1.get(&Some(ancestor)) {
             candidates.extend_from_slice(bucket);
         }
     }
@@ -804,9 +789,7 @@ fn scopes<T>(tree: &TreeArenas<T>, id: NodeId, name: &Atom, name_tree: Option<No
     if !tree.anchors().is_scoper(id) {
         return false;
     }
-    let Some(node) = tree.get(id) else {
-        return false;
-    };
+    let node = tree.at(id);
     let Some(style) = node.layout_computed_style() else {
         return false;
     };
@@ -826,7 +809,9 @@ fn acceptable<T>(
     query: &Query<'_, T>,
 ) -> bool {
     let mut current = candidate;
-    let mut current_chain = None;
+    // `current`'s chain is `chain[at..]`: a containing block's generator is
+    // a flat-tree ancestor, so its chain is a suffix of the candidate's.
+    let mut at = 0;
     loop {
         if current.id() == query.node.id() {
             return false;
@@ -839,20 +824,16 @@ fn acceptable<T>(
             if !is_absolutely_positioned(style) {
                 return true;
             }
-            let chain = match &current_chain {
-                None => chain,
-                Some(own) => own,
-            };
-            return precedes(tree, chain, &query.chain);
+            return precedes(tree, &chain[at..], &query.chain);
         }
         let Some(generator) = generator else {
             return false;
         };
+        at += chain[at..]
+            .iter()
+            .position(|&id| id == generator.id())
+            .expect("a containing block's generator is a flat-tree ancestor");
         current = generator;
-        let Some(chain) = connected_chain(current) else {
-            return false;
-        };
-        current_chain = Some(chain);
     }
 }
 
@@ -896,7 +877,7 @@ pub(crate) fn default_anchor<'t, T>(
                 Liveness::Committed(state) => state
                     .anchored
                     .get(&parent.id())
-                    .and_then(|entry| entry.outcome)
+                    .map(|entry| entry.outcome)
                     .filter(|outcome| outcome.chosen > 0)
                     .and_then(|outcome| option_style(tree, parent, outcome.chosen))
                     .unwrap_or(parent_base),
@@ -904,11 +885,10 @@ pub(crate) fn default_anchor<'t, T>(
             };
             let parent_query = Query::of(parent)?;
             let anchor = default_anchor(tree, &parent_query, parent_style, liveness)?;
+            // The recursive lookup applied `has_box` with the same liveness,
+            // and `acceptable` rejects the query box itself.
             let chain = connected_chain(anchor)?;
-            (anchor.id() != query.node.id()
-                && has_box(tree, anchor, &chain, liveness)
-                && acceptable(tree, anchor, &chain, query))
-            .then_some(anchor)
+            acceptable(tree, anchor, &chain, query).then_some(anchor)
         }
         // `normal` is `none` without a `position-area` and `auto` with one,
         // and `auto` names the implicit anchor element, which no host
@@ -943,7 +923,7 @@ fn unrounded_origin<T>(
 
 /// `anchor`'s unrounded border box in the padding-box coordinates of
 /// `containing_block` (the viewport's for `None`), unscrolled.
-pub(crate) fn layout_rect<T>(
+fn layout_rect<T>(
     tree: &TreeArenas<T>,
     state: &DocumentLayoutState,
     anchor: NodeId,
@@ -968,7 +948,7 @@ pub(crate) fn layout_rect<T>(
 /// Every scroll container on `anchor`'s containing-block chain, up to, not
 /// including, `containing_block`: the scroll containers whose offset moves
 /// the anchor relative to that containing block.
-pub(crate) fn scroll_ancestors<T>(
+fn scroll_ancestors<T>(
     anchor: &Node<T>,
     containing_block: Option<NodeId>,
 ) -> SmallVec<[NodeId; 4]> {
@@ -1000,10 +980,7 @@ fn stored_displacement<T>(
     anchor: NodeId,
     containing_block: Option<NodeId>,
 ) -> Vector2D<f32> {
-    let Some(node) = tree.get(anchor) else {
-        return Vector2D::zero();
-    };
-    scroll_ancestors(node, containing_block)
+    scroll_ancestors(tree.at(anchor), containing_block)
         .iter()
         .fold(Vector2D::zero(), |sum, &scroller| {
             // Clamped the way `Document::scroll_offset` clamps it, against
@@ -1027,7 +1004,7 @@ fn stored_displacement<T>(
 /// point recorded one (and for an option being *tried*, §6.5.2's
 /// hypothetical recalculation point, which a scroll-driven re-determination
 /// makes of every option), by the displacement the stored offsets give now.
-pub(crate) fn anchor_rect_of<T>(
+fn anchor_rect_of<T>(
     tree: &TreeArenas<T>,
     state: &DocumentLayoutState,
     query: &Query<'_, T>,
@@ -1059,7 +1036,7 @@ pub(crate) fn anchor_rect_of<T>(
 /// last committing run recorded it before laying its out-of-flow boxes out
 /// (the current run's, when the box is being laid out by that container's
 /// absolute pass). `None` when the generator is not a scroll container.
-pub(crate) fn scrollable_containing_block<T>(
+fn scrollable_containing_block<T>(
     tree: &TreeArenas<T>,
     state: &DocumentLayoutState,
     containing_block: Option<NodeId>,
@@ -1112,8 +1089,15 @@ pub(crate) fn scrolls_with_default<T>(
 /// anchor's edges. Only an `auto` inset's containing-block edge constrains
 /// the shifted box, as in Blink (`CalculateNonOverflowingRangeInOneAxis`):
 /// a carried edge keeps the relation it was laid out with.
+///
+/// At a zero shift the answer is the outcome's own: whether the box fit as
+/// laid out, after position fallback, which also carries `hughie`'s
+/// negative-size correction.
 pub(crate) fn fits_shifted(outcome: &AnchorOutcome, shift: Vector2D<f32>) -> bool {
     const SLACK: f32 = 1.0 / 64.0;
+    if shift == Vector2D::zero() {
+        return !outcome.overflows;
+    }
     let (imcb, margin_box, carried) = (outcome.imcb, outcome.margin_box, outcome.carried_edges);
     let moved = |carried: bool, edge: f32, by: f32| if carried { edge + by } else { edge };
     let left = moved(carried.left, imcb.origin.x, shift.x);
@@ -1125,6 +1109,53 @@ pub(crate) fn fits_shifted(outcome: &AnchorOutcome, shift: Vector2D<f32>) -> boo
         && y >= top - SLACK
         && x + margin_box.size.width <= right + SLACK
         && y + margin_box.size.height <= bottom + SLACK
+}
+
+/// `v` with the axes a box does not compensate in (§3.3,
+/// [`AnchorOutcome::compensates`]) zeroed.
+pub(crate) fn mask(compensates: Size<bool>, v: Vector2D<f32>) -> Vector2D<f32> {
+    Vector2D::new(
+        if compensates.width { v.x } else { 0.0 },
+        if compensates.height { v.y } else { 0.0 },
+    )
+}
+
+/// How a scroll-adjustment ancestor moves an anchor (§3.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ScrollAdjust {
+    /// A scroll container: by minus its scroll offset.
+    Scroll,
+    /// A sticky box, the anchor included: by its sticky shift.
+    Sticky,
+}
+
+/// `anchor`'s scroll-adjustment ancestors relative to `containing_block`,
+/// nearest first: walking `anchor`'s containing-block chain up to, not
+/// including, `containing_block`, every scroll container other than the
+/// anchor itself and every sticky box, the anchor included. A box that is
+/// both yields its scroll entry first. [`RememberedScroll`]'s displacement
+/// is the sum of their moves.
+pub(crate) fn scroll_adjustment_ancestors<T>(
+    document: &crate::tree::document::Document<T>,
+    anchor: NodeId,
+    containing_block: Option<NodeId>,
+) -> impl Iterator<Item = (NodeId, ScrollAdjust)> + '_ {
+    std::iter::successors(document.get(anchor), |&step| {
+        containing_block_generator(step)
+    })
+    .take_while(move |step| Some(step.id()) != containing_block)
+    .flat_map(move |step| {
+        let style = step.layout_computed_style();
+        let scroll = step.id() != anchor && style.is_some_and(crate::scroll::is_scroll_container);
+        let sticky = style.is_some_and(|style| style.clone_position() == PositionProperty::Sticky);
+        [
+            (scroll, ScrollAdjust::Scroll),
+            (sticky, ScrollAdjust::Sticky),
+        ]
+        .into_iter()
+        .filter(|&(applies, _)| applies)
+        .map(move |(_, adjust)| (step.id(), adjust))
+    })
 }
 
 /// The option style `option` names for `node`: its base style for `0`.
@@ -1258,7 +1289,7 @@ fn fallback_sensitive_difference(old: &ComputedValues, new: &ComputedValues) -> 
 /// Whether two styles differ in an accepted `@position-try` property
 /// (§6.3): insets, margins, sizes and min/max sizes, `justify-self`,
 /// `align-self`, `position-anchor`, `position-area`.
-pub(crate) fn accepted_properties_differ(old: &ComputedValues, new: &ComputedValues) -> bool {
+fn accepted_properties_differ(old: &ComputedValues, new: &ComputedValues) -> bool {
     let (a, b) = (old.get_position(), new.get_position());
     let position = !std::ptr::eq(a, b)
         && (a.top != b.top
@@ -1375,7 +1406,9 @@ impl<T: Sync> crate::tree::document::Document<T> {
                     )
                 }
             };
-            self.arenas_mut().anchors_mut().set_options(id, options);
+            if let Some(options) = options {
+                self.arenas_mut().anchors_mut().options.insert(id, options);
+            }
             if sensitive
                 && source == RestyleSource::Flush
                 && let Some(entry) = self.layout_state_mut().anchored.get_mut(&id)
@@ -1384,8 +1417,9 @@ impl<T: Sync> crate::tree::document::Document<T> {
                 entry.fallback_sensitive = true;
             }
             // A changed option reaches layout through no damage of the base
-            // style when only an `@position-try` rule moved.
-            if options_moved && self.get(id).is_some() {
+            // style when only an `@position-try` rule moved. Every id here
+            // is live: it has a style, or options a free would have dropped.
+            if options_moved {
                 self.invalidate_layout(id);
                 invalidated = true;
             }
@@ -1497,7 +1531,7 @@ impl<T> crate::tree::document::Document<T> {
     /// the painter (scroll compensation, `position-visibility`) and readback.
     #[must_use]
     pub(crate) fn anchor_outcome(&self, id: NodeId) -> Option<&AnchorOutcome> {
-        self.layout_state().anchored.get(&id)?.outcome.as_ref()
+        Some(&self.layout_state().anchored.get(&id)?.outcome)
     }
 
     /// `id`'s remembered scroll offsets (§3.3), recorded at its last anchor
@@ -1505,21 +1539,6 @@ impl<T> crate::tree::document::Document<T> {
     #[must_use]
     pub(crate) fn remembered_scroll(&self, id: NodeId) -> Option<&RememberedScroll> {
         self.layout_state().anchored.get(&id)?.remembered.as_ref()
-    }
-
-    /// Every anchor-positioned box with its state, in no particular order.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the painter's scroll compensation and position-visibility read it"
-        )
-    )]
-    pub(crate) fn anchored_boxes(&self) -> impl Iterator<Item = (NodeId, &AnchoredBox)> {
-        self.layout_state()
-            .anchored
-            .iter()
-            .map(|(&id, entry)| (id, entry))
     }
 
     /// The element generating `id`'s containing block — the frame its
@@ -1534,33 +1553,21 @@ impl<T> crate::tree::document::Document<T> {
     /// [`RememberedScroll`] remembers. Reads the stored scroll offsets and
     /// the rounded boxes of the last run.
     #[must_use]
-    pub(crate) fn anchor_displacement(
+    fn anchor_displacement(
         &self,
         anchor: NodeId,
         containing_block: Option<NodeId>,
     ) -> Vector2D<f32> {
-        let Some(node) = self.get(anchor) else {
-            return Vector2D::zero();
-        };
-        let mut displacement = Vector2D::zero();
         let mut sampled = Vec::new();
-        let mut current = Some(node);
-        while let Some(step) = current {
-            if Some(step.id()) == containing_block {
-                break;
-            }
-            if let Some(style) = step.layout_computed_style() {
-                if step.id() != anchor && crate::scroll::is_scroll_container(style) {
-                    displacement -= self.scroll_offset(step.id());
+        scroll_adjustment_ancestors(self, anchor, containing_block).fold(
+            Vector2D::zero(),
+            |displacement, (id, adjust)| match adjust {
+                ScrollAdjust::Scroll => displacement - self.scroll_offset(id),
+                ScrollAdjust::Sticky => {
+                    displacement + crate::visual::sticky::live_offset(self, id, &mut sampled)
                 }
-                if style.clone_position() == PositionProperty::Sticky {
-                    displacement +=
-                        crate::visual::sticky::live_offset(self, step.id(), &mut sampled);
-                }
-            }
-            current = containing_block_generator(step);
-        }
-        displacement
+            },
+        )
     }
 
     /// The position option style `id` was last laid out with, when that is
@@ -1640,9 +1647,7 @@ impl<T> crate::tree::document::Document<T> {
                 .keys()
                 .copied()
                 .filter(|&id| {
-                    let Some(node) = tree.get(id) else {
-                        return true;
-                    };
+                    let node = tree.at(id);
                     if state.get(id).is_none_or(|entry| entry.slot.is_hidden()) {
                         return true;
                     }
@@ -1676,9 +1681,7 @@ impl<T> crate::tree::document::Document<T> {
         let Some(entry) = self.layout_state().anchored.get(&id) else {
             return;
         };
-        let Some(outcome) = entry.outcome else {
-            return;
-        };
+        let outcome = entry.outcome;
         let chosen = outcome.chosen;
         // A scroll-driven re-determination laid every option out at the
         // current offsets, the one it kept included, so what it committed
@@ -1688,45 +1691,45 @@ impl<T> crate::tree::document::Document<T> {
                 .remembered
                 .as_ref()
                 .is_none_or(|remembered| remembered.option != chosen);
-        let mut targets: SmallVec<[NodeId; 2]> = entry
+        let previous = if recalculate {
+            None
+        } else {
+            entry.remembered.clone()
+        };
+        // A scrollable-containing-block read has no target.
+        let targets: SmallVec<[NodeId; 2]> = entry
             .reads
             .iter()
-            .filter(|read| read.option == chosen && read.query != AnchorQuery::Scrollable)
+            .filter(|read| read.option == chosen)
             .filter_map(|read| read.target)
             .collect();
         let default = {
             let (tree, state) = self.visual_parts();
-            tree.get(id).and_then(|node| {
-                let query = Query::of(node)?;
+            let node = tree.at(id);
+            Query::of(node).and_then(|query| {
                 let style = option_style(tree, node, chosen)?;
                 default_anchor(tree, &query, style, Liveness::Committed(state)).map(Node::id)
             })
         };
-        if let Some(default) = default
-            && !targets.contains(&default)
-        {
-            targets.push(default);
-        }
         let containing_block = self.anchor_containing_block(id);
-        let previous = if recalculate {
-            None
-        } else {
-            self.layout_state()
-                .anchored
-                .get(&id)
-                .and_then(|entry| entry.remembered.clone())
-        };
         let mut remembered = previous.unwrap_or_else(|| RememberedScroll {
             option: chosen,
             ..RememberedScroll::default()
         });
-        remembered.default = default;
-        for target in targets {
-            if remembered.displacement_of(target).is_none() {
+        // `target`'s remembered displacement, remembering the current one
+        // when it has none yet.
+        let remember = |remembered: &mut RememberedScroll, target: NodeId| {
+            remembered.displacement_of(target).unwrap_or_else(|| {
                 let displacement = self.anchor_displacement(target, containing_block);
                 remembered.anchors.push((target, displacement));
-            }
+                displacement
+            })
+        };
+        for target in targets {
+            remember(&mut remembered, target);
         }
+        let default = default.map(|default| (default, remember(&mut remembered, default)));
+        remembered.default = default;
         if let Some(entry) = self.layout_state_mut().anchored.get_mut(&id) {
             entry.remembered = Some(remembered);
             entry.redetermine = false;
@@ -1751,10 +1754,7 @@ impl<T> crate::tree::document::Document<T> {
         ratio: Option<f32>,
     ) -> Option<Vector2D<f32>> {
         let entry = self.layout_state().anchored.get(&id)?;
-        let outcome = entry.outcome?;
-        let remembered = entry.remembered.as_ref()?;
-        let default = remembered.default?;
-        let then = remembered.displacement_of(default)?;
+        let (default, then) = entry.remembered.as_ref()?.default?;
         let now = self.anchor_displacement(default, self.anchor_containing_block(id));
         let shift = match ratio {
             Some(ratio) => {
@@ -1763,18 +1763,7 @@ impl<T> crate::tree::document::Document<T> {
             }
             None => now - then,
         };
-        Some(Vector2D::new(
-            if outcome.compensates.width {
-                shift.x
-            } else {
-                0.0
-            },
-            if outcome.compensates.height {
-                shift.y
-            } else {
-                0.0
-            },
-        ))
+        Some(mask(entry.outcome.compensates, shift))
     }
 
     /// css-anchor-position-1 §6.5 on scroll: "When a positioned box (after
@@ -1796,36 +1785,28 @@ impl<T> crate::tree::document::Document<T> {
         if self.layout_state().anchored.is_empty() {
             return false;
         }
-        let candidates: SmallVec<[NodeId; 4]> = {
+        let candidates: SmallVec<[(NodeId, AnchorOutcome); 4]> = {
             let (tree, state) = self.visual_parts();
             state
                 .anchored
                 .iter()
-                .filter(|&(&id, entry)| {
-                    !entry.redetermine
-                        && entry.outcome.is_some()
-                        && tree.anchors().has_fallbacks(id)
-                })
-                .map(|(&id, _)| id)
+                .filter(|&(&id, entry)| !entry.redetermine && tree.anchors().has_fallbacks(id))
+                .map(|(&id, entry)| (id, entry.outcome))
                 .collect()
         };
         let mut due: SmallVec<[NodeId; 2]> = SmallVec::new();
         let ratio = self.device_pixel_ratio();
-        for id in candidates {
+        for (id, outcome) in candidates {
             let Some(shift) = self.default_scroll_shift(id, Some(ratio)) else {
                 continue;
             };
-            let Some(outcome) = self.anchor_outcome(id).copied() else {
-                continue;
-            };
-            let fits = if shift == Vector2D::zero() {
-                !outcome.overflows
-            } else {
-                fits_shifted(&outcome, shift)
-            };
-            let Some(entry) = self.layout_state_mut().anchored.get_mut(&id) else {
-                continue;
-            };
+            let fits = fits_shifted(&outcome, shift);
+            // Nothing removes an entry between the collection and here.
+            let entry = self
+                .layout_state_mut()
+                .anchored
+                .get_mut(&id)
+                .expect("a candidate keeps its entry");
             if std::mem::replace(&mut entry.fits_scrolled, fits) && !fits {
                 entry.redetermine = true;
                 due.push(id);
@@ -1865,11 +1846,10 @@ impl<T> crate::tree::document::Document<T> {
     pub(crate) fn record_last_successful_options(&mut self) {
         let (tree, state, _) = self.layout_parts();
         for (&id, entry) in &mut state.anchored {
-            let has_options = tree.anchors().has_fallbacks(id);
-            entry.last_successful = entry
-                .outcome
-                .filter(|_| has_options)
-                .map(|outcome| outcome.chosen);
+            entry.last_successful = tree
+                .anchors()
+                .has_fallbacks(id)
+                .then_some(entry.outcome.chosen);
         }
     }
 
@@ -1887,9 +1867,7 @@ impl<T> crate::tree::document::Document<T> {
         }
         let liveness = Liveness::Relevance { unskipped: element };
         state.anchored.iter().any(|(&id, entry)| {
-            let Some(node) = tree.get(id) else {
-                return false;
-            };
+            let node = tree.at(id);
             if state.get(id).is_none_or(|slot| slot.slot.is_hidden()) {
                 return false;
             }
@@ -1950,7 +1928,6 @@ mod tests {
         assert_eq!(runs, 1, "no settle run for a page without anchors");
         assert!(doc.dom.arenas().anchors().is_empty());
         assert!(doc.dom.layout_state().anchored.is_empty());
-        assert_eq!(doc.dom.anchored_boxes().count(), 0);
     }
 
     #[test]
@@ -2003,7 +1980,7 @@ mod tests {
         let anchored = doc.el(cb, "view.anchored");
         doc.flush();
         let remembered = doc.dom.remembered_scroll(anchored).expect("recorded");
-        assert_eq!(remembered.default, Some(anchor));
+        assert_eq!(remembered.default, Some((anchor, Vector2D::zero())));
         assert_eq!(remembered.displacement_of(anchor), Some(Vector2D::zero()));
         let outcome = doc.dom.anchor_outcome(anchored).expect("reported");
         assert!(!outcome.default_anchor_missing);
@@ -2127,8 +2104,9 @@ mod tests {
     /// relaying `hop{k}` dirties `ring{k}` only (a strict boundary's size does
     /// not depend on its content), so every run moves exactly one more hop
     /// and leaves the next one served from the cache. Two stale hops is
-    /// the three-hop chain `--hop0` → `hop1` → `hop2`; nine runs is more than
-    /// the six the removed constant allowed.
+    /// the three-hop chain `--hop0` → `hop1` → `hop2`; eight is deep enough
+    /// that a bound tied to a small fixed run count rather than to the boxes
+    /// would stop short of settling.
     #[test]
     fn each_stale_hop_of_an_anchor_chain_costs_one_run() {
         use std::fmt::Write as _;
@@ -2365,7 +2343,6 @@ mod tests {
         doc.set_inline(target, "top: 5px");
         doc.dom.layout();
         assert!(doc.dom.anchor_outcome(target).is_none());
-        assert!(!doc.dom.layout_state().anchored.contains_key(&target));
     }
 
     /// `match-parent` matches the default anchor of the option its parent

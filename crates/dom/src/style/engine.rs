@@ -207,9 +207,7 @@ impl StyleEngine {
         let changed = &invalidations
             .cascade_data_difference
             .changed_position_try_names;
-        if !changed.is_empty() {
-            pending.extend(changed.iter().cloned());
-        }
+        pending.extend(changed.iter().cloned());
     }
 
     /// Takes the `@position-try` names changed since the last call.

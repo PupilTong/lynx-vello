@@ -26,7 +26,6 @@
 //!   above it. The rounding tail places those boxes ([`places_late`]), with the same function the
 //!   containing block's pass would have used, so a box comes out the same either way.
 
-use hughie::compute::compute_hoisted_layout;
 use hughie::geometry::Point;
 use hughie::style::{CoreStyle, PositionProperty};
 use hughie::tree::{HoistedChild, Layout, LayoutTree};
@@ -85,9 +84,8 @@ pub(super) fn children_of<T>(
     };
     let mut found: SmallVec<[(NodeSlot, NodeSlot, super::anchors::Chain); 2]> = SmallVec::new();
     for &node in listed {
-        let Some(hoisted) = tree.get(node) else {
-            continue;
-        };
+        // A free unlists the box (`DocumentLayoutState::remove`).
+        let hoisted = tree.at(node);
         if hoisting_block(hoisted) != Some(block) {
             continue;
         }
@@ -97,9 +95,12 @@ pub(super) fn children_of<T>(
         // The child of `block` the box sits under, as the flattened child
         // list names it: the first box below `block` on the chain, a
         // `display: contents` level being spliced into its parent's list.
-        let Some(at) = chain.iter().position(|&id| id == block) else {
-            continue;
-        };
+        // `hoisting_block` found `block` on the chain, and the box itself
+        // is not `display: contents`.
+        let at = chain
+            .iter()
+            .position(|&id| id == block)
+            .expect("`hoisting_block` found the block on the chain");
         let via = chain[..at]
             .iter()
             .rev()
@@ -109,18 +110,16 @@ pub(super) fn children_of<T>(
                     .and_then(Node::layout_computed_style)
                     .is_none_or(|style| !style.clone_display().is_contents())
             })
-            .unwrap_or(node);
+            .expect("the hoisted box itself generates a box");
         found.push((node, via, chain));
     }
-    if found.len() > 1 {
-        found.sort_by(|(_, _, a), (_, _, b)| {
-            if precedes(tree, a, b) {
-                std::cmp::Ordering::Less
-            } else {
-                std::cmp::Ordering::Greater
-            }
-        });
-    }
+    found.sort_by(|(_, _, a), (_, _, b)| {
+        if precedes(tree, a, b) {
+            std::cmp::Ordering::Less
+        } else {
+            std::cmp::Ordering::Greater
+        }
+    });
     // Tree order is the order of the vias' subtrees, so one walk over the
     // flattened children numbers them all.
     let mut children = SmallVec::with_capacity(found.len());
@@ -173,10 +172,9 @@ pub(super) fn commit<T>(
     mut layout: Layout,
 ) {
     let hoisted = tree.at(node);
-    let Some(parent) = hoisted.flat_parent_slot() else {
-        tree.layout_mut(state, node).set_unrounded(layout);
-        return;
-    };
+    let parent = hoisted
+        .flat_parent_slot()
+        .expect("a hoisted box has an element parent (`hoisting_block`)");
     let ordering_parent = box_parent(hoisted).map_or(parent, Node::slot);
     layout.order = super::host::sibling_paint_order(tree, ordering_parent, node);
     tree.layout_mut(state, node).set_unrounded(layout);
@@ -218,25 +216,12 @@ pub(super) fn places_late<T>(
     false
 }
 
-/// Places `node` against `block` from the tail; see [`places_late`].
-pub(super) fn place_late<T>(
-    tree: &TreeArenas<T>,
-    state: &mut DocumentLayoutState,
-    block: NodeSlot,
-    node: NodeSlot,
-) {
-    compute_hoisted_layout(tree, state, block, node);
-}
-
 impl<T> Document<T> {
     /// Lays every listed hoisted box inside the subtree at `root` out again:
     /// the subtree moved — inserted elsewhere, or reslotted — with its
     /// caches, so the parents inside it will not record again, and its
     /// boxes may escape to another containing block now.
     pub(crate) fn invalidate_hoisted_under(&mut self, root: NodeId) {
-        if self.layout_state().hoisted_to.is_empty() {
-            return;
-        }
         let inside: SmallVec<[NodeId; 4]> = {
             let tree = self.arenas();
             self.layout_state()

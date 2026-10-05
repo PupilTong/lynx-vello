@@ -657,10 +657,8 @@ impl DocumentLayoutState {
         if !self.anchored.is_empty() {
             self.anchored.remove(&slot);
         }
-        if !self.hoisted_to.is_empty() {
-            self.register_hoisted(slot, None);
-            self.hoisted_to.remove(&slot);
-        }
+        self.register_hoisted(slot, None);
+        self.hoisted_to.remove(&slot);
         if !self.scrollable_containing_blocks.is_empty() {
             self.scrollable_containing_blocks.remove(&slot);
         }

@@ -339,9 +339,6 @@ impl AnchoredSlot {
 
 impl OverflowTest {
     fn overflows_at(self, shift: Vector2D<f32>) -> bool {
-        if shift == Vector2D::zero() {
-            return self.outcome.overflows;
-        }
         !fits_shifted(&self.outcome, shift)
     }
 }
@@ -506,7 +503,7 @@ impl PaintOrder {
         // Each default anchor's own box item.
         let mut anchors: FxHashMap<NodeId, Option<usize>> = FxHashMap::default();
         for slot in &self.anchored {
-            if let Some(default) = document
+            if let Some((default, _)) = document
                 .remembered_scroll(slot.node)
                 .and_then(|remembered| remembered.default)
             {
@@ -576,8 +573,13 @@ impl PaintOrder {
         let Some(outcome) = document.anchor_outcome(node).copied() else {
             return;
         };
-        let remembered = document.remembered_scroll(node);
-        let default = remembered.and_then(|remembered| remembered.default);
+        let (default, remembered_default) = match document
+            .remembered_scroll(node)
+            .and_then(|remembered| remembered.default)
+        {
+            Some((anchor, displacement)) => (Some(anchor), displacement),
+            None => (None, Vector2D::zero()),
+        };
         let containing_block = document.anchor_containing_block(node);
 
         let compensating = outcome.compensates.width || outcome.compensates.height;
@@ -587,9 +589,6 @@ impl PaintOrder {
             containing_block,
             sticky_index,
         );
-        let remembered_default = default
-            .and_then(|anchor| remembered?.displacement_of(anchor))
-            .unwrap_or_default();
 
         // §6.6 `anchor-valid`.
         let mut hidden = visibility.contains(PositionVisibility::ANCHORS_VALID)
