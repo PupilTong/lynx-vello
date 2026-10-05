@@ -806,6 +806,18 @@ consequential choice about whether to follow the spec or the quirk.
   native-Lynx gate is documented as a config-gated fallback design
   (doctored parent `ComputedValues`, allowlist mask) but not implemented.
   Custom properties inherit unconditionally in both worlds.
+  **The premise no longer holds for the flag set to `true` (found
+  2026-10-06):** since lynx-stack #3907 (`8d0b358bf`, 2026-09-11) web-core
+  writes `lynx-enable-css-inheritance="true"` on the page and
+  `web-core/css/in_shadow.css` then lets a `<text>` directly under a `<view>`
+  inherit `color`, the gradient text colour and a typography list. This engine
+  still resets `color` unconditionally (`text { color: initial }` in
+  `crates/bobcat-core/src/main/tree/text.rs`) and reads no such flag, so
+  `config-css-inheritance-true` in the web-core-e2e corpus paints black where
+  native and web-core both paint the view's red. The decision above was made
+  against a web-core that ignored the flag and has not been looked at again;
+  the corpus's three `config-css-inheritance-*` cards stay pending until it
+  is.
   **Landed 2026-08-21** in `bobcat_core::tree`'s UA sheet, which had carried
   the decision unimplemented until then — until it landed an ancestor `view`'s
   `color` really did reach the text under it. The port is `color: initial` on
