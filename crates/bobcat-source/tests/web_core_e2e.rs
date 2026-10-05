@@ -116,8 +116,12 @@ async fn first_screen(case: &str) -> Image {
         for event in view.pump() {
             match event {
                 EngineEvent::ScriptFinished => settling_until = Some(Instant::now() + SETTLE),
-                EngineEvent::ConsoleMessage { level, message } => {
-                    eprintln!("[{level}] {message}");
+                EngineEvent::ConsoleMessage {
+                    level,
+                    message,
+                    source,
+                } => {
+                    eprintln!("[{level}] [{source:?}] {message}");
                 }
                 // A card that reports an error still has a first screen, and
                 // whether that screen is right is what the reader judged, so
