@@ -119,17 +119,14 @@ impl PaintOrder {
         let (x0, x1) = slot.axes[0].offset_bounds();
         let (y0, y1) = slot.axes[1].offset_bounds();
         let transform = &slot.parent_transform;
-        let axis = |a: f32, b: f32| {
-            let x = [a * x0, a * x1];
-            let y = [b * y0, b * y1];
-            (
-                x[0].min(x[1]) + y[0].min(y[1]),
-                x[0].max(x[1]) + y[0].max(y[1]),
-            )
-        };
-        let (low_x, high_x) = axis(transform.m11, transform.m21);
-        let (low_y, high_y) = axis(transform.m12, transform.m22);
-        (Vector2D::new(low_x, low_y), Vector2D::new(high_x, high_y))
+        super::space::linear_range(
+            [
+                Vector2D::new(transform.m11, transform.m12),
+                Vector2D::new(transform.m21, transform.m22),
+            ],
+            Vector2D::new(x0, y0),
+            Vector2D::new(x1, y1),
+        )
     }
 
     /// A conservative range for content movement relative to its effect group.

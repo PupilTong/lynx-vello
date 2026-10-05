@@ -848,11 +848,7 @@ pub(crate) fn replay_ops(
                 space,
             } => {
                 let transform = device_transform(*space);
-                // A space `position-visibility` hides is the zero map, and
-                // content collapsed to a point draws nothing.
-                if transform.determinant() != 0.0 {
-                    scene.append(&fragments[*fragment as usize], Some(transform));
-                }
+                scene.append(&fragments[*fragment as usize], Some(transform));
             }
             ComposeOp::Push {
                 clip_only,
@@ -886,9 +882,7 @@ pub(crate) fn replay_ops(
             }
             ComposeOp::Image { index: draw, space } => {
                 let transform = device_transform(*space);
-                if transform.determinant() != 0.0 {
-                    encode_draw(scene, image_draws, images, *draw, transform);
-                }
+                encode_draw(scene, image_draws, images, *draw, transform);
             }
             ComposeOp::Pop => scene.pop_layer(),
             ComposeOp::PushFilter { index: group } => {

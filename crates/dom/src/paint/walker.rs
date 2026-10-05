@@ -2309,8 +2309,11 @@ fn into_group(
 
 /// `bounds`, in `from`'s coordinates, carried into `into`'s: forward through
 /// every node from `from` out to the two spaces' common ancestor — a scroll
-/// node over its encode window, a sticky node over its range, a transform
-/// curve over its [`Reach`](crate::visual::reach::Reach) — then pulled back
+/// node over its encode window, a sticky node over its range, an anchored
+/// node over its default scroll shift's range
+/// ([`PaintOrder::anchored_slot_range`]), a visibility node unchanged (it
+/// moves nothing), a transform curve over its
+/// [`Reach`](crate::visual::reach::Reach) — then pulled back
 /// from there into `into`. The forward carry is bounded whatever a curve's
 /// scale range; the pullback is [`Admitted::Everything`] through a scale
 /// range reaching 0.

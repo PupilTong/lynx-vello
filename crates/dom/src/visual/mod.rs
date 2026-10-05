@@ -849,9 +849,11 @@ impl<T: Sync> Document<T> {
     /// Renders only when the retained frame no longer represents the current
     /// document state. Returns whether a new frame was built.
     pub fn render(&mut self) -> bool {
-        // css-anchor-position-1 §6.5 after a scroll this document took
-        // without the main loop's adoption asking (a caller driving the
-        // document directly): one `is_empty` test on a page without
+        // css-anchor-position-1 §6.5 after a scroll. The embedder path
+        // already asked when it adopted the painter's offsets
+        // (`adopt_scroll_offsets`); this serves a document driven without
+        // that marker, and repeats at most one cheap walk per candidate
+        // otherwise — one `is_empty` test on a page without
         // anchor-positioned boxes.
         self.redetermine_scrolled_fallbacks();
         if !self.needs_render() {

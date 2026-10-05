@@ -6,7 +6,7 @@
 use euclid::default::Vector2D;
 use hughie::geometry::Edges;
 use hughie::style::PositionProperty;
-use stylo::values::computed::{Inset, Margin};
+use stylo::values::computed::Margin;
 
 use crate::NodeId;
 use crate::layout::box_parent;
@@ -98,13 +98,6 @@ impl StickyAxis {
             },
         )
     }
-}
-
-/// A sticky box is not absolutely positioned, so an `anchor-size()` inset
-/// takes its fallback, or leaves the side `auto` without one
-/// ([`hughie::compute::used_inset`]).
-fn inset(value: &Inset, basis: f32) -> Option<f32> {
-    hughie::compute::used_inset(value, Some(basis))
 }
 
 fn origin<T>(document: &Document<T>, id: NodeId) -> Vector2D<f32> {
@@ -274,8 +267,11 @@ pub(crate) fn axes<T>(
             size,
             min_offset: cb_start + start_margin - normal,
             max_offset: cb_end - end_margin - normal - size,
-            inset_start: inset(low, scrollport_size),
-            inset_end: inset(high, scrollport_size),
+            // A sticky box is not absolutely positioned, so an
+            // `anchor-size()` inset takes its fallback, or leaves the side
+            // `auto` without one.
+            inset_start: hughie::compute::used_inset(low, Some(scrollport_size)),
+            inset_end: hughie::compute::used_inset(high, Some(scrollport_size)),
             scrollport_size,
             end_is_start: reversed[axis],
         }

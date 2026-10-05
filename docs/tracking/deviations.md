@@ -128,15 +128,6 @@ consequential choice about whether to follow the spec or the quirk.
     nothing and hits nothing, but its computed `visibility` stays what the
     cascade says (Blink's model; the ED's `visibility: force-hidden` is not
     a computed value here), and `boundingClientRect` still reports it.
-  - **Scroll-driven fallback without Blink's anti-flicker rule.** The fit
-    test after a scroll leaves a length inset's side unconstrained (as
-    Blink does), but a box flipping between two options on adjacent
-    boundaries is bounded only by one re-determination per adopted offset;
-    Blink's last-successful hysteresis is not implemented. Transforms on
-    the scrollers between anchor and containing block are ignored in the
-    default scroll shift (Chrome maps through them), and a box anchored to
-    an anchored box does not follow that box's own shift (Chrome adds the
-    chained translation; the spec adjusts for scroll containers only).
   - **No transforms in anchor geometry.** The anchor box is the layout box
     (relative offsets included), not the bounding box of its transformed
     border box.
@@ -176,7 +167,13 @@ consequential choice about whether to follow the spec or the quirk.
     remembered one, so two options with the same constraints do not
     alternate as the user scrolls; this engine tries every option but the
     current one, as §6.5 reads, and a box that overflowed in every option is
-    re-determined only after it fits again and leaves again.
+    re-determined only after it fits again and leaves again. The fit test
+    after a scroll leaves a length inset's side unconstrained (as Blink
+    does). Transforms on the scrollers between anchor and containing block
+    are ignored in the default scroll shift (Chrome maps through them), and
+    a box anchored to an anchored box does not follow that box's own shift
+    (Chrome adds the chained translation; the spec adjusts for scroll
+    containers only).
   - **Overflow limit of a grid item.** For an absolutely positioned grid
     item whose `position-area` region lies at an empty column, css-align-3
     §4.4.1.2's overflow limit is the bounding box of the inset-modified

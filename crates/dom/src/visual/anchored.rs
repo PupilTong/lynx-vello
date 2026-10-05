@@ -71,7 +71,8 @@
 
 use std::ops::Range;
 
-use euclid::default::{Point2D, Rect, Size2D, Transform3D, Vector2D};
+use euclid::default::{Point2D, Rect, Transform3D, Vector2D};
+use hughie::tree::AnchorOutcome;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use stylo::values::specified::position::PositionVisibility;
@@ -79,7 +80,7 @@ use stylo::values::specified::position::PositionVisibility;
 use super::space::{self, SpaceKind, SpaceSamples};
 use super::{PaintItemKind, PaintOrder};
 use crate::NodeId;
-use crate::layout::anchors::{containing_block_generator, fits_shifted};
+use crate::layout::anchors::{ScrollAdjust, fits_shifted, mask, scroll_adjustment_ancestors};
 use crate::paint::compose::snap_offset;
 use crate::tree::document::Document;
 use crate::vello::kurbo::{self, Affine};
@@ -88,31 +89,31 @@ use crate::vello::kurbo::{self, Affine};
 #[derive(Debug, Clone)]
 pub(crate) struct AnchoredSlot {
     /// The anchor-positioned box.
-    pub(crate) node: NodeId,
+    node: NodeId,
     /// The clip chain the box itself composes in: its containing block's.
     clip: Option<usize>,
     /// The containing block's world, linear part: layout-space vectors to
     /// viewport CSS px, as a sticky slot's `parent_transform`.
     linear: [Vector2D<f32>; 2],
-    /// §3.3 per physical axis.
-    compensates: [bool; 2],
+    /// The box's outcome as laid out: §3.3's per-axis compensation, and
+    /// what `no-overflow` compares, in the containing block's layout space
+    /// ([`fits_shifted`]).
+    outcome: AnchorOutcome,
     /// The box's `position-visibility`.
     visibility: PositionVisibility,
+    /// The default anchor with its remembered displacement, unsnapped.
+    default: Option<(NodeId, Vector2D<f32>)>,
     /// The scroll and sticky slots between the default anchor and the
     /// box's containing block, as a range of [`PaintOrder::anchor_links`].
     links: Range<u32>,
     /// The displacement of the ancestors with no slot: `fixed` in the
     /// module formula.
     fixed: Vector2D<f32>,
-    /// The default anchor's remembered displacement, unsnapped.
-    remembered: Vector2D<f32>,
     /// `anchor-valid` failed, or `anchor-visible` found the anchor not
     /// `visible`: hidden whatever the offsets.
     hidden: bool,
     /// `anchor-visible`'s live test, where one is due.
     probe: Option<AnchorProbe>,
-    /// `no-overflow`'s live test, where one is due.
-    overflow: Option<OverflowTest>,
     /// Whether [`Self::probe`] reads a space a transform curve moves, or one
     /// an anchored slot that does hides: the hidden state changes with the
     /// timeline reading as well as with the offsets.
@@ -132,21 +133,10 @@ pub(crate) enum AnchorLink {
 /// anchored box's containing block.
 #[derive(Debug, Clone)]
 struct AnchorProbe {
-    transform: Transform3D<f32>,
-    size: Size2D<f32>,
-    space: Option<u32>,
+    /// The anchor's own box item in [`PaintOrder::items`].
+    item: u32,
     /// A range of [`PaintOrder::anchor_clips`].
     clips: Range<u32>,
-}
-
-/// What `no-overflow` compares, in the containing block's layout space:
-/// the outcome's inset-modified containing block, margin box and carried
-/// edges, and whether the box overflowed as laid out, after position
-/// fallback — the answer at a zero shift, which also carries `hughie`'s
-/// negative-size correction.
-#[derive(Debug, Clone, Copy)]
-struct OverflowTest {
-    outcome: hughie::tree::AnchorOutcome,
 }
 
 /// One anchored slot's sampled values.
@@ -185,22 +175,24 @@ impl AnchoredSample {
 /// Whether a box with `outcome` and `visibility` needs an anchored node:
 /// it compensates on some axis, or a `position-visibility` predicate can
 /// hide it.
-fn needs_slot(
-    outcome: &hughie::tree::AnchorOutcome,
-    visibility: PositionVisibility,
-    has_default: bool,
-) -> bool {
+fn needs_slot(outcome: &AnchorOutcome, visibility: PositionVisibility, has_default: bool) -> bool {
     let compensates = outcome.compensates.width || outcome.compensates.height;
     (compensates && has_default)
-        || (visibility.contains(PositionVisibility::ANCHORS_VALID)
-            && outcome.default_anchor_missing)
+        || anchor_invalid(outcome, visibility)
         || (visibility.contains(PositionVisibility::ANCHORS_VISIBLE) && has_default)
         || visibility.contains(PositionVisibility::NO_OVERFLOW)
 }
 
+/// §6.6 `anchor-valid` hides the box: the chosen option references the
+/// default anchor and there is none.
+fn anchor_invalid(outcome: &AnchorOutcome, visibility: PositionVisibility) -> bool {
+    visibility.contains(PositionVisibility::ANCHORS_VALID) && outcome.default_anchor_missing
+}
+
 impl AnchoredSlot {
     /// The slot a build allocates for `node` when the host reported it
-    /// anchor-positioned and it needs one; the rest is bound after the walk
+    /// anchor-positioned and it needs one; its links and its
+    /// `anchor-visible` probe are bound after the walk
     /// ([`PaintOrder::bind_anchored`]).
     pub(crate) fn allocate<T>(
         document: &Document<T>,
@@ -209,12 +201,12 @@ impl AnchoredSlot {
         parent_world: &Transform3D<f32>,
         clip: Option<usize>,
     ) -> Option<Self> {
-        let outcome = document.anchor_outcome(node)?;
+        let outcome = *document.anchor_outcome(node)?;
         let visibility = style.clone_position_visibility();
-        let has_default = document
+        let default = document
             .remembered_scroll(node)
-            .is_some_and(|remembered| remembered.default.is_some());
-        if !needs_slot(outcome, visibility, has_default) {
+            .and_then(|remembered| remembered.default);
+        if !needs_slot(&outcome, visibility, default.is_some()) {
             return None;
         }
         Some(Self {
@@ -224,14 +216,13 @@ impl AnchoredSlot {
                 Vector2D::new(parent_world.m11, parent_world.m12),
                 Vector2D::new(parent_world.m21, parent_world.m22),
             ],
-            compensates: [outcome.compensates.width, outcome.compensates.height],
+            hidden: anchor_invalid(&outcome, visibility),
+            outcome,
             visibility,
+            default,
             links: 0..0,
             fixed: Vector2D::zero(),
-            remembered: Vector2D::zero(),
-            hidden: false,
             probe: None,
-            overflow: None,
             reads_timeline: false,
         })
     }
@@ -251,10 +242,14 @@ impl AnchoredSlot {
 
     /// `v` with the axes the box does not compensate in zeroed.
     fn mask(&self, v: Vector2D<f32>) -> Vector2D<f32> {
-        Vector2D::new(
-            if self.compensates[0] { v.x } else { 0.0 },
-            if self.compensates[1] { v.y } else { 0.0 },
-        )
+        mask(self.outcome.compensates, v)
+    }
+
+    /// The default anchor's remembered displacement; zero without one,
+    /// where the slot has no links either.
+    fn remembered(&self) -> Vector2D<f32> {
+        self.default
+            .map_or(Vector2D::zero(), |(_, displacement)| displacement)
     }
 
     fn map(&self, v: Vector2D<f32>) -> Vector2D<f32> {
@@ -273,7 +268,7 @@ impl AnchoredSlot {
                 AnchorLink::Sticky(slot) => live += samples.stickies.get(slot).own,
             }
         }
-        self.mask(snap_offset(live, samples.ratio) - snap_offset(self.remembered, samples.ratio))
+        self.mask(snap_offset(live, samples.ratio) - snap_offset(self.remembered(), samples.ratio))
     }
 
     /// This slot's values at `samples`, whose anchored table holds every
@@ -285,7 +280,8 @@ impl AnchoredSlot {
                 .probe
                 .as_ref()
                 .is_some_and(|probe| probe.clipped(frame, samples))
-            || self.overflow.is_some_and(|test| test.overflows_at(shift));
+            || (self.visibility.contains(PositionVisibility::NO_OVERFLOW)
+                && !fits_shifted(&self.outcome, shift));
         AnchoredSample {
             delta: self.map(shift),
             hidden,
@@ -300,7 +296,7 @@ impl AnchoredSlot {
         frame: &PaintOrder,
         windows: &[(Vector2D<f32>, Vector2D<f32>)],
     ) -> (Vector2D<f32>, Vector2D<f32>) {
-        let base = self.fixed - self.remembered;
+        let base = self.fixed - self.remembered();
         let mut low = base - Vector2D::splat(1.0);
         let mut high = base + Vector2D::splat(1.0);
         for link in &frame.anchor_links[self.links.start as usize..self.links.end as usize] {
@@ -319,27 +315,7 @@ impl AnchoredSlot {
                 }
             }
         }
-        let (low, high) = (self.mask(low), self.mask(high));
-        let x0 = self.linear[0] * low.x;
-        let x1 = self.linear[0] * high.x;
-        let y0 = self.linear[1] * low.y;
-        let y1 = self.linear[1] * high.y;
-        (
-            Vector2D::new(
-                x0.x.min(x1.x) + y0.x.min(y1.x),
-                x0.y.min(x1.y) + y0.y.min(y1.y),
-            ),
-            Vector2D::new(
-                x0.x.max(x1.x) + y0.x.max(y1.x),
-                x0.y.max(x1.y) + y0.y.max(y1.y),
-            ),
-        )
-    }
-}
-
-impl OverflowTest {
-    fn overflows_at(self, shift: Vector2D<f32>) -> bool {
-        !fits_shifted(&self.outcome, shift)
+        space::linear_range(self.linear, self.mask(low), self.mask(high))
     }
 }
 
@@ -349,10 +325,11 @@ impl AnchorProbe {
     /// or its space is degenerate — a hidden anchored box's, or one inside
     /// it (the chained case).
     fn clipped(&self, frame: &PaintOrder, samples: &SpaceSamples<'_>) -> bool {
+        let item = &frame.items[self.item as usize];
         let Some(anchor) = bounds(
-            samples.css(self.space),
-            &self.transform,
-            Rect::from_size(self.size),
+            samples.css(item.space),
+            &item.transform,
+            Rect::from_size(item.size),
         ) else {
             return true;
         };
@@ -478,14 +455,18 @@ impl PaintOrder {
             let Some(probe) = &slot.probe else {
                 continue;
             };
-            let clip_spaces = self.anchor_clips
-                [probe.clips.start as usize..probe.clips.end as usize]
-                .iter()
-                .map(|&clip| self.clips[clip as usize].space);
-            for space in std::iter::once(probe.space).chain(clip_spaces).flatten() {
+            for space in self.probe_spaces(probe).flatten() {
                 spaces[space as usize] = true;
             }
         }
+    }
+
+    /// The spaces an `anchor-visible` probe reads: its anchor's, then each
+    /// of its clips'.
+    fn probe_spaces(&self, probe: &AnchorProbe) -> impl Iterator<Item = Option<u32>> {
+        let clips = &self.anchor_clips[probe.clips.start as usize..probe.clips.end as usize];
+        std::iter::once(self.items[probe.item as usize].space)
+            .chain(clips.iter().map(|&clip| self.clips[clip as usize].space))
     }
 
     /// Binds every anchored slot the walk allocated, now that every scroll
@@ -503,10 +484,7 @@ impl PaintOrder {
         // Each default anchor's own box item.
         let mut anchors: FxHashMap<NodeId, Option<usize>> = FxHashMap::default();
         for slot in &self.anchored {
-            if let Some((default, _)) = document
-                .remembered_scroll(slot.node)
-                .and_then(|remembered| remembered.default)
-            {
+            if let Some((default, _)) = slot.default {
                 anchors.insert(default, None);
             }
         }
@@ -543,22 +521,19 @@ impl PaintOrder {
         let Some(probe) = &self.anchored[index].probe else {
             return false;
         };
-        let clip_spaces = self.anchor_clips[probe.clips.start as usize..probe.clips.end as usize]
-            .iter()
-            .map(|&clip| self.clips[clip as usize].space);
-        std::iter::once(probe.space)
-            .chain(clip_spaces)
-            .any(|space| {
-                space::path(&self.spaces, space).any(|kind| match kind {
-                    SpaceKind::Animation(slot) => {
-                        self.animations[slot as usize].curve.transform.is_some()
-                    }
-                    SpaceKind::Anchored(slot) | SpaceKind::AnchoredVisibility(slot) => {
-                        slot as usize != index && self.anchored[slot as usize].reads_timeline
-                    }
-                    SpaceKind::Scroll(_) | SpaceKind::Sticky(_) => false,
-                })
+        // A slot's own flag is still unset while it is decided, so its own
+        // nodes answer `false`.
+        self.probe_spaces(probe).any(|space| {
+            space::path(&self.spaces, space).any(|kind| match kind {
+                SpaceKind::Animation(slot) => {
+                    self.animations[slot as usize].curve.transform.is_some()
+                }
+                SpaceKind::Anchored(slot) | SpaceKind::AnchoredVisibility(slot) => {
+                    self.anchored[slot as usize].reads_timeline
+                }
+                SpaceKind::Scroll(_) | SpaceKind::Sticky(_) => false,
             })
+        })
     }
 
     fn bind_slot<T>(
@@ -568,69 +543,50 @@ impl PaintOrder {
         sticky_index: &FxHashMap<NodeId, u32>,
         anchors: &FxHashMap<NodeId, Option<usize>>,
     ) {
-        let node = self.anchored[index].node;
-        let visibility = self.anchored[index].visibility;
-        let Some(outcome) = document.anchor_outcome(node).copied() else {
-            return;
-        };
-        let (default, remembered_default) = match document
-            .remembered_scroll(node)
-            .and_then(|remembered| remembered.default)
-        {
-            Some((anchor, displacement)) => (Some(anchor), displacement),
-            None => (None, Vector2D::zero()),
-        };
-        let containing_block = document.anchor_containing_block(node);
-
-        let compensating = outcome.compensates.width || outcome.compensates.height;
+        let slot = &self.anchored[index];
+        let (node, visibility, box_clip) = (slot.node, slot.visibility, slot.clip);
+        let default = slot.default.map(|(anchor, _)| anchor);
+        let compensating = slot.outcome.compensates.width || slot.outcome.compensates.height;
         let (links, fixed) = self.bind_links(
             document,
             default.filter(|_| compensating),
-            containing_block,
+            document.anchor_containing_block(node),
             sticky_index,
         );
 
-        // §6.6 `anchor-valid`.
-        let mut hidden = visibility.contains(PositionVisibility::ANCHORS_VALID)
-            && outcome.default_anchor_missing;
-
         // §6.6 `anchor-visible`.
+        let mut invisible = false;
         let mut probe = None;
         if visibility.contains(PositionVisibility::ANCHORS_VISIBLE)
             && let Some(anchor) = default
         {
-            let invisible = document
+            invisible = document
                 .get(anchor)
                 .and_then(crate::tree::node::Node::layout_computed_style)
                 .is_none_or(|style| {
                     style.clone_visibility() != hughie::style::visibility::T::Visible
                 });
-            if invisible {
-                hidden = true;
-            } else if let Some(&Some(item)) = anchors.get(&anchor) {
-                let item = &self.items[item];
-                let (transform, size, space, anchor_clip) =
-                    (item.transform, item.size, item.space, item.clip);
-                let box_chain: SmallVec<[usize; 8]> =
-                    std::iter::successors(self.anchored[index].clip, |&clip| {
-                        self.clips[clip].parent
-                    })
-                    .collect();
+            if !invisible && let Some(&Some(item)) = anchors.get(&anchor) {
+                // The anchor's clips below the deepest one on both chains:
+                // a clip's parent is always an earlier entry, so of two
+                // distinct clips the later steps outward, as in
+                // `space::common_ancestor`.
                 let start = u32::try_from(self.anchor_clips.len()).expect("bounded by the frame");
-                let mut clip = anchor_clip;
-                while let Some(at) = clip {
-                    if box_chain.contains(&at) {
-                        break;
+                let (mut clip, mut box_clip) = (self.items[item].clip, box_clip);
+                while clip != box_clip {
+                    match clip {
+                        // `None` orders first, so this side is a clip.
+                        Some(at) if clip > box_clip => {
+                            self.anchor_clips
+                                .push(u32::try_from(at).expect("bounded by the frame"));
+                            clip = self.clips[at].parent;
+                        }
+                        _ => box_clip = box_clip.and_then(|at| self.clips[at].parent),
                     }
-                    self.anchor_clips
-                        .push(u32::try_from(at).expect("bounded by the frame"));
-                    clip = self.clips[at].parent;
                 }
                 let end = u32::try_from(self.anchor_clips.len()).expect("bounded by the frame");
                 probe = Some(AnchorProbe {
-                    transform,
-                    size,
-                    space,
+                    item: u32::try_from(item).expect("bounded by the frame"),
                     clips: start..end,
                 });
             }
@@ -638,23 +594,18 @@ impl PaintOrder {
             // painted by its paragraph — is never found clipped.
         }
 
-        let overflow = visibility
-            .contains(PositionVisibility::NO_OVERFLOW)
-            .then_some(OverflowTest { outcome });
-
         let slot = &mut self.anchored[index];
         slot.links = links;
         slot.fixed = fixed;
-        slot.remembered = remembered_default;
-        slot.hidden = hidden;
+        slot.hidden |= invisible;
         slot.probe = probe;
-        slot.overflow = overflow;
     }
 
     /// §3.3: appends the links of `anchor`'s scroll-adjustment ancestors
-    /// below `containing_block` — the chain `Document::anchor_displacement`
-    /// walks — and answers their range with the displacement of those the
-    /// frame carries no slot for. No anchor, no links.
+    /// below `containing_block` ([`scroll_adjustment_ancestors`], the walk
+    /// `Document::anchor_displacement` sums) and answers their range with
+    /// the displacement of those the frame carries no slot for. No anchor,
+    /// no links.
     fn bind_links<T>(
         &mut self,
         document: &Document<T>,
@@ -665,28 +616,19 @@ impl PaintOrder {
         let start = u32::try_from(self.anchor_links.len()).expect("bounded by the frame");
         let mut fixed = Vector2D::zero();
         let mut sampled = Vec::new();
-        let mut current = anchor.and_then(|anchor| document.get(anchor));
-        while let Some(step) = current {
-            if Some(step.id()) == containing_block {
-                break;
-            }
-            if let Some(style) = step.layout_computed_style() {
-                if Some(step.id()) != anchor && crate::scroll::is_scroll_container(style) {
-                    match self.slot_index.get(&step.id()) {
+        if let Some(anchor) = anchor {
+            for (id, adjust) in scroll_adjustment_ancestors(document, anchor, containing_block) {
+                match adjust {
+                    ScrollAdjust::Scroll => match self.slot_index.get(&id) {
                         Some(&slot) => self.anchor_links.push(AnchorLink::Scroll(slot)),
-                        None => fixed -= document.scroll_offset(step.id()),
-                    }
-                }
-                if style.clone_position() == hughie::style::PositionProperty::Sticky {
-                    match sticky_index.get(&step.id()) {
+                        None => fixed -= document.scroll_offset(id),
+                    },
+                    ScrollAdjust::Sticky => match sticky_index.get(&id) {
                         Some(&slot) => self.anchor_links.push(AnchorLink::Sticky(slot)),
-                        None => {
-                            fixed += super::sticky::live_offset(document, step.id(), &mut sampled);
-                        }
-                    }
+                        None => fixed += super::sticky::live_offset(document, id, &mut sampled),
+                    },
                 }
             }
-            current = containing_block_generator(step);
         }
         let end = u32::try_from(self.anchor_links.len()).expect("bounded by the frame");
         (start..end, fixed)
@@ -696,39 +638,33 @@ impl PaintOrder {
     /// anchor's path and on its clips' paths.
     fn order_anchored(&mut self) {
         let count = self.anchored.len();
-        let mut state = vec![0_u8; count];
+        let mut visited = vec![false; count];
         let mut order = std::mem::take(&mut self.anchored_order);
-        order.clear();
         for index in 0..count {
-            self.visit_anchored(index, &mut state, &mut order);
+            self.visit_anchored(index, &mut visited, &mut order);
         }
         self.anchored_order = order;
     }
 
-    fn visit_anchored(&self, index: usize, state: &mut [u8], order: &mut Vec<u32>) {
-        // 0 unvisited, 1 on the stack, 2 placed. The acceptability rule
-        // leaves no cycle; one would only sample a dependency late.
-        if state[index] != 0 {
+    fn visit_anchored(&self, index: usize, visited: &mut [bool], order: &mut Vec<u32>) {
+        // Marked before its dependencies, so a slot's own nodes on its
+        // probe's paths stop at it. The acceptability rule leaves no cycle;
+        // one would only sample a dependency late.
+        if visited[index] {
             return;
         }
-        state[index] = 1;
+        visited[index] = true;
         if let Some(probe) = &self.anchored[index].probe {
-            let clip_spaces = self.anchor_clips
-                [probe.clips.start as usize..probe.clips.end as usize]
-                .iter()
-                .map(|&clip| self.clips[clip as usize].space);
-            for space in std::iter::once(probe.space).chain(clip_spaces) {
+            for space in self.probe_spaces(probe) {
                 for kind in space::path(&self.spaces, space) {
                     if let SpaceKind::Anchored(dependency)
                     | SpaceKind::AnchoredVisibility(dependency) = kind
-                        && dependency as usize != index
                     {
-                        self.visit_anchored(dependency as usize, state, order);
+                        self.visit_anchored(dependency as usize, visited, order);
                     }
                 }
             }
         }
-        state[index] = 2;
         order.push(u32::try_from(index).expect("bounded by the frame"));
     }
 }
@@ -973,13 +909,6 @@ mod tests {
             order.spaces(),
             order.animations(),
             order.anchored(),
-            anchored,
-            None,
-        ));
-        assert!(!super::space::sampled_against(
-            order.spaces(),
-            order.animations(),
-            &[],
             anchored,
             None,
         ));

@@ -1233,7 +1233,8 @@ and §D.16 with what the wire format actually permits.)*
          (`most-height`/`most-block-size` vertical, the others horizontal) —
          skipping the current one, each as a measurement; the first that
          fits is committed. None fits → the current option's commit stands.
-         The engine never records the last successful option (below).
+         `hughie` never records the last successful option; the host
+         does (below).
       7. *Outcome.* For every committed anchor-positioned box: the chosen
          option, whether it still overflows (`no-overflow`), whether it
          references the default anchor (`position-area`, `anchor-center`,
@@ -1457,10 +1458,12 @@ and §D.16 with what the wire format actually permits.)*
       in every option is re-determined on scroll only after it fits again
       and leaves again (Blink re-checks each option's range); a box that
       flips between two options on adjacent boundaries is bounded by one
-      re-determination per adopted offset, with no last-successful
-      hysteresis (Blink's anti-flicker rule is not implemented); a length
-      inset leaves its side of the scrolled fit test unconstrained (Blink's
-      rule, not the spec's fixed inset-modified containing block); with
+      re-determination per adopted offset (§6.5.1.1's last successful
+      option is recorded, but Blink's anti-flicker rule — skip every option
+      that also overflowed at the remembered offset — is not implemented);
+      a length inset leaves its side of the scrolled fit test
+      unconstrained (Blink's rule, not the spec's fixed inset-modified
+      containing block); with
       more than one scroller between anchor and containing block the
       snapped shift may differ from the anchor's pixels by one device
       pixel; the shift sums the intervening scrollers' offsets in the

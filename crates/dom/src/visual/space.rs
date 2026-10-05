@@ -143,9 +143,9 @@ pub(crate) fn sampled_against(
     let common = common_ancestor(spaces, record, bake);
     path_below(spaces, record, common).any(|node| match node.kind {
         SpaceKind::Animation(_) => true,
-        SpaceKind::Anchored(slot) | SpaceKind::AnchoredVisibility(slot) => anchored
-            .get(slot as usize)
-            .is_some_and(AnchoredSlot::reads_timeline),
+        SpaceKind::Anchored(slot) | SpaceKind::AnchoredVisibility(slot) => {
+            anchored[slot as usize].reads_timeline()
+        }
         SpaceKind::Scroll(_) | SpaceKind::Sticky(_) => false,
     }) || curves_within(spaces, animations, bake, record)
         .next()
@@ -197,6 +197,28 @@ pub(crate) fn movers_bounded(
     })
 }
 
+/// The viewport `(low, high)` range of a layout-space vector anywhere in
+/// `low..high` (per axis) mapped through the linear part `m` (its columns:
+/// the images of the x and y unit vectors).
+pub(crate) fn linear_range(
+    m: [Vector2D<f32>; 2],
+    low: Vector2D<f32>,
+    high: Vector2D<f32>,
+) -> (Vector2D<f32>, Vector2D<f32>) {
+    let (x0, x1) = (m[0] * low.x, m[0] * high.x);
+    let (y0, y1) = (m[1] * low.y, m[1] * high.y);
+    (
+        Vector2D::new(
+            x0.x.min(x1.x) + y0.x.min(y1.x),
+            x0.y.min(x1.y) + y0.y.min(y1.y),
+        ),
+        Vector2D::new(
+            x0.x.max(x1.x) + y0.x.max(y1.x),
+            x0.y.max(x1.y) + y0.y.max(y1.y),
+        ),
+    )
+}
+
 /// The innermost scroll slot on `space`'s path.
 pub(crate) fn nearest_scroll(spaces: &[Space], space: Option<u32>) -> Option<u32> {
     path(spaces, space).find_map(|kind| match kind {
@@ -243,8 +265,9 @@ pub(crate) struct SpaceSamples<'a> {
     pub(crate) slots: &'a [ScrollSlot],
     pub(crate) animations: &'a AnimationSamples,
     pub(crate) stickies: &'a StickySamples,
-    /// Indexed by anchored slot; a slot past its end samples as the
-    /// identity, which is what sampling the table itself relies on.
+    /// Indexed by anchored slot, one entry per slot: while the table is
+    /// being sampled, a slot not yet reached holds the default sample — the
+    /// identity — which is what sampling the table itself relies on.
     pub(crate) anchored: &'a AnchoredSamples,
     pub(crate) ratio: f32,
     pub(crate) offset_of: &'a dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
@@ -321,14 +344,8 @@ impl SpaceSamples<'_> {
                 Affine::translate((f64::from(shift.x), f64::from(shift.y)))
             }
             SpaceKind::Animation(slot) => self.animations.get(slot).delta,
-            SpaceKind::Anchored(slot) => self
-                .anchored
-                .get(slot as usize)
-                .map_or(Affine::IDENTITY, |sample| sample.affine()),
-            SpaceKind::AnchoredVisibility(slot) => self
-                .anchored
-                .get(slot as usize)
-                .map_or(Affine::IDENTITY, |sample| sample.visibility_affine()),
+            SpaceKind::Anchored(slot) => self.anchored[slot as usize].affine(),
+            SpaceKind::AnchoredVisibility(slot) => self.anchored[slot as usize].visibility_affine(),
         }
     }
 }
