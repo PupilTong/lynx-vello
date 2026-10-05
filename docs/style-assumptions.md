@@ -15,12 +15,20 @@ the semantics are stylo's.** Everything below refines that sentence.
 ## Settled before this session (not re-decided)
 
 - stylo is the cascade engine, layered `future runtime adapter → dom →
-  vendor/stylo` (fork with the `lynx` feature; Lynx-only properties and
-  `rpx`/`ppx`/`sp` units are first-class grammar in the fork, no side-channel
-  tricks — and since 2026-09-21 the fork's `lynx` length surface also admits
-  the W3C `cqw`/`cqh` container units, see the containment scope note below
-  for what every unit resolves against). The runtime-adapter layer is not
-  currently implemented.
+  vendor/stylo` (fork with the `lynx` feature; Lynx-only properties and the
+  `rpx` unit are first-class grammar in the fork, no side-channel tricks —
+  and since 2026-09-21 the fork's `lynx` length surface also admits the W3C
+  `cqw`/`cqh` container units, see the containment scope note below for what
+  every unit resolves against). The other two Lynx length units are
+  **deliberately absent**: `vendor/stylo/style/tests/lynx_lengths.rs`'s
+  `rejects_invalid_or_removed_units` asserts that `ppx` and `sp` fail to
+  parse, so a declaration using either is dropped as invalid and the property
+  keeps its inherited or initial value — which is why the corpus card
+  `basic-ppx-unit` paints nothing. Admitting `ppx` means a fork patch adding a
+  length unit that resolves against the device pixel ratio, the way `rpx`
+  resolves against the design width; tracked in
+  [`tracking/css-layout.md`](tracking/css-layout.md). The runtime-adapter
+  layer is not currently implemented.
 - Compat target is **web-core / `.web.bundle`** behavior, not native
   `.lynx.bundle`.
 - W3C-correct semantics for real spec features; faithful cloning for

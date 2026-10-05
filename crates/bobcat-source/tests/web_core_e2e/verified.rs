@@ -144,4 +144,110 @@ verified! {
     basic_at_rule_animation_from_to => "basic-at-rule-animation-from-to",
     // an `<x-blur-view>` with no `blur-radius` blurs nothing: no presentational hint, no bake, the backdrop sharp through the 1px border
     basic_element_x_blur_view_default => "basic-element-x-blur-view-default",
+    // `flex: 1` fills the column and the grandchild keeps its declared 50x50 at the item's content origin.
+    basic_flex_1 => "basic-flex-1",
+    // Every `align-self` keyword on a column flex cross axis: `auto` takes the container's `align-items: center`, `baseline` synthesizes one at the bottom edge, `stretch` is inert against a definite `width`.
+    basic_flex_column_container_items_align_self => "basic-flex-column-container-items-align-self",
+    // Linear derives its cross gravity from `align-self` over `align-items`, and `baseline` maps to no gravity, so that item sits at cross-start.
+    basic_linear_column_container_items_align_self => "basic-linear-column-container-items-align-self",
+    // `linear-direction` is initially `column`, so a bare `display: linear` stacks down the block axis.
+    basic_linear_default_orientation => "basic-linear-default-orientation",
+    // `linear-weight` is read only by the linear container that owns the item: a grandchild under a flex parent keeps its declared 200x200.
+    basic_linear_grand_kid_weight => "basic-linear-grand-kid-weight",
+    // A linear item reads no flex longhand, so `flex: 1 2 auto` neither grows nor shrinks it and the second 100px item overflows the 110px row.
+    basic_linear_item_do_not_respond_to_flex => "basic-linear-item-do-not-respond-to-flex",
+    // `flex-basis: 0` is equally inert in linear: each item is sized from its own `width`, never from a flex base.
+    basic_linear_item_do_not_respond_to_flex_basis => "basic-linear-item-do-not-respond-to-flex-basis",
+    // Linear items never shrink to fit: two 100px items in a 110px row overflow instead.
+    basic_linear_item_do_not_shrink => "basic-linear-item-do-not-shrink",
+    // `order` sorts linear items stably, so the two `order: 2` items keep their source order between them.
+    basic_linear_item_use_order => "basic-linear-item-use-order",
+    // `order` moves a linear item in the paint stack as well as the flow. Upstream skips this case over a z-index bug of its own and has no golden; this is the W3C answer, and deliberately not native's, which paints by insertion order and `z-index` alone.
+    basic_linear_item_use_order_affect_z_layout => "basic-linear-item-use-order-affect-z-layout",
+    // Adjacent linear items keep both margins, so three 100px items with `margin: 10px` make a 360px container.
+    basic_linear_margin_not_collapse => "basic-linear-margin-not-collapse",
+    // `direction: rtl` reverses a row linear's main axis, so the first item packs at the right edge.
+    basic_linear_orientation_horizontal_with_direction => "basic-linear-orientation-horizontal-with-direction",
+    // A positive `linear-weight` replaces the declared main size: `width: 50px` grows to the 100px share of a 200px row at `linear-weight-sum: 2`.
+    basic_linear_weight_calced_large_than_size => "basic-linear-weight-calced-large-than-size",
+    // The weighted share also shrinks: `width: 200px` is cut to the 100px half-share, so a declared size never wins.
+    basic_linear_weight_calced_less_than_size => "basic-linear-weight-calced-less-than-size",
+    // `linear-weight-sum` and `linear-weight` divide as floats, so 0.25/0.5 of a 200px row is 100px.
+    basic_linear_weight_sum_is_float => "basic-linear-weight-sum-is-float",
+    // A class selector from the card's compiled sheet: `.basic` gives `#target` 100x100 and `background-color: pink`.
+    basic_class_selector => "basic-class-selector",
+    // `color` is non-inheriting by default, so the `<text>` under `style="color:red"` paints black.
+    basic_color_not_inherit => "basic-color-not-inherit",
+    // `var()` fallback: an undefined custom property falls back to `green` on `background-color`.
+    basic_css_var_fallback_background_color => "basic-css-var-fallback-background-color",
+    // A fallback nested in a fallback: two undefined custom properties resolve to the innermost `green`.
+    basic_css_var_nested_fallback_background_color => "basic-css-var-nested-fallback-background-color",
+    // `>` plus `~` with `:not([hidden])`: only the second child beats the `view` type rule, so red sits above green.
+    basic_style_combinator => "basic-style-combinator",
+    // `rpx` resolves against the 750-unit design width: `20rpx` on a 393px viewport is 10.48px, painted as a snapped 10x10 box.
+    basic_rpx_unit => "basic-rpx-unit",
+    // A JS-computed `${10+10}rpx` inline style parses as `20rpx`, giving the same box as the literal form.
+    basic_rpx_unit_js_value => "basic-rpx-unit-js-value",
+    // `vw`/`vh` resolve against the 393x727 viewport: `50vw`/`50vh` are 196.5x363.5, painted as a snapped 197x364 box.
+    basic_vw_vh_unit => "basic-vw-vh-unit",
+    // Under `enableRemoveCSSScope: false`, an `@import`ed `display: linear` reaches the sub component; `#sub`'s own green 100x100 covers `#index` exactly.
+    config_css_remove_scope_false_display_linear => "config-css-remove-scope-false-display-linear",
+    // An `@import`ed fragment cascades into the importing component: `common.css`'s `.green` paints `#sub` over the colourless `.basic` parent.
+    config_css_remove_scope_false_import_css => "config-css-remove-scope-false-import-css",
+    // With `enableCSSSelector: false` the sheet still cascades by real specificity: `.parent .background` (pink) beats both single-class rules.
+    config_css_selector_false_multi_level_selector => "config-css-selector-false-multi-level-selector",
+    // A bare `view` type selector still matches under `enableCSSSelector: false`, giving `#target` yellow at 100x100.
+    config_css_selector_false_type_selector => "config-css-selector-false-type-selector",
+    // First screen only, since the suite drives no reload: `.parent` gives `#target` a 200x200 red box under `enableCSSSelector: false`.
+    config_css_selector_false_reload => "config-css-selector-false-reload",
+    // A mapped child list renders in order after a zero-height sibling: pink, orange, wheat, 100px each.
+    basic_list_rendering => "basic-list-rendering",
+    // Two `useEffect`-inserted lists keep their place around two static rects: red, green, gap, blue, yellow.
+    basic_replaceelement => "basic-replaceelement",
+    // A `setState` in a constructor applies but never runs its callback, so the text stays `awesome` (preact#2638).
+    basic_setsate_with_cb => "basic-setsate-with-cb",
+    // A constructor `setState` is what the first render paints: green, not the initial pink.
+    basic_setstate_in_constructor => "basic-setstate-in-constructor",
+    // One `useEffect` filling two lists appends them contiguously after the static rect: red, green, blue, yellow.
+    basic_useeffect_hydrate => "basic-useeffect-hydrate",
+    // The wrapper a mapped list compiles to is transparent to flex: three `flex: 1 1 0` children of a 180px row each get 60px.
+    basic_wrapper_element_do_not_impact_layout => "basic-wrapper-element-do-not-impact-layout",
+    // A 100x100 inline-styled `<view>` paints its `background: pink` over exactly its border box at the page origin.
+    basic_pink_rect => "basic-pink-rect",
+    // An `<image>` whose source never loads, with no `placeholder`, paints nothing at all: the box exists, the bitmap does not.
+    basic_image => "basic-image",
+    // `auto-size` derives a content box that `padding` and `box-sizing` offset like any replaced element's, while the item's auto cross size still stretches to its linear parent.
+    basic_element_image_auto_size_with_padding => "basic-element-image-auto-size-with-padding",
+    // `border-radius: 50%` clips an `<image>`'s bitmap to a circle inscribed in its border box, not only its background.
+    basic_element_image_border_radius => "basic-element-image-border-radius",
+    // A CSS-sized rather than content-sized view makes the page the whole viewport, so a `width:100%;height:100%` root `<view>` covers every pixel.
+    basic_element_lynx_view_not_auto => "basic-element-lynx-view-not-auto",
+    // `border-width` alone paints, because the UA sheet's `border-style: solid` default makes it visible: a 10px black ring around a 180x180 hole.
+    basic_element_view_border_style_default => "basic-element-view-border-style-default",
+    // Upstream times SSR here, not pixels. 10 block-level 100x100 pink boxes stack gaplessly into one 100-wide column that overflows the viewport.
+    basic_performance_div_10 => "basic-performance-div-10",
+    // Upstream times SSR here. 100 boxes give the same gapless column, since the viewport only ever shows the first 7.27 of them.
+    basic_performance_div_100 => "basic-performance-div-100",
+    // Upstream times SSR here. 1000 boxes give the same column; the count never reaches the paint.
+    basic_performance_div_1000 => "basic-performance-div-1000",
+    // Upstream times SSR here. 10000 boxes give a frame identical to the 10-box card, which is the culling working.
+    basic_performance_div_10000 => "basic-performance-div-10000",
+    // Upstream times SSR here, and the card's `placeholder.png` exists in no repository, so 200 `<image>` boxes with an unresolvable source and no background correctly paint nothing. The golden pins the absence of a broken-image mark, not the boxes' geometry.
+    basic_performance_image_100 => "basic-performance-image-100",
+    // Upstream times SSR here. The ~100-rule sheet matches no element — nothing carries a class — so the frame is byte-identical to `basic-performance-div-100`, which is the invariance the card is for.
+    basic_performance_large_css => "basic-performance-large-css",
+    // Upstream snapshots the SSR HTML here, not pixels. 100 nested unstyled `<div>`s are zero-height block boxes with no background, so an empty frame is correct.
+    basic_performance_nest_level_100 => "basic-performance-nest-level-100",
+    // Upstream times SSR here. The 10-rule sheet matches nothing, so the frame is byte-identical to both `basic-performance-div-100` and `basic-performance-large-css`.
+    basic_performance_small_css => "basic-performance-small-css",
+    // Upstream times SSR here. 200 `<text>` boxes stack at an exact 100px pitch, each painting its pink background over the full box and its label on the first line at the box origin.
+    basic_performance_text_200 => "basic-performance-text-200",
+    // A relative `src` written as a plain string resolves against the card's own URL: the 700x700 logo fills its 100x100 box, unletterboxed and uncropped.
+    basic_element_image_src => "basic-element-image-src",
+    // `useInitData()` sees the host's page data at first render, so the box is green rather than the no-data pink.
+    api_initdata => "api-initdata",
+    // A stylesheet the host registers and names in `ViewSources::style_sheets` cascades onto the card's own element — web core's `injectStyleRules` under this engine's name for it.
+    api_inject_style_rules => "api-inject-style-rules",
+    // `registerDataProcessors`'s default processor runs over the host's raw page data before the first render, turning `mockData` into the green background.
+    basic_dataprocessor => "basic-dataprocessor",
 }

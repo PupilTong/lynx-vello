@@ -41,7 +41,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bobcat_core::{DrawTarget, EngineEvent, LynxGroup, NoWakeup, Painter, StyleThreads};
+use bobcat_core::{
+    DrawTarget, EngineEvent, LynxGroup, NoWakeup, Painter, PreparsedDeclaration, PreparsedRule,
+    PreparsedStyleSheet, StyleThreads,
+};
 use bobcat_resources::{Resources, ResourcesConfig};
 use bobcat_source::PageSource;
 use flashbulb::{Image, Screenshots};
@@ -70,6 +73,54 @@ fn repository() -> PathBuf {
 
 fn corpus() -> PathBuf {
     repository().join("packages/web-core-e2e-fixtures/dist")
+}
+
+/// Mounts the vendored bitmaps and fonts where a card's own runtime-relative
+/// `src` resolves to them.
+///
+/// Most cards `import` their asset, and the build bakes an absolute `file:`
+/// URL for it. A few instead write the path as a plain string —
+/// `src='../../../resources/lynx-logo.jpeg'` — which the engine resolves
+/// against the template's URL at runtime, so no build step can see it.
+/// Upstream serves the package root, with the card's bundle at `/<case>.web.bundle`,
+/// so that string climbs past the root and lands on `/resources/lynx-logo.jpeg`.
+/// Registering the same four files under `app:///resources/` reproduces that
+/// exactly, and a card naming an asset that upstream does not serve either —
+/// `basic-performance-image-100` asks for `placeholder.png` — still finds
+/// nothing, which is the behaviour under test.
+fn mount_resources(resources: &Resources) {
+    let directory = repository().join("packages/web-core-e2e-fixtures/resources");
+    for entry in std::fs::read_dir(&directory)
+        .expect("the vendored resources")
+        .flatten()
+    {
+        let name = entry.file_name();
+        let name = name.to_str().expect("an ASCII resource name");
+        let bytes = std::fs::read(entry.path()).expect("read the resource");
+        resources
+            .register(&format!("app:///resources/{name}"), bytes, None)
+            .expect("register the resource");
+    }
+}
+
+/// Initial page data, as upstream's shell hands it to every card.
+const INIT_DATA: &str = r#"{"mockData":"mockData"}"#;
+/// Initial global properties, likewise.
+const GLOBAL_PROPS: &str = r#"{"backgroundColor":"pink"}"#;
+
+/// `.injected-style-rules { background: green }`, the single rule upstream's
+/// shell injects for `api-inject-style-rules`.
+fn injected_style_rules() -> PreparsedStyleSheet {
+    PreparsedStyleSheet {
+        rules: vec![PreparsedRule::Style {
+            selectors: ".injected-style-rules".to_owned(),
+            declarations: vec![PreparsedDeclaration {
+                property: "background".to_owned(),
+                value: "green".to_owned(),
+                important: false,
+            }],
+        }],
+    }
 }
 
 fn screenshots() -> Screenshots {
@@ -101,23 +152,49 @@ async fn first_screen(case: &str) -> Image {
     });
     let input = Url::parse(&format!("app:///{case}.web.bundle")).unwrap();
     let page = PageSource::from_bytes(&input, &bytes).expect("decode the compiled card");
-    let resources = Resources::new(ResourcesConfig::default(), || {});
+    // The fetcher resolves against the view's own base, which is the card's
+    // URL — the contract `ResourcesConfig::base_url` states. Without it a
+    // card that writes a relative `src` as a plain string gets
+    // `relative URL without a base` and paints nothing, which looks exactly
+    // like a bitmap that failed to decode.
+    let resources = Resources::new(
+        ResourcesConfig {
+            base_url: Some(input.clone()),
+            ..ResourcesConfig::default()
+        },
+        || {},
+    );
     page.register_with(&resources);
+    mount_resources(&resources);
 
     let (width, height) = VIEWPORT;
     let screen = bobcat_core::ScreenMetrics::for_viewport(width, height, 1.0);
+    let mut sources = page.view_sources(screen);
+    // The page data every card was written against. Upstream's shell sets
+    // these on the host element before it loads any card
+    // (`shell-project/index.ts`), so `useInitData().mockData` is `'mockData'`
+    // and `lynx.__globalProps.backgroundColor` is `'pink'` throughout the
+    // corpus. Leaving them unset does not make a card test less — it makes it
+    // test nothing: `api-initdata` paints its "no data" branch and passes a
+    // golden of the wrong input.
+    sources.init_data = Some(INIT_DATA.to_owned());
+    sources.global_props = Some(GLOBAL_PROPS.to_owned());
+    if case == "api-inject-style-rules" {
+        // The one card upstream's shell gives an extra author sheet to. Web
+        // core takes it as `injectStyleRules`, a list of rule texts; here the
+        // same thing is an author stylesheet the host registers and names in
+        // `ViewSources::style_sheets`, which is the engine's whole surface for
+        // it.
+        let url = resources
+            .register_style_sheet("app:///injected.css", injected_style_rules())
+            .expect("register the injected sheet");
+        sources.style_sheets.push(url.to_string());
+    }
     let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Auto)
         .await
         .unwrap();
     let mut view = group
-        .create_lynx_view(
-            width,
-            height,
-            1.0,
-            resources.builder(),
-            Vec::new(),
-            page.view_sources(screen),
-        )
+        .create_lynx_view(width, height, 1.0, resources.builder(), Vec::new(), sources)
         .unwrap();
     let mut painter = Painter::new(DrawTarget::Offscreen, width, height, 1.0)
         .await

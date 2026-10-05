@@ -790,6 +790,27 @@ consequential choice about whether to follow the spec or the quirk.
   web-core runs on the browser's parser and accepts them; web-core is
   followed. The fork change that enabled them (lynx fork `76f6a809b`) did so
   for the UA `<dialog>` rules.
+- **Component-scoped CSS applies globally**, so two components styling the
+  same class name collide. A bundle compiled with `enableRemoveCSSScope:
+  false` keeps each component's rules in its own `css_id` fragment, and
+  web-core reproduces the scope by guarding every rule with
+  `:where([l-css-id="N"])`. This engine synthesizes no guard:
+  `crates/bobcat-source/src/lower_style.rs::to_preparsed_style_sheet` walks
+  `fragment_order(style_info)` and extends one flat rule list with every
+  fragment's rules, and `crates/bobcat-source/src/page.rs` reports the
+  consequence as `CompatibilityWarning::ComponentScopedCss` rather than
+  fixing it. So a selector written in one component matches elements in
+  another, and the tie goes to whichever fragment `fragment_order` puts last
+  — ascending `css_id` among non-imports, which is the later component. The
+  corpus card `config-css-remove-scope-false-with-descendant-combinator` is
+  built to test exactly this and shows the collision: `index.css`'s
+  `.a .b { background: green }` loses to `sub.css`'s
+  `.a .b { background-color: orange }` on the index-owned child, so both
+  boxes paint orange where the first should be green. Recorded, not fixed:
+  guard synthesis belongs to the runtime-adapter layer
+  ([`style-assumptions.md`](../style-assumptions.md) D.16, D.21), which is
+  not implemented. A bundle compiled with the default
+  `enableRemoveCSSScope: true` has one fragment and is unaffected.
 
 ## Components (see [components.md](components.md))
 

@@ -16,7 +16,8 @@ pending! {
     "api-boundingclientrect-lynx-view-relative" => "not read yet",
     "api-createLynxView-browserConfig" => "not read yet",
     "api-devtool-event" => "not read yet",
-    "api-dispose" => "not read yet",
+    "api-dispose" =>
+        "the first screen (a 100x100 pink box) is right, but the assertion is on what happens after the host releases the view: the ReactLynx unmount cleanup logs `fin` and exactly one worker terminates. The suite never drops the `LynxView`, and the evidence is a console line plus a worker count that no capture carries",
     "api-error" =>
         "the card throws on both threads, so a blank screen is the only painting there can be; what upstream asserts is the error report's sourcemap offset and stack, which no capture can settle. web-core also hides the host element, where this engine deliberately keeps the view (#330)",
     "api-error-bts" =>
@@ -49,10 +50,10 @@ pending! {
         "DEFECT: `MTS_CHUNK_PREAMBLE` (crates/bobcat-core/src/esm.rs) declares none of the disallowed globals the BTS preamble shadows, so MTS code naming `navigator`/`postMessage` raises a ReferenceError where web-core's lepus wrapper gives `undefined`. The card paints only a sizeless view, so the blank screen hides it",
     "api-globalThis" =>
         "a module-level `globalThis.foo` must be a bare identifier in both realms and inside a `runOnMainThread` worklet; the card paints only a sizeless view, so a capture says nothing about it",
-    "api-initdata" => "not read yet",
-    "api-inject-style-rules" => "not read yet",
-    "api-invoke-fail" => "not read yet",
-    "api-invoke-success" => "not read yet",
+    "api-invoke-fail" =>
+        "the card taps to invoke an unknown method (`seekTo`) and asserts the `fail` callback reports `code === 3`; the suite drives no input, and the target element is an `<x-input>`, where editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green",
+    "api-invoke-success" =>
+        "`SelectorQuery.invoke`'s success callback is the subject, but the method it calls is `<x-input>`'s `focus`, and editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green; the invoke contract itself is covered by `api-invoke-fail`'s unknown-method path once a tap can be driven",
     "api-lynx-performance" => "not read yet",
     "api-nativemodules-bridge-call" => "not read yet",
     "api-nativemodules-call" => "not read yet",
@@ -66,8 +67,10 @@ pending! {
     "api-set-release-bts" =>
         "DEFECT: the BTS `app` behind `lynxCoreInject.tt` has no `setSourceMapRelease`, so the card hits a TypeError before its own error",
     "api-setSharedData" => "not read yet",
-    "api-updateData" => "not read yet",
-    "api-updateData-callback" => "not read yet",
+    "api-updateData" =>
+        "the first screen is upstream's pre-call pink; the assertion is the green after `lynxView.updateData({mockData:'updatedData'})`, and the suite captures one screen and never calls `LynxView::update_data`",
+    "api-updateData-callback" =>
+        "two things stand in the way: the suite never calls `update_data`, and this engine's host API has no completion callback at all — `LynxView::update_data(data, processor_name)` reports no completion, where web-core takes a third callback argument. Upstream asserts only the console line it produces",
     "api-updateData-processData" => "not read yet",
     "api-updateGlobalProps" => "not read yet",
     "basic-bindkeydown-out-of-view-noop" => "not read yet",
@@ -76,18 +79,11 @@ pending! {
     "basic-bindtap-detail" => "not read yet",
     "basic-bindtap-simultaneous" => "not read yet",
     "basic-bindwheel-view" => "not read yet",
-    "basic-class-selector" => "not read yet",
-    "basic-color-not-inherit" => "not read yet",
-    "basic-css-var-fallback-background-color" => "not read yet",
-    "basic-css-var-nested-fallback-background-color" => "not read yet",
-    "basic-dataprocessor" => "not read yet",
     "basic-element-image-auto-size" => "not read yet",
-    "basic-element-image-auto-size-with-padding" => "not read yet",
-    "basic-element-image-border-radius" => "not read yet",
     "basic-element-image-placeholder" => "not read yet",
-    "basic-element-image-src" => "not read yet",
     "basic-element-image-support-tap-event" => "not read yet",
-    "basic-element-input-bindinput" => "not read yet",
+    "basic-element-input-bindinput" =>
+        "JSX `<input>` is the same element as `<x-input>`, and editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card types into the box and asserts `bindinput`'s detail carries `value`, `textLength`, `selectionStart` and `selectionEnd` consistently",
     "basic-element-list-basic" => "not read yet",
     "basic-element-list-basic-size" => "not read yet",
     "basic-element-list-bindwheel" => "not read yet",
@@ -99,7 +95,6 @@ pending! {
     "basic-element-list-scroll-to-position" =>
         "the first screen is right (five 100px cells in a 500px list); `scrollToPosition` is a UI method that does not exist and the card drives it from a tap",
     "basic-element-list-waterfall" => "not read yet",
-    "basic-element-lynx-view-not-auto" => "not read yet",
     "basic-element-scroll-view-event-scroll" =>
         "the pre-swipe frame is right; `scroll-view` emits no `scroll` event and a swipe cannot be settled by a capture",
     "basic-element-scroll-view-event-scrollend" =>
@@ -132,7 +127,6 @@ pending! {
         "same un-retargeted push; the pre-tap frame is right",
     "basic-element-text-text-selection" =>
         "what a selection drag highlights is an interaction no first screen carries; selection is out of scope",
-    "basic-element-view-border-style-default" => "not read yet",
     "basic-element-x-audio-tt-play" => "not read yet",
     "basic-element-x-blur-view-blur-radius" =>
         "DEFECT: the backdrop bake clears to transparent black and never carries the canvas base colour, and the filtered texture is drawn over the still-painted unfiltered backdrop, so wherever the baked alpha is below one the sharp backdrop shows through — a visible logo silhouette inside the blurred box. The blur itself is spec-exact (sigma 25 matches Chromium to 1-2 levels over opaque areas). Not one of the recorded backdrop-filter narrowings",
@@ -141,23 +135,35 @@ pending! {
     "basic-element-x-foldview-ng-method-setFoldExpanded-overflow" =>
         "same unfolded screen; the method is not implemented and a capped fold offset is invisible while unfolded",
     "basic-element-x-input-bindblur" =>
-        "`<x-input>` is implemented nowhere, so the box is geometrically right but its `value` never paints; the blur event has nothing to fire from",
-    "basic-element-x-input-bindconfirm" => "not read yet",
-    "basic-element-x-input-bindfocus" => "not read yet",
-    "basic-element-x-input-bindinput" => "not read yet",
-    "basic-element-x-input-bindselection" => "not read yet",
+        "`<x-input>` paints a geometrically right box with no value, and editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card asserts `bindblur` reports the value when focus leaves",
+    "basic-element-x-input-bindconfirm" =>
+        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card starts the input focused and asserts the keyboard's confirm key fires `bindconfirm` with the current value",
+    "basic-element-x-input-bindfocus" =>
+        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card asserts `bindfocus` reports the value of a `type=\"password\"` input when it gains focus",
+    "basic-element-x-input-bindinput" =>
+        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card types and asserts `bindinput`'s detail keeps `value.length == textLength` with the caret positions alongside",
+    "basic-element-x-input-bindselection" =>
+        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card asserts `bindselection` reports `selectionStart`/`selectionEnd` as the selection moves",
     "basic-element-x-input-blur" =>
-        "the same missing `<x-input>`: the red square and the input's box are placed right, the value is absent, and there is no focus machinery for the tap to drive",
-    "basic-element-x-input-focus" => "not read yet",
-    "basic-element-x-input-getValue" => "not read yet",
+        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the red square and the input's box are placed right, the value is absent, and there is no focus machinery for the tap to drive",
+    "basic-element-x-input-focus" =>
+        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card taps a square to run `SelectorQuery.invoke({method:'focus'})` on the input and asserts `bindfocus` then fires",
+    "basic-element-x-input-getValue" =>
+        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card invokes the input's `getValue` method, whose `{value, selectionBegin, selectionEnd}` reply only an editable input can produce",
     "basic-element-x-input-input-filter" =>
-        "the same missing `<x-input>`: a geometrically right, empty box where `input-filter` would strip punctuation as the user types",
-    "basic-element-x-input-ng-bindinput" => "not read yet",
-    "basic-element-x-input-placeholder" => "not read yet",
-    "basic-element-x-input-placeholder-pseudo-element" => "not read yet",
-    "basic-element-x-input-setValue" => "not read yet",
-    "basic-element-x-input-type" => "not read yet",
-    "basic-element-x-input-value" => "not read yet",
+        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: a geometrically right, empty box where `input-filter` would strip punctuation as the user types",
+    "basic-element-x-input-ng-bindinput" =>
+        "`<x-input-ng>` is the same element under its other tag name, and editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card asserts the same `bindinput` detail contract",
+    "basic-element-x-input-placeholder" =>
+        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card asserts the `placeholder` text paints with `placeholder-color`, `-font-weight` and `-font-size` applied, none of which exists without an input",
+    "basic-element-x-input-placeholder-pseudo-element" =>
+        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card styles the placeholder through a `::placeholder` rule instead of the attributes, which needs the same missing element",
+    "basic-element-x-input-setValue" =>
+        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card taps to grow the bound value, then invokes `setValue` with an empty string and asserts the box clears",
+    "basic-element-x-input-type" =>
+        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card asserts each `type` (default, `text`, `number`, `digit`, `password`) renders its value the way that type demands",
+    "basic-element-x-input-value" =>
+        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card taps to append to the bound `value` and asserts the input repaints with it",
     "basic-element-x-overlay-ng-counter-test2" =>
         "there is no `x-overlay-ng`, so four overlays that are hidden on the first screen paint in place and cover the page",
     "basic-element-x-overlay-ng-demo" =>
@@ -211,20 +217,32 @@ pending! {
         "remounting a swiper on tap and re-reading `indicator-color`; `x-swiper` is not a component here, so its items get no border box, no clip and no indicator, and the first screen stacks them instead of showing one page",
     "basic-element-x-swiper-vertical" =>
         "vertical paging across five modes; `x-swiper` is not a component here, so its items get no border box, no clip and no indicator, and the first screen stacks them instead of showing one page",
-    "basic-element-x-textarea-bindinput" => "not read yet",
-    "basic-element-x-textarea-bindselection" => "not read yet",
-    "basic-element-x-textarea-color" => "not read yet",
-    "basic-element-x-textarea-disabled" => "not read yet",
-    "basic-element-x-textarea-focus" => "not read yet",
-    "basic-element-x-textarea-getValue" => "not read yet",
+    "basic-element-x-textarea-bindinput" =>
+        "`<x-textarea>` is out of scope for the same reason, and editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card asserts `bindinput`/`bindfocus`/`bindblur` each deliver an object detail",
+    "basic-element-x-textarea-bindselection" =>
+        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card asserts `bindselection` reports the caret range inside a textarea",
+    "basic-element-x-textarea-color" =>
+        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card asserts `color: red` reaches the textarea's own value text, which never paints",
+    "basic-element-x-textarea-disabled" =>
+        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card asserts an unset, a static and a toggled `disabled` textarea each paint their disabled state",
+    "basic-element-x-textarea-focus" =>
+        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card asserts an unset, a static and a toggled `focus` attribute each move focus into the right textarea",
+    "basic-element-x-textarea-getValue" =>
+        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card invokes the textarea's `getValue` method, which only an editable textarea can answer",
     "basic-element-x-textarea-input-filter" =>
-        "`<x-textarea>` is equally unimplemented: an empty 300x42 box where the initial value belongs",
-    "basic-element-x-textarea-maxlength" => "not read yet",
-    "basic-element-x-textarea-maxlines" => "not read yet",
-    "basic-element-x-textarea-min-height-max-height" => "not read yet",
-    "basic-element-x-textarea-placeholder" => "not read yet",
-    "basic-element-x-textarea-placeholder-font-size" => "not read yet",
-    "basic-element-x-textarea-placeholder-style" => "not read yet",
+        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: an empty 300x42 box where the initial value belongs",
+    "basic-element-x-textarea-maxlength" =>
+        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card asserts the five orderings of setting `value` and `maxlength` all truncate to the same result",
+    "basic-element-x-textarea-maxlines" =>
+        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card asserts `maxlines=3` clamps a four-line value, and re-clamps when the value changes",
+    "basic-element-x-textarea-min-height-max-height" =>
+        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card asserts the textarea grows with its content between `min-height: 100px` and `max-height: 200px`",
+    "basic-element-x-textarea-placeholder" =>
+        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card asserts a static and a later-set `placeholder` both paint",
+    "basic-element-x-textarea-placeholder-font-size" =>
+        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card asserts the precedence between `placeholder-font-size` and the element's own `font-size` across four textareas",
+    "basic-element-x-textarea-placeholder-style" =>
+        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card asserts the placeholder's colour, size and weight all repaint when their bound values change",
     "basic-element-x-viewpager-ng-allow-horizontal-gesture" =>
         "the first screen is right; `allow-horizontal-gesture={false}` only shows under the swipe it refuses",
     "basic-element-x-viewpager-ng-bindchange" =>
@@ -242,8 +260,6 @@ pending! {
     "basic-event-dataset" => "not read yet",
     "basic-event-target-id" => "not read yet",
     "basic-event-trigger" => "not read yet",
-    "basic-flex-1" => "not read yet",
-    "basic-flex-column-container-items-align-self" => "not read yet",
     "basic-flex-nested-linear-setting" =>
         "the case asserts computed style only and neither box has a background, so a first screen shows nothing either way",
     "basic-global-bind" => "not read yet",
@@ -253,7 +269,6 @@ pending! {
     "basic-global-bindkeydown-shift" => "not read yet",
     "basic-global-bindkeyup" => "not read yet",
     "basic-globalProps" => "not read yet",
-    "basic-image" => "not read yet",
     "basic-lazy-component" => "not read yet",
     "basic-lazy-component-css" => "not read yet",
     "basic-lazy-component-css-blank" => "not read yet",
@@ -275,20 +290,6 @@ pending! {
     "basic-lazy-component-relative-path" => "not read yet",
     "basic-lazy-component-when-need-with-itself" => "not read yet",
     "basic-lazy-component-when-needed" => "not read yet",
-    "basic-linear-column-container-items-align-self" => "not read yet",
-    "basic-linear-default-orientation" => "not read yet",
-    "basic-linear-grand-kid-weight" => "not read yet",
-    "basic-linear-item-do-not-respond-to-flex" => "not read yet",
-    "basic-linear-item-do-not-respond-to-flex-basis" => "not read yet",
-    "basic-linear-item-do-not-shrink" => "not read yet",
-    "basic-linear-item-use-order" => "not read yet",
-    "basic-linear-item-use-order-affect-z-layout" => "not read yet",
-    "basic-linear-margin-not-collapse" => "not read yet",
-    "basic-linear-orientation-horizontal-with-direction" => "not read yet",
-    "basic-linear-weight-calced-large-than-size" => "not read yet",
-    "basic-linear-weight-calced-less-than-size" => "not read yet",
-    "basic-linear-weight-sum-is-float" => "not read yet",
-    "basic-list-rendering" => "not read yet",
     "basic-lynx-reload" => "not read yet",
     "basic-main-query-selector" => "not read yet",
     "basic-mts-bindtap" => "not read yet",
@@ -300,51 +301,29 @@ pending! {
     "basic-mts-run-on-main-thread" => "not read yet",
     "basic-mts-systeminfo" => "not read yet",
     "basic-page-event" => "not read yet",
-    "basic-performance-div-10" => "not read yet",
-    "basic-performance-div-100" => "not read yet",
-    "basic-performance-div-1000" => "not read yet",
-    "basic-performance-div-10000" => "not read yet",
     "basic-performance-event-div-100" => "not read yet",
-    "basic-performance-image-100" => "not read yet",
-    "basic-performance-large-css" => "not read yet",
-    "basic-performance-nest-level-100" => "not read yet",
-    "basic-performance-small-css" => "not read yet",
-    "basic-performance-text-200" => "not read yet",
-    "basic-pink-rect" => "not read yet",
-    "basic-ppx-unit" => "not read yet",
+    "basic-ppx-unit" =>
+        "the Lynx-only `ppx` unit is not in the fork's length grammar — `vendor/stylo/style/tests/lynx_lengths.rs::rejects_invalid_or_removed_units` asserts `2ppx` fails to parse — so both inline declarations are dropped, the view lays out at `height: auto` = 0 and nothing paints. Admitting it is a `vendor/stylo` patch adding a unit that resolves against the device pixel ratio the way `rpx` resolves against the design width",
     "basic-ref-main-invoke-ui-method" => "not read yet",
     "basic-reload" => "not read yet",
-    "basic-replaceelement" => "not read yet",
-    "basic-rpx-unit" => "not read yet",
-    "basic-rpx-unit-js-value" => "not read yet",
-    "basic-setsate-with-cb" => "not read yet",
-    "basic-setstate-in-constructor" => "not read yet",
-    "basic-style-combinator" => "not read yet",
     "basic-style-remove" =>
         "the removal happens on tap, so a first screen cannot show what the case is named for",
     "basic-style-remove-one-property" => "not read yet",
-    "basic-useeffect-hydrate" => "not read yet",
-    "basic-vw-vh-unit" => "not read yet",
-    "basic-wrapper-element-do-not-impact-layout" => "not read yet",
     "config-css-default-display-linear-false" => "not read yet",
     "config-css-default-overflow-visible-unset" => "not read yet",
     "config-css-inheritance-default" => "not read yet",
     "config-css-inheritance-false" => "not read yet",
     "config-css-inheritance-true" => "not read yet",
     "config-css-remove-scope-false" => "not read yet",
-    "config-css-remove-scope-false-display-linear" => "not read yet",
-    "config-css-remove-scope-false-import-css" => "not read yet",
-    "config-css-remove-scope-false-with-descendant-combinator" => "not read yet",
+    "config-css-remove-scope-false-with-descendant-combinator" =>
+        "the flag this card is built to test has no effect here: `index.css` and `sub.css` each define `.a .b` with a different colour, and per-component css-id scoping is the only thing that could tell the two views apart. `crates/bobcat-source/src/lower_style.rs::to_preparsed_style_sheet` flattens every `css_id` fragment into one rule list and synthesizes no `:where([l-css-id=\"N\"])` guard, so both rules match both views and `sub.css`'s later `orange` overrides `index.css`'s `green` on the index-owned child too — the collision `CompatibilityWarning::ComponentScopedCss` already predicts. The two stacked 100x100 boxes are placed right; only the upper one's colour is wrong",
     "config-css-remove-scope-true" => "not read yet",
     "config-css-selector-false-exchange-class" => "not read yet",
     "config-css-selector-false-inline-css-change-same-time" => "not read yet",
     "config-css-selector-false-inline-remove-css-remove-inline" => "not read yet",
-    "config-css-selector-false-multi-level-selector" => "not read yet",
-    "config-css-selector-false-reload" => "not read yet",
     "config-css-selector-false-remove-all" => "not read yet",
     "config-css-selector-false-remove-css-and-reuse-css" => "not read yet",
     "config-css-selector-false-remove-css-and-style-collapsed" => "not read yet",
     "config-css-selector-false-remove-inline-style-and-reuse-css" => "not read yet",
-    "config-css-selector-false-type-selector" => "not read yet",
     "config-mixed-01" => "not read yet",
 }
