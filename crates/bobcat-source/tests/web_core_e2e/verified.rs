@@ -116,4 +116,10 @@ verified! {
     // view is `visible`, and only the page clips. Upstream's committed golden
     // shows the opposite because it predates the switch and was never redone.
     basic_flex_with_overflow => "basic-flex-with-overflow",
+    // an author `position: absolute` on a page does not leave the pager's row: the UA `position: relative !important` holds
+    basic_element_x_viewpager_ng_item_position_absolute => "basic-element-x-viewpager-ng-item-position-absolute",
+    // `select-index` starts the pager on the second page in the first committed frame, through `--viewpager-initial-index` + `scroll-initial-target`
+    basic_element_x_viewpager_ng_select_index => "basic-element-x-viewpager-ng-select-index",
+    // an out-of-flow header with no author width fills the coordinator, and the `anchor-size()` slot offset puts the slot at the header's end
+    basic_element_x_foldview_ng_header_width => "basic-element-x-foldview-ng-header-width",
 }

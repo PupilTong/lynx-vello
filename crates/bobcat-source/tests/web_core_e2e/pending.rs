@@ -129,9 +129,10 @@ pending! {
     "basic-element-x-audio-tt-play" => "not read yet",
     "basic-element-x-blur-view-blur-radius" => "not read yet",
     "basic-element-x-blur-view-default" => "not read yet",
-    "basic-element-x-foldview-ng-header-width" => "not read yet",
-    "basic-element-x-foldview-ng-method-setFoldExpanded" => "not read yet",
-    "basic-element-x-foldview-ng-method-setFoldExpanded-overflow" => "not read yet",
+    "basic-element-x-foldview-ng-method-setFoldExpanded" =>
+        "the unfolded first screen matches run for run; `setFoldExpanded` is deliberately not implemented and the card is a tap + method",
+    "basic-element-x-foldview-ng-method-setFoldExpanded-overflow" =>
+        "same unfolded screen; the method is not implemented and a capped fold offset is invisible while unfolded",
     "basic-element-x-input-bindblur" => "not read yet",
     "basic-element-x-input-bindconfirm" => "not read yet",
     "basic-element-x-input-bindfocus" => "not read yet",
@@ -190,14 +191,18 @@ pending! {
     "basic-element-x-textarea-placeholder" => "not read yet",
     "basic-element-x-textarea-placeholder-font-size" => "not read yet",
     "basic-element-x-textarea-placeholder-style" => "not read yet",
-    "basic-element-x-viewpager-ng-allow-horizontal-gesture" => "not read yet",
-    "basic-element-x-viewpager-ng-bindchange" => "not read yet",
-    "basic-element-x-viewpager-ng-bindchange-select-tab" => "not read yet",
-    "basic-element-x-viewpager-ng-bindoffsetchange" => "not read yet",
-    "basic-element-x-viewpager-ng-exposure" => "not read yet",
-    "basic-element-x-viewpager-ng-item-position-absolute" => "not read yet",
-    "basic-element-x-viewpager-ng-method-selecttab" => "not read yet",
-    "basic-element-x-viewpager-ng-select-index" => "not read yet",
+    "basic-element-x-viewpager-ng-allow-horizontal-gesture" =>
+        "the first screen is right; `allow-horizontal-gesture={false}` only shows under the swipe it refuses",
+    "basic-element-x-viewpager-ng-bindchange" =>
+        "the first screen is right; the pager's `change` event is deliberately not implemented and the card is swipe-driven",
+    "basic-element-x-viewpager-ng-bindchange-select-tab" =>
+        "the first screen is right; tap + `selectTab` + `change` are all outside a first screen, and `change` is not implemented",
+    "basic-element-x-viewpager-ng-bindoffsetchange" =>
+        "the first screen is right; `offsetchange` is deliberately not implemented and the card is swipe-driven",
+    "basic-element-x-viewpager-ng-exposure" =>
+        "geometry is right, but exposure tracking does not exist, so the five texts never repaint as pages come into view",
+    "basic-element-x-viewpager-ng-method-selecttab" =>
+        "the pre-tap screen is right; a `selectTab` call on tap cannot be settled by a first screen",
     "basic-element-x-webview-bindmessage" => "not read yet",
     "basic-event-bubble-dataset" => "not read yet",
     "basic-event-dataset" => "not read yet",
