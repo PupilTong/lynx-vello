@@ -1244,22 +1244,10 @@ where
     for pending in items {
         hoisted.before(tree, state, node, pending.ordered.document_index);
         let key = pending.key();
-        // An `anchor-size()` inset may still resolve to `auto`, so it asks for
-        // the static position too; `absolute_layout` decides whether it reads it.
-        let (inset_auto, has_fallbacks) = {
-            let style = tree.style(key.node);
-            (
-                style
-                    .inset()
-                    .map(|inset| inset.is_auto() || crate::compute::anchor::is_anchor_inset(inset)),
-                style.has_position_try_fallbacks(),
-            )
-        };
-        // A position option can make an inset `auto` the box's own style
-        // gives a length, so a box with options always has one ready.
-        let needs_static_measurement = (inset_auto.left && inset_auto.right)
-            || (inset_auto.top && inset_auto.bottom)
-            || (has_fallbacks && tree.position_option_count(key.node) > 1);
+        // `absolute_layout` decides whether it reads the static position.
+        let static_axes =
+            crate::compute::util::needs_static_position(tree, key.node, &tree.style(key.node));
+        let needs_static_measurement = static_axes.width || static_axes.height;
         let content_static_offset = if needs_static_measurement {
             let item = resolve_grid_item(
                 &tree.style(key.node),

@@ -4,14 +4,15 @@
 //!
 //! Only boxes that use anchor positioning or have position options come
 //! here; `absolute_layout` sends every other box straight to
-//! [`place_absolute`] with its style's own values, so they pay one predicate
-//! and one host call (`position_option_count`) and nothing else.
+//! [`place_absolute`] with its style's own values, so they pay two style
+//! predicates and nothing else — a box whose style lists no
+//! `position-try-fallbacks` is never asked about through a host call.
 
 use smallvec::SmallVec;
 use stylo::values::computed::PositionTryOrder;
 
-use super::anchor::{AnchorMemo, AnchoredGeometry, GeometryValues};
-use super::{AbsoluteContainingBlock, AbsolutePlacement, Placed, place_absolute};
+use super::anchor::{AnchorMemo, AnchoredGeometry, imcb_size_auto_zero};
+use super::{AbsoluteContainingBlock, Placed, place_absolute, place_without_anchors};
 use crate::geometry::{Edges, Point, Rect, Size};
 use crate::style::CoreStyle;
 use crate::tree::{AnchorOutcome, Layout, LayoutGoal, LayoutTree, RequestedAxis};
@@ -19,24 +20,25 @@ use crate::tree::{AnchorOutcome, Layout, LayoutGoal, LayoutTree, RequestedAxis};
 /// One option laid out, with the facts the outcome reports.
 struct Tried {
     placed: Placed,
-    references_default_anchor: bool,
-    has_default_anchor: bool,
+    default_anchor_missing: bool,
     compensates: Size<bool>,
     carried_edges: Edges<bool>,
 }
 
-/// Lays `node` out with the geometry values of `style`, position option
-/// `option` (`base` is the box's own style).
+/// Lays `node` out with position option `option`: the host's cascaded
+/// option style (§6.5.2 "apply a position option"), which for option `0` is
+/// its own style. `base` is the box's own style and `base_uses` whether it
+/// uses anchor positioning.
 #[allow(
     clippy::too_many_arguments,
     reason = "absolute_layout's inputs plus the option"
 )]
-fn lay_out_with<T, StaticPosition>(
+fn lay_out_option<T, StaticPosition>(
     tree: &T,
     state: &mut T::State,
     node: T::NodeId,
     base: &impl CoreStyle,
-    style: &impl CoreStyle,
+    base_uses: bool,
     option: usize,
     containing_block: &AbsoluteContainingBlock,
     static_position: &StaticPosition,
@@ -47,34 +49,32 @@ where
     T: LayoutTree,
     StaticPosition: Fn(Size<f32>, Edges<f32>) -> Point<f32>,
 {
+    let style = tree.position_option_style(node, option);
     let geometry = AnchoredGeometry::resolve(
         tree,
         state,
         node,
         base,
-        style,
+        base_uses,
+        &style,
         option,
         containing_block,
         memo,
     );
     let Some(geometry) = geometry else {
-        let values = GeometryValues::of(style);
-        let placement = AbsolutePlacement::plain(style, &values, containing_block);
-        let placed = place_absolute(
+        let placed = place_without_anchors(
             tree,
             state,
             node,
             base,
-            &values,
-            &placement,
+            &style,
             containing_block,
             static_position,
             goal,
         );
         return Tried {
             placed,
-            references_default_anchor: false,
-            has_default_anchor: false,
+            default_anchor_missing: false,
             compensates: Size::new(false, false),
             // No default anchor: no shift to carry anything by.
             carried_edges: Edges {
@@ -98,73 +98,24 @@ where
     );
     Tried {
         placed,
-        references_default_anchor: geometry.references_default_anchor,
-        has_default_anchor: geometry.has_default_anchor,
+        default_anchor_missing: geometry.default_anchor_missing,
         compensates: geometry.compensates,
         carried_edges: geometry.carried,
     }
 }
 
-/// Lays `node` out with position option `option`: the host's cascaded
-/// option style when the box has options (§6.5.2 "apply a position
-/// option"), its own style otherwise.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "absolute_layout's inputs plus the option"
-)]
-fn lay_out_option<T, StaticPosition>(
-    tree: &T,
-    state: &mut T::State,
-    node: T::NodeId,
-    base: &impl CoreStyle,
-    option: usize,
-    has_options: bool,
-    containing_block: &AbsoluteContainingBlock,
-    static_position: &StaticPosition,
-    goal: LayoutGoal,
-    memo: &mut AnchorMemo,
-) -> Tried
-where
-    T: LayoutTree,
-    StaticPosition: Fn(Size<f32>, Edges<f32>) -> Point<f32>,
-{
-    if has_options {
-        let style = tree.position_option_style(node, option);
-        lay_out_with(
-            tree,
-            state,
-            node,
-            base,
-            &style,
-            option,
-            containing_block,
-            static_position,
-            goal,
-            memo,
-        )
-    } else {
-        lay_out_with(
-            tree,
-            state,
-            node,
-            base,
-            base,
-            option,
-            containing_block,
-            static_position,
-            goal,
-            memo,
-        )
-    }
-}
-
 /// The inset-modified containing block size option `option` yields for
 /// §6.2's sort, without laying the box out.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "absolute_layout's inputs plus the option and its memo"
+)]
 fn option_sort_size<T: LayoutTree>(
     tree: &T,
     state: &T::State,
     node: T::NodeId,
     base: &impl CoreStyle,
+    base_uses: bool,
     option: usize,
     containing_block: &AbsoluteContainingBlock,
     memo: &mut AnchorMemo,
@@ -175,35 +126,33 @@ fn option_sort_size<T: LayoutTree>(
         state,
         node,
         base,
+        base_uses,
         &style,
         option,
         containing_block,
         memo,
     )
     .map_or_else(
-        || {
-            // No anchor positioning in this option: its containing block
-            // is the handed-over one and its insets are its own.
-            let inset = style.inset();
-            let size = containing_block.size;
-            let used = |inset, basis| super::util::resolve_inset(inset, Some(basis)).unwrap_or(0.0);
-            Size::new(
-                (size.width - used(inset.left, size.width) - used(inset.right, size.width))
-                    .max(0.0),
-                (size.height - used(inset.top, size.height) - used(inset.bottom, size.height))
-                    .max(0.0),
-            )
-        },
+        // No anchor positioning in this option: its containing block is the
+        // handed-over one and its insets are its own.
+        || imcb_size_auto_zero(containing_block.size, style.inset()),
         |geometry| geometry.sort_size(),
     )
 }
 
 /// The absolute pass of a box that uses anchor positioning or has position
-/// options. Out of line and cold: the absolute pass of every other box never
-/// reaches it.
+/// options, with what `absolute_layout` already read: its own style `base`,
+/// the length `count` of its position options list (`0` when the style
+/// lists no `position-try-fallbacks`) and whether `base` uses anchor
+/// positioning (`base_uses`). Out of line and cold: the absolute pass of
+/// every other box never reaches it.
 #[allow(
     clippy::too_many_lines,
     reason = "§6.5's determination in its order, threading one memo"
+)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "absolute_layout's inputs plus what it already read"
 )]
 #[cold]
 #[inline(never)]
@@ -211,6 +160,9 @@ pub(super) fn anchored_absolute_layout<T, StaticPosition>(
     tree: &T,
     state: &mut T::State,
     node: T::NodeId,
+    base: &impl CoreStyle,
+    count: usize,
+    base_uses: bool,
     containing_block: &AbsoluteContainingBlock,
     static_position: &StaticPosition,
     goal: LayoutGoal,
@@ -219,8 +171,6 @@ where
     T: LayoutTree,
     StaticPosition: Fn(Size<f32>, Edges<f32>) -> Point<f32>,
 {
-    let base = tree.style(node);
-    let count = tree.position_option_count(node);
     let has_options = count > 1;
     let mut memo = AnchorMemo::default();
     // §6.5: "Let current styles be the current used styles of abspos, as
@@ -243,9 +193,9 @@ where
             tree,
             state,
             node,
-            &base,
+            base,
+            base_uses,
             current,
-            has_options,
             containing_block,
             static_position,
             goal,
@@ -267,9 +217,9 @@ where
         tree,
         state,
         node,
-        &base,
+        base,
+        base_uses,
         current,
-        has_options,
         containing_block,
         static_position,
         commit,
@@ -295,7 +245,8 @@ where
                     tree,
                     state,
                     node,
-                    &base,
+                    base,
+                    base_uses,
                     option,
                     containing_block,
                     &mut memo,
@@ -324,9 +275,9 @@ where
             tree,
             state,
             node,
-            &base,
+            base,
+            base_uses,
             option,
-            has_options,
             containing_block,
             static_position,
             LayoutGoal::Measure(RequestedAxis::Both),
@@ -340,9 +291,9 @@ where
                 tree,
                 state,
                 node,
-                &base,
+                base,
+                base_uses,
                 option,
-                has_options,
                 containing_block,
                 static_position,
                 commit,
@@ -374,8 +325,7 @@ fn report<T: LayoutTree>(
             // §6.6 `no-overflow`: after the determination, the margin box
             // still overflows (every option did, or the box has none).
             overflows: !tried.placed.fits(),
-            references_default_anchor: tried.references_default_anchor,
-            default_anchor_resolved: tried.has_default_anchor,
+            default_anchor_missing: tried.default_anchor_missing,
             compensates: tried.compensates,
             carried_edges: tried.carried_edges,
             imcb: to_host(tried.placed.imcb),

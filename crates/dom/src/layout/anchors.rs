@@ -2006,7 +2006,7 @@ mod tests {
         assert_eq!(remembered.default, Some(anchor));
         assert_eq!(remembered.displacement_of(anchor), Some(Vector2D::zero()));
         let outcome = doc.dom.anchor_outcome(anchored).expect("reported");
-        assert!(outcome.default_anchor_resolved);
+        assert!(!outcome.default_anchor_missing);
         assert!(outcome.compensates.width && outcome.compensates.height);
         assert_eq!(doc.dom.anchor_containing_block(anchored), Some(cb));
 

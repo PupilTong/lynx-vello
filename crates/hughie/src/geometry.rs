@@ -202,11 +202,6 @@ impl<T> Rect<T> {
 }
 
 impl Rect<f32> {
-    pub const ZERO: Self = Self {
-        origin: Point::ZERO,
-        size: Size::ZERO,
-    };
-
     /// The rectangle moved by `offset`.
     #[inline]
     #[must_use]

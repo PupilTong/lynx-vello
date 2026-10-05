@@ -148,10 +148,9 @@ pub(super) fn position_area_region(
             anchor.origin.y + anchor.size.height,
         ),
     );
-    Rect::new(
-        Point::new(left, top),
-        Size::new((right - left).max(0.0), (bottom - top).max(0.0)),
-    )
+    // The lines ascend: the containing block and (`AnchorMemo::rect`'s
+    // assertion) the anchor box have non-negative sizes.
+    Rect::new(Point::new(left, top), Size::new(right - left, bottom - top))
 }
 
 /// Which edges of the region [`position_area_region`] selects — left,

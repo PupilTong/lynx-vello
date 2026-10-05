@@ -361,19 +361,6 @@ impl<T> LayoutTree for TreeArenas<T> {
         self.anchor_query(state, node, option, query).1
     }
 
-    /// Recorded like an anchor query: a box whose default anchor does not
-    /// exist yet reads nothing else, and must still be laid out again when
-    /// one appears.
-    fn default_anchor(
-        &self,
-        state: &Self::State,
-        node: NodeSlot,
-        option: usize,
-    ) -> Option<NodeSlot> {
-        self.anchor_query(state, node, option, anchors::AnchorQuery::Default)
-            .0
-    }
-
     fn anchor_scrolls_with_default(
         &self,
         state: &Self::State,

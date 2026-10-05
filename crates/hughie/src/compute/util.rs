@@ -13,7 +13,7 @@ use stylo::values::specified::align::AlignFlags;
 use super::anchor;
 use crate::geometry::{Edges, Point, Size};
 use crate::style::{Contain, CoreStyle};
-use crate::tree::{AvailableSpace, LayoutInput, RequestedAxis, SizingMode};
+use crate::tree::{AvailableSpace, LayoutInput, LayoutTree, RequestedAxis, SizingMode};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Axis {
@@ -1309,6 +1309,27 @@ pub(super) fn resolve_container_box(
         inner,
         available_inner,
     }
+}
+
+/// Per axis, whether the absolute pass may read the static position of the
+/// absolutely positioned `node` (whose style is `style`), so its container
+/// has one ready: both insets on the axis are `auto`. An anchor-function
+/// inset may still resolve to `auto`, so it counts as one; a position option
+/// can make `auto` an inset the box's own style gives a length, so a box
+/// with options needs both axes.
+#[inline]
+pub(super) fn needs_static_position<T: LayoutTree>(
+    tree: &T,
+    node: T::NodeId,
+    style: &impl CoreStyle,
+) -> Size<bool> {
+    if style.has_position_try_fallbacks() && tree.position_option_count(node) > 1 {
+        return Size::new(true, true);
+    }
+    let auto = style
+        .inset()
+        .map(|inset| inset.is_auto() || anchor::is_anchor_inset(inset));
+    Size::new(auto.left && auto.right, auto.top && auto.bottom)
 }
 
 #[inline]

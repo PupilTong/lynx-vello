@@ -117,32 +117,6 @@ fn container_style() -> TestStyle {
 }
 
 #[test]
-fn keywords_map_onto_physical_axes() {
-    use hughie::compute::anchor_size_axis;
-    use hughie::style::PhysicalAxis::{Horizontal, Vertical};
-    for property in [Horizontal, Vertical] {
-        assert_eq!(
-            anchor_size_axis(AnchorSizeKeyword::None, property),
-            property
-        );
-        for keyword in [
-            AnchorSizeKeyword::Width,
-            AnchorSizeKeyword::Inline,
-            AnchorSizeKeyword::SelfInline,
-        ] {
-            assert_eq!(anchor_size_axis(keyword, property), Horizontal);
-        }
-        for keyword in [
-            AnchorSizeKeyword::Height,
-            AnchorSizeKeyword::Block,
-            AnchorSizeKeyword::SelfBlock,
-        ] {
-            assert_eq!(anchor_size_axis(keyword, property), Vertical);
-        }
-    }
-}
-
-#[test]
 fn a_flex_container_resolves_its_absolute_childs_sizes_insets_and_margins() {
     let mut tree = tree_with_anchor();
     let sized = tree.push_leaf(

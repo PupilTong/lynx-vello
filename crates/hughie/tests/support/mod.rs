@@ -1140,7 +1140,9 @@ pub(super) struct TestTree {
     /// padding-box coordinates; looked up before `anchors`.
     pub(super) anchor_rects: Vec<(&'static str, Rect<f32>)>,
     /// The name every absolutely positioned box's default anchor has, under
-    /// every option (`position-anchor` is the host's).
+    /// every option (`position-anchor` is the host's). As in `dom`, a box
+    /// has a default anchor exactly when `anchor_rect` answers for it: a
+    /// name with no rectangle here is no default anchor.
     pub(super) default_anchor: Option<&'static str>,
     /// Per option index, a different default anchor name (or none).
     pub(super) option_default_anchors: Vec<(usize, Option<&'static str>)>,
@@ -1311,10 +1313,6 @@ impl LayoutTree for TestTree {
             AnchorSpec::Named(name) => &*name.value.0,
         };
         self.anchor_named(name)
-    }
-
-    fn default_anchor(&self, _state: &TestState, node: TestRef, option: usize) -> Option<TestRef> {
-        self.default_anchor_name(option).map(|_| node)
     }
 
     fn anchor_scrolls_with_default(

@@ -193,8 +193,7 @@ fn needs_slot(
     let compensates = outcome.compensates.width || outcome.compensates.height;
     (compensates && has_default)
         || (visibility.contains(PositionVisibility::ANCHORS_VALID)
-            && outcome.references_default_anchor
-            && !outcome.default_anchor_resolved)
+            && outcome.default_anchor_missing)
         || (visibility.contains(PositionVisibility::ANCHORS_VISIBLE) && has_default)
         || visibility.contains(PositionVisibility::NO_OVERFLOW)
 }
@@ -594,8 +593,7 @@ impl PaintOrder {
 
         // §6.6 `anchor-valid`.
         let mut hidden = visibility.contains(PositionVisibility::ANCHORS_VALID)
-            && outcome.references_default_anchor
-            && !outcome.default_anchor_resolved;
+            && outcome.default_anchor_missing;
 
         // §6.6 `anchor-visible`.
         let mut probe = None;

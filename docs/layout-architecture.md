@@ -336,8 +336,9 @@ the §6.5 determination, `position-try-order`'s sort). The host owns what is a
 tree walk or a cascade, through `LayoutTree` methods whose defaults mean "no
 anchors": `anchor_rect(state, node, option, AnchorSpec)` — a target's border
 box in the padding-box coordinates of the element generating `node`'s
-containing block, with §3.3's remembered scroll offsets applied —
-`default_anchor`, `anchor_scrolls_with_default` (§3.3's scroll-container
+containing block, with §3.3's remembered scroll offsets applied; with
+`AnchorSpec::Default`, `None` means the box has no default anchor —
+`anchor_scrolls_with_default` (§3.3's scroll-container
 condition), `scrollable_containing_block` (css-position-4: the area the
 containing block's own algorithm recorded through
 `set_scrollable_containing_block` between its in-flow commit and its absolute
@@ -346,7 +347,7 @@ pass — its in-flow scrollable overflow, which no out-of-flow box can grow),
 already cascaded with its try tactic; index 0 is the box's own style),
 `last_successful_option` (which the host records after layout, §6.5.1.1), and
 `set_anchor_outcome`, which hands back per box the chosen option, whether it
-still overflows, whether it references and resolved its default anchor, the
+still overflows, whether it references a default anchor it does not have, the
 per-axis compensation flags and its inset-modified containing block and margin
 box (`AnchorOutcome`). The engine asks only from an absolute pass, where
 everything in flow under the containing block and every earlier box it is the
@@ -355,7 +356,7 @@ containing block of — its own out-of-flow children and the hoisted ones alike
 actually lays out against (a grid area, the scrollable containing block, a
 `position-area` region). Within one absolute layout of a box it asks each
 question once per option (`AnchorMemo`), never across a pass. A box that uses
-none of it pays one style predicate, and a host call to count its options only
+none of it pays two style predicates, and a host call to count its options only
 when its `position-try-fallbacks` lists something; the anchored path is a
 cold, out-of-line function. The box's own run never
 resolves an anchor function or reads an option: the absolute pass hands it

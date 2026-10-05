@@ -421,20 +421,6 @@ pub trait LayoutTree {
         None
     }
 
-    /// The default anchor element of `node` under position option `option`
-    /// (css-anchor-position-1 §2.4, `position-anchor` resolved), if any. The
-    /// engine only asks whether there is one; [`Self::anchor_rect`] with
-    /// [`AnchorSpec::Default`] supplies its geometry.
-    fn default_anchor(
-        &self,
-        state: &Self::State,
-        node: Self::NodeId,
-        option: usize,
-    ) -> Option<Self::NodeId> {
-        let _ = (state, node, option);
-        None
-    }
-
     /// css-anchor-position-1 §3.3's last compensation condition: whether the
     /// target anchor element `name` selects for `node` (under `option`) has
     /// the same nearest scroll container with `axis` scrollable as `node`'s
@@ -556,12 +542,10 @@ pub struct AnchorOutcome {
     /// css-anchor-position-1 §6.5: no option kept the margin box inside the
     /// inset-modified containing block (`position-visibility: no-overflow`).
     pub overflows: bool,
-    /// The chosen option references the default anchor — `position-area`,
-    /// `anchor-center`, or an `anchor()`/`anchor-size()` without a name
-    /// (§6.6 `anchor-valid`).
-    pub references_default_anchor: bool,
-    /// The box has a default anchor element under the chosen option.
-    pub default_anchor_resolved: bool,
+    /// §6.6 `anchor-valid`: the chosen option references the default anchor
+    /// — `position-area`, `anchor-center`, or an `anchor()`/`anchor-size()`
+    /// without a name — and the box has no default anchor element under it.
+    pub default_anchor_missing: bool,
     /// §3.3: per physical axis, whether the box compensates for the scroll
     /// of its default anchor.
     pub compensates: Size<bool>,

@@ -419,7 +419,7 @@ fn position_area_without_a_default_anchor_has_no_effect() {
         "no default anchor",
     );
     let reported = outcome(&tree, id);
-    assert!(reported.references_default_anchor && !reported.default_anchor_resolved);
+    assert!(reported.default_anchor_missing);
     assert_eq!(reported.compensates, Size::new(false, false));
 }
 
@@ -600,7 +600,10 @@ fn explicit_alignment_overrides_the_area_default() {
 #[test]
 fn a_scrollable_containing_block_extends_the_position_area_grid() {
     let mut tree = with_default_anchor("--a", rect(100.0, 100.0, 50.0, 50.0));
-    tree.scrollable_containing_block = Some(Size::new(600.0, 250.0));
+    // The host's area is never smaller than the padding box (its producer,
+    // `record_scrollable_containing_block`, clamps against it): content
+    // overflowing to 600 wide, none below.
+    tree.scrollable_containing_block = Some(Size::new(600.0, 300.0));
     let layout = place(
         &mut tree,
         Size::new(300.0, 300.0),
@@ -612,7 +615,6 @@ fn a_scrollable_containing_block_extends_the_position_area_grid() {
             ..TestStyle::default()
         },
     );
-    // Never smaller than the padding box: 600 × 300.
     assert_box(&layout, (150.0, 0.0, 450.0, 300.0), "right of the anchor");
 }
 
@@ -1715,7 +1717,7 @@ fn compensation_follows_the_three_conditions() {
         false,
     );
     assert_eq!(area.compensates, Size::new(true, true), "position-area");
-    assert!(area.references_default_anchor && area.default_anchor_resolved);
+    assert!(!area.default_anchor_missing);
 
     let centered = run(
         TestStyle {
@@ -1744,13 +1746,25 @@ fn compensation_follows_the_three_conditions() {
         run(with(named_top.clone()), true).compensates,
         Size::new(false, true)
     );
-    let other = run(with(named_top), false);
+    let other = run(with(named_top.clone()), false);
     assert_eq!(
         other.compensates,
         Size::new(false, false),
         "another scroller"
     );
-    assert!(!other.references_default_anchor);
+    assert!(!other.default_anchor_missing);
+
+    // §6.6 `anchor-valid`: a named `anchor()` does not reference the default
+    // anchor, so a box without one is not missing it.
+    let mut tree = TestTree::default();
+    tree.anchor_rects = vec![("--b", rect(0.0, 0.0, 10.0, 10.0))];
+    let id = place_in(
+        &mut tree,
+        container(300.0, 300.0),
+        with(named_top),
+        Size::new(10.0, 10.0),
+    );
+    assert!(!outcome(&tree, id).default_anchor_missing);
 }
 
 #[test]

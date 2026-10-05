@@ -10,7 +10,7 @@ mod relative;
 mod single_axis;
 mod util;
 
-pub use anchor::{anchor_size_axis, uses_anchor_positioning};
+pub use anchor::uses_anchor_positioning;
 pub use flexbox::compute_flexbox_layout;
 pub use grid::{compute_grid_lanes_layout, compute_grid_layout};
 #[cfg(feature = "layout-test-utils")]
@@ -730,35 +730,74 @@ where
         "containing-block sizes must be finite and non-negative"
     );
     let style = tree.style(node);
-    // The style test first: a box that names no anchor and lists no
+    // The style tests first: a box that names no anchor and lists no
     // fallbacks — nearly every absolutely positioned box — decides here,
     // without asking the host for an options list it cannot have.
-    if anchor::uses_anchor_positioning(&style)
-        || (style.has_position_try_fallbacks() && tree.position_option_count(node) > 1)
-    {
+    let base_uses = anchor::uses_anchor_positioning(&style);
+    let count = if style.has_position_try_fallbacks() {
+        tree.position_option_count(node)
+    } else {
+        0
+    };
+    if base_uses || count > 1 {
         return anchor_fallback::anchored_absolute_layout(
             tree,
             state,
             node,
+            &style,
+            count,
+            base_uses,
             containing_block,
             static_position,
             goal,
         );
     }
-    let values = GeometryValues::of(&style);
-    let placement = AbsolutePlacement::plain(&style, &values, containing_block);
-    place_absolute(
+    place_without_anchors(
         tree,
         state,
         node,
         &style,
+        &style,
+        containing_block,
+        static_position,
+        goal,
+    )
+    .layout
+}
+
+/// Lays `node` out with the geometry values of `style` as they are, without
+/// anchor positioning (`base` is the box's own style).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "absolute_layout's inputs plus the style the values come from"
+)]
+pub(super) fn place_without_anchors<T, StaticPosition>(
+    tree: &T,
+    state: &mut T::State,
+    node: T::NodeId,
+    base: &impl CoreStyle,
+    style: &impl CoreStyle,
+    containing_block: &AbsoluteContainingBlock,
+    static_position: &StaticPosition,
+    goal: LayoutGoal,
+) -> Placed
+where
+    T: LayoutTree,
+    StaticPosition: Fn(Size<f32>, Edges<f32>) -> Point<f32>,
+{
+    let values = GeometryValues::of(style);
+    let placement = AbsolutePlacement::plain(style, &values, containing_block);
+    place_absolute(
+        tree,
+        state,
+        node,
+        base,
         &values,
         &placement,
         containing_block,
         static_position,
         goal,
     )
-    .layout
 }
 
 /// The used self-alignment of an absolutely positioned box on one axis.
@@ -838,14 +877,10 @@ impl AbsolutePlacement {
         Self {
             area: Rect::new(Point::ZERO, containing_block.size),
             original: containing_block.original(),
-            align: if containing_block.honors_self_alignment {
-                Size::new(
-                    AxisAlignment::of(style.justify_self().0),
-                    AxisAlignment::of(style.align_self().0),
-                )
-            } else {
-                Size::new(AxisAlignment::NORMAL, AxisAlignment::NORMAL)
-            },
+            align: Size::new(
+                anchor::authored_alignment(style.justify_self().0, containing_block),
+                anchor::authored_alignment(style.align_self().0, containing_block),
+            ),
             auto_inset: values.inset.map(|inset| matches!(inset, Inset::Auto)),
             sensitive: Size::new(false, false),
         }
@@ -1668,7 +1703,7 @@ fn aligned_margin_box_start(axis: AlignedAxis, subject: f32) -> f32 {
         // over the default anchor box in the relevant axis".
         Some(center) => center - subject / 2.0,
         None => match alignment.flags.value() {
-            AlignFlags::CENTER | AlignFlags::ANCHOR_CENTER => imcb_start + free / 2.0,
+            AlignFlags::CENTER => imcb_start + free / 2.0,
             AlignFlags::END | AlignFlags::FLEX_END => toward(!containing_rtl),
             AlignFlags::LEFT if horizontal => toward(false),
             AlignFlags::RIGHT if horizontal => toward(true),
@@ -2100,7 +2135,6 @@ mod tests {
             tree.anchor_rect(&state, 1, 0, AnchorSpec::Named(&name)),
             None
         );
-        assert_eq!(tree.default_anchor(&state, 1, 0), None);
         assert!(!tree.anchor_scrolls_with_default(
             &state,
             1,
@@ -2121,12 +2155,11 @@ mod tests {
             AnchorOutcome {
                 chosen: 0,
                 overflows: false,
-                references_default_anchor: false,
-                default_anchor_resolved: false,
+                default_anchor_missing: false,
                 compensates: Size::new(false, false),
                 carried_edges: Edges::default(),
-                imcb: Rect::ZERO,
-                margin_box: Rect::ZERO,
+                imcb: Rect::new(Point::ZERO, Size::ZERO),
+                margin_box: Rect::new(Point::ZERO, Size::ZERO),
             },
         );
         // Hoisting: a host that lowers no position reports nothing, and the

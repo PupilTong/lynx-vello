@@ -2335,10 +2335,11 @@ resolution, the `position-area` grid, `anchor-center`, the css-position-3
 host-placed boxes; Lynx `linear`/`relative` keep starlight's inset-only
 placement) and the §6.5 fallback loop (`compute/anchor.rs`,
 `anchor_area.rs`, `anchor_fallback.rs`), against `LayoutTree` methods whose
-defaults mean "no anchors" (`anchor_rect`, `default_anchor`,
+defaults mean "no anchors" (`anchor_rect`,
 `scrollable_containing_block`, `position_option_style`,
-`set_anchor_outcome`, …). A box that uses none of it pays one predicate and
-one `position_option_count` call; an anchored box's own run reads its base
+`set_anchor_outcome`, …). A box that uses none of it pays two style
+predicates, and a `position_option_count` call only when it lists
+`position-try-fallbacks`; an anchored box's own run reads its base
 style and gets every differing axis as a known dimension, so it stays
 cacheable (`docs/style-assumptions.md` §28, `docs/layout-architecture.md`).
 
