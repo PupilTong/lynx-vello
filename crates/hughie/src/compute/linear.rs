@@ -21,7 +21,7 @@ use super::util::{
     resolve_insets, resolve_intrinsic, resolve_item_geometry, resolve_margins, resolve_padding,
     sort_and_assign_layout_order, store_committed_child,
 };
-use super::{compute_absolute_layout_with_static_position, measure_absolute_layout};
+use super::{AbsoluteContainingBlock, compute_absolute_layout_in, measure_absolute_layout};
 use crate::geometry::{Edges, Point, Size};
 use crate::style::containment::contained_axes;
 use crate::style::{Contain, CoreStyle, LinearStyle};
@@ -237,9 +237,9 @@ fn margin_depends_on_basis(value: &Margin) -> bool {
     match value {
         Margin::LengthPercentage(lp) => lp_depends_on_basis(lp),
         Margin::Auto => false,
-        Margin::AnchorSizeFunction(_) | Margin::AnchorContainingCalcFunction(_) => {
-            unreachable!("anchor margins are pref-dead under the lynx feature")
-        }
+        // Conservatively yes: a refresh re-resolves the margin, whatever the
+        // unresolvable form turns out to be, and keeps a call off every item.
+        Margin::AnchorSizeFunction(_) | Margin::AnchorContainingCalcFunction(_) => true,
     }
 }
 
@@ -248,11 +248,10 @@ fn inset_depends_on_basis(value: &Inset) -> bool {
     match value {
         Inset::LengthPercentage(lp) => lp_depends_on_basis(lp),
         Inset::Auto => false,
+        // Conservatively yes, as for margins above.
         Inset::AnchorFunction(_)
         | Inset::AnchorSizeFunction(_)
-        | Inset::AnchorContainingCalcFunction(_) => {
-            unreachable!("anchor insets are pref-dead under the lynx feature")
-        }
+        | Inset::AnchorContainingCalcFunction(_) => true,
     }
 }
 
@@ -1223,9 +1222,11 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
+#[inline(never)]
 fn commit_non_in_flow_children<T>(
     tree: &T,
     state: &mut T::State,
+    node: T::NodeId,
     hidden_items: &[LayoutItemKey<T::NodeId>],
     absolute_items: &[AbsoluteItem<T::NodeId>],
     axes: LinearAxes,
@@ -1233,10 +1234,12 @@ fn commit_non_in_flow_children<T>(
     border: Edges<f32>,
     main_gravity: AlignFlags,
     mut content_size: Size<f32>,
+    rtl: bool,
 ) -> Size<f32>
 where
     T: LayoutTree,
 {
+    let containing_block = |size| AbsoluteContainingBlock::lynx_padding_box(size, rtl);
     let padding_box_size = Size::new(
         (outer_size.width - border.horizontal_sum()).max(0.0),
         (outer_size.height - border.vertical_sum()).max(0.0),
@@ -1246,6 +1249,8 @@ where
     for key in hidden_items {
         super::hide_child_at_order(tree, state, key.node, key.layout_order);
     }
+    super::util::debug_assert_tree_order(absolute_items.iter().map(|item| item.key.document_index));
+    let mut hoisted = super::HoistedPass::new(padding_box_size, border, rtl);
     for item in absolute_items {
         let AbsoluteItem {
             key,
@@ -1253,16 +1258,17 @@ where
             gravity,
             static_axes,
         } = *item;
+        hoisted.before(tree, state, node, key.document_index);
         let child = key.node;
         let layout_order = key.layout_order;
 
         match position {
             PositionProperty::Absolute => {
-                let mut layout = compute_absolute_layout_with_static_position(
+                let mut layout = compute_absolute_layout_in(
                     tree,
                     state,
                     child,
-                    padding_box_size,
+                    containing_block(padding_box_size),
                     |size, margin| {
                         let static_position = absolute_static_position(
                             axes,
@@ -1290,6 +1296,7 @@ where
                     tree.style(child).overflow(),
                 );
                 tree.set_unrounded_layout(state, child, layout);
+                hoisted.inside(tree, state, node, key.document_index);
             }
             PositionProperty::Fixed => {
                 let measured = match (static_axes.width, static_axes.height) {
@@ -1298,7 +1305,7 @@ where
                         tree,
                         state,
                         child,
-                        padding_box_size,
+                        containing_block(padding_box_size),
                         match (width, height) {
                             (true, false) => RequestedAxis::Horizontal,
                             (false, true) => RequestedAxis::Vertical,
@@ -1321,6 +1328,7 @@ where
             _ => unreachable!(),
         }
     }
+    hoisted.rest(tree, state, node);
     content_size
 }
 
@@ -1463,7 +1471,6 @@ where
         }
         if is_absolute {
             if commits_layout {
-                let inset = child_style.inset();
                 absolute_items.push(AbsoluteItem {
                     key: OrderedItem {
                         node: child,
@@ -1473,10 +1480,7 @@ where
                     },
                     position,
                     gravity: computed_cross_gravity(child_style.align_self(), align_items, axes),
-                    static_axes: Size::new(
-                        inset.left.is_auto() && inset.right.is_auto(),
-                        inset.top.is_auto() && inset.bottom.is_auto(),
-                    ),
+                    static_axes: super::util::needs_static_position(tree, child, &child_style),
                 });
             }
             continue;
@@ -1599,10 +1603,25 @@ where
         final_outer_size,
         content_origin,
     );
-    if !absolute_items.is_empty() || !hidden_items.is_empty() {
+    super::record_scrollable_containing_block(
+        tree,
+        state,
+        node,
+        &style,
+        final_outer_size,
+        border,
+        content_size,
+    );
+    // A box this one is the containing block of may sit deeper than its
+    // children (`LayoutTree::hoisted_children`).
+    if !hidden_items.is_empty()
+        || !absolute_items.is_empty()
+        || tree.has_hoisted_children(state, node)
+    {
         content_size = commit_non_in_flow_children(
             tree,
             state,
+            node,
             &hidden_items,
             &absolute_items,
             axes,
@@ -1610,6 +1629,7 @@ where
             border,
             main_gravity,
             content_size,
+            style.direction() == direction::T::Rtl,
         );
     }
     let content_size = own_scrollable_overflow(&style, final_outer_size, content_size);

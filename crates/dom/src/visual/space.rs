@@ -1,10 +1,13 @@
-//! Compose spaces: the scroll, sticky and animation nodes a frame composes
-//! through, as one tree in containing-block order.
+//! Compose spaces: the scroll, sticky, anchored and animation nodes a frame
+//! composes through, as one tree in containing-block order.
 //!
 //! The frame is baked unscrolled, unstuck and at committed transforms. Each
 //! node applies one CSS-px affine `X` built from committed geometry outside
 //! it: a scroll node `Tr(−A·snap(o))` with `A` the scrollport's
 //! [`ScrollSlot::viewport_axes`], a sticky node its own mapped shift, an
+//! anchored node its box's default scroll shift `Tr(L·s)` — or the zero map
+//! while `position-visibility` hides the box ([`super::anchored`]) — a
+//! visibility node the identity or that same zero map, an
 //! animation node its sampled delta `pre·L(t)·Lc⁻¹·pre⁻¹`. A record's live map
 //! is the product of the `X`s on its path, root first — so a node's order on
 //! the path is the order its movement applies in.
@@ -13,8 +16,12 @@
 //! ops, image draws, filter entries, paint items and clips. An element's own
 //! box, clip and effect layer take its *box space* — after its own sticky and
 //! animation nodes, before its own scroll node — and its content takes its
-//! *content space*, after its scroll node. [`SpaceSamples::css`] is the one
-//! place the product is formed: compose, filter bakes and hit testing (which
+//! *content space*, after its scroll node. An anchor-positioned box's
+//! anchored node is the outermost of its own: it encloses its box space. Its
+//! descendants that escape its containing-block chain (a `position: fixed`
+//! box whose containing block is outside it) compose through its visibility
+//! node instead, which hides them with it and does not shift them. [`SpaceSamples::css`] is
+//! the one place the product is formed: compose, filter bakes and hit testing (which
 //! inverts it) all read it.
 //!
 //! The slot tables keep their own parent links for their own relations:
@@ -23,6 +30,7 @@
 
 use euclid::default::Vector2D;
 
+use super::anchored::{AnchoredSamples, AnchoredSlot};
 use super::reach::Reach;
 use super::{AnimationSamples, AnimationSlot, ClipNode, ScrollSlot, StickySamples};
 use crate::paint::compose::snap_offset;
@@ -45,6 +53,14 @@ pub(crate) enum SpaceKind {
     Sticky(u32),
     /// An exported animation, by animation slot.
     Animation(u32),
+    /// An anchor-positioned box's default scroll shift and
+    /// `position-visibility`, by anchored slot.
+    Anchored(u32),
+    /// An anchor-positioned box's `position-visibility` alone, by anchored
+    /// slot, for its descendants that escape its containing-block chain:
+    /// `force-hidden` hides "the element and its descendants", but only
+    /// the box and what its containing-block chain carries move with it.
+    AnchoredVisibility(u32),
 }
 
 /// The kinds on `space`'s path, innermost first.
@@ -103,26 +119,37 @@ pub(crate) fn curves_within<'a>(
             .transform
             .as_ref()
             .map(|track| &track.reach),
-        SpaceKind::Scroll(_) | SpaceKind::Sticky(_) => None,
+        SpaceKind::Scroll(_)
+        | SpaceKind::Sticky(_)
+        | SpaceKind::Anchored(_)
+        | SpaceKind::AnchoredVisibility(_) => None,
     })
 }
 
 /// Whether what a record in `record` draws into a bake in `bake` changes
 /// with the timeline reading: a curve on `record`'s path below the two
-/// spaces' common ancestor moves or fades it, and a transform curve on
-/// `bake`'s moves the bake across it. An opacity-only curve on `bake`'s
-/// side changes neither, since its alpha applies where the bake is drawn.
+/// spaces' common ancestor moves or fades it, an anchored node there hides
+/// it on a probe a transform curve moves
+/// ([`AnchoredSlot::reads_timeline`]), and a transform curve on `bake`'s
+/// moves the bake across it. An opacity-only curve on `bake`'s side
+/// changes neither, since its alpha applies where the bake is drawn.
 pub(crate) fn sampled_against(
     spaces: &[Space],
     animations: &[AnimationSlot],
+    anchored: &[AnchoredSlot],
     record: Option<u32>,
     bake: Option<u32>,
 ) -> bool {
     let common = common_ancestor(spaces, record, bake);
-    path_below(spaces, record, common).any(|node| matches!(node.kind, SpaceKind::Animation(_)))
-        || curves_within(spaces, animations, bake, record)
-            .next()
-            .is_some()
+    path_below(spaces, record, common).any(|node| match node.kind {
+        SpaceKind::Animation(_) => true,
+        SpaceKind::Anchored(slot) | SpaceKind::AnchoredVisibility(slot) => {
+            anchored[slot as usize].reads_timeline()
+        }
+        SpaceKind::Scroll(_) | SpaceKind::Sticky(_) => false,
+    }) || curves_within(spaces, animations, bake, record)
+        .next()
+        .is_some()
 }
 
 /// The innermost clip on `clip`'s chain that no transform curve moves
@@ -161,8 +188,35 @@ pub(crate) fn movers_bounded(
             .transform
             .as_ref()
             .is_none_or(|track| track.reach.inverse_norm().is_some()),
-        SpaceKind::Scroll(_) | SpaceKind::Sticky(_) => true,
+        // A translation, or the zero map of a hidden box, which draws
+        // nothing to bound.
+        SpaceKind::Scroll(_)
+        | SpaceKind::Sticky(_)
+        | SpaceKind::Anchored(_)
+        | SpaceKind::AnchoredVisibility(_) => true,
     })
+}
+
+/// The viewport `(low, high)` range of a layout-space vector anywhere in
+/// `low..high` (per axis) mapped through the linear part `m` (its columns:
+/// the images of the x and y unit vectors).
+pub(crate) fn linear_range(
+    m: [Vector2D<f32>; 2],
+    low: Vector2D<f32>,
+    high: Vector2D<f32>,
+) -> (Vector2D<f32>, Vector2D<f32>) {
+    let (x0, x1) = (m[0] * low.x, m[0] * high.x);
+    let (y0, y1) = (m[1] * low.y, m[1] * high.y);
+    (
+        Vector2D::new(
+            x0.x.min(x1.x) + y0.x.min(y1.x),
+            x0.y.min(x1.y) + y0.y.min(y1.y),
+        ),
+        Vector2D::new(
+            x0.x.max(x1.x) + y0.x.max(y1.x),
+            x0.y.max(x1.y) + y0.y.max(y1.y),
+        ),
+    )
 }
 
 /// The innermost scroll slot on `space`'s path.
@@ -181,6 +235,19 @@ pub(crate) fn nearest_sticky(spaces: &[Space], space: Option<u32>) -> Option<u32
     })
 }
 
+/// The innermost anchored or anchored-visibility *node* on `space`'s path,
+/// as its index in `spaces`: two records under the same one move and hide
+/// together; under a box's anchored node and its visibility node they hide
+/// together but only one moves.
+pub(crate) fn nearest_anchored(spaces: &[Space], space: Option<u32>) -> Option<u32> {
+    std::iter::successors(space, |&index| spaces[index as usize].parent).find(|&index| {
+        matches!(
+            spaces[index as usize].kind,
+            SpaceKind::Anchored(_) | SpaceKind::AnchoredVisibility(_)
+        )
+    })
+}
+
 /// The innermost animation slot on `space`'s path.
 pub(crate) fn nearest_animation(spaces: &[Space], space: Option<u32>) -> Option<u32> {
     path(spaces, space).find_map(|kind| match kind {
@@ -191,13 +258,17 @@ pub(crate) fn nearest_animation(spaces: &[Space], space: Option<u32>) -> Option<
 
 /// One instant's node inputs with the tables they index: the scroll offsets
 /// `offset_of` reports (falling back to the committed ones), the sampled
-/// sticky shifts and animation deltas.
+/// sticky shifts, anchored shifts and animation deltas.
 #[derive(Clone, Copy)]
 pub(crate) struct SpaceSamples<'a> {
     pub(crate) spaces: &'a [Space],
     pub(crate) slots: &'a [ScrollSlot],
     pub(crate) animations: &'a AnimationSamples,
     pub(crate) stickies: &'a StickySamples,
+    /// Indexed by anchored slot, one entry per slot: while the table is
+    /// being sampled, a slot not yet reached holds the default sample — the
+    /// identity — which is what sampling the table itself relies on.
+    pub(crate) anchored: &'a AnchoredSamples,
     pub(crate) ratio: f32,
     pub(crate) offset_of: &'a dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
 }
@@ -273,6 +344,8 @@ impl SpaceSamples<'_> {
                 Affine::translate((f64::from(shift.x), f64::from(shift.y)))
             }
             SpaceKind::Animation(slot) => self.animations.get(slot).delta,
+            SpaceKind::Anchored(slot) => self.anchored[slot as usize].affine(),
+            SpaceKind::AnchoredVisibility(slot) => self.anchored[slot as usize].visibility_affine(),
         }
     }
 }
@@ -355,10 +428,13 @@ mod tests {
             slots,
             animations,
             stickies,
+            anchored: &NO_ANCHORED,
             ratio: 1.0,
             offset_of: &|_| None,
         }
     }
+
+    static NO_ANCHORED: crate::visual::anchored::AnchoredSamples = smallvec::SmallVec::new_const();
 
     /// Two branches under a scroller: an animated element holding a
     /// scroller (spaces 1 and 3), and a sticky box (space 2).
@@ -520,7 +596,7 @@ mod tests {
             alpha: None,
         }]);
         let stickies = StickySamples::default();
-        let samples = order.space_samples(&animations, &stickies, 1.0, &|_| None);
+        let samples = order.space_samples(&animations, &stickies, &NO_ANCHORED, 1.0, &|_| None);
         let [inside, clipped, unclipped] = [0, 1, 2].map(|index| &order.items[index]);
 
         // Baked at (5, 55); `S` scrolls it to (5, 35) in `A`'s box, inside
@@ -554,7 +630,7 @@ mod tests {
             delta: Affine::scale(0.0),
             alpha: None,
         }]);
-        let samples = order.space_samples(&collapsed, &stickies, 1.0, &|_| None);
+        let samples = order.space_samples(&collapsed, &stickies, &NO_ANCHORED, 1.0, &|_| None);
         assert_eq!(
             order.item_hit(unclipped, Point2D::new(0.0, 0.0), &samples),
             None,

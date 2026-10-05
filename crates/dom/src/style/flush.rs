@@ -182,7 +182,13 @@ impl<T: Sync> Document<T> {
             }
         };
         drop(phase);
-        self.harvest_flush(harvest_root, snapshots, sink);
+        let anchor_restyled = self.harvest_flush(harvest_root, snapshots, sink);
+        // After the harvest, so every element it reads holds its post-flush
+        // style; before the animation sync, which cascades nothing new.
+        self.refresh_anchor_state(
+            &anchor_restyled,
+            crate::layout::anchors::RestyleSource::Flush,
+        );
         // The flush is where animations start and stop; the timeline has to
         // learn what it now owns before the next frame asks whether to tick.
         self.sync_animation_state();

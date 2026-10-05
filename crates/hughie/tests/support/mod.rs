@@ -11,8 +11,11 @@ use hughie::compute::{
     compute_leaf_layout_with_measurement_for_testing, compute_linear_layout,
     compute_relative_layout, compute_skipped_contents_size, hide_skipped_contents, hide_subtree,
 };
+use hughie::geometry::Rect;
 use hughie::prelude::*;
 use hughie::style::containment::effective_containment;
+use hughie::style::{DashedIdent, PhysicalAxis, TreeScoped};
+use hughie::tree::{AnchorOutcome, AnchorSpec};
 use style_traits::values::specified::AllowedNumericType;
 use stylo::computed_values::{
     box_sizing, direction, flex_direction, flex_wrap, linear_direction, relative_center,
@@ -27,7 +30,8 @@ use stylo::values::computed::{
     ContentDistribution, ContentVisibility, Display, FlexBasis, FlowTolerance, GridAutoFlow,
     GridLine, GridTemplateComponent, ImplicitGridTracks, Inset, ItemPlacement, JustifyItems,
     Length, LengthPercentage, Margin, MaxSize, NonNegativeLengthPercentage, NonNegativeNumber,
-    Overflow, Percentage, PositionProperty, Ratio, SelfAlignment, Size as StyleSize,
+    Overflow, Percentage, PositionArea, PositionProperty, PositionTryOrder, Ratio, SelfAlignment,
+    Size as StyleSize,
 };
 use stylo::values::generics::position::PreferredRatio;
 use stylo::values::generics::{NonNegative, Optional, grid as generic_grid};
@@ -436,6 +440,8 @@ pub(super) struct TestStyle {
     pub(super) grid_row: Line<GridLine>,
     pub(super) grid_column: Line<GridLine>,
     pub(super) justify_self: SelfAlignment,
+    pub(super) position_area: PositionArea,
+    pub(super) position_try_order: PositionTryOrder,
     pub(super) flow_tolerance: FlowTolerance,
     pub(super) font_size: f32,
     pub(super) relative_layout_once: relative_layout_once::T,
@@ -490,6 +496,8 @@ impl Default for TestStyle {
             grid_row: Line::new(grid_auto_placement(), grid_auto_placement()),
             grid_column: Line::new(grid_auto_placement(), grid_auto_placement()),
             justify_self: SelfAlignment::auto(),
+            position_area: PositionArea::none(),
+            position_try_order: PositionTryOrder::normal(),
             flow_tolerance: tolerance_normal(),
             font_size: 16.0,
             relative_layout_once: relative_layout_once::T::True,
@@ -509,6 +517,13 @@ impl Default for TestStyle {
 impl CoreStyle for TestStyle {
     fn display(&self) -> Display {
         self.display
+    }
+
+    /// The mock host keeps position options in its own table
+    /// (`TestTree::position_options`), not in a `position-try-fallbacks`
+    /// value, so every style lets the absolute pass ask it.
+    fn has_position_try_fallbacks(&self) -> bool {
+        true
     }
 
     fn position(&self) -> PositionProperty {
@@ -605,6 +620,18 @@ impl CoreStyle for TestStyle {
         self.align_self
     }
 
+    fn justify_self(&self) -> SelfAlignment {
+        self.justify_self
+    }
+
+    fn position_area(&self) -> PositionArea {
+        self.position_area
+    }
+
+    fn position_try_order(&self) -> PositionTryOrder {
+        self.position_try_order
+    }
+
     fn order(&self) -> i32 {
         self.order
     }
@@ -679,10 +706,6 @@ impl GridStyle for TestStyle {
 
     fn grid_column_end(&self) -> &GridLine {
         &self.grid_column.end
-    }
-
-    fn justify_self(&self) -> SelfAlignment {
-        self.justify_self
     }
 }
 
@@ -1094,6 +1117,8 @@ pub(super) struct TestSessionNode {
 pub(super) struct TestState {
     slots: Vec<LayoutSlot>,
     cache_enabled: bool,
+    /// Every `set_anchor_outcome`, in call order.
+    anchor_outcomes: Vec<(TestId, AnchorOutcome)>,
 }
 
 /// Immutable test tree with separately borrowed layout state.
@@ -1107,6 +1132,35 @@ pub(super) struct TestTree {
     pub(super) static_position_writes: Cell<usize>,
     pub(super) leaf_measure_calls: Cell<usize>,
     pub(super) record_measure_inputs: Cell<bool>,
+    /// The anchors every box's `anchor-size()` sees, by name: the target
+    /// lookup is the host's (`dom`'s), so this host answers any query. Their
+    /// border boxes sit at the containing block's origin.
+    pub(super) anchors: Vec<(&'static str, Size<f32>)>,
+    /// Anchors with a position, in the containing block generator's
+    /// padding-box coordinates; looked up before `anchors`.
+    pub(super) anchor_rects: Vec<(&'static str, Rect<f32>)>,
+    /// The name every absolutely positioned box's default anchor has, under
+    /// every option (`position-anchor` is the host's). As in `dom`, a box
+    /// has a default anchor exactly when `anchor_rect` answers for it: a
+    /// name with no rectangle here is no default anchor.
+    pub(super) default_anchor: Option<&'static str>,
+    /// Per option index, a different default anchor name (or none).
+    pub(super) option_default_anchors: Vec<(usize, Option<&'static str>)>,
+    /// Names whose nearest scroll container is the default anchor's.
+    pub(super) scrolls_with_default: Vec<&'static str>,
+    /// The scrollable containing block size answered for every box.
+    pub(super) scrollable_containing_block: Option<Size<f32>>,
+    /// Position options per node: the fallbacks, option 1 onwards.
+    pub(super) position_options: Vec<(TestId, Vec<TestStyle>)>,
+    /// Last successful position option per node.
+    pub(super) last_successful: Vec<(TestId, usize)>,
+    /// Boxes hoisted to a containing block other than their parent:
+    /// `(containing block, box, via)`, in tree order. The host's job in
+    /// production (`dom`'s `layout::hoisted`); here the test names them.
+    pub(super) hoisted: Vec<(TestId, TestId, usize)>,
+    /// Every box written by an absolute pass, in write order, own children
+    /// and hoisted ones alike.
+    pub(super) out_of_flow_writes: RefCell<Vec<TestId>>,
 }
 
 impl Default for TestTree {
@@ -1120,6 +1174,16 @@ impl Default for TestTree {
             static_position_writes: Cell::new(0),
             leaf_measure_calls: Cell::new(0),
             record_measure_inputs: Cell::new(true),
+            anchors: Vec::new(),
+            anchor_rects: Vec::new(),
+            default_anchor: None,
+            option_default_anchors: Vec::new(),
+            scrolls_with_default: Vec::new(),
+            scrollable_containing_block: None,
+            position_options: Vec::new(),
+            last_successful: Vec::new(),
+            hoisted: Vec::new(),
+            out_of_flow_writes: RefCell::new(Vec::new()),
         }
     }
 }
@@ -1180,7 +1244,54 @@ impl LayoutTree for TestTree {
     fn set_unrounded_layout(&self, state: &mut TestState, node: TestRef, layout: Layout) {
         self.layout_writes
             .set(self.layout_writes.get().saturating_add(1));
+        if matches!(
+            self.nodes[node.index].style.position,
+            PositionProperty::Absolute | PositionProperty::Fixed
+        ) {
+            self.out_of_flow_writes.borrow_mut().push(node.index);
+        }
         state.slots[node.index].unrounded = layout;
+    }
+
+    fn hoisted_children(
+        &self,
+        _state: &TestState,
+        node: TestRef,
+    ) -> smallvec::SmallVec<[hughie::tree::HoistedChild<TestRef>; 2]> {
+        self.hoisted
+            .iter()
+            .filter(|&&(block, ..)| block == node.index)
+            .map(|&(_, hoisted, via)| hughie::tree::HoistedChild {
+                node: TestRef { index: hoisted },
+                via,
+            })
+            .collect()
+    }
+
+    /// The sum of the locations from the box's parent up to, not including,
+    /// the containing block.
+    fn hoisted_parent_offset(
+        &self,
+        state: &TestState,
+        containing_block: TestRef,
+        node: TestRef,
+    ) -> Point<f32> {
+        let parent_of = |child: TestId| {
+            self.nodes
+                .iter()
+                .position(|candidate| candidate.children.contains(&child))
+        };
+        let mut offset = Point::ZERO;
+        let mut current = parent_of(node.index);
+        while let Some(ancestor) = current {
+            if ancestor == containing_block.index {
+                break;
+            }
+            let location = state.slots[ancestor].unrounded.location;
+            offset = Point::new(offset.x + location.x, offset.y + location.y);
+            current = parent_of(ancestor);
+        }
+        offset
     }
 
     fn set_static_position(&self, state: &mut TestState, node: TestRef, position: Point<f32>) {
@@ -1188,6 +1299,62 @@ impl LayoutTree for TestTree {
             .set(self.static_position_writes.get().saturating_add(1));
         self.session[node.index].static_position.set(Some(position));
         state.slots[node.index].static_position = position;
+    }
+
+    fn anchor_rect(
+        &self,
+        _state: &TestState,
+        _node: TestRef,
+        option: usize,
+        spec: AnchorSpec<'_>,
+    ) -> Option<Rect<f32>> {
+        let name = match spec {
+            AnchorSpec::Default => self.default_anchor_name(option)?,
+            AnchorSpec::Named(name) => &*name.value.0,
+        };
+        self.anchor_named(name)
+    }
+
+    fn anchor_scrolls_with_default(
+        &self,
+        _state: &TestState,
+        _node: TestRef,
+        _option: usize,
+        name: &TreeScoped<DashedIdent>,
+        _axis: PhysicalAxis,
+    ) -> bool {
+        self.scrolls_with_default
+            .iter()
+            .any(|shared| **shared == *name.value.0)
+    }
+
+    fn scrollable_containing_block(&self, _state: &TestState, _node: TestRef) -> Option<Size<f32>> {
+        self.scrollable_containing_block
+    }
+
+    fn position_option_count(&self, node: TestRef) -> usize {
+        self.options_of(node.index)
+            .map_or(0, |options| options.len() + 1)
+    }
+
+    fn position_option_style(&self, node: TestRef, index: usize) -> &TestStyle {
+        if index == 0 {
+            return &self.nodes[node.index].style;
+        }
+        &self
+            .options_of(node.index)
+            .expect("an option index below the count")[index - 1]
+    }
+
+    fn last_successful_option(&self, _state: &TestState, node: TestRef) -> Option<usize> {
+        self.last_successful
+            .iter()
+            .find(|(id, _)| *id == node.index)
+            .map(|&(_, option)| option)
+    }
+
+    fn set_anchor_outcome(&self, state: &mut TestState, node: TestRef, outcome: AnchorOutcome) {
+        state.anchor_outcomes.push((node.index, outcome));
     }
 
     fn compute_layout(
@@ -1276,6 +1443,39 @@ pub(super) fn snapshot_layout(layout: &Layout) -> Layout {
 }
 
 impl TestTree {
+    fn default_anchor_name(&self, option: usize) -> Option<&'static str> {
+        self.option_default_anchors
+            .iter()
+            .find(|(index, _)| *index == option)
+            .map_or(self.default_anchor, |&(_, name)| name)
+    }
+
+    fn anchor_named(&self, name: &str) -> Option<Rect<f32>> {
+        if let Some((_, rect)) = self.anchor_rects.iter().find(|(anchor, _)| *anchor == name) {
+            return Some(*rect);
+        }
+        let (_, size) = self.anchors.iter().find(|(anchor, _)| *anchor == name)?;
+        Some(Rect::new(Point::ZERO, *size))
+    }
+
+    fn options_of(&self, id: TestId) -> Option<&Vec<TestStyle>> {
+        self.position_options
+            .iter()
+            .find(|(node, _)| *node == id)
+            .map(|(_, options)| options)
+    }
+
+    /// The outcomes `set_anchor_outcome` recorded for `id`, oldest first.
+    pub(super) fn anchor_outcomes(&self, id: TestId) -> Vec<AnchorOutcome> {
+        self.state
+            .borrow()
+            .anchor_outcomes
+            .iter()
+            .filter(|(node, _)| *node == id)
+            .map(|&(_, outcome)| outcome)
+            .collect()
+    }
+
     pub(super) fn node(&self, id: TestId) -> TestRef {
         debug_assert!(id < self.nodes.len());
         TestRef { index: id }

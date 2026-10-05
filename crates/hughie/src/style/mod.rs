@@ -50,6 +50,8 @@ pub use stylo::computed_values::{
     box_sizing, direction, flex_direction, flex_wrap, linear_direction, relative_center,
     relative_layout_once, text_wrap_mode, visibility,
 };
+pub use stylo::logical_geometry::PhysicalAxis;
+pub use stylo::values::DashedIdent;
 pub use stylo::values::computed::length::NonNegativeLengthPercentageOrNormal;
 pub use stylo::values::computed::lynx_layout::{RelativeAlign, RelativeReference};
 pub use stylo::values::computed::{
@@ -58,10 +60,12 @@ pub use stylo::values::computed::{
     FontFeatureSettings, FontStyle, FontVariationSettings, FontWeight, GridAutoFlow, GridLine,
     GridTemplateComponent, ImplicitGridTracks, Inset, ItemPlacement, JustifyItems,
     LengthPercentage, LetterSpacing, LineHeight, Margin, MaxSize, NonNegativeLengthPercentage,
-    NonNegativeNumber, Overflow, PositionProperty, SelfAlignment, Size as StyleSize, TextAlign,
-    TextIndent, WordBreak,
+    NonNegativeNumber, Overflow, PositionArea, PositionProperty, PositionTryOrder, SelfAlignment,
+    Size as StyleSize, TextAlign, TextIndent, WordBreak,
 };
+pub use stylo::values::generics::position::TreeScoped;
 pub use stylo::values::specified::align::AlignFlags;
+use stylo::values::specified::position::PositionAnchorKeyword;
 pub use text::{TextBrush, TextContainerStyle, TextRun, TextRunStyle};
 
 pub const RELATIVE_REFERENCE_NONE: RelativeReference = -1;
@@ -204,6 +208,40 @@ style_protocol! {
                 style.computed_values().get_position().justify_content,
             align_self -> SelfAlignment =
                 style.computed_values().get_position().align_self,
+            // Grid items read it, and so does every algorithm's absolute
+            // pass: css-align-3 §6.1.2 aligns an absolutely positioned box's
+            // margin box in the inline axis of its containing block.
+            justify_self -> SelfAlignment =
+                style.computed_values().get_position().justify_self,
+            // css-anchor-position-1 §3.1. An accepted `@position-try`
+            // property, so the absolute pass reads it from the position
+            // option being laid out, like the insets, sizes and margins.
+            position_area -> PositionArea =
+                style.computed_values().get_position().position_area,
+            // §6.2, read from the box's own style: the order the fallback
+            // loop tries its options in is not itself an option's property.
+            position_try_order -> PositionTryOrder =
+                style.computed_values().get_position().position_try_order,
+            // §2.4: whether `position-anchor` names an element — a
+            // `<anchor-name>` or `match-parent` — rather than `normal`,
+            // `none` or `auto`. `normal` and `auto` name the implicit anchor
+            // element, which only a host language defines; `normal` with a
+            // `position-area` is already on the anchored path through that
+            // property. A box whose only anchor-positioning property is
+            // `position-anchor` still has a default anchor, and so its
+            // scrollable containing block (css-position-4), which only the
+            // anchored path asks the host for.
+            names_position_anchor -> bool = !matches!(
+                style.computed_values().get_position().position_anchor.value,
+                PositionAnchorKeyword::Normal
+                    | PositionAnchorKeyword::None
+                    | PositionAnchorKeyword::Auto
+            ),
+            // §6.1: whether `position-try-fallbacks` lists anything. Only a
+            // box that does can have position options, so only it costs the
+            // absolute pass a host call to count them.
+            has_position_try_fallbacks -> bool =
+                !style.computed_values().get_position().position_try_fallbacks.value.is_none(),
             order -> i32 = style.computed_values().get_position().order,
         }
     }
@@ -282,6 +320,10 @@ mod tests {
         assert_eq!(style.align_items(), ItemPlacement::normal());
         assert_eq!(style.justify_content(), ContentDistribution::normal());
         assert_eq!(style.align_self(), SelfAlignment::auto());
+        assert_eq!(style.justify_self(), SelfAlignment::auto());
+        assert!(style.position_area().is_none());
+        assert!(style.position_try_order().is_normal());
+        assert!(!style.names_position_anchor());
         assert_eq!(style.order(), 0);
     }
 

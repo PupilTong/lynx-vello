@@ -52,7 +52,8 @@ hide sweep outside the cache, the size through it — and the
 content-visibility-implied fixed/absolute containing block. Each NodeId-indexed state entry owns one `LayoutSlot` with
 the measurement cache, persistent static position, and durable rounded/
 unrounded results; `Document` exposes their query APIs. The host also owns the
-fixed/hoisted positioned pass (pruned at skipped
+registry of hoisted out-of-flow boxes their containing blocks lay out (plus
+the tail placement of initial-containing-block boxes, pruned at skipped
 subtrees), device-pixel rounding, and automatic
 style-damage→`invalidate_layout` consumption with in-place boundary re-layout
 that refreshes the boundary's scrollable `content_size`, with
@@ -125,7 +126,7 @@ Text behavior is inventoried in
 | `hughie` | Implemented Flex, Grid, grid lanes, Relative, and Linear algorithms; one unified source-backed `CoreStyle` protocol speaking stylo computed values (including the `relative-*` and `linear-*` longhands); the text style/run protocol; closed natural-size and Parley leaf paths, box-generation rules (`display: none` hiding and `display: contents` box-tree flattening through `flattened_children`), hidden-subtree cleanup, positioned layout, rounding; shared private arithmetic; geometry and layout IO; cache semantics | Node/style/content storage, display dispatch, arbitrary host content/measurers, DOM/runtime types, an engine-side style value vocabulary (it re-exports stylo's), resolved device-unit policy (`rpx`, etc.), stacking/paint order |
 | `hughie::text` (unconditional) | Parley context/font registration, whitespace processing, shaping, line breaking, intrinsic and height-for-width measurement, baselines, and the single retained `TextLayout` artifact per node — one shaped layout re-broken in place for every constraint, memoising both the constraint its lines currently reflect and the last few constraints it reported on, plus the committed break state a probe must hand back before the pass ends | Text truncation and ellipsis, inline boxes, paint styling, runtime/attribute lowering, resource fetching, or host cache and per-node slot storage |
 | `hughie::text::block` (standalone, unwired) | The Lynx text-block semantics on its own parameter structs: the flattened paragraph with atomic inline boxes (size + baseline + vertical-align, no content), the UTF-16 source map, `text-maxline`/`text-maxlength`/`text-overflow` truncation with inline-truncation content, per-line layout-event data, and the retained-natural-layout / rebuilt-display lifecycle | The box-protocol wire format (`LayoutInput`), the measurement path's `TextLayout` store and probe/commit machinery, host tree walking and the scoped style overlay (host cascade), paint styling, runtime/attribute lowering |
-| `dom::layout` (implemented) | `LayoutTree` on immutable `TreeArenas<T>`, plain `NodeId`s, and separately borrowed mutable `DocumentLayoutState` (one protocol; no view/session/store wrapper layers); post-flush style views lending the `ComputedValues` pointer published from Stylo's still-owning primary `Arc` under the exclusive `Document` phase boundary (no `ElementData` borrow check, `Arc` bump, copy, or translation; public computed-style queries remain guarded); logical `relative-*-inline-*` lowering; the W3C fixed/absolute containing-block rule expressed through `position()`; anonymous box geometry plus inherited parent font/text values for text nodes; display dispatch (flex/grid/linear/relative, `display: none` hiding, `display: contents` box-less handling — never a containing block, never contained, never skipped, never hoisted, and zeroed by the positioned pass — skipped-contents routing — the hide sweep before the cache, the size through it — natural-size leaf, `-lynx-text` paragraph blocks); lazily boxed shared `TextContext` and per-text-block `TextBlockStore` in layout state; a NodeId-aligned `LayoutSlot` containing cache, static position, unrounded layout, and rounded layout; public `rounded_layout` queries with unrounded and cache state kept internal; automatic dirty-path invalidation when content changes; one fused preorder positioned-and-rounding traversal whose pre-node hook keeps hoisted placement cache-proof, prunes positioning at skipped-contents subtrees so a hoisted descendant cannot be revived, and applies the engine's effective-`order`-0 paint rule for out-of-flow children; device-pixel rounding without a whole-`Layout` clone; the effective-containment fold on the style view (feeding both the relayout-boundary predicate and the content-visibility-aware fixed/absolute containing-block predicate); **automatic style-damage consumption** (every harvest boundary-stops the internal `Document::invalidate_layout` funnel per relayout-damaged node during commit; it also invalidates direct text children, which read inherited style from the damaged element but have no Stylo damage record of their own — always their measurement cache, since the funnel walks upward and nothing else clears it, and their retained shaped layout only when a two-level comparison of the element's `Font` and `InheritedText` structs, pointer first and then narrowed to the shaping fields, says Parley would shape the paragraph differently; the animation harvest routes through the same decision; `Document::layout` re-runs each parked `contain: strict`/skipped boundary in place before the root pass, merging the re-run's scrollable `content_size` back into the boundary's stored layout); and public content/child/style mutations that perform their own invalidation (the explicit hook is `layout-test-utils`-only) | A second layout algorithm, generic content-measurement callbacks, engine-side style copies, layout/text runtime borrow wrappers, Lynx runtime-element vocabulary or device-unit policy (`rpx`), Lynx computed defaults (cascade/UA-sheet policy), text shaping algorithms |
+| `dom::layout` (implemented) | `LayoutTree` on immutable `TreeArenas<T>`, plain `NodeId`s, and separately borrowed mutable `DocumentLayoutState` (one protocol; no view/session/store wrapper layers); post-flush style views lending the `ComputedValues` pointer published from Stylo's still-owning primary `Arc` under the exclusive `Document` phase boundary (no `ElementData` borrow check, `Arc` bump, copy, or translation; public computed-style queries remain guarded); logical `relative-*-inline-*` lowering; the W3C fixed/absolute containing-block rule expressed through `position()`; anonymous box geometry plus inherited parent font/text values for text nodes; display dispatch (flex/grid/linear/relative, `display: none` hiding, `display: contents` box-less handling — never a containing block, never contained, never skipped, never hoisted, and zeroed by the positioned pass — skipped-contents routing — the hide sweep before the cache, the size through it — natural-size leaf, `-lynx-text` paragraph blocks); lazily boxed shared `TextContext` and per-text-block `TextBlockStore` in layout state; a NodeId-aligned `LayoutSlot` containing cache, static position, unrounded layout, and rounded layout; public `rounded_layout` queries with unrounded and cache state kept internal; automatic dirty-path invalidation when content changes; the hoisted-box registry (`LayoutTree::hoisted_children`: each out-of-flow box whose containing block is not its box parent, listed under the element that generates that block when its parent records its static position, and laid out by that block's own absolute pass in tree order); one fused preorder rounding traversal whose pre-node hook places the boxes no containing block ran for (initial-containing-block boxes, and boxes under a subtree relaid in place), prunes at skipped-contents subtrees so a hoisted descendant cannot be revived, and applies the engine's effective-`order`-0 paint rule for out-of-flow children; device-pixel rounding without a whole-`Layout` clone; the effective-containment fold on the style view (feeding both the relayout-boundary predicate and the content-visibility-aware fixed/absolute containing-block predicate); **automatic style-damage consumption** (every harvest boundary-stops the internal `Document::invalidate_layout` funnel per relayout-damaged node during commit; it also invalidates direct text children, which read inherited style from the damaged element but have no Stylo damage record of their own — always their measurement cache, since the funnel walks upward and nothing else clears it, and their retained shaped layout only when a two-level comparison of the element's `Font` and `InheritedText` structs, pointer first and then narrowed to the shaping fields, says Parley would shape the paragraph differently; the animation harvest routes through the same decision; `Document::layout` re-runs each parked `contain: strict`/skipped boundary in place before the root pass, merging the re-run's scrollable `content_size` back into the boundary's stored layout); and public content/child/style mutations that perform their own invalidation (the explicit hook is `layout-test-utils`-only) | A second layout algorithm, generic content-measurement callbacks, engine-side style copies, layout/text runtime borrow wrappers, Lynx runtime-element vocabulary or device-unit policy (`rpx`), Lynx computed defaults (cascade/UA-sheet policy), text shaping algorithms |
 | Future runtime integration | Lynx view metrics and `rpx` policy; Lynx-specific text attributes, element-backed raw text and truncation; the `<list>` component surface over `display: grid-lanes` (attribute→CSS mapping and virtualization; the `update-list-info` consumer that delivers the cells is implemented in `packages/bobcat-element`) | A second Flex/Grid/grid-lanes/Relative/Linear/text-measurement implementation, arbitrary host content, engine-side copies of styles, the style-damage→layout wiring (now engine-internal in `dom`) |
 
 The engine/host seam keeps the engine storage-free even though its
@@ -194,8 +195,11 @@ Implemented machinery: `compute_root_layout`, `compute_leaf_layout`
 `hide_subtree`, `compute_cached_layout`
 (keyed on every **`LayoutInput` field that decides geometry** — see the
 caching section),
-`compute_absolute_layout` (the positioned pass for out-of-flow nodes whose
-containing block is not their formatting parent), and
+`compute_absolute_layout` (for an out-of-flow node the host places against
+the initial containing block), `compute_hoisted_layout` and
+`compute_hoisted_children` (a hoisted box's layout against its containing
+block's padding box, for a host that places one itself or runs an algorithm
+of its own), and
 `round_layout(tree, state, root, scale)` (device-pixel snapping), plus
 `compute_flexbox_layout`, `compute_grid_layout`, `compute_relative_layout`,
 and `compute_linear_layout`. All four algorithms share private allocation-free
@@ -319,6 +323,54 @@ field of `Layout`: only sticky grid items have one, so `LayoutSlot` stays at
 its 336-byte budget and a page without them pays nothing per node. The
 visual layer reads the recorded area rather than reconstructing track
 placement, alignment or baseline adjustments.
+
+css-anchor-position-1 crosses the seam the other way. The engine owns every
+rule that turns anchor geometry into a box: `anchor()` and `anchor-size()`
+resolution (`compute/anchor.rs`: sides, the matching-axis rule, fallbacks, the
+initial value standing in for invalid-at-computed-value time, `calc()`
+substitution), the `position-area` grid and its default alignment
+(`compute/anchor_area.rs`), `anchor-center`, the self-alignment of absolutely
+positioned boxes (css-position-3 §4.3 with css-align-3 §4.4.1.2's overflow
+rules, in `compute/mod.rs`), and position fallback (`compute/anchor_fallback.rs`:
+the §6.5 determination, `position-try-order`'s sort). The host owns what is a
+tree walk or a cascade, through `LayoutTree` methods whose defaults mean "no
+anchors": `anchor_rect(state, node, option, AnchorSpec)` — a target's border
+box in the padding-box coordinates of the element generating `node`'s
+containing block, with §3.3's remembered scroll offsets applied; with
+`AnchorSpec::Default`, `None` means the box has no default anchor —
+`anchor_scrolls_with_default` (§3.3's scroll-container
+condition), `scrollable_containing_block` (css-position-4: the area the
+containing block's own algorithm recorded through
+`set_scrollable_containing_block` between its in-flow commit and its absolute
+pass — its in-flow scrollable overflow, which no out-of-flow box can grow),
+`position_option_count`/`position_option_style` (the options list, each
+already cascaded with its try tactic; index 0 is the box's own style),
+`last_successful_option` (which the host records after layout, §6.5.1.1), and
+`set_anchor_outcome`, which hands back per box the chosen option, whether it
+still overflows, whether it references a default anchor it does not have, the
+per-axis compensation flags and its inset-modified containing block and margin
+box (`AnchorOutcome`). The engine asks only from an absolute pass, where
+everything in flow under the containing block and every earlier box it is the
+containing block of — its own out-of-flow children and the hoisted ones alike
+— is already committed, and rebases the host's rectangles onto what it
+actually lays out against (a grid area, the scrollable containing block, a
+`position-area` region). Within one absolute layout of a box it asks each
+question once per option (`AnchorMemo`), never across a pass. A box that uses
+none of it pays two style predicates, and a host call to count its options only
+when its `position-try-fallbacks` lists something; the anchored path is a
+cold, out-of-line function. The box's own run never
+resolves an anchor function or reads an option: the absolute pass hands it
+every axis whose values differ from its own style's as a known dimension, so
+its cache key carries every anchor and option it depends on, and trial options
+are measured, only the chosen one committed. A box with none of those
+properties but a `position-anchor` naming an element
+(`CoreStyle::names_position_anchor`) is on the anchored path too: it has a
+default anchor, and so a scrollable containing block. The `dom` host's half —
+the anchor-name index, the §2.3 lookup, remembered scroll offsets, options
+cascaded at the style harvest, and the settle loop that relays a box whose
+anchor moved without its containing block running again — is
+`docs/dom-architecture.md` ("Anchor positioning"). Scope and reasons:
+`docs/style-assumptions.md` §28.
 
 **`LayoutInput` stays one type, and the tree stays one trait.** The style
 surface splits per algorithm and the wire struct does not, for a structural
@@ -546,17 +598,26 @@ definite-inset visual nudge):
   parent's algorithm computes the node's flex/grid-aware static position
   and records it via
   `tree.set_static_position(state, node, ...)`, but does not size
-  or place it. After in-flow layout the host runs the **positioned pass**:
-  it resolves the CB node (for Lynx `fixed`: the viewport root, or the
-  nearest transformed/filtered/`will-change` ancestor per the W3C rule the
-  tracking doc mandates), converts the recorded static position into CB
-  padding-box space (all unrounded layouts exist by then), and calls
-  `compute_absolute_layout(tree, state, node, cb_padding_box_size,
-  static_position)`. That entry sizes the node per the CSS abs-pos rules,
-  lays out its subtree normally, and *returns* the node's own layout in CB
-  space; the host converts it into formatting-parent space and stores it,
-  keeping `Layout::location`'s parent-relative contract intact for rounding
-  and painting.
+  or place it. The host resolves the CB node there (for Lynx `fixed`: the
+  viewport root, or the nearest transformed/filtered/`will-change` ancestor
+  per the W3C rule the tracking doc mandates) and reports the node from
+  `tree.hoisted_children(state, cb)`, behind the cheap
+  `tree.has_hoisted_children(state, cb)` probe every container asks first (a
+  container with no out-of-flow child and no hoisted box skips its absolute
+  pass outright, and keeps the pass out of line). The CB's own algorithm lays
+  it out in its absolute pass, after its in-flow commit, interleaved in flat tree order
+  with its own out-of-flow children (each reported box names the index of
+  the flattened child it sits under): css-position-3's order, in which every
+  box a later one may anchor to is already placed. It moves the recorded
+  static position into its padding-box space through
+  `tree.hoisted_parent_offset` (the box parent's origin, committed by then),
+  lays the node out against its padding box, and hands the layout back in
+  box-parent space through `tree.set_hoisted_layout`, keeping
+  `Layout::location`'s parent-relative contract intact for rounding and
+  painting. Only a node whose CB is the initial containing block is placed
+  after the run (`compute_absolute_layout` against the viewport), as is one
+  under a subtree the host relaid in place, whose CB above it did not run
+  (`compute_hoisted_layout`, the same placement).
 
 `position: sticky` is resolved by the `dom` visual host at composition time.
 The retained frame stores scrollport inset and containing-block constraints;
@@ -821,7 +882,7 @@ is read rather than in `compute_layout`, along exactly two lines:
   `content-visibility` computes to, including `auto`, whose relevance bit a
   box-less element never consults — so `is_relayout_boundary` is false and
   host ancestor walks pass straight through), and is never hoisted. Its own `LayoutSlot` is zeroed by the
-  positioned pass's pre-node hook, which makes it a transparent zero-offset
+  rounding tail's pre-node hook, which makes it a transparent zero-offset
   pass-through for the rounding walk and for
   `accumulated_unrounded_origin`, and reports an empty box to
   `Document::{rounded,unrounded}_layout` — matching CSSOM, where an element
@@ -1137,7 +1198,9 @@ the engine we're succeeding.
    then sized/placed against the container's padding box from their insets
    (auto insets anchor to the static position); hoisted
    `PositionProperty::Fixed` children only get the static position recorded
-   via the `LayoutSlot::static_position` field — the host's positioned pass finishes them.
+   via the `LayoutSlot::static_position` field — their containing block's
+   absolute pass finishes them (`LayoutTree::hoisted_children`), and lays
+   out the boxes hoisted to this container in tree order among its own.
 9. **Finalize** — per-child `LayoutSlot::unrounded` writes (only for
    `LayoutGoal::Commit`), container border-box size, `content_size`
    accumulation, container baseline.
@@ -1452,9 +1515,9 @@ fragmentation are out of scope; the grammar side of that list is recorded in
   containment-scoped positioned + rounding tail and the idle-frame skip cover
   the asymptotic end-to-end cost; the remaining items are constant-factor and
   should land only behind a profile that shows them:
-  - The incremental positioned pass still walks a whole boundary *subtree* to
-    find its hoisted nodes; a per-boundary hoisted-node registry would visit
-    only the out-of-flow nodes. Similarly, an already-hidden subtree is still
+  - The incremental rounding tail still visits every hoisted node a parked
+    subtree's marks lead to, to decide whether its containing block ran;
+    the registry could answer that directly. Similarly, an already-hidden subtree is still
     re-zeroed inside a boundary re-run rather than only on the visible↔hidden
     transition.
   - The rounding, hide-subtree, and positioned walks are recursive, so a

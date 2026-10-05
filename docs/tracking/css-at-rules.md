@@ -91,6 +91,20 @@ On the lynx-stack side, the offline build-time compiler (`lynx-stack/packages/to
 
 ---
 
+### @position-try (css-anchor-position-1)
+
+Neither native Lynx nor web-core parses `@position-try` (web-core passes it
+through to the browser). lynx-vello parses it under the fork's `lynx`
+feature and cascades it for `position-try-fallbacks`; the cascade side is
+tracked in [css-selectors-cascade.md](css-selectors-cascade.md) and the
+whole module in [style-assumptions.md](../style-assumptions.md) §28.
+
+| Item | Description | Tier | W3C-compliant? | Deviation & what we should do instead | Source refs |
+|---|---|---|---|---|---|
+| `@position-try <dashed-ident> { … }` | Declares one named position option; accepts exactly the ED's properties that exist on the Lynx surface, drops custom properties, every other property and `!important` declarations; the block-axis logical longhands (`inset-block-*`, `margin-block-*`, `block-size`, …) are not Lynx properties and are dropped as in a style rule; a rule added, changed or overridden later re-cascades the options that name it | Extended (user-directed 2026-09-30) | Yes | — | `vendor/stylo/style/stylesheets/rule_parser.rs`; `vendor/stylo/style/tests/lynx_anchor_positioning.rs` (`position_try_accepts_exactly_the_listed_properties`); `crates/dom/tests/anchor_positioning.rs` (`wpt_at_position_try_invalidation`) |
+
+---
+
 ## Also see
 
 Scope note: this is a spec for `.claude/agents/lynx-css-engine.md`. Added as a gap found by the completeness-critique pass.

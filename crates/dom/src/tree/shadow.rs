@@ -175,6 +175,60 @@ impl<T> Node<T> {
         None
     }
 
+    /// The tree a tree-scoped name cascaded for this element at `scope`
+    /// belongs to: a shadow root, or `None` for the document tree. Stylo
+    /// records the scope relative to the element (css-scoping §3.5), and
+    /// this reads it back the way stylo's rule collector writes it:
+    /// - 0: the element's own tree;
+    /// - `-j`: `::slotted` rules from the tree of the `j`-th slot outward along the element's
+    ///   assigned-slot chain, and `-(1 + the chain's length)`: `:host` rules from the element's own
+    ///   shadow tree;
+    /// - `n > 0`: `::part` rules from the `n`-th tree outward that has any `::part` rule, the trees
+    ///   without one not counted.
+    ///
+    /// Shared by every tree-scoped name this engine resolves: timeline names
+    /// (`style::timeline`) and anchor names (`layout::anchors`).
+    #[must_use]
+    pub(crate) fn scoped_name_tree(&self, scope: stylo::rule_tree::CascadeLevel) -> Option<NodeId> {
+        use stylo::rule_tree::ShadowCascadeOrder;
+        let tree = self.arenas();
+        let own = self.containing_shadow_root().map(Node::id);
+        let order = scope.shadow_order();
+        let same = ShadowCascadeOrder::for_same_tree();
+        if !scope.is_tree() || order == same {
+            return own;
+        }
+        if order < same {
+            let mut step = ShadowCascadeOrder::for_outermost_shadow_tree();
+            let mut slot = self.assigned_slot_slot().map(|slot| tree.at(slot));
+            while let Some(current) = slot {
+                if step == order {
+                    return current.containing_shadow_root().map(Node::id);
+                }
+                step.dec();
+                slot = current.assigned_slot_slot().map(|slot| tree.at(slot));
+            }
+            return self.shadow_root_id();
+        }
+        // Past the last shadow tree is the document tree.
+        let mut root = own?;
+        let mut step = ShadowCascadeOrder::for_innermost_containing_tree();
+        loop {
+            let host = tree.get(root)?.shadow_host_id()?;
+            root = tree.get(host)?.containing_shadow_root()?.id();
+            let has_part_rules = tree
+                .get(root)
+                .and_then(Node::shadow_data)
+                .is_some_and(|shadow| shadow.styles.data.part_rules(&[]).is_some());
+            if has_part_rules {
+                if step >= order {
+                    return Some(root);
+                }
+                step.inc();
+            }
+        }
+    }
+
     #[must_use]
     pub(crate) fn has_part_attr(&self) -> bool {
         self.attr_local_name(&PART).is_some()
@@ -259,6 +313,7 @@ impl<T> Document<T> {
         self.assign_slots(root);
         self.mark_subtree_dirty(host);
         self.invalidate_layout(host);
+        self.invalidate_hoisted_under(host);
         root
     }
 
@@ -584,6 +639,7 @@ impl<T> Document<T> {
         if changed {
             self.mark_subtree_dirty(host);
             self.invalidate_layout(host);
+            self.invalidate_hoisted_under(host);
         }
     }
 }

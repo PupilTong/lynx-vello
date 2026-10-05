@@ -2310,3 +2310,248 @@ fn a_throwing_interval_is_reported_and_keeps_its_place_in_the_schedule() {
         std::thread::yield_now();
     }
 }
+
+/// A 400px containing block (node 3) holding a scroller (node 4) whose
+/// content (node 5) carries the anchor (node 6) at `anchor_css`'s place, and,
+/// outside the scroller, the anchored box (node 7) styled `anchored_css`.
+fn booted_anchored(sheet: &str) -> TestEngine {
+    TestViewSpec::new(
+        r"
+        globalThis.renderPage = function () {
+          const page = __CreatePage('card', 0);
+          const cb = __CreateView(0);
+          const scroller = __CreateView(0);
+          const content = __CreateView(0);
+          const anchor = __CreateView(0);
+          const anchored = __CreateView(0);
+          __AppendElement(page, cb);
+          __AppendElement(cb, scroller);
+          __AppendElement(scroller, content);
+          __AppendElement(content, anchor);
+          __AppendElement(cb, anchored);
+          globalThis.held = [page, cb, scroller, content, anchor, anchored];
+          __SetClasses(cb, 'cb');
+          __SetClasses(scroller, 'scroller');
+          __SetClasses(content, 'content');
+          __SetClasses(anchor, 'anchor');
+          __SetClasses(anchored, 'anchored');
+          __FlushElementTree();
+        };
+        ",
+    )
+    .with_style_sheet(sheet)
+    .boot()
+}
+
+/// The page [`booted_anchored`] builds with a 200×100 scroller over 500px
+/// square content, the anchor 40×30 at (50, 50), and `anchored` added to the
+/// anchored box's 10px square.
+fn anchor_sheet(anchored: &str) -> String {
+    format!(
+        ".cb {{ display: flex; flex-direction: column; position: relative;
+               width: 400px; height: 400px; }}
+         .scroller {{ display: flex; flex-direction: column; flex-shrink: 0;
+                     overflow: scroll; width: 200px; height: 100px; }}
+         .content {{ display: flex; flex-direction: column; flex-shrink: 0;
+                    width: 500px; height: 500px; }}
+         .anchor {{ flex-shrink: 0; anchor-name: --a; width: 40px; height: 30px;
+                   margin-top: 50px; margin-left: 50px; }}
+         .anchored {{ position: absolute; position-anchor: --a;
+                     width: 10px; height: 10px; {anchored} }}"
+    )
+}
+
+/// What the painter's hit test finds at `(x, y)`, at its own offsets.
+fn painter_hit(engine: &mut TestEngine, x: f32, y: f32) -> Option<dom::NodeId> {
+    let frame = engine.published_frame()?;
+    let intents = &engine.painter.scroll_intents;
+    frame
+        .hit(
+            Point2D::new(x, y),
+            &|slot| intents.offset_for(slot.node),
+            None,
+        )
+        .map(|target| target.node)
+}
+
+/// What the document's own hit test finds at `(x, y)`, at its adopted
+/// offsets.
+fn main_hit(engine: &mut TestEngine, x: f32, y: f32) -> Option<dom::NodeId> {
+    engine
+        .probe_document(move |tree| {
+            tree.elements_from_point(Point2D::new(x, y))
+                .first()
+                .copied()
+        })
+        .flatten()
+}
+
+fn wheel(engine: &mut TestEngine, dx: f32, dy: f32) {
+    engine.dispatch_input(InputEvent::wheel(
+        Point2D::new(100.0, 50.0),
+        dom::Vector2D::new(dx, dy),
+    ));
+}
+
+/// css-anchor-position-1 §3.3 from the engine's side (WPT `anchor-scroll-001`
+/// adapted): a box placed below its anchor by `position-area` follows the
+/// anchor on both axes while the scroller between them moves — composed by
+/// the painter at its intents, hit where it is drawn on both threads, and
+/// never committed.
+#[test]
+fn an_anchored_box_follows_its_anchor_through_a_scroll_on_both_axes() {
+    let mut engine = booted_anchored(&anchor_sheet("position-area: bottom center;"));
+    let anchored = node_id(7);
+    // Centered under the anchor: (65, 80), 10×10.
+    assert_eq!(painter_hit(&mut engine, 70.0, 85.0), Some(anchored));
+    let boot = engine
+        .published_frame()
+        .expect("boot published a frame")
+        .commit_id();
+
+    wheel(&mut engine, 20.0, 30.0);
+    assert_eq!(
+        scroll_offset_of(&mut engine, 4),
+        dom::Vector2D::new(20.0, 30.0),
+        "main adopted the scroll"
+    );
+    assert_eq!(painter_hit(&mut engine, 50.0, 55.0), Some(anchored));
+    assert_ne!(painter_hit(&mut engine, 70.0, 85.0), Some(anchored));
+    assert_eq!(main_hit(&mut engine, 50.0, 55.0), Some(anchored));
+    assert_eq!(
+        engine
+            .published_frame()
+            .expect("still published")
+            .commit_id(),
+        boot,
+        "the painter composed the shift: no commit"
+    );
+}
+
+/// §3.3's compensation is per axis: a box whose only anchor reference is a
+/// vertical `anchor()` follows the anchor up and stays where it is across.
+#[test]
+fn an_anchored_box_follows_only_on_the_axes_it_compensates() {
+    let mut engine = booted_anchored(&anchor_sheet("top: anchor(bottom); left: 150px;"));
+    let anchored = node_id(7);
+    assert_eq!(painter_hit(&mut engine, 155.0, 85.0), Some(anchored));
+    wheel(&mut engine, 20.0, 30.0);
+    assert_eq!(
+        scroll_offset_of(&mut engine, 4),
+        dom::Vector2D::new(20.0, 30.0)
+    );
+    assert_eq!(painter_hit(&mut engine, 155.0, 55.0), Some(anchored));
+    assert_ne!(
+        painter_hit(&mut engine, 135.0, 55.0),
+        Some(anchored),
+        "the horizontal scroll does not carry it"
+    );
+}
+
+/// §6.6 `position-visibility: anchor-visible`, the initial value, flips
+/// while scrolling: the box hides once its anchor is scrolled wholly out of
+/// the scroller's clip and shows again when it comes back — each frame, on
+/// the painter. (The 70px step is past half the 100px scrollport's encode
+/// headroom, so a recentering commit follows it; the flips do not wait on
+/// one.)
+#[test]
+fn an_anchored_box_hides_while_its_anchor_is_scrolled_away() {
+    let mut engine = booted_anchored(&anchor_sheet("position-area: bottom center;"));
+    let anchored = node_id(7);
+    // The anchor at y −20..10 still shows 10px: the box at y 10..20 shows.
+    wheel(&mut engine, 0.0, 70.0);
+    assert_eq!(painter_hit(&mut engine, 70.0, 15.0), Some(anchored));
+    // At −35..−5 it is gone, and so is the box at −5..5.
+    wheel(&mut engine, 0.0, 15.0);
+    assert!((scroll_offset_of(&mut engine, 4).y - 85.0).abs() < 0.5);
+    assert_ne!(painter_hit(&mut engine, 70.0, 2.0), Some(anchored));
+    assert_ne!(main_hit(&mut engine, 70.0, 2.0), Some(anchored));
+    wheel(&mut engine, 0.0, -85.0);
+    assert_eq!(painter_hit(&mut engine, 70.0, 85.0), Some(anchored));
+}
+
+/// §6.6 `no-overflow` flips while scrolling: the box shifted past its
+/// containing block's top edge hides.
+#[test]
+fn a_no_overflow_box_hides_once_the_shift_pushes_it_out() {
+    let mut engine = booted_anchored(&anchor_sheet(
+        "bottom: anchor(top); left: anchor(left); height: 40px;
+         position-visibility: no-overflow;",
+    ));
+    let anchored = node_id(7);
+    // Above the anchor: y 10..50.
+    assert_eq!(painter_hit(&mut engine, 55.0, 20.0), Some(anchored));
+    wheel(&mut engine, 0.0, 5.0);
+    assert_eq!(painter_hit(&mut engine, 55.0, 10.0), Some(anchored));
+    wheel(&mut engine, 0.0, 6.0);
+    assert!((scroll_offset_of(&mut engine, 4).y - 11.0).abs() < 0.5);
+    assert_ne!(painter_hit(&mut engine, 55.0, 10.0), Some(anchored));
+}
+
+/// Waits for a commit newer than `after` to publish, and answers its id.
+fn next_commit(engine: &mut TestEngine, after: u64) -> u64 {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let commit = engine
+            .published_frame()
+            .expect("still published")
+            .commit_id();
+        if commit > after {
+            return commit;
+        }
+        assert!(Instant::now() < deadline, "no commit followed the scroll");
+        std::thread::yield_now();
+    }
+}
+
+/// §6.5 on scroll (WPT `anchor-scroll-position-try-001` adapted): a box
+/// above its anchor, scrolled up past its containing block's top edge,
+/// switches to its `flip-block` fallback below the anchor in the commit that
+/// answers the adopted offset; scrolled back until the fallback overflows
+/// the bottom edge, it switches back. The painter's post is the whole wake:
+/// main re-runs the determination where it adopts the offsets.
+#[test]
+fn a_scroll_that_pushes_an_anchored_box_out_switches_its_fallback_and_back() {
+    let mut engine = booted_anchored(
+        ".cb { display: flex; flex-direction: column; position: relative;
+               width: 400px; height: 400px; }
+         .scroller { display: flex; flex-direction: column; flex-shrink: 0;
+                     overflow: scroll; width: 400px; height: 400px; }
+         .content { display: flex; flex-direction: column; flex-shrink: 0;
+                    width: 400px; height: 1000px; }
+         .anchor { flex-shrink: 0; anchor-name: --a; width: 40px; height: 30px;
+                   margin-top: 250px; }
+         .anchored { position: absolute; position-anchor: --a; position-area: top;
+                     position-try-fallbacks: flip-block; width: 10px; height: 150px; }",
+    );
+    let anchored = node_id(7);
+    // Above the anchor, y 100..250, centered on it at x 15..25.
+    assert_eq!(painter_hit(&mut engine, 20.0, 200.0), Some(anchored));
+    let boot = engine
+        .published_frame()
+        .expect("boot published a frame")
+        .commit_id();
+
+    // 100px up still fits: 0..150, no commit.
+    wheel(&mut engine, 0.0, 100.0);
+    assert!((scroll_offset_of(&mut engine, 4).y - 100.0).abs() < 0.5);
+    assert_eq!(painter_hit(&mut engine, 20.0, 100.0), Some(anchored));
+    assert_eq!(
+        engine.published_frame().expect("published").commit_id(),
+        boot
+    );
+
+    // 200px up would put it at −100..50: below the anchor at 50..80
+    // instead, 80..230.
+    wheel(&mut engine, 0.0, 100.0);
+    let switched = next_commit(&mut engine, boot);
+    assert_eq!(painter_hit(&mut engine, 20.0, 150.0), Some(anchored));
+    assert_eq!(main_hit(&mut engine, 20.0, 150.0), Some(anchored));
+
+    // Back to the top: below the anchor at 250..280 it would overflow
+    // (280..430), and above it fits again.
+    wheel(&mut engine, 0.0, -200.0);
+    next_commit(&mut engine, switched);
+    assert_eq!(painter_hit(&mut engine, 20.0, 200.0), Some(anchored));
+    assert_ne!(painter_hit(&mut engine, 20.0, 300.0), Some(anchored));
+}

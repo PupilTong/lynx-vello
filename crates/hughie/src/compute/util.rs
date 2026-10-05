@@ -10,9 +10,10 @@ use stylo::values::computed::{
 use stylo::values::generics::position::PreferredRatio;
 use stylo::values::specified::align::AlignFlags;
 
+use super::anchor;
 use crate::geometry::{Edges, Point, Size};
 use crate::style::{Contain, CoreStyle};
-use crate::tree::{AvailableSpace, LayoutInput, RequestedAxis, SizingMode};
+use crate::tree::{AvailableSpace, LayoutInput, LayoutTree, RequestedAxis, SizingMode};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Axis {
@@ -90,6 +91,11 @@ fn normalize_alignment<const CONTENT: bool>(
     }
     if !CONTENT && value == AlignFlags::LAST_BASELINE {
         return Some(AlignFlags::END);
+    }
+    // css-anchor-position-1 §4.2: "If the box is not absolutely positioned,
+    // … this value behaves as center" — every in-flow item is not.
+    if !CONTENT && value == AlignFlags::ANCHOR_CENTER {
+        return Some(AlignFlags::CENTER);
     }
     let common = matches!(
         value,
@@ -249,6 +255,28 @@ pub(super) fn sort_and_assign_layout_order<N, InFlow, OutOfFlow>(
     }
 }
 
+/// Checks, in debug builds, that a container lays its out-of-flow children
+/// out in tree order.
+///
+/// Every algorithm lays them out after its in-flow commit and in tree order,
+/// and [`crate::tree::LayoutTree::anchor_rect`] depends on both: when an
+/// absolutely positioned child resolves an anchor function, `position-area`
+/// or `anchor-center`, each in-flow sibling and each earlier out-of-flow
+/// sibling — every acceptable target — already holds its box from this pass.
+#[inline]
+pub(super) fn debug_assert_tree_order(document_indices: impl Iterator<Item = usize>) {
+    if cfg!(debug_assertions) {
+        let mut previous = None;
+        for index in document_indices {
+            debug_assert!(
+                previous.is_none_or(|previous| previous < index),
+                "out-of-flow children must be laid out in tree order"
+            );
+            previous = Some(index);
+        }
+    }
+}
+
 /// Compact auto-edge mask retained with resolved item geometry.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[repr(transparent)]
@@ -325,10 +353,8 @@ macro_rules! intrinsic_tag_from {
                 $type::MinContent => Self::MinContent,
                 $type::MaxContent => Self::MaxContent,
                 $type::FitContentFunction(_) => Self::FitContent,
-                $type::AnchorSizeFunction(_) | $type::AnchorContainingCalcFunction(_) => {
-                    debug_assert!(false, "anchor sizing is pref-dead under the lynx feature");
-                    Self::None
-                }
+                // Resolved, a fallback, or `auto`/`none` when invalid at
+                // computed-value time: never an intrinsic keyword.
                 _ => Self::None,
             }
         }
@@ -515,8 +541,75 @@ pub(super) fn resolve_margin(value: &Margin, basis: Option<f32>) -> Option<f32> 
         Margin::LengthPercentage(lp) => resolve_length_percentage(lp, basis),
         Margin::Auto => None,
         Margin::AnchorSizeFunction(_) | Margin::AnchorContainingCalcFunction(_) => {
-            unreachable!("anchor margins are pref-dead under the lynx feature")
+            resolve_unresolvable_margin(value, basis)
         }
+    }
+}
+
+// The anchor arms of the resolvers below are cold and out of line on purpose:
+// every box resolves its geometry through these on the in-flow hot path, and
+// a resolver that called itself on the substituted value would be recursive,
+// which keeps it from being inlined into any of its callers. Each cold
+// sibling substitutes the §5.1.1 unresolvable form (which never carries an
+// anchor function again) and matches it without calling back. The
+// `*_depends_on_basis` predicates need no sibling at all: they answer an
+// anchor function with a conservative `true`, which only withholds a
+// stability claim or asks for a re-resolution.
+
+#[cold]
+#[inline(never)]
+fn resolve_unresolvable_margin(value: &Margin, basis: Option<f32>) -> Option<f32> {
+    match anchor::unresolvable_margin(value) {
+        Margin::LengthPercentage(lp) => resolve_length_percentage(&lp, basis),
+        _ => None,
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn resolve_unresolvable_inset(value: &Inset, basis: Option<f32>) -> Option<f32> {
+    match anchor::unresolvable_inset(value) {
+        Inset::LengthPercentage(lp) => resolve_length_percentage(&lp, basis),
+        _ => None,
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn resolve_unresolvable_style_size(value: &StyleSize, basis: Option<f32>) -> Option<f32> {
+    match anchor::unresolvable_style_size(value) {
+        StyleSize::LengthPercentage(lp) => resolve_length_percentage(&lp.0, basis),
+        _ => None,
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn resolve_unresolvable_max_size(value: &MaxSize, basis: Option<f32>) -> Option<f32> {
+    match anchor::unresolvable_max_size(value) {
+        MaxSize::LengthPercentage(lp) => resolve_length_percentage(&lp.0, basis),
+        _ => None,
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn unresolvable_style_size_behaves_auto(value: &StyleSize) -> bool {
+    matches!(
+        anchor::unresolvable_style_size(value),
+        StyleSize::Auto
+            | StyleSize::FitContent
+            | StyleSize::Stretch
+            | StyleSize::WebkitFillAvailable
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn unresolvable_style_size_is_definite(value: &StyleSize, parent_basis: Option<f32>) -> bool {
+    match anchor::unresolvable_style_size(value) {
+        StyleSize::LengthPercentage(lp) => !lp.0.has_percentage() || parent_basis.is_some(),
+        _ => false,
     }
 }
 
@@ -527,9 +620,7 @@ pub(super) fn resolve_inset(value: &Inset, basis: Option<f32>) -> Option<f32> {
         Inset::Auto => None,
         Inset::AnchorFunction(_)
         | Inset::AnchorSizeFunction(_)
-        | Inset::AnchorContainingCalcFunction(_) => {
-            unreachable!("anchor insets are pref-dead under the lynx feature")
-        }
+        | Inset::AnchorContainingCalcFunction(_) => resolve_unresolvable_inset(value, basis),
     }
 }
 
@@ -545,7 +636,7 @@ pub(super) fn resolve_style_size(value: &StyleSize, basis: Option<f32>) -> Optio
         | StyleSize::WebkitFillAvailable
         | StyleSize::FitContentFunction(_) => None,
         StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => {
-            unreachable!("anchor sizing is pref-dead under the lynx feature")
+            resolve_unresolvable_style_size(value, basis)
         }
     }
 }
@@ -562,7 +653,7 @@ pub(super) fn resolve_max_size(value: &MaxSize, basis: Option<f32>) -> Option<f3
         | MaxSize::WebkitFillAvailable
         | MaxSize::FitContentFunction(_) => None,
         MaxSize::AnchorSizeFunction(_) | MaxSize::AnchorContainingCalcFunction(_) => {
-            unreachable!("anchor sizing is pref-dead under the lynx feature")
+            resolve_unresolvable_max_size(value, basis)
         }
     }
 }
@@ -720,6 +811,10 @@ pub(super) fn style_size_depends_on_basis(value: &StyleSize) -> bool {
     match value {
         StyleSize::LengthPercentage(lp) => lp.0.has_percentage(),
         StyleSize::FitContentFunction(limit) => limit.0.has_percentage(),
+        // Conservatively yes: the answer only withholds a stability claim or
+        // asks for a re-resolution, and a precise one would put a call on
+        // every box's path for a value no in-flow box carries in practice.
+        StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => true,
         _ => false,
     }
 }
@@ -729,6 +824,10 @@ pub(super) fn max_size_depends_on_basis(value: &MaxSize) -> bool {
     match value {
         MaxSize::LengthPercentage(lp) => lp.0.has_percentage(),
         MaxSize::FitContentFunction(limit) => limit.0.has_percentage(),
+        // Conservatively yes: the answer only withholds a stability claim or
+        // asks for a re-resolution, and a precise one would put a call on
+        // every box's path for a value no in-flow box carries in practice.
+        MaxSize::AnchorSizeFunction(_) | MaxSize::AnchorContainingCalcFunction(_) => true,
         _ => false,
     }
 }
@@ -743,9 +842,8 @@ pub(super) fn edges_depend_on_inline_basis(
     let margin_depends = |value: &Margin| match value {
         Margin::LengthPercentage(lp) => lp.has_percentage(),
         Margin::Auto => false,
-        Margin::AnchorSizeFunction(_) | Margin::AnchorContainingCalcFunction(_) => {
-            unreachable!("anchor margins are pref-dead under the lynx feature")
-        }
+        // Conservatively yes, as in `style_size_depends_on_basis`.
+        Margin::AnchorSizeFunction(_) | Margin::AnchorContainingCalcFunction(_) => true,
     };
     margin_depends(margin.left)
         || margin_depends(margin.right)
@@ -829,7 +927,7 @@ pub(super) fn axis_sizing_is_stable(
 pub(super) fn style_size_behaves_auto(value: &StyleSize) -> bool {
     match value {
         StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => {
-            unreachable!("anchor sizing is pref-dead under the lynx feature")
+            unresolvable_style_size_behaves_auto(value)
         }
         _ => matches!(
             value,
@@ -913,7 +1011,7 @@ fn style_size_is_definite(value: &StyleSize, parent_basis: Option<f32>) -> bool 
     match value {
         StyleSize::LengthPercentage(lp) => !lp.0.has_percentage() || parent_basis.is_some(),
         StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => {
-            unreachable!("anchor sizing is pref-dead under the lynx feature")
+            unresolvable_style_size_is_definite(value, parent_basis)
         }
         _ => false,
     }
@@ -1213,6 +1311,27 @@ pub(super) fn resolve_container_box(
     }
 }
 
+/// Per axis, whether the absolute pass may read the static position of the
+/// absolutely positioned `node` (whose style is `style`), so its container
+/// has one ready: both insets on the axis are `auto`. An anchor-function
+/// inset may still resolve to `auto`, so it counts as one; a position option
+/// can make `auto` an inset the box's own style gives a length, so a box
+/// with options needs both axes.
+#[inline]
+pub(super) fn needs_static_position<T: LayoutTree>(
+    tree: &T,
+    node: T::NodeId,
+    style: &impl CoreStyle,
+) -> Size<bool> {
+    if style.has_position_try_fallbacks() && tree.position_option_count(node) > 1 {
+        return Size::new(true, true);
+    }
+    let auto = style
+        .inset()
+        .map(|inset| inset.is_auto() || anchor::is_anchor_inset(inset));
+    Size::new(auto.left && auto.right, auto.top && auto.bottom)
+}
+
 #[inline]
 pub(super) fn is_scroll_container(overflow: Point<Overflow>) -> bool {
     overflow.x.is_scrollable() || overflow.y.is_scrollable()
@@ -1398,6 +1517,7 @@ mod tests {
             "physical right vertical": A::RIGHT, false, false => Some(A::START);
             "self start": A::SELF_START, true, false => Some(A::START);
             "self end": A::SELF_END, false, false => Some(A::START);
+            "anchor-center in flow": A::ANCHOR_CENTER, true, false => Some(A::CENTER);
         }
     }
 

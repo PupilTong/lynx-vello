@@ -27,8 +27,10 @@
 //! between a scroll and its repaint hit the content the user was shown.
 //!
 //! The frame is built unscrolled, unstuck and at committed transforms. Scroll
-//! offsets ([`crate::scroll`]), sticky shifts and exported animation curves
-//! are nodes of its compose space tree ([`space`]), applied at composition
+//! offsets ([`crate::scroll`]), sticky shifts, anchor-positioned boxes'
+//! default scroll shifts and `position-visibility` ([`anchored`]) and
+//! exported animation curves are nodes of its compose space tree ([`space`]),
+//! applied at composition
 //! and inverted by hit testing, so a scroll inside its encode window or a
 //! frame of an exported animation recomposes the retained frame instead of
 //! rebuilding it.
@@ -36,9 +38,9 @@
 //! Invariants this module relies on (verified against the layout host):
 //! - `Layout.location` is border-box-relative to the **box parent**'s border box for every box —
 //!   the container whose formatting context laid the box out, which is the DOM parent except across
-//!   dissolved `display: contents` levels — including hoisted absolute/fixed boxes
-//!   (`position_hoisted` rewrites their location back into parent-relative terms). The build walks
-//!   the same flattened box-tree, so plain offset accumulation along it is sound.
+//!   dissolved `display: contents` levels — including hoisted absolute/fixed boxes (the layout
+//!   host's `hoisted` module rewrites their location back into parent-relative terms). The build
+//!   walks the same flattened box-tree, so plain offset accumulation along it is sound.
 //! - Rounded layouts stay in CSS px with parent-relative locations that telescope exactly to
 //!   snapped absolute positions at any device scale.
 //! - Subtrees the layout host zeroes (display:none, unstyled descendants, `DisplayMode::Leaf`
@@ -99,6 +101,7 @@
 //!   computed by the style flush and dropped; they are what a tiered scheme would key on, but
 //!   nothing on this path reads them today.
 
+pub(crate) mod anchored;
 mod build;
 pub(crate) mod curves;
 pub(crate) mod frame;
@@ -150,9 +153,19 @@ pub(crate) struct PaintOrder {
     slot_index: FxHashMap<NodeId, u32>,
     animations: Vec<AnimationSlot>,
     stickies: Vec<StickySlot>,
-    /// The scroll, sticky and animation nodes, in allocation order; see
-    /// [`space`].
+    /// The scroll, sticky, anchored and animation nodes, in allocation
+    /// order; see [`space`].
     spaces: Vec<Space>,
+    /// Every anchor-positioned box with a space node; see [`anchored`].
+    anchored: Vec<anchored::AnchoredSlot>,
+    /// The scroll and sticky inputs of the anchored slots' shifts, sliced
+    /// per slot.
+    anchor_links: Vec<anchored::AnchorLink>,
+    /// The clips between each anchored slot's default anchor and its
+    /// containing block, sliced per slot.
+    anchor_clips: Vec<u32>,
+    /// The order the anchored slots are sampled in.
+    anchored_order: Vec<u32>,
     /// Every `content-visibility: auto` box this build reached, in build
     /// order. See [`AutoBox`].
     auto_boxes: Vec<AutoBox>,
@@ -277,6 +290,10 @@ pub(crate) struct FrameBuffers {
     animations: Vec<AnimationSlot>,
     stickies: Vec<StickySlot>,
     spaces: Vec<Space>,
+    anchored: Vec<anchored::AnchoredSlot>,
+    anchor_links: Vec<anchored::AnchorLink>,
+    anchor_clips: Vec<u32>,
+    anchored_order: Vec<u32>,
     auto_boxes: Vec<AutoBox>,
     snap_points: Vec<SnapPoint>,
 }
@@ -311,6 +328,10 @@ impl PaintOrder {
         self.animations.clear();
         self.stickies.clear();
         self.spaces.clear();
+        self.anchored.clear();
+        self.anchor_links.clear();
+        self.anchor_clips.clear();
+        self.anchored_order.clear();
         self.auto_boxes.clear();
         self.snap_points.clear();
         FrameBuffers {
@@ -322,6 +343,10 @@ impl PaintOrder {
             animations: self.animations,
             stickies: self.stickies,
             spaces: self.spaces,
+            anchored: self.anchored,
+            anchor_links: self.anchor_links,
+            anchor_clips: self.anchor_clips,
+            anchored_order: self.anchored_order,
             auto_boxes: self.auto_boxes,
             snap_points: self.snap_points,
         }
@@ -340,6 +365,10 @@ impl PaintOrder {
             animations: Vec::new(),
             stickies: Vec::new(),
             spaces: Vec::new(),
+            anchored: Vec::new(),
+            anchor_links: Vec::new(),
+            anchor_clips: Vec::new(),
+            anchored_order: Vec::new(),
             auto_boxes: Vec::new(),
             snap_points: Vec::new(),
             initial_targets: Vec::new(),
@@ -535,6 +564,10 @@ impl PaintOrder {
         let stickies = &mut marks.stickies;
         stickies.clear();
         stickies.resize(self.stickies.len(), false);
+        // Every anchored slot is sampled whatever the program draws, since
+        // one hides another through its anchor; what they read is marked
+        // with the program's spaces.
+        self.mark_anchored_inputs(spaces, stickies);
         composed.clear();
         // A node is pushed after its parent, so one reverse pass closes the
         // set under `Space::parent`.
@@ -547,7 +580,9 @@ impl PaintOrder {
                 spaces[parent as usize] = true;
             }
             match node.kind {
-                SpaceKind::Scroll(_) => {}
+                SpaceKind::Scroll(_)
+                | SpaceKind::Anchored(_)
+                | SpaceKind::AnchoredVisibility(_) => {}
                 SpaceKind::Sticky(slot) => stickies[slot as usize] = true,
                 SpaceKind::Animation(slot) => composed.animations.push(slot),
             }
@@ -595,6 +630,7 @@ impl PaintOrder {
         &'a self,
         animations: &'a AnimationSamples,
         stickies: &'a StickySamples,
+        anchored: &'a anchored::AnchoredSamples,
         ratio: f32,
         offset_of: &'a dyn Fn(&ScrollSlot) -> Option<euclid::default::Vector2D<f32>>,
     ) -> SpaceSamples<'a> {
@@ -603,6 +639,7 @@ impl PaintOrder {
             slots: &self.slots,
             animations,
             stickies,
+            anchored,
             ratio,
             offset_of,
         }
@@ -812,6 +849,13 @@ impl<T: Sync> Document<T> {
     /// Renders only when the retained frame no longer represents the current
     /// document state. Returns whether a new frame was built.
     pub fn render(&mut self) -> bool {
+        // css-anchor-position-1 §6.5 after a scroll. The embedder path
+        // already asked when it adopted the painter's offsets
+        // (`adopt_scroll_offsets`); this serves a document driven without
+        // that marker, and repeats at most one cheap walk per candidate
+        // otherwise — one `is_empty` test on a page without
+        // anchor-positioned boxes.
+        self.redetermine_scrolled_fallbacks();
         if !self.needs_render() {
             return false;
         }
@@ -823,6 +867,15 @@ impl<T: Sync> Document<T> {
         // invalidates layout, which notes a visual mutation, so an id
         // claimed ahead of it would be stale the instant it was claimed.
         self.layout();
+        // css-anchor-position-1 §6.5.1.1 records the last successful position
+        // option "at the time that ResizeObserver events are determined and
+        // delivered" — here, once per rendering update, after layout and
+        // before paint. A box that made a fallback-sensitive change forgets
+        // its option first and determines again from its base style.
+        if self.forget_fallback_sensitive_options() {
+            self.layout();
+        }
+        self.record_last_successful_options();
         let _ = self.next_commit_id();
         let frame = self.build_frame_with_relevance();
         // A request is carried by the container's scroll slot, so one whose

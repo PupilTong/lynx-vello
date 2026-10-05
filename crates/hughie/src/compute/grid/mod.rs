@@ -28,7 +28,7 @@ use sizing::{
     resolve_item_intrinsic_dimensions, size_tracks,
 };
 use stylo::computed_values::direction;
-use stylo::values::computed::{Inset, PositionProperty, Size as StyleSize};
+use stylo::values::computed::{PositionProperty, Size as StyleSize};
 use stylo::values::specified::align::AlignFlags;
 use tracks::{ExpandedTemplate, MAX_MATERIALIZED_TRACKS, build_axis_tracks, expand_template};
 use types::{Axis, GridItem, TrackSet, TrackSizingFunction};
@@ -41,7 +41,7 @@ use super::util::{
     resolve_container_box, resolve_gap, resolve_insets, resolve_item_geometry,
     sort_and_assign_layout_order,
 };
-use super::{compute_absolute_layout, hide_subtree};
+use super::{AbsoluteContainingBlock, compute_absolute_layout_in, hide_subtree};
 use crate::geometry::{Edges, Line, Point, Size};
 use crate::style::containment::contained_axes;
 use crate::style::{Contain, CoreStyle, Display, GridStyle, Overflow};
@@ -187,8 +187,13 @@ where
         | StyleSize::WebkitFillAvailable => true,
         StyleSize::LengthPercentage(length) => length.0.to_length().is_none(),
         StyleSize::MinContent | StyleSize::MaxContent | StyleSize::FitContentFunction(_) => false,
+        // A grid item is in flow, so §5.1.1 resolves nothing for it: the
+        // fallback, or `auto` when the declaration is invalid.
         StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => {
-            unreachable!("anchor positioning is pref-disabled under lynx")
+            match crate::compute::anchor::unresolvable_style_size(value) {
+                StyleSize::LengthPercentage(length) => length.0.to_length().is_none(),
+                _ => true,
+            }
         }
     };
     let minimum_behaves_auto = |value: &StyleSize| {
@@ -1198,9 +1203,15 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one ordered pass; the hoisted boxes interleave with it in tree order"
+)]
+#[inline(never)]
 fn layout_absolute_items<'tree, T>(
     tree: &'tree T,
     state: &mut T::State,
+    node: T::NodeId,
     items: &[PendingItem<T::NodeId>],
     columns: &TrackSet,
     rows: &TrackSet,
@@ -1226,14 +1237,17 @@ where
     let content_origin = Point::new(border.left + padding.left, border.top + padding.top);
     let logical_content_start =
         Point::new(if rtl { padding.right } else { padding.left }, padding.top);
+    crate::compute::util::debug_assert_tree_order(
+        items.iter().map(|item| item.ordered.document_index),
+    );
+    let mut hoisted = crate::compute::HoistedPass::new(padding_box_size, border, rtl);
     for pending in items {
+        hoisted.before(tree, state, node, pending.ordered.document_index);
         let key = pending.key();
-        let inset_auto = {
-            let style = tree.style(key.node);
-            style.inset().map(Inset::is_auto)
-        };
-        let needs_static_measurement =
-            (inset_auto.left && inset_auto.right) || (inset_auto.top && inset_auto.bottom);
+        // `absolute_layout` decides whether it reads the static position.
+        let static_axes =
+            crate::compute::util::needs_static_position(tree, key.node, &tree.style(key.node));
+        let needs_static_measurement = static_axes.width || static_axes.height;
         let content_static_offset = if needs_static_measurement {
             let item = resolve_grid_item(
                 &tree.style(key.node),
@@ -1272,8 +1286,20 @@ where
                     padding.left + content_static_offset.x - x,
                     padding.top + content_static_offset.y - y,
                 );
-                let mut layout =
-                    compute_absolute_layout(tree, state, key.node, containing_size, static_offset);
+                let mut layout = compute_absolute_layout_in(
+                    tree,
+                    state,
+                    key.node,
+                    AbsoluteContainingBlock {
+                        origin: Point::new(x, y),
+                        size: containing_size,
+                        padding_box_size,
+                        is_padding_box: x == 0.0 && y == 0.0 && containing_size == padding_box_size,
+                        rtl,
+                        honors_self_alignment: true,
+                    },
+                    move |_, _| static_offset,
+                );
                 layout.location.x += origin.x;
                 layout.location.y += origin.y;
                 layout.order = key.layout_order;
@@ -1285,6 +1311,7 @@ where
                     tree.style(key.node).overflow(),
                 );
                 tree.set_unrounded_layout(state, key.node, layout);
+                hoisted.inside(tree, state, node, pending.ordered.document_index);
             }
             PositionProperty::Fixed => {
                 tree.set_static_position(
@@ -1299,6 +1326,7 @@ where
             PositionProperty::Static | PositionProperty::Relative | PositionProperty::Sticky => {}
         }
     }
+    hoisted.rest(tree, state, node);
     content_size
 }
 
@@ -1527,21 +1555,38 @@ where
                 Layout::with_order(u32::try_from(document_index).unwrap_or(u32::MAX)),
             );
         }
-        let absolute_content_size = layout_absolute_items(
+        crate::compute::record_scrollable_containing_block(
             tree,
             state,
-            &absolute.expect("commit keeps out-of-flow grid items"),
-            &columns,
-            &rows,
-            explicit_columns.tracks.len(),
-            explicit_rows.tracks.len(),
-            final_inner,
+            node,
+            &style,
             outer_size,
-            metrics.padding,
             metrics.border,
-            rtl,
-            item_defaults,
+            content_size,
         );
+        let absolute = absolute.expect("commit keeps out-of-flow grid items");
+        // With no out-of-flow box to lay out, the pass answers `outer_size`.
+        let absolute_content_size =
+            if absolute.is_empty() && !tree.has_hoisted_children(state, node) {
+                outer_size
+            } else {
+                layout_absolute_items(
+                    tree,
+                    state,
+                    node,
+                    &absolute,
+                    &columns,
+                    &rows,
+                    explicit_columns.tracks.len(),
+                    explicit_rows.tracks.len(),
+                    final_inner,
+                    outer_size,
+                    metrics.padding,
+                    metrics.border,
+                    rtl,
+                    item_defaults,
+                )
+            };
         content_size = content_size.zip_map(absolute_content_size, f32::max);
     }
     let content_size = own_scrollable_overflow(&style, outer_size, content_size);

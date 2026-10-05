@@ -346,6 +346,9 @@ impl CommittedFrame {
             self.device_pixel_ratio,
             offset_of,
         );
+        let anchored =
+            self.order
+                .sample_anchored(&animations, &stickies, self.device_pixel_ratio, offset_of);
         compose::replay(
             scene,
             &self.presentation.fragments,
@@ -354,9 +357,13 @@ impl CommittedFrame {
             images,
             &self.presentation.filter_groups,
             filtered,
-            &self
-                .order
-                .space_samples(&animations, &stickies, self.device_pixel_ratio, offset_of),
+            &self.order.space_samples(
+                &animations,
+                &stickies,
+                &anchored,
+                self.device_pixel_ratio,
+                offset_of,
+            ),
         );
     }
 
@@ -415,9 +422,22 @@ impl CommittedFrame {
             self.device_pixel_ratio,
             offset_of,
         );
-        let samples =
+        let anchored =
             self.order
-                .space_samples(&animations, &stickies, self.device_pixel_ratio, offset_of);
+                .sample_anchored(&animations, &stickies, self.device_pixel_ratio, offset_of);
+        let samples = self.order.space_samples(
+            &animations,
+            &stickies,
+            &anchored,
+            self.device_pixel_ratio,
+            offset_of,
+        );
+        // An entry inside a box `position-visibility` hides composes through
+        // the zero map: it draws nothing, so it bakes nothing either — its
+        // own map has no inverse to bake through.
+        if samples.device(group.space).determinant().abs() < f64::EPSILON {
+            return;
+        }
         let transform = samples.bake_map(group.space, (group.rect.x0, group.rect.y0));
         compose::replay_ops(
             scene,
@@ -643,9 +663,16 @@ impl CommittedFrame {
         let stickies = self
             .order
             .sample_stickies(self.device_pixel_ratio, offset_of);
-        let samples =
+        let anchored =
             self.order
-                .space_samples(&animations, &stickies, self.device_pixel_ratio, offset_of);
+                .sample_anchored(&animations, &stickies, self.device_pixel_ratio, offset_of);
+        let samples = self.order.space_samples(
+            &animations,
+            &stickies,
+            &anchored,
+            self.device_pixel_ratio,
+            offset_of,
+        );
         self.order.raw_hits_at(point, &samples).next()
     }
 

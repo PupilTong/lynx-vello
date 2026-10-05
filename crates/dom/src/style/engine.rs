@@ -5,11 +5,13 @@ use std::sync::Arc as StdArc;
 use std::sync::atomic::AtomicBool;
 
 use cssparser::Parser;
+use rustc_hash::FxHashSet;
 use stylo::author_styles::AuthorStyles;
 use stylo::context::QuirksMode;
 use stylo::custom_properties::AttrTaint;
 use stylo::device::Device;
 use stylo::font_face::{FontFaceRule, Source as StyloFontFaceSource, parse_font_face_block};
+use stylo::invalidation::stylesheets::StylesheetInvalidationSet;
 use stylo::media_queries::MediaList;
 use stylo::parser::{Parse, ParserContext};
 use stylo::properties::declaration_block::parse_one_declaration_into;
@@ -28,6 +30,7 @@ use stylo::stylesheets::{
 };
 use stylo::stylist::Stylist;
 use stylo::values::{KeyframesName, SourceLocation};
+use stylo_atoms::Atom;
 use stylo_traits::ParsingMode;
 
 use crate::Document;
@@ -163,6 +166,14 @@ pub(crate) struct StyleEngine {
     /// re-collect it, and a strong reference is what stops a freed rule's
     /// address from being reused by a later one.
     reported_font_faces: Vec<Arc<Locked<FontFaceRule>>>,
+    /// The `@position-try` names whose rules the stylist flushes since the
+    /// last style harvest added, removed or changed
+    /// (`CascadeDataDifference::changed_position_try_names`). No element's
+    /// base style changes with them, so no restyle carries the news; the
+    /// harvest re-cascades the position options that name one
+    /// (css-anchor-position-1 §6.5.1, and `layout::anchors`). Empty for a
+    /// page whose sheets declare no `@position-try` rule.
+    changed_position_try_names: FxHashSet<Atom>,
 }
 
 impl std::fmt::Debug for StyleEngine {
@@ -186,7 +197,22 @@ impl StyleEngine {
             url_data,
             font_faces_dirty: false,
             reported_font_faces: Vec::new(),
+            changed_position_try_names: FxHashSet::default(),
         }
+    }
+
+    /// Keeps what one stylist flush reports that the style harvest has to
+    /// act on outside the element restyles it already produces.
+    fn note_flush(pending: &mut FxHashSet<Atom>, invalidations: &StylesheetInvalidationSet) {
+        let changed = &invalidations
+            .cascade_data_difference
+            .changed_position_try_names;
+        pending.extend(changed.iter().cloned());
+    }
+
+    /// Takes the `@position-try` names changed since the last call.
+    pub(crate) fn take_changed_position_try_names(&mut self) -> FxHashSet<Atom> {
+        std::mem::take(&mut self.changed_position_try_names)
     }
 
     /// Every `@font-face` rule this engine has not reported before.
@@ -211,7 +237,8 @@ impl StyleEngine {
             return Vec::new();
         }
         let guard = self.lock.read();
-        self.stylist.flush(&StylesheetGuards::same(&guard));
+        let invalidations = self.stylist.flush(&StylesheetGuards::same(&guard));
+        Self::note_flush(&mut self.changed_position_try_names, &invalidations);
         let mut requests = Vec::new();
         let mut reported = Vec::new();
         for (data, _) in self.stylist.iter_extra_data_origins() {
@@ -416,7 +443,9 @@ impl StyleEngine {
         let sheet = self.parse_stylesheet(css, origin);
         let guard = self.lock.read();
         self.stylist.append_stylesheet(sheet, &guard);
-        self.stylist.flush(&StylesheetGuards::same(&guard));
+        let invalidations = self.stylist.flush(&StylesheetGuards::same(&guard));
+        drop(guard);
+        Self::note_flush(&mut self.changed_position_try_names, &invalidations);
         self.font_faces_dirty = true;
     }
 
@@ -430,7 +459,9 @@ impl StyleEngine {
         styles
             .stylesheets
             .append_stylesheet(None, &CustomMediaMap::default(), sheet, &guard);
-        drop(styles.flush(&mut self.stylist, &guard));
+        let invalidations = styles.flush(&mut self.stylist, &guard);
+        drop(guard);
+        Self::note_flush(&mut self.changed_position_try_names, &invalidations);
     }
 
     /// Installs rules this engine built as one author-origin sheet.
@@ -458,7 +489,9 @@ impl StyleEngine {
         let guard = self.lock.read();
         self.stylist
             .append_stylesheet(DocumentStyleSheet(Arc::new(sheet)), &guard);
-        self.stylist.flush(&StylesheetGuards::same(&guard));
+        let invalidations = self.stylist.flush(&StylesheetGuards::same(&guard));
+        drop(guard);
+        Self::note_flush(&mut self.changed_position_try_names, &invalidations);
         self.font_faces_dirty = true;
     }
 
@@ -609,7 +642,9 @@ impl StyleEngine {
             return StyleInvalidation::Recascade;
         }
         self.stylist.force_stylesheet_origins_dirty(changed);
-        self.stylist.flush(&guards);
+        let invalidations = self.stylist.flush(&guards);
+        drop(guard);
+        Self::note_flush(&mut self.changed_position_try_names, &invalidations);
         StyleInvalidation::Rematch
     }
 }

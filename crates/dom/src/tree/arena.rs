@@ -12,12 +12,14 @@ use core::fmt;
 use std::hint::likely;
 use std::num::{NonZeroU32, NonZeroU64};
 
-use hughie::geometry::Edges;
+use hughie::geometry::{Edges, Size};
 use hughie::text::TextContext;
 use hughie::tree::{LayoutInput, LayoutSlot};
 use rustc_hash::FxHashMap;
 use slab::Slab;
+use smallvec::SmallVec;
 
+use crate::layout::anchors::{AnchorBuckets, AnchorRegistry, AnchoredBox, PendingReads};
 use crate::layout::committed_box::{CommittedBox, CommittedBoxTable};
 use crate::layout::relevance::{Relevance, RelevanceTable};
 use crate::layout::text_block::TextBlockStore;
@@ -164,6 +166,13 @@ pub(crate) struct TreeArenas<T> {
     /// Neither can reach anything but these arenas. See
     /// [`crate::layout::committed_box`].
     committed_boxes: CommittedBoxTable,
+    /// css-anchor-position-1's name index and each element's position
+    /// options, here rather than in `DocumentLayoutState` because
+    /// `LayoutTree::position_option_style` lends an option style out of
+    /// these arenas as it lends the base style, with no state to reach. Its
+    /// entries are the elements that declare an anchor name, an anchor
+    /// scope or position-try fallbacks; see [`crate::layout::anchors`].
+    anchors: AnchorRegistry,
 }
 
 impl<T> TreeArenas<T> {
@@ -174,7 +183,19 @@ impl<T> TreeArenas<T> {
             generations: Vec::with_capacity(INITIAL_NODE_CAPACITY),
             relevance: RelevanceTable::default(),
             committed_boxes: CommittedBoxTable::default(),
+            anchors: AnchorRegistry::default(),
         }
+    }
+
+    /// The anchor-positioning registry; see [`crate::layout::anchors`].
+    #[inline]
+    pub(crate) fn anchors(&self) -> &AnchorRegistry {
+        &self.anchors
+    }
+
+    #[inline]
+    pub(crate) fn anchors_mut(&mut self) -> &mut AnchorRegistry {
+        &mut self.anchors
     }
 
     /// One element's `content-visibility: auto` relevance.
@@ -192,7 +213,11 @@ impl<T> TreeArenas<T> {
 
     /// Records one determination, answering whether the bit moved.
     pub(crate) fn determine_relevance(&mut self, slot: NodeId, state: Relevance) -> bool {
-        self.relevance.determine(slot.arena_key(), state)
+        let flipped = self.relevance.determine(slot.arena_key(), state);
+        if flipped {
+            self.anchors.note_relevance_flip();
+        }
+        flipped
     }
 
     /// Ends a render's determinations; see [`RelevanceTable::settle`].
@@ -434,6 +459,9 @@ impl<T> TreeArenas<T> {
         // and no element is a query container until its own `container-type`
         // says so, so the key's next occupant starts with neither.
         self.committed_boxes.reset(id.arena_key());
+        // And whatever it declared for anchor positioning: a name index that
+        // outlived its element would offer a dead candidate to every lookup.
+        self.anchors.forget(id);
         (node, payload)
     }
 }
@@ -493,6 +521,53 @@ pub(crate) struct DocumentLayoutState {
     /// items have one: a page without them keeps it empty and pays nothing
     /// per node (`hughie::LayoutTree::set_sticky_containing_block`).
     pub(crate) sticky_containing_blocks: Vec<StickyContainingBlock>,
+    /// css-anchor-position-1's per-box state — outcome, reads, remembered
+    /// scroll offsets, last successful position option, and whether the run
+    /// in flight reported it (for the settle loop's recording) — for every box
+    /// `hughie` reported as anchor-positioned and nothing else: a page
+    /// without anchor positioning keeps it empty. See
+    /// [`crate::layout::anchors`] for what each part is for.
+    pub(crate) anchored: FxHashMap<NodeId, AnchoredBox>,
+    /// The reads of the boxes being laid out that `hughie` has not reported
+    /// an outcome for yet. Interior-mutable because the queries arrive with
+    /// the state borrowed shared; empty between runs.
+    pub(crate) anchor_pending: PendingReads,
+    /// Each scoped anchor name's definers partitioned by their nearest
+    /// `anchor-scope`, for the §2.3 lookup; see
+    /// [`crate::layout::anchors::AnchorBuckets`].
+    pub(crate) anchor_buckets: AnchorBuckets,
+    /// Each element that generates the containing block of an out-of-flow
+    /// box whose box parent is another box (an `absolute` box under a
+    /// non-positioned parent, a `fixed` one under a transformed ancestor),
+    /// with those boxes: what its algorithm's absolute pass lays out besides
+    /// its own children ([`hughie::tree::LayoutTree::hoisted_children`]).
+    /// Written where the box's parent records its static position, the one
+    /// call every committing run of that parent makes for it. A side table
+    /// because only such containing blocks have an entry: the document's
+    /// UA sheet makes every Lynx element `position: relative`, so a page
+    /// gets one only from `fixed` boxes under transforms or authored
+    /// `position: static` parents. An entry can outlive its box's escape —
+    /// the box stopped being positioned, or moved — until the box escapes
+    /// elsewhere or is freed; every read re-derives the containing block and
+    /// skips it, so a stale entry costs a lookup, never a misplaced box.
+    /// A box is listed under one block at most. There is no inverse map:
+    /// moving or freeing a box scans these entries, which are few for the
+    /// same reason they exist at all.
+    pub(crate) hoisted_to: FxHashMap<NodeId, SmallVec<[NodeId; 2]>>,
+    /// Whether the rounding tail is running, where a box placed late (its
+    /// containing block did not run) is written after the walk has already
+    /// rounded the boxes above it and needs no marks on them.
+    pub(crate) in_rounding_tail: bool,
+    /// Each scroll container's css-position-4 scrollable containing block
+    /// from its last committing run: its in-flow content's scrollable
+    /// overflow, the out-of-flow boxes' excluded
+    /// ([`hughie::tree::LayoutTree::set_scrollable_containing_block`]). A
+    /// side table because only scroll containers have one and only the
+    /// anchor-positioned boxes laid out against one read it — not a field
+    /// of every `Layout`, which would grow `LayoutSlot` for every node to
+    /// serve the few that scroll. An entry lives until its element is freed;
+    /// one that stops scrolling is never asked about again.
+    pub(crate) scrollable_containing_blocks: FxHashMap<NodeId, Size<f32>>,
 }
 
 /// One entry of [`DocumentLayoutState::sticky_containing_blocks`].
@@ -530,6 +605,12 @@ impl DocumentLayoutState {
             scroll_requests: FxHashMap::default(),
             next_scroll_request: NonZeroU64::MIN,
             sticky_containing_blocks: Vec::new(),
+            anchored: FxHashMap::default(),
+            anchor_pending: PendingReads::default(),
+            anchor_buckets: AnchorBuckets::default(),
+            hoisted_to: FxHashMap::default(),
+            in_rounding_tail: false,
+            scrollable_containing_blocks: FxHashMap::default(),
         }
     }
 
@@ -572,6 +653,41 @@ impl DocumentLayoutState {
         }
         if !self.scroll_requests.is_empty() {
             self.scroll_requests.remove(&slot);
+        }
+        if !self.anchored.is_empty() {
+            self.anchored.remove(&slot);
+        }
+        self.register_hoisted(slot, None);
+        self.hoisted_to.remove(&slot);
+        if !self.scrollable_containing_blocks.is_empty() {
+            self.scrollable_containing_blocks.remove(&slot);
+        }
+    }
+
+    /// Lists `node` under the containing block `block` its absolute pass
+    /// lays it out from (`None`: no element's — the initial containing
+    /// block's, which the run's tail places), moving it off any other.
+    ///
+    /// Finds the block it was listed under by scanning [`Self::hoisted_to`];
+    /// see the field for why that is cheap.
+    pub(crate) fn register_hoisted(&mut self, node: NodeId, block: Option<NodeId>) {
+        if self.hoisted_to.is_empty() && block.is_none() {
+            return;
+        }
+        if let Some(block) = block
+            && self
+                .hoisted_to
+                .get(&block)
+                .is_some_and(|listed| listed.contains(&node))
+        {
+            return;
+        }
+        self.hoisted_to.retain(|_, listed| {
+            listed.retain(|listed| *listed != node);
+            !listed.is_empty()
+        });
+        if let Some(block) = block {
+            self.hoisted_to.entry(block).or_default().push(node);
         }
     }
 
@@ -617,6 +733,12 @@ impl DocumentLayoutState {
             scroll_requests: _,
             next_scroll_request: _,
             sticky_containing_blocks: _,
+            anchored: _,
+            anchor_pending: _,
+            anchor_buckets: _,
+            hoisted_to: _,
+            in_rounding_tail: _,
+            scrollable_containing_blocks: _,
         } = self;
         let context = text_context
             .get_or_insert_with(|| Box::new(TextContext::new()))
@@ -663,6 +785,12 @@ impl DocumentLayoutState {
             scroll_requests: _,
             next_scroll_request: _,
             sticky_containing_blocks: _,
+            anchored: _,
+            anchor_pending: _,
+            anchor_buckets: _,
+            hoisted_to: _,
+            in_rounding_tail: _,
+            scrollable_containing_blocks: _,
         } = self;
         // Unlike the path this replaces, restoring can re-enter the shaper —
         // a truncating block rebuilds its display layout — so the context is

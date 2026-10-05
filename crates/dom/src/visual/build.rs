@@ -38,6 +38,7 @@ use stylo::computed_values::scroll_initial_target;
 use stylo::properties::ComputedValues;
 use stylo::values::computed::PointerEvents;
 
+use super::anchored::AnchoredSlot;
 use super::curves::TransformTrack;
 use super::frame::MAX_MOVING_EXTENT_VIEWPORTS;
 use super::geometry::{inner_radii, resolve_corner_radii};
@@ -81,6 +82,7 @@ pub(crate) fn build<T: Sync>(
         animations: buffers.animations,
         stickies: buffers.stickies,
         spaces: buffers.spaces,
+        anchored: buffers.anchored,
         auto_boxes: buffers.auto_boxes,
         snap_points: buffers.snap_points,
         initial_targets: Vec::new(),
@@ -95,6 +97,10 @@ pub(crate) fn build<T: Sync>(
             && builder.animations.is_empty()
             && builder.stickies.is_empty()
             && builder.spaces.is_empty()
+            && builder.anchored.is_empty()
+            && buffers.anchor_links.is_empty()
+            && buffers.anchor_clips.is_empty()
+            && buffers.anchored_order.is_empty()
             && builder.auto_boxes.is_empty()
             && builder.snap_points.is_empty(),
         "a recycled frame is emptied before it is handed back to the builder",
@@ -127,23 +133,26 @@ pub(crate) fn build<T: Sync>(
             u32::try_from(index).expect("a frame cannot hold 2^32 scroll containers"),
         )
     }));
-    (
-        PaintOrder {
-            items: builder.items,
-            clips: builder.clips,
-            layers: builder.layers,
-            slots: builder.slots,
-            slot_index,
-            animations: builder.animations,
-            stickies: builder.stickies,
-            spaces: builder.spaces,
-            auto_boxes: builder.auto_boxes,
-            snap_points: builder.snap_points,
-            initial_targets: builder.initial_targets,
-            commit_id,
-        },
-        builder.scratch,
-    )
+    let mut order = PaintOrder {
+        items: builder.items,
+        clips: builder.clips,
+        layers: builder.layers,
+        slots: builder.slots,
+        slot_index,
+        animations: builder.animations,
+        stickies: builder.stickies,
+        spaces: builder.spaces,
+        anchored: builder.anchored,
+        anchor_links: buffers.anchor_links,
+        anchor_clips: buffers.anchor_clips,
+        anchored_order: buffers.anchored_order,
+        auto_boxes: builder.auto_boxes,
+        snap_points: builder.snap_points,
+        initial_targets: builder.initial_targets,
+        commit_id,
+    };
+    order.bind_anchored(document);
+    (order, builder.scratch)
 }
 
 /// The working buffers one paint-order build fills, retained across frames.
@@ -371,6 +380,9 @@ struct Builder<'doc, T> {
     animations: Vec<AnimationSlot>,
     stickies: Vec<StickySlot>,
     spaces: Vec<Space>,
+    /// Every anchor-positioned box given an anchored node, bound after the
+    /// walk ([`PaintOrder::bind_anchored`]).
+    anchored: Vec<AnchoredSlot>,
     /// Every `content-visibility: auto` box this build reached, in build
     /// order. Independent of `items`: see [`AutoBox`].
     auto_boxes: Vec<AutoBox>,
@@ -400,6 +412,48 @@ impl<'doc, T: Sync> Builder<'doc, T> {
 
     fn nearest_sticky(&self, space: Option<u32>) -> Option<u32> {
         super::space::nearest_sticky(&self.spaces, space)
+    }
+
+    /// Opens `node`'s anchored node inside `space` when the host reported
+    /// it anchor-positioned and its default scroll shift or its
+    /// `position-visibility` can change at compose time, and returns the
+    /// space its box starts from. `parent_world` is its containing block's
+    /// world, `clip` the clip chain its box is in. A page without
+    /// anchor-positioned boxes pays one `is_empty` test per box.
+    ///
+    /// When `position-visibility` can hide the box and the box is not
+    /// itself a fixed containing block, also opens the slot's visibility
+    /// node inside `fixed` — the context its escaping `position: fixed`
+    /// descendants take — so they hide with it.
+    fn enter_anchored(
+        &mut self,
+        node: NodeId,
+        style: &ComputedValues,
+        parent_world: &Transform3D<f32>,
+        (space, clip): (Option<u32>, Option<usize>),
+        fixed: &mut FlowContext,
+    ) -> Option<u32> {
+        if self.state.anchored.is_empty()
+            || !matches!(
+                style.clone_position(),
+                PositionProperty::Absolute | PositionProperty::Fixed
+            )
+        {
+            return space;
+        }
+        let Some(slot) = AnchoredSlot::allocate(self.document, node, style, parent_world, clip)
+        else {
+            return space;
+        };
+        let can_hide = slot.can_hide();
+        self.anchored.push(slot);
+        let index = u32::try_from(self.anchored.len() - 1)
+            .expect("a frame cannot hold 2^32 anchored boxes");
+        let anchored = self.push_space(space, SpaceKind::Anchored(index));
+        if can_hide && !establishes_fixed_containing_block(self.node(node), style) {
+            fixed.space = Some(self.push_space(fixed.space, SpaceKind::AnchoredVisibility(index)));
+        }
+        Some(anchored)
     }
 
     /// Records `node` in the frame's scroll-slot table when it is a scroll
@@ -512,6 +566,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
             return None;
         }
         self.stickies.push(StickySlot {
+            node,
             parent: self.nearest_sticky(flow.space),
             scroll,
             scroll_sticky: scroll
@@ -612,14 +667,20 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         offset_in_parent: Point2D<f32>,
         parent_world: &Transform3D<f32>,
         parent_perspective: Option<ParentPerspective>,
-        seed: ClipContexts,
+        mut seed: ClipContexts,
     ) {
         let values = style.values();
-        // Allocation order is space order: the element's own sticky and
-        // animation nodes enclose its box, its own scroll node only its
-        // content.
+        // Allocation order is space order: the element's own anchored,
+        // sticky and animation nodes enclose its box, its own scroll node
+        // only its content.
+        let mut box_space = self.enter_anchored(
+            root,
+            values,
+            parent_world,
+            (seed.current.space, seed.current.clip),
+            &mut seed.fixed,
+        );
         let own_sticky = self.allocate_sticky_slot(root, values, seed.current, parent_world);
-        let mut box_space = seed.current.space;
         if let Some(index) = own_sticky {
             box_space = Some(self.push_space(box_space, SpaceKind::Sticky(index)));
         }
@@ -1016,10 +1077,19 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         // none at all, because it is not a member.
         let pseudo = (child.position != PositionProperty::Static)
             .then(|| (collection.next_seq(), self.take_pseudo_stream()));
-        let (target, outer) = match pseudo {
+        let (target, mut outer) = match pseudo {
             Some((_, stream)) => (StreamTarget::Pseudo(stream), child.clips),
             None => (target, ctx),
         };
+        // An anchor-positioned box is positioned, so it is always a
+        // pseudo-context or a context: its anchored node encloses its box.
+        outer.current.space = self.enter_anchored(
+            child.node,
+            style,
+            collection.world,
+            (outer.current.space, outer.current.clip),
+            &mut outer.fixed,
+        );
 
         // A scroll container that is no stacking context takes its slot and
         // scroll space here, in the order `build_stacking_context` allocates

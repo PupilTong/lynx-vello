@@ -16,7 +16,6 @@ use stylo::values::computed::{
 };
 use stylo::values::specified::align::AlignFlags;
 
-use super::compute_absolute_layout;
 use super::single_axis::{
     BaseReversals, FlowAxes, flow_end, flow_start, flow_to_physical, measure_child, set_flow_end,
     set_flow_start,
@@ -24,12 +23,13 @@ use super::single_axis::{
 use super::util::{
     Axis, ItemGeometry, ItemKey, OrderedItem, ResolvedContainerBox, accumulate_scrollable_overflow,
     axis_has_intrinsic_style, axis_sizing_is_stable, clamp_axis, container_content_independence,
-    edges_depend_on_inline_basis, normalize_content_alignment, normalize_item_alignment,
-    own_scrollable_overflow, relative_offset, resolve_container_box, resolve_gap, resolve_gap_axis,
-    resolve_insets, resolve_item_geometry, resolve_length_percentage, resolve_style_size,
-    sort_and_assign_layout_order, store_committed_child, style_size_behaves_auto,
-    style_size_depends_on_basis,
+    debug_assert_tree_order, edges_depend_on_inline_basis, normalize_content_alignment,
+    normalize_item_alignment, own_scrollable_overflow, relative_offset, resolve_container_box,
+    resolve_gap, resolve_gap_axis, resolve_insets, resolve_item_geometry,
+    resolve_length_percentage, resolve_style_size, sort_and_assign_layout_order,
+    store_committed_child, style_size_behaves_auto, style_size_depends_on_basis,
 };
+use super::{AbsoluteContainingBlock, compute_absolute_layout_in};
 use crate::geometry::{Edges, Point, Size};
 use crate::style::containment::contained_axes;
 use crate::style::{Contain, CoreStyle, FlexboxStyle};
@@ -546,6 +546,17 @@ fn determine_flex_base_sizes<'tree, T>(
                     }
                 }
             };
+            // A flex item is in flow, so §5.1.1 resolves nothing for it.
+            let unresolved_anchor;
+            let content_basis = if matches!(
+                content_basis,
+                StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_)
+            ) {
+                unresolved_anchor = super::anchor::unresolvable_style_size(content_basis);
+                &unresolved_anchor
+            } else {
+                content_basis
+            };
             match content_basis {
                 StyleSize::MinContent => probes.min_content(),
                 StyleSize::MaxContent => probes.max_content(),
@@ -575,7 +586,7 @@ fn determine_flex_base_sizes<'tree, T>(
                     }
                 }
                 StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => {
-                    unreachable!("anchor sizing is pref-dead under the lynx feature")
+                    unreachable!("substituted with the unresolvable form above")
                 }
             }
         };
@@ -1564,9 +1575,11 @@ fn static_position_for_absolute<N>(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[inline(never)]
 fn perform_absolute_children<'tree, T>(
     tree: &'tree T,
     state: &mut T::State,
+    node: T::NodeId,
     absolute_items: &[OrderedItem<T::NodeId>],
     axes: Axes,
     rtl: bool,
@@ -1589,7 +1602,10 @@ where
         (container_size.height - border.vertical_sum()).max(0.0),
     );
 
+    debug_assert_tree_order(absolute_items.iter().map(|item| item.document_index));
+    let mut hoisted = super::HoistedPass::new(padding_box_size, border, rtl);
     for pending in absolute_items {
+        hoisted.before(tree, state, node, pending.document_index);
         let key = pending.key();
         let style = tree.style(key.node);
         let mut item = resolve_item(&style, key, parent_size, axes, rtl, default_alignment);
@@ -1630,12 +1646,12 @@ where
                     static_position.x - border.left,
                     static_position.y - border.top,
                 );
-                let mut layout = compute_absolute_layout(
+                let mut layout = compute_absolute_layout_in(
                     tree,
                     state,
                     key.node,
-                    padding_box_size,
-                    static_in_padding_space,
+                    AbsoluteContainingBlock::padding_box(padding_box_size, rtl),
+                    move |_, _| static_in_padding_space,
                 );
                 layout.order = key.layout_order;
                 layout.location.x += border.left;
@@ -1648,6 +1664,7 @@ where
                     item.overflow,
                 );
                 tree.set_unrounded_layout(state, key.node, layout);
+                hoisted.inside(tree, state, node, pending.document_index);
             }
             PositionProperty::Fixed => {
                 tree.set_static_position(state, key.node, static_position);
@@ -1655,6 +1672,7 @@ where
             PositionProperty::Static | PositionProperty::Relative | PositionProperty::Sticky => {}
         }
     }
+    hoisted.rest(tree, state, node);
     content_size
 }
 
@@ -2015,19 +2033,35 @@ where
         let order = u32::try_from(document_index).unwrap_or(u32::MAX);
         super::hide_child_at_order(tree, state, child, order);
     }
-    let absolute_content_size = perform_absolute_children(
+    super::record_scrollable_containing_block(
         tree,
         state,
-        &absolute_items,
-        axes,
-        rtl,
-        inner_size,
+        node,
+        &style,
         outer_size,
-        padding,
         border,
-        justify_content,
-        align_items,
+        content_size,
     );
+    // With no out-of-flow box to lay out, the pass answers `outer_size`.
+    let absolute_content_size =
+        if absolute_items.is_empty() && !tree.has_hoisted_children(state, node) {
+            outer_size
+        } else {
+            perform_absolute_children(
+                tree,
+                state,
+                node,
+                &absolute_items,
+                axes,
+                rtl,
+                inner_size,
+                outer_size,
+                padding,
+                border,
+                justify_content,
+                align_items,
+            )
+        };
     content_size = content_size.zip_map(absolute_content_size, f32::max);
     let content_size = own_scrollable_overflow(&style, outer_size, content_size);
 

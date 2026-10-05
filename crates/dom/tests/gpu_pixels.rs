@@ -2100,3 +2100,76 @@ fn a_colour_only_backdrop_darkens_only_inside_the_box() {
         luma(&pixels, 128, 48, 64),
     );
 }
+
+/// css-anchor-position-1 at the GPU: an anchored box outside a scroller
+/// follows its anchor through a composed scroll (§3.3's default scroll
+/// shift), and once the anchor is scrolled wholly out of the scroller's clip
+/// `position-visibility: anchor-visible` hides it — its rounded, shadowed,
+/// blurred box and all, through the zero map its anchored node composes,
+/// without a bake through a map with no inverse.
+#[test]
+fn an_anchored_box_follows_its_scrolled_anchor_and_hides_with_it() {
+    use dom::Vector2D;
+
+    let mut gpu = headless("an_anchored_box_follows_its_scrolled_anchor_and_hides_with_it");
+    let mut doc = Doc::with_css_sized(
+        "page { display: flex; position: relative; width: 200px; height: 150px; }
+         .scroller { display: flex; flex-direction: column; overflow: scroll;
+                     width: 100px; height: 100px; }
+         .gap { display: flex; flex-shrink: 0; width: 100px; height: 40px; }
+         .anchor { display: flex; flex-shrink: 0; width: 20px; height: 20px;
+                   background-color: #0000ff; anchor-name: --a; }
+         .tail { display: flex; flex-shrink: 0; width: 100px; height: 300px; }
+         .anchored { display: flex; position: absolute; position-anchor: --a;
+                     top: anchor(top); left: 120px; width: 40px; height: 20px;
+                     background-color: #00ff00; border-radius: 5px;
+                     box-shadow: 0 0 4px #000000; filter: blur(1px); }",
+        200.0,
+        150.0,
+    );
+    let root = doc.root;
+    let scroller = doc.el(root, "scroller");
+    doc.el(scroller, "gap");
+    doc.el(scroller, "anchor");
+    doc.el(scroller, "tail");
+    doc.el(root, "anchored");
+    doc.dom.render();
+    let frame = doc
+        .dom
+        .committed_frame()
+        .expect("render leaves a committed frame retained");
+    let green = |pixel: [u8; 4]| pixel[1] > 200 && pixel[0] < 60 && pixel[2] < 60;
+
+    // (offset, where the box's middle is, or `None` when it is hidden)
+    for (generation, (offset, middle)) in [(0.0_f32, Some(50)), (30.0, Some(20)), (70.0, None)]
+        .into_iter()
+        .enumerate()
+    {
+        let offset_of = move |_: &dom::ScrollSlot| Some(Vector2D::new(0.0, offset));
+        let filtered: Vec<Option<dom::vello::peniko::ImageData>> = gpu
+            .prepare_filters(&frame, &[], &offset_of, generation as u64, None)
+            .expect("the filter bakes render")
+            .to_vec();
+        let mut scene = Scene::new();
+        frame.compose_into(&mut scene, &[], &filtered, &offset_of, None);
+        let pixels = gpu
+            .render(&scene, &[], 200, 150, Color::WHITE)
+            .expect("headless render");
+        let column: Vec<u32> = (0..150)
+            .filter(|&y| green(pixel(&pixels, 200, 140, y)))
+            .collect();
+        if let Some(middle) = middle {
+            assert!(
+                column.contains(&middle) && column.iter().all(|y| y.abs_diff(middle) <= 12),
+                "offset {offset}: the box is centred on y {middle}, got {column:?}"
+            );
+        } else {
+            assert!(column.is_empty(), "offset {offset}: hidden, got {column:?}");
+            assert_eq!(
+                pixel(&pixels, 200, 140, 5),
+                WHITE,
+                "offset {offset}: no shadow either"
+            );
+        }
+    }
+}
