@@ -122,4 +122,26 @@ verified! {
     basic_element_x_viewpager_ng_select_index => "basic-element-x-viewpager-ng-select-index",
     // an out-of-flow header with no author width fills the coordinator, and the `anchor-size()` slot offset puts the slot at the header's end
     basic_element_x_foldview_ng_header_width => "basic-element-x-foldview-ng-header-width",
+    // `globalThis.Object` is truthy in the realm that evaluates the component, so the 100x100 target paints green
+    basic_globalThis_property_bts => "basic-globalThis-property-bts",
+    // the same probe through a BTS `useEffect`: the effect ran, the state update crossed back, and the green re-render reached the first screen
+    basic_globalThis_property_mts => "basic-globalThis-property-mts",
+    // a `position: fixed` child of a scroll-view anchors to the viewport, not the scrollport, and escapes the scroller's clip
+    basic_element_scroll_view_fixed => "basic-element-scroll-view-fixed",
+    // the scroll-x/scroll-y/enable-scroll axis matrix: the first scroller clips its 1000x1000 image to the scrollport on both axes and the eight empty ones paint nothing (the card's post-tap half is outside a first screen)
+    basic_element_scroll_view_scrollable => "basic-element-scroll-view-scrollable",
+    // 200 sibling scroll-views mount and lay out in the page's linear column, clipped by the page
+    basic_performance_scroll_view_100 => "basic-performance-scroll-view-100",
+    // a bare 100x100 scroll-view as the whole app
+    basic_scroll_view => "basic-scroll-view",
+    // the imperative `animate()` is tap-driven, so the still is the pre-tap state: a 300x300 green view at the page origin, the same geometry and colour as upstream's own `initial`
+    api_animate => "api-animate",
+    // which animation and transition event names arrive after four taps: untapped, both report lines are empty, which is right, and the `.test-box` boxes lay out where their margins and shrink-wrap put them
+    api_animation_event => "api-animation-event",
+    // a 0.1s animation with `animation-fill-mode: forwards` holds its 100% keyframe: the box is green once the clock has passed the animation's end
+    basic_at_rule_animation => "basic-at-rule-animation",
+    // the same with `from`/`to` instead of `0%`/`100%`, inside a `<page>`
+    basic_at_rule_animation_from_to => "basic-at-rule-animation-from-to",
+    // an `<x-blur-view>` with no `blur-radius` blurs nothing: no presentational hint, no bake, the backdrop sharp through the 1px border
+    basic_element_x_blur_view_default => "basic-element-x-blur-view-default",
 }

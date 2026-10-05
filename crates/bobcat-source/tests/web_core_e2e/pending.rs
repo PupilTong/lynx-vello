@@ -10,8 +10,6 @@ pending! {
     "api-SelectorQuery" => "not read yet",
     "api-SystemInfo" => "not read yet",
     "api-SystemInfo-height-width" => "not read yet",
-    "api-animate" => "not read yet",
-    "api-animation-event" => "not read yet",
     "api-bindlauoutchange" => "not read yet",
     "api-bindlayoutchange-lynx-view-relative" => "not read yet",
     "api-bindtap-lynx-view-relative" => "not read yet",
@@ -19,9 +17,12 @@ pending! {
     "api-createLynxView-browserConfig" => "not read yet",
     "api-devtool-event" => "not read yet",
     "api-dispose" => "not read yet",
-    "api-error" => "not read yet",
-    "api-error-bts" => "not read yet",
-    "api-error-mts" => "not read yet",
+    "api-error" =>
+        "the card throws on both threads, so a blank screen is the only painting there can be; what upstream asserts is the error report's sourcemap offset and stack, which no capture can settle. web-core also hides the host element, where this engine deliberately keeps the view (#330)",
+    "api-error-bts" =>
+        "a BTS-only throw, same shape: upstream asserts `fileName` (`app-service.js`), where this engine names the realm instead",
+    "api-error-mts" =>
+        "an MTS-only throw: blank is consistent and the view surviving to `ScriptFinished` is #330 working; upstream asserts the report's `fileName` (`lepus.js`), which this engine does not carry",
     "api-exposure-area" => "not read yet",
     "api-exposure-basic" => "not read yet",
     "api-exposure-change-exposure-id" => "not read yet",
@@ -44,8 +45,10 @@ pending! {
     "api-get-path-info" => "not read yet",
     "api-getJSModule" => "not read yet",
     "api-getSharedData" => "not read yet",
-    "api-global-disallowed-vars" => "not read yet",
-    "api-globalThis" => "not read yet",
+    "api-global-disallowed-vars" =>
+        "DEFECT: `MTS_CHUNK_PREAMBLE` (crates/bobcat-core/src/esm.rs) declares none of the disallowed globals the BTS preamble shadows, so MTS code naming `navigator`/`postMessage` raises a ReferenceError where web-core's lepus wrapper gives `undefined`. The card paints only a sizeless view, so the blank screen hides it",
+    "api-globalThis" =>
+        "a module-level `globalThis.foo` must be a bare identifier in both realms and inside a `runOnMainThread` worklet; the card paints only a sizeless view, so a capture says nothing about it",
     "api-initdata" => "not read yet",
     "api-inject-style-rules" => "not read yet",
     "api-invoke-fail" => "not read yet",
@@ -58,15 +61,15 @@ pending! {
     "api-report-error" => "not read yet",
     "api-requestAnimationFrame" => "not read yet",
     "api-sendGlobalEvent" => "not read yet",
-    "api-set-release" => "not read yet",
-    "api-set-release-bts" => "not read yet",
+    "api-set-release" =>
+        "`_SetSourceMapRelease` is a deliberate no-op here and `ScriptReported` carries no release, so the report upstream asserts cannot match; the blank screen is consistent but settles nothing",
+    "api-set-release-bts" =>
+        "DEFECT: the BTS `app` behind `lynxCoreInject.tt` has no `setSourceMapRelease`, so the card hits a TypeError before its own error",
     "api-setSharedData" => "not read yet",
     "api-updateData" => "not read yet",
     "api-updateData-callback" => "not read yet",
     "api-updateData-processData" => "not read yet",
     "api-updateGlobalProps" => "not read yet",
-    "basic-at-rule-animation" => "not read yet",
-    "basic-at-rule-animation-from-to" => "not read yet",
     "basic-bindkeydown-out-of-view-noop" => "not read yet",
     "basic-bindmouse" => "not read yet",
     "basic-bindtap" => "not read yet",
@@ -93,16 +96,20 @@ pending! {
     "basic-element-list-horizontal-estimated-main-axis-size-px" => "not read yet",
     "basic-element-list-horizontal-estimated-main-axis-size-px-waterfall" => "not read yet",
     "basic-element-list-remove-action" => "not read yet",
-    "basic-element-list-scroll-to-position" => "not read yet",
+    "basic-element-list-scroll-to-position" =>
+        "the first screen is right (five 100px cells in a 500px list); `scrollToPosition` is a UI method that does not exist and the card drives it from a tap",
     "basic-element-list-waterfall" => "not read yet",
     "basic-element-lynx-view-not-auto" => "not read yet",
-    "basic-element-scroll-view-event-scroll" => "not read yet",
-    "basic-element-scroll-view-event-scrollend" => "not read yet",
-    "basic-element-scroll-view-event-scrolltolower" => "not read yet",
-    "basic-element-scroll-view-event-scrolltoupper" => "not read yet",
-    "basic-element-scroll-view-fixed" => "not read yet",
-    "basic-element-scroll-view-scroll-to-index" => "not read yet",
-    "basic-element-scroll-view-scrollable" => "not read yet",
+    "basic-element-scroll-view-event-scroll" =>
+        "the pre-swipe frame is right; `scroll-view` emits no `scroll` event and a swipe cannot be settled by a capture",
+    "basic-element-scroll-view-event-scrollend" =>
+        "same card with `bindscrollend`: the event does not exist and the gesture cannot be settled",
+    "basic-element-scroll-view-event-scrolltolower" =>
+        "the bottom-threshold event: the threshold observer behind `scrolltolower` is not built, and the frame cannot swipe",
+    "basic-element-scroll-view-event-scrolltoupper" =>
+        "the upper-threshold event, same reason",
+    "basic-element-scroll-view-scroll-to-index" =>
+        "`initial-scroll-to-index={1}` must land the scrollport on the second child at boot; the attribute does not exist here, so we start at the first. Statically wrong, and a missing attribute rather than an interaction",
     "basic-element-svg-background-image" => "not read yet",
     "basic-element-svg-bindload" => "not read yet",
     "basic-element-svg-hex-color" => "not read yet",
@@ -127,21 +134,24 @@ pending! {
         "what a selection drag highlights is an interaction no first screen carries; selection is out of scope",
     "basic-element-view-border-style-default" => "not read yet",
     "basic-element-x-audio-tt-play" => "not read yet",
-    "basic-element-x-blur-view-blur-radius" => "not read yet",
-    "basic-element-x-blur-view-default" => "not read yet",
+    "basic-element-x-blur-view-blur-radius" =>
+        "DEFECT: the backdrop bake clears to transparent black and never carries the canvas base colour, and the filtered texture is drawn over the still-painted unfiltered backdrop, so wherever the baked alpha is below one the sharp backdrop shows through — a visible logo silhouette inside the blurred box. The blur itself is spec-exact (sigma 25 matches Chromium to 1-2 levels over opaque areas). Not one of the recorded backdrop-filter narrowings",
     "basic-element-x-foldview-ng-method-setFoldExpanded" =>
         "the unfolded first screen matches run for run; `setFoldExpanded` is deliberately not implemented and the card is a tap + method",
     "basic-element-x-foldview-ng-method-setFoldExpanded-overflow" =>
         "same unfolded screen; the method is not implemented and a capped fold offset is invisible while unfolded",
-    "basic-element-x-input-bindblur" => "not read yet",
+    "basic-element-x-input-bindblur" =>
+        "`<x-input>` is implemented nowhere, so the box is geometrically right but its `value` never paints; the blur event has nothing to fire from",
     "basic-element-x-input-bindconfirm" => "not read yet",
     "basic-element-x-input-bindfocus" => "not read yet",
     "basic-element-x-input-bindinput" => "not read yet",
     "basic-element-x-input-bindselection" => "not read yet",
-    "basic-element-x-input-blur" => "not read yet",
+    "basic-element-x-input-blur" =>
+        "the same missing `<x-input>`: the red square and the input's box are placed right, the value is absent, and there is no focus machinery for the tap to drive",
     "basic-element-x-input-focus" => "not read yet",
     "basic-element-x-input-getValue" => "not read yet",
-    "basic-element-x-input-input-filter" => "not read yet",
+    "basic-element-x-input-input-filter" =>
+        "the same missing `<x-input>`: a geometrically right, empty box where `input-filter` would strip punctuation as the user types",
     "basic-element-x-input-ng-bindinput" => "not read yet",
     "basic-element-x-input-placeholder" => "not read yet",
     "basic-element-x-input-placeholder-pseudo-element" => "not read yet",
@@ -155,36 +165,60 @@ pending! {
     "basic-element-x-overlay-ng-playground-test" =>
         "there is no `x-overlay-ng`: a hidden modal leaks into the bottom half of the page",
     "basic-element-x-refresh-view-demo" => "not read yet",
-    "basic-element-x-swiper-autoplay" => "not read yet",
-    "basic-element-x-swiper-bindchange" => "not read yet",
-    "basic-element-x-swiper-bindscrollend" => "not read yet",
-    "basic-element-x-swiper-bindscrollstart" => "not read yet",
-    "basic-element-x-swiper-circular-carousel" => "not read yet",
-    "basic-element-x-swiper-circular-carry" => "not read yet",
-    "basic-element-x-swiper-circular-coverflow" => "not read yet",
-    "basic-element-x-swiper-circular-flat-coverflow" => "not read yet",
-    "basic-element-x-swiper-circular-normal" => "not read yet",
-    "basic-element-x-swiper-current" => "not read yet",
-    "basic-element-x-swiper-duration" => "not read yet",
-    "basic-element-x-swiper-indicator-color" => "not read yet",
-    "basic-element-x-swiper-indicator-dots" => "not read yet",
-    "basic-element-x-swiper-interval" => "not read yet",
-    "basic-element-x-swiper-method-scroll-to" => "not read yet",
-    "basic-element-x-swiper-mode-carousel" => "not read yet",
-    "basic-element-x-swiper-mode-carry" => "not read yet",
-    "basic-element-x-swiper-mode-coverflow" => "not read yet",
-    "basic-element-x-swiper-mode-flat-coverflow" => "not read yet",
-    "basic-element-x-swiper-mode-normal" => "not read yet",
-    "basic-element-x-swiper-page-margin" => "not read yet",
-    "basic-element-x-swiper-swiper-dynamic" => "not read yet",
-    "basic-element-x-swiper-vertical" => "not read yet",
+    "basic-element-x-swiper-autoplay" =>
+        "autoplay paging on an interval; `x-swiper` is not a component here, so its items get no border box, no clip and no indicator, and the first screen stacks them instead of showing one page",
+    "basic-element-x-swiper-bindchange" =>
+        "the `change` payload across manual, autoplay and programmatic paging; `x-swiper` is not a component here, so its items get no border box, no clip and no indicator, and the first screen stacks them instead of showing one page",
+    "basic-element-x-swiper-bindscrollend" =>
+        "the `scrollend` payload; `x-swiper` is not a component here, so its items get no border box, no clip and no indicator, and the first screen stacks them instead of showing one page",
+    "basic-element-x-swiper-bindscrollstart" =>
+        "the `scrollstart` payload; `x-swiper` is not a component here, so its items get no border box, no clip and no indicator, and the first screen stacks them instead of showing one page",
+    "basic-element-x-swiper-circular-carousel" =>
+        "`circular` wrap in carousel mode; `x-swiper` is not a component here, so its items get no border box, no clip and no indicator, and the first screen stacks them instead of showing one page",
+    "basic-element-x-swiper-circular-carry" =>
+        "`circular` wrap in carry mode; `x-swiper` is not a component here, so its items get no border box, no clip and no indicator, and the first screen stacks them instead of showing one page",
+    "basic-element-x-swiper-circular-coverflow" =>
+        "`circular` wrap in coverflow mode; `x-swiper` is not a component here, so its items get no border box, no clip and no indicator, and the first screen stacks them instead of showing one page",
+    "basic-element-x-swiper-circular-flat-coverflow" =>
+        "`circular` wrap in flat-coverflow mode; `x-swiper` is not a component here, so its items get no border box, no clip and no indicator, and the first screen stacks them instead of showing one page",
+    "basic-element-x-swiper-circular-normal" =>
+        "`circular` wrap in the default mode; `x-swiper` is not a component here, so its items get no border box, no clip and no indicator, and the first screen stacks them instead of showing one page",
+    "basic-element-x-swiper-current" =>
+        "`current={1}` must start on the second page with no interaction at all, and we stack all four pages: `x-swiper` is not a component here. Statically wrong, not an interaction gap",
+    "basic-element-x-swiper-duration" =>
+        "the paging animation duration across taps; `x-swiper` is not a component here, so its items get no border box, no clip and no indicator, and the first screen stacks them instead of showing one page",
+    "basic-element-x-swiper-indicator-color" =>
+        "`indicator-color`/`indicator-active-color` must tint the dot strip, and no indicator is drawn at all — shadow-part machinery no UA sheet can carry. Statically wrong",
+    "basic-element-x-swiper-indicator-dots" =>
+        "dots on against dots off: both swipers render identically here because neither draws dots. Statically wrong",
+    "basic-element-x-swiper-interval" =>
+        "autoplay intervals of 5000, 1000 and 0; `x-swiper` is not a component here, so its items get no border box, no clip and no indicator, and the first screen stacks them instead of showing one page",
+    "basic-element-x-swiper-method-scroll-to" =>
+        "`invoke({method: 'scrollTo'})` from a tap; `x-swiper` is not a component here, so its items get no border box, no clip and no indicator, and the first screen stacks them instead of showing one page",
+    "basic-element-x-swiper-mode-carousel" =>
+        "carousel snap offsets, side pages peeking; `x-swiper` is not a component here, so its items get no border box, no clip and no indicator, and the first screen stacks them instead of showing one page",
+    "basic-element-x-swiper-mode-carry" =>
+        "carry mode with the dots off; `x-swiper` is not a component here, so its items get no border box, no clip and no indicator, and the first screen stacks them instead of showing one page",
+    "basic-element-x-swiper-mode-coverflow" =>
+        "coverflow's skewed peek; `x-swiper` is not a component here, so its items get no border box, no clip and no indicator, and the first screen stacks them instead of showing one page",
+    "basic-element-x-swiper-mode-flat-coverflow" =>
+        "the flat variant of coverflow; `x-swiper` is not a component here, so its items get no border box, no clip and no indicator, and the first screen stacks them instead of showing one page",
+    "basic-element-x-swiper-mode-normal" =>
+        "default paging: one page plus a dot strip; `x-swiper` is not a component here, so its items get no border box, no clip and no indicator, and the first screen stacks them instead of showing one page",
+    "basic-element-x-swiper-page-margin" =>
+        "`page-margin` gaps between pages in all five modes; `x-swiper` is not a component here, so its items get no border box, no clip and no indicator, and the first screen stacks them instead of showing one page",
+    "basic-element-x-swiper-swiper-dynamic" =>
+        "remounting a swiper on tap and re-reading `indicator-color`; `x-swiper` is not a component here, so its items get no border box, no clip and no indicator, and the first screen stacks them instead of showing one page",
+    "basic-element-x-swiper-vertical" =>
+        "vertical paging across five modes; `x-swiper` is not a component here, so its items get no border box, no clip and no indicator, and the first screen stacks them instead of showing one page",
     "basic-element-x-textarea-bindinput" => "not read yet",
     "basic-element-x-textarea-bindselection" => "not read yet",
     "basic-element-x-textarea-color" => "not read yet",
     "basic-element-x-textarea-disabled" => "not read yet",
     "basic-element-x-textarea-focus" => "not read yet",
     "basic-element-x-textarea-getValue" => "not read yet",
-    "basic-element-x-textarea-input-filter" => "not read yet",
+    "basic-element-x-textarea-input-filter" =>
+        "`<x-textarea>` is equally unimplemented: an empty 300x42 box where the initial value belongs",
     "basic-element-x-textarea-maxlength" => "not read yet",
     "basic-element-x-textarea-maxlines" => "not read yet",
     "basic-element-x-textarea-min-height-max-height" => "not read yet",
@@ -219,8 +253,6 @@ pending! {
     "basic-global-bindkeydown-shift" => "not read yet",
     "basic-global-bindkeyup" => "not read yet",
     "basic-globalProps" => "not read yet",
-    "basic-globalThis-property-bts" => "not read yet",
-    "basic-globalThis-property-mts" => "not read yet",
     "basic-image" => "not read yet",
     "basic-lazy-component" => "not read yet",
     "basic-lazy-component-css" => "not read yet",
@@ -276,7 +308,6 @@ pending! {
     "basic-performance-image-100" => "not read yet",
     "basic-performance-large-css" => "not read yet",
     "basic-performance-nest-level-100" => "not read yet",
-    "basic-performance-scroll-view-100" => "not read yet",
     "basic-performance-small-css" => "not read yet",
     "basic-performance-text-200" => "not read yet",
     "basic-pink-rect" => "not read yet",
@@ -286,7 +317,6 @@ pending! {
     "basic-replaceelement" => "not read yet",
     "basic-rpx-unit" => "not read yet",
     "basic-rpx-unit-js-value" => "not read yet",
-    "basic-scroll-view" => "not read yet",
     "basic-setsate-with-cb" => "not read yet",
     "basic-setstate-in-constructor" => "not read yet",
     "basic-style-combinator" => "not read yet",
