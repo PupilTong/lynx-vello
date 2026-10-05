@@ -1,100 +1,111 @@
-// Cards nobody has read against their own source yet, or whose rendering is
-// wrong in a way the reason names. No golden belongs to any of them; see
-// `web_core_e2e.rs`.
+// Cards that were read against their own source and upstream's test, and whose
+// rendering is wrong, or cannot be judged from a frame, in the way the reason
+// names. No golden belongs to any of them; see `web_core_e2e.rs`.
+//
+// A reason starting `awaiting a ruling` is a card where native Lynx and
+// web-core disagree and nobody has said which this engine follows.
 //
 // Moving one into `verified.rs` is the whole job this suite exists for: read
 // what the case tests, decide whether this engine answers it correctly, and
 // only then accept the picture.
 
 pending! {
-    "api-SelectorQuery" => "not read yet",
-    "api-SystemInfo" => "not read yet",
-    "api-SystemInfo-height-width" => "not read yet",
-    "api-bindlauoutchange" => "not read yet",
-    "api-bindlayoutchange-lynx-view-relative" => "not read yet",
-    "api-bindtap-lynx-view-relative" => "not read yet",
-    "api-boundingclientrect-lynx-view-relative" => "not read yet",
-    "api-createLynxView-browserConfig" => "not read yet",
-    "api-devtool-event" => "not read yet",
+    "api-SelectorQuery" =>
+        "thirty `select(…).invoke('boundingClientRect')` probes, each a green or red row; rows `s24_dataset` (`[data-test]`) and `s25_dataset_value` (`[data-test=test_value]`) are red where the card's table, native and web-core have green: typed datasets are not reflected to DOM `data-*` attributes, which `__BobcatQueryNodes` (`packages/bobcat-element/src/element-papi.ts`) matches over (`docs/node-query-runtime.md`, Remaining boundaries)",
+    "api-SystemInfo" =>
+        "awaiting a ruling: the box turns green only if `SystemInfo.platform === 'web'`. web-core hard-codes `'web'`, native reports its build platform, and this engine reports `\"headless\"` (`packages/bobcat-element/src/main-thread-runtime.ts`, `background-thread-runtime.ts`); `docs/tracking/js-runtime.md` leaves the string open. `pixelRatio` is already a number, so the string alone decides the card",
+    "api-bindlauoutchange" =>
+        "`bindLayoutChange` must deliver the box's rect and turn `#target` green; no `layoutchange` event exists here (`docs/tracking/web-text-test-replication.md` section E), so it stays pink",
+    "api-bindlayoutchange-lynx-view-relative" =>
+        "the same `layoutchange` card with the host element offset upstream; no `layoutchange` event exists here (`docs/tracking/web-text-test-replication.md` section E), so `#target` stays pink",
+    "api-devtool-event" =>
+        "the card shows `ready` once it has a listener on `lynx.getDevtool()`, then the host's `sendDevtoolEvent` payload; it shows `waiting` because `lynx.getDevtool` does not exist (the background thread throws `TypeError: not a function`), and a view has no devtool-event call for a host to make",
     "api-dispose" =>
-        "the first screen (a 100x100 pink box) is right, but the assertion is on what happens after the host releases the view: the ReactLynx unmount cleanup logs `fin` and exactly one worker terminates. The suite never drops the `LynxView`, and the evidence is a console line plus a worker count that no capture carries",
+        "the first screen (a 100x100 pink box) is right, but the assertion is on what happens after the host releases the view: the ReactLynx unmount cleanup logs `fin` and exactly one worker terminates. Dropping the `LynxView` ends the only channel a console line could arrive on, so neither is observable from the host",
     "api-error" =>
         "the card throws on both threads, so a blank screen is the only painting there can be; what upstream asserts is the error report's sourcemap offset and stack, which no capture can settle. web-core also hides the host element, where this engine deliberately keeps the view (#330)",
     "api-error-bts" =>
         "a BTS-only throw, same shape: upstream asserts `fileName` (`app-service.js`), where this engine names the realm instead",
     "api-error-mts" =>
         "an MTS-only throw: blank is consistent and the view surviving to `ScriptFinished` is #330 working; upstream asserts the report's `fileName` (`lepus.js`), which this engine does not carry",
-    "api-exposure-area" => "not read yet",
-    "api-exposure-basic" => "not read yet",
-    "api-exposure-change-exposure-id" => "not read yet",
-    "api-exposure-custom-event-handler" => "not read yet",
-    "api-exposure-dynamic-screen-margin" => "not read yet",
-    "api-exposure-dynamic-ui-margin" => "not read yet",
-    "api-exposure-no-fake-disappear" => "not read yet",
-    "api-exposure-stop-events-has-complex-dataset" => "not read yet",
-    "api-exposure-stop-events-has-dataset" => "not read yet",
-    "api-exposure-stop-exposure" => "not read yet",
-    "api-frame-auto-height" => "not read yet",
-    "api-frame-auto-width" => "not read yet",
-    "api-frame-bindload" => "not read yet",
-    "api-frame-data" => "not read yet",
-    "api-frame-data-update" => "not read yet",
-    "api-frame-element-map" => "not read yet",
-    "api-frame-global-props" => "not read yet",
-    "api-frame-inner" => "not read yet",
-    "api-frame-src" => "not read yet",
-    "api-get-path-info" => "not read yet",
-    "api-getJSModule" => "not read yet",
-    "api-getSharedData" => "not read yet",
+    "api-exposure-area" =>
+        "upstream scrolls `#x` by script and expects the node with `exposure-area='50%'` to report exposure only once half of it is in view; nothing changes colour because this engine produces no exposure events (`uiappear`, `uidisappear`, `exposure`, `disexposure` occur nowhere in `crates/` or `packages/bobcat-element/src`)",
+    "api-exposure-basic" =>
+        "upstream scrolls two scroll-views by script and screenshots the background the `exposure`/`disexposure` global events set; the background never changes because this engine produces no exposure events (`uiappear`, `uidisappear`, `exposure`, `disexposure` occur nowhere in `crates/` or `packages/bobcat-element/src`)",
+    "api-exposure-change-exposure-id" =>
+        "tapping a numbered box changes the `exposure-id` it carries, and the lines must then read the current, exposed and dis-exposed index; `target index:` and `prev index:` stay empty because this engine produces no exposure events (`uiappear`, `uidisappear`, `exposure`, `disexposure` occur nowhere in `crates/` or `packages/bobcat-element/src`)",
+    "api-exposure-custom-event-handler" =>
+        "each of ten rows must turn green from its `binduiappear`; every row stays orange because this engine produces no exposure events (`uiappear`, `uidisappear`, `exposure`, `disexposure` occur nowhere in `crates/` or `packages/bobcat-element/src`)",
+    "api-exposure-dynamic-screen-margin" =>
+        "`exposure-screen-margin-bottom` must move the edge a node is tested against as `#y` is scrolled; nothing turns orange because this engine produces no exposure events (`uiappear`, `uidisappear`, `exposure`, `disexposure` occur nowhere in `crates/` or `packages/bobcat-element/src`)",
+    "api-exposure-dynamic-ui-margin" =>
+        "`exposure-ui-margin-top` in percent must grow or shrink the node's own box as `#y` is scrolled; nothing turns orange because this engine produces no exposure events (`uiappear`, `uidisappear`, `exposure`, `disexposure` occur nowhere in `crates/` or `packages/bobcat-element/src`)",
+    "api-exposure-no-fake-disappear" =>
+        "`#control` must turn green from `binduiappear` while `#target` below the fold receives neither event; `#control` stays red because this engine produces no exposure events (`uiappear`, `uidisappear`, `exposure`, `disexposure` occur nowhere in `crates/` or `packages/bobcat-element/src`)",
+    "api-exposure-stop-events-has-complex-dataset" =>
+        "`lynx.stopExposure()` must send a `disexposure` carrying the node's dataset, logged as `pass:dataset2`; `lynx.stopExposure` is not a function here (the background thread throws) and this engine produces no exposure events (`uiappear`, `uidisappear`, `exposure`, `disexposure` occur nowhere in `crates/` or `packages/bobcat-element/src`)",
+    "api-exposure-stop-events-has-dataset" =>
+        "`lynx.stopExposure()` must send a `disexposure` per exposed node with its dataset, logged as `pass:dataset1` and `pass:dataset2`; `lynx.stopExposure` is not a function here (the background thread throws) and this engine produces no exposure events (`uiappear`, `uidisappear`, `exposure`, `disexposure` occur nowhere in `crates/` or `packages/bobcat-element/src`)",
+    "api-exposure-stop-exposure" =>
+        "the orange area must read `disexposure`, `none`, `disexposure` after the three `lynx.stopExposure(…)` buttons; it reads `none` throughout: `lynx.stopExposure` is not a function here and this engine produces no exposure events (`uiappear`, `uidisappear`, `exposure`, `disexposure` occur nowhere in `crates/` or `packages/bobcat-element/src`)",
+    "api-frame-auto-height" =>
+        "a `<frame auto-height>` must take its height from the nested card. `<frame>` does not exist here: the compiled card calls `__CreateFrame`, which `packages/bobcat-element/src/element-papi.ts` lists as not implemented, so the main-thread render throws and the screen is blank",
+    "api-frame-auto-width" =>
+        "upstream asserts only attributes of web-core's host element for a `<frame auto-width>`, which no capture carries. `<frame>` does not exist here: the compiled card calls `__CreateFrame`, which `packages/bobcat-element/src/element-papi.ts` lists as not implemented, so the main-thread render throws and the screen is blank",
+    "api-frame-bindload" =>
+        "`bindload` on a `<frame>` must deliver `statusCode: 0`, `success` and the bundle URL, printed in three texts. `<frame>` does not exist here: the compiled card calls `__CreateFrame`, which `packages/bobcat-element/src/element-papi.ts` lists as not implemented, so the main-thread render throws and the screen is blank",
+    "api-frame-data" =>
+        "a `<frame data=…>` must hand its `data` to the nested card, which prints `data:from-data`. `<frame>` does not exist here: the compiled card calls `__CreateFrame`, which `packages/bobcat-element/src/element-papi.ts` lists as not implemented, so the main-thread render throws and the screen is blank",
+    "api-frame-data-update" =>
+        "a tap changes a `<frame>`'s `data` and the nested card must go from `data:before` to `data:after`. `<frame>` does not exist here: the compiled card calls `__CreateFrame`, which `packages/bobcat-element/src/element-papi.ts` lists as not implemented, so the main-thread render throws and the screen is blank",
+    "api-frame-element-map" =>
+        "upstream asserts that web-core realizes `<frame>` as a `LYNX-VIEW` DOM element, a fact about web-core's tag map that no capture carries. `<frame>` does not exist here: the compiled card calls `__CreateFrame`, which `packages/bobcat-element/src/element-papi.ts` lists as not implemented, so the main-thread render throws and the screen is blank",
+    "api-frame-global-props" =>
+        "a `<frame global-props=…>` must reach the nested card's `lynx.__globalProps`, which prints `global:from-global-props`. `<frame>` does not exist here: the compiled card calls `__CreateFrame`, which `packages/bobcat-element/src/element-papi.ts` lists as not implemented, so the main-thread render throws and the screen is blank",
+    "api-frame-src" =>
+        "a 300x120 `<frame src>` must load and render the nested card, whose first line reads `frame:ready`. `<frame>` does not exist here: the compiled card calls `__CreateFrame`, which `packages/bobcat-element/src/element-papi.ts` lists as not implemented, so the main-thread render throws and the screen is blank",
+    "api-get-path-info" =>
+        "awaiting a ruling: the card reads `res.path` in the `path()` callback and expects `id: undefined` for an element with none. web-core answers `{path: […]}` with `id: undefined`; native answers the node array itself with `id: \"\"`, and this engine follows native (`__BobcatQueryNodes`, `nodeFields` in `packages/bobcat-element/src/element-papi.ts`), so `res.path` is undefined and `#result` stays pink",
+    "api-getSharedData" =>
+        "no upstream test has this name: it is the second view of `api-shared-context`, where a tap must paint the colour the first view stored with `lynx.setSharedData`. `lynx.getSharedData` does not exist here (`docs/tracking/js-runtime.md`), and the suite boots no second view in the group",
     "api-global-disallowed-vars" =>
         "DEFECT: `MTS_CHUNK_PREAMBLE` (crates/bobcat-core/src/esm.rs) declares none of the disallowed globals the BTS preamble shadows, so MTS code naming `navigator`/`postMessage` raises a ReferenceError where web-core's lepus wrapper gives `undefined`. The card paints only a sizeless view, so the blank screen hides it",
     "api-globalThis" =>
         "a module-level `globalThis.foo` must be a bare identifier in both realms and inside a `runOnMainThread` worklet; the card paints only a sizeless view, so a capture says nothing about it",
     "api-invoke-fail" =>
-        "the card taps to invoke an unknown method (`seekTo`) and asserts the `fail` callback reports `code === 3`; the suite drives no input, and the target element is an `<x-input>`, where editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green",
+        "the subject works: a tap invokes the unknown method `seekTo` and the `fail` callback's `code === 3` turns `#result` green. The frame still cannot be pinned, because the element above it is an `<x-input>`, which is not an element here (editable text is out of scope: user, 2026-09-14) and so takes no border-box default: it is drawn 42px high where its styles give 40px, and both boxes sit 2px low",
     "api-invoke-success" =>
         "`SelectorQuery.invoke`'s success callback is the subject, but the method it calls is `<x-input>`'s `focus`, and editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green; the invoke contract itself is covered by `api-invoke-fail`'s unknown-method path once a tap can be driven",
-    "api-lynx-performance" => "not read yet",
-    "api-nativemodules-bridge-call" => "not read yet",
-    "api-nativemodules-call" => "not read yet",
-    "api-nativemodules-call-delay" => "not read yet",
-    "api-queueMicrotask" => "not read yet",
-    "api-report-error" => "not read yet",
-    "api-requestAnimationFrame" => "not read yet",
-    "api-sendGlobalEvent" => "not read yet",
+    "api-lynx-performance" =>
+        "the box turns green once `lynx.performance.addTimingListener` has seen `__lynx_timing_actual_fmp` and a flagged update; `lynx.performance` is undefined on the background thread, so it stays pink. Upstream also reads the keys of the host's `timing` event, which the view does not report",
+    "api-report-error" =>
+        "a tap calls `lynx.reportError('foo')`, and upstream asserts the host's `error` event: `detail.error.message === 'Error: foo'`, a stack, `sourceMap.offset`, and that its shell then hides the view. The report arrives (`ScriptReported`, message `foo`) and the red box stays; the fields upstream reads are not on it, and hiding the view is what #330 deliberately does not do — both await a ruling",
     "api-set-release" =>
         "`_SetSourceMapRelease` is a deliberate no-op here and `ScriptReported` carries no release, so the report upstream asserts cannot match; the blank screen is consistent but settles nothing",
     "api-set-release-bts" =>
         "DEFECT: the BTS `app` behind `lynxCoreInject.tt` has no `setSourceMapRelease`, so the card hits a TypeError before its own error",
-    "api-setSharedData" => "not read yet",
-    "api-updateData" =>
-        "the first screen is upstream's pre-call pink; the assertion is the green after `lynxView.updateData({mockData:'updatedData'})`, and the suite captures one screen and never calls `LynxView::update_data`",
+    "api-setSharedData" =>
+        "the effect stores `green` with `lynx.setSharedData` and paints what `lynx.getSharedData` returns; neither exists here (`docs/tracking/js-runtime.md`), the effect throws on the background thread, and the box stays orange",
     "api-updateData-callback" =>
         "two things stand in the way: the suite never calls `update_data`, and this engine's host API has no completion callback at all — `LynxView::update_data(data, processor_name)` reports no completion, where web-core takes a third callback argument. Upstream asserts only the console line it produces",
-    "api-updateData-processData" => "not read yet",
-    "api-updateGlobalProps" => "not read yet",
-    "basic-bindkeydown-out-of-view-noop" => "not read yet",
-    "basic-bindmouse" => "not read yet",
-    "basic-bindtap" => "not read yet",
-    "basic-bindtap-detail" => "not read yet",
-    "basic-bindtap-simultaneous" => "not read yet",
-    "basic-bindwheel-view" => "not read yet",
-    "basic-element-image-auto-size" => "not read yet",
-    "basic-element-image-placeholder" => "not read yet",
-    "basic-element-image-support-tap-event" => "not read yet",
+    "basic-bindkeydown-out-of-view-noop" =>
+        "a non-global `bindKeydown` must not fire for a key pressed outside the view, so the box must stay pink. It does, but for no reason the case is about: the engine has no key input: `InputKind` (`crates/dom/src/input/mod.rs`) is `Pointer | Wheel`, so nothing can deliver `keydown` or `keyup`",
+    "basic-bindmouse" =>
+        "`bindmousedown`, `bindmouseup` and `bindmousemove` must each fire with `button`, `buttons`, `x`, `y`, `pageX`, `clientX`…; the engine synthesizes pointer and touch events plus `tap` and `longpress` (`crates/bobcat-core/src/paint/gesture.rs`) and no `mouse*` event",
     "basic-element-input-bindinput" =>
         "JSX `<input>` is the same element as `<x-input>`, and editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card types into the box and asserts `bindinput`'s detail carries `value`, `textLength`, `selectionStart` and `selectionEnd` consistently",
-    "basic-element-list-basic" => "not read yet",
-    "basic-element-list-basic-size" => "not read yet",
-    "basic-element-list-bindwheel" => "not read yet",
-    "basic-element-list-estimated-main-axis-size-px" => "not read yet",
-    "basic-element-list-estimated-main-axis-size-px-waterfall" => "not read yet",
-    "basic-element-list-horizontal-estimated-main-axis-size-px" => "not read yet",
-    "basic-element-list-horizontal-estimated-main-axis-size-px-waterfall" => "not read yet",
-    "basic-element-list-remove-action" => "not read yet",
+    "basic-element-list-basic" =>
+        "the first screen is right (five 100px cells), and a 500px wheel scroll brings cells 6 to 10; what upstream asserts after its scripted scroll is that `bindscroll` and `bindscrollend` both ran, and neither handler is ever called on a `<list>` here (the card logs nothing)",
+    "basic-element-list-basic-size" =>
+        "same card with cells sized by their content (110px each, right on the first screen); the `scroll` and `scrollend` events upstream asserts after scrolling are never delivered on a `<list>` here",
+    "basic-element-list-estimated-main-axis-size-px-waterfall" =>
+        "The card exists to show that a waterfall list whose cells carry only `estimated-main-axis-size-px` still reports `scrolltolower` after `autoScroll` is invoked from `useEffect` (upstream's removed test waited for that console line). This engine has neither: list threshold events are not implemented (`crates/bobcat-core/src/main/tree/list.rs` head comment) and `autoScroll` is not a UI method the host has (`invokeUIMethod`, `packages/bobcat-element/src/element-papi.ts`, answers code 3), so nothing is logged — and the evidence is a console line, which no capture carries.",
+    "basic-element-list-horizontal-estimated-main-axis-size-px" =>
+        "The card exists to show that a horizontal list whose cells carry only `estimated-main-axis-size-px` still reports `scrolltolower` after `autoScroll` is invoked from `useEffect` (upstream's removed test waited for that console line). This engine has neither: list threshold events are not implemented (`crates/bobcat-core/src/main/tree/list.rs` head comment) and `autoScroll` is not a UI method the host has (`invokeUIMethod`, `packages/bobcat-element/src/element-papi.ts`, answers code 3), so nothing is logged — and the evidence is a console line, which no capture carries.",
+    "basic-element-list-horizontal-estimated-main-axis-size-px-waterfall" =>
+        "The card exists to show that a horizontal waterfall list whose cells carry only `estimated-main-axis-size-px` still reports `scrolltolower` after `autoScroll` is invoked from `useEffect` (upstream's removed test waited for that console line; the same commit fixed the lower threshold of a horizontal waterfall). This engine has neither: list threshold events are not implemented (`crates/bobcat-core/src/main/tree/list.rs` head comment) and `autoScroll` is not a UI method the host has (`invokeUIMethod`, `packages/bobcat-element/src/element-papi.ts`, answers code 3), so nothing is logged — and the evidence is a console line, which no capture carries.",
     "basic-element-list-scroll-to-position" =>
         "the first screen is right (five 100px cells in a 500px list); `scrollToPosition` is a UI method that does not exist and the card drives it from a tap",
-    "basic-element-list-waterfall" => "not read yet",
     "basic-element-scroll-view-event-scroll" =>
         "the pre-swipe frame is right; `scroll-view` emits no `scroll` event and a swipe cannot be settled by a capture",
     "basic-element-scroll-view-event-scrollend" =>
@@ -105,12 +116,18 @@ pending! {
         "the upper-threshold event, same reason",
     "basic-element-scroll-view-scroll-to-index" =>
         "`initial-scroll-to-index={1}` must land the scrollport on the second child at boot; the attribute does not exist here, so we start at the first. Statically wrong, and a missing attribute rather than an interaction",
-    "basic-element-svg-background-image" => "not read yet",
-    "basic-element-svg-bindload" => "not read yet",
-    "basic-element-svg-hex-color" => "not read yet",
-    "basic-element-svg-utf8" => "not read yet",
-    "basic-element-svg-with-css" => "not read yet",
-    "basic-element-svg-with-position" => "not read yet",
+    "basic-element-svg-background-image" =>
+        "upstream's screenshot is a drawing from the `content` string over the element's own tiled `background-image`; the tiles paint and the drawing does not: `svg` is not an element here (`crates/bobcat-core/src/main/tree/lib.rs` defines `image` and the blur-view tags only, nothing reads a `content` attribute, and `crates/bobcat-resources/src/image_header.rs` answers no header for SVG), so nothing is drawn",
+    "basic-element-svg-bindload" =>
+        "`#result` must turn green from the `<svg>`'s `bindload`, but it has no size for a capture to show, and the event cannot fire: `svg` is not an element here (`crates/bobcat-core/src/main/tree/lib.rs` defines `image` and the blur-view tags only, nothing reads a `content` attribute, and `crates/bobcat-resources/src/image_header.rs` answers no header for SVG), so nothing is drawn",
+    "basic-element-svg-hex-color" =>
+        "upstream's screenshot is a plus sign from an `<svg content=…>` whose colour is written with a `#`; the frame is blank: `svg` is not an element here (`crates/bobcat-core/src/main/tree/lib.rs` defines `image` and the blur-view tags only, nothing reads a `content` attribute, and `crates/bobcat-resources/src/image_header.rs` answers no header for SVG), so nothing is drawn",
+    "basic-element-svg-utf8" =>
+        "upstream's screenshot is a drawing from an `<svg content=…>` string with non-ASCII characters in it; the frame is blank: `svg` is not an element here (`crates/bobcat-core/src/main/tree/lib.rs` defines `image` and the blur-view tags only, nothing reads a `content` attribute, and `crates/bobcat-resources/src/image_header.rs` answers no header for SVG), so nothing is drawn",
+    "basic-element-svg-with-css" =>
+        "upstream's screenshot is a drawing in an `<svg>` sized by a class; the frame is blank: `svg` is not an element here (`crates/bobcat-core/src/main/tree/lib.rs` defines `image` and the blur-view tags only, nothing reads a `content` attribute, and `crates/bobcat-resources/src/image_header.rs` answers no header for SVG), so nothing is drawn",
+    "basic-element-svg-with-position" =>
+        "upstream's screenshot is a red square in an absolutely positioned, padded, translucent `<svg>`; the frame is blank: `svg` is not an element here (`crates/bobcat-core/src/main/tree/lib.rs` defines `image` and the blur-view tags only, nothing reads a `content` attribute, and `crates/bobcat-resources/src/image_header.rs` answers no header for SVG), so nothing is drawn",
     "basic-element-text-bindlayout" =>
         "the layout event is produced but never dispatched, so the result row stays empty",
     "basic-element-text-bindselectionchange" =>
@@ -127,7 +144,8 @@ pending! {
         "same un-retargeted push; the pre-tap frame is right",
     "basic-element-text-text-selection" =>
         "what a selection drag highlights is an interaction no first screen carries; selection is out of scope",
-    "basic-element-x-audio-tt-play" => "not read yet",
+    "basic-element-x-audio-tt-play" =>
+        "upstream's own test body is empty (its skip is commented out with a FIXME), so nothing is asserted. There is no `x-audio-tt` component and no audio output here, and the card's tap handler reads an undeclared `e`, so it would throw before any `invoke`",
     "basic-element-x-blur-view-blur-radius" =>
         "DEFECT: the backdrop bake clears to transparent black and never carries the canvas base colour, and the filtered texture is drawn over the still-painted unfiltered backdrop, so wherever the baked alpha is below one the sharp backdrop shows through — a visible logo silhouette inside the blurred box. The blur itself is spec-exact (sigma 25 matches Chromium to 1-2 levels over opaque areas). Not one of the recorded backdrop-filter narrowings",
     "basic-element-x-foldview-ng-method-setFoldExpanded" =>
@@ -170,7 +188,8 @@ pending! {
         "there is no `x-overlay-ng`: a hidden overlay's scrim paints over the whole page",
     "basic-element-x-overlay-ng-playground-test" =>
         "there is no `x-overlay-ng`: a hidden modal leaks into the bottom half of the page",
-    "basic-element-x-refresh-view-demo" => "not read yet",
+    "basic-element-x-refresh-view-demo" =>
+        "pull-to-refresh and load-more on an `<x-refresh-view>`, screenshotted through two drags; there is no `x-refresh-view` component here (nothing under `crates/bobcat-core/src/main/tree/`), so the header, the pull and `finishRefresh` do not exist",
     "basic-element-x-swiper-autoplay" =>
         "autoplay paging on an interval; `x-swiper` is not a component here, so its items get no border box, no clip and no indicator, and the first screen stacks them instead of showing one page",
     "basic-element-x-swiper-bindchange" =>
@@ -253,77 +272,76 @@ pending! {
         "the first screen is right; `offsetchange` is deliberately not implemented and the card is swipe-driven",
     "basic-element-x-viewpager-ng-exposure" =>
         "geometry is right, but exposure tracking does not exist, so the five texts never repaint as pages come into view",
-    "basic-element-x-viewpager-ng-method-selecttab" =>
-        "the pre-tap screen is right; a `selectTab` call on tap cannot be settled by a first screen",
-    "basic-element-x-webview-bindmessage" => "not read yet",
-    "basic-event-bubble-dataset" => "not read yet",
-    "basic-event-dataset" => "not read yet",
-    "basic-event-target-id" => "not read yet",
-    "basic-event-trigger" => "not read yet",
+    "basic-element-x-webview-bindmessage" =>
+        "the text must read `hello from iframe` once the `<x-webview html=…>` document posts a message; it reads `waiting`: there is no `x-webview` component and nothing in `crates/` hosts an HTML document",
+    "basic-event-trigger" =>
+        "a `capture-bindtap` and a `bindtap` on one element must both run for one tap, capture first, with the first handler's `setState` visible to the second: the text must read `[capture tap][bind tap]`. It reads `[bind tap]`: the second handler's `setText(text + …)` still sees the empty `text`, so the capture handler's update is overwritten. Both handlers reach the background thread without a render between them (inferred from the picture, not traced)",
     "basic-flex-nested-linear-setting" =>
         "the case asserts computed style only and neither box has a background, so a first screen shows nothing either way",
-    "basic-global-bind" => "not read yet",
-    "basic-global-bindkeydown" => "not read yet",
-    "basic-global-bindkeydown-code" => "not read yet",
-    "basic-global-bindkeydown-key" => "not read yet",
-    "basic-global-bindkeydown-shift" => "not read yet",
-    "basic-global-bindkeyup" => "not read yet",
-    "basic-globalProps" => "not read yet",
-    "basic-lazy-component" => "not read yet",
-    "basic-lazy-component-css" => "not read yet",
-    "basic-lazy-component-css-blank" => "not read yet",
-    "basic-lazy-component-css-multi" => "not read yet",
-    "basic-lazy-component-css-selector-false-exchange-class" => "not read yet",
-    "basic-lazy-component-css-selector-false-inline-css-change-same-time" => "not read yet",
-    "basic-lazy-component-css-selector-false-inline-remove-css-remove-inline" => "not read yet",
-    "basic-lazy-component-css-selector-false-multi-level-selector" => "not read yet",
-    "basic-lazy-component-css-selector-false-remove-all" => "not read yet",
-    "basic-lazy-component-css-selector-false-remove-css-and-reuse-css" => "not read yet",
-    "basic-lazy-component-css-selector-false-remove-css-and-style-collapsed" => "not read yet",
-    "basic-lazy-component-css-selector-false-remove-inline-style-and-reuse-css" => "not read yet",
-    "basic-lazy-component-css-selector-false-type-selector" => "not read yet",
-    "basic-lazy-component-effect" => "not read yet",
-    "basic-lazy-component-fail" => "not read yet",
-    "basic-lazy-component-mts-bindtap" => "not read yet",
-    "basic-lazy-component-multi" => "not read yet",
-    "basic-lazy-component-multi-import" => "not read yet",
-    "basic-lazy-component-relative-path" => "not read yet",
-    "basic-lazy-component-when-need-with-itself" => "not read yet",
-    "basic-lazy-component-when-needed" => "not read yet",
-    "basic-lynx-reload" => "not read yet",
-    "basic-main-query-selector" => "not read yet",
-    "basic-mts-bindtap" => "not read yet",
-    "basic-mts-bindtap-change-element-background" => "not read yet",
-    "basic-mts-bindtouchstart" => "not read yet",
-    "basic-mts-mainthread-nested-ref" => "not read yet",
-    "basic-mts-mainthread-ref" => "not read yet",
-    "basic-mts-run-on-background" => "not read yet",
-    "basic-mts-run-on-main-thread" => "not read yet",
-    "basic-mts-systeminfo" => "not read yet",
-    "basic-page-event" => "not read yet",
-    "basic-performance-event-div-100" => "not read yet",
+    "basic-global-bindkeydown" =>
+        "`global-bindKeydown` must turn the box green on a key press; the engine has no key input: `InputKind` (`crates/dom/src/input/mod.rs`) is `Pointer | Wheel`, so nothing can deliver `keydown` or `keyup`",
+    "basic-global-bindkeydown-code" =>
+        "`global-bindKeydown` must show the pressed key's `code`; the engine has no key input: `InputKind` (`crates/dom/src/input/mod.rs`) is `Pointer | Wheel`, so nothing can deliver `keydown` or `keyup`",
+    "basic-global-bindkeydown-key" =>
+        "`global-bindKeydown` must show the pressed key's `key`; the engine has no key input: `InputKind` (`crates/dom/src/input/mod.rs`) is `Pointer | Wheel`, so nothing can deliver `keydown` or `keyup`",
+    "basic-global-bindkeydown-shift" =>
+        "`global-bindKeydown` must see `shiftKey` for Shift+a; the engine has no key input: `InputKind` (`crates/dom/src/input/mod.rs`) is `Pointer | Wheel`, so nothing can deliver `keydown` or `keyup`",
+    "basic-global-bindkeyup" =>
+        "`global-bindKeyup` must turn the box green on a key release; the engine has no key input: `InputKind` (`crates/dom/src/input/mod.rs`) is `Pointer | Wheel`, so nothing can deliver `keydown` or `keyup`",
+    "basic-lazy-component-css" =>
+        "the card's `.container` must stay red while the lazy component's own `.container` is orange; both boxes are red. the lazy container loads, but its stylesheet does not: `__AdoptStyleSheet('<container>/index.css')` throws, because `lazy_bundle_sources` (`crates/bobcat-source/src/lazy_bundle.rs`) registers a named sheet only for a custom section with `encoding: \"CSS\"`, and a `.web.bundle` container carries its rules in `StyleInfo`. No class rule of the lazy component applies. Once it does, per-entry scoping still stands in the way: every sheet is mounted document-wide (`__SetCSSId` is a sink)",
+    "basic-lazy-component-css-blank" =>
+        "the card's `.container { background-color: red }` must not colour the lazy component's `.container`, whose own rule only sizes it; both boxes are red. the lazy container loads, but its stylesheet does not: `__AdoptStyleSheet('<container>/index.css')` throws, because `lazy_bundle_sources` (`crates/bobcat-source/src/lazy_bundle.rs`) registers a named sheet only for a custom section with `encoding: \"CSS\"`, and a `.web.bundle` container carries its rules in `StyleInfo`. No class rule of the lazy component applies, and the card's rule reaches the lazy view because every sheet is mounted document-wide (`__SetCSSId` is a sink)",
+    "basic-lazy-component-css-multi" =>
+        "three `.container` boxes must paint three colours, each from its own entry's sheet; the lazy container loads, but its stylesheet does not: `__AdoptStyleSheet('<container>/index.css')` throws, because `lazy_bundle_sources` (`crates/bobcat-source/src/lazy_bundle.rs`) registers a named sheet only for a custom section with `encoding: \"CSS\"`, and a `.web.bundle` container carries its rules in `StyleInfo`. No class rule of the lazy component applies, and the screen never stops changing, so no frame can be taken at all",
+    "basic-lazy-component-css-selector-false-exchange-class" =>
+        "`#target` must be green, yellow, then unpainted as its classes are exchanged and removed; it is never painted. the lazy container loads, but its stylesheet does not: `__AdoptStyleSheet('<container>/index.css')` throws, because `lazy_bundle_sources` (`crates/bobcat-source/src/lazy_bundle.rs`) registers a named sheet only for a custom section with `encoding: \"CSS\"`, and a `.web.bundle` container carries its rules in `StyleInfo`. No class rule of the lazy component applies",
+    "basic-lazy-component-css-selector-false-inline-css-change-same-time" =>
+        "`#target` must be yellow, red, yellow; it is unpainted, red, unpainted: only the inline colour shows. the lazy container loads, but its stylesheet does not: `__AdoptStyleSheet('<container>/index.css')` throws, because `lazy_bundle_sources` (`crates/bobcat-source/src/lazy_bundle.rs`) registers a named sheet only for a custom section with `encoding: \"CSS\"`, and a `.web.bundle` container carries its rules in `StyleInfo`. No class rule of the lazy component applies",
+    "basic-lazy-component-css-selector-false-inline-remove-css-remove-inline" =>
+        "`#target` must be green, red, red, yellow, then unpainted; it is unpainted wherever a class should colour it. the lazy container loads, but its stylesheet does not: `__AdoptStyleSheet('<container>/index.css')` throws, because `lazy_bundle_sources` (`crates/bobcat-source/src/lazy_bundle.rs`) registers a named sheet only for a custom section with `encoding: \"CSS\"`, and a `.web.bundle` container carries its rules in `StyleInfo`. No class rule of the lazy component applies",
+    "basic-lazy-component-css-selector-false-multi-level-selector" =>
+        "the lazy component's `.parent .background` must paint `#target` pink; the frame is blank. the lazy container loads, but its stylesheet does not: `__AdoptStyleSheet('<container>/index.css')` throws, because `lazy_bundle_sources` (`crates/bobcat-source/src/lazy_bundle.rs`) registers a named sheet only for a custom section with `encoding: \"CSS\"`, and a `.web.bundle` container carries its rules in `StyleInfo`. No class rule of the lazy component applies",
+    "basic-lazy-component-css-selector-false-remove-all" =>
+        "`#target` must be green until its classes are removed; it is never painted. the lazy container loads, but its stylesheet does not: `__AdoptStyleSheet('<container>/index.css')` throws, because `lazy_bundle_sources` (`crates/bobcat-source/src/lazy_bundle.rs`) registers a named sheet only for a custom section with `encoding: \"CSS\"`, and a `.web.bundle` container carries its rules in `StyleInfo`. No class rule of the lazy component applies",
+    "basic-lazy-component-css-selector-false-remove-css-and-reuse-css" =>
+        "`#target` must be yellow, green, yellow as a class is added and removed; it is never painted. the lazy container loads, but its stylesheet does not: `__AdoptStyleSheet('<container>/index.css')` throws, because `lazy_bundle_sources` (`crates/bobcat-source/src/lazy_bundle.rs`) registers a named sheet only for a custom section with `encoding: \"CSS\"`, and a `.web.bundle` container carries its rules in `StyleInfo`. No class rule of the lazy component applies",
+    "basic-lazy-component-css-selector-false-remove-css-and-style-collapsed" =>
+        "the three frames look right (green, yellow, green) only because the inline colour decides each of them; the class rules the case sets against it never apply: the lazy container loads, but its stylesheet does not: `__AdoptStyleSheet('<container>/index.css')` throws, because `lazy_bundle_sources` (`crates/bobcat-source/src/lazy_bundle.rs`) registers a named sheet only for a custom section with `encoding: \"CSS\"`, and a `.web.bundle` container carries its rules in `StyleInfo`. No class rule of the lazy component applies. A golden now would be of a card that tests nothing",
+    "basic-lazy-component-css-selector-false-remove-inline-style-and-reuse-css" =>
+        "`#target` must be green, red, green; it is unpainted, red, unpainted. the lazy container loads, but its stylesheet does not: `__AdoptStyleSheet('<container>/index.css')` throws, because `lazy_bundle_sources` (`crates/bobcat-source/src/lazy_bundle.rs`) registers a named sheet only for a custom section with `encoding: \"CSS\"`, and a `.web.bundle` container carries its rules in `StyleInfo`. No class rule of the lazy component applies",
+    "basic-lazy-component-css-selector-false-type-selector" =>
+        "no upstream test opens it (the test of that position opens the `config-` twin); by its source the lazy component's `view { … background-color: yellow }` must paint a 100x100 yellow box, and the frame is blank. the lazy container loads, but its stylesheet does not: `__AdoptStyleSheet('<container>/index.css')` throws, because `lazy_bundle_sources` (`crates/bobcat-source/src/lazy_bundle.rs`) registers a named sheet only for a custom section with `encoding: \"CSS\"`, and a `.web.bundle` container carries its rules in `StyleInfo`. No class rule of the lazy component applies",
+    "basic-lazy-component-mts-bindtap" =>
+        "the lazy component mounts (pink box), but a tap on its `main-thread:bindtap` box does not turn it green. The log shows the container's stylesheet failing to load (`__AdoptStyleSheet('<chunk>/index.css')`: no such sheet is registered for a container without a `CSS` section, `crates/bobcat-source/src/lazy_bundle.rs`) inside `rLynxPrepareLazyBundleMTS`; whether that throw is what keeps the lazy bundle's main-thread handler from being registered is not traced",
+    "basic-main-query-selector" =>
+        "a main-thread tap handler calls `autoScroll` on the scroll-view it finds with `lynx.querySelector`, and upstream reads `scrollTop > 100` three seconds later; `autoScroll` is not a UI method here (`invokeUIMethod` answers code 3, reported as `ListenerFailed`), so the list does not move",
+    "basic-mts-systeminfo" =>
+        "awaiting the same ruling as `api-SystemInfo`: the main-thread tap handler logs `hello world` only if `SystemInfo.platform === 'web'`, and this engine reports `\"headless\"`, so the line never comes",
     "basic-ppx-unit" =>
-        "the Lynx-only `ppx` unit is not in the fork's length grammar — `vendor/stylo/style/tests/lynx_lengths.rs::rejects_invalid_or_removed_units` asserts `2ppx` fails to parse — so both inline declarations are dropped, the view lays out at `height: auto` = 0 and nothing paints. Admitting it is a `vendor/stylo` patch adding a unit that resolves against the device pixel ratio the way `rpx` resolves against the design width",
-    "basic-ref-main-invoke-ui-method" => "not read yet",
-    "basic-reload" => "not read yet",
-    "basic-style-remove" =>
-        "the removal happens on tap, so a first screen cannot show what the case is named for",
-    "basic-style-remove-one-property" => "not read yet",
-    "config-css-default-display-linear-false" => "not read yet",
-    "config-css-default-overflow-visible-unset" => "not read yet",
-    "config-css-inheritance-default" => "not read yet",
-    "config-css-inheritance-false" => "not read yet",
-    "config-css-inheritance-true" => "not read yet",
-    "config-css-remove-scope-false" => "not read yet",
+        "the Lynx-only `ppx` unit is not in the fork's length grammar (`vendor/stylo/style/tests/lynx_lengths.rs::rejects_invalid_or_removed_units`), so both declarations are dropped and nothing paints. Admitting it needs a ruling first: native resolves `ppx` by dividing by the device pixel ratio (`lynx/core/renderer/css/css_style_utils.cc`), web-core defines `--ppx-unit: 1cqw` (`web-core/css/index.css`), and upstream's assertion — a 10x10 box after the host narrows the view to 50px — holds only under web-core's. That resize is also a step the suite does not have",
+    "basic-ref-main-invoke-ui-method" =>
+        "a main-thread tap handler calls `autoScroll` through a `main-thread:ref` on a scroll-view, and upstream reads `scrollTop > 100` two seconds later; `autoScroll` is not a UI method here (`invokeUIMethod` answers code 3, reported as `ListenerFailed`), so the list does not move",
+    "config-css-inheritance-default" =>
+        "awaiting the same re-confirmation as `config-css-inheritance-false`: the build leaves `enableCSSInheritance` unset, which compiles to `false`",
+    "config-css-inheritance-false" =>
+        "awaiting re-confirmation of a ruling: with the flag off this engine paints web-core's picture (texts take the view's typography and reset only `color`), where native inherits nothing. That is the recorded decision (`docs/tracking/deviations.md`, CSS inheritance, 2026-07), but its premise — web-core ignores the flag entirely — stopped being true with lynx-stack #3907, so a golden would settle the off case without the user having looked again. Upstream also taps `#update` and asserts `#solid-text` stays black",
+    "config-css-inheritance-true" =>
+        "DEFECT: `enableCSSInheritance: true` has no effect: the three inherited texts and the two gradient texts are black where upstream asserts the view's red and its `linear-gradient(red, blue)`. The UA rule `text { color: initial }` (`crates/bobcat-core/src/main/tree/text.rs`) is unconditional and `PageConfig` has no inheritance switch. That was a decision (`docs/tracking/deviations.md`, CSS inheritance) resting on web-core ignoring the flag; since lynx-stack #3907 web-core honours it, as native does. Upstream also taps `#update` and asserts the new size and gradient reach `#solid-text`",
+    "config-css-remove-scope-false" =>
+        "`#index` must be red and `#sub` green, each from its own file's `.basic`; `#sub` covers `#index` exactly, so a frame shows only `#sub`, which is green with or without scoping, and the hidden half is the wrong one: fragments are mounted globally (`crates/bobcat-source/src/lower_style.rs`), so `#index` computes green. Same cause as `config-css-remove-scope-false-with-descendant-combinator`",
     "config-css-remove-scope-false-with-descendant-combinator" =>
         "the flag this card is built to test has no effect here: `index.css` and `sub.css` each define `.a .b` with a different colour, and per-component css-id scoping is the only thing that could tell the two views apart. `crates/bobcat-source/src/lower_style.rs::to_preparsed_style_sheet` flattens every `css_id` fragment into one rule list and synthesizes no `:where([l-css-id=\"N\"])` guard, so both rules match both views and `sub.css`'s later `orange` overrides `index.css`'s `green` on the index-owned child too — the collision `CompatibilityWarning::ComponentScopedCss` already predicts. The two stacked 100x100 boxes are placed right; only the upper one's colour is wrong",
-    "config-css-remove-scope-true" => "not read yet",
-    "config-css-selector-false-exchange-class" => "not read yet",
-    "config-css-selector-false-inline-css-change-same-time" => "not read yet",
-    "config-css-selector-false-inline-remove-css-remove-inline" => "not read yet",
-    "config-css-selector-false-remove-all" => "not read yet",
-    "config-css-selector-false-remove-css-and-reuse-css" => "not read yet",
-    "config-css-selector-false-remove-css-and-style-collapsed" => "not read yet",
-    "config-css-selector-false-remove-inline-style-and-reuse-css" => "not read yet",
-    "config-mixed-01" => "not read yet",
+    "config-css-selector-false-exchange-class" =>
+        "`class='background-yellow background-green'` must be green, the exchanged order yellow, no class unpainted; it is yellow, yellow, unpainted. The card is built with `enableCSSSelector: false`, where the class written last in the `class` attribute wins; this engine ignores the flag by decision (`docs/style-assumptions.md` D.17, D-bis.23) and resolves the two equal-specificity rules by source order, where `.background-yellow` comes second",
+    "config-css-selector-false-inline-remove-css-remove-inline" =>
+        "the first screen must be green and is yellow; the later frames (red, red, yellow, unpainted) are right. The card is built with `enableCSSSelector: false`, where the class written last in the `class` attribute wins; this engine ignores the flag by decision (`docs/style-assumptions.md` D.17, D-bis.23) and resolves the two equal-specificity rules by source order, where `.background-yellow` comes second",
+    "config-css-selector-false-remove-all" =>
+        "the first screen must be green and is yellow; removing the classes leaves it unpainted, which is right. The card is built with `enableCSSSelector: false`, where the class written last in the `class` attribute wins; this engine ignores the flag by decision (`docs/style-assumptions.md` D.17, D-bis.23) and resolves the two equal-specificity rules by source order, where `.background-yellow` comes second",
+    "config-css-selector-false-remove-css-and-reuse-css" =>
+        "adding `background-green` after `background-yellow` must turn the box green; it stays yellow in all three frames. The card is built with `enableCSSSelector: false`, where the class written last in the `class` attribute wins; this engine ignores the flag by decision (`docs/style-assumptions.md` D.17, D-bis.23) and resolves the two equal-specificity rules by source order, where `.background-yellow` comes second",
+    "config-css-selector-false-remove-inline-style-and-reuse-css" =>
+        "must be green, red, green; it is yellow, red, yellow. The card is built with `enableCSSSelector: false`, where the class written last in the `class` attribute wins; this engine ignores the flag by decision (`docs/style-assumptions.md` D.17, D-bis.23) and resolves the two equal-specificity rules by source order, where `.background-yellow` comes second",
+    "config-mixed-01" =>
+        "`class='background-yellow background-green'` must be green and is yellow. The card is built with `enableCSSSelector: false`, where the class written last in the `class` attribute wins; this engine ignores the flag by decision (`docs/style-assumptions.md` D.17, D-bis.23) and resolves the two equal-specificity rules by source order, where `.background-yellow` comes second",
 }

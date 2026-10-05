@@ -8,7 +8,7 @@
 //
 // Keep this table in step with upstream when re-syncing `src/`: a case whose
 // family moved would otherwise be compiled with the wrong switches and fail
-// the census for a reason that is not the engine's.
+// the suite for a reason that is not the engine's.
 
 /** Cases compiled together, in upstream's own grouping. */
 export const groups = [

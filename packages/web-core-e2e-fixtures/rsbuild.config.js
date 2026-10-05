@@ -29,7 +29,7 @@ const UNBUILDABLE = new Set(['external-bundle']);
 // `<package>/resources`, the directory those four files were copied into.
 const SOURCE = path.join(import.meta.dirname, 'src', 'cases');
 
-/** Every case directory, in the order the census will meet them. */
+/** Every case directory, in the order the suite will meet them. */
 function cases() {
   return fs.readdirSync(SOURCE, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
@@ -68,7 +68,7 @@ export default defineConfig({
   output: {
     // Every group writes into the same tree, one `<case>.web.bundle` per card,
     // which is the layout upstream's Playwright goldens were taken against and
-    // the one the census reads.
+    // the one the suite reads.
     distPath: {
       root: group.directory ? `dist/${group.directory}`
         : group.ownDirectory && only ? `dist/${only}`
