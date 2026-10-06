@@ -540,16 +540,38 @@ fn display_contents_flip_relayouts_the_container_and_clears_the_stale_box() {
     assert_eq!(h.rect(lifted).2, 150.0);
 }
 
+/// css-display-3 §2.7 computes a root `display: contents` to `block`; the
+/// fork's `lynx` grammar has no flow layout, so its block-level container,
+/// `flex`, takes that place. The root lays out exactly as a `display: flex`
+/// root does: a flex container whose `auto` size is its content's (this
+/// engine does not stretch an `auto` root to the viewport), with its children
+/// in a row; sized to the viewport, it fills it.
 #[test]
-#[should_panic(expected = "Bobcat does not support Stylo computed display")]
-fn display_contents_root_fixup_panics_as_an_unsupported_display() {
-    let mut h = Harness::new(
-        "page { display: contents; width: 120px; height: 30px; }
-         view { width: 20px; height: 10px; }",
+fn display_contents_root_blockifies_to_a_flex_container() {
+    let layout = |display: &str, size: &str| {
+        let mut h = Harness::new(&format!(
+            "page {{ display: {display}; {size} align-items: flex-start; }}
+             view {{ width: 20px; height: 10px; }}"
+        ));
+        let root = h.doc.root;
+        let first = h.doc.el(root, "view");
+        let second = h.doc.el(root, "view");
+        h.layout();
+        [h.rect(root), h.rect(first), h.rect(second)]
+    };
+
+    for size in ["", "width: 100vw; height: 100vh;"] {
+        assert_eq!(layout("contents", size), layout("flex", size), "{size:?}");
+    }
+    assert_eq!(
+        layout("contents", "width: 100vw; height: 100vh;"),
+        [
+            (0.0, 0.0, 800.0, 600.0),
+            (0.0, 0.0, 20.0, 10.0),
+            (20.0, 0.0, 20.0, 10.0),
+        ]
     );
-    let root = h.doc.root;
-    let _child = h.doc.el(root, "view");
-    h.layout();
+    assert_eq!(layout("contents", "")[0], (0.0, 0.0, 40.0, 10.0));
 }
 
 #[test]

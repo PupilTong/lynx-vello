@@ -5,6 +5,7 @@ mod common;
 use common::device;
 use dom::{Document, NodeId, StylesheetOrigin};
 use stylo::color::AbsoluteColor;
+use stylo::values::computed::Display;
 
 type TestDocument = Document<()>;
 
@@ -69,6 +70,20 @@ fn standard_cascade_is_embedder_neutral() {
         rgb(BLUE),
         "standard inline declarations outrank author class rules"
     );
+}
+
+/// css-display-3 §2.7: a root `display: contents` computes to a block-level
+/// box. Under the fork's `lynx` grammar that box is `flex`, where a browser
+/// gives `block`.
+#[test]
+fn root_display_contents_computes_to_flex() {
+    let mut doc = document();
+    doc.add_stylesheet("page { display: contents; }", StylesheetOrigin::Author);
+    let root = doc.document_element().id();
+    doc.layout();
+
+    let style = doc.get(root).unwrap().computed_style().unwrap();
+    assert_eq!(*style.get_display(), Display::Flex);
 }
 
 #[test]

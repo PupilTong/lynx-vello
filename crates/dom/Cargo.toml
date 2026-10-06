@@ -48,6 +48,7 @@ divan = { workspace = true }
 flashbulb = { workspace = true, features = ["render"] }
 html5ever = { workspace = true }
 markup5ever_rcdom = { workspace = true }
+num-traits = { workspace = true }
 png = { workspace = true }
 
 [[bench]]

@@ -935,7 +935,14 @@ Linear, including insertion of a fresh wrapper after an earlier layout.
 
 `compute_layout` is therefore unreachable for one: the document element
 blockifies in Stylo (`Display::equivalent_block_display`, CSS Display 3
-§2.8), and no other path reaches a box-less node. Inheritance is unaffected — it follows the DOM tree,
+§2.7), and no other path reaches a box-less node. A root `display: contents`
+computes to `flex` under the fork's `lynx` grammar (lynx fork `9648159a6`),
+where a browser gives `block`: `flex` is that grammar's block-level container,
+so the root lays out exactly as a `display: flex` root
+(`display_contents_root_blockifies_to_a_flex_container` in
+`crates/dom/tests/layout.rs`). No `lynx` path produces Stylo's internal
+block/flow display, and `display_mode` panics on it rather than treating it as
+a leaf. Inheritance is unaffected — it follows the DOM tree,
 so a text child still reads its box-less parent's font/text values.
 
 **The relayout-boundary theorem.** A box is a **relayout boundary** iff its

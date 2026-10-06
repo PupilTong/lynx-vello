@@ -433,7 +433,8 @@ mod tests {
     use core::mem::size_of;
 
     use hughie::style::Display;
-    use stylo::values::specified::box_::DisplayInside;
+    use num_traits::FromPrimitive;
+    use stylo::values::specified::box_::{DisplayInside, DisplayOutside};
 
     use super::{DisplayMode, StyleView, TextRunView, display_mode};
 
@@ -452,9 +453,13 @@ mod tests {
     #[test]
     #[should_panic(expected = "Bobcat does not support Stylo computed display")]
     fn unsupported_stylo_display_panics_instead_of_becoming_a_leaf() {
-        // Stylo's root `display: contents` fixup creates its private block-flow
-        // encoding, giving this test a real computed value that Lynx cannot lay out.
-        let unsupported = Display::Contents.equivalent_block_display(true);
+        // No `lynx` grammar path produces this today; the panic guards a Stylo
+        // value the layout cannot express. Stylo's private block/flow encoding
+        // is built from its raw bits through the derived `FromPrimitive`.
+        let raw =
+            ((DisplayOutside::Block as u16) << Display::OUTSIDE_SHIFT) | DisplayInside::Flow as u16;
+        let unsupported = Display::from_u16(raw).expect("every u16 is a Display");
+        assert_eq!(unsupported.outside(), DisplayOutside::Block);
         assert_eq!(unsupported.inside(), DisplayInside::Flow);
 
         let _ = display_mode(unsupported);
