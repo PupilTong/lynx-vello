@@ -1696,6 +1696,133 @@ fn absolute_intrinsic_keywords_between_insets_ignore_the_stretch_fit_size() {
     assert_point(max.location, Point::new(0.0, 250.0));
 }
 
+/// A flex container with `style` placed with `inset: 0` in an 800×600
+/// containing block around the items `content` pushes; returns the tree for
+/// reading the items back.
+fn inset_zero_flex(
+    style: TestStyle,
+    content: impl FnOnce(&mut TestTree) -> Vec<TestId>,
+) -> (TestTree, Vec<TestId>, Layout) {
+    let mut tree = TestTree::default();
+    let children = content(&mut tree);
+    let target = tree.push_flex(inset_zero(style), children.clone());
+    let layout = place_in_800_by_600(&tree, target);
+    (tree, children, layout)
+}
+
+fn wrapping(style: TestStyle) -> TestStyle {
+    TestStyle {
+        flex_wrap: flex_wrap::T::WRAP,
+        ..style
+    }
+}
+
+fn two_rigid_items(width: f32) -> impl FnOnce(&mut TestTree) -> Vec<TestId> {
+    move |tree| {
+        vec![
+            rigid_item(tree, width, 100.0),
+            rigid_item(tree, width, 100.0),
+        ]
+    }
+}
+
+/// A `fit-content` flex container's width is css-sizing-3 §3.2's
+/// `min(max-content, max(min-content, stretch-fit))` over css-flexbox-1
+/// §9.9.1's intrinsic main sizes, so content wider than the inset-modified
+/// containing block is held to it. `nowrap`: min-content 500 (the
+/// paragraph's longest word), max-content 1000 (its unbroken line), 800 in
+/// between, where the paragraph wraps onto two lines. Multi-line: two
+/// 500-wide items make max-content 1000 (one line) and min-content 500 (the
+/// largest item), so the container is 800 wide and the items still break
+/// onto two lines.
+#[test]
+fn absolute_fit_content_between_insets_limits_a_flex_container_to_the_stretch_fit_size() {
+    let fit = || sized_auto_margin(StyleSize::FitContent, StyleSize::FitContent);
+
+    let (tree, items, layout) = inset_zero_flex(fit(), |tree| vec![paragraph(tree)]);
+    assert_size(layout.size, Size::new(800.0, 200.0));
+    assert_point(layout.location, Point::new(0.0, 200.0));
+    assert_size(tree.layout(items[0]).size, Size::new(800.0, 200.0));
+
+    let (tree, items, layout) = inset_zero_flex(wrapping(fit()), two_rigid_items(500.0));
+    assert_size(layout.size, Size::new(800.0, 200.0));
+    assert_point(layout.location, Point::new(0.0, 200.0));
+    assert_point(tree.layout(items[0]).location, Point::ZERO);
+    assert_point(tree.layout(items[1]).location, Point::new(0.0, 100.0));
+}
+
+/// Content narrower than the stretch-fit size keeps its max-content width
+/// (one line, centred by the `auto` margins), where `width: auto` still
+/// stretches to the inset-modified containing block (css-position-3 §4.1).
+#[test]
+fn absolute_fit_content_between_insets_keeps_a_narrower_flex_container_at_its_content() {
+    let fit = || sized_auto_margin(StyleSize::FitContent, StyleSize::FitContent);
+    let (tree, items, layout) = inset_zero_flex(wrapping(fit()), two_rigid_items(300.0));
+    assert_size(layout.size, Size::new(600.0, 100.0));
+    assert_point(layout.location, Point::new(100.0, 250.0));
+    assert_point(tree.layout(items[1]).location, Point::new(300.0, 0.0));
+
+    let auto_width = sized_auto_margin(size_auto(), StyleSize::FitContent);
+    let (_, _, layout) = inset_zero_flex(wrapping(auto_width), two_rigid_items(300.0));
+    assert_size(layout.size, Size::new(800.0, 100.0));
+    assert_point(layout.location, Point::new(0.0, 250.0));
+}
+
+/// `min-content` and `max-content` on a multi-line container keep their own
+/// constraint: the largest item's width on one line each, or every item on
+/// one line, whatever the stretch-fit size.
+#[test]
+fn absolute_intrinsic_keywords_between_insets_size_a_multi_line_flex_container() {
+    let (_, _, min) = inset_zero_flex(
+        wrapping(sized_auto_margin(size_min_content(), StyleSize::FitContent)),
+        two_rigid_items(500.0),
+    );
+    assert_size(min.size, Size::new(500.0, 200.0));
+    assert_point(min.location, Point::new(150.0, 200.0));
+
+    let (_, _, max) = inset_zero_flex(
+        wrapping(sized_auto_margin(size_max_content(), StyleSize::FitContent)),
+        two_rigid_items(500.0),
+    );
+    assert_size(max.size, Size::new(1000.0, 100.0));
+    assert_point(max.location, Point::new(0.0, 250.0));
+}
+
+/// A flex container whose main size its parent already knows is not
+/// fit-content sized: stretched by a column parent to 300, it stays 300 and
+/// its paragraph overflows at its 500 min-content width. Not stretched
+/// (`align-self: flex-start`), the same container is fit-content sized in
+/// the 300 available (css-flexbox-1 §9.4 step 7): its min-content 500.
+#[test]
+fn in_flow_flex_container_fit_content_follows_its_parents_stretch() {
+    for (align_self, container_width) in [
+        (AlignFlags::STRETCH, 300.0),
+        (AlignFlags::FLEX_START, 500.0),
+    ] {
+        let mut tree = TestTree::default();
+        let item = paragraph(&mut tree);
+        let row = flex_container(
+            &mut tree,
+            TestStyle {
+                align_self: self_align(align_self),
+                ..TestStyle::default()
+            },
+            &[item],
+        );
+        let root = flex_container(
+            &mut tree,
+            TestStyle {
+                flex_direction: flex_direction::T::Column,
+                ..TestStyle::default()
+            },
+            &[row],
+        );
+        definite_layout(&tree, root, 300.0, 400.0);
+        assert_size(tree.layout(row).size, Size::new(container_width, 200.0));
+        assert_size(tree.layout(item).size, Size::new(500.0, 200.0));
+    }
+}
+
 #[test]
 fn cyclic_percentage_item_margin_resolves_after_intrinsic_container_sizing() {
     let mut tree = TestTree::default();

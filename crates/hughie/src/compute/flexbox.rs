@@ -434,10 +434,13 @@ fn determine_flex_base_sizes<'tree, T>(
 {
     let container_main = axes.main.size(container_inner_size);
     let available_main = axes.main.size(available_space);
+    // A definite available main size needs both: the container's
+    // fit-content main size clamps between its min- and max-content main
+    // sizes (`determine_auto_main_size`).
     let needs_min_content_contribution =
-        needs_intrinsic_main_contributions && available_main == AvailableSpace::MinContent;
+        needs_intrinsic_main_contributions && available_main != AvailableSpace::MaxContent;
     let needs_max_content_contribution =
-        needs_intrinsic_main_contributions && available_main == AvailableSpace::MaxContent;
+        needs_intrinsic_main_contributions && available_main != AvailableSpace::MinContent;
 
     for item in items {
         let node = item.key.node;
@@ -770,23 +773,27 @@ fn collect_flex_lines<N>(
     lines
 }
 
-fn line_intrinsic_main<N>(items: &[FlexItem<N>], line: FlexLine, gap: f32, axes: Axes) -> f32 {
-    let line_items = &items[line.start..line.end];
-    let item_sum = line_items
-        .iter()
-        .map(|item| item.flex_basis.max(item.resolved_min_main) + axes.main.sum(item.margin))
-        .sum::<f32>();
-    item_sum + gap * line_items.len().saturating_sub(1) as f32
-}
-
-fn line_content_contribution<N>(
+/// css-flexbox-1 §9.9.1's intrinsic main size of a flex container's content
+/// box: with `maximum`, the max-content main size, the sum of the items'
+/// max-content contributions and the gaps between them as one line even when
+/// the container wraps; otherwise the min-content main size, that same sum
+/// of min-content contributions for a single-line container and the largest
+/// one for a multi-line container, whose every item may take a line of its
+/// own.
+fn intrinsic_main_size<N>(
     items: &[FlexItem<N>],
-    line: FlexLine,
     gap: f32,
+    single_line: bool,
     maximum: bool,
 ) -> f32 {
-    let line_items = &items[line.start..line.end];
-    let item_sum = line_items
+    if !maximum && !single_line {
+        return items
+            .iter()
+            .map(|item| item.min_content_contribution)
+            .max_by(f32::total_cmp)
+            .unwrap_or(0.0);
+    }
+    let item_sum = items
         .iter()
         .map(|item| {
             if maximum {
@@ -796,30 +803,43 @@ fn line_content_contribution<N>(
             }
         })
         .sum::<f32>();
-    item_sum + gap * line_items.len().saturating_sub(1) as f32
+    item_sum + gap * items.len().saturating_sub(1) as f32
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The outer main size of a flex container whose main size is not known
+/// (css-flexbox-1 §9.2 step 4, "using the rules of the formatting context in
+/// which it participates"), clamped by its min/max main sizes.
+///
+/// Under a min- or max-content constraint that is the matching intrinsic
+/// main size (§9.9.1, [`intrinsic_main_size`]). Under a definite available
+/// main size the box is shrink-to-fit sized — an absolutely positioned box
+/// that does not stretch (css-position-3 §4.1), `fit-content`, an unstretched
+/// flex or grid item — and css-sizing-3 §5.2.2 makes that the fit-content
+/// size, `min(max-content, max(min-content, stretch-fit))`, the stretch-fit
+/// size being `available`, the space left after the container's margins,
+/// border and padding. It comes from the container's intrinsic main sizes,
+/// not from the lines collected under `available`: a `nowrap` line's sum of
+/// flex base sizes is not limited by `available` at all, and a wrapping
+/// container's widest line is narrower than the fit-content size whenever
+/// the break leaves space at the end of every line.
 fn determine_auto_main_size<N>(
     items: &[FlexItem<N>],
-    lines: &[FlexLine],
     gap: f32,
-    axes: Axes,
+    single_line: bool,
     available_main: AvailableSpace,
     inset_main: f32,
     min_outer: Option<f32>,
     max_outer: Option<f32>,
 ) -> f32 {
-    let content = lines
-        .iter()
-        .copied()
-        .map(|line| match available_main {
-            AvailableSpace::MaxContent => line_content_contribution(items, line, gap, true),
-            AvailableSpace::MinContent => line_content_contribution(items, line, gap, false),
-            AvailableSpace::Definite(_) => line_intrinsic_main(items, line, gap, axes),
-        })
-        .max_by(f32::total_cmp)
-        .unwrap_or(0.0);
+    let content = match available_main {
+        AvailableSpace::MaxContent => intrinsic_main_size(items, gap, single_line, true),
+        AvailableSpace::MinContent => intrinsic_main_size(items, gap, single_line, false),
+        AvailableSpace::Definite(available) => {
+            let max_content = intrinsic_main_size(items, gap, single_line, true);
+            let min_content = intrinsic_main_size(items, gap, single_line, false);
+            max_content.min(min_content.max(available))
+        }
+    };
     clamp_axis(content + inset_main, min_outer, max_outer, inset_main)
 }
 
@@ -1850,12 +1870,12 @@ where
     };
     let inset_main = axes.main.size(container_inset_size);
     if axes.main.size(outer_size).is_none() {
-        let outer_main = contained_outer(axes.main, inset_main).unwrap_or_else(|| {
+        let contained_main = contained_outer(axes.main, inset_main);
+        let outer_main = contained_main.unwrap_or_else(|| {
             determine_auto_main_size(
                 &items,
-                &lines,
                 main_gap,
-                axes,
+                flex_wrap == flex_wrap::T::NOWRAP,
                 line_available_main,
                 inset_main,
                 axes.main.size(min_size),
@@ -1868,6 +1888,32 @@ where
         let resolved_main_gap =
             resolve_gap_axis(axes.main.size(gap_value), axes.main.size(inner_size));
         axes.main.set_size(&mut gap, resolved_main_gap);
+        // css-flexbox-1 §9.3 step 5 breaks lines at the inner main size step 4
+        // just decided; the lines above broke at the available main size.
+        // When the fit-content size is the available size they are the same
+        // lines. When it is smaller it is the max-content main size, and
+        // every hypothetical outer main size is at most its item's max-content
+        // contribution (both clamp the same content size, flex basis and
+        // min/max), so all the items already shared one line and still do.
+        // When it is larger — one item's min-content contribution or the
+        // container's own minimum exceeds the available size — a wider limit
+        // can join items the narrower one split; and a percentage gap only
+        // resolves now. Breaking again is a walk over the items' sizes, so it
+        // is done whenever the container wraps rather than only in those
+        // cases. (A row container with an indefinite width re-resolves its
+        // items and breaks a third time below.)
+        if contained_main.is_none()
+            && flex_wrap != flex_wrap::T::NOWRAP
+            && line_available_main.is_definite()
+        {
+            lines = collect_flex_lines(
+                &items,
+                flex_wrap,
+                AvailableSpace::Definite((outer_main - inset_main).max(0.0)),
+                resolved_main_gap,
+                axes,
+            );
+        }
     }
     let inner_main = axes.main.size(inner_size).unwrap_or(0.0);
     let mut main_gap = axes.main.size(gap);
@@ -2425,7 +2471,7 @@ mod tests {
             ),
             Some(100.0),
             true,
-            true,
+            false,
             true,
             None,
         );
@@ -2435,6 +2481,39 @@ mod tests {
         // main size never reaches the probe (css-flexbox-1 9.2.3 step E).
         assert_eq!(items[0].flex_basis, 23.0);
         assert_eq!(TEST_MEASURE_CALLS.get(), 1);
+
+        // A container whose main size is not known under a definite available
+        // size is fit-content sized from both intrinsic main sizes, so it
+        // consumes both contributions: one more probe, the max-content one
+        // shared with the flex basis.
+        let mut items = [item(0.0, 0.0)];
+        items[0].min_size.width = Some(0.0);
+        let mut state = TestState::default();
+        TEST_MEASURE_CALLS.set(0);
+        determine_flex_base_sizes(
+            &tree,
+            &mut state,
+            &mut items,
+            axes,
+            Size::new(None, Some(20.0)),
+            Size::new(
+                AvailableSpace::Definite(37.0),
+                AvailableSpace::Definite(20.0),
+            ),
+            None,
+            false,
+            true,
+            true,
+            None,
+        );
+        assert_eq!(
+            [
+                items[0].min_content_contribution,
+                items[0].max_content_contribution
+            ],
+            [11.0, 23.0]
+        );
+        assert_eq!(TEST_MEASURE_CALLS.get(), 2);
     }
 
     #[test]
@@ -2647,30 +2726,63 @@ mod tests {
             axes,
         );
         assert_eq!(lines.len(), 2);
-        assert_eq!(
-            line_intrinsic_main(&items, test_line(2, 0.0), 2.0, axes),
-            32.0
-        );
-        for (name, available_main, expected) in [
-            ("min content", AvailableSpace::MinContent, 16.0),
-            ("max content", AvailableSpace::MaxContent, 25.0),
-            ("definite", AvailableSpace::Definite(100.0), 21.0),
+        // Contributions 8/15 (min) and 12/24 (max), gap 2, inset 1: the
+        // max-content main size is one line, 12 + 2 + 24 = 38; the
+        // min-content main size is the largest item when wrapping (15) and the
+        // line sum without (8 + 2 + 15 = 25); a definite available size picks
+        // between them.
+        for (name, single_line, available_main, expected) in [
+            ("min content, wrap", false, AvailableSpace::MinContent, 16.0),
+            (
+                "min content, nowrap",
+                true,
+                AvailableSpace::MinContent,
+                26.0,
+            ),
+            ("max content", false, AvailableSpace::MaxContent, 39.0),
+            (
+                "definite above max",
+                false,
+                AvailableSpace::Definite(100.0),
+                39.0,
+            ),
+            (
+                "definite between",
+                false,
+                AvailableSpace::Definite(20.0),
+                21.0,
+            ),
+            (
+                "definite below min, wrap",
+                false,
+                AvailableSpace::Definite(10.0),
+                16.0,
+            ),
+            (
+                "definite below min, nowrap",
+                true,
+                AvailableSpace::Definite(10.0),
+                26.0,
+            ),
         ] {
             assert_eq!(
-                determine_auto_main_size(
-                    &items,
-                    &lines,
-                    2.0,
-                    axes,
-                    available_main,
-                    1.0,
-                    None,
-                    None
-                ),
+                determine_auto_main_size(&items, 2.0, single_line, available_main, 1.0, None, None),
                 expected,
                 "{name}"
             );
         }
+        assert_eq!(
+            determine_auto_main_size::<TestRef>(
+                &[],
+                2.0,
+                false,
+                AvailableSpace::Definite(10.0),
+                1.0,
+                None,
+                None
+            ),
+            1.0
+        );
     }
 
     #[test]

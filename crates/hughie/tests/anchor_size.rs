@@ -634,8 +634,8 @@ fn keyword_box_width(anchors: Vec<(&'static str, Size<f32>)>, style: TestStyle) 
 /// An anchored limit or margin on an axis sized by an intrinsic keyword
 /// changes only the limit: the keyword still picks the size, exactly as it
 /// does with the same limit written in pixels. (The items' min-content width
-/// is 250 and their max-content width 400; the wrapping box's own run sizes
-/// `fit-content` in 260px at its widest line, 250.)
+/// is 250 and their max-content width 400; the wrapping box's `fit-content`
+/// width in 260px is css-sizing-3's `min(400, max(250, 260))`, 260.)
 #[test]
 fn an_anchored_axis_keeps_its_intrinsic_sizing_keyword() {
     let anchor = |width| vec![("--a", Size::new(width, 30.0))];
@@ -678,7 +678,7 @@ fn an_anchored_axis_keeps_its_intrinsic_sizing_keyword() {
         ),
         (
             "width: fit-content; margin-left: 40px",
-            250.0,
+            260.0,
             anchor(40.0),
             TestStyle {
                 size: Size::new(StyleSize::FitContent, size_auto()),

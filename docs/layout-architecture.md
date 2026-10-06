@@ -1219,8 +1219,15 @@ the engine we're succeeding.
 2. **Available space & flex base sizes** (§9.2) — flex base + hypothetical
    main size per item; child measurement via `compute_layout` probes
    with `SizingMode::IgnoreSizeStyles`.
-3. **Line breaking** (§9.3) — single line for `NoWrap`, else greedy
-   line-fill against main available size including `gap`.
+3. **Container main size and line breaking** (§9.2 step 4, §9.3) — single
+   line for `NoWrap`, else greedy line-fill against main available size
+   including `gap`. A container whose main size is not known takes its
+   §9.9.1 intrinsic main size under a min-/max-content constraint, and under
+   a definite one the fit-content size between those two (css-sizing-3
+   §5.2.2: an absolutely positioned box that does not stretch,
+   `fit-content`, an unstretched item), never the widest line broken at the
+   available size; a wrapping container then breaks its lines again at that
+   size.
 4. **Resolving flexible lengths** (§9.7) — the freeze/unfreeze grow/shrink
    loop per line → target main sizes.
 5. **Cross sizing** (§9.4) — hypothetical cross sizes (probes with known
