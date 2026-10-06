@@ -81,7 +81,7 @@ impl PaintOrder {
         point: Point2D<f32>,
         samples: &'frame SpaceSamples<'frame>,
     ) -> impl Iterator<Item = NodeId> + 'frame {
-        self.items
+        self.hit_testable_items()
             .iter()
             .rev()
             .filter_map(move |item| self.item_hit(item, point, samples))
@@ -113,7 +113,7 @@ impl PaintOrder {
         }
         Some(match item.kind {
             PaintItemKind::ElementBox => item.node,
-            PaintItemKind::TextRun { element } => element,
+            PaintItemKind::TextRun { element } | PaintItemKind::Backdrop { element } => element,
         })
     }
 

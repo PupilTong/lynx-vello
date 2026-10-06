@@ -176,6 +176,11 @@ pub(crate) struct PaintOrder {
     /// with its slot; see `scroll::initial_target`. Rarely non-empty, so
     /// not a recycled buffer.
     initial_targets: Vec<InitialTarget>,
+    /// The index of the first item of the topmost top-layer entry that
+    /// blocks the document (HTML's modal dialog), its `::backdrop`'s when it
+    /// has one: every item before it is inert to hit testing. `None` while
+    /// nothing blocks the document. See `tree::top_layer`.
+    inert_floor: Option<usize>,
     commit_id: u64,
 }
 
@@ -372,6 +377,7 @@ impl PaintOrder {
             auto_boxes: Vec::new(),
             snap_points: Vec::new(),
             initial_targets: Vec::new(),
+            inert_floor: None,
             commit_id: 0,
         }
     }
@@ -392,6 +398,21 @@ impl PaintOrder {
     #[must_use]
     pub(crate) fn items(&self) -> &[PaintItem] {
         &self.items
+    }
+
+    /// The items hit testing considers, back to front: every item above the
+    /// inert floor (see [`Self::inert_floor`]).
+    #[must_use]
+    pub(crate) fn hit_testable_items(&self) -> &[PaintItem] {
+        &self.items[self.inert_floor.unwrap_or(0)..]
+    }
+
+    /// The index of the first item a modal top-layer entry leaves
+    /// hit-testable, or `None` when nothing blocks the document.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) const fn inert_floor(&self) -> Option<usize> {
+        self.inert_floor
     }
 
     #[must_use]
@@ -649,7 +670,17 @@ impl PaintOrder {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PaintItemKind {
     ElementBox,
-    TextRun { element: NodeId },
+    TextRun {
+        element: NodeId,
+    },
+    /// A top-layer element's `::backdrop` box: painted as an element box of
+    /// the item's own node — the detached backdrop node, whose style and
+    /// layout the walk reads — and hit-tested as `element`, the originating
+    /// element, as a browser targets a pointer on the backdrop
+    /// (`tree::top_layer`).
+    Backdrop {
+        element: NodeId,
+    },
 }
 
 /// One node's entry in the paint order.

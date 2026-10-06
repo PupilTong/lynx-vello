@@ -45,10 +45,12 @@
 //!
 //! css-contain-2 also makes a box relevant when it is in the **top layer**,
 //! contains the **focused** element, contains a **selection**, or is captured
-//! in a **view transition**. All four are N/A: `dom` has no top layer (no
-//! dialog, no fullscreen), no focus model, no selection, and no view
-//! transitions. When any of them arrives, it belongs in
-//! [`determine`] beside the geometric test, never instead of it.
+//! in a **view transition**. The top layer exists (`tree::top_layer`), and
+//! its clause sits beside the geometric test in
+//! [`Document::determine_relevance`]. The other three are N/A: `dom` has no
+//! focus model, no selection, and no view transitions. When any of them
+//! arrives, it belongs there too, beside the geometric test, never instead
+//! of it.
 //!
 //! # The pass loop
 //!
@@ -161,8 +163,11 @@ impl<T: Sync> Document<T> {
             // anchor of a positioned box outside it that is itself shown is
             // relevant, wherever it is. Asked only of a box about to skip,
             // and only on a page with anchor-positioned boxes.
+            // css-contain-2 §4: an element in the top layer is relevant.
             let state = Relevance::of(
-                scratch.plan.admits_auto_box(frame, auto) || self.anchor_keeps_relevant(auto.node),
+                scratch.plan.admits_auto_box(frame, auto)
+                    || self.anchor_keeps_relevant(auto.node)
+                    || self.in_top_layer(auto.node),
             );
             if self.arenas_mut().determine_relevance(slot, state) {
                 scratch.flips.push(auto.node);
