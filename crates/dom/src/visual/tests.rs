@@ -3531,3 +3531,40 @@ fn a_scrolling_modal_dialog_chains_to_nothing_behind_it() {
     assert_eq!(outside.node, dialog);
     assert_eq!(outside.scroll, None, "a backdrop hit scrolls nothing");
 }
+
+/// A top-layer element inside a scrolled scroller stays where the viewport
+/// places it: no ancestor scroll offset reaches it, in paint or in hits.
+#[test]
+fn a_top_layer_element_ignores_its_ancestors_scroll_offset() {
+    let mut h = top_layer_harness(
+        ".scroller { display: flex; flex-direction: column; position: relative;
+                     overflow: scroll; width: 200px; height: 200px; }
+         .tall { display: flex; flex-shrink: 0; width: 200px; height: 1000px; }
+         .dialog { left: 300px; top: 100px; width: 50px; height: 50px; }
+         dialog::backdrop { display: none; }",
+    );
+    let root = h.root();
+    let scroller = h.el(root, "view.scroller");
+    h.el(scroller, "view.tall");
+    let dialog = h.el(scroller, "dialog.modal.dialog");
+    h.doc.dom.add_to_top_layer(dialog, true);
+    h.doc.dom.layout();
+    h.doc
+        .dom
+        .scroll_to(scroller, crate::Vector2D::new(0.0, 300.0));
+    let paint = h.paint();
+    let item = &paint.items()[element_index(&paint, dialog)];
+    assert_eq!(item.space, None);
+    assert_eq!(
+        item.transform,
+        euclid::default::Transform3D::translation(300.0, 100.0, 0.0)
+    );
+    assert_eq!(h.hit(310.0, 110.0), Some(dialog));
+    assert_eq!(
+        h.doc
+            .dom
+            .bounding_client_rect(dialog)
+            .map(|rect| (rect.origin.x, rect.origin.y)),
+        Some((300.0, 100.0))
+    );
+}

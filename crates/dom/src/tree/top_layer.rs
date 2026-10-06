@@ -10,7 +10,7 @@
 //! to rendering:
 //!
 //! - **Containing block.** A top-layer element's containing block is the initial containing block,
-//!   whatever its ancestors (§3.1): the position lowering ([`crate::layout::resolve_position`])
+//!   whatever its ancestors (§3.1): the position lowering (`layout::style::resolve_position`)
 //!   answers `fixed` for it, so its parent records only a static position, and
 //!   [`crate::layout::anchors::containing_block_generator`] answers the initial containing block,
 //!   so the rounding tail places it against the viewport with a static position of zero. The
