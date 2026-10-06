@@ -123,6 +123,90 @@ fn gradient_color_fills_glyph_ink_from_the_padding_box() {
     );
 }
 
+/// Renders a 100px square at the page origin with `background-image: <image>`
+/// over a white page.
+fn gradient_square(name: &str, image: &str) -> Vec<u8> {
+    let mut gpu = headless(name);
+    let css = format!(
+        "page {{ display: flex; position: relative; width: 200px; height: 100px; }}
+        .square {{ display: flex; position: absolute; left: 0px; top: 0px;
+                   width: 100px; height: 100px; background-image: {image}; }}"
+    );
+    let mut doc = Doc::with_css(&css);
+    let root = doc.root;
+    doc.el(root, "square");
+
+    doc.dom.render();
+    let scene = doc.dom.scene(&dom::NoImages);
+    gpu.render(&scene, &[], 200, 100, Color::WHITE)
+        .expect("headless render")
+}
+
+#[test]
+fn a_linear_gradients_first_stop_colours_the_line_before_it() {
+    let pixels = gradient_square(
+        "a_linear_gradients_first_stop_colours_the_line_before_it",
+        "linear-gradient(red 50%, blue 50%)",
+    );
+    for y in [5, 25, 45] {
+        let above = pixel(&pixels, 200, 50, y);
+        assert!(
+            above[0] > 240 && above[2] < 15,
+            "the line before the first stop is its colour at y={y} ({above:?})"
+        );
+    }
+    for y in [55, 75, 95] {
+        let below = pixel(&pixels, 200, 50, y);
+        assert!(
+            below[0] < 15 && below[2] > 240,
+            "the line past the hard edge is blue at y={y} ({below:?})"
+        );
+    }
+}
+
+#[test]
+fn a_linear_gradients_last_stop_colours_the_line_past_it() {
+    // The stop at -50% re-maps the ramp so the hard edge at 50% is its end.
+    let pixels = gradient_square(
+        "a_linear_gradients_last_stop_colours_the_line_past_it",
+        "linear-gradient(red -50%, red 50%, blue 50%)",
+    );
+    let above = pixel(&pixels, 200, 50, 45);
+    assert!(
+        above[0] > 240 && above[2] < 15,
+        "the line before the hard edge is red ({above:?})"
+    );
+    for y in [55, 75, 95] {
+        let below = pixel(&pixels, 200, 50, y);
+        assert!(
+            below[0] < 15 && below[2] > 240,
+            "the line past the last stop is its colour at y={y} ({below:?})"
+        );
+    }
+}
+
+#[test]
+fn a_radial_gradients_first_stop_fills_the_disc_up_to_it() {
+    let pixels = gradient_square(
+        "a_radial_gradients_first_stop_fills_the_disc_up_to_it",
+        "radial-gradient(circle 40px, red 100%, transparent 100%)",
+    );
+    for x in [50, 70, 87] {
+        let inside = pixel(&pixels, 200, x, 50);
+        assert!(
+            inside[0] > 240 && inside[1] < 15 && inside[2] < 15,
+            "the disc is solid red up to its edge at x={x} ({inside:?})"
+        );
+    }
+    for (x, y) in [(93, 50), (50, 7), (5, 5)] {
+        assert_eq!(
+            pixel(&pixels, 200, x, y),
+            WHITE,
+            "past the last stop the disc is transparent at ({x}, {y})"
+        );
+    }
+}
+
 #[test]
 fn outline_rings_the_border_box() {
     let mut gpu = headless("outline_rings_the_border_box");

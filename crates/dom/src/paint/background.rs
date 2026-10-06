@@ -900,10 +900,7 @@ fn linear_gradient(
             };
             return Some(GradientBrush::Solid(color));
         }
-        let remapped: Vec<(f32, Color)> = stops
-            .iter()
-            .map(|&(p, c)| (((p - first) / span) as f32, c))
-            .collect();
+        let remapped = ramp_stops(&stops, |p| ((p - first) / span) as f32);
         let gradient = peniko::Gradient::new_linear(start.lerp(end, first), start.lerp(end, last))
             .with_stops(remapped.as_slice())
             .with_extend(if repeating {
@@ -916,7 +913,7 @@ fn linear_gradient(
             local: Affine::IDENTITY,
         });
     }
-    let plain: Vec<(f32, Color)> = stops.iter().map(|&(p, c)| (p as f32, c)).collect();
+    let plain = ramp_stops(&stops, |p| p as f32);
     Some(GradientBrush::Gradient {
         gradient: peniko::Gradient::new_linear(start, end).with_stops(plain.as_slice()),
         local: Affine::IDENTITY,
@@ -976,10 +973,7 @@ fn radial_gradient(
         }
         let shift = (-first / span).ceil().max(0.0) * span;
         let (first, last) = (first + shift, last + shift);
-        let remapped: Vec<(f32, Color)> = stops
-            .iter()
-            .map(|&(p, c)| ((((p + shift) - first) / span) as f32, c))
-            .collect();
+        let remapped = ramp_stops(&stops, |p| (((p + shift) - first) / span) as f32);
         let gradient = peniko::Gradient::new_two_point_radial(
             center,
             (stop_basis * first) as f32,
@@ -995,13 +989,39 @@ fn radial_gradient(
         return Some(GradientBrush::Solid(stops[0].1));
     }
     let extent = last.max(1.0);
-    let scaled: Vec<(f32, Color)> = stops
-        .iter()
-        .map(|&(p, c)| ((p / extent) as f32, c))
-        .collect();
+    let scaled = ramp_stops(&stops, |p| (p / extent) as f32);
     let gradient = peniko::Gradient::new_radial(center, (stop_basis * extent) as f32)
         .with_stops(scaled.as_slice());
     Some(GradientBrush::Gradient { gradient, local })
+}
+
+/// The largest `f32` below 1: where stops resolved to the ramp's end are kept.
+const RAMP_END: f32 = 1.0 - f32::EPSILON / 2.0;
+
+/// Maps fixed-up stops onto the `[0, 1]` ramp vello samples so both ends hold
+/// their stop's colour.
+///
+/// css-images-3 §3.4.2: "Before the first color stop, the gradient line is
+/// the color of the first color stop, and after the last color stop, the
+/// gradient line is the color of the last color stop." `vello_encoding` 0.10's
+/// `make_ramp` breaks both halves. It never reads the first stop's offset —
+/// its first segment always runs from 0 to the second stop — so
+/// `red 50%, blue 50%` would fade over [0, 0.5]; a copy of the first stop at
+/// 0 holds its colour instead. And it advances past a stop only once a sample
+/// lies strictly beyond it, so the sample at 1, which `Extend::Pad` stretches
+/// past the end, takes the *first* of several stops at 1: the disc in
+/// `red 100%, transparent 100%` would pad red. Pulling those stops to the
+/// largest offset below 1 lets the last sample reach the last stop; the move
+/// is far below one of the ramp's 512 samples.
+fn ramp_stops(stops: &[(f64, Color)], offset: impl Fn(f64) -> f32) -> Vec<(f32, Color)> {
+    let mut out = Vec::with_capacity(stops.len() + 1);
+    if let Some(&(first, color)) = stops.first()
+        && offset(first) > 0.0
+    {
+        out.push((0.0, color));
+    }
+    out.extend(stops.iter().map(|&(p, c)| (offset(p).min(RAMP_END), c)));
+    out
 }
 
 fn synthesize_zero_radius_stop(stops: Vec<(f64, Color)>) -> Vec<(f64, Color)> {
