@@ -550,6 +550,10 @@ impl<T> Document<T> {
         // move it. It is the computed value, not hughie's parent-lowered
         // one, so it matches what the paint walk keys its flow contexts on.
         let mut escape = *style.values().get_box().get_position();
+        // A top-layer element's containing block is the initial one: no box
+        // above it is on its chain, nor on its descendants' past it.
+        let top_layer = self.arenas().top_layer();
+        let mut escaped = top_layer.places_against_viewport(id);
         let mut current = node;
         let mut top = id;
         // `box_parent` skips `display: contents` ancestors, which hold a
@@ -566,17 +570,18 @@ impl<T> Document<T> {
             let ancestor_id = ancestor.id();
             let ancestor_layout = self.rounded_layout(ancestor_id)?;
             origin += Vector2D::new(ancestor_layout.location.x, ancestor_layout.location.y);
-            let on_chain = match escape {
-                PositionProperty::Absolute => {
-                    establishes_absolute_containing_block(ancestor, ancestor_style.values())
-                }
-                PositionProperty::Fixed => {
-                    establishes_fixed_containing_block(ancestor, ancestor_style.values())
-                }
-                PositionProperty::Static
-                | PositionProperty::Relative
-                | PositionProperty::Sticky => true,
-            };
+            let on_chain = !escaped
+                && match escape {
+                    PositionProperty::Absolute => {
+                        establishes_absolute_containing_block(ancestor, ancestor_style.values())
+                    }
+                    PositionProperty::Fixed => {
+                        establishes_fixed_containing_block(ancestor, ancestor_style.values())
+                    }
+                    PositionProperty::Static
+                    | PositionProperty::Relative
+                    | PositionProperty::Sticky => true,
+                };
             if on_chain {
                 if *ancestor_style.values().get_box().get_position() == PositionProperty::Sticky {
                     origin +=
@@ -588,6 +593,7 @@ impl<T> Document<T> {
                 origin += shift(ancestor_id);
                 escape = *ancestor_style.values().get_box().get_position();
             }
+            escaped |= top_layer.places_against_viewport(ancestor_id);
             current = ancestor;
             top = ancestor_id;
         }

@@ -139,6 +139,12 @@ pub(crate) fn establishes_absolute_containing_block<T>(
         return false;
     }
     *style.get_box().get_position() != PositionProperty::Static
+        // css-position-4 §3.1 computes a top-layer element's position to
+        // `absolute` when it is neither `absolute` nor `fixed`. Stylo's
+        // adjuster would, but the fork's `lynx` build cannot parse the
+        // `-servo-top-layer` longhand that switches it on, so membership
+        // stands in for the computed value here (`tree::top_layer`).
+        || node.arenas().top_layer().places_against_viewport(node.id())
         || style
             .get_box()
             .will_change

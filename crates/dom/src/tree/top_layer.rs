@@ -45,10 +45,24 @@
 //! compared with the previous one through Stylo's own damage computation,
 //! and stored only when it differs — so a flush that changed nothing the
 //! backdrop reads costs one cascade per entry and no layout. `::backdrop`
-//! rules of every origin take part, and the UA-only `-servo-top-layer:
-//! auto` makes Stylo's adjuster apply §3.1's computed-value fixups to it.
-//! Animations and transitions on `::backdrop` itself are not run: the lazy
-//! cascade has no animation declarations.
+//! rules of every origin take part. Animations and transitions on
+//! `::backdrop` itself are not run: the lazy cascade has no animation
+//! declarations.
+//!
+//! # §3.1's computed-value fixups
+//!
+//! Stylo applies them (`StyleAdjuster::adjust_for_top_layer`: a position
+//! other than `absolute`/`fixed` computes to `absolute`, `display: contents`
+//! to its block equivalent) to a style whose `-servo-top-layer` is `auto`.
+//! The fork's `lynx` build compiles that longhand as storage but leaves it
+//! out of the property-name table (`LYNX_INTERNAL_LONGHANDS`), so no sheet,
+//! the UA sheet included, can declare it, and the fixups never run. What
+//! they would decide is taken from membership instead where this crate
+//! reads it: the position lowering answers `fixed`, and a top-layer
+//! element establishes the containing block of its absolutely positioned
+//! descendants whatever its computed position. A top-layer element whose
+//! `display` computes to `contents` generates no box and so does not render
+//! (a browser would blockify it).
 //!
 //! # Removal
 //!
@@ -374,5 +388,178 @@ impl<T: Sync> Document<T> {
             false,
             None,
         )
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    #![allow(clippy::float_cmp)]
+
+    use crate::NodeId;
+    use crate::test_common::Doc;
+
+    /// The parts of bobcat-core's UA sheet these tests read.
+    const UA: &str = "
+        dialog { display: flex; position: absolute; }
+        dialog.modal { position: fixed; }
+        ::backdrop { display: flex; position: fixed; inset: 0; }
+        dialog::backdrop { background-color: rgba(0, 0, 0, 0.1); }";
+
+    fn page(css: &str) -> (Doc, NodeId) {
+        let mut doc = Doc::with_css(&format!(
+            "page {{ display: flex; width: 800px; height: 600px; }} {css}"
+        ));
+        doc.add_ua_css(UA);
+        let dialog = doc.el(doc.root, "dialog.modal");
+        (doc, dialog)
+    }
+
+    fn backdrop_of(doc: &Doc, element: NodeId) -> NodeId {
+        doc.dom
+            .arenas()
+            .top_layer()
+            .entries()
+            .iter()
+            .find(|entry| entry.element() == element)
+            .expect("in the top layer")
+            .backdrop
+    }
+
+    fn rect(doc: &Doc, id: NodeId) -> (f32, f32, f32, f32) {
+        let layout = doc.dom.rounded_layout(id).expect("laid out");
+        (
+            layout.location.x,
+            layout.location.y,
+            layout.size.width,
+            layout.size.height,
+        )
+    }
+
+    #[test]
+    fn the_ua_default_and_an_author_rule_both_reach_the_backdrop() {
+        let (mut doc, dialog) =
+            page("dialog::backdrop { border-top-width: 7px; border-top-style: solid; }");
+        doc.dom.add_to_top_layer(dialog, true);
+        doc.flush();
+        let backdrop = backdrop_of(&doc, dialog);
+        assert_eq!(doc.value(backdrop, "position"), "fixed", "UA origin");
+        assert_eq!(doc.value(backdrop, "top"), "0px", "UA origin");
+        assert_eq!(
+            doc.value(backdrop, "background-color"),
+            "rgba(0, 0, 0, 0.1)"
+        );
+        assert_eq!(
+            doc.value(backdrop, "border-top-width"),
+            "7px",
+            "author origin"
+        );
+
+        doc.add_css("dialog::backdrop { background-color: rgb(1, 2, 3); top: 10px; }");
+        doc.flush();
+        assert_eq!(doc.value(backdrop, "background-color"), "rgb(1, 2, 3)");
+        assert_eq!(doc.value(backdrop, "top"), "10px", "author over UA");
+    }
+
+    #[test]
+    fn the_backdrop_inherits_from_its_element_and_follows_its_restyle() {
+        let (mut doc, dialog) = page(
+            "dialog { color: rgb(10, 20, 30); font-size: 21px; }
+             dialog.warm { color: rgb(200, 0, 0); }",
+        );
+        doc.dom.add_to_top_layer(dialog, true);
+        doc.flush();
+        let backdrop = backdrop_of(&doc, dialog);
+        assert_eq!(doc.value(backdrop, "color"), "rgb(10, 20, 30)");
+        assert_eq!(doc.value(backdrop, "font-size"), "21px");
+        doc.add_class(dialog, "warm");
+        doc.flush();
+        assert_eq!(doc.value(backdrop, "color"), "rgb(200, 0, 0)");
+    }
+
+    #[test]
+    fn a_modal_state_rule_on_the_backdrop_restyles_with_the_state() {
+        let (mut doc, dialog) =
+            page("dialog:modal::backdrop { background-color: rgb(0, 0, 255); }");
+        doc.dom.add_to_top_layer(dialog, true);
+        doc.flush();
+        let backdrop = backdrop_of(&doc, dialog);
+        assert_eq!(
+            doc.value(backdrop, "background-color"),
+            "rgba(0, 0, 0, 0.1)"
+        );
+        doc.dom
+            .add_element_state(dialog, crate::ElementState::MODAL);
+        doc.flush();
+        assert_eq!(doc.value(backdrop, "background-color"), "rgb(0, 0, 255)");
+    }
+
+    #[test]
+    fn the_backdrop_covers_the_viewport_and_follows_insets_and_resizes() {
+        let (mut doc, dialog) = page(".modal { width: 100px; height: 50px; }");
+        doc.dom.add_to_top_layer(dialog, true);
+        doc.flush();
+        let backdrop = backdrop_of(&doc, dialog);
+        assert_eq!(rect(&doc, backdrop), (0.0, 0.0, 800.0, 600.0));
+
+        doc.add_css("dialog::backdrop { inset: 10px; }");
+        doc.flush();
+        assert_eq!(rect(&doc, backdrop), (10.0, 10.0, 780.0, 580.0));
+
+        doc.dom.set_viewport(400.0, 300.0);
+        doc.flush();
+        assert_eq!(rect(&doc, backdrop), (10.0, 10.0, 380.0, 280.0));
+    }
+
+    #[test]
+    fn an_element_that_does_not_render_paints_no_backdrop() {
+        let (mut doc, dialog) = page(".gone { display: none; }");
+        doc.dom.add_to_top_layer(dialog, true);
+        let paint = doc.dom.build_paint_order();
+        assert!(
+            paint
+                .items()
+                .iter()
+                .any(|item| matches!(item.kind, crate::visual::PaintItemKind::Backdrop { .. }))
+        );
+        let wrapper = doc.el(doc.root, "view.gone");
+        doc.dom.append_child(wrapper, dialog);
+        // A move leaves the top layer (HTML's removing steps run).
+        assert!(!doc.dom.in_top_layer(dialog));
+        doc.dom.add_to_top_layer(dialog, true);
+        let paint = doc.dom.build_paint_order();
+        assert!(
+            paint
+                .items()
+                .iter()
+                .all(|item| item.node != dialog && item.node != backdrop_of(&doc, dialog)),
+            "nothing under a `display: none` ancestor paints"
+        );
+        assert_eq!(
+            paint.inert_floor(),
+            Some(paint.items().len()),
+            "still blocks"
+        );
+    }
+
+    #[test]
+    fn content_none_suppresses_the_backdrop_box() {
+        let (mut doc, dialog) = page("dialog::backdrop { content: none; }");
+        doc.dom.add_to_top_layer(dialog, true);
+        let paint = doc.dom.build_paint_order();
+        assert!(
+            paint
+                .items()
+                .iter()
+                .all(|item| !matches!(item.kind, crate::visual::PaintItemKind::Backdrop { .. }))
+        );
+    }
+
+    #[test]
+    fn an_empty_top_layer_cascades_no_backdrop() {
+        let (mut doc, _) = page("");
+        doc.flush();
+        assert!(!doc.dom.backdrops_need_restyle());
+        assert_eq!(doc.dom.restyle_backdrops().restyled, 0);
     }
 }

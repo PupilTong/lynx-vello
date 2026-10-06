@@ -577,6 +577,11 @@ impl<T> Document<T> {
         if !node.is_element() {
             return node.flat_parent_id();
         }
+        // A top-layer element's chain ends at it: its containing block is
+        // the initial one (`tree::top_layer`).
+        if node.arenas().top_layer().places_against_viewport(id) {
+            return None;
+        }
         let style = node.layout_computed_style()?;
         match *style.get_box().get_position() {
             PositionProperty::Absolute => Self::containing_block(node, false),
@@ -588,6 +593,7 @@ impl<T> Document<T> {
     }
 
     fn containing_block(node: &Node<T>, fixed: bool) -> Option<NodeId> {
+        let top_layer = node.arenas().top_layer();
         let mut current = box_parent(node);
         while let Some(ancestor) = current {
             let style = ancestor.layout_computed_style()?;
@@ -598,6 +604,9 @@ impl<T> Document<T> {
             };
             if establishes {
                 return Some(ancestor.id());
+            }
+            if !top_layer.is_empty() && top_layer.contains(ancestor.id()) {
+                return None;
             }
             current = box_parent(ancestor);
         }
