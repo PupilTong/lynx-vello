@@ -344,10 +344,11 @@ Starting and cancelling animations belong to the style flush the main thread
 already runs at `__FlushElementTree`.
 
 **Every job starts at the painter's clock.** The realm driver's `enter_now`
-(`realm/owner.rs`), the body of every job that enters a view's realm, runs the
-page's `before_operation` hook, which reads the clock the painter last wrote
-into the mailbox — lock-free, an `AtomicU64` of the `f64` bits — and calls
-`Document::sync_animation_clock` before the job's operation
+(`realm/owner.rs`) is the body of every job `enter` queues, and
+`Page::open_realm` runs it inline once it has stored the realm. `enter_now`
+runs the page's `before_operation` hook, which reads the clock the painter
+last wrote into the mailbox — lock-free, an `AtomicU64` of the `f64` bits —
+and calls `Document::sync_animation_clock` before the entry's operation
 runs: the timeline moves to that instant (never back) and every live
 animation and transition is promoted at an anchored start, iterated and
 ended, with nothing re-cascaded and nothing committed; the next tick
@@ -357,7 +358,10 @@ HTML's order — timelines are current before a task's style change events —
 and it is what lets a restyle while an exported curve covers the element (a
 transition retargeted or reversed, `animation-play-state: paused`) compute
 from the instant the painter showed rather than from the last frame main
-ticked, which may be arbitrarily old.
+ticked, which may be arbitrarily old. JavaScript runs in a view's realm
+without the hook in two places: `Page::open_realm` starts the boot module
+before it runs `enter_now`, and the disposal exchange of an ended view runs
+as `after_end` jobs.
 
 A fresh `Pending` start is still not anchored by the flush that creates it:
 the first frame after it is what starts it, and the driver shifts the pending
