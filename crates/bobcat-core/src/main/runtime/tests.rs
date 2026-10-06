@@ -2265,12 +2265,18 @@ fn swiper_autoplay_turns_one_item_per_tick_until_autoplay_goes_away() {
         &mut js_runtime,
         "import { __FlushElementTree } from 'bobcat:element'; __FlushElementTree();",
     );
-    let swiper = {
+    // The swiper scrolls its shadow `#content`, the shadow root's first
+    // child.
+    let content = {
         let tree = elements.tree();
         let page = tree.document_element().id();
-        tree.get(page).expect("the page").child_ids()[0]
+        let swiper = tree.get(page).expect("the page").child_ids()[0];
+        let shadow = tree
+            .shadow_root(swiper)
+            .expect("a swiper has a shadow tree");
+        tree.get(shadow).expect("the shadow root").child_ids()[0]
     };
-    let offset = || elements.tree().scroll_offset(swiper).x;
+    let offset = || elements.tree().scroll_offset(content).x;
     let mut seen = vec![offset()];
     for _ in 0..3 {
         assert!(runtime.run_due_timers(&mut js_runtime).is_empty());

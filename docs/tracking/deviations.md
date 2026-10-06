@@ -1285,16 +1285,21 @@ consequential choice about whether to follow the spec or the quirk.
     above. *No `contain: strict` from the fifth page on* (`:66-68`): a browser
     performance shortcut, not a behavior.
 
-- **`x-swiper` (2026-10-06): the authored swiper is the scroll container,
-  its layouts are UA rules, and autoplay is a realm interval.**
-  `crates/bobcat-core/src/main/tree/swiper.rs` translates `x-swiper.css` onto
-  web-core's two tags, `x-swiper` and `x-swiper-item` (web-core's tag map has
-  no `swiper` entry; native's tag is `swiper`, Android `XSwiperUI.java:52`).
-  No events and no UI methods. Where it leaves a reference:
-  - *The main axis and each item's main-axis size are UA `!important`*
-    (§D.15, [style-assumptions.md](../style-assumptions.md)), web-core's own
-    `!important` declarations kept as structural invariants because no
-    shadow box holds the items here. An item's `position` is not pinned.
+- **`x-swiper` (2026-10-06): a component with web-core's shadow `#content`
+  scroll container and a dot strip, its layouts are UA rules, and autoplay is
+  a realm interval.** `crates/bobcat-core/src/main/tree/swiper.rs` translates
+  `x-swiper.css` and its template (`htmlTemplates.ts:225-275`) onto web-core's
+  two tags, `x-swiper` and `x-swiper-item` (web-core's tag map has no `swiper`
+  entry; native's tag is `swiper`, Android `XSwiperUI.java:52`). No events and
+  no UI methods. Where it leaves a reference:
+  - *The shadow tree is `#content` (with one default slot) and `#indicator`
+    only*: no `#bounce-padding`, no `circular-start`/`circular-end` slots, no
+    per-dot elements.
+  - *Each item's main-axis size is UA `!important`* (§D.15,
+    [style-assumptions.md](../style-assumptions.md)), web-core's own
+    `!important` kept as a structural invariant. The main axis itself is a
+    plain declaration on `#content`, which no author rule reaches, as in
+    web-core. An item's `position` is not pinned.
   - *`coverflow` is flat.* web-core's keyframes rotate each item
     (`rotateY`/`rotateX`, `x-swiper.css:244-267`) under `perspective: 200px`
     and `transform-style: preserve-3d`; here only their `scale()` is kept,
@@ -1348,12 +1353,39 @@ consequential choice about whether to follow the spec or the quirk.
     `previous-margin`/`next-margin` size and offset the page in `coverflow`,
     `flat-coverflow` and `carry` (`:617-638`), and `duration` is the turn's
     animation length, 500 ms by default (`:91,855-863`).
-  - *Not implemented:* the indicator dots (`indicator-dots`,
-    `indicator-color`, `indicator-active-color`) — generated boxes, while no
-    tag uses a shadow tree and `::before`/`::after` are deferred — so no
-    swiper draws dots, which is native's default (`XSwiperUI.java:887-890`)
-    and not web-core's (it draws them unless `indicator-dots` is present,
-    `x-swiper.css:133-135`); `circular` wrap-around dragging (web-core
+  - *`indicator-dots`: shown by default and by `"true"`, hidden by any other
+    present value.* The default is web-core's (native's is hidden,
+    `@LynxProp(name = "indicator-dots", defaultBoolean = false)`,
+    `XSwiperUI.java:887-890`); `"true"` showing is native's (web-core's rule
+    `x-swiper[indicator-dots]::part(indicator-container) { display: none }`,
+    `x-swiper.css:133-135`, hides the dots for any present value, `"true"`
+    included); every other value hides them on both references, including the
+    literal string `"{{false}}"` that web-core's own golden
+    `basic-element-x-swiper-indicator-dots` writes
+    (`__SetAttribute(s, "indicator-dots", "{{false}}")` in its `.web.bundle`)
+    and shows hidden. The architect's decision.
+  - *The strip's geometry is web-core's, not native's*: a `0.6rem` dot
+    (`1rem` is 16px here, so 9.6px) at a `0.6rem × 7 / 5` pitch, `0.5rem` in
+    from the bottom edge (the right edge under `vertical`)
+    (`x-swiper.css:137-178`). Native draws a 7dp dot with 3.5dp on each side
+    (a 14dp pitch), 10dp from the edge (Android `SwiperView.java:50,85,92,
+    112-116`), and its default inactive colour is white at 35%
+    (`XSwiperUI.java:57`) where web-core's is `#ffffff4d` (30%). The strip's
+    box spans only the dots; web-core's container spans the whole edge, so a
+    press beside the dots reaches `#content` here and the container there.
+    An `indicator-color` that is no colour keeps the default, as native does
+    (`XSwiperUI.java:892-901`); web-core writes it into `--indicator-color`
+    unchecked.
+  - *The active dot switches at the scroll range's page boundaries.* One
+    animation on `#content`'s scroll timeline, `steps(count, jump-none)`,
+    moves the active layer, so the dot changes when the offset passes the
+    middle of a step of the whole range. web-core runs one animation per dot
+    on its item's view timeline, active between 30% and 70% of it
+    (`htmlTemplates.ts:250-266`), and native switches on page selection.
+    Before a centred mode's at-rest snap settles an initial `current` under
+    `vertical`, the first frame can show the dot after it, for the frame
+    that shows the item's start.
+  - *Not implemented:* `circular` wrap-around dragging (web-core
     re-slots the edge items in its shadow tree, `XSwiperCircular.ts`, and
     turns snapping off, `x-swiper.css:122-131`) — here `circular` only makes
     autoplay wrap from the last item to the first; every event; every UI

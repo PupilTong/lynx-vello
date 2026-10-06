@@ -409,7 +409,9 @@ impl<T> Document<T> {
 
         let mut x = Vec::new();
         let mut y = Vec::new();
-        let mut pending: Vec<NodeId> = node.child_ids().iter().rev().copied().collect();
+        // The flat tree: a snap area is a box, and a scroll container in a
+        // shadow tree holds its slotted descendants' boxes.
+        let mut pending: Vec<NodeId> = node.flat_children().iter().rev().copied().collect();
         while let Some(child_id) = pending.pop() {
             let Some(child) = self.get(child_id) else {
                 continue;
@@ -452,7 +454,7 @@ impl<T> Document<T> {
                 // may still be one of our areas.
                 continue;
             }
-            pending.extend(child.child_ids().iter().rev());
+            pending.extend(child.flat_children().iter().rev());
         }
         x.sort_by(|a, b| a.min.total_cmp(&b.min));
         y.sort_by(|a, b| a.min.total_cmp(&b.min));

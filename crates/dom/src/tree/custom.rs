@@ -83,7 +83,10 @@
 //!   would force every removal to detect and refuse at run time. `&Document` makes them
 //!   unrepresentable instead, and costs a teardown handler nothing it needs: its own element, its
 //!   subtree, its attributes, and its computed style are all still readable. The other three
-//!   callbacks keep `&mut Document`; none of them runs with a free pending.
+//!   callbacks and `children_changed` keep `&mut Document`; none of them runs with a free pending.
+//! - **`children_changed` is not a standard callback.** It stands in for the `MutationObserver` a
+//!   script component would attach to itself (`childList`, no `subtree`), which needs a microtask
+//!   checkpoint this crate does not own; see [`CustomElement::children_changed`].
 //! - **A callback may detach any node, but may not free one its caller is still holding.**
 //!   [`Document::create_element`] and the constructor call pin the id they will still be naming
 //!   once the drain returns, and [`Document::drop_element`]/[`Document::drop_subtree`] refuse to
@@ -148,6 +151,29 @@ pub trait CustomElement<T> {
         let _ = (document, element, name, old, new);
     }
 
+    /// `element`'s own child list changed: a child was inserted, removed, or
+    /// moved within it.
+    ///
+    /// The standard has no such callback; a script component observes its
+    /// children with a `MutationObserver` (`childList: true`, `subtree:
+    /// false`), and this is that observer's delivery for an engine component,
+    /// without the records — the component reads the child list it now has.
+    /// It is a reaction like the four lifecycle callbacks: queued by the
+    /// mutation and run at the same `[CEReactions]` boundary, after the
+    /// connected and disconnected reactions the same mutation raised. One
+    /// mutation raises it at most once per parent — a move within one parent
+    /// is one change — and only for a parent that is a constructed custom
+    /// element: an element still in its constructor, or any other parent,
+    /// costs the mutation one state check. Only the node tree counts, so a
+    /// change inside the element's shadow tree does not raise it.
+    ///
+    /// A removal that frees the removed node raises it once the node is
+    /// freed, in a scope of its own, so the handler can mutate the document
+    /// without reaching a node about to go.
+    fn children_changed(&self, document: &mut Document<T>, element: NodeId) {
+        let _ = (document, element);
+    }
+
     /// One engine event reaching this element, on the standard's path.
     ///
     /// Not a lifecycle callback: it is called by
@@ -203,6 +229,7 @@ enum Reaction {
         old: Option<String>,
         new: Option<String>,
     },
+    ChildrenChanged,
 }
 
 struct Definition<T> {
@@ -477,6 +504,12 @@ impl<T> Document<T> {
                     new.as_deref(),
                 );
             }
+            Reaction::ChildrenChanged => {
+                let Some(handler) = self.dispatch_target(element) else {
+                    return;
+                };
+                handler.children_changed(self, element);
+            }
         }
     }
 
@@ -593,6 +626,19 @@ impl<T> Document<T> {
         for element in removed {
             self.enqueue_reaction(element, Reaction::Disconnected);
         }
+    }
+
+    /// Queues [`CustomElement::children_changed`] for `parent`, whose child
+    /// list a mutation just changed, when it is a constructed custom element.
+    pub(crate) fn note_children_changed(&mut self, parent: NodeId) {
+        if self.custom_elements.is_empty()
+            || self
+                .get(parent)
+                .is_none_or(|node| node.custom_state != CustomElementState::Custom)
+        {
+            return;
+        }
+        self.enqueue_reaction(parent, Reaction::ChildrenChanged);
     }
 
     pub(crate) fn observes_attribute(&self, element: NodeId, name: &LocalName) -> bool {

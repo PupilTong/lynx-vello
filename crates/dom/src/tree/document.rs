@@ -488,7 +488,7 @@ impl<T> Document<T> {
         );
 
         let base = self.begin_reactions();
-        self.unlink_from_parent(child);
+        let old_parent = self.unlink_from_parent(child);
         let index = match before {
             None => self
                 .get(parent)
@@ -516,6 +516,12 @@ impl<T> Document<T> {
         self.invalidate_hoisted_under(child);
         let connected = contains_custom_elements && self.is_connected(child);
         self.note_custom_elements_inserted(child, connected);
+        if let Some(old_parent) = old_parent
+            && old_parent != parent
+        {
+            self.note_children_changed(old_parent);
+        }
+        self.note_children_changed(parent);
         self.drain_reactions(base);
     }
 
@@ -563,8 +569,22 @@ impl<T> Document<T> {
     /// owner outside the tree that named the node still names it.
     pub fn remove_element(&mut self, child: NodeId) {
         let base = self.begin_reactions();
-        self.unlink_from_parent(child);
+        if let Some(parent) = self.unlink_from_parent(child) {
+            self.note_children_changed(parent);
+        }
         self.drain_reactions(base);
+    }
+
+    /// Raises [`CustomElement::children_changed`](crate::CustomElement::children_changed)
+    /// for the parent a freeing removal took a node from, in a scope of its
+    /// own once the node is gone: a handler run inside the removal's scope
+    /// could re-attach the node the removal is about to free.
+    fn note_children_changed_after_free(&mut self, parent: Option<NodeId>) {
+        if let Some(parent) = parent {
+            let base = self.begin_reactions();
+            self.note_children_changed(parent);
+            self.drain_reactions(base);
+        }
     }
 
     /// Frees `root`, a detached node, together with everything under it that
@@ -654,7 +674,9 @@ impl<T> Document<T> {
         self.note_slot_assignment_removed(parent, child);
     }
 
-    fn unlink_from_parent(&mut self, child: NodeId) {
+    /// Unlinks `child` and answers the parent it had, `None` when it was
+    /// detached already.
+    fn unlink_from_parent(&mut self, child: NodeId) -> Option<NodeId> {
         assert_ne!(
             child, DOCUMENT_NODE_ID,
             "the document node cannot be removed: it has no parent"
@@ -671,9 +693,7 @@ impl<T> Document<T> {
             .get(child)
             .expect("stale NodeId passed to a Document removal method")
             .parent_id();
-        let Some(parent) = old_parent else {
-            return;
-        };
+        let parent = old_parent?;
         let was_connected = self.custom_subtree_may_contain(child) && self.is_connected(parent);
 
         self.cancel_animations_in_subtree(child);
@@ -702,6 +722,7 @@ impl<T> Document<T> {
         );
         self.note_child_list_change(parent, removed_index);
         self.note_custom_elements_removed(child, was_connected);
+        Some(parent)
     }
 
     /// Frees `id`, returning its payload. Its element children are unlinked
@@ -740,17 +761,19 @@ impl<T> Document<T> {
         // whole subtree under it goes, elements and all.
         let in_shadow_tree = self.containing_shadow_root(id).is_some();
         let base = self.begin_reactions();
-        self.unlink_from_parent(id);
+        let parent = self.unlink_from_parent(id);
         self.drain_reactions(base);
         // No visual mutation is noted here. Every node this frees was either
         // detached already or detached by the unlink above, which noted one
         // itself; freeing what is not rendered changes no frame.
-        match self.free_owned_subtree(id, in_shadow_tree).0 {
+        let payload = match self.free_owned_subtree(id, in_shadow_tree).0 {
             PayloadSlot::Node(payload) => payload,
             PayloadSlot::ShadowRoot => unreachable!("a shadow root is refused above"),
             PayloadSlot::Document => unreachable!("the document node is refused above"),
             PayloadSlot::Reserved => unreachable!("no id resolves to the reservation"),
-        }
+        };
+        self.note_children_changed_after_free(parent);
+        payload
     }
 
     pub fn drop_subtree(&mut self, id: NodeId) -> Vec<T> {
@@ -768,7 +791,7 @@ impl<T> Document<T> {
         );
         self.assert_subtree_not_pinned(id);
         let base = self.begin_reactions();
-        self.unlink_from_parent(id);
+        let parent = self.unlink_from_parent(id);
         self.drain_reactions(base);
         self.note_visual_mutation();
         let mut removed = Vec::new();
@@ -793,6 +816,7 @@ impl<T> Document<T> {
             }
         }
         self.prune_relayout_roots();
+        self.note_children_changed_after_free(parent);
         removed
     }
 

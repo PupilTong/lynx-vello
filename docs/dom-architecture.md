@@ -135,7 +135,14 @@ hold instances in, so every callback names its element by `NodeId` and
 per-element state belongs to the layer owning `T`. The handler receives
 `constructed`, `connected_callback`, `disconnected_callback` and
 `attribute_changed_callback`, the last filtered by an `observed_attributes`
-list read once at definition time, plus `handle_event` — not a lifecycle
+list read once at definition time; `children_changed`, a non-standard
+reaction raised once per child-list mutation of a constructed element's own
+node-tree children (a shadow-tree change does not raise it) — the
+`MutationObserver` (`childList`, no `subtree`) a script component would
+attach to itself, queued and drained at the same `[CEReactions]` boundary,
+after the mutation's connected/disconnected reactions, and raised in a scope
+of its own after a freeing removal frees the node so its `&mut Document`
+cannot reach the doomed subtree; plus `handle_event` — not a lifecycle
 callback but the engine-side event hook, which is how a component hears
 something the engine decided about it or about its descendants (see the
 `event` module above). **Scope: user-agent components, not

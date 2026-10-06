@@ -712,7 +712,7 @@ mod tests {
         }
     }
 
-    /// A compiled `ReactLynx` card of four 120px `<x-swiper>`s, laid out by
+    /// A compiled `ReactLynx` card of six 120px `<x-swiper>`s, laid out by
     /// the engine's UA sheet alone: the top-left one starts on the blue item
     /// its `current={2}` names, the `vertical` top-right one on the green
     /// item of its `current={1}`, and the `coverflow` bottom-left one shows
@@ -720,6 +720,15 @@ mod tests {
     /// bottom-right one's one-second autoplay is not sampled: the capture
     /// does not wait for it; `crates/bobcat-source/tests/reactlynx_runtime.rs`
     /// does.
+    ///
+    /// The dots: a 9.6px dot every 13.44px (`1rem` is 16px), the strip
+    /// centred 8px in from the bottom edge, or the right edge when vertical,
+    /// so a horizontal swiper's dot `k` is centred at (46.56 + 13.44k, 107.2)
+    /// in it. The top-left one's third dot is the current one, white; the
+    /// vertical one's middle dot, at (227.2, 60), too. The third row's
+    /// `indicator-dots={false}` swiper shows its red item where its dots
+    /// would be, and the one beside it its custom colours: a cyan current
+    /// first dot and a yellow second.
     #[tokio::test(flavor = "current_thread")]
     async fn a_swiper_card_renders_its_current_items() {
         let executor = CaptureExecutor::new().expect("start capture owner thread");
@@ -751,6 +760,12 @@ mod tests {
             (180, 60, [0, 128, 0]),
             (60, 180, [0, 128, 0]),
             (5, 180, [255, 0, 0]),
+            (73, 107, [255, 255, 255]),
+            (227, 60, [255, 255, 255]),
+            (46, 347, [255, 0, 0]),
+            (60, 347, [255, 0, 0]),
+            (166, 347, [0, 255, 255]),
+            (180, 347, [255, 255, 0]),
         ] {
             assert_eq!(pixel(x, y), colour, "at ({x}, {y})");
         }

@@ -3,7 +3,7 @@
   left: 0px;
   top: 0px;
   width: 240px;
-  height: 240px;
+  height: 360px;
 }
 
 .swiper {
@@ -18,6 +18,10 @@
 
 .bottom {
   top: 120px;
+}
+
+.third {
+  top: 240px;
 }
 
 .left {

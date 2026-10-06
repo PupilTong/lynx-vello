@@ -101,9 +101,10 @@ impl<T> Document<T> {
         requested
     }
 
-    /// Of `candidates` under `container`, the first in tree order — the
-    /// only one when there is one, which is the common case and costs no
-    /// walk.
+    /// Of `candidates` under `container`, the first in flat tree order —
+    /// the only one when there is one, which is the common case and costs no
+    /// walk. The flat tree, because a container in a shadow tree reaches its
+    /// slotted descendants through it alone.
     fn first_in_tree_order(
         &self,
         container: NodeId,
@@ -115,7 +116,7 @@ impl<T> Document<T> {
         }
         let mut pending: Vec<NodeId> = self
             .get(container)?
-            .child_ids()
+            .flat_children()
             .iter()
             .rev()
             .copied()
@@ -125,7 +126,7 @@ impl<T> Document<T> {
                 return Some(id);
             }
             if let Some(node) = self.get(id) {
-                pending.extend(node.child_ids().iter().rev());
+                pending.extend(node.flat_children().iter().rev());
             }
         }
         None

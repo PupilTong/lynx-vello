@@ -293,14 +293,19 @@ async fn compiled_scroll_coordinator_folds_its_header_before_the_content() {
     );
 }
 
-/// A compiled card of four 120px `<x-swiper>`s in a 240px square, laid out
-/// by the engine's UA sheet: `current={2}` starts on its blue item, a
-/// `vertical` one with `current={1}` on its green item, a `coverflow` one
+/// A compiled card of six 120px `<x-swiper>`s in a 240px by 360px grid,
+/// laid out by the engine's UA sheet: `current={2}` starts on its blue item,
+/// a `vertical` one with `current={1}` on its green item, a `coverflow` one
 /// with `current={1}` shows its green item centred and its red one scaled
 /// down at its left, and a one-second `autoplay` one turns from red through
 /// green to blue, where it stays. The autoplay swiper carries
 /// `smooth-scroll`, so each turn is instant: an offscreen painter advances
-/// no smooth glide, which waits for display frames.
+/// no smooth glide, which waits for display frames. Its white current dot
+/// moves with it, from the first of its three dots, centred at
+/// (166.56, 227.2), to the third, at (193.44, 227.2) — the strip's
+/// animation runs on the main thread after each turn. The third row's dots
+/// are hidden on the left and custom-coloured on the right
+/// (`crates/bobcat-cli/src/server/capture.rs` has the geometry).
 #[tokio::test]
 async fn compiled_swipers_start_on_current_and_autoplay_to_the_last_item() {
     use bobcat_core::{DrawTarget, Painter};
@@ -308,6 +313,9 @@ async fn compiled_swipers_start_on_current_and_autoplay_to_the_last_item() {
     const RED: [u8; 4] = [255, 0, 0, 255];
     const GREEN: [u8; 4] = [0, 128, 0, 255];
     const BLUE: [u8; 4] = [0, 0, 255, 255];
+    const WHITE: [u8; 4] = [255, 255, 255, 255];
+    const CYAN: [u8; 4] = [0, 255, 255, 255];
+    const YELLOW: [u8; 4] = [255, 255, 0, 255];
 
     let page = PageSource::from_bytes(
         &Url::parse("app:///react-swiper.web.bundle").unwrap(),
@@ -320,7 +328,7 @@ async fn compiled_swipers_start_on_current_and_autoplay_to_the_last_item() {
         .await
         .unwrap();
     // `settle` reads the shot at the coordinator test's width.
-    let (width, height) = (f32::from(COORDINATOR_WIDTH), 240.0);
+    let (width, height) = (f32::from(COORDINATOR_WIDTH), 360.0);
     let mut view = group
         .create_lynx_view(
             width,
@@ -348,6 +356,11 @@ async fn compiled_swipers_start_on_current_and_autoplay_to_the_last_item() {
             (180, 60, GREEN),
             (60, 180, GREEN),
             (5, 180, RED),
+            (73, 107, WHITE),
+            (227, 60, WHITE),
+            (60, 347, RED),
+            (166, 347, CYAN),
+            (180, 347, YELLOW),
         ],
         "boot",
     );
@@ -355,7 +368,7 @@ async fn compiled_swipers_start_on_current_and_autoplay_to_the_last_item() {
         &mut view,
         &mut painter,
         &mut booted,
-        &[(180, 180, BLUE), (60, 60, BLUE)],
+        &[(180, 180, BLUE), (60, 60, BLUE), (193, 227, WHITE)],
         "autoplay",
     );
 }

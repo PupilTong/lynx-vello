@@ -112,18 +112,18 @@ impl Default for PageConfig {
 /// row is the fifth and sixth: its pages form one row in both references
 /// whatever main axis an author writes on it, so its `flex-direction`,
 /// `linear-direction` and `flex-wrap`, and its pages' `position`, are pinned
-/// ([`super::viewpager`] carries the argument). The swiper's main axis is
-/// eight more, after the pager's, for the same reason: the swiper's
-/// direction and wrap in a row and in a column, and its items' main-axis
-/// size in each of its layouts, which web-core itself pins
-/// ([`super::swiper`] carries the argument). The coordinator's structure
+/// ([`super::viewpager`] carries the argument). The swiper's items are six
+/// more, after the pager's: their main-axis size in each of its layouts,
+/// which web-core itself pins (the swiper's own main axis is on its shadow
+/// `#content`, out of every author rule's reach; [`super::swiper`] carries
+/// the argument). The coordinator's structure
 /// is six more, between the swiper's and the text block's in the sheet: its
 /// `overflow-y: scroll` and its column, the `overflow-y: hidden` that
 /// `enable-scroll="false"` needs to beat that scroll, and the header's, the
 /// toolbar's and the slot's positions, which its geometry is built from
 /// ([`super::scroll_coordinator`] carries the argument).
 /// `the_ua_sheet_is_important_free_apart_from_the_text_block` pins the set to
-/// exactly those twenty rules.
+/// exactly those eighteen rules.
 #[must_use]
 pub(super) fn ua_stylesheet(config: PageConfig) -> String {
     let component_tags = format!(
@@ -384,13 +384,15 @@ mod tests {
                 .map(|tag| (tag, child(&mut document, tag, "")));
             let scroller = child(&mut document, "scroll-view", "");
             let list = child(&mut document, "list", "");
-            let pagers = [VIEWPAGER_TAG, X_VIEWPAGER_TAG, SWIPER_TAG]
-                .map(|tag| child(&mut document, tag, ""));
+            let pagers = [VIEWPAGER_TAG, X_VIEWPAGER_TAG].map(|tag| child(&mut document, tag, ""));
             let coordinators =
                 [SCROLL_COORDINATOR_TAG, X_FOLDVIEW_TAG].map(|tag| child(&mut document, tag, ""));
+            // A swiper scrolls its shadow `#content`, so the host itself is
+            // a box that clips (`super::super::swiper`).
             let leaves = [
                 "text",
                 "image",
+                SWIPER_TAG,
                 VIEWPAGER_ITEM_TAG,
                 X_VIEWPAGER_ITEM_TAG,
                 SWIPER_ITEM_TAG,
@@ -436,7 +438,7 @@ mod tests {
                 assert_eq!(
                     overflow(&document, pager),
                     (Overflow::Scroll, Overflow::Hidden),
-                    "a pager or a swiper keeps its own axes whatever the switch says: {visible}"
+                    "a pager keeps its own axes whatever the switch says: {visible}"
                 );
             }
             for coordinator in coordinators {
@@ -531,14 +533,10 @@ mod tests {
     /// scroll. [`super::super::scroll_coordinator`] carries the argument.
     #[test]
     fn the_ua_sheet_is_important_free_apart_from_the_text_block() {
-        const ALLOWED: [&str; 20] = [
+        const ALLOWED: [&str; 18] = [
             "viewpager, x-viewpager-ng { flex-direction: row !important; \
              linear-direction: row !important; flex-wrap: nowrap !important; }",
             "viewpager-item, x-viewpager-item-ng { position: relative !important; }",
-            "x-swiper { flex-direction: row !important; linear-direction: row !important; \
-             flex-wrap: nowrap !important; }",
-            "x-swiper[vertical]:not([vertical=\"false\"]) { flex-direction: column !important; \
-             linear-direction: column !important; }",
             "x-swiper > x-swiper-item { width: 100% !important; }",
             "x-swiper[vertical]:not([vertical=\"false\"]) > x-swiper-item { height: 100% !important; }",
             "x-swiper[mode=\"carousel\"]:is(:not([vertical]), [vertical=\"false\"]) > x-swiper-item \

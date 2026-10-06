@@ -37,6 +37,9 @@ struct Probe {
     on_connected: Option<Action>,
     on_disconnected: Option<ReadAction>,
     on_attribute: Option<Action>,
+    /// Whether `children_changed` is recorded; off by default so the tests
+    /// that only watch the lifecycle callbacks keep their transcripts.
+    children: bool,
 }
 
 impl Probe {
@@ -49,7 +52,13 @@ impl Probe {
             on_connected: None,
             on_disconnected: None,
             on_attribute: None,
+            children: false,
         }
+    }
+
+    fn recording_children(mut self) -> Self {
+        self.children = true;
+        self
     }
 
     fn observing(mut self, names: &[&str]) -> Self {
@@ -126,6 +135,15 @@ impl CustomElement<()> for Probe {
         ));
         if let Some(action) = &self.on_attribute {
             action(document, element);
+        }
+    }
+
+    fn children_changed(&self, document: &mut Document<()>, element: NodeId) {
+        if self.children {
+            let count = document
+                .get(element)
+                .map_or(0, |node| node.child_ids().len());
+            self.record(&format!("children#{element} {count}"));
         }
     }
 }
@@ -1079,4 +1097,159 @@ fn a_document_with_no_definitions_behaves_exactly_as_before() {
 
     assert_eq!(doc.value(child, "width"), "5px");
     assert!(doc.matches(child, ":defined"));
+}
+
+#[test]
+fn children_changed_reports_each_child_list_mutation_once_after_the_lifecycle_reactions() {
+    let log = log();
+    let mut doc = Doc::new();
+    let root = doc.root;
+    define(&mut doc, Probe::new("x-list", &log).recording_children());
+    define(&mut doc, Probe::new("x-item", &log));
+    let list = doc.el(root, "x-list");
+    let other = doc.el(root, "view");
+    let _ = take(&log);
+
+    let first = doc.el(list, "x-item");
+    assert_eq!(
+        take(&log),
+        vec![
+            format!("x-item:constructed#{first}"),
+            format!("x-item:connected#{first}"),
+            format!("x-list:children#{list} 1"),
+        ],
+        "an insertion reports after the child's own reactions"
+    );
+
+    let text = doc.dom.create_text_node("t", ());
+    doc.dom.append_child(list, text);
+    let second = doc.el(list, "view");
+    assert_eq!(
+        take(&log),
+        vec![
+            format!("x-list:children#{list} 2"),
+            format!("x-list:children#{list} 3"),
+        ],
+        "a text node and an undefined child count as any child does"
+    );
+
+    doc.dom.insert_before(list, second, Some(first));
+    assert_eq!(
+        take(&log),
+        vec![format!("x-list:children#{list} 3")],
+        "a move within one parent is one change"
+    );
+
+    doc.dom.append_child(other, second);
+    assert_eq!(
+        take(&log),
+        vec![format!("x-list:children#{list} 2")],
+        "a move out reports for the parent it left"
+    );
+    doc.dom.append_child(list, second);
+    let _ = take(&log);
+
+    doc.dom.remove_element(text);
+    assert_eq!(take(&log), vec![format!("x-list:children#{list} 2")]);
+
+    doc.dom.drop_element(second);
+    assert_eq!(
+        take(&log),
+        vec![format!("x-list:children#{list} 1")],
+        "a freeing removal reports once the node is gone"
+    );
+
+    doc.dom.drop_subtree(first);
+    assert_eq!(
+        take(&log),
+        vec![
+            format!("x-item:disconnected#{first}"),
+            format!("x-list:children#{list} 0"),
+        ]
+    );
+
+    doc.dom.remove_element(list);
+    let detached = doc.dom.create_element("view", ());
+    doc.dom.append_child(list, detached);
+    assert_eq!(
+        take(&log),
+        vec![
+            format!("x-list:disconnected#{list}"),
+            format!("x-list:children#{list} 1"),
+        ],
+        "a disconnected parent still hears its children change"
+    );
+}
+
+#[test]
+fn children_changed_ignores_the_shadow_tree_and_the_constructor() {
+    let log = log();
+    let mut doc = Doc::new();
+    let root = doc.root;
+    define(
+        &mut doc,
+        Probe::new("x-host", &log)
+            .recording_children()
+            .on_constructed(Box::new(|document, element| {
+                // Inside the constructor: the element is no instance yet.
+                let light = document.create_element("view", ());
+                document.append_child(element, light);
+                let shadow = document.attach_shadow(element, ShadowRootMode::Open);
+                let inner = document.create_element("view", ());
+                document.append_child(shadow, inner);
+            })),
+    );
+    let host = doc.el(root, "x-host");
+    assert_eq!(
+        take(&log),
+        vec![
+            format!("x-host:constructed#{host}"),
+            format!("x-host:connected#{host}"),
+        ]
+    );
+
+    let shadow = doc
+        .dom
+        .shadow_root(host)
+        .expect("the constructor attached one");
+    doc.el(shadow, "view");
+    assert!(take(&log).is_empty(), "a shadow child is not a child");
+
+    doc.el(host, "view");
+    assert_eq!(take(&log), vec![format!("x-host:children#{host} 2")]);
+}
+
+/// Writes its own child count into `data-count`.
+struct Counter;
+
+impl CustomElement<()> for Counter {
+    fn children_changed(&self, document: &mut Document<()>, element: NodeId) {
+        let count = document
+            .get(element)
+            .map_or(0, |node| node.child_ids().len());
+        document.set_attribute(element, "data-count", &count.to_string());
+    }
+}
+
+#[test]
+fn a_children_changed_handler_that_mutates_drains_in_the_same_scope() {
+    let log = log();
+    let mut doc = Doc::new();
+    let root = doc.root;
+    doc.dom.define("x-counter", Box::new(Counter));
+    define(&mut doc, Probe::new("x-item", &log));
+    let counter = doc.el(root, "x-counter");
+    doc.el(counter, "x-item");
+    doc.el(counter, "x-item");
+    let dropped = doc.el(counter, "x-item");
+    assert_eq!(
+        doc.dom.get(counter).unwrap().attribute("data-count"),
+        Some("3"),
+        "the reaction ran before the mutation returned"
+    );
+    doc.dom.drop_element(dropped);
+    assert_eq!(
+        doc.dom.get(counter).unwrap().attribute("data-count"),
+        Some("2")
+    );
 }

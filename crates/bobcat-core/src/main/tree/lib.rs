@@ -10,15 +10,16 @@
 //! JavaScript error.
 //!
 //! Each tag owns its UA rules and tests. Numeric text and list attributes
-//! flow through `attr()`; boolean flags use attribute selectors. Only `image`
-//! and `blur_view` need components, for image resources and blur hints.
+//! flow through `attr()`; boolean flags use attribute selectors. Only `image`,
+//! `blur_view` and `swiper` need components: for image resources, blur hints,
+//! and the swiper's UA shadow tree and item count.
 //! `viewpager` needs none; its one UI method, `selectTab`, is here for the
 //! runtime to dispatch by tag name.
 //! `scroll_coordinator` needs none either, and has no UI method: its ten tags
 //! are UA rules over anchor-sized absolute boxes, a sticky toolbar and
-//! `scroll-capture-y`. `swiper` needs none and has no UI method; its one
-//! entry point, the autoplay tick [`advance_swiper`], is here for the
-//! runtime's `swiperAdvance` host member.
+//! `scroll-capture-y`. `swiper` has no UI method; its one entry point, the
+//! autoplay tick [`advance_swiper`], is here for the runtime's
+//! `swiperAdvance` host member.
 //!
 //! [`NodeId`]: dom::NodeId
 
@@ -65,6 +66,7 @@ pub(crate) fn new_document(
     let mut document = Document::new(viewport.device(), PAGE_TAG, ());
     blur_view::define(&mut document);
     image::define(&mut document, outcomes);
+    swiper::define(&mut document);
     document.add_stylesheet(
         &ua_sheet::ua_stylesheet(config),
         StylesheetOrigin::UserAgent,
