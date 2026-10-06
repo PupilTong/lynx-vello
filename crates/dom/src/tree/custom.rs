@@ -84,6 +84,13 @@
 //!   unrepresentable instead, and costs a teardown handler nothing it needs: its own element, its
 //!   subtree, its attributes, and its computed style are all still readable. The other three
 //!   callbacks keep `&mut Document`; none of them runs with a free pending.
+//! - **`slotchange` fires at this drain boundary, not at a microtask checkpoint.** The standard
+//!   collects every slot whose assigned nodes changed in a *signal slots* set and fires
+//!   `slotchange` at each one from the mutation-observer microtask (DOM §4.2.2.5, "notify mutation
+//!   observers"). This crate owns no checkpoint, so the set is fired where the reactions drain
+//!   instead: once the outermost mutation's reactions have run, in signal order, each slot once,
+//!   through [`Document::dispatch_element_event`] — after the free, for a removal that frees. A
+//!   slot signalled while the set is being fired is fired after it, as the next checkpoint would.
 //! - **A callback may detach any node, but may not free one its caller is still holding.**
 //!   [`Document::create_element`] and the constructor call pin the id they will still be naming
 //!   once the drain returns, and [`Document::drop_element`]/[`Document::drop_subtree`] refuse to
@@ -105,7 +112,7 @@ use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use stylo::LocalName;
 
-use crate::event::ElementEvent;
+use crate::event::{ElementEvent, ElementEventKind};
 use crate::tree::document::{DOCUMENT_ELEMENT_NODE_ID, Document, NodeId, NodeSlot};
 
 const MAX_REACTION_DEPTH: usize = 64;
@@ -171,6 +178,16 @@ pub trait CustomElement<T> {
     /// each call is its own `[CEReactions]` scope, so the reactions this
     /// handler's mutations raise run before the next node on the path is
     /// visited.
+    ///
+    /// One event a component hears without being on the path is a
+    /// non-composed one fired inside its own shadow tree, such as the
+    /// standard's `slotchange` at one of its slots: the path ends at the
+    /// shadow root, and the shadow root's step is delivered here with
+    /// `element` the host — where a script component would listen on
+    /// `this.shadowRoot`. The shadow root cannot be the `currentTarget` of a
+    /// call that is the host's, so [`ElementEvent::current_target`] is the
+    /// host there too; [`ElementEvent::target`] is the node inside the shadow
+    /// tree the event was fired at.
     fn handle_event(&self, document: &mut Document<T>, element: NodeId, event: &mut ElementEvent) {
         let _ = (document, element, event);
     }
@@ -219,6 +236,12 @@ pub(crate) struct CustomElementRegistry<T> {
     pinned: SmallVec<[NodeId; 4]>,
     depth: Arc<AtomicUsize>,
     abandoned: Arc<AtomicBool>,
+    /// The standard's *signal slots*: slots whose assigned nodes changed, in
+    /// signal order, each once, waiting for the drain boundary.
+    signal_slots: Vec<NodeId>,
+    /// Set while the signal slots are being fired, so a handler's own
+    /// mutation leaves what it signals to the firing loop.
+    firing_slots: Arc<AtomicBool>,
 }
 
 impl<T> Default for CustomElementRegistry<T> {
@@ -231,6 +254,8 @@ impl<T> Default for CustomElementRegistry<T> {
             pinned: SmallVec::new(),
             depth: Arc::new(AtomicUsize::new(0)),
             abandoned: Arc::new(AtomicBool::new(false)),
+            signal_slots: Vec::new(),
+            firing_slots: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -322,6 +347,16 @@ impl Drop for ReactionDepthToken {
     }
 }
 
+/// Clears the firing flag on every exit, unwinding included, so a panicking
+/// `slotchange` handler does not stop every later one.
+struct FiringSlotsToken(Arc<AtomicBool>);
+
+impl Drop for FiringSlotsToken {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
 impl<T> Document<T> {
     /// Registers a tag's behavior before any matching element exists.
     pub fn define(&mut self, local_name: &str, element: Box<dyn CustomElement<T>>) {
@@ -401,7 +436,17 @@ impl<T> Document<T> {
         self.custom_elements.element_queue.len()
     }
 
+    /// Runs the reactions queued since `base`, then fires the signal slots
+    /// when this is the outermost boundary.
     pub(crate) fn drain_reactions(&mut self, base: usize) {
+        self.run_reactions(base);
+        self.fire_slot_changes();
+    }
+
+    /// The reaction half of [`Self::drain_reactions`] alone, for a removal
+    /// that frees: it fires the signal slots itself once the free is done,
+    /// so no `slotchange` handler runs with a free pending.
+    pub(crate) fn run_reactions(&mut self, base: usize) {
         if self.custom_elements.element_queue.len() == base {
             return;
         }
@@ -437,6 +482,51 @@ impl<T> Document<T> {
             }
         }
         self.custom_elements.element_queue.truncate(base);
+    }
+
+    /// The standard's *signal a slot change*: `slot`'s assigned nodes are no
+    /// longer what they were. Nothing can hear it in a document that defines
+    /// no component, so nothing is recorded there.
+    pub(crate) fn signal_slot_change(&mut self, slot: NodeId) {
+        if self.custom_elements.is_empty() {
+            return;
+        }
+        let signalled = &mut self.custom_elements.signal_slots;
+        if !signalled.contains(&slot) {
+            signalled.push(slot);
+        }
+    }
+
+    /// Fires `slotchange` at every signalled slot, in signal order — the
+    /// standard's "notify mutation observers" step for *signal slots*, run at
+    /// the outermost drain boundary in place of the microtask checkpoint.
+    ///
+    /// The one check a mutation pays is the set's emptiness. Inside a reaction
+    /// or a firing already under way this returns, leaving the set to the
+    /// boundary that encloses it. A slot freed since it was signalled
+    /// dispatches nothing.
+    pub(crate) fn fire_slot_changes(&mut self) {
+        if self.custom_elements.signal_slots.is_empty()
+            || self.custom_elements.is_draining()
+            || self.custom_elements.firing_slots.load(Ordering::Acquire)
+        {
+            return;
+        }
+        self.custom_elements
+            .firing_slots
+            .store(true, Ordering::Release);
+        let _firing = FiringSlotsToken(Arc::clone(&self.custom_elements.firing_slots));
+        let mut budget = MAX_REACTIONS_PER_SCOPE;
+        while !self.custom_elements.signal_slots.is_empty() {
+            let signalled = std::mem::take(&mut self.custom_elements.signal_slots);
+            for slot in signalled {
+                budget = budget.checked_sub(1).expect(
+                    "slotchange did not reach a fixpoint: a handler keeps changing slot \
+                     assignments",
+                );
+                self.dispatch_element_event(slot, ElementEventKind::SlotChange, true, false);
+            }
+        }
     }
 
     fn enqueue_reaction(&mut self, element: NodeId, reaction: Reaction) {

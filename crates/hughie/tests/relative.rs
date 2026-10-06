@@ -1380,3 +1380,27 @@ fn quantitative_values_survive_intrinsic_resolution() {
     assert_close(tree.layout(fit_keyword).size.width, 200.0);
     assert_close(tree.layout(stretch_keyword).size.width, 150.0);
 }
+
+#[test]
+fn a_scrolling_relative_container_counts_its_items_margin_areas() {
+    // web-core has no `display: relative` (the declaration is dropped and the
+    // element keeps its UA `display: flex`), so its children are flex items
+    // whose margin areas css-overflow-3 §3.3 counts in a scroll container.
+    use stylo::values::computed::Overflow;
+    let mut tree = TestTree::default();
+    let item = relative_leaf_with(&mut tree, 120.0, 20.0, 1, |style| {
+        style.margin.right = margin_px(30.0);
+        style.margin.bottom = margin_px(-5.0);
+    });
+    let root = relative_container(
+        &mut tree,
+        TestStyle {
+            overflow: Point::new(Overflow::Hidden, Overflow::Hidden),
+            ..TestStyle::default()
+        },
+        &[item],
+    );
+    let output = definite_layout(&tree, root, 100.0, 10.0);
+    assert_point(tree.layout(item).location, Point::ZERO);
+    assert_size(output.content_size, Size::new(150.0, 20.0));
+}

@@ -741,16 +741,20 @@ impl<T> Document<T> {
         let in_shadow_tree = self.containing_shadow_root(id).is_some();
         let base = self.begin_reactions();
         self.unlink_from_parent(id);
-        self.drain_reactions(base);
+        self.run_reactions(base);
         // No visual mutation is noted here. Every node this frees was either
         // detached already or detached by the unlink above, which noted one
         // itself; freeing what is not rendered changes no frame.
-        match self.free_owned_subtree(id, in_shadow_tree).0 {
+        let payload = match self.free_owned_subtree(id, in_shadow_tree).0 {
             PayloadSlot::Node(payload) => payload,
             PayloadSlot::ShadowRoot => unreachable!("a shadow root is refused above"),
             PayloadSlot::Document => unreachable!("the document node is refused above"),
             PayloadSlot::Reserved => unreachable!("no id resolves to the reservation"),
-        }
+        };
+        // `slotchange` waits for the free: a handler run inside the removal
+        // could re-attach the node about to go.
+        self.fire_slot_changes();
+        payload
     }
 
     pub fn drop_subtree(&mut self, id: NodeId) -> Vec<T> {
@@ -769,7 +773,7 @@ impl<T> Document<T> {
         self.assert_subtree_not_pinned(id);
         let base = self.begin_reactions();
         self.unlink_from_parent(id);
-        self.drain_reactions(base);
+        self.run_reactions(base);
         self.note_visual_mutation();
         let mut removed = Vec::new();
         let mut stack = vec![id];
@@ -793,6 +797,9 @@ impl<T> Document<T> {
             }
         }
         self.prune_relayout_roots();
+        // As in `drop_element`: no `slotchange` handler runs with a free
+        // pending.
+        self.fire_slot_changes();
         removed
     }
 

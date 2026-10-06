@@ -1423,7 +1423,16 @@ horizontal scroll container that snaps page by page, its pages' row pinned in
 the cascade, the initial page (`select-index`/`initial-select-index`) as a
 typed `attr()` and an `if()` over `sibling-index()` into
 `scroll-initial-target`, and the `selectTab` UI method the runtime dispatches
-by tag name; no component), `tree::scroll_coordinator` (the ten
+by tag name; no component), `tree::swiper` (`x-swiper`/`x-swiper-item`: the first
+component with a UA shadow tree, web-core's `#content` scroll container
+snapping item by item on its main axis with the items slotted into it, and
+`#indicator`, one box drawing the dots as background layers whose active
+layer a `steps()` animation on `#content`'s scroll timeline moves, sized by
+the item count the component keeps in `--swiper-count` on `slotchange` at its
+slot; the five `mode` layouts with `coverflow` and `carry` as
+compositor-exported `view()` scale animations and `current` by the viewpager
+recipe; `autoplay`, `interval` and `smooth-scroll` deferred, no UI method, no
+events), `tree::scroll_coordinator` (the ten
 `scroll-coordinator`/`x-foldview-*-ng` tags as a collapsing header: the
 coordinator a vertical scroll container, the header and slot absolutely
 positioned with the slot placed and sized by `anchor-size()` of the header and
@@ -2252,8 +2261,10 @@ Rulings and limits to know before touching it:
 - The crate dispatches no events and has no `preventDefault` and no gesture
   recognizer; `InputEvent::default_prevented` is the embedder's seam.
 - Custom elements are user-agent components only, `define` must precede any
-  element with its tag, reactions are queued rather than called inline, and
-  `disconnected_callback` takes a shared `&Document`.
+  element with its tag, reactions are queued rather than called inline,
+  `disconnected_callback` takes a shared `&Document`, and `slotchange` fires at
+  the drain boundary (no microtask checkpoint here) to the host, whose
+  `handle_event` hears the shadow root a non-composed path ends at.
 - Attribute-derived style enters through `Document::set_presentational_hint` at
   `CascadeOrigin::PresHints`, never the author's inline block.
 - The fork's `lynx` feature carries css-values-5 `if()` (an arbitrary

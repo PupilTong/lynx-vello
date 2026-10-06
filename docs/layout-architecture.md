@@ -742,6 +742,20 @@ incremental relayout (which refreshes only a boundary's *own* `content_size` in 
 a cold full relayout by construction: an ancestor never re-derives a value that includes a scroll
 container's trapped interior.
 
+**Item margin areas (css-overflow-3 §3.3).** A scroll container's scrollable overflow also takes in
+"the margin areas of grid item and flex item boxes for which the box establishes a containing
+block": each algorithm's in-flow accumulation passes the item's resolved right and bottom margins,
+clamped at zero (the area is a union with the border box, so a negative margin adds nothing),
+through `item_end_margin`, and the margin area is a third rectangle of the union beside the border
+box and the item's own visible overflow. Flexbox, Grid and grid-lanes items (css-grid-3 calls them
+grid items) qualify by the spec; Linear and Relative items do too, because web-core lays both out
+as flex items (`display: linear` lowers to `display: flex`, and `display: relative` is dropped,
+leaving the element's UA `display: flex`). Absolutely positioned children keep their border box.
+A container that does not scroll adds no item margins, so they never reach an ancestor: the
+section's "of a box" reads as any box, but no browser propagates them
+([csswg-drafts#9194](https://github.com/w3c/csswg-drafts/issues/9194)), and the engine follows
+the browsers. A start margin needs no term: it already moves the item's location.
+
 **Skipped contents** (`content-visibility: hidden`, or `auto` while the box is
 not *relevant to the user*): the box is sized purely from styles +
 `contain-intrinsic` substitution, lays out **no** children, and on Commit

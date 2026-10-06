@@ -61,6 +61,17 @@ consequential choice about whether to follow the spec or the quirk.
   scroll`, a horizontal overflow that a browser would let the user drag is
   clipped here instead. The vertical scrolling authors actually wanted is
   unaffected, and no axis becomes spuriously draggable.
+- **Item margin areas in scrollable overflow stop at the scroll container**
+  — css-overflow-3 §3.3 defines a box's scrollable overflow to include "the
+  margin areas of grid item and flex item boxes for which the box
+  establishes a containing block", and reads as applying to every box, so a
+  `visible` flex container would carry its items' margins up to the scroll
+  container above it. Chrome, Firefox and Safari count them only in a
+  container that itself scrolls
+  ([csswg-drafts#9194](https://github.com/w3c/csswg-drafts/issues/9194),
+  open); this engine does the same (`item_end_margin`,
+  `crates/hughie/src/compute/util.rs`), for Linear and Relative items too.
+  Details in [layout-architecture.md](../layout-architecture.md).
 - **`box-sizing` default** — Lynx defaults to `border-box`; CSS defaults to
   `content-box`. **Decision: match Lynx's default**, same reasoning as
   `overflow` above.
@@ -1273,6 +1284,100 @@ consequential choice about whether to follow the spec or the quirk.
     web-core hides it (`x-viewpager-ng.css:6-14`) — the `list-item` decision
     above. *No `contain: strict` from the fifth page on* (`:66-68`): a browser
     performance shortcut, not a behavior.
+
+- **`x-swiper` (2026-10-06): a component with web-core's shadow `#content`
+  scroll container and a dot strip, and its layouts are UA rules.** `crates/bobcat-core/src/main/tree/swiper.rs` translates
+  `x-swiper.css` and its template (`htmlTemplates.ts:225-275`) onto web-core's
+  two tags, `x-swiper` and `x-swiper-item` (web-core's tag map has no `swiper`
+  entry; native's tag is `swiper`, Android `XSwiperUI.java:52`). No events and
+  no UI methods. Where it leaves a reference:
+  - *The shadow tree is `#content` (with one default slot) and `#indicator`
+    only*: no `#bounce-padding`, no `circular-start`/`circular-end` slots, no
+    per-dot elements.
+  - *Each item's main-axis size is UA `!important`* (§D.15,
+    [style-assumptions.md](../style-assumptions.md)), web-core's own
+    `!important` kept as a structural invariant. The main axis itself is a
+    plain declaration on `#content`, which no author rule reaches, as in
+    web-core. An item's `position` is not pinned.
+  - *`coverflow` is flat.* web-core's keyframes rotate each item
+    (`rotateY`/`rotateX`, `x-swiper.css:244-267`) under `perspective: 200px`
+    and `transform-style: preserve-3d`; here only their `scale()` is kept,
+    so the animation exports to the painter and is sampled from the live
+    scroll offset with no main-thread work per frame (a 3D keyframe refuses
+    the export). `coverflow` and `carry` also drop web-core's `z-index: 1`
+    keyframe, and run linear rather than web-core's default `ease` per
+    segment. **The architect's decision (performance), to be confirmed by
+    the user.**
+  - *Under `vertical`, the 20% margins resolve against the swiper's width*,
+    as CSS resolves every percentage margin and as web-core does; native
+    offsets the first page by 20% of the main axis (`XSwiperUI.java:582-604`).
+    `carousel`'s trailing margin is `margin-bottom` under `vertical`, where
+    web-core writes `margin-right` in both orientations
+    (`x-swiper.css:193-195`).
+  - *`current` is CSS* — the `<viewpager>` recipe above, with
+    `--swiper-current` — so every consequence listed there for
+    `select-index` applies, and a later change turns the swiper instantly
+    where web-core turns it smoothly (`XSwiperAutoScroll.ts:35-41`,
+    `XSwiper.ts:95-103`). The initial position is the item's snap position,
+    as in web-core: its start, or its centre in `flat-coverflow`,
+    `coverflow` and `carry`.
+  - *`bounces` stretches both ends of the main axis*
+    (`overscroll-behavior-x`/`-y: contain-bounce`), the `<viewpager>`
+    decision; web-core shows a blank page-wide box ahead of the items only
+    (`x-swiper.css:64-66`, `htmlTemplates.ts:226-232`).
+  - *`page-margin`, `previous-margin`, `next-margin`, `duration`: no
+    effect, following web-core*, where the three margins become custom
+    properties on the indicator container (`XSwiperIndicator.ts:54-74`) that
+    no item reads, and nothing observes `duration`. Native differs:
+    `page-margin` is the gap between pages (`XSwiperUI.java:569`),
+    `previous-margin`/`next-margin` size and offset the page in `coverflow`,
+    `flat-coverflow` and `carry` (`:617-638`), and `duration` is the turn's
+    animation length, 500 ms by default (`:91,855-863`).
+  - *`indicator-dots`: shown by default and by `"true"`, hidden by any other
+    present value.* The default is web-core's (native's is hidden,
+    `@LynxProp(name = "indicator-dots", defaultBoolean = false)`,
+    `XSwiperUI.java:887-890`); `"true"` showing is native's (web-core's rule
+    `x-swiper[indicator-dots]::part(indicator-container) { display: none }`,
+    `x-swiper.css:133-135`, hides the dots for any present value, `"true"`
+    included); every other value hides them on both references, including the
+    literal string `"{{false}}"` that web-core's own golden
+    `basic-element-x-swiper-indicator-dots` writes
+    (`__SetAttribute(s, "indicator-dots", "{{false}}")` in its `.web.bundle`)
+    and shows hidden. The architect's decision.
+  - *The strip's geometry is web-core's, not native's*: a `0.6rem` dot
+    (`1rem` is 16px here, so 9.6px) at a `0.6rem × 7 / 5` pitch, `0.5rem` in
+    from the bottom edge (the right edge under `vertical`)
+    (`x-swiper.css:137-178`). Native draws a 7dp dot with 3.5dp on each side
+    (a 14dp pitch), 10dp from the edge (Android `SwiperView.java:50,85,92,
+    112-116`), and its default inactive colour is white at 35%
+    (`XSwiperUI.java:57`) where web-core's is `#ffffff4d` (30%). The strip's
+    box spans only the dots; web-core's container spans the whole edge, so a
+    press beside the dots reaches `#content` here and the container there.
+    An `indicator-color` that is no colour keeps the default, as native does
+    (`XSwiperUI.java:892-901`); web-core writes it into `--indicator-color`
+    unchecked.
+  - *The active dot switches at the scroll range's page boundaries.* One
+    animation on `#content`'s scroll timeline, `steps(count, jump-none)`,
+    moves the active layer, so the dot changes when the offset passes the
+    middle of a step of the whole range. web-core runs one animation per dot
+    on its item's view timeline, active between 30% and 70% of it
+    (`htmlTemplates.ts:250-266`), and native switches on page selection.
+    Before a centred mode's at-rest snap settles an initial `current` under
+    `vertical`, the first frame can show the dot after it, for the frame
+    that shows the item's start.
+  - *Not implemented:* `circular` wrap-around dragging (web-core
+    re-slots the edge items in its shadow tree, `XSwiperCircular.ts`, and
+    turns snapping off, `x-swiper.css:122-131`) — here `circular` has no
+    effect; `autoplay`, `interval` and `smooth-scroll`, deferred by the user
+    (web-core's `XSwiperAutoScroll.ts`; `smooth-scroll` only matters to
+    autoplay); every event; every UI method; `contain: strict`/
+    `content-visibility` from the twentieth item (`x-swiper.css:77-80`), a
+    browser shortcut.
+  - *A child that is neither an `x-swiper-item` nor a `wrapper` generates no
+    box* (`x-swiper.css:98-100`), as in web-core. *An item inside a `wrapper`
+    gets none of the item rules*; web-core sizes only the swiper's own
+    children too, but still gives a wrapped item `scroll-snap-align: start`
+    (`:68-75`).
 
 - **`<scroll-coordinator>` (2026-09-29): the authored coordinator is the
   scroll container, its slot is anchor-sized, and the fold is

@@ -960,3 +960,51 @@ fn a_structural_selector_on_a_shadow_host_still_restyles_its_light_children() {
     );
     assert_eq!(doc.color(third), common::rgb(0, 0, 255));
 }
+
+/// A scroll container inside a shadow tree snaps to the light children its
+/// slot renders, and of two slotted initial targets it starts on the first
+/// in flat tree order: snap areas and initial targets are boxes, found over
+/// the flat tree, not the node tree the slotted children are not in.
+#[test]
+fn a_shadow_scroller_snaps_to_and_starts_on_its_slotted_children() {
+    let mut harness = Harness::new();
+    let scroller = harness.shadow_el(harness.shadow, "frame");
+    harness.shadow_el(scroller, "slot");
+    harness.doc.add_css(
+        "page { display: linear; }
+         host { display: linear; width: 100px; height: 100px; }
+         a { display: linear; flex-shrink: 0; width: 100px; height: 100px;
+             scroll-snap-align: start; }
+         a.target { scroll-initial-target: nearest; }",
+    );
+    harness.doc.dom.add_shadow_stylesheet(
+        harness.shadow,
+        "frame { display: flex; width: 100%; height: 100%; overflow-x: scroll;
+                 scroll-snap-type: x mandatory; }
+         slot { display: contents; }",
+    );
+    let pages = harness
+        .doc
+        .els(harness.host, &["a", "a.target", "a.target"]);
+    harness.doc.dom.commit();
+
+    let positions = harness
+        .doc
+        .dom
+        .snap_positions(scroller)
+        .expect("the frame snaps");
+    let points: Vec<f32> = positions
+        .x()
+        .expect("on x")
+        .points
+        .iter()
+        .map(|point| point.min)
+        .collect();
+    assert_eq!(points, [0.0, 100.0, 200.0]);
+    assert_eq!(
+        harness.doc.dom.scroll_offset(scroller),
+        dom::Vector2D::new(100.0, 0.0),
+        "the first slotted target, {:?}, not the second",
+        pages[1]
+    );
+}

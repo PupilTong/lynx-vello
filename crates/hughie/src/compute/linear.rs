@@ -16,10 +16,10 @@ use super::single_axis::{
 use super::util::{
     Axis, EdgeMask, ItemGeometry, ItemKey as LayoutItemKey, OrderedItem, PendingLayoutItem,
     ResolvedContainerBox, accumulate_scrollable_overflow, apply_aspect_ratio, auto_edges_to_zero,
-    axis_has_intrinsic_style, clamp_axis, container_content_independence, item_value_stability,
-    mirror_ratio_definiteness, own_scrollable_overflow, relative_offset, resolve_container_box,
-    resolve_insets, resolve_intrinsic, resolve_item_geometry, resolve_margins, resolve_padding,
-    sort_and_assign_layout_order, store_committed_child,
+    axis_has_intrinsic_style, clamp_axis, container_content_independence, is_scroll_container,
+    item_value_stability, mirror_ratio_definiteness, own_scrollable_overflow, relative_offset,
+    resolve_container_box, resolve_insets, resolve_intrinsic, resolve_item_geometry,
+    resolve_margins, resolve_padding, sort_and_assign_layout_order, store_committed_child,
 };
 use super::{AbsoluteContainingBlock, compute_absolute_layout_in, measure_absolute_layout};
 use crate::geometry::{Edges, Point, Size};
@@ -1181,6 +1181,7 @@ fn commit_in_flow<T>(
     inner_size: Size<f32>,
     outer_size: Size<f32>,
     content_origin: Point<f32>,
+    scroll_container: bool,
 ) -> Size<f32>
 where
     T: LayoutTree,
@@ -1216,6 +1217,7 @@ where
             output,
             item,
             &mut content_size,
+            scroll_container,
         );
     }
     content_size
@@ -1294,6 +1296,7 @@ where
                     layout.size,
                     layout.content_size,
                     tree.style(child).overflow(),
+                    Size::ZERO,
                 );
                 tree.set_unrounded_layout(state, child, layout);
                 hoisted.inside(tree, state, node, key.document_index);
@@ -1602,6 +1605,7 @@ where
         final_inner_size,
         final_outer_size,
         content_origin,
+        is_scroll_container(style.overflow()),
     );
     super::record_scrollable_containing_block(
         tree,

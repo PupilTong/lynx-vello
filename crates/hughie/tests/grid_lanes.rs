@@ -1760,3 +1760,36 @@ fn flow_tolerance_moves_ratio_items_without_resizing_them() {
         }
     }
 }
+
+#[test]
+fn a_scrolling_grid_lanes_container_counts_its_items_margin_areas() {
+    // Grid-lanes items are grid items (css-grid-3 §2), so css-overflow-3
+    // §3.3 takes in their margin areas: the last item in the lane ends at 60
+    // and its margin at 80.
+    let mut tree = TestTree::default();
+    let first = fixed(&mut tree, 20.0, 30.0);
+    let last = styled(
+        &mut tree,
+        TestStyle {
+            margin: Edges {
+                bottom: margin_px(20.0),
+                ..Edges::uniform(margin_px(0.0))
+            },
+            ..leaf_style(20.0, 30.0)
+        },
+        20.0,
+        30.0,
+    );
+    let root = tree.push_grid_lanes(
+        TestStyle {
+            overflow: Point::new(Overflow::Hidden, Overflow::Hidden),
+            ..lanes_style(&[px(20.0)], &[])
+        },
+        vec![first, last],
+    );
+
+    let output = sized_layout(&tree, root, Some(20.0), Some(40.0));
+
+    assert_point(tree.layout(last).location, Point::new(0.0, 30.0));
+    assert_size(output.content_size, Size::new(20.0, 80.0));
+}

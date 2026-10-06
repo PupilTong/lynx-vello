@@ -23,11 +23,12 @@ use super::single_axis::{
 use super::util::{
     Axis, ItemGeometry, ItemKey, OrderedItem, ResolvedContainerBox, accumulate_scrollable_overflow,
     axis_has_intrinsic_style, axis_sizing_is_stable, clamp_axis, container_content_independence,
-    debug_assert_tree_order, edges_depend_on_inline_basis, normalize_content_alignment,
-    normalize_item_alignment, own_scrollable_overflow, relative_offset, resolve_container_box,
-    resolve_gap, resolve_gap_axis, resolve_insets, resolve_item_geometry,
-    resolve_length_percentage, resolve_style_size, sort_and_assign_layout_order,
-    store_committed_child, style_size_behaves_auto, style_size_depends_on_basis,
+    debug_assert_tree_order, edges_depend_on_inline_basis, is_scroll_container,
+    normalize_content_alignment, normalize_item_alignment, own_scrollable_overflow,
+    relative_offset, resolve_container_box, resolve_gap, resolve_gap_axis, resolve_insets,
+    resolve_item_geometry, resolve_length_percentage, resolve_style_size,
+    sort_and_assign_layout_order, store_committed_child, style_size_behaves_auto,
+    style_size_depends_on_basis,
 };
 use super::{AbsoluteContainingBlock, compute_absolute_layout_in};
 use crate::geometry::{Edges, Point, Size};
@@ -1468,6 +1469,7 @@ fn perform_in_flow_layout<T>(
     inner_size: Size<f32>,
     content_origin: Point<f32>,
     container_size: Size<f32>,
+    scroll_container: bool,
 ) -> (Size<f32>, Option<f32>)
 where
     T: LayoutTree,
@@ -1509,6 +1511,7 @@ where
                 output,
                 item,
                 &mut content_size,
+                scroll_container,
             );
 
             if first_baseline.is_none()
@@ -1662,6 +1665,7 @@ where
                     layout.size,
                     layout.content_size,
                     item.overflow,
+                    Size::ZERO,
                 );
                 tree.set_unrounded_layout(state, key.node, layout);
                 hoisted.inside(tree, state, node, pending.document_index);
@@ -2028,6 +2032,7 @@ where
         inner_size,
         content_origin,
         outer_size,
+        is_scroll_container(style.overflow()),
     );
     for (document_index, child) in hidden {
         let order = u32::try_from(document_index).unwrap_or(u32::MAX);

@@ -712,6 +712,66 @@ mod tests {
         }
     }
 
+    /// A compiled `ReactLynx` card of six 120px `<x-swiper>`s, laid out by
+    /// the engine's UA sheet alone: the top-left one starts on the blue item
+    /// its `current={2}` names, the `vertical` top-right one on the green
+    /// item of its `current={1}`, and the `coverflow` bottom-left one shows
+    /// its green item centred with its red one scaled down at its left. The
+    /// bottom-right one starts on its green item, `current={1}`.
+    ///
+    /// The dots: a 9.6px dot every 13.44px (`1rem` is 16px), the strip
+    /// centred 8px in from the bottom edge, or the right edge when vertical,
+    /// so a horizontal swiper's dot `k` is centred at (46.56 + 13.44k, 107.2)
+    /// in it. The top-left one's third dot is the current one, white; the
+    /// vertical one's middle dot, at (227.2, 60), and the bottom-right one's
+    /// middle dot, at (180, 227.2), too. The third row's
+    /// `indicator-dots={false}` swiper shows its red item where its dots
+    /// would be, and the one beside it its custom colours: a cyan current
+    /// first dot and a yellow second.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_swiper_card_renders_its_current_items() {
+        let executor = CaptureExecutor::new().expect("start capture owner thread");
+        let result = executor
+            .capture(CaptureRequest {
+                input: CaptureInput::Bytes(fixtures::fixture("react-swiper").page.to_vec()),
+                width: 800,
+                height: 600,
+                screenshot_settle: Duration::ZERO,
+                timeout: Duration::from_secs(30),
+                url: Url::parse("file:///react-swiper.web.bundle").expect("fixture URL"),
+            })
+            .await
+            .expect("capture queue remains available");
+        executor.shutdown().expect("stop capture owner thread");
+
+        let screenshot = result.expect("decode, boot, and render the web bundle");
+        let width = usize::try_from(screenshot.size.width).expect("an addressable width");
+        let pixel = |x: usize, y: usize| {
+            let at = (y * width + x) * 4;
+            [
+                screenshot.pixels[at],
+                screenshot.pixels[at + 1],
+                screenshot.pixels[at + 2],
+            ]
+        };
+        for (x, y, colour) in [
+            (60, 60, [0, 0, 255]),
+            (180, 60, [0, 128, 0]),
+            (60, 180, [0, 128, 0]),
+            (5, 180, [255, 0, 0]),
+            (73, 107, [255, 255, 255]),
+            (227, 60, [255, 255, 255]),
+            (180, 180, [0, 128, 0]),
+            (180, 227, [255, 255, 255]),
+            (46, 347, [255, 0, 0]),
+            (60, 347, [255, 0, 0]),
+            (166, 347, [0, 255, 255]),
+            (180, 347, [255, 255, 0]),
+        ] {
+            assert_eq!(pixel(x, y), colour, "at ({x}, {y})");
+        }
+    }
+
     /// A compiled `ReactLynx` `<scroll-coordinator>`, 300 by 400 at the page
     /// origin and laid out by the engine's UA sheet: a translucent blue
     /// toolbar 60 tall pinned over a red header 200 tall, and the slot

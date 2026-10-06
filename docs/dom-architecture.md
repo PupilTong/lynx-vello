@@ -125,7 +125,15 @@ Recorded limits: `TElement::slotted_nodes` keeps Stylo's empty default
 (assignment changes dirty the host subtree wholesale instead of invalidating
 `::slotted` per slot), `:host-context()` is absent from the vendored selector
 grammar, and a node that leaves the flat tree keeps its last computed style and
-geometry — the contract detached subtrees already have.
+geometry — the contract detached subtrees already have. Every path that changes
+a slot's assigned nodes (and an insertion into or removal from a slot showing
+fallback content) signals a slot change as DOM §4.2.2.4/§4.2.3 do; the
+signalled slots, deduplicated in signal order, receive `slotchange`
+(`bubbles`, not composed) through `dispatch_element_event` at the
+`[CEReactions]` drain boundary below — the stand-in for the mutation-observer
+microtask this crate does not own — after the mutation's reactions, and after
+the free for a freeing removal. A document that defines no component records
+no signal; a mutation pays one emptiness check.
 
 **Custom elements** (W3C behavior within a deliberately narrowed scope) are the
 other half of the component model. `Document::define(local_name, Box<dyn
@@ -698,11 +706,16 @@ liveness before the call; each call is its own `[CEReactions]` scope, so what a
 handler's mutation raised is drained before the next step. `ElementEvent`
 answers `kind`/`target`/`current_target`/`phase` and carries both stop
 methods behind one flag, because a node's local name resolves to at most one
-definition. `ElementEventKind` is the extension point and has one variant,
-css-contain-2 §4.4's `ContentVisibilityAutoStateChange { skipped }`, which
-`Document::dispatch_content_visibility_changes` fires from the queue the
+definition. A shadow root has no hook, so the shadow root a non-composed path
+ends at is delivered to its host's `handle_event` (with `element` and
+`current_target` the host) — where a script component would listen on
+`this.shadowRoot`; a shadow root the path crosses delivers nothing, since its
+host follows it as itself. `ElementEventKind` is the extension point. Its
+variants are css-contain-2 §4.4's `ContentVisibilityAutoStateChange { skipped }`,
+which `Document::dispatch_content_visibility_changes` fires from the queue the
 relevance pass filled — `bubbles`, not composed, not cancelable, and never
-reaching a realm. A document that defines nothing pays one `is_empty` check
+reaching a realm — and DOM's `SlotChange`, fired by the slot assignment paths
+above. A document that defines nothing pays one `is_empty` check
 per dispatch and builds no path.
 
 ## Text

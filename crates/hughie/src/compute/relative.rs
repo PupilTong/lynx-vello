@@ -6,10 +6,10 @@ use stylo::values::computed::{PositionProperty, Size as StyleSize};
 
 use super::util::{
     Axis, ItemGeometry, ItemKey, OrderedItem, ResolvedContainerBox, accumulate_scrollable_overflow,
-    axis_has_intrinsic_style, clamp_axis, container_content_independence, item_value_stability,
-    own_scrollable_overflow, relative_offset, resolve_container_box, resolve_intrinsic,
-    resolve_item_geometry_with_bases, resolve_length_percentage, sort_and_assign_layout_order,
-    store_committed_child, subtract_available_space,
+    axis_has_intrinsic_style, clamp_axis, container_content_independence, is_scroll_container,
+    item_value_stability, own_scrollable_overflow, relative_offset, resolve_container_box,
+    resolve_intrinsic, resolve_item_geometry_with_bases, resolve_length_percentage,
+    sort_and_assign_layout_order, store_committed_child, subtract_available_space,
 };
 use super::{AbsoluteContainingBlock, compute_absolute_layout_in};
 use crate::geometry::{Edges, Line, Point, Size};
@@ -1280,6 +1280,7 @@ fn commit_in_flow<T>(
     content_size: Size<f32>,
     content_origin: Point<f32>,
     container_size: Size<f32>,
+    scroll_container: bool,
 ) -> Size<f32>
 where
     T: LayoutTree,
@@ -1321,6 +1322,7 @@ where
             output,
             item,
             &mut scrollable_size,
+            scroll_container,
         );
     }
     scrollable_size
@@ -1367,6 +1369,7 @@ where
                     layout.size,
                     layout.content_size,
                     style.overflow(),
+                    Size::ZERO,
                 );
                 tree.set_unrounded_layout(state, pending.node, layout);
                 hoisted.inside(tree, state, node, pending.document_index);
@@ -1582,6 +1585,7 @@ where
         content_size,
         content_origin,
         outer_size,
+        is_scroll_container(style.overflow()),
     );
     for (document_index, child) in hidden {
         let order = u32::try_from(document_index).unwrap_or(u32::MAX);

@@ -1935,3 +1935,29 @@ fn aspect_ratio_transfers_percentage_definiteness_across_axes() {
 
     assert_size(tree.layout(item).size, Size::new(100.0, 50.0));
 }
+
+#[test]
+fn a_scrolling_linear_container_counts_its_items_margin_areas() {
+    // web-core lowers `display: linear` to `display: flex`, whose items'
+    // margin areas css-overflow-3 §3.3 adds to a scroll container's
+    // scrollable overflow: border boxes end at 180, the last margin at 200.
+    use stylo::values::computed::Overflow;
+    let mut tree = TestTree::default();
+    let first = fixed_leaf(&mut tree, 60.0, 20.0);
+    let second = fixed_leaf(&mut tree, 60.0, 20.0);
+    let last = fixed_leaf_with(&mut tree, 60.0, 20.0, |style| {
+        style.margin.right = margin_px(20.0);
+    });
+    let root = support::linear_container(
+        &mut tree,
+        TestStyle {
+            linear_direction: linear_direction::T::Row,
+            overflow: Point::new(Overflow::Hidden, Overflow::Hidden),
+            ..TestStyle::default()
+        },
+        &[first, second, last],
+    );
+    let output = definite_layout(&tree, root, 100.0, 20.0);
+    assert_close(tree.layout(last).location.x, 120.0);
+    assert_size(output.content_size, Size::new(200.0, 20.0));
+}
