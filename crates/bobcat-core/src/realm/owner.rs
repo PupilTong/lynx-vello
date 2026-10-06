@@ -318,7 +318,7 @@ pub(crate) fn enter_now<O: RealmOwner, T>(
 ///    the event that implies it; a rejected one is marked and, where [`RealmOwner::BOOT_REJECTION`]
 ///    names a scene, reported under it.
 /// 8. **Nothing more, for an owner that report ended.**
-/// 9. **[`RealmOwner::after_boot`]**: a page's `BeginFrame` acknowledgement, after both the commit
+/// 9. **[`RealmOwner::after_boot`]**: a page's frame-post acknowledgement, after both the commit
 ///    and the boot report, because a host blocked on that sequence number is blocked on the frame.
 /// 10. **The module requests** this entry produced, each asked of the host and spawned as a
 ///     [`load_module`] of its own — except the one [`RealmOwner::entry_name`] names, which the role

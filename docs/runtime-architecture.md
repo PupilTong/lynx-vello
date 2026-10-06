@@ -343,9 +343,11 @@ main thread a tick posts a frame, until a commit reports the timeline idle.
 Starting and cancelling animations belong to the style flush the main thread
 already runs at `__FlushElementTree`.
 
-**Every job starts at the painter's clock.** `Page::enter` reads the clock the
-painter last wrote into the mailbox — lock-free, an `AtomicU64` of the `f64`
-bits — and calls `Document::sync_animation_clock` before the job's operation
+**Every job starts at the painter's clock.** The realm driver's `enter_now`
+(`realm/owner.rs`), the body of every job that enters a view's realm, runs the
+page's `before_operation` hook, which reads the clock the painter last wrote
+into the mailbox — lock-free, an `AtomicU64` of the `f64` bits — and calls
+`Document::sync_animation_clock` before the job's operation
 runs: the timeline moves to that instant (never back) and every live
 animation and transition is promoted at an anchored start, iterated and
 ended, with nothing re-cascaded and nothing committed; the next tick
@@ -887,10 +889,12 @@ below. The functions in `realm/owner.rs` are the rest, written once:
   `enter_now` is that job's body: it returns `None` for an owner that has
   ended, borrows the shared runtime (`None` for a runtime that was never
   built), borrows the realm (`None` before it opened or after its release),
-  runs the operation, and then the epilogue;
+  runs the owner's `before_operation` hook — a page's moves the document's
+  animation clock to the painter's, and a worker has none — then the
+  operation, and then the epilogue;
 - `end` sets the lifetime's latch once, and the call that set it runs the
-  owner's `on_end` hook: the `BeginFrame` acknowledgement for a page, nothing
-  for a worker;
+  owner's `on_end` hook: the acknowledgement of a pending frame post for a
+  page, nothing for a worker;
 - `terminal` sends an event that ends the owner through the lifetime's
   terminal latch and then ends it, and `trapped` sends the table's Panic row
   through the panic latch and then ends it;
@@ -928,7 +932,7 @@ The epilogue's steps and their order are the contract, for both owners:
    `BOOT_REJECTION` scene on a page — a worker's `BOOT_REJECTION` names none,
    because the entry the rejection happened in has already reported it;
 7. nothing more, for an owner that report ended;
-8. `after_boot`: on a page the `BeginFrame` acknowledgement, after both the
+8. `after_boot`: on a page the frame-post acknowledgement, after both the
    commit and the boot report;
 9. the module requests the operation left, each asked of the host through the
    owner's `HostOutbox` and spawned as a `load_module`, except the one

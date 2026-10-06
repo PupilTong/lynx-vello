@@ -832,9 +832,11 @@ impl Page {
 
 /// What the driver in [`owner`] is told about a view: where its realm, its
 /// runtime and its host are, that its reports are engine events, and what a
-/// page adds to the epilogue, the end and the release — the commit and the
-/// deliveries it posts, the boot report, the `BeginFrame` acknowledgement,
-/// the `@font-face` loads, and the JavaScript disposal before the release.
+/// page adds to an entry, the epilogue, the end and the release — the
+/// animation clock moved to the painter's before the operation, the commit
+/// and the deliveries it posts, the boot report, the frame-post
+/// acknowledgement, the `@font-face` loads, the acknowledgement of a pending
+/// frame post at the end, and the JavaScript disposal before the release.
 impl RealmOwner for Page {
     type Realm = MainThreadRuntime;
     type Event = EngineEvent;
