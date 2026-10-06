@@ -305,6 +305,28 @@ the semantics are stylo's.** Everything below refines that sentence.
       rule reaches, exactly as in web-core (`htmlTemplates.ts:225-275`). An
       item's `position` is not pinned (web-core does not pin it).
       `crates/bobcat-core/src/main/tree/swiper.rs` carries the argument.
+    - The `<x-refresh-view>` header, footer and content (2026-10-06), three
+      rules: `position: relative` on the first `x-refresh-header` (unless
+      `enable-refresh="false"`) and on the first `x-refresh-footer` (unless
+      `enable-loadmore="false"`), and `overscroll-behavior-y: auto` on every
+      other child of the view. The two positions are web-core's own
+      `!important` (`x-refresh-view.css:31,50`), and web-core's demo card
+      `basic-element-x-refresh-view-demo` writes `position: absolute` on its
+      header: the header and the footer are the column's ends, and the snap
+      positions that hold them are built from where they sit, so a header an
+      author rule takes out of the flow could never be pulled into view. The
+      third is this engine's: the pull is the scroll chain from the content
+      child into the shadow `#container`, and a content child whose y
+      boundary contains its chain — an author's `overscroll-behavior`, or the
+      `contain` a `scroll-coordinator` declares on itself — would stop every
+      pull before it. A `scroll-view`'s `bounces` attribute reaches no style,
+      so the rule is not there to beat a UA default. The view's other
+      defaults — the host's flex column, box model, the header's and the
+      footer's display (the container tags' `defaultDisplayLinear` policy)
+      and `flex-shrink: 0`, the footer's `margin-top: auto`, both ends'
+      `scroll-snap-align` and its view-timeline animation — stay normal
+      declarations. `crates/bobcat-core/src/main/tree/refresh_view.rs`
+      carries the argument.
     - The `<scroll-coordinator>` structure (2026-09-29), six rules under
       both spellings (`scroll-coordinator*` and web-core's
       `x-foldview-*-ng`): the coordinator's `overflow-y: scroll` and its

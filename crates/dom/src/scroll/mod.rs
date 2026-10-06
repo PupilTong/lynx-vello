@@ -825,6 +825,52 @@ mod tests {
         assert_eq!(document.scroll_offset(outer), pinned_at);
     }
 
+    /// A slotted scroller chains into the scroller of its host's shadow tree
+    /// that holds the slot: the chain walks the flat tree, through the
+    /// `display: contents` slot, across the shadow boundary.
+    #[test]
+    fn a_slotted_scroller_chains_into_the_shadow_scroller_around_its_slot() {
+        let mut document: Document<()> = Document::new(device(), "page", ());
+        document.add_stylesheet(
+            "page { display: flex; width: 800px; height: 600px; }
+             .inner { display: flex; flex-shrink: 0; overflow: scroll; width: 100px; height: 100px; }
+             .content { flex-shrink: 0; width: 100px; height: 400px; }",
+            StylesheetOrigin::Author,
+        );
+        let root = document.document_element().id();
+        let host = document.create_element("view", ());
+        document.append_child(root, host);
+        let shadow = document.attach_shadow(host, crate::ShadowRootMode::Open);
+        document.add_shadow_stylesheet(
+            shadow,
+            "slot { display: contents; }
+             div { display: flex; flex-direction: column; overflow: scroll;
+                   width: 100px; height: 200px; }
+             span { display: block; flex-shrink: 0; height: 300px; }",
+        );
+        let outer = document.create_element("div", ());
+        document.append_child(shadow, outer);
+        let slot = document.create_element("slot", ());
+        document.append_child(outer, slot);
+        let filler = document.create_element("span", ());
+        document.append_child(outer, filler);
+        let inner = document.create_element("view", ());
+        document.add_class(inner, "inner");
+        document.append_child(host, inner);
+        let content = document.create_element("view", ());
+        document.add_class(content, "content");
+        document.append_child(inner, content);
+        document.layout();
+
+        assert_eq!(document.scroll_parent(inner), Some(outer));
+        let (named, total) = document
+            .scroll_chain(content, Vector2D::new(0.0, 350.0))
+            .expect("something scrolled");
+        assert_eq!((named, total), (inner, Vector2D::new(0.0, 350.0)));
+        assert_eq!(document.scroll_offset(inner), Vector2D::new(0.0, 300.0));
+        assert_eq!(document.scroll_offset(outer), Vector2D::new(0.0, 50.0));
+    }
+
     #[test]
     fn the_chain_follows_containing_blocks_not_dom_ancestry() {
         let mut document: Document<()> = Document::new(device(), "page", ());

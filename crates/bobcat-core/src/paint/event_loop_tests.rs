@@ -2709,3 +2709,93 @@ fn a_coordinator_that_is_not_user_scrollable_never_folds() {
     quiet_drag(&mut engine, 0.0, 350.0, 242.0);
     assert_eq!(coordinator_offsets(&mut engine), (0.0, 100.0));
 }
+
+/// An `<x-refresh-view>` 200px x 400px: a 50px header, a `scroll-view` of
+/// the view's full height holding 1000px of content, a 50px footer. Its
+/// shadow `#container` scrolls 740px (two 120px placeholders, the header,
+/// the content, the footer) in a 400px port and opens on the content at
+/// 170. Answers the engine and `#container`'s handle bits.
+fn booted_refresh_view() -> (TestEngine, u64) {
+    let mut engine = booted(
+        r"
+        globalThis.renderPage = function () {
+          const page = __CreatePage('card', 0);
+          const view = __CreateElement('x-refresh-view', 0);
+          const header = __CreateElement('x-refresh-header', 0);
+          const inner = __CreateScrollView(0);
+          const tall = __CreateView(0);
+          const footer = __CreateElement('x-refresh-footer', 0);
+          __AppendElement(page, view);
+          __AppendElement(view, header);
+          __AppendElement(view, inner);
+          __AppendElement(inner, tall);
+          __AppendElement(view, footer);
+          globalThis.held = [page, view, header, inner, tall, footer];
+          __SetInlineStyles(view, 'width:200px;height:400px');
+          __SetInlineStyles(header, 'height:50px;position:absolute');
+          __SetInlineStyles(inner, 'width:100%;height:100%');
+          __SetInlineStyles(tall, 'flex-shrink:0;width:200px;height:1000px');
+          __SetInlineStyles(footer, 'height:50px');
+          __FlushElementTree();
+        };
+        ",
+    );
+    let container = engine
+        .probe_document(|document| {
+            let page = document.document_element().id();
+            let view = document
+                .query_selector_all(page, "x-refresh-view")
+                .expect("a valid selector")[0];
+            let shadow = document.shadow_root(view)?;
+            Some(document.get(shadow)?.child_ids()[0].to_bits())
+        })
+        .flatten()
+        .expect("the refresh view has a shadow `#container`");
+    (engine, container)
+}
+
+/// The pull on the inner scroller at its top chains into the shadow
+/// `#container`, which the drag then holds: a commit landing mid-drag — the
+/// one that publishes the header's new snap alignment — does not settle it.
+/// Released with the header fully shown (`#container` at 70, the header at
+/// 120..170), it glides to the header's start; released with the header 60%
+/// shown, back to the content at 170.
+#[test]
+fn a_pull_on_a_refresh_view_holds_its_container_then_settles_on_release() {
+    for (to_y, pulled, shown, rest) in [(308.0, 70.0, true, 120.0), (238.0, 140.0, false, 170.0)] {
+        let (mut engine, container) = booted_refresh_view();
+        let commit = engine.published_frame().expect("booted").commit_id();
+        assert!((live_offset(&mut engine, container).y - 170.0).abs() < f32::EPSILON);
+
+        touch_at(&mut engine, 0.0, PointerPhase::Down, 200.0);
+        touch_at(&mut engine, 0.01, PointerPhase::Move, to_y);
+        assert!(
+            (live_offset(&mut engine, container).y - pulled).abs() < 0.5,
+            "the pull reached `#container`: {:?}",
+            live_offset(&mut engine, container)
+        );
+        // Main adopts the pulled offset and re-samples the header; when its
+        // alignment changed, it commits the new snap positions.
+        if shown {
+            next_commit(&mut engine, commit);
+        }
+        adopt_at(&mut engine, 0.2);
+        assert!(
+            (live_offset(&mut engine, container).y - pulled).abs() < 0.5,
+            "a held container is not settled by a commit"
+        );
+
+        touch_at(&mut engine, 0.6, PointerPhase::Up, to_y);
+        let mut at = 0.6;
+        while engine.is_animating() {
+            at += 1.0 / 60.0;
+            assert!(at < 5.0, "never came to rest");
+            frame_at(&mut engine, at);
+        }
+        let landed = live_offset(&mut engine, container).y;
+        assert!(
+            (landed - rest).abs() < f32::EPSILON,
+            "pulled to {pulled}, landed on {landed}, not {rest}"
+        );
+    }
+}

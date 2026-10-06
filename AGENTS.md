@@ -1432,7 +1432,16 @@ the item count the component keeps in `--swiper-count` on `slotchange` at its
 slot; the five `mode` layouts with `coverflow` and `carry` as
 compositor-exported `view()` scale animations and `current` by the viewpager
 recipe; `autoplay`, `interval` and `smooth-scroll` deferred, no UI method, no
-events), `tree::scroll_coordinator` (the ten
+events), `tree::refresh_view` (`x-refresh-view`/`x-refresh-header`/
+`x-refresh-footer`: a component with web-core's UA shadow tree, a `#container`
+scroll container snapping `y mandatory` with 30% placeholders above and below,
+the header and footer in named slots (the component sets their `slot` on
+`slotchange` at its default slot) and the content in `#content`, the only
+resting snap target and the initial scroll target; the header's and footer's
+`scroll-snap-align` is a `view(block)` animation, `start`/`end` from 90%
+visible, in place of web-core's `x-magnet-enable`; `enable-refresh`/
+`enable-loadmore="false"` hide an end; no UI method, no events),
+`tree::scroll_coordinator` (the ten
 `scroll-coordinator`/`x-foldview-*-ng` tags as a collapsing header: the
 coordinator a vertical scroll container, the header and slot absolutely
 positioned with the slot placed and sized by `anchor-size()` of the header and
@@ -1447,8 +1456,9 @@ those tags agree on, the order
 they cascade in, and `PageConfig`; `tree/lib.rs` only mints the document they
 describe. Attribute policy stays in each tag's module. Numeric text and list
 attributes use UA `attr()` declarations and registered custom properties;
-`tail-color-convert` uses an attribute selector. Only image resources and blur
-hints need `dom::CustomElement` callbacks. Runtime attribute members perform
+`tail-color-convert` uses an attribute selector. Only image resources, blur
+hints, the swiper's item count and the refresh view's slot assignment need
+`dom::CustomElement` callbacks. Runtime attribute members perform
 DOM mutations; Stylo tracks attribute dependencies and recascades on changes.
 The UA assembly order is mostly documentation, with one exception that is
 mechanism: `image`'s child suppression ties on specificity with the `display`

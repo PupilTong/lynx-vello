@@ -772,6 +772,53 @@ mod tests {
         }
     }
 
+    /// A compiled `ReactLynx` card of two `<x-refresh-view>`s side by side,
+    /// 400 by 600 each, laid out by the engine's UA sheet: each opens on its
+    /// yellow `scroll-view`, whose green items sit at 120, 340 and 560, with
+    /// the red header above the scrollport (its author `position: absolute`
+    /// overridden, so it stays in the column) and the red footer below it.
+    /// The right one, `enable-refresh={false}`, opens the same way. A pull
+    /// needs input this capture route has no way to send;
+    /// `crates/bobcat-source/tests/reactlynx_runtime.rs` drives it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_refresh_view_card_opens_on_its_content() {
+        let executor = CaptureExecutor::new().expect("start capture owner thread");
+        let result = executor
+            .capture(CaptureRequest {
+                input: CaptureInput::Bytes(fixtures::fixture("react-refresh-view").page.to_vec()),
+                width: 800,
+                height: 600,
+                screenshot_settle: Duration::ZERO,
+                timeout: Duration::from_secs(30),
+                url: Url::parse("file:///react-refresh-view.web.bundle").expect("fixture URL"),
+            })
+            .await
+            .expect("capture queue remains available");
+        executor.shutdown().expect("stop capture owner thread");
+
+        let screenshot = result.expect("decode, boot, and render the web bundle");
+        let width = usize::try_from(screenshot.size.width).expect("an addressable width");
+        let pixel = |x: usize, y: usize| {
+            let at = (y * width + x) * 4;
+            [
+                screenshot.pixels[at],
+                screenshot.pixels[at + 1],
+                screenshot.pixels[at + 2],
+            ]
+        };
+        for x in [200, 600] {
+            for (y, colour) in [
+                (1, [255, 255, 0]),
+                (60, [255, 255, 0]),
+                (170, [0, 128, 0]),
+                (500, [255, 255, 0]),
+                (598, [0, 128, 0]),
+            ] {
+                assert_eq!(pixel(x, y), colour, "at ({x}, {y})");
+            }
+        }
+    }
+
     /// A compiled `ReactLynx` `<scroll-coordinator>`, 300 by 400 at the page
     /// origin and laid out by the engine's UA sheet: a translucent blue
     /// toolbar 60 tall pinned over a red header 200 tall, and the slot

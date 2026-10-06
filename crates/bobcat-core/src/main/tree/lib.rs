@@ -11,13 +11,14 @@
 //!
 //! Each tag owns its UA rules and tests. Numeric text and list attributes
 //! flow through `attr()`; boolean flags use attribute selectors. Only `image`,
-//! `blur_view` and `swiper` need components: for image resources, blur hints,
-//! and the swiper's UA shadow tree and item count.
+//! `blur_view`, `swiper` and `refresh_view` need components: for image
+//! resources, blur hints, the swiper's UA shadow tree and item count, and the
+//! refresh view's UA shadow tree and its header and footer slot assignment.
 //! `viewpager` needs none; its one UI method, `selectTab`, is here for the
 //! runtime to dispatch by tag name.
 //! `scroll_coordinator` needs none either, and has no UI method: its ten tags
 //! are UA rules over anchor-sized absolute boxes, a sticky toolbar and
-//! `scroll-capture-y`. `swiper` has no UI method.
+//! `scroll-capture-y`. `swiper` and `refresh_view` have no UI method.
 //!
 //! [`NodeId`]: dom::NodeId
 
@@ -25,6 +26,7 @@ mod blur_view;
 mod image;
 mod list;
 pub(crate) mod raw_text;
+mod refresh_view;
 mod scroll_container;
 mod scroll_coordinator;
 mod swiper;
@@ -64,6 +66,7 @@ pub(crate) fn new_document(
     blur_view::define(&mut document);
     image::define(&mut document, outcomes);
     swiper::define(&mut document);
+    refresh_view::define(&mut document);
     document.add_stylesheet(
         &ua_sheet::ua_stylesheet(config),
         StylesheetOrigin::UserAgent,
