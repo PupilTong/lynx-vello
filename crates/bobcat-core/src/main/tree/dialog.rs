@@ -20,27 +20,30 @@
 //!   `defaultDisplayLinear` picks for every container — `linear` when it is on, the fork's initial
 //!   `flex` when it is off — in [`super::ua_sheet`]'s display line, so both lay out. It is not in
 //!   the container-defaults block (`border-box`, `position: relative`, `overflow: clip`, …): a
-//!   browser gives `<dialog>` HTML's defaults, and so does this sheet.
+//!   browser gives `<dialog>` HTML's defaults, and so does this sheet. An author `display:
+//!   contents` on a modal dialog is blockified by §3.1's fixup (below) to the fork's internal
+//!   block-flow display, which `dom` does not lower either: `dom::layout::style::display_mode`
+//!   panics on it. Which display it should lower to is open (the ignored
+//!   `a_display_contents_modal_dialog_is_blockified_and_renders`).
 //! - **Closed is `display: none`.** `dialog:not([open])` as in HTML, plus `dialog[open="false"]`:
 //!   `open` is a boolean attribute, this engine's `__SetAttribute` stringifies `false`, and
 //!   web-core removes an attribute whose value is `"false"` before its CSS sees it (see
 //!   [`super::swiper`]'s "Boolean attributes and `"false"`"). The component reads it the same way.
 //! - **`dialog:modal`.** HTML writes `overflow: auto` and `inset-block: 0`. `overflow: auto` is
 //!   deliberately out of this engine and the fork disables `inset-block`, so the rule writes
-//!   `overflow: scroll` and `top: 0; bottom: 0`. HTML's `position: fixed` is there, and must be:
-//!   the fork's `lynx` build cannot declare `-servo-top-layer`, so §3.1's computed-value fixups
-//!   never run, and membership stands in for them in `dom` (a top-layer element's containing block
-//!   is the viewport whatever its computed `position`). The computed `position` of a modal dialog
-//!   is therefore the author's when an author rule sets one, where a browser would compute a
-//!   non-`absolute`/`fixed` value to `absolute`; where it renders is the same.
-//! - **Colours.** HTML writes `background-color: Canvas; color: CanvasText`. The fork's `lynx`
-//!   build parses no system colour (`specified/color.rs`, the `#[cfg(not(feature = "lynx"))]` arm
-//!   of `Color::parse_internal`), so the rule writes the values both resolve to in a light colour
-//!   scheme — this engine has no other — `white` and `black`, which is what Stylo's Servo device
-//!   answers for them (`device/servo.rs`, `system_color`).
-//! - **`::backdrop`.** HTML's `position: fixed; inset: 0`, plus `display: flex`, because the
-//!   pseudo-element's style has no other source of a display `dom` lowers. `dialog::backdrop` is
-//!   HTML's `rgba(0, 0, 0, 0.1)`.
+//!   `overflow: scroll` and `top: 0; bottom: 0`. HTML's `position: fixed` is kept. The rule also
+//!   declares `-servo-top-layer: auto`, a UA-only longhand (an author or user sheet drops it) that
+//!   switches on Stylo's `StyleAdjuster::adjust_for_top_layer`, css-position-4 §3.1's
+//!   computed-value fixups: a `position` other than `absolute`/`fixed` computes to `absolute`, as
+//!   in a browser, and `display: contents` is blockified. Membership remains `dom`'s truth for what
+//!   the computed value does not carry: paint order, the backdrop, inertness and the initial
+//!   containing block (`dom::tree::top_layer`).
+//! - **Colours.** HTML's `background-color: Canvas; color: CanvasText`. Both compute through
+//!   Stylo's Servo device (`device/servo.rs`, `system_color`) under the light colour scheme — this
+//!   engine's device has no other — to `rgb(255, 255, 255)` and `rgb(0, 0, 0)`.
+//! - **`::backdrop`.** HTML's `position: fixed; inset: 0`, plus `-servo-top-layer: auto` as on
+//!   `dialog:modal`, and `display: flex`, because the pseudo-element's style has no other source of
+//!   a display `dom` lowers. `dialog::backdrop` is HTML's `rgba(0, 0, 0, 0.1)`.
 //!
 //! No rule is `!important`. HTML's `width: fit-content; height: fit-content;
 //! margin: auto` centres a modal dialog by shrink-to-fit sizing, and so it
@@ -137,16 +140,17 @@ dialog {
   margin: auto;
   border: solid;
   padding: 1em;
-  background-color: white; color: black;
+  background-color: Canvas; color: CanvasText;
 }
 dialog:modal {
+  -servo-top-layer: auto;
   position: fixed;
   overflow: scroll;
   top: 0; bottom: 0;
   max-width: calc(100% - 6px - 2em);
   max-height: calc(100% - 6px - 2em);
 }
-::backdrop { position: fixed; inset: 0; display: flex; }
+::backdrop { -servo-top-layer: auto; position: fixed; inset: 0; display: flex; }
 dialog::backdrop { background: rgba(0, 0, 0, 0.1); }
 "#;
 
@@ -381,6 +385,7 @@ mod tests {
             ("padding-top", "10px"),
             ("padding-left", "10px"),
             ("box-sizing", "content-box"),
+            // `Canvas` and `CanvasText` under the light colour scheme.
             ("background-color", "rgb(255, 255, 255)"),
             ("color", "rgb(0, 0, 0)"),
         ] {
@@ -468,9 +473,10 @@ mod tests {
         );
     }
 
-    /// Membership places a modal dialog against the viewport even when an
-    /// author rule keeps it `position: relative` — where a browser would
-    /// compute `absolute` (§3.1), the fork cannot, so `dom` reads membership.
+    /// An author `position: relative` on a modal dialog computes to
+    /// `absolute`, as in a browser (css-position-4 §3.1, run by Stylo's
+    /// adjuster because `dialog:modal` declares `-servo-top-layer`), and the
+    /// dialog is placed against the viewport.
     #[test]
     fn an_author_position_does_not_take_a_modal_dialog_out_of_the_viewport() {
         let mut document = document();
@@ -483,8 +489,29 @@ mod tests {
         );
         show_modal(&mut document, dialog).expect("a closed, connected dialog");
         document.layout();
-        assert_eq!(value(&document, dialog, "position"), "relative");
+        assert_eq!(value(&document, dialog, "position"), "absolute");
         // 101 + 2 × 10 + 2 × 3 = 127 across, 77 down, centred by the margins.
+        assert_eq!(rect(&document, dialog), (133.0, 325.0, 127.0, 77.0));
+    }
+
+    /// An author `display: contents` on a modal dialog is blockified
+    /// (css-position-4 §3.1), so the dialog still generates a box and renders
+    /// centred in the viewport.
+    #[test]
+    #[ignore = "BLOCKED (ruling needed): under `lynx` Stylo's top-layer adjuster blockifies \
+                `contents` through `Display::equivalent_block_display` to the fork's internal \
+                block-flow display (raw 0x0202), which `dom::layout::style::display_mode` \
+                refuses with a panic"]
+    fn a_display_contents_modal_dialog_is_blockified_and_renders() {
+        let mut document = document();
+        let dialog = child(
+            &mut document,
+            DIALOG_TAG,
+            "display: contents; width: 101px; height: 51px; font-size: 10px",
+        );
+        show_modal(&mut document, dialog).expect("a closed, connected dialog");
+        document.layout();
+        assert_ne!(display(&document, dialog), Display::Contents);
         assert_eq!(rect(&document, dialog), (133.0, 325.0, 127.0, 77.0));
     }
 
