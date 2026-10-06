@@ -189,53 +189,35 @@ pending! {
     "basic-element-x-overlay-ng-playground-test" =>
         "there is no `x-overlay-ng`: a hidden modal leaks into the bottom half of the page",
     "basic-element-x-refresh-view-demo" =>
-        "pull-to-refresh and load-more on an `<x-refresh-view>`, screenshotted through two drags; there is no `x-refresh-view` component here (nothing under `crates/bobcat-core/src/main/tree/`), so the header, the pull and `finishRefresh` do not exist",
+        "the first screen is right, and a 100px pull does bring the red header in. What upstream asserts after each release needs `startrefresh`/`startloadmore` to fire and `finishRefresh`/`finishLoadMore` to put the header and footer back: no refresh-view event or UI method exists (`crates/bobcat-core/src/main/tree/refresh_view.rs`), so no item rows appear and the header stays snapped in. Upstream's two mid-pull screenshots are taken with the finger still down, which the suite has no step for",
     "basic-element-x-swiper-autoplay" =>
-        "autoplay paging on an interval; `x-swiper` is not a component here, so its items get no border box, no clip and no indicator, and the first screen stacks them instead of showing one page",
+        "the first frame is right (with `autoplay` off nothing turns in 5.6 s); the next three must show the second, third and fourth item as autoplay turns the swiper, and it stays on the first: `autoplay`, `interval` and `smooth-scroll` are not implemented (deferred by the user; `crates/bobcat-core/src/main/tree/swiper.rs`). The last frame is also a native/web-core difference: web-core turns once more after `autoplay` is switched off, native stops",
     "basic-element-x-swiper-bindchange" =>
-        "the `change` payload across manual, autoplay and programmatic paging; `x-swiper` is not a component here, so its items get no border box, no clip and no indicator, and the first screen stacks them instead of showing one page",
+        "upstream asserts the `change` events three swipers log across a manual swipe, autoplay and a `current` change; the card logs nothing: no swiper event exists (`swiper.rs`: every event and every UI method is not implemented), and `autoplay`, `interval` and `smooth-scroll` are not implemented (deferred by the user; `crates/bobcat-core/src/main/tree/swiper.rs`)",
     "basic-element-x-swiper-bindscrollend" =>
-        "the `scrollend` payload; `x-swiper` is not a component here, so its items get no border box, no clip and no indicator, and the first screen stacks them instead of showing one page",
+        "upstream asserts the `scrollend` events three swipers log; the card logs nothing: no swiper event exists (`swiper.rs`: every event and every UI method is not implemented)",
     "basic-element-x-swiper-bindscrollstart" =>
-        "the `scrollstart` payload; `x-swiper` is not a component here, so its items get no border box, no clip and no indicator, and the first screen stacks them instead of showing one page",
+        "upstream asserts the `scrollstart` events three swipers log, with `isDragged` and `current`; the card logs nothing: no swiper event exists (`swiper.rs`: every event and every UI method is not implemented)",
     "basic-element-x-swiper-circular-carousel" =>
-        "`circular` wrap in carousel mode; `x-swiper` is not a component here, so its items get no border box, no clip and no indicator, and the first screen stacks them instead of showing one page",
-    "basic-element-x-swiper-circular-carry" =>
-        "`circular` wrap in carry mode; `x-swiper` is not a component here, so its items get no border box, no clip and no indicator, and the first screen stacks them instead of showing one page",
+        "four of the five frames are right; on the last item web-core shows the first one, wrapped round, in the 20% to its right, where this engine shows the swiper's orange background: `circular` has no effect here (`swiper.rs`: wrap-around is not implemented; web-core re-slots the edge items around the current one)",
     "basic-element-x-swiper-circular-coverflow" =>
-        "`circular` wrap in coverflow mode; `x-swiper` is not a component here, so its items get no border box, no clip and no indicator, and the first screen stacks them instead of showing one page",
+        "the first screen is already different: web-core shows the last item, wrapped round, to the left of the first, where this engine shows the swiper's orange background: `circular` has no effect here (`swiper.rs`: wrap-around is not implemented; web-core re-slots the edge items around the current one). `coverflow` is also flat here, which is itself awaiting confirmation",
     "basic-element-x-swiper-circular-flat-coverflow" =>
-        "`circular` wrap in flat-coverflow mode; `x-swiper` is not a component here, so its items get no border box, no clip and no indicator, and the first screen stacks them instead of showing one page",
-    "basic-element-x-swiper-circular-normal" =>
-        "`circular` wrap in the default mode; `x-swiper` is not a component here, so its items get no border box, no clip and no indicator, and the first screen stacks them instead of showing one page",
-    "basic-element-x-swiper-current" =>
-        "`current={1}` must start on the second page with no interaction at all, and we stack all four pages: `x-swiper` is not a component here. Statically wrong, not an interaction gap",
-    "basic-element-x-swiper-duration" =>
-        "the paging animation duration across taps; `x-swiper` is not a component here, so its items get no border box, no clip and no indicator, and the first screen stacks them instead of showing one page",
-    "basic-element-x-swiper-indicator-color" =>
-        "`indicator-color`/`indicator-active-color` must tint the dot strip, and no indicator is drawn at all — shadow-part machinery no UA sheet can carry. Statically wrong",
-    "basic-element-x-swiper-indicator-dots" =>
-        "dots on against dots off: both swipers render identically here because neither draws dots. Statically wrong",
+        "the first screen is already different: web-core shows the last item, wrapped round, in the 20% to the left of the first, where this engine shows the swiper's orange background: `circular` has no effect here (`swiper.rs`: wrap-around is not implemented; web-core re-slots the edge items around the current one). web-core also drops the two 20% edge margins under `circular`, which the UA rules here keep",
     "basic-element-x-swiper-interval" =>
-        "autoplay intervals of 5000, 1000 and 0; `x-swiper` is not a component here, so its items get no border box, no clip and no indicator, and the first screen stacks them instead of showing one page",
+        "autoplay at `interval` 5000, then 1000, then 0 must reach the second, third and last item; the swiper stays on the first: `autoplay`, `interval` and `smooth-scroll` are not implemented (deferred by the user; `crates/bobcat-core/src/main/tree/swiper.rs`)",
     "basic-element-x-swiper-method-scroll-to" =>
-        "`invoke({method: 'scrollTo'})` from a tap; `x-swiper` is not a component here, so its items get no border box, no clip and no indicator, and the first screen stacks them instead of showing one page",
-    "basic-element-x-swiper-mode-carousel" =>
-        "carousel snap offsets, side pages peeking; `x-swiper` is not a component here, so its items get no border box, no clip and no indicator, and the first screen stacks them instead of showing one page",
+        "a tap invokes the swiper's `scrollTo` UI method with the next index; the right-hand swiper must go to its second and third item and stays on the first: no swiper UI method exists (`swiper.rs`)",
     "basic-element-x-swiper-mode-carry" =>
-        "carry mode with the dots off; `x-swiper` is not a component here, so its items get no border box, no clip and no indicator, and the first screen stacks them instead of showing one page",
+        "the first screen is right (one item at full scale, no dots), but what upstream screenshots is the swiper with a 250px drag still held, both items part-scaled. The suite has no step that leaves the finger down, and the picture would show the scale running linearly where web-core's keyframes ease, which is part of the flat-coverflow decision awaiting confirmation",
     "basic-element-x-swiper-mode-coverflow" =>
-        "coverflow's skewed peek; `x-swiper` is not a component here, so its items get no border box, no clip and no indicator, and the first screen stacks them instead of showing one page",
-    "basic-element-x-swiper-mode-flat-coverflow" =>
-        "the flat variant of coverflow; `x-swiper` is not a component here, so its items get no border box, no clip and no indicator, and the first screen stacks them instead of showing one page",
-    "basic-element-x-swiper-mode-normal" =>
-        "default paging: one page plus a dot strip; `x-swiper` is not a component here, so its items get no border box, no clip and no indicator, and the first screen stacks them instead of showing one page",
+        "awaiting confirmation: `coverflow` is flat here — each neighbour is scaled, where web-core rotates it in 3D (and native rotates without scaling). `docs/tracking/deviations.md` records that as the architect's decision, for performance, to be confirmed by the user, and a golden would settle it. Everything else in both frames is right: 60% items, centred, the 20% margins, the dots",
     "basic-element-x-swiper-page-margin" =>
-        "`page-margin` gaps between pages in all five modes; `x-swiper` is not a component here, so its items get no border box, no clip and no indicator, and the first screen stacks them instead of showing one page",
+        "five swipers, one per mode, turned from `current` 0 to 1; four are right in both frames and the fourth is `coverflow`. awaiting confirmation: `coverflow` is flat here — each neighbour is scaled, where web-core rotates it in 3D (and native rotates without scaling). `docs/tracking/deviations.md` records that as the architect's decision, for performance, to be confirmed by the user, and a golden would settle it. `page-margin` itself changes nothing here, as in web-core; native draws it as a gap between pages",
     "basic-element-x-swiper-swiper-dynamic" =>
-        "remounting a swiper on tap and re-reading `indicator-color`; `x-swiper` is not a component here, so its items get no border box, no clip and no indicator, and the first screen stacks them instead of showing one page",
+        "the first four frames are right: `current` and `indicator-color` changing together, and the right-hand swiper unmounted so the left one takes the full width. When a new swiper is mounted and the left one is halved again, it must stay on its second item and lands on its third: its scroll offset is kept across the width change, where css-scroll-snap-1 has a snapped container re-snap to the same item (Chromium and WebKit do; upstream calls the element's own `scrollTo` from the page to make Firefox agree, a call no embedder here has)",
     "basic-element-x-swiper-vertical" =>
-        "vertical paging across five modes; `x-swiper` is not a component here, so its items get no border box, no clip and no indicator, and the first screen stacks them instead of showing one page",
+        "five `vertical` swipers, one per mode, turned from `current` 0 to 1; four are right in both frames and the fourth is `coverflow`. awaiting confirmation: `coverflow` is flat here — each neighbour is scaled, where web-core rotates it in 3D (and native rotates without scaling). `docs/tracking/deviations.md` records that as the architect's decision, for performance, to be confirmed by the user, and a golden would settle it",
     "basic-element-x-textarea-bindinput" =>
         "`<x-textarea>` is out of scope for the same reason, and editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card asserts `bindinput`/`bindfocus`/`bindblur` each deliver an object detail",
     "basic-element-x-textarea-bindselection" =>
