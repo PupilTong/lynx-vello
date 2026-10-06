@@ -366,4 +366,22 @@ verified! {
     config_css_remove_scope_true => "config-css-remove-scope-true",
     // A cell not reached yet is sized by `estimated-main-axis-size-px` and takes its real size once reached: the first scroll to the end stops with 100px of the last cell in view, because the extent counted its 100px estimate, and a second one shows all 200px of it.
     basic_element_list_estimated_main_axis_size_px => "basic-element-list-estimated-main-axis-size-px",
+    // The default mode: one item fills the swiper, the dot strip is centred under it, and `current` set to the last item shows the yellow one with the fourth dot lit.
+    basic_element_x_swiper_mode_normal => "basic-element-x-swiper-mode-normal",
+    // `mode='carousel'`: items are 80% wide and start-aligned, so the next one shows at the right; on the last item the remaining 20% is the swiper's own orange, the end margin that lets it reach the start.
+    basic_element_x_swiper_mode_carousel => "basic-element-x-swiper-mode-carousel",
+    // `mode='flat-coverflow'`: items are 60% wide and centred with a 20% margin before the first and after the last, so the first screen has orange on the left and the last item orange on the right.
+    basic_element_x_swiper_mode_flat_coverflow => "basic-element-x-swiper-mode-flat-coverflow",
+    // `current` picks the item a swiper starts on (the left one opens on its second) and turns it when it changes (the right one, tap by tap); a `current` past the last item leaves it on the last.
+    basic_element_x_swiper_current => "basic-element-x-swiper-current",
+    // `current` changing under a `duration`: green, blue, yellow, and yellow again for a `current` past the end. Every frame is at rest, where `duration` shows nothing; it has no rule here, following web-core (native uses it as the turn's length).
+    basic_element_x_swiper_duration => "basic-element-x-swiper-duration",
+    // `indicator-color` and `indicator-active-color`: the left strip has the defaults (white, and white at 30%), the right one a violet active dot and three tomato ones.
+    basic_element_x_swiper_indicator_color => "basic-element-x-swiper-indicator-color",
+    // The dot strip shows with no `indicator-dots` attribute and is gone for a present value that is not `true` (here the literal string `{{false}}`). Showing by default is web-core's; native hides it by default.
+    basic_element_x_swiper_indicator_dots => "basic-element-x-swiper-indicator-dots",
+    // A `circular` swiper in the default mode, turned through all four items and back to the first by `current`. `circular` has no effect here, and nothing in these frames could show one: at rest a wrapped turn and a plain one are the same picture.
+    basic_element_x_swiper_circular_normal => "basic-element-x-swiper-circular-normal",
+    // The same turn through four items and back in `carry` mode, where the current item is at full scale and fills the swiper. As in `circular-normal`, no frame at rest shows the wrap.
+    basic_element_x_swiper_circular_carry => "basic-element-x-swiper-circular-carry",
 }

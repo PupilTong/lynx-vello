@@ -1158,16 +1158,6 @@ consequential choice about whether to follow the spec or the quirk.
   `scrolltoupper`/`scrolltolower`. Several of those are shadow-part machinery
   that a UA sheet cannot express alone; they belong with the component work,
   not with the tag defaults.
-- **`x-swiper` does not exist** *(recorded 2026-10-05)* — neither the tag nor
-  `x-swiper-item` is a defined element or named in the UA sheet, so a swiper
-  gets no border box, no clip, no paging and no indicator strip: its items lay
-  out as ordinary children of whatever display the card's own CSS asks for,
-  stacked rather than paged. 23 cards in `packages/web-core-e2e-fixtures`
-  exercise it, and three of them (`current`, `indicator-color`,
-  `indicator-dots`) are wrong on their first screen rather than only under a
-  gesture. The indicator is shadow-part machinery a UA sheet cannot carry
-  alone, so this belongs with the component work, beside `scroll-view`'s own
-  missing parts above.
 - **A `list` is that plus virtualized, placed cells — and nothing else yet**
   *(2026-09-21)*. `crates/bobcat-core/src/main/tree/list.rs` carries the same
   axis rules written against `scroll-orientation`, and on top of them

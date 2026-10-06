@@ -120,6 +120,10 @@ driven! {
     "basic-element-list-basic-size" => [
         "scrolled": [Wheel((196.5, 250.0), (0.0, 500.0))],
     ],
+    // The wheel is turned 100px over `#target`, the 240x240 list at the origin.
+    "basic-element-list-bindwheel" => [
+        "wheeled": [Wheel((120.0, 120.0), (0.0, 100.0))],
+    ],
     // Upstream scrolls the list to offset 5000, past its end, and reads the last
     // cell's computed height before and after. Here the wheel is turned that far
     // over the list, twice: the first turn stops where the extent ended while the
@@ -128,10 +132,6 @@ driven! {
     "basic-element-list-estimated-main-axis-size-px" => [
         "reached": [Wheel((196.5, 250.0), (0.0, 5000.0))],
         "measured": [Wheel((196.5, 250.0), (0.0, 5000.0))],
-    ],
-    // The wheel is turned 100px over `#target`, the 240x240 list at the origin.
-    "basic-element-list-bindwheel" => [
-        "wheeled": [Wheel((120.0, 120.0), (0.0, 100.0))],
     ],
     // `#target`, clicked twice.
     "basic-element-list-remove-action" => [
@@ -156,6 +156,141 @@ driven! {
     // `#tap`, clicked once.
     "basic-element-x-foldview-ng-method-setFoldExpanded-overflow" => [
         "folded-to-limit": [Tap(141.5, 450.0)],
+    ],
+    // Upstream drags the content down 100px and screenshots with the finger held, then
+    // again 2 s after letting go; then the same upward by 200px. A drag here lifts at
+    // its end, so only the two frames after a release are taken.
+    "basic-element-x-refresh-view-demo" => [
+        "refreshed": [Drag((200.0, 500.0), (200.0, 600.0)), Wait(2000)],
+        "loaded-more": [Drag((200.0, 600.0), (200.0, 400.0)), Wait(2000)],
+    ],
+    // Upstream waits out one 5 s interval with `autoplay` off, clicks the 10x10 button
+    // at the top right to turn it on, waits two intervals, and clicks it off again.
+    "basic-element-x-swiper-autoplay" => [
+        "idle-one-interval": [Wait(5600)],
+        "autoplayed-to-1": [Tap(388.0, 5.0), Wait(5600)],
+        "autoplayed-to-2": [Wait(5600)],
+        "autoplay-toggled-off": [Tap(388.0, 5.0), Wait(5500)],
+    ],
+    // The `next` button under the three swipers (y 450..460), a wait for two autoplay
+    // turns, then a 100px swipe left on the first swiper. Upstream asserts once, at
+    // the end, on the `change` events the card logged.
+    "basic-element-x-swiper-bindchange" => [
+        "paged": [Tap(5.0, 455.0), Wait(6600), Drag((300.0, 50.0), (200.0, 50.0))],
+    ],
+    // The same sequence with a 200px swipe; upstream reads the logged `scrollend` events.
+    "basic-element-x-swiper-bindscrollend" => [
+        "paged": [Tap(5.0, 455.0), Wait(6600), Drag((300.0, 50.0), (100.0, 50.0))],
+    ],
+    // The same sequence; upstream reads the logged `scrollstart` events.
+    "basic-element-x-swiper-bindscrollstart" => [
+        "paged": [Tap(5.0, 455.0), Wait(6600), Drag((300.0, 50.0), (100.0, 50.0))],
+    ],
+    // The transparent 10x10 `next` button under the swiper, at (0, 150), clicked four
+    // times: `current` goes 1, 2, 3 and back to 0.
+    "basic-element-x-swiper-circular-carousel" => [
+        "current-1": [Tap(5.0, 155.0)],
+        "current-2": [Tap(5.0, 155.0)],
+        "current-3": [Tap(5.0, 155.0)],
+        "wrapped-to-0": [Tap(5.0, 155.0)],
+    ],
+    // The transparent 10x10 `next` button under the swiper, at (0, 150), clicked four
+    // times: `current` goes 1, 2, 3 and back to 0.
+    "basic-element-x-swiper-circular-carry" => [
+        "current-1": [Tap(5.0, 155.0)],
+        "current-2": [Tap(5.0, 155.0)],
+        "current-3": [Tap(5.0, 155.0)],
+        "wrapped-to-0": [Tap(5.0, 155.0)],
+    ],
+    // The transparent 10x10 `next` button under the swiper, at (0, 150), clicked four
+    // times: `current` goes 1, 2, 3 and back to 0.
+    "basic-element-x-swiper-circular-coverflow" => [
+        "current-1": [Tap(5.0, 155.0)],
+        "current-2": [Tap(5.0, 155.0)],
+        "current-3": [Tap(5.0, 155.0)],
+        "wrapped-to-0": [Tap(5.0, 155.0)],
+    ],
+    // The `next` button, here `position: fixed` at the viewport origin, clicked four
+    // times: `current` goes 1, 2, 3 and back to 0.
+    "basic-element-x-swiper-circular-flat-coverflow" => [
+        "current-1": [Tap(5.0, 5.0)],
+        "current-2": [Tap(5.0, 5.0)],
+        "current-3": [Tap(5.0, 5.0)],
+        "wrapped-to-0": [Tap(5.0, 5.0)],
+    ],
+    // The transparent 10x10 `next` button under the swiper, at (0, 150), clicked four
+    // times: `current` goes 1, 2, 3 and back to 0.
+    "basic-element-x-swiper-circular-normal" => [
+        "current-1": [Tap(5.0, 155.0)],
+        "current-2": [Tap(5.0, 155.0)],
+        "current-3": [Tap(5.0, 155.0)],
+        "wrapped-to-0": [Tap(5.0, 155.0)],
+    ],
+    // The right-hand swiper (x 196.5..393), whose `bindtap` adds one to its `current`,
+    // clicked four times; the last value, 4, names no item of four.
+    "basic-element-x-swiper-current" => [
+        "current-1": [Tap(294.75, 75.0)],
+        "current-2": [Tap(294.75, 75.0)],
+        "current-3": [Tap(294.75, 75.0)],
+        "current-4-out-of-range": [Tap(294.75, 75.0)],
+    ],
+    // The swiper (x 0..383), whose `bindtap` adds one to `current`; before the third
+    // click the 10x10 button at the top right sets `duration` to 100.
+    "basic-element-x-swiper-duration" => [
+        "current-1": [Tap(191.5, 75.0)],
+        "current-2": [Tap(191.5, 75.0)],
+        "current-3-duration-100": [Tap(388.0, 5.0), Tap(191.5, 75.0)],
+        "current-4-out-of-range": [Tap(191.5, 75.0)],
+    ],
+    // Upstream waits for one 5 s autoplay turn, then clicks the two 10x10 buttons under
+    // the swiper: `interval` 1000 (y 150..160), then `interval` 0 (y 160..170).
+    "basic-element-x-swiper-interval" => [
+        "second-item": [Wait(5100)],
+        "third-item": [Tap(5.0, 155.0), Wait(1100)],
+        "last-item": [Tap(5.0, 165.0)],
+    ],
+    // The right-hand swiper, `#swiper-1`, whose `bindtap` invokes `scrollTo` with the
+    // next index, clicked twice.
+    "basic-element-x-swiper-method-scroll-to" => [
+        "scrolled-to-1": [Tap(294.75, 75.0)],
+        "scrolled-to-2": [Tap(294.75, 75.0)],
+    ],
+    // The swiper, whose `bindtap` sets `current` to its last item.
+    "basic-element-x-swiper-mode-carousel" => [
+        "last-item": [Tap(196.5, 75.0)],
+    ],
+    // The swiper, whose `bindtap` sets `current` to its last item.
+    "basic-element-x-swiper-mode-coverflow" => [
+        "last-item": [Tap(196.5, 75.0)],
+    ],
+    // The swiper, whose `bindtap` sets `current` to its last item.
+    "basic-element-x-swiper-mode-flat-coverflow" => [
+        "last-item": [Tap(196.5, 75.0)],
+    ],
+    // The swiper, whose `bindtap` sets `current` to its last item.
+    "basic-element-x-swiper-mode-normal" => [
+        "last-item": [Tap(196.5, 75.0)],
+    ],
+    // The `next` button, `position: fixed` at the viewport origin: all five swipers go
+    // to `current` 1.
+    "basic-element-x-swiper-page-margin" => [
+        "current-1": [Tap(5.0, 5.0)],
+    ],
+    // The right-hand swiper, clicked twice; then the left-hand one, which unmounts
+    // the right-hand one, and again (it is now the full width), which mounts a new
+    // one. Before each of its last two screenshots upstream also calls the left
+    // swiper's own `scrollTo` from the page, to put Firefox, which keeps the old
+    // offset across the width change, where Chromium and WebKit already are.
+    "basic-element-x-swiper-swiper-dynamic" => [
+        "index-1": [Tap(294.75, 75.0)],
+        "index-2": [Tap(294.75, 75.0)],
+        "unmounted": [Tap(98.25, 75.0)],
+        "remounted": [Tap(196.5, 75.0)],
+    ],
+    // The `next` button, `position: fixed` at the viewport origin: all five swipers go
+    // to `current` 1.
+    "basic-element-x-swiper-vertical" => [
+        "current-1": [Tap(5.0, 5.0)],
     ],
     // The control texts `last` (y 16..32), then `first` (y 0..16).
     "basic-element-x-viewpager-ng-bindchange-select-tab" => [
@@ -281,13 +416,13 @@ driven! {
     "basic-mts-bindtap" => [
         "tapped": [Tap(50.0, 50.0), Logged("hello world")],
     ],
-    // A finger swipes 10px to the right from (20, 20), inside `#target`.
-    "basic-mts-bindtouchstart" => [
-        "swiped": [Drag((20.0, 20.0), (30.0, 20.0))],
-    ],
     // `#target`, clicked once.
     "basic-mts-bindtap-change-element-background" => [
         "tapped": [Tap(50.0, 50.0)],
+    ],
+    // A finger swipes 10px to the right from (20, 20), inside `#target`.
+    "basic-mts-bindtouchstart" => [
+        "swiped": [Drag((20.0, 20.0), (30.0, 20.0))],
     ],
     // `#target`, clicked once.
     "basic-mts-mainthread-ref" => [
