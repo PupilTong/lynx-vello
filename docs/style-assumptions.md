@@ -1683,27 +1683,34 @@ and §D.16 with what the wire format actually permits.)*
       initial `flex`) for HTML's `block`, which no box here lowers to;
       `dialog[open="false"]` closed beside `dialog:not([open])`, because
       `__SetAttribute` stringifies `false` and web-core removes such an
-      attribute; `white`/`black` for `Canvas`/`CanvasText`, because the
-      fork's `lynx` build parses no system colour (they are the values both
-      take in the light scheme, the only one this engine has);
+      attribute; HTML's `background-color: Canvas; color: CanvasText`, which
+      compute to `rgb(255, 255, 255)`/`rgb(0, 0, 0)` in the light scheme, the
+      only one this engine's device has;
       `overflow: scroll` for `dialog:modal`'s `overflow: auto` (out of this
       engine) and `top: 0; bottom: 0` for its `inset-block: 0` (disabled in
-      the fork); and `::backdrop { position: fixed; inset: 0; display: flex }`,
+      the fork); `-servo-top-layer: auto` on `dialog:modal` and `::backdrop`
+      (below); and `::backdrop { position: fixed; inset: 0; display: flex }`,
       the display because the pseudo-element has no other source of one `dom`
       lowers. No rule is `!important`.
-    - **Membership stands in for §3.1's fixups.** The fork compiles
-      `-servo-top-layer` and `StyleAdjuster::adjust_for_top_layer`, but the
-      `lynx` build keeps the longhand out of its property-name table, so no
-      sheet can declare it and the fixups never run. `dom` reads membership
-      instead: a top-layer element and its backdrop lower to `fixed` against
-      the viewport whatever their computed `position`, and a top-layer
-      element ends its descendants' containing-block walks. Consequences: the
-      computed `position` of a top-layer element is the author's (a browser
-      computes a non-`absolute`/`fixed` value to `absolute`; where the box
-      renders is the same), and a `display: contents` top-layer element is
-      not blockified and so renders nothing. The UA rules write
-      `position: fixed` on `dialog:modal` and `::backdrop` explicitly. Fork
-      follow-up: expose `-servo-top-layer` to UA sheets.
+    - **§3.1's fixups run where the UA sheet asks; membership places the
+      box.** The `lynx` build admits the UA-only `-servo-top-layer` in a
+      UA-origin sheet (lynx fork `76f6a809b`), and `dialog:modal` and
+      `::backdrop` declare it, so Stylo's
+      `StyleAdjuster::adjust_for_top_layer` computes a modal dialog's
+      `position` other than `absolute`/`fixed` to `absolute`, as a browser
+      does, and blockifies `display: contents`. `dom` does not derive
+      membership from the longhand: the layer is generic and the embedder
+      decides what enters it, so a top-layer element and its backdrop lower
+      to `fixed` against the viewport whatever their computed `position`, and
+      a top-layer element ends its descendants' containing-block walks. For
+      an element the UA rule reaches this agrees with the computed value; for
+      one no rule reaches (`dom` used directly) membership alone places it,
+      and a `display: contents` one renders nothing. The UA rules keep HTML's
+      `position: fixed` on `dialog:modal` and `::backdrop`. Open: the
+      blockified display of a `display: contents` modal dialog is the fork's
+      internal block-flow display, which `dom`'s `display_mode` panics on
+      (the ignored `a_display_contents_modal_dialog_is_blockified_and_renders`
+      in `tree::dialog`).
     - **State.** "Open" is the `open` attribute, present and not `"false"`;
       the attribute callback is the one path that flips `:open`, and its
       removal (or `"false"`) also leaves the top layer and clears `:modal`,

@@ -1450,9 +1450,9 @@ the toolbar, a sticky toolbar, `scroll-capture-y: nearest forward` inside the
 slot for the fold order, and the structure pinned in the cascade; no
 component, no UI method), `tree::dialog` (HTML's `<dialog>` on `dom`'s top
 layer: HTML's UA rules adapted — the display `defaultDisplayLinear` picks,
-`white`/`black` for the system colours the `lynx` build cannot parse,
-`overflow: scroll` and `top`/`bottom` on `:modal`, `::backdrop` with
-`display: flex` — a component with no per-element state whose `open`
+`Canvas`/`CanvasText` (light scheme), `overflow: scroll` and `top`/`bottom`
+on `:modal`, `-servo-top-layer: auto` on `:modal` and `::backdrop` so Stylo's
+§3.1 position fixup runs, `::backdrop` with `display: flex` — a component with no per-element state whose `open`
 attribute callback is the one path that flips `:open` and, on removal or
 `"false"`, leaves the top layer; "modal" is `Document::blocks_document`; the
 four HTML methods as UI methods the runtime dispatches by tag name, an
@@ -2328,9 +2328,11 @@ Rulings and limits to know before touching it:
   cascade after each flush, laid out by a tail after the rounding tail, and
   hit-tested as its element; it is never handed out. A side table, not a
   per-node bit: the layer is almost always empty and every per-box reader
-  tests `is_empty` first. The fork cannot parse `-servo-top-layer`, so §3.1's
-  computed-value fixups never run and membership stands in for them (see
-  `docs/dom-architecture.md` "Top layer and `::backdrop`").
+  tests `is_empty` first. §3.1's computed-value fixups run where a UA rule
+  declares the UA-only `-servo-top-layer` (bobcat-core's `dialog:modal` and
+  `::backdrop`); membership, not the longhand, stays `dom`'s truth for the
+  containing block (see `docs/dom-architecture.md` "Top layer and
+  `::backdrop`").
 - Stylo's per-element style data and its traversal/invalidation flags live
   inline on `Node` (bench-defended 2026-08-03: no traversal regression, a
   measurably faster no-op-commit fast path).

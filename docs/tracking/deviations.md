@@ -749,6 +749,17 @@ consequential choice about whether to follow the spec or the quirk.
   family rather than the file's own — which is a resource-pipeline feature,
   not a style-engine one. Until then, treat `@font-face` in a bundle as
   something that will silently do nothing.
+- **System colours parse for authors (2026-10-07)** — `Canvas`,
+  `CanvasText` and the rest of css-color-4's system colours (Stylo's
+  `SystemColor` set) parse in every origin, as in a browser, and compute
+  through Stylo's Servo device under the light scheme (`Canvas` is
+  `rgb(255, 255, 255)`, `CanvasText` `rgb(0, 0, 0)`). Native Lynx's colour
+  parser has none: `CSSColor::ParseNamedColor`
+  (`lynx/core/renderer/css/css_color.cc:243-251`) accepts only the named
+  colours in `css_keywords.tmpl`, so a native page drops such a declaration.
+  web-core runs on the browser's parser and accepts them; web-core is
+  followed. The fork change that enabled them (lynx fork `76f6a809b`) did so
+  for the UA `<dialog>` rules.
 
 ## Components (see [components.md](components.md))
 
@@ -1581,14 +1592,19 @@ consequential choice about whether to follow the spec or the quirk.
   - *`dialog:modal` scrolls with `overflow: scroll`*, not HTML's
     `overflow: auto`, which this engine deliberately lacks, and is placed by
     `top: 0; bottom: 0` for HTML's `inset-block: 0`, which the fork disables.
-  - *`Canvas`/`CanvasText` are written as `white`/`black`*: the fork's
-    `lynx` build parses no system colour; these are the light-scheme values.
-  - *Membership stands in for css-position-4 §3.1's computed-value fixups.*
-    The fork cannot declare `-servo-top-layer`, so a top-layer element's
-    computed `position` stays the author's (a browser computes a value other
-    than `absolute`/`fixed` to `absolute`; where it renders is the same),
-    and a `display: contents` top-layer element is not blockified and
-    renders nothing.
+  - *`Canvas`/`CanvasText` are always the light-scheme values*
+    (`rgb(255, 255, 255)`/`rgb(0, 0, 0)`): the engine's device has no dark
+    scheme and `color-scheme` is not authorable under `lynx`.
+  - *A `display: contents` modal dialog panics the layout.* `dialog:modal`
+    declares `-servo-top-layer: auto`, so css-position-4 §3.1's fixups run
+    (a `position` other than `absolute`/`fixed` computes to `absolute`, as in
+    a browser), and the blockification of `contents` yields the fork's
+    internal block-flow display, which `dom`'s `display_mode` refuses with a
+    panic. Open; the ignored
+    `a_display_contents_modal_dialog_is_blockified_and_renders` in
+    `tree::dialog` is the acceptance test. An element `dom` puts in the top
+    layer without such a UA rule is not adjusted: membership alone places it
+    against the viewport, and a `display: contents` one renders nothing.
   - *`returnValue` is dropped.* `close(returnValue)` and
     `requestClose(returnValue)` accept and ignore it; Lynx JS has no reader.
   - *`InvalidStateError` is `invoke` code 4.* `show()` on a modal dialog and

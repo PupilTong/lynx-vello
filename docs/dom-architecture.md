@@ -678,14 +678,19 @@ committed frame's `hit`) stop there: HTML's inert subtrees, which act as if
 `pointer-events` were `none`. A top-layer element is **relevant to the
 user** for `content-visibility: auto`.
 
-Stylo would apply §3.1's computed-value fixups (position to `absolute`,
-`display: contents` to its block equivalent) through `-servo-top-layer:
-auto`, but the fork's `lynx` build leaves that longhand out of its
-property-name table, so no sheet can declare it. Membership stands in where
-this crate reads the result: the lowering above, and a top-layer element
-establishing its absolutely positioned descendants' containing block
-whatever its computed position. A top-layer element whose `display`
-computes to `contents` therefore generates no box and does not render. Not
+Stylo applies §3.1's computed-value fixups (position to `absolute`,
+`display: contents` to its block equivalent) to a style whose
+`-servo-top-layer` is `auto`. The fork's `lynx` build admits that longhand in
+a UA-origin sheet only, and bobcat-core's `dialog:modal` and `::backdrop`
+rules declare it. Membership does not depend on that declaration — the
+embedder decides what enters the layer — so it stays the truth where this
+crate reads it: the lowering above, and a top-layer element establishing its
+absolutely positioned descendants' containing block whatever its computed
+position. For an element the UA rule reaches this agrees with the computed
+value. Without the rule, a top-layer element whose `display` computes to
+`contents` generates no box and does not render; with it, the fixup
+blockifies `contents` to the fork's internal block-flow display, which
+`display_mode` panics on (open). Not
 implemented: css-anchor-position-1's top-layer acceptability clause, close
 requests and focus, and rendering a top-layer element inside skipped
 contents (the skipping ancestor still hides it). A page with an empty top
