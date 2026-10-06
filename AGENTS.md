@@ -2187,7 +2187,8 @@ embedder cascade policy in the UA sheet.
 Subsystems:
 
 - `tree/` — the boxed `TreeArenas<T>`, `Node`, `Document`, shadow roots, the
-  flat tree, custom-element definitions and reactions.
+  flat tree, custom-element definitions and reactions, and the document's
+  top layer with its `::backdrop` nodes (`tree/top_layer.rs`).
 - `style/` — the per-document `StyleEngine` (`Stylist`, cascade pipeline,
   device, stylesheet set, `SharedRwLock`), flush, invalidation, `StyleDamage`.
 - `layout/` — the concrete `hughie` host: `Document::layout`, the `LayoutTree`
@@ -2301,6 +2302,22 @@ Rulings and limits to know before touching it:
   reads per restyled element at the harvest. Scope, the "Out"
   list, approximations and gaps: `docs/style-assumptions.md` §28; the
   browser-visible differences: `docs/tracking/deviations.md`.
+- css-position-4's **top layer** is an ordered side table on `TreeArenas`
+  (`crates/dom/src/tree/top_layer.rs`), generic rather than dialog-specific:
+  the embedder adds and removes entries (`add_to_top_layer(element,
+  blocks_document)`, `remove_from_top_layer`), sets `:modal`/`:open` as
+  element state, and `dom` does the rest — `fixed` lowering against the
+  initial containing block with a static position of zero, a paint-order
+  tail after the root stacking context, the inert floor below the topmost
+  blocking entry for hit testing, relevance, and removal with the element
+  through the one unlink path. Each entry's `::backdrop` is a detached
+  element node (`PayloadSlot::Backdrop`) styled by Stylo's lazy pseudo
+  cascade after each flush, laid out by a tail after the rounding tail, and
+  hit-tested as its element; it is never handed out. A side table, not a
+  per-node bit: the layer is almost always empty and every per-box reader
+  tests `is_empty` first. The fork cannot parse `-servo-top-layer`, so §3.1's
+  computed-value fixups never run and membership stands in for them (see
+  `docs/dom-architecture.md` "Top layer and `::backdrop`").
 - Stylo's per-element style data and its traversal/invalidation flags live
   inline on `Node` (bench-defended 2026-08-03: no traversal regression, a
   measurably faster no-op-commit fast path).

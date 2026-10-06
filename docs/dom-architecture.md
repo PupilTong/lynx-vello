@@ -52,7 +52,11 @@ third, keyed rather than slot-aligned, is css-anchor-position-1's
 element's cascaded position options, kept on the arenas because
 `LayoutTree::position_option_style` lends an option style out of them exactly
 as it lends the base style, with no state parameter to reach (see "Anchor
-positioning" under the layout host). The **document element is permanent
+positioning" under the layout host). A fourth is the document's **top
+layer** (`tree/top_layer.rs`), an ordered list of entries, for the same
+reason: the position lowering a `StyleView` answers and the
+containing-block walks read it with nothing but the arenas in hand (see
+"Top layer and `::backdrop`" below). The **document element is permanent
 and pre-created**: `Document::new(device, root_tag, root_payload)` builds it at
 slot one (tag injected — the core owns no tag vocabulary), `document_element()`
 returns it non-optionally, and it can never be detached or removed, so the
@@ -618,6 +622,76 @@ all renders while its image cache still counts every resident image clean, so
 `AtlasResidency` — one per `vello::Renderer` — re-marks each image once after
 such a loss and nothing in the steady state. `Headless::new` reports `NoAdapter`; every GPU-backed test
 treats that as a hard failure, including in CI.
+
+## Top layer and `::backdrop`
+
+css-position-4 §3's top layer is an ordered set of elements on
+`TreeArenas` (`tree/top_layer.rs`), generic rather than dialog-specific:
+the embedder decides what enters it (`Document::add_to_top_layer(element,
+blocks_document)`, which moves an element already present to the top) and
+when it leaves (`remove_from_top_layer`, immediate — there is no `overlay`
+property and so no pending removal), and reads it back through
+`in_top_layer`, `blocks_document`, `top_layer` and `backdrop_origin`.
+`blocks_document` is HTML's modal flag. `:modal` and `:open` match
+`ElementState::MODAL` / `OPEN`, which the embedder's element sets beside
+its entry; membership itself is no selector state. HTML's removing steps
+hook the one unlink path every removal and move takes
+(`Document::unlink_from_parent`): after an unlink, entries whose element is
+no longer connected are dropped — a walk over the entries, never over the
+removed subtree.
+
+Each entry owns its **`::backdrop` box as a real element node** that is
+never linked under a parent, so no style traversal, selector query, child
+list or flat-tree walk reaches it, and no script handle names it; its
+payload slot is `PayloadSlot::Backdrop`, which is also what marks it. Its
+style is Stylo's lazy pseudo-element cascade with the element's primary
+style as parent (so it inherits from the element), recomputed for every
+entry after each flush and animation tick that ran, diffed through Stylo's
+own damage computation and stored only when it moved — written into both
+Stylo's primary slot and the layout snapshot, which is what keeps the
+snapshot's divergence check honest. A backdrop has no box when its
+`display` or its `content` computes to `none`, or when its element does not
+render. Animations on `::backdrop` itself do not run (the lazy cascade has
+none).
+
+What membership does, by stage: the **position lowering** answers `fixed`
+for a top-layer element and a backdrop, and the containing-block lookups
+(`layout::anchors::containing_block_generator`, the document scroll chain,
+`bounding_client_rect`) answer the initial containing block and end their
+descendants' walks at the element, so its parent records only a static
+position and the rounding tail places it against the viewport with a
+static position of zero; a **top-layer tail** after the rounding tail lays
+the backdrops out against the viewport (see `layout-architecture.md`). The
+**paint-order build** skips a top-layer element where its parent's
+collection meets it and, after the root stacking context, builds each
+rendered entry in layer order as a stacking context of its own — the
+backdrop first, then the element — at its viewport position with an
+identity parent world, no clip chain, no space and no group layer, so no
+ancestor's transform, clip, scroll offset, `opacity` or `perspective`
+reaches it. A backdrop's box item is `PaintItemKind::Backdrop { element }`:
+painted from the backdrop node, hit-tested as the originating element, as a
+browser targets a pointer on the backdrop. The build records the index of
+the first item of the topmost entry with `blocks_document` as
+`PaintOrder::inert_floor` — whether or not that entry paints — and both hit
+walks (`hits_at` for the document-side queries, `raw_hits_at` for the
+committed frame's `hit`) stop there: HTML's inert subtrees, which act as if
+`pointer-events` were `none`. A top-layer element is **relevant to the
+user** for `content-visibility: auto`.
+
+Stylo would apply §3.1's computed-value fixups (position to `absolute`,
+`display: contents` to its block equivalent) through `-servo-top-layer:
+auto`, but the fork's `lynx` build leaves that longhand out of its
+property-name table, so no sheet can declare it. Membership stands in where
+this crate reads the result: the lowering above, and a top-layer element
+establishing its absolutely positioned descendants' containing block
+whatever its computed position. A top-layer element whose `display`
+computes to `contents` therefore generates no box and does not render. Not
+implemented: css-anchor-position-1's top-layer acceptability clause, close
+requests and focus, and rendering a top-layer element inside skipped
+contents (the skipping ancestor still hides it). A page with an empty top
+layer pays one `is_empty` test per lowered position, containing-block
+lookup, collected child, unlink, flush and layout run; no node carries a
+field for any of it.
 
 ## Scroll, input and event paths
 

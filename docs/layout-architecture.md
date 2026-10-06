@@ -619,6 +619,27 @@ definite-inset visual nudge):
   under a subtree the host relaid in place, whose CB above it did not run
   (`compute_hoisted_layout`, the same placement).
 
+**The top layer (css-position-4 §3) is host policy over the same
+protocol.** `dom` keeps the document's top layer as an ordered side table
+(`crates/dom/src/tree/top_layer.rs`). A top-layer element lowers to
+`PositionProperty::Fixed` whatever its computed position, and the host's
+containing-block lookup answers the initial containing block for it, so
+its parent records only a static position, it contributes nothing to the
+parent's flow, intrinsic size or scrollable overflow, and the rounding
+tail places it against the viewport with a static position of zero
+(§3.1) rather than the recorded one. The containing-block walk of its own
+descendants ends at it, so a `fixed` descendant escapes to the viewport
+rather than to a transformed ancestor outside the layer. Each entry's
+`::backdrop` is a box with no parent: a **top-layer tail** after the
+rounding tail lays it out with `compute_absolute_layout` against the
+viewport and rounds it as a subtree of its own, every run, for every entry
+whose element rendered. `hughie` itself knows nothing of the layer. One
+gap is `hughie`'s: an absolutely positioned box with both insets sizes
+`fit-content` as `auto` (stretch-fit), so HTML's modal-dialog sizing
+(`inset: 0; width: fit-content; height: fit-content; margin: auto`) fills
+the viewport instead of shrinking to its contents
+(`crates/dom/tests/layout.rs`, an ignored GAP test).
+
 `position: sticky` is resolved by the `dom` visual host at composition time.
 The retained frame stores scrollport inset and containing-block constraints;
 live scroll offsets determine the visual displacement without changing layout.
