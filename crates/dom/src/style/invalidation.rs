@@ -1,6 +1,5 @@
 //! Matching-relevant mutation, with its style invalidation baked in.
 
-use std::collections::hash_map::Entry;
 use std::sync::LazyLock;
 
 use selectors::matching::ElementSelectorFlags;
@@ -871,17 +870,14 @@ impl<T> Document<T> {
         }
         let opaque = OpaqueNode(id.arena_key());
         let (nodes, pending_snapshots) = self.snapshot_storage();
-        match pending_snapshots.entry(opaque) {
-            Entry::Occupied(entry) => Some(entry.into_mut()),
-            Entry::Vacant(entry) => {
-                let node = nodes
-                    .get(id)
-                    .expect("live node disappeared while recording its snapshot");
-                let snapshot = entry.insert(build_snapshot(node));
-                node.set_snapshot_present();
-                Some(snapshot)
-            }
-        }
+        Some(pending_snapshots.entry(opaque).or_insert_with(|| {
+            let node = nodes
+                .get(id)
+                .expect("live node disappeared while recording its snapshot");
+            let snapshot = build_snapshot(node);
+            node.set_snapshot_present();
+            snapshot
+        }))
     }
 }
 

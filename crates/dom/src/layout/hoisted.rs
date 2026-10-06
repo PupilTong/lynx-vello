@@ -43,7 +43,7 @@ use crate::tree::node::Node;
 /// hoisted to the initial containing block.
 pub(crate) fn hoisting_block<T>(node: &Node<T>) -> Option<NodeSlot> {
     let style = node.layout_computed_style()?;
-    let display = style.clone_display();
+    let display = *style.get_display();
     if display.is_none() || display.is_contents() {
         return None;
     }
@@ -108,7 +108,7 @@ pub(super) fn children_of<T>(
             .find(|&id| {
                 tree.get(id)
                     .and_then(Node::layout_computed_style)
-                    .is_none_or(|style| !style.clone_display().is_contents())
+                    .is_none_or(|style| !style.get_display().is_contents())
             })
             .expect("the hoisted box itself generates a box");
         found.push((node, via, chain));

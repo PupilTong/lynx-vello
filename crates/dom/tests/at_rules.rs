@@ -97,7 +97,7 @@ fn font_face_full_descriptor_set() {
     "#;
     assert_eq!(
         font_face_descriptor(body, DescriptorId::FontFamily).as_deref(),
-        Some("\"Bitstream Vera Serif Bold\"")
+        Some("Bitstream Vera Serif Bold")
     );
     let src = font_face_descriptor(body, DescriptorId::Src).expect("src parses");
     assert!(src.contains("local(\"PingFang SC\")"), "src: {src}");

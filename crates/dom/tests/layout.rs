@@ -1482,7 +1482,8 @@ fn color_only_change_preserves_text_geometry() {
             .unwrap()
             .computed_style()
             .unwrap()
-            .clone_color(),
+            .get_color()
+            .solid_color(),
         common::rgb(0, 0, 255),
     );
 }

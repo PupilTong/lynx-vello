@@ -533,7 +533,7 @@ impl<T> Document<T> {
         let size = Size2D::new(layout.size.width, layout.size.height);
         let mut origin = Point2D::new(layout.location.x, layout.location.y);
         let mut sticky_offsets = Vec::new();
-        if style.values().clone_position() == PositionProperty::Sticky {
+        if *style.values().get_box().get_position() == PositionProperty::Sticky {
             origin += crate::visual::sticky::live_offset(self, id, &mut sticky_offsets);
         }
         let anchored = !self.layout_state().anchored.is_empty();
@@ -549,7 +549,7 @@ impl<T> Document<T> {
         // ancestor is its containing block — and so which scroll offsets
         // move it. It is the computed value, not hughie's parent-lowered
         // one, so it matches what the paint walk keys its flow contexts on.
-        let mut escape = style.values().clone_position();
+        let mut escape = *style.values().get_box().get_position();
         let mut current = node;
         let mut top = id;
         // `box_parent` skips `display: contents` ancestors, which hold a
@@ -578,7 +578,7 @@ impl<T> Document<T> {
                 | PositionProperty::Sticky => true,
             };
             if on_chain {
-                if ancestor_style.values().clone_position() == PositionProperty::Sticky {
+                if *ancestor_style.values().get_box().get_position() == PositionProperty::Sticky {
                     origin +=
                         crate::visual::sticky::live_offset(self, ancestor_id, &mut sticky_offsets);
                 }
@@ -586,7 +586,7 @@ impl<T> Document<T> {
                     origin -= self.scroll_offset(ancestor_id);
                 }
                 origin += shift(ancestor_id);
-                escape = ancestor_style.values().clone_position();
+                escape = *ancestor_style.values().get_box().get_position();
             }
             current = ancestor;
             top = ancestor_id;
@@ -853,10 +853,10 @@ impl<T> Document<T> {
                 let Some(style) = child.layout_computed_style() else {
                     continue;
                 };
-                if display_mode(style.clone_display()) == DisplayMode::None {
+                if display_mode(*style.get_display()) == DisplayMode::None {
                     continue;
                 }
-                match style.clone_position() {
+                match *style.get_box().get_position() {
                     PositionProperty::Fixed => positioned.push(child.id()),
                     PositionProperty::Absolute if !absolute_held => positioned.push(child.id()),
                     _ => {}
@@ -894,14 +894,14 @@ impl<T> Document<T> {
         // belongs to the surrounding paragraph and must be removed from it.
         let mut paragraph = start
             .layout_computed_style()
-            .filter(|style| style.clone_display() == Display::LynxText)
+            .filter(|style| *style.get_display() == Display::LynxText)
             .map(|_| id);
         let mut current = start.flat_parent();
         while let Some(node) = current {
             let Some(style) = node.layout_computed_style() else {
                 break;
             };
-            match style.clone_display() {
+            match *style.get_display() {
                 Display::LynxText => paragraph = Some(node.id()),
                 Display::Contents => {}
                 _ => break,

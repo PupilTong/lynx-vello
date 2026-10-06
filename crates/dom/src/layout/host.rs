@@ -472,7 +472,7 @@ impl<T> TreeArenas<T> {
             node_ref
                 .layout_computed_style()
                 .is_some_and(|style| matches!(
-                    style.clone_position(),
+                    *style.get_box().get_position(),
                     PositionProperty::Absolute | PositionProperty::Fixed
                 )),
             "only an absolutely positioned box asks anchor queries"
@@ -973,7 +973,7 @@ fn sibling_effective_paint_order<T>(child: &Node<T>) -> Option<i32> {
             if display_mode(style.display()) == DisplayMode::None {
                 None
             } else if matches!(
-                style.values().clone_position(),
+                *style.values().get_box().get_position(),
                 PositionProperty::Absolute | PositionProperty::Fixed
             ) {
                 Some(0)

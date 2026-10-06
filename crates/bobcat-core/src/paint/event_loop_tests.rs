@@ -1779,7 +1779,7 @@ fn blue_of(engine: &mut TestEngine, node: u64) -> f32 {
         .probe_document(move |tree| {
             tree.get(node_id(node))
                 .and_then(dom::Node::computed_style)
-                .map(|style| style.clone_color().components.2)
+                .map(|style| style.get_color().solid_color().components.2)
         })
         .flatten()
         .expect("the row is styled")

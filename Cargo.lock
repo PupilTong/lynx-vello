@@ -507,7 +507,7 @@ checksum = "65c35e4b699c7e15ccbe7ee35c005e4fc0a278d22238a2857e6ce2dadeda1b06"
 dependencies = [
  "cfg-if",
  "cpufeatures",
- "rand_core",
+ "rand_core 0.10.1",
 ]
 
 [[package]]
@@ -1285,7 +1285,7 @@ dependencies = [
  "js-sys",
  "libc",
  "r-efi",
- "rand_core",
+ "rand_core 0.10.1",
  "wasm-bindgen",
 ]
 
@@ -1430,6 +1430,8 @@ version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 dependencies = [
+ "allocator-api2",
+ "equivalent",
  "foldhash 0.2.0",
 ]
 
@@ -2939,7 +2941,7 @@ dependencies = [
  "bytes",
  "getrandom 0.4.3",
  "lru-slab",
- "rand",
+ "rand 0.10.2",
  "rand_pcg",
  "ring",
  "rustc-hash 2.1.3",
@@ -2989,14 +2991,29 @@ checksum = "dc33ff2d4973d518d823d61aa239014831e521c75da58e3df4840d3f47749d09"
 
 [[package]]
 name = "rand"
+version = "0.8.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e058c7de0b26af77780c769414d6257830bb240f3c38477dbc2c16e5f54d6d4c"
+dependencies = [
+ "rand_core 0.6.4",
+]
+
+[[package]]
+name = "rand"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c7f5fa3a058cd35567ef9bfa5e75732bee0f9e4c55fa90477bef2dfcdbc4be80"
 dependencies = [
  "chacha20",
  "getrandom 0.4.3",
- "rand_core",
+ "rand_core 0.10.1",
 ]
+
+[[package]]
+name = "rand_core"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
 
 [[package]]
 name = "rand_core"
@@ -3010,7 +3027,7 @@ version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "caa0f4137e1c0a72f4c651489402276c8e8e1cf081f3b0ba156d2cbeef09e86a"
 dependencies = [
- "rand_core",
+ "rand_core 0.10.1",
 ]
 
 [[package]]
@@ -3432,11 +3449,12 @@ dependencies = [
 
 [[package]]
 name = "selectors"
-version = "0.40.0"
+version = "0.41.0"
 dependencies = [
  "bitflags 2.13.0",
  "cssparser",
  "derive_more",
+ "hashbrown 0.17.1",
  "log",
  "new_debug_unreachable",
  "precomputed-hash",
@@ -3530,7 +3548,7 @@ dependencies = [
 
 [[package]]
 name = "servo_arc"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "serde",
  "stable_deref_trait",
@@ -3756,7 +3774,7 @@ dependencies = [
 
 [[package]]
 name = "stylo"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "app_units",
  "arrayvec",
@@ -3767,6 +3785,7 @@ dependencies = [
  "derive_more",
  "encoding_rs",
  "euclid",
+ "hashbrown 0.17.1",
  "icu_segmenter",
  "indexmap",
  "itertools",
@@ -3781,6 +3800,7 @@ dependencies = [
  "num_cpus",
  "parking_lot",
  "precomputed-hash",
+ "rand 0.8.8",
  "rayon",
  "rayon-core",
  "rustc-hash 2.1.3",
@@ -3811,7 +3831,7 @@ dependencies = [
 
 [[package]]
 name = "stylo_atoms"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "string_cache 0.11.0",
  "string_cache_codegen 0.11.2",
@@ -3819,7 +3839,7 @@ dependencies = [
 
 [[package]]
 name = "stylo_derive"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "darling",
  "proc-macro2",
@@ -3830,7 +3850,7 @@ dependencies = [
 
 [[package]]
 name = "stylo_dom"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "bitflags 2.13.0",
  "stylo_malloc_size_of",
@@ -3838,11 +3858,12 @@ dependencies = [
 
 [[package]]
 name = "stylo_malloc_size_of"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "app_units",
  "cssparser",
  "euclid",
+ "hashbrown 0.17.1",
  "parking_lot",
  "selectors",
  "servo_arc",
@@ -3855,14 +3876,14 @@ dependencies = [
 
 [[package]]
 name = "stylo_static_prefs"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "toml",
 ]
 
 [[package]]
 name = "stylo_traits"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "app_units",
  "bitflags 2.13.0",
@@ -3984,6 +4005,9 @@ name = "thin-vec"
 version = "0.2.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b0f7e269b48f0a7dd0146680fa24b50cc67fc0373f086a5b2f99bd084639b482"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "thiserror"
@@ -4053,9 +4077,10 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "to_shmem"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "cssparser",
+ "hashbrown 0.17.1",
  "servo_arc",
  "smallbitvec",
  "smallvec",
@@ -4065,7 +4090,7 @@ dependencies = [
 
 [[package]]
 name = "to_shmem_derive"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "darling",
  "proc-macro2",

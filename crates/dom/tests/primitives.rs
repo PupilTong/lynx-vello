@@ -326,7 +326,8 @@ fn inline_style_setter_parses_replaces_and_clears_observable_style() {
             .unwrap()
             .computed_style()
             .unwrap()
-            .clone_color(),
+            .get_color()
+            .solid_color(),
         common::rgb(255, 0, 0),
     );
 
@@ -337,7 +338,8 @@ fn inline_style_setter_parses_replaces_and_clears_observable_style() {
             .unwrap()
             .computed_style()
             .unwrap()
-            .clone_color(),
+            .get_color()
+            .solid_color(),
         common::rgb(0, 0, 255),
     );
 
@@ -349,7 +351,8 @@ fn inline_style_setter_parses_replaces_and_clears_observable_style() {
             .unwrap()
             .computed_style()
             .unwrap()
-            .clone_color(),
+            .get_color()
+            .solid_color(),
         common::rgb(0, 0, 255),
     );
 }
@@ -375,7 +378,8 @@ fn inline_style_property_updates_merge_remove_and_reject_invalid_values() {
             .unwrap()
             .computed_style()
             .unwrap()
-            .clone_color(),
+            .get_color()
+            .solid_color(),
         common::rgb(0, 0, 255),
     );
 
@@ -394,7 +398,8 @@ fn inline_style_property_updates_merge_remove_and_reject_invalid_values() {
             .unwrap()
             .computed_style()
             .unwrap()
-            .clone_color(),
+            .get_color()
+            .solid_color(),
         common::rgb(0, 0, 255),
     );
 
@@ -417,7 +422,8 @@ fn inline_style_property_updates_custom_properties_and_descendant_cascade() {
             .unwrap()
             .computed_style()
             .unwrap()
-            .clone_color(),
+            .get_color()
+            .solid_color(),
         common::rgb(255, 0, 0),
     );
 
@@ -428,7 +434,8 @@ fn inline_style_property_updates_custom_properties_and_descendant_cascade() {
             .unwrap()
             .computed_style()
             .unwrap()
-            .clone_color(),
+            .get_color()
+            .solid_color(),
         common::rgb(0, 0, 255),
     );
 }
@@ -469,7 +476,8 @@ fn inline_style_property_update_invalidates_style_attribute_selectors() {
             .unwrap()
             .computed_style()
             .unwrap()
-            .clone_color(),
+            .get_color()
+            .solid_color(),
         common::rgb(0, 0, 255),
     );
 
@@ -480,7 +488,8 @@ fn inline_style_property_update_invalidates_style_attribute_selectors() {
             .unwrap()
             .computed_style()
             .unwrap()
-            .clone_color(),
+            .get_color()
+            .solid_color(),
         common::rgb(0, 0, 255),
     );
 }

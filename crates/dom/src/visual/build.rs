@@ -435,7 +435,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
     ) -> Option<u32> {
         if self.state.anchored.is_empty()
             || !matches!(
-                style.clone_position(),
+                *style.get_box().get_position(),
                 PositionProperty::Absolute | PositionProperty::Fixed
             )
         {
@@ -537,7 +537,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         flow: FlowContext,
         parent_transform: &Transform3D<f32>,
     ) -> Option<u32> {
-        if style.clone_position() != PositionProperty::Sticky {
+        if *style.get_box().get_position() != PositionProperty::Sticky {
             return None;
         }
         let mut scroll = [None; 2];
@@ -548,10 +548,10 @@ impl<'doc, T: Sync> Builder<'doc, T> {
                 .document
                 .paint_style(entry.node)
                 .expect("a recorded scroll container keeps its style through the build");
-            if scroll[0].is_none() && values.clone_overflow_x().is_scrollable() {
+            if scroll[0].is_none() && values.get_overflow_x().is_scrollable() {
                 scroll[0] = Some(index);
             }
-            if scroll[1].is_none() && values.clone_overflow_y().is_scrollable() {
+            if scroll[1].is_none() && values.get_overflow_y().is_scrollable() {
                 scroll[1] = Some(index);
             }
             current = entry.parent;
@@ -729,7 +729,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         // `visibility: hidden` element — which emits no item — still has to
         // be determined, or its `visibility: visible` contents would never
         // lay out.
-        if values.clone_content_visibility() == ContentVisibility::Auto {
+        if *values.get_content_visibility() == ContentVisibility::Auto {
             self.auto_boxes.push(AutoBox {
                 node: root,
                 transform: world,
@@ -956,7 +956,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
                 Size2D::new(layout.size.width, layout.size.height),
             )
         };
-        let position = style.clone_position();
+        let position = *style.get_box().get_position();
         let clips = member_clip_contexts(position, *cursor.ctx);
         let z_applies = stacking::z_index_applies(position, cursor.is_item_container);
         Some(ChildBox {
@@ -1244,7 +1244,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         ctx: ClipContexts,
         own_scroll: Option<(u32, u32)>,
     ) -> ClipContexts {
-        if style.clone_scroll_initial_target() == scroll_initial_target::T::Nearest
+        if *style.get_scroll_initial_target() == scroll_initial_target::T::Nearest
             && let Some(chain) = ctx.current.chain
         {
             self.initial_targets.push(InitialTarget { chain, node });
@@ -1372,18 +1372,18 @@ fn member_clip_contexts(position: PositionProperty, ctx: ClipContexts) -> ClipCo
 /// which reads only `PAINT` — it cannot change the result.
 fn clipped_axes<T>(node: &Node<T>, style: &ComputedValues) -> ScrollAxes {
     if effective_containment(
-        style.clone_contain(),
-        style.clone_content_visibility(),
+        *style.get_contain(),
+        *style.get_content_visibility(),
         skips_contents(node, style),
-        style.clone_container_type(),
+        *style.get_container_type(),
     )
     .intersects(Contain::PAINT)
     {
         return ScrollAxes::BOTH;
     }
     ScrollAxes {
-        x: !matches!(style.clone_overflow_x(), Overflow::Visible),
-        y: !matches!(style.clone_overflow_y(), Overflow::Visible),
+        x: !matches!(*style.get_overflow_x(), Overflow::Visible),
+        y: !matches!(*style.get_overflow_y(), Overflow::Visible),
     }
 }
 
@@ -1402,8 +1402,8 @@ fn unclipped_axes_unbounded(rect: Rect<f32>, clipped: ScrollAxes) -> Rect<f32> {
 }
 
 fn item_flags(style: &ComputedValues) -> (bool, bool) {
-    let visible = matches!(style.clone_visibility(), visibility::T::Visible);
-    let hit_testable = visible && !matches!(style.clone_pointer_events(), PointerEvents::None);
+    let visible = matches!(*style.get_visibility(), visibility::T::Visible);
+    let hit_testable = visible && !matches!(*style.get_pointer_events(), PointerEvents::None);
     (visible, hit_testable)
 }
 

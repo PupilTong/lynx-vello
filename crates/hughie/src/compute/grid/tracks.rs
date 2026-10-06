@@ -37,8 +37,8 @@ pub(super) fn expand_template(
             return ExpandedTemplate::default();
         }
         GridTemplateComponent::TrackList(list) => list,
-        GridTemplateComponent::Subgrid(_) | GridTemplateComponent::Masonry => {
-            unreachable!("subgrid and masonry are not parseable under the lynx grammar")
+        GridTemplateComponent::Subgrid(_) => {
+            unreachable!("subgrid is not parseable under the lynx grammar")
         }
     };
 

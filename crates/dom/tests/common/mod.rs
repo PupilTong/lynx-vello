@@ -155,7 +155,7 @@ impl Doc {
 
     #[must_use]
     pub(crate) fn color(&self, id: NodeId) -> AbsoluteColor {
-        self.style(id).clone_color()
+        self.style(id).get_color().solid_color()
     }
 
     #[must_use]
@@ -322,7 +322,7 @@ pub(crate) fn media_matches_on(
     doc.layout();
     doc.get(probe)
         .and_then(dom::Node::computed_style)
-        .is_some_and(|style| style.clone_color() == rgb(1, 2, 3))
+        .is_some_and(|style| style.get_color().solid_color() == rgb(1, 2, 3))
 }
 
 #[must_use]

@@ -142,23 +142,23 @@ impl<T> Document<T> {
         let style = self.get(container)?.layout_computed_style()?;
         let port = scroll_box.scrollport;
         let snapport_x = (
-            scroll_padding(style.clone_scroll_padding_left(), port.width),
-            port.width - scroll_padding(style.clone_scroll_padding_right(), port.width),
+            scroll_padding(style.get_scroll_padding_left(), port.width),
+            port.width - scroll_padding(style.get_scroll_padding_right(), port.width),
         );
         let snapport_y = (
-            scroll_padding(style.clone_scroll_padding_top(), port.height),
-            port.height - scroll_padding(style.clone_scroll_padding_bottom(), port.height),
+            scroll_padding(style.get_scroll_padding_top(), port.height),
+            port.height - scroll_padding(style.get_scroll_padding_bottom(), port.height),
         );
         let rect = self.rect_in_scroll_container(target, container)?;
         let values = self.get(target)?.layout_computed_style()?;
         let margin = |length: Length| length.px();
         let area_x = (
-            rect.min_x() - margin(values.clone_scroll_margin_left()),
-            rect.max_x() + margin(values.clone_scroll_margin_right()),
+            rect.min_x() - margin(*values.get_scroll_margin_left()),
+            rect.max_x() + margin(*values.get_scroll_margin_right()),
         );
         let area_y = (
-            rect.min_y() - margin(values.clone_scroll_margin_top()),
-            rect.max_y() + margin(values.clone_scroll_margin_bottom()),
+            rect.min_y() - margin(*values.get_scroll_margin_top()),
+            rect.max_y() + margin(*values.get_scroll_margin_bottom()),
         );
         Some(Vector2D::new(
             nearest_edge(scroll_box.offset.x, area_x, snapport_x),

@@ -224,8 +224,8 @@ mod tests {
 
         for (tag, container) in CONTAINER_TAGS.iter().zip(containers) {
             let style = style_of(&document, container);
-            assert_eq!(style.clone_box_sizing(), box_sizing::T::BorderBox, "{tag}");
-            assert_eq!(style.clone_display(), Display::Linear, "{tag}");
+            assert_eq!(*style.get_box_sizing(), box_sizing::T::BorderBox, "{tag}");
+            assert_eq!(*style.get_display(), Display::Linear, "{tag}");
         }
     }
 
@@ -252,32 +252,36 @@ mod tests {
 
         for (tag, element) in CONTAINER_TAGS.iter().chain(&["text", "image"]).zip(boxes) {
             let style = style_of(&document, element);
-            assert_eq!(style.clone_box_sizing(), box_sizing::T::BorderBox, "{tag}");
+            assert_eq!(*style.get_box_sizing(), box_sizing::T::BorderBox, "{tag}");
             let border = style.get_border();
             for (side_style, side_width) in [
                 (
-                    border.clone_border_top_style(),
-                    border.clone_border_top_width(),
+                    *border.get_border_top_style(),
+                    border.get_border_top_width(),
                 ),
                 (
-                    border.clone_border_right_style(),
-                    border.clone_border_right_width(),
+                    *border.get_border_right_style(),
+                    border.get_border_right_width(),
                 ),
                 (
-                    border.clone_border_bottom_style(),
-                    border.clone_border_bottom_width(),
+                    *border.get_border_bottom_style(),
+                    border.get_border_bottom_width(),
                 ),
                 (
-                    border.clone_border_left_style(),
-                    border.clone_border_left_width(),
+                    *border.get_border_left_style(),
+                    border.get_border_left_width(),
                 ),
             ] {
                 assert_eq!(side_style, BorderStyle::Solid, "{tag}");
                 assert_eq!(side_width.0.to_px(), 0, "{tag}");
             }
-            assert_eq!(style.clone_position(), position::T::Relative, "{tag}");
-            assert_eq!(px(&style.clone_min_width()), Some(0.0), "{tag}");
-            assert_eq!(px(&style.clone_min_height()), Some(0.0), "{tag}");
+            assert_eq!(
+                *style.get_box().get_position(),
+                position::T::Relative,
+                "{tag}"
+            );
+            assert_eq!(px(style.get_min_width()), Some(0.0), "{tag}");
+            assert_eq!(px(style.get_min_height()), Some(0.0), "{tag}");
         }
     }
 
@@ -295,12 +299,12 @@ mod tests {
 
         let style = style_of(&document, view);
         assert_eq!(
-            style.get_border().clone_border_top_style(),
+            *style.get_border().get_border_top_style(),
             BorderStyle::Solid
         );
-        assert_eq!(style.get_border().clone_border_top_width().0.to_px(), 2);
-        assert_eq!(style.clone_position(), position::T::Absolute);
-        assert_eq!(px(&style.clone_min_width()), Some(10.0));
+        assert_eq!(style.get_border().get_border_top_width().0.to_px(), 2);
+        assert_eq!(*style.get_box().get_position(), position::T::Absolute);
+        assert_eq!(px(style.get_min_width()), Some(10.0));
         assert_eq!(
             overflow(&document, view),
             (Overflow::Hidden, Overflow::Hidden)
@@ -325,7 +329,7 @@ mod tests {
             document.layout();
             for node in [page, view, text] {
                 assert_eq!(
-                    &style_of(&document, node).get_font().clone_font_family(),
+                    style_of(&document, node).get_font().get_font_family(),
                     FontFamily::generic(family),
                 );
             }
@@ -344,11 +348,11 @@ mod tests {
         for (tag, container) in CONTAINER_TAGS.iter().zip(containers) {
             let style = style_of(&document, container);
             assert_eq!(
-                style.clone_display(),
+                *style.get_display(),
                 Display::Flex,
                 "a scroller follows `defaultDisplayLinear` the way a view does: {tag}"
             );
-            assert_eq!(style.clone_box_sizing(), box_sizing::T::BorderBox, "{tag}");
+            assert_eq!(*style.get_box_sizing(), box_sizing::T::BorderBox, "{tag}");
         }
     }
 

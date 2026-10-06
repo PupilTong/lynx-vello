@@ -1167,7 +1167,7 @@ fn the_page_config_written_into_the_boot_module_builds_the_ua_cascade() {
         let view = tree.get(node_id(2)).expect("the card's one view");
         let style = view.computed_style().expect("a flushed element has style");
         assert_eq!(
-            style.clone_display(),
+            *style.get_display(),
             if linear {
                 Display::Linear
             } else {
@@ -1176,7 +1176,7 @@ fn the_page_config_written_into_the_boot_module_builds_the_ua_cascade() {
             "`defaultDisplayLinear` reached the cascade: linear={linear}"
         );
         assert_eq!(
-            style.clone_overflow_x() == Overflow::Visible,
+            *style.get_overflow_x() == Overflow::Visible,
             !linear,
             "`defaultOverflowVisible` reached it too: linear={linear}"
         );

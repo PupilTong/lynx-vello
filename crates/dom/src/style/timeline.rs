@@ -938,7 +938,7 @@ impl<T: Sync> Document<T> {
         // layout is zeroed.
         let style = self.paint_style(subject)?;
         if matches!(
-            display_mode(style.clone_display()),
+            display_mode(*style.get_display()),
             DisplayMode::None | DisplayMode::Contents
         ) || self.in_skipped_subtree(subject)
         {
@@ -958,12 +958,12 @@ impl<T: Sync> Document<T> {
         let padding = self.paint_style(source)?;
         let (padding_start, padding_end) = match axis {
             Axis::X => (
-                padding.clone_scroll_padding_left(),
-                padding.clone_scroll_padding_right(),
+                padding.get_scroll_padding_left(),
+                padding.get_scroll_padding_right(),
             ),
             Axis::Y => (
-                padding.clone_scroll_padding_top(),
-                padding.clone_scroll_padding_bottom(),
+                padding.get_scroll_padding_top(),
+                padding.get_scroll_padding_bottom(),
             ),
         };
         let resolve = |side: &LengthPercentageOrAuto<LengthPercentage>, padding| match side {
@@ -1007,7 +1007,7 @@ impl<T: Sync> Document<T> {
         {
             if self
                 .paint_style(id)
-                .is_some_and(|style| style.clone_position() == PositionProperty::Sticky)
+                .is_some_and(|style| *style.get_box().get_position() == PositionProperty::Sticky)
             {
                 chain.push(id);
             }
@@ -1086,7 +1086,7 @@ impl<T: Sync> Document<T> {
 
     /// Whether `element`'s `timeline-scope` limits `reference` to its subtree.
     fn limits(&self, element: NodeId, style: &ComputedValues, reference: &Reference<'_>) -> bool {
-        let scope = style.clone_timeline_scope();
+        let scope = style.get_timeline_scope();
         (scope.value.is_all() || scope.value.iter().any(|atom| atom == reference.atom))
             && self.name_tree(element, scope.scope) == reference.tree
     }

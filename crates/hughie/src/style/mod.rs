@@ -97,8 +97,8 @@ style_protocol! {
             computed_values -> &ComputedValues = initial_values(),
             inherited_values -> &ComputedValues = style.computed_values(),
 
-            display -> Display = style.computed_values().clone_display(),
-            position -> PositionProperty = style.computed_values().clone_position(),
+            display -> Display = *style.computed_values().get_display(),
+            position -> PositionProperty = *style.computed_values().get_box().get_position(),
             inset -> Edges<&Inset> = {
                 let position = style.computed_values().get_position();
                 Edges {
@@ -120,7 +120,7 @@ style_protocol! {
                 let position = style.computed_values().get_position();
                 Size::new(&position.max_width, &position.max_height)
             },
-            aspect_ratio -> AspectRatio = style.computed_values().clone_aspect_ratio(),
+            aspect_ratio -> AspectRatio = *style.computed_values().get_aspect_ratio(),
             // The natural size of replaced content, as the *host* reports it
             // — the same `NaturalSize` `compute_leaf_layout` receives, seen
             // from the container above rather than from inside the leaf. A
@@ -161,16 +161,16 @@ style_protocol! {
                 }
             },
             overflow -> Point<Overflow> = Point::new(
-                style.computed_values().clone_overflow_x(),
-                style.computed_values().clone_overflow_y(),
+                *style.computed_values().get_overflow_x(),
+                *style.computed_values().get_overflow_y(),
             ),
-            box_sizing -> box_sizing::T = style.computed_values().clone_box_sizing(),
-            direction -> direction::T = style.inherited_values().clone_direction(),
+            box_sizing -> box_sizing::T = *style.computed_values().get_box_sizing(),
+            direction -> direction::T = *style.inherited_values().get_direction(),
             // css-contain-3 §2.1: a size query container is a contained
             // box, so the `container-type` fold lives with the rest of
             // containment rather than beside the units that read it.
             container_type -> ContainerType =
-                style.computed_values().get_box().clone_container_type(),
+                *style.computed_values().get_box().get_container_type(),
             containment -> Contain = {
                 let box_style = style.computed_values().get_box();
                 let container_type = style.container_type();
@@ -189,11 +189,11 @@ style_protocol! {
                 }
             },
             contain_intrinsic_width -> ContainIntrinsicSize =
-                style.computed_values().clone_contain_intrinsic_width(),
+                style.computed_values().slow_clone_contain_intrinsic_width(),
             contain_intrinsic_height -> ContainIntrinsicSize =
-                style.computed_values().clone_contain_intrinsic_height(),
+                style.computed_values().slow_clone_contain_intrinsic_height(),
             skips_contents -> bool =
-                style.computed_values().clone_content_visibility() == ContentVisibility::Hidden
+                *style.computed_values().get_content_visibility() == ContentVisibility::Hidden
                     && !style.display().is_contents(),
 
             gap -> Size<&NonNegativeLengthPercentageOrNormal> = {

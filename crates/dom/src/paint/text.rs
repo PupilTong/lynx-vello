@@ -622,7 +622,7 @@ fn decorations(style: &ComputedValues) -> Option<Decorations> {
     let underline = line.contains(TextDecorationLine::UNDERLINE);
     let line_through = line.contains(TextDecorationLine::LINE_THROUGH);
     if !(underline || line_through)
-        || matches!(text.text_decoration_style, TextDecorationStyle::MozNone)
+        || matches!(text.text_decoration_style, TextDecorationStyle::None)
     {
         return None;
     }
@@ -895,7 +895,7 @@ fn paint_band(
                 &wavy_path(band),
             );
         }
-        TextDecorationStyle::MozNone => {}
+        TextDecorationStyle::None => {}
     }
 }
 

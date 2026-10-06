@@ -22,8 +22,8 @@ style_protocol! {
     pub trait FlexboxStyle: CoreStyle {
         defaults(style) {
             flex_direction -> flex_direction::T =
-                style.computed_values().clone_flex_direction(),
-            flex_wrap -> flex_wrap::T = style.computed_values().clone_flex_wrap(),
+                *style.computed_values().get_flex_direction(),
+            flex_wrap -> flex_wrap::T = *style.computed_values().get_flex_wrap(),
             flex_basis -> &FlexBasis = &style.computed_values().get_position().flex_basis,
             flex_grow -> NonNegativeNumber =
                 style.computed_values().get_position().flex_grow,
@@ -69,7 +69,7 @@ style_protocol! {
             // algorithm needs the element's own computed font size to resolve
             // it. No other length in layout is font-relative.
             font_size -> f32 =
-                style.computed_values().get_font().clone_font_size().computed_size().px(),
+                style.computed_values().get_font().slow_clone_font_size().computed_size().px(),
         }
     }
 }
@@ -78,11 +78,11 @@ style_protocol! {
     pub trait LinearStyle: CoreStyle {
         defaults(style) {
             linear_direction -> linear_direction::T =
-                style.computed_values().clone_linear_direction(),
+                *style.computed_values().get_linear_direction(),
             linear_weight_sum -> NonNegativeNumber =
-                style.computed_values().clone_linear_weight_sum(),
+                *style.computed_values().get_linear_weight_sum(),
             linear_weight -> NonNegativeNumber =
-                style.computed_values().clone_linear_weight(),
+                *style.computed_values().get_linear_weight(),
         }
     }
 }
@@ -91,58 +91,58 @@ style_protocol! {
     pub trait RelativeStyle: CoreStyle {
         defaults(style) {
             relative_layout_once -> relative_layout_once::T =
-                style.computed_values().clone_relative_layout_once(),
+                *style.computed_values().get_relative_layout_once(),
             relative_id -> RelativeReference =
-                style.computed_values().clone_relative_id(),
+                *style.computed_values().get_relative_id(),
             relative_align -> Edges<RelativeAlign> = {
                 let values = style.computed_values();
                 let (inline_start, inline_end) = (
-                    values.clone_relative_align_inline_start(),
-                    values.clone_relative_align_inline_end(),
+                    *values.get_relative_align_inline_start(),
+                    *values.get_relative_align_inline_end(),
                 );
                 let (logical_left, logical_right) =
-                    if values.clone_direction() == direction::T::Ltr {
+                    if *values.get_direction() == direction::T::Ltr {
                         (inline_start, inline_end)
                     } else {
                         (inline_end, inline_start)
                     };
                 Edges {
                     left: lower_relative_logical(
-                        values.clone_relative_align_left(),
+                        *values.get_relative_align_left(),
                         logical_left,
                     ),
                     right: lower_relative_logical(
-                        values.clone_relative_align_right(),
+                        *values.get_relative_align_right(),
                         logical_right,
                     ),
-                    top: values.clone_relative_align_top(),
-                    bottom: values.clone_relative_align_bottom(),
+                    top: *values.get_relative_align_top(),
+                    bottom: *values.get_relative_align_bottom(),
                 }
             },
             relative_adjacent -> Edges<RelativeReference> = {
                 let values = style.computed_values();
                 let (inline_start, inline_end) = (
-                    values.clone_relative_inline_start_of(),
-                    values.clone_relative_inline_end_of(),
+                    *values.get_relative_inline_start_of(),
+                    *values.get_relative_inline_end_of(),
                 );
                 let (logical_left, logical_right) =
-                    if values.clone_direction() == direction::T::Ltr {
+                    if *values.get_direction() == direction::T::Ltr {
                         (inline_start, inline_end)
                     } else {
                         (inline_end, inline_start)
                     };
                 Edges {
-                    left: lower_relative_logical(values.clone_relative_left_of(), logical_left),
+                    left: lower_relative_logical(*values.get_relative_left_of(), logical_left),
                     right: lower_relative_logical(
-                        values.clone_relative_right_of(),
+                        *values.get_relative_right_of(),
                         logical_right,
                     ),
-                    top: values.clone_relative_top_of(),
-                    bottom: values.clone_relative_bottom_of(),
+                    top: *values.get_relative_top_of(),
+                    bottom: *values.get_relative_bottom_of(),
                 }
             },
             relative_center -> relative_center::T =
-                style.computed_values().clone_relative_center(),
+                *style.computed_values().get_relative_center(),
         }
     }
 }

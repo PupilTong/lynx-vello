@@ -795,13 +795,13 @@ fn the_text_block_class_gives_a_fixture_the_lynx_text_display() {
         .first_child()
         .map(dom::Node::id)
         .expect("the staged root wraps the text box");
-    let display = doc
+    let display = *doc
         .dom
         .get(inner)
         .expect("live")
         .computed_style()
         .expect("flushed")
-        .clone_display();
+        .get_display();
     assert_eq!(
         display,
         Display::LynxText,

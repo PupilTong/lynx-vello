@@ -61,7 +61,7 @@ pub(crate) fn resolve_color(
 }
 
 pub(crate) fn current_color(style: &ComputedValues) -> Color {
-    color(style.clone_color())
+    color(style.get_color().solid_color())
 }
 
 #[cfg(test)]

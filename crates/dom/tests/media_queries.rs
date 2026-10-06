@@ -35,7 +35,7 @@ fn matches_dev(device: Device, query: &str) -> bool {
     doc.layout();
     doc.get(probe)
         .and_then(dom::Node::computed_style)
-        .is_some_and(|style| style.clone_color() == rgb(1, 2, 3))
+        .is_some_and(|style| style.get_color().solid_color() == rgb(1, 2, 3))
 }
 
 fn reference() -> Device {

@@ -292,13 +292,13 @@ pub(super) fn replaces_children<T>(node: &Node<T>) -> bool {
     let Some(style) = node.layout_computed_style() else {
         return false;
     };
-    match display_mode(style.clone_display()) {
+    match display_mode(*style.get_display()) {
         DisplayMode::Text => generated_content(node).is_some(),
         DisplayMode::Contents => {
             generated_content(node).is_some()
                 && crate::layout::style::box_parent(node).is_some_and(|parent| {
                     parent.layout_computed_style().is_some_and(|style| {
-                        display_mode(style.clone_display()) == DisplayMode::Text
+                        display_mode(*style.get_display()) == DisplayMode::Text
                     })
                 })
         }
@@ -343,7 +343,7 @@ fn preserves_newlines<T>(node: &Node<T>) -> bool {
 
 fn style_preserves_newlines(style: &ComputedValues) -> bool {
     use stylo::computed_values::white_space_collapse::T as Collapse;
-    style.get_inherited_text().clone_white_space_collapse() == Collapse::PreserveBreaks
+    *style.get_inherited_text().get_white_space_collapse() == Collapse::PreserveBreaks
 }
 
 /// A cheap structural identity of the flattened content.

@@ -1684,7 +1684,7 @@ fn collect_text_clip_under<'doc, T>(
     // none — they are content of the block above them.
     let visible = document.paint_style(node).is_none_or(|style| {
         matches!(
-            style.clone_visibility(),
+            *style.get_visibility(),
             stylo::computed_values::visibility::T::Visible
         )
     });
@@ -2384,7 +2384,7 @@ fn extents<T>(document: &Document<T>, item: &PaintItem) -> Extents {
         }
         PaintItemKind::TextRun { element } => {
             let layer = document.paint_style(element).map_or(4.0, |style| {
-                0.5 * f64::from(style.get_font().clone_font_size().computed_size().px())
+                0.5 * f64::from(style.get_font().slow_clone_font_size().computed_size().px())
                     + text::extent(style)
             });
             Extents {

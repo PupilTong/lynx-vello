@@ -390,30 +390,30 @@ impl ScrollBox {
 
 #[must_use]
 pub(crate) fn is_scroll_container(style: &ComputedValues) -> bool {
-    style.clone_overflow_x().is_scrollable() || style.clone_overflow_y().is_scrollable()
+    style.get_overflow_x().is_scrollable() || style.get_overflow_y().is_scrollable()
 }
 
 #[must_use]
 fn user_scrollable_axes(style: &ComputedValues) -> ScrollAxes {
     ScrollAxes {
-        x: style.clone_overflow_x().is_user_scrollable(),
-        y: style.clone_overflow_y().is_user_scrollable(),
+        x: style.get_overflow_x().is_user_scrollable(),
+        y: style.get_overflow_y().is_user_scrollable(),
     }
 }
 
 #[must_use]
 fn chaining_axes(style: &ComputedValues) -> ScrollAxes {
     ScrollAxes {
-        x: style.clone_overscroll_behavior_x() == OverscrollBehavior::Auto,
-        y: style.clone_overscroll_behavior_y() == OverscrollBehavior::Auto,
+        x: *style.get_overscroll_behavior_x() == OverscrollBehavior::Auto,
+        y: *style.get_overscroll_behavior_y() == OverscrollBehavior::Auto,
     }
 }
 
 #[must_use]
 fn bouncing_axes(style: &ComputedValues) -> ScrollAxes {
     ScrollAxes {
-        x: style.clone_overscroll_behavior_x() == OverscrollBehavior::ContainBounce,
-        y: style.clone_overscroll_behavior_y() == OverscrollBehavior::ContainBounce,
+        x: *style.get_overscroll_behavior_x() == OverscrollBehavior::ContainBounce,
+        y: *style.get_overscroll_behavior_y() == OverscrollBehavior::ContainBounce,
     }
 }
 
@@ -426,8 +426,8 @@ fn scroll_capture(style: &ComputedValues) -> CaptureAxes {
         ComputedScrollCapture::NearestBackward => ScrollCapture::NearestBackward,
     };
     CaptureAxes {
-        x: lower(style.clone_scroll_capture_x()),
-        y: lower(style.clone_scroll_capture_y()),
+        x: lower(*style.get_scroll_capture_x()),
+        y: lower(*style.get_scroll_capture_y()),
     }
 }
 
@@ -559,7 +559,7 @@ impl<T> Document<T> {
             return node.flat_parent_id();
         }
         let style = node.layout_computed_style()?;
-        match style.clone_position() {
+        match *style.get_box().get_position() {
             PositionProperty::Absolute => Self::containing_block(node, false),
             PositionProperty::Fixed => Self::containing_block(node, true),
             PositionProperty::Static | PositionProperty::Relative | PositionProperty::Sticky => {

@@ -473,18 +473,18 @@ mod tests {
 
             let style = style_of(&document, element);
             assert_eq!(
-                style.clone_box_sizing(),
+                *style.get_box_sizing(),
                 box_sizing::T::BorderBox,
                 "an image is a border box like every other Lynx element: linear={linear}"
             );
             assert_eq!(
-                style.clone_display(),
+                *style.get_display(),
                 Display::Flex,
                 "`defaultDisplayLinear` reaches the container tags, and \
                  web-elements keeps `x-image` out of that list: linear={linear}"
             );
             assert_eq!(
-                style.clone_contain(),
+                *style.get_contain(),
                 Contain::SIZE | Contain::INLINE_SIZE | Contain::BLOCK_SIZE,
                 "size containment, and nothing else: linear={linear}"
             );
@@ -793,7 +793,7 @@ mod tests {
     }
 
     fn object_fit(document: &LynxDocument, element: NodeId) -> ObjectFit {
-        style_of(document, element).clone_object_fit()
+        *style_of(document, element).get_object_fit()
     }
 
     /// `mode` reaches the engine as three UA attribute rules and nothing else.
@@ -882,7 +882,7 @@ mod tests {
             set(&mut document, element, AUTO_SIZE_ATTRIBUTE, value);
             document.layout();
             assert_eq!(
-                style_of(&document, element).clone_contain(),
+                *style_of(&document, element).get_contain(),
                 contain,
                 "auto-size={value:?}",
             );

@@ -35,11 +35,11 @@ pub(crate) fn establishes_stacking_context<T>(
     style: &ComputedValues,
     z_applies: bool,
 ) -> bool {
-    let position = style.clone_position();
+    let position = *style.get_box().get_position();
     if matches!(position, PositionProperty::Fixed | PositionProperty::Sticky) {
         return true;
     }
-    if z_applies && !style.clone_z_index().is_auto() {
+    if z_applies && !style.get_z_index().is_auto() {
         return true;
     }
     let box_style = style.get_box();
@@ -89,10 +89,10 @@ pub(crate) fn establishes_stacking_context<T>(
         return true;
     }
     effective_containment(
-        style.clone_contain(),
-        style.clone_content_visibility(),
+        *style.get_contain(),
+        *style.get_content_visibility(),
         skips_contents(node, style),
-        style.clone_container_type(),
+        *style.get_container_type(),
     )
     .intersects(Contain::LAYOUT | Contain::PAINT)
 }
@@ -124,7 +124,7 @@ pub(crate) fn needs_group_rendering(style: &ComputedValues) -> bool {
 
 pub(crate) fn stack_level(style: &ComputedValues, z_applies: bool) -> i32 {
     if z_applies {
-        style.clone_z_index().integer_or(0)
+        style.get_z_index().integer_or(0)
     } else {
         0
     }

@@ -21,7 +21,12 @@ fn rgb([red, green, blue]: [u8; 3]) -> AbsoluteColor {
 }
 
 fn computed_color(doc: &TestDocument, id: NodeId) -> AbsoluteColor {
-    doc.get(id).unwrap().computed_style().unwrap().clone_color()
+    doc.get(id)
+        .unwrap()
+        .computed_style()
+        .unwrap()
+        .get_color()
+        .solid_color()
 }
 
 macro_rules! assert_color {
@@ -54,13 +59,13 @@ fn standard_cascade_is_embedder_neutral() {
     doc.layout();
 
     let parent_style = doc.get(parent).unwrap().computed_style().unwrap();
-    assert_eq!(parent_style.clone_color(), rgb(GREEN));
+    assert_eq!(parent_style.get_color().solid_color(), rgb(GREEN));
 
     doc.set_inline_style(child, "color: blue");
     doc.layout();
     let child_style = doc.get(child).unwrap().computed_style().unwrap();
     assert_eq!(
-        child_style.clone_color(),
+        child_style.get_color().solid_color(),
         rgb(BLUE),
         "standard inline declarations outrank author class rules"
     );
@@ -183,14 +188,20 @@ fn id_class_and_style_attributes_are_reflected_dom_state() {
     assert_eq!(node.id_attribute(), Some("target"));
     assert!(node.has_class("hot"));
     assert_eq!(node.attribute("style"), Some("width: 10px"));
-    assert_eq!(node.computed_style().unwrap().clone_color(), rgb(RED));
+    assert_eq!(
+        node.computed_style().unwrap().get_color().solid_color(),
+        rgb(RED)
+    );
 
     doc.remove_attribute(target, "class");
     doc.layout();
     let node = doc.get(target).unwrap();
     assert!(!node.has_class("hot"));
     assert_eq!(node.attribute("class"), None);
-    assert_ne!(node.computed_style().unwrap().clone_color(), rgb(RED));
+    assert_ne!(
+        node.computed_style().unwrap().get_color().solid_color(),
+        rgb(RED)
+    );
 
     for (name, value, matches) in [
         ("class", Some("hot"), true),
@@ -346,12 +357,15 @@ fn media_queries_follow_standard_viewport_updates() {
     doc.layout();
 
     let wide = doc.get(element).unwrap().computed_style().unwrap();
-    assert_eq!(wide.clone_color(), rgb(RED));
+    assert_eq!(wide.get_color().solid_color(), rgb(RED));
 
     doc.set_viewport(400.0, 600.0);
     doc.layout();
     let narrow = doc.get(element).unwrap().computed_style().unwrap();
-    assert_ne!(narrow.clone_color(), wide.clone_color());
+    assert_ne!(
+        narrow.get_color().solid_color(),
+        wide.get_color().solid_color()
+    );
 }
 
 #[test]
@@ -418,8 +432,11 @@ fn documents_own_independent_stylesheets() {
 
     let first_style = first.get(first_probe).unwrap().computed_style().unwrap();
     let second_style = second.get(second_probe).unwrap().computed_style().unwrap();
-    assert_eq!(first_style.clone_color(), rgb(RED));
-    assert_ne!(second_style.clone_color(), first_style.clone_color());
+    assert_eq!(first_style.get_color().solid_color(), rgb(RED));
+    assert_ne!(
+        second_style.get_color().solid_color(),
+        first_style.get_color().solid_color()
+    );
 }
 
 /// `:nth-last-child` and the `-of-type` family count from the end, so adding or
