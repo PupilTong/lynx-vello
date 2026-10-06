@@ -2496,9 +2496,10 @@ would host it:
   has no fling or velocity, no `:active` driving, no `consume-slide-event`, no
   per-element `GestureDetector`/arena relations and no `click`; `tapSlop` is
   the default 50 px rather than the page config's.
-- **The rest of the `<image>` element surface.** `src` loads; `mode`,
-  `auto-size`, `placeholder` racing, `cap-insets`, `blur-radius` and the
-  `load`/`error` events do not.
+- **The rest of the `<image>` element surface.** `src`, `placeholder`,
+  `mode`, `auto-size` and `blur-radius` work, and `load` (with the bitmap's
+  natural size) and `error` fire, non-bubbling, through the component-event
+  queue; `cap-insets` and the animated-image events do not.
 - **UI methods other than `boundingClientRect`, `selectTab` and a dialog's
   `show`/`showModal`/`close`/`requestClose`.** Those dispatch by name
   (`selectTab` on the two pager tags only, the dialog's on `dialog` only) through
