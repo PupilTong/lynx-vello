@@ -702,6 +702,9 @@ impl<T> Document<T> {
         );
         self.note_child_list_change(parent, removed_index);
         self.note_custom_elements_removed(child, was_connected);
+        // HTML's removing steps: an element that left the document leaves
+        // the top layer with it (`tree::top_layer`, "Removal").
+        self.drop_disconnected_top_layer_entries();
     }
 
     /// Frees `id`, returning its payload. Its element children are unlinked
@@ -748,6 +751,7 @@ impl<T> Document<T> {
         let payload = match self.free_owned_subtree(id, in_shadow_tree).0 {
             PayloadSlot::Node(payload) => payload,
             PayloadSlot::ShadowRoot => unreachable!("a shadow root is refused above"),
+            PayloadSlot::Backdrop => unreachable!("a `::backdrop` node is never handed out"),
             PayloadSlot::Document => unreachable!("the document node is refused above"),
             PayloadSlot::Reserved => unreachable!("no id resolves to the reservation"),
         };
@@ -792,6 +796,7 @@ impl<T> Document<T> {
             match payload {
                 PayloadSlot::Node(payload) => removed.push(payload),
                 PayloadSlot::ShadowRoot => {}
+                PayloadSlot::Backdrop => unreachable!("a `::backdrop` node has no parent"),
                 PayloadSlot::Document => unreachable!("the document node cannot be removed"),
                 PayloadSlot::Reserved => unreachable!("no id resolves to the reservation"),
             }
@@ -838,7 +843,7 @@ impl<T> Document<T> {
     }
 
     /// Empties all three arenas of one node and retires its id.
-    fn free_node(&mut self, id: NodeId) -> (Node<T>, PayloadSlot<T>) {
+    pub(crate) fn free_node(&mut self, id: NodeId) -> (Node<T>, PayloadSlot<T>) {
         let removed_snapshot = self
             .pending_snapshots
             .remove(&OpaqueNode(id.arena_key()))

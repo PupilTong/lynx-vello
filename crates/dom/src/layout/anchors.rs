@@ -81,8 +81,10 @@
 //! must contain the query box; the query box's nearest scope must contain
 //! the anchor), "nearest ancestor, else last in tree order", and
 //! acceptability through the containing-block chain. Approximated: "tree
-//! order" is the flat tree's; the top layer does not exist (every box is in
-//! one layer); the initial containing block and the viewport are the same
+//! order" is the flat tree's; the top layer exists (`tree::top_layer`) but
+//! §2.3's top-layer clause is not implemented — an element's place in the
+//! layer does not enter acceptability, only its containing block does; the
+//! initial containing block and the viewport are the same
 //! containing block (so a `fixed` box can anchor to anything in flow); the
 //! skipped-contents clause is subsumed by the committed-layout check (an
 //! element in skipped contents has none, and a positioned box in the same
@@ -434,6 +436,11 @@ pub(crate) fn candidates_examined_during(pass: impl FnOnce()) -> usize {
 /// or `None` for the initial containing block — which this engine does not
 /// tell from the viewport, the fixed containing block.
 pub(crate) fn containing_block_generator<T>(node: &Node<T>) -> Option<&Node<T>> {
+    // A top-layer element and a `::backdrop` take the initial containing
+    // block (css-position-4 §3.1, `tree::top_layer`).
+    if node.arenas().top_layer().places_against_viewport(node.id()) {
+        return None;
+    }
     let Some(style) = node.layout_computed_style() else {
         return box_parent(node);
     };
@@ -448,7 +455,11 @@ pub(crate) fn containing_block_generator<T>(node: &Node<T>) -> Option<&Node<T>> 
 
 /// The nearest box ancestor establishing the containing block of an
 /// absolutely (or, with `fixed`, fixed) positioned descendant.
+///
+/// The walk ends at a top-layer element: its own containing block is the
+/// initial one, so nothing outside it is in its descendants' chain either.
 fn positioned_containing_block<T>(node: &Node<T>, fixed: bool) -> Option<&Node<T>> {
+    let top_layer = node.arenas().top_layer();
     let mut current = box_parent(node);
     while let Some(ancestor) = current {
         let style = ancestor.layout_computed_style()?;
@@ -459,6 +470,9 @@ fn positioned_containing_block<T>(node: &Node<T>, fixed: bool) -> Option<&Node<T
         };
         if establishes {
             return Some(ancestor);
+        }
+        if !top_layer.is_empty() && top_layer.contains(ancestor.id()) {
+            return None;
         }
         current = box_parent(ancestor);
     }

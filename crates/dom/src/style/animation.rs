@@ -1322,6 +1322,10 @@ impl<T: Sync> Document<T> {
             &anchor_restyled,
             crate::layout::anchors::RestyleSource::Animation,
         );
+        // An animated value a `::backdrop` inherits reaches it here.
+        let backdrops = self.restyle_backdrops();
+        tick.restyled += backdrops.restyled;
+        tick.relayout |= backdrops.relayout;
         tick
     }
 }

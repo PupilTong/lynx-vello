@@ -142,6 +142,11 @@ impl<T: Sync> Document<T> {
     {
         let root = self.document_element();
         if !root.needs_style_flush() {
+            // An entry added since the last flush still owes its first
+            // backdrop cascade, with nothing else to restyle.
+            if self.backdrops_need_restyle() {
+                self.restyle_backdrops();
+            }
             return;
         }
         let root = root.id();
@@ -189,6 +194,10 @@ impl<T: Sync> Document<T> {
             &anchor_restyled,
             crate::layout::anchors::RestyleSource::Flush,
         );
+        // css-position-4 §3.2: each `::backdrop` inherits from its element's
+        // style the harvest just published (`tree::top_layer`). One test on
+        // a page with an empty top layer.
+        self.restyle_backdrops();
         // The flush is where animations start and stop; the timeline has to
         // learn what it now owns before the next frame asks whether to tick.
         self.sync_animation_state();

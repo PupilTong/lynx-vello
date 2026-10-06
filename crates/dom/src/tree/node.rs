@@ -544,6 +544,9 @@ impl<T> Node<T> {
                 let arenas = self.arenas();
                 match arenas.payload_at(arenas.live_slot(self.id)) {
                     PayloadSlot::Node(payload) => payload,
+                    PayloadSlot::Backdrop => {
+                        panic!("a `::backdrop` node has no payload and is never handed out")
+                    }
                     PayloadSlot::Document | PayloadSlot::ShadowRoot | PayloadSlot::Reserved => {
                         unreachable!("payload-less sentinels belong to non-element nodes")
                     }
@@ -676,6 +679,25 @@ impl<T> Node<T> {
             );
         }
         snapshot.as_deref()
+    }
+
+    /// Stores a lazily cascaded pseudo-element style as this node's computed
+    /// style — Stylo's primary style and the layout snapshot together, so the
+    /// snapshot's divergence check above holds — and returns the old one.
+    ///
+    /// Only for a `::backdrop` node ([`crate::tree::top_layer`]): it is never
+    /// in a parent's child list, so no traversal reaches it and no harvest
+    /// swaps its style; this is the one writer.
+    pub(crate) fn replace_pseudo_style(
+        &mut self,
+        style: Arc<ComputedValues>,
+    ) -> Option<Arc<ComputedValues>> {
+        let NodeData::Element(snapshot) = &mut self.data else {
+            unreachable!("a pseudo-element node is an element node");
+        };
+        *self.stylo_data_present.get_mut() = true;
+        self.style_data.borrow_mut().styles.primary = Some(style.clone());
+        snapshot.replace(style)
     }
 
     #[must_use]

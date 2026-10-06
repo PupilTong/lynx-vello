@@ -159,6 +159,13 @@ pub(crate) fn box_parent<T>(node: &Node<T>) -> Option<&Node<T>> {
 }
 
 pub(crate) fn resolve_position<T>(node: &Node<T>, style: &ComputedValues) -> PositionProperty {
+    // css-position-4 §3.1: a top-layer element's containing block, and its
+    // `::backdrop`'s, is the initial one whatever the ancestors establish
+    // (`tree::top_layer`). Stylo's adjuster already computed the position
+    // to `absolute` or `fixed`.
+    if node.arenas().top_layer().places_against_viewport(node.id()) {
+        return PositionProperty::Fixed;
+    }
     let parent_establishes = |fixed: bool| {
         box_parent(node).is_some_and(|parent| {
             StyleView::try_of(parent).is_some_and(|parent_style| {
