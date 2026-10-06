@@ -42,7 +42,6 @@ http = "1"
 image = { version = "0.25.10", default-features = false }
 getrandom = "0.4.3"
 markup5ever_rcdom = "0.39"
-num-traits = "0.2"
 parley = { version = "0.11", default-features = false, features = [
     "std",
     "system",

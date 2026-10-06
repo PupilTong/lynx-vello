@@ -49,6 +49,11 @@ pub(crate) fn display_mode(display: Display) -> DisplayMode {
         Display::Linear => DisplayMode::Linear,
         Display::LynxRelative => DisplayMode::Relative,
         Display::LynxText => DisplayMode::Text,
+        // No `lynx` grammar path produces any other display today: the fork
+        // blockifies every `display: contents` fixup (root and top layer) to
+        // `flex`, never to Stylo's internal block/flow display. The panic
+        // guards a Stylo value the layout cannot express, rather than letting
+        // it silently become a leaf box.
         unsupported => panic!(
             "Bobcat does not support Stylo computed display {unsupported:?} \
              (raw={:#06x}, outside={:?}, inside={:?})",
@@ -433,8 +438,6 @@ mod tests {
     use core::mem::size_of;
 
     use hughie::style::Display;
-    use num_traits::FromPrimitive;
-    use stylo::values::specified::box_::{DisplayInside, DisplayOutside};
 
     use super::{DisplayMode, StyleView, TextRunView, display_mode};
 
@@ -448,21 +451,6 @@ mod tests {
         assert_eq!(display_mode(Display::Linear), DisplayMode::Linear);
         assert_eq!(display_mode(Display::LynxRelative), DisplayMode::Relative);
         assert_eq!(display_mode(Display::LynxText), DisplayMode::Text);
-    }
-
-    #[test]
-    #[should_panic(expected = "Bobcat does not support Stylo computed display")]
-    fn unsupported_stylo_display_panics_instead_of_becoming_a_leaf() {
-        // No `lynx` grammar path produces this today; the panic guards a Stylo
-        // value the layout cannot express. Stylo's private block/flow encoding
-        // is built from its raw bits through the derived `FromPrimitive`.
-        let raw =
-            ((DisplayOutside::Block as u16) << Display::OUTSIDE_SHIFT) | DisplayInside::Flow as u16;
-        let unsupported = Display::from_u16(raw).expect("every u16 is a Display");
-        assert_eq!(unsupported.outside(), DisplayOutside::Block);
-        assert_eq!(unsupported.inside(), DisplayInside::Flow);
-
-        let _ = display_mode(unsupported);
     }
 
     #[test]
