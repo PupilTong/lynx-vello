@@ -36,10 +36,10 @@ use types::{Axis, GridItem, TrackSet, TrackSizingFunction};
 use super::util::{
     IntrinsicTag, ItemKey, OrderedItem, PendingLayoutItem, ResolvedContainerBox,
     accumulate_scrollable_overflow, apply_aspect_ratio, axis_has_intrinsic_style, box_inset_size,
-    clamp, clamp_axis, container_content_independence, item_value_stability,
-    normalize_content_alignment, normalize_item_alignment, own_scrollable_overflow,
-    resolve_container_box, resolve_gap, resolve_insets, resolve_item_geometry,
-    sort_and_assign_layout_order,
+    clamp, clamp_axis, container_content_independence, is_scroll_container, item_end_margin,
+    item_value_stability, normalize_content_alignment, normalize_item_alignment,
+    own_scrollable_overflow, resolve_container_box, resolve_gap, resolve_insets,
+    resolve_item_geometry, sort_and_assign_layout_order,
 };
 use super::{AbsoluteContainingBlock, compute_absolute_layout_in, hide_subtree};
 use crate::geometry::{Edges, Line, Point, Size};
@@ -806,6 +806,7 @@ fn layout_in_flow_items<T>(
     // each item narrows per axis.
     goal: LayoutGoal,
     rtl: bool,
+    scroll_container: bool,
 ) -> (Size<f32>, Point<Option<f32>>)
 where
     T: LayoutTree,
@@ -939,6 +940,7 @@ where
                 layout.size,
                 layout.content_size,
                 item.overflow,
+                item_end_margin(scroll_container, layout.margin),
             );
             if goal.commits() {
                 tree.set_unrounded_layout(state, item.key.node, layout);
@@ -1041,6 +1043,7 @@ where
             item.layout.size,
             item.layout.content_size,
             item.overflow,
+            item_end_margin(scroll_container, item.layout.margin),
         );
         if goal.commits() {
             tree.set_unrounded_layout(state, item.node, item.layout);
@@ -1309,6 +1312,7 @@ where
                     layout.size,
                     layout.content_size,
                     tree.style(key.node).overflow(),
+                    Size::ZERO,
                 );
                 tree.set_unrounded_layout(state, key.node, layout);
                 hoisted.inside(tree, state, node, pending.ordered.document_index);
@@ -1545,6 +1549,7 @@ where
             },
         ),
         rtl,
+        is_scroll_container(style.overflow()),
     );
     if commits_layout {
         for (document_index, child) in hidden.expect("commit keeps hidden grid items") {

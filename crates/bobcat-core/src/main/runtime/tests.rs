@@ -2220,6 +2220,138 @@ fn select_tab_turns_a_viewpager_through_both_invoke_paths() {
     assert_eq!(offset(), dom::Vector2D::new(600.0, 0.0));
 }
 
+/// `x-swiper` autoplay through the realm: `__SetAttribute(…, 'autoplay', …)`
+/// arms an interval of `interval` ms whose ticks call `swiperAdvance`, which
+/// turns the 200px swiper one item per tick (instantly, as `smooth-scroll`
+/// asks) and stops on the last item; removing `autoplay` clears it, and
+/// `circular` wraps. A zero interval is due at once, so each round of due
+/// timers is one tick.
+#[test]
+#[expect(clippy::float_cmp, reason = "explicit pixel offsets are exact")]
+fn swiper_autoplay_turns_one_item_per_tick_until_autoplay_goes_away() {
+    let (mut js_runtime, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const swiper = __CreateElement('x-swiper', 0);
+                  __SetInlineStyles(swiper, 'width:200px;height:100px');
+                  __SetAttribute(swiper, 'smooth-scroll', '');
+                  __AppendElement(page, swiper);
+                  for (let i = 0; i < 3; i++) {
+                    __AppendElement(swiper, __CreateElement('x-swiper-item', 0));
+                  }
+                  __SetAttribute(swiper, 'interval', 0);
+                  __SetAttribute(swiper, 'autoplay', true);
+                  globalThis.held = [page, swiper];
+                };
+                ",
+            "app:///swiper.js",
+        )
+        .expect("main-thread script");
+    // One module per step, each under a URL of its own.
+    let steps = std::cell::Cell::new(0);
+    let step = |runtime: &mut MainThreadRuntime, js_runtime: &mut ScriptRuntime, source: &str| {
+        steps.set(steps.get() + 1);
+        let name = format!("app:///swiper-step-{}.js", steps.get());
+        runtime
+            .evaluate_module(js_runtime, source, &name, "step")
+            .expect("step");
+    };
+    step(
+        &mut runtime,
+        &mut js_runtime,
+        "import { __FlushElementTree } from 'bobcat:element'; __FlushElementTree();",
+    );
+    let swiper = {
+        let tree = elements.tree();
+        let page = tree.document_element().id();
+        tree.get(page).expect("the page").child_ids()[0]
+    };
+    let offset = || elements.tree().scroll_offset(swiper).x;
+    let mut seen = vec![offset()];
+    for _ in 0..3 {
+        assert!(runtime.run_due_timers(&mut js_runtime).is_empty());
+        seen.push(offset());
+    }
+    assert_eq!(seen, [0.0, 200.0, 400.0, 400.0], "stops on the last item");
+    assert!(runtime.next_timer_deadline().is_some(), "still armed");
+
+    step(
+        &mut runtime,
+        &mut js_runtime,
+        "import { __SetAttribute } from 'bobcat:element'; __SetAttribute(held[1], 'autoplay', null);",
+    );
+    assert_eq!(
+        runtime.next_timer_deadline(),
+        None,
+        "removing autoplay stops it"
+    );
+
+    step(
+        &mut runtime,
+        &mut js_runtime,
+        r"
+            import { __SetAttribute } from 'bobcat:element';
+            __SetAttribute(held[1], 'circular', true);
+            __SetAttribute(held[1], 'autoplay', '');
+            ",
+    );
+    assert!(runtime.run_due_timers(&mut js_runtime).is_empty());
+    assert_eq!(offset(), 0.0, "circular wraps to the first item");
+
+    step(
+        &mut runtime,
+        &mut js_runtime,
+        "import { __SetAttribute } from 'bobcat:element'; __SetAttribute(held[1], 'autoplay', 'false');",
+    );
+    assert_eq!(
+        runtime.next_timer_deadline(),
+        None,
+        "`\"false\"` is no autoplay"
+    );
+}
+
+/// The autoplay interval holds its swiper weakly: once the handle is
+/// collected, and its element with it, the next tick clears the interval
+/// and calls nothing.
+#[test]
+fn swiper_autoplay_ends_with_its_collected_element() {
+    let (mut js_runtime, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.renderPage = function () {
+                  globalThis.held = [__CreatePage('card', 0)];
+                  // Detached and let go of: only the interval still names it.
+                  const swiper = __CreateElement('x-swiper', 0);
+                  __SetAttribute(swiper, 'interval', 0);
+                  __SetAttribute(swiper, 'autoplay', true);
+                };
+                ",
+            "app:///released-swiper.js",
+        )
+        .expect("main-thread script");
+    assert!(elements.tree().get(node_id(3)).is_some());
+    assert!(runtime.next_timer_deadline().is_some());
+
+    runtime
+        .collect_garbage(&mut js_runtime)
+        .expect("collection");
+    assert!(
+        elements.tree().get(node_id(3)).is_none(),
+        "the interval did not keep the handle, or the element, alive"
+    );
+    assert!(
+        runtime.run_due_timers(&mut js_runtime).is_empty(),
+        "the tick reached no freed element"
+    );
+    assert_eq!(runtime.next_timer_deadline(), None, "and cleared itself");
+}
+
 /// Measuring runs no pipeline step. A job that mutates and then measures
 /// sees the box the last pass produced; the new one arrives only once the
 /// realm flushes itself, or once the entry's epilogue commits for it.
@@ -4622,6 +4754,7 @@ fn an_mts_realm_declares_these_host_members() {
         "settleFuture",
         "supportsStyleProperty",
         "swapElement",
+        "swiperAdvance",
         "tagName",
         "takeFuture",
         "terminateWorker",

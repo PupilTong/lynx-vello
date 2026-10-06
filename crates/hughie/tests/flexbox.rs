@@ -5,7 +5,7 @@ mod support;
 use hughie::compute::{compute_absolute_layout, compute_leaf_layout};
 use hughie::prelude::*;
 use stylo::computed_values::{box_sizing, direction, flex_direction, flex_wrap};
-use stylo::values::computed::{Display, MaxSize, Overflow, PositionProperty};
+use stylo::values::computed::{Display, Margin, MaxSize, Overflow, PositionProperty};
 use stylo::values::specified::align::AlignFlags;
 use support::*;
 
@@ -1823,4 +1823,218 @@ fn intrinsic_keyword_flex_bases_use_contributions() {
 
     assert_close(width_of(FlexBasis::Size(size_min_content())), 30.0);
     assert_close(width_of(FlexBasis::Size(size_max_content())), 90.0);
+}
+
+/// css-overflow-3 §3.3 scrollable overflow: a scroll container's area takes
+/// in "the margin areas of grid item and flex item boxes for which the box
+/// establishes a containing block". Three unshrinkable 60px items in a 100px
+/// container, the last one (or the first) carrying `margins`.
+fn scrolling_flex_row(
+    overflow: Overflow,
+    first_margin: Edges<Margin>,
+    last_margin: Edges<Margin>,
+) -> (TestTree, TestId, [TestId; 3]) {
+    let mut tree = TestTree::default();
+    let mut item = |margin: Edges<Margin>| {
+        let style = TestStyle {
+            flex_shrink: nn(0.0),
+            margin,
+            ..fixed_leaf_style(60.0, 20.0)
+        };
+        tree.push_leaf(style, Size::new(60.0, 20.0), None)
+    };
+    let items = [
+        item(first_margin),
+        item(Edges::uniform(margin_px(0.0))),
+        item(last_margin),
+    ];
+    let root = flex_container(
+        &mut tree,
+        TestStyle {
+            overflow: Point::new(overflow, overflow),
+            ..TestStyle::default()
+        },
+        &items,
+    );
+    (tree, root, items)
+}
+
+fn right_margin(value: f32) -> Edges<Margin> {
+    Edges {
+        right: margin_px(value),
+        ..Edges::uniform(margin_px(0.0))
+    }
+}
+
+#[test]
+fn a_scroll_container_counts_the_last_flex_item_end_margin() {
+    let (tree, root, _) = scrolling_flex_row(
+        Overflow::Hidden,
+        Edges::uniform(margin_px(0.0)),
+        right_margin(20.0),
+    );
+    let output = definite_layout(&tree, root, 100.0, 20.0);
+    // Border boxes end at 180; the last margin area at 200.
+    assert_size(output.content_size, Size::new(200.0, 20.0));
+
+    let mut tree = TestTree::default();
+    let mut item = |bottom: f32| {
+        let style = TestStyle {
+            flex_shrink: nn(0.0),
+            margin: Edges {
+                bottom: margin_px(bottom),
+                ..Edges::uniform(margin_px(0.0))
+            },
+            flex_basis: basis_px(60.0),
+            ..fixed_leaf_style(20.0, 60.0)
+        };
+        tree.push_leaf(style, Size::new(20.0, 60.0), None)
+    };
+    let items = [item(0.0), item(0.0), item(20.0)];
+    let root = flex_container(
+        &mut tree,
+        TestStyle {
+            flex_direction: flex_direction::T::Column,
+            overflow: Point::new(Overflow::Hidden, Overflow::Hidden),
+            ..TestStyle::default()
+        },
+        &items,
+    );
+    let output = definite_layout(&tree, root, 20.0, 100.0);
+    assert_size(output.content_size, Size::new(20.0, 200.0));
+}
+
+#[test]
+fn a_first_item_start_margin_reaches_scrollable_overflow_through_its_location() {
+    let left = Edges {
+        left: margin_px(30.0),
+        ..Edges::uniform(margin_px(0.0))
+    };
+    let (tree, root, items) = scrolling_flex_row(
+        Overflow::Hidden,
+        left.clone(),
+        Edges::uniform(margin_px(0.0)),
+    );
+    let output = definite_layout(&tree, root, 100.0, 20.0);
+    assert_close(tree.layout(items[0]).location.x, 30.0);
+    assert_size(output.content_size, Size::new(210.0, 20.0));
+
+    let (tree, root, _) = scrolling_flex_row(Overflow::Hidden, left, right_margin(20.0));
+    let output = definite_layout(&tree, root, 100.0, 20.0);
+    assert_size(output.content_size, Size::new(230.0, 20.0));
+}
+
+#[test]
+fn a_negative_end_margin_does_not_shrink_scrollable_overflow() {
+    // The area is a union with the border box: a margin area ending at 170
+    // leaves the border box's 180.
+    let (tree, root, _) = scrolling_flex_row(
+        Overflow::Hidden,
+        Edges::uniform(margin_px(0.0)),
+        right_margin(-10.0),
+    );
+    let output = definite_layout(&tree, root, 100.0, 20.0);
+    assert_size(output.content_size, Size::new(180.0, 20.0));
+}
+
+#[test]
+fn an_item_margin_area_and_its_visible_overflow_are_a_union() {
+    // One 60px item whose own content reaches 100px: the margin area and the
+    // content overflow are each a rectangle of the union, not a sum.
+    let content_with = |margin: f32| {
+        let mut tree = TestTree::default();
+        let wide = tree.push_leaf(
+            TestStyle {
+                flex_shrink: nn(0.0),
+                ..fixed_leaf_style(100.0, 20.0)
+            },
+            Size::new(100.0, 20.0),
+            None,
+        );
+        let item = flex_container(
+            &mut tree,
+            TestStyle {
+                flex_shrink: nn(0.0),
+                margin: right_margin(margin),
+                ..fixed_leaf_style(60.0, 20.0)
+            },
+            &[wide],
+        );
+        let root = flex_container(
+            &mut tree,
+            TestStyle {
+                overflow: Point::new(Overflow::Hidden, Overflow::Hidden),
+                ..TestStyle::default()
+            },
+            &[item],
+        );
+        definite_layout(&tree, root, 50.0, 20.0).content_size.width
+    };
+    assert_close(content_with(20.0), 100.0);
+    assert_close(content_with(50.0), 110.0);
+}
+
+#[test]
+fn an_absolutely_positioned_child_counts_its_border_box_only() {
+    let mut tree = TestTree::default();
+    let absolute = tree.push_leaf(
+        TestStyle {
+            position: PositionProperty::Absolute,
+            inset: Edges {
+                left: inset_px(150.0),
+                top: inset_px(0.0),
+                ..Edges::uniform(inset_auto())
+            },
+            margin: Edges {
+                right: margin_px(30.0),
+                bottom: margin_px(30.0),
+                ..Edges::uniform(margin_px(0.0))
+            },
+            ..fixed_leaf_style(20.0, 20.0)
+        },
+        Size::new(20.0, 20.0),
+        None,
+    );
+    let root = flex_container(
+        &mut tree,
+        TestStyle {
+            overflow: Point::new(Overflow::Hidden, Overflow::Hidden),
+            ..TestStyle::default()
+        },
+        &[absolute],
+    );
+    let output = definite_layout(&tree, root, 100.0, 100.0);
+    assert_size(output.content_size, Size::new(170.0, 100.0));
+}
+
+#[test]
+fn a_non_scrolling_container_keeps_its_item_margins_to_itself() {
+    // css-overflow-3 §3.3 defines the area for any box, so read literally a
+    // `visible` flex container would carry the 20px margin up to the scroll
+    // container above it (220). No browser does (csswg-drafts#9194): an item
+    // margin counts only in its own container's area when that container
+    // scrolls, and the engine follows them.
+    let (mut tree, inner, _) = scrolling_flex_row(
+        Overflow::Visible,
+        Edges::uniform(margin_px(0.0)),
+        right_margin(20.0),
+    );
+    let inner_style = TestStyle {
+        flex_shrink: nn(0.0),
+        margin: right_margin(10.0),
+        ..fixed_leaf_style(100.0, 20.0)
+    };
+    tree.source_node_mut(inner).style = inner_style;
+    let root = flex_container(
+        &mut tree,
+        TestStyle {
+            overflow: Point::new(Overflow::Hidden, Overflow::Hidden),
+            ..TestStyle::default()
+        },
+        &[inner],
+    );
+    let output = definite_layout(&tree, root, 100.0, 20.0);
+    assert_size(tree.layout(inner).content_size, Size::new(180.0, 20.0));
+    // The inner container's own 10px margin ends at 110, inside its 180.
+    assert_size(output.content_size, Size::new(180.0, 20.0));
 }

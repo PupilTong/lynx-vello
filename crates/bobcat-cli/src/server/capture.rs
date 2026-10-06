@@ -712,6 +712,50 @@ mod tests {
         }
     }
 
+    /// A compiled `ReactLynx` card of four 120px `<x-swiper>`s, laid out by
+    /// the engine's UA sheet alone: the top-left one starts on the blue item
+    /// its `current={2}` names, the `vertical` top-right one on the green
+    /// item of its `current={1}`, and the `coverflow` bottom-left one shows
+    /// its green item centred with its red one scaled down at its left. The
+    /// bottom-right one's one-second autoplay is not sampled: the capture
+    /// does not wait for it; `crates/bobcat-source/tests/reactlynx_runtime.rs`
+    /// does.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_swiper_card_renders_its_current_items() {
+        let executor = CaptureExecutor::new().expect("start capture owner thread");
+        let result = executor
+            .capture(CaptureRequest {
+                input: CaptureInput::Bytes(fixtures::fixture("react-swiper").page.to_vec()),
+                width: 800,
+                height: 600,
+                screenshot_settle: Duration::ZERO,
+                timeout: Duration::from_secs(30),
+                url: Url::parse("file:///react-swiper.web.bundle").expect("fixture URL"),
+            })
+            .await
+            .expect("capture queue remains available");
+        executor.shutdown().expect("stop capture owner thread");
+
+        let screenshot = result.expect("decode, boot, and render the web bundle");
+        let width = usize::try_from(screenshot.size.width).expect("an addressable width");
+        let pixel = |x: usize, y: usize| {
+            let at = (y * width + x) * 4;
+            [
+                screenshot.pixels[at],
+                screenshot.pixels[at + 1],
+                screenshot.pixels[at + 2],
+            ]
+        };
+        for (x, y, colour) in [
+            (60, 60, [0, 0, 255]),
+            (180, 60, [0, 128, 0]),
+            (60, 180, [0, 128, 0]),
+            (5, 180, [255, 0, 0]),
+        ] {
+            assert_eq!(pixel(x, y), colour, "at ({x}, {y})");
+        }
+    }
+
     /// A compiled `ReactLynx` `<scroll-coordinator>`, 300 by 400 at the page
     /// origin and laid out by the engine's UA sheet: a translucent blue
     /// toolbar 60 tall pinned over a red header 200 tall, and the slot

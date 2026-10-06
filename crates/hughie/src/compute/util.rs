@@ -771,7 +771,8 @@ pub(super) fn used_aspect_ratio(value: AspectRatio) -> Option<f32> {
 
 /// Stores one committed child's durable layout and folds its box into the
 /// container's scrollable overflow — the common tail of every algorithm's
-/// in-flow commit loop.
+/// in-flow commit loop. A `scroll_container` folds in the child's margin
+/// area too ([`item_end_margin`]).
 #[inline]
 #[expect(
     clippy::too_many_arguments,
@@ -786,6 +787,7 @@ pub(super) fn store_committed_child<T: crate::tree::LayoutTree>(
     output: crate::tree::LayoutOutput,
     geometry: &ItemGeometry,
     scrollable: &mut Size<f32>,
+    scroll_container: bool,
 ) {
     let mut layout = crate::tree::Layout::with_order(order);
     layout.location = location;
@@ -801,6 +803,7 @@ pub(super) fn store_committed_child<T: crate::tree::LayoutTree>(
         output.size,
         output.content_size,
         geometry.overflow,
+        item_end_margin(scroll_container, geometry.margin),
     );
 }
 
@@ -1337,6 +1340,11 @@ pub(super) fn is_scroll_container(overflow: Point<Overflow>) -> bool {
     overflow.x.is_scrollable() || overflow.y.is_scrollable()
 }
 
+/// Grows `content_size` by one child placed at `location`: its border box,
+/// its own scrollable overflow when `overflow` is `visible` on the axis, and
+/// its margin area past the border box's right and bottom edges,
+/// `end_margin` (see [`item_end_margin`]; zero for a box whose margin area
+/// does not count). The three are a union, so each axis takes the farthest.
 #[inline]
 pub(super) fn accumulate_scrollable_overflow(
     content_size: &mut Size<f32>,
@@ -1344,24 +1352,51 @@ pub(super) fn accumulate_scrollable_overflow(
     child_size: Size<f32>,
     child_content_size: Size<f32>,
     child_overflow: Point<Overflow>,
+    end_margin: Size<f32>,
 ) {
-    let visible_overflow_reach = |overflow: Overflow, size: f32, content: f32| {
+    let visible_overflow_reach = |overflow: Overflow, size: f32, content: f32, margin: f32| {
+        let margin_area = size + margin;
         if overflow == Overflow::Visible {
-            size.max(content)
+            margin_area.max(content)
         } else {
-            size
+            margin_area
         }
     };
     let reach = Size::new(
-        visible_overflow_reach(child_overflow.x, child_size.width, child_content_size.width),
+        visible_overflow_reach(
+            child_overflow.x,
+            child_size.width,
+            child_content_size.width,
+            end_margin.width,
+        ),
         visible_overflow_reach(
             child_overflow.y,
             child_size.height,
             child_content_size.height,
+            end_margin.height,
         ),
     );
     content_size.width = content_size.width.max(location.x + reach.width);
     content_size.height = content_size.height.max(location.y + reach.height);
+}
+
+/// The part of an in-flow child's margin area that css-overflow-3 §3.3 adds
+/// to its container's scrollable overflow past the child's border box: "the
+/// margin areas of grid item and flex item boxes for which the box
+/// establishes a containing block" — Flexbox, Grid and grid-lanes items,
+/// and Linear and Relative items, which web-core lays out as flex items.
+/// Only a `scroll_container` counts them, as every browser does
+/// ([csswg-drafts#9194](https://github.com/w3c/csswg-drafts/issues/9194)):
+/// a non-scrolling container's item margins never reach an ancestor's
+/// scrollable overflow. The area is a union with the border box, so a
+/// negative margin adds nothing.
+#[inline]
+pub(super) fn item_end_margin(scroll_container: bool, margin: Edges<f32>) -> Size<f32> {
+    if scroll_container {
+        Size::new(margin.right.max(0.0), margin.bottom.max(0.0))
+    } else {
+        Size::ZERO
+    }
 }
 
 #[inline]

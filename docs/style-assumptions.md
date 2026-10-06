@@ -294,6 +294,22 @@ the semantics are stylo's.** Everything below refines that sentence.
       `position` is web-core's own `!important` (`x-viewpager-ng.css:63`): a
       page positioned absolutely would leave the row. The pager's `display`
       stays a default, as a scroller's does.
+    - The `x-swiper` main axis (2026-10-06), eight rules: `flex-direction`,
+      `linear-direction` and `flex-wrap: nowrap` on `x-swiper` in a row, the
+      first two as `column` under `vertical` (winning by specificity), and an
+      `x-swiper-item`'s main-axis size — `width: 100%`, `height: 100%` under
+      `vertical`, and the `carousel` (80%) and `flat-coverflow`/`coverflow`
+      (60%) sizes on each axis. web-core lays the items out in a shadow
+      `#content` box no author rule on the host reaches
+      (`htmlTemplates.ts:225-275`), and pins `flex-wrap`, the column and
+      every one of those sizes with its own `!important`
+      (`x-swiper.css:9,59,102-118,181-191,215-226,275-289`). Here the
+      authored swiper lays the items out and its snap positions are built
+      from their sizes, so a normal declaration would let an author rule
+      stack the items or resize one off its page. An item's `position` is
+      not pinned (web-core does not pin it), and the swiper's `display` stays
+      a default. `crates/bobcat-core/src/main/tree/swiper.rs` carries the
+      argument.
     - The `<scroll-coordinator>` structure (2026-09-29), six rules under
       both spellings (`scroll-coordinator*` and web-core's
       `x-foldview-*-ng`): the coordinator's `overflow-y: scroll` and its

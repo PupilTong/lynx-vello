@@ -2,8 +2,9 @@
 //! defaults every container tag shares, and the assembly of the one sheet.
 //!
 //! Each tag's own policy lives with that tag — [`super::scroll_container`],
-//! [`super::list`], [`super::viewpager`], [`super::scroll_coordinator`],
-//! [`super::text`], [`super::raw_text`], [`super::image`] — and this module
+//! [`super::list`], [`super::viewpager`], [`super::swiper`],
+//! [`super::scroll_coordinator`], [`super::text`], [`super::raw_text`],
+//! [`super::image`] — and this module
 //! only decides what they all agree on and what order they land in.
 //! [`super::blur_view`] is the one tag module with no rules of its own: a
 //! blur view is a container and nothing more, so everything it needs is here.
@@ -11,15 +12,17 @@
 //! Order is mostly documentation, with one exception that is mechanism:
 //! [`super::image`]'s child suppression ties on specificity with the `display`
 //! rules `view`, `scroll-view`, `list`, `list-item`, the two spellings each of
-//! `viewpager` and `viewpager-item`, the ten `scroll-coordinator` tags,
+//! `viewpager` and `viewpager-item`, `x-swiper`, `x-swiper-item`, the ten
+//! `scroll-coordinator` tags,
 //! `blur-view`, `x-blur-view` and `wrapper` carry, so it wins only by being
 //! assembled last.
 //! That module's `nothing_inside_an_image_generates_a_box` is the tripwire for
 //! it.
 
 use super::blur_view::{BLUR_VIEW_TAG, X_BLUR_VIEW_TAG};
+use super::swiper::{SWIPER_ITEM_TAG, SWIPER_TAG};
 use super::viewpager::{VIEWPAGER_ITEM_TAG, VIEWPAGER_TAG, X_VIEWPAGER_ITEM_TAG, X_VIEWPAGER_TAG};
-use super::{image, list, raw_text, scroll_container, scroll_coordinator, text, viewpager};
+use super::{image, list, raw_text, scroll_container, scroll_coordinator, swiper, text, viewpager};
 
 /// Page configuration for the Lynx runtime and UA cascade.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,7 +56,7 @@ impl Default for PageConfig {
 ///
 /// The container tags — `page`, `view`, `scroll-view`, `list`, `list-item`,
 /// `viewpager`, `x-viewpager-ng`, `viewpager-item`, `x-viewpager-item-ng`,
-/// the five `scroll-coordinator` roles under both spellings
+/// `x-swiper`, `x-swiper-item`, the five `scroll-coordinator` roles under both spellings
 /// (`scroll-coordinator`, `-header`, `-toolbar`, `-slot`, `-slot-drag`, and
 /// web-core's `x-foldview-ng`, `x-foldview-header-ng`, …),
 /// `blur-view` and `x-blur-view` — share
@@ -74,9 +77,10 @@ impl Default for PageConfig {
 /// that. `defaultOverflowVisible` releases the non-scrolling containers —
 /// `page`, `view` and the two blur-view tags — back to `visible`, the way
 /// web-core's `[lynx-default-overflow-visible=true] x-view` releases `x-view`
-/// alone; a scroller carries its own axes regardless, and a `list-item` or a
-/// pager's page stays clipped — by this `clip` and by the paint containment
-/// [`super::list`] and [`super::viewpager`] give them.
+/// alone; a scroller carries its own axes regardless, and a `list-item`, a
+/// pager's page or a swiper's item stays clipped — by this `clip`, and the
+/// first two also by the paint containment [`super::list`] and
+/// [`super::viewpager`] give them.
 ///
 /// The blur-view tags are here because native's `LynxUIBlurView` extends
 /// `LynxUIView`: a blur view is a view in everything layout can see, and its
@@ -108,18 +112,23 @@ impl Default for PageConfig {
 /// row is the fifth and sixth: its pages form one row in both references
 /// whatever main axis an author writes on it, so its `flex-direction`,
 /// `linear-direction` and `flex-wrap`, and its pages' `position`, are pinned
-/// ([`super::viewpager`] carries the argument). The coordinator's structure
-/// is six more, between the pager's and the text block's in the sheet: its
+/// ([`super::viewpager`] carries the argument). The swiper's main axis is
+/// eight more, after the pager's, for the same reason: the swiper's
+/// direction and wrap in a row and in a column, and its items' main-axis
+/// size in each of its layouts, which web-core itself pins
+/// ([`super::swiper`] carries the argument). The coordinator's structure
+/// is six more, between the swiper's and the text block's in the sheet: its
 /// `overflow-y: scroll` and its column, the `overflow-y: hidden` that
 /// `enable-scroll="false"` needs to beat that scroll, and the header's, the
 /// toolbar's and the slot's positions, which its geometry is built from
 /// ([`super::scroll_coordinator`] carries the argument).
 /// `the_ua_sheet_is_important_free_apart_from_the_text_block` pins the set to
-/// exactly those twelve rules.
+/// exactly those twenty rules.
 #[must_use]
 pub(super) fn ua_stylesheet(config: PageConfig) -> String {
     let component_tags = format!(
-        "{VIEWPAGER_TAG}, {X_VIEWPAGER_TAG}, {VIEWPAGER_ITEM_TAG}, {X_VIEWPAGER_ITEM_TAG}, {}",
+        "{VIEWPAGER_TAG}, {X_VIEWPAGER_TAG}, {VIEWPAGER_ITEM_TAG}, {X_VIEWPAGER_ITEM_TAG}, \
+         {SWIPER_TAG}, {SWIPER_ITEM_TAG}, {}",
         scroll_coordinator::TAGS.join(", ")
     );
     let display = if config.default_display_linear {
@@ -146,6 +155,7 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
          {scrollers}\
          {lists}\
          {pagers}\
+         {swipers}\
          {coordinators}\
          {text}\
          {carriers}\
@@ -153,6 +163,7 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
         scrollers = scroll_container::UA_RULES,
         lists = list::UA_RULES,
         pagers = viewpager::UA_RULES,
+        swipers = swiper::UA_RULES,
         coordinators = scroll_coordinator::UA_RULES,
         text = text::UA_RULES,
         carriers = raw_text::UA_RULES,
@@ -175,15 +186,15 @@ mod tests {
     };
     use super::super::test_support::{child, document, overflow, style_of, with_config};
     use super::{
-        BLUR_VIEW_TAG, PageConfig, VIEWPAGER_ITEM_TAG, VIEWPAGER_TAG, X_BLUR_VIEW_TAG,
-        X_VIEWPAGER_ITEM_TAG, X_VIEWPAGER_TAG, ua_stylesheet,
+        BLUR_VIEW_TAG, PageConfig, SWIPER_ITEM_TAG, SWIPER_TAG, VIEWPAGER_ITEM_TAG, VIEWPAGER_TAG,
+        X_BLUR_VIEW_TAG, X_VIEWPAGER_ITEM_TAG, X_VIEWPAGER_TAG, ua_stylesheet,
     };
 
     /// The tags that get `web-elements`' common container block and keep
     /// its `position: relative`. The coordinator's header, toolbar and slot
     /// get the block too, but their positions are pinned
     /// ([`super::super::scroll_coordinator`] tests them).
-    const CONTAINER_TAGS: [&str; 15] = [
+    const CONTAINER_TAGS: [&str; 17] = [
         "page",
         "view",
         "scroll-view",
@@ -193,6 +204,8 @@ mod tests {
         X_VIEWPAGER_TAG,
         VIEWPAGER_ITEM_TAG,
         X_VIEWPAGER_ITEM_TAG,
+        SWIPER_TAG,
+        SWIPER_ITEM_TAG,
         SCROLL_COORDINATOR_TAG,
         X_FOLDVIEW_TAG,
         SCROLL_COORDINATOR_SLOT_DRAG_TAG,
@@ -371,7 +384,8 @@ mod tests {
                 .map(|tag| (tag, child(&mut document, tag, "")));
             let scroller = child(&mut document, "scroll-view", "");
             let list = child(&mut document, "list", "");
-            let pagers = [VIEWPAGER_TAG, X_VIEWPAGER_TAG].map(|tag| child(&mut document, tag, ""));
+            let pagers = [VIEWPAGER_TAG, X_VIEWPAGER_TAG, SWIPER_TAG]
+                .map(|tag| child(&mut document, tag, ""));
             let coordinators =
                 [SCROLL_COORDINATOR_TAG, X_FOLDVIEW_TAG].map(|tag| child(&mut document, tag, ""));
             let leaves = [
@@ -379,6 +393,7 @@ mod tests {
                 "image",
                 VIEWPAGER_ITEM_TAG,
                 X_VIEWPAGER_ITEM_TAG,
+                SWIPER_ITEM_TAG,
                 SCROLL_COORDINATOR_HEADER_TAG,
                 X_FOLDVIEW_HEADER_TAG,
                 SCROLL_COORDINATOR_TOOLBAR_TAG,
@@ -421,7 +436,7 @@ mod tests {
                 assert_eq!(
                     overflow(&document, pager),
                     (Overflow::Scroll, Overflow::Hidden),
-                    "a pager keeps its own axes whatever the switch says: {visible}"
+                    "a pager or a swiper keeps its own axes whatever the switch says: {visible}"
                 );
             }
             for coordinator in coordinators {
@@ -500,7 +515,12 @@ mod tests {
     /// itself pins with `!important`. [`super::viewpager`] carries the full
     /// argument.
     ///
-    /// The coordinator's six follow the pager's. In every reference its
+    /// The swiper's eight follow the pager's, on the same argument: web-core
+    /// lays its items out in a shadow box, pins `flex-wrap`, the column and
+    /// each item's main-axis size itself, and here the authored swiper is the
+    /// box. [`super::super::swiper`] carries the argument.
+    ///
+    /// The coordinator's six follow the swiper's. In every reference its
     /// header, toolbar and slot are placed by something no author rule
     /// reaches — web-core's `!important` scroll axis, header position and
     /// component code, native's own layout — and here the authored boxes
@@ -511,10 +531,24 @@ mod tests {
     /// scroll. [`super::super::scroll_coordinator`] carries the argument.
     #[test]
     fn the_ua_sheet_is_important_free_apart_from_the_text_block() {
-        const ALLOWED: [&str; 12] = [
+        const ALLOWED: [&str; 20] = [
             "viewpager, x-viewpager-ng { flex-direction: row !important; \
              linear-direction: row !important; flex-wrap: nowrap !important; }",
             "viewpager-item, x-viewpager-item-ng { position: relative !important; }",
+            "x-swiper { flex-direction: row !important; linear-direction: row !important; \
+             flex-wrap: nowrap !important; }",
+            "x-swiper[vertical]:not([vertical=\"false\"]) { flex-direction: column !important; \
+             linear-direction: column !important; }",
+            "x-swiper > x-swiper-item { width: 100% !important; }",
+            "x-swiper[vertical]:not([vertical=\"false\"]) > x-swiper-item { height: 100% !important; }",
+            "x-swiper[mode=\"carousel\"]:is(:not([vertical]), [vertical=\"false\"]) > x-swiper-item \
+             { width: 80% !important; }",
+            "x-swiper[mode=\"carousel\"][vertical]:not([vertical=\"false\"]) > x-swiper-item \
+             { height: 80% !important; }",
+            "x-swiper:is([mode=\"flat-coverflow\"], [mode=\"coverflow\"]):is(:not([vertical]), \
+             [vertical=\"false\"]) > x-swiper-item { width: 60% !important; }",
+            "x-swiper:is([mode=\"flat-coverflow\"], [mode=\"coverflow\"])[vertical]:not([vertical=\"false\"]) \
+             > x-swiper-item { height: 60% !important; }",
             "scroll-coordinator, x-foldview-ng { overflow-y: scroll !important; }",
             "scroll-coordinator, x-foldview-ng { flex-direction: column !important; \
              linear-direction: column !important; }",

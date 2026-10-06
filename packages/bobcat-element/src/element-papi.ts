@@ -22,9 +22,11 @@ import {
   supportsStyleProperty,
   queryElementIds,
   swapElement,
+  swiperAdvance,
   tagName,
 } from "bobcat-internal:host";
 import type { NodeQueryRequest, QueryNode } from "bobcat:selector-query";
+import type { TimerGlobals } from "bobcat:timers";
 import { __BobcatPublishEvent } from "bobcat:runtime";
 
 // The Lynx Element PAPI runtime.
@@ -67,7 +69,7 @@ import { __BobcatPublishEvent } from "bobcat:runtime";
 // | `__AddInlineStyle(element, property, value)` | native `setInlineStyleProperty`; CSS names, not numeric native IDs |
 // | `__SetDataset` / `__GetDataset` / `__AddDataset` | typed per-element values in this realm |
 // | `__SetCSSId(elements, cssId, entryName?)` | nothing — accepted and ignored |
-// | `__SetAttribute(element, name, value)` | native `setAttribute` / `removeAttribute` exports; `update-list-info` instead drives the list callbacks over `childElementIds` / `insertBefore` / `removeElement` |
+// | `__SetAttribute(element, name, value)` | native `setAttribute` / `removeAttribute` exports; `update-list-info` instead drives the list callbacks over `childElementIds` / `insertBefore` / `removeElement`; `autoplay` / `interval` on an `x-swiper` also re-arm its autoplay interval over `tagName` + `setInterval` + `swiperAdvance` |
 // | `__UpdateListCallbacks(list, ...)` | this runtime's own store |
 // | `__AddEvent(element, type, name, handler)` | this runtime's own store |
 // | `__GetEvent(element, name, type)` | this runtime's own store |
@@ -583,6 +585,7 @@ interface Handle {
   [attributeValuesSymbol]?: Map<string, unknown>;
   [ownedChildrenSymbol]?: OwnedChildren;
   [ownerSymbol]?: number | undefined;
+  [autoplaySymbol]?: number | undefined;
 }
 
 function listenersOf(handle: Handle): ListenerLists | undefined {
@@ -1608,7 +1611,49 @@ export function __SetAttribute(
     setAttribute(nodeId, key, String(value));
     values.set(key, copyElementValue(value));
   }
+  // The name first: only these two names on this one tag pay a crossing.
+  if ((key === "autoplay" || key === "interval") && tagName(nodeId) === "x-swiper") {
+    syncAutoplay(element as Handle, values);
+  }
   return undefined;
+}
+
+/**
+ * The id of the autoplay interval an `x-swiper`'s handle has armed, if any.
+ */
+const autoplaySymbol = Symbol("autoplay");
+
+/**
+ * Clears a swiper's autoplay interval and, while it carries `autoplay`, arms
+ * a new one — web-core's `XSwiperAutoScroll` (`XSwiperAutoScroll.ts:43-70`),
+ * run whenever `autoplay` or `interval` changes.
+ *
+ * `autoplay` counts as present with any value but `"false"`, the one value
+ * web-core's attribute filter removes. The period is `interval` through
+ * `parseFloat`, `5000` when it is missing or `NaN`. Removing `autoplay`
+ * stops the interval, which is native's behavior; web-core never stops it.
+ *
+ * Each tick is one `swiperAdvance` call, which turns the swiper from the
+ * last completed layout and flushes nothing. The interval holds the handle
+ * only through a `WeakRef`, because a handle is its element's sole owner
+ * and collection is the only release: the first tick after the handle is
+ * collected clears the interval instead.
+ */
+function syncAutoplay(swiper: Handle, values: Map<string, unknown>): void {
+  const timers = globalThis as unknown as TimerGlobals;
+  if (swiper[autoplaySymbol] !== undefined) {
+    timers.clearInterval(swiper[autoplaySymbol]);
+    swiper[autoplaySymbol] = undefined;
+  }
+  if (!values.has("autoplay") || String(values.get("autoplay")) === "false") return;
+  const period = parseFloat(String(values.get("interval") ?? ""));
+  const held = new WeakRef(swiper);
+  const id = timers.setInterval(() => {
+    const live = held.deref();
+    if (live === undefined) timers.clearInterval(id);
+    else swiperAdvance(nodeIdOf(live));
+  }, Number.isNaN(period) ? 5000 : period);
+  swiper[autoplaySymbol] = id;
 }
 
 /** One UI method's answer: the status shape every `invoke` path reports. */

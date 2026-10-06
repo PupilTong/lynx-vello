@@ -46,8 +46,9 @@ use super::{
 use crate::compute::hide_subtree;
 use crate::compute::single_axis::flow_to_physical;
 use crate::compute::util::{
-    accumulate_scrollable_overflow, container_content_independence, normalize_content_alignment,
-    normalize_item_alignment, own_scrollable_overflow, resolve_gap_axis, resolve_length_percentage,
+    accumulate_scrollable_overflow, container_content_independence, is_scroll_container,
+    item_end_margin, normalize_content_alignment, normalize_item_alignment,
+    own_scrollable_overflow, resolve_gap_axis, resolve_length_percentage,
     sort_and_assign_layout_order,
 };
 use crate::geometry::{Edges, Point, Size};
@@ -830,6 +831,7 @@ where
     // A horizontal stacking axis under `direction: rtl` stacks from the
     // inline-start edge, which is the right one.
     let stacking_reverse = rtl && stacking_axis == Axis::Horizontal;
+    let scroll_container = is_scroll_container(style.overflow());
     let mut content_size = outer_size;
     for placed in &mut pass.items {
         let physical = flow_to_physical(
@@ -845,6 +847,7 @@ where
             placed.layout.size,
             placed.layout.content_size,
             placed.overflow,
+            item_end_margin(scroll_container, placed.layout.margin),
         );
     }
     let baselines = if layout_contained {
@@ -858,7 +861,7 @@ where
             // axis uses the container's full content box. A scroll container
             // extends the latter over its scrolling contents.
             let start = stacking_axis.start(metrics.border) + stacking_axis.start(metrics.padding);
-            let end = if style.overflow().x.is_scrollable() || style.overflow().y.is_scrollable() {
+            let end = if scroll_container {
                 stacking_axis.size(content_size) - stacking_axis.end(metrics.padding)
             } else {
                 start + stacking_inner

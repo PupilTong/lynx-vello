@@ -2947,3 +2947,48 @@ fn size_containment_leaves_a_replaced_item_unstretched_at_its_substituted_size()
     definite_layout(&tree, root, 400.0, 400.0);
     assert_size(tree.layout(item).size, Size::ZERO);
 }
+
+#[test]
+fn a_scroll_container_counts_grid_item_margin_areas() {
+    // css-overflow-3 §3.3: "the margin areas of grid item and flex item
+    // boxes". The first item's margin area ends at 150, past both its 120px
+    // track and its border box; the baseline-aligned second item's at 35.
+    let mut tree = TestTree::default();
+    let first = tree.push_leaf(
+        TestStyle {
+            margin: Edges {
+                right: margin_px(30.0),
+                ..Edges::uniform(margin_px(0.0))
+            },
+            ..fixed_leaf_style(120.0, 20.0)
+        },
+        Size::new(120.0, 20.0),
+        Size::new(120.0, 20.0),
+    );
+    let second = tree.push_leaf(
+        TestStyle {
+            margin: Edges {
+                bottom: margin_px(15.0),
+                ..Edges::uniform(margin_px(0.0))
+            },
+            align_self: SelfAlignment(AlignFlags::BASELINE),
+            ..fixed_leaf_style(20.0, 20.0)
+        },
+        Size::new(20.0, 20.0),
+        Size::new(20.0, 20.0),
+    );
+    let style = |overflow| TestStyle {
+        overflow: Point::new(overflow, overflow),
+        ..grid_style(&[px(120.0), px(40.0)], &[px(20.0)])
+    };
+    let root = tree.push_grid(style(Overflow::Hidden), vec![first, second]);
+    let output = definite_layout(&tree, root, 100.0, 20.0);
+    assert_point(tree.layout(first).location, Point::ZERO);
+    assert_point(tree.layout(second).location, Point::new(120.0, 0.0));
+    assert_size(output.content_size, Size::new(150.0, 35.0));
+
+    // A `visible` grid keeps the border boxes only (csswg-drafts#9194).
+    let root = tree.push_grid(style(Overflow::Visible), vec![first, second]);
+    let output = definite_layout(&tree, root, 100.0, 20.0);
+    assert_size(output.content_size, Size::new(140.0, 20.0));
+}

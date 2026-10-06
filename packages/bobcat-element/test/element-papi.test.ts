@@ -8,7 +8,7 @@
 // run against the real native side in
 // crates/bobcat-core/tests/main_thread.rs.
 
-import { beforeEach, describe, expect, it, rstest } from "@rstest/core";
+import { afterEach, beforeEach, describe, expect, it, rstest } from "@rstest/core";
 import type * as elementPapi from "../src/element-papi.ts";
 
 rstest.mockRequire("bobcat-internal:host", () => {
@@ -28,6 +28,7 @@ rstest.mockRequire("bobcat-internal:host", () => {
     removeAttribute: native.removeAttribute,
     getAttribute: native.getAttribute,
     tagName: native.tagName,
+    swiperAdvance: native.swiperAdvance,
     attributeNames: native.attributeNames,
     callElementMethod: native.callElementMethod,
     getComputedStyleMap: native.getComputedStyleMap,
@@ -303,6 +304,9 @@ function createMockBobcat(issuedIds?: number[]): MockBobcat {
         throw new Error(`tagName: ${id} is not a live element`);
       }
       return tag;
+    },
+    swiperAdvance: (node: unknown) => {
+      calls.push(["swiperAdvance", nodeId("swiperAdvance", node)]);
     },
     answerElementMethod: () => 3,
     callElementMethod: (node: unknown, method: unknown, params: unknown) => {
@@ -1141,6 +1145,65 @@ describe("__SetInlineStyles", () => {
         ["removeAttribute", 3, "style"],
       ]);
     }
+  });
+});
+
+describe("x-swiper autoplay", () => {
+  afterEach(() => {
+    rstest.useRealTimers();
+  });
+
+  it("ticks swiperAdvance every interval until autoplay goes away", () => {
+    rstest.useFakeTimers();
+    const swiper = __CreateElement("x-swiper", 0);
+    const id = __GetElementUniqueID(swiper);
+    __SetAttribute(swiper, "interval", "100");
+    __SetAttribute(swiper, "autoplay", true);
+    mock.calls.length = 0;
+    rstest.advanceTimersByTime(250);
+    expect(mock.named("swiperAdvance")).toEqual([
+      ["swiperAdvance", id],
+      ["swiperAdvance", id],
+    ]);
+    // A new interval restarts the period.
+    __SetAttribute(swiper, "interval", "40");
+    mock.calls.length = 0;
+    rstest.advanceTimersByTime(100);
+    expect(mock.named("swiperAdvance")).toHaveLength(2);
+    for (const off of [false, null]) {
+      __SetAttribute(swiper, "autoplay", true);
+      __SetAttribute(swiper, "autoplay", off);
+      mock.calls.length = 0;
+      rstest.advanceTimersByTime(1000);
+      expect(mock.named("swiperAdvance"), String(off)).toEqual([]);
+    }
+  });
+
+  it("defaults the period to 5000 ms when interval is missing or not a number", () => {
+    rstest.useFakeTimers();
+    for (const interval of [undefined, "abc", ""]) {
+      const swiper = __CreateElement("x-swiper", 0);
+      __SetAttribute(swiper, "interval", interval);
+      __SetAttribute(swiper, "autoplay", "");
+      mock.calls.length = 0;
+      rstest.advanceTimersByTime(4999);
+      expect(mock.named("swiperAdvance"), String(interval)).toEqual([]);
+      rstest.advanceTimersByTime(1);
+      expect(mock.named("swiperAdvance"), String(interval)).toHaveLength(1);
+      __SetAttribute(swiper, "autoplay", null);
+    }
+  });
+
+  it("arms nothing on any other tag, and asks the tag for those two names only", () => {
+    rstest.useFakeTimers();
+    const view = __CreateView(0);
+    mock.calls.length = 0;
+    __SetAttribute(view, "text", "hello");
+    expect(mock.named("tagName")).toEqual([]);
+    __SetAttribute(view, "autoplay", true);
+    rstest.advanceTimersByTime(10000);
+    expect(mock.named("tagName")).toHaveLength(1);
+    expect(mock.named("swiperAdvance")).toEqual([]);
   });
 });
 

@@ -1423,7 +1423,13 @@ horizontal scroll container that snaps page by page, its pages' row pinned in
 the cascade, the initial page (`select-index`/`initial-select-index`) as a
 typed `attr()` and an `if()` over `sibling-index()` into
 `scroll-initial-target`, and the `selectTab` UI method the runtime dispatches
-by tag name; no component), `tree::scroll_coordinator` (the ten
+by tag name; no component), `tree::swiper` (`x-swiper`/`x-swiper-item` as a
+scroll container snapping item by item on its main axis, the five `mode`
+layouts with `coverflow` and `carry` as compositor-exported `view()` scale
+animations, `current` by the viewpager recipe, and `advance`, the autoplay
+tick behind the `swiperAdvance` host member that `bobcat:element`'s
+`__SetAttribute` arms a realm interval for; no component, no UI method, no
+events), `tree::scroll_coordinator` (the ten
 `scroll-coordinator`/`x-foldview-*-ng` tags as a collapsing header: the
 coordinator a vertical scroll container, the header and slot absolutely
 positioned with the slot placed and sized by `anchor-size()` of the header and
